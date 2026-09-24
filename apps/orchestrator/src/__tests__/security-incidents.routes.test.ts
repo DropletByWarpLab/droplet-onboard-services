@@ -461,6 +461,40 @@ describe("route 19 — acknowledge", () => {
     expect(f.world.notificationLog.find((r) => r.id === "log-maria")).toMatchObject({ ackState: "unacked" });
   });
 
+  it("the audit is the LAST write of the transaction (after the CAS, the ack row and the notification ack)", async () => {
+    const f = world();
+    let writesAtAudit = -1;
+    h.inTx.mockImplementation(async () => {
+      writesAtAudit = f.log.length;
+      return { id: 1n };
+    });
+    await request(app(f, "family", "act").server).post(`/api/security/incidents/${SHARED}/acknowledge`).send({ notificationId: "log-maria" });
+    expect(f.log.slice(0, writesAtAudit)).toEqual(["securityIncident.updateMany", "securityIncidentAck.create", "notificationLog.updateMany"]);
+    expect(writesAtAudit).toBe(f.log.length);
+  });
+
+  it("a lost CAS re-reads and re-plans once; losing it twice is 409 INCIDENT_CONFLICT with nothing written", async () => {
+    const bump = (w: FakeWorld) => {
+      (w.securityIncident.find((i) => i.id === SHARED)!.version as number)++;
+    };
+    const once = world();
+    once.onCall("securityIncident", "updateMany", bump);
+    const ok = await request(app(once, "family", "act").server).post(`/api/security/incidents/${SHARED}/acknowledge`).send({});
+    expect(ok.status).toBe(200);
+    expect(once.log.filter((e) => e === "securityIncident.updateMany")).toHaveLength(2);
+    expect(once.world.securityIncidentAck).toHaveLength(1);
+
+    h.inTx.mockClear();
+    const twice = world();
+    twice.onCall("securityIncident", "updateMany", bump);
+    twice.onCall("securityIncident", "updateMany", bump);
+    const conflict = await request(app(twice, "family", "act").server).post(`/api/security/incidents/${SHARED}/acknowledge`).send({});
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error.code).toBe("INCIDENT_CONFLICT");
+    expect(twice.world.securityIncidentAck).toHaveLength(0);
+    expect(h.inTx).not.toHaveBeenCalled();
+  });
+
   it("a strict body", async () => {
     const res = await request(app(world(), "family", "act").server).post(`/api/security/incidents/${SHARED}/acknowledge`).send({ via: "x" });
     expect(res.status).toBe(400);
