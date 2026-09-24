@@ -58,6 +58,7 @@ from middleware.off_lan_gating import get_cloud_model_escape, is_local_provider
 from middleware.rate_limit import RateLimitMiddleware, close_rate_limiter
 from middleware.request_id import RequestIdMiddleware
 from models.registry import ModelRegistry
+from providers.ollama_local import ModelLoadFailedError
 from router import ProviderRouter
 from schemas import (
     ApiKeyRequest,
@@ -197,6 +198,20 @@ def _provider_error_detail(exc: Exception, context: str) -> str:
     correlation_id = uuid.uuid4().hex[:12]
     logger.error("%s [correlation_id=%s]: %s", context, correlation_id, exc)
     return f"Upstream provider error (ref: {correlation_id})"
+
+
+def _model_load_failed_response(exc: ModelLoadFailedError) -> JSONResponse:
+    """WARP-3047 — the on-box runtime could not LOAD the requested model
+    (not enough GPU memory next to what is resident, even after the
+    inference-manager made room). A typed 503, not the GW-08 generic 502:
+    the orchestrator and the person need to know it is a capacity problem
+    that retrying later — or switching model — can fix. ``detail`` is copy
+    built from model names only; the runtime's raw body was logged, never
+    echoed (the same non-leak rule as GW-08)."""
+    return JSONResponse(
+        status_code=503,
+        content={"error": "model_load_failed", "detail": exc.detail},
+    )
 
 
 # Global instances
@@ -471,6 +486,9 @@ async def chat(
     except ValueError as e:
         await _release_once()
         raise HTTPException(status_code=400, detail=str(e))
+    except ModelLoadFailedError as e:
+        await _release_once()
+        return _model_load_failed_response(e)
     except BaseException as e:
         # GW-06: release the held slot on ANY exit from the awaited chat() —
         # including asyncio.CancelledError (a BaseException, raised when the
@@ -677,6 +695,8 @@ async def session_chat(session_id: str, body: SessionChatRequest, request: Reque
         result = await provider_router.chat(chat_request, user_id=principal)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except ModelLoadFailedError as e:
+        return _model_load_failed_response(e)
     except Exception as e:
         # GW-08: generic message + correlation id; full error logged server-side.
         raise HTTPException(

@@ -495,6 +495,62 @@ _HARMONY_500_RETRIES = 2
 _HARMONY_500_BACKOFF_S = 0.5
 
 
+# WARP-3047 — a model that could not be LOADED. Docker Model Runner v1.2.6
+# has no memory-aware eviction: a request for model B while A is resident
+# starts a second llama-server with `-ngl 999`, and a B that does not fit in
+# what A left free fails at runner init. DMR answers that with a 500 whose
+# text/plain body starts "unable to load runner:" (scheduling/http_handler.go)
+# and, for a CUDA out-of-memory, carries llama.cpp's own "not enough GPU
+# memory to load the model (CUDA)" (backends/llamacpp/errors.go). Neither is
+# the harmony flake above: retrying the identical load just fails again, so it
+# is classified first, the inference-manager is asked to make room, and the
+# load is retried ONCE.
+_LOAD_FAILURE_PREFIX = "unable to load runner"
+_GPU_OOM_MARKER = "not enough GPU memory to load the model"
+# Unloading waits for each evicted runner process to exit (DMR's terminate()
+# blocks on it), so allow it longer than a listing but far less than a turn.
+_UNLOAD_TIMEOUT_S = 30.0
+
+
+def _is_model_load_failure(status: int, body: str) -> bool:
+    """True for DMR's "could not load the model" 500 (see above)."""
+    if status != 500:
+        return False
+    text = (body or "").lstrip()
+    return text.startswith(_LOAD_FAILURE_PREFIX) or _GPU_OOM_MARKER in text
+
+
+class ModelLoadFailedError(Exception):
+    """The runtime could not load ``model`` — after the inference-manager
+    unloaded every idle other model and one retry, or when nothing could be
+    freed. ``main.py`` maps it to ``503 {"error": "model_load_failed",
+    "detail": ...}``; ``detail`` is user-facing copy, never the runtime's raw
+    body (that goes to the log)."""
+
+    def __init__(self, model: str, *, out_of_memory: bool, resident: list[str] | None):
+        super().__init__(f"model_load_failed: {model}")
+        self.model = model
+        self.out_of_memory = out_of_memory
+        # None → the inference-manager could not be asked; [] → it confirmed
+        # nothing else is resident.
+        self.resident = resident
+
+    @property
+    def detail(self) -> str:
+        name = prettify_model_name(self.model)
+        if not self.out_of_memory:
+            return f"{name} couldn't be loaded by this Droplet's inference runtime."
+        if self.resident:
+            others = ", ".join(prettify_model_name(m) for m in self.resident)
+            return (
+                f"{name} doesn't fit in GPU memory next to {others}, which is still "
+                "in use. Try again in a moment."
+            )
+        if self.resident is None:
+            return f"{name} doesn't fit in the GPU memory that's free right now."
+        return f"{name} doesn't fit in this Droplet's GPU memory."
+
+
 def _log_harmony_500_retry(path: str, attempt: int, attempts: int) -> None:
     """Emit the one harmony-500 retry event shared by both chat paths.
 
@@ -976,14 +1032,29 @@ class OllamaLocalProvider(BaseProvider):
             # attempt so concurrency limits stay honest. A 500 without tools
             # (or one that persists past the budget) is a real error.
             attempts = (_HARMONY_500_RETRIES + 1) if has_tools else 1
-            for attempt in range(attempts):
+            attempt = 0
+            room: dict[str, list[str]] | None = None
+            made_room = False
+            while True:
                 async with self._sema:
                     resp = await self.client.post(
                         _CHAT_PATH, json=body, headers=headers
                     )
+                # WARP-3047: a load failure is classified BEFORE the harmony
+                # retry — it must never spend that budget re-trying a load
+                # that cannot succeed. At most one make-room retry.
+                if resp.status_code == 500 and _is_model_load_failure(500, resp.text):
+                    if made_room:
+                        raise self._load_failed(model, resp.text, room)
+                    made_room = True
+                    room = await self._make_room_for(model)
+                    if room is None or not room["unloaded"]:
+                        raise self._load_failed(model, resp.text, room)
+                    continue
                 if resp.status_code == 500 and attempt < attempts - 1:
                     _log_harmony_500_retry("blocking", attempt + 1, attempts)
                     await asyncio.sleep(_HARMONY_500_BACKOFF_S * (attempt + 1))
+                    attempt += 1
                     continue
                 break
             if resp.status_code == 503:
@@ -998,6 +1069,63 @@ class OllamaLocalProvider(BaseProvider):
             return resp.json()
 
         return self._stream_chat(body)
+
+    async def _make_room_for(self, model: str) -> dict[str, list[str]] | None:
+        """WARP-3047 — ask the inference-manager to unload every resident
+        model except ``model`` (``POST /models/unload {keep}``), so a load
+        that failed for lack of GPU memory can be retried once.
+
+        Lifecycle only: the manager owns residency and no chat passes through
+        it. Returns its ``{unloaded, still_resident}`` answer, or None when no
+        manager is wired or it could not be asked — the caller then fails
+        fast rather than retry blind. Bearer is ``INFERENCE_AUTH_TOKEN``, the
+        manager's own (its auth.py reads that name; compose delivers it
+        through the repo-root .env).
+        """
+        if not INFERENCE_MANAGER_URL:
+            return None
+        token = (os.getenv("INFERENCE_AUTH_TOKEN") or "").strip()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            resp = await self.client.post(
+                f"{INFERENCE_MANAGER_URL.rstrip('/')}/models/unload",
+                json={"keep": model},
+                headers=headers,
+                timeout=_UNLOAD_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001 — never mask the load failure itself
+            logger.warning("model_load_make_room_failed: model=%s error=%s", model, exc)
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        def _names(key: str) -> list[str]:
+            raw = data.get(key)
+            return [m for m in raw if isinstance(m, str)] if isinstance(raw, list) else []
+
+        room = {"unloaded": _names("unloaded"), "still_resident": _names("still_resident")}
+        logger.warning(
+            "model_load_failed_made_room: model=%s unloaded=%s still_resident=%s",
+            model,
+            room["unloaded"],
+            room["still_resident"],
+        )
+        return room
+
+    @staticmethod
+    def _load_failed(
+        model: str, body: str, room: dict[str, list[str]] | None
+    ) -> ModelLoadFailedError:
+        """Log the runtime's own reason server-side; hand back the typed
+        error whose ``detail`` is the user-facing copy."""
+        logger.warning("model_load_failed: model=%s runtime=%s", model, (body or "")[:300])
+        return ModelLoadFailedError(
+            model,
+            out_of_memory=_GPU_OOM_MARKER in (body or ""),
+            resident=room["still_resident"] if room is not None else None,
+        )
 
     async def _stream_chat(self, body: dict) -> AsyncGenerator[str, None]:
         """Stream Ollama's SSE frames through verbatim.
@@ -1028,15 +1156,28 @@ class OllamaLocalProvider(BaseProvider):
         # what chat() built, so the tools key is the authoritative signal.
         has_tools = bool(body.get("tools"))
         attempts = (_HARMONY_500_RETRIES + 1) if has_tools else 1
-        for attempt in range(attempts):
+        model = str(body.get("model", ""))
+        attempt = 0
+        room: dict[str, list[str]] | None = None
+        made_room = False
+        while True:
+            load_failure_body: str | None = None
             async with self._sema:
                 async with self.client.stream(
                     "POST", _CHAT_PATH, json=body, headers=headers
                 ) as resp:
+                    if resp.status_code == 500:
+                        # WARP-3047: read the error body to classify it —
+                        # still before any frame, so the retry boundary holds.
+                        error_text = (await resp.aread()).decode(errors="replace")
+                        if _is_model_load_failure(500, error_text):
+                            load_failure_body = error_text
                     retryable_500 = (
-                        resp.status_code == 500 and attempt < attempts - 1
+                        resp.status_code == 500
+                        and load_failure_body is None
+                        and attempt < attempts - 1
                     )
-                    if not retryable_500:
+                    if not retryable_500 and load_failure_body is None:
                         if resp.status_code == 503:
                             # Same handler the non-streaming branch uses, so a
                             # scale-up signaled via 503 is not silently missed
@@ -1053,15 +1194,26 @@ class OllamaLocalProvider(BaseProvider):
                             if line.startswith("data: "):
                                 yield f"{line}\n\n"
                         return
-                    # Retryable harmony 500, and nothing has been yielded yet:
-                    # the retry is invisible to the caller. Drain the error body
-                    # so the connection goes back to the pool.
-                    await resp.aread()
-                    _log_harmony_500_retry("streaming", attempt + 1, attempts)
+                    if load_failure_body is None:
+                        # Retryable harmony 500, and nothing has been yielded
+                        # yet: the retry is invisible to the caller. The error
+                        # body was drained above, so the connection goes back
+                        # to the pool.
+                        _log_harmony_500_retry("streaming", attempt + 1, attempts)
+            if load_failure_body is not None:
+                # Make room OUTSIDE the semaphore; at most one retry.
+                if made_room:
+                    raise self._load_failed(model, load_failure_body, room)
+                made_room = True
+                room = await self._make_room_for(model)
+                if room is None or not room["unloaded"]:
+                    raise self._load_failed(model, load_failure_body, room)
+                continue
             # Back off OUTSIDE the semaphore, and re-acquire it per attempt, so
             # a retrying stream doesn't hold a concurrency slot while it waits
             # (mirrors the blocking branch).
             await asyncio.sleep(_HARMONY_500_BACKOFF_S * (attempt + 1))
+            attempt += 1
 
     async def is_reachable(self) -> bool:
         try:
