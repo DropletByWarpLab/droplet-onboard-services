@@ -32,8 +32,10 @@
  *                 pushSubscription.upsert( / pushSubscription.create(
  *
  * A direct NotificationLog UPDATE that names no `username` must be keyed by
- * the row's own id (`where: { id: … }`, the delivery stamps) — it then cannot
- * reach another person's rows, and it may not write the recipient column.
+ * the row's own id (`where: { id: … }`, the delivery claim and stamps) — it
+ * then cannot reach another person's rows, and it may not write the recipient
+ * column. One that writes an `ack*` column (or spreads into `data`) must ALSO
+ * have `username` in its `where`: only the recipient acks (review F7).
  *
  * ## What it asserts, per site
  *
@@ -719,11 +721,42 @@ const forwarded = (site: Site) =>
   FORWARDERS.some((f) => f.file === site.file.id && f.callee === site.callee);
 
 /**
+ * WARP-2804 (review F7) — a NotificationLog update that writes an `ack*`
+ * column acknowledges SOMEONE's notification, and only the recipient may
+ * (`keyedByRowId` alone would pass an id-keyed ack of anybody's row — exactly
+ * P3's "ack my own rows for this incident" done wrong). So:
+ *   - `data` must be an object literal (otherwise what it writes is unseen);
+ *   - if it names an `ack*` column, or spreads something that could, the
+ *     `where` must be an object literal naming `username` — whose value the
+ *     sweep then checks like any other recipient.
+ */
+function ackWriteProblems(site: Site): string[] {
+  if (!/^notificationLog\.update(Many)?$/.test(site.callee)) return [];
+  const arg = splitTop(site.args, [","])[0] ?? "";
+  const data = propertyOf(arg, "data");
+  if (data === null || !data.trim().startsWith("{")) {
+    return ["a NotificationLog update whose `data` is not an object literal — the columns it writes (an ack?) cannot be seen"];
+  }
+  const body = data.trim().slice(1, scanTo(data.trim(), 1, "}"));
+  const entries = splitTop(body, [","]);
+  const writesAck = entries.some((e) => /^ack[A-Z]\w*\s*(:|$)/.test(e) || e.startsWith("..."));
+  if (!writesAck) return [];
+  const where = propertyOf(arg, "where");
+  if (where !== null && where.trim().startsWith("{") && propertyOf(where, "username") !== null) return [];
+  return [
+    "writes the ack columns without `username` in its `where` — it would ack another person's notification; " +
+      "only the recipient acks (WARP-2804)",
+  ];
+}
+
+/**
  * Everything wrong with one site, `[]` when nothing is. The sweep below and the
  * scanner's self-test run THIS function, so a fixture the self-test proves red
  * is red for the same reason a production site would be.
  */
 function siteProblems(site: Site, universe: readonly SourceFile[]): string[] {
+  const acks = ackWriteProblems(site);
+  if (acks.length > 0) return acks;
   const recipients = recipientsOf(site);
   if (recipients.length === 0) {
     const legacy = site.args.match(/(?<![\w$.'"`])userId\s*:\s*([^,}\n]+)/);
@@ -1035,9 +1068,58 @@ const KNOWN_BAD: ReadonlyArray<readonly [string, string]> = [
       await sendNotification(prisma, { userId: admin.id, kind: "system", title: "t" });
     }`,
   ],
+  // WARP-2804 (review F7) — writing `ack*` acks SOMEONE's notification, and
+  // only the recipient may: the where must carry the username. The first
+  // two are exactly P3's "ack my own rows for this incident" done wrong.
+  [
+    "an id-keyed update that writes the ack columns (acks whoever's row it is)",
+    `async function ackRow(prisma, id) {
+      await prisma.notificationLog.update({ where: { id }, data: { ackState: "acked", ackedAt: new Date(), ackMethod: "incident" } });
+    }`,
+  ],
+  [
+    "an id-list updateMany that acks without the recipient in its where",
+    `async function ackIncidentRows(prisma, ids, sid) {
+      await prisma.notificationLog.updateMany({
+        where: { id: { in: ids }, ackState: "unacked" },
+        data: { ackState: "acked", ackedAt: new Date(), ackMethod: "incident", ackSessionId: sid },
+      });
+    }`,
+  ],
+  [
+    "ack columns hidden behind a spread in `data`",
+    `async function ackRow(prisma, id, patch) {
+      await prisma.notificationLog.updateMany({ where: { id }, data: { ...patch } });
+    }`,
+  ],
+  [
+    "a `data` that is not an object literal",
+    `async function ackRow(prisma, id, patch) {
+      await prisma.notificationLog.update({ where: { id }, data: patch });
+    }`,
+  ],
 ];
 
 const KNOWN_GOOD: ReadonlyArray<readonly [string, string]> = [
+  // WARP-2804 (review F7) — the two NotificationLog update shapes that ARE right.
+  [
+    "an ack of the actor's OWN rows: the ids AND the actor's username in the where",
+    `async function ackOwn(prisma, ids, username) {
+      await prisma.notificationLog.updateMany({
+        where: { id: { in: ids }, username, ackState: { in: ["unacked", "untracked"] } },
+        data: { ackState: "acked", ackedAt: new Date(), ackMethod: "incident" },
+      });
+    }
+    async function onAck(prisma, req, ids) {
+      await ackOwn(prisma, ids, req.user.username);
+    }`,
+  ],
+  [
+    "a delivery stamp keyed by the row's id writes no ack column",
+    `async function stamp(prisma, id) {
+      await prisma.notificationLog.update({ where: { id }, data: { channels: "toast", deliveredAt: new Date(), error: null } });
+    }`,
+  ],
   [
     "a username selected and destructured in the loop",
     `async function run(prisma) {
