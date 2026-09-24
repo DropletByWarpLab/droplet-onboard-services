@@ -520,7 +520,13 @@ export function SecurityEventRow({
   const low = e.kind === "detection_low";
   const zones = e.zones ?? [];
   return (
-    <li className="lrow" data-kind={e.kind} data-testid={testId} style={low ? { opacity: 0.7 } : undefined}>
+    <li
+      className="lrow"
+      data-kind={e.kind}
+      data-testid={testId}
+      // With media under it, the icon and time line up with the title, not the row's middle.
+      style={{ ...(low ? { opacity: 0.7 } : {}), ...(children ? { alignItems: "flex-start" } : {}) }}
+    >
       <span className={`ri${e.severity === "info" ? "" : " brand"}`} aria-hidden>
         <Icon size={16} />
       </span>

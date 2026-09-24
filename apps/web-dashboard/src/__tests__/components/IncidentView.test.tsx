@@ -157,6 +157,8 @@ describe("the page's order and content", () => {
     expect(within(row).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
     expect(within(row).getByRole("link", { name: "Clip" })).toHaveAttribute("href", "/api/cameras/clips/event/1727140000.1-person");
     expect(row).toHaveTextContent("Also in Till");
+    // With a thumbnail under it, the row's icon and time line up with its title, not its middle.
+    expect(row).toHaveStyle({ alignItems: "flex-start" });
   });
 
   it("after Frigate's 14 days: Clip expired, no dead link or thumbnail", async () => {

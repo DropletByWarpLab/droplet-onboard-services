@@ -42,6 +42,8 @@ export const INCIDENT_COPY = {
     threat_signal: "A network or sign-in warning",
   },
   codeShortUnknown: "Flagged by Droplet",
+  // Under a camera's or the camera system's own title, which camera is already said.
+  codeShortStoppedReporting: "Stopped reporting",
   eventOne: "1 event",
   eventMany: "{n} events",
 
@@ -162,15 +164,17 @@ export function spanText(first: string, last: string, tz: string, now: Date): st
   return `${start} – ${end}`;
 }
 
-function codesText(codes: Codes): string {
-  return codes.map((c, n) => (n === 0 ? codeShort(c) : lowerFirst(codeShort(c)))).join(", ");
+function codesText(codes: Codes, scope: IncidentSummary["scope"]): string {
+  const short = (c: string) =>
+    c === "camera_offline" && (scope === "camera" || scope === "site_camera_system") ? INCIDENT_COPY.codeShortStoppedReporting : codeShort(c);
+  return codes.map((c, n) => (n === 0 ? short(c) : lowerFirst(short(c)))).join(", ");
 }
 
 /** Line 2: the visible codes (else the visible event count, never 0), then the span. */
 export function whatLine(i: IncidentSummary, tz: string, now: Date): string {
   const what =
     i.reasonCodes.length > 0
-      ? codesText(i.reasonCodes)
+      ? codesText(i.reasonCodes, i.scope)
       : i.eventCount === 1
         ? INCIDENT_COPY.eventOne
         : i.eventCount > 1

@@ -111,6 +111,14 @@ describe("the card's three lines", () => {
     );
   });
 
+  it("under a camera's or the camera system's own title, camera_offline says just `Stopped reporting`", () => {
+    const off = { reasonCodes: ["camera_offline"] as IncidentSummary["reasonCodes"], severity: "notice" as const };
+    expect(whatLine(summary({ ...off, scope: "site_camera_system", zone: null }), TZ, NOW)).toBe("Stopped reporting · 2:14 AM – 2:20 AM");
+    expect(whatLine(summary({ ...off, scope: "camera", zone: null, camera: "back_cam" }), TZ, NOW)).toBe("Stopped reporting · 2:14 AM – 2:20 AM");
+    // In an area, which camera matters: the area's title doesn't say it.
+    expect(whatLine(summary(off), TZ, NOW)).toBe("A camera stopped reporting · 2:14 AM – 2:20 AM");
+  });
+
   it("never says 0 events", () => {
     expect(whatLine(summary({ reasonCodes: [], eventCount: 0 }), TZ, NOW)).toBe("2:14 AM – 2:20 AM");
   });
