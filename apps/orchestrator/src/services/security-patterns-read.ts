@@ -30,6 +30,7 @@ import { resolveSecurityTimezone } from "./security-mode.service.js";
 import { loadActiveLinks, loadCameraLabels, parseLinkRef, visibleLinks, zoneVisibleTo, type ActiveZoneLink } from "./security-zones.service.js";
 import {
   BASELINE,
+  DWELL_MIN_SAMPLES,
   PATTERN_RELEASE,
   RARITY_MAX_P,
   dwellThresholdSec,
@@ -325,7 +326,7 @@ export async function readPatternCells(
         ready: ready_,
         rare: ready_ && isRare(rarityP(s)),
         typicalPerHour: ready_ ? hourlyRate(s) : null,
-        longestUsualVisitSec: cur && cur.dwellSamples >= 30 ? cur.durationP99Sec : null,
+        longestUsualVisitSec: cur && cur.dwellSamples >= DWELL_MIN_SAMPLES ? cur.durationP99Sec : null,
       });
     }
   }
@@ -401,7 +402,7 @@ export async function explainSecurityPattern(
         flagsFrom: ready_ && lambdaHour !== null ? volumeThreshold(slotRate(lambdaHour, slotMinutes(slot))) : null,
       },
       dwell: {
-        longestUsualVisitSec: dwell.dwellSamples >= 30 ? dwell.durationP99Sec : null,
+        longestUsualVisitSec: dwell.dwellSamples >= DWELL_MIN_SAMPLES ? dwell.durationP99Sec : null,
         samples: dwell.dwellSamples,
         wouldFlagAboveSec: ready_ ? dwellThresholdSec(label, dwell) : null,
       },
