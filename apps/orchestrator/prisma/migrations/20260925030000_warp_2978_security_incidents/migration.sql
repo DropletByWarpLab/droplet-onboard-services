@@ -18,9 +18,10 @@
 -- read — never upsert({update:{}}), which Prisma 5 runs as read-then-insert.
 --
 -- RE-RUNNABLE (review R2; the repo idiom, WARP-2896's and WARP-2804's). This
--- folder has been re-stamped twice (20260924050000 → 20260924070000 →
--- 20260925020000) while it was unmerged, so a dev box that applied an earlier
--- stamp runs it again under the new name. Every statement is therefore a
+-- folder has been re-stamped three times (20260924050000 → 20260924070000 →
+-- 20260925020000 → 20260925030000, past #2357's 20260925020000_warp_3060)
+-- while it was unmerged, so a dev box that applied an earlier stamp runs it
+-- again under the new name. Every statement is therefore a
 -- no-op the second time, and a box that applied the pre-review shape is
 -- brought to this one rather than left behind:
 --   · the types are created in a DO block that swallows duplicate_object;

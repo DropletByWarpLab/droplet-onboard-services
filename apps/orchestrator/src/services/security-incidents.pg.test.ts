@@ -3,7 +3,7 @@
  *
  * WHY THESE CASES RUN HERE AND NOT IN THE MOCKED LANE
  *
- *   the CHECKs    — every hand-written CHECK in 20260925020000_warp_2978_…
+ *   the CHECKs    — every hand-written CHECK in 20260925030000_warp_2978_…
  *                   refuses its bad row, with SQLSTATE 23514 AND the
  *                   constraint's own name (a row refused by the WRONG rule does
  *                   not count). They are invisible to `prisma migrate diff`.
@@ -59,7 +59,7 @@ const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
 /** Thrown to roll a probe transaction back after a successful insert. */
 class Rollback extends Error {}
 
-const MIGRATION_SQL = readFileSync(join(MIGRATIONS_DIR, "20260925020000_warp_2978_security_incidents", "migration.sql"), "utf8");
+const MIGRATION_SQL = readFileSync(join(MIGRATIONS_DIR, "20260925030000_warp_2978_security_incidents", "migration.sql"), "utf8");
 
 /** The migration's statements, split at top-level `;` (a `DO $$ … $$` body keeps its own) — WARP-2804's splitter. */
 function statements(sql: string): string[] {
