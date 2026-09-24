@@ -59,11 +59,21 @@ describe("migration folder names (WARP-2896)", () => {
   it("the WARP-2704 M365 migration exists once, re-stamped to sort after the stage migrations it merged behind", () => {
     // Written as 20260924010000, the stamp #2247 had already given the 2896
     // workspace migration, so `warp_2704` sorted BEFORE a migration stage boxes
-    // had applied. Re-stamped before merge to follow stage's newest at the
-    // time, 20260924020000_warp_2911_notification_recipient_username (#2349).
+    // had applied. Re-stamped to 20260924030000 after #2349's
+    // 20260924020000_warp_2911_notification_recipient_username; then #2326
+    // landed 20260924030000_warp_2900_extensions on stage, the same stamp
+    // again, and `warp_2704` sorted before it. Re-stamped once more to follow
+    // stage's newest at the time.
     const folders = migrationFolders();
-    expect(folders).toContain("20260924030000_warp_2704_m365_auth_code_per_connection_app");
+    expect(folders).toContain("20260924040000_warp_2704_m365_auth_code_per_connection_app");
     expect(folders).not.toContain("20260924010000_warp_2704_m365_auth_code_per_connection_app");
+    expect(folders).not.toContain("20260924030000_warp_2704_m365_auth_code_per_connection_app");
     expect(folders).toContain("20260924020000_warp_2911_notification_recipient_username");
+    expect(folders).toContain("20260924030000_warp_2900_extensions");
+    // Prisma applies folders in name order: it runs after both.
+    const order = [...folders].sort();
+    const m365 = order.indexOf("20260924040000_warp_2704_m365_auth_code_per_connection_app");
+    expect(m365).toBeGreaterThan(order.indexOf("20260924030000_warp_2900_extensions"));
+    expect(m365).toBeGreaterThan(order.indexOf("20260924020000_warp_2911_notification_recipient_username"));
   });
 });
