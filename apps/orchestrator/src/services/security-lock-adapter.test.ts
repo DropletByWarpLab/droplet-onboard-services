@@ -1545,3 +1545,96 @@ describe(`a lock is gone only after ${SECURITY_LOCK_GONE_AFTER_LISTS} successful
     expect(store.rows).toHaveLength(1);
   });
 });
+
+// ── review F7: an unsaved reading of a lock the list can't poll ──────────
+
+describe("a reading Droplet heard but could not save, on a lock the list cannot poll (review F7)", () => {
+  // Rule: every sweep re-offers — as `polled`, its time the check's — the
+  // last-heard reading of each unsaved lock it did not poll itself (several
+  // DoorLock endpoints, not connected, or kept while a list skips it). A store
+  // that has recovered settles it within one sweep; it stays down only while
+  // the store is still failing. Gone locks leave the set (they are forgotten).
+  const TWO_EP = lockDevice({
+    friendlyName: "Double door",
+    endpoints: [
+      { endpointId: 1, deviceTypes: [], clusters: [257] },
+      { endpointId: 2, deviceTypes: [], clusters: [257] },
+    ],
+  });
+
+  function started(devices: LockSourceDevice[]) {
+    const ctx = adapterWith({ source: staticSource(() => Promise.resolve(devices)) });
+    ctx.adapter.start();
+    ctx.adapter.noteSweepScheduled();
+    return ctx;
+  }
+
+  it("several endpoints (never polled): a failed history read is settled by the next sweep once the store answers", async () => {
+    const { adapter, store, emitter, c } = started([TWO_EP]);
+    await adapter.sweep();
+    c.advance(1000);
+    store.lastReading.mockRejectedValueOnce(new Error("db down"));
+    emitter.emit("state_changed", frame(2)); // endpoint 1 unlocked, heard live
+    await flush();
+    expect(adapter.tracker.writeHealth().unsaved).toBe(1);
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Lock changes are arriving but could not be saved" });
+    expect(store.rows).toHaveLength(0);
+
+    c.advance(60_000);
+    await adapter.sweep();
+    expect(adapter.tracker.writeHealth().unsaved).toBe(0);
+    expect(store.rows.map((r) => [r.draft.sourceRef, r.draft.labels[0], r.draft.observed])).toEqual([[REF, "unlocked", "polled"]]);
+    expect(adapter.health().state).toBe("ok");
+  });
+
+  it("…and while the store is still failing it stays down — the retry never pretends", async () => {
+    const { adapter, store, emitter, c } = started([TWO_EP]);
+    await adapter.sweep();
+    store.lastReading.mockRejectedValue(new Error("db down"));
+    emitter.emit("state_changed", frame(2));
+    await flush();
+    for (let i = 0; i < 3; i++) {
+      c.advance(60_000);
+      await adapter.sweep();
+    }
+    expect(adapter.tracker.writeHealth().unsaved).toBe(1);
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Lock changes are arriving but could not be saved" });
+  });
+
+  it("not connected: a failed write is re-offered from what was heard, settled once the store takes it", async () => {
+    const devices = [lockDevice()];
+    const { adapter, store, emitter, c } = started(devices);
+    await adapter.sweep(); // baseline: unlocked (lockDevice's lockState 2)
+    c.advance(1000);
+    store.write.mockResolvedValueOnce("failed");
+    emitter.emit("state_changed", frame(1)); // locked, heard live — not saved
+    await flush();
+    expect(adapter.tracker.writeHealth().unsaved).toBe(1);
+
+    devices[0] = lockDevice({ connectionState: "disconnected" });
+    c.advance(60_000);
+    await adapter.sweep();
+    expect(adapter.tracker.writeHealth().unsaved).toBe(0);
+    expect(store.rows.map((r) => [r.draft.labels[0], r.draft.observed])).toEqual([
+      ["unlocked", "polled"],
+      ["locked", "polled"],
+    ]);
+  });
+
+  it("a live frame at or after the sweep started wins over the re-offer (the t0 guard)", async () => {
+    const { adapter, store, emitter, c } = started([TWO_EP]);
+    await adapter.sweep();
+    store.lastReading.mockRejectedValueOnce(new Error("db down"));
+    emitter.emit("state_changed", frame(2));
+    await flush();
+
+    // A fresh live frame lands after the sweep started (same clock instant: t0).
+    c.advance(60_000);
+    const sweeping = adapter.sweep();
+    emitter.emit("state_changed", frame(1)); // locked, live, at t0
+    await flush();
+    await sweeping;
+    expect(store.rows.map((r) => [r.draft.labels[0], r.draft.observed])).toEqual([["locked", "live"]]);
+    expect(adapter.tracker.writeHealth().unsaved).toBe(0);
+  });
+});

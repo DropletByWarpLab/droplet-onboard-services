@@ -359,6 +359,8 @@ export interface LockTracker {
   forgetNodesExcept(present: ReadonlySet<string>): Promise<number>;
   /** The reading the device last gave for `ref` (live, or a polled one no live frame superseded), or null. */
   lastHeard(ref: string): LockReading | null;
+  /** The keys whose latest store round-trip failed and is not settled (`writeHealth().unsaved` counts them). */
+  unsavedRefs(): string[];
   writeHealth(): Readonly<LockWriteHealth>;
 }
 
@@ -509,6 +511,7 @@ export function createLockTracker(deps: {
       return Promise.all(drops).then(() => drops.length);
     },
     lastHeard: (ref) => heard.get(ref) ?? null,
+    unsavedRefs: () => [...unsaved],
     writeHealth: () => ({ ...health, unsaved: unsaved.size }),
   };
 }
@@ -872,8 +875,24 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
     // forgotten, with no row.
     names = new Map(locks.map((l) => [l.ref, l.name]));
     const dropped = await tracker.forgetNodesExcept(new Set([...present, ...kept.map((l) => l.nodeId)]));
+
+    // Review F7: a reading Droplet heard but could not save, on a lock this
+    // list cannot poll (several DoorLock endpoints, not connected, or kept
+    // while the list skips it), is re-offered from what was heard — as
+    // `polled`, since its row is stamped at this check. A store that has
+    // recovered settles it here, instead of the header reading "could not be
+    // saved" until that lock's next live frame, days later. Gone locks were
+    // forgotten above and are not re-offered.
+    const polledRefs = new Set(polledReadings.map((o) => o.ref));
+    const reoffered: LockObservation[] = [];
+    for (const ref of tracker.unsavedRefs()) {
+      const m = REF.exec(ref);
+      const reading = tracker.lastHeard(ref);
+      if (polledRefs.has(ref) || !m || reading === null) continue;
+      reoffered.push({ nodeId: m[1]!, endpointId: Number(m[2]), ref, reading });
+    }
     const outcomes = await Promise.all(
-      polledReadings.map((obs) => tracker.observe(obs, "polled", { sweepStartedAt: t0 })),
+      [...polledReadings, ...reoffered].map((obs) => tracker.observe(obs, "polled", { sweepStartedAt: t0 })),
     );
 
     snapshot = locks;
