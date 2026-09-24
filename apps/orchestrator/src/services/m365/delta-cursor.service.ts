@@ -234,6 +234,10 @@ export async function recordFailure(
   const failures = (current[0]?.consecutiveFailures ?? 0) + 1;
 
   if (kind === "FATAL") {
+    // `resumeLink` is kept here, like `deltaLink`, because nothing moves a
+    // cursor out of FAILED today. Whatever does (a reset, a retry button) must
+    // clear resumeLink as well: a stale resume link that draws a non-410 4xx
+    // is one of the ways a cursor lands here (#2347 review).
     await prisma.m365DeltaCursor.updateMany({
       where: { id: cursorId },
       data: {
