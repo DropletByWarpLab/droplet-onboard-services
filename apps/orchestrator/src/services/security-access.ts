@@ -13,13 +13,13 @@
  *   · `mayReadThreats` — mirrored warn/err network/auth ActivityRows point at
  *     owner/admin-only rows, so they are owner/admin-only here too.
  *   · `mayReadLocks` (WARP-2977 P2b-2, DS-019) — lock_state rows, lock links,
- *     the `locks` health row and the names in a Close up's `unlockedLocks`
- *     need Devices (smart_home) ≥ view on top of the Security view every
- *     Security route already sits behind. Lock state is presence data, and
- *     with `camera = null` the camera grant would otherwise show it to every
- *     Security viewer. Unresolved (no local User row) fails closed to
- *     owner/admin; a resolver failure rejects (the caller's 503), never a
- *     guess.
+ *     the `locks` health row and the names in a Close up's `unlockedLocks` /
+ *     `uncheckedLocks` need Devices (smart_home) ≥ view on top of the
+ *     Security view every Security route already sits behind. Lock state is
+ *     presence data, and with `camera = null` the camera grant would
+ *     otherwise show it to every Security viewer. Unresolved (no local User
+ *     row) fails closed to owner/admin; a resolver failure rejects (the
+ *     caller's 503), never a guess.
  */
 import type { Request } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -56,9 +56,9 @@ export interface SecurityRouteDeps {
   /**
    * WARP-2977 P2b-2 — the Matter lock adapter, read at request time (a
    * fresh lock list for the Areas page and link checks, the last sweep's
-   * locks for labels and a Close up's `unlockedLocks`, the `locks` health
-   * row). Default: the one index.ts started (`securityLockAdapter`); null =
-   * none is running.
+   * locks for labels and a Close up's `unlockedLocks` / `uncheckedLocks`,
+   * whether those readings are current, the `locks` health row). Default:
+   * the one index.ts started (`securityLockAdapter`); null = none is running.
    */
   locks?: () => SecurityLockReader | null;
 }

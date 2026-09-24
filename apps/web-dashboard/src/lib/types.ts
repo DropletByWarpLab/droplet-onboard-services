@@ -3701,15 +3701,23 @@ export interface SecurityModeActionResult {
   changed: boolean;
   /**
    * WARP-2977 P2b-2 — on a Close up or Away, for people with Devices view:
-   * the door locks last heard open, by name, when `locksChecked` is true.
-   * Never read as "all locked" — a lock Droplet can't vouch for is simply not
-   * named. Absent when `locksChecked` is false, and for everyone else.
+   * the connected door locks last heard open, by name, when `locksChecked` is
+   * true. Never read as "all locked". Absent when `locksChecked` is false, and
+   * for everyone else.
    */
   unlockedLocks?: string[];
   /**
-   * WARP-2977 P2b-2 (review F4) — false when Droplet could not vouch for the
-   * lock readings (no lock adapter, or its `locks` row is down): say so, never
-   * "none open". Absent for people without Devices view.
+   * WARP-2977 P2b-2 (rjouffret, review of 4fa950c8) — beside `unlockedLocks`:
+   * the locks Droplet can't vouch for while the others' readings stand (not
+   * reporting, never heard, or unknown), by name. Same presence rules as
+   * `unlockedLocks`.
+   */
+  uncheckedLocks?: string[];
+  /**
+   * WARP-2977 P2b-2 (review F4) — false when every lock reading may be stale
+   * (no lock adapter, not checked yet, or the smart-home service unreachable):
+   * say so, name nothing, never "none open". Absent for people without
+   * Devices view.
    */
   locksChecked?: boolean;
 }

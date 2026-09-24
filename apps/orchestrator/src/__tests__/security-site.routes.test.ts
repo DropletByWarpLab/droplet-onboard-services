@@ -48,6 +48,7 @@ import { createSecuritySiteRouter } from "../routes/security-site.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
+import type { LockReadingsState } from "../services/security-lock-adapter.js";
 import { _resetSiteModeHealthForTests } from "../services/security-mode.service.js";
 import { zonedWallClockToUtc } from "../lib/zoned-time.js";
 import { defaultHours, defaultMode, fakePrisma, newWorld, weekRows, type FakeWorld } from "./security-site.fake.js";
@@ -120,13 +121,15 @@ function app(
   role: Role | null | "",
   level: Level | null,
   now: Date = NOW,
-  opts: { devices?: boolean; locks?: KnownLockFixture[] | null; lockHealth?: "ok" | "down" | "not_configured" } = {},
+  opts: { devices?: boolean; locks?: KnownLockFixture[] | null; readings?: LockReadingsState } = {},
 ) {
   const resolve = vi.fn(async (_userId: string) => access(level, role === "owner" ? "owner" : "family", opts.devices === true));
   const prisma = fakePrisma(w);
   const knownLocks = vi.fn(() => opts.locks ?? []);
-  const health = vi.fn(() => ({ id: "locks", state: opts.lockHealth ?? "ok", detail: "(the adapter's copy)", lastSeenAt: null }));
-  const reader = opts.locks === null ? null : { knownLocks, listLocks: vi.fn(), health };
+  // Route 7 never reads the header row: whether it may name locks is the adapter's explicit readings state.
+  const health = vi.fn(() => ({ id: "locks", state: "down", detail: "(the adapter's copy)", lastSeenAt: null }));
+  const readingsState = vi.fn((): LockReadingsState => opts.readings ?? "current");
+  const reader = opts.locks === null ? null : { knownLocks, listLocks: vi.fn(), health, readingsState };
   const server = express();
   server.use(express.json());
   server.use((req: Request, _res: Response, next: NextFunction) => {
@@ -140,7 +143,7 @@ function app(
     "/api",
     createSecuritySiteRouter(prisma as unknown as PrismaClient, { resolve, now: () => now, locks: () => reader as never }),
   );
-  return { server, resolve, prisma, knownLocks, health };
+  return { server, resolve, prisma, knownLocks, health, readingsState };
 }
 
 const HOURS_BODY = {
@@ -454,54 +457,77 @@ describe("POST /api/security/mode — unlockedLocks", () => {
     expect(res.status).toBe(200);
     expect(res.body.changed).toBe(true);
     expect(res.body.unlockedLocks).toEqual(["Back door lock", "Side gate"]);
+    // Not reporting (Garage, whatever it last said), never heard (Annex), unknown (Cellar).
+    expect(res.body.uncheckedLocks).toEqual(["Annex", "Cellar", "Garage"]);
     expect(res.body.locksChecked).toBe(true);
     expect(resolve).toHaveBeenCalledWith(USER_ID);
+  });
+
+  // rjouffret, review of 4fa950c8: one dead battery put the whole header row
+  // down, and the Close up then said "couldn't check the door locks" instead
+  // of naming the Back door it had just heard unlocked.
+  it("one lock not reporting (the row is down, the readings current): names the open Back door AND the lock it couldn't check", async () => {
+    const locks = [lock("1", "Back door", "unlocked"), lock("2", "Side gate", "locked", false), lock("3", "Front door", "locked")];
+    const { server, health } = app(seeded(), "family", "act", NOW, { devices: true, locks, readings: "current" });
+    const res = await request(server).post("/api/security/mode").send({ action: "close" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ locksChecked: true, unlockedLocks: ["Back door"], uncheckedLocks: ["Side gate"] });
+    expect(health).not.toHaveBeenCalled();
   });
 
   it("…also on a changed:false answer (already closed) — the doors are still worth naming", async () => {
     const { server } = app(seeded(), "family", "act", NOW, { devices: true, locks: LOCKS });
     await request(server).post("/api/security/mode").send({ action: "close" });
     const again = await request(server).post("/api/security/mode").send({ action: "close" });
-    expect(again.body).toMatchObject({ changed: false, unlockedLocks: ["Back door lock", "Side gate"], locksChecked: true });
+    expect(again.body).toMatchObject({
+      changed: false,
+      unlockedLocks: ["Back door lock", "Side gate"],
+      uncheckedLocks: ["Annex", "Cellar", "Garage"],
+      locksChecked: true,
+    });
   });
 
   it("nothing known open, locks reporting: an empty list — and checked, so it is not 'couldn't check'", async () => {
     const { server } = app(seeded(), "family", "act", NOW, { devices: true, locks: [lock("2", "Front door lock", "locked")] });
     const res = await request(server).post("/api/security/mode").send({ action: "close" });
-    expect(res.body).toMatchObject({ unlockedLocks: [], locksChecked: true });
+    expect(res.body).toMatchObject({ unlockedLocks: [], uncheckedLocks: [], locksChecked: true });
   });
 
-  it("without Devices view both fields are ABSENT — nothing says a lock exists", async () => {
-    const { server, knownLocks, health } = app(seeded(), "family", "act", NOW, { devices: false, locks: LOCKS });
+  it("without Devices view every lock field is ABSENT — nothing says a lock exists", async () => {
+    const { server, knownLocks, readingsState } = app(seeded(), "family", "act", NOW, { devices: false, locks: LOCKS });
     const res = await request(server).post("/api/security/mode").send({ action: "close" });
     expect(res.status).toBe(200);
     expect(res.body).not.toHaveProperty("unlockedLocks");
+    expect(res.body).not.toHaveProperty("uncheckedLocks");
     expect(res.body).not.toHaveProperty("locksChecked");
     expect(knownLocks).not.toHaveBeenCalled();
-    expect(health).not.toHaveBeenCalled();
+    expect(readingsState).not.toHaveBeenCalled();
   });
 
-  // Review F4: the names are only as good as the adapter's word. When the
-  // locks row is down (the smart-home service unreachable, sweeps failing, a
-  // lock not reporting, nothing checked yet) the readings may be an hour old —
-  // naming "still unlocked" could be false, and an empty list would read as
-  // "none open". The answer says it could not check instead.
-  it("the locks row is DOWN: no names at all — locksChecked:false (never a stale 'still unlocked', never an empty 'none open')", async () => {
-    const w = seeded();
-    const { server, knownLocks } = app(w, "family", "act", NOW, { devices: true, locks: LOCKS, lockHealth: "down" });
-    const res = await request(server).post("/api/security/mode").send({ action: "close" });
-    expect(res.status).toBe(200);
-    expect(res.body.locksChecked).toBe(false);
-    expect(res.body).not.toHaveProperty("unlockedLocks");
-    expect(knownLocks).not.toHaveBeenCalled();
-    expect(w.mode).toMatchObject({ mode: "closed" });
-  });
+  // Review F4: the names are only as good as the adapter's word. When every
+  // reading may be stale (not running, nothing checked yet, the smart-home
+  // service unreachable) naming "still unlocked" could be false, and an empty
+  // list would read as "none open". The answer says it could not check instead.
+  it.each(["not_running", "not_checked_yet", "unreachable"] as const)(
+    "readings %s: no names at all — locksChecked:false (never a stale 'still unlocked', never an empty 'none open')",
+    async (readings) => {
+      const w = seeded();
+      const { server, knownLocks } = app(w, "family", "act", NOW, { devices: true, locks: LOCKS, readings });
+      const res = await request(server).post("/api/security/mode").send({ action: "close" });
+      expect(res.status).toBe(200);
+      expect(res.body.locksChecked).toBe(false);
+      expect(res.body).not.toHaveProperty("unlockedLocks");
+      expect(res.body).not.toHaveProperty("uncheckedLocks");
+      expect(knownLocks).not.toHaveBeenCalled();
+      expect(w.mode).toMatchObject({ mode: "closed" });
+    },
+  );
 
-  it("no door locks paired (not_configured): checked, and an empty list", async () => {
-    const res = await request(app(seeded(), "family", "act", NOW, { devices: true, locks: [], lockHealth: "not_configured" }).server)
+  it("no door locks paired: checked, and empty lists", async () => {
+    const res = await request(app(seeded(), "family", "act", NOW, { devices: true, locks: [] }).server)
       .post("/api/security/mode")
       .send({ action: "close" });
-    expect(res.body).toMatchObject({ unlockedLocks: [], locksChecked: true });
+    expect(res.body).toMatchObject({ unlockedLocks: [], uncheckedLocks: [], locksChecked: true });
   });
 
   it.each([
@@ -514,6 +540,7 @@ describe("POST /api/security/mode — unlockedLocks", () => {
       .send(body);
     expect(res.status).toBe(200);
     expect(res.body).not.toHaveProperty("unlockedLocks");
+    expect(res.body).not.toHaveProperty("uncheckedLocks");
   });
 
   it("no lock adapter running → locksChecked:false (not an empty list, which would read as 'none open'), never an error after the commit", async () => {
@@ -524,10 +551,11 @@ describe("POST /api/security/mode — unlockedLocks", () => {
     expect(res.status).toBe(200);
     expect(res.body.locksChecked).toBe(false);
     expect(res.body).not.toHaveProperty("unlockedLocks");
+    expect(res.body).not.toHaveProperty("uncheckedLocks");
     expect(w.mode).toMatchObject({ mode: "closed", modeSource: "manual" });
   });
 
-  it.each(["knownLocks", "health"] as const)(
+  it.each(["knownLocks", "readingsState"] as const)(
     "a lock reader whose %s throws AFTER the commit → 200, locksChecked:false — every 5xx means nothing changed",
     async (which) => {
       const w = seeded();
@@ -539,6 +567,7 @@ describe("POST /api/security/mode — unlockedLocks", () => {
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ changed: true, locksChecked: false });
       expect(res.body).not.toHaveProperty("unlockedLocks");
+      expect(res.body).not.toHaveProperty("uncheckedLocks");
       expect(w.mode).toMatchObject({ mode: "closed" });
     },
   );

@@ -27,6 +27,7 @@ import {
   modeToast,
   openUpEnds,
   staleLine,
+  uncheckedLocksLine,
   unlockedLocksLine,
 } from "@/components/security/ModeCard";
 import type { SecurityHealthRow, SecurityModeActionResult, SecurityModeView } from "@/lib/types";
@@ -782,10 +783,55 @@ describe("the toast names the doors still open (WARP-2977 P2b-2)", () => {
 
   it("doorLocksLine: not checked wins over any names; no fields at all (no Devices view) adds nothing", () => {
     expect(doorLocksLine({ locksChecked: false })).toBe(COPY.locksNotChecked);
-    expect(doorLocksLine({ locksChecked: false, unlockedLocks: ["Back door lock"] })).toBe(COPY.locksNotChecked);
+    expect(doorLocksLine({ locksChecked: false, unlockedLocks: ["Back door lock"], uncheckedLocks: ["Side gate"] })).toBe(
+      COPY.locksNotChecked,
+    );
     expect(doorLocksLine({ locksChecked: true, unlockedLocks: ["Back door lock"] })).toBe("Back door lock is still unlocked.");
-    expect(doorLocksLine({ locksChecked: true, unlockedLocks: [] })).toBeNull();
+    expect(doorLocksLine({ locksChecked: true, unlockedLocks: [], uncheckedLocks: [] })).toBeNull();
     expect(doorLocksLine({})).toBeNull();
+  });
+
+  // rjouffret, review of 4fa950c8: one lock with a dead battery no longer
+  // hides the Back door — the toast names it, then the lock it couldn't check.
+  it("one lock not reporting: the open Back door, then 'couldn't check' for the silent one — and nothing about the rest", async () => {
+    h.postSecurityMode.mockResolvedValueOnce({
+      ...result(closedUpByStefan()),
+      locksChecked: true,
+      unlockedLocks: ["Back door"],
+      uncheckedLocks: ["Side gate"],
+    });
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.closeUp }));
+    expect(
+      await screen.findByText("Closed until 9:00 AM tomorrow. Back door is still unlocked. Droplet couldn't check Side gate."),
+    ).toBeInTheDocument();
+  });
+
+  it("Away with nothing open but a lock it couldn't check: only the 'couldn't check' line", async () => {
+    h.postSecurityMode.mockResolvedValueOnce({
+      ...result(view({ mode: "away", source: "manual", manualEnd: "until_changed" })),
+      locksChecked: true,
+      unlockedLocks: [],
+      uncheckedLocks: ["Garage", "Side gate"],
+    });
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.moreLabel }));
+    fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: COPY.away }));
+    const toast = await screen.findByText(`${COPY.toastAway} Droplet couldn't check Garage or Side gate.`);
+    expect(toast.closest("[data-toast]")).not.toHaveTextContent(/still unlocked|all locked/i);
+  });
+});
+
+describe("uncheckedLocksLine — the locks Droplet can't vouch for, never 'all locked'", () => {
+  it("nothing to name → no line", () => {
+    expect(uncheckedLocksLine(undefined)).toBeNull();
+    expect(uncheckedLocksLine([])).toBeNull();
+  });
+
+  it("one, two, or the first and a count", () => {
+    expect(uncheckedLocksLine(["Side gate"])).toBe("Droplet couldn't check Side gate.");
+    expect(uncheckedLocksLine(["Garage", "Side gate"])).toBe("Droplet couldn't check Garage or Side gate.");
+    expect(uncheckedLocksLine(["Annex", "Garage", "Side gate"])).toBe("Droplet couldn't check Annex and 2 other locks.");
   });
 });
 

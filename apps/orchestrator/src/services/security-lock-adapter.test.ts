@@ -31,6 +31,7 @@ import {
   lockDisplayName,
   lockFrameSubscriber,
   lockHealthRow,
+  lockReadingsState,
   lockRowDraft,
   matterLockDeviceSource,
   parseLockFrame,
@@ -40,6 +41,7 @@ import {
   securityLockHealthRow,
   startSecurityLockAdapter,
   stillUnlockedLocks,
+  uncheckedLocks,
   type KnownLock,
   type LockDeviceSource,
   type LockHealthInput,
@@ -1026,6 +1028,35 @@ describe("lockHealthRow", () => {
   });
 });
 
+describe("lockReadingsState — whether a Close up may name any lock (rjouffret, review of 4fa950c8)", () => {
+  it("not running, not checked yet, unreachable: the three reasons every reading may be stale", () => {
+    expect(lockReadingsState(healthInput({ started: false }))).toBe("not_running");
+    expect(lockReadingsState(healthInput({ sweepScheduled: false }))).toBe("not_running");
+    expect(lockReadingsState(healthInput({ lastSweepOkAt: null }))).toBe("not_checked_yet");
+    expect(lockReadingsState(healthInput({ bridgeUp: false }))).toBe("unreachable");
+    const err = { at: new Date(T0), message: "ECONNREFUSED" };
+    expect(lockReadingsState(healthInput({ lastSweepOkAt: null, lastSweepError: err }))).toBe("unreachable");
+    expect(lockReadingsState(healthInput({ consecutiveSweepFailures: 2, lastSweepError: err }))).toBe("current");
+    expect(lockReadingsState(healthInput({ consecutiveSweepFailures: 3, lastSweepError: err }))).toBe("unreachable");
+    expect(lockReadingsState(healthInput())).toBe("current");
+  });
+
+  it("each is exactly the header's down row of the same name", () => {
+    expect(lockHealthRow(healthInput({ started: false })).detail).toBe("Not running");
+    expect(lockHealthRow(healthInput({ lastSweepOkAt: null })).detail).toBe("Hasn't checked the locks yet");
+    expect(lockHealthRow(healthInput({ bridgeUp: false })).detail).toBe("Can't reach the smart-home service");
+  });
+
+  it("a lock that isn't reporting, or a change that couldn't be saved, puts the ROW down but leaves the readings current", () => {
+    const silent = healthInput({ knownLocks: [{ nodeId: NODE, name: "Side gate", connected: false }] });
+    expect(lockHealthRow(silent)).toMatchObject({ state: "down", detail: "Side gate isn't reporting" });
+    expect(lockReadingsState(silent)).toBe("current");
+    const unsaved = healthInput({ write: { lastRecordedAt: null, lastWriteError: { at: new Date(T0), message: "x" }, lastLiveFrameAt: null, unsaved: 1 } });
+    expect(lockHealthRow(unsaved)).toMatchObject({ state: "down", detail: "Lock changes are arriving but could not be saved" });
+    expect(lockReadingsState(unsaved)).toBe("current");
+  });
+});
+
 describe("the adapter's health, end to end", () => {
   it.each([
     ["the bridge down too", false],
@@ -1123,6 +1154,23 @@ describe("the adapter's health, end to end", () => {
     devices.length = 0;
     for (let i = 0; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) await adapter.sweep();
     expect(adapter.health()).toMatchObject({ state: "not_configured", detail: "No door locks paired" });
+  });
+
+  it("readingsState follows the same input as the row: not_running → not_checked_yet → current, and a lock that stops reporting leaves it current", async () => {
+    const devices = [lockDevice(), lockDevice({ nodeId: "99", friendlyName: "Gate", attributes: { lockState: 1 } })];
+    const { adapter } = adapterWith({ source: staticSource(() => Promise.resolve(devices)) });
+    expect(adapter.readingsState()).toBe("not_running");
+    adapter.start();
+    adapter.noteSweepScheduled();
+    expect(adapter.readingsState()).toBe("not_checked_yet");
+    await adapter.sweep();
+    expect(adapter.readingsState()).toBe("current");
+    devices[1] = { ...devices[1]!, connectionState: "disconnected" };
+    await adapter.sweep();
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Gate isn't reporting" });
+    expect(adapter.readingsState()).toBe("current");
+    expect(uncheckedLocks(adapter.knownLocks())).toEqual(["Gate"]);
+    expect(stillUnlockedLocks(adapter.knownLocks())).toEqual(["Back door lock"]);
   });
 
   it("a source whose bridgeUp throws reads as unreachable", async () => {
@@ -1458,6 +1506,47 @@ describe("stillUnlockedLocks — the names a Close up / Away answer lists (never
         known({ connected: false, nodeId: "4" }),
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("uncheckedLocks — the locks a Close up / Away answer can't vouch for (rjouffret, review of 4fa950c8)", () => {
+  const known = (over: Partial<KnownLock>): KnownLock => ({
+    ref: REF,
+    nodeId: NODE,
+    endpointId: 1,
+    name: "Back door lock",
+    room: null,
+    connected: true,
+    reading: "locked" as LockReading | null,
+    polled: true,
+    ...over,
+  });
+
+  it("not reporting (whatever it last said), never heard, or unknown — one name per device, sorted", () => {
+    expect(
+      uncheckedLocks([
+        known({ name: "Side gate", nodeId: "2", ref: "matter:2/1", connected: false, reading: "unlocked" }),
+        known({ name: "Annex", nodeId: "3", ref: "matter:3/1", reading: null }),
+        // A second endpoint of the same device: one name.
+        known({ name: "Annex", nodeId: "3", ref: "matter:3/2", endpointId: 2, reading: null }),
+        known({ name: "Cellar", nodeId: "4", ref: "matter:4/1", reading: "unknown" }),
+      ]),
+    ).toEqual(["Annex", "Cellar", "Side gate"]);
+  });
+
+  it("a connected lock with a reading: locked is in neither list, open only in 'still unlocked'", () => {
+    const locks = [
+      known({ reading: "locked" }),
+      known({ name: "Gate", nodeId: "2", ref: "matter:2/1", reading: "unlatched" }),
+      // A second endpoint of the open device that was never heard: the device is already named.
+      known({ name: "Gate", nodeId: "2", ref: "matter:2/2", endpointId: 2, reading: null }),
+    ];
+    expect(uncheckedLocks(locks)).toEqual([]);
+    expect(stillUnlockedLocks(locks)).toEqual(["Gate"]);
+  });
+
+  it("nothing paired: empty — never a line that reads as 'all locked'", () => {
+    expect(uncheckedLocks([])).toEqual([]);
   });
 });
 

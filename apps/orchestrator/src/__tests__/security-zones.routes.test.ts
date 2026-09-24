@@ -359,6 +359,7 @@ const lockReader = {
   listLocks: vi.fn(),
   knownLocks: vi.fn(),
   health: vi.fn(),
+  readingsState: vi.fn(),
 };
 /** False = no adapter was started (`deps.locks()` answers null). */
 let locksRunning = true;

@@ -107,8 +107,12 @@ export const COPY = {
   stillUnlockedOne: "{lock} is still unlocked.",
   stillUnlockedTwo: "{a} and {b} are still unlocked.",
   stillUnlockedMany: "{a} and {n} other locks are still unlocked.",
-  // The server could not vouch for the lock readings: never read as "none open".
+  // The server could not vouch for any lock reading: never read as "none open".
   locksNotChecked: "Droplet couldn't check the door locks.",
+  // The other readings stand, but these locks aren't reporting or said nothing Droplet can name.
+  notCheckedOne: "Droplet couldn't check {lock}.",
+  notCheckedTwo: "Droplet couldn't check {a} or {b}.",
+  notCheckedMany: "Droplet couldn't check {a} and {n} other locks.",
 } as const;
 
 /**
@@ -282,14 +286,31 @@ export function unlockedLocksLine(names: readonly string[] | undefined): string 
 }
 
 /**
- * The door-lock line of a Close up / Away toast, from the server's answer:
- * "Droplet couldn't check the door locks." when it could not vouch for the
- * readings (`locksChecked: false`, review F4), else the names still open, else
- * nothing. Both fields are absent for people without Devices view.
+ * The line naming the locks the server can't vouch for (`uncheckedLocks`,
+ * sorted by name) while the other readings stand. Null when there are none.
  */
-export function doorLocksLine(r: Pick<SecurityModeActionResult, "unlockedLocks" | "locksChecked">): string | null {
+export function uncheckedLocksLine(names: readonly string[] | undefined): string | null {
+  if (!names || names.length === 0) return null;
+  if (names.length === 1) return fill(COPY.notCheckedOne, { lock: names[0]! });
+  if (names.length === 2) return fill(COPY.notCheckedTwo, { a: names[0]!, b: names[1]! });
+  return fill(COPY.notCheckedMany, { a: names[0]!, n: String(names.length - 1) });
+}
+
+/**
+ * The door-lock line of a Close up / Away toast, from the server's answer:
+ * "Droplet couldn't check the door locks." when it could not vouch for any
+ * reading (`locksChecked: false`, review F4); else the names still open, then
+ * the ones it couldn't check (rjouffret, review of 4fa950c8); else nothing.
+ * Every field is absent for people without Devices view.
+ */
+export function doorLocksLine(
+  r: Pick<SecurityModeActionResult, "unlockedLocks" | "uncheckedLocks" | "locksChecked">,
+): string | null {
   if (r.locksChecked === false) return COPY.locksNotChecked;
-  return unlockedLocksLine(r.unlockedLocks);
+  const lines = [unlockedLocksLine(r.unlockedLocks), uncheckedLocksLine(r.uncheckedLocks)].filter(
+    (l): l is string => l !== null,
+  );
+  return lines.length > 0 ? lines.join(" ") : null;
 }
 
 /** The stale warning, read off the `site_mode` health row's lastSeenAt. */

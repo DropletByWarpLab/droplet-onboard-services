@@ -13,7 +13,8 @@
  *     existing matter.service exports by index.ts;
  *   · `SecurityLockReader` — what the /security routes read (a fresh lock
  *     list for the Areas page and link checks, the last sweep's locks for a
- *     Close up's `unlockedLocks`, the health row).
+ *     Close up's `unlockedLocks` / `uncheckedLocks` and whether their
+ *     readings are current, the health row).
  * No Prisma ENUM is imported here (the store passes the draft's string
  * unions straight to the writer). It does NOT import matter.service: index.ts
  * injects the functions, so the route tests that mock matter.service with
@@ -741,6 +742,30 @@ export function stillUnlockedLocks(
   return [...byNode.values()].sort((a, b) => a.localeCompare(b));
 }
 
+/**
+ * Route 7's `uncheckedLocks` (review F4 follow-up): the locks a Close up /
+ * Away answer cannot vouch for while the other readings stand — NOT
+ * reporting (not connected, including one the sweep keeps while the list
+ * skips it, review F5), or reporting with no reading Droplet can name (never
+ * heard, or the lock itself says unknown). One name per device, sorted; a
+ * device already named in `stillUnlockedLocks` is not repeated. A lock last
+ * heard locked is in neither list, and nothing is ever phrased as "all locked".
+ */
+export function uncheckedLocks(
+  known: ReadonlyArray<Pick<KnownLock, "nodeId" | "name" | "connected" | "reading">>,
+): string[] {
+  const named = new Set(
+    known.filter((l) => l.connected && l.reading !== null && STILL_OPEN.has(l.reading)).map((l) => l.nodeId),
+  );
+  const byNode = new Map<string, string>();
+  for (const l of known) {
+    if (named.has(l.nodeId)) continue;
+    if (l.connected && l.reading !== null && l.reading !== "unknown") continue;
+    if (!byNode.has(l.nodeId)) byNode.set(l.nodeId, l.name);
+  }
+  return [...byNode.values()].sort((a, b) => a.localeCompare(b));
+}
+
 export type LockSweepResult =
   | {
       status: "ok";
@@ -781,6 +806,42 @@ export interface LockHealthInput extends LockSweepState {
 }
 
 /**
+ * Whether the lock readings Droplet holds are CURRENT — an explicit state,
+ * never read back off the header's copy (review F4 follow-up). Anything but
+ * `current` means every reading may be stale: nothing is listening, nothing
+ * has been checked since boot, or the smart-home service can't be reached. A
+ * Close up / Away then says it couldn't check the door locks, naming none.
+ * A lock that isn't reporting, or a change that couldn't be saved, is NOT one
+ * of these: the other locks' readings stand (a reading is held in memory
+ * when it is heard, before any save), and that lock is named as unchecked
+ * (`uncheckedLocks`) instead of hiding every other lock's line.
+ */
+export type LockReadingsState = "current" | "not_running" | "not_checked_yet" | "unreachable";
+
+export function lockReadingsState(
+  input: Pick<LockHealthInput, "started" | "sweepScheduled" | "bridgeUp" | "lastSweepOkAt" | "lastSweepError" | "consecutiveSweepFailures">,
+): LockReadingsState {
+  if (!input.started || !input.sweepScheduled) return "not_running";
+  // Registered, the service is up, and the first sweep (run at registration,
+  // review F9) has not finished yet. Never "no locks".
+  if (input.lastSweepOkAt === null && input.lastSweepError === null && input.bridgeUp) return "not_checked_yet";
+  if (
+    !input.bridgeUp ||
+    input.lastSweepOkAt === null ||
+    input.consecutiveSweepFailures >= SECURITY_LOCK_SWEEP_FAILURES_DOWN
+  ) {
+    return "unreachable";
+  }
+  return "current";
+}
+
+const READINGS_NOT_CURRENT: Record<Exclude<LockReadingsState, "current">, string> = {
+  not_running: "Not running",
+  not_checked_yet: "Hasn't checked the locks yet",
+  unreachable: "Can't reach the smart-home service",
+};
+
+/**
  * The `locks` row of the /security header (shown only to viewers who may
  * read locks — the route's job). Pure. There is no "quiet" rule: locks
  * legitimately sit still for days.
@@ -792,19 +853,8 @@ export function lockHealthRow(input: LockHealthInput): LockHealth {
   const lastSeenAt = seen ? seen.toISOString() : null;
   const row = (state: LockHealthState, detail: string): LockHealth => ({ id: "locks", state, detail, lastSeenAt });
 
-  if (!input.started || !input.sweepScheduled) return row("down", "Not running");
-  if (input.lastSweepOkAt === null && input.lastSweepError === null && input.bridgeUp) {
-    // Registered, the service is up, the first sweep has not run yet
-    // (scheduleInterval has no immediate tick). Still down, never "no locks".
-    return row("down", "Hasn't checked the locks yet");
-  }
-  if (
-    !input.bridgeUp ||
-    input.lastSweepOkAt === null ||
-    input.consecutiveSweepFailures >= SECURITY_LOCK_SWEEP_FAILURES_DOWN
-  ) {
-    return row("down", "Can't reach the smart-home service");
-  }
+  const readings = lockReadingsState(input);
+  if (readings !== "current") return row("down", READINGS_NOT_CURRENT[readings]);
   if (input.write.unsaved > 0) {
     return row("down", "Lock changes are arriving but could not be saved");
   }
@@ -858,6 +908,8 @@ export interface SecurityLockAdapter {
   knownLocks(): KnownLock[];
   sweepState(): Readonly<LockSweepState>;
   health(): LockHealth;
+  /** Whether the readings `knownLocks` carries are current (review F4 follow-up): route 7 names locks only when they are. */
+  readingsState(): LockReadingsState;
 }
 
 export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): SecurityLockAdapter {
@@ -904,6 +956,17 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
     logger: log,
     nameOf: (obs) => names.get(obs.ref) ?? fallbackLockName(obs.nodeId),
   });
+
+  /** What the header row and the readings state are computed from — one input, so they cannot disagree. */
+  const healthInput = (): LockHealthInput => {
+    let bridgeUp = false;
+    try {
+      bridgeUp = deps.source.bridgeUp() === true;
+    } catch {
+      // A source that cannot say reads as unreachable, never as fine.
+    }
+    return { ...state, started, sweepScheduled, bridgeUp, knownLocks: snapshot, write: tracker.writeHealth() };
+  };
 
   async function runSweep(): Promise<LockSweepResult> {
     const t0 = now();
@@ -1088,22 +1151,8 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
       return snapshot.map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
     },
     sweepState: () => state,
-    health() {
-      let bridgeUp = false;
-      try {
-        bridgeUp = deps.source.bridgeUp() === true;
-      } catch {
-        // A source that cannot say reads as unreachable, never as fine.
-      }
-      return lockHealthRow({
-        ...state,
-        started,
-        sweepScheduled,
-        bridgeUp,
-        knownLocks: snapshot,
-        write: tracker.writeHealth(),
-      });
-    },
+    health: () => lockHealthRow(healthInput()),
+    readingsState: () => lockReadingsState(healthInput()),
   };
   return adapter;
 }
@@ -1146,7 +1195,7 @@ export function createPrismaLockStore(prisma: Pick<PrismaClient, "securityEvent"
 // ── wiring (index.ts calls these; the /security routes read the adapter) ─
 
 /** What the /security routes read from the adapter (injectable through the routers' `deps.locks`). */
-export type SecurityLockReader = Pick<SecurityLockAdapter, "listLocks" | "knownLocks" | "health">;
+export type SecurityLockReader = Pick<SecurityLockAdapter, "listLocks" | "knownLocks" | "health" | "readingsState">;
 
 let active: SecurityLockAdapter | null = null;
 
