@@ -621,6 +621,8 @@ class OrchestratorLLM(LLMClient):
         after an owner switched, and on DMR that loads it next to the active
         one. Every failure is soft: the last known answer stands, else the
         configured model — a voice turn never fails because this lookup did.
+        An active model the listing states can't call tools is not followed
+        (``_states_no_tools``): voice is a tool-driven loop.
         """
         if not self._follow_active_model:
             return self._model
@@ -643,7 +645,21 @@ class OrchestratorLLM(LLMClient):
                 data = resp.json()
                 default = data.get("defaultModel") if isinstance(data, dict) else None
                 if isinstance(default, str) and default.strip():
-                    self._active_model = default.strip()
+                    default = default.strip()
+                    if _states_no_tools(data.get("models"), default):
+                        # Voice is a tool-driven loop (``allowed_tools``). An
+                        # active model the box says can't call tools (a
+                        # vision-only one) keeps voice on its configured
+                        # model — the rule agent runs get from the
+                        # orchestrator's resolveActiveModel({requireTools}).
+                        logger.info(
+                            "active model %s can't call tools — voice keeps %s",
+                            default,
+                            self._model,
+                        )
+                        self._active_model = None
+                    else:
+                        self._active_model = default
                 else:
                     logger.info(
                         "orchestrator named no active model — keeping %s",
@@ -825,6 +841,24 @@ class OrchestratorLLM(LLMClient):
         if etype in ("tool_call", "tool_result"):
             logger.debug("voice stream: ignoring %s frame for audio", etype)
         return False
+
+
+def _states_no_tools(models: Any, model_id: str) -> bool:
+    """WARP-3047 — True only when the orchestrator's listing STATES that
+    ``model_id`` cannot call tools (``capabilities.tools is False``).
+
+    Absent from the listing, no ``capabilities``, or anything but an explicit
+    ``False`` reads as unknown — and unknown keeps the active model: moving
+    voice to another model is a second model on the GPU, so only a stated
+    "no" is worth that.
+    """
+    if not isinstance(models, list):
+        return False
+    for entry in models:
+        if isinstance(entry, dict) and entry.get("id") == model_id:
+            caps = entry.get("capabilities")
+            return isinstance(caps, dict) and caps.get("tools") is False
+    return False
 
 
 def _extract_error_detail(resp: "httpx.Response") -> str:

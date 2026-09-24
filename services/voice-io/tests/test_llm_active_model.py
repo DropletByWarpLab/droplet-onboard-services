@@ -14,6 +14,9 @@ The contract pinned here:
     per turn); a switch is picked up on the next window.
   - When the orchestrator can't name one (non-2xx, transport error, null
     ``defaultModel``) the last known answer stands, else env ``LLM_MODEL``.
+  - An active model the same listing STATES can't call tools
+    (``capabilities.tools is False``) is not followed — voice is a
+    tool-driven loop; unknown capabilities still follow.
   - A directly-constructed ``OrchestratorLLM`` (tests, ``__mock__`` style
     wiring) keeps sending its configured model and never makes the GET.
 """
@@ -47,6 +50,9 @@ class _Orchestrator:
     def __init__(self, default: object = ACTIVE_B, models_status: int = 200) -> None:
         self.default = default
         self.models_status = models_status
+        # The `models` half of the listing — the gateway's ModelInfo rows,
+        # whose `capabilities` voice reads for the active model.
+        self.models: list[dict] = []
         self.models_gets: list[httpx.Request] = []
         self.chat_models: list[str] = []
         self.raise_on_models = False
@@ -59,7 +65,7 @@ class _Orchestrator:
                     raise httpx.ConnectError("orchestrator restarting", request=req)
                 return httpx.Response(
                     self.models_status,
-                    json={"models": [], "defaultModel": self.default},
+                    json={"models": self.models, "defaultModel": self.default},
                 )
             body = json.loads(req.content)
             self.chat_models.append(body["model"])
@@ -127,6 +133,37 @@ class TestFollowsActiveModel:
         llm = _following()
         llm.reply("hi")
         assert orch.chat_models == [ENV_MODEL]
+
+    def test_an_active_model_that_cannot_call_tools_keeps_the_configured_model(self, orch):
+        """Voice is a tool-driven agent loop (``allowed_tools``). An active
+        model the box states cannot call tools (a vision-only model, e.g.
+        llava) keeps voice on its configured model — the same rule agent
+        runs get from ``resolveActiveModel({ requireTools })``."""
+        orch.default = "llava:7b"
+        orch.models = [
+            {"id": "llava:7b", "provider": "ollama", "name": "Llava 7B",
+             "capabilities": {"vision": True, "tools": False}},
+        ]
+        llm = _following()
+        llm.reply("hi")
+        assert orch.chat_models == [ENV_MODEL]
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            None,  # the active model is not in the listing at all
+            {"id": ACTIVE_B, "provider": "ollama", "name": "Qwen 3 8B"},
+            {"id": ACTIVE_B, "provider": "ollama", "name": "Qwen 3 8B", "capabilities": None},
+            {"id": ACTIVE_B, "provider": "ollama", "name": "Qwen 3 8B",
+             "capabilities": {"vision": False, "tools": True}},
+        ],
+    )
+    def test_only_a_stated_no_moves_voice_off_the_active_model(self, orch, entry):
+        # Unknown capabilities are not a reason to load a second model.
+        orch.models = [entry] if entry else []
+        llm = _following()
+        llm.reply("hi")
+        assert orch.chat_models == [ACTIVE_B]
 
     def test_a_failed_refresh_keeps_the_last_known_active_model(self, orch):
         clock = _Clock()
