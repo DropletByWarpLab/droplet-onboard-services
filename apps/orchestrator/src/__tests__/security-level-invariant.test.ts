@@ -40,6 +40,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 import { createSecurityRouter } from "../routes/security.js";
 import { createSecurityZonesRouter } from "../routes/security-zones.js";
 import { createSecuritySiteRouter } from "../routes/security-site.js";
+import { createSecurityPatternsRouter } from "../routes/security-patterns.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
@@ -94,6 +95,7 @@ const ROUTERS = [
   ["createSecurityRouter", createSecurityRouter(PRISMA, {})],
   ["createSecurityZonesRouter", createSecurityZonesRouter(PRISMA, {})],
   ["createSecuritySiteRouter", createSecuritySiteRouter(PRISMA, {})],
+  ["createSecurityPatternsRouter", createSecurityPatternsRouter(PRISMA, {})],
 ] as const;
 
 function routesOf(name: string, router: unknown): RouteInfo[] {
@@ -196,7 +198,7 @@ describe("Security level invariant — the three routers' real stacks (spec §7,
   });
 
   it("no route source uses requireRoleOrMcpService / requireRoleOrService (comments aside)", () => {
-    for (const file of ["security.ts", "security-zones.ts", "security-site.ts"]) {
+    for (const file of ["security.ts", "security-zones.ts", "security-site.ts", "security-patterns.ts"]) {
       const code = readFileSync(resolve(__dirname, "../routes", file), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "");
@@ -216,7 +218,7 @@ describe("Security level invariant — the three routers' real stacks (spec §7,
     expect(shadowed).toEqual([]);
   });
 
-  it("app.ts mounts the three routers at /api in the order this table assumes", () => {
+  it("app.ts mounts the Security routers at /api in the order this table assumes", () => {
     const app = readFileSync(resolve(__dirname, "../app.ts"), "utf8");
     const mounts = [...app.matchAll(/app\.use\(\s*"\/api"\s*,\s*(createSecurity\w*Router)\(/g)].map((m) => m[1]);
     expect(mounts).toEqual(ROUTERS.map(([name]) => name));

@@ -787,6 +787,11 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "ZONES_UNAVAILABLE",
     "VALIDATION_ERROR",
     "INTERNAL_ERROR",
+    // WARP-2980 (P5 PR-A) — the read-only patterns routes 29–31.
+    "PATTERNS_UNAVAILABLE",
+    "PATTERN_NOT_FOUND",
+    "PATTERNS_NOT_BUILT",
+    "NO_TIMEZONE",
   ] as const satisfies readonly SecurityErrorCode[];
   // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
   // code added to SecurityErrorCode without copy here fails the build.

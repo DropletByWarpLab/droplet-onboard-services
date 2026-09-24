@@ -3382,10 +3382,11 @@ export interface SecurityEventsPage {
 /**
  * One line of the feed header: what the feed is listening to, and whether it
  * is reporting. Served in the order camera_ingest, camera_system,
- * threat_mirror, site_mode, retention (PR-2 adds `locks` after camera_system).
+ * threat_mirror, site_mode, patterns, retention (PR-2 adds `locks` after
+ * camera_system). `patterns` (WARP-2980) is the baseline job's row.
  */
 export interface SecurityHealthRow {
-  id: "camera_ingest" | "camera_system" | "threat_mirror" | "site_mode" | "retention";
+  id: "camera_ingest" | "camera_system" | "threat_mirror" | "site_mode" | "patterns" | "retention";
   state: "ok" | "quiet" | "down" | "not_configured";
   detail: string;
   lastSeenAt: string | null;
@@ -3622,9 +3623,96 @@ export type SecurityErrorCode =
   | "EXCEPTION_OUT_OF_RANGE"
   // A 500: a programming error on the box (a refused audit precondition, a
   // TypeError), never an outage — retrying the same request will not help.
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  // WARP-2980 (P5 PR-A) — the read-only patterns routes 29–31.
+  | "PATTERNS_UNAVAILABLE"
+  | "PATTERN_NOT_FOUND"
+  | "PATTERNS_NOT_BUILT"
+  | "NO_TIMEZONE";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
   error: { code: SecurityErrorCode; message: string; issues?: unknown[]; archivedZoneId?: string };
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like ──
+// Wire shapes of GET /api/security/patterns{,/cells,/explain} (routes 29–31).
+// Mirrors apps/orchestrator/src/services/security-patterns-read.ts. "Patterns"
+// and "what's usual" in the UI; never "baseline" or "suppression".
+
+export type SecurityPatternCode = "out_of_place" | "unusual_volume" | "long_dwell";
+export type SecurityPatternRelease = "trial" | "live";
+export type SecurityLearningState = "learning" | "active" | "stale";
+export type SecurityDayType = "weekday" | "weekend";
+
+/** Route 29. */
+export interface SecurityPatternsOverview {
+  state: "not_configured" | "not_built" | "ready";
+  reason: "no_timezone" | "no_cameras" | null;
+  timezone: string | null;
+  window: { from: string; to: string; builtAt: string } | null;
+  release: Record<SecurityPatternCode, SecurityPatternRelease>;
+  /** Visible cameras Droplet has heard from. A camera with no row here has never reported. */
+  sources: Array<{
+    camera: string;
+    label: string;
+    state: SecurityLearningState;
+    daysObserved: number;
+    daysNeeded: 14;
+    lastSeenAt: string;
+    detectionsPerDay: number | null;
+  }>;
+  /** Areas first, then cameras; only keys whose every camera the viewer can see. */
+  keys: Array<{
+    zoneKey: string;
+    kind: "area" | "camera";
+    zoneId: string | null;
+    name: string;
+    cameras: string[];
+    labels: string[];
+    learning: boolean;
+  }>;
+  waitingProposals: number;
+}
+
+/** One (dayType, hour) of route 30. */
+export interface SecurityPatternCellView {
+  dayType: SecurityDayType;
+  hour: number;
+  daysObserved: number;
+  daysWithEvent: number;
+  /** Enough observed days to judge this hour. */
+  ready: boolean;
+  /** Not usually seen at this hour. */
+  rare: boolean;
+  typicalPerHour: number | null;
+  longestUsualVisitSec: number | null;
+}
+
+/** Route 30: 48 cells, weekdays 0–23 then weekends 0–23. */
+export interface SecurityPatternCells {
+  key: string;
+  label: string;
+  window: { from: string; to: string; builtAt: string };
+  cells: SecurityPatternCellView[];
+}
+
+/** Route 31. */
+export interface SecurityPatternExplainView {
+  key: { zoneKey: string; kind: "area" | "camera"; zoneId: string | null; name: string; cameras: string[] };
+  at: { instant: string; local: string; dayType: SecurityDayType; hour: number; timezone: string };
+  window: { from: string; to: string; builtAt: string };
+  sources: Array<{ camera: string; state: SecurityLearningState; daysObserved: number; daysNeeded: 14; lastSeenAt: string }>;
+  cell: {
+    ready: boolean;
+    daysObserved: number;
+    daysWithEvent: number;
+    smoothed: { daysObserved: number; daysWithEvent: number };
+    rarity: { p: number; flagsBelow: 0.05; wouldFlag: boolean };
+    volume: { typicalPerHour: number | null; flagsFrom: number | null };
+    dwell: { longestUsualVisitSec: number | null; samples: number; wouldFlagAboveSec: number | null };
+    neighbours: Array<{ hour: number; daysObserved: number; daysWithEvent: number }>;
+  } | null;
+  expected: Array<{ id: string; text: string; until: string }>;
+  release: Record<SecurityPatternCode, SecurityPatternRelease>;
 }

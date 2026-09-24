@@ -145,7 +145,24 @@ describe("createStatusTracker — transitions only, previous read back from the 
   it("the snapshot carries the latest reading, including Frigate's own (null key)", async () => {
     const { t } = tracker(null);
     await t.observe("frigate/available", "online", NOW);
-    expect(t.snapshot().get(null)).toEqual({ health: "online", at: NOW });
+    expect(t.snapshot().get(null)).toEqual({ health: "online", at: NOW, since: NOW });
+  });
+
+  it("WARP-2980: `since` is when the health last CHANGED — a repeated reading moves `at`, never `since`", async () => {
+    const { t } = tracker("camera_online");
+    const later = new Date(NOW.getTime() + 60_000);
+    const muchLater = new Date(NOW.getTime() + 120_000);
+    await t.observe("frigate/cam1/status/detect", "online", NOW);
+    await t.observe("frigate/cam1/status/detect", "online", later);
+    expect(t.snapshot().get("cam1")).toEqual({ health: "online", at: later, since: NOW });
+    // A change moves both.
+    await t.observe("frigate/cam1/status/detect", "offline", muchLater);
+    expect(t.snapshot().get("cam1")).toEqual({ health: "offline", at: muchLater, since: muchLater });
+    // A retained replay of the same health after a reconnect does not move `since`
+    // (the reconnect is caught by frigateSubscribedAt, not here).
+    const replay = new Date(NOW.getTime() + 180_000);
+    await t.observe("frigate/cam1/status/detect", "offline", replay);
+    expect(t.snapshot().get("cam1")).toEqual({ health: "offline", at: replay, since: muchLater });
   });
 
   it("a topic that is not a status topic does nothing", async () => {
@@ -383,6 +400,20 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode });
     expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "camera_system", "threat_mirror", "site_mode", "retention"]);
     expect(row(rows, "site_mode")).toBe(siteMode);
+  });
+
+  it("WARP-2980: a patterns row lands after site_mode and before retention, verbatim", () => {
+    const siteMode = { id: "site_mode" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const patterns = { id: "patterns" as const, state: "down" as const, detail: "Not running", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode, patterns });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "camera_system", "threat_mirror", "site_mode", "patterns", "retention"]);
+    expect(row(rows, "patterns")).toBe(patterns);
+  });
+
+  it("WARP-2980: without a site_mode row, patterns still sits right before retention", () => {
+    const patterns = { id: "patterns" as const, state: "quiet" as const, detail: "x", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, frigateConfigured: false, ingest: ingest(), patterns });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "patterns", "retention"]);
   });
 
   it("WARP-2977 P2b: the pinned order holds when rows drop out — no camera system, site_mode still before retention", () => {

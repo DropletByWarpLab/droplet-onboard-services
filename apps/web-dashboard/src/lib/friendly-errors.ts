@@ -743,6 +743,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     MODE_UNAVAILABLE: "Droplet can't tell the site's mode right now. Try again in a moment.",
     HOURS_UNAVAILABLE: "Droplet couldn't load the opening hours right now. Try again in a moment.",
     ZONES_UNAVAILABLE: "Droplet couldn't load the areas right now. Try again in a moment.",
+    // WARP-2980 (P5 PR-A) — the read-only patterns page. A hidden area or
+    // camera answers exactly like a missing one, so this copy never says which.
+    PATTERNS_UNAVAILABLE: "Droplet couldn't load what's usual right now. Try again in a moment.",
+    PATTERN_NOT_FOUND: "There's nothing to show for that area or camera. Pick another one.",
+    PATTERNS_NOT_BUILT: "Droplet hasn't worked out what's usual yet. It does that every night.",
+    NO_TIMEZONE: "Droplet needs the site's timezone first. Set the opening hours to choose it.",
     VALIDATION_ERROR: "Some of that isn't quite right. Check what you entered and try again.",
     // A route-level feature gate answers 404 module_disabled (a flat body, so
     // apiFetch carries no typed code — the status entry catches it): this

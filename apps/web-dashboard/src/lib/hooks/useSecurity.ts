@@ -22,6 +22,7 @@ import useSWRInfinite from "swr/infinite";
 import {
   SECURITY_HOURS_PATH,
   SECURITY_MODE_PATH,
+  SECURITY_PATTERNS_PATH,
   SECURITY_SOURCES_PATH,
   SECURITY_ZONES_PATH,
   archiveSecurityZone,
@@ -32,6 +33,8 @@ import {
   getSecurityHealth,
   getSecurityHours,
   getSecurityMode,
+  getSecurityPatternCells,
+  getSecurityPatterns,
   getSecuritySources,
   getSecurityZones,
   patchSecurityZone,
@@ -54,6 +57,8 @@ import type {
   SecurityModeAction,
   SecurityModeActionResult,
   SecurityModeView,
+  SecurityPatternCells,
+  SecurityPatternsOverview,
   SecuritySourcesView,
   SecurityZoneCreateBody,
   SecurityZoneCreated,
@@ -282,4 +287,28 @@ export function useSecurityHours() {
     saveException,
     deleteException,
   };
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like ──
+
+/** The learning numbers move with the job's hourly step; a minute's lag is plenty. */
+const PATTERNS_REFRESH_MS = 60_000;
+
+/** GET /api/security/patterns — never an empty 200 on an outage: a failed read is an `error`. */
+export function useSecurityPatterns() {
+  const { data, error, isLoading, mutate } = useSWR<SecurityPatternsOverview>(
+    SECURITY_PATTERNS_PATH,
+    () => getSecurityPatterns(),
+    { refreshInterval: PATTERNS_REFRESH_MS },
+  );
+  return { overview: data ?? null, error: error as Error | undefined, isLoading, mutate };
+}
+
+/** GET /api/security/patterns/cells — one key and label; a `null` key fetches nothing. */
+export function useSecurityPatternCells(key: string | null, label: string | null) {
+  const { data, error, isLoading } = useSWR<SecurityPatternCells>(
+    key && label ? [SECURITY_PATTERNS_PATH, "cells", key, label] : null,
+    () => getSecurityPatternCells(key!, label!),
+  );
+  return { cells: data ?? null, error: error as Error | undefined, isLoading };
 }
