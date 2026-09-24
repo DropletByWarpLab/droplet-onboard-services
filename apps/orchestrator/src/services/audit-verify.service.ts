@@ -176,13 +176,20 @@ export async function runNightlyChainVerification(
     where: { role: { in: ["owner", "admin"] } },
     select: { username: true },
   });
+  // WARP-2911 — contained PER RECIPIENT: one refused or failed send (e.g. an
+  // account whose username predates the ban on the User.id shape) must never
+  // cost the admins after it the one alert that must not be missed.
   for (const admin of admins) {
-    await sendNotification(prisma, {
-      username: admin.username,
-      kind: "system",
-      title: "Audit log integrity check failed",
-      body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,
-    });
+    try {
+      await sendNotification(prisma, {
+        username: admin.username,
+        kind: "system",
+        title: "Audit log integrity check failed",
+        body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,
+      });
+    } catch (err) {
+      logger.error({ err, username: admin.username }, "audit-chain alert to one admin failed — continuing with the rest");
+    }
   }
   return result;
 }

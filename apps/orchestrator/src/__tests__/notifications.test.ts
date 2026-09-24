@@ -33,6 +33,7 @@ import {
   assertNotificationLink,
   assertNotificationData,
   NotificationRecipientError,
+  notifyOwnersAndAdmins,
 } from "../services/notifications.service.js";
 import { isReservedUserId, isUserIdShaped } from "@droplet/auth-policy";
 
@@ -472,4 +473,41 @@ describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIE
       expect(mqttPublish).toHaveBeenCalledWith(`droplet/notifications/${username}`, expect.anything());
     },
   );
+});
+
+// WARP-2911 — the OTA path's owner/admin fan-out (index.ts `notifyOwners`),
+// here so it can be tested: one refused recipient (an account whose username
+// predates the ban on the User.id shape) never costs the others the alert.
+describe("notifyOwnersAndAdmins (WARP-2911)", () => {
+  const LEGACY = "5f0c2a1e-7b3d-4c9e-8a21-0e6d4b9c3f70";
+
+  function ownersStub(usernames: string[]) {
+    const stub = makePrismaStub() as unknown as Record<string, unknown>;
+    stub.user = {
+      findMany: vi.fn(async ({ where }: { where: { role: { in: string[] } } }) => {
+        expect(where.role.in.sort()).toEqual(["admin", "owner"]);
+        return usernames.map((username) => ({ username }));
+      }),
+    };
+    return stub as unknown as PrismaClient & { _created: Array<Record<string, unknown>>; user: { findMany: ReturnType<typeof vi.fn> } };
+  }
+
+  it("notifies every owner and admin by username", async () => {
+    const prisma = ownersStub(["stefan", "romain"]);
+    await notifyOwnersAndAdmins(prisma, "Update rolled back", "It is running the previous version.");
+    expect(mqttPublish.mock.calls.map((c) => c[0])).toEqual([
+      "droplet/notifications/stefan",
+      "droplet/notifications/romain",
+    ]);
+    expect(prisma._created.map((r) => r.username)).toEqual(["stefan", "romain"]);
+  });
+
+  it("🔴 a refused recipient is skipped and logged; the ones after it are still told", async () => {
+    const prisma = ownersStub([LEGACY, "romain"]);
+    await expect(
+      notifyOwnersAndAdmins(prisma, "Update rolled back", "It is running the previous version."),
+    ).resolves.toEqual({ notified: ["romain"], failed: [LEGACY] });
+    expect(mqttPublish.mock.calls.map((c) => c[0])).toEqual(["droplet/notifications/romain"]);
+    expect(prisma._created.map((r) => r.username)).toEqual(["romain"]);
+  });
 });

@@ -24,6 +24,7 @@ vi.mock("./notifications.service.js", () => ({
   }),
 }));
 import { sendNotification } from "./notifications.service.js";
+import { NotificationRecipientError } from "./notification-recipient.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 /** What `transaction_timestamp()::text` reports inside the fake transaction (WARP-2977 P2b). */
@@ -194,6 +195,19 @@ describe("verifyActivityChain / runNightlyChainVerification", () => {
     for (const key of keys) {
       expect(key).not.toContain("uuid");
     }
+  });
+
+  it("🔴 WARP-2911 one admin whose notification is refused does not cost the others the alert", async () => {
+    // A username with the shape of a User.id (an account from before creation
+    // refused it) is refused by sendNotification. Without a per-recipient
+    // catch that throw ended the loop, and every admin after it never heard
+    // that the audit chain was broken.
+    vi.mocked(sendNotification).mockRejectedValueOnce(NotificationRecipientError.isId("sendNotification", null));
+    fake.rows[2]!.what = "tampered";
+    const res = await runNightlyChainVerification(fake.prisma);
+    expect(res?.ok).toBe(false);
+    const keys = vi.mocked(sendNotification).mock.calls.map((call) => (call[1] as { username: string }).username);
+    expect(keys).toEqual(["admin-1", "owner-1"]);
   });
 
   it("nightly job on an intact chain appends nothing and notifies nobody", async () => {

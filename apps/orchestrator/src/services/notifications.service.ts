@@ -305,6 +305,36 @@ export async function sendNotification(
   };
 }
 
+/**
+ * WARP-2911 — a `system` notification to every owner and admin, by username,
+ * contained PER RECIPIENT: one refused or failed send (e.g. an account whose
+ * username predates the ban on the `User.id` shape) is logged and skipped,
+ * and never costs the recipients after it the alert. The OTA apply path's
+ * `notifyOwners` (index.ts) is this.
+ */
+export async function notifyOwnersAndAdmins(
+  prisma: PrismaClient,
+  title: string,
+  body: string,
+): Promise<{ notified: string[]; failed: string[] }> {
+  const owners = await prisma.user.findMany({
+    where: { role: { in: ["owner", "admin"] } },
+    select: { username: true },
+  });
+  const notified: string[] = [];
+  const failed: string[] = [];
+  for (const { username } of owners) {
+    try {
+      await sendNotification(prisma, { username, kind: "system", title, body });
+      notified.push(username);
+    } catch (err) {
+      failed.push(username);
+      logger.error({ err, username, title }, "owner/admin alert to one recipient failed — continuing with the rest");
+    }
+  }
+  return { notified, failed };
+}
+
 /** Recent notifications for a user (by USERNAME), newest-first. Used by the
  *  "Recent notifications" panel; the LLM `list_notifications` tool reads the
  *  same column directly. */

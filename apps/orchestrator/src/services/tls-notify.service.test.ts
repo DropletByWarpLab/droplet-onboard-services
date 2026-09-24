@@ -10,6 +10,7 @@ vi.mock("./notifications.service.js", () => ({
   sendNotification: (prisma: unknown, input: Dispatch) => sendNotification(prisma, input),
 }));
 
+import { NotificationRecipientError } from "./notification-recipient.js";
 import {
   TLS_EXPIRING_TITLE,
   TLS_RENEW_FAILED_TITLE,
@@ -59,6 +60,20 @@ describe("tls-notify — who hears it", () => {
       expect(input.body).toContain("12 more days");
       expect(input.body).toContain("internet");
     }
+  });
+});
+
+describe("tls-notify — one refused recipient (WARP-2911)", () => {
+  it("🔴 does not cost the other owners and admins the alert", async () => {
+    // A username with the shape of a User.id (an account from before creation
+    // refused it) is refused by sendNotification; the fan-out logs it and
+    // carries on rather than ending the loop at that recipient.
+    const { prisma } = makePrisma();
+    sendNotification.mockRejectedValueOnce(NotificationRecipientError.isId("sendNotification", null));
+    await expect(
+      createTlsNotifier(prisma).renewFailed({ fqdn: "mybox.droplet-us.com", notAfter: null, daysLeft: 12 }),
+    ).resolves.toBeUndefined();
+    expect(sendNotification.mock.calls.map((c) => c[1].username)).toEqual(["stefan", "romain"]);
   });
 });
 
