@@ -69,6 +69,8 @@ function prismaWith(disabled: ModuleId[]) {
     securityEvent: { findMany: vi.fn().mockResolvedValue([]) },
     cameraAccessGrant: { findMany: vi.fn().mockResolvedValue([]) },
     securityIngestState: { findUnique: vi.fn().mockResolvedValue(null) },
+    // WARP-2977 P2b: the feed resolves each row's areas from the active links.
+    securityZoneLink: { findMany: vi.fn().mockResolvedValue([]) },
   } as never;
 }
 
@@ -155,13 +157,32 @@ describe("the egress-audit collector is not behind the Security toggle", () => {
 
   it("no OTHER existing route lives under /api/security (a new one must be checked the same way)", () => {
     // Every router file that declares a `/security…` path, other than the
-    // command center's own and the egress collector's. A new one appearing
-    // here must be deliberately placed before or after the gate.
+    // command center's own three (WARP-2977 P2b split areas and the site mode
+    // into their own routers — pinned as gated below) and the egress
+    // collector's. A new one appearing here must be deliberately placed
+    // before or after the gate.
     const routes = join(SRC, "routes");
+    const SECURITY_MODULE_ROUTERS = new Set(["security.ts", "security-zones.ts", "security-site.ts"]);
     const offenders = readdirSync(routes)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
-      .filter((f) => f !== "security.ts" && f !== "egress-audit.ts")
+      .filter((f) => !SECURITY_MODULE_ROUTERS.has(f) && f !== "egress-audit.ts")
       .filter((f) => /["'`]\/security[/"'`]/.test(readFileSync(join(routes, f), "utf8")));
     expect(offenders).toEqual([]);
+  });
+
+  it("app.ts mounts the Security module's own routers AFTER mountModuleGates (they are gated)", () => {
+    // The mirror of the egress pin: these ARE the module, so they must sit
+    // behind the toggle and the per-person view gate. Mounted before it,
+    // every area and opening-hours route would answer with Security off.
+    const src = readFileSync(join(SRC, "app.ts"), "utf8");
+    const gates = src.indexOf("mountModuleGates(app, moduleGate)");
+    expect(gates).toBeGreaterThan(-1);
+    for (const mount of [
+      'app.use("/api", createSecurityRouter(prisma))',
+      'app.use("/api", createSecurityZonesRouter(prisma))',
+      'app.use("/api", createSecuritySiteRouter(prisma))',
+    ]) {
+      expect(src.indexOf(mount), mount).toBeGreaterThan(gates);
+    }
   });
 });
