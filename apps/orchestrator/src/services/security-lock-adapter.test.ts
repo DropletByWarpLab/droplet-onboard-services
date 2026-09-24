@@ -50,6 +50,7 @@ import {
   type LockWriteOutcome,
 } from "./security-lock-adapter.js";
 import type { MatterGrouped } from "../types/smart-home.js";
+import { createCronRuntime } from "./cron-runtime.service.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────────
 
@@ -1161,8 +1162,11 @@ describe("startSecurityLockAdapter / registerSecurityLockJobs", () => {
     expect(securityLockHealthRow()).toMatchObject({ detail: "Not running" }); // sweep not scheduled yet
     const scheduleInterval = vi.fn();
     registerSecurityLockJobs({ scheduleInterval }, adapter);
+    // Review F9: one sweep at registration (through the same lock), so the
+    // header is not "Hasn't checked the locks yet" for the first minute of every boot.
     expect(scheduleInterval).toHaveBeenCalledWith(SECURITY_LOCK_SWEEP_INTERVAL_MS, expect.any(Function), {
       lockKey: SECURITY_LOCK_SWEEP_LOCK_KEY,
+      runImmediately: true,
     });
     expect(SECURITY_LOCK_SWEEP_INTERVAL_MS).toBe(60_000);
     expect(SECURITY_LOCK_SWEEP_LOCK_KEY).toBe("droplet:security-lock-sweep");
@@ -1172,6 +1176,22 @@ describe("startSecurityLockAdapter / registerSecurityLockJobs", () => {
     expect(d.store.rows).toHaveLength(1);
     expect(d.store.rows[0].draft.observed).toBe("polled");
     expect(securityLockHealthRow()).toMatchObject({ state: "ok", detail: "Listening to 1 lock" });
+  });
+
+  it("on a real cron runtime the header is not 'Hasn't checked the locks yet' right after boot (review F9)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { d } = deps();
+      const adapter = startSecurityLockAdapter(d);
+      const rt = createCronRuntime();
+      registerSecurityLockJobs(rt, adapter);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(securityLockHealthRow()).toMatchObject({ state: "ok", detail: "Listening to 1 lock" });
+      expect(d.store.rows).toHaveLength(1);
+      rt.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stop() unsubscribes and reads as not running", () => {

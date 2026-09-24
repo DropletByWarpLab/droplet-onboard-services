@@ -1065,7 +1065,12 @@ export function startSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securit
   return adapter;
 }
 
-/** Beside `registerSecurityJobs` in index.ts. The sweep is single-flighted on its advisory lock. */
+/**
+ * Beside `registerSecurityJobs` in index.ts. The sweep is single-flighted on
+ * its advisory lock, and also runs once at registration through that same
+ * lock (review F9): otherwise the header reads "Hasn't checked the locks
+ * yet" (down) for the first minute of every boot.
+ */
 export function registerSecurityLockJobs(
   cronRuntime: Pick<CronRuntime, "scheduleInterval">,
   adapter: SecurityLockAdapter,
@@ -1076,7 +1081,7 @@ export function registerSecurityLockJobs(
       // sweep() never throws and logs through the adapter's own logger.
       await adapter.sweep();
     },
-    { lockKey: SECURITY_LOCK_SWEEP_LOCK_KEY },
+    { lockKey: SECURITY_LOCK_SWEEP_LOCK_KEY, runImmediately: true },
   );
   adapter.noteSweepScheduled();
 }

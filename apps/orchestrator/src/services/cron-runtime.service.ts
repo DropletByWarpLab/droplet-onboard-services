@@ -108,6 +108,13 @@ export interface CronScheduleOpts {
    * if `createCronRuntime` was called without a prisma handle.
    */
   lockKey?: string;
+  /**
+   * `scheduleInterval` only: also run the handler once right away, through
+   * the same path as a tick (the `lockKey` advisory lock, failure counting).
+   * For a job whose health reads "not checked yet" until its first run —
+   * otherwise that is a full interval after every boot. Default false.
+   */
+  runImmediately?: boolean;
 }
 
 export interface CronRuntime {
@@ -223,6 +230,7 @@ export function createCronRuntime(
       intervals.push(setInterval(() => {
         void safeRun(handler, opts);
       }, ms));
+      if (opts?.runImmediately) void safeRun(handler, opts);
     },
     scheduleCron(spec, handler, opts) {
       const task = cron.schedule(spec, () => {
