@@ -47,6 +47,10 @@
  *     A node whose connection was never heard counts as connected. A
  *     Connected event, or a successful list that says connected (and no
  *     connection event heard at or after that sweep started), ends it.
+ *   · That same "not connected" makes a lock not reporting AT ONCE — in
+ *     `knownLocks` (so a Close up's `unlockedLocks` / `uncheckedLocks`) and the
+ *     header row — not only from the next sweep. A Connected event only undoes
+ *     it: a lock the last list said is not connected waits for a list.
  *   · A known lock is gone only after SECURITY_LOCK_GONE_AFTER_LISTS
  *     successful lists in a row lack it; until then it is kept as not
  *     reporting (the sidecar skips a node whose info build throws).
@@ -904,7 +908,7 @@ export interface SecurityLockAdapter {
   listLocks(): Promise<KnownLock[]>;
   /** Called by `registerSecurityLockJobs` once the sweep is on the cron runtime. */
   noteSweepScheduled(): void;
-  /** DoorLock endpoints from the last successful list, with their last-heard readings. */
+  /** DoorLock endpoints from the last successful list, with their last-heard readings; not connected once the bridge says so. */
   knownLocks(): KnownLock[];
   sweepState(): Readonly<LockSweepState>;
   health(): LockHealth;
@@ -950,6 +954,19 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
   };
   const viaOf = (nodeId: string): LockObservedVia => (notConnectedSince.has(nodeId) ? "polled" : "live");
 
+  /**
+   * The last sweep's locks as they stand NOW. `snapshot.connected` is what
+   * the list said; any state but Connected heard since is only in
+   * `notConnectedSince`, and without this a Close up would trust a lock the
+   * bridge has just reported gone for up to a sweep. The sweep ends an entry
+   * heard before its list for a node the list says is connected, so this
+   * only ever reads a disconnect newer than the list. A Connected event
+   * never vouches for a lock the list said is not connected: that waits for
+   * a list.
+   */
+  const currentLocks = (): KnownLock[] =>
+    snapshot.map((l) => ({ ...l, connected: l.connected && !notConnectedSince.has(l.nodeId) }));
+
   const tracker = createLockTracker({
     store: deps.store,
     now,
@@ -965,7 +982,7 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
     } catch {
       // A source that cannot say reads as unreachable, never as fine.
     }
-    return { ...state, started, sweepScheduled, bridgeUp, knownLocks: snapshot, write: tracker.writeHealth() };
+    return { ...state, started, sweepScheduled, bridgeUp, knownLocks: currentLocks(), write: tracker.writeHealth() };
   };
 
   async function runSweep(): Promise<LockSweepResult> {
@@ -1148,7 +1165,7 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
       return [...fresh, ...kept].map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
     },
     knownLocks() {
-      return snapshot.map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
+      return currentLocks().map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
     },
     sweepState: () => state,
     health: () => lockHealthRow(healthInput()),

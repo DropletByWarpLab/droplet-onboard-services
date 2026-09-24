@@ -2026,6 +2026,107 @@ describe("a change heard while its lock is not connected is recorded as polled (
   });
 });
 
+describe("a lock the bridge reports gone is not reporting at once — not from the next sweep", () => {
+  function swept(devices: LockSourceDevice[] | (() => Promise<readonly LockSourceDevice[]>) = [lockDevice()]) {
+    const a = adapterWith({ source: staticSource(devices) });
+    a.adapter.start();
+    a.adapter.noteSweepScheduled();
+    return a;
+  }
+  /** What route 7 names for a Close up / Away, from the adapter as it stands. */
+  const closeUp = (adapter: ReturnType<typeof adapterWith>["adapter"]) => ({
+    unlocked: stillUnlockedLocks(adapter.knownLocks()),
+    unchecked: uncheckedLocks(adapter.knownLocks()),
+  });
+
+  it.each([
+    [1, "Disconnected"],
+    [2, "Reconnecting"],
+    [3, "WaitingForDeviceDiscovery"],
+  ])("last heard locked, then %i (%s): unchecked at once, and the header says it isn't reporting", async (state) => {
+    const { adapter, emitter, c } = swept([lockDevice({ attributes: { lockState: 1 } })]);
+    await adapter.sweep();
+    expect(closeUp(adapter)).toEqual({ unlocked: [], unchecked: [] });
+    c.advance(1000);
+    emitter.emit("connection_changed", connection(state));
+    expect(closeUp(adapter)).toEqual({ unlocked: [], unchecked: ["Back door lock"] });
+    expect(adapter.knownLocks()[0]).toMatchObject({ connected: false, reading: "locked" });
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Back door lock isn't reporting" });
+    expect(adapter.readingsState()).toBe("current");
+  });
+
+  it("last heard unlocked, then Disconnected: no longer named open on a stale reading — named unchecked instead", async () => {
+    const { adapter, emitter, c } = swept();
+    await adapter.sweep();
+    expect(closeUp(adapter)).toEqual({ unlocked: ["Back door lock"], unchecked: [] });
+    c.advance(1000);
+    emitter.emit("connection_changed", connection(1));
+    expect(closeUp(adapter)).toEqual({ unlocked: [], unchecked: ["Back door lock"] });
+  });
+
+  it("a Connected event restores both lists and the header", async () => {
+    const { adapter, emitter, c } = swept();
+    await adapter.sweep();
+    c.advance(1000);
+    emitter.emit("connection_changed", connection(1));
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Back door lock isn't reporting" });
+    c.advance(1000);
+    emitter.emit("connection_changed", connection(0));
+    expect(closeUp(adapter)).toEqual({ unlocked: ["Back door lock"], unchecked: [] });
+    expect(adapter.health()).toMatchObject({ state: "ok", detail: "Listening to 1 lock" });
+  });
+
+  it("per NODE: another lock dropping off leaves this one named open", async () => {
+    const { adapter, emitter, c } = swept([
+      lockDevice(),
+      lockDevice({ nodeId: "99", friendlyName: "Gate", attributes: { lockState: 1 } }),
+    ]);
+    await adapter.sweep();
+    c.advance(1000);
+    emitter.emit("connection_changed", connection(1, "99"));
+    expect(closeUp(adapter)).toEqual({ unlocked: ["Back door lock"], unchecked: ["Gate"] });
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Gate isn't reporting" });
+  });
+
+  it("a disconnect heard BEFORE a sweep whose list says connected is over: that list is newer", async () => {
+    const { adapter, emitter, c } = swept();
+    await adapter.sweep();
+    c.advance(1000);
+    emitter.emit("connection_changed", connection(1)); // its Connected (0) is then lost
+    c.advance(SECURITY_LOCK_SWEEP_INTERVAL_MS);
+    await adapter.sweep(); // the list says connected
+    expect(closeUp(adapter)).toEqual({ unlocked: ["Back door lock"], unchecked: [] });
+    expect(adapter.health()).toMatchObject({ state: "ok", detail: "Listening to 1 lock" });
+  });
+
+  it("a disconnect heard while the sweep's list was in flight outlives that list", async () => {
+    const listed = deferred<readonly LockSourceDevice[]>();
+    const { adapter, emitter, c } = swept(() => listed.promise);
+    const sweeping = adapter.sweep();
+    c.advance(200);
+    emitter.emit("connection_changed", connection(1)); // the lock drops off after t0
+    listed.resolve([lockDevice()]); // the list, from before, says connected and unlocked
+    await expect(sweeping).resolves.toMatchObject({ status: "ok" });
+    expect(closeUp(adapter)).toEqual({ unlocked: [], unchecked: ["Back door lock"] });
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Back door lock isn't reporting" });
+  });
+
+  it("a Connected event never vouches for a lock the last list said isn't reporting: that waits for a list", async () => {
+    const devices = [lockDevice({ connectionState: "disconnected" })];
+    const { adapter, emitter, c } = swept(() => Promise.resolve(devices));
+    await adapter.sweep();
+    expect(closeUp(adapter)).toEqual({ unlocked: [], unchecked: ["Back door lock"] });
+    c.advance(1000);
+    emitter.emit("connection_changed", connection(0));
+    expect(closeUp(adapter)).toEqual({ unlocked: [], unchecked: ["Back door lock"] });
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Back door lock isn't reporting" });
+    devices[0] = lockDevice();
+    c.advance(SECURITY_LOCK_SWEEP_INTERVAL_MS);
+    await adapter.sweep();
+    expect(closeUp(adapter)).toEqual({ unlocked: ["Back door lock"], unchecked: [] });
+  });
+});
+
 describe("lockConnectionSubscriber — can never throw into the bridge (review F8)", () => {
   it("hands a well-formed event to onState with the canonical node id; ignores everything else", () => {
     const onState = vi.fn();
