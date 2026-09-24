@@ -26,6 +26,7 @@ import {
   modeToast,
   openUpEnds,
   staleLine,
+  unlockedLocksLine,
 } from "@/components/security/ModeCard";
 import type { SecurityHealthRow, SecurityModeActionResult, SecurityModeView } from "@/lib/types";
 import { SECURITY_MODE_PATH } from "@/lib/api";
@@ -719,6 +720,53 @@ describe("the stale line reads the site_mode health row", () => {
   it("staleLine: no row (header not loaded or failed) → can't confirm", () => {
     expect(staleLine(null, view(), NOW)).toBe(COPY.staleUnknown);
     expect(staleLine(siteModeRow(null), view(), NOW)).toBe(COPY.staleNever);
+  });
+});
+
+// WARP-2977 P2b-2 (spec §8): a Close up or Away names the door locks still open.
+describe("unlockedLocksLine — the doors still open, never 'all locked'", () => {
+  it("nothing to name → no line at all (absent for people without Devices view, empty when none is known open)", () => {
+    expect(unlockedLocksLine(undefined)).toBeNull();
+    expect(unlockedLocksLine([])).toBeNull();
+  });
+
+  it("one, two, or the first and a count", () => {
+    expect(unlockedLocksLine(["Back door lock"])).toBe("Back door lock is still unlocked.");
+    expect(unlockedLocksLine(["Back door lock", "Side gate"])).toBe("Back door lock and Side gate are still unlocked.");
+    expect(unlockedLocksLine(["Back door lock", "Cellar", "Side gate"])).toBe(
+      "Back door lock and 2 other locks are still unlocked.",
+    );
+  });
+});
+
+describe("the toast names the doors still open (WARP-2977 P2b-2)", () => {
+  it("Close up: the end, then the lock — and Undo is still offered", async () => {
+    h.postSecurityMode.mockResolvedValueOnce({ ...result(closedUpByStefan()), unlockedLocks: ["Back door lock"] });
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.closeUp }));
+    const toast = await screen.findByText("Closed until 9:00 AM tomorrow. Back door lock is still unlocked.");
+    expect(within(toast.closest("[data-toast]") as HTMLElement).getByRole("button", { name: COPY.undo })).toBeInTheDocument();
+  });
+
+  it("Away: the same line after the away copy", async () => {
+    h.postSecurityMode.mockResolvedValueOnce({
+      ...result(view({ mode: "away", source: "manual", manualEnd: "until_changed" })),
+      unlockedLocks: ["Back door lock", "Side gate"],
+    });
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.moreLabel }));
+    fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: COPY.away }));
+    expect(
+      await screen.findByText(`${COPY.toastAway} Back door lock and Side gate are still unlocked.`),
+    ).toBeInTheDocument();
+  });
+
+  it("an empty list adds nothing — the toast never says the doors are locked", async () => {
+    h.postSecurityMode.mockResolvedValueOnce({ ...result(closedUpByStefan()), unlockedLocks: [] });
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.closeUp }));
+    const toast = await screen.findByText("Closed until 9:00 AM tomorrow.");
+    expect(toast.closest("[data-toast]")).not.toHaveTextContent(/locked/i);
   });
 });
 
