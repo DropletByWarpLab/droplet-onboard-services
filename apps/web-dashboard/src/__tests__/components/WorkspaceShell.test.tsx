@@ -63,6 +63,8 @@ vi.mock("swr", () => ({
 }));
 
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
+import { Composer } from "@/components/workshop/Composer";
+import { collect, readSheet } from "../helpers/css-cascade";
 
 function renderAt(path: string) {
   pathnameRef.current = path;
@@ -256,5 +258,67 @@ describe("WorkspaceShell — keyboard", () => {
     fireEvent.keyDown(tabs[tabs.length - 1], { key: "ArrowRight" });
     expect(document.activeElement).toBe(tabs[0]);
     expect(pushMock).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * WARP-3063 — the header's health pill and the Workshop composer's notice line
+ * are both `.ws-status`. A bare `.ws-status` rule in workspace-nav.css styled
+ * the Workshop line as a bordered 32px pill, and clipped it to a 32px square
+ * below 1024px. jsdom never applies the sheet, so this resolves the sheet's own
+ * selectors against the real DOM (css-cascade), @media rules included.
+ */
+describe("WorkspaceShell — its .ws-status pill stays in its header (WARP-3063)", () => {
+  const NAV_SHEET = collect(
+    readSheet("components/workspace/workspace-nav.css"),
+    "workspace-nav.css",
+  );
+  const rulesMatching = (el: Element) =>
+    NAV_SHEET.filter((d) => el.matches(d.selector)).map(
+      (d) => `${d.conditions.join(" ")} ${d.selector} { ${d.prop}: ${d.value} }`.trim(),
+    );
+
+  it("styles the header pill but nothing on the Workshop's status line, at any width", () => {
+    pathnameRef.current = "/workshop";
+    const notice = "The run could not start.";
+    const { container } = render(
+      <WorkspaceShell>
+        {/* WorkshopSpace's own root, where the composer really sits. */}
+        <div className="droplet-shell chat-app workshop-app">
+          <Composer
+            workspaces={[]}
+            workspaceId=""
+            onWorkspaceId={() => {}}
+            busy={false}
+            onSubmit={async () => true}
+            status={{ text: notice }}
+          />
+        </div>
+      </WorkspaceShell>,
+    );
+
+    const line = screen.getByText(notice);
+    expect(line).toHaveClass("ws-status");
+    expect(rulesMatching(line)).toEqual([]);
+
+    // The scope still reaches the pill it exists for: desktop geometry and the
+    // phone's dot-only square.
+    const pill = container.querySelector("header .ws-status") as HTMLElement;
+    expect(pill).not.toBeNull();
+    const pillRules = rulesMatching(pill);
+    expect(pillRules).toContain(".ws-head .ws-status { height: 32px }");
+    expect(pillRules).toContain(
+      "@media (max-width: 1023.98px) .ws-head .ws-status { width: 32px }",
+    );
+  });
+
+  it("names .ws-status only under the header in every rule of the sheet", () => {
+    // The render above has no `.dot` or `.lbl` inside the Workshop line, so a
+    // bare `.ws-status .dot` would slip past it; this closes that gap.
+    const selectors = [...new Set(NAV_SHEET.map((d) => d.selector))].filter((s) =>
+      /\.ws-status(?![\w-])/.test(s),
+    );
+    expect(selectors.length).toBeGreaterThan(0);
+    for (const s of selectors) expect(s).toMatch(/^\.ws-head \.ws-status(?![\w-])/);
   });
 });
