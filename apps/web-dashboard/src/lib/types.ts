@@ -364,8 +364,21 @@ export interface CatalogModelEntry {
 /** Wire shape of `GET /api/models/catalog` — the ELIGIBLE set (VRAM-gated,
  *  decided appliance-side by the inference-manager) with `pulled` flags. */
 export interface ModelsCatalogPayload {
+  /** null = the box couldn't measure it. */
   detected_vram_gb: number | null;
+  /** WARP-3048 — where `detected_vram_gb` came from (`override`,
+   *  `device_bridge`, `dgpu_sysfs`, `unified_memory`; null when unknown).
+   *  Its presence is what makes a 0 a measurement. Optional: an older
+   *  orchestrator drops it. */
+  vram_source?: string | null;
   models: CatalogModelEntry[];
+  /** WARP-3048 — the sidecar couldn't list what's installed, so `pulled`
+   *  can't be trusted (and downloads are refused). Optional: an older
+   *  orchestrator drops the flag. */
+  tags_unreachable?: boolean;
+  /** WARP-3048 — the box's model list file couldn't be read; the catalog
+   *  is last-known-good or empty. Optional, as above. */
+  degraded_manifest?: boolean;
 }
 
 /** One opt-in cloud provider on the Models page. WARP-2871 — the page is the
