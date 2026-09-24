@@ -18,8 +18,12 @@
  *     that would violate one fails here the way Postgres would. Like Prisma
  *     on Postgres, a `create` that omits a scalar list stores NULL (and the
  *     CHECKs refuse a NULL list); seeded rows get empty lists;
- *   · ROLLBACK: `$transaction(fn)` snapshots every table and restores them
- *     when the callback throws. The isolation level asked for is recorded.
+ *   · TRANSACTIONS on the shared WARP-1570 seam (`createTransactionSeam`):
+ *     `$transaction(fn, opts)` snapshots every table and restores them when
+ *     the callback throws (re-applying any transaction that committed in the
+ *     meantime), and a RepeatableRead / Serializable transaction that lost a
+ *     write-conflict throws P2034. The isolation level asked for is recorded
+ *     (`txLevels`).
  *
  * Concurrency, the real CHECK text, the trigger and the advisory locks are
  * the pg lane's job (security-incidents.pg.test.ts).
@@ -29,6 +33,7 @@
  * recorded failed" cases.
  */
 import { randomUUID } from "node:crypto";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 type Row = Record<string, unknown>;
 type Where = Record<string, unknown> | undefined;
@@ -710,19 +715,30 @@ export function createFakeSecurityPrisma(init: Partial<FakeWorld> = {}, start: D
   }
 
   const client: Record<string, unknown> = Object.fromEntries(TABLES.map((t) => [t, delegate(t)]));
+  // WARP-1570: the shared seam owns the transaction — the options argument,
+  // rollback (the whole world, through `snapshot`/`restore`), the replay of
+  // any transaction that committed while a rolled-back one was open, and the
+  // P2034 a RepeatableRead / Serializable write-conflict raises. This wrapper
+  // only adds what these suites read: the isolation levels asked for, and
+  // how many callbacks are running.
+  const seam = createTransactionSeam({
+    client: () => client,
+    snapshot: () => clone(world),
+    restore: (snap) => {
+      for (const t of TABLES) world[t] = (snap as FakeWorld)[t];
+    },
+  });
   client.$transaction = async (fn: unknown, opts?: { isolationLevel?: string }) => {
-    if (Array.isArray(fn)) return Promise.all(fn);
+    if (Array.isArray(fn)) return seam.$transaction(fn as never, opts);
     txLevels.push(opts?.isolationLevel ?? "default");
-    const snapshot = clone(world);
-    depth++;
-    try {
-      return await (fn as (tx: unknown) => Promise<unknown>)(client);
-    } catch (err) {
-      for (const t of TABLES) world[t] = snapshot[t];
-      throw err;
-    } finally {
-      depth--;
-    }
+    return seam.$transaction(async (tx: unknown) => {
+      depth++;
+      try {
+        return await (fn as (t: unknown) => Promise<unknown>)(tx);
+      } finally {
+        depth--;
+      }
+    }, opts);
   };
   client.$executeRawUnsafe = async (sql: string) => {
     raw.push(sql);
