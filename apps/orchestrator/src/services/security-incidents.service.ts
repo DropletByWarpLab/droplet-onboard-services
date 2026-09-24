@@ -93,6 +93,12 @@ export const SECURITY_INCIDENT_LOCK_KEY = "droplet:security-incidents";
 export const TRIAGE_BATCH = 200;
 /** A tick stops triaging after this long — well inside the cron lock transaction's 60 s. */
 export const TICK_BUDGET_MS = 30_000;
+/**
+ * Review #6 — nothing new is started after this (no notify, no delivery, no
+ * redelivery): with one push dial of at most 10 s still in flight, the tick
+ * ends inside the cron lock transaction's 60 s.
+ */
+export const TICK_DEADLINE_MS = 45_000;
 /** The floor only advances to a head seen at least this long ago (§6.1 step 3). */
 export const FLOOR_SETTLE_MS = 120_000;
 /** The grouping numbers (D13) and the evidence cap live with the rules they belong to (lib/security-rules.ts). */
@@ -610,10 +616,12 @@ export async function tickSecurityIncidents(
   opts: TickOptions = {},
 ): Promise<TickResult> {
   const now = deps.now?.() ?? new Date();
-  const deadline = Date.now() + (opts.budgetMs ?? TICK_BUDGET_MS);
+  const startedAt = Date.now();
+  const deadline = startedAt + (opts.budgetMs ?? TICK_BUDGET_MS);
+  const hardDeadline = startedAt + TICK_DEADLINE_MS;
   ticks++;
   try {
-    const result = await runTick(prisma, deps, now, deadline);
+    const result = await runTick(prisma, deps, now, deadline, () => Date.now() > hardDeadline);
     incidentHealth.lastOkAt = now;
     return result;
   } catch (err) {
@@ -622,7 +630,13 @@ export async function tickSecurityIncidents(
   }
 }
 
-async function runTick(prisma: PrismaClient, deps: SecurityIncidentDeps, now: Date, deadline: number): Promise<TickResult> {
+async function runTick(
+  prisma: PrismaClient,
+  deps: SecurityIncidentDeps,
+  now: Date,
+  deadline: number,
+  pastHardDeadline: () => boolean,
+): Promise<TickResult> {
   // 1. State.
   const state = await ensureEngineState(prisma, now);
 
@@ -706,9 +720,9 @@ async function runTick(prisma: PrismaClient, deps: SecurityIncidentDeps, now: Da
     for (const { id } of due) if (await updateCollecting(prisma, id, now, true)) sealed++;
   }
 
-  // 6. Notify, then redeliver.
-  await notifyPendingIncidents(prisma, deps, now);
-  await redeliverStuckNotices(prisma, now);
+  // 6. Notify, then redeliver — each stops at the tick's hard deadline (review #6).
+  await notifyPendingIncidents(prisma, deps, now, { deadline: pastHardDeadline });
+  await redeliverStuckNotices(prisma, now, { deadline: pastHardDeadline });
 
   // 7. Health.
   incidentHealth.failedLastDay = await prisma.securityEventTriage.count({

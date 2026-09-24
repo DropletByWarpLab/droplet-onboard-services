@@ -54,6 +54,7 @@ vi.mock("./off-lan-gate.service.js", () => ({ webPushGate: async () => h.gate })
 import {
   SECURITY_ALERT_HOURLY_CAP,
   SECURITY_NOTIFY_MAX_ATTEMPTS,
+  SECURITY_REDELIVER_AFTER_MS,
   _resetAlertsHealthForTests,
   computeAlertsHealthRow,
   incidentTag,
@@ -455,6 +456,57 @@ describe("the notifier (§6.7)", () => {
     await notifyPendingIncidents(client(f), deps(), NOW);
     expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "queued", settledAt: null });
     expect(f.world.securityIncident[0]).toMatchObject({ notifyState: "done" });
+  });
+});
+
+// Review #6: a tick must never outlive its 60 s lock — notify and redelivery stop at the deadline.
+describe("the tick's deadline", () => {
+  /** A deadline that has not passed for the first `n` checks, and has after. */
+  const passedAfter = (n: number) => {
+    let calls = 0;
+    return () => ++calls > n;
+  };
+  const second = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+
+  it("already passed: no incident is touched — it stays pending, and no attempt is counted", async () => {
+    const f = world();
+    await notifyPendingIncidents(client(f), deps(), NOW, { deadline: () => true });
+    expect(f.world.securityIncident[0]).toMatchObject({ notifyState: "pending", notifyAttempts: 0, version: 2 });
+    expect(notices(f)).toHaveLength(0);
+  });
+
+  it("passing after the first incident: the second waits for the next tick", async () => {
+    const f = world();
+    f.world.securityIncident.push({ ...incident({ id: second, alertedAt: plus(NOW, -1_000) }), zoneLinkIds: ["l0"] });
+    f.world.securityIncidentReason.push({ id: "r2", createdAt: NOW, ...reason("back", plus(NOW, -50_000), { incidentId: second }) });
+    await notifyPendingIncidents(client(f), deps(), NOW, { deadline: passedAfter(2) });
+    expect(f.world.securityIncident.find((i) => i.id === INCIDENT)).toMatchObject({ notifyState: "done" });
+    expect(f.world.securityIncident.find((i) => i.id === second)).toMatchObject({ notifyState: "pending" });
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(f.world.securityIncident.find((i) => i.id === second)).toMatchObject({ notifyState: "done" });
+  });
+
+  it("passing between deliveries: the rest stay queued, and redelivery sends them after two minutes", async () => {
+    const f = world({ securityAlertRecipient: [{ userId: JORDAN, state: "receiving", origin: "chosen", version: 1, setById: STEFAN }] });
+    await notifyPendingIncidents(client(f), deps(), NOW, { deadline: passedAfter(2) });
+    expect(h.delivered).toHaveLength(1);
+    const left = notices(f).filter((n) => n.outcome === "queued");
+    expect(left).toHaveLength(1);
+    await redeliverStuckNotices(client(f), plus(NOW, SECURITY_REDELIVER_AFTER_MS));
+    expect(h.delivered).toHaveLength(2);
+    expect(notices(f).filter((n) => n.outcome === "queued")).toHaveLength(0);
+  });
+
+  it("redelivery stops at the deadline too", async () => {
+    const f = world({
+      notificationLog: [{ id: "clog1", username: "stefan", kind: "event", title: "t", channels: "", deliveredAt: null, pushOutcome: null, createdAt: plus(NOW, -150_000) }],
+      securityIncidentNotice: [
+        { id: "n1", incidentId: INCIDENT, userId: STEFAN, username: "stefan", reason: "routed", outcome: "queued", notificationLogId: "clog1", createdAt: plus(NOW, -150_000) },
+      ],
+    });
+    await redeliverStuckNotices(client(f), NOW, { deadline: () => true });
+    expect(h.delivered).toHaveLength(0);
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "queued" });
   });
 });
 

@@ -41,6 +41,7 @@ import {
   SETTLE_MS,
   TRIAGE_BATCH,
   TRIAGE_TRANSIENT_ATTEMPTS,
+  TICK_DEADLINE_MS,
   IncidentConflictError,
   isTransientTriageError,
   _resetIncidentHealthForTests,
@@ -497,6 +498,16 @@ describe("after triage: the notifier, and health", () => {
     expect(alerts.notify).toHaveBeenCalledTimes(6);
     expect(alerts.redeliver).toHaveBeenCalledTimes(6);
     expect(alerts.recompute).toHaveBeenCalledTimes(1);
+  });
+
+  it(`review #6: notify and redelivery get the tick's hard deadline (${TICK_DEADLINE_MS} ms), not yet passed at the start`, async () => {
+    const f = world();
+    await tick(f);
+    const notifyOpts = (alerts.notify.mock.calls[0] as unknown[])[3] as { deadline: () => boolean };
+    const redeliverOpts = (alerts.redeliver.mock.calls[0] as unknown[])[2] as { deadline: () => boolean };
+    expect(notifyOpts.deadline()).toBe(false);
+    expect(redeliverOpts.deadline()).toBe(false);
+    expect(TICK_DEADLINE_MS).toBeLessThanOrEqual(45_000);
   });
 
   it("a completed tick sets lastOkAt; a throwing one records lastError and rethrows", async () => {

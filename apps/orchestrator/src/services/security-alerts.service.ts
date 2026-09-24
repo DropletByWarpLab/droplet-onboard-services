@@ -80,6 +80,17 @@ export interface NotifierDeps {
   resolveAccess: EffectiveAccessResolver;
 }
 
+/**
+ * Review #6 — the engine's tick runs inside a 60 s advisory-lock transaction,
+ * and a push dial may take 10 s. `deadline()` turns true once the tick has
+ * spent its budget: nothing new is started after that (an incident, a
+ * delivery, a redelivery) and the rest waits for the next tick — pending
+ * incidents stay pending, queued notices stay queued for redelivery.
+ */
+export interface NotifyOptions {
+  deadline?: () => boolean;
+}
+
 /** The push / tray collapse key for one incident's notifications. */
 export function incidentTag(incidentId: string): string {
   return `security-incident-${incidentId}`;
@@ -307,7 +318,13 @@ function alertedWhat(i: { scope: string; zoneName: string | null }): string {
 }
 
 /** One incident, steps 1–6. True when its notices were written. Throws only from the after-commit audit. */
-async function notifyIncident(prisma: PrismaClient, deps: NotifierDeps, incidentId: string, now: Date): Promise<boolean> {
+async function notifyIncident(
+  prisma: PrismaClient,
+  deps: NotifierDeps,
+  incidentId: string,
+  now: Date,
+  opts: NotifyOptions,
+): Promise<boolean> {
   const incident = await prisma.securityIncident.findUnique({ where: { id: incidentId }, select: INCIDENT_SELECT });
   if (!incident || incident.notifyState !== "pending") return false;
   let written: Array<{ id: string; userId: string; outcome: SecurityNoticeOutcome; reason: SecurityNoticeReason; notificationLogId: string | null }> | null;
@@ -372,7 +389,10 @@ async function notifyIncident(prisma: PrismaClient, deps: NotifierDeps, incident
   if (!written) return false;
 
   for (const n of written) {
-    if (n.outcome === "queued") await deliverAndSettle(prisma, { id: n.id, incidentId: incident.id, notificationLogId: n.notificationLogId }, now, false);
+    if (n.outcome !== "queued") continue;
+    // Past the deadline: left queued — redelivery gives it its first delivery.
+    if (opts.deadline?.()) continue;
+    await deliverAndSettle(prisma, { id: n.id, incidentId: incident.id, notificationLogId: n.notificationLogId }, now, false);
   }
   const settled = await prisma.securityIncidentNotice.findMany({
     where: { incidentId: incident.id },
@@ -392,7 +412,12 @@ async function notifyIncident(prisma: PrismaClient, deps: NotifierDeps, incident
  * fails is counted as an attempt and does not stop the others; a failed
  * after-commit audit is rethrown once all of them are handled (safeRun's canary).
  */
-export async function notifyPendingIncidents(prisma: PrismaClient, deps: NotifierDeps, now: Date): Promise<{ incidents: number }> {
+export async function notifyPendingIncidents(
+  prisma: PrismaClient,
+  deps: NotifierDeps,
+  now: Date,
+  opts: NotifyOptions = {},
+): Promise<{ incidents: number }> {
   const pending = await prisma.securityIncident.findMany({
     where: { notifyState: "pending" },
     orderBy: [{ alertedAt: "asc" }, { id: "asc" }],
@@ -402,8 +427,9 @@ export async function notifyPendingIncidents(prisma: PrismaClient, deps: Notifie
   let incidents = 0;
   let firstError: unknown = null;
   for (const { id } of pending) {
+    if (opts.deadline?.()) break;
     try {
-      if (await notifyIncident(prisma, deps, id, now)) incidents++;
+      if (await notifyIncident(prisma, deps, id, now, opts)) incidents++;
     } catch (err) {
       logger.error({ err, incidentId: id }, "security alert sent, but its audit row was not written");
       firstError ??= err;
@@ -414,15 +440,20 @@ export async function notifyPendingIncidents(prisma: PrismaClient, deps: Notifie
 }
 
 /** Engine step 6, second half: notices still queued two minutes on get one more delivery, then settle. */
-export async function redeliverStuckNotices(prisma: PrismaClient, now: Date): Promise<{ redelivered: number }> {
+export async function redeliverStuckNotices(prisma: PrismaClient, now: Date, opts: NotifyOptions = {}): Promise<{ redelivered: number }> {
   const stuck = await prisma.securityIncidentNotice.findMany({
     where: { outcome: "queued", createdAt: { lte: new Date(now.getTime() - SECURITY_REDELIVER_AFTER_MS) } },
     orderBy: { createdAt: "asc" },
     take: REDELIVER_BATCH,
     select: { id: true, incidentId: true, notificationLogId: true },
   });
-  for (const n of stuck) await deliverAndSettle(prisma, n, now, true);
-  return { redelivered: stuck.length };
+  let redelivered = 0;
+  for (const n of stuck) {
+    if (opts.deadline?.()) break;
+    await deliverAndSettle(prisma, n, now, true);
+    redelivered++;
+  }
+  return { redelivered };
 }
 
 // ── the alerts health row (§6.11) ─────────────────────────────────────────
