@@ -458,6 +458,23 @@ export async function triageOne(
   }, READ_COMMITTED_TX);
 }
 
+/**
+ * Step 2's candidates: the events in (floor, head] with no triage row, in id
+ * order, at most TRIAGE_BATCH. Spec §6.1 asks for a NOT EXISTS anti-join;
+ * Prisma 5.22 emits `LEFT JOIN "SecurityEventTriage" … WHERE "eventId" IS
+ * NULL` (never `NOT IN`), which Postgres plans as the same anti-join (review
+ * #5: a Hash Anti Join over 100k triaged rows at floor 0, a Nested Loop Anti
+ * Join on the two primary keys at a realistic floor). The pg lane EXPLAINs
+ * this exact query and fails if a Prisma upgrade ever changes that.
+ */
+export function triageCandidates(prisma: Pick<PrismaClient, "securityEvent">, floor: bigint, head: bigint) {
+  return prisma.securityEvent.findMany({
+    where: { id: { gt: floor, lte: head }, triage: { is: null } },
+    orderBy: { id: "asc" },
+    take: TRIAGE_BATCH,
+  });
+}
+
 /** Prisma error codes that say nothing about the event: the pool, the connection, the transaction. */
 const TRANSIENT_PRISMA_CODES: ReadonlySet<string> = new Set([
   "P1001", // can't reach the database server
@@ -612,11 +629,7 @@ async function runTick(prisma: PrismaClient, deps: SecurityIncidentDeps, now: Da
   // 2. Triage.
   const { _max } = await prisma.securityEvent.aggregate({ _max: { id: true } });
   const head = _max.id ?? state.triageFloor;
-  const rows = await prisma.securityEvent.findMany({
-    where: { id: { gt: state.triageFloor, lte: head }, triage: { is: null } },
-    orderBy: { id: "asc" },
-    take: TRIAGE_BATCH,
-  });
+  const rows = await triageCandidates(prisma, state.triageFloor, head);
   let triaged = 0;
   let failed = 0;
   let processed = 0;

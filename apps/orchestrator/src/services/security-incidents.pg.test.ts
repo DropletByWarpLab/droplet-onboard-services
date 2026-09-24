@@ -33,7 +33,13 @@ import type { PrismaClient, Prisma } from "@prisma/client";
 
 vi.unmock("@prisma/client");
 
-import { tickSecurityIncidents, trimSecurityIncidents, _resetIncidentHealthForTests, type SecurityIncidentDeps } from "./security-incidents.service.js";
+import {
+  tickSecurityIncidents,
+  triageCandidates,
+  trimSecurityIncidents,
+  _resetIncidentHealthForTests,
+  type SecurityIncidentDeps,
+} from "./security-incidents.service.js";
 import { loadActiveLinks, matchAreasForEvent, zoneEventWhere } from "./security-zones.service.js";
 
 const RUN =
@@ -465,6 +471,29 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
         expect(memory.map((e) => e.id).sort(), zone).toEqual(sql.map((e) => e.id).sort());
       }
     });
+  });
+
+  // ── review #5: the candidate query is an anti-join ───────────────────────
+
+  it("the engine's candidate query (triage: {is: null}) is planned as an ANTI JOIN — never a NOT IN subplan", async () => {
+    const { PrismaClient: RealPrismaClient } = await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
+    const logging = new RealPrismaClient({ log: [{ emit: "event", level: "query" }] });
+    const seen: Array<{ query: string; params: string }> = [];
+    logging.$on("query", (e) => seen.push({ query: e.query, params: e.params }));
+    try {
+      await triageCandidates(logging, 0n, 9_000_000_000n);
+      const q = seen.find((s) => /FROM "public"\."SecurityEvent"/.test(s.query));
+      expect(q, "the candidate query was not captured").toBeDefined();
+      expect(q!.query).not.toMatch(/NOT IN/i);
+      const params = JSON.parse(q!.params) as unknown[];
+      const plan = (await prisma.$queryRawUnsafe<Array<{ "QUERY PLAN": string }>>(`EXPLAIN ${q!.query}`, ...params))
+        .map((r) => r["QUERY PLAN"])
+        .join("\n");
+      expect(plan, plan).toMatch(/Anti Join/);
+      expect(plan, plan).not.toMatch(/SubPlan/);
+    } finally {
+      await logging.$disconnect();
+    }
   });
 
   // ── retention ─────────────────────────────────────────────────────────────
