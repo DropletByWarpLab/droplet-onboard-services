@@ -46,7 +46,8 @@ export interface DispatchInput {
    *  `droplet/notifications/<username>` (ws-bridge subscribes on the username
    *  only), the `PushSubscription.username` lookup, and both
    *  `NotificationLog.username` readers. A `User.id` here reaches nobody, so
-   *  every entry point refuses one (`NOTIFICATION_RECIPIENT_IS_ID`, below). */
+   *  every entry point refuses one (`NOTIFICATION_RECIPIENT_IS_ID`, below) and
+   *  `__tests__/notification-recipient.guard.test.ts` sweeps every call site. */
   username: string;
   kind: NotificationKind;
   title: string;

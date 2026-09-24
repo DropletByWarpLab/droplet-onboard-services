@@ -162,14 +162,16 @@ export async function runNightlyChainVerification(
     actor: { type: "system", id: null },
   });
   // The notifications subsystem is keyed by `User.username`, not `User.id` —
-  // `sendNotification` publishes to `droplet/notifications/${userId}` and the
-  // only subscriber is ws-bridge's `droplet/notifications/${user.username}`,
+  // `sendNotification` publishes to `droplet/notifications/${username}` and
+  // the only subscriber is ws-bridge's `droplet/notifications/${user.username}`,
   // while both readers of the persisted NotificationLog (routes/notifications.ts
-  // and the `list_notifications` tool) also filter by username. Selecting `id`
-  // here used to make this the one UUID-keyed caller in the codebase, so the
-  // toast was dropped by the broker AND the stored row was invisible to every
-  // reader — the single alert that must never be missed reached nobody. Select
-  // the username so this caller speaks the same vocabulary as the rest.
+  // and the `list_notifications` tool) also filter by username. This site used
+  // to select `id` (WARP-2783), so the toast was dropped by the broker AND the
+  // stored row was invisible to every reader — the single alert that must never
+  // be missed reached nobody. It was not the only such caller (WARP-2813,
+  // WARP-2910), and no comment can say it is the last: that is what
+  // `__tests__/notification-recipient.guard.test.ts` is for (every call site,
+  // swept), backed by the `NOTIFICATION_RECIPIENT_IS_ID` refusal at runtime.
   const admins = await prisma.user.findMany({
     where: { role: { in: ["owner", "admin"] } },
     select: { username: true },
