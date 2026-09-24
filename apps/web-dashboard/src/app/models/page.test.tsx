@@ -75,20 +75,38 @@ vi.mock("@/lib/auth", () => ({
 }));
 // WARP-2871 — the three cloud writes, hoisted so the mock factory can see
 // them; everything else in @/lib/api stays real (LocalModelCard imports it).
-const { setCloudModelEscapeMock, saveProviderKeyMock, deleteProviderKeyMock } =
-  vi.hoisted(() => ({
-    setCloudModelEscapeMock: vi.fn(),
-    saveProviderKeyMock: vi.fn(),
-    deleteProviderKeyMock: vi.fn(),
-  }));
+const {
+  setCloudModelEscapeMock,
+  saveProviderKeyMock,
+  deleteProviderKeyMock,
+  startModelPullMock,
+  refreshLlmModelsMock,
+  activePickerProps,
+} = vi.hoisted(() => ({
+  setCloudModelEscapeMock: vi.fn(),
+  saveProviderKeyMock: vi.fn(),
+  deleteProviderKeyMock: vi.fn(),
+  startModelPullMock: vi.fn(),
+  refreshLlmModelsMock: vi.fn(),
+  activePickerProps: { current: null as null | { onChanged: () => void } },
+}));
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
   setCloudModelEscape: setCloudModelEscapeMock,
   saveProviderKey: saveProviderKeyMock,
   deleteProviderKey: deleteProviderKeyMock,
+  startModelPull: startModelPullMock,
+}));
+// WARP-3048 — the chat-model cache refill is observed, not performed.
+vi.mock("@/lib/hooks/useModels", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hooks/useModels")>()),
+  useRefreshLlmModels: () => refreshLlmModelsMock,
 }));
 vi.mock("@/components/models/ActiveModelPicker", () => ({
-  ActiveModelPicker: () => null,
+  ActiveModelPicker: (props: { onChanged: () => void }) => {
+    activePickerProps.current = props;
+    return null;
+  },
 }));
 
 import ModelsPage from "./page";
@@ -194,6 +212,9 @@ beforeEach(() => {
   setCloudModelEscapeMock.mockReset();
   saveProviderKeyMock.mockReset();
   deleteProviderKeyMock.mockReset();
+  startModelPullMock.mockReset();
+  refreshLlmModelsMock.mockReset();
+  activePickerProps.current = null;
   // Default: catalog not loaded → the section renders nothing, and every
   // pre-WARP-1827 test sees exactly the page it always did.
   useModelsCatalogMock.mockReturnValue({
@@ -777,24 +798,94 @@ describe("<ModelsPage /> catalog section (WARP-1827)", () => {
     expect(screen.getByText(/model registry/i)).toBeInTheDocument();
   });
 
-  it("renders NOTHING when every eligible model is already pulled (no empty shell)", () => {
+  // WARP-3048 — the section used to render NOTHING whenever it was empty,
+  // so every reason looked the same as "there is no way to add a model".
+  // Each state now gets one honest line under the heading, and no cards.
+  function expectOnlyNote(pattern: RegExp) {
+    expect(
+      screen.getByRole("heading", { name: /available to install/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(pattern);
+    expect(screen.queryByText(/model registry/i)).toBeNull();
+  }
+
+  it("says everything is installed when every eligible model is pulled (WARP-3048)", () => {
     ready();
     catalogReady([catalogEntry({ pulled: true })]);
     render(<ModelsPage />);
-    expect(screen.queryByText(/available to install/i)).toBeNull();
-    expect(screen.queryByText(/model registry/i)).toBeNull();
+    expectOnlyNote(/everything this droplet can run is already installed/i);
   });
 
-  it("renders NOTHING while the catalog is unavailable (error/loading)", () => {
+  it("says the catalog couldn't be read on a fetch error / 503 (WARP-3048)", () => {
     ready();
     useModelsCatalogMock.mockReturnValue({
       data: undefined,
-      error: new Error("503"),
+      error: new Error("Failed to fetch model catalog: 503"),
       isLoading: false,
       refresh: vi.fn(),
     });
     render(<ModelsPage />);
+    expectOnlyNote(/couldn.t read the model catalog/i);
+  });
+
+  it("renders NOTHING while the catalog has not answered yet", () => {
+    ready();
+    render(<ModelsPage />); // default mock: no data, no error
     expect(screen.queryByText(/available to install/i)).toBeNull();
+  });
+
+  it.each([0, null])(
+    "says the GPU memory couldn't be measured when detected_vram_gb is %s (WARP-3048)",
+    (vram) => {
+      ready();
+      useModelsCatalogMock.mockReturnValue({
+        data: { detected_vram_gb: vram, models: [] },
+        error: undefined,
+        isLoading: false,
+        refresh: vi.fn(),
+      });
+      render(<ModelsPage />);
+      expectOnlyNote(/couldn.t measure this droplet.s gpu memory/i);
+    },
+  );
+
+  it("says nothing fits when the box measured real memory and none qualifies (WARP-3048)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      data: { detected_vram_gb: 2, models: [] },
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expectOnlyNote(/none of the models droplet offers fit this droplet.s 2 gb/i);
+  });
+
+  it("offers no cards while installed tags are unknown — tags_unreachable (WARP-3048)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      // `pulled:false` is a guess here: offering it could re-download the
+      // model the box is already serving.
+      data: { detected_vram_gb: 16, models: [catalogEntry()], tags_unreachable: true },
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expectOnlyNote(/couldn.t check which models are already on this droplet/i);
+    expect(screen.queryByText("Qwen3 14B")).toBeNull();
+  });
+
+  it("says the model list couldn't be read — degraded_manifest (WARP-3048)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      data: { detected_vram_gb: 16, models: [], degraded_manifest: true },
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expectOnlyNote(/couldn.t read this droplet.s list of supported models/i);
   });
 
   it("member (no admin role) sees the metadata but NO download control", () => {
@@ -950,5 +1041,36 @@ describe("WARP-2883 — KPI strip: model count, GPU hardware, endpoint latency",
     ready(); // no endpointLatencyMs at all
     render(<ModelsPage />);
     expect(screen.getByText("Latency isn’t measured yet")).toBeInTheDocument();
+  });
+});
+
+// ── WARP-3048 — /chat and Home read `/api/llm/models`; this page must refill
+// that cache whenever it changes the answer, or they keep the old model. ──
+describe("<ModelsPage /> refreshes the chat-model list (WARP-3048)", () => {
+  it("after the active model changes", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(activePickerProps.current).not.toBeNull();
+    activePickerProps.current!.onChanged();
+    expect(refreshLlmModelsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("after a download succeeds", async () => {
+    asAdmin();
+    ready();
+    catalogReady([catalogEntry()]);
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"status":"success"}\n'));
+        c.close();
+      },
+    });
+    startModelPullMock.mockResolvedValue({ ok: true, status: 200, body });
+    render(<ModelsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /download/i }));
+
+    await waitFor(() => expect(refreshLlmModelsMock).toHaveBeenCalledTimes(1));
+    expect(startModelPullMock).toHaveBeenCalledWith("qwen3:14b");
   });
 });
