@@ -36,6 +36,8 @@ import {
 import { webPushGate } from "./off-lan-gate.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { canAccessCamera } from "./camera-access.service.js";
+// WARP-2911 — the leaf, never notifications.service (which imports this module).
+import { assertRecipientIsUsername } from "./notification-recipient.js";
 
 const logger = createLogger("push-dispatch");
 
@@ -197,18 +199,23 @@ type PushEgressOutcome =
  * and the payload never appears here at all.
  */
 function auditPushEgress(userId: string, outcome: PushEgressOutcome, host?: string): void {
+  recordPushEgress(outcome, { userId, ...(host ? { dst: host } : {}) }, host);
+}
+
+/** The signed `network` row itself — shared by the per-recipient rows above
+ *  and the one-per-event camera refusal below. */
+function recordPushEgress(
+  outcome: PushEgressOutcome,
+  refs: Record<string, string | number>,
+  host?: string,
+): void {
   void recordActivity({
     kind: "network",
     severity: outcome === "allowed" ? "info" : "warn",
     sourceIcon: "globe",
     what: host ? `Web push: ${host}` : "Web push",
     sub: "web_push",
-    refs: {
-      channel: "web_push",
-      outcome,
-      userId,
-      ...(host ? { dst: host } : {}),
-    },
+    refs: { channel: "web_push", outcome, ...refs },
     actor: { type: "system", id: null },
   });
 }
@@ -263,6 +270,10 @@ export async function dispatchToUser(
   username: string,
   payload: PushPayload,
 ): Promise<DispatchOutcome> {
+  // WARP-2911 — FIRST, before the gate: a `User.id` here is a caller bug, not
+  // a refused dial, and this function has callers (the camera fan-out, the
+  // push test button) that never pass through sendNotification's own check.
+  assertRecipientIsUsername("dispatchToUser", username);
   if (!(await webPushGate(prisma))) {
     // Audit a refusal only when there was something to refuse. Push ships
     // off, so an unconditional row here would mean one signed warning per
@@ -412,6 +423,29 @@ export async function dispatchDetectionEvent(
     if (await canAccessCamera(prisma, u, ev.cameraName)) allowed.push(u);
   }
   if (allowed.length === 0) return;
+
+  // WARP-2911 — the `web_push` gate is read ONCE per detection. `web_push`
+  // ships off and detections are the most frequent sender, so letting each
+  // recipient's `dispatchToUser` discover the closed gate wrote one signed
+  // refusal row per subscribed recipient per detection. Closed: at most ONE
+  // row for the event (and none when nobody is subscribed — push ships off,
+  // so "nothing to refuse" is the normal case), no subscription loaded,
+  // nothing dialled. Open: `dispatchToUser` still reads the gate itself, per
+  // recipient — it is the one dial site and keeps that contract.
+  if (!(await webPushGate(prisma))) {
+    const usernames = allowed.map((u) => u.username);
+    const pending = await prisma.pushSubscription
+      .count({ where: { username: { in: usernames } } })
+      .catch(() => 1);
+    if (pending > 0) {
+      recordPushEgress("refused_gate", {
+        source: "camera_detection",
+        camera: ev.cameraName,
+        subscriptions: pending,
+      });
+    }
+    return;
+  }
 
   const cameraDisplay = camera.displayName || ev.cameraName.replace(/_/g, " ");
   const payload: PushPayload = {
