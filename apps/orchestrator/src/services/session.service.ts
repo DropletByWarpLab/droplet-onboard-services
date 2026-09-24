@@ -306,6 +306,41 @@ export async function checkSession(
   return { kind: "ok", record };
 }
 
+/**
+ * WARP-2981 (ADR-059 §6.2, D22) — when this sign-in ends: the record's
+ * createdAt + the ABSOLUTE limit for the role it was minted with, the same
+ * arithmetic checkSession enforces, so the time a client shows is the time
+ * that will be applied. The idle deadline is deliberately not offered: any
+ * client that polls keeps sliding it, so it would say nothing useful.
+ *
+ * One Redis GET and nothing else. It never slides lastSeenAt, never destroys
+ * or audits an expired record (enforcement is checkSession's, on the same
+ * request, in authMiddleware), and never throws: a missing record, a record
+ * that does not parse or has no usable createdAt, and a Redis error all
+ * answer null — "cannot tell", which a caller shows as nothing.
+ */
+export async function readSessionDeadline(sid: string): Promise<{ endsAt: Date } | null> {
+  let raw: string | null;
+  try {
+    raw = await getRedis().get(SESSION_KEY_PREFIX + sid);
+  } catch (err) {
+    // authMiddleware's checkSession already logged this outage for the request.
+    logger.debug({ err, sid }, "session deadline read failed — answering null");
+    return null;
+  }
+  if (!raw) return null;
+  let record: Partial<SessionRecord>;
+  try {
+    record = JSON.parse(raw) as Partial<SessionRecord>;
+  } catch {
+    return null;
+  }
+  if (typeof record !== "object" || record === null) return null;
+  const { createdAt, role } = record;
+  if (typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
+  return { endsAt: new Date((createdAt + absoluteLimitSecondsForRole(role as Role)) * 1000) };
+}
+
 /** Logout: drop this device's record so the remaining ≤15-min access token
  *  dies at the next middleware check, not just at refresh. */
 export async function deleteSession(userId: string, sid: string): Promise<void> {

@@ -32,6 +32,13 @@ export interface AuthUser {
   // server-side regardless. Optional so a cached pre-WARP-824 profile is
   // treated as "not gated".
   mustChangePassword?: boolean;
+  // WARP-2981 (ADR-059 §6.2): when this sign-in ends — the absolute cap, fixed
+  // at sign-in and never extended (the idle deadline slides with every poll,
+  // so the box does not offer it). Only /auth/me carries it: absent after a
+  // login response or on an older orchestrator, null when the box cannot tell
+  // (a service principal, a grace-path token, an unreadable session record).
+  // Absent and null both mean "show nothing".
+  session?: { endsAt: string } | null;
 }
 
 /**
