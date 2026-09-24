@@ -14,6 +14,8 @@
  *   work         GET /api/pm/work-items?department=<id> (WARP-2717)
  *   cameras      GET /api/cameras — online / total, module-gated
  *   files        the department's library link + `usedBytes` from its row
+ *   security-incidents  GET /api/security/incidents/summary (WARP-2978) —
+ *                open alerts / notices and the latest three, module-gated
  *
  * A widget whose source module is off for the viewer is not rendered on the
  * board at all (`requiresModule`) — the home follows the nav, which hides a
@@ -30,6 +32,7 @@ import {
   FolderKanban,
   FolderOpen,
   LayoutGrid,
+  ShieldAlert,
   Users,
   Video,
   type LucideIcon,
@@ -48,7 +51,16 @@ import type {
   DepartmentWidgetSize,
 } from "@/lib/types";
 
-import { useCameraFleet, useDepartmentWork } from "./department-sources";
+import { IncidentCard } from "@/components/security/IncidentCard";
+import { useCameraDisplayNames, useSecurityMode } from "@/lib/hooks/useSecurity";
+import { deviceTimeZone } from "@/lib/security-time";
+import {
+  OPEN_INCIDENTS_COPY,
+  openIncidentsFigure,
+  useCameraFleet,
+  useDepartmentWork,
+  useOpenIncidents,
+} from "./department-sources";
 
 export interface DepartmentWidgetProps {
   department: Department;
@@ -276,6 +288,52 @@ function FilesWidget({ department }: DepartmentWidgetProps) {
   );
 }
 
+/* ── security-incidents (WARP-2978) ──────────────────────── */
+
+/** Incidents shown per tile size — the summary carries at most three. */
+const INCIDENT_ROWS: Record<DepartmentWidgetSize, number> = { s: 1, m: 3, l: 3 };
+
+function SecurityIncidentsWidget({ size }: DepartmentWidgetProps) {
+  const { summary, off, error, isLoading } = useOpenIncidents(true);
+  const { mode } = useSecurityMode();
+  const cameraLabel = useCameraDisplayNames();
+  if (off) return <Invite>{OPEN_INCIDENTS_COPY.off}</Invite>;
+  if (error) {
+    return (
+      <p className="dept-note" role="status">
+        {OPEN_INCIDENTS_COPY.loadFailed}
+      </p>
+    );
+  }
+  if (isLoading || !summary) return <Skeleton />;
+  const figure = openIncidentsFigure(summary.openAlerts, summary.openNotices);
+  const timezone = mode?.displayTimezone ?? deviceTimeZone() ?? "UTC";
+  const shown = summary.latest.slice(0, INCIDENT_ROWS[size]);
+  return (
+    <div className="dept-work">
+      {figure ? (
+        // The space reads "2 open alerts" to a screen reader; the flex column ignores it.
+        <p className="dept-figure">
+          <span className="dept-figure-n">{figure.n}</span> <span className="dept-figure-l">{figure.label}</span>
+        </p>
+      ) : (
+        <p className="dept-note">{OPEN_INCIDENTS_COPY.nothing}</p>
+      )}
+      {!summary.alertsReady && <p className="dept-note">{OPEN_INCIDENTS_COPY.notReady}</p>}
+      {shown.length > 0 && (
+        <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+          {shown.map((i) => (
+            <IncidentCard key={i.id} incident={i} cameraLabel={cameraLabel} timezone={timezone} />
+          ))}
+        </ul>
+      )}
+      <Link href="/security" className="dept-more">
+        {OPEN_INCIDENTS_COPY.openSecurity}
+      </Link>
+    </div>
+  );
+}
+
 /* ── the registry ────────────────────────────────────────── */
 
 export const DEPARTMENT_WIDGETS: Record<DepartmentWidgetId, DepartmentWidgetDef> = {
@@ -311,6 +369,13 @@ export const DEPARTMENT_WIDGETS: Record<DepartmentWidgetId, DepartmentWidgetDef>
     icon: FolderOpen,
     requiresModule: "files",
     Component: FilesWidget,
+  },
+  "security-incidents": {
+    label: "Incidents",
+    description: "What needs attention in Security, and the latest incidents.",
+    icon: ShieldAlert,
+    requiresModule: "security",
+    Component: SecurityIncidentsWidget,
   },
 };
 
