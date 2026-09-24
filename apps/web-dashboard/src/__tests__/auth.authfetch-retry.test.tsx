@@ -12,7 +12,7 @@
  * `authFetch("/api/calendar/places", { signal })` (a non-auth URL + signal), so
  * the test drives that path.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { authFetch } from "@/lib/auth";
 
 describe("authFetch — post-refresh retry uses a fresh signal (onboard#477)", () => {
@@ -285,5 +285,177 @@ describe("authFetch — 403 PASSWORD_CHANGE_REQUIRED routes to remediation (F8)"
     await Promise.resolve();
     await Promise.resolve();
     expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-3048 — the retry's budget ends when the HEADERS arrive ──────────
+//
+// The post-refresh retry used `AbortSignal.timeout(6s)`, which keeps ticking
+// after `fetch` resolves and aborts the BODY mid-read. A model download's
+// NDJSON progress stream that happened to need the 401→refresh→retry path
+// (access tokens last 15 minutes) died six seconds in.
+describe("authFetch — the retry timeout bounds only the headers (WARP-3048)", () => {
+  // The pre-fix path used `AbortSignal.timeout`, whose timer the fakes do
+  // not drive; hiding it sends that path through the setTimeout fallback so
+  // a regression is observable under fake timers.
+  const realTimeout = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Object.defineProperty(AbortSignal, "timeout", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    if (realTimeout) Object.defineProperty(AbortSignal, "timeout", realTimeout);
+  });
+
+  function stubPullAfterRefresh(retry: (init?: RequestInit) => Promise<Response>) {
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === "/api/auth/refresh") {
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        attempts += 1;
+        return attempts === 1
+          ? Promise.resolve(new Response("", { status: 401 }))
+          : retry(init);
+      }),
+    );
+  }
+
+  it("a streamed body outlives the retry budget once the headers are in", async () => {
+    let retrySignal: AbortSignal | undefined;
+    stubPullAfterRefresh((init) => {
+      retrySignal = init?.signal ?? undefined;
+      return Promise.resolve(new Response("{\"status\":\"pulling\"}\n", { status: 200 }));
+    });
+
+    const res = await authFetch("/api/models/qwen3%3A14b/pull", { method: "POST" });
+    expect(res.status).toBe(200);
+
+    // A multi-GB download streams for minutes.
+    vi.advanceTimersByTime(60_000);
+    expect(retrySignal).toBeDefined();
+    expect(retrySignal!.aborted).toBe(false);
+  });
+
+  it("still gives up on a retry whose headers never arrive", async () => {
+    stubPullAfterRefresh(
+      (init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("TimeoutError", "TimeoutError")),
+          );
+        }),
+    );
+
+    const pending = authFetch("/api/models/qwen3%3A14b/pull", { method: "POST" });
+    const settled = expect(pending).rejects.toThrow(/TimeoutError/);
+    await vi.advanceTimersByTimeAsync(6_000);
+    await settled;
+  });
+});
+
+// ── WARP-3048 review — the retry drops the caller's CLOCK, not its CANCEL ──
+//
+// onboard#477 stopped the retry inheriting `init.signal` because a caller's
+// timeout may be spent by the first attempt + the refresh. But dropping the
+// signal outright also dropped the caller's cancel: a chat reply that needed
+// the 401→refresh→retry path (the first send after the 15-minute access
+// token lapses) could no longer be stopped — useChat.stop() only aborts its
+// controller — so the stream ran on, a cloud turn kept billing and the GPU
+// kept generating.
+describe("authFetch — a caller's cancel reaches the retry (WARP-3048)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** 401 → refresh 200 → the retry's response comes from `retry`. */
+  function stubRetryAfterRefresh(
+    retry: (init?: RequestInit) => Promise<Response>,
+    onRefresh?: () => void,
+  ) {
+    let attempts = 0;
+    const calls: Array<{ aborted: boolean }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === "/api/auth/refresh") {
+          onRefresh?.();
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        attempts += 1;
+        calls.push({ aborted: Boolean(init?.signal?.aborted) });
+        if (init?.signal?.aborted) {
+          return Promise.reject(new DOMException("Aborted", "AbortError"));
+        }
+        return attempts === 1
+          ? Promise.resolve(new Response("", { status: 401 }))
+          : retry(init);
+      }),
+    );
+    return calls;
+  }
+
+  /** A stream that never ends — a reply still being generated. */
+  function endless(): Response {
+    return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+      status: 200,
+    });
+  }
+
+  it("Stop after the retry's headers arrive aborts the retried stream", async () => {
+    const stop = new AbortController();
+    let retrySignal: AbortSignal | undefined;
+    stubRetryAfterRefresh((init) => {
+      retrySignal = init?.signal ?? undefined;
+      return Promise.resolve(endless());
+    });
+
+    const res = await authFetch("/api/llm/chat", {
+      method: "POST",
+      signal: stop.signal,
+    });
+    expect(res.status).toBe(200);
+    expect(retrySignal!.aborted).toBe(false);
+
+    stop.abort();
+    expect(retrySignal!.aborted).toBe(true);
+  });
+
+  it("the caller's own timeout firing later never cuts the retry (onboard#477)", async () => {
+    const budget = new AbortController();
+    let retrySignal: AbortSignal | undefined;
+    stubRetryAfterRefresh((init) => {
+      retrySignal = init?.signal ?? undefined;
+      return Promise.resolve(endless());
+    });
+
+    await authFetch("/api/auth/me", { signal: budget.signal });
+    // e.g. restoreSession's cold-boot budget runs out mid-body.
+    budget.abort(new DOMException("TimeoutError", "TimeoutError"));
+    expect(retrySignal!.aborted).toBe(false);
+  });
+
+  it("a caller that cancelled during the refresh gets no retry", async () => {
+    const stop = new AbortController();
+    const calls = stubRetryAfterRefresh(
+      () => Promise.resolve(new Response("{}", { status: 200 })),
+      () => stop.abort(), // the owner pressed Stop while the token refreshed
+    );
+
+    await expect(
+      authFetch("/api/llm/chat", { method: "POST", signal: stop.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    // The turn never went out again: the only un-aborted call was the 401.
+    expect(calls.filter((c) => !c.aborted)).toHaveLength(1);
   });
 });

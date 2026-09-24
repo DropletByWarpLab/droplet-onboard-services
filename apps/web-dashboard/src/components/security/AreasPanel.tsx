@@ -22,8 +22,14 @@
  * `translateError(err, "security")` toast (never the server's message), then a
  * refresh through the hooks' own `mutate`, so a version conflict shows the
  * other person's change before the next try.
+ *
+ * Keyboard: Restore is aria-disabled, never `disabled`, while a restore is in
+ * flight — the pressed button keeps focus (a ref refuses the second press, as
+ * in ModeCard). A restored area leaves the Removed list, so its button goes
+ * with it; focus then moves to the area's first action on its card, where the
+ * area now is, instead of dropping to <body>.
  */
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Loader2, MapPin, Plus, RefreshCw } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
@@ -153,9 +159,29 @@ export function AreasPanel() {
   // One Restore at a time: a second click would carry the same (now stale)
   // version and come back as a conflict toast right after the success one.
   const [restoring, setRestoring] = useState<string | null>(null);
+  // The in-flight guard itself: Restore stays focusable (aria-disabled), so a
+  // second press between renders must be refused here, not by `disabled`.
+  const restoringRef = useRef(false);
+  // The area whose card should take focus once it is back in the active list.
+  const [focusAreaId, setFocusAreaId] = useState<string | null>(null);
+  const listRef = useRef<HTMLUListElement | null>(null);
 
   const all = useMemo(() => zonesQ.zones ?? [], [zonesQ.zones]);
-  const active = all.filter((z) => z.state === "active");
+  const active = useMemo(() => all.filter((z) => z.state === "active"), [all]);
+
+  // Runs after each render that could have brought the restored card in: the
+  // refresh lands after the unarchive resolves, so wait until the card exists.
+  useEffect(() => {
+    if (!focusAreaId) return;
+    const card = Array.from(listRef.current?.children ?? []).find(
+      (el) => (el as HTMLElement).dataset.zoneId === focusAreaId,
+    );
+    const target = card?.querySelector<HTMLButtonElement>("button");
+    if (target) {
+      target.focus();
+      setFocusAreaId(null);
+    }
+  }, [focusAreaId, active]);
   // Below manage the server ignores include=archived; this is the page's own
   // guard that a removed area (and its Restore) never surfaces there anyway.
   const archived = canManage ? all.filter((z) => z.state === "archived") : [];
@@ -240,6 +266,8 @@ export function AreasPanel() {
   };
   /** True when the area is back. */
   const onRestore = async (zone: SecurityZoneView): Promise<boolean> => {
+    if (restoringRef.current) return false;
+    restoringRef.current = true;
     setRestoring(zone.id);
     try {
       await zonesQ.unarchive(zone.id, zone.version);
@@ -249,6 +277,7 @@ export function AreasPanel() {
       report(err);
       return false;
     } finally {
+      restoringRef.current = false;
       setRestoring(null);
     }
   };
@@ -298,7 +327,7 @@ export function AreasPanel() {
     );
   } else {
     body = (
-      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 12 }}>
+      <ul ref={listRef} style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 12 }}>
         {active.map((zone) => {
           const titleId = `area-${zone.id}-title`;
           const problems = linkProblems(zone, sourcesForCards);
@@ -415,8 +444,12 @@ export function AreasPanel() {
                   type="button"
                   className="btn sm"
                   aria-label={`${COPY.restore} ${zone.name}`}
-                  disabled={restoring !== null}
-                  onClick={() => void onRestore(zone)}
+                  aria-disabled={restoring !== null || undefined}
+                  onClick={() => {
+                    void onRestore(zone).then((ok) => {
+                      if (ok) setFocusAreaId(zone.id);
+                    });
+                  }}
                 >
                   {COPY.restore}
                 </button>

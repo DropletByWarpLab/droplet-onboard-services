@@ -453,13 +453,11 @@ const envSchema = z.object({
   DEVICE_SECRET: z.string().default(""),
 
   // --- Microsoft 365 cloud connector (WARP-2115, ADR-041) ---
-  // The Entra application (client) id of Droplet's multi-tenant app. NOT a
-  // secret: a public-client id is designed to ship inside the client, and the
-  // delegated device-code/auth-code flows use no client secret at all — which
-  // also sidesteps the tenant app-management policies that increasingly block
-  // long-lived secrets. Empty default = the connector is simply unavailable
-  // (isM365Configured() is false); it never half-starts.
-  M365_CLIENT_ID: z.string().default(""),
+  // There is deliberately NO box-wide client id (WARP-2705, removed
+  // M365_CLIENT_ID): each connection signs in through the customer's own Entra
+  // app registration, stored on its M365Connection row. A single Warp-Lab
+  // multitenant app is the PARTNER_GATED shape ADR-042 §3 rules out and would
+  // pool Graph's per-app throttling ceiling across every box we ship.
   // Entra login host. Overridable only so a national cloud (login.microsoftonline.us,
   // login.chinacloudapi.cn) can be pointed at without a code change; the
   // worldwide endpoint is correct for every commercial tenant. Whatever this
@@ -1181,6 +1179,38 @@ const envSchema = z.object({
   // The output cap a transform may return. Exceeding it FAILS the step with
   // "output exceeded N bytes" — never a silent slice (ROUTINES brief §4.4).
   SANDBOX_OUTPUT_CAP_BYTES: z.coerce.number().int().min(1_024).max(4_194_304).default(262_144),
+  // WARP-2900 (ADR-056 slice H2) — how often the extension reconciler asks
+  // the sandbox whether every installed extension is still running, and
+  // reinstalls (re-verify the signed statement, rotate the bearer, start)
+  // any it lost — a sandbox restart forgets every process. One tick with no
+  // Extension rows dials nothing. Ships dark with the sandbox's
+  // SANDBOX_PROCESS_SUPERVISION=0: no extension can be promoted then.
+  EXTENSION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(60_000),
+  // WARP-2900 (ADR-056 slice H3) — the orchestrator URL an extension calls
+  // back on (handed to the child as DROPLET_ORCHESTRATOR_URL, next to its own
+  // dxt_ bearer). The orchestrator's name on `droplet-internal`: the only
+  // network the sandbox is on. The bearer resolves to `_service:ext:<slug>`,
+  // which reaches /api/extensions/self and /self/call and nothing else.
+  // Must stay a compose service name: the sandbox refuses anything that is not
+  // an http(s) URL of host[:port].
+  EXTENSION_CALLBACK_URL: z.string().url().default("http://orchestrator:3000"),
+  // WARP-2900 (H3) — whether POST /api/extensions/self/call may run a static
+  // tool AS THE INSTALLING OWNER. On, the route admits only the pinned
+  // allowlist of box-local reads (EXTENSION_SELF_CALL_TOOLS in
+  // services/extension-self-call.ts, EMPTY in v1) and never a tool that
+  // reaches outside the box (egress screen, cloud or ERP connector, model,
+  // mail server), so the bearer never reaches anything off the box. OFF by
+  // default, separately from SANDBOX_PROCESS_SUPERVISION: every process in
+  // the sandbox shares one uid, so a workspace `run` child can read an
+  // installed extension's `dxt_` bearer from /proc
+  // (docs/security/extension-trust.md) and run what the allowlist admits as
+  // that owner. Off, the route answers 503 and GET /api/extensions/self
+  // still works. String + transform, not z.coerce.boolean: "false" must stay
+  // false.
+  EXTENSION_SELF_CALL_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),

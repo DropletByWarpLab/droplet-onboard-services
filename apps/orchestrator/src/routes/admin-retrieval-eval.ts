@@ -22,6 +22,7 @@ import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { createLogger } from "../lib/logger.js";
 import { requireRoleOrService } from "../middleware/auth.js";
+import { resolveActiveModel } from "../services/active-model.service.js";
 
 const logger = createLogger("admin-retrieval-eval");
 
@@ -187,7 +188,9 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
           cache: inMemoryCache,
         });
         const preset = agentMod.presetForClass(cls, query);
-        const chat = makeAdminEvalChatAdapter();
+        // WARP-3047 — the eval measures the model the box actually answers
+        // with (and never loads a second one next to it on DMR).
+        const chat = makeAdminEvalChatAdapter(await resolveActiveModel(prisma));
 
         let hydeVector: number[] | undefined;
         let extraQueryVectors: number[][] | undefined;
@@ -365,22 +368,20 @@ function makeInMemoryClassifierCache() {
  * `priority`; the eval calls run at normal priority. That's fine for a
  * one-shot eval — production paths use the agent-loop's chat adapter.
  */
-function makeAdminEvalChatAdapter() {
+function makeAdminEvalChatAdapter(model: string | null) {
   return async (args: {
     prompt: string;
     temperature: number;
     maxTokens: number;
     priority: number;
   }): Promise<{ content: string }> => {
+    // No resolvable model: an empty rewrite, which HyDE / multi-query
+    // already treat as "use the raw query" — never a hardcoded tag the box
+    // does not host.
+    if (!model) return { content: "" };
     const ai = await import("../services/ai-gateway.client.js");
     const res = await ai.chat({
-      // LLM_MODEL is the model the box actually hosts (single-box.sh
-      // writes it to .env); the historic mistral fallback is not pulled
-      // in production and would 404 upstream.
-      model:
-        process.env.DEFAULT_MODEL ??
-        process.env.LLM_MODEL ??
-        "mistral:7b-instruct",
+      model,
       messages: [{ role: "user", content: args.prompt }],
       stream: false,
       temperature: args.temperature,

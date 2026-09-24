@@ -16,6 +16,8 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createToolsRuntimeRouter } from "./routes/tools-runtime.js";
+import { resolveToolAccessScope } from "./services/tool-access.service.js";
 import { createTeamChatRouter } from "./routes/team-chat.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
@@ -24,7 +26,7 @@ import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js"
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createErpDriftRouter } from "./routes/erp-drift.js";
-import { createM365Router } from "./routes/m365.js";
+import { createM365CallbackRouter, createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
@@ -59,6 +61,11 @@ import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
+import { createExtensionsRouter } from "./routes/extensions.js";
+import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
+import { createExtensionAttacher, lazyExtensionAttachPort } from "./services/extension-attach.service.js";
+import { bindExtensionPrincipalPrisma } from "./services/extension-principal.js";
+import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 // WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
 import { createBrainRouter } from "./routes/brain.js";
 import type { BrainPassTrigger } from "./services/brain/brain-pass-runner.js";
@@ -72,6 +79,7 @@ import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cam
 import { createSecurityRouter } from "./routes/security.js";
 import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
+import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
@@ -117,8 +125,9 @@ import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
-import { detachRemoteMcp, mcpClient } from "./services/mcp-client.singleton.js";
+import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
@@ -214,6 +223,14 @@ export function createApp(
   // auth middleware so /sso/oidc/authorize + /sso/oidc/callback don't need one.
   app.use("/api", createSsoRouter(prisma));
 
+  // WARP-2704 — Microsoft 365's authorization-code callback. Public for the
+  // same reason as the SSO callback above: a Microsoft sign-in with MFA or an
+  // admin's consent can outlast the 15-minute access token. It identifies the
+  // person by the flow (state cookie + single-use server-side row), never by a
+  // session. Only GET /api/m365/callback lives here; every other /m365 route
+  // is on the authenticated router below.
+  app.use("/api", createM365CallbackRouter(prisma));
+
   // PR #377 — passwordless WebAuthn / passkey authentication. The
   // authenticate/options + authenticate/verify endpoints are how a caller
   // GETs a session, so they MUST mount BEFORE authMiddleware (same posture as
@@ -271,6 +288,12 @@ export function createApp(
   // Idempotent — a second createApp() in tests is a no-op.
   initScopeLoader(prisma);
 
+  // WARP-2900 (H3) — the `dxt_` bearer lookup in authMiddleware reads the
+  // Extension table through its own binding (auth.ts's process-wide Prisma
+  // left with the Nextcloud fallback, WARP-2994). Bound before the first
+  // request; unbound, every extension bearer is a 401.
+  bindExtensionPrincipalPrisma(prisma);
+
   // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
   // scope loader (same singleton discipline, same reason): layer-2
   // per-person access resolution (features / tools / cloud / connectors /
@@ -293,6 +316,13 @@ export function createApp(
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
+
+  // WARP-2900 (ADR-056 slice H3) — an extension's call-back principal
+  // (`_service:ext:<slug>`, from its `dxt_` bearer) reaches its own two
+  // routes and nothing else. Mounted right after authMiddleware, before any
+  // router, so a route with no requireRole of its own is not reachable by
+  // an extension either.
+  app.use(extensionPrincipalGuard);
 
   // WARP-824 — forced-password-change gate. Mounts AFTER authMiddleware (so
   // req.user is populated) and BEFORE every protected router so an
@@ -355,7 +385,22 @@ export function createApp(
   // deliberately NOT under a module gate: no module in `module-registry.ts`
   // claims an `/api/admin` prefix, and a console that disappears when a module
   // is switched off is a console you cannot use to find out why.
-  app.use("/api", createAdminPromptInspectorRouter(prisma));
+  // WARP-2900 (H4) — the inspector's runtime rows ask the SAME dispatch
+  // policy the multiplexer calls, read lazily (route suites mock the
+  // singleton; see the extensions router below).
+  app.use("/api", createAdminPromptInspectorRouter(prisma, { remoteCallPolicy: (input) => remoteCallPolicy(input) }));
+  // WARP-2900 (H4) — GET /api/llm/tools/runtime: the runtime half of the tool
+  // universe for /tools (extensions, connected servers). Names, sources and
+  // the dispatch decision only; never a wire description.
+  app.use(
+    "/api",
+    createToolsRuntimeRouter({
+      policy: (input) => remoteCallPolicy(input),
+      // §3 — a custom role never reaches a runtime tool in chat, so it is
+      // not listed one here either.
+      resolveScope: (user) => resolveToolAccessScope(prisma, user),
+    }),
+  );
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the
@@ -420,7 +465,8 @@ export function createApp(
   app.use("/api", createErpDriftRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
-  // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.
+  // OFF per person: nothing is read until someone connects through their
+  // organisation's own Entra app (WARP-2705 — there is no box-wide app).
   // Every route is scoped to the requester's OWN link — no :userId parameter,
   // because delegated authorization makes a person's mailbox connection theirs.
   app.use("/api", createM365Router(prisma));
@@ -501,6 +547,36 @@ export function createApp(
   // reached as /git/* through nginx). Owner/admin, admitting the mcp
   // principal for a run bound to the workspace ("run owns workspace").
   app.use("/api", createWorkspaceRouter(prisma));
+  // WARP-2900 (ADR-056 slice H2) — promote a workshop proposal into a
+  // box-signed extension and install / disable / enable / uninstall it.
+  // Promote is OWNER only (never the mcp principal); the rest owner/admin
+  // reads and owner writes. Dark until SANDBOX_PROCESS_SUPERVISION=1: the
+  // sandbox 404s every extension route and the promote answers 503.
+  // H3: the default lifecycle goes `live` through the multiplexer attach,
+  // hands each child the call-back URL, and `/self/call` dispatches through
+  // the same multiplexer. Every binding is read lazily (see the integrations
+  // router above for why).
+  app.use(
+    "/api",
+    createExtensionsRouter(prisma, {
+      attach: lazyExtensionAttachPort(() =>
+        createExtensionAttacher({
+          prisma,
+          mux: mcpClient,
+          sandbox: createExtensionSandboxClient(),
+          identity: createDeviceIdentityClient(),
+        }),
+      ),
+      orchestratorUrl: config.EXTENSION_CALLBACK_URL,
+      selfCallEnabled: config.EXTENSION_SELF_CALL_ENABLED,
+      mcp: {
+        get isStarted() {
+          return mcpClient.isStarted;
+        },
+        callTool: (name, args, context) => mcpClient.callTool(name, args, context),
+      },
+    }),
+  );
   app.use("/api", createBrainRouter(prisma, brainPassTrigger));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
@@ -524,6 +600,9 @@ export function createApp(
   // add requireFeatureAccess at the route.
   app.use("/api", createSecurityZonesRouter(prisma));
   app.use("/api", createSecuritySiteRouter(prisma));
+  // WARP-2980 (ADR-059 P5) — "what normal looks like", read-only (routes
+  // 29–31). Same /api/security module gate; the last Security router.
+  app.use("/api", createSecurityPatternsRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
@@ -649,7 +728,7 @@ export function createApp(
   // Single fn override at module level so createEmailRouter keeps its
   // existing (prisma, gate) signature. Tests can call wireEmailAnalysis
   // directly with a stub.
-  wireEmailAnalysis(createEmailAnalysisFn(mcpClient));
+  wireEmailAnalysis(createEmailAnalysisFn(mcpClient, () => resolveActiveModel(prisma)));
 
   // WARP-465 (D1): email backbone — accounts list, threads list +
   // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468

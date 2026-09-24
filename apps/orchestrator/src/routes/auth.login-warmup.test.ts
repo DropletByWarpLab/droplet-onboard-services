@@ -40,12 +40,15 @@ vi.mock("../config.js", () => ({
 }));
 
 // The unit under test: the login route must call this exactly once per
-// COMPLETED login, and never await it on the response path.
-const warmDefaultModel = vi.hoisted(() =>
-  vi.fn(async (): Promise<void> => undefined),
+// COMPLETED login, and never await it on the response path. WARP-3047: it
+// is the ACTIVE-model warm (active-model.service resolves which model), so
+// a box switched to B warms B at login — not env LLM_MODEL.
+const warmActiveModel = vi.hoisted(() =>
+  vi.fn(async (_prisma: unknown): Promise<void> => undefined),
 );
-vi.mock("../services/model-readiness.service.js", () => ({
-  warmDefaultModel: () => warmDefaultModel(),
+vi.mock("../services/active-model.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/active-model.service.js")>()),
+  warmActiveModel: (prisma: unknown) => warmActiveModel(prisma),
 }));
 
 // Stateful in-memory cache double — createSession / the login backoff need
@@ -225,13 +228,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   cacheStore.clear();
   verifyDummyPassword.mockResolvedValue(false);
-  warmDefaultModel.mockImplementation(async () => undefined);
+  warmActiveModel.mockImplementation(async () => undefined);
 });
 
 describe("WARP-1954 — POST /auth/login model warm-up", () => {
   it("fires exactly one warm-up after a completed login", async () => {
     verifyPassword.mockResolvedValue(true);
-    const app = buildApp(createPrismaMock([stefan]));
+    const prisma = createPrismaMock([stefan]);
+    const app = buildApp(prisma);
 
     const res = await request(app)
       .post("/api/auth/login")
@@ -239,7 +243,9 @@ describe("WARP-1954 — POST /auth/login model warm-up", () => {
     expect(res.status).toBe(200);
 
     await flushWarmTrigger();
-    expect(warmDefaultModel).toHaveBeenCalledTimes(1);
+    expect(warmActiveModel).toHaveBeenCalledTimes(1);
+    // The active-model warm resolves against THIS box's settings row.
+    expect(warmActiveModel).toHaveBeenCalledWith(prisma);
   });
 
   it("never warms on a wrong password", async () => {
@@ -252,7 +258,7 @@ describe("WARP-1954 — POST /auth/login model warm-up", () => {
     expect(res.status).toBe(401);
 
     await flushWarmTrigger();
-    expect(warmDefaultModel).not.toHaveBeenCalled();
+    expect(warmActiveModel).not.toHaveBeenCalled();
   });
 
   it("never warms on an unknown email (no pre-auth probe surface)", async () => {
@@ -265,7 +271,7 @@ describe("WARP-1954 — POST /auth/login model warm-up", () => {
     expect(res.status).toBe(401);
 
     await flushWarmTrigger();
-    expect(warmDefaultModel).not.toHaveBeenCalled();
+    expect(warmActiveModel).not.toHaveBeenCalled();
   });
 
   it("never warms when the second factor fails (password ok, TOTP wrong)", async () => {
@@ -286,12 +292,12 @@ describe("WARP-1954 — POST /auth/login model warm-up", () => {
     expect(res.body.code).toBe("TOTP_REQUIRED");
 
     await flushWarmTrigger();
-    expect(warmDefaultModel).not.toHaveBeenCalled();
+    expect(warmActiveModel).not.toHaveBeenCalled();
   });
 
   it("a rejecting warm-up never surfaces to the login response", async () => {
     verifyPassword.mockResolvedValue(true);
-    warmDefaultModel.mockImplementation(async () => {
+    warmActiveModel.mockImplementation(async () => {
       throw new Error("runtime unreachable");
     });
     const app = buildApp(createPrismaMock([stefan]));
@@ -303,6 +309,6 @@ describe("WARP-1954 — POST /auth/login model warm-up", () => {
     expect(res.body.user?.username).toBe("stefan");
 
     await flushWarmTrigger();
-    expect(warmDefaultModel).toHaveBeenCalledTimes(1);
+    expect(warmActiveModel).toHaveBeenCalledTimes(1);
   });
 });

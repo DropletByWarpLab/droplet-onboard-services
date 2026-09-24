@@ -392,14 +392,80 @@ controls existing devices but does NOT add new ones.
 
 ### Notifications (`/api/notifications`)
 
-| Method | Path | Auth | Returns / body |
-|---|---|---|---|
-| GET | `/notifications?since=…` | Bearer | `[{ id, type, ts, title, body, deepLink? }]` |
-| POST | `/notifications/:id/ack` | Bearer | `{ ok }` |
+> **Rewritten for WARP-2804 (notification acknowledgement).** The earlier
+> table (`?since=…`, a bare array, `{ ok }` from the ack) described no shipped
+> route. The routes below are what the orchestrator serves
+> (`apps/orchestrator/src/routes/notifications.ts`).
 
-Native apps fetch on launch and every 5 minutes when foregrounded.
-APNs / FCM push is the real-time delivery; this endpoint is for catch-up
-+ in-app inbox.
+A person reads and acknowledges **their own** notifications only; every
+route is keyed on the signed-in username. All four need a person's sign-in
+(Bearer JWT or the session cookie): N3 and N4 answer `403 HUMAN_ONLY` to a
+service token.
+
+| # | Method | Path | Body / query | 200 response |
+|---|---|---|---|---|
+| N1 | GET | `/notifications` | query: `limit` 1–200 (default 50), `cursor`, `state` = `unacked` \| `all` (default `all`) | `{ notifications: NotificationRow[], unread, nextCursor }` |
+| N2 | GET | `/notifications/unread-count` | — | `{ unread }` |
+| N3 | POST | `/notifications/:id/ack` | `{ via?: "inbox" \| "opened" }` (an empty body acks as `inbox`) | `{ notification: NotificationRow, changed }` |
+| N4 | POST | `/notifications/ack-all` | `{ ids: string[] }`, 1–200 ids: the notifications the app **showed** | `{ acked, unread }` |
+
+`NotificationRow`:
+
+```json
+{
+  "id": "clx…", "kind": "reminder" | "event" | "system" | "ai",
+  "title": "…", "body": "…" | null,
+  "url": "/calendar" | null, "data": { … } | null,
+  "createdAt": "ISO-8601", "deliveredAt": "ISO-8601" | null,
+  "channels": "toast,push", "pushOutcome": "sent" | "no_subscribers" | "refused_gate" | "failed" | null,
+  "error": "…" | null,
+  "ackState": "unacked" | "acked" | "untracked",
+  "ackedAt": "ISO-8601" | null,
+  "ackMethod": "inbox" | "opened" | "all" | "incident" | null
+}
+```
+
+- **Unread means `ackState = "unacked"`.** Rows written before WARP-2804 are
+  `untracked`: never counted as unread, and still ackable with N3. `unread`
+  (N1, N2, N4) counts `unacked` only.
+- **`url`** is a same-origin dashboard path (`/workshop?run=…`); map it to the
+  app's own screen. **`data`** is small, flat and PHI-free.
+- **Paging.** `nextCursor` is opaque (`<ms>.<id>`): pass it back as `cursor`
+  for the next (older) page. It is `null` on the last page.
+- **N1 is strict about its query.** An unknown key, a `limit` outside 1–200,
+  a `state` other than `unacked`/`all`, or a cursor the box did not mint is a
+  `400 VALIDATION_ERROR`, never silently ignored. Calling it with no query
+  (what the shipped iOS and Android apps do) returns the newest 50.
+- **N3 is idempotent; the first ack wins.** Acking an acked row is a 200 with
+  `changed: false` and the original `ackedAt`/`ackMethod`. Send
+  `{ "via": "opened" }` when the person opened the notification's link,
+  and nothing (or `{}`) for a plain "mark read" — the shipped iOS "Mark read"
+  POSTs an empty body, which acks as `inbox`.
+- **N3's id** must match `^[A-Za-z0-9_-]{1,64}$` (else `400`). Someone else's
+  id answers **exactly** like a missing one (`404 NOTIFICATION_NOT_FOUND`), so
+  the route never confirms that a notification exists.
+- **N4 takes ids, never a time.** Send the ids the app actually displayed. A
+  notification that is not the person's, or does not exist, is simply not
+  counted (no error). `untracked` rows are left as they are. Both bodies are
+  strict: an unknown key is a `400`.
+- **Errors on N1–N4 are nested**, unlike the flat envelope described under
+  [Error shape](#error-shape): `{ "error": { "code": "…", "message": "…" } }`
+  with `code` one of `VALIDATION_ERROR` (400), `HUMAN_ONLY` (403),
+  `NOTIFICATION_NOT_FOUND` (404). Key on `code`; `message` is for logs.
+
+**`X-Droplet-Client` (send it on N3 and N4).** The box records what the
+acking device *said* it was, labelled as reported (it proves nothing). Send
+`X-Droplet-Client: <product>/<version>`, optionally with a comment:
+`droplet-ios/1.4.0 (iOS 18.2)`. Grammar:
+`^[a-z0-9-]{1,32}/[0-9A-Za-z.+-]{1,24}( \([^()\r\n]{1,48}\))?$`. A header that
+does not match is ignored and the box falls back to a coarse User-Agent label
+("Safari on iPhone"). The box also records which sign-in acked (the token's
+session id) and whether its session store confirmed that sign-in live; none
+of the three is ever returned.
+
+Native apps fetch on launch and every 5 minutes when foregrounded. APNs / FCM
+push is the real-time delivery once it exists (see "Push status" above); this
+endpoint is for catch-up and the in-app inbox.
 
 ### VPN / remote access (`/api/vpn/*`)
 

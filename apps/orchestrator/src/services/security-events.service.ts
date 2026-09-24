@@ -119,8 +119,22 @@ export interface StatusTracker {
    * message. Resolves to null when the message is not a status topic.
    */
   observe(topic: string, payload: string, now?: Date): Promise<StatusObservation | null>;
-  /** Latest reading per camera (null key = Frigate itself), for the health header. */
-  snapshot(): ReadonlyMap<string | null, { health: SourceHealth; at: Date }>;
+  /**
+   * Latest reading per camera (null key = Frigate itself), for the health
+   * header and the coverage recorder (WARP-2980). `at` is the last reading;
+   * `since` is when the health last CHANGED — a repeated reading (or a
+   * retained replay on reconnect) moves `at`, never `since`.
+   */
+  snapshot(): ReadonlyMap<string | null, TrackedHealth>;
+}
+
+/** One camera's (or Frigate's own) latest reading, as `StatusTracker.snapshot()` holds it. */
+export interface TrackedHealth {
+  health: SourceHealth;
+  /** The last reading. */
+  at: Date;
+  /** WARP-2980 — when `health` last changed. Coverage breaks a span on a change since its last confirmation. */
+  since: Date;
 }
 
 /**
@@ -148,7 +162,7 @@ export interface StatusTracker {
 let statusTrackerSeq = 0;
 
 export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">): StatusTracker {
-  const last = new Map<string | null, { health: SourceHealth; at: Date }>();
+  const last = new Map<string | null, TrackedHealth>();
   const told = new Map<string | null, SourceHealth>();
   const persisted = new Map<string | null, SourceHealth | null>();
   const pending = new Map<string | null, SecurityEventDraft>();
@@ -176,7 +190,8 @@ export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">)
 
   async function apply(reading: StatusReading, now: Date): Promise<StatusObservation> {
     const key = reading.camera;
-    last.set(key, { health: reading.health, at: now });
+    const prev = last.get(key);
+    last.set(key, { health: reading.health, at: now, since: prev && prev.health === reading.health ? prev.since : now });
 
     if (!persisted.has(key)) {
       try {
@@ -446,10 +461,12 @@ export type SourceState = "ok" | "quiet" | "down" | "not_configured";
 
 /**
  * The header's rows, in the pinned display order
- * `camera_ingest, camera_system, locks, threat_mirror, site_mode, retention`.
+ * `camera_ingest, camera_system, locks, threat_mirror, site_mode, patterns, retention`.
  * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `locks`
  * (P2b-2) is the Matter lock adapter's, shown only to viewers who may read
- * locks (DS-019).
+ * locks (DS-019); `patterns` (WARP-2980 P5) is the baseline job's. P3's
+ * `incidents, alerts` and P4's `links, summaries` go between site_mode and
+ * patterns when they land — whichever merges second moves this pin.
  */
 export type SecurityHealthId =
   | "camera_ingest"
@@ -457,6 +474,7 @@ export type SecurityHealthId =
   | "locks"
   | "threat_mirror"
   | "site_mode"
+  | "patterns"
   | "retention";
 
 export interface SecurityHealthRow {
@@ -490,6 +508,12 @@ export function buildSecurityHealth(input: {
    * viewers who may read locks.
    */
   locks?: SecurityHealthRow;
+  /**
+   * WARP-2980 P5 — the baseline job's row (`patternsHealthRow` in
+   * security-baselines.service.ts), placed right before `retention`.
+   * Optional: omitted, the header is exactly P2b's.
+   */
+  patterns?: SecurityHealthRow;
   now: Date;
 }): SecurityHealthRow[] {
   const { ingest, now } = input;
@@ -553,6 +577,7 @@ export function buildSecurityHealth(input: {
   });
 
   if (input.siteMode) rows.push(input.siteMode);
+  if (input.patterns) rows.push(input.patterns);
 
   const retentionRan = input.state?.retentionRanAt ?? null;
   rows.push({

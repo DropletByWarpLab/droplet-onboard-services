@@ -9,7 +9,7 @@ import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
-import { sendNotification } from "./services/notifications.service.js";
+import { notifyOwnersAndAdmins } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
@@ -47,6 +47,11 @@ import {
   stopMcp,
 } from "./services/mcp-client.singleton.js";
 import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
+import {
+  createExtensionLifecycle,
+  EXTENSION_RECONCILE_LOCK_KEY,
+} from "./services/extension-lifecycle.service.js";
+import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
@@ -148,6 +153,7 @@ import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-
 import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
+import { createExtensionAttacher } from "./services/extension-attach.service.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
@@ -170,12 +176,13 @@ import {
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
+  grantCoversNoWorkload,
   runSyncTick,
   type M365SyncDeps,
 } from "./services/m365/m365-sync.service.js";
 import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
-import { createEntraClient, isM365Configured } from "./services/m365/entra-client.js";
+import { createEntraClient } from "./services/m365/entra-client.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -191,6 +198,7 @@ import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
+import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -202,6 +210,7 @@ import {
   migrateBrainMemoryDirectoryLayout,
 } from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { initAnalytics, analytics } from "./services/analytics/index.js";
 import { forwardHealthSnapshot } from "./services/analytics/service-health.js";
 import { createLogger } from "./lib/logger.js";
@@ -487,8 +496,9 @@ async function main() {
   // dashboard ~20 min after first boot without any manual `ollama pull`.
   // Non-blocking — the orchestrator is fully serving requests while the
   // model downloads in the background. See model-readiness.service.ts.
+  // WARP-3047: the boot warm is of the ACTIVE model, not LLM_MODEL.
   try {
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(() => resolveActiveModel(prisma));
   } catch (err) {
     logger.warn(
       "Model readiness check failed: %s (orchestrator continues serving requests)",
@@ -539,6 +549,40 @@ async function main() {
   // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
   // without dialling anything at all.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
+
+  // WARP-2900 (ADR-056 slice H2) — the extension reconciler, both ways. A
+  // sandbox restart forgets every extension process and a dead one is never
+  // restarted in place; each tick reinstalls any `installed`/`live`
+  // extension the sandbox no longer runs — re-verifying its signed statement
+  // and rotating its bearer first (install()), a bounded number of times for
+  // a process that keeps dying — and stops any process the sandbox runs for
+  // a row that must not run (review #2323). Same clock, its own lock key
+  // (the sandbox is one shared resource), never a `while True`. No Extension
+  // rows → the tick dials nothing, so a box with
+  // SANDBOX_PROCESS_SUPERVISION=0 (the shipped default) never calls out.
+  // H3: the same tick re-attaches every running extension this process has
+  // not attached (after an orchestrator restart the sandbox's processes
+  // outlive the in-memory attachment), and each restarted child gets the
+  // call-back URL.
+  const extensionSandbox = createExtensionSandboxClient();
+  const extensionIdentity = createDeviceIdentityClient();
+  const extensionLifecycle = createExtensionLifecycle({
+    prisma,
+    sandbox: extensionSandbox,
+    identity: extensionIdentity,
+    attach: createExtensionAttacher({ prisma, mux: mcpClient, sandbox: extensionSandbox, identity: extensionIdentity }),
+    orchestratorUrl: config.EXTENSION_CALLBACK_URL,
+  });
+  void extensionLifecycle.refreshInstalledIds().catch((err) => {
+    logger.warn({ err }, "extension installed-id refresh failed at boot");
+  });
+  cronRuntime.scheduleInterval(
+    config.EXTENSION_RECONCILE_INTERVAL_MS,
+    async () => {
+      await extensionLifecycle.reconcile();
+    },
+    { lockKey: EXTENSION_RECONCILE_LOCK_KEY },
+  );
 
   // Router-dependent schedulers only run when routing supervision is active.
   // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
@@ -722,10 +766,10 @@ async function main() {
     await seedBrainPasses(prisma);
 
     // Same resolution the agent-run routes use. Read at CALL time, not once at
-    // boot: `DEFAULT_MODEL` is what the box is configured with now, and a
-    // process that started before the operator set one should pick it up.
-    const resolveBrainModel = () =>
-      (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+    // boot: WARP-3047 — the pass follows the box's ACTIVE model, so a switch
+    // on the Models page moves the hourly pass too instead of it reloading
+    // the env model next to the active one.
+    const resolveBrainModel = async () => (await resolveActiveModel(prisma)) ?? "";
 
     // WARP-2850 — the pass BODIES, named once. The interval tick, the boot run
     // and the operator's "check now" are three callers of the same function
@@ -765,7 +809,7 @@ async function main() {
       // box has already recorded and the route has already reported started.
       [CORPUS_PASS_KEY]: async () => {
         const outcome = await runCorpusPass(
-          { prisma, chat: aiGateway.chat, model: resolveBrainModel() },
+          { prisma, chat: aiGateway.chat, model: await resolveBrainModel() },
           { limit: config.brain.corpusUnitsPerRun },
         );
         if (outcome.errors.length > 0) {
@@ -780,8 +824,8 @@ async function main() {
       // Corpus only. The detector pass is bounded indexed SQL and re-running
       // it costs the box nothing anyone would notice.
       manualMinIntervalMs: { [CORPUS_PASS_KEY]: config.brain.manualMinIntervalMs },
-      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and `DEFAULT_MODEL` are
-      // independent env vars with no cross-validation, so "brain on, no model
+      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and the active model are
+      // independent with no cross-validation, so "brain on, no model
       // configured" is a reachable box. On one of those, a check living inside
       // the runner would run only AFTER `claimPass` had stamped
       // `runState: "running"` and `lastRunAt` — the operator gets a 202 and
@@ -810,7 +854,7 @@ async function main() {
           (await isBrainEnabled(prisma)) ? null : "disabled",
         [CORPUS_PASS_KEY]: async () => {
           if (!(await isBrainEnabled(prisma))) return "disabled";
-          return resolveBrainModel() ? null : "no_model";
+          return (await resolveBrainModel()) ? null : "no_model";
         },
       },
     });
@@ -1093,6 +1137,13 @@ async function main() {
   // reconciles SecurityModeState with the opening hours (level-triggered, on
   // its own advisory lock). Unconditional, like the jobs above.
   registerSecurityModeJobs(cronRuntime, prisma);
+  // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
+  // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
+  // later), keeps the learning state, and rebuilds what normal looks like
+  // nightly in the site's zone. One tick on its own advisory lock; database
+  // watermarks. Unconditional, like the jobs above (the DS-015 rule): the
+  // learning clock must not start from zero when the owner turns Security on.
+  registerSecurityBaselineJobs(cronRuntime, prisma);
 
   cronRuntime.scheduleCron(
     "0 3 * * *",
@@ -1377,14 +1428,9 @@ async function main() {
         runner: otaApplyRunner,
         releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        // WARP-2911 — contained per recipient (notifications.service.ts).
         notifyOwners: async (title: string, body: string) => {
-          const owners = await prisma.user.findMany({
-            where: { role: { in: ["owner", "admin"] } },
-            select: { username: true },
-          });
-          for (const { username } of owners) {
-            await sendNotification(prisma, { userId: username, kind: "system", title, body });
-          }
+          await notifyOwnersAndAdmins(prisma, title, body);
         },
       }
     : null;
@@ -1910,9 +1956,10 @@ async function main() {
   // resolves the grant — and none of them had anything calling them in
   // sequence, so no mailbox was ever read.
   //
-  // Gated on `isM365Configured()`: with no client id there is no app to
-  // authenticate against, and a tick that runs anyway would mark every cursor
-  // failed on a box that simply does not offer the feature.
+  // Not gated on configuration: since WARP-2705 each connection carries its
+  // own app registration, so there is no box-wide switch to read. A box where
+  // nobody has connected pays one indexed `findMany` per tick and dials
+  // nothing — the tick below walks CONNECTED rows only.
   //
   // Discovery runs BEFORE the tick, every time, and that ordering is
   // load-bearing rather than tidy: mail delta is per-folder, so a folder
@@ -1922,7 +1969,7 @@ async function main() {
   //
   // `lockKey` for the same reason as the ERP legs: without it a multi-instance
   // box double-polls Microsoft and spends the tenant's throttling budget twice.
-  if (isM365Configured()) {
+  {
     const m365Deps: M365SyncDeps = {
       prisma: prisma as never,
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
@@ -1953,6 +2000,15 @@ async function main() {
             logger.info(
               { skipped: found.skipped, registered: found.registered },
               "m365 discovery skipped workloads",
+            );
+          }
+          // `notGranted` alone is not logged (To Do's is expected), but a grant
+          // that covers NOTHING means this person syncs nothing, and silence
+          // would read as an empty mailbox (#2347 review).
+          if (grantCoversNoWorkload(found)) {
+            logger.warn(
+              { userId, notGranted: found.notGranted },
+              "m365 grant covers no workload; nothing syncs for this connection",
             );
           }
         }

@@ -23,11 +23,22 @@ The API
     POST /processes                    slice H's seam; gated, see supervisor.py
     GET  /processes/{id}
     DELETE /processes/{id}
+    GET  /workspaces/{id}/proposals/{version}/manifest
+                                       WARP-2900 H2, gated like /processes:
+    GET  /extensions                   extensions.py (list, install, relay,
+    GET  /extensions/budget            stop, uninstall) and the proposal a
+    GET  /extensions/{slug}            promote reads from the bare repository
+    POST /extensions/{slug}/install
+    POST /extensions/{slug}/rpc
+    DELETE /extensions/{slug}/process
+    DELETE /extensions/{slug}
     POST /workspaces                   slice G (WARP-2896): the git store, see
     GET  /workspaces/templates         gitstore.py + workspace.py
     GET|DELETE /workspaces/{id}
     POST /workspaces/{id}/{read,search,diff,log,write,commit,run,propose}
     GET  /workspaces/{id}/output
+    GET  /workspaces/{id}/bundle            WARP-2899: the export, a git bundle
+    GET  /workspaces/{id}/connector-draft   WARP-2899: a draft's facts at ?ref=
     ANY  /git/{repo}.git/...           `git http-backend`, proxied by the orchestrator
 
 Every `/transform` is ONE child process (runner.py), killed on completion or
@@ -44,6 +55,7 @@ dev escape.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import os
@@ -57,13 +69,51 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+import connector_draft
+import extensions
 import gitstore
 import supervisor
 import workspace
 
 SANDBOX_SERVICE_TOKEN = os.getenv("SANDBOX_SERVICE_TOKEN", "").strip()
+
+# prctl(2) option: PR_SET_DUMPABLE.
+PR_SET_DUMPABLE = 4
+
+
+def _make_undumpable(libc: Any = None) -> bool:
+    """Mark this server process non-dumpable (WARP-2900).
+
+    Installed extensions and workspace runs execute as this process's uid. A
+    dumpable server lets any of them read SANDBOX_SERVICE_TOKEN from
+    /proc/<pid>/environ (or /proc/<pid>/mem) and drive the whole sandbox API.
+    Non-dumpable, those entries are root-owned and ptrace-protected for the
+    same uid. Children are unaffected: execve resets the flag, so this does
+    not stop one extension reading another's environment (see
+    docs/security/extension-trust.md).
+    """
+    if libc is None:
+        if not sys.platform.startswith("linux"):
+            return False
+        import ctypes
+
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+        except OSError:
+            return False
+    try:
+        rc = libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except (AttributeError, OSError):
+        rc = -1
+    if rc != 0:
+        print("[sandbox] WARNING: could not mark the server non-dumpable; a same-uid child can read its bearer", flush=True)
+        return False
+    return True
+
+
+SERVER_UNDUMPABLE = _make_undumpable()
 
 AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
@@ -129,6 +179,15 @@ async def _lifespan(_app: FastAPI):
         print(f"[sandbox] git store at {gitstore.REPOS_DIR} (templates {'seeded' if seeded else 'present'})", flush=True)
     except gitstore.StoreError as exc:
         print(f"[sandbox] git store: templates not seeded: {exc}", flush=True)
+    # WARP-2899: a template the image gained since this box seeded is added;
+    # an existing one is never touched. Best-effort: nothing it raises may
+    # cost a box that already worked its sandbox.
+    try:
+        added = gitstore.sync_templates()
+        if added:
+            print(f"[sandbox] git store: templates added from the image: {', '.join(added)}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — logged; the service must still start
+        print(f"[sandbox] git store: templates not synced: {exc}", flush=True)
     yield
 
 
@@ -304,6 +363,132 @@ async def stop_process(proc_id: str):
     return status
 
 
+# ── Slice H2 (WARP-2900): extensions ───────────────────────────────────────
+#
+# Gated exactly like /processes: off, every route here is 404. The
+# orchestrator is the only caller; it has verified the signed statement and
+# resolved the owner before it asks for an install. Nothing here takes an
+# argv or an environment from the request: the argv is the runtime's host
+# shim, and the environment is CHILD_ENV plus keys extensions.py sets.
+
+
+class InstallExtensionRequest(BaseModel):
+    # Any other key is refused (422): the request cannot smuggle an env var,
+    # an argv or a path in under a name this model does not know.
+    model_config = ConfigDict(extra="forbid")
+
+    workspaceId: str = Field(pattern=gitstore.WORKSPACE_ID.pattern)
+    version: str = Field(pattern=extensions.SEMVER.pattern, max_length=64)
+    commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    tree: str = Field(pattern=r"^[0-9a-f]{40}$")
+    runtime: str = Field(pattern=r"^(node20|python312)$")
+    entrypoint: str = Field(min_length=1, max_length=256)
+    memoryMb: int = Field(ge=extensions.MEMORY_MB_MIN, le=extensions.MEMORY_MB_MAX)
+    token: str = Field(pattern=extensions.EXT_TOKEN.pattern)
+    orchestratorUrl: str | None = Field(default=None, pattern=r"^https?://[A-Za-z0-9.-]+(:\d{1,5})?$", max_length=256)
+
+
+def _ext(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except gitstore.StoreError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except supervisor.SupervisorError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="git timed out") from exc
+
+
+async def _ext_thread(fn, *args, **kwargs):
+    import functools
+
+    import anyio
+
+    return await anyio.to_thread.run_sync(functools.partial(_ext, fn, *args, **kwargs))
+
+
+@app.get("/workspaces/{workspace_id}/proposals/{version}/manifest", dependencies=[Depends(_processes_enabled)])
+async def proposal_manifest(workspace_id: str, version: str):
+    if not extensions.SEMVER.match(version):
+        raise HTTPException(status_code=400, detail="version must be semver")
+    tag = f"proposal/{version}"
+    found = await _ext_thread(gitstore.read_at_tag, workspace_id, tag)
+    manifest = found["manifest"]
+    return {
+        "workspaceId": workspace_id,
+        "tag": tag,
+        "commit": found["commit"],
+        "tree": found["tree"],
+        # Base64 of the exact committed bytes: what is digested and signed.
+        "manifest": base64.b64encode(manifest).decode("ascii") if manifest is not None else None,
+    }
+
+
+@app.get("/extensions", dependencies=[Depends(_processes_enabled)])
+async def extensions_listing():
+    # The reconciler's other direction (review #2323): what this sandbox
+    # holds and whether each process runs, so the orchestrator can stop one
+    # whose row says it must not run.
+    return {"extensions": extensions.listing()}
+
+
+@app.get("/extensions/budget", dependencies=[Depends(_processes_enabled)])
+async def extensions_budget():
+    return extensions.budget()
+
+
+@app.get("/extensions/{slug}", dependencies=[Depends(_processes_enabled)])
+async def extension_status(slug: str):
+    return await _ext_thread(extensions.status, slug)
+
+
+@app.post("/extensions/{slug}/install", dependencies=[Depends(_processes_enabled)])
+async def install_extension(slug: str, req: InstallExtensionRequest):
+    return await _ext_thread(
+        extensions.install,
+        slug,
+        workspace_id=req.workspaceId,
+        version=req.version,
+        commit=req.commit,
+        tree=req.tree,
+        runtime=req.runtime,
+        entrypoint=req.entrypoint,
+        memory_mb=req.memoryMb,
+        token=req.token,
+        base_env=CHILD_ENV,
+        orchestrator_url=req.orchestratorUrl,
+    )
+
+
+MAX_RELAY_BODY_BYTES = 1024 * 1024
+
+
+@app.post("/extensions/{slug}/rpc", dependencies=[Depends(_processes_enabled)])
+async def relay_extension(slug: str, request: Request, timeoutMs: int | None = None):
+    body = await request.body()
+    if not body or len(body) > MAX_RELAY_BODY_BYTES:
+        raise HTTPException(status_code=413 if body else 400, detail="a JSON-RPC body of 1 byte to 1 MiB")
+    status_code, payload = await _ext_thread(extensions.relay, slug, body, timeoutMs)
+    return Response(
+        content=payload,
+        status_code=status_code,
+        media_type="application/json" if payload else None,
+    )
+
+
+@app.delete("/extensions/{slug}/process", dependencies=[Depends(_processes_enabled)])
+async def stop_extension(slug: str):
+    snap = await _ext_thread(extensions.stop, slug)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"extension {slug} has no process")
+    return snap
+
+
+@app.delete("/extensions/{slug}", dependencies=[Depends(_processes_enabled)])
+async def uninstall_extension(slug: str):
+    return await _ext_thread(extensions.uninstall, slug)
+
+
 # ── Slice G (WARP-2896): workspaces + the git store ────────────────────────
 #
 # Every route here is an internal call from the orchestrator, which has
@@ -446,6 +631,23 @@ async def workspace_output(workspace_id: str):
 @app.post("/workspaces/{workspace_id}/propose")
 async def workspace_propose(workspace_id: str, req: ProposeRequest):
     return await _in_thread(workspace.propose, workspace_id, req.name, req.version, req.summary, req.author.pair())
+
+
+@app.get("/workspaces/{workspace_id}/bundle")
+async def workspace_bundle(workspace_id: str):
+    content, head = await _in_thread(gitstore.bundle, workspace_id)
+    return Response(content=content, media_type="application/octet-stream", headers={"X-Bundle-Head": head})
+
+
+def _connector_draft_at(workspace_id: str, ref: str) -> dict[str, Any] | None:
+    if not gitstore.ref_exists(workspace_id, ref):
+        raise gitstore.StoreError(404, f"no {ref} in workspace {workspace_id}")
+    return connector_draft.describe_tree(lambda path: gitstore.show_at(workspace_id, ref, path))
+
+
+@app.get("/workspaces/{workspace_id}/connector-draft")
+async def workspace_connector_draft(workspace_id: str, ref: str = gitstore.WORK_BRANCH):
+    return {"draft": await _in_thread(_connector_draft_at, workspace_id, ref)}
 
 
 # The smart-HTTP transport. The orchestrator forwards /git/<repo>.git/* here

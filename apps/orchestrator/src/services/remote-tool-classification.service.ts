@@ -19,7 +19,20 @@
  * A person, through {@link classifyRemoteTool} — the owner route's service —
  * which stamps `reviewedBy` / `reviewedAt`. Re-discovery on a later attach
  * touches `lastSeenAt` and the recorded wire description and NOTHING else, so
- * a demotion survives every reconnect. An unconfirmed write
+ * a demotion survives every reconnect.
+ *
+ * WARP-2900 — with ONE exception, for a caller that knows the tool's input
+ * schema (a promoted extension; the Atlassian attach sends none). What a
+ * person reviewed is the tool's description AND its arguments, so the row
+ * keeps {@link remoteToolReviewHash} of the two (in the `inputSchemaHash`
+ * column). A tool whose description or schema CHANGED is a different tool
+ * under an old name: a person reviewed what it used to say and take, not
+ * what it says and takes now (review #2325: a description change reset
+ * nothing). So it goes back to {@link IMPORT_DEFAULT_CLASSIFICATION} with
+ * the review cleared, and a review sent with the hash it was shown is a
+ * STALE_REVIEW. The same name, description and schema keep their review
+ * across a version bump. An operator's BLOCK is never lifted by a reset:
+ * `denied` stays, with the reviewer who set it. An unconfirmed write
  * (`requiresWrite: true, requiresConfirmation: false`) is not expressible
  * through any writer: the service refuses it.
  *
@@ -46,6 +59,7 @@
  * refresh. A stale cache errs closed: a row that does not exist in the cache
  * is "not classified", never "allowed".
  */
+import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { createLogger } from "../lib/logger.js";
 import {
@@ -83,6 +97,12 @@ export interface RemoteToolClassificationRow {
   reviewedBy: string | null;
   reviewedAt: Date | null;
   wireDescription: string | null;
+  /**
+   * WARP-2900 — {@link remoteToolReviewHash} of the description and the
+   * input-schema hash last discovered: what a review covers. Null when the
+   * caller sent no schema hash.
+   */
+  inputSchemaHash?: string | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
 }
@@ -90,8 +110,30 @@ export interface RemoteToolClassificationRow {
 export interface DiscoveredRemoteTool {
   /** The WIRE name — what the server calls it, before namespacing. */
   wireName: string;
-  /** Recorded for the operator; never read as truth. */
+  /**
+   * Recorded for the operator; never read as a privilege claim. With an
+   * `inputSchemaHash` it is also part of what a review covers (the header).
+   */
   description?: string;
+  /**
+   * WARP-2900 — sha256 of the tool's canonical inputSchema. When present,
+   * the row keeps {@link remoteToolReviewHash} of it and the description,
+   * and a row whose stored hash differs is reset to the import default (see
+   * the header). Absent → the row's classification is never touched.
+   */
+  inputSchemaHash?: string;
+}
+
+/**
+ * sha256 hex over what a person reviews of a tool: its description (absent
+ * is not the empty string) and its input-schema hash. Stored in the row's
+ * `inputSchemaHash` column, and what a review sends back as the hash it was
+ * shown.
+ */
+export function remoteToolReviewHash(description: string | undefined, inputSchemaHash: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ description: description ?? null, inputSchemaHash }), "utf8")
+    .digest("hex");
 }
 
 /** The one Prisma surface this module needs; typed narrowly so tests can hand
@@ -101,24 +143,31 @@ export type ClassificationPrisma = Pick<PrismaClient, "remoteToolClassification"
 /**
  * THE import path. Upserts one row per discovered tool: a row that does not
  * exist is created as {@link IMPORT_DEFAULT_CLASSIFICATION}; a row that does
- * gets `lastSeenAt` and the wire description refreshed and nothing else.
+ * gets `lastSeenAt` and the wire description refreshed and nothing else —
+ * unless the caller sent an input-schema hash that differs from the stored
+ * one, which resets the classification (WARP-2900, see the header).
  *
- * Returns the names it created, so the attach path can log "N new tools,
- * all confirming writes" — an operator surface's honest first line.
+ * Returns the names it created and the names it reset, so the attach path
+ * can log "N new tools, all confirming writes" — an operator surface's
+ * honest first line.
  */
 export async function recordDiscoveredRemoteTools(
   prisma: ClassificationPrisma,
   serverId: string,
   tools: readonly DiscoveredRemoteTool[],
   now: Date = new Date(),
-): Promise<{ created: string[]; seen: number }> {
+): Promise<{ created: string[]; seen: number; reset: string[] }> {
   const created: string[] = [];
+  const reset: string[] = [];
   for (const tool of tools) {
     const wireDescription = tool.description?.slice(0, 2000) ?? null;
-    const before = await prisma.remoteToolClassification.findUnique({
+    const before = (await prisma.remoteToolClassification.findUnique({
       where: { serverId_toolName: { serverId, toolName: tool.wireName } },
-      select: { id: true },
-    });
+      select: { id: true, denied: true, inputSchemaHash: true },
+    })) as { id: string; denied: boolean; inputSchemaHash: string | null } | null;
+    // The description and the arguments together: a person reviewed both.
+    const hash = tool.inputSchemaHash === undefined ? undefined : remoteToolReviewHash(tool.description, tool.inputSchemaHash);
+    const schemaChanged = before !== null && hash !== undefined && before.inputSchemaHash !== hash;
     await prisma.remoteToolClassification.upsert({
       where: { serverId_toolName: { serverId, toolName: tool.wireName } },
       create: {
@@ -126,20 +175,38 @@ export async function recordDiscoveredRemoteTools(
         toolName: tool.wireName,
         ...IMPORT_DEFAULT_CLASSIFICATION,
         wireDescription,
+        ...(hash !== undefined ? { inputSchemaHash: hash } : {}),
         firstSeenAt: now,
         lastSeenAt: now,
       },
-      // Only the "seen" facts. Never the classification, never the review —
-      // a reconnect must not undo a person's decision.
-      update: { lastSeenAt: now, wireDescription },
+      // Only the "seen" facts — a reconnect must not undo a person's
+      // decision — unless the arguments the person reviewed are gone.
+      update: schemaChanged
+        ? {
+            lastSeenAt: now,
+            wireDescription,
+            inputSchemaHash: hash,
+            // A block is final: the reset re-opens a review, it never
+            // unblocks a tool (nor forgets who blocked it).
+            ...(before.denied
+              ? {}
+              : {
+                  requiresWrite: IMPORT_DEFAULT_CLASSIFICATION.requiresWrite,
+                  requiresConfirmation: IMPORT_DEFAULT_CLASSIFICATION.requiresConfirmation,
+                  reviewedBy: null,
+                  reviewedAt: null,
+                }),
+          }
+        : { lastSeenAt: now, wireDescription },
     });
     if (!before) created.push(tool.wireName);
+    else if (schemaChanged) reset.push(tool.wireName);
   }
   logger.info(
-    { serverId, seen: tools.length, created: created.length },
+    { serverId, seen: tools.length, created: created.length, reset: reset.length },
     "remote_tools_recorded_as_confirming_writes",
   );
-  return { created, seen: tools.length };
+  return { created, seen: tools.length, reset };
 }
 
 export interface ClassifyRemoteToolInput {
@@ -150,11 +217,19 @@ export interface ClassifyRemoteToolInput {
   denied: boolean;
   /** The person deciding. Required — an anonymous demotion is not a review. */
   reviewedBy: string;
+  /**
+   * WARP-2900 — the input-schema hash of the tool the person was SHOWN. When
+   * sent, the review lands only while the row still has that hash: a
+   * re-discovery that changed the schema (and so reset the review) between
+   * the person reading the tool and deciding is a STALE_REVIEW, never a
+   * review of arguments they did not see. Omitted: today's behaviour.
+   */
+  expectedInputSchemaHash?: string;
 }
 
 export type ClassifyRemoteToolResult =
   | { ok: true; row: RemoteToolClassificationRow }
-  | { ok: false; code: "NOT_FOUND" | "NO_REVIEWER" | "UNCONFIRMED_WRITE"; message: string };
+  | { ok: false; code: "NOT_FOUND" | "NO_REVIEWER" | "UNCONFIRMED_WRITE" | "STALE_REVIEW"; message: string };
 
 /**
  * A person's classification of one tool. Refuses:
@@ -191,16 +266,39 @@ export async function classifyRemoteTool(
       message: `${input.serverId} has never advertised a tool named ${input.toolName}.`,
     };
   }
-  const row = (await prisma.remoteToolClassification.update({
-    where: { serverId_toolName: { serverId: input.serverId, toolName: input.toolName } },
-    data: {
-      requiresWrite: input.requiresWrite,
-      requiresConfirmation: input.requiresConfirmation,
-      denied: input.denied,
-      reviewedBy,
-      reviewedAt: now,
-    },
-  })) as RemoteToolClassificationRow;
+  const data = {
+    requiresWrite: input.requiresWrite,
+    requiresConfirmation: input.requiresConfirmation,
+    denied: input.denied,
+    reviewedBy,
+    reviewedAt: now,
+  };
+  let row: RemoteToolClassificationRow;
+  if (input.expectedInputSchemaHash !== undefined) {
+    // The hash in the WHERE: one statement, so a reset that lands between
+    // the read above and this write still wins.
+    const u = await prisma.remoteToolClassification.updateMany({
+      where: { serverId: input.serverId, toolName: input.toolName, inputSchemaHash: input.expectedInputSchemaHash },
+      data,
+    });
+    if (u.count === 0) {
+      return {
+        ok: false,
+        code: "STALE_REVIEW",
+        message:
+          `${input.serverId}'s ${input.toolName} has changed its arguments since it was shown to you; ` +
+          "its review was reset. Reload it and review the new arguments.",
+      };
+    }
+    row = (await prisma.remoteToolClassification.findUnique({
+      where: { serverId_toolName: { serverId: input.serverId, toolName: input.toolName } },
+    })) as RemoteToolClassificationRow;
+  } else {
+    row = (await prisma.remoteToolClassification.update({
+      where: { serverId_toolName: { serverId: input.serverId, toolName: input.toolName } },
+      data,
+    })) as RemoteToolClassificationRow;
+  }
   logger.info(
     {
       serverId: row.serverId,

@@ -9,6 +9,11 @@ import type { SaasConnectionState } from "@droplet/shared-types";
 import type {
   ToolInspectResponse,
   PromptInspectResponse,
+  RuntimeToolsResponse,
+  ExtensionListItem,
+  ExtensionProposal,
+  ExtensionPromotePhase1,
+  ExtensionPromoteResult,
   CameraInfo,
   CameraGroupInfo,
   CameraPinInfo,
@@ -125,6 +130,7 @@ import type {
   PutDepartmentProfilePayload,
   AccessRole,
   AccessRolePayload,
+  AccessToolDomainsResponse,
   AccessSyncState,
   AccessStartingPoint,
   AccessExceptionInput,
@@ -144,6 +150,8 @@ import type {
   SecurityHoursExceptionBody,
   SecurityHoursView,
   SecurityHoursWriteResult,
+  SecurityPatternCells,
+  SecurityPatternsOverview,
   SecurityModeAction,
   SecurityModeActionResult,
   SecurityModeView,
@@ -154,6 +162,9 @@ import type {
   SecurityZonePatchBody,
   SecurityZonesResponse,
   SecurityZoneWriteResult,
+  NotificationAckAllResult,
+  NotificationAckResult,
+  NotificationsPage,
 } from "./types";
 import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
@@ -8032,6 +8043,20 @@ export async function listRoleTemplates(): Promise<RoleTemplatesResponse> {
   return res.json();
 }
 
+/**
+ * WARP-2897 — the grantable tool-domain vocabulary, both layers (owner/admin).
+ * The role builder appends one Extensions row per `runtime[]` entry
+ * (toolDomainGroupsWith); a box with nothing attached answers `runtime: []`.
+ */
+export async function listAccessToolDomains(): Promise<AccessToolDomainsResponse> {
+  const res = await authFetch(`${BASE}/api/access/tool-domains`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load tool domains: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function createAccessRole(
   payload: AccessRolePayload,
 ): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
@@ -8940,6 +8965,95 @@ export async function deleteRoutineSchedule(
   }
 }
 
+// ─── WARP-2900 (ADR-056 slice H4) — runtime tools + extensions ──────────────
+
+/**
+ * `GET /api/llm/tools/runtime` — tools that exist only at runtime (promoted
+ * extensions, connected servers): name, source and what dispatch does with a
+ * call. No descriptions, by design.
+ */
+export async function fetchRuntimeTools(): Promise<RuntimeToolsResponse> {
+  const res = await authFetch(`${BASE}/api/llm/tools/runtime`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load runtime tools: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * A refused extension request. `code` is the orchestrator's machine code
+ * (`TOKEN_OPERATION_MISMATCH`, `extensions_disabled`, …) so the page can say
+ * something specific; `message` is the server's sentence when it sent one.
+ */
+export class ExtensionRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+    /** The whole refusal body — a blocked phase 1 carries `readback` + `preflight`. */
+    readonly body: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = "ExtensionRequestError";
+  }
+}
+
+async function extensionRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await authFetch(`${BASE}${path}`, init);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    const code = typeof body.error === "string" ? body.error : null;
+    const message =
+      typeof body.message === "string" ? body.message : code ?? `Request failed: ${res.status}`;
+    throw new ExtensionRequestError(message, res.status, code, body);
+  }
+  return res.json() as Promise<T>;
+}
+
+const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json" } } as const;
+
+export function fetchExtensions(): Promise<{ extensions: ExtensionListItem[] }> {
+  return extensionRequest("/api/extensions");
+}
+
+export function fetchExtensionProposals(): Promise<{ proposals: ExtensionProposal[] }> {
+  return extensionRequest("/api/extensions/proposals");
+}
+
+/** Phase 1: the readback + preflight the owner confirms. Signs nothing. */
+export function prepareExtensionPromotion(workspaceId: string): Promise<ExtensionPromotePhase1> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
+    ...JSON_POST,
+    body: JSON.stringify({}),
+  });
+}
+
+/** Phase 2: echoes the token and the digest that was read back; 409 if the bytes moved. */
+export function confirmExtensionPromotion(
+  workspaceId: string,
+  input: { confirmationToken: string; manifestSha256: string; operatorDomain?: string | null },
+): Promise<ExtensionPromoteResult> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
+    ...JSON_POST,
+    body: JSON.stringify(input),
+  });
+}
+
+export function setExtensionEnabled(
+  slug: string,
+  enabled: boolean,
+): Promise<{ id: string; status: string }> {
+  return extensionRequest(
+    `/api/extensions/${encodeURIComponent(slug)}/${enabled ? "enable" : "disable"}`,
+    { ...JSON_POST, body: JSON.stringify({}) },
+  );
+}
+
+export function uninstallExtension(slug: string): Promise<{ id: string; status: string }> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, { method: "DELETE" });
+}
+
 /** WARP-2991 — what a cloud turn on this conversation would carry. Mirrors
  *  `CloudHistorySummary` in the orchestrator's cloud-history-consent.service. */
 export interface CloudHistorySummary {
@@ -9153,10 +9267,84 @@ export function putSecurityHoursException(
   );
 }
 
+// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like — routes 29–30 ──
+// View-level, read-only, through `securityFetch` (typed `.code`); a failure is
+// rendered with `translateError(err, "security")`.
+
+export const SECURITY_PATTERNS_PATH = "/api/security/patterns";
+
+/** 29 — the learning list, the keys the viewer may see, and the release of each flag. */
+export function getSecurityPatterns(): Promise<SecurityPatternsOverview> {
+  return securityFetch<SecurityPatternsOverview>(`${BASE}${SECURITY_PATTERNS_PATH}`);
+}
+
+/** 30 — one key's 48 hour cells for one label. 404 PATTERN_NOT_FOUND when missing or hidden. */
+export function getSecurityPatternCells(key: string, label: string): Promise<SecurityPatternCells> {
+  const qs = new URLSearchParams({ key, label }).toString();
+  return securityFetch<SecurityPatternCells>(`${BASE}${SECURITY_PATTERNS_PATH}/cells?${qs}`);
+}
+
 /** 15 (manage) — 204. `version` is the hours version the page read. */
 export async function deleteSecurityHoursException(date: string, version: number): Promise<void> {
   await securityFetch<unknown>(
     `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}?version=${encodeURIComponent(String(version))}`,
     { method: "DELETE" },
   );
+}
+
+// ── WARP-2804: notification acknowledgement (routes N1–N4) ──
+// A person reads and acknowledges their OWN notifications. The transport is
+// `securityFetch` above — authFetch (token refresh, the session cookie) with
+// typed errors (`.code` = the server's `error.code`, `.status`) — so a 404
+// NOTIFICATION_NOT_FOUND is distinguishable from a network failure. The box
+// records the sign-in that acked and what the client said it was; neither
+// comes back.
+
+export const NOTIFICATIONS_PATH = "/api/notifications";
+
+export interface NotificationsQuery {
+  /** 1–200; the box defaults to 50. */
+  limit?: number;
+  /** `nextCursor` from the previous page. */
+  cursor?: string | null;
+  /** `unacked`: unread only. The box defaults to `all`. */
+  state?: "unacked" | "all";
+}
+
+/** N1 — newest first, keyset-paged, with the unread count. */
+export function getNotifications(q: NotificationsQuery = {}): Promise<NotificationsPage> {
+  const p = new URLSearchParams();
+  if (q.limit !== undefined) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  if (q.state) p.set("state", q.state);
+  const qs = p.toString();
+  return securityFetch<NotificationsPage>(`${BASE}${NOTIFICATIONS_PATH}${qs ? `?${qs}` : ""}`);
+}
+
+/** N2 — the badge. */
+export async function getUnreadNotificationCount(): Promise<number> {
+  const { unread } = await securityFetch<{ unread: number }>(`${BASE}${NOTIFICATIONS_PATH}/unread-count`);
+  return unread;
+}
+
+/**
+ * N3 — acknowledge one. `via: 'opened'` reports that the person opened its
+ * link (the toaster's "Open"); the default is `inbox`. Idempotent: the first
+ * ack stands and a repeat answers `changed: false`.
+ */
+export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } = {}): Promise<NotificationAckResult> {
+  return securityFetch<NotificationAckResult>(
+    `${BASE}${NOTIFICATIONS_PATH}/${encodeURIComponent(id)}/ack`,
+    jsonBody("POST", opts.via ? { via: opts.via } : {}),
+  );
+}
+
+/**
+ * N4 — "mark all read": the ids of the notifications the person was SHOWN
+ * (1–200). Never a time bound: a notification committed late by a longer
+ * transaction can be older than everything shown, and must stay unread. Ids
+ * that are not the person's are simply not counted.
+ */
+export function ackAllNotifications(ids: readonly string[]): Promise<NotificationAckAllResult> {
+  return securityFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { ids }));
 }

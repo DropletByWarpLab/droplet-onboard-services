@@ -2,10 +2,10 @@
  * WARP-2977 P2b (spec §7, §9 "Invariant") — the act / manage level table of
  * every Security route, read off the REAL router stacks.
  *
- * The three routers mounted at "/api" in app.ts (createSecurityRouter,
- * createSecurityZonesRouter, createSecuritySiteRouter) are walked layer by
- * layer, so what is pinned is the middleware that actually runs, not what a
- * comment claims:
+ * The four routers mounted at "/api" in app.ts (createSecurityRouter,
+ * createSecurityZonesRouter, createSecuritySiteRouter and — WARP-2980 —
+ * createSecurityPatternsRouter) are walked layer by layer, so what is pinned
+ * is the middleware that actually runs, not what a comment claims:
  *
  *   · the exact method + path → level + role table below (§7). Every write
  *     carries `requireFeatureAccess('security', act|manage)` — a write with
@@ -22,9 +22,10 @@
  *     principal, so no route is `requireRoleOrMcpService` (checked in the
  *     source too);
  *   · no parameterised path precedes a literal sibling it would swallow,
- *     across the three routers in app.ts's mount order;
- *   · the write-route count is 9 and the GET count 6, so the table cannot
- *     pass over empty stubs or a dropped route.
+ *     across the routers in app.ts's mount order;
+ *   · the write-route count is 9 and the GET count 9 (P2b's 6 + WARP-2980's
+ *     routes 29–31, all view), so the table cannot pass over empty stubs or a
+ *     dropped route. P3, P4 and P5 PR-B each add their own rows.
  */
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -40,6 +41,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 import { createSecurityRouter } from "../routes/security.js";
 import { createSecurityZonesRouter } from "../routes/security-zones.js";
 import { createSecuritySiteRouter } from "../routes/security-site.js";
+import { createSecurityPatternsRouter } from "../routes/security-patterns.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
@@ -51,7 +53,7 @@ const VIEW_ROLES: readonly Role[] = ["owner", "admin", "family"];
 const ACT_ROLES: readonly Role[] = ["owner", "admin", "family"];
 const MANAGE_ROLES: readonly Role[] = ["owner", "admin"];
 
-/** Spec §7, in app.ts mount order (security, zones, site), each router in declaration order. */
+/** Spec §7, in app.ts mount order (security, zones, site, patterns), each router in declaration order. */
 const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly Role[]]> = [
   // createSecurityRouter (P2a)
   ["GET /security/events", "view", VIEW_ROLES],
@@ -71,11 +73,16 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["PUT /security/hours", "manage", MANAGE_ROLES],
   ["PUT /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
   ["DELETE /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
+  // createSecurityPatternsRouter (WARP-2980, routes 29–31): read-only; all literal paths
+  ["GET /security/patterns", "view", VIEW_ROLES],
+  ["GET /security/patterns/cells", "view", VIEW_ROLES],
+  ["GET /security/patterns/explain", "view", VIEW_ROLES],
 ];
 
-/** The real number of Security write routes in PR-1 (spec §9 says 9 — and it is). */
+/** The real number of Security write routes (P2b spec §9 says 9 — and it is; P5 PR-A adds none). */
 const WRITE_ROUTES = 9;
-const GET_ROUTES = 6;
+/** P2b's 6 plus WARP-2980's routes 29–31. */
+const GET_ROUTES = 9;
 
 type Handle = (req: unknown, res: unknown, next: () => void) => unknown;
 interface Layer {
@@ -94,6 +101,7 @@ const ROUTERS = [
   ["createSecurityRouter", createSecurityRouter(PRISMA, {})],
   ["createSecurityZonesRouter", createSecurityZonesRouter(PRISMA, {})],
   ["createSecuritySiteRouter", createSecuritySiteRouter(PRISMA, {})],
+  ["createSecurityPatternsRouter", createSecurityPatternsRouter(PRISMA, {})],
 ] as const;
 
 function routesOf(name: string, router: unknown): RouteInfo[] {
@@ -152,7 +160,7 @@ function pathRegex(path: string): RegExp {
   return new RegExp(`^${body}$`);
 }
 
-describe("Security level invariant — the three routers' real stacks (spec §7, §9)", () => {
+describe("Security level invariant — the four routers' real stacks (spec §7, §9)", () => {
   it("the routes are exactly the §7 table, in mount order", () => {
     expect(ROUTES.map((r) => r.key)).toEqual(TABLE.map(([key]) => key));
   });
@@ -196,7 +204,7 @@ describe("Security level invariant — the three routers' real stacks (spec §7,
   });
 
   it("no route source uses requireRoleOrMcpService / requireRoleOrService (comments aside)", () => {
-    for (const file of ["security.ts", "security-zones.ts", "security-site.ts"]) {
+    for (const file of ["security.ts", "security-zones.ts", "security-site.ts", "security-patterns.ts"]) {
       const code = readFileSync(resolve(__dirname, "../routes", file), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "");
@@ -216,7 +224,7 @@ describe("Security level invariant — the three routers' real stacks (spec §7,
     expect(shadowed).toEqual([]);
   });
 
-  it("app.ts mounts the three routers at /api in the order this table assumes", () => {
+  it("app.ts mounts the Security routers at /api in the order this table assumes", () => {
     const app = readFileSync(resolve(__dirname, "../app.ts"), "utf8");
     const mounts = [...app.matchAll(/app\.use\(\s*"\/api"\s*,\s*(createSecurity\w*Router)\(/g)].map((m) => m[1]);
     expect(mounts).toEqual(ROUTERS.map(([name]) => name));

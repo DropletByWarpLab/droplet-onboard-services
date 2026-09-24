@@ -422,12 +422,42 @@ describe("AreasPanel — removing and restoring", () => {
     h.unarchive.mockReturnValue(new Promise((r) => (settle = r)));
     render(<AreasPanel />);
     const restore = screen.getByRole("button", { name: "Restore Car park" });
+    restore.focus();
     fireEvent.click(restore);
     fireEvent.click(restore);
     expect(h.unarchive).toHaveBeenCalledTimes(1);
-    expect(restore).toBeDisabled();
+    // aria-disabled, never `disabled`: the pressed Restore keeps keyboard focus.
+    await waitFor(() => expect(restore).toHaveAttribute("aria-disabled", "true"));
+    expect(restore).not.toBeDisabled();
+    expect(document.activeElement).toBe(restore);
     settle({ zone: { ...OLD, state: "active", version: 6 }, changed: true });
-    await waitFor(() => expect(restore).not.toBeDisabled());
+    await waitFor(() => expect(restore).not.toHaveAttribute("aria-disabled"));
+  });
+
+  it("a restored area takes focus on its card, since its Restore button leaves with the Removed row", async () => {
+    h.unarchive.mockResolvedValue({ zone: { ...OLD, state: "active", version: 6 }, changed: true });
+    const { rerender } = render(<AreasPanel />);
+    const restore = screen.getByRole("button", { name: "Restore Car park" });
+    restore.focus();
+    fireEvent.click(restore);
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith("Restored Car park.", "success"));
+    // The hook's refresh lands after the unarchive resolves.
+    h.zones = [FRONT, STOCK, BARE, { ...OLD, state: "active", version: 6 }];
+    rerender(<AreasPanel />);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(card("Car park").getByRole("button", { name: "What covers it?" })),
+    );
+  });
+
+  it("a failed Restore leaves focus on Restore, with no card to move to", async () => {
+    h.unarchive.mockRejectedValue(typedError("ZONE_LIMIT", 409));
+    render(<AreasPanel />);
+    const restore = screen.getByRole("button", { name: "Restore Car park" });
+    restore.focus();
+    fireEvent.click(restore);
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.stringMatching(/limit of 64 areas/), "error"));
+    await waitFor(() => expect(restore).not.toHaveAttribute("aria-disabled"));
+    expect(document.activeElement).toBe(restore);
   });
 
   it("a refused Restore (too many areas) is a translateError toast", async () => {

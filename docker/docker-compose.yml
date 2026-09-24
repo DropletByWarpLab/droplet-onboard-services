@@ -2192,13 +2192,28 @@ services:
       # Slice H's process-supervision seam. Off until an operator turns it on;
       # off, its routes are 404 and nothing on the box can discover them.
       - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
+      # WARP-2900 (slice H2): where promoted extensions are installed (one
+      # read-only dir per <slug>/<version>, exported from the signed commit)
+      # and the loopback ports their host shims bind INSIDE this container.
+      # Nothing here changes the network: an extension listens on 127.0.0.1
+      # only and the orchestrator reaches it through /extensions/<slug>/rpc.
+      - SANDBOX_EXTENSIONS_DIR=/var/lib/workspace-ext
+      - SANDBOX_EXTENSION_PORT_RANGE=${SANDBOX_EXTENSION_PORT_RANGE:-18000-18999}
       - PYTHONDONTWRITEBYTECODE=1
     # WARP-2896: the workspace git store. Bare repos (the truth, backed up)
     # and working checkouts (rebuildable from the bare repos) on two volumes,
     # the only writable paths besides /tmp on this read-only rootfs.
+    # WARP-2900: installed extensions on a third, rebuildable from the store.
     volumes:
       - workspace-git:/var/lib/workspace-git
       - workspace-checkouts:/var/lib/workspace
+      - extensions-installed:/var/lib/workspace-ext
+    # WARP-2900 / WARP-3012: a stopped extension's process group and a
+    # timed-out run's are killed with killpg; their orphans are reparented to
+    # PID 1. An init (Docker's tini) reaps them. Without it PID 1 is the
+    # Python server, which never does, and the zombies count against
+    # pids_limit until the container restarts. Pinned by test-security.sh 14b.
+    init: true
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -2567,10 +2582,10 @@ services:
       # Set LLM_URL=__mock__ for a dev box with no orchestrator (transcript
       # echoes as the spoken reply).
       - LLM_URL=${LLM_URL:-http://orchestrator:3000}
-      # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct fits
-      # the inference host's 7 GB RAM budget with the rest of the stack up).
-      # Override via env if the appliance has a larger/different model
-      # loaded (see droplet-local-LLM /models/sync).
+      # FALLBACK ONLY (WARP-3047): voice follows the box's ACTIVE model — it
+      # asks the orchestrator's GET /api/llm/models for defaultModel (cached
+      # 30 s) — and sends LLM_MODEL only when the orchestrator can't name one.
+      # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
       # WARP-1432 — voice turn shaping (client-side request shape only).
       # Empty passthrough: the effective defaults live in
@@ -3312,6 +3327,16 @@ services:
       INFERENCE_RUNTIME_URL: http://dmr:12434
       MODEL_MANIFEST: /app/models/model-manifest.json
       VRAM_RESERVE_GB: ${VRAM_RESERVE_GB:-2}
+      # WARP-3046: the unified-memory VRAM budget (an APU-only or GPU-less box,
+      # both of which run the `dmr` service above on the CPU) is capped at the
+      # runtime's own cgroup — weights there live in THAT container's memory,
+      # and MemTotal offered models the 4 GiB default could only thrash on.
+      # 🔴 The default MUST equal the `dmr` service's `mem_limit` default: the
+      # same interpolation then yields the same value on every box, whichever
+      # env source compose resolves it from (tests/gpu-vendor-selection.test.sh
+      # asserts the two agree). `dmr-cuda`'s 16g never applies here — an
+      # NVIDIA box is sized by its card, or reported unknown.
+      DMR_MEM_LIMIT: ${DMR_MEM_LIMIT:-4g}
       # INFERENCE_AUTH_TOKEN is NOT listed here on purpose — it arrives via
       # `env_file: ../.env` below, and the vendored auth.py reads that exact
       # name. A `${INFERENCE_AUTH_TOKEN}` substitution here would resolve
@@ -3345,11 +3370,18 @@ services:
       # Read-only: the disk preflight only needs stat/traverse on the mount to
       # read the filesystem's free-space counters, never the model blobs.
       - dmr-models:/data/models:ro
-      # Read-only: vram.py reads
-      # /sys/class/drm/card*/device/mem_info_vram_total to size the VRAM gate,
-      # taking the MAX across cards so this box's 512 MiB iGPU cannot win over
-      # the 16 GB dGPU. Harmless when absent — detection falls back to
-      # /proc/meminfo.
+      # Read-only: vram.py reads each card's PCI vendor and, for an AMD card,
+      # /sys/class/drm/cardN/device/mem_info_vram_total to size the VRAM gate.
+      # WARP-3046: that memory node is amdgpu-only — an NVIDIA card publishes
+      # none, and the old "max across cards" rule then sized .195's RTX 5060 Ti
+      # from the 512 MiB Raphael iGPU (0 GB, empty catalog). An NVIDIA card is
+      # now sized by the host device-bridge's GET /gpu (DEVICE_BRIDGE_URL +
+      # BRIDGE_AUTH_TOKEN/SERVICE_TOKEN_DISPLAY, from the env_file above), and
+      # carve-out-sized nodes are skipped. Harmless when absent — detection
+      # falls back to /proc/meminfo, or reports the VRAM as unknown. (An
+      # NVIDIA card with no DRM node — nvidia-drm unloaded — is still seen:
+      # vram.py also reads GPU_VENDOR and the container's own
+      # /sys/bus/pci, which needs no mount.)
       - /sys/class/drm:/sys/class/drm:ro
     # Hardening: a FastAPI sidecar running as non-root that reads its own code
     # and makes outbound HTTP. It needs no capabilities and must not gain any.
@@ -3699,6 +3731,12 @@ volumes:
   # wiped by factory reset.
   workspace-git:
   workspace-checkouts:
+  # WARP-2900 (ADR-056 slice H2) — installed extensions: each promoted
+  # extension's signed commit exported read-only (and compiled, for node20).
+  # Rebuildable: the reconciler re-exports every enabled extension from
+  # workspace-git after re-verifying its signed statement, so it is excluded
+  # from backup like the checkouts. Wiped by factory reset.
+  extensions-installed:
   # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
   # Named so a container recreate never silently reverts the tuned
   # gain/threshold; factory-reset's volume sweep clears it.

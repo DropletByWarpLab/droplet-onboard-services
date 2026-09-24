@@ -114,7 +114,7 @@ import {
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
-import { warmDefaultModel } from "../services/model-readiness.service.js";
+import { warmActiveModel } from "../services/active-model.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
@@ -1485,10 +1485,16 @@ export function createPublicAuthRouter(
       // never awaited, so a cold/hung runtime can never stall or fail the
       // login. Placed on the COMPLETED-login path only (password AND
       // second factor satisfied) so the warm can't become a pre-auth
-      // probe surface.
-      setImmediate(() => {
-        void warmDefaultModel().catch(() => undefined);
-      });
+      // probe surface. WARP-3047: the ACTIVE model — warming env
+      // LLM_MODEL loaded the old model next to a switched-to one.
+      // `prisma` is always wired by here (directory login fails closed
+      // without it, above); the guard only narrows it for the closure.
+      if (prisma) {
+        const db = prisma;
+        setImmediate(() => {
+          void warmActiveModel(db).catch(() => undefined);
+        });
+      }
     } catch (err) {
       next(err);
     }

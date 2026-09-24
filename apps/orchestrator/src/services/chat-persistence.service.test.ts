@@ -323,6 +323,60 @@ describe("ChatPersistenceService (WARP-304)", () => {
     ).toBeNull();
   });
 
+  // WARP-3048 — a mid-conversation model switch must survive a reopen. The
+  // chat page restores its picker from the conversation's `model`, so a
+  // session stamped only at creation reopened every thread on its FIRST
+  // turn's model, silently undoing the user's switch.
+  it("ensureConversation moves the session to the latest turn's model + provider (WARP-3048)", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const created = await svc.ensureConversation({
+      conversationId: null,
+      userId: "alice",
+      model: "model-a",
+      provider: "local",
+      firstUserContent: "hi",
+    });
+    await svc.ensureConversation({
+      conversationId: created.id,
+      userId: "alice",
+      model: "model-b",
+      provider: "anthropic",
+      firstUserContent: "again",
+    });
+
+    const row = sessions.find((s) => s.id === created.id);
+    expect(row?.model).toBe("model-b");
+    expect(row?.provider).toBe("anthropic");
+    const convo = await svc.getConversationForUser(created.id, "alice");
+    expect(convo?.model).toBe("model-b");
+    expect(convo?.provider).toBe("anthropic");
+  });
+
+  it("ensureConversation writes nothing when the turn's model is unchanged (WARP-3048)", async () => {
+    const { prisma } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const created = await svc.ensureConversation({
+      conversationId: null,
+      userId: "alice",
+      model: "model-a",
+      provider: "local",
+      firstUserContent: "hi",
+    });
+    await svc.ensureConversation({
+      conversationId: created.id,
+      userId: "alice",
+      model: "model-a",
+      provider: "local",
+      firstUserContent: "again",
+    });
+
+    // `update` bumps `@updatedAt`; a same-model turn has no reason to.
+    expect(prisma.chatSession.update).not.toHaveBeenCalled();
+  });
+
   it("setMessageFeedback rates an assistant row and clears on null (WARP-844)", async () => {
     const { prisma, sessions, messages } = makePrismaMock();
     const svc = new ChatPersistenceService(prisma as never);

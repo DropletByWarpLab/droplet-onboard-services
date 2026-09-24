@@ -585,6 +585,10 @@ export interface ToolDomainGroup {
   feature: AccessModuleId | null;
   /** Smart-home row carries the locks note (§5.2/§5.4). */
   locks?: boolean;
+  /** WARP-2897 — `extensions` for a runtime-domain row appended by
+   *  toolDomainGroupsWith; absent for the static compiled rows. Such a row
+   *  offers Off as well as View/Use, and starts Off on a new role. */
+  section?: "extensions";
 }
 
 /** Every tools-core domain exactly once, EXCEPT `erp` — connector reach is
@@ -632,6 +636,60 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "cloud", label: "Cloud accounts", domains: ["cloud"], feature: null },
   { id: "system", label: "System", domains: ["system", "data"], feature: null },
 ];
+
+/**
+ * WARP-2897 — the static table plus one "Extensions" row per RUNTIME domain
+ * (GET /api/access/tool-domains `runtime[]`, a domain some attached runtime
+ * tool carries that the compiled vocabulary does not declare).
+ *
+ * TOOL_DOMAIN_GROUPS stays static on purpose: it is the hand-kept half of the
+ * compiled grantable list (access-catalog.ts GRANTABLE_TOOL_DOMAINS), and a
+ * runtime domain exists only on the box that has it attached. Each runtime
+ * domain appears exactly once. One that equals a compiled domain — grouped
+ * or not — or `erp` is REJECTED rather than given a second row:
+ * two rows fanning out onto one domain would let the later select silently
+ * overwrite the earlier. (The server never serves such a domain as runtime;
+ * this is the client refusing to trust that.)
+ */
+export function toolDomainGroupsWith(
+  runtime: ReadonlyArray<{ domain: string }>,
+  /** The server's compiled grantable list (the same response's `compiled`).
+   *  Several compiled domains belong to no row (money, team_chat, …), so the
+   *  grouped table alone cannot tell a compiled domain from a runtime one. */
+  compiled: readonly string[] = [],
+): ToolDomainGroup[] {
+  const taken = new Set<string>([
+    "erp",
+    ...compiled,
+    ...TOOL_DOMAIN_GROUPS.flatMap((g) => g.domains),
+  ]);
+  const ids = new Set(TOOL_DOMAIN_GROUPS.map((g) => g.id));
+  const out = [...TOOL_DOMAIN_GROUPS];
+  for (const { domain } of runtime) {
+    if (taken.has(domain)) continue;
+    const id = `ext:${domain}`;
+    if (ids.has(id)) continue;
+    taken.add(domain);
+    ids.add(id);
+    out.push({ id, label: domain, domains: [domain], feature: null, section: "extensions" });
+  }
+  return out;
+}
+
+/**
+ * WARP-2897 — the grants the builder badges as reaching nothing: a runtime
+ * domain no attached tool carries any more (its extension disabled, its
+ * server detached). The server marks the crm/pm landing slots dead too
+ * (`empty_domain`), but those are expected — the Business row writes them on
+ * purpose for a future remote catalog — so they are not badged.
+ */
+export function deadToolGrants(
+  role: Pick<AccessRole, "toolGrants">,
+): Array<{ domain: string; deadReason: "not_provided" }> {
+  return role.toolGrants
+    .filter((g) => g.state === "dead" && g.deadReason === "not_provided")
+    .map((g) => ({ domain: g.domain, deadReason: "not_provided" as const }));
+}
 
 // ── Floor clamping ─────────────────────────────────────────────────────────
 
@@ -704,8 +762,10 @@ export interface RoleDraft {
   startingPoint: AccessStartingPoint;
   features: FeatureDraft;
   /** Keyed by TOOL_DOMAIN_GROUPS id — the group select's DISPLAY value.
-   *  Only groups listed in `touchedToolGroups` write from this map. */
-  tools: Record<string, ToolAccessLevel>;
+   *  Only groups listed in `touchedToolGroups` write from this map.
+   *  `"off"` exists only for Extensions rows (WARP-2897): a touched row at
+   *  off emits no grant. */
+  tools: Record<string, ToolAccessLevel | "off">;
   /** The server's tool-grant rows VERBATIM (edit mode; empty on create).
    *  Untouched groups re-emit these rows exactly — a group select is a
    *  lossy view over per-domain rows, so an untouched save must never
@@ -715,6 +775,12 @@ export interface RoleDraft {
    *  Create mode marks every group touched (the blank builder's selects
    *  are the source of truth for a brand-new role). */
   touchedToolGroups: string[];
+  /** WARP-2897 — domains whose ORIGINAL rows the admin removed this session
+   *  (the dead-grant Remove action). A dead grant has no group row to set
+   *  Off, and the server lets a held dead grant be kept, so this is the
+   *  builder's only way to revoke one before it revives when something
+   *  registers a tool under that domain again. Absent = nothing removed. */
+  removedToolGrants?: string[];
   /** Keyed by connector provider; "none" = no grant row. */
   connectors: Record<string, ConnectorAccessLevel | "none">;
   usage: RoleUsageDraft;
@@ -749,9 +815,14 @@ export function defaultFeatureDraft(sp: AccessStartingPoint): FeatureDraft {
   return draft;
 }
 
-export function blankRoleDraft(sp: AccessStartingPoint = "family"): RoleDraft {
-  const tools: Record<string, ToolAccessLevel> = {};
-  for (const g of TOOL_DOMAIN_GROUPS) tools[g.id] = "view";
+export function blankRoleDraft(
+  sp: AccessStartingPoint = "family",
+  groups: readonly ToolDomainGroup[] = TOOL_DOMAIN_GROUPS,
+): RoleDraft {
+  const tools: Record<string, ToolAccessLevel | "off"> = {};
+  // WARP-2897: an Extensions row starts OFF — a new role reaches an
+  // extension only when the operator chooses to grant it.
+  for (const g of groups) tools[g.id] = g.section === "extensions" ? "off" : "view";
   return {
     id: null,
     name: "",
@@ -763,7 +834,7 @@ export function blankRoleDraft(sp: AccessStartingPoint = "family"): RoleDraft {
     originalToolGrants: [],
     // Create mode: no server rows exist, so the builder's selects ARE the
     // truth — every group is explicit and fans out on save.
-    touchedToolGroups: TOOL_DOMAIN_GROUPS.map((g) => g.id),
+    touchedToolGroups: groups.map((g) => g.id),
     connectors: {},
     usage: { storageValue: "", storageUnit: "GB", uploadMb: "", llmDaily: "" },
     originalUsage: { storageQuotaBytes: null, maxUploadSizeMb: null, llmDailyMessageCap: null },
@@ -869,10 +940,24 @@ export function connectorAxisBlocked(sp: AccessStartingPoint): boolean {
 
 // ── Draft ⇄ wire ───────────────────────────────────────────────────────────
 
+/** A group's DISPLAY level from its domains' rows: the widest level held;
+ *  an Extensions row with no row shows Off (WARP-2897), a compiled row View. */
+function displayLevel(
+  g: ToolDomainGroup,
+  grants: ReadonlyArray<{ level: ToolAccessLevel }>,
+): ToolAccessLevel | "off" {
+  if (grants.some((t) => t.level === "use")) return "use";
+  if (grants.length === 0 && g.section === "extensions") return "off";
+  return "view";
+}
+
 /** Draft → POST/PATCH body. Absent row = OFF: only enabled gateable features
  *  emit grants; always-on rows never do; feature-off tool domains drop; a
  *  connector write grant is clamped to read on non-admin starting points. */
-export function draftToRolePayload(draft: RoleDraft): AccessRolePayload {
+export function draftToRolePayload(
+  draft: RoleDraft,
+  groups: readonly ToolDomainGroup[] = TOOL_DOMAIN_GROUPS,
+): AccessRolePayload {
   const featureGrants = GATEABLE_FEATURES.filter((f) => draft.features[f.moduleId]?.on).map(
     (f) => {
       const entry = draft.features[f.moduleId]!;
@@ -890,17 +975,22 @@ export function draftToRolePayload(draft: RoleDraft): AccessRolePayload {
   // never drop rows for domains outside the grouped list (e.g. erp).
   const touched = new Set(draft.touchedToolGroups);
   const groupByDomain = new Map<string, ToolDomainGroup>();
-  for (const g of TOOL_DOMAIN_GROUPS) {
+  for (const g of groups) {
     for (const domain of g.domains) groupByDomain.set(domain, g);
   }
   const toolGrants: AccessRoleToolGrant[] = [];
-  for (const g of TOOL_DOMAIN_GROUPS) {
+  for (const g of groups) {
     if (!touched.has(g.id)) continue;
     if (g.feature && !draft.features[g.feature]?.on) continue;
     const level = draft.tools[g.id] ?? "view";
+    // WARP-2897 — a touched Extensions row at Off emits nothing, and (being
+    // touched) supersedes the original rows below: that is how Off revokes.
+    if (level === "off") continue;
     for (const domain of g.domains) toolGrants.push({ domain, level });
   }
+  const removed = new Set(draft.removedToolGrants ?? []);
   for (const row of draft.originalToolGrants) {
+    if (removed.has(row.domain)) continue; // WARP-2897 — the dead-grant Remove
     const group = groupByDomain.get(row.domain);
     if (group && touched.has(group.id)) continue; // superseded by the fan-out
     if (group?.feature && !draft.features[group.feature]?.on) continue; // auto-off
@@ -955,7 +1045,10 @@ export function draftToRolePayload(draft: RoleDraft): AccessRolePayload {
 }
 
 /** Wire role → editable draft (edit + duplicate modes). */
-export function roleToDraft(role: AccessRole): RoleDraft {
+export function roleToDraft(
+  role: AccessRole,
+  groups: readonly ToolDomainGroup[] = TOOL_DOMAIN_GROUPS,
+): RoleDraft {
   const features: FeatureDraft = {};
   for (const f of ACCESS_FEATURES) {
     if (f.alwaysOn) {
@@ -968,14 +1061,14 @@ export function roleToDraft(role: AccessRole): RoleDraft {
       : { on: false, level: f.levels[0]!.value };
   }
 
-  const tools: Record<string, ToolAccessLevel> = {};
-  for (const g of TOOL_DOMAIN_GROUPS) {
+  const tools: Record<string, ToolAccessLevel | "off"> = {};
+  for (const g of groups) {
     const grants = role.toolGrants.filter((t) => g.domains.includes(t.domain));
     // DISPLAY value only: a group select shows the widest of its domains'
     // levels. The save path ignores this map for untouched groups — the
     // original rows pass through verbatim (see draftToRolePayload), so the
     // lossy display can never widen or invent grants.
-    tools[g.id] = grants.some((t) => t.level === "use") ? "use" : "view";
+    tools[g.id] = displayLevel(g, grants);
   }
 
   const connectors: Record<string, ConnectorAccessLevel | "none"> = {};
@@ -1062,7 +1155,10 @@ export function roleToDraft(role: AccessRole): RoleDraft {
  * Tool grants have no such hole: an unknown domain rides through
  * `originalToolGrants` untouched, exactly as `erp` does.
  */
-export function templateToDraft(template: RoleTemplate): RoleDraft {
+export function templateToDraft(
+  template: RoleTemplate,
+  groups: readonly ToolDomainGroup[] = TOOL_DOMAIN_GROUPS,
+): RoleDraft {
   const features: FeatureDraft = {};
   for (const f of ACCESS_FEATURES) {
     if (f.alwaysOn) {
@@ -1079,10 +1175,10 @@ export function templateToDraft(template: RoleTemplate): RoleDraft {
   // exactly as roleToDraft computes them. The save path ignores this map while
   // the group is untouched, so a group the template covers partially (or not at
   // all) shows a level without that level becoming a grant.
-  const tools: Record<string, ToolAccessLevel> = {};
-  for (const g of TOOL_DOMAIN_GROUPS) {
+  const tools: Record<string, ToolAccessLevel | "off"> = {};
+  for (const g of groups) {
     const grants = template.toolGrants.filter((t) => g.domains.includes(t.domain));
-    tools[g.id] = grants.some((t) => t.level === "use") ? "use" : "view";
+    tools[g.id] = displayLevel(g, grants);
   }
 
   // Always empty in practice — no template carries a connector grant, because a

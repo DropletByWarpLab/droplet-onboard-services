@@ -1,0 +1,29 @@
+{
+  "provider": "",
+  "displayName": "",
+  "baseUrl": { "kind": "static", "origin": "" },
+  "auth": { "headerName": "", "valueTemplate": "{{token}}" },
+  "constantHeaders": {},
+  "probePath": "",
+  "minRequestIntervalMs": null,
+  "datasets": [],
+  "egress": { "dataClass": "user-content-on-request", "purpose": "" },
+  "credential": {
+    "pastes": "",
+    "acceptedShape": "",
+    "fullPrivilegeAlternative": "",
+    "scopeGranularity": "",
+    "expires": "",
+    "accept": "",
+    "reject": "",
+    "provisionedBy": ""
+  },
+  "guide": {
+    "planPrerequisite": "",
+    "cost": "",
+    "clickPath": [],
+    "scopes": "",
+    "rotation": "",
+    "revocation": ""
+  }
+}

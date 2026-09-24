@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useModels } from "@/lib/hooks/useModels";
 import { isLocalProvider } from "@/lib/provider";
 
@@ -20,11 +21,35 @@ const providerBadge: Record<string, { className: string; label: string }> = {
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const { models, isLoading } = useModels();
 
-  // Design handoff: when only one model is available there's nothing to
-  // choose, so don't show the picker/pill in the input zone at all. The
-  // page's auto-select already pins that single model. (Still render while
-  // loading, when we don't yet know the count.)
-  if (!isLoading && models.length <= 1) return null;
+  // No model at all: the chat page's empty state says so and links to
+  // /models. (Still render while loading, when we don't yet know the count.)
+  if (!isLoading && models.length === 0) return null;
+
+  // WARP-3048 — /chat holds a thread's model while the list is degraded and
+  // never falls a thread back to the cloud, so `value` can name a model that
+  // is not listed right now. A <select> whose value matches no option
+  // DISPLAYS its first one — the composer would name a model the thread is
+  // not on — so the held model gets an option of its own.
+  const held = Boolean(value) && !isLoading && !models.some((m) => m.id === value);
+
+  // WARP-3048 — one model: there is nothing to choose here, but hiding the
+  // pill left the composer naming no model at all. The models brief
+  // (WARP-1116) asks for a read-only chip instead — dot + name — that leads
+  // to /models, where models are installed and switched.
+  if (!isLoading && models.length === 1 && !held) {
+    const only = models[0];
+    return (
+      <Link
+        href="/models"
+        className="chat-model chat-model-link"
+        aria-label={`Model: ${only.name} — manage on Models`}
+        title="Manage models"
+      >
+        <span className="dot" aria-hidden="true" />
+        <span className="chat-model-name">{only.name}</span>
+      </Link>
+    );
+  }
 
   const selected = models.find((m) => m.id === value);
   const provider = selected?.provider ?? "";
@@ -44,6 +69,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
           {!isLoading && models.length === 0 && (
             <option>No models available</option>
           )}
+          {held && <option value={value}>{value} · unavailable</option>}
           {models.map((m) => (
             // Native <option> can't render a badge, so mark vision-capable
             // models inline so they're distinguishable in the dropdown.

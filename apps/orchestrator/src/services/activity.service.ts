@@ -4,8 +4,8 @@
  * `record({kind, severity, sourceIcon, what, sub?, refs?})` is the
  * single writer to `ActivityRow`. Every other surface (chat, MCP tool
  * dispatch, file indexer MQTT bridge, Matter writes, auth events,
- * network ops) calls into here — direct `prisma.activityRow.create`
- * calls outside this module are a bug per AC3.
+ * network ops) calls into here — direct `ActivityRow` inserts outside
+ * this module are a bug per AC3.
  *
  * Chain integrity is enforced inside a Prisma `$transaction`:
  *   1. Take the constant transaction-scoped advisory lock
@@ -15,14 +15,15 @@
  *      forked the chain).
  *   2. Read the current tail row's signature.
  *   3. Compute the new row's signature with the injected signer.
- *   4. INSERT the new row. The lock releases at COMMIT/ROLLBACK.
+ *   4. INSERT the new row, `refs` bound as the exact canonical text the
+ *      signer signed (WARP-3011). The lock releases at COMMIT/ROLLBACK.
  *
  * The signer is injected so tests can use a fixed key and production
  * pulls from `/data/secrets/audit.key` via `getDefaultSigner()`.
  */
-import type { PrismaClient } from "@prisma/client";
-import { Prisma } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import {
+  canonicalRefsJson,
   hashSignature,
   type ActivityActorTypeName,
   type ActivityKindName,
@@ -65,6 +66,28 @@ const KNOWN_ACTOR_TYPES: ReadonlySet<ActivityActorTypeName> =
  * `canonicalizeRowContent` must learn every historical value.
  */
 export const CURRENT_ACTIVITY_SCHEMA_VERSION = 2;
+
+/**
+ * WARP-3011: the append's INSERT — raw SQL, never `tx.activityRow.create`.
+ *
+ * Prisma 5.22's Json WRITE keeps 16 significant digits, so a refs number
+ * whose shortest form needs 17 was stored as a different value while the
+ * signature covers the original, and verification failed on that row (and
+ * so on the whole chain after it) forever. That is not only `0.1 + 0.2`:
+ * an openWakeWord float32 score widened to a double needs 17 digits about
+ * one time in four, and routes/voice.ts puts it in refs. `$7` is the
+ * canonical refs text the signer signed (`canonicalRefsJson`), so the
+ * column holds exactly that: jsonb keeps numbers as exact decimals and
+ * Prisma's read path is exact (activity.service.pg.test.ts pins both).
+ *
+ * `$1` is ISO-8601 text: casting text to `timestamp(3)` ignores the `Z`,
+ * which stores the UTC wall-clock time Prisma's own DateTime writes store,
+ * with no dependence on the session TimeZone.
+ */
+const INSERT_ACTIVITY_ROW_SQL =
+  'INSERT INTO "ActivityRow" ("at", "severity", "sourceIcon", "what", "sub", "kind", "refs", "signature", "prevSignatureHash", "actorType", "actorId", "schemaVersion") ' +
+  'VALUES ($1::timestamp(3), $2::"ActivitySeverity", $3::text, $4::text, $5::text, $6::"ActivityKind", $7::jsonb, $8::text, $9::text, $10::"ActivityActorType", $11::text, $12::integer) ' +
+  'RETURNING "id"';
 
 /**
  * WARP-181: who performed the action. Required on every record() call
@@ -241,18 +264,23 @@ function snapshotActor(actor: ActivityActor): ActivityActor {
  * not Prisma's methods — it is refused before any statement as well, as a
  * precondition, never as an outage.
  *
+ * `activityRow` stays in the handle's shape although the append never calls
+ * it: every statement — the lock, the tail read AND the INSERT (WARP-3011,
+ * `INSERT_ACTIVITY_ROW_SQL`) — goes through `$queryRawUnsafe`. It is part of
+ * the check that the handle is Prisma's transaction client itself. Because
+ * the INSERT rides the same method as the lock and the tail read, a handle
+ * assembled from a real tx's id and raw method plus the bare client's
+ * `activityRow` writes its row IN the transaction: the caller's rollback
+ * removes it (activity.service.pg.test.ts pins this).
+ *
  * WHAT THESE CHECKS ASSUME: the real interactive-transaction handle, and ONE
  * instance of this module per process. They are in-process checks only. A
- * handle assembled on purpose from a real tx's id and raw method plus the
- * bare client's `activityRow` passes them all (the lock and the tail read run
- * in the tx, so the timestamps match), and its INSERT autocommits — the audit
- * row survives the caller's rollback (measured on pg16; the chain stays
- * linear only because the tx held the lock until then). A second copy of this
- * module (e.g. after `vi.resetModules`) keeps a second `appendQueues`, so
- * appends through the two copies on one transaction are not serialised
- * against each other. Neither happens in production code; a DB-side check
- * (a post-insert tail check, or a partial unique index on prevSignatureHash)
- * would be the defence in depth if it ever must be ruled out.
+ * second copy of this module (e.g. after `vi.resetModules`) keeps a second
+ * `appendQueues`, so appends through the two copies on one transaction are
+ * not serialised against each other. That does not happen in production
+ * code; a DB-side check (a post-insert tail check, or a partial unique index
+ * on prevSignatureHash) would be the defence in depth if it ever must be
+ * ruled out.
  */
 export type ActivityAppendTx = Pick<Prisma.TransactionClient, "$queryRawUnsafe" | "activityRow"> & {
   $transaction?: never;
@@ -290,7 +318,9 @@ const PRISMA_TX_ID = Symbol.for("prisma.client.transaction.id");
  * the real tx carries the id (own enumerable symbol) but not Prisma's
  * methods, and would otherwise fail on its first statement with a TypeError
  * that the Security routes report as an outage (503 AUDIT_UNAVAILABLE)
- * instead of the programming error it is (500).
+ * instead of the programming error it is (500). (`activityRow.create` is
+ * checked as part of that shape only; the append writes through
+ * `$queryRawUnsafe` — see `ActivityAppendTx`.)
  */
 function transactionIdOf(tx: ActivityAppendTx): string {
   const id: unknown = (tx as unknown as Record<symbol, unknown>)[PRISMA_TX_ID];
@@ -538,45 +568,46 @@ async function appendNow(
   const prevSignatureHash = prevSig === "" ? "" : hashSignature(prevSig);
   const signature = signer.sign(content, prevSignatureHash);
 
-  // refs is JSON; Prisma's Json input is structurally typed so
-  // we cast to its expected shape. `undefined` would cause
-  // Prisma to omit the field; we want explicit null.
-  const data: Prisma.ActivityRowCreateInput = {
+  // WARP-3011: see INSERT_ACTIVITY_ROW_SQL. Through `$queryRawUnsafe`, like
+  // the lock and the tail read, so it runs in the same transaction. Absent
+  // refs stay SQL NULL (a null `$7`), never the JSON value `null`.
+  const refsJson = canonicalRefsJson(content.refs);
+  const insertedRows = await tx.$queryRawUnsafe<Array<{ id: bigint }>>(
+    INSERT_ACTIVITY_ROW_SQL,
+    at.toISOString(),
+    content.severity,
+    content.sourceIcon,
+    content.what,
+    content.sub,
+    content.kind,
+    refsJson,
+    signature,
+    prevSignatureHash,
+    content.actorType,
+    content.actorId,
+    content.schemaVersion,
+  );
+  const id = insertedRows[0]?.id;
+  if (typeof id !== "bigint") {
+    throw new Error("ActivityRow INSERT returned no id");
+  }
+
+  // The row as bound — which is the row stored.
+  return {
+    id,
     at,
-    severity: params.severity,
-    sourceIcon: params.sourceIcon,
-    what: params.what,
-    sub: params.sub ?? null,
-    kind: params.kind,
-    refs:
-      content.refs === null
-        ? Prisma.DbNull
-        : (content.refs as Prisma.InputJsonValue),
+    severity: content.severity,
+    sourceIcon: content.sourceIcon,
+    what: content.what,
+    sub: content.sub,
+    kind: content.kind,
+    // The refs the column now holds: the signed text, parsed.
+    refs: refsJson === null ? null : (JSON.parse(refsJson) as Record<string, unknown>),
     signature,
     prevSignatureHash,
     actorType: content.actorType,
     actorId: content.actorId,
     schemaVersion: content.schemaVersion,
-  };
-  const inserted = await tx.activityRow.create({ data });
-
-  return {
-    id: inserted.id,
-    at: inserted.at,
-    severity: inserted.severity as ActivitySeverityName,
-    sourceIcon: inserted.sourceIcon,
-    what: inserted.what,
-    sub: inserted.sub,
-    kind: inserted.kind as ActivityKindName,
-    refs:
-      inserted.refs === null
-        ? null
-        : (inserted.refs as Record<string, unknown>),
-    signature: inserted.signature,
-    prevSignatureHash: inserted.prevSignatureHash,
-    actorType: inserted.actorType as ActivityActorTypeName | null,
-    actorId: inserted.actorId,
-    schemaVersion: inserted.schemaVersion,
   };
 }
 
@@ -679,11 +710,3 @@ export async function recordSafely(
     return null;
   }
 }
-
-// Prisma's namespace is imported at the top of the file (alongside the
-// type-only PrismaClient) for runtime use of `Prisma.DbNull`. The shared test
-// setup (`src/__tests__/setup.ts`) exports the three JSON-null sentinels as
-// distinct objects, so a suite mocking `@prisma/client` gets a value that
-// compares by identity rather than an `undefined` that silently matches
-// everything (WARP-2484).
-export type { Prisma };

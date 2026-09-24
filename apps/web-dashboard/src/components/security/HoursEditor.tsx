@@ -22,8 +22,13 @@
  * controls keeps a click from turning into a denial the threat mirror shows.
  *
  * Mobile: each day is its own card, and its controls wrap inside it.
+ *
+ * Keyboard: Save is aria-disabled, never `disabled` — while it saves and after
+ * it lands (nothing left to save), the button that was just pressed keeps
+ * focus instead of dropping it to <body>. A ref refuses a second press, as in
+ * ModeCard.
  */
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Clock, Loader2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatSiteTime, formatWallTime, hhmmToMinutes, siteDateOf } from "@/lib/security-time";
@@ -555,8 +560,13 @@ function WeekEditor({ hours, deviceZone, onSave, onReload, zones }: HoursEditorP
   const problems = week.map(dayProblem);
   const valid = problems.every((p) => p === null) && timezone !== "";
   const canSave = dirty && valid && !saving;
+  // The in-flight guard: Save stays focusable (aria-disabled), so a second
+  // press between renders is refused here rather than by `disabled`.
+  const savingRef = useRef(false);
 
   const run = async (body: SecurityHoursBody) => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     try {
       const outcome = await onSave(body);
@@ -567,6 +577,7 @@ function WeekEditor({ hours, deviceZone, onSave, onReload, zones }: HoursEditorP
         setConflict(true);
       }
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -653,7 +664,15 @@ function WeekEditor({ hours, deviceZone, onSave, onReload, zones }: HoursEditorP
         )}
 
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
-          <button type="button" className="btn primary" disabled={!canSave} onClick={() => void run(buildHoursBody(week, timezone, baseVersion))}>
+          <button
+            type="button"
+            className="btn primary"
+            aria-disabled={!canSave || undefined}
+            onClick={() => {
+              if (!canSave) return;
+              void run(buildHoursBody(week, timezone, baseVersion));
+            }}
+          >
             {saving && <Loader2 size={16} className="animate-spin" aria-hidden />}
             {saving ? COPY.saving : COPY.save}
           </button>

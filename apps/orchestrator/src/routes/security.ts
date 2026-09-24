@@ -59,6 +59,7 @@ import {
 } from "../services/security-access.js";
 import { securityLockAdapter, securityLockHealthRow } from "../services/security-lock-adapter.js";
 import { securitySiteModeHealth } from "../services/security-mode.service.js";
+import { securityPatternsHealth } from "../services/security-baselines.service.js";
 import { loadActiveLinks, viewerAreas, zoneFilterFor, zonesForEvent } from "../services/security-zones.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -174,7 +175,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
   router.get("/security/health", requireRole(...SECURITY_VIEW_ROLES), async (req: Request, res: Response) => {
     try {
       const now = deps.now?.() ?? new Date();
-      const [state, siteMode, mayReadLocks] = await Promise.all([
+      const [state, siteMode, mayReadLocks, patterns] = await Promise.all([
         prisma.securityIngestState.findUnique({
           where: { id: "singleton" },
           select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true },
@@ -184,6 +185,16 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         // WARP-2977 P2b-2 (DS-019). A resolver failure rejects: a 503 of the
         // header, never a header that guessed who may see locks.
         mayReadLocksFor(req, deps.resolve),
+        // WARP-2980 — never throws either. Visible to every viewer, with its
+        // counts scoped to the viewer's cameras (DS-005); a scope that cannot
+        // be read gives the row nothing to count (null), never "all".
+        securityViewerScope(prisma, req, deps.resolve).then(
+          (scope) => securityPatternsHealth(prisma, scope, now),
+          (err: unknown) => {
+            logger.warn({ err }, "security health: viewer scope unreadable for the patterns row");
+            return securityPatternsHealth(prisma, null, now);
+          },
+        ),
       ]);
       const sources = buildSecurityHealth({
         frigateConfigured: Boolean(config.FRIGATE_URL && config.FRIGATE_URL.trim()),
@@ -193,6 +204,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         siteMode,
         // "Not running" when no adapter was started — shown, never omitted.
         locks: mayReadLocks ? securityLockHealthRow((deps.locks ?? securityLockAdapter)()) : undefined,
+        patterns,
         now,
       });
       // The threat source is only a row for the people who can see threats.

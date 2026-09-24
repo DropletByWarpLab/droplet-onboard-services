@@ -13,10 +13,12 @@
  *   3. `redispatchSafe`: write / commit / run repeat (idempotent by
  *      contract, loudly); propose is gated and follows the confirming rule.
  *   4. `workspace_propose` ENDS the run: Tier-2 parks it, the owner
- *      approves, the resumed worker performs the handshake, the tool runs
- *      ONCE, and the run is `succeeded` with `stopReason: proposed` and the
- *      proposal as its result — the model is never asked for a final answer
- *      and the person is notified.
+ *      approves, the resumed worker performs the handshake on the STORED
+ *      call (WARP-3044), the tool runs ONCE, and the run is `succeeded` with
+ *      `stopReason: proposed` and the proposal as its result — the model is
+ *      not asked again, not even to re-issue the call, and the person is
+ *      notified. A model that rewords `summary` on every ask (run 1efa11c8 on
+ *      .195) changes nothing.
  *   5. `_meta.workspaceId` rides every dispatch of a workshop run and none
  *      of an ordinary one.
  */
@@ -167,7 +169,7 @@ const writeThenPropose = (req: { messages: Array<{ role: string; content: unknow
   return { role: "assistant", content: null, tool_calls: [toolCall("c2", "workspace_propose", { name: "N", version: "0.1.0", summary: "s" })] };
 };
 
-function interceptingMcp(tier2: Set<string>) {
+function interceptingMcp(tier2: Set<string>, proposed: Record<string, unknown> = { tag: "proposal/0.1.0", commit: "abc" }) {
   let minted = 0;
   const live = new Set<string>();
   const executed: Array<{ name: string; args: Record<string, unknown>; ctx?: Record<string, unknown> }> = [];
@@ -194,7 +196,7 @@ function interceptingMcp(tier2: Set<string>) {
       }
     }
     executed.push({ name, args, ctx });
-    if (name === "workspace_propose") return wire({ ok: true, data: { tag: "proposal/0.1.0", commit: "abc" } });
+    if (name === "workspace_propose") return wire({ ok: true, data: proposed });
     return wire({ ok: true, data: { changed: true } });
   });
   const listed = [...EXPECTED_WORKSPACE_TOOLS, "list_files"].map((name) => ({ name, description: "d", inputSchema: {} }));
@@ -260,16 +262,44 @@ describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
     expect(row.result).toContain("proposal/0.1.0");
     expect(row.pendingTool).toBeNull();
     // The proposal ran exactly once, and NOTHING after it — the model's
-    // next write (c9) was never dispatched, and the model was not asked.
+    // next write (c9) was never dispatched. WARP-3044: the resumed worker ran
+    // the STORED propose itself, so the model was not asked at all.
     expect(mcp.executed.map((e) => e.name)).toEqual(["workspace_write", "workspace_propose"]);
-    expect(b.chat).toHaveBeenCalledTimes(1);
+    expect(b.chat).not.toHaveBeenCalled();
     expect(sendNotificationMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ userId: "romain", title: "Extension proposed" }),
+      expect.objectContaining({ username: "romain", title: "Extension proposed" }),
     );
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({ what: "Agent run proposed an extension", refs: expect.objectContaining({ agentRunId: id }) }),
     );
+  });
+
+  it("a run that proposes a connector draft is not told it proposed an extension (WARP-2899)", async () => {
+    // Review of #2324: the notification and the terminal audit said
+    // "Extension proposed" for a draft that can never be installed.
+    // MUTATION: drop the kind branch in the worker → red.
+    const readback = "drafts a connector for Acme; nothing on this box will dial api.acme.example until Warp Lab ships it";
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "draft acme", model: "m", workspaceId: "ws-c" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]), { tag: "proposal/0.1.0", commit: "abc", kind: "connector-draft", readback });
+    const a = makeWorker(db, mcp, "A");
+    await a.worker.tickOnce();
+    await settle(a.worker);
+    expect(await decideAgentRun(db.prisma, { id, decision: "approved", decidedBy: { id: OWNER.id, username: "romain", role: "owner" } })).toMatchObject({ ok: true });
+    const b = makeWorker(db, mcp, "B");
+    await b.worker.tickOnce();
+    await settle(b.worker);
+
+    expect(db.row(id).status).toBe("succeeded");
+    expect(db.row(id).stopReason).toBe("proposed");
+    expect(sendNotificationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ title: "Connector draft proposed", body: expect.stringContaining(readback) }),
+    );
+    expect(sendNotificationMock).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: "Extension proposed" }));
+    expect(recordActivityMock).toHaveBeenCalledWith(expect.objectContaining({ what: "Agent run proposed a connector draft" }));
+    expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Agent run proposed an extension" }));
   });
 
   it("an ordinary run puts no workspaceId on the wire and never sees the workspace tools", async () => {
@@ -285,6 +315,90 @@ describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
     for (const call of mcp.callTool.mock.calls) {
       expect((call[2] as Record<string, unknown> | undefined)?.workspaceId).toBeUndefined();
     }
+  });
+});
+
+// ── WARP-3044: the live failure, replayed ─────────────────────────────────
+//
+// .195, run 1efa11c8: `workspace_propose` parked; after each approval the
+// resumed run re-asked gpt-oss, which reworded `summary` every time — so the
+// re-issued call never matched the approval, the run re-parked three times,
+// and it ended `succeeded / model_done` with nothing proposed. These are the
+// model's four wordings. The fixed worker runs the STORED call.
+
+describe("an approved workspace_propose runs as parked, however the model would reword it (WARP-3044)", () => {
+  const SUMMARIES = [
+    "Both tsc and npm test exited with code 0.",
+    "Compilation exit code 0, tests exit code 0",
+    "Compiled src/ with tsc (exit code 0). Ran npm test (exit code 0).",
+    "tsc exit code 0, npm test exit code 0",
+  ];
+
+  /** Writes, then proposes — rewording the summary every time it is asked to. */
+  function rewordingProposer() {
+    let asks = 0;
+    return scripted((req) => {
+      const replies = req.messages.filter((m) => m.role === "tool").map((m) => String(m.content));
+      if (replies.length === 0) {
+        return { role: "assistant", content: null, tool_calls: [toolCall("c1", "workspace_write", { path: "a.txt", content: "x" })] };
+      }
+      if (replies.some((r) => r.includes("proposal/"))) {
+        return { role: "assistant", content: null, tool_calls: [toolCall("c9", "workspace_write", { path: "b.txt", content: "y" })] };
+      }
+      const summary = SUMMARIES[asks % SUMMARIES.length]!;
+      asks += 1;
+      return {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall(`p${asks}`, "workspace_propose", { name: "N", version: "0.1.0", summary })],
+      };
+    });
+  }
+
+  it("one approval → exactly ONE workspace_propose, with the PARKED summary; the run is succeeded/proposed; the model is not asked again", async () => {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "build a word counter", model: "m", workspaceId: "ws-a" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]));
+    const chat = rewordingProposer();
+    const worker = (workerId: string) =>
+      createAgentRunWorker({
+        prisma: db.prisma,
+        agent: { mcp: mcp.mcp, aiGateway: { chat } as never },
+        workerId,
+        resolveAccess: ownerAccess as never,
+        toolSelectionMode: "off",
+      });
+
+    const a = worker("A");
+    await a.tickOnce();
+    await settle(a);
+    expect(db.row(id).status).toBe("awaiting_confirmation");
+    expect(db.row(id).pendingArgs).toEqual({ name: "N", version: "0.1.0", summary: SUMMARIES[0] });
+    const askedBeforeApproval = chat.mock.calls.length;
+
+    expect(
+      await decideAgentRun(db.prisma, { id, decision: "approved", decidedBy: { id: OWNER.id, username: "romain", role: "owner" } }),
+    ).toMatchObject({ ok: true });
+    const b = worker("B");
+    await b.tickOnce();
+    await settle(b);
+
+    const row = db.row(id);
+    expect(row.status).toBe("succeeded");
+    expect(row.stopReason).toBe("proposed");
+    expect(row.result).toContain("proposal/0.1.0");
+    expect(row.pendingTool).toBeNull();
+    expect(row.pendingDecision).toBeNull();
+    const proposes = mcp.executed.filter((e) => e.name === "workspace_propose");
+    expect(proposes).toHaveLength(1);
+    expect(proposes[0]!.args).toEqual({ name: "N", version: "0.1.0", summary: SUMMARIES[0] });
+    expect(proposes[0]!.ctx).toMatchObject({ confirmationToken: "tok-2", workspaceId: "ws-a", agentRunId: id });
+    expect(mcp.executed.map((e) => e.name)).toEqual(["workspace_write", "workspace_propose"]);
+    expect(chat.mock.calls.length).toBe(askedBeforeApproval);
+    const prompts = sendNotificationMock.mock.calls
+      .map((c) => (c[1] as { title: string }).title)
+      .filter((t) => t.startsWith("Approval needed"));
+    expect(prompts).toHaveLength(1);
   });
 });
 

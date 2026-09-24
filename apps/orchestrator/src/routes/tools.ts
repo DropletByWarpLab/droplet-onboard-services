@@ -28,12 +28,12 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService, type AuthUser } from "../middleware/auth.js";
 import {
   plannedToolNames,
-  referencedStepNames,
   runToolSpec,
   type StepDispatcher,
   type Summarizer,
 } from "../services/tool-spec-runner.service.js";
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
+import { resolveActiveModel } from "../services/active-model.service.js";
 import { createSandboxTransformer, type Transformer } from "../services/sandbox.client.js";
 import {
   DAILY_REPORT_SLUG,
@@ -45,9 +45,19 @@ import {
   firstToolDeniedForPrincipal,
   hasWriteTool,
   resolveToolAccessScope,
-  unknownToolsIn,
-  writeToolsIn,
 } from "../services/tool-access.service.js";
+import {
+  createDraftSpecTx,
+  DraftSlugTakenError,
+  createSpecSchema,
+  reconcileWrites,
+  stepReferenceError,
+  stepSchema,
+  storedArgsFor,
+  toStoredShape,
+  writeToolNamesIn,
+  writesDisagreementBody,
+} from "../services/tool-spec-draft.service.js";
 import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -129,236 +139,6 @@ async function actorOr403(
 const SPEC_STATUSES = ["live", "draft", "suggested"] as const;
 type SpecStatus = (typeof SPEC_STATUSES)[number];
 
-// Per-tool slug shape — lowercase kebab, 2..80 chars. Tight enough to
-// be URL-safe in `/api/tools/:slug` without escaping; loose enough for
-// operator-typed names.
-const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-/**
- * WARP-2670 — the name a step may publish its result under, for later steps
- * to read as `${steps.<name>}`. Lowercase snake so the reference syntax needs
- * no quoting or escaping, and so two names cannot differ only by case.
- */
-const OUTPUT_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
-const outputNameSchema = z.string().regex(OUTPUT_NAME_RE).optional();
-
-/**
- * A step is either a tool CALL or — since WARP-1996 — a SUMMARIZE, which
- * turns what the earlier steps gathered into prose. `call` stays the default
- * so every spec authored before this keeps parsing unchanged.
- *
- * A summarize step names no tool: there is nothing for the §3 scope check to
- * authorize, and it can only read the trace the run already produced under
- * that check.
- */
-const callStepSchema = z.object({
-  kind: z.literal("call").default("call"),
-  tool: z.string().min(1).max(64),
-  args: z.record(z.unknown()).optional(),
-  as: outputNameSchema,
-  /** A failure of this step is recorded and the walk continues. */
-  optional: z.boolean().optional(),
-});
-
-const summarizeStepSchema = z.object({
-  kind: z.literal("summarize"),
-  /** Optional framing; the runner supplies its default when absent. */
-  prompt: z.string().min(1).max(4000).optional(),
-  as: outputNameSchema,
-});
-
-/**
- * WARP-2895 — a `transform` step runs customer-written Python over the run's
- * named results in services/sandbox and publishes `output`; a `when` step is
- * the same call whose truthiness decides whether the walk continues. Neither
- * names a tool: nothing for the §3 scope check to authorize, nothing for the
- * `writes` derivation to count (`writeToolNamesIn` reads `plannedToolNames`,
- * which ignores both kinds — pinned by tool-spec-runner.transform.test.ts).
- *
- * `code` is bounded here at 64 KB (the service refuses more); `inputs` is an
- * object whose values may carry `${steps.x}` references.
- */
-const transformStepSchema = z.object({
-  kind: z.literal("transform"),
-  code: z.string().min(1).max(64_000),
-  inputs: z.record(z.unknown()).optional(),
-  as: outputNameSchema,
-});
-
-const whenStepSchema = z.object({
-  kind: z.literal("when"),
-  code: z.string().min(1).max(64_000),
-  inputs: z.record(z.unknown()).optional(),
-  as: outputNameSchema,
-});
-
-const stepSchema = z.union([callStepSchema, summarizeStepSchema, transformStepSchema, whenStepSchema]);
-
-type ParsedStep = z.infer<typeof stepSchema>;
-
-/**
- * Shape a validated step for the `ToolStep.args` JSON column.
- *
- * The two kinds store different payloads, so this cannot be one literal:
- * a `call` keeps `{tool, args}` — the shape `parseCallStep` reads — and a
- * `summarize` keeps `{prompt}`. Writing a summarize step through the call
- * shape would persist `tool: undefined` and the runner would reject it as
- * malformed on the next run.
- */
-function storedArgsFor(s: ParsedStep): Record<string, unknown> {
-  // WARP-2670 — `as` rides in the same JSON blob for both kinds. It is not a
-  // column because `ToolStep.args` is Json and `kind` is a plain String, the
-  // seam C1's schema comment already nominated for exactly this; a column
-  // would cost a migration to store something only the walker reads.
-  const named = s.as ? { as: s.as } : {};
-  if (s.kind === "summarize") {
-    return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
-  }
-  if (s.kind === "transform" || s.kind === "when") {
-    return { code: s.code, inputs: s.inputs ?? {}, ...named };
-  }
-  return { tool: s.tool, args: s.args ?? {}, ...(s.optional ? { optional: true } : {}), ...named };
-}
-
-/**
- * WARP-2670 — refuse a reference graph the runner could not satisfy.
- *
- * Three ways to write a spec that parses but cannot run:
- *   - two steps publishing the same name (the second silently shadows);
- *   - `${steps.x}` where nothing is named `x`;
- *   - `${steps.x}` where `x` is published by a LATER step, or by this one.
- *
- * The walker catches all three, but only on the first fire — and for a
- * scheduled spec the first fire is at 03:00 with nobody reading. Checking
- * here means the author is told while they are still looking at the step
- * they typed. This is the same argument the schedule routes make for
- * parsing an rrule at write time instead of auto-disabling it later.
- *
- * Paths are NOT checked: `${steps.invoices.0.total}` depends on what the
- * tool returns at run time, which authoring cannot know. Only the name
- * graph — which is static — is decided here.
- *
- * A summarize step's `prompt` is NOT scanned either. The runner hands the
- * prompt to the summarizer verbatim — it never runs `resolveRefs` over it —
- * so a `${steps.x}` inside prose is text, not a reference, and refusing it
- * here would enforce a contract the runtime does not implement. Only the
- * args a `call` step dispatches are resolved, so only those are checked.
- */
-function stepReferenceError(steps: ParsedStep[]): Record<string, unknown> | null {
-  const published = new Set<string>();
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const scanned = step.kind === "summarize" ? {} : storedArgsFor(step);
-    for (const ref of referencedStepNames(scanned)) {
-      if (!published.has(ref)) {
-        return {
-          error: `Step ${i} refers to \${steps.${ref}}, which no earlier step publishes`,
-          detail:
-            "give the producing step an `as` name, and make sure it comes first",
-          step: i,
-          reference: ref,
-        };
-      }
-    }
-    if (step.as) {
-      if (published.has(step.as)) {
-        return {
-          error: `Two steps publish the name "${step.as}"`,
-          detail: "step output names must be unique within a spec",
-          step: i,
-          reference: step.as,
-        };
-      }
-      published.add(step.as);
-    }
-  }
-  return null;
-}
-
-/**
- * WARP-2665 — the write tools a step list actually calls.
- *
- * `ToolSpec.writes` gates two safety decisions: run-now's 409 confirmation
- * (`POST /tools/:slug/runs`) and the WARP-463 ticker's refusal to auto-fire a
- * `writes && !reversible` spec unattended. Until now it was whatever the
- * author put in the request body and was never checked against the steps, so
- * a spec calling a writing tool could be stored as `writes: false` and would
- * then fire with nobody watching. The ADR-004 write tier still applied at
- * fire time — this was never an escalation — but a gate that exists for
- * "destructive, and nobody is looking" was deciding on a self-declared field.
- *
- * Names come from `plannedToolNames`, the runner's OWN parser and the same one
- * the walker dispatches through, rather than a second reading of the step
- * shape that could drift from it. A step kind that dispatches no tool (today
- * `summarize`) contributes no name, so it can never make a spec look like it
- * writes — which is also what keeps a future non-dispatching kind correct here
- * without touching this function.
- *
- * `writeToolsIn` is the classification the ticker's gate and the miner read
- * too, against `WRITE_TOOLS` — derived from each tool's `requiresWrite` in
- * `@droplet/tools-core` — so a write tool added to the registry is classified
- * everywhere without anyone remembering to update a list.
- */
-function writeToolNamesIn(
-  steps: ReadonlyArray<{ kind: string; args: unknown }>,
-): string[] {
-  return writeToolsIn(plannedToolNames(steps));
-}
-
-/** Parsed request steps in the stored `{kind, args}` shape `plannedToolNames` reads. */
-function toStoredShape(
-  steps: ParsedStep[],
-): Array<{ kind: string; args: unknown }> {
-  return steps.map((s) => ({ kind: s.kind, args: storedArgsFor(s) }));
-}
-
-/**
- * WARP-2665 — reconcile a declared `writes` against the derived one.
- *
- * Asymmetric on purpose. Declaring `writes: true` on a spec that calls no
- * write tool is a CONSERVATIVE disagreement: it can only add a confirmation
- * prompt and keep the scheduler's hands off, so it is accepted as authored.
- * Declaring `writes: false` on a spec that does call one is the only
- * direction that defeats a safety gate, and it is refused — loudly, at
- * authoring time while a human is present to read the error, rather than
- * silently at 03:00 when the schedule fires.
- *
- * Omitting the field derives it. That is what keeps existing clients and the
- * miner's draft→live promotion correct without asking either to change.
- */
-function reconcileWrites(
-  declared: boolean | undefined,
-  writeTools: string[],
-): { ok: true; writes: boolean } | { ok: false; writeTools: string[] } {
-  if (declared === false && writeTools.length > 0) {
-    return { ok: false, writeTools };
-  }
-  return { ok: true, writes: declared === true ? true : writeTools.length > 0 };
-}
-
-/** The 400 body for a `writes: false` declaration the steps contradict. */
-function writesDisagreementBody(writeTools: string[]): Record<string, unknown> {
-  return {
-    error: "Declared writes:false, but these steps call write tools",
-    detail:
-      "omit `writes` to have it derived from the steps, or declare writes:true",
-    writeTools,
-  };
-}
-
-const createSpecSchema = z.object({
-  /** WARP-2894 — username the mcp principal acts for. Ignored for everyone else. */
-  onBehalfOf: z.string().trim().min(1).max(200).optional(),
-  slug: z.string().min(2).max(80).regex(SLUG_RE),
-  name: z.string().min(1).max(200),
-  category: z.string().max(64).optional(),
-  description: z.string().max(2000).optional(),
-  share: z.string().max(64).optional(),
-  safety: z.number().int().min(1).max(3).optional(),
-  writes: z.boolean().optional(),
-  reversible: z.boolean().optional(),
-  steps: z.array(stepSchema).min(1).max(32),
-});
 
 const patchSpecSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -499,7 +279,7 @@ export function createToolsRouter(
    * inference backend, the same reason `dispatcher` is a parameter. Defaults
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
-  summarizer: Summarizer = createToolSpecSummarizer(),
+  summarizer: Summarizer = createToolSpecSummarizer(() => resolveActiveModel(prisma)),
   /**
    * WARP-2895 — injected so tests can drive a `transform` / `when` step
    * without a sandbox container, the same reason `summarizer` is a
@@ -646,8 +426,9 @@ export function createToolsRouter(
     "/tools",
     // WARP-2894 — `routine_draft` reaches this as the mcp principal. It can
     // only ever CREATE a draft: `createSpecSchema` has no `status` field and
-    // the row is born `draft` by schema default, so the model has no path to
-    // `live` short of a person pressing Promote on /routines.
+    // `createDraftSpecTx` writes `status: "draft"` explicitly (WARP-2897), so
+    // the model has no path to `live` short of a person pressing Promote on
+    // /routines.
     requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -661,80 +442,25 @@ export function createToolsRouter(
         const who = await actorOr403(prisma, req, res, parsed.data.onBehalfOf);
         if (!who) return;
 
-        // WARP-2894 — a step naming a tool this box does not have is refused
-        // here, where the author (a person or the model) can fix it, rather
-        // than at the first run. POST only: PATCH edits carry names the
-        // route tests seed as placeholders, and a stored spec's names are
-        // re-checked by the run pre-flight regardless.
-        const unknown = unknownToolsIn(
-          parsed.data.steps.flatMap((st) => (st.kind === "call" ? [st.tool] : [])),
-        );
-        if (unknown.length > 0) {
-          res.status(400).json({
-            error: "unknown_tools",
-            detail: "these steps name tools this box does not have",
-            tools: unknown,
-          });
-          return;
-        }
-        // WARP-485: ownerId is a UUID (User.id), not the Nextcloud
-        // username. Storing the username would break any
-        // `WHERE ownerId = <User.id>` join (returns zero rows) and
-        // diverge from cameras / network-firewall / reminders which
-        // all key on req.user.id.
-        const actor = who.id;
-
-        // WARP-2670 — refuse a reference graph the walker could not satisfy.
-        const refError = stepReferenceError(parsed.data.steps);
-        if (refError) {
-          res.status(400).json(refError);
-          return;
-        }
-
-        // WARP-2665 — classify from the steps, not from the body.
-        const reconciled = reconcileWrites(
-          parsed.data.writes,
-          writeToolNamesIn(toStoredShape(parsed.data.steps)),
-        );
-        if (!reconciled.ok) {
-          res.status(400).json(writesDisagreementBody(reconciled.writeTools));
-          return;
-        }
-
-        try {
-          const created = (await prisma.toolSpec.create({
-            data: {
-              slug: parsed.data.slug,
-              name: parsed.data.name,
-              category: parsed.data.category ?? null,
-              description: parsed.data.description ?? null,
-              share: parsed.data.share ?? null,
-              safety: parsed.data.safety ?? 1,
-              writes: reconciled.writes,
-              reversible: parsed.data.reversible ?? true,
-              ownerId: actor,
-              steps: {
-                create: parsed.data.steps.map((s, idx) => ({
-                  idx,
-                  kind: s.kind,
-                  args: storedArgsFor(s) as any,
-                })),
-              },
-            },
-            include: { steps: { orderBy: { idx: "asc" } } },
-          })) as unknown as SpecRow & { steps: StepRow[] };
-          res.status(201).json(projectSpec(created));
-        } catch (err) {
-          // Prisma surfaces unique-constraint violations as P2002. Convert
-          // to a 409 so the dashboard can render "slug already in use".
-          if ((err as { code?: string }).code === "P2002") {
-            res
-              .status(409)
-              .json({ error: "Slug already in use", slug: parsed.data.slug });
-            return;
-          }
+        // WARP-2897 — the validators and the create live in ONE service
+        // (tool-spec-draft.service.ts) so slice I-1's seeded drafts pass the
+        // same checks. WARP-485: ownerId is the User.id, never the username.
+        // No runtime tool sets: the walker dispatches compiled tools only.
+        // A slug collision is thrown typed (it aborts a transaction, so a
+        // multi-draft caller must unwind); here it is just the 409.
+        const created = await createDraftSpecTx<SpecRow & { steps: StepRow[] }>(
+          prisma,
+          parsed.data,
+          who.id,
+        ).catch((err: unknown) => {
+          if (err instanceof DraftSlugTakenError) return { ok: false as const, refusal: err.refusal };
           throw err;
+        });
+        if (!created.ok) {
+          res.status(created.refusal.status).json(created.refusal.body);
+          return;
         }
+        res.status(201).json(projectSpec(created.spec));
       } catch (err) {
         next(err);
       }

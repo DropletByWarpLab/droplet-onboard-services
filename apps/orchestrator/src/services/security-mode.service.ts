@@ -1020,6 +1020,36 @@ async function workspaceTimezone(prisma: Pick<PrismaClient, "workspace">): Promi
 }
 
 /**
+ * WARP-2980 (P5 §6.2, D20) — THE display-zone rule, in one place: the site
+ * zone when the opening hours are set; else Workspace.tz when
+ * `isValidIanaZone` accepts it (canonical spelling); else null. Never "UTC"
+ * as a stand-in for "unknown".
+ *
+ * Used by the mode card (`ModeView.displayTimezone`) and by the baselines,
+ * which cut their hour slots in this zone — so a household with no opening
+ * hours still learns, in the workspace's zone. When the hours are set but
+ * their zone is one the runtime cannot read, the answer is null: the site's
+ * declared zone is never silently swapped for another one.
+ *
+ * `known` — the hours header a caller already read in its own snapshot (the
+ * mode view); the header is then not read again.
+ */
+export async function resolveSecurityTimezone(
+  prisma: Pick<PrismaClient, "securitySiteHours" | "workspace">,
+  known?: SiteModeHealthHours,
+): Promise<string | null> {
+  let hours: SiteModeHealthHours;
+  if (known) {
+    hours = known;
+  } else {
+    const header = await prisma.securitySiteHours.findUnique({ where: { id: SINGLETON } });
+    hours = header && header.state === "set" && header.timezone ? { state: "set", timezone: header.timezone } : { state: "not_set" };
+  }
+  if (hours.state === "set") return isValidIanaZone(hours.timezone) ? hours.timezone : null;
+  return workspaceTimezone(prisma);
+}
+
+/**
  * A person's name as a feed summary can carry it: none of the characters
  * `stripUnsafeDisplayChars` removes (controls, line separators, bidi
  * overrides and isolates — the name is a self-edited Nextcloud display name,
@@ -1075,7 +1105,10 @@ async function buildModeView(
             upcoming: upcoming ? { at: upcoming.at.toISOString(), mode: upcoming.to } : null,
           }
         : { state: "not_set" },
-    displayTimezone: hours.state === "set" ? hours.timezone : await workspaceTimezone(prisma),
+    displayTimezone: await resolveSecurityTimezone(
+      prisma,
+      hours.state === "set" ? { state: "set", timezone: hours.timezone } : { state: "not_set" },
+    ),
     stale: modeViewStale(state, hours, health, now),
     version: state.version,
   };

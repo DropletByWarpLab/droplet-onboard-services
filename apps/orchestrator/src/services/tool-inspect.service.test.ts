@@ -87,6 +87,9 @@ describe("🔴 the reported gate order is the order the chain applies", () => {
       "off_lan_withhold",
       "chat_policy",
       "turn_relevance",
+      // WARP-2900 — a runtime tool's dispatch verdict is NOT here: it is
+      // decided inside callTool, after the tool was advertised, so it is a
+      // caveat on the row (`callRefusal`), never a withholding gate.
     ]);
   });
 });

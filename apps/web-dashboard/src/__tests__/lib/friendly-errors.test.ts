@@ -787,6 +787,11 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "ZONES_UNAVAILABLE",
     "VALIDATION_ERROR",
     "INTERNAL_ERROR",
+    // WARP-2980 (P5 PR-A) — the read-only patterns routes 29–31.
+    "PATTERNS_UNAVAILABLE",
+    "PATTERN_NOT_FOUND",
+    "PATTERNS_NOT_BUILT",
+    "NO_TIMEZONE",
   ] as const satisfies readonly SecurityErrorCode[];
   // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
   // code added to SecurityErrorCode without copy here fails the build.
@@ -806,18 +811,36 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
   it("the copy never says zone, and never promises the site is watched over", () => {
     // "zone" as a NOUN — "timezone" is the ordinary word for what the owner picks.
     const banned = /monitor|armed|\barm\b|alarm|\bsecure\b|protected|guard|\bspaces?\b|\bzones?\b/i;
-    for (const code of [...CODES, "401", "404", "403", "409", "429", "NETWORK", "TIMEOUT", "TOTALLY_UNKNOWN_CODE"]) {
+    for (const code of [...CODES, "401", "404", "403", "409", "429", "NETWORK", "NETWORK_ERROR", "TIMEOUT", "TOTALLY_UNKNOWN_CODE"]) {
       expect(translateError({ code }, "security"), code).not.toMatch(banned);
     }
     expect(fallback).not.toMatch(banned);
   });
 
-  it("a 401 that survives authFetch's refresh (a flat 401, code UNKNOWN) says the session ended, not the fallback", () => {
+  it("a 401 that survives authFetch's refresh (a flat 401, code UNKNOWN) says nothing changed, not the fallback", () => {
     // securityFetch turns a flat `{error: "..."}` 401 into code "UNKNOWN" + status 401 — after authFetch already tried to refresh.
     const copy = translateError({ code: "UNKNOWN", status: 401, message: SECRET }, "security");
-    expect(copy).toBe("Your session has ended. Sign in again to make that change.");
     expect(copy).not.toBe(fallback);
+    expect(copy).not.toContain(SECRET);
+    expect(copy).toMatch(/nothing was changed/);
     expect(translateError({ status: 401 }, "security")).toBe(copy);
+  });
+
+  it("the 401 copy never says the session ended — authFetch also returns a 401 on a transient refresh, with the session fine", () => {
+    // auth.tsx: outcome.kind === "transient" → the original 401, no logout.
+    const copy = translateError({ code: "UNKNOWN", status: 401 }, "security");
+    expect(copy).not.toMatch(/session (has )?ended|signed out|logged out/i);
+    // Signing in again is the remedy only when it keeps happening.
+    expect(copy).toMatch(/sign in again if this keeps happening/i);
+  });
+
+  it("securityFetch's NETWORK_ERROR has its own key, so the copy doesn't depend on the browser's message text", () => {
+    // Safari's fetch rejects with "Load failed", which inferCodeFromMessage does not match.
+    for (const message of ["Load failed", "Failed to fetch", ""]) {
+      const copy = translateError({ code: "NETWORK_ERROR", status: 0, message }, "security");
+      expect(copy, message).toBe(translateError({ code: "NETWORK" }, "security"));
+      expect(copy, message).not.toBe(fallback);
+    }
   });
 
   it("an audit failure says nothing was changed; a conflict says someone else moved it", () => {

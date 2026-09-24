@@ -1,0 +1,19 @@
+-- WARP-3047 — a recurring agent run created without a model follows the
+-- box's ACTIVE model instead of freezing the model active at creation.
+--
+-- Before this column the schedules route resolved the active model when the
+-- schedule was CREATED and stored it in the non-null `model`, so after an
+-- owner switched the box from A to B every such schedule kept asking for A
+-- at each fire — on Docker Model Runner a second model on the one GPU.
+--
+-- An explicit flag, not a sentinel value in `model`: the state is stated in
+-- its own column rather than read off a magic value (the same reason status
+-- is an explicit enum, never inferred), `model` keeps holding a real runtime
+-- id — the fallback when nothing resolves at fire, and exactly what a build
+-- without this column fires on — and every existing row reads `false`, i.e.
+-- pinned, which is what it was.
+--
+-- Additive, with a constant default: a metadata-only change on Postgres 11+,
+-- no table rewrite. IF NOT EXISTS so a re-run over an applied schema is a
+-- no-op (the WARP-456 / WARP-2896 re-stamp pattern).
+ALTER TABLE "AgentRunSchedule" ADD COLUMN IF NOT EXISTS "followsActiveModel" BOOLEAN NOT NULL DEFAULT false;
