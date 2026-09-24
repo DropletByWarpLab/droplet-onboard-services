@@ -364,6 +364,15 @@ export interface IncidentAckView {
   /** The ack came from the person's own alert notification for this incident (verified). */
   viaNotification: boolean;
   note: string;
+  /**
+   * Review #11 — the sign-in behind the ack, for owner/admin ONLY (null for
+   * anyone else): whether the request carried a sign-in id (the signed
+   * token's `sid`) and whether authMiddleware confirmed that sign-in live.
+   * The id itself is never returned — not even truncated: nothing an owner
+   * can see names a sign-in by it (GET /auth/sessions deliberately omits
+   * sids), so a prefix would identify a session without matching anything.
+   */
+  signIn: { recorded: boolean; confirmedLive: boolean } | null;
 }
 
 export interface IncidentNoticeView {
@@ -584,6 +593,7 @@ export async function loadIncidentDetail(
       client: a.client,
       viaNotification: a.viaNotificationId !== null,
       note: a.note,
+      signIn: v.ownerOrAdmin ? { recorded: a.sessionId !== null, confirmedLive: a.sessionId !== null && a.sessionChecked } : null,
     })),
     notices: notices.map((n) => ({
       userId: n.userId,

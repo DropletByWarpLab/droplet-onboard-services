@@ -415,7 +415,7 @@ describe("route 19 — acknowledge", () => {
     expect(res.body.changed).toBe(true);
     expect(res.body.incident).toMatchObject({ id: SHARED, state: "acknowledged", viewer: { acknowledged: true } });
     expect(res.body.incident.acks).toEqual([
-      { action: "acknowledge", byName: "Maria", at: NOW.toISOString(), client: "droplet-ios/1.4.0 (iOS 18.2)", viaNotification: true, note: "" },
+      { action: "acknowledge", byName: "Maria", at: NOW.toISOString(), client: "droplet-ios/1.4.0 (iOS 18.2)", viaNotification: true, note: "", signIn: null },
     ]);
     expect(f.world.securityIncidentAck[0]).toMatchObject({ byUserId: MARIA, sessionId: "sess-1", sessionChecked: true, viaNotificationId: "log-maria" });
     expect(f.world.securityIncident.find((i) => i.id === SHARED)).toMatchObject({ state: "acknowledged", stateChangedById: MARIA, version: 5 });
@@ -600,6 +600,36 @@ describe("review #1 (DS-005) — a viewer who sees only a LOWER code (front noti
     const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${SHARED}`);
     expect(res.body.severity).toBe("alert");
     expect(res.body.notices).toEqual([]);
+  });
+});
+
+describe("review #11 — the sign-in behind an acknowledgement (box proof step 4)", () => {
+  function withAcks(f: FakeSecurityPrisma) {
+    f.world.securityIncidentAck.push(
+      { id: "a1", incidentId: SHARED, action: "acknowledge", byUserId: MARIA, byName: "Maria", at: T, sessionId: "sess-maria-7f3a", sessionChecked: true, client: "droplet-ios/1.4.0 (iOS 18.2)", viaNotificationId: null, note: "" },
+      { id: "a2", incidentId: SHARED, action: "acknowledge", byUserId: STEFAN, byName: "Stefan", at: T, sessionId: null, sessionChecked: false, client: null, viaNotificationId: null, note: "" },
+    );
+  }
+
+  it("owner/admin see whether a sign-in was recorded and confirmed live — never the sign-in's id", async () => {
+    const f = world();
+    withAcks(f);
+    for (const role of ["owner", "admin"] as const) {
+      const res = await request(app(f, role, "manage").server).get(`/api/security/incidents/${SHARED}`);
+      expect(res.body.acks.map((a: { signIn: unknown }) => a.signIn), role).toEqual([
+        { recorded: true, confirmedLive: true },
+        { recorded: false, confirmedLive: false },
+      ]);
+      expect(JSON.stringify(res.body)).not.toContain("sess-maria");
+    }
+  });
+
+  it("anyone else gets no sign-in facts at all (null)", async () => {
+    const f = world();
+    withAcks(f);
+    const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${SHARED}`);
+    expect(res.body.acks.map((a: { signIn: unknown }) => a.signIn)).toEqual([null, null]);
+    expect(JSON.stringify(res.body)).not.toContain("sess-maria");
   });
 });
 
