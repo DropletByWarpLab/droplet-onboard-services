@@ -52,7 +52,16 @@ export type UpdateFailureReason =
   | "schema_invalid"
   | "schema_downgrade"
   | "schema_unsupported"
-  | "orchestrator_schema_unsupported";
+  | "orchestrator_schema_unsupported"
+  // WARP-2900 (ADR-056 slice H1): the extension-statement verifier
+  // (extension-verify.ts). A usage mismatch is never reported as
+  // signature_failed: "the right key signed the wrong kind of thing" and
+  // "nobody we trust signed this" are different operator stories.
+  | "extension_kind_missing"
+  | "key_usage_mismatch"
+  | "extension_key_changed"
+  | "extension_schema_invalid"
+  | "extension_digest_mismatch";
 
 export type ManifestFailureReason = Extract<
   UpdateFailureReason,
