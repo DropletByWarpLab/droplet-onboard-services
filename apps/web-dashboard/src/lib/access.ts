@@ -280,8 +280,10 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
   },
   // WARP-2977 (ADR-059 §6). Value-identical to the orchestrator's catalog:
   // view and act floored at family (presence data — no guest tier), manage
-  // at admin (zones, hours and what counts as expected are business policy).
-  // Camera rows inside it still need a camera grant.
+  // at admin (areas, hours and what counts as expected are business policy).
+  // Camera rows inside it still need a camera grant. WARP-2977 P2b: "Areas"
+  // is the UI noun for what the code calls zones (ADR-002 lists "zones" as
+  // installer jargon).
   {
     moduleId: "security",
     label: "Security",
@@ -306,7 +308,7 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
       {
         value: "manage",
         label: "Manage",
-        grants: "Zones, opening hours and what counts as expected",
+        grants: "Areas, opening hours and what counts as expected",
         minTier: ADMIN,
         dropNoun: "Manage security",
         dropVerb: "manage security",
