@@ -191,6 +191,7 @@ import {
   migrateBrainMemoryDirectoryLayout,
 } from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { initAnalytics, analytics } from "./services/analytics/index.js";
 import { forwardHealthSnapshot } from "./services/analytics/service-health.js";
 import { createLogger } from "./lib/logger.js";
@@ -457,8 +458,9 @@ async function main() {
   // dashboard ~20 min after first boot without any manual `ollama pull`.
   // Non-blocking — the orchestrator is fully serving requests while the
   // model downloads in the background. See model-readiness.service.ts.
+  // WARP-3047: the boot warm is of the ACTIVE model, not LLM_MODEL.
   try {
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(() => resolveActiveModel(prisma));
   } catch (err) {
     logger.warn(
       "Model readiness check failed: %s (orchestrator continues serving requests)",
@@ -692,10 +694,10 @@ async function main() {
     await seedBrainPasses(prisma);
 
     // Same resolution the agent-run routes use. Read at CALL time, not once at
-    // boot: `DEFAULT_MODEL` is what the box is configured with now, and a
-    // process that started before the operator set one should pick it up.
-    const resolveBrainModel = () =>
-      (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+    // boot: WARP-3047 — the pass follows the box's ACTIVE model, so a switch
+    // on the Models page moves the hourly pass too instead of it reloading
+    // the env model next to the active one.
+    const resolveBrainModel = async () => (await resolveActiveModel(prisma)) ?? "";
 
     // WARP-2850 — the pass BODIES, named once. The interval tick, the boot run
     // and the operator's "check now" are three callers of the same function
@@ -735,7 +737,7 @@ async function main() {
       // box has already recorded and the route has already reported started.
       [CORPUS_PASS_KEY]: async () => {
         const outcome = await runCorpusPass(
-          { prisma, chat: aiGateway.chat, model: resolveBrainModel() },
+          { prisma, chat: aiGateway.chat, model: await resolveBrainModel() },
           { limit: config.brain.corpusUnitsPerRun },
         );
         if (outcome.errors.length > 0) {
@@ -750,8 +752,8 @@ async function main() {
       // Corpus only. The detector pass is bounded indexed SQL and re-running
       // it costs the box nothing anyone would notice.
       manualMinIntervalMs: { [CORPUS_PASS_KEY]: config.brain.manualMinIntervalMs },
-      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and `DEFAULT_MODEL` are
-      // independent env vars with no cross-validation, so "brain on, no model
+      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and the active model are
+      // independent with no cross-validation, so "brain on, no model
       // configured" is a reachable box. On one of those, a check living inside
       // the runner would run only AFTER `claimPass` had stamped
       // `runState: "running"` and `lastRunAt` — the operator gets a 202 and
@@ -780,7 +782,7 @@ async function main() {
           (await isBrainEnabled(prisma)) ? null : "disabled",
         [CORPUS_PASS_KEY]: async () => {
           if (!(await isBrainEnabled(prisma))) return "disabled";
-          return resolveBrainModel() ? null : "no_model";
+          return (await resolveBrainModel()) ? null : "no_model";
         },
       },
     });

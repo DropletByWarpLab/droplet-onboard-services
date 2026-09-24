@@ -35,6 +35,13 @@ vi.mock("../services/jwt.service.js", () => ({
       : null,
 }));
 
+// WARP-3047 — the DEFAULT warm (no injected spy) is the active-model warm.
+const warmActiveModel = vi.hoisted(() => vi.fn(async (_prisma: unknown) => undefined));
+vi.mock("../services/active-model.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/active-model.service.js")>()),
+  warmActiveModel: (prisma: unknown) => warmActiveModel(prisma),
+}));
+
 import { createSetupRouter } from "./setup.js";
 
 // ── In-memory applianceSetup singleton store ──
@@ -450,6 +457,22 @@ describe("PATCH /api/setup/state — model pre-warm trigger (WARP-1041)", () => 
       expect(warm).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("defaults to warming the box's ACTIVE model, resolved against this box's settings (WARP-3047)", async () => {
+    warmActiveModel.mockClear();
+    const prisma = createPrismaMock();
+    const app = express();
+    app.use(cookieParser());
+    app.use(express.json());
+    app.use("/api", createSetupRouter(prisma as never));
+
+    const res = await request(app).patch("/api/setup/state").send({ setup_step: "storage" });
+    await flushWarmTick();
+
+    expect(res.status).toBe(200);
+    expect(warmActiveModel).toHaveBeenCalledTimes(1);
+    expect(warmActiveModel).toHaveBeenCalledWith(prisma);
+  });
 
   it.each(["welcome", "claim", "account", "org", "internet"])(
     "does NOT fire the warm on the early step %s",

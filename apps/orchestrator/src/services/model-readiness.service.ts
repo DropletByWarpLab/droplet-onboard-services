@@ -88,19 +88,27 @@ interface OllamaPullProgress {
  *  Also blunts abuse via the pre-auth PATCH /setup/state trigger. */
 const WARM_DEBOUNCE_MS = 10 * 60 * 1000;
 
-/** Timestamp of the last warm ATTEMPT (module-level debounce). Reset to
- *  0 on failure so the next trigger — typically the pull-complete hook
- *  firing after a first-boot 404 — retries immediately. */
-let lastWarmAttemptAt = 0;
+/** Timestamp of the last warm ATTEMPT, per model. Cleared for that model on
+ *  failure so the next trigger — typically the pull-complete hook firing
+ *  after a first-boot 404 — retries immediately.
+ *
+ *  WARP-3047: keyed BY MODEL. One module-level stamp meant a login's warm
+ *  of A swallowed, for ten minutes, the warm of B that a model switch fires
+ *  seconds later — the common case of an owner who signs in and then
+ *  switches. */
+const lastWarmAttemptAt = new Map<string, number>();
 
 /** Exported for testing: clears the module-level warm debounce. */
 export function resetWarmStateForTests(): void {
-  lastWarmAttemptAt = 0;
+  lastWarmAttemptAt.clear();
 }
 
 /**
- * Load the configured chat model (LLM_MODEL) into the serving runtime's
- * memory. Fire-and-forget at every call site; never throws.
+ * Load `model` — the box's ACTIVE chat model, resolved by the caller
+ * (`warmActiveModel` in active-model.service) — into the serving runtime's
+ * memory. Fire-and-forget at every call site; never throws. WARP-3047: this
+ * used to warm env LLM_MODEL whatever the box had been switched to, so every
+ * login loaded the old model next to the new one on DMR.
  *
  *   - OpenAI path, max_tokens=1 — the ONLY load-triggering request both
  *     runtimes serve (Ollama and DMR). Ollama's nicer empty-prompt
@@ -109,30 +117,32 @@ export function resetWarmStateForTests(): void {
  *     (OLLAMA_KEEP_ALIVE) or the runtime's own configuration, never
  *     this code path.
  *
- * All failures (404 while the model is still pulling, ECONNREFUSED
- * while the runtime boots) are swallowed at debug level: warming is an
- * optimization, never a dependency.
+ * All failures are swallowed: warming is an optimization, never a
+ * dependency. ECONNREFUSED while the runtime boots stays at debug; a non-2xx
+ * is logged at WARN with the runtime's own reason (WARP-3047), because that
+ * is where "not enough GPU memory to load the model" shows up — a model that
+ * doesn't fit must be visible, not a debug line nobody reads.
  */
-export async function warmDefaultModel(): Promise<void> {
-  const model = process.env.LLM_MODEL ?? "";
-  if (!model) {
-    logger.debug("LLM_MODEL unset — skipping model warm");
+export async function warmDefaultModel(model?: string | null): Promise<void> {
+  const target = (model ?? "").trim();
+  if (!target) {
+    logger.debug("no active model resolved — skipping model warm");
     return;
   }
   const now = Date.now();
-  if (now - lastWarmAttemptAt < WARM_DEBOUNCE_MS) {
+  if (now - (lastWarmAttemptAt.get(target) ?? 0) < WARM_DEBOUNCE_MS) {
     return;
   }
   // Stamp at attempt start so concurrent triggers debounce against the
   // in-flight warm rather than stacking duplicate loads.
-  lastWarmAttemptAt = now;
+  lastWarmAttemptAt.set(target, now);
   const startedAt = Date.now();
   try {
     const resp = await fetch(`${inferenceRuntimeUrl()}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model,
+        model: target,
         messages: [{ role: "user", content: "ping" }],
         max_tokens: 1,
         stream: false,
@@ -140,14 +150,16 @@ export async function warmDefaultModel(): Promise<void> {
     });
     if (!resp.ok) {
       // Drain the error body — under undici an unconsumed body can pin
-      // the socket until GC. Same pattern as the ok branch below.
-      await resp.json().catch(() => undefined);
-      // Likely 404: the model isn't pulled yet (first boot mid-pull).
-      // Clear the debounce so the pull-complete hook can warm this boot.
-      lastWarmAttemptAt = 0;
-      logger.debug(
-        { model, status: resp.status },
-        "model_warm_skipped (runtime non-2xx — model may still be pulling)",
+      // the socket until GC. Read as TEXT: DMR's load failure is a
+      // text/plain "unable to load runner: …" body, not JSON.
+      const detail = (await resp.text().catch(() => "")).slice(0, 300);
+      // A 404 is the model still pulling (first boot mid-pull); a 500 is a
+      // runtime that could not load it. Clear the debounce either way so
+      // the pull-complete hook (or the next trigger) can retry this boot.
+      lastWarmAttemptAt.delete(target);
+      logger.warn(
+        { model: target, status: resp.status, detail },
+        "model_warm_failed (runtime non-2xx — 404: still pulling; 500: could not load, e.g. not enough GPU memory)",
       );
       return;
     }
@@ -155,12 +167,12 @@ export async function warmDefaultModel(): Promise<void> {
     // useful payload for a load-only request.
     await resp.json().catch(() => undefined);
     const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
-    logger.info({ model, elapsedSec }, "model_warm_complete");
+    logger.info({ model: target, elapsedSec }, "model_warm_complete");
   } catch (err) {
     // ECONNREFUSED and friends — Ollama not up yet. Non-fatal.
-    lastWarmAttemptAt = 0;
+    lastWarmAttemptAt.delete(target);
     logger.debug(
-      { model, err: (err as Error).message },
+      { model: target, err: (err as Error).message },
       "model_warm_failed (runtime unreachable — will retry on next trigger)",
     );
   }
@@ -454,8 +466,17 @@ function nativeListingHasUsableSize(entries: unknown[], model: string): boolean 
  * Non-fatal in every failure mode: orchestrator startup never blocks
  * on this, never exits on a pull failure. The dashboard model list
  * (`useModels` SWR poll) will surface the model once Ollama has it.
+ *
+ * WARP-3047 — the env loop stays env-driven (it PROVISIONS the seeded
+ * models), but the warm does not: `resolveActiveModel` names the model the
+ * box actually answers with, and exactly that one is warmed — after the
+ * loop when it is already present, or by its pull-complete hook when it is
+ * being pulled. Injected rather than imported so this module stays free of
+ * Prisma and the gateway client.
  */
-export async function ensureDefaultModelPulled(): Promise<void> {
+export async function ensureDefaultModelPulled(
+  resolveActiveModel: () => Promise<string | null>,
+): Promise<void> {
   // The chat default (LLM_MODEL) plus the optional local vision model
   // (VISION_MODEL) the image-vision path auto-routes to. Both are ensured at
   // startup so a fresh box has them ready without manual `ollama pull`.
@@ -468,6 +489,7 @@ export async function ensureDefaultModelPulled(): Promise<void> {
   );
   if (models.length === 0) {
     logger.info("LLM_MODEL/VISION_MODEL unset — skipping model readiness check");
+    warmActiveUnlessPulling(resolveActiveModel, new Set());
     return;
   }
 
@@ -516,6 +538,7 @@ export async function ensureDefaultModelPulled(): Promise<void> {
   // number. So a DMR readiness check must verify SERVEABILITY, not listing.
   // ──────────────────────────────────────────────────────────────────
   const present = new Set((tags.models ?? []).map((m) => m.name));
+  const pulling = new Set<string>();
   for (const model of models) {
     if (present.has(model)) {
       // WARP-1749 — listed ≠ serveable. On the default runtime this returns
@@ -533,13 +556,6 @@ export async function ensureDefaultModelPulled(): Promise<void> {
         // warming a phantom just errors.
       } else {
         logger.info({ model, serveability: verdict }, "Model already pulled — ready");
-        // WARP-1041 — pulled ≠ loaded. Warm the CHAT default so the first
-        // ask after this boot (wizard probe or /chat) skips the 30-90 s
-        // GPU load. Only the LLM_MODEL: warming is chat-first, and the
-        // vision model loads on demand.
-        if (model === process.env.LLM_MODEL) {
-          void warmDefaultModel();
-        }
         continue;
       }
     }
@@ -551,13 +567,48 @@ export async function ensureDefaultModelPulled(): Promise<void> {
     );
     // Fire-and-forget. The `void` makes intent explicit and silences the
     // floating-promise lint. Errors are caught + logged inside backgroundPull.
-    void backgroundPull(model);
+    pulling.add(model);
+    void backgroundPull(model, resolveActiveModel);
   }
+
+  // WARP-1041 — pulled ≠ loaded. Warm the ACTIVE chat model (WARP-3047: not
+  // LLM_MODEL — the owner may have switched) so the first ask after this
+  // boot skips the 30-90 s GPU load. One model only: warming is chat-first,
+  // the vision model loads on demand, and on DMR a second warm is a second
+  // resident model. A model being pulled right now is warmed by its
+  // pull-complete hook instead — warming it here would 404.
+  warmActiveUnlessPulling(resolveActiveModel, pulling);
+}
+
+/**
+ * Resolve the active model and warm it, off the boot path: the resolver asks
+ * the ai-gateway, which may not be up yet this early (it starts after the
+ * orchestrator), and boot must never wait on that.
+ */
+function warmActiveUnlessPulling(
+  resolveActiveModel: () => Promise<string | null>,
+  pulling: ReadonlySet<string>,
+): void {
+  void resolveActiveModel()
+    .then((active) => {
+      if (active && !pulling.has(active)) return warmDefaultModel(active);
+      return undefined;
+    })
+    .catch((err: unknown) => {
+      logger.debug({ err: (err as Error).message }, "model_warm_skipped (active model unresolved)");
+    });
 }
 
 // Exported for testing: the streaming progress parser is the unit under
 // regression test (completed:0 must be forwarded as pct=0).
-export async function backgroundPull(model: string): Promise<void> {
+//
+// WARP-3047 — `resolveActiveModel` is asked at COMPLETION, not at start: a
+// multi-GB pull outlives the boot, and the model to warm is whichever one the
+// box answers with by the time the weights are on disk. Omitted → never warm.
+export async function backgroundPull(
+  model: string,
+  resolveActiveModel?: () => Promise<string | null>,
+): Promise<void> {
   const startedAt = Date.now();
   // Seed at -10 (not -1) so the very first event (pct=0) clears the +10
   // throttle below and logs the start of the pull.
@@ -634,12 +685,15 @@ export async function backgroundPull(model: string): Promise<void> {
         if (ev.status === "success") {
           const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
           logger.info({ model, elapsedSec }, "model_pull_complete");
-          // WARP-1041 — the freshly-pulled chat default is on disk but
-          // NOT in GPU memory. Warm it now so a first-boot customer's
-          // wizard probe doesn't pay the cold load (and so a startup
-          // warm that 404'd mid-pull gets its retry this boot).
-          if (model === process.env.LLM_MODEL) {
-            void warmDefaultModel();
+          // WARP-1041 — the freshly-pulled chat model is on disk but NOT
+          // in GPU memory. Warm it now — if it is the ACTIVE one — so a
+          // first-boot customer's wizard probe doesn't pay the cold load
+          // (and so a startup warm that 404'd mid-pull gets its retry).
+          if (resolveActiveModel) {
+            warmActiveUnlessPulling(
+              async () => ((await resolveActiveModel()) === model ? model : null),
+              new Set(),
+            );
           }
         }
       }
