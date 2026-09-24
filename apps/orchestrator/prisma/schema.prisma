@@ -8810,7 +8810,7 @@ model SecurityModeState {
 //
 // Explicit enums, never IS NULL as state. Shape rules Prisma cannot express
 // are hand-written CHECKs and partial unique indexes in
-// 20260925000000_warp_2980_security_baselines.
+// 20260925010000_warp_2980_security_baselines.
 
 /// The SITE-LOCAL date's ISO weekday: 1–5 weekday, 6–7 weekend (brief §4.3).
 enum SecurityDayType {
