@@ -78,8 +78,11 @@ export const M365_CALLBACK_PATH = "/api/m365/callback";
 export const M365_STATE_COOKIE = "droplet_m365_state";
 const M365_COOKIE_PATH = "/api/m365";
 
-/** Where the callback lands the person, with the outcome for the page to say. */
-const M365_LANDING_PATH = "/integrations";
+/** Where the callback lands the person, with the outcome for the page to say:
+ *  Settings, where each person's own Microsoft 365 card lives (WARP-3056).
+ *  Not the integrations hub — that is owner/admin and box-level, and this
+ *  connection is per person, family included. */
+const M365_LANDING_PATH = "/settings";
 
 function isHttps(req: Request): boolean {
   return req.secure || req.headers["x-forwarded-proto"] === "https";

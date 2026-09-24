@@ -263,7 +263,7 @@ describe("GET /api/m365/callback", () => {
       .set("Cookie", `${M365_STATE_COOKIE}=${encodeURIComponent(state)}`);
 
     expect(res.status).toBe(303);
-    expect(res.headers.location).toBe("/integrations?m365=connected");
+    expect(res.headers.location).toBe("/settings?m365=connected");
     // Single-use: the cookie is cleared on the way out.
     expect(([] as string[]).concat(res.headers["set-cookie"] ?? []).join(";")).toMatch(
       new RegExp(`${M365_STATE_COOKIE}=;`),
@@ -279,7 +279,7 @@ describe("GET /api/m365/callback", () => {
     const res = await request(publicApp(prisma, entra)).get("/api/m365/callback").query({ code: "c", state });
 
     expect(res.status).toBe(303);
-    expect(res.headers.location).toBe("/integrations?m365=invalid");
+    expect(res.headers.location).toBe("/settings?m365=invalid");
     expect(entra.acquireByAuthorizationCode).not.toHaveBeenCalled();
     expect(prisma.__row()).toMatchObject({ state: "PENDING_CONSENT" });
   });
@@ -292,7 +292,7 @@ describe("GET /api/m365/callback", () => {
       .get("/api/m365/callback")
       .query({ state, error: "access_denied", error_description: "AADSTS65004: declined" })
       .set("Cookie", `${M365_STATE_COOKIE}=${encodeURIComponent(state)}`);
-    expect(res.headers.location).toBe("/integrations?m365=cancelled");
+    expect(res.headers.location).toBe("/settings?m365=cancelled");
   });
 
   it("reflects nothing from the query into the Location header", async () => {
@@ -302,7 +302,7 @@ describe("GET /api/m365/callback", () => {
       .query({ state: hostile, code: hostile, error: hostile })
       .set("Cookie", `${M365_STATE_COOKIE}=${encodeURIComponent(hostile)}`);
     expect(res.status).toBe(303);
-    expect(res.headers.location).toBe("/integrations?m365=invalid");
+    expect(res.headers.location).toBe("/settings?m365=invalid");
   });
 
   it("is the ONLY route without a role guard", () => {
