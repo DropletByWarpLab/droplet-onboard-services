@@ -11,6 +11,12 @@
  * success, a throttle, a dead delta token, and a dead grant. `sync-policy.ts`
  * makes the decisions; this applies them to state. Prisma is injected, so the
  * whole lifecycle is testable without a database.
+ *
+ * Every write to a cursor is `updateMany` by id, never `update` (#2347
+ * review). A disconnect deletes the person's cursors while a tick may be
+ * running one, and `update` throws on a missing row (P2025): the throw escaped
+ * `syncCursor` and skipped the rest of the tick, other people's cursors
+ * included. For a cursor that no longer exists, writing nothing is correct.
  */
 import type { PrismaClient } from "@prisma/client";
 
@@ -33,6 +39,9 @@ export interface DueCursor {
   resourceId: string;
   /** Null means "enumerate from scratch" — either never synced, or resyncing. */
   deltaLink: string | null;
+  /** WARP-3059 — set when the last run ran out of page budget mid-enumeration:
+   *  where this run picks up. Takes precedence over `deltaLink`. */
+  resumeLink: string | null;
   state: string;
 }
 
@@ -43,14 +52,28 @@ export interface DueCursor {
  *   - `SYNCING`, so two ticks cannot overlap on one cursor and double-write.
  *   - `FAILED`, which means retrying will not help and a person needs to look.
  *     Retrying it on every tick would hammer Microsoft to no purpose.
+ *
+ * And only for people whose connection is CONNECTED (WARP-3059). A cursor's
+ * token comes from its owner's grant; claiming one whose owner is
+ * disconnected, reconnecting or in ERROR spends a tick to fail at
+ * `getAccessToken`, every tick, and pins the failure on a cursor that did
+ * nothing wrong. `M365DeltaCursor.userId` is not a relation, so this is two
+ * reads rather than a join.
  */
 export async function claimDueCursors(
   prisma: PrismaClient,
   limit: number,
   now: Date = new Date(),
 ): Promise<DueCursor[]> {
+  const owners = (await prisma.m365Connection.findMany({
+    where: { state: "CONNECTED" },
+    select: { userId: true },
+  })) as Array<{ userId: string }>;
+  if (owners.length === 0) return [];
+
   const rows = await prisma.m365DeltaCursor.findMany({
     where: {
+      userId: { in: owners.map((o) => o.userId) },
       state: { in: [...CLAIMABLE_STATES] },
       // Never attempted, or its backoff window has elapsed.
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
@@ -105,10 +128,12 @@ export async function recordSuccess(
   deltaLink: string | null,
   now: Date = new Date(),
 ): Promise<void> {
-  await prisma.m365DeltaCursor.update({
+  await prisma.m365DeltaCursor.updateMany({
     where: { id: cursorId },
     data: {
       deltaLink,
+      // The run this checkpoint belonged to has finished.
+      resumeLink: null,
       state: "IDLE",
       consecutiveFailures: 0,
       nextAttemptAt: null,
@@ -116,6 +141,45 @@ export async function recordSuccess(
       lastError: null,
     },
   });
+}
+
+/**
+ * WARP-3059 — a run ran out of page budget mid-enumeration: remember where it
+ * resumes.
+ *
+ * `resumeLink` is the `nextLink` of the last page the run HANDLED, so every
+ * page before it has been processed — which is what makes resuming from it
+ * correct, where resuming from a failed page would skip records. `deltaLink`
+ * is untouched: the cursor still advances only when a run completes.
+ * `lastSyncedAt` is untouched too; the hub's "last synced" means a completed
+ * sync, and this is not one.
+ */
+export async function recordCheckpoint(
+  prisma: PrismaClient,
+  cursorId: string,
+  resumeLink: string,
+): Promise<void> {
+  await prisma.m365DeltaCursor.updateMany({
+    where: { id: cursorId },
+    data: {
+      resumeLink,
+      state: "IDLE",
+      consecutiveFailures: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    },
+  });
+}
+
+/**
+ * WARP-3059 — delete every cursor a person owns. Called on disconnect and on
+ * user deletion: ADR-041's disconnect purges, and a delta link is the old
+ * account's position — replayed after reconnecting as a different account it
+ * is wrong, and kept for a deleted user it is residue nobody owns.
+ */
+export async function purgeCursorsForUser(prisma: PrismaClient, userId: string): Promise<number> {
+  const { count } = await prisma.m365DeltaCursor.deleteMany({ where: { userId } });
+  return count;
 }
 
 /**
@@ -147,12 +211,14 @@ export async function recordFailure(
   const kind = classifySyncFailure(err);
 
   if (kind === "RESYNC_REQUIRED") {
-    await prisma.m365DeltaCursor.update({
+    await prisma.m365DeltaCursor.updateMany({
       where: { id: cursorId },
       data: {
         state: "RESYNC_REQUIRED",
-        // Keeping the link would replay a token Graph has already rejected.
+        // Keeping the link would replay a token Graph has already rejected —
+        // and a checkpoint inside that enumeration is dead with it (WARP-3059).
         deltaLink: null,
+        resumeLink: null,
         consecutiveFailures: 0,
         nextAttemptAt: null,
         lastError: null,
@@ -168,7 +234,11 @@ export async function recordFailure(
   const failures = (current[0]?.consecutiveFailures ?? 0) + 1;
 
   if (kind === "FATAL") {
-    await prisma.m365DeltaCursor.update({
+    // `resumeLink` is kept here, like `deltaLink`, because nothing moves a
+    // cursor out of FAILED today. Whatever does (a reset, a retry button) must
+    // clear resumeLink as well: a stale resume link that draws a non-410 4xx
+    // is one of the ways a cursor lands here (#2347 review).
+    await prisma.m365DeltaCursor.updateMany({
       where: { id: cursorId },
       data: {
         state: "FAILED",
@@ -182,7 +252,7 @@ export async function recordFailure(
 
   // TRANSIENT and AUTH both wait. AUTH keeps its delta link deliberately.
   const waitMs = computeBackoffMs(failures, parseRetryAfter(retryAfterHeader, now));
-  await prisma.m365DeltaCursor.update({
+  await prisma.m365DeltaCursor.updateMany({
     where: { id: cursorId },
     data: {
       state: "BACKOFF",

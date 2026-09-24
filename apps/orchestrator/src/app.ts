@@ -26,7 +26,7 @@ import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js"
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createErpDriftRouter } from "./routes/erp-drift.js";
-import { createM365Router } from "./routes/m365.js";
+import { createM365CallbackRouter, createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
@@ -125,6 +125,7 @@ import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
@@ -221,6 +222,14 @@ export function createApp(
   // Public: a user signing in via SSO has no session yet. Mounted BEFORE the
   // auth middleware so /sso/oidc/authorize + /sso/oidc/callback don't need one.
   app.use("/api", createSsoRouter(prisma));
+
+  // WARP-2704 — Microsoft 365's authorization-code callback. Public for the
+  // same reason as the SSO callback above: a Microsoft sign-in with MFA or an
+  // admin's consent can outlast the 15-minute access token. It identifies the
+  // person by the flow (state cookie + single-use server-side row), never by a
+  // session. Only GET /api/m365/callback lives here; every other /m365 route
+  // is on the authenticated router below.
+  app.use("/api", createM365CallbackRouter(prisma));
 
   // PR #377 — passwordless WebAuthn / passkey authentication. The
   // authenticate/options + authenticate/verify endpoints are how a caller
@@ -456,7 +465,8 @@ export function createApp(
   app.use("/api", createErpDriftRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
-  // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.
+  // OFF per person: nothing is read until someone connects through their
+  // organisation's own Entra app (WARP-2705 — there is no box-wide app).
   // Every route is scoped to the requester's OWN link — no :userId parameter,
   // because delegated authorization makes a person's mailbox connection theirs.
   app.use("/api", createM365Router(prisma));
@@ -718,7 +728,7 @@ export function createApp(
   // Single fn override at module level so createEmailRouter keeps its
   // existing (prisma, gate) signature. Tests can call wireEmailAnalysis
   // directly with a stub.
-  wireEmailAnalysis(createEmailAnalysisFn(mcpClient));
+  wireEmailAnalysis(createEmailAnalysisFn(mcpClient, () => resolveActiveModel(prisma)));
 
   // WARP-465 (D1): email backbone — accounts list, threads list +
   // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468

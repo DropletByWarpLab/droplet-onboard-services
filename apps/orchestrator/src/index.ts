@@ -165,12 +165,13 @@ import {
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
+  grantCoversNoWorkload,
   runSyncTick,
   type M365SyncDeps,
 } from "./services/m365/m365-sync.service.js";
 import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
-import { createEntraClient, isM365Configured } from "./services/m365/entra-client.js";
+import { createEntraClient } from "./services/m365/entra-client.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -198,6 +199,7 @@ import {
   migrateBrainMemoryDirectoryLayout,
 } from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { initAnalytics, analytics } from "./services/analytics/index.js";
 import { forwardHealthSnapshot } from "./services/analytics/service-health.js";
 import { createLogger } from "./lib/logger.js";
@@ -464,8 +466,9 @@ async function main() {
   // dashboard ~20 min after first boot without any manual `ollama pull`.
   // Non-blocking — the orchestrator is fully serving requests while the
   // model downloads in the background. See model-readiness.service.ts.
+  // WARP-3047: the boot warm is of the ACTIVE model, not LLM_MODEL.
   try {
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(() => resolveActiveModel(prisma));
   } catch (err) {
     logger.warn(
       "Model readiness check failed: %s (orchestrator continues serving requests)",
@@ -733,10 +736,10 @@ async function main() {
     await seedBrainPasses(prisma);
 
     // Same resolution the agent-run routes use. Read at CALL time, not once at
-    // boot: `DEFAULT_MODEL` is what the box is configured with now, and a
-    // process that started before the operator set one should pick it up.
-    const resolveBrainModel = () =>
-      (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+    // boot: WARP-3047 — the pass follows the box's ACTIVE model, so a switch
+    // on the Models page moves the hourly pass too instead of it reloading
+    // the env model next to the active one.
+    const resolveBrainModel = async () => (await resolveActiveModel(prisma)) ?? "";
 
     // WARP-2850 — the pass BODIES, named once. The interval tick, the boot run
     // and the operator's "check now" are three callers of the same function
@@ -776,7 +779,7 @@ async function main() {
       // box has already recorded and the route has already reported started.
       [CORPUS_PASS_KEY]: async () => {
         const outcome = await runCorpusPass(
-          { prisma, chat: aiGateway.chat, model: resolveBrainModel() },
+          { prisma, chat: aiGateway.chat, model: await resolveBrainModel() },
           { limit: config.brain.corpusUnitsPerRun },
         );
         if (outcome.errors.length > 0) {
@@ -791,8 +794,8 @@ async function main() {
       // Corpus only. The detector pass is bounded indexed SQL and re-running
       // it costs the box nothing anyone would notice.
       manualMinIntervalMs: { [CORPUS_PASS_KEY]: config.brain.manualMinIntervalMs },
-      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and `DEFAULT_MODEL` are
-      // independent env vars with no cross-validation, so "brain on, no model
+      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and the active model are
+      // independent with no cross-validation, so "brain on, no model
       // configured" is a reachable box. On one of those, a check living inside
       // the runner would run only AFTER `claimPass` had stamped
       // `runState: "running"` and `lastRunAt` — the operator gets a 202 and
@@ -821,7 +824,7 @@ async function main() {
           (await isBrainEnabled(prisma)) ? null : "disabled",
         [CORPUS_PASS_KEY]: async () => {
           if (!(await isBrainEnabled(prisma))) return "disabled";
-          return resolveBrainModel() ? null : "no_model";
+          return (await resolveBrainModel()) ? null : "no_model";
         },
       },
     });
@@ -1919,9 +1922,10 @@ async function main() {
   // resolves the grant — and none of them had anything calling them in
   // sequence, so no mailbox was ever read.
   //
-  // Gated on `isM365Configured()`: with no client id there is no app to
-  // authenticate against, and a tick that runs anyway would mark every cursor
-  // failed on a box that simply does not offer the feature.
+  // Not gated on configuration: since WARP-2705 each connection carries its
+  // own app registration, so there is no box-wide switch to read. A box where
+  // nobody has connected pays one indexed `findMany` per tick and dials
+  // nothing — the tick below walks CONNECTED rows only.
   //
   // Discovery runs BEFORE the tick, every time, and that ordering is
   // load-bearing rather than tidy: mail delta is per-folder, so a folder
@@ -1931,7 +1935,7 @@ async function main() {
   //
   // `lockKey` for the same reason as the ERP legs: without it a multi-instance
   // box double-polls Microsoft and spends the tenant's throttling budget twice.
-  if (isM365Configured()) {
+  {
     const m365Deps: M365SyncDeps = {
       prisma: prisma as never,
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
@@ -1962,6 +1966,15 @@ async function main() {
             logger.info(
               { skipped: found.skipped, registered: found.registered },
               "m365 discovery skipped workloads",
+            );
+          }
+          // `notGranted` alone is not logged (To Do's is expected), but a grant
+          // that covers NOTHING means this person syncs nothing, and silence
+          // would read as an empty mailbox (#2347 review).
+          if (grantCoversNoWorkload(found)) {
+            logger.warn(
+              { userId, notGranted: found.notGranted },
+              "m365 grant covers no workload; nothing syncs for this connection",
             );
           }
         }

@@ -30,7 +30,7 @@ import httpx
 from timeouts import TIMEOUT_MGMT
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import disk
 from auth import setup_auth
@@ -166,6 +166,12 @@ class PullRequest(BaseModel):
     model: str
 
 
+class UnloadRequest(BaseModel):
+    # WARP-3047 — the model to KEEP resident; every other chat model goes.
+    # Required and non-blank: an empty `keep` would read as "unload everything".
+    keep: str = Field(min_length=1, pattern=r"\S")
+
+
 # /health response schema version. Bump when adding a key, removing a key, or
 # changing the meaning of an existing key. The orchestrator's
 # ``OllamaLocalProvider`` reads this and logs a warning when it sees a version
@@ -182,7 +188,14 @@ class PullRequest(BaseModel):
 #       (`state`: ok | degraded | not_applicable | unknown, plus per-model
 #       `gpu_fraction`). Consumers to bump: `scripts/verify.sh` and the
 #       ai-gateway `_LimitsCache._KNOWN_SCHEMA_VERSION` (onboard repo).
-_HEALTH_SCHEMA_VERSION = 2
+#   3 (WARP-3047, 2026-09-23): `limits.max_loaded_models` is reported ONLY by
+#       a runtime that enforces a loaded-model cap (Ollama). DMR has none —
+#       slot-count eviction, up to min(NumCPU, 8) runners — so the key is
+#       omitted there rather than advertising OLLAMA_MAX_LOADED_MODELS, an
+#       Ollama setting DMR never reads. Omitted, not null: the gateway keeps
+#       its own default for a missing key and would reject `int(None)`.
+#       Consumer bumped in the same change: ai-gateway `_LimitsCache`.
+_HEALTH_SCHEMA_VERSION = 3
 
 
 @app.get("/health")
@@ -216,6 +229,16 @@ async def health():
     # own vocabulary instead of fabricating a measurement. See VENDORED.md.
     placement_report = {"state": "not_applicable", "models": []}
 
+    limits = {
+        "num_parallel": int(os.getenv("OLLAMA_NUM_PARALLEL", "1")),
+        "max_queue": int(os.getenv("OLLAMA_MAX_QUEUE", "16")),
+    }
+    # Schema v3 (WARP-3047): only a runtime that enforces the cap reports it.
+    # On DMR "1" was a promise nothing kept — a switched-to model loaded NEXT
+    # to the resident one until the GPU ran out (see POST /models/unload).
+    if INFERENCE_RUNTIME != "dmr":
+        limits["max_loaded_models"] = int(os.getenv("OLLAMA_MAX_LOADED_MODELS", "1"))
+
     return {
         "schema_version": _HEALTH_SCHEMA_VERSION,
         "status": overall,
@@ -223,11 +246,7 @@ async def health():
         "models_loading": loading,
         "circuit_breaker": breaker_state,
         "placement": placement_report,
-        "limits": {
-            "num_parallel": int(os.getenv("OLLAMA_NUM_PARALLEL", "1")),
-            "max_queue": int(os.getenv("OLLAMA_MAX_QUEUE", "16")),
-            "max_loaded_models": int(os.getenv("OLLAMA_MAX_LOADED_MODELS", "1")),
-        },
+        "limits": limits,
     }
 
 
@@ -255,6 +274,36 @@ async def list_loaded():
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@app.post("/models/unload")
+async def unload_models(body: UnloadRequest):
+    """Unload every resident chat model except ``keep`` (WARP-3047).
+
+    The lifecycle half of a model switch: the orchestrator calls this when the
+    owner changes the box's active model, and the ai-gateway calls it once
+    when a load fails for lack of GPU memory, before its single retry. Docker
+    Model Runner has no memory-aware eviction, so without it the old model
+    stays resident next to the new one until the GPU runs out. Lifecycle
+    only — no inference passes through here (chat still goes gateway →
+    runtime directly).
+
+    Answers ``{unloaded, still_resident}`` read back from the daemon: a model
+    that is still serving a request is not evicted by DMR, and the caller is
+    told so rather than promised a swap that did not happen. A daemon
+    failure is a 502, never a 200 that hides it.
+    """
+    runtime = _runtime()
+    if not runtime:
+        raise HTTPException(status_code=503, detail="Not ready")
+    keep = body.keep.strip()
+    try:
+        result = await runtime.unload_others(keep)
+    except Exception as e:
+        logger.warning("models_unload_failed", keep=keep, error=str(e))
+        raise HTTPException(status_code=502, detail=str(e))
+    logger.info("models_unloaded", keep=keep, **result)
+    return result
+
+
 @app.get("/models/manifest")
 async def get_manifest():
     """Raw manifest contents (desired state)."""
@@ -280,9 +329,17 @@ async def list_eligible():
     # manifest. WARP-1743 fixed that same comparison on /models/sync and scoped
     # itself to the four lifecycle operations, which left this one reporting
     # `pulled: false` for every entry on a DMR box, the serving model included.
+    #
+    # WARP-3046: detection may ask the host device-bridge (an NVIDIA card has
+    # no sysfs memory node) — a blocking call, so `detect_async` runs it off
+    # the event loop and a slow bridge stalls this request only, never
+    # /health. One pass answers the number and its source; an unknown result
+    # is re-measured on the next call, not cached.
+    detected_gb, vram_source = await vram.detect_async()
     result = await build_eligible(
         manifest=manifest,
-        detected_vram_gb=vram.detected_vram_gb(),
+        detected_vram_gb=detected_gb,
+        vram_source=vram_source,
         runtime=runtime,
     )
     # WARP-195 finding 2: surface the resilient loader's fallback so a corrupt

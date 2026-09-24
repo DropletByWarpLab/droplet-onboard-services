@@ -58,6 +58,7 @@ import hubspot from "../../../../docs/integrations/hubspot.md?raw";
 import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
 import loyverse from "../../../../docs/integrations/loyverse.md?raw";
 import mailchimp from "../../../../docs/integrations/mailchimp.md?raw";
+import microsoft365 from "../../../../docs/integrations/microsoft-365.md?raw";
 import pipedrive from "../../../../docs/integrations/pipedrive.md?raw";
 import readme from "../../../../docs/integrations/README.md?raw";
 import setup from "../../../../docs/integrations/SETUP.md?raw";
@@ -94,6 +95,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   klaviyo,
   loyverse,
   mailchimp,
+  "microsoft-365": microsoft365,
   pipedrive,
   readme,
   setup,

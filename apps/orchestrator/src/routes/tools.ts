@@ -33,6 +33,7 @@ import {
   type Summarizer,
 } from "../services/tool-spec-runner.service.js";
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
+import { resolveActiveModel } from "../services/active-model.service.js";
 import { createSandboxTransformer, type Transformer } from "../services/sandbox.client.js";
 import {
   DAILY_REPORT_SLUG,
@@ -278,7 +279,7 @@ export function createToolsRouter(
    * inference backend, the same reason `dispatcher` is a parameter. Defaults
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
-  summarizer: Summarizer = createToolSpecSummarizer(),
+  summarizer: Summarizer = createToolSpecSummarizer(() => resolveActiveModel(prisma)),
   /**
    * WARP-2895 — injected so tests can drive a `transform` / `when` step
    * without a sandbox container, the same reason `summarizer` is a

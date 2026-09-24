@@ -128,11 +128,23 @@ const SYSTEM = [
   "- If there is nothing of note, say that briefly rather than padding.",
 ].join("\n");
 
-export function createToolSpecSummarizer(): Summarizer {
+/**
+ * @param resolveModel WARP-3047 — the box's ACTIVE model, asked per summary
+ *   (routes/tools.ts passes `resolveActiveModel`). A routine run started from
+ *   a chat turn (`routine_run`) summarises on the model that turn already
+ *   has resident, instead of loading env DEFAULT_MODEL/LLM_MODEL next to it.
+ */
+export function createToolSpecSummarizer(
+  resolveModel: () => Promise<string | null>,
+): Summarizer {
   return {
     async summarize(prompt: string, facts: RunStepTrace[]): Promise<string> {
-      const model =
-        process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "mistral:7b-instruct";
+      const model = await resolveModel();
+      if (!model) {
+        // A failed step, said plainly — never a hardcoded tag the box does
+        // not host (the historic mistral fallback 404'd upstream).
+        throw new Error("no local model is available to write the summary");
+      }
 
       const text = `${prompt}\n\nResults:\n${renderFacts(facts)}`;
       const ask = (maxTokens: number, reasoningEffort?: "low") =>

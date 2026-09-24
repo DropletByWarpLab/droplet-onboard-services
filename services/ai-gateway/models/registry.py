@@ -30,6 +30,11 @@ class ModelRegistry:
         # than on every re-query while degraded (the registry re-fetches on
         # each poll in that state — per-request logging would be spam).
         self._last_degraded: tuple[str, ...] = ()
+        # WARP-3046: bumped by invalidate(). A fan-out started under an older
+        # generation listed an inventory that is now known stale (a model
+        # download just finished), so its result is served to whoever was
+        # already awaiting it but never cached — see _refresh.
+        self._generation = 0
 
     @property
     def is_stale(self) -> bool:
@@ -51,13 +56,19 @@ class ModelRegistry:
             return self._cache
         inflight = self._inflight
         if inflight is None or inflight.done():
-            inflight = asyncio.create_task(self._refresh(router))
+            inflight = asyncio.create_task(self._refresh(router, self._generation))
             self._inflight = inflight
         return await inflight
 
-    async def _refresh(self, router) -> ModelListResult:
+    async def _refresh(self, router, generation: int) -> ModelListResult:
         try:
             result = await router.list_all_models()
+            if generation != self._generation:
+                # WARP-3046: invalidated while this fan-out was in flight —
+                # its listing predates whatever changed. Serve it to the
+                # callers already awaiting it; caching it would pin the old
+                # inventory for a full TTL.
+                return result
             self._cache = result
             degraded = tuple(result.degraded_providers)
             if degraded:
@@ -83,5 +94,12 @@ class ModelRegistry:
         return self._cache
 
     def invalidate(self):
-        """Force a refresh on next access."""
+        """Force a refresh on next access.
+
+        WARP-3046: also detaches any fan-out already in flight, so the next
+        caller starts a fresh one instead of awaiting a pre-change listing
+        through single-flight (and that stale listing is never cached).
+        """
         self._last_fetched = 0
+        self._generation += 1
+        self._inflight = None

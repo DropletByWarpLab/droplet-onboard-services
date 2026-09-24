@@ -453,13 +453,11 @@ const envSchema = z.object({
   DEVICE_SECRET: z.string().default(""),
 
   // --- Microsoft 365 cloud connector (WARP-2115, ADR-041) ---
-  // The Entra application (client) id of Droplet's multi-tenant app. NOT a
-  // secret: a public-client id is designed to ship inside the client, and the
-  // delegated device-code/auth-code flows use no client secret at all — which
-  // also sidesteps the tenant app-management policies that increasingly block
-  // long-lived secrets. Empty default = the connector is simply unavailable
-  // (isM365Configured() is false); it never half-starts.
-  M365_CLIENT_ID: z.string().default(""),
+  // There is deliberately NO box-wide client id (WARP-2705, removed
+  // M365_CLIENT_ID): each connection signs in through the customer's own Entra
+  // app registration, stored on its M365Connection row. A single Warp-Lab
+  // multitenant app is the PARTNER_GATED shape ADR-042 §3 rules out and would
+  // pool Graph's per-app throttling ceiling across every box we ship.
   // Entra login host. Overridable only so a national cloud (login.microsoftonline.us,
   // login.chinacloudapi.cn) can be pointed at without a code change; the
   // worldwide endpoint is correct for every commercial tenant. Whatever this
