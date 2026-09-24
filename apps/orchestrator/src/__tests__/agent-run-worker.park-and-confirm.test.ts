@@ -12,12 +12,12 @@
  *      released, the pending call bound as the interceptor binds its token,
  *      NO token anywhere on the row, the owner notified, the tool never run,
  *      the model not asked again.
- *   2. Approve → resume (a fresh worker, as after a restart) → the model
- *      re-issues → the worker performs the handshake: the tool runs exactly
+ *   2. Approve → resume (a fresh worker, as after a restart) → the worker runs
+ *      the STORED call itself, through the handshake: the tool runs exactly
  *      once, with the SECOND token (minted at resume), the pending columns
  *      clear, the run succeeds, the deadline was extended by the parked time.
- *   3. Deny → resume → the model receives CONFIRMATION_DENIED, adapts, and
- *      finishes; the tool never runs.
+ *   3. Deny → resume → the model receives CONFIRMATION_DENIED as the parked
+ *      call's result, adapts, and finishes; the tool never runs.
  *   4. Approval is not an escalation path: refused when the run's principal
  *      can no longer reach the tool; refused for a non-owner; the run stays
  *      parked.
@@ -30,6 +30,13 @@
  *      the approved write; a thrown or refused redeem leg is a tool error the
  *      run survives, audited as "approved but did not run"; a cancel while
  *      parked clears the parked call.
+ *   8. WARP-3044 — the model is never asked to re-issue a decided call, so a
+ *      model that rewords free text on every ask (gpt-oss, run 1efa11c8 on
+ *      .195) still gets exactly one execution per approval, with the parked
+ *      args; a denial executes nothing; a second approval cannot
+ *      double-execute; a byte-identical re-issue after the result is answered
+ *      from the trace, not run and not parked; the stored call must still
+ *      match its binding and the principal's reach at the claim.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -105,7 +112,7 @@ function interceptingMcp(
   tools: string[],
   tier2: Set<string>,
   denied: Set<string> = new Set(),
-  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean } = {},
+  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean; challengeAsError?: boolean } = {},
 ) {
   let minted = 0;
   const live = new Set<string>();
@@ -157,7 +164,7 @@ function interceptingMcp(
                 confirmationToken: token,
               },
             },
-          });
+          }, opts.challengeAsError === true);
         }
       }
       executed.push({ name, args, token: ctx?.confirmationToken });
@@ -527,10 +534,10 @@ describe("agent runs — the handshake is crash-safe and error-safe (WARP-2179 r
     expect(consumed).toBeDefined();
     expect(consumed!.text).toBeUndefined(); // outcome never recorded
 
-    // Reclaim + resume on C: the model re-issues the same call; with no
-    // decision left the worker dispatches WITHOUT a token, the interceptor
-    // challenges again, and the run parks again — a second prompt, not a
-    // silent second delete.
+    // Reclaim + resume on C: the consumed-but-unrecorded approved call is
+    // found at the checkpoint and the run parks again on THAT stored call
+    // (WARP-3044) — a second prompt, not a silent second delete, and not a
+    // question about whatever the model would re-issue.
     clock = new Date(clock.getTime() + 61_000);
     const c = makeWorker(db, mcp, { workerId: "C", now });
     const tick = await c.worker.tickOnce();
@@ -539,9 +546,12 @@ describe("agent runs — the handshake is crash-safe and error-safe (WARP-2179 r
     const reparked = db.row(id);
     expect(reparked.status).toBe("awaiting_confirmation");
     expect(reparked.pendingTool).toBe("delete_file");
+    expect(reparked.pendingArgs).toEqual({ path: "/old.txt" });
     expect(reparked.pendingDecision).toBeNull();
     expect(mcp.executed).toHaveLength(1); // still exactly one execution
-    expect(mcp.minted()).toBe(3); // park, resume leg 1, re-park
+    // Park, resume leg 1 — and no third: the re-park is decided on the stored
+    // call with nothing dispatched, so no fresh challenge is needed.
+    expect(mcp.minted()).toBe(2);
     const titles = sendNotificationMock.mock.calls.map((x) => (x[1] as { title: string }).title);
     expect(titles.filter((t) => t.startsWith("Approval needed"))).toHaveLength(2);
 
@@ -624,5 +634,501 @@ describe("agent runs — the handshake is crash-safe and error-safe (WARP-2179 r
     expect(row.pendingBindingHash).toBeNull();
     expect(row.pendingArgs).toBeNull();
     expect(row.parkedAt).toBeNull();
+  });
+});
+
+describe("agent runs — an approved park runs the STORED call; the model never re-issues it (WARP-3044)", () => {
+  /**
+   * gpt-oss on the house unit (.195), run 1efa11c8: each time the parked
+   * iteration was re-run after an approval, the model reworded the free-text
+   * argument. The binding never matched the approval, the run re-parked, and
+   * after three approvals nothing had run. These are its four wordings.
+   */
+  const REWORDINGS = [
+    "Both tsc and npm test exited with code 0.",
+    "Compilation exit code 0, tests exit code 0",
+    "Compiled src/ with tsc (exit code 0). Ran npm test (exit code 0).",
+    "tsc exit code 0, npm test exit code 0",
+  ];
+  const TOOL = "memory_extract_fact";
+  const factArgs = (fact: string) => ({ category: "workflow", fact });
+  const PARKED = factArgs(REWORDINGS[0]!);
+
+  type Msg = { role: string; content: unknown; tool_call_id?: string; tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> };
+
+  /**
+   * Asks to save a fact with no result in front of it, rewording the fact on
+   * every ask. With a result in front of it, it reports. `repeat` makes it
+   * send the decided call once more, byte for byte, after seeing its result.
+   * `seen` snapshots every conversation it was handed (the loop's array is
+   * live, so the mock's own call record would show later pushes).
+   */
+  function rewordingModel(opts: { repeat?: boolean } = {}) {
+    let asks = 0;
+    const seen: Msg[][] = [];
+    const chat = scripted((req) => {
+      seen.push(JSON.parse(JSON.stringify(req.messages)) as Msg[]);
+      const replies = req.messages.filter((m) => m.role === "tool").map((m) => String(m.content));
+      if (replies.length === 0) {
+        const fact = REWORDINGS[asks % REWORDINGS.length]!;
+        asks += 1;
+        return { role: "assistant", content: null, tool_calls: [toolCall(`c${asks}`, TOOL, factArgs(fact))] };
+      }
+      if (opts.repeat && replies.length === 1) {
+        return { role: "assistant", content: null, tool_calls: [toolCall("c-again", TOOL, PARKED)] };
+      }
+      const last = replies[replies.length - 1]!;
+      if (last.includes("CONFIRMATION_DENIED")) return { role: "assistant", content: "Not saved, as you asked." };
+      if (replies.some((r) => r.includes('"ok":true'))) return { role: "assistant", content: "Saved the fact." };
+      return { role: "assistant", content: "The fact was not saved." };
+    });
+    return { chat, seen };
+  }
+
+  const decide = (db: ReturnType<typeof createAgentRunPrismaMock>, id: string, decision: "approved" | "denied", now?: Date) =>
+    decideAgentRun(db.prisma, {
+      id,
+      decision,
+      decidedBy: { id: OWNER.id, role: "owner", username: OWNER.username },
+      resolveAccess: ownerAccess as never,
+      ...(now ? { now } : {}),
+    });
+
+  async function parked(
+    model: ReturnType<typeof rewordingModel>,
+    opts: {
+      maxIter?: number;
+      resolveAccess?: unknown;
+      userId?: string;
+      now?: () => Date;
+      mcp?: Parameters<typeof interceptingMcp>[3];
+    } = {},
+  ) {
+    const db = createAgentRunPrismaMock({ users: [OWNER, { id: "u-adm", username: "stefan", role: "admin" }], now: opts.now });
+    const { id } = await enqueueAgentRun(db.prisma, {
+      userId: opts.userId ?? OWNER.id,
+      goal: "record what the build did",
+      model: "m",
+      ...(opts.maxIter ? { maxIter: opts.maxIter } : {}),
+    });
+    const mcp = interceptingMcp([TOOL], new Set([TOOL]), new Set(), opts.mcp);
+    const a = makeWorker(db, mcp, { workerId: "A", chat: model.chat, resolveAccess: opts.resolveAccess, now: opts.now });
+    await a.worker.tickOnce();
+    await settle(a.worker);
+    const row = db.row(id);
+    expect(row.status).toBe("awaiting_confirmation");
+    expect(row.pendingArgs).toEqual(PARKED);
+    return { db, id, mcp };
+  }
+
+  async function resume(
+    db: ReturnType<typeof createAgentRunPrismaMock>,
+    mcp: ReturnType<typeof interceptingMcp>,
+    model: ReturnType<typeof rewordingModel>,
+    opts: { workerId?: string; resolveAccess?: unknown; now?: () => Date } = {},
+  ) {
+    const w = makeWorker(db, mcp, { workerId: opts.workerId ?? "B", chat: model.chat, resolveAccess: opts.resolveAccess, now: opts.now });
+    const tick = await w.worker.tickOnce();
+    await settle(w.worker);
+    return tick;
+  }
+
+  const approvalPrompts = () =>
+    sendNotificationMock.mock.calls.map((c) => c[1] as { title: string; body: string }).filter((n) => n.title.startsWith("Approval needed"));
+
+  function expectPendingCleared(row: ReturnType<ReturnType<typeof createAgentRunPrismaMock>["row"]>) {
+    expect(row.pendingTool).toBeNull();
+    expect(row.pendingBindingHash).toBeNull();
+    expect(row.pendingArgs).toBeNull();
+    expect(row.pendingToolCallId).toBeNull();
+    expect(row.pendingDecision).toBeNull();
+    expect(row.pendingDecidedAt).toBeNull();
+    expect(row.pendingDecidedBy).toBeNull();
+    expect(row.parkedAt).toBeNull();
+  }
+
+  it("one approval runs the parked call exactly once, with the PARKED args, though the model would reword them; the model resumes with the result in context", async () => {
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model);
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true, decision: "approved" });
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("Saved the fact.");
+    // Exactly one execution: the stored call, redeemed with the token the
+    // interceptor minted at resume — never the park's, which was dropped.
+    expect(mcp.executed).toEqual([{ name: TOOL, args: PARKED, token: "tok-2" }]);
+    expect(mcp.minted()).toBe(2);
+    expectPendingCleared(done);
+    expect(rowText(done)).not.toMatch(/tok-\d/);
+
+    // The model was asked twice in all: the ask that parked, then — with the
+    // approved call and its result already in the conversation — for its
+    // report. It was never asked to re-issue the call.
+    expect(model.chat).toHaveBeenCalledTimes(2);
+    const resumed = model.seen[1]!;
+    const [call, reply] = resumed.slice(-2);
+    expect(call).toMatchObject({ role: "assistant" });
+    expect(call!.tool_calls).toHaveLength(1);
+    expect(call!.tool_calls![0]).toMatchObject({ id: "c1", type: "function", function: { name: TOOL } });
+    expect(JSON.parse(call!.tool_calls![0]!.function.arguments)).toEqual(PARKED);
+    expect(reply).toMatchObject({ role: "tool", tool_call_id: "c1" });
+    expect(String(reply!.content)).toContain('"ok":true');
+    // The checkpoint holds the same conversation.
+    const persisted = done.messages as Msg[];
+    expect(persisted.some((m) => m.role === "tool" && m.tool_call_id === "c1" && String(m.content).includes('"ok":true'))).toBe(true);
+
+    // The trace: the park's challenge, then the approved call and its result.
+    const trace = done.trace as AgentRunTraceEntry[];
+    const confirmed = trace.filter((e) => e.confirmation === "confirmed");
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]).toMatchObject({ tool_call_id: "c1", tool: TOOL, args: PARKED, isError: false, iteration: 0 });
+    expect(confirmed[0]!.completedAt).toBeDefined();
+    // Iteration 0 asked and parked; the approved call completed it; iteration 1 reported.
+    expect(done.iteration).toBe(2);
+
+    expect(approvalPrompts()).toHaveLength(1);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: `${TOOL} approved and run`,
+        refs: expect.objectContaining({ agentRunId: id, name: TOOL, confirmation: "confirmed" }),
+      }),
+    );
+  });
+
+  it("a denial executes nothing: the model gets CONFIRMATION_DENIED as the parked call's result and is not asked to re-issue", async () => {
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model);
+    expect(await decide(db, id, "denied")).toMatchObject({ ok: true, decision: "denied" });
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("Not saved, as you asked.");
+    expect(mcp.executed).toHaveLength(0);
+    expect(mcp.minted()).toBe(1); // the park's challenge only; no handshake on a denial
+    expect(mcp.callTool).toHaveBeenCalledTimes(1);
+    expectPendingCleared(done);
+    expect(model.chat).toHaveBeenCalledTimes(2);
+    const reply = model.seen[1]!.at(-1)!;
+    expect(reply).toMatchObject({ role: "tool", tool_call_id: "c1" });
+    expect(String(reply.content)).toContain("CONFIRMATION_DENIED");
+    const denied = (done.trace as AgentRunTraceEntry[]).filter((e) => e.confirmation === "denied");
+    expect(denied).toHaveLength(1);
+    expect(denied[0]).toMatchObject({ tool_call_id: "c1", tool: TOOL, args: PARKED, isError: true });
+    expect(approvalPrompts()).toHaveLength(1);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ refs: expect.objectContaining({ agentRunId: id, confirmation: "denied" }) }),
+    );
+  });
+
+  it("a second approval cannot double-execute: a repeat tap finds nothing parked, and a byte-identical re-issue is answered from the trace — not run, not parked", async () => {
+    const model = rewordingModel({ repeat: true });
+    const { db, id, mcp } = await parked(model);
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+    // The owner taps Approve again before the worker gets to it.
+    expect(await decide(db, id, "approved")).toEqual({ ok: false, reason: "not_parked" });
+
+    await resume(db, mcp, model);
+    // …and once more after the run is done; a further tick claims nothing.
+    expect(await decide(db, id, "approved")).toEqual({ ok: false, reason: "not_parked" });
+    expect((await resume(db, mcp, model, { workerId: "C" })).claimed).toBe(0);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("Saved the fact.");
+    expect(mcp.executed).toEqual([{ name: TOOL, args: PARKED, token: "tok-2" }]);
+    expect(mcp.minted()).toBe(2);
+    expect(approvalPrompts()).toHaveLength(1);
+    expectPendingCleared(done);
+    const again = (done.trace as AgentRunTraceEntry[]).find((e) => e.tool_call_id === "c-again");
+    expect(again).toMatchObject({ tool: TOOL, replayOf: "c1", isError: true });
+    expect(String(again!.text)).toContain("REPEATED_CALL");
+    expect(model.chat).toHaveBeenCalledTimes(3);
+  });
+
+  it("an approved call lost to a crash re-parks THE STORED call — not the model's rewording — and says it may already have run", async () => {
+    let clock = new Date("2026-09-04T03:00:00Z");
+    const now = () => clock;
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model, { now });
+    expect(await decide(db, id, "approved", clock)).toMatchObject({ ok: true });
+
+    // The DB dies at the completion write, after the redeem ran the tool.
+    let dead = false;
+    db.setFailOn((op, args) => {
+      const trace = (args as { data?: { trace?: AgentRunTraceEntry[] } }).data?.trace;
+      if (op === "updateMany" && Array.isArray(trace) && trace.some((e) => e.confirmation === "confirmed" && e.completedAt)) {
+        dead = true;
+      }
+      return dead;
+    });
+    await resume(db, mcp, model, { now });
+    db.setFailOn(null);
+    expect(db.row(id).status).toBe("running");
+    expect(mcp.executed).toHaveLength(1);
+    const asked = (model.chat as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    clock = new Date(clock.getTime() + 61_000);
+    expect((await resume(db, mcp, model, { workerId: "C", now })).reclaimed).toBe(1);
+
+    const reparked = db.row(id);
+    expect(reparked.status).toBe("awaiting_confirmation");
+    expect(reparked.pendingTool).toBe(TOOL);
+    expect(reparked.pendingArgs).toEqual(PARKED);
+    expect(reparked.pendingBindingHash).toBe(confirmationBindingHash(TOOL, PARKED));
+    expect(reparked.pendingDecision).toBeNull();
+    // Decided on the stored call alone: no model turn, no dispatch, no challenge.
+    expect(model.chat).toHaveBeenCalledTimes(asked);
+    expect(mcp.executed).toHaveLength(1);
+    expect(mcp.minted()).toBe(2);
+    const prompts = approvalPrompts();
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]!.body).toContain("MAY ALREADY");
+    expect(prompts[1]!.body).not.toContain("Nothing has been done yet");
+    const lost = (reparked.trace as AgentRunTraceEntry[]).filter((e) => e.unknownOutcome);
+    expect(lost).toHaveLength(1);
+    expect(lost[0]).toMatchObject({ tool: TOOL, args: PARKED, confirmation: "confirmed" });
+  });
+
+  it("the approval does not outlive the principal's reach: narrowed between approval and claim, the stored call is not run", async () => {
+    const writes = vi.fn(async () => ({
+      scope: { domains: new Set(["memory"]), writeDomains: new Set(["memory"]), locks: false },
+      tier: "admin",
+      unresolved: null,
+    }));
+    const readsOnly = vi.fn(async () => ({
+      scope: { domains: new Set(["memory"]), writeDomains: new Set<string>(), locks: false },
+      tier: "admin",
+      unresolved: null,
+    }));
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model, { userId: "u-adm", resolveAccess: writes });
+    expect(
+      await decideAgentRun(db.prisma, {
+        id,
+        decision: "approved",
+        decidedBy: { id: "u-adm", role: "admin" },
+        resolveAccess: writes as never,
+      }),
+    ).toMatchObject({ ok: true });
+    recordActivityMock.mockClear();
+
+    await resume(db, mcp, model, { resolveAccess: readsOnly });
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("The fact was not saved.");
+    expect(mcp.executed).toHaveLength(0);
+    expect(mcp.minted()).toBe(1);
+    expectPendingCleared(done);
+    const entry = (done.trace as AgentRunTraceEntry[]).find((e) => e.confirmation === "confirmed");
+    expect(entry).toMatchObject({ tool: TOOL, isError: true });
+    expect(String(entry!.text)).toContain("FORBIDDEN_TOOL_FOR_ROLE");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ what: `${TOOL} approved but did not run`, refs: expect.objectContaining({ confirmation: "confirmed_failed" }) }),
+    );
+  });
+
+  it("what runs is what was approved: stored args that no longer match the parked binding are refused, nothing dispatched", async () => {
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model);
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+    db.row(id).pendingArgs = factArgs("Ship it without the tests.");
+    recordActivityMock.mockClear();
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("The fact was not saved.");
+    expect(mcp.executed).toHaveLength(0);
+    expect(mcp.minted()).toBe(1);
+    expectPendingCleared(done);
+    const entry = (done.trace as AgentRunTraceEntry[]).find((e) => e.confirmation === "confirmed");
+    expect(entry).toMatchObject({ tool: TOOL, isError: true });
+    expect(String(entry!.text)).toContain("APPROVED_CALL_MISMATCH");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ what: `${TOOL} approved but did not run` }),
+    );
+  });
+
+  it("an approval on the run's last iteration runs the call and ends on the iteration cap — the model is not asked past it", async () => {
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model, { maxIter: 1 });
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(mcp.executed).toEqual([{ name: TOOL, args: PARKED, token: "tok-2" }]);
+    expect(model.chat).toHaveBeenCalledTimes(1);
+    expect(done.status).toBe("failed");
+    expect(done.stopReason).toBe("iteration_limit");
+    expect(done.iteration).toBe(1);
+    expectPendingCleared(done);
+    expect(approvalPrompts()).toHaveLength(1);
+  });
+
+  it("a denied call re-sent byte for byte is answered with the same denial — not run, not parked again", async () => {
+    const model = rewordingModel({ repeat: true });
+    const { db, id, mcp } = await parked(model);
+    expect(await decide(db, id, "denied")).toMatchObject({ ok: true });
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("Not saved, as you asked.");
+    expect(mcp.executed).toHaveLength(0);
+    expect(mcp.minted()).toBe(1);
+    expect(approvalPrompts()).toHaveLength(1);
+    const again = (done.trace as AgentRunTraceEntry[]).find((e) => e.tool_call_id === "c-again");
+    expect(again).toMatchObject({ tool: TOOL, replayOf: "c1", isError: true });
+    expect(String(again!.text)).toContain("CONFIRMATION_DENIED");
+  });
+
+  it("an approved call that did NOT run is not answered from the trace: an identical re-send asks the owner again", async () => {
+    const model = rewordingModel({ repeat: true });
+    const { db, id, mcp } = await parked(model, { mcp: { refuseRedeem: true } });
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+
+    await resume(db, mcp, model);
+
+    const row = db.row(id);
+    expect(mcp.executed).toHaveLength(0);
+    expect(row.status).toBe("awaiting_confirmation");
+    expect(row.pendingArgs).toEqual(PARKED);
+    expect(row.pendingToolCallId).toBe("c-again");
+    expect(approvalPrompts()).toHaveLength(2);
+  });
+
+  it("no confirmation token reaches the conversation or the row, even when the redeem leg hands one back", async () => {
+    const model = rewordingModel();
+    // A transport that flags the interceptor's challenge as an error: the
+    // handshake stops at leg 1 and the challenge — token and all — is the
+    // outcome it hands back.
+    const { db, id, mcp } = await parked(model, { mcp: { challengeAsError: true } });
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(mcp.executed).toHaveLength(0);
+    expect(mcp.minted()).toBe(2);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("The fact was not saved.");
+    expect(JSON.stringify(model.seen)).not.toMatch(/tok-\d/);
+    expect(rowText(done)).not.toMatch(/tok-\d/);
+  });
+
+  it("a run whose wall clock ran out while it waited in the queue does not run the approved call", async () => {
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model);
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+    db.row(id).deadlineAt = new Date(Date.now() - 1_000);
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(done.status).toBe("failed");
+    expect(done.stopReason).toBe("deadline");
+    expect(mcp.executed).toHaveLength(0);
+    expect(mcp.callTool).toHaveBeenCalledTimes(1); // the park's own dispatch only
+    expectPendingCleared(done);
+  });
+
+  describe("a lease lost mid-resume stops the resume where it stands", () => {
+    type Update = { where: Record<string, unknown>; data: Record<string, unknown> };
+    /** Answer `count: 0` — the lease was taken — to the one write `lost` picks. */
+    function loseLeaseOn(db: ReturnType<typeof createAgentRunPrismaMock>, lost: (u: Update) => boolean) {
+      const updateMany = db.prisma.agentRun.updateMany as unknown as ReturnType<typeof vi.fn>;
+      const real = updateMany.getMockImplementation()!;
+      updateMany.mockImplementation(async (args: Update) => (lost(args) ? { count: 0 } : real(args)));
+    }
+    const confirmedEntry = (u: Update, completed: boolean) =>
+      Array.isArray(u.data.trace) &&
+      (u.data.trace as AgentRunTraceEntry[]).some((e) => e.confirmation === "confirmed" && Boolean(e.completedAt) === completed);
+
+    it("lost at the write that consumes the approval: nothing is dispatched and the approval stays for the lease holder", async () => {
+      const model = rewordingModel();
+      const { db, id, mcp } = await parked(model);
+      expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+      loseLeaseOn(db, (u) => u.data.pendingDecision === null && u.data.messages === undefined && confirmedEntry(u, false));
+
+      await resume(db, mcp, model);
+
+      expect(mcp.executed).toHaveLength(0);
+      expect(mcp.minted()).toBe(1);
+      expect(model.chat).toHaveBeenCalledTimes(1);
+      expect(db.row(id).pendingDecision).toBe("approved");
+    });
+
+    it("lost at the write that records the result: the model is not asked on a lease this worker no longer holds", async () => {
+      const model = rewordingModel();
+      const { db, id, mcp } = await parked(model);
+      expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+      loseLeaseOn(db, (u) => u.data.messages !== undefined && confirmedEntry(u, true));
+
+      await resume(db, mcp, model);
+
+      expect(mcp.executed).toHaveLength(1);
+      expect(model.chat).toHaveBeenCalledTimes(1);
+      expect(db.row(id).iteration).toBe(0);
+    });
+  });
+
+  describe("a decided park never outlives the run: every terminal write clears it (WARP-2720)", () => {
+    it("the principal can no longer be resolved at the claim: failed, nothing run, the approval gone with it", async () => {
+      const model = rewordingModel();
+      const { db, id, mcp } = await parked(model);
+      expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+
+      await resume(db, mcp, model, {
+        resolveAccess: vi.fn(async () => ({ scope: null, tier: null, unresolved: "no_role" })),
+      });
+
+      const done = db.row(id);
+      expect(done.status).toBe("failed");
+      expect(done.error).toBe("attribution_failed:no_role");
+      expect(mcp.executed).toHaveLength(0);
+      expectPendingCleared(done);
+    });
+
+    it("the iteration cap was lowered while it sat parked: failed at the claim, the approval gone with it", async () => {
+      const model = rewordingModel();
+      const { db, id, mcp } = await parked(model);
+      expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+      db.row(id).maxIter = 0;
+
+      await resume(db, mcp, model);
+
+      const done = db.row(id);
+      expect(done.status).toBe("failed");
+      expect(done.stopReason).toBe("iteration_limit");
+      expect(mcp.executed).toHaveLength(0);
+      expectPendingCleared(done);
+    });
+
+    it("a claimed run that dies past AGENT_RUN_MAX_ATTEMPTS before consuming its approval: failed, the approval gone with it", async () => {
+      let clock = new Date("2026-09-04T03:00:00Z");
+      const now = () => clock;
+      const model = rewordingModel();
+      const { db, id, mcp } = await parked(model, { now });
+      expect(await decide(db, id, "approved", clock)).toMatchObject({ ok: true });
+      // A worker claimed it and vanished before touching the decision, on its last attempt.
+      Object.assign(db.row(id), { status: "running", claimedBy: "gone", claimedAt: clock, heartbeatAt: clock, attempts: 3 });
+
+      clock = new Date(clock.getTime() + 61_000);
+      expect((await resume(db, mcp, model, { workerId: "C", now })).failed).toBe(1);
+
+      const done = db.row(id);
+      expect(done.status).toBe("failed");
+      expect(mcp.executed).toHaveLength(0);
+      expectPendingCleared(done);
+    });
   });
 });

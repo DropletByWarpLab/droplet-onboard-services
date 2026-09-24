@@ -362,6 +362,31 @@ describe("agent-runs routes — ownership, list, detail, cancel (WARP-2180)", ()
     expect(res.body).toMatchObject({ id, tool: "get_current_datetime", decision: "approved", status: "queued" });
     expect(db.row(id).status).toBe("queued");
   });
+
+  it("WARP-3044: a second confirm on the same park is a 409 and changes nothing — one approval, one decision on the row", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "g", model: "m" });
+    const { app } = buildApp(owner, db);
+    Object.assign(db.row(id), {
+      status: "awaiting_confirmation",
+      pendingTool: "get_current_datetime",
+      pendingBindingHash: "h",
+      pendingArgs: {},
+      parkedAt: new Date(),
+    });
+    expect((await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "approved" })).status).toBe(200);
+    const decided = { ...db.row(id) };
+    const again = await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "approved" });
+    expect(again.status).toBe(409);
+    expect(again.body).toEqual({ error: "not_parked", id });
+    // A late denial cannot overwrite the approval either.
+    expect((await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "denied" })).status).toBe(409);
+    const row = db.row(id);
+    expect(row.status).toBe("queued");
+    expect(row.pendingDecision).toBe("approved");
+    expect(row.pendingDecidedAt).toEqual(decided.pendingDecidedAt);
+    expect(row.deadlineAt).toEqual(decided.deadlineAt);
+  });
 });
 
 describe("agent-runs routes — recurring runs (WARP-2180)", () => {
