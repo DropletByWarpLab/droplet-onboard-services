@@ -759,6 +759,37 @@ describe("routing reads and writes (routes 21–22)", () => {
     expect(off).toMatchObject({ status: "ok", person: { state: "not_receiving", version: 4 } });
   });
 
+  it("review B: an ineligible person's receiving row can be switched off even when nobody eligible is left receiving", async () => {
+    const f = world({
+      securityAlertRecipient: [
+        { userId: STEFAN, state: "not_receiving", origin: "chosen", version: 1, setById: STEFAN },
+        { userId: JORDAN, state: "receiving", origin: "chosen", version: 3, setById: STEFAN },
+      ],
+    });
+    LEVELS[JORDAN] = "view";
+    const off = await setAlertRouting(client(f), resolve, req, { userId: JORDAN, state: "not_receiving", expectedVersion: 3 }, NOW);
+    expect(off).toMatchObject({ status: "ok", person: { userId: JORDAN, state: "not_receiving", eligible: false, version: 4 } });
+    expect(h.inTxAudit).toHaveBeenCalledTimes(1);
+    // Switching him back on is still refused.
+    expect(await setAlertRouting(client(f), resolve, req, { userId: JORDAN, state: "receiving", expectedVersion: 4 }, NOW)).toEqual({
+      status: "not_eligible",
+      reason: "no_access",
+    });
+  });
+
+  it("…while switching off the last ELIGIBLE receiver is still refused", async () => {
+    const f = world({
+      securityAlertRecipient: [
+        { userId: STEFAN, state: "not_receiving", origin: "chosen", version: 1, setById: STEFAN },
+        { userId: MARIA, state: "receiving", origin: "chosen", version: 2, setById: STEFAN },
+      ],
+    });
+    LEVELS[MARIA] = "act";
+    expect(await setAlertRouting(client(f), resolve, req, { userId: MARIA, state: "not_receiving", expectedVersion: 2 }, NOW)).toEqual({
+      status: "no_recipient",
+    });
+  });
+
   it("a stale version or a create over an existing row is a version conflict; an unknown person is not_found", async () => {
     const f = world();
     await readAlertRouting(client(f), resolve, { id: STEFAN, role: "owner" }, "manage");

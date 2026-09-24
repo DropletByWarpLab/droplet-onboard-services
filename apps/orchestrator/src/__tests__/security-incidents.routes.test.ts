@@ -603,6 +603,46 @@ describe("review #1 (DS-005) — a viewer who sees only a LOWER code (front noti
   });
 });
 
+describe("review A — incident events carry `zones`, like feed rows (the viewer's visible areas only)", () => {
+  const TILL = "7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c82";
+  const YARD = "8b3c4d5e-6f70-4b2c-9d3e-4f5a6b7c8d93";
+  function withMembers(f: FakeSecurityPrisma) {
+    f.world.securityZone.push(
+      { id: TILL, name: "Till", nameKey: "till", kind: "restricted", state: "active", version: 0 },
+      { id: YARD, name: "Yard", nameKey: "yard", kind: "perimeter", state: "active", version: 0 },
+    );
+    f.world.securityZoneLink.push(
+      { id: "lt1", zoneId: TILL, sourceKind: "camera", sourceRef: "front", sourceLabel: "Front door", state: "active" },
+      { id: "ly1", zoneId: YARD, sourceKind: "camera", sourceRef: "back", sourceLabel: "Back camera", state: "active" },
+    );
+    const ev = (id: bigint, camera: string) => ({
+      id, source: "frigate", kind: "detection", severity: "info", camera, sourceRef: `${camera}/${id}.5-a`, dedupeKey: `z:${id}`,
+      labels: ["person"], cameraZones: [], score: 0.9, startedAt: T, endedAt: T, summary: "Person", createdAt: T,
+    });
+    f.world.securityEvent.push(ev(71n, "front"), ev(72n, "back"));
+    f.world.securityEventTriage.push(
+      { eventId: 71n, outcome: "grouped", incidentId: SHARED, matchedLinkIds: [], alsoZoneIds: [], rulesetVersion: 1, error: null, triagedAt: T },
+      { eventId: 72n, outcome: "grouped", incidentId: SHARED, matchedLinkIds: [], alsoZoneIds: [], rulesetVersion: 1, error: null, triagedAt: T },
+    );
+  }
+
+  it("family sees only her visible event, with only its visible area", async () => {
+    const f = world();
+    withMembers(f);
+    const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${SHARED}`);
+    expect(res.body.events.map((e: { id: string; zones: unknown }) => [e.id, e.zones])).toEqual([["71", [{ id: TILL, name: "Till" }]]]);
+    expect(JSON.stringify(res.body)).not.toContain("Yard");
+  });
+
+  it("the owner sees every member with its areas", async () => {
+    const f = world();
+    withMembers(f);
+    const res = await request(app(f, "owner", "manage").server).get(`/api/security/incidents/${SHARED}`);
+    const zones = Object.fromEntries(res.body.events.map((e: { id: string; zones: Array<{ name: string }> }) => [e.id, e.zones.map((z) => z.name)]));
+    expect(zones).toEqual({ "71": ["Till"], "72": ["Yard"] });
+  });
+});
+
 describe("review #11 — the sign-in behind an acknowledgement (box proof step 4)", () => {
   function withAcks(f: FakeSecurityPrisma) {
     f.world.securityIncidentAck.push(
@@ -729,6 +769,25 @@ describe("routes 21–22 — who is told about alerts", () => {
     const off = await request(server).put(`/api/security/alert-routing/${MARIA}`).send({ state: "not_receiving", expectedVersion: 2 });
     expect(off.status).toBe(200);
     expect(off.body.person).toMatchObject({ userId: MARIA, state: "not_receiving", eligible: false, ineligibleReason: "inactive" });
+  });
+
+  it("22 (review B): an ineligible person's row switches off even when nobody eligible is left; switching on is still 422", async () => {
+    const f = world({
+      user: [
+        { ...USERS.owner, role: "owner", directoryStatus: "ACTIVE" },
+        { ...USERS.family, role: "family", directoryStatus: "DEACTIVATED" },
+      ],
+      securityAlertRecipient: [
+        { userId: STEFAN, state: "not_receiving", origin: "chosen", version: 1 },
+        { userId: MARIA, state: "receiving", origin: "chosen", version: 2 },
+      ],
+    });
+    const { server } = app(f, "owner", "manage");
+    const off = await request(server).put(`/api/security/alert-routing/${MARIA}`).send({ state: "not_receiving", expectedVersion: 2 });
+    expect(off.status).toBe(200);
+    expect(off.body.person).toMatchObject({ userId: MARIA, state: "not_receiving", eligible: false });
+    const on = await request(server).put(`/api/security/alert-routing/${MARIA}`).send({ state: "receiving", expectedVersion: 3 });
+    expect(on.status).toBe(422);
   });
 
   it("22: an unknown person → 404; a stale version → 409 VERSION_CONFLICT; a bad body → 400", async () => {

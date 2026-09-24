@@ -56,7 +56,7 @@ import { mayReadThreats, securityViewerScope, type SecurityRouteDeps } from "../
 import { securitySiteModeHealth } from "../services/security-mode.service.js";
 import { securityIncidentsHealth } from "../services/security-incidents.service.js";
 import { securityAlertsHealth } from "../services/security-alerts.service.js";
-import { loadActiveLinks, viewerAreas, zoneFilterFor, zonesForEvent } from "../services/security-zones.service.js";
+import { loadActiveLinks, viewerAreas, zoneChipsFor, zoneFilterFor } from "../services/security-zones.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -177,9 +177,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
           const incidentId = incidents.get(e.id);
           return {
             ...e,
-            zones: zonesForEvent(e, areas.index)
-              .map((id) => ({ id, name: areas.names.get(id) ?? "" }))
-              .sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+            zones: zoneChipsFor(e, areas),
             incident: incidentId ? { id: incidentId } : null,
           };
         }),

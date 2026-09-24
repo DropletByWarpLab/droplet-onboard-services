@@ -728,10 +728,12 @@ class RoutingRollback extends Error {
  *   2. CAS on the row's version — or, with `expectedVersion: null`, insert it
  *      (a row that already exists is a version conflict);
  *   3. count the eligible receiving rows (the resolver reads on its own
- *      connections): none → roll back, `no_recipient`;
+ *      connections): none, when the change took away an eligible receiver →
+ *      roll back, `no_recipient`;
  *   4. the audit, last.
  * `receiving` for an ineligible person is refused before the transaction;
- * `not_receiving` is always allowed (clean-up).
+ * `not_receiving` for an ineligible person is always allowed (clean-up) —
+ * even when nobody eligible is left receiving (review B).
  */
 export async function setAlertRouting(
   prisma: PrismaClient,
@@ -767,7 +769,10 @@ export async function setAlertRouting(
       for (const { user } of receiving) {
         if (user.id === target.id ? eligibility.eligible : (await eligibilityOf(user, resolve)).eligible) eligibleCount++;
       }
-      if (eligibleCount === 0) throw new RoutingRollback("no_recipient");
+      // Only a change that takes away an ELIGIBLE receiver can leave nobody to
+      // tell. Switching off someone who cannot be told anyway (review B) is
+      // always allowed — the clean-up the settings page needs.
+      if (eligibleCount === 0 && eligibility.eligible) throw new RoutingRollback("no_recipient");
       // LAST: nothing may follow the audit in this callback.
       await auditSecurityInTx(tx, req, {
         action: "alert_routing.set",

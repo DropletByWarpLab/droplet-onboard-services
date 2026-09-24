@@ -50,7 +50,7 @@ import type {
   SecurityZoneKind,
 } from "@prisma/client";
 import { feedVisibilityWhere, listSecurityEvents } from "./security-events.service.js";
-import { loadActiveLinks, viewerAreas } from "./security-zones.service.js";
+import { loadActiveLinks, viewerAreas, zoneChipsFor } from "./security-zones.service.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { QUIET_MS, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 
@@ -386,7 +386,14 @@ export interface IncidentNoticeView {
   settledAt: string | null;
 }
 
+/**
+ * A member as the feed shows it (route 1's row shape): the event, its
+ * `zones` — the viewer's VISIBLE areas, from the feed's own resolver
+ * (`zoneChipsFor`, review A) — and `alsoIn`. Route 1's `incident` field is
+ * left out: every member here belongs to this incident.
+ */
 export type IncidentMemberView = Awaited<ReturnType<typeof listSecurityEvents>>["events"][number] & {
+  zones: Array<{ id: string; name: string }>;
   /** The other visible areas the event also matched at triage. */
   alsoIn: Array<{ id: string; name: string }>;
 };
@@ -561,6 +568,7 @@ export async function loadIncidentDetail(
     const areas = viewerAreas(await loadActiveLinks(prisma), { visibleCameras: v.visibleCameras });
     events = page.events.map((e) => ({
       ...e,
+      zones: zoneChipsFor(e, areas),
       alsoIn: (also.get(e.id) ?? [])
         .filter((zoneId) => areas.names.has(zoneId))
         .map((zoneId) => ({ id: zoneId, name: areas.names.get(zoneId)! })),

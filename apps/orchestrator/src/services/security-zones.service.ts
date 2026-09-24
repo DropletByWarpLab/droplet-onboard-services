@@ -448,6 +448,18 @@ export function viewerAreas(
 }
 
 /**
+ * A row's area chips for one viewer — `{id, name}` of the VISIBLE areas it
+ * belongs to, sorted by name then id. The ONE resolver behind the feed's
+ * `zones` (route 1) and the incident page's member rows (route 18, WARP-2978
+ * review A), so the two can never disagree about what a viewer may see.
+ */
+export function zoneChipsFor(row: ZoneMatchableEvent, areas: ViewerAreas): Array<{ id: string; name: string }> {
+  return zonesForEvent(row, areas.index)
+    .map((id) => ({ id, name: areas.names.get(id) ?? "" }))
+    .sort((a, b) => a.name.localeCompare(b.name) || byString(a.id, b.id));
+}
+
+/**
  * The `?zone=` clause for one viewer: "none" when the area is missing,
  * archived, hidden from the viewer, or has no visible link — every one of
  * which answers the P2a way (an empty page, never a 403/404 that confirms
