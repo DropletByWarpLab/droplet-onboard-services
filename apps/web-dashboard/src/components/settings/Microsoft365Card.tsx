@@ -51,7 +51,8 @@ export interface M365ConnectionView {
 }
 
 /** The outcomes `/api/m365/callback` can land here with. A closed set: the
- *  callback never reflects the query, and neither does this card. */
+ *  callback never reflects the query, and neither does this card. Looked up
+ *  by own key only (`isOutcome`) — `"toString" in OUTCOMES` is true. */
 const OUTCOMES = {
   connected: { tone: "ok", text: "Microsoft 365 is connected." },
   cancelled: { tone: "info", text: "Sign-in was cancelled. Nothing was connected." },
@@ -118,6 +119,10 @@ function formatDate(iso: string | null): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString();
 }
 
+function isOutcome(raw: string): raw is Outcome {
+  return Object.hasOwn(OUTCOMES, raw);
+}
+
 /** Read and strip `?m365=` once. Reads `window.location` rather than
  *  `useSearchParams`, which would force a Suspense boundary onto Settings. */
 function takeOutcome(): Outcome | null {
@@ -127,7 +132,7 @@ function takeOutcome(): Outcome | null {
   if (raw === null) return null;
   url.searchParams.delete(M365_OUTCOME_PARAM);
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
-  return raw in OUTCOMES ? (raw as Outcome) : null;
+  return isOutcome(raw) ? raw : null;
 }
 
 export function Microsoft365Card({
@@ -152,6 +157,10 @@ export function Microsoft365Card({
   const [loadFailed, setLoadFailed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  /** A failed disconnect. Said inside the dialog, which stays open over the
+   *  card so the person can retry; the card's own error line would be hidden
+   *  behind it. */
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -205,13 +214,24 @@ export function Microsoft365Card({
   };
 
   const disconnect = async () => {
-    const res = await authFetch("/api/m365/connection", { method: "DELETE" });
-    if (!res.ok) {
-      setError("Droplet could not disconnect Microsoft 365. Try again.");
+    setDisconnectError(null);
+    let ok = false;
+    try {
+      ok = (await authFetch("/api/m365/connection", { method: "DELETE" })).ok;
+    } catch {
+      // Unreachable is said the same way: nothing was disconnected.
+    }
+    if (!ok) {
+      setDisconnectError("Droplet could not disconnect Microsoft 365. Nothing changed. Try again.");
       throw new Error("disconnect failed"); // keeps the dialog open
     }
     setOutcome(null);
     await load();
+  };
+
+  const closeDisconnect = () => {
+    setConfirmingDisconnect(false);
+    setDisconnectError(null);
   };
 
   const copyRedirect = async () => {
@@ -350,7 +370,14 @@ export function Microsoft365Card({
         confirmedIdentifier={view?.accountUpn ?? undefined}
         confirmLabel="Disconnect"
         variant="destructive"
-        onCancel={() => setConfirmingDisconnect(false)}
+        accessory={
+          disconnectError ? (
+            <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2" role="alert">
+              {disconnectError}
+            </p>
+          ) : undefined
+        }
+        onCancel={closeDisconnect}
         onConfirm={disconnect}
       />
     </section>

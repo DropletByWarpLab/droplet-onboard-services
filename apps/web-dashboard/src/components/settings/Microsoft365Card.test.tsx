@@ -8,7 +8,8 @@
  * hints, and disconnect.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 
 const { authFetch, session } = vi.hoisted(() => ({
   authFetch: vi.fn(),
@@ -18,14 +19,26 @@ vi.mock("@/lib/auth", () => ({
   authFetch: (...a: unknown[]) => authFetch(...a),
   useAuth: () => ({ user: session.role ? { id: "u1", role: session.role } : null }),
 }));
-// A ConfirmDialog that shows its confirm button when open, so the disconnect
-// path can be driven without the real modal's focus trap.
+// A ConfirmDialog with the real one's contract (resolve closes, reject stays
+// open) but no focus trap, so the disconnect path can be driven directly.
 vi.mock("@/components/ConfirmDialog", () => ({
-  ConfirmDialog: (p: { open: boolean; confirmLabel: string; onConfirm: () => Promise<void> }) =>
+  ConfirmDialog: (p: {
+    open: boolean;
+    confirmLabel: string;
+    onConfirm: () => Promise<void>;
+    onCancel: () => void;
+    accessory?: ReactNode;
+  }) =>
     p.open ? (
-      <button type="button" onClick={() => void p.onConfirm().catch(() => {})}>
-        confirm-{p.confirmLabel}
-      </button>
+      <div data-testid="confirm-dialog">
+        {p.accessory}
+        <button type="button" onClick={p.onCancel}>
+          cancel
+        </button>
+        <button type="button" onClick={() => void p.onConfirm().then(p.onCancel, () => {})}>
+          confirm-{p.confirmLabel}
+        </button>
+      </div>
     ) : null,
 }));
 
@@ -175,6 +188,20 @@ describe("the callback outcome", () => {
     expect(document.body.innerHTML).not.toContain("<b>hi</b>");
     expect(window.location.search).toBe("");
   });
+
+  // `in` walks the prototype chain: every plain object "has" these. The set
+  // of outcomes is the five keys the callback can send, and nothing inherited.
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"])(
+    "treats ?m365=%s as unknown, not as an outcome",
+    async (raw) => {
+      window.history.replaceState(null, "", `/settings?m365=${raw}`);
+      authFetch.mockResolvedValue(json(view()));
+      render(<Microsoft365Card />);
+      await screen.findByText("Not connected");
+      expect(screen.queryByTestId("m365-outcome")).not.toBeInTheDocument();
+      expect(window.location.search).toBe("");
+    },
+  );
 });
 
 describe("a broken app registration", () => {
@@ -219,6 +246,46 @@ describe("connected", () => {
     await waitFor(() => expect(authFetch).toHaveBeenCalledWith("/api/m365/connection", { method: "DELETE" }));
     // Back to the form, with the app still filled in.
     expect(await screen.findByDisplayValue(APP.clientId)).toBeInTheDocument();
+    expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument();
+  });
+
+  // The dialog stays open on a failed disconnect (so the person can retry),
+  // which covers the card: the reason has to be said inside the dialog.
+  it.each([
+    ["the box refuses", () => authFetch.mockResolvedValueOnce(json({ error: "internal" }, 500))],
+    ["the box cannot be reached", () => authFetch.mockRejectedValueOnce(new TypeError("Failed to fetch"))],
+  ])("says so inside the open dialog when %s", async (_label, fail) => {
+    authFetch.mockResolvedValueOnce(json(view({ state: "CONNECTED", accountUpn: "sam@practice.com", app: APP })));
+    fail();
+    render(<Microsoft365Card />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "confirm-Disconnect" }));
+
+    const dialog = await screen.findByTestId("confirm-dialog");
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent(/could not disconnect microsoft 365/i),
+    );
+    // Still connected, and said once: not a second copy on the card beneath.
+    expect(screen.getByText(/connected as sam@practice\.com/i)).toBeInTheDocument();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("forgets a failed disconnect's reason once the dialog is dismissed and opened again", async () => {
+    authFetch
+      .mockResolvedValueOnce(json(view({ state: "CONNECTED", accountUpn: "sam@practice.com", app: APP })))
+      .mockResolvedValueOnce(json({ error: "internal" }, 500));
+    render(<Microsoft365Card />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "confirm-Disconnect" }));
+    await screen.findByRole("alert");
+
+    fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    expect(await screen.findByTestId("confirm-dialog")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 
@@ -226,5 +293,21 @@ describe("the setup guide", () => {
   it("links to the bundled guide, at the href the guide registry would build", () => {
     expect(SETUP_GUIDE_HREF).toBe(integrationGuideHref("microsoft-365"));
     expect(INTEGRATION_GUIDES["microsoft-365"]).toMatch(/^# Microsoft 365/);
+  });
+
+  // The guide tells a person which button to press; it has to be one the card
+  // actually shows. "Reconnect" is the state, not a button.
+  it("names the card's buttons as the card labels them", async () => {
+    const guide = INTEGRATION_GUIDES["microsoft-365"]!;
+    const pressed = [...guide.matchAll(/select \*\*([^*]+)\*\*/gi)].map((m) => m[1]);
+    const cardButtons = ["Sign in with Microsoft", "Sign in again", "Disconnect"];
+    const onCard = pressed.filter((label) => cardButtons.includes(label!));
+    expect(onCard).toEqual(expect.arrayContaining(["Sign in with Microsoft", "Sign in again"]));
+    expect(guide).not.toMatch(/select \*\*Reconnect\*\*/i);
+
+    authFetch.mockResolvedValue(json(view({ state: "NEEDS_RECONNECT", app: APP })));
+    render(<Microsoft365Card />);
+    expect(await screen.findByRole("button", { name: "Sign in again" })).toBeInTheDocument();
+    expect(screen.getByText("Needs reconnect")).toBeInTheDocument();
   });
 });

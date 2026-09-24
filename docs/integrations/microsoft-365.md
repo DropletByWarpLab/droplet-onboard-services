@@ -62,9 +62,9 @@ Nothing. Registering an app in Entra, and the Microsoft Graph calls Droplet make
 
 There is **no secret to rotate**: the app registration holds none, and Droplet never asks for one.
 
-A person's connection lasts until something on Microsoft's side ends it — a password reset by an administrator, a revoked consent, or Droplet being switched off for more than about 90 days. Droplet then shows **"Needs reconnect"** against that person's account; they select **Reconnect** and sign in again.
+A person's connection lasts until something on Microsoft's side ends it — a password reset by an administrator, a revoked consent, or Droplet being switched off for more than about 90 days. Droplet then shows **"Needs reconnect"** against that person's account; they select **Sign in again** on the same card.
 
-If Droplet shows **"Error"** instead, signing in again will not help: the message names what Microsoft refused (usually the redirect URI or the platform chosen in step 4), and the fix is in the app registration.
+If Droplet shows **"Error"** instead, signing in again will not help on its own: the message names what Microsoft refused (usually the redirect URI or the platform chosen in step 4), and the fix is in the app registration. Once it is changed there, select **Sign in again**.
 
 ---
 
