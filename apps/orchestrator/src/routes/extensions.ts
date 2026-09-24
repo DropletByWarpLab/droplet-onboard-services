@@ -8,6 +8,8 @@
  *   POST   /api/extensions/:slug/disable         owner
  *   POST   /api/extensions/:slug/enable          owner
  *   DELETE /api/extensions/:slug                 owner
+ *   GET    /api/extensions/self                  the extension itself (H3)
+ *   POST   /api/extensions/self/call             the extension itself (H3)
  *
  * Promote is `requireRole("owner")` and never `requireRoleOrMcpService`: the
  * box signing code is the owner's decision, and no service principal — the
@@ -15,13 +17,32 @@
  * in services/extension-promote.service.ts; the readback the owner confirms
  * is derived from what the manifest PROVIDES, never from its descriptions.
  *
+ * THE CALL-BACK (H3). An installed extension holds a `dxt_` bearer that
+ * resolves to the `_service:ext:<slug>` principal, which the global
+ * extension-principal guard confines to the two `/self` routes. Those
+ * resolve the INSTALLING OWNER at call time — the User row, still active,
+ * still an owner — and answer 403 when nobody resolves (never an empty
+ * 200). `/self/call` runs a static tool as that owner, after the owner's
+ * own reach check, only if it is on the pinned allowlist of box-local reads
+ * (services/extension-self-call.ts, EMPTY in v1); a write, or a read that
+ * reaches outside the box, is refused whatever the allowlist says (review
+ * #2325). `/self/call` ships OFF
+ * (EXTENSION_SELF_CALL_ENABLED, a 503) until the sandbox's same-uid
+ * limitation is closed. The /self routes are registered before every
+ * `/extensions/:param` route.
+ *
  * This file exports only the router factory (the route-file rule); every
  * helper lives in services/.
  */
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole, type AuthUser } from "../middleware/auth.js";
+import { TOOL_CATALOG } from "@droplet/tools-core";
+import { recordAccessDenied, requireRole, type AuthUser } from "../middleware/auth.js";
+import { isExtensionPrincipal } from "../middleware/extension-principal-guard.js";
+import type { McpClientPort } from "../services/mcp-client.port.js";
+import { resolveAttributedToolAccess, toolAllowedForPrincipal } from "../services/tool-access.service.js";
+import { EXTENSION_BEARER_STATUSES } from "../services/extension-token.js";
 import { createRequireRecentMfa } from "../middleware/require-recent-mfa.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
@@ -43,6 +64,7 @@ import {
 import {
   createExtensionLifecycle,
   ExtensionLifecycleError,
+  type ExtensionAttachPort,
   type ExtensionKeySource,
   type ExtensionLifecycle,
 } from "../services/extension-lifecycle.service.js";
@@ -51,6 +73,7 @@ import {
   ExtensionSandboxError,
   type ExtensionSandboxClient,
 } from "../services/extension-sandbox.client.js";
+import { extensionSelfCallRefusal } from "../services/extension-self-call.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("extensions-route");
@@ -73,18 +96,46 @@ const phase2Schema = z
   })
   .strict();
 const phase1Schema = z.object({}).strict();
+const selfCallSchema = z
+  .object({
+    tool: z.string().min(1).max(64),
+    arguments: z.record(z.unknown()).optional(),
+  })
+  .strict();
 
 interface ExtensionsRouterDeps {
   sandbox?: ExtensionSandboxClient;
   identity?: ExtensionSigningIdentity & ExtensionKeySource;
   lifecycle?: ExtensionLifecycle;
+  /** H3: the multiplexer attach/detach the default lifecycle goes live through. */
+  attach?: ExtensionAttachPort;
+  /** H3: handed to each started extension as DROPLET_ORCHESTRATOR_URL. */
+  orchestratorUrl?: string;
+  /** H3: the dispatch `/self/call` runs through (the process-wide multiplexer). */
+  mcp?: Pick<McpClientPort, "isStarted" | "callTool">;
+  /** H3: config.EXTENSION_SELF_CALL_ENABLED. Absent → off: `/self/call` is a 503. */
+  selfCallEnabled?: boolean;
+  /**
+   * Tests only: the static tools `/self/call` admits. Absent → the pinned
+   * EXTENSION_SELF_CALL_TOOLS (empty in v1). A tool that leaves the box is
+   * refused whatever this names.
+   */
+  selfCallTools?: readonly string[];
 }
 
 export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRouterDeps = {}): Router {
   const router = Router();
   const sandbox = deps.sandbox ?? createExtensionSandboxClient();
   const identity = deps.identity ?? createDeviceIdentityClient();
-  const lifecycle = deps.lifecycle ?? createExtensionLifecycle({ prisma, sandbox, identity });
+  const lifecycle =
+    deps.lifecycle ??
+    createExtensionLifecycle({
+      prisma,
+      sandbox,
+      identity,
+      ...(deps.attach ? { attach: deps.attach } : {}),
+      ...(deps.orchestratorUrl ? { orchestratorUrl: deps.orchestratorUrl } : {}),
+    });
   const promoteDeps: PromoteDeps = {
     prisma,
     sandbox,
@@ -125,6 +176,115 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
     const user = (req as Request & { user: AuthUser }).user;
     return { id: user.id, actor: actorFromRequest(req) };
   }
+
+  // ─── the extension's own routes (H3) ─────────────────────────────────
+  //
+  // Registered first: nothing below may ever match `/extensions/self`.
+
+  /** The calling extension and the owner it acts for, or a 403 already sent. */
+  async function resolveSelf(req: Request, res: Response) {
+    const user = req.user;
+    if (!isExtensionPrincipal(user) || !user?.extensionId) {
+      recordAccessDenied(req, "not-an-extension");
+      res.status(403).json({ error: "Forbidden: only an extension calls its own routes" });
+      return null;
+    }
+    const ext = await prisma.extension.findUnique({
+      where: { id: user.extensionId },
+      include: { currentVersion: true },
+    });
+    if (!ext || !EXTENSION_BEARER_STATUSES.includes(ext.status)) {
+      recordAccessDenied(req, "extension-not-running");
+      res.status(403).json({ error: "extension_not_running" });
+      return null;
+    }
+    const owner = await prisma.user.findUnique({
+      where: { id: ext.installedByUserId },
+      select: { id: true, username: true, displayName: true, role: true, directoryStatus: true },
+    });
+    // The owner who installed it, as they are NOW: a demoted, deactivated or
+    // deleted owner is nobody the extension may act for.
+    if (!owner || owner.directoryStatus === "DEACTIVATED" || owner.role !== "owner") {
+      recordAccessDenied(req, "extension-owner-unresolved");
+      res.status(403).json({
+        error: "owner_unresolved",
+        message: "the owner who installed this extension is no longer an active owner of this box",
+      });
+      return null;
+    }
+    return { ext, owner };
+  }
+
+  router.get("/extensions/self", async (req, res, next) => {
+    try {
+      const self = await resolveSelf(req, res);
+      if (!self) return;
+      res.json({
+        extension: {
+          id: self.ext.id,
+          version: self.ext.currentVersion?.version ?? null,
+          status: self.ext.status,
+        },
+        actingFor: { id: self.owner.id, username: self.owner.username, displayName: self.owner.displayName },
+      });
+    } catch (err) {
+      fail(err, res, next);
+    }
+  });
+
+  router.post("/extensions/self/call", async (req, res, next) => {
+    try {
+      const self = await resolveSelf(req, res);
+      if (!self) return;
+      if (deps.selfCallEnabled !== true) {
+        res.status(503).json({
+          error: "self_call_disabled",
+          message: "extensions may not call tools on this box (EXTENSION_SELF_CALL_ENABLED is off)",
+        });
+        return;
+      }
+      const body = selfCallSchema.safeParse(req.body ?? {});
+      if (!body.success) {
+        res.status(400).json({ error: "invalid_request", details: body.error.flatten() });
+        return;
+      }
+      // A STATIC tool only: runtime and other extensions' tools are not in
+      // the catalog, so an extension cannot call another one through here.
+      const tool = TOOL_CATALOG.find((t) => t.name === body.data.tool);
+      if (!tool) {
+        res.status(404).json({ error: "unknown_tool" });
+        return;
+      }
+      // An explicit allowlist of box-local reads (empty in v1), never
+      // "any read": a read can still carry the owner's data off the box
+      // (review #2325; services/extension-self-call.ts).
+      const refusal = extensionSelfCallRefusal(tool, deps.selfCallTools);
+      if (refusal) {
+        recordAccessDenied(req, refusal.auditReason);
+        res.status(403).json({ error: refusal.code, message: refusal.message });
+        return;
+      }
+      const access = await resolveAttributedToolAccess(prisma, self.owner.id);
+      if (access.unresolved !== null || !toolAllowedForPrincipal(tool.name, access.tier ?? undefined, access.scope)) {
+        recordAccessDenied(req, "extension-tool-not-permitted");
+        res.status(403).json({ error: "tool_not_permitted" });
+        return;
+      }
+      const mcp = deps.mcp;
+      if (!mcp || !mcp.isStarted) {
+        res.status(503).json({ error: "tools_unavailable" });
+        return;
+      }
+      const out = await mcp.callTool(tool.name, body.data.arguments ?? {}, {
+        userId: self.owner.username,
+        userRole: self.owner.role,
+        extensionId: self.ext.id,
+      });
+      res.json({ isError: out.isError, content: out.content });
+    } catch (err) {
+      fail(err, res, next);
+    }
+  });
 
   router.get("/extensions", ownerOrAdmin, async (_req, res, next) => {
     try {

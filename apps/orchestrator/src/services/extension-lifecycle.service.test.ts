@@ -18,8 +18,10 @@ import { generateKeyPairSync, sign } from "node:crypto";
 vi.mock("../config.js", () => ({ config: { SANDBOX_URL: "http://sandbox:8030", SANDBOX_SERVICE_TOKEN: "t" } }));
 vi.mock("./activity.singleton.js", () => ({ recordActivity: vi.fn(async () => null) }));
 
+import { config } from "../config.js";
 import {
   createExtensionLifecycle,
+  ExtensionAttachError,
   EXTENSION_MAX_RECONCILE_RESTARTS,
   hashExtensionToken,
   installedExtensionIds,
@@ -201,7 +203,8 @@ describe("install re-verifies and rotates", () => {
     const k = kit();
     await seedSigned(k.db, k.identity);
     const row = await k.lifecycle.install("wc", OWNER);
-    expect(row.status).toBe("installed");
+    // H3: a start that attached is `live`.
+    expect(row.status).toBe("live");
     const token = k.sandbox.installs[0].req.token;
     expect(k.db.extensions.get("wc")?.serviceTokenHash).toBe(hashExtensionToken(token));
     expect(k.attach.attach).toHaveBeenCalledWith("wc");
@@ -334,7 +337,7 @@ describe("transitions are claimed in one statement (no read-then-write race)", (
 describe("the reconciler", () => {
   it("dials nothing on a box with no extension at all", async () => {
     const k = kit();
-    expect(await k.lifecycle.reconcile()).toEqual({ checked: 0, restarted: [], failed: [], stopped: [] });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 0, restarted: [], failed: [], stopped: [], reattached: [] });
     expect(k.sandbox.calls).toEqual([]);
   });
 
@@ -351,7 +354,7 @@ describe("the reconciler", () => {
     k.sandbox.installed.set("idle", { ...running("idle"), running: false });
     const report = await k.lifecycle.reconcile();
     expect({ ...report, stopped: [...report.stopped].sort() }).toEqual({
-      checked: 0, restarted: [], failed: [], stopped: ["broke", "gone", "off", "orphan", "stale"],
+      checked: 0, restarted: [], failed: [], stopped: ["broke", "gone", "off", "orphan", "stale"], reattached: [],
     });
     // A row that still exists keeps its sandbox copy (stopped); an uninstalled
     // row, or none, loses it (the uninstall the owner asked for).
@@ -378,7 +381,8 @@ describe("the reconciler", () => {
     k.sandbox.installed.set("wc", running("wc")); // the sandbox has started it, the row says signed
     expect((await k.lifecycle.reconcile()).stopped).toEqual([]);
     release();
-    await expect(enabling).resolves.toMatchObject({ status: "installed" });
+    // H3: the kit's attach port answers, so the enable lands `live`.
+    await expect(enabling).resolves.toMatchObject({ status: "live" });
     expect(k.sandbox.calls).not.toContain("stop wc");
   });
 
@@ -391,7 +395,7 @@ describe("the reconciler", () => {
       running: true, process: { state: "running", restarts: 0, exitCode: null },
     });
     const report = await k.lifecycle.reconcile();
-    expect(report).toEqual({ checked: 2, restarted: ["lost"], failed: [], stopped: [] });
+    expect(report).toEqual({ checked: 2, restarted: ["lost"], failed: [], stopped: [], reattached: [] });
     expect(k.sandbox.installs.map((i) => i.slug)).toEqual(["lost"]);
     expect(k.audit.mock.calls.map((c) => (c[0] as { refs: { op: string } }).refs.op)).toEqual(["reconcile"]);
     expect([...installedExtensionIds].sort()).toEqual(["ext-alive", "ext-lost"]);
@@ -403,7 +407,7 @@ describe("the reconciler", () => {
     const k = kit();
     await seedSigned(k.db, k.identity, { slug: "bad", status: "installed", tamper: true });
     const report = await k.lifecycle.reconcile();
-    expect(report).toEqual({ checked: 1, restarted: [], failed: ["bad"], stopped: [] });
+    expect(report).toEqual({ checked: 1, restarted: [], failed: ["bad"], stopped: [], reattached: [] });
     expect(k.sandbox.installs).toEqual([]);
     expect(k.db.extensions.get("bad")?.status).toBe("failed");
   });
@@ -412,7 +416,7 @@ describe("the reconciler", () => {
     const k = kit();
     await seedSigned(k.db, k.identity, { status: "installed" });
     k.sandbox.state.supervisionOff = true;
-    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: [], failed: [], stopped: [], skipped: "supervision_off" });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: [], failed: [], stopped: [], reattached: [], skipped: "supervision_off" });
     expect(k.sandbox.installs).toEqual([]);
   });
 
@@ -489,7 +493,7 @@ describe("an owner's kill switch beats an install in flight", () => {
     await untilSandboxInstall(k);
     await k.lifecycle.uninstall("wc", OWNER);
     release();
-    expect(await reconciling).toEqual({ checked: 1, restarted: [], failed: ["wc"], stopped: [] });
+    expect(await reconciling).toEqual({ checked: 1, restarted: [], failed: ["wc"], stopped: [], reattached: [] });
     expect(k.db.extensions.get("wc")).toMatchObject({ status: "uninstalled", serviceTokenHash: null });
     const after = k.sandbox.calls.slice(k.sandbox.calls.indexOf("installed wc"));
     expect(after).toContain("uninstall wc");
@@ -623,19 +627,19 @@ describe("the reconciler does not rebuild a process that keeps dying", () => {
       k.sandbox.installed.set("wc", { ...running("wc"), running: false, process: { state: "failed", restarts: 0, exitCode: 1 } });
     for (let i = 0; i < EXTENSION_MAX_RECONCILE_RESTARTS; i += 1) {
       die();
-      expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [] });
+      expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [], reattached: [] });
     }
     const tokens = new Set(k.sandbox.installs.map((i) => i.req.token));
     expect(tokens.size).toBe(EXTENSION_MAX_RECONCILE_RESTARTS);
     die();
-    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: [], failed: ["wc"], stopped: [] });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: [], failed: ["wc"], stopped: [], reattached: [] });
     expect(k.sandbox.installs).toHaveLength(EXTENSION_MAX_RECONCILE_RESTARTS);
     expect(k.db.extensions.get("wc")).toMatchObject({ status: "failed", serviceTokenHash: null });
     expect(String(k.db.extensions.get("wc")?.failureReason)).toBe(
       `process_failed: exit code 1 after ${EXTENSION_MAX_RECONCILE_RESTARTS} restarts`,
     );
     // The next tick has nothing to do: the row is no longer one that should run.
-    expect(await k.lifecycle.reconcile()).toEqual({ checked: 0, restarted: [], failed: [], stopped: [] });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 0, restarted: [], failed: [], stopped: [], reattached: [] });
   });
 
   it("the owner's disable and enable give it a whole budget again", async () => {
@@ -664,7 +668,7 @@ describe("the reconciler does not rebuild a process that keeps dying", () => {
       slug: "wc", workspaceId: "wc", version: "0.1.0", runtime: "python312", memoryMb: 64, port: 18001,
       running: false, process: { state: "stopped", restarts: 0, exitCode: -15 },
     });
-    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [] });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [], reattached: [] });
   });
 });
 
@@ -684,3 +688,242 @@ describe("enable preflights like a promote", () => {
   });
 });
 
+
+// ─── H3: live means attached ─────────────────────────────────────────────
+
+/** An attach port whose behaviour a test scripts, with an honest isAttached. */
+function scriptedAttach() {
+  const attached = new Set<string>();
+  const state = { fail: null as ExtensionAttachError | null, during: null as null | (() => Promise<void>) };
+  const port = {
+    attach: vi.fn(async (slug: string) => {
+      if (state.during) await state.during();
+      if (state.fail) throw state.fail;
+      attached.add(slug);
+    }),
+    detach: vi.fn(async (slug: string) => {
+      attached.delete(slug);
+    }),
+    isAttached: (slug: string) => attached.has(slug),
+  };
+  return { port, attached, state };
+}
+
+function kitWith(attach: ReturnType<typeof scriptedAttach>["port"] | undefined, orchestratorUrl?: string) {
+  const db = extensionPrisma();
+  const sandbox = fakeSandbox();
+  const identity = fakeSidecar();
+  const audit = vi.fn(async (_p: unknown) => null);
+  const lifecycle = createExtensionLifecycle({
+    prisma: db.prisma,
+    sandbox: sandbox.client,
+    identity,
+    audit,
+    ...(attach ? { attach } : {}),
+    ...(orchestratorUrl ? { orchestratorUrl } : {}),
+  });
+  return { db, sandbox, identity, audit, lifecycle };
+}
+
+describe("H3 — an extension is live only once its tools are attached", () => {
+  it("a start that attached is live; with no attach port it stays installed and claims nothing", async () => {
+    const a = scriptedAttach();
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity);
+    expect((await k.lifecycle.install("wc", OWNER)).status).toBe("live");
+    expect(a.attached.has("wc")).toBe(true);
+
+    const bare = kitWith(undefined);
+    await seedSigned(bare.db, bare.identity);
+    expect((await bare.lifecycle.install("wc", OWNER)).status).toBe("installed");
+  });
+
+  it("a listing that is not what was signed fails the extension and stops its process", async () => {
+    // MUTATION: treat a permanent refusal like a transient one → the row
+    // stays installed with the process running → red.
+    const a = scriptedAttach();
+    a.state.fail = new ExtensionAttachError("listing_mismatch", true, "wc: word_count's description is not the signed one");
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity);
+    await expect(k.lifecycle.install("wc", OWNER)).rejects.toMatchObject({ code: "attach_refused", httpStatus: 409 });
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "failed", serviceTokenHash: null });
+    expect(String(k.db.extensions.get("wc")?.failureReason)).toMatch(/^attach_refused: /);
+    expect(k.sandbox.calls).toContain("stop wc");
+    expect(installedExtensionIds.has("ext-wc")).toBe(false);
+    const ops = k.audit.mock.calls.map((c) => (c[0] as { what: string }).what);
+    expect(ops).toContain("Extension refused: its tools are not what was signed");
+  });
+
+  it("an extension that does not answer yet stays installed, and the reconciler attaches it later", async () => {
+    const a = scriptedAttach();
+    a.state.fail = new ExtensionAttachError("listing_unavailable", false, "wc did not list its tools");
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity);
+    const row = await k.lifecycle.install("wc", OWNER);
+    expect(row.status).toBe("installed");
+    expect(String(row.failureReason)).toMatch(/^attach_pending: /);
+    expect(k.sandbox.calls).not.toContain("stop wc");
+
+    a.state.fail = null;
+    const report = await k.lifecycle.reconcile();
+    expect(report).toEqual({ checked: 1, restarted: [], failed: [], stopped: [], reattached: ["wc"] });
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "live", failureReason: null });
+    // Re-attaching is not re-installing: no second start, no new bearer.
+    expect(k.sandbox.installs).toHaveLength(1);
+  });
+
+  it("after an orchestrator restart the reconciler re-attaches what the sandbox still runs", async () => {
+    // MUTATION: drop the isAttached branch from reconcile() → a live row
+    // whose tools this process never attached stays invisible → red.
+    const a = scriptedAttach();
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity, { status: "live" });
+    k.sandbox.installed.set("wc", {
+      slug: "wc", workspaceId: "wc", version: "0.1.0", runtime: "python312", memoryMb: 64, port: 18000,
+      running: true, process: { state: "running", restarts: 0, exitCode: null },
+    });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: [], failed: [], stopped: [], reattached: ["wc"] });
+    expect(a.attached.has("wc")).toBe(true);
+    // A second tick finds it attached and does nothing.
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: [], failed: [], stopped: [], reattached: [] });
+    expect(a.port.attach).toHaveBeenCalledTimes(1);
+  });
+
+  describe("only the process install() started is re-attached as it runs (review #2325, blocker 1)", () => {
+    // A process the sandbox restarted in place runs from files the same uid
+    // can rewrite (docs/security/extension-trust.md): what runs is no longer
+    // what install() re-verified. MUTATION: drop the restarts check from
+    // reconcile() → it is attached as it runs, before any reinstall → red.
+    const restartedInPlace = (restarts: number | null): SandboxExtensionStatus => ({
+      slug: "wc", workspaceId: "wc", version: "0.1.0", runtime: "python312", memoryMb: 64, port: 18000,
+      running: true, process: restarts === null ? null : { state: "running", restarts, exitCode: null },
+    });
+
+    for (const restarts of [1, 3, null]) {
+      it(`restarts ${restarts === null ? "unknown" : restarts}: not attached until install() has re-verified and restarted it`, async () => {
+        const a = scriptedAttach();
+        const k = kitWith(a.port);
+        await seedSigned(k.db, k.identity, { status: "live" });
+        k.sandbox.installed.set("wc", restartedInPlace(restarts));
+        // How many starts the sandbox had seen each time something attached.
+        const startsAtAttach: number[] = [];
+        a.state.during = async () => {
+          startsAtAttach.push(k.sandbox.installs.length);
+        };
+        const report = await k.lifecycle.reconcile();
+        expect(report).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [], reattached: [] });
+        expect(startsAtAttach).toEqual([1]);
+        expect(k.sandbox.installs).toHaveLength(1);
+        const token = k.sandbox.installs[0].req.token;
+        expect(k.db.extensions.get("wc")).toMatchObject({ status: "live", serviceTokenHash: hashExtensionToken(token) });
+      });
+    }
+
+    it("restarts > 0 and a statement that no longer verifies: never attached, the row fails", async () => {
+      const a = scriptedAttach();
+      const k = kitWith(a.port);
+      await seedSigned(k.db, k.identity, { status: "live", tamper: true });
+      k.sandbox.installed.set("wc", restartedInPlace(2));
+      const report = await k.lifecycle.reconcile();
+      expect(report).toEqual({ checked: 1, restarted: [], failed: ["wc"], stopped: [], reattached: [] });
+      expect(a.port.attach).not.toHaveBeenCalled();
+      expect(a.attached.has("wc")).toBe(false);
+      expect(k.sandbox.installs).toEqual([]);
+      expect(k.db.extensions.get("wc")?.status).toBe("failed");
+      expect(installedExtensionIds.has("ext-wc")).toBe(false);
+    });
+
+    it("an attached process found restarted in place is detached before its reinstall starts", async () => {
+      // MUTATION: drop the detach before the reinstall → its tools stay
+      // dispatchable while the sandbox rebuilds it → red.
+      const a = scriptedAttach();
+      const k = kitWith(a.port);
+      await seedSigned(k.db, k.identity);
+      expect((await k.lifecycle.install("wc", OWNER)).status).toBe("live");
+      k.sandbox.installed.set("wc", restartedInPlace(1));
+      let release: () => void = () => {};
+      k.sandbox.state.installHold = new Promise<void>((r) => {
+        release = r;
+      });
+      const reconciling = k.lifecycle.reconcile();
+      const starts = () => k.sandbox.calls.filter((c) => c === "install wc").length;
+      for (let i = 0; i < 50 && starts() < 2; i += 1) await new Promise((r) => setTimeout(r, 0));
+      expect(starts()).toBe(2);
+      // The reinstall is in the sandbox: nothing of the restarted process is attached.
+      expect(a.attached.has("wc")).toBe(false);
+      expect(installedExtensionIds.has("ext-wc")).toBe(false);
+      release();
+      expect(await reconciling).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [], reattached: [] });
+      expect(a.attached.has("wc")).toBe(true);
+    });
+  });
+
+  it("a disable that lands while the tools are being attached wins, and the attachment is taken down", async () => {
+    const a = scriptedAttach();
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity);
+    a.state.during = async () => {
+      a.state.during = null;
+      await k.lifecycle.disable("wc", OWNER);
+    };
+    await k.lifecycle.install("wc", OWNER);
+    expect(k.db.extensions.get("wc")?.status).toBe("disabled");
+    expect(a.attached.has("wc")).toBe(false);
+    expect(installedExtensionIds.has("ext-wc")).toBe(false);
+  });
+
+  it("a re-install of a live extension that fails before the attach takes the old attachment down", async () => {
+    // Review finding (PR #2325): a promote over a live version reinstalls
+    // without detaching; a failed start marked the row `failed` but left
+    // the previous version's tools in the multiplexer, dispatchable.
+    // MUTATION: drop the detach from markFailed → still attached → red.
+    const a = scriptedAttach();
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity);
+    expect((await k.lifecycle.install("wc", OWNER)).status).toBe("live");
+    expect(a.attached.has("wc")).toBe(true);
+    k.sandbox.state.failInstall = new Error("the TypeScript build failed");
+    await expect(k.lifecycle.install("wc", OWNER)).rejects.toMatchObject({ code: "install_failed" });
+    expect(k.db.extensions.get("wc")?.status).toBe("failed");
+    expect(a.attached.has("wc")).toBe(false);
+  });
+
+  it("disable and uninstall detach", async () => {
+    const a = scriptedAttach();
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity);
+    await k.lifecycle.install("wc", OWNER);
+    await k.lifecycle.disable("wc", OWNER);
+    expect(a.attached.has("wc")).toBe(false);
+    await k.lifecycle.enable("wc", OWNER);
+    expect(a.attached.has("wc")).toBe(true);
+    await k.lifecycle.uninstall("wc", OWNER);
+    expect(a.attached.has("wc")).toBe(false);
+  });
+});
+
+describe("H3 — the child's environment carries its own bearer and nothing else", () => {
+  it("the install request holds the dxt_ bearer and the call-back URL, never another service token", async () => {
+    // What the sandbox turns into the child's env (DROPLET_EXT_TOKEN,
+    // DROPLET_ORCHESTRATOR_URL) comes only from this request body.
+    const secrets = {
+      SERVICE_TOKEN_MCP: "svc-mcp-7c1d9e",
+      SANDBOX_SERVICE_TOKEN: "sandbox-bearer-44af02",
+      SERVICE_TOKEN_VOICE: "svc-voice-0b33aa",
+      SERVICE_TOKEN_EMAIL: "svc-email-91c2f0",
+      ORCHESTRATOR_TOKEN: "orch-token-5e6f10",
+    };
+    Object.assign(config as unknown as Record<string, unknown>, secrets);
+    const k = kitWith(scriptedAttach().port, "http://orchestrator:3000");
+    await seedSigned(k.db, k.identity);
+    await k.lifecycle.install("wc", OWNER);
+    const req = k.sandbox.installs[0].req;
+    expect(Object.keys(req).sort()).toEqual(
+      ["commit", "entrypoint", "memoryMb", "orchestratorUrl", "runtime", "token", "tree", "version", "workspaceId"],
+    );
+    expect(req.token).toMatch(/^dxt_/);
+    expect(req.orchestratorUrl).toBe("http://orchestrator:3000");
+    const body = JSON.stringify(req);
+    for (const value of Object.values(secrets)) expect(body).not.toContain(value);
+  });
+});

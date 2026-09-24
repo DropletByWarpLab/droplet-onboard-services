@@ -52,10 +52,23 @@
  * mcp-client.singleton reads it to decide which extension servers may
  * attach; it is maintained here, from the database, never from env.
  *
+ * LIVE MEANS ATTACHED (H3). `installed` is "the sandbox runs it"; `live` is
+ * "and its tools are in this orchestrator's runtime layer". After a start
+ * the attach port (extension-attach.service) lists the extension's tools
+ * through the relay and checks them against the signed manifest. A listing
+ * that differs is refused for good: the row goes `failed` and the process
+ * is stopped. An extension that does not answer yet stays `installed` and
+ * the reconciler attaches it on a later tick — the same tick that
+ * re-attaches every running extension after an orchestrator restart, since
+ * the attachment lives in this process's memory and the sandbox's process
+ * outlives it. Re-attached as it runs is only the process install() started
+ * (`restarts` 0): one the sandbox restarted in place, or one with no process
+ * record, is reinstalled through install() first (review #2325).
+ *
  * AUDIT: every transition writes a `tool_run` activity row with
  * `refs.extensionId` and `refs.op` — no new activity kind.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { TOOL_CATALOG } from "@droplet/tools-core";
 import { createLogger } from "../lib/logger.js";
@@ -74,12 +87,13 @@ import {
   type SandboxHeldExtension,
 } from "./extension-sandbox.client.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
-import { verifyExtensionStatement } from "./update-agent/extension-verify.js";
+import { verifyExtensionStatement, type ExtensionSigner } from "./update-agent/extension-verify.js";
+import { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken } from "./extension-token.js";
+
+export { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken };
 
 const logger = createLogger("extension-lifecycle");
 
-export const EXTENSION_TOKEN_PREFIX = "dxt_";
-export const EXTENSION_SERVER_PREFIX = "ext-";
 export const EXTENSION_RECONCILE_LOCK_KEY = "droplet:extension-reconciler";
 export const EXTENSION_TICKET = "WARP-2900";
 
@@ -110,10 +124,6 @@ export const reconcileRestartCounts = new Map<string, number>();
 
 export function extensionServerId(slug: string): string {
   return `${EXTENSION_SERVER_PREFIX}${slug}`;
-}
-
-export function hashExtensionToken(token: string): string {
-  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 export function mintExtensionToken(): { token: string; hash: string } {
@@ -246,7 +256,8 @@ export type ExtensionLifecycleErrorCode =
   | "wrong_state"
   | "verify_failed"
   | "install_failed"
-  | "supervision_off";
+  | "supervision_off"
+  | "attach_refused";
 
 export class ExtensionLifecycleError extends Error {
   constructor(
@@ -260,10 +271,46 @@ export class ExtensionLifecycleError extends Error {
   }
 }
 
-/** H3 plugs the multiplexer attach/detach in here; H2 has nothing to attach. */
+/**
+ * The multiplexer attach/detach (extension-attach.service, H3). `attach`
+ * throws {@link ExtensionAttachError}; `isAttached` lets the reconciler find
+ * a running extension this process has not attached (an orchestrator
+ * restart). Without `isAttached` the reconciler never re-attaches.
+ */
 export interface ExtensionAttachPort {
-  attach(slug: string): Promise<void>;
+  attach(slug: string): Promise<unknown>;
   detach(slug: string): Promise<void>;
+  isAttached?(slug: string): boolean;
+}
+
+export type ExtensionAttachErrorCode =
+  | "sandbox_url_refused"
+  | "not_promoted"
+  | "listing_unavailable"
+  | "listing_mismatch"
+  | "attach_rejected"
+  /** The review could not be recorded or re-read: transient, retried. */
+  | "classification_unavailable"
+  /** The stored statement no longer verifies, or the row disagrees with it. */
+  | "statement_unverified"
+  /** The box's extension key could not be read (the sidecar): transient. */
+  | "statement_unavailable";
+
+/**
+ * Why an attach did not happen. `permanent` is the lifecycle's switch: a
+ * permanent refusal (the listing is not what was signed, the server is not
+ * allowed) fails the extension and stops its process; a transient one (it
+ * did not answer) leaves it `installed` for the reconciler to retry.
+ */
+export class ExtensionAttachError extends Error {
+  constructor(
+    readonly code: ExtensionAttachErrorCode,
+    readonly permanent: boolean,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ExtensionAttachError";
+  }
 }
 
 export interface ExtensionKeySource {
@@ -317,6 +364,48 @@ export function statementMismatch(
   return null;
 }
 
+/** The signed columns of a stored ExtensionVersion. */
+export interface StoredExtensionVersion {
+  version: string;
+  commit: string;
+  tree: string;
+  statementBytes: Uint8Array;
+  signature: string;
+  manifestBytes: Uint8Array;
+  signer: ExtensionSigner;
+  keyFingerprint: string;
+}
+
+export type StoredExtensionVersionCheck =
+  | { ok: true; manifest: ExtensionManifest; statement: ExtensionStatement }
+  | { ok: false; failureReason: string; detail: string };
+
+/**
+ * Re-verify a stored version: the statement's signature by the signer and
+ * key recorded at promote, the manifest's digest against the statement, and
+ * the row's plain columns against the statement ({@link statementMismatch}).
+ * What install() starts and what the attach pins both come from here, never
+ * from the row alone. `boxKey` is the box extension key now (null: none).
+ */
+export async function verifyStoredExtensionVersion(
+  slug: string,
+  workspaceId: string,
+  v: StoredExtensionVersion,
+  boxKey: { spkiDer: Uint8Array } | null,
+): Promise<StoredExtensionVersionCheck> {
+  const check = await verifyExtensionStatement({
+    statement: v.statementBytes,
+    signature: v.signature,
+    manifest: v.manifestBytes,
+    boxKey,
+    recorded: { signer: v.signer, keyFingerprint: v.keyFingerprint },
+  });
+  if (!check.ok) return { ok: false, failureReason: check.failureReason, detail: check.detail };
+  const mismatch = statementMismatch(slug, workspaceId, v, check.statement);
+  if (mismatch) return { ok: false, failureReason: "statement_mismatch", detail: mismatch };
+  return { ok: true, manifest: check.manifest, statement: check.statement };
+}
+
 /** Supervisor states that mean the process died: the sandbox never restarts one. */
 const DEAD_PROCESS_STATES: ReadonlySet<string> = new Set(["failed", "exited"]);
 
@@ -326,6 +415,8 @@ export interface ReconcileReport {
   checked: number;
   restarted: string[];
   failed: string[];
+  /** Running in the sandbox, attached again by this tick (H3). */
+  reattached: string[];
   /** Processes the sandbox ran for a row that must not run, now stopped. */
   stopped: string[];
   skipped?: "supervision_off";
@@ -334,10 +425,9 @@ export interface ReconcileReport {
 export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
   const { prisma, sandbox, identity } = deps;
   const audit = deps.audit ?? recordActivity;
-  const attach: ExtensionAttachPort = deps.attach ?? {
-    attach: async () => {},
-    detach: async () => {},
-  };
+  // No port → nothing is attached, and nothing claims to be: the row stays
+  // `installed` (`live` is only ever written after a real attach).
+  const attach: ExtensionAttachPort | null = deps.attach ?? null;
 
   async function record(
     op: LifecycleOp,
@@ -365,9 +455,17 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     return ext;
   }
 
-  /** `failed` only while the row is still in `from`; false when someone else moved it. */
+  /**
+   * `failed` only while the row is still in `from`; false when someone else
+   * moved it. A failed extension is never left attached: a re-install of a
+   * live one (a promote) that fails before its attach would otherwise leave
+   * the previous version's tools in the multiplexer.
+   */
   async function markFailed(slug: string, reason: string, from: readonly ExtensionStatusName[]): Promise<boolean> {
     installedExtensionIds.delete(extensionServerId(slug));
+    if (attach) {
+      await attach.detach(slug).catch((err: unknown) => logger.warn({ err, slug }, "extension_detach_on_failure_failed"));
+    }
     const u = await prisma.extension.updateMany({
       where: { id: slug, status: { in: [...from] } },
       data: { status: "failed", failureReason: reason.slice(0, 1000), serviceTokenHash: null },
@@ -450,31 +548,27 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
         boxKey = null;
       }
     }
-    const check = await verifyExtensionStatement({
-      statement: v.statementBytes,
-      signature: v.signature,
-      manifest: v.manifestBytes,
-      boxKey,
-      recorded: { signer: v.signer, keyFingerprint: v.keyFingerprint },
-    });
-    const refuse = async (failureReason: string, detail: string, what: string): Promise<never> => {
-      const reason = `${failureReason}: ${detail}`;
-      if (!(await markFailed(slug, reason, from))) throw await overtaken(slug);
-      await record(op, slug, actor, { severity: "warn", what, refs: { version: v.version, failureReason } });
-      throw new ExtensionLifecycleError("verify_failed", 409, reason);
-    };
-    if (!check.ok) {
-      return refuse(check.failureReason, check.detail, "Extension refused: its signed statement no longer verifies");
-    }
-    const manifest = check.manifest;
     // The signature covers the statement, never the row's plain columns
     // (review #2323). A row whose workspace, version, commit or tree says
     // something the statement does not, or that carries another extension's
-    // statement, is refused. What the sandbox is sent comes from the
-    // statement alone.
+    // statement, is refused (statement_mismatch). What the sandbox is sent
+    // comes from the statement alone.
+    const check = await verifyStoredExtensionVersion(slug, ext.workspaceId, v, boxKey);
+    if (!check.ok) {
+      const reason = `${check.failureReason}: ${check.detail}`;
+      if (!(await markFailed(slug, reason, from))) throw await overtaken(slug);
+      await record(op, slug, actor, {
+        severity: "warn",
+        what:
+          check.failureReason === "statement_mismatch"
+            ? "Extension refused: its row is not what was signed"
+            : "Extension refused: its signed statement no longer verifies",
+        refs: { version: v.version, failureReason: check.failureReason },
+      });
+      throw new ExtensionLifecycleError("verify_failed", 409, reason);
+    }
+    const manifest = check.manifest;
     const signed = check.statement;
-    const mismatch = statementMismatch(slug, ext.workspaceId, v, signed);
-    if (mismatch) return refuse("statement_mismatch", mismatch, "Extension refused: its row is not what was signed");
 
     // 2. Rotate the bearer BEFORE the start: the child may call back at once.
     const { token, hash } = mintExtensionToken();
@@ -525,14 +619,69 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     if (done.count === 0) return undoOvertakenInstall(slug, actor, op);
     // The owner started it: the reconciler's restart budget is whole again.
     if (op !== "reconcile") reconcileRestartCounts.delete(slug);
-    const row = await load(slug);
     installedExtensionIds.add(extensionServerId(slug));
-    await attach.attach(slug);
     await record(op, slug, actor, {
       what: op === "enable" ? "Extension enabled" : op === "reconcile" ? "Extension restarted" : "Extension installed",
       refs: { version: v.version, runtime: manifest.runtime, memoryMb: manifest.resources.memoryMb },
     });
-    return row;
+    if (attach) await goLive(attach, slug, actor, op);
+    return load(slug);
+  }
+
+  /**
+   * Attach a running extension and move it to `live`. A permanent refusal
+   * fails it and stops the process; a transient one leaves it `installed`
+   * (with the reason) for the reconciler. Only rows still running may go
+   * live: a disable that landed meanwhile wins, and what this attached is
+   * taken down again.
+   */
+  async function goLive(attach: ExtensionAttachPort, slug: string, actor: ActivityActor, op: InstallOp): Promise<void> {
+    const from: readonly ExtensionStatusName[] = ["installed", "live"];
+    try {
+      await attach.attach(slug);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const permanent = err instanceof ExtensionAttachError ? err.permanent : false;
+      if (!permanent) {
+        logger.warn({ err, slug }, "extension_attach_pending");
+        await prisma.extension.updateMany({
+          where: { id: slug, status: { in: [...from] } },
+          data: { status: "installed", failureReason: `attach_pending: ${message}`.slice(0, 1000) },
+        });
+        // One row per owner action, not one per reconciler tick.
+        if (op !== "reconcile") {
+          await record(op, slug, actor, {
+            severity: "warn",
+            what: "Extension running, its tools not attached yet",
+            refs: { error: message.slice(0, 300) },
+          });
+        }
+        return;
+      }
+      await attach.detach(slug).catch(() => undefined);
+      const failed = await markFailed(slug, `attach_refused: ${message}`, from);
+      try {
+        await sandbox.stop(slug);
+      } catch (e) {
+        logger.warn({ err: e, slug }, "extension_stop_after_refused_attach_failed");
+      }
+      if (!failed) return;
+      await record(op, slug, actor, {
+        severity: "warn",
+        what: "Extension refused: its tools are not what was signed",
+        refs: { error: message.slice(0, 300), code: err instanceof ExtensionAttachError ? err.code : null },
+      });
+      throw new ExtensionLifecycleError("attach_refused", 409, message);
+    }
+    const live = await prisma.extension.updateMany({
+      where: { id: slug, status: { in: [...from] } },
+      data: { status: "live", failureReason: null },
+    });
+    if (live.count === 0) {
+      // Disabled or uninstalled while it was attaching: that stands.
+      installedExtensionIds.delete(extensionServerId(slug));
+      await attach.detach(slug);
+    }
   }
 
   /**
@@ -563,7 +712,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
 
   async function stopAndDetach(slug: string): Promise<void> {
     installedExtensionIds.delete(extensionServerId(slug));
-    await attach.detach(slug);
+    if (attach) await attach.detach(slug);
   }
 
   return {
@@ -676,7 +825,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       const shouldRun = (status: string | undefined): boolean =>
         (RUNNING_EXTENSION_STATUSES as readonly string[]).includes(status ?? "");
       const rows = all.filter((r) => shouldRun(r.status));
-      const report: ReconcileReport = { checked: rows.length, restarted: [], failed: [], stopped: [] };
+      const report: ReconcileReport = { checked: rows.length, restarted: [], failed: [], stopped: [], reattached: [] };
       if (all.length === 0) return report;
 
       // ── 1. strays ──
@@ -721,9 +870,34 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
           logger.warn({ err, slug: id }, "extension_reconcile_status_failed");
           continue;
         }
-        if (st?.running === true) {
+        if (st?.running === true && st.process?.restarts === 0) {
           installedExtensionIds.add(extensionServerId(id));
+          // Running, but not attached in THIS process: an orchestrator
+          // restart, or an attach that did not answer last time. Only the
+          // process install() re-verified and started (restarts 0) is
+          // attached as it runs.
+          if (attach?.isAttached && !attach.isAttached(id)) {
+            try {
+              await goLive(attach, id, SYSTEM_ACTOR, "reconcile");
+              if (attach.isAttached(id)) report.reattached.push(id);
+            } catch (err) {
+              logger.warn({ err, slug: id }, "extension_reconcile_reattach_failed");
+              report.failed.push(id);
+            }
+          }
           continue;
+        }
+        if (st?.running === true) {
+          // Restarted in place (or no process record says otherwise): it runs
+          // from files the same uid can rewrite, so it is not the code
+          // install() verified (review #2325). Nothing of it stays attached;
+          // it is reinstalled below, through install() — re-verified, a new
+          // bearer, a fresh export — and attached from there, or failed.
+          logger.warn({ slug: id, restarts: st.process?.restarts ?? null }, "extension_reconcile_restarted_in_place");
+          installedExtensionIds.delete(extensionServerId(id));
+          if (attach) {
+            await attach.detach(id).catch((err: unknown) => logger.warn({ err, slug: id }, "extension_detach_before_reinstall_failed"));
+          }
         }
         const proc = st?.process ?? null;
         if (proc && DEAD_PROCESS_STATES.has(proc.state)) {

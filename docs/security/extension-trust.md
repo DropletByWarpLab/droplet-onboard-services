@@ -89,8 +89,8 @@ statement alone.
   code cannot pose as the sandbox's own `503` (bearer not configured) or
   bare `404` (supervision off).
 - Every start mints a new `dxt_` call-back bearer. Only its sha256 is
-  stored (`Extension.serviceTokenHash`), and a stop clears it. Resolving it
-  to a principal is slice H3.
+  stored (`Extension.serviceTokenHash`), and a stop clears it. What it
+  resolves to is under "Attach and call-back" below.
 - Everything is gated by `SANDBOX_PROCESS_SUPERVISION` (default `0`): off,
   every extension route in the sandbox is `404` and promote answers `503`.
 - Every install write is status-claimed. An owner's disable or uninstall
@@ -130,6 +130,72 @@ statement alone.
 - `budget` is a reserved slug: the sandbox's `GET /extensions/budget` is
   declared before `GET /extensions/{slug}`.
 
+## Attach and call-back (slice H3)
+
+- **Attach.** Every attach re-verifies the stored statement against the
+  box key and the row against the statement (the check install() makes),
+  and pins what that verified, never the row's manifest bytes on their own
+  word: the reconciler attaches with no install before it. A statement
+  that does not verify fails the extension; a box key the sidecar cannot
+  hand over yet leaves it `installed` for a later tick. The orchestrator
+  then lists the extension's tools
+  through the relay (`services/extension-mcp.port.ts`, plain JSON-RPC
+  over the sandbox client, no MCP SDK transport) and compares the listing
+  with the signed manifest: the same names, descriptions and input-schema
+  hashes. A listing that differs fails the extension and stops its
+  process. The port stays pinned to the manifest, so a listing that the
+  extension's code rewrites at runtime stops being advertised
+  (`REMOTE_CATALOG_UNAVAILABLE`) instead of being absorbed. Only then does
+  `attachRemote('ext-<slug>')` run. The multiplexer admits an `ext-*` id
+  only while the lifecycle lists it as installed; the env allowlist does
+  not reach that namespace. `SANDBOX_URL` must name the `sandbox` host.
+- **The row is `live` only once attached.** An extension that does not
+  answer yet stays `installed`, and the reconciler attaches it later. The
+  same tick re-attaches every running extension after an orchestrator
+  restart (the attachment is in-process memory), but only the process
+  install() started (`restarts` 0). One the sandbox restarted in place, or
+  one with no process record, is detached and reinstalled through
+  install() first (review #2325).
+- **Classification.** Every tool is recorded as a confirming write
+  (`requiresWrite`, `requiresConfirmation`), whatever the author proposed
+  or the wire claims (`readOnlyHint` is never read). For `ext-*` the
+  record is the whole call policy: an unreviewed tool is
+  `REMOTE_WRITE_NOT_PERMITTED`, so **no extension tool runs from chat until
+  an owner reviews it as a read** (or WARP-2321 lands). A new version keeps
+  a reviewed read only while the tool's description and input schema are
+  unchanged (one hash over both, `remoteToolReviewHash`); a changed
+  description or schema resets the tool to the default and clears the
+  review, and a review sent with the hash it was shown is then a
+  `STALE_REVIEW`. An
+  operator's block is never lifted by that reset.
+- **Call-back principal.** A `dxt_` header bearer is looked up by its
+  sha256 and resolves to `_service:ext:<slug>` only while the extension is
+  `installed` or `live`. An unknown one is a 401 at once; it never reaches
+  the Nextcloud fallback, a `dxt_` cookie is refused, and it never opens a
+  WebSocket. A global guard mounted right after `authMiddleware` confines
+  that principal to `GET /api/extensions/self` and
+  `POST /api/extensions/self/call` (exact method and path), so the routes
+  that carry no `requireRole` of their own are closed to it too.
+- **Acting for the owner.** Both routes resolve the owner who installed
+  the extension at call time (the User row, active, still an owner) and
+  answer `403 owner_unresolved` otherwise. `/self/call` runs a static
+  catalog tool as that owner, after the owner's own reach check, only if
+  the tool is on an explicit allowlist of box-local reads
+  (`EXTENSION_SELF_CALL_TOOLS`, `services/extension-self-call.ts`), which
+  is **empty in v1**: every tool is a `403 tool_not_allowlisted`. "Any
+  read" is not the rule (review #2325): a read can still carry the owner's
+  data off the box. A tool whose domain is a connector (`cloud`, `erp`), or
+  whose route goes through the egress screen (`/api/web/`, so
+  `get_weather`, `currency_convert`), a connector (`/api/erp/`, so
+  `cloud_query_dataset`; `/api/integrations/`), the model (`/api/llm/`: the
+  provider may be a cloud one) or a mail account (`/api/email/`), or that
+  has no route entry, is a `403 off_box_tool_refused` whatever the
+  allowlist says, and the allowlist's test refuses such an entry. Writes
+  are `403 write_tool_refused`. The `tool_call` row carries
+  `refs.extensionId`. **`/self/call` ships off**
+  (`EXTENSION_SELF_CALL_ENABLED=0`, a 503), for the reason in the first
+  known limitation below.
+
 ### Why a sandbox relay and not the mcp-bridge
 
 The ticket's "attach through the multiplexer" could read as "add an
@@ -168,6 +234,13 @@ inside the host shim) can do the following:
   the flag), so any child can read another's environment under `/proc`,
   including an installed extension's relay key and `dxt_` call-back
   bearer. The relay key stops a naive connect, not a same-uid reader.
+  Since H3 that bearer has authority: with `EXTENSION_SELF_CALL_ENABLED=1`
+  it runs the allowlisted box-local reads as the extension's installing
+  OWNER. A workspace `run` child belongs to whoever started the workshop
+  run, which need not be an owner, so turning that flag on lets such a
+  child run those reads as the owner. It never lets it reach outside the
+  box: no tool that does is callable, and the allowlist is empty in v1.
+  The flag stays off until WARP-2898 (or per-process uids) closes this.
 - **Not the server's bearer, conditionally.** `SANDBOX_SERVICE_TOKEN` is in
   the SERVER's environment only, and the server is non-dumpable (above).
   If `prctl` fails (the log line says so), a child can read
@@ -188,4 +261,4 @@ inside the host shim) can do the following:
   extension's group, so a stop does not reach it. It keeps running,
   bounded by `pids_limit` and `mem_limit`, holding whatever it read.
 - Extension tools stay denied at dispatch until an owner reviews one as a
-  read, or WARP-2321's runtime confirmation lands (H3).
+  read, or WARP-2321's runtime confirmation lands (H3, above).

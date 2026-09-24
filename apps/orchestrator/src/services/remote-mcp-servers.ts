@@ -109,6 +109,8 @@ export interface RemoteCatalogSyncOptions {
   operatorDomain?: ToolDomain;
   /** Domain the server declared for itself. A hint from outside the box. */
   serverDomain?: ToolDomain;
+  /** WARP-2900 — stamped on every descriptor ({@link RuntimeToolDescriptor.provenance}). */
+  provenance?: string;
   /** Injectable for tests; defaults to the process-wide registry. */
   registry?: RuntimeToolRegistry;
 }
@@ -192,6 +194,7 @@ function toRuntimeDescriptor(
     domainSource: source,
     description: tool.description,
     inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
+    ...(opts.provenance ? { provenance: opts.provenance } : {}),
   };
 }
 

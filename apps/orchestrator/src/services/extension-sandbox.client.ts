@@ -72,7 +72,9 @@ export type ExtensionSandboxErrorCode =
   | "UNREACHABLE"
   | "SANDBOX_ERROR"
   | "TIMEOUT"
-  | "SUPERVISION_OFF";
+  | "SUPERVISION_OFF"
+  /** SANDBOX_URL does not name the compose-internal sandbox: nothing was sent. */
+  | "HOST_REFUSED";
 
 export class ExtensionSandboxError extends Error {
   constructor(
@@ -113,6 +115,25 @@ export const INSTALL_TIMEOUT_MS = 240_000;
 /** The sandbox gate's exact 404 body. */
 const GATE_DETAIL = "Not found";
 
+/** The one host the extension routes may be reached at: the compose service name. */
+export const EXTENSION_SANDBOX_HOST = "sandbox";
+
+/**
+ * Whether `url` is http(s) on the compose-internal {@link EXTENSION_SANDBOX_HOST}.
+ * Every extension call carries the sandbox bearer, and an install carries
+ * the extension's fresh `dxt_` call-back bearer too: a SANDBOX_URL pointed
+ * anywhere else must receive neither (review finding on #2325).
+ */
+export function isInternalSandboxUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname === EXTENSION_SANDBOX_HOST;
+}
+
 export function createExtensionSandboxClient(
   opts: ExtensionSandboxClientOptions = {},
 ): ExtensionSandboxClient {
@@ -120,6 +141,13 @@ export function createExtensionSandboxClient(
 
   function settings(): { baseUrl: string; token: string } {
     const baseUrl = (opts.baseUrl ?? config.SANDBOX_URL ?? "http://sandbox:8030").replace(/\/+$/, "");
+    if (!isInternalSandboxUrl(baseUrl)) {
+      throw new ExtensionSandboxError(
+        `extensions are reached only through the compose-internal '${EXTENSION_SANDBOX_HOST}' host; SANDBOX_URL names another`,
+        503,
+        "HOST_REFUSED",
+      );
+    }
     const token = opts.serviceToken ?? config.SANDBOX_SERVICE_TOKEN ?? "";
     if (!token) {
       throw new ExtensionSandboxError(
