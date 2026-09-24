@@ -22,10 +22,13 @@ import {
   resolveAttributedToolAccess,
   resolveToolAccessScope,
   toolAllowedInScope,
+  toolDispatchDenial,
+  unknownToolsIn,
   WRITE_TOOLS,
   writeToolsIn,
   type ToolAccessScope,
 } from "./tool-access.service.js";
+import type { RuntimeToolLookup } from "./tool-layers.service.js";
 
 const scopeOf = (
   domains: string[],
@@ -161,6 +164,121 @@ describe("narrowToolsToScope — the single narrowing expression (WARP-2556)", (
     // Fail-closed, same as the predicate: an empty scope is not "no scope".
     const tools = toolsOf(nameOf("files", false), nameOf("cameras", true));
     expect(narrowToolsToScope(tools, DENY_ALL_TOOL_SCOPE)).toEqual([]);
+  });
+});
+
+// ── WARP-2897 — runtime tools through the SAME predicate ──────────────
+//
+// Until WARP-2897, `toolAllowedInScope` looked a name up in the compiled
+// catalog only, so EVERY runtime tool (remote MCP today, extensions once
+// slice H lands) was denied to any person holding an AccessRole whatever
+// their grants said. The runtime lookup (tool-layers.service.ts
+// `currentRuntimeToolLookup`, shared by both LLM sites) supplies the domain
+// from the descriptor and the write flag from the classification record.
+describe("toolAllowedInScope — runtime tools (WARP-2897)", () => {
+  const runtime: RuntimeToolLookup = (name) =>
+    ({
+      "bookings__list_slots": { domain: "ext-bookings", requiresWrite: false },
+      "bookings__book_slot": { domain: "ext-bookings", requiresWrite: true },
+    })[name];
+
+  /**
+   * MUTATION: make `toolAllowedInScope` catalog-only again (drop the runtime
+   * fallback) -> the first case goes red.
+   */
+  it("admits a READ runtime tool whose domain is in scope", () => {
+    expect(toolAllowedInScope("bookings__list_slots", scopeOf(["ext-bookings"]), runtime)).toBe(true);
+  });
+
+  it("denies it when the domain is not in scope", () => {
+    expect(toolAllowedInScope("bookings__list_slots", scopeOf(["files"], ["files"]), runtime)).toBe(false);
+  });
+
+  it("denies a WRITE-classified runtime tool without the domain in writeDomains", () => {
+    expect(toolAllowedInScope("bookings__book_slot", scopeOf(["ext-bookings"]), runtime)).toBe(false);
+    expect(
+      toolAllowedInScope("bookings__book_slot", scopeOf(["ext-bookings"], ["ext-bookings"]), runtime),
+    ).toBe(true);
+  });
+
+  it("with no lookup passed, every runtime tool stays denied (the fail-closed default)", () => {
+    expect(toolAllowedInScope("bookings__list_slots", scopeOf(["ext-bookings"]))).toBe(false);
+  });
+
+  it("a runtime lookup never rescues a compiled tool the scope drops", () => {
+    // The catalog answers first; a lookup that (wrongly) claimed a compiled
+    // name must not widen it.
+    const liar: RuntimeToolLookup = () => ({ domain: "files", requiresWrite: false });
+    expect(toolAllowedInScope(nameOf("cameras", false), scopeOf(["files"]), liar)).toBe(false);
+  });
+
+  it("both narrowing helpers and the dispatch gate thread the same lookup", () => {
+    const names = ["bookings__list_slots", "bookings__book_slot", "bookings__unknown"];
+    const scope = scopeOf(["ext-bookings"]);
+    expect(narrowToolNamesToScope(names, scope, runtime)).toEqual(["bookings__list_slots"]);
+    expect(
+      narrowToolsToScope(names.map((name) => ({ name })), scope, runtime).map((t) => t.name),
+    ).toEqual(["bookings__list_slots"]);
+    // Dispatch: an out-of-scope REGISTERED runtime tool is refused as forbidden…
+    expect(toolDispatchDenial("bookings__book_slot", {}, scope, runtime)?.code).toBe(
+      "FORBIDDEN_TOOL_FOR_ROLE",
+    );
+    // …an in-scope one passes…
+    expect(toolDispatchDenial("bookings__list_slots", {}, scope, runtime)).toBeNull();
+    // …and an unregistered name still falls through to the WARP-642 guard.
+    expect(toolDispatchDenial("bookings__unknown", {}, scope, runtime)).toBeNull();
+  });
+
+  /**
+   * The PRINCIPAL helpers (both axes) are what chat's catalog build
+   * (`narrowAllowedToolsForRole`) goes through. Without the lookup here, a
+   * scoped family/guest person — or a scoped admin sending `allowed_tools` —
+   * never gets a runtime tool their grant admits, while effective-access
+   * reports the domain as theirs.
+   *
+   * MUTATION: drop the `runtime` argument in `toolAllowedForPrincipal`'s
+   * scope check → red (the principal helpers go back to catalog-only).
+   */
+  it("the principal helpers (tier + scope) thread the same lookup", () => {
+    const names = ["bookings__list_slots", "bookings__book_slot"];
+    const viewScope = scopeOf(["ext-bookings"]);
+    expect(narrowToolNamesForPrincipal(names, "family", viewScope, false, runtime)).toEqual([
+      "bookings__list_slots",
+    ]);
+    expect(narrowToolNamesForPrincipal(names, "admin", viewScope, false, runtime)).toEqual([
+      "bookings__list_slots",
+    ]);
+    expect(
+      narrowToolNamesForPrincipal(
+        names,
+        "admin",
+        scopeOf(["ext-bookings"], ["ext-bookings"]),
+        false,
+        runtime,
+      ),
+    ).toEqual(names);
+    expect(firstToolDeniedForPrincipal(names, "family", viewScope, false, runtime)).toEqual({
+      tool: "bookings__book_slot",
+      axis: "role_grant",
+    });
+    // No lookup passed: the fail-closed default still denies every runtime tool.
+    expect(narrowToolNamesForPrincipal(names, "family", viewScope)).toEqual([]);
+  });
+});
+
+describe("unknownToolsIn / writeToolsIn — optional runtime sets (WARP-2897)", () => {
+  it("a runtime name is known only when passed in extraKnown", () => {
+    expect(unknownToolsIn(["bookings__list_slots"])).toEqual(["bookings__list_slots"]);
+    expect(unknownToolsIn(["bookings__list_slots"], new Set(["bookings__list_slots"]))).toEqual([]);
+    // compiled names stay known either way
+    expect(unknownToolsIn([nameOf("files", false)], new Set())).toEqual([]);
+  });
+
+  it("a runtime name counts as a write only when passed in runtimeWrite", () => {
+    expect(writeToolsIn(["bookings__book_slot"])).toEqual([]);
+    expect(writeToolsIn(["bookings__book_slot"], new Set(["bookings__book_slot"]))).toEqual([
+      "bookings__book_slot",
+    ]);
   });
 });
 

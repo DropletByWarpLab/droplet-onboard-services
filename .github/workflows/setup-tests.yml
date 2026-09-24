@@ -89,6 +89,9 @@ on:
       - "scripts/lib/tls-reload.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
+      # WARP-2995: the OTA host .env reconcile ships under docker/ (the only
+      # tree a release delivers); its suite lives in scripts/test/.
+      - "docker/ota/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
       - "docker/frigate/config.yml"
@@ -174,6 +177,7 @@ on:
       - "scripts/lib/tls-reload.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
+      - "docker/ota/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
       - "docker/frigate/config.yml"
@@ -308,6 +312,12 @@ jobs:
         # docker; the pin-resolution assertions run the real
         # `docker compose config` client-side (no daemon needed).
         run: bash scripts/test/apply-update.test.sh
+      - name: Run OTA host .env reconcile tests
+        # WARP-2995: docker/ota/env-reconcile.sh — additive/idempotent .env
+        # backfill + boot-unit profile flags an OTA runs on the host before
+        # any swap, plus the drift gate against migrate_env's key list.
+        # Pure POSIX sh over a tmp dir, no Docker. ~1 s.
+        run: bash scripts/test/ota-env-reconcile.test.sh
       - name: Run LUKS2 data-partition tests
         # WARP-232: HERMETICALLY EXECUTES droplet-luks-provision.sh provision +
         # the existing-LUKS re-run refusal, scripts/lib/luks.sh secrets

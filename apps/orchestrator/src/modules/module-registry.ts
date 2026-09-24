@@ -207,7 +207,10 @@ export const MODULES: readonly ModuleDef[] = [
     // prefixes with their own toggles.
     category: "workspace", routePrefixes: ["/api/pm", "/api/mobile/pm"], navHrefs: ["/projects"],
     // WARP-1527: the tools-core domain for the PM suite is "pm".
-    toolDomains: ["pm"], core: false, defaultEnabled: false,
+    // WARP-2988: `business` is SHARED with `crm` — ADR-045's one door to the
+    // CRM and the tracker passes the feature intersection when EITHER module
+    // is held (access-catalog.ts `domainsForFeatures`, OR semantics).
+    toolDomains: ["pm", "business"], core: false, defaultEnabled: false,
     available: () => true, // native to the orchestrator
   },
   {
@@ -223,7 +226,9 @@ export const MODULES: readonly ModuleDef[] = [
     // WARP-2546 — claimed in the same change that adds the handlers, which is
     // what the registry's `unknown domain` invariant enforces: a domain the
     // tools-core catalog cannot resolve is a gate pointing at nothing.
-    toolDomains: ["crm"], core: false, defaultEnabled: false,
+    // WARP-2988: `business` is shared with `projects` (OR semantics) — see
+    // the projects entry above.
+    toolDomains: ["crm", "business"], core: false, defaultEnabled: false,
     // WARP-2558 — `requires: "projects"` is DELIBERATELY absent now.
     //
     // The bar for that field is "the child has no reachable surface of its own

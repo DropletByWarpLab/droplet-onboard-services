@@ -1012,6 +1012,15 @@ SERVICE_TOKEN_EGRESS_AUDIT=$service_token_egress_audit
 # MQTT stays scheme-gated (mqtts://) independent of this knob (WARP-235).
 DROPLET_INTERNAL_TLS=0
 
+# --- OTA apply (WARP-3007) ---
+# Enable flag for the orchestrator's OTA apply window: any value turns it on,
+# empty leaves the box polling + tracking releases without ever applying one.
+# The helper that runs is always the release-shipped docker/ota/apply-update.sh
+# (executed on the HOST); this is its path by convention. On by default on
+# Linux (Romain 2026-09-23: V1.1 needs updates to work); empty on macOS, a dev
+# laptop must never self-update from the release feed.
+DROPLET_OTA_APPLY_SCRIPT=$([ "$(uname)" = "Linux" ] && printf '%s' "$REPO_ROOT/docker/ota/apply-update.sh")
+
 # --- Application ---
 STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
@@ -1116,6 +1125,12 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 # 🔴 It shipped under \`profiles: ["full"]\` alone, and \`full\` is never in this
 # default — so the IMAP subsystem has never run on any box that ever shipped.
 # That is the defect WARP-2734 exists to close; the conditional is the close.
+#
+# WARP-2970: email-indexer is now default-on (no \`profiles:\` key), so on the
+# current compose file this token selects nothing. It is still written as a
+# COMPATIBILITY token: a box rolled back or reinstalled onto a compose file
+# from before WARP-2970 still gates email-indexer on \`email\`, and without it
+# that box silently loses mail ingest. Drop it once no such compose can return.
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')$([ -n "$service_token_email" ] && printf ',email')
 
 # --- NVR recordings target (WARP-2099) ---
@@ -1381,7 +1396,9 @@ migrate_env() {
   # because it fails silently and looks fine.
   #
   # Fresh installs get `email` from generate_env's heredoc; this is the upgrade
-  # path's half of the same decision. Compared as a whole list element (the
+  # path's half of the same decision. Since WARP-2970 the token is inert on the
+  # current compose (email-indexer is default-on); it stays as a compatibility
+  # token for a pre-2970 compose file (see the generate_env heredoc note). Compared as a whole list element (the
   # comma-wrapping) so a profile merely STARTING with "email" is never mistaken
   # for it, and an empty value does not gain a leading comma.
   if grep -qE '^COMPOSE_PROFILES=' "$stage"; then
@@ -1398,7 +1415,7 @@ migrate_env() {
         /^COMPOSE_PROFILES=/ { print "COMPOSE_PROFILES=" v; next } { print }
       ' "$stage" > "$stage.tmp" && mv "$stage.tmp" "$stage"
       normalized=true
-      log_info "Migrated .env: added 'email' to COMPOSE_PROFILES (WARP-2734 — email-indexer never started on an upgraded box)"
+      log_info "Migrated .env: added the 'email' compatibility token to COMPOSE_PROFILES (WARP-2734; inert on the current compose, where email-indexer is default-on — WARP-2970)"
     fi
     unset _current_profiles _new_profiles
   fi
@@ -1537,6 +1554,12 @@ migrate_env() {
   # byte-identical posture to before). Append-if-missing only, so a box whose
   # operator flipped it to 1 keeps that choice across setup re-runs.
   _migrate_ensure_key DROPLET_INTERNAL_TLS 0
+
+  # WARP-3007: OTA apply on by default on Linux (see generate_env). Only when
+  # ABSENT, so a box whose operator set it empty (apply off) keeps that.
+  local ota_apply_default=""
+  [ "$(uname)" = "Linux" ] && ota_apply_default="$REPO_ROOT/docker/ota/apply-update.sh"
+  _migrate_ensure_key DROPLET_OTA_APPLY_SCRIPT "$ota_apply_default"
 
   # WARP-235: move existing installs from the shared-password plaintext broker
   # to the mTLS endpoint (single listener :8883; identity = client cert CN).

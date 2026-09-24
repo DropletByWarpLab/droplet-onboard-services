@@ -77,7 +77,7 @@ import {
   type ApplyUpdateOptions,
   type ApplyUpdateResult,
 } from "../services/update-agent/apply.js";
-import { createHostComposeRunner } from "../services/update-agent/host-compose-runner.js";
+import { getOtaHost } from "../services/update-agent/host-exec.js";
 import {
   getUpdateAgentSettings,
   saveUpdateAgentSettings,
@@ -111,6 +111,8 @@ const ROW_SELECT = {
   gitSha: true,
   builtAt: true,
   failureReason: true,
+  // WARP-3007 — the explicit apply outcome (DeviceUpdateOutcome).
+  outcome: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -123,6 +125,7 @@ interface UpdateRowView {
   gitSha: string;
   builtAt: Date;
   failureReason: string | null;
+  outcome: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -153,14 +156,9 @@ function defaultDeps(): UpdatesRouterDeps {
     applyPendingUpdate,
     getUpdateAgentSettings,
     saveUpdateAgentSettings,
-    getApplyRunner: () =>
-      config.DROPLET_OTA_APPLY_SCRIPT
-        ? createHostComposeRunner({
-            scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
-            composeFile: config.DROPLET_OTA_COMPOSE_FILE,
-            updatesDir: config.DROPLET_OTA_UPDATES_DIR,
-          })
-        : null,
+    // WARP-3007 — the runner index.ts provisioned at boot (host exec); null
+    // when apply is off or the host context could not be resolved.
+    getApplyRunner: () => getOtaHost()?.runner ?? null,
   };
 }
 

@@ -558,7 +558,7 @@ fi
 # Two invariants that must never silently regress:
 #   1. cmd_pull_images verifies each ref BEFORE docker pull (fail-closed gate).
 #   2. publish-release.yml keyless-signs every pushed image.
-APPLY_UPDATE_SH="$REPO_ROOT/scripts/lib/apply-update.sh"
+APPLY_UPDATE_SH="$REPO_ROOT/docker/ota/apply-update.sh"
 if awk '/^cmd_pull_images\(\)/,/^}/' "$APPLY_UPDATE_SH" | grep -q 'verify_image_signature "\$img"'; then
   pass "apply-update.sh pull-images verifies signatures before docker pull (WARP-244)"
 else

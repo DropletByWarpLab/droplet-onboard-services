@@ -13,10 +13,12 @@
  *   3. `redispatchSafe`: write / commit / run repeat (idempotent by
  *      contract, loudly); propose is gated and follows the confirming rule.
  *   4. `workspace_propose` ENDS the run: Tier-2 parks it, the owner
- *      approves, the resumed worker performs the handshake, the tool runs
- *      ONCE, and the run is `succeeded` with `stopReason: proposed` and the
- *      proposal as its result — the model is never asked for a final answer
- *      and the person is notified.
+ *      approves, the resumed worker performs the handshake on the STORED
+ *      call (WARP-3044), the tool runs ONCE, and the run is `succeeded` with
+ *      `stopReason: proposed` and the proposal as its result — the model is
+ *      not asked again, not even to re-issue the call, and the person is
+ *      notified. A model that rewords `summary` on every ask (run 1efa11c8 on
+ *      .195) changes nothing.
  *   5. `_meta.workspaceId` rides every dispatch of a workshop run and none
  *      of an ordinary one.
  */
@@ -47,8 +49,18 @@ const { recordActivityMock, sendNotificationMock } = vi.hoisted(() => ({
 }));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 vi.mock("../services/notifications.service.js", () => ({ sendNotification: sendNotificationMock }));
+// Only the DB read of the §3 resolver is faked; the composition, the scope
+// builder and the worker's own attributed-access resolver stay real.
+const resolveEffectiveAccessMock = vi.hoisted(() => vi.fn());
+vi.mock("../services/effective-access.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/effective-access.service.js")>()),
+  resolveEffectiveAccess: resolveEffectiveAccessMock,
+}));
 
+import type { ModuleId } from "@prisma/client";
 import { TOOL_CATALOG, TOOL_ROUTES } from "@droplet/tools-core";
+import { GATEABLE_MODULE_IDS, GRANTABLE_TOOL_DOMAINS } from "../services/access-catalog.js";
+import { computeEffectiveAccess, type EffectiveAccessInputs } from "../services/effective-access.service.js";
 import {
   WORKSPACE_TOOLS,
   WORKSPACE_TOOL_DOMAINS,
@@ -250,9 +262,10 @@ describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
     expect(row.result).toContain("proposal/0.1.0");
     expect(row.pendingTool).toBeNull();
     // The proposal ran exactly once, and NOTHING after it — the model's
-    // next write (c9) was never dispatched, and the model was not asked.
+    // next write (c9) was never dispatched. WARP-3044: the resumed worker ran
+    // the STORED propose itself, so the model was not asked at all.
     expect(mcp.executed.map((e) => e.name)).toEqual(["workspace_write", "workspace_propose"]);
-    expect(b.chat).toHaveBeenCalledTimes(1);
+    expect(b.chat).not.toHaveBeenCalled();
     expect(sendNotificationMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: "romain", title: "Extension proposed" }),
@@ -275,6 +288,90 @@ describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
     for (const call of mcp.callTool.mock.calls) {
       expect((call[2] as Record<string, unknown> | undefined)?.workspaceId).toBeUndefined();
     }
+  });
+});
+
+// ── WARP-3044: the live failure, replayed ─────────────────────────────────
+//
+// .195, run 1efa11c8: `workspace_propose` parked; after each approval the
+// resumed run re-asked gpt-oss, which reworded `summary` every time — so the
+// re-issued call never matched the approval, the run re-parked three times,
+// and it ended `succeeded / model_done` with nothing proposed. These are the
+// model's four wordings. The fixed worker runs the STORED call.
+
+describe("an approved workspace_propose runs as parked, however the model would reword it (WARP-3044)", () => {
+  const SUMMARIES = [
+    "Both tsc and npm test exited with code 0.",
+    "Compilation exit code 0, tests exit code 0",
+    "Compiled src/ with tsc (exit code 0). Ran npm test (exit code 0).",
+    "tsc exit code 0, npm test exit code 0",
+  ];
+
+  /** Writes, then proposes — rewording the summary every time it is asked to. */
+  function rewordingProposer() {
+    let asks = 0;
+    return scripted((req) => {
+      const replies = req.messages.filter((m) => m.role === "tool").map((m) => String(m.content));
+      if (replies.length === 0) {
+        return { role: "assistant", content: null, tool_calls: [toolCall("c1", "workspace_write", { path: "a.txt", content: "x" })] };
+      }
+      if (replies.some((r) => r.includes("proposal/"))) {
+        return { role: "assistant", content: null, tool_calls: [toolCall("c9", "workspace_write", { path: "b.txt", content: "y" })] };
+      }
+      const summary = SUMMARIES[asks % SUMMARIES.length]!;
+      asks += 1;
+      return {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall(`p${asks}`, "workspace_propose", { name: "N", version: "0.1.0", summary })],
+      };
+    });
+  }
+
+  it("one approval → exactly ONE workspace_propose, with the PARKED summary; the run is succeeded/proposed; the model is not asked again", async () => {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "build a word counter", model: "m", workspaceId: "ws-a" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]));
+    const chat = rewordingProposer();
+    const worker = (workerId: string) =>
+      createAgentRunWorker({
+        prisma: db.prisma,
+        agent: { mcp: mcp.mcp, aiGateway: { chat } as never },
+        workerId,
+        resolveAccess: ownerAccess as never,
+        toolSelectionMode: "off",
+      });
+
+    const a = worker("A");
+    await a.tickOnce();
+    await settle(a);
+    expect(db.row(id).status).toBe("awaiting_confirmation");
+    expect(db.row(id).pendingArgs).toEqual({ name: "N", version: "0.1.0", summary: SUMMARIES[0] });
+    const askedBeforeApproval = chat.mock.calls.length;
+
+    expect(
+      await decideAgentRun(db.prisma, { id, decision: "approved", decidedBy: { id: OWNER.id, username: "romain", role: "owner" } }),
+    ).toMatchObject({ ok: true });
+    const b = worker("B");
+    await b.tickOnce();
+    await settle(b);
+
+    const row = db.row(id);
+    expect(row.status).toBe("succeeded");
+    expect(row.stopReason).toBe("proposed");
+    expect(row.result).toContain("proposal/0.1.0");
+    expect(row.pendingTool).toBeNull();
+    expect(row.pendingDecision).toBeNull();
+    const proposes = mcp.executed.filter((e) => e.name === "workspace_propose");
+    expect(proposes).toHaveLength(1);
+    expect(proposes[0]!.args).toEqual({ name: "N", version: "0.1.0", summary: SUMMARIES[0] });
+    expect(proposes[0]!.ctx).toMatchObject({ confirmationToken: "tok-2", workspaceId: "ws-a", agentRunId: id });
+    expect(mcp.executed.map((e) => e.name)).toEqual(["workspace_write", "workspace_propose"]);
+    expect(chat.mock.calls.length).toBe(askedBeforeApproval);
+    const prompts = sendNotificationMock.mock.calls
+      .map((c) => (c[1] as { title: string }).title)
+      .filter((t) => t.startsWith("Approval needed"));
+    expect(prompts).toHaveLength(1);
   });
 });
 
@@ -341,5 +438,84 @@ describe("a workshop run is OFFERED its tools under domain selection (WARP-2896,
     const offered = advertisedOnFirstTurn(chat);
     for (const name of EXPECTED_WORKSPACE_TOOLS) expect(offered, name).not.toContain(name);
     expect(mcp.executed).toEqual([]);
+  });
+});
+
+// ── a role-scoped ADMIN with every module switched off ─────────────────────
+//
+// Every run above belongs to an OWNER, and owners bypass the feature axis
+// (resolveAttributedToolAccess answers `scope: null`), so none of them says
+// anything about it. An admin holding an access role is narrowed by §3:
+// toolDomains = writeFilter(tier) ∩ moduleToolDomains(features) ∩ roleToolGrants.
+// Since #2295 (WARP-2742) the middle term FAILS CLOSED: a domain no module
+// claims passes only when FEATURE_UNGATED_TOOL_DOMAINS (access-catalog.ts)
+// declares it. No module owns the workshop, so `workspace` is declared there;
+// this pins why. With every module off, the admin's workshop run must still
+// be offered the eight tools, and its write must still dispatch.
+
+describe("a role-scoped ADMIN's workshop run keeps the workspace tools with every module off (WARP-2896 × WARP-2742)", () => {
+  const ADMIN = { id: "u-admin", username: "stefan", role: "admin" };
+
+  it("the run's pool offers all eight workspace tools and the write dispatches", async () => {
+    // MUTATION: delete `workspace` from FEATURE_UNGATED_TOOL_DOMAINS and
+    // domainsForFeatures drops the domain, the admin's scope loses it, and the
+    // eight leave the run's pool: absent from the turn AND refused at dispatch.
+    const toolGrants = GRANTABLE_TOOL_DOMAINS.map((domain) => ({ domain, level: "use" as const }));
+    const inputs: EffectiveAccessInputs = {
+      user: {
+        id: ADMIN.id,
+        role: "admin",
+        accessRole: {
+          mayOperateLocks: false,
+          cloudModelsAllowed: false,
+          storageQuotaBytes: null,
+          maxUploadSizeMb: null,
+          llmDailyMessageCap: null,
+          // The widest Admin-based role: every feature at manage, every
+          // grantable tool domain at `use`. The box is what switches them off.
+          featureGrants: GATEABLE_MODULE_IDS.map((moduleId) => ({ moduleId, level: "manage" as const })),
+          toolGrants,
+          connectorGrants: [],
+        },
+      },
+      exceptions: [],
+      // Every gateable module off box-wide; only the always-on chat floor.
+      workspaceModuleIds: new Set<ModuleId>(["chat"]),
+      cloudEscapeEnabled: false,
+      connections: [],
+      usagePolicy: null,
+      deptRights: [],
+    };
+    const effective = computeEffectiveAccess(inputs);
+    // Precondition: the feature set really does exclude every module.
+    const gateable = new Set<string>(GATEABLE_MODULE_IDS);
+    expect(effective.features.filter((f) => gateable.has(f.moduleId))).toEqual([]);
+    resolveEffectiveAccessMock.mockReset();
+    resolveEffectiveAccessMock.mockResolvedValue(effective);
+
+    // The row the worker's resolver reads: an active admin WITH an access role.
+    const adminRow = { ...ADMIN, directoryStatus: "ACTIVE", accessRoleId: "r-admin", accessRole: { toolGrants } };
+    const db = createAgentRunPrismaMock({ users: [adminRow] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: ADMIN.id, goal: "build a word counter", model: "m", workspaceId: "ws-admin" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]));
+    const chat = scripted(writeThenPropose);
+    // No `resolveAccess` override: the worker's own attributed resolver, the
+    // one production uses, reads the role. Shipping selection mode.
+    const worker = createAgentRunWorker({
+      prisma: db.prisma,
+      agent: { mcp: mcp.mcp, aiGateway: { chat } as never },
+      workerId: "A",
+      toolSelectionMode: "domains",
+    });
+    await worker.tickOnce();
+    await settle(worker);
+
+    // The admin was narrowed through §3 (the owner bypass did not fire) ...
+    expect(resolveEffectiveAccessMock).toHaveBeenCalledWith(ADMIN.id);
+    // ... and the run was still offered all eight, and its write dispatched.
+    const offered = advertisedOnFirstTurn(chat);
+    for (const name of EXPECTED_WORKSPACE_TOOLS) expect(offered, name).toContain(name);
+    expect(mcp.executed.map((e) => e.name)).toEqual(["workspace_write"]);
+    expect(db.row(id).pendingTool).toBe("workspace_propose");
   });
 });

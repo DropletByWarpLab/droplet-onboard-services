@@ -98,8 +98,8 @@ export const BUSINESS_BLOCK_DELIMITER_CLOSE = "--- end business context ---";
 /** What a given role may see of the business profile (§15 audience ladder).
  *  `full` = summary + structured fields; `summary` = the narrative only;
  *  `none` = nothing at all. Unknown/undefined role → most restrictive. */
-type BusinessView = "full" | "summary" | "none";
-function businessViewForRole(role: string | undefined): BusinessView {
+export type BusinessView = "full" | "summary" | "none";
+export function businessViewForRole(role: string | undefined): BusinessView {
   if (role === "owner" || role === "admin") return "full";
   if (role === "family") return "summary";
   return "none"; // guest, service, unknown, undefined

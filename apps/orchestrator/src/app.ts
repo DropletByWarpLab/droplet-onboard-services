@@ -75,6 +75,8 @@ import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSecurityRouter } from "./routes/security.js";
+import { createSecurityZonesRouter } from "./routes/security-zones.js";
+import { createSecuritySiteRouter } from "./routes/security-site.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
@@ -98,7 +100,8 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
 import { createModuleGate } from "./middleware/module-gate.js";
-import { mountModuleGates } from "./modules/module-mounts.js";
+import { mountModuleGates, mountMcpActingUserGates } from "./modules/module-mounts.js";
+import { actingUserAccessResolver } from "./middleware/mcp-acting-user-gate.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
@@ -353,6 +356,10 @@ export function createApp(
 
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
+  // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
+  // the CRM / PM routes are narrowed by the ACTING user's §3 tool scope
+  // (`business` needs CRM or Projects). Humans are untouched by this mount.
+  mountMcpActingUserGates(app, actingUserAccessResolver(prisma));
 
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
 
@@ -559,6 +566,12 @@ export function createApp(
   // `security` module gate (toggle + per-person view) is mounted above by
   // mountModuleGates off the registry prefix /api/security.
   app.use("/api", createSecurityRouter(prisma));
+  // WARP-2977 P2b — areas (routes/security-zones.ts) and the site mode +
+  // opening hours (routes/security-site.ts). Separate routers, not nested,
+  // under the same /api/security module gate; their act/manage write routes
+  // add requireFeatureAccess at the route.
+  app.use("/api", createSecurityZonesRouter(prisma));
+  app.use("/api", createSecuritySiteRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));

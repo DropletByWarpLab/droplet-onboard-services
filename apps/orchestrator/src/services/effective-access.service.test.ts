@@ -18,6 +18,7 @@ import {
   type EffectiveAccessInputs,
 } from "./effective-access.service.js";
 import { GATEABLE_MODULE_IDS } from "./access-catalog.js";
+import { toolLayers } from "./tool-layers.service.js";
 import {
   createTransactionSeam,
   expectAllTransactionsAt,
@@ -785,6 +786,119 @@ describe("effective-access — deptRights are a read-only reference", () => {
     ];
     const res = computeEffectiveAccess(baseInputs({ deptRights }));
     expect(res.deptRights).toEqual(deptRights);
+  });
+});
+
+// ── WARP-2897 — the tool-domain axis over BOTH layers ────────────────
+//
+// The runtime layer (remote MCP servers today, extensions once slice H lands)
+// can carry domains the compiled vocabulary does not declare. The universe
+// the §3 intersection filters is TOOL_DOMAINS ∪ those domains, so a role
+// grant on one actually reaches it — and only through the same three terms
+// (reachable ∩ featureDomains ∩ granted) every compiled domain passes.
+describe("effective-access — tool domains over both layers (WARP-2897)", () => {
+  const runtime = (domain: string, requiresWrite: boolean) =>
+    toolLayers([{ name: `ext__${domain}_tool`, domain, requiresWrite, source: "runtime:ext" }]);
+
+  it("a family role granting a runtime domain with a READ-classified tool reaches it", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-1",
+          role: "family",
+          accessRole: role({ toolGrants: [{ domain: "ext-bookings", level: "view" }] }),
+        },
+        toolLayers: runtime("ext-bookings", false),
+      }),
+    );
+    expect(res.toolDomains).toEqual(["ext-bookings"]);
+  });
+
+  it("an all-WRITE runtime domain is not reached by a family role, grant or not", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-1",
+          role: "family",
+          accessRole: role({ toolGrants: [{ domain: "ext-bookings", level: "use" }] }),
+        },
+        toolLayers: runtime("ext-bookings", true),
+      }),
+    );
+    expect(res.toolDomains).not.toContain("ext-bookings");
+  });
+
+  it("admin holding a grant on an emptied domain does not reach it (disable, or crm/pm)", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-a",
+          role: "admin",
+          accessRole: role({
+            toolGrants: [
+              { domain: "ext-bookings", level: "use" },
+              { domain: "crm", level: "use" },
+              { domain: "files", level: "use" },
+            ],
+            featureGrants: [{ moduleId: "files", level: "manage" }, { moduleId: "crm", level: "manage" }],
+          }),
+        },
+        // The extension was disabled: nothing in the runtime layer carries it.
+        toolLayers: toolLayers([]),
+      }),
+    );
+    expect(res.toolDomains).toEqual(["files"]);
+  });
+
+  it("the same admin grant reaches the domain while the runtime tool is attached", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-a",
+          role: "admin",
+          accessRole: role({ toolGrants: [{ domain: "ext-bookings", level: "use" }] }),
+        },
+        toolLayers: runtime("ext-bookings", true),
+      }),
+    );
+    expect(res.toolDomains).toEqual(["ext-bookings"]);
+  });
+
+  it("a role WITHOUT the grant does not reach an attached runtime domain", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-a",
+          role: "admin",
+          accessRole: role({ toolGrants: [{ domain: "files", level: "use" }] }),
+        },
+        toolLayers: runtime("ext-bookings", false),
+      }),
+    );
+    expect(res.toolDomains).not.toContain("ext-bookings");
+  });
+
+  it("the owner bypass includes runtime-only domains", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-o", role: "owner", accessRole: null },
+        toolLayers: runtime("ext-bookings", true),
+      }),
+    );
+    expect(res.toolDomains).toEqual([...TOOL_DOMAINS, "ext-bookings"]);
+  });
+
+  it("a role-less admin (today's world) reaches an attached runtime domain like any populated one", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-a", role: "admin", accessRole: null },
+        toolLayers: runtime("ext-bookings", true),
+      }),
+    );
+    expect(res.toolDomains).toContain("ext-bookings");
+    // …and no longer the declared-empty landing slots (the WARP-2761 reversal).
+    expect(res.toolDomains).not.toContain("crm");
+    expect(res.toolDomains).not.toContain("pm");
   });
 });
 

@@ -13,7 +13,11 @@ security properties this file pins:
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -231,6 +235,81 @@ def test_run_times_out_and_says_so(store, monkeypatch):
     workspace.write("ws-k", "test_slow.py", "import time\n\ndef test_slow():\n    time.sleep(30)\n")
     res = workspace.run("ws-k", ["pytest", "-q", "test_slow.py"], 1000)
     assert res["timedOut"] is True and res["exitCode"] is None
+
+
+# WARP-3012. The command the allow-list starts (npm) is not the only process
+# holding the run's stdout: node, `node --test` workers and esbuild inherit it.
+# These scripts are that shape: the allow-listed command's child starts a
+# sleeping grandchild that inherits stdout/stderr, writes its pid where the
+# test can find it, then outlives the deadline itself.
+_HOLD_STDOUT = """
+import subprocess, sys, time
+g = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"]{session})
+open("grandchild.pid", "w").write(str(g.pid))
+print("started", flush=True)
+time.sleep(20)
+"""
+
+
+def _running(pid: int) -> bool:
+    """A zombie (killed, not yet reaped by whoever inherited it) is not running."""
+    if Path("/proc").is_dir():
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0] not in ("Z", "X")
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _run_holding_stdout(store, monkeypatch, ws: str, *, escape: bool) -> tuple[dict, float, int]:
+    script = _HOLD_STDOUT.format(session=", start_new_session=True" if escape else "")
+    monkeypatch.setitem(workspace.RUN_COMMANDS, ("hold-stdout",), [sys.executable, "-c", script])
+    store.create_workspace(ws, None, ALICE)
+    started = time.monotonic()
+    res = workspace.run(ws, ["hold-stdout"], 2000)
+    elapsed = time.monotonic() - started
+    pid_file = store.work_path(ws) / "grandchild.pid"
+    assert pid_file.is_file(), f"the grandchild never started: {res['stdout']!r} {res['stderr']!r}"
+    return res, elapsed, int(pid_file.read_text())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+def test_run_timeout_kills_the_grandchild_that_holds_stdout(store, monkeypatch):
+    # MUTATION: `proc.kill()` in place of killpg (or no start_new_session,
+    # so killpg finds no group) leaves the grandchild sleeping. With the
+    # unbounded re-read the old code had, run() does not return until the
+    # grandchild exits on its own, 20 s later.
+    res, elapsed, grandchild = _run_holding_stdout(store, monkeypatch, "ws-hold", escape=False)
+    try:
+        assert res["timedOut"] is True and res["exitCode"] is None
+        assert elapsed < 2 + 3, f"run() took {elapsed:.1f}s against a 2s deadline"
+        assert "started" in res["stdout"]
+        assert not _running(grandchild), "the timeout left the grandchild running"
+    finally:
+        if _running(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+def test_run_timeout_abandons_pipes_a_grandchild_escaped_with(store, monkeypatch):
+    # A descendant that called setsid() is outside the run's group, so killpg
+    # cannot reach it and its copy of stdout never closes. run() still answers,
+    # and it keeps the output read before the deadline.
+    # MUTATION: re-read with no timeout: run() waits the grandchild's full 20 s.
+    # MUTATION: drop TimeoutExpired.output: "started" is lost.
+    monkeypatch.setattr(workspace, "RUN_DRAIN_TIMEOUT_S", 0.5)
+    res, elapsed, grandchild = _run_holding_stdout(store, monkeypatch, "ws-escape", escape=True)
+    try:
+        assert res["timedOut"] is True and res["exitCode"] is None
+        assert elapsed < 2 + 3, f"run() took {elapsed:.1f}s against a 2s deadline"
+        assert "started" in res["stdout"]
+    finally:
+        if _running(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
 
 
 def test_run_refuses_a_disallowed_command_before_starting_anything(store):

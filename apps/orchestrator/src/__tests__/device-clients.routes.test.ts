@@ -23,6 +23,7 @@ const mockPrisma = {
   pushSubscription: { upsert: vi.fn(), deleteMany: vi.fn() },
   $transaction: vi.fn(),
 };
+const txSeam = createTransactionSeam({ client: () => mockPrisma });
 
 vi.mock("../services/nextcloud.client.js", () => ({
   ncGenerateAppPassword: vi.fn(),
@@ -75,6 +76,7 @@ import { cacheGet } from "../services/cache.service.js";
 import { createDeviceClientsRouter } from "../routes/device-clients.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import type { RecordParams } from "../services/activity.service.js";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 // WARP-237: capture pairing/revoke audit rows.
 const recordedDeviceClients: RecordParams[] = [];
@@ -142,9 +144,12 @@ beforeEach(() => {
     },
     null,
   );
-  // Restore the default transaction runner after clearAllMocks wipes impls.
+  // Restore the default transaction runner after clearAllMocks wipes impls:
+  // the shared seam (WARP-1570), which runs the callback against mockPrisma,
+  // records the options argument and rejects on a throw.
+  txSeam.reset();
   mockPrisma.$transaction.mockImplementation(
-    async (fn: (tx: typeof mockPrisma) => unknown) => fn(mockPrisma),
+    (fn: (tx: typeof mockPrisma) => Promise<unknown>, options?: unknown) => txSeam.$transaction(fn, options),
   );
   // Sensible defaults that individual tests override.
   mockCacheGet.mockResolvedValue(null);
@@ -416,5 +421,52 @@ describe("POST /api/devices/pair — code alphabet", () => {
       seen.add(code);
     }
     expect(seen.size).toBeGreaterThan(1);
+  });
+});
+
+// WARP-2904: the orchestrator POSTs to a subscription's endpoint, so the
+// endpoint is vetted at registration (and again at dial time, see
+// push-dispatch.test.ts).
+describe("POST /api/devices/push/subscribe — endpoint guard", () => {
+  const keys = { p256dh: "p".repeat(40), auth: "a".repeat(20) };
+
+  it.each([
+    ["a private address", "https://192.168.1.10/push", "not_a_push_service"],
+    ["loopback", "https://127.0.0.1/push", "not_a_push_service"],
+    ["a .local name", "https://droplet-ai.local/push", "not_a_push_service"],
+    // The review's bypass: the two URL parsers split on `;`.
+    ["the ; parser-split form", "https://127.0.0.1;.evil.example/push/abc", "bad_host"],
+    ["a ; split onto a push host", "https://127.0.0.1;.fcm.googleapis.com/push/abc", "bad_host"],
+    ["userinfo @", "https://fcm.googleapis.com@127.0.0.1/x", "bad_host"],
+    ["a percent-encoded host", "https://fcm%2Egoogleapis.com/x", "bad_host"],
+    ["a non-default port", "https://fcm.googleapis.com:8443/x", "bad_host"],
+    ["a non-push public host", "https://push.vendor.example.com/send/x", "not_a_push_service"],
+    ["a suffix look-alike", "https://evilfcm.googleapis.com.attacker.example/x", "not_a_push_service"],
+  ])("refuses %s with 400 blocked_destination", async (_label, endpoint, reason) => {
+    const res = await request(makeApp()).post("/api/devices/push/subscribe").send({ endpoint, keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "blocked_destination", reason });
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses a plain-http endpoint with 400 https_required", async () => {
+    const res = await request(makeApp())
+      .post("/api/devices/push/subscribe")
+      .send({ endpoint: "http://fcm.googleapis.com/fcm/send/x", keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "https_required", reason: "https_required" });
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://fcm.googleapis.com/fcm/send/x",
+    "https://updates.push.services.mozilla.com/wpush/v2/x",
+    "https://web.push.apple.com/QGx",
+    "https://wns2-by3p.notify.windows.com/w/?token=x",
+  ])("accepts the real push service endpoint %s", async (endpoint) => {
+    mockPrisma.pushSubscription.upsert.mockResolvedValue({ id: "sub-1" });
+    const res = await request(makeApp()).post("/api/devices/push/subscribe").send({ endpoint, keys });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ id: "sub-1" });
   });
 });

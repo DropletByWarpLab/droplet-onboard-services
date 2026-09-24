@@ -315,30 +315,61 @@ with `pendingDecision` set and extends `deadlineAt` by the time spent parked,
 so a day waiting for a human is not a day of wall clock. Denial needs no
 reach check.
 
-**Resume.** The run is claimed like any other and resumes from its checkpoint
-— the top of the parked iteration — so the model re-issues the call. In
-`beforeToolCall`, a call whose binding matches the decided pending call is
-consumed:
+**Resume.** The run is claimed like any other. Its checkpoint is the top of
+the parked iteration, and the model is **not** asked to re-issue the call
+(WARP-3044): the worker consumes the decision on the **stored** call — tool,
+args and `tool_call_id` exactly as parked — before the loop runs.
 
-- *approved* — the worker performs the interceptor handshake itself: one
-  dispatch without a token, which returns a **fresh** challenge minted now,
-  seconds after the human decided; one dispatch presenting it. The
-  interceptor stays the single gate and the token's TTL starts at human
-  attention, which is where it was designed to start. The tool runs exactly
-  once. Anything other than a challenge on the first leg (a deny-tier
-  refusal, a tool that no longer confirms, an error) is the box's honest
-  answer and is handed back as-is.
-- *denied* — the model receives a `CONFIRMATION_DENIED` tool result and
-  adapts or finishes; the tool never runs.
+- *approved* — the stored args must still carry `pendingBindingHash` (what
+  runs is what the human was shown), and the tool must still be in the run's
+  pool as narrowed for the principal at **this** claim, and pass the loop's
+  args-dependent rule (§3 locks). Then the worker performs the interceptor
+  handshake itself: one dispatch without a token, which returns a **fresh**
+  challenge minted now, seconds after the human decided; one dispatch
+  presenting it. The interceptor stays the single gate and the token's TTL
+  starts at human attention, which is where it was designed to start. The
+  tool runs exactly once. Anything other than a challenge on the first leg (a
+  deny-tier refusal, a tool that no longer confirms, an error) is the box's
+  honest answer and is handed back as-is. A binding or reach failure
+  dispatches nothing and the model is told why.
+- *denied* — nothing is dispatched; the result is `CONFIRMATION_DENIED`.
 
-Either way the pending columns clear, the trace entry carries
-`confirmation: "confirmed" | "denied"`, and a `tool_call` row with
-`refs.agentRunId` records the outcome. Two rules from review: the decision is
-**consumed and the call's trace entry written before the first dispatch**
-(the replay guard's discipline), so a crash mid-handshake leaves an entry with
-no result that the resume re-dispatches without a token — the interceptor
-challenges again and the run re-parks, a second prompt rather than a silent
-duplicate — and both legs are wrapped so a thrown dispatch is a tool error,
+Either way the call (an assistant `tool_calls` message) and its result (the
+`role: "tool"` reply, bounded and token-redacted as the loop treats any
+result) are appended to the conversation, and the checkpoint advances past
+the parked iteration: the loop resumes one iteration later with the result
+already in front of the model, as if the call had run when first made. If the
+parked iteration was the run's last, the run ends on its iteration cap
+without another model call. An approved `workspace_propose` that runs ends a
+workshop run right there, `succeeded / proposed` (§8a).
+
+**Why not let the model re-issue it.** The binding matches only a
+byte-identical re-issue, and a model asked the same question again does not
+promise the same bytes. gpt-oss rewords free text on every ask: on the house
+unit, run 1efa11c8 parked `workspace_propose` and re-parked after each of three
+approvals because the `summary` came back reworded each time — "Both tsc and
+npm test exited with code 0.", then "Compilation exit code 0, tests exit code
+0", then "Compiled src/ with tsc (exit code 0). Ran npm test (exit code 0)." —
+and ended `succeeded / model_done` with nothing proposed.
+
+**No second prompt for a decided call.** A model that sends the decided call
+again with the same binding (`confirmed` aside, as the interceptor binds) gets
+the recorded answer from the trace — `REPEATED_CALL` for an approved call that
+ran, the same `CONFIRMATION_DENIED` for a denied one — never a second dispatch
+and never a second park. A *reworded* call is a different write and parks for
+its own approval, as any new write does. A second `POST …/confirm` finds the
+run no longer parked (409) and changes nothing.
+
+The pending columns clear, the trace entry carries `confirmation:
+"confirmed" | "denied"`, and a `tool_call` row with `refs.agentRunId` records
+the outcome. Two rules from review: the decision is **consumed and the call's
+trace entry written before the first dispatch** (the replay guard's
+discipline), and the result, the conversation and the advanced checkpoint
+then land in one write — so a crash mid-handshake leaves a `confirmed` entry
+with no result at the checkpoint's iteration. The next claim finds it before
+the loop and re-parks **that stored call**, with a notification saying it may
+already have run (WARP-2877), rather than asking about whatever the model
+would re-issue. Both legs are wrapped so a thrown dispatch is a tool error,
 not the death of the run. The audit label follows what happened: an approval
 whose redeem leg did not run the tool records `approved but did not run`.
 Every terminal write clears the parked-call columns, and both readers
@@ -503,8 +534,9 @@ halting the run as `unknown_outcome`; `propose` is gated and follows the
 confirming rule.
 
 **Propose ends the run.** The worker reads `workspace_propose`'s own
-success (in `afterToolCall`, and in the approved handshake of a resumed
-park) and stops the loop with `proposed`; the terminal write is `succeeded`
+success (in `afterToolCall`, and — for a resumed park — right after it runs
+the approved STORED call, before the model is asked anything; §7, WARP-3044)
+and stops with `proposed`; the terminal write is `succeeded`
 with `stopReason: proposed` and the proposal as the run's result, the
 person is notified, and the model is never asked for a final answer — it
 would not stop itself reliably. The workspace row flips to `proposed` with
