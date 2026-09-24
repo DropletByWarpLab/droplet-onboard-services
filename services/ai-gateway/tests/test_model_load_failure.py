@@ -14,8 +14,10 @@ surfaced a generic 502 "Upstream provider error". Policy under test:
   - classify the load failure; never spend the harmony budget on it;
   - ask the inference-manager (lifecycle owner) to unload every idle model
     other than the requested one, and retry ONCE when it freed something;
-  - otherwise raise ``ModelLoadFailedError``, which ``/ai/chat`` maps to a
-    typed ``503 {error: "model_load_failed", detail}`` with honest copy.
+  - otherwise raise ``ModelLoadFailedError``, which ``/ai/chat`` and the
+    session route map to a typed ``503 {error: "model_load_failed", detail}``
+    with honest copy — streaming too: the stream is run to its first frame
+    before the response starts, so the status is still ours to choose.
 """
 
 from __future__ import annotations
@@ -211,26 +213,51 @@ async def test_streaming_load_failure_evicts_and_retries_before_any_frame(provid
             httpx.Response(200, text=frames, headers={"content-type": "text/event-stream"}),
         ]
     )
-    respx.post(UNLOAD_URL).mock(
+    unload = respx.post(UNLOAD_URL).mock(
         return_value=httpx.Response(200, json={"unloaded": [A], "still_resident": []})
     )
-    gen = await _chat(provider, stream=True)
-    out = [chunk async for chunk in gen]
+    with patch("providers.ollama_local.asyncio.sleep", new=AsyncMock()) as slept:
+        gen = await _chat(provider, stream=True)
+        out = [chunk async for chunk in gen]
 
     assert chat.call_count == 2
     assert out[0].startswith("data: ") and "hi" in out[0]
+    # The retry was earned by making room — not the harmony backoff.
+    assert unload.call_count == 1
+    sent = unload.calls[0].request
+    assert json.loads(sent.content) == {"keep": B}
+    assert sent.headers["authorization"] == "Bearer im-token"
+    assert slept.await_count == 0
 
 
 @respx.mock
 async def test_streaming_persistent_load_failure_raises_before_yielding(provider):
-    respx.post(TEST_CHAT_URL).mock(return_value=httpx.Response(500, text=_OOM_BODY))
+    chat = respx.post(TEST_CHAT_URL).mock(return_value=httpx.Response(500, text=_OOM_BODY))
     respx.post(UNLOAD_URL).mock(
         return_value=httpx.Response(200, json={"unloaded": [], "still_resident": [A]})
     )
     gen = await _chat(provider, stream=True)
-    with pytest.raises(ModelLoadFailedError):
+    with pytest.raises(ModelLoadFailedError) as exc_info:
         async for _ in gen:
             pytest.fail("nothing may be yielded for a model that never loaded")
+    # Nothing was freed, so a retry could only fail the same way.
+    assert chat.call_count == 1
+    assert "next to Gpt-oss 20B F16" in exc_info.value.detail
+
+
+@respx.mock
+async def test_streaming_still_failing_after_eviction_retries_exactly_once(provider):
+    chat = respx.post(TEST_CHAT_URL).mock(return_value=httpx.Response(500, text=_OOM_BODY))
+    unload = respx.post(UNLOAD_URL).mock(
+        return_value=httpx.Response(200, json={"unloaded": [A], "still_resident": []})
+    )
+    with patch("providers.ollama_local.asyncio.sleep", new=AsyncMock()):
+        gen = await _chat(provider, stream=True)
+        with pytest.raises(ModelLoadFailedError):
+            async for _ in gen:
+                pytest.fail("nothing may be yielded for a model that never loaded")
+    assert chat.call_count == 2  # the request + ONE retry
+    assert unload.call_count == 1
 
 
 # ── /health schema v3 ───────────────────────────────────────────────────
@@ -257,29 +284,121 @@ async def test_limits_keep_their_default_when_dmr_omits_max_loaded_models(caplog
     assert not [r for r in caplog.records if "schema" in r.getMessage().lower() and r.levelname == "WARNING"]
 
 
-# ── /ai/chat maps it to a typed 503 ─────────────────────────────────────
+# ── /ai/chat and the session route map it to a typed 503 ────────────────
 
 
-async def test_ai_chat_answers_a_typed_503_with_honest_copy(client):
+@pytest.fixture
+async def chat_globals():
+    """The module globals the chat routes need, owned by THIS test.
+
+    The ASGI test transport runs no lifespan, so the globals are None unless a
+    test sets them. A scheduler started here runs its worker on this test's
+    event loop, which closes when the test ends — left installed, the next
+    test to use `main.inference_scheduler` would enqueue into a dead worker and
+    hang until the pytest timeout. So: a fresh scheduler, stopped and the
+    previous globals restored on the way out.
+    """
     import main
     from router import ProviderRouter
     from scheduler import InferenceScheduler
 
-    if main.provider_router is None:
-        main.provider_router = ProviderRouter()
-    if main.inference_scheduler is None:
-        main.inference_scheduler = InferenceScheduler()
-        await main.inference_scheduler.start()
-    err = ModelLoadFailedError(B, out_of_memory=True, resident=[A])
-    active_before = main.inference_scheduler._active_count
-    with patch.object(main.provider_router, "chat", AsyncMock(side_effect=err)):
-        resp = await client.post(
-            "/ai/chat",
-            json={"model": B, "messages": [{"role": "user", "content": "hi"}], "stream": False},
-        )
+    saved = (main.provider_router, main.inference_scheduler)
+    sched = InferenceScheduler()
+    await sched.start()
+    main.provider_router = saved[0] or ProviderRouter()
+    main.inference_scheduler = sched
+    try:
+        yield main
+    finally:
+        await sched.stop()
+        main.provider_router, main.inference_scheduler = saved
+
+
+_ERR = ModelLoadFailedError(B, out_of_memory=True, resident=[A])
+_HONEST = "doesn't fit in GPU memory next to Gpt-oss 20B F16"
+
+
+def _chat_body(stream: bool) -> dict:
+    return {"model": B, "messages": [{"role": "user", "content": "hi"}], "stream": stream}
+
+
+async def _never_loads():
+    """A provider stream whose model never loaded: DMR's load failure is
+    classified before any frame, so the generator raises on first pull."""
+    raise _ERR
+    yield  # pragma: no cover — makes this an async generator
+
+
+async def test_ai_chat_answers_a_typed_503_with_honest_copy(client, chat_globals):
+    main = chat_globals
+    with patch.object(main.provider_router, "chat", AsyncMock(side_effect=_ERR)):
+        resp = await client.post("/ai/chat", json=_chat_body(stream=False))
     assert resp.status_code == 503
     body = resp.json()
     assert body["error"] == "model_load_failed"
-    assert "doesn't fit in GPU memory next to Gpt-oss 20B F16" in body["detail"]
+    assert _HONEST in body["detail"]
     # The scheduler slot is released — the next request is admitted.
-    assert main.inference_scheduler._active_count == active_before
+    assert main.inference_scheduler.active_requests == 0
+
+
+async def test_ai_chat_stream_answers_the_typed_503_before_any_frame(client, chat_globals):
+    """The dashboard chat STREAMS. The load failure is raised inside the
+    provider's generator, so it must be pulled before the response starts —
+    a 200 that is then cut off can't carry the honest copy."""
+    main = chat_globals
+    with patch.object(main.provider_router, "chat", AsyncMock(return_value=_never_loads())):
+        resp = await client.post("/ai/chat", json=_chat_body(stream=True))
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body == {"error": "model_load_failed", "detail": body["detail"]}
+    assert _HONEST in body["detail"]
+    assert main.inference_scheduler.active_requests == 0
+
+
+async def test_ai_chat_stream_still_streams_every_frame_and_frees_the_slot(client, chat_globals):
+    main = chat_globals
+
+    async def frames():
+        yield 'data: {"choices":[{"delta":{"content":"he"}}]}\n\n'
+        yield 'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n'
+        yield "data: [DONE]\n\n"
+
+    with patch.object(main.provider_router, "chat", AsyncMock(return_value=frames())):
+        resp = await client.post("/ai/chat", json=_chat_body(stream=True))
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert resp.text.index('"he"') < resp.text.index('"llo"') < resp.text.index("[DONE]")
+    assert main.inference_scheduler.active_requests == 0
+
+
+async def test_ai_chat_stream_other_pre_frame_errors_are_the_generic_502(client, chat_globals):
+    """Anything else that fails before the first frame gets the blocking
+    path's GW-08 answer — a generic 502 with a correlation id, never the
+    upstream text — instead of a 200 cut off mid-body."""
+    main = chat_globals
+    secret = "http://test-dmr:12434 sk-LEAKED upstream body"
+
+    async def boom():
+        raise RuntimeError(secret)
+        yield  # pragma: no cover
+
+    with patch.object(main.provider_router, "chat", AsyncMock(return_value=boom())):
+        resp = await client.post("/ai/chat", json=_chat_body(stream=True))
+    assert resp.status_code == 502
+    assert "sk-LEAKED" not in resp.text
+    assert "Upstream provider error" in resp.json()["detail"]
+    assert main.inference_scheduler.active_requests == 0
+
+
+async def test_session_chat_stream_answers_the_typed_503(client_with_sessions):
+    import main
+
+    created = await client_with_sessions.post("/ai/sessions", json={"model": B})
+    session_id = created.json()["id"]
+    with patch.object(main.provider_router, "chat", AsyncMock(return_value=_never_loads())):
+        resp = await client_with_sessions.post(
+            f"/ai/sessions/{session_id}/chat", json={"message": "hi", "stream": True}
+        )
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "model_load_failed"
+    assert _HONEST in resp.json()["detail"]

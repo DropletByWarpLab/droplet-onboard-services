@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
@@ -212,6 +213,41 @@ def _model_load_failed_response(exc: ModelLoadFailedError) -> JSONResponse:
         status_code=503,
         content={"error": "model_load_failed", "detail": exc.detail},
     )
+
+
+async def _start_stream(stream: AsyncIterator[str]) -> AsyncGenerator[str, None]:
+    """WARP-3047 — run a provider stream up to its FIRST frame before the
+    HTTP response starts, and hand back a stream that replays that frame and
+    then the rest.
+
+    A local provider's generator does its real work on the first pull: the
+    runtime loads the model, and a load failure is classified, room is made
+    and the load retried — all before any frame. Returned un-pulled, that
+    work ran inside StreamingResponse, after the 200 was already sent, so a
+    ``ModelLoadFailedError`` could only cut the body off and its honest copy
+    never reached anyone. Pulled here, inside the caller's ``try``, every
+    failure before the first frame gets the same status the blocking path
+    gives: 503 ``model_load_failed``, 400 for a ValueError, else the GW-08
+    generic 502. Nothing has been sent yet, so there is nothing to take back.
+
+    Cost: the response headers wait for the first frame instead of leaving
+    at once. The orchestrator's streaming fetch has no timeout of its own
+    (ai-gateway.client.ts ``chat``) and undici's default header timeout is
+    its body timeout, so the ceiling on the first frame is unchanged.
+    """
+    frames: list[str] = []
+    try:
+        frames.append(await stream.__anext__())
+    except StopAsyncIteration:
+        pass
+
+    async def _replayed() -> AsyncGenerator[str, None]:
+        for frame in frames:
+            yield frame
+        async for chunk in stream:
+            yield chunk
+
+    return _replayed()
 
 
 # Global instances
@@ -483,6 +519,11 @@ async def chat(
 
     try:
         result = await provider_router.chat(request, user_id=principal)
+        if request.stream:
+            # WARP-3047: up to the first frame the stream is still "the call"
+            # — a model that can't load fails HERE, before any byte is sent,
+            # so it gets the 503 below instead of a 200 cut off mid-body.
+            result = await _start_stream(result)
     except ValueError as e:
         await _release_once()
         raise HTTPException(status_code=400, detail=str(e))
@@ -693,6 +734,9 @@ async def session_chat(session_id: str, body: SessionChatRequest, request: Reque
 
     try:
         result = await provider_router.chat(chat_request, user_id=principal)
+        if body.stream:
+            # WARP-3047: the same first-frame boundary as /ai/chat.
+            result = await _start_stream(result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except ModelLoadFailedError as e:
