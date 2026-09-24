@@ -681,6 +681,16 @@ const envSchema = z.object({
   //   at a wrong guess. The box IP is DHCP, so there is intentionally no
   //   host-specific default here.
   WIREGUARD_HOME_ENDPOINT_HOST: z.string().default(""),
+  // WIREGUARD_PUBLIC_FORWARD (WARP-3018) — a UDP port forward the operator set
+  //   up on the upstream gateway to wg0. `<port>` (public IP taken from STUN on
+  //   every profile fetch, so a dynamic IP needs nothing) or
+  //   `<public-ipv4>:<port>` (static IP, or STUN unavailable). Advertised to
+  //   overlay clients as the `mapped` candidate. Needed whenever wg0 sits
+  //   behind a NAT that rewrites the source port, e.g. box behind an edge
+  //   router behind an ISP gateway. Empty (default) = no forward declared.
+  //   Parsed leniently per profile fetch (routes/vpn.ts): a bad value is
+  //   logged and ignored rather than failing boot.
+  WIREGUARD_PUBLIC_FORWARD: z.string().default(""),
   // REMOTE_ACCESS_MODE — how a phone reaches this box from OUTSIDE the home
   // LAN (WARP-993). Drives the honest `offLanReachable` boolean on
   // /api/vpn/status so the dashboard never promises "from anywhere" it can't

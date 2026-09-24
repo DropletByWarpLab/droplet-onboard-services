@@ -86,7 +86,7 @@ describe("department templates", () => {
   it("pins the ADR-059 default destinations", () => {
     const nav = Object.fromEntries(DEPARTMENT_TEMPLATES.map((t) => [t.id, t.navHrefs]));
     expect(nav).toEqual({
-      security: ["/cameras", "/events", "/network", "/devices", "/integrations"],
+      security: ["/security", "/cameras", "/events", "/network", "/devices", "/integrations"],
       sales: ["/customers", "/projects", "/email", "/calendar"],
       finance: ["/money", "/customers", "/files", "/reports"],
       operations: ["/projects", "/calendar", "/files", "/routines"],
