@@ -22,12 +22,13 @@ import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
 import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
 import { DeviceStats } from "@/components/smart-home/DeviceStats";
 import { RoutinesSection } from "@/components/smart-home/RoutinesSection";
+import { BuildingSystemsSection } from "@/components/smart-home/BuildingSystemsSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ShellPage } from "@/components/shell/ShellPage";
 import type { MatterDevice } from "@/lib/types";
 
 const SUB =
-  "Lights, plugs, sensors and more paired over Matter — discovered and controlled locally on your Droplet.";
+  "Lights, plugs and sensors over Matter, plus building systems over BACnet, Modbus, SNMP and KNX — controlled locally on your Droplet.";
 
 export default function DevicesPage() {
   const router = useRouter();
@@ -210,6 +211,13 @@ export default function DevicesPage() {
             )}
           </div>
         )}
+      </div>
+
+      {/* Building systems (BACnet/Modbus/SNMP/KNX via the device gateway) —
+          outside the Matter branch above so it renders even when the Matter
+          controller is unavailable. */}
+      <div style={{ marginTop: 28 }}>
+        <BuildingSystemsSection canAdmin={canAuthor} />
       </div>
 
       {selectedDevice && liveSelected && (

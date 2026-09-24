@@ -68,7 +68,7 @@ building's own BMS is not locked out.
 |---|---|---|
 | `SERVICE_SECRET` | — | required; bearer the orchestrator presents |
 | `DEVICE_GATEWAY_LIVE_WRITES` | off | `1` sends writes to equipment |
-| `DEVICE_GATEWAY_REGISTRY_PATH` | `/data/registry.json` | written atomically, mode 0600 |
+| `DEVICE_GATEWAY_REGISTRY_PATH` | `/var/lib/droplet/device-gateway/registry.json` | written atomically, mode 0600 |
 | `DEVICE_GATEWAY_TIMEOUT_S` | `3` | per request to a device |
 | `DEVICE_GATEWAY_BACNET_INSTANCE` | `4194000` | the gateway's own BACnet device instance; must be unique on site |
 | `DEVICE_GATEWAY_BACNET_ADDRESS` | host | `<ip>/<prefix>` of the LAN interface |

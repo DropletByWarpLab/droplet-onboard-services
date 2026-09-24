@@ -119,6 +119,7 @@ DATA_VOLUMES=(
   nvrdata
   ops-audit
   workspace-git
+  device-gateway-state # building devices + points (BACnet/Modbus/SNMP/KNX)
 )
 
 # Volumes that factory-reset's `down -v` ALSO wipes but that we deliberately do

@@ -73,7 +73,9 @@ if not SERVICE_SECRET:
 # Explicit boolean, never derived: plan-only unless an operator opts in.
 LIVE_WRITES = _flag("DEVICE_GATEWAY_LIVE_WRITES")
 TIMEOUT_S = float(os.environ.get("DEVICE_GATEWAY_TIMEOUT_S", "3"))
-REGISTRY_PATH = os.environ.get("DEVICE_GATEWAY_REGISTRY_PATH", "/data/registry.json")
+REGISTRY_PATH = os.environ.get(
+    "DEVICE_GATEWAY_REGISTRY_PATH", "/var/lib/droplet/device-gateway/registry.json"
+)
 
 
 class ServiceAuthMiddleware(BaseHTTPMiddleware):

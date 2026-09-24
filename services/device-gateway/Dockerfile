@@ -26,8 +26,9 @@ COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
 COPY services/_shared/serve.py /app/_shared/serve.py
 COPY services/_shared/healthcheck.py /app/_shared/healthcheck.py
 
-# Registry of devices + points (0600, Vault volume).
-VOLUME ["/data"]
+# Registry of devices + points (0600). /data/service-tls is the mTLS bundle
+# mount, so the registry lives beside the other host services' state.
+VOLUME ["/var/lib/droplet/device-gateway"]
 
 EXPOSE 8084
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
