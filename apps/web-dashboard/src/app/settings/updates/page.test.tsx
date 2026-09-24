@@ -62,6 +62,7 @@ function release(overrides: Record<string, unknown> = {}) {
     gitSha: SHA_CURRENT,
     builtAt: "2026-07-01T00:00:00Z",
     failureReason: null,
+    outcome: "committed",
     createdAt: "2026-07-01T01:00:00Z",
     updatedAt: "2026-07-01T03:05:00Z",
     ...overrides,
@@ -220,6 +221,24 @@ describe("/settings/updates — degraded health banner", () => {
   });
 });
 
+describe("/settings/updates — partial install banner (WARP-3007)", () => {
+  it("warns when the running release committed but a new part didn't start", async () => {
+    getUpdatesStatus.mockResolvedValue(
+      statusPayload({ current: release({ outcome: "services_start_failed" }) }),
+    );
+    render(<UpdatesSettingsPage />);
+    expect(
+      await screen.findByText(/part of the last update didn't start/i),
+    ).toBeInTheDocument();
+  });
+
+  it("stays quiet on a clean install", async () => {
+    render(<UpdatesSettingsPage />);
+    await screen.findAllByText(SHA_CURRENT.slice(0, 10));
+    expect(screen.queryByText(/part of the last update didn't start/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("/settings/updates — history table", () => {
   it("lists tracked releases with their verdicts", async () => {
     getUpdatesHistory.mockResolvedValue([
@@ -230,6 +249,16 @@ describe("/settings/updates — history table", () => {
     expect(await screen.findByText("Rolled back")).toBeInTheDocument();
     expect(screen.getByText("health_gate_failed")).toBeInTheDocument();
     expect(screen.getByText("Committed")).toBeInTheDocument();
+  });
+
+  it("WARP-3007 — shows each release's apply outcome", async () => {
+    getUpdatesHistory.mockResolvedValue([
+      release({ id: "du-3", status: "rolled_back", outcome: "rolled_back" }),
+      release({ id: "du-1", status: "committed", outcome: "services_start_failed" }),
+    ]);
+    render(<UpdatesSettingsPage />);
+    expect(await screen.findByText("Previous release restored")).toBeInTheDocument();
+    expect(screen.getByText("Installed; a new part didn't start")).toBeInTheDocument();
   });
 
   it("uses distinct empty copy when there is genuinely no history", async () => {

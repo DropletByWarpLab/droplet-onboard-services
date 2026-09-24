@@ -3,7 +3,7 @@
  *
  * The runner is the ONLY thing in the update agent that touches the host
  * compose socket, and it does so exclusively by exec'ing
- * scripts/lib/apply-update.sh with an ARGV array (never a shell string) so
+ * docker/ota/apply-update.sh with an ARGV array (never a shell string) so
  * a manifest field can never be interpreted as a command. These tests pin
  * that contract: the exact subcommand + argv the runner builds for each
  * step, the JSON it hands the script via a temp file (not argv, to dodge
@@ -12,10 +12,15 @@
  * exec boundary is faked so the command surface is asserted deterministically.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createHostComposeRunner, type ExecFn } from "./host-compose-runner.js";
+import {
+  createHostComposeRunner,
+  parseEnvReconcileReport,
+  type ExecFn,
+} from "./host-compose-runner.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
 
 const DIGEST = (c: string) => `sha256:${c.repeat(64)}`;
@@ -69,7 +74,7 @@ afterEach(() => {
 
 function makeRunner(exec: ExecFn) {
   return createHostComposeRunner({
-    scriptPath: "/opt/droplet/scripts/lib/apply-update.sh",
+    scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
     composeFile: "/opt/droplet/docker/docker-compose.yml",
     updatesDir: workDir,
     exec,
@@ -94,7 +99,7 @@ describe("createHostComposeRunner (WARP-539)", () => {
       missing: null,
     });
     // Never a shell string — subcommand + argv only.
-    expect(calls[0]!.file).toBe("/opt/droplet/scripts/lib/apply-update.sh");
+    expect(calls[0]!.file).toBe("/opt/droplet/docker/ota/apply-update.sh");
     expect(calls[0]!.args).toEqual([
       "current-image-refs",
       "--compose-file",
@@ -325,6 +330,116 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(calls[1]!.args).toContain("du-1");
   });
 
+  it("enabledServices parses one service per line and drops anything not service-shaped (WARP-2970)", async () => {
+    const { fn, calls } = fakeExec({
+      "enabled-services": "orchestrator\nemail-indexer\n\nWARN something odd\n",
+    });
+    const runner = makeRunner(fn);
+    expect(await runner.enabledServices({ updateId: "du-none" })).toEqual([
+      "orchestrator",
+      "email-indexer",
+    ]);
+    // WARP-2995: no reconcile report → explicit EMPTY profiles (profile-less
+    // services only), never "whatever this container's env says".
+    expect(calls[0]!.args).toEqual([
+      "enabled-services",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--profiles",
+      "",
+    ]);
+  });
+
+  it("enabledServices passes the box's real profiles from the update's reconcile report (WARP-2995)", async () => {
+    const { fn, calls } = fakeExec({ "enabled-services": "gateway\n" });
+    const runner = makeRunner(fn);
+    mkdirSync(path.join(workDir, "du-7"), { recursive: true });
+    writeFileSync(
+      path.join(workDir, "du-7", "env-reconcile.json"),
+      '{"addedKeys":[],"addedProfiles":["email"],"profiles":"linux,eval,email","unitUpdated":true,"backup":null}\n',
+    );
+    await runner.enabledServices({ updateId: "du-7" });
+    expect(calls[0]!.args.slice(-2)).toEqual(["--profiles", "linux,eval,email"]);
+  });
+
+  it("reconcileEnv runs the helper with the release image and parses its report (WARP-2995)", async () => {
+    const report =
+      '{"addedKeys":["SANDBOX_SERVICE_TOKEN"],"addedProfiles":["email"],"profiles":"linux,email","unitUpdated":true,"backup":"/d/.env.bak.ota-du-3"}';
+    const { fn, calls } = fakeExec({ "reconcile-env": `${report}\n` });
+    const runner = makeRunner(fn);
+    const img = `ghcr.io/x/droplet-orchestrator@${DIGEST("a")}`;
+    await expect(runner.reconcileEnv({ updateId: "du-3", image: img })).resolves.toEqual({
+      addedKeys: ["SANDBOX_SERVICE_TOKEN"],
+      addedProfiles: ["email"],
+      profiles: "linux,email",
+      unitUpdated: true,
+    });
+    expect(calls[0]!.args).toEqual([
+      "reconcile-env",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-3",
+      "--image",
+      img,
+    ]);
+  });
+
+  it("parseEnvReconcileReport refuses an off-shape report (a value where a name belongs)", () => {
+    expect(() =>
+      parseEnvReconcileReport('{"addedKeys":["A=secret"],"addedProfiles":[],"profiles":"","unitUpdated":false}'),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseEnvReconcileReport('{"addedKeys":[],"addedProfiles":[],"profiles":"a;b","unitUpdated":false}'),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseEnvReconcileReport("not json")).toThrow();
+  });
+
+  it("startServices pins each service in override-grow.yml and recreates with --target grow (WARP-2970)", async () => {
+    const { fn, calls } = fakeExec();
+    const runner = makeRunner(fn);
+    const svc: ReleaseService = {
+      name: "email-indexer",
+      image: `ghcr.io/x/email-indexer@${DIGEST("5")}`,
+      digest: DIGEST("5"),
+      healthcheck: { type: "none" },
+    };
+    await mkdir(path.join(workDir, "du-9"), { recursive: true });
+    await runner.startServices({ updateId: "du-9", services: [svc] });
+    const yaml = readFileSync(path.join(workDir, "du-9", "override-grow.yml"), "utf8");
+    expect(yaml).toContain(`  email-indexer:\n    image: ghcr.io/x/email-indexer@${DIGEST("5")}`);
+    expect(calls[0]!.args).toEqual([
+      "recreate-services",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-9",
+      "--services",
+      "email-indexer",
+      "--target",
+      "grow",
+    ]);
+  });
+
+  it("startServices reports only what the helper started, not what it skipped (WARP-2970)", async () => {
+    const { fn } = fakeExec({
+      "recreate-services": '{"failed":[],"skipped":["mcp-server"]}\n',
+    });
+    const runner = makeRunner(fn);
+    const svc = (name: string): ReleaseService => ({
+      name,
+      image: `ghcr.io/x/${name}@${DIGEST("5")}`,
+      digest: DIGEST("5"),
+      healthcheck: { type: "none" },
+    });
+    await mkdir(path.join(workDir, "du-10"), { recursive: true });
+    const res = await runner.startServices({
+      updateId: "du-10",
+      services: [svc("email-indexer"), svc("mcp-server")],
+    });
+    expect(res.started).toEqual(["email-indexer"]);
+  });
+
   it("never builds a shell string — argv is always an array of discrete tokens", async () => {
     const { fn, calls } = fakeExec({ "current-image-refs": "{}" });
     const runner = makeRunner(fn);
@@ -332,5 +447,58 @@ describe("createHostComposeRunner (WARP-539)", () => {
     await runner.currentImageRefs(["orchestrator; rm -rf /"]);
     // The whole thing lands as ONE argv token, never split by a shell.
     expect(calls[0]!.args).toContain("orchestrator; rm -rf /");
+  });
+});
+
+describe("WARP-3007 — the helper runs on the host", () => {
+  it("hands the helper HOST paths (helperUpdatesDir) while writing through its own mount", async () => {
+    const calls: Array<{ args: string[] }> = [];
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      helperUpdatesDir: "/var/lib/docker/volumes/docker_ota-updates/_data",
+      exec: async (_file, args) => {
+        calls.push({ args });
+        return { stdout: "", stderr: "" };
+      },
+    });
+    await runner.snapshot({
+      updateId: "du-1",
+      manifest: buildManifest(),
+      previousRefs: { orchestrator: DIGEST("5"), "web-dashboard": DIGEST("6") },
+    });
+    await runner.stageConfigs({
+      updateId: "du-1",
+      configsTar: Buffer.from("tar"),
+      manifest: buildManifest(),
+    });
+    const host = "/var/lib/docker/volumes/docker_ota-updates/_data/du-1";
+    expect(calls[0]!.args).toContain(`${host}/backup`);
+    expect(calls[1]!.args).toContain(`${host}/configs.tar.gz`);
+    // …and the files themselves landed through this process's mount.
+    expect(readFileSync(path.join(workDir, "du-1", "configs.tar.gz"), "utf8")).toBe("tar");
+    expect(readFileSync(path.join(workDir, "du-1", "services.txt"), "utf8")).toContain("orchestrator");
+  });
+
+  it("passes the registry token to pull-images ONLY", async () => {
+    const seen: Array<{ sub: string; env?: Record<string, string> }> = [];
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      githubToken: "ghp_secret",
+      exec: async (_file, args, opts) => {
+        seen.push({ sub: args[0]!, env: opts?.env });
+        return { stdout: "{}", stderr: "" };
+      },
+    });
+    await runner.currentImageRefs(["orchestrator"]);
+    await runner.pullImages(buildManifest().services);
+    await runner.migrateDeploy();
+    expect(seen.find((c) => c.sub === "pull-images")?.env).toEqual({
+      DROPLET_OTA_GITHUB_TOKEN: "ghp_secret",
+    });
+    expect(seen.filter((c) => c.sub !== "pull-images").every((c) => c.env === undefined)).toBe(true);
   });
 });

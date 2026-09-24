@@ -47,8 +47,18 @@ const { recordActivityMock, sendNotificationMock } = vi.hoisted(() => ({
 }));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 vi.mock("../services/notifications.service.js", () => ({ sendNotification: sendNotificationMock }));
+// Only the DB read of the §3 resolver is faked; the composition, the scope
+// builder and the worker's own attributed-access resolver stay real.
+const resolveEffectiveAccessMock = vi.hoisted(() => vi.fn());
+vi.mock("../services/effective-access.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/effective-access.service.js")>()),
+  resolveEffectiveAccess: resolveEffectiveAccessMock,
+}));
 
+import type { ModuleId } from "@prisma/client";
 import { TOOL_CATALOG, TOOL_ROUTES } from "@droplet/tools-core";
+import { GATEABLE_MODULE_IDS, GRANTABLE_TOOL_DOMAINS } from "../services/access-catalog.js";
+import { computeEffectiveAccess, type EffectiveAccessInputs } from "../services/effective-access.service.js";
 import {
   WORKSPACE_TOOLS,
   WORKSPACE_TOOL_DOMAINS,
@@ -368,5 +378,84 @@ describe("a workshop run is OFFERED its tools under domain selection (WARP-2896,
     const offered = advertisedOnFirstTurn(chat);
     for (const name of EXPECTED_WORKSPACE_TOOLS) expect(offered, name).not.toContain(name);
     expect(mcp.executed).toEqual([]);
+  });
+});
+
+// ── a role-scoped ADMIN with every module switched off ─────────────────────
+//
+// Every run above belongs to an OWNER, and owners bypass the feature axis
+// (resolveAttributedToolAccess answers `scope: null`), so none of them says
+// anything about it. An admin holding an access role is narrowed by §3:
+// toolDomains = writeFilter(tier) ∩ moduleToolDomains(features) ∩ roleToolGrants.
+// Since #2295 (WARP-2742) the middle term FAILS CLOSED: a domain no module
+// claims passes only when FEATURE_UNGATED_TOOL_DOMAINS (access-catalog.ts)
+// declares it. No module owns the workshop, so `workspace` is declared there;
+// this pins why. With every module off, the admin's workshop run must still
+// be offered the eight tools, and its write must still dispatch.
+
+describe("a role-scoped ADMIN's workshop run keeps the workspace tools with every module off (WARP-2896 × WARP-2742)", () => {
+  const ADMIN = { id: "u-admin", username: "stefan", role: "admin" };
+
+  it("the run's pool offers all eight workspace tools and the write dispatches", async () => {
+    // MUTATION: delete `workspace` from FEATURE_UNGATED_TOOL_DOMAINS and
+    // domainsForFeatures drops the domain, the admin's scope loses it, and the
+    // eight leave the run's pool: absent from the turn AND refused at dispatch.
+    const toolGrants = GRANTABLE_TOOL_DOMAINS.map((domain) => ({ domain, level: "use" as const }));
+    const inputs: EffectiveAccessInputs = {
+      user: {
+        id: ADMIN.id,
+        role: "admin",
+        accessRole: {
+          mayOperateLocks: false,
+          cloudModelsAllowed: false,
+          storageQuotaBytes: null,
+          maxUploadSizeMb: null,
+          llmDailyMessageCap: null,
+          // The widest Admin-based role: every feature at manage, every
+          // grantable tool domain at `use`. The box is what switches them off.
+          featureGrants: GATEABLE_MODULE_IDS.map((moduleId) => ({ moduleId, level: "manage" as const })),
+          toolGrants,
+          connectorGrants: [],
+        },
+      },
+      exceptions: [],
+      // Every gateable module off box-wide; only the always-on chat floor.
+      workspaceModuleIds: new Set<ModuleId>(["chat"]),
+      cloudEscapeEnabled: false,
+      connections: [],
+      usagePolicy: null,
+      deptRights: [],
+    };
+    const effective = computeEffectiveAccess(inputs);
+    // Precondition: the feature set really does exclude every module.
+    const gateable = new Set<string>(GATEABLE_MODULE_IDS);
+    expect(effective.features.filter((f) => gateable.has(f.moduleId))).toEqual([]);
+    resolveEffectiveAccessMock.mockReset();
+    resolveEffectiveAccessMock.mockResolvedValue(effective);
+
+    // The row the worker's resolver reads: an active admin WITH an access role.
+    const adminRow = { ...ADMIN, directoryStatus: "ACTIVE", accessRoleId: "r-admin", accessRole: { toolGrants } };
+    const db = createAgentRunPrismaMock({ users: [adminRow] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: ADMIN.id, goal: "build a word counter", model: "m", workspaceId: "ws-admin" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]));
+    const chat = scripted(writeThenPropose);
+    // No `resolveAccess` override: the worker's own attributed resolver, the
+    // one production uses, reads the role. Shipping selection mode.
+    const worker = createAgentRunWorker({
+      prisma: db.prisma,
+      agent: { mcp: mcp.mcp, aiGateway: { chat } as never },
+      workerId: "A",
+      toolSelectionMode: "domains",
+    });
+    await worker.tickOnce();
+    await settle(worker);
+
+    // The admin was narrowed through §3 (the owner bypass did not fire) ...
+    expect(resolveEffectiveAccessMock).toHaveBeenCalledWith(ADMIN.id);
+    // ... and the run was still offered all eight, and its write dispatched.
+    const offered = advertisedOnFirstTurn(chat);
+    for (const name of EXPECTED_WORKSPACE_TOOLS) expect(offered, name).toContain(name);
+    expect(mcp.executed.map((e) => e.name)).toEqual(["workspace_write"]);
+    expect(db.row(id).pendingTool).toBe("workspace_propose");
   });
 });

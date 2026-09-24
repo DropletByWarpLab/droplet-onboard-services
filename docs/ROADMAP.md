@@ -161,7 +161,7 @@ GA readiness is tracked by five risk-based epics, WARP-956 through WARP-960. The
 - **GTM scope:** Input sanitization, output schema validation, rate limiting on sensitive tools.
 - **This repo's slice:** ai-gateway is the entry point; `services/ai-gateway/middleware/` and `tools/` directories exist. Rate limiting and input validation are now implemented.
 - **Files involved:** `services/ai-gateway/middleware/rate_limit.py`, `services/ai-gateway/schemas.py`, `services/ai-gateway/tools/`
-- **Cross-ref:** Depth-defence in `droplet-local-LLM` (OpenClaw guardrails + sandbox). This repo's ai-gateway is the outer input layer.
+- **Cross-ref:** Depth-defence is this repo's own: the confirmation interceptor and the classification record (ADR-043 §2, ADR-056 §D) and, for code the model writes, `services/sandbox` (ADR-056 §C, WARP-2895). OpenClaw was deleted from `droplet-local-LLM` on 2026-04-30. This repo's ai-gateway is the outer input layer.
 - **Status:** `[~]` Partial — rate limiting, input bounds, and CORS restriction are done. Output schema validation for tool-call responses remains.
 - **Blockers:** None.
 - **What was done:** Sliding-window rate limiter (Redis/in-memory) on chat endpoints; `max_tokens` capped at 4096; message list capped at 100; content length capped at 32k; CORS restricted from `*` to explicit origins.
@@ -192,18 +192,18 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 ### M3.4 OTA update system
 - **GTM scope:** Secure update mechanism for the entire stack (containers, configs, models).
 - **This repo's slice:** The external `DropletByWarpLab/releases` repo holds the signed manifests + release assets. ADR-020 / WARP-663 already built the **substrate this consumes**: the `manifest.json` schema, `droplet-image sign`/`verify` (detached ECDSA-P256 over the manifest + per-asset sha256, fail-closed), and the releases-repo layout. M3.4 adds the update **agent/endpoint** that pulls a signed manifest, `verify`s it, and applies container + OpenWrt image updates atomically (A/B partitions are M3.4's to add).
-- **Files involved:** `scripts/image/` (manifest + verify substrate), `apps/orchestrator/src/routes/updates.ts`, `apps/orchestrator/src/services/update-agent/` (manifest fetch, verify, apply, self-swap resume, backup GC), `scripts/lib/apply-update.sh`
+- **Files involved:** `scripts/image/` (manifest + verify substrate), `apps/orchestrator/src/routes/updates.ts`, `apps/orchestrator/src/services/update-agent/` (manifest fetch, verify, apply, self-swap resume, backup GC), `docker/ota/apply-update.sh`
 - **Status:** `[x]` Done — the update agent shipped (`routes/updates.ts` + `services/update-agent/` in the orchestrator, signed-manifest verification fail-closed) and is exercised end-to-end by `.github/workflows/ota-e2e.yml`. The OTA risk rows in the risk table below describe the shipped design's threat posture.
 - **Blockers:** None for the mechanism. The cosign release-key custody ceremony (WARP-244) is still pending, so `publish-release.yml` stays `workflow_dispatch`-only.
 - **Next action:** Run the WARP-244 key ceremony; first live publish against `DropletByWarpLab/releases`.
 
 ### M3.6 Community marketplace
 - **GTM scope:** Framework for community-contributed tool extensions and integrations.
-- **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox lives in `droplet-local-LLM` (OpenClaw), so the boundary here is about surfacing and provisioning extensions — not running them.
+- **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox is `services/sandbox` on the first `internal: true` network ([ADR-056 §C](ADR-056-agentic-extensibility.md), WARP-2895); extensions run there as processes first (WARP-2900) and as containers through the apply-path fragment schema second (WARP-2898).
 - **Files involved:** `apps/orchestrator/src/routes/` (new `extensions.ts`), `apps/web-dashboard/src/app/` (new `/extensions` route), `apps/orchestrator/prisma/schema.prisma` (new `Extension` model)
 - **Status:** `[ ]` Not started. ADR-020's signed-manifest substrate + ADR-004's RBAC guard are design-committed to reuse (WARP-908 / [ADR-030](ADR-030-signed-rbac-gated-app-catalog-installer.md) — a curated, signed, RBAC-gated catalog installer, explicitly NOT the free-form Docker-socket one-click install pattern some competitors ship). ADR-030 is a design ADR only; build is explicitly deferred to post-GA.
-- **Blockers:** Sandbox contract with `droplet-local-LLM`'s OpenClaw (ADR-030 does not resolve this half); signing/trust model (resolved by ADR-030, reusing ADR-020).
-- **Next action:** Post-GA, build against ADR-030 once the OpenClaw sandbox contract lands.
+- **Blockers:** the sandbox contract — owned by ADR-056 §C: the service is built (WARP-2895, #2218, on `stage`); the fragment schema (WARP-2898) is not; signing/trust model (resolved by ADR-030, reusing ADR-020; the box-local extension key is ADR-056 §C).
+- **Next action:** Post-GA, build against ADR-030 as revised by ADR-056 §C, in the WARP-2891 slice order (WARP-2895 → WARP-2900 → WARP-2898).
 
 ---
 
@@ -259,8 +259,8 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 | Risk | Severity | Likelihood | Owner in this repo | Notes |
 |---|---|---|---|---|
 | LLM inference too slow on a low-power host (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation — M1.6 token streaming — is shipped (WARP-1442); hardware path is droplet-local-LLM / the inference host. |
-| Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence in droplet-local-LLM's OpenClaw tool policy. |
-| Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here; sandbox + guardrails live in droplet-local-LLM. |
+| Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence is the confirmation interceptor and the classification record (ADR-043 §2, ADR-056 §D); OpenClaw is gone. |
+| Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here, and so does the depth-defence: the confirmation interceptor, the classification record and `services/sandbox` (ADR-043 §2, ADR-056 §C / §D). OpenClaw, the droplet-local-LLM guardrail this row used to name, is gone. |
 | Privileged container escape from router/NAS | Critical | Low | `openwrt/` (replaces privileged Docker approach) | Architecture already mitigates: router is OpenWrt, not a `--privileged` container. |
 | SD card corruption / data loss | High | Medium | `scripts/setup.sh`, `openwrt/` | Storage health monitoring + A/B partition scheme (overlaps M3.4). |
 | Docker Compose complexity for non-technical users | Medium | High | `scripts/setup.sh`, `scripts/factory-reset.sh`, `openwrt/build.sh` | M2.8 SD-card image is the long-term mitigation. |
@@ -268,10 +268,10 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 | Nextcloud dependency weight | — | — | `docker/docker-compose.yml`, `apps/orchestrator/src/middleware/auth.ts` | Current auth model couples to Nextcloud OCS; reconsider in M1.3 ADR. |
 | Conversation state ephemeral | — | — | `apps/orchestrator/src/routes/llm.ts`, `services/ai-gateway/sessions/` | M1.5. |
 | Single-threaded Ollama serving | — | — | `services/ai-gateway/scheduler.py` (queueing) | Partial — scheduler exists; true concurrency lives in droplet-local-LLM. |
-| OTA: cosign release-key leak → attacker signs a hostile release the whole fleet installs | Critical | Low | `apps/orchestrator/src/services/update-agent/verify.ts` (trust anchor), `scripts/lib/apply-update.sh` (WARP-244 image-signature gate at pull) | Single org-held keypair; custody/rotation is the WARP-244 key ceremony (still pending). Recovery path is an emergency release rotating `cosign.pub` — no in-band revocation exists yet. |
-| OTA: compose-socket escape — a compromised orchestrator uses `/var/run/docker.sock` for host root | Critical | Low | `docker/docker-compose.yml` (socket on orchestrator ONLY), `scripts/lib/apply-update.sh` + `update-agent/host-compose-runner.ts` (fixed subcommands, argv arrays, no shell) | The socket is root-equivalent by design; the fence is one audited helper with a fixed surface. Boxes without the mount (`DROPLET_OTA_APPLY_SCRIPT` empty) have no apply path at all. |
+| OTA: cosign release-key leak → attacker signs a hostile release the whole fleet installs | Critical | Low | `apps/orchestrator/src/services/update-agent/verify.ts` (trust anchor), `docker/ota/apply-update.sh` (WARP-244 image-signature gate at pull) | Single org-held keypair; custody/rotation is the WARP-244 key ceremony (still pending). Recovery path is an emergency release rotating `cosign.pub` — no in-band revocation exists yet. |
+| OTA: compose-socket escape — a compromised orchestrator uses `/var/run/docker.sock` for host root | Critical | Low | `docker/docker-compose.yml` (socket on orchestrator ONLY), `docker/ota/apply-update.sh` + `update-agent/host-compose-runner.ts` (fixed subcommands, argv arrays, no shell) | The socket is root-equivalent by design; the fence is one audited helper with a fixed surface. Boxes without the mount (`DROPLET_OTA_APPLY_SCRIPT` empty) have no apply path at all. |
 | OTA: migration breaks mid-update — schema half-applied and rollback cannot restore it | High | Medium | `apps/orchestrator/scripts/migrate-and-start.sh` (WARP-573 guarded boot: advisory lock + pre-migrate snapshot), `update-agent/apply.ts` step 4 | Rollback deliberately does NOT restore the DB schema (migrations are additive by policy); the `pg_dump` snapshots in `backup/` are forensic/manual-recovery material only. |
-| OTA: self-update orphan — the orchestrator dies mid-self-swap and no process owns the verdict | High | Low | `scripts/lib/apply-update.sh` `recreate-self-detached` (detached helper survives the swap), `update-agent/apply.ts` `resumeInterruptedApply` boot hook | The `applying` row is an exact restart cursor (advance-only state machine, `update-agent/transitions.ts`); whichever orchestrator boots next writes committed/rolled_back/failed. |
+| OTA: self-update orphan — the orchestrator dies mid-self-swap and no process owns the verdict | High | Low | `docker/ota/apply-update.sh` `recreate-self-detached` (detached helper survives the swap), `update-agent/apply.ts` `resumeInterruptedApply` boot hook | The `applying` row is an exact restart cursor (advance-only state machine, `update-agent/transitions.ts`); whichever orchestrator boots next writes committed/rolled_back/failed. |
 | OTA: backup disk fill — per-update backups + exited self-swap helpers accumulate until `/data` is full | Medium | Medium | `update-agent/purge-update-backups.ts` + `update-agent/purge-self-swap-helpers.ts` (daily 03:00 GC, 7-day retention) | GC only reaps TERMINAL updates (in-flight backups are the live rollback target) and captures helper logs before `rm`. A wedged dir logs and is retried next sweep — monitor `update.backup_purge_failed`. |
 
 ---
@@ -280,6 +280,6 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 
 - **M1.3 JWT auth** — entirely in this repo; the API contract lives in `packages/shared-types` + `docs/mobile-api-contract.md`.
 - **M1.6 Streaming** — done, entirely in-repo (orchestrator `routes/llm.ts` SSE path + WARP-1442 agent-loop token streaming); not a `droplet-local-LLM` dependency.
-- **M2.7 Prompt-injection hardening** — input layer here; sandbox layer in droplet-local-LLM.
+- **M2.7 Prompt-injection hardening** — input layer and sandbox both here (`services/sandbox`, ADR-056 §C); not a `droplet-local-LLM` dependency since OpenClaw was deleted on 2026-04-30.
 - **M3.2 Native mobile apps** — not this repo; `droplet-ios` + `droplet-android` consume the orchestrator per `packages/shared-types` + `docs/mobile-api-contract.md`.
 - **M3.4 OTA** — this repo owns the update agent; `releases/` holds the manifests.

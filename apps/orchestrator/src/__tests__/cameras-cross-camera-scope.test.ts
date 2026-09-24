@@ -53,6 +53,11 @@ vi.mock("mqtt", () => ({
   },
 }));
 
+// WARP-2904: the dial-time DNS check resolves the push host; keep it offline.
+vi.mock("node:dns/promises", () => ({
+  lookup: async () => [{ address: "142.250.0.1", family: 4 }],
+}));
+
 vi.mock("web-push", () => ({
   default: {
     generateVAPIDKeys: () => ({ publicKey: "pub", privateKey: "priv" }),
@@ -86,6 +91,18 @@ vi.mock("../services/frigate.client.js", async (importOriginal) => {
     regenerateEventDescription: vi.fn().mockResolvedValue(undefined),
     tagEventAsFace: vi.fn().mockResolvedValue(undefined),
     openBirdseyeStream: vi.fn(async () => new Response("mjpeg")),
+    // Frigate's /api/faces lists every folder under its faces dir: the
+    // curated roster AND `train`, its recent recognition attempts — crops
+    // named `{event_id}-{timestamp}-{sub_label}-{score}.webp`, from any camera.
+    fetchKnownFaces: vi.fn(async () => [
+      { name: "Alice", images: [{ name: "alice-1.webp", imageUrl: "" }] },
+      {
+        name: "train",
+        images: [{ name: "1790000000.1-abc123-1790000001.2-unknown-0.81.webp", imageUrl: "" }],
+      },
+    ]),
+    fetchFaceImage: vi.fn(async () => new Response("webp")),
+    deleteFaceImage: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -132,10 +149,16 @@ const prisma = {
   },
   pushSubscription: {
     findMany: vi.fn(async ({ where }: { where: { userId: string } }) => [
-      { endpoint: `https://push.test/${where.userId}`, p256dhKey: "k", authKey: "a" },
+      // WARP-2904: only a real push-service host is dialled.
+      { endpoint: `https://fcm.googleapis.com/fcm/send/${where.userId}`, p256dhKey: "k", authKey: "a" },
     ]),
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+  },
+  // WARP-2904: dispatchToUser reads the web_push off-LAN gate first; open it
+  // so this suite exercises the per-camera grant filter, not the gate.
+  offLanAllowlistChannel: {
+    findUnique: vi.fn().mockResolvedValue({ key: "web_push", enabled: true }),
   },
 } as never;
 
@@ -260,6 +283,73 @@ describe("routes addressed by event / review id check the owning camera", () => 
     const res = await owner().delete("/api/cameras/events/ev-bed");
     expect(res.status).toBe(200);
     expect(vi.mocked(frigate.fetchEventCamera)).not.toHaveBeenCalled();
+  });
+});
+
+describe("WARP-3013: Frigate's `train` face crops are for all-camera viewers only", () => {
+  const CROP = "1790000000.1-abc123-1790000001.2-unknown-0.81.webp";
+  const faceNames = (body: { faces: Array<{ name: string }> }) => body.faces.map((f) => f.name);
+
+  it("the face list hides `train` from a scoped user and keeps the roster", async () => {
+    const res = await sam().get("/api/cameras/faces");
+    expect(res.status).toBe(200);
+    expect(faceNames(res.body)).toEqual(["Alice"]);
+  });
+
+  it("an owner still sees `train`", async () => {
+    const res = await owner().get("/api/cameras/faces");
+    expect(res.status).toBe(200);
+    expect(faceNames(res.body)).toEqual(["Alice", "train"]);
+  });
+
+  it("a grant on every current camera is still not 'all': a new camera would be ungranted", async () => {
+    GRANTS["u-family"] = ["front_door", "bedroom"];
+    try {
+      expect(faceNames((await sam().get("/api/cameras/faces")).body)).toEqual(["Alice"]);
+    } finally {
+      GRANTS["u-family"] = ["front_door"];
+    }
+  });
+
+  it("a scoped user gets 404 for a `train` crop, and Frigate is never asked", async () => {
+    const res = await sam().get(`/api/cameras/faces/train/images/${CROP}`);
+    expect(res.status).toBe(404);
+    expect(vi.mocked(frigate.fetchFaceImage)).not.toHaveBeenCalled();
+  });
+
+  it("a scoped user still opens a roster image; an owner opens a `train` crop", async () => {
+    expect((await sam().get("/api/cameras/faces/Alice/images/alice-1.webp")).status).toBe(200);
+    expect(vi.mocked(frigate.fetchFaceImage)).toHaveBeenLastCalledWith("Alice", "alice-1.webp");
+    expect((await owner().get(`/api/cameras/faces/train/images/${CROP}`)).status).toBe(200);
+    expect(vi.mocked(frigate.fetchFaceImage)).toHaveBeenLastCalledWith("train", CROP);
+  });
+
+  it("a scoped user cannot delete a `train` crop", async () => {
+    const res = await sam().delete(`/api/cameras/faces/train/images/${CROP}`);
+    expect(res.status).toBe(404);
+    expect(vi.mocked(frigate.deleteFaceImage)).not.toHaveBeenCalled();
+  });
+
+  it("a scoped user still removes a roster image; an owner removes a `train` crop", async () => {
+    expect((await sam().delete("/api/cameras/faces/Alice/images/alice-1.webp")).status).toBe(204);
+    expect((await owner().delete(`/api/cameras/faces/train/images/${CROP}`)).status).toBe(204);
+    expect(vi.mocked(frigate.deleteFaceImage).mock.calls).toEqual([
+      ["Alice", "alice-1.webp"],
+      ["train", CROP],
+    ]);
+  });
+
+  it("a scoped user cannot tag an event's face into `train`, even from their own camera", async () => {
+    // ev-front is Sam's camera, so the event guard passes; the folder is
+    // still the all-camera one, and Sam may not write into what they cannot see.
+    const res = await sam().post("/api/cameras/faces/train/from-event/ev-front");
+    expect(res.status).toBe(404);
+    expect(vi.mocked(frigate.tagEventAsFace)).not.toHaveBeenCalled();
+  });
+
+  it("an owner can still clear the whole `train` folder", async () => {
+    const res = await owner().delete("/api/cameras/faces/train");
+    expect(res.status).toBe(204);
   });
 });
 
@@ -438,7 +528,7 @@ describe("push notifications follow grants, not just prefs", () => {
     const endpoints = vi
       .mocked(webpush.sendNotification)
       .mock.calls.map((c) => (c[0] as { endpoint: string }).endpoint);
-    expect(endpoints).toEqual(["https://push.test/u-owner"]);
+    expect(endpoints).toEqual(["https://fcm.googleapis.com/fcm/send/u-owner"]);
   });
 });
 

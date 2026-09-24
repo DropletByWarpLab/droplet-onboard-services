@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -43,6 +44,11 @@ MAX_DIFF_BYTES = 256 * 1024
 RUN_DEFAULT_TIMEOUT_MS = 120_000
 RUN_MAX_TIMEOUT_MS = 600_000
 RUN_OUTPUT_CAP_BYTES = 256 * 1024
+# After a timed-out run is killed, how long what is left in its pipes is read
+# for. Under the orchestrator's 5 s caller grace (workspace.service.ts
+# CALLER_TIMEOUT_GRACE_MS), so a timed-out run still answers as timedOut and
+# not as the caller's 504.
+RUN_DRAIN_TIMEOUT_S = 2.0
 # What a run's stdout/stderr is kept as, per workspace, for the dashboard's
 # /output view. Ignored by git (DEFAULT_IGNORE covers .workspace/).
 LAST_RUN_FILE = Path(".workspace") / "last-run.json"
@@ -299,6 +305,48 @@ def _with_limits(exe: list[str]) -> list[str]:
     return [sys.executable, "-I", "-S", "-c", _LIMIT_WRAPPER, *exe]
 
 
+def _kill_and_drain(proc: subprocess.Popen) -> tuple[bytes, bytes]:
+    """The run is past its deadline: kill its whole process group, then read
+    what is left for at most RUN_DRAIN_TIMEOUT_S.
+
+    `proc.kill()` alone reaches only the direct child (npm, exec'd by the
+    wrapper). A grandchild (node, a `node --test` worker, esbuild) inherited
+    stdout/stderr and holds them open, so an unbounded read after the kill
+    waits for an EOF that never comes and parks this request thread
+    (WARP-3012). killpg reaches everything still in the group. A descendant
+    that left it (setsid, a daemonising tool) is out of reach: its pipes are
+    abandoned, and what was read before the deadline is kept.
+    """
+    if os.name == "posix":
+        try:
+            # proc.pid IS the group id: start_new_session made the child a
+            # group leader. Never os.getpgid(): for a child that is not a
+            # leader, that is this server's own group.
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # the whole group has already exited
+    else:
+        proc.kill()  # a Windows dev checkout: no process groups
+    try:
+        return proc.communicate(timeout=RUN_DRAIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        # On POSIX the exception carries everything read so far, before and
+        # after the deadline (Windows' reader threads do not report it).
+        out, err = exc.output or b"", exc.stderr or b""
+    if os.name == "posix":
+        # Nothing reads these any more (POSIX communicate() reads on this
+        # thread); closing our ends gives the escaped writer EPIPE instead of
+        # a full pipe, and gives this process its descriptors back.
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+    try:
+        proc.wait(timeout=RUN_DRAIN_TIMEOUT_S)  # reap the killed child
+    except subprocess.TimeoutExpired:
+        pass
+    return out, err
+
+
 def run(workspace_id: str, argv: list[str], timeout_ms: int | None = None) -> dict[str, Any]:
     work = _checkout(workspace_id)
     exe = resolve_run_argv(argv)
@@ -319,15 +367,20 @@ def run(workspace_id: str, argv: list[str], timeout_ms: int | None = None) -> di
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             close_fds=True,
+            # Its own session, so its process group is the whole tree it
+            # starts (npm → node → test workers, esbuild) and a timeout can
+            # kill all of it. POSIX only (ignored on Windows). The setsid()
+            # happens in C after the fork, so none of preexec_fn's
+            # threaded-fork hazard (see _LIMIT_WRAPPER).
+            start_new_session=True,
         )
     except OSError as exc:
         raise StoreError(500, f"could not start {argv[0]}: {exc}") from exc
     try:
         out, err = proc.communicate(timeout=timeout_ms / 1000)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        out, err = proc.communicate()
         timed_out = True
+        out, err = _kill_and_drain(proc)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     def cap(b: bytes) -> tuple[str, bool]:

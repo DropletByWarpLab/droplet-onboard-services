@@ -13,11 +13,17 @@ on:
     paths:
       - "scripts/release/**"
       - ".github/workflows/release-scripts-tests.yml"
+      # WARP-3001: check_services_drift.py fails when a compose `build:`
+      # service is missing from services.json, so a compose edit must fire
+      # this lane. One ~30 s job per compose-touching PR (well under the
+      # 2k min/mo callout in docs/ci-cost-budget.md).
+      - "docker/docker-compose.yml"
   push:
     branches: [main]
     paths:
       - "scripts/release/**"
       - ".github/workflows/release-scripts-tests.yml"
+      - "docker/docker-compose.yml" # WARP-3001, see pull_request above
   workflow_dispatch:
 
 concurrency:
@@ -33,5 +39,5 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run release-script tests (SBOM aggregate + manifest generator)
         run: |
-          python3 -m pip install --upgrade pip pytest
+          python3 -m pip install --upgrade pip pytest pyyaml
           python3 -m pytest scripts/release/ -q
