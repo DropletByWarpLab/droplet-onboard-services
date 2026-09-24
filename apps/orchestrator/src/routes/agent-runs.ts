@@ -33,6 +33,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { resolveActiveModel } from "../services/active-model.service.js";
 import {
   recordAccessDenied,
   requireRoleOrMcpService,
@@ -142,9 +143,18 @@ function encodeCursor(row: { createdAt: Date; id: string }): string {
   return `${row.createdAt.toISOString()}|${row.id}`;
 }
 
-function defaultModel(): string | null {
-  const m = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
-  return m.length > 0 ? m : null;
+/**
+ * WARP-3047 — a run with no explicit `model` runs on the box's ACTIVE model
+ * (tools-capable: an active model that states it cannot call tools falls back
+ * to LLM_MODEL), not env DEFAULT_MODEL/LLM_MODEL — on DMR a run on another
+ * model than chat is a second model competing for one GPU. Resolved when the
+ * run is QUEUED and when a schedule is CREATED: `AgentRun.model` and
+ * `AgentRunSchedule.model` are non-null columns, so resolving at claim/fire
+ * time would need a schema change. A run is claimed seconds after it is
+ * queued; a schedule keeps the model that was active when it was made.
+ */
+function defaultModel(prisma: PrismaClient): Promise<string | null> {
+  return resolveActiveModel(prisma, { requireTools: true });
 }
 
 interface RunRow {
@@ -305,7 +315,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
-      const model = parsed.data.model ?? defaultModel();
+      const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
         res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
         return;
@@ -436,7 +446,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "Invalid timezone" });
         return;
       }
-      const model = parsed.data.model ?? defaultModel();
+      const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
         res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
         return;

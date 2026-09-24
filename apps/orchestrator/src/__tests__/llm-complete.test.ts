@@ -72,6 +72,15 @@ vi.mock("../services/ai-gateway.client.js", () => ({
     err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError"),
 }));
 
+// WARP-3047 — a request with no `model` runs on the box's ACTIVE model,
+// resolved by active-model.service (whose own suite covers the resolution
+// rules). Observed here so the route's wiring is what is under test.
+const mockResolveActiveModel = vi.hoisted(() => vi.fn());
+vi.mock("../services/active-model.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/active-model.service.js")>()),
+  resolveActiveModel: (...args: unknown[]) => mockResolveActiveModel(...args),
+}));
+
 vi.mock("../services/cache.service.js", async () => {
   const actual = await vi.importActual<
     typeof import("../services/cache.service.js")
@@ -128,9 +137,8 @@ function okChatResponseNoFinish(content: string) {
   };
 }
 
-// The route resolves the default model from env at request time; clear the
-// triad's env vars per test so each case is deterministic regardless of
-// the host shell / .env.
+// The route must NOT read the default model from env any more (WARP-3047);
+// clear the env vars per test so a host .env can never make a case pass.
 const MODEL_ENV_KEYS = ["DEFAULT_MODEL", "LLM_MODEL"] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
@@ -205,6 +213,9 @@ describe("POST /api/llm/complete", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockChat.mockResolvedValue(okChatResponse("Hello"));
+    // The box's active model for these cases (any id — the happy-path
+    // assertions below were written against this one).
+    mockResolveActiveModel.mockResolvedValue("mistral:7b-instruct");
     savedEnv = {};
     for (const k of MODEL_ENV_KEYS) {
       savedEnv[k] = process.env[k];
@@ -287,7 +298,7 @@ describe("POST /api/llm/complete", () => {
 
   describe("model resolution", () => {
     it("honors an explicit model override", async () => {
-      process.env.DEFAULT_MODEL = "env-default"; // override must beat env
+      mockResolveActiveModel.mockResolvedValue("docker.io/ai/qwen3:8B-Q4_K_M");
       const res = await request(app)
         .post("/api/llm/complete")
         .set("x-test-role", "owner")
@@ -298,36 +309,34 @@ describe("POST /api/llm/complete", () => {
       expect(mockChat.mock.calls[0][0].model).toBe("llama3:8b");
     });
 
-    it("falls back to DEFAULT_MODEL first", async () => {
+    it("no model → the box's ACTIVE model, not env DEFAULT_MODEL/LLM_MODEL (WARP-3047)", async () => {
+      // A switch to B on the Models page must move translate_text /
+      // summarize_file too — they run inside a B chat turn, and asking for
+      // the env model there loads it next to B.
       process.env.DEFAULT_MODEL = "qwen3:4b";
-      process.env.LLM_MODEL = "gpt-oss:20b";
+      process.env.LLM_MODEL = "docker.io/ai/gpt-oss:20B-F16";
+      mockResolveActiveModel.mockResolvedValue("docker.io/ai/qwen3:8B-Q4_K_M");
       const res = await request(app)
         .post("/api/llm/complete")
-        .set("x-test-role", "owner")
+        .set("x-test-role", "service")
         .send({ text: "hi" });
 
-      expect(res.body.model).toBe("qwen3:4b");
-      expect(mockChat.mock.calls[0][0].model).toBe("qwen3:4b");
+      expect(res.status).toBe(200);
+      expect(res.body.model).toBe("docker.io/ai/qwen3:8B-Q4_K_M");
+      expect(mockChat.mock.calls[0][0].model).toBe("docker.io/ai/qwen3:8B-Q4_K_M");
+      expect(mockResolveActiveModel).toHaveBeenCalledTimes(1);
     });
 
-    it("falls back to LLM_MODEL when DEFAULT_MODEL is unset", async () => {
-      process.env.LLM_MODEL = "gpt-oss:20b";
+    it("nothing resolvable → 502 llm_unavailable, never a hardcoded tag", async () => {
+      mockResolveActiveModel.mockResolvedValue(null);
       const res = await request(app)
         .post("/api/llm/complete")
         .set("x-test-role", "owner")
         .send({ text: "hi" });
 
-      expect(res.body.model).toBe("gpt-oss:20b");
-      expect(mockChat.mock.calls[0][0].model).toBe("gpt-oss:20b");
-    });
-
-    it("falls back to mistral:7b-instruct when both env vars are unset", async () => {
-      const res = await request(app)
-        .post("/api/llm/complete")
-        .set("x-test-role", "owner")
-        .send({ text: "hi" });
-
-      expect(res.body.model).toBe("mistral:7b-instruct");
+      expect(res.status).toBe(502);
+      expect(res.body).toEqual({ error: "llm_unavailable" });
+      expect(mockChat).not.toHaveBeenCalled();
     });
   });
 

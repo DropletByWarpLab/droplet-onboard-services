@@ -52,6 +52,18 @@ vi.mock("../services/effective-access.service.js", async (importOriginal) => ({
   resolveEffectiveAccess: vi.fn(async () => ({ cloud: false })),
 }));
 
+// WARP-3047 — a run with no `model` runs on the box's ACTIVE model. The
+// resolver (active-model.service, own suite) is observed here; by default it
+// answers what it answers on a box with a blank row and no confirmable
+// listing — LLM_MODEL — so the WARP-2180 cases below keep their meaning.
+const { resolveActiveModelMock } = vi.hoisted(() => ({
+  resolveActiveModelMock: vi.fn(),
+}));
+vi.mock("../services/active-model.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/active-model.service.js")>()),
+  resolveActiveModel: (...args: unknown[]) => resolveActiveModelMock(...args),
+}));
+
 import { createAgentRunsRouter } from "../routes/agent-runs.js";
 import { enqueueAgentRun } from "../services/agent-run-worker.service.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
@@ -82,6 +94,8 @@ function buildApp(user: AuthUser, db = createAgentRunPrismaMock({ users: [owner,
 beforeEach(() => {
   recordActivityMock.mockClear();
   process.env.LLM_MODEL = "gpt-oss:20b";
+  resolveActiveModelMock.mockReset();
+  resolveActiveModelMock.mockImplementation(async () => (process.env.LLM_MODEL ?? "").trim() || null);
 });
 
 describe("agent-runs routes — roles (WARP-2180)", () => {
@@ -314,5 +328,46 @@ describe("agent-runs routes — recurring runs (WARP-2180)", () => {
     expect((await request(buildApp(admin, db).app).delete(`/api/agent-runs/schedules/${res.body.id}`)).status).toBe(404);
     expect((await request(app).delete(`/api/agent-runs/schedules/${res.body.id}`)).status).toBe(204);
     expect(db.schedules).toHaveLength(0);
+  });
+});
+
+describe("agent-runs routes — runs follow the box's ACTIVE model (WARP-3047)", () => {
+  const ACTIVE = "docker.io/ai/qwen3:8B-Q4_K_M";
+
+  it("a run with no model is queued on the active model, asked for a TOOLS-capable one", async () => {
+    // LLM_MODEL still names the provisioned model; the owner switched to B.
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "tidy old files" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).model).toBe(ACTIVE);
+    expect(resolveActiveModelMock).toHaveBeenCalledWith(db.prisma, { requireTools: true });
+  });
+
+  it("an explicit model still wins and the resolver is not asked", async () => {
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "g", model: "gpt-oss:20b" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).model).toBe("gpt-oss:20b");
+    expect(resolveActiveModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a schedule with no model stores the model active at CREATION (non-null column)", async () => {
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "sweep clips", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(res.status).toBe(201);
+    expect(db.schedules[0]).toMatchObject({ model: ACTIVE });
+    expect(resolveActiveModelMock).toHaveBeenCalledWith(db.prisma, { requireTools: true });
+  });
+
+  it("nothing resolvable → 400, never a queued run on a guessed model", async () => {
+    resolveActiveModelMock.mockResolvedValue(null);
+    const { app, db } = buildApp(owner);
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g" })).status).toBe(400);
+    expect(db.rows).toHaveLength(0);
   });
 });

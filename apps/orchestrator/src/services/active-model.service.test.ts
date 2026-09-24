@@ -18,7 +18,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 
 const getCachedModelListing = vi.hoisted(() => vi.fn());
-vi.mock("./ai-gateway.client.js", () => ({ getCachedModelListing }));
+const getModelProvider = vi.hoisted(() => vi.fn(async (_model: string) => undefined as string | undefined));
+vi.mock("./ai-gateway.client.js", () => ({ getCachedModelListing, getModelProvider }));
 const warmDefaultModel = vi.hoisted(() => vi.fn(async (_model?: string | null) => undefined));
 vi.mock("./model-readiness.service.js", () => ({ warmDefaultModel }));
 
@@ -28,6 +29,7 @@ import {
   readActiveChatModel,
   resolveActiveChatModel,
   resolveActiveModel,
+  resolveTurnSideModel,
   warmActiveModel,
 } from "./active-model.service.js";
 import type { ModelInfo } from "../types/index.js";
@@ -312,5 +314,23 @@ describe("warmActiveModel (WARP-3047)", () => {
     getCachedModelListing.mockResolvedValue(null);
     await warmActiveModel(prismaStub(null));
     expect(warmDefaultModel).toHaveBeenCalledWith(null);
+  });
+});
+
+describe("resolveTurnSideModel — HyDE never loads a second model mid-turn (WARP-3047)", () => {
+  it("a LOCAL turn keeps its own (already resident) model, even when it isn't the active one", async () => {
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    getModelProvider.mockResolvedValue("local");
+    const prisma = prismaStub({ valueJson: B });
+    expect(await resolveTurnSideModel(prisma, { model: A, provider: "local" })).toBe(A);
+  });
+
+  it("a CLOUD turn uses the box's active model, never the cloud id", async () => {
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    getModelProvider.mockResolvedValue("anthropic");
+    const prisma = prismaStub({ valueJson: B });
+    expect(
+      await resolveTurnSideModel(prisma, { model: "claude-sonnet-4-20250514", provider: "anthropic" }),
+    ).toBe(B);
   });
 });

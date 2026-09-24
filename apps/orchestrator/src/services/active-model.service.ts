@@ -34,7 +34,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { ModelInfo } from "../types/index.js";
 import { createLogger } from "../lib/logger.js";
 import { getCachedModelListing } from "./ai-gateway.client.js";
-import { isLocalProvider } from "./cloud-access.service.js";
+import { isLocalProvider, resolveOffLanProvider } from "./cloud-access.service.js";
 import { warmDefaultModel } from "./model-readiness.service.js";
 
 const logger = createLogger("active-model");
@@ -225,6 +225,26 @@ export async function resolveActiveModel(
     }
   }
   return resolved;
+}
+
+/**
+ * WARP-3047 — the model a SIDE call made inside a chat turn (HyDE /
+ * multi-query rewrites) should use: the turn's own model when it is local —
+ * it is already resident, and any other local model mid-turn is a second
+ * runner on the GPU (DMR has no memory-aware eviction) — else, for a cloud
+ * turn, the box's active model. Local-ness is decided catalogue-first by
+ * `resolveOffLanProvider`, the same answer the cloud gate uses.
+ */
+export async function resolveTurnSideModel(
+  prisma: PrismaClient,
+  turn: { model: string; provider?: string | null },
+): Promise<string | null> {
+  const offLan = await resolveOffLanProvider({
+    user: undefined,
+    model: turn.model,
+    provider: turn.provider ?? undefined,
+  });
+  return offLan === null ? turn.model : resolveActiveModel(prisma);
 }
 
 /**
