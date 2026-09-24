@@ -3769,3 +3769,54 @@ export type SecurityErrorCode =
 export interface SecurityApiErrorBody {
   error: { code: SecurityErrorCode; message: string; issues?: unknown[]; archivedZoneId?: string };
 }
+
+// ── WARP-2804: notification acknowledgement (routes N1–N4) ──
+
+export type NotificationKind = "reminder" | "event" | "system" | "ai";
+
+/** Whether the RECIPIENT has seen it. Unread means `unacked`; `untracked` rows
+ *  predate WARP-2804 and are never counted as unread (they can still be acked). */
+export type NotificationAckState = "unacked" | "acked" | "untracked";
+
+/** The path that acknowledged it. `incident` is WARP-2978's; no notification route sets it. */
+export type NotificationAckMethod = "inbox" | "opened" | "all" | "incident";
+
+/** One of the signed-in person's own notifications, as N1 returns it. The box
+ *  also records which sign-in acked it and what the client said it was; it
+ *  never returns either. */
+export interface NotificationRow {
+  id: string;
+  kind: NotificationKind;
+  title: string;
+  body: string | null;
+  /** A same-origin dashboard path, validated by the box. */
+  url: string | null;
+  data: Record<string, string | number | boolean> | null;
+  createdAt: string;
+  deliveredAt: string | null;
+  channels: string;
+  pushOutcome: "sent" | "no_subscribers" | "refused_gate" | "failed" | null;
+  error: string | null;
+  ackState: NotificationAckState;
+  ackedAt: string | null;
+  ackMethod: NotificationAckMethod | null;
+}
+
+/** N1. `nextCursor` is null on the last page. */
+export interface NotificationsPage {
+  notifications: NotificationRow[];
+  unread: number;
+  nextCursor: string | null;
+}
+
+/** N3. `changed: false` when it was already acked (the first ack stands). */
+export interface NotificationAckResult {
+  notification: NotificationRow;
+  changed: boolean;
+}
+
+/** N4. `unread` is what the badge should say now. */
+export interface NotificationAckAllResult {
+  acked: number;
+  unread: number;
+}

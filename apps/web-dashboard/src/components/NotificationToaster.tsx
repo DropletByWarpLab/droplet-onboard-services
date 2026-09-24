@@ -9,12 +9,19 @@
  * Mounted once at the layout level. Reconnects on backoff like the file
  * realtime hook so a server bounce doesn't leave the user without
  * notifications.
+ *
+ * WARP-2804 — acknowledgement. The payload carries the NotificationLog `id`,
+ * and choosing "Open" acknowledges that row as `opened` before navigating
+ * (fire-and-forget: a failed ack never blocks the navigation). A toast that
+ * times out or is dismissed is NOT an acknowledgement — nobody can prove it
+ * was read. A payload without an `id` (an older box) is never acked.
  */
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useToast, type ToastAction } from "./Toast";
 import { useAuth } from "@/lib/auth";
+import { ackNotification } from "@/lib/api";
 
 interface IncomingNotification {
   kind?: "reminder" | "event" | "system" | "ai";
@@ -23,6 +30,10 @@ interface IncomingNotification {
   at?: string;
   /** WARP-2909 — a same-origin dashboard path to open (e.g. a parked run). */
   url?: string;
+  /** WARP-2804 — the NotificationLog row this toast is for; "Open" acknowledges it. */
+  id?: string;
+  /** WARP-2978 fills this (an alert vs a notice). Carried, not yet rendered. */
+  priority?: string;
 }
 
 /** WARP-2909 — the box validates `url`, but the toaster never trusts a wire
@@ -100,8 +111,17 @@ export function NotificationToaster() {
           ? `${title} — ${payload.body}`
           : title;
         const link = payload.url;
+        const id = typeof payload.id === "string" && payload.id.length > 0 ? payload.id : null;
         const action: ToastAction | undefined = isInAppPath(link)
-          ? { label: "Open", onClick: () => routerRef.current.push(link) }
+          ? {
+              label: "Open",
+              onClick: () => {
+                // WARP-2804 — opening it is the acknowledgement. Sent first,
+                // never awaited: the navigation must not wait on the network.
+                if (id) void ackNotification(id, { via: "opened" }).catch(() => {});
+                routerRef.current.push(link);
+              },
+            }
           : undefined;
         toastRef.current(message, payload.kind === "ai" ? "info" : "success", action);
       };

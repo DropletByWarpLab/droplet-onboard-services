@@ -160,6 +160,9 @@ import type {
   SecurityZonePatchBody,
   SecurityZonesResponse,
   SecurityZoneWriteResult,
+  NotificationAckAllResult,
+  NotificationAckResult,
+  NotificationsPage,
 } from "./types";
 import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
@@ -9268,4 +9271,56 @@ export async function deleteSecurityHoursException(date: string, version: number
     `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}?version=${encodeURIComponent(String(version))}`,
     { method: "DELETE" },
   );
+}
+
+// ── WARP-2804: notification acknowledgement (routes N1–N4) ──
+// A person reads and acknowledges their OWN notifications. The transport is
+// `securityFetch` above — authFetch (token refresh, the session cookie) with
+// typed errors (`.code` = the server's `error.code`, `.status`) — so a 404
+// NOTIFICATION_NOT_FOUND is distinguishable from a network failure. The box
+// records the sign-in that acked and what the client said it was; neither
+// comes back.
+
+export const NOTIFICATIONS_PATH = "/api/notifications";
+
+export interface NotificationsQuery {
+  /** 1–200; the box defaults to 50. */
+  limit?: number;
+  /** `nextCursor` from the previous page. */
+  cursor?: string | null;
+  /** `unacked`: unread only. The box defaults to `all`. */
+  state?: "unacked" | "all";
+}
+
+/** N1 — newest first, keyset-paged, with the unread count. */
+export function getNotifications(q: NotificationsQuery = {}): Promise<NotificationsPage> {
+  const p = new URLSearchParams();
+  if (q.limit !== undefined) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  if (q.state) p.set("state", q.state);
+  const qs = p.toString();
+  return securityFetch<NotificationsPage>(`${BASE}${NOTIFICATIONS_PATH}${qs ? `?${qs}` : ""}`);
+}
+
+/** N2 — the badge. */
+export async function getUnreadNotificationCount(): Promise<number> {
+  const { unread } = await securityFetch<{ unread: number }>(`${BASE}${NOTIFICATIONS_PATH}/unread-count`);
+  return unread;
+}
+
+/**
+ * N3 — acknowledge one. `via: 'opened'` reports that the person opened its
+ * link (the toaster's "Open"); the default is `inbox`. Idempotent: the first
+ * ack stands and a repeat answers `changed: false`.
+ */
+export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } = {}): Promise<NotificationAckResult> {
+  return securityFetch<NotificationAckResult>(
+    `${BASE}${NOTIFICATIONS_PATH}/${encodeURIComponent(id)}/ack`,
+    jsonBody("POST", opts.via ? { via: opts.via } : {}),
+  );
+}
+
+/** N4 — "mark all read", up to `before`: the ISO time of the newest notification the person was shown. */
+export function ackAllNotifications(before: string): Promise<NotificationAckAllResult> {
+  return securityFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { before }));
 }

@@ -14,6 +14,13 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: routerPush, replace: vi.fn() }),
 }));
 
+// WARP-2804 — the ack the "Open" action sends. Resolves by default; a test
+// can make it reject to prove a failed ack never blocks the navigation.
+const ackSpy = vi.fn((_id: string, _opts?: { via?: string }) => Promise.resolve({ changed: true }));
+vi.mock("@/lib/api", () => ({
+  ackNotification: (id: string, opts?: { via?: string }) => ackSpy(id, opts),
+}));
+
 // Mock auth so the WebSocket effect runs.
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({
@@ -163,4 +170,85 @@ describe("NotificationToaster deep link (WARP-2909)", () => {
       expect(routerPush).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("NotificationToaster acknowledgement (WARP-2804)", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    toastSpy.mockReset();
+    routerPush.mockReset();
+    ackSpy.mockClear();
+    (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { protocol: "http:", host: "localhost" } as Location,
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function toastFor(payload: unknown) {
+    render(<NotificationToaster />);
+    await act(async () => {
+      await Promise.resolve();
+      deliver(payload);
+    });
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    return toastSpy.mock.calls[0][2] as { label: string; onClick: () => void } | undefined;
+  }
+
+  it("\"Open\" acknowledges the notification as opened, then navigates", async () => {
+    const action = await toastFor({ id: "clx1", kind: "reminder", title: "Standup", url: "/calendar" });
+    action!.onClick();
+    expect(ackSpy).toHaveBeenCalledTimes(1);
+    expect(ackSpy).toHaveBeenCalledWith("clx1", { via: "opened" });
+    expect(routerPush).toHaveBeenCalledWith("/calendar");
+    // The ack is sent first; navigation never waits for it.
+    expect(ackSpy.mock.invocationCallOrder[0]!).toBeLessThan(routerPush.mock.invocationCallOrder[0]!);
+  });
+
+  it("a failed ack never blocks the navigation, and is swallowed", async () => {
+    ackSpy.mockImplementationOnce(() => Promise.reject(new Error("offline")));
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const action = await toastFor({ id: "clx1", kind: "ai", title: "Approval needed", url: "/workshop?run=r1" });
+      action!.onClick();
+      expect(routerPush).toHaveBeenCalledWith("/workshop?run=r1");
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("without an id (an older box), Open navigates and sends no ack", async () => {
+    const action = await toastFor({ kind: "reminder", title: "Standup", url: "/calendar" });
+    action!.onClick();
+    expect(routerPush).toHaveBeenCalledWith("/calendar");
+    expect(ackSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([42, "", { id: "x" }])("a malformed id (%j) is not acked", async (id) => {
+    const action = await toastFor({ id, kind: "reminder", title: "Standup", url: "/calendar" });
+    action!.onClick();
+    expect(ackSpy).not.toHaveBeenCalled();
+  });
+
+  it("a toast that is shown and times out is NOT an acknowledgement", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await toastFor({ id: "clx1", kind: "reminder", title: "Standup", url: "/calendar" });
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(ackSpy).not.toHaveBeenCalled();
+  });
+
+  it("a toast with an id but no link has no Open, and nothing acks it", async () => {
+    expect(await toastFor({ id: "clx1", kind: "system", title: "Backups resumed" })).toBeUndefined();
+    expect(ackSpy).not.toHaveBeenCalled();
+  });
 });
