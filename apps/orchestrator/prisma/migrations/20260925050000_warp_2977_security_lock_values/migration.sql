@@ -10,6 +10,10 @@
 -- 20260923010000_warp_2977_module_security and
 -- 20260924000000_warp_2977_security_mode_event_values. Nothing else goes in
 -- this folder.
+--
+-- Re-stamped from 20260925000000 with its rows migration (see
+-- 20260925050100_warp_2977_security_lock_rows for why); the pg_enum guards
+-- are what make the re-run on a box that applied the old stamp a no-op.
 
 DO $$ BEGIN
     IF NOT EXISTS (

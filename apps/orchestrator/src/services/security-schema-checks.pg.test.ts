@@ -1,7 +1,7 @@
 /**
  * WARP-2977 P2b — every hand-written CHECK in migration
  * 20260924000100_warp_2977_security_zones_hours_mode, on a real Postgres,
- * plus the two PR-2 (Matter lock) ones in 20260925000100_warp_2977_security_lock_rows:
+ * plus the two PR-2 (Matter lock) ones in 20260925050100_warp_2977_security_lock_rows:
  * `SecurityEvent_lock_shape` and the re-added `SecurityZoneLink_ref` with
  * its third (`lock`) arm.
  *
@@ -381,7 +381,7 @@ describe.skipIf(!RUN)("P2b schema CHECKs live in the database (WARP-2977)", () =
     });
   });
 
-  // ── PR-2: SecurityEvent_lock_shape (20260925000100) ───────────────────────
+  // ── PR-2: SecurityEvent_lock_shape (20260925050100) ───────────────────────
 
   const lockRow = (
     source: string,
@@ -457,7 +457,7 @@ describe.skipIf(!RUN)("P2b schema CHECKs live in the database (WARP-2977)", () =
 
   // ── PR-2: SecurityZoneLink_ref's third arm ────────────────────────────────
 
-  describe("SecurityZoneLink_ref — the lock arm (re-added in 20260925000100)", () => {
+  describe("SecurityZoneLink_ref — the lock arm (re-added in 20260925050100)", () => {
     it("accepts a lock link on a matter:<node>/<endpoint> ref, and still accepts camera and camera_zone links", async () => {
       expect(await run(...link("lock", "matter:1/1"))).toBe("inserted");
       expect(await run(...link("lock", "matter:18446744073709551615/65534"))).toBe("inserted");
