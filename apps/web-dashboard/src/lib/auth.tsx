@@ -184,6 +184,9 @@ const SETUP_PROBE_RETRY_DELAYS_MS = [1_500, 3_000, 6_000];
  * retry with an already-aborted signal → instant `AbortError` → a valid-but-slow
  * session is wrongly treated as unauthenticated. A fresh, self-contained budget
  * keeps the single retry bounded without depending on the caller's clock.
+ *
+ * WARP-3048 — it bounds the wait for the response HEADERS only (see
+ * `fetchWithHeaderTimeout`), never the body.
  */
 const AUTHFETCH_RETRY_TIMEOUT_MS = 6_000;
 
@@ -223,6 +226,47 @@ function timeoutSignal(ms: number): AbortSignal {
   const ctrl = new AbortController();
   setTimeout(() => ctrl.abort(new DOMException("TimeoutError", "TimeoutError")), ms);
   return ctrl.signal;
+}
+
+/**
+ * WARP-3048 — `fetch` whose time budget ends when the response HEADERS
+ * arrive. An `AbortSignal.timeout` keeps ticking after `fetch` resolves and
+ * aborts the body mid-read, so a streamed response that needed the
+ * 401→refresh→retry path — a model download's NDJSON progress, a chat
+ * reply — was cut off six seconds in. Clearing the timer once the headers
+ * are in keeps "a silent box can't hang the retry" without putting a
+ * deadline on the body.
+ */
+async function fetchWithHeaderTimeout(
+  url: string,
+  init: RequestInit,
+  ms: number,
+  cancel?: AbortSignal | null,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(
+    () => ctrl.abort(new DOMException("TimeoutError", "TimeoutError")),
+    ms,
+  );
+  // WARP-3048 — the caller's CANCEL (chat Stop, a superseded lookup) still
+  // reaches the request, headers and body alike; the caller's CLOCK does
+  // not. A timeout aborts with a `TimeoutError` reason — `AbortSignal.timeout`
+  // and every house deadline (`timeoutSignal`, the Matter browse) — and that
+  // budget was spent on the first attempt + the refresh (onboard#477).
+  if (cancel) {
+    const forward = () => {
+      const reason: unknown = cancel.reason;
+      if ((reason as { name?: unknown } | undefined)?.name === "TimeoutError") return;
+      ctrl.abort(reason);
+    };
+    if (cancel.aborted) forward();
+    else cancel.addEventListener("abort", forward, { once: true });
+  }
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -495,12 +539,14 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     // Give the retry a FRESH timeout instead of inheriting `init.signal`
     // (onboard#477): the caller's signal may already be spent by the initial
     // request + refresh, and spreading it here would abort the retry instantly.
-    const { signal: _staleSignal, ...rest } = init ?? {};
-    return fetch(url, {
-      ...withRid(rest),
-      signal: timeoutSignal(AUTHFETCH_RETRY_TIMEOUT_MS),
-      credentials: "same-origin",
-    });
+    // WARP-3048 — only its timeout is dropped; a cancel is still forwarded.
+    const { signal: callerSignal, ...rest } = init ?? {};
+    return fetchWithHeaderTimeout(
+      url,
+      { ...withRid(rest), credentials: "same-origin" },
+      AUTHFETCH_RETRY_TIMEOUT_MS,
+      callerSignal,
+    );
   }
 
   // WARP-1726 — the refresh failed but told us nothing about the session.

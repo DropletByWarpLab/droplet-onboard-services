@@ -23,7 +23,7 @@ describe("send_notification", () => {
     const create = vi.fn().mockResolvedValue({ id: "n1", createdAt: new Date() });
     await sendNotification.handler({ title: "Pop!" }, ctxWith(create));
     expect(create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ userId: "alice", kind: "ai", title: "Pop!" }),
+      data: expect.objectContaining({ username: "alice", kind: "ai", title: "Pop!" }),
     });
   });
 });

@@ -51,6 +51,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
 import { createLogger } from "../lib/logger.js";
 import { authRateLimit } from "../middleware/rate-limit.js";
+import { isUserIdShaped } from "@droplet/auth-policy";
 
 const logger = createLogger("sso-oidc-route");
 
@@ -115,11 +116,13 @@ export function safeReturnTo(value: unknown): string {
   }
 }
 
-/** Local-part of an email, sanitized for use as a username seed. */
+/** Local-part of an email, sanitized for use as a username seed.
+ *  WARP-2911: never the shape of a `User.id` — notifications refuse a
+ *  UUID-shaped recipient, so such a username would be refused every one. */
 function usernameSeedFromEmail(email: string): string {
   const local = email.split("@")[0] ?? email;
   const cleaned = local.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 48);
-  return cleaned.length >= 2 ? cleaned : `sso-${cleaned}`;
+  return cleaned.length >= 2 && !isUserIdShaped(cleaned) ? cleaned : `sso-${cleaned}`;
 }
 
 type PrismaClient = import("@prisma/client").PrismaClient;

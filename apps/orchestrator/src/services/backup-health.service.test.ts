@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type Dispatch = { userId: string; kind: string; title: string; body?: string | null; url?: string };
+type Dispatch = { username: string; kind: string; title: string; body?: string | null; url?: string };
 const sendNotification = vi.fn(async (_prisma: unknown, _input: Dispatch) => ({ id: "n", channels: ["toast"], delivered: true }));
 vi.mock("./notifications.service.js", () => ({
   sendNotification: (prisma: unknown, input: Dispatch) => sendNotification(prisma, input),
 }));
 
+import { NotificationRecipientError } from "./notification-recipient.js";
 import {
   BACKUP_STOPPED_TITLE,
   backupHealth,
@@ -138,10 +139,23 @@ describe("createBackupHealthCheck — exactly one notification per outage", () =
     }
 
     expect(sendNotification).toHaveBeenCalledTimes(2); // one per recipient, one round
-    expect(sendNotification.mock.calls.map((c) => c[1].userId).sort()).toEqual(["romain", "stefan"]);
+    expect(sendNotification.mock.calls.map((c) => c[1].username).sort()).toEqual(["romain", "stefan"]);
     const input = sendNotification.mock.calls[0][1];
     expect(input).toMatchObject({ kind: "system", title: BACKUP_STOPPED_TITLE, url: "/settings" });
     expect(input.body).toContain("writing the snapshot");
+  });
+
+  it("🔴 WARP-2911 one recipient whose notification is refused does not cost the others theirs", async () => {
+    // A username with the shape of a User.id (an account from before creation
+    // refused it) is refused by sendNotification; the fan-out logs it and
+    // carries on rather than ending the loop at that recipient.
+    const { prisma } = makePrisma();
+    sendNotification.mockRejectedValueOnce(NotificationRecipientError.isId("sendNotification", null));
+    const s = status({ state: "failed", reason: "writing the snapshot (exit 1)", lastSuccessAt: ago(72) });
+    await expect(
+      createBackupHealthCheck({ prisma, readStatus: async () => s, now: () => clock }).runOnce(),
+    ).resolves.toMatchObject({ alerting: true });
+    expect(sendNotification.mock.calls.map((c) => c[1].username)).toEqual(["stefan", "romain"]);
   });
 
   it("an orphaned repository is reported, not ignored", async () => {
