@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
-import { useSWRConfig } from "swr";
+import { unload, useSWRConfig } from "swr";
 // NOTE: api.ts imports `authFetch` from this module, so this is a module
 // cycle. It is safe: `patchSetupReady` is only INVOKED at runtime (inside the
 // `completeSetup` callback), never during module evaluation, so the live
@@ -17,7 +17,7 @@ import { useSWRConfig } from "swr";
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
 import { HELP_PATH } from "./routing";
-import { clearSignedInState } from "./session-reset";
+import { clearChatHandoffs } from "./session-reset";
 
 export interface AuthUser {
   id: string;
@@ -580,14 +580,22 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // Confirmed dead. Drop cached user and bounce to login so the UI doesn't
   // keep showing stale data while every call 401s.
   //
-  // WARP-2992 — and forget what the dead session left in this tab: its SWR
-  // cache and chat hand-offs (lib/session-reset.ts). The bounce below is a
-  // full navigation, but the public-page branch does not navigate, and a
-  // client-side trip back to /login from there would carry the cache into the
-  // next sign-in. Only when a session was signed in here (its cached profile
+  // WARP-2992 — and forget what the dead session left in this tab
+  // (lib/session-reset.ts). The chat hand-offs ALWAYS: sessionStorage is this
+  // tab's own and outlives the bounce below, while the cached profile is
+  // shared by every tab — when A signed out in another tab it is already
+  // gone here, and it is no evidence that this tab's hand-offs are not A's.
+  // A hand-off dropped on an anonymous 401 costs a re-typed question; one
+  // kept acts as the next person to sign in.
+  //
+  // The SWR cache only when a session was signed in here (its cached profile
   // was present, or storage would not say): an anonymous visitor's 401 on
   // /setup or /help ends nobody's session, and emptying the wizard's cache
-  // would blank its steps.
+  // would blank its steps. The bounce below is a full navigation, but the
+  // public-page branch does not navigate, and a client-side trip back to
+  // /login from there would carry the cache into the next sign-in.
+  // `revalidate: false`: the page is still up, and a refetch here is only
+  // one more 401 on the way to /login.
   let hadSession = true;
   try {
     hadSession = localStorage.getItem(USER_KEY) !== null;
@@ -595,7 +603,8 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   } catch {
     /* ignore — privacy mode, etc. */
   }
-  if (hadSession) void clearSignedInState({ revalidate: false });
+  clearChatHandoffs();
+  if (hadSession) unload({ revalidate: false });
   // Public pages own their anonymous flow: a refresh failure on /setup (the
   // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
   // NOT hard-navigate to /login — AuthGate routes those contextually
@@ -615,6 +624,21 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     );
   }
   return res;
+}
+
+/**
+ * WARP-2992 — whether the profile this browser cached names someone other
+ * than `id`. No cached profile is not someone else. One that cannot be read
+ * (blocked storage, a corrupt entry) cannot say whose it is, so it counts as
+ * someone else's.
+ */
+function cachedProfileIsNot(id: string): boolean {
+  try {
+    const cached = localStorage.getItem(USER_KEY);
+    return cached !== null && (JSON.parse(cached) as { id?: unknown }).id !== id;
+  } catch {
+    return true;
+  }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -768,6 +792,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [isLoading, setupProbeError, setupState, setupRetryAttempt, probeSetupState]);
 
+  // WARP-2992 — the SWR cache in this provider's scope: SWR's default one,
+  // which every page reads (see lib/session-reset.ts).
+  const { unload: unloadSwrCache } = useSWRConfig();
+
+  // WARP-2992 — a sign-in as someone other than the cached profile empties
+  // the cache before the new person renders. Every path that ends a session
+  // in this tab clears the profile and the cache together, so this is the
+  // backstop for a session that ended some other way (another tab signing
+  // someone else in over it, a profile left by a tab that never saw its
+  // session die): whatever the cache still holds was read as that profile.
+  // Called before the new profile is written over the old one; `unload()`
+  // revalidates what is mounted, as the person now signed in.
+  const forgetOtherIdentity = useCallback(
+    (next: AuthUser) => {
+      if (cachedProfileIsNot(next.id)) unloadSwrCache();
+    },
+    [unloadSwrCache],
+  );
+
   const login = useCallback(
     async (
       username: string,
@@ -814,6 +857,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const data = await res.json();
+    forgetOtherIdentity(data.user);
     // The server sets the HTTP-only cookie — we only store the user profile
     localStorage.setItem(USER_KEY, JSON.stringify(data.user));
     // WARP-867 — re-read the AUTHORITATIVE lifecycle state before exposing
@@ -830,11 +874,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // routes off that.
     await probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
     setUser(data.user);
-  }, [probeSetupState]);
+  }, [probeSetupState, forgetOtherIdentity]);
 
   const setUserFromPasskey = useCallback((u: AuthUser) => {
     // The cookie is already set server-side by authenticate/verify — same as
     // the password login, we only persist the profile for fast hydration.
+    forgetOtherIdentity(u);
     try {
       localStorage.setItem(USER_KEY, JSON.stringify(u));
     } catch {
@@ -849,11 +894,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // AuthGate routes off the last-known state — authenticated+unclaimed is
     // a stable wizard state now, so no flip-flop either way.
     void probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
-  }, [probeSetupState]);
-
-  // WARP-2992 — the cache in this provider's scope: SWR's default one, which
-  // every page reads (see lib/session-reset.ts).
-  const { cache: swrCache, mutate: swrMutate } = useSWRConfig();
+  }, [probeSetupState, forgetOtherIdentity]);
 
   const logout = useCallback(async () => {
     try {
@@ -868,15 +909,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     //
     // Sign the tree out FIRST, synchronously. AuthGate renders nothing on a
     // protected route without a user, so once this commit lands no page is
-    // subscribed to the cache, and the clear can also drop SWR's dedupe
-    // markers (`revalidate: true`) without refetching anything. If a hook is
-    // ever left mounted, its refetch goes out on the dead cookie and 401s into
-    // authFetch's bounce — to /login, never back into this person's data.
-    // After the POST, not before: a poll that fires in between can only 401,
-    // and an answer already in flight is discarded when it lands.
+    // subscribed to the cache and `revalidate: true` refetches nothing. If a
+    // hook is ever left mounted, its refetch goes out on the dead cookie and
+    // 401s into authFetch's bounce — to /login, never back into this person's
+    // data. After the POST, not before: a poll that fires in between can only
+    // 401, and every answer already in flight — an infinite feed page
+    // included — is discarded by `unload()` when it lands.
     flushSync(() => setUser(null));
-    await clearSignedInState({ cache: swrCache, mutate: swrMutate, revalidate: true });
-  }, [swrCache, swrMutate]);
+    clearChatHandoffs();
+    unloadSwrCache({ revalidate: true });
+  }, [unloadSwrCache]);
 
   const completeSetup = useCallback(async (): Promise<boolean> => {
     setCompleteSetupError(null);

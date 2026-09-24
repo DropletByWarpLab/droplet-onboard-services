@@ -21,54 +21,22 @@
  * The third holder, the toast stack, is cleared by `NotificationToaster`: the
  * one layout-level component that sees both the session and the toasts.
  *
- * The dashboard mounts no `SWRConfig` provider (only tests do), so every page
- * and the global `mutate` imports share SWR's default cache — the one
- * `SWRConfig.defaultValue` names. `logout()` passes the cache in its own scope
- * instead, which is the same one today and stays right if a provider is ever
- * mounted above `AuthProvider`.
+ * The cache is emptied with SWR's own `unload()` (`lib/auth.tsx`: `logout()`,
+ * authFetch's confirmed-dead path, and a sign-in over a different cached
+ * profile). Nothing narrower is enough. Deleting or mutating each key empties
+ * the cache at that instant, and a per-key mutation stamp makes a plain
+ * `useSWR` answer already in flight discard itself — but a `useSWRInfinite`
+ * page answer (the Security feed, events, reviews) is written straight to its
+ * page key, past those stamps, so a poll on the wire at sign-out landed A's
+ * rows in the cache after it was emptied, and the next person's feed rendered
+ * them without asking. `unload()` bumps the cache's unload generation, which
+ * the infinite fetcher checks before every page write; drops the fetch and
+ * preload markers, so an in-flight plain read or preload is discarded when it
+ * lands; overwrites every mutation stamp, so an in-flight mutation is too;
+ * deletes every key, `$inf$` and `$sub$` included; and drops the data
+ * `keepPreviousData` holds on screen.
  */
-import { SWRConfig, type Cache, type ScopedMutator } from "swr";
 import { PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "./types";
-
-export interface SwrClearOptions {
-  /**
-   * `true` also drops SWR's in-flight/dedupe markers. Without that, a hook
-   * mounted within `dedupingInterval` (2 s) of the old session's last answer
-   * is handed THAT answer, the mutation stamp below discards it, and the hook
-   * sits empty until its next poll or focus — the next person's Security page
-   * reading "nothing happened". But it also refetches every hook still
-   * mounted on a key, so pass `true` only once the signed-in tree is gone
-   * (`logout()`), and `false` while it is still up (`authFetch`'s bounce,
-   * where a refetch is one more 401 on the way to /login).
-   */
-  revalidate: boolean;
-}
-
-/**
- * Empty every entry of `cache` — INCLUDING the `$inf$` (useSWRInfinite) keys.
- *
- * Not `mutate(() => true, undefined, …)`: SWR's key-filter form skips every
- * `$inf$`/`$sub$` key (`/^\$(inf|sub)\$/` in its mutate), and the Security
- * feed — camera and door-lock rows — lives under one. Mutating each key by its
- * serialized name reaches them all.
- *
- * `mutate` first, not a bare `cache.delete`: it tells every mounted hook, so a
- * page still on screen renders empty instead of keeping its rows, and it
- * stamps the key's mutation time, so an answer the old session asked for
- * before this call is DISCARDED when it lands instead of being written back.
- * Then the entries are deleted, so nothing of the old session (an infinite
- * list's page count, a cursor in a key) is left for the next hooks to start
- * from.
- */
-export async function clearSwrCache(
-  cache: Cache,
-  mutate: ScopedMutator,
-  { revalidate }: SwrClearOptions,
-): Promise<void> {
-  const keys = Array.from(cache.keys());
-  await Promise.all(keys.map((key) => mutate(key, undefined, { revalidate })));
-  for (const key of keys) cache.delete(key);
-}
 
 /** Drop the one-shot chat hand-offs (see the module note). */
 export function clearChatHandoffs(): void {
@@ -79,14 +47,4 @@ export function clearChatHandoffs(): void {
       /* storage blocked — nothing could have been handed off */
     }
   }
-}
-
-/** Everything above, for the session that just ended. */
-export async function clearSignedInState({
-  cache = SWRConfig.defaultValue.cache,
-  mutate = SWRConfig.defaultValue.mutate,
-  revalidate,
-}: Partial<{ cache: Cache; mutate: ScopedMutator }> & SwrClearOptions): Promise<void> {
-  clearChatHandoffs();
-  await clearSwrCache(cache, mutate, { revalidate });
 }
