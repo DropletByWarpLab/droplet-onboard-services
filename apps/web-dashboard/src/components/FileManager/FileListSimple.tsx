@@ -4,6 +4,11 @@ import { Thumbnail } from "./Thumbnail";
 import { StarButton } from "./StarButton";
 import { Download, X, AlertTriangle, type LucideIcon } from "lucide-react";
 import type { FileEntryInfo } from "@/lib/types";
+import {
+  FILES_UNAVAILABLE_HINT,
+  FILES_UNAVAILABLE_TITLE,
+  isFilesUnavailableError,
+} from "@/lib/files-unavailable";
 
 /**
  * WARP-1549 — the library chip. Neutral and text-first, like the rights chip
@@ -136,8 +141,13 @@ export function FileListSimple({
           <span className="ei">
             <AlertTriangle size={24} />
           </span>
-          <p className="eh">{errorTitle}</p>
-          <p style={{ maxWidth: "22rem", fontSize: "13px" }}>{errorDescription}</p>
+          {/* WARP-3076 — the box said the file service is down: one copy everywhere. */}
+          <p className="eh">
+            {isFilesUnavailableError(error) ? FILES_UNAVAILABLE_TITLE : errorTitle}
+          </p>
+          <p style={{ maxWidth: "22rem", fontSize: "13px" }}>
+            {isFilesUnavailableError(error) ? FILES_UNAVAILABLE_HINT : errorDescription}
+          </p>
           {onRetry && (
             <button
               type="button"

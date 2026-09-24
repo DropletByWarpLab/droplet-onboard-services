@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { isFilesUnavailableError } from "../files-unavailable";
 import { fetchFiles } from "../api";
 import type { FileEntryInfo, FileSpaceId } from "../types";
 
@@ -31,7 +32,9 @@ export function useFiles(path: string, space: FileSpaceId = "personal") {
   );
 
   return {
-    files: data ?? [],
+    // WARP-3076 — SWR keeps the last good data on error; during an outage
+    // those rows (and their actions) must not stay on screen.
+    files: isFilesUnavailableError(error) ? [] : data ?? [],
     error,
     isLoading,
     refresh: mutate,
