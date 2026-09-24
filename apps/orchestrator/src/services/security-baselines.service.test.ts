@@ -403,11 +403,22 @@ describe("area rebuild failures back off and never fail the tick (review #2352, 
 });
 
 describe("tickSecurityBaselines — health bookkeeping", () => {
-  it("a throw records lastError and rethrows into safeRun's canary", async () => {
+  it("a throw records lastError IN PLAIN WORDS and rethrows the raw error into safeRun's canary", async () => {
     h.recordCoverage.mockRejectedValueOnce(new Error("db down"));
     const now = ny("15:00");
     await expect(tickSecurityBaselines(fakePrisma(world()).prisma, now, deps(TZ))).rejects.toThrow("db down");
-    expect(baselineHealthState()).toMatchObject({ lastOkAt: null, lastError: { at: now, message: "db down" } });
+    expect(baselineHealthState()).toMatchObject({ lastOkAt: null, lastError: { at: now, message: "something went wrong" } });
+  });
+
+  it("a database error reads as one (review #2352, finding 8) — never its text", async () => {
+    h.recordCoverage.mockRejectedValueOnce(
+      Object.assign(new Error('Invalid `prisma.securityCoverageSpan.findMany()` invocation: relation "SecurityZone" does not exist'), {
+        name: "PrismaClientKnownRequestError",
+        code: "P2021",
+      }),
+    );
+    await expect(tickSecurityBaselines(fakePrisma(world()).prisma, ny("15:00"), deps(TZ))).rejects.toThrow();
+    expect(baselineHealthState().lastError?.message).toBe("the database couldn't be read");
   });
 });
 
@@ -451,6 +462,20 @@ const ALL = { visibleCameras: "all" as const };
 describe("patternsHealthRow — every state (§6.14)", () => {
   const cases: Array<[string, BaselineHealthState, PatternsHealthDb | null, { visibleCameras: "all" | Set<string> } | null, { state: string; detail: string }]> = [
     ["not registered (the boot assertion)", { registeredAt: null, lastOkAt: null, lastError: null }, db(), ALL, { state: "down", detail: "Not running" }],
+    [
+      "the last tick failed, after the last ok one (review #2352, finding 8)",
+      running({ lastOkAt: new Date(NOW.getTime() - 90_000), lastError: { at: new Date(NOW.getTime() - 30_000), message: "the database couldn't be read" } }),
+      db(),
+      ALL,
+      { state: "down", detail: "Couldn't check which cameras Droplet can hear: the database couldn't be read" },
+    ],
+    [
+      "an older failure, followed by an ok tick, is history",
+      running({ lastOkAt: new Date(NOW.getTime() - 30_000), lastError: { at: new Date(NOW.getTime() - 90_000), message: "something went wrong" } }),
+      db(),
+      ALL,
+      { state: "ok", detail: "Knows what normal looks like for 3 cameras; 1 still learning · Trial: pattern flags aren't raised yet" },
+    ],
     [
       "registered 4 minutes ago and never ok",
       running({ registeredAt: new Date(NOW.getTime() - 4 * 60_000), lastOkAt: null }),

@@ -107,6 +107,10 @@ export interface BaselineHealthState {
   registeredAt: Date | null;
   /** The last tick that ran every step. */
   lastOkAt: Date | null;
+  /**
+   * The last tick that threw. `message` is plain words for the patterns row
+   * (`plainTickError`); the raw error goes to the log and safeRun's canary only.
+   */
   lastError: { at: Date; message: string } | null;
   /**
    * The last time an area rebuild failed, while any area still waits out its
@@ -326,6 +330,14 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
 }
 
 /** Frigate's stats for this tick, or null when they did not answer (or Frigate is not set up). Never throws. */
+/** A tick failure in words the Sources card can show: never an error's own text (it can hold table names). */
+export function plainTickError(err: unknown): string {
+  const name = err instanceof Error ? err.name : "";
+  const code = (err as { code?: unknown } | null)?.code;
+  const fromDatabase = name.startsWith("PrismaClient") || (typeof code === "string" && /^P\d{4}$/.test(code));
+  return fromDatabase ? "the database couldn't be read" : "something went wrong";
+}
+
 async function readFrigateStats(deps: BaselineJobDeps, now: Date): Promise<FrigateStatsView | null> {
   const read =
     deps.stats ??
@@ -391,7 +403,7 @@ export async function tickSecurityBaselines(
     baselineHealth.lastOkAt = now;
     return result;
   } catch (err) {
-    baselineHealth.lastError = { at: now, message: err instanceof Error ? err.message : String(err) };
+    baselineHealth.lastError = { at: now, message: plainTickError(err) };
     throw err;
   }
 }
@@ -487,6 +499,9 @@ export function patternsHealthRow(
 
   const nowMs = now.getTime();
   const lastOk = state.lastOkAt;
+  if (state.lastError && (!lastOk || state.lastError.at.getTime() > lastOk.getTime())) {
+    return row("down", `Couldn't check which cameras Droplet can hear: ${state.lastError.message}`);
+  }
   if (nowMs - registeredAt.getTime() > SECURITY_BASELINE_GRACE_MS && (!lastOk || nowMs - lastOk.getTime() > SECURITY_BASELINE_GRACE_MS)) {
     const since = lastOk ?? registeredAt;
     const tz = db?.timezone ?? null;
