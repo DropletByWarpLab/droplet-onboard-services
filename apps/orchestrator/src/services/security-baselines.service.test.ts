@@ -308,6 +308,17 @@ describe("tickSecurityBaselines — area rebuilds when links change (D2)", () =>
     expect(h.rebuildAreas).not.toHaveBeenCalled();
   });
 
+  it("reads one row per built area — never Prisma's in-memory `distinct` over every cell (review #2352, finding 4)", async () => {
+    const f = fakePrisma(world({ areaCells: [{ zoneId: "z-1", zoneVersion: 2 }], liveAreas: [{ id: "z-1", version: 2 }] }));
+    await tickSecurityBaselines(f.prisma, ny("15:00"), deps(TZ));
+    const args = f.cell.findMany.mock.calls.map((c) => (c as unknown as [Record<string, unknown>])[0]);
+    expect(args.length).toBeGreaterThan(0);
+    for (const a of args) {
+      expect(a).not.toHaveProperty("distinct");
+      expect(a.where).toMatchObject({ keyKind: "area", label: "person", dayType: "weekday", hour: 0 });
+    }
+  });
+
   it("nothing changed → no rebuild", async () => {
     const f = fakePrisma(world({ areaCells: [{ zoneId: "z-1", zoneVersion: 2 }], liveAreas: [{ id: "z-1", version: 2 }] }));
     await tickSecurityBaselines(f.prisma, ny("15:00"), deps(TZ));

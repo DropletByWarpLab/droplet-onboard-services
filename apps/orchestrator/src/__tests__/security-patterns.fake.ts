@@ -103,17 +103,6 @@ function project<T extends Record<string, unknown>>(row: T, select: Record<strin
   return out;
 }
 
-function distinctBy<T extends Record<string, unknown>>(rows: T[], keys: readonly string[] | undefined): T[] {
-  if (!keys) return rows;
-  const seen = new Set<string>();
-  return rows.filter((r) => {
-    const k = JSON.stringify(keys.map((x) => r[x]));
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-}
-
 const CELL_WHERE = ["buildId", "zoneKey", "label", "dayType", "hour", "keyKind", "zoneId", "camera"] as const;
 
 export function patternsPrisma(w: PatternsWorld) {
@@ -169,12 +158,15 @@ export function patternsPrisma(w: PatternsWorld) {
       }),
     },
     securityBaselineCell: {
-      findMany: guard((a: { where?: Where; distinct?: string[]; select?: Record<string, unknown> }) =>
-        distinctBy(
-          w.cells.map((c) => c as unknown as Record<string, unknown>).filter((c) => matches(c, a.where, CELL_WHERE)),
-          a.distinct,
-        ).map((c) => project(c, a.select)),
-      ),
+      findMany: guard((a: { where?: Where; distinct?: string[]; select?: Record<string, unknown> }) => {
+        // Prisma 5 without `nativeDistinct` runs `distinct` IN MEMORY over every
+        // matching row (review #2352): refused here, so no reader can use it.
+        if (a.distinct) throw new Error("patterns fake: `distinct` runs in memory in Prisma 5 — narrow the where instead");
+        return w.cells
+          .map((c) => c as unknown as Record<string, unknown>)
+          .filter((c) => matches(c, a.where, CELL_WHERE))
+          .map((c) => project(c, a.select));
+      }),
       findFirst: guard((a: { where?: Where; select?: Record<string, unknown> }) => {
         const c = w.cells.find((x) => matches(x as unknown as Record<string, unknown>, a.where, CELL_WHERE));
         return c ? project(c as unknown as Record<string, unknown>, a.select) : null;

@@ -225,6 +225,15 @@ async function fullBuildTrigger(prisma: JobDb, zone: string, now: Date): Promise
   return trigger;
 }
 
+/**
+ * One row per built area key: every kept key has all four tracked labels and
+ * all 48 (dayType, hour) rows (the build statement's `key_label` / `grid`,
+ * pinned by the pg property test), so (person, weekday, 00) is exactly one
+ * row per key. Never Prisma's `distinct`, which Prisma 5 runs in memory over
+ * every matching cell (review #2352).
+ */
+const ONE_ROW_PER_KEY = { label: "person", dayType: "weekday", hour: 0 } as const;
+
 /** §6.7 step 6. Returns the areas it rebuilt. */
 async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Promise<string[]> {
   const ready = await prisma.securityBaselineBuild.findFirst({
@@ -237,8 +246,7 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
 
   const [built, live] = await Promise.all([
     prisma.securityBaselineCell.findMany({
-      where: { buildId: ready.id, keyKind: "area" },
-      distinct: ["zoneId"],
+      where: { buildId: ready.id, keyKind: "area", ...ONE_ROW_PER_KEY },
       select: { zoneId: true, zoneVersion: true },
     }),
     prisma.securityZone.findMany({
@@ -286,8 +294,7 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
   if (failedAreaRebuilds.size === 0) baselineHealth.areaRebuildFailedAt = null;
   if (r.status === "rebuilt") {
     const withCells = await prisma.securityBaselineCell.findMany({
-      where: { buildId: r.buildId, keyKind: "area", zoneId: { in: due } },
-      distinct: ["zoneId"],
+      where: { buildId: r.buildId, keyKind: "area", zoneId: { in: due }, ...ONE_ROW_PER_KEY },
       select: { zoneId: true },
     });
     const has = new Set(withCells.map((c) => c.zoneId));

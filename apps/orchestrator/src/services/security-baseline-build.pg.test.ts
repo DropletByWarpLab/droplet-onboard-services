@@ -299,6 +299,12 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
     expect(got.some((c) => c.observedMinutes > c.daysObserved * 60)).toBe(true); // the 120-minute fall-back hour
     expect(got.some((c) => c.eventCount > 0)).toBe(true);
     expect(got.some((c) => c.dwellSamples >= 2)).toBe(true);
+    // Every key keeps the four tracked labels: the readers take one row per key
+    // from (person, weekday, hour 0) instead of an in-memory `distinct` (review #2352).
+    for (const k of keys) {
+      const labels = new Set(got.filter((c) => c.zoneKey === k).map((c) => c.label));
+      for (const tracked of ["person", "car", "dog", "cat"]) expect(labels.has(tracked), `${k} ${tracked}`).toBe(true);
+    }
     // Every kept (key, label) has all 48 (dayType, hour) rows.
     for (const k of keys) {
       for (const label of new Set(got.filter((c) => c.zoneKey === k).map((c) => c.label))) {

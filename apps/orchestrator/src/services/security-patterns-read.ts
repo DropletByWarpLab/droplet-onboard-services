@@ -218,9 +218,11 @@ export async function readPatternsOverview(prisma: ReadDb, scope: SecurityViewer
   const perDay = new Map<string, number | null>();
   if (ready) {
     const [keyRows, eventSums, minuteSums] = await Promise.all([
+      // One row per (key, label): every kept pair has all 48 (dayType, hour) rows
+      // (pinned by the pg property test). Never Prisma's `distinct`, which
+      // Prisma 5 runs in memory over every cell (review #2352).
       prisma.securityBaselineCell.findMany({
-        where: { buildId: ready.id },
-        distinct: ["zoneKey", "label"],
+        where: { buildId: ready.id, dayType: "weekday", hour: 0 },
         select: { zoneKey: true, keyKind: true, zoneId: true, camera: true, cameras: true, label: true },
       }),
       prisma.securityBaselineCell.groupBy({ by: ["camera"], where: { buildId: ready.id, keyKind: "camera" }, _sum: { eventCount: true } }),
