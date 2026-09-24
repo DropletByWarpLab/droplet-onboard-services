@@ -479,6 +479,16 @@ describe("sealing (§6.1 step 5): quiet + settle, the last arrival, and a draine
     expect(incidents(f)[0]!.grouping).toBe("closed");
   });
 
+  it("review #9 (not adopted for sealing): an alert that escalates and seals in the SAME tick (a backlog after downtime) stays pending for the notifier", async () => {
+    // Seen 2 hours ago, triaged only now (the engine was down): drained, quiet, and its arrival is old.
+    const old = eventRow({ id: 1n, startedAt: plus(T0, -7_200_000), createdAt: plus(T0, -7_190_000) });
+    const f = world({ securityEvent: [old] });
+    await tick(f);
+    expect(incidents(f)[0]).toMatchObject({ severity: "alert", grouping: "closed", notifyState: "pending" });
+    // The notifier runs after sealing in the same tick (mocked here) and would tell people.
+    expect(alerts.notify).toHaveBeenCalledTimes(1);
+  });
+
   it("a sealed incident never takes a late member: the late event opens its own", async () => {
     const f = world({ securityEvent: [eventRow({ id: 1n })] });
     await tick(f);

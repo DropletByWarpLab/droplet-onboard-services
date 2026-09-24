@@ -604,6 +604,29 @@ describe("review #1 (DS-005) — a viewer who sees only a LOWER code (front noti
 });
 
 describe("route 20 — resolve", () => {
+  it("review #9: resolving before the notifier ran marks the alert handled — notifyState done, nobody is told", async () => {
+    const f = world();
+    Object.assign(f.world.securityIncident.find((i) => i.id === SHARED)!, { notifyState: "pending" });
+    const noticesBefore = f.world.securityIncidentNotice.length;
+    const res = await request(app(f, "owner", "manage").server).post(`/api/security/incidents/${SHARED}/resolve`).send({});
+    expect(res.status).toBe(200);
+    expect(f.world.securityIncident.find((i) => i.id === SHARED)).toMatchObject({ state: "resolved", notifyState: "done" });
+    expect(f.world.securityIncidentNotice).toHaveLength(noticesBefore);
+  });
+
+  it("…but acknowledging leaves it pending: someone is on it, and the others are still told", async () => {
+    const f = world();
+    Object.assign(f.world.securityIncident.find((i) => i.id === SHARED)!, { notifyState: "pending" });
+    await request(app(f, "owner", "manage").server).post(`/api/security/incidents/${SHARED}/acknowledge`).send({});
+    expect(f.world.securityIncident.find((i) => i.id === SHARED)).toMatchObject({ state: "acknowledged", notifyState: "pending" });
+  });
+
+  it("a resolve after the notifier ran leaves notifyState alone", async () => {
+    const f = world();
+    await request(app(f, "owner", "manage").server).post(`/api/security/incidents/${SHARED}/resolve`).send({});
+    expect(f.world.securityIncident.find((i) => i.id === SHARED)).toMatchObject({ state: "resolved", notifyState: "done" });
+  });
+
   it("resolves and seals a collecting incident, with the note on the ack row — never in the audit refs", async () => {
     const f = world();
     const res = await request(app(f, "family", "act").server).post(`/api/security/incidents/${SHARED}/resolve`).send({ note: "  Cleaner, as expected  " });

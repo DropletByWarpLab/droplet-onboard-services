@@ -437,6 +437,12 @@ describe("the notifier (§6.7)", () => {
     expect(noticeOf(old, STEFAN)?.outcome).toBe("sent");
   });
 
+  it("a sealed (closed) incident that is still pending is notified — sealing is not handling it", async () => {
+    const f = world({ securityIncident: [incident({ grouping: "closed", closedAt: plus(NOW, -1_000) })] });
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "sent" });
+  });
+
   it("module off box-wide → module_off: grouped, never sent (D29)", async () => {
     const f = world();
     await notifyPendingIncidents(client(f), deps(false), NOW);

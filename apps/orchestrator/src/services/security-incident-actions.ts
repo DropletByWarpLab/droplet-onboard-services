@@ -28,6 +28,11 @@
  *   4. `auditSecurityInTx`, LAST — nothing follows it in the callback.
  * A notification ack never acknowledges an incident (that is the other
  * direction, and it needs act level).
+ *
+ * A resolve made before the notifier reached a pending alert also settles
+ * the alert: `notifyState` pending → done, with no notices (review #9) — a
+ * person has already handled it, so nobody is woken for it. An acknowledge
+ * leaves it pending: someone is on it, and the others are still told.
  */
 import type { PrismaClient, SecurityIncidentAckAction, SecurityIncidentState } from "@prisma/client";
 import { auditSecurityInTx, stripUnsafeDisplayChars } from "./security-audit.js";
@@ -97,7 +102,7 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
   for (let attempt = 0; attempt < 2; attempt++) {
     const row = await prisma.securityIncident.findUnique({
       where: { id: input.incidentId },
-      select: { ...INCIDENT_VIEW_SELECT, version: true },
+      select: { ...INCIDENT_VIEW_SELECT, version: true, notifyState: true },
     });
     if (!row) return { status: "not_found" };
     const reasons = await prisma.securityIncidentReason.findMany({ where: { incidentId: row.id }, select: REASON_VIEW_SELECT });
@@ -119,6 +124,7 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
           resolvedAt: now,
           resolvedById: actor.id,
           ...(row.grouping === "collecting" ? { grouping: "closed", closedAt: now } : {}),
+          ...(row.notifyState === "pending" ? { notifyState: "done" } : {}),
         },
       };
     } else if (row.state === "open") {
