@@ -909,15 +909,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     //
     // Sign the tree out FIRST, synchronously. AuthGate renders nothing on a
     // protected route without a user, so once this commit lands no page is
-    // subscribed to the cache and `revalidate: true` refetches nothing. If a
-    // hook is ever left mounted, its refetch goes out on the dead cookie and
-    // 401s into authFetch's bounce — to /login, never back into this person's
-    // data. After the POST, not before: a poll that fires in between can only
+    // subscribed to the cache. `revalidate: false` for a hook ever left
+    // mounted: its refetch would go out on the dead cookie and 401 through
+    // authFetch's bounce to /login?next=<this person's page>, which the next
+    // person to sign in would be sent on to. Emptied, it waits for its next
+    // poll. After the POST, not before: a poll that fires in between can only
     // 401, and every answer already in flight — an infinite feed page
     // included — is discarded by `unload()` when it lands.
     flushSync(() => setUser(null));
     clearChatHandoffs();
-    unloadSwrCache({ revalidate: true });
+    unloadSwrCache({ revalidate: false });
   }, [unloadSwrCache]);
 
   const completeSetup = useCallback(async (): Promise<boolean> => {

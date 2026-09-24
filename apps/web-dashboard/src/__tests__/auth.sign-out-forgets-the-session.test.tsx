@@ -20,9 +20,10 @@
  *      health. The feed is a `useSWRInfinite` key: SWR's key-filter
  *      `mutate(() => true, …)` does not reach it, and its page answers are
  *      written past the per-key markers a plain `useSWR` answer is checked
- *      against — only SWR's `unload()` discards them.
+ *      against — only SWR's `unload()` discards them. Sign-out then asks the
+ *      box for nothing, even for a read still mounted when the cache empties.
  *   2. A's session dies under authFetch (the confirmed-dead bounce), not via
- *      the button: the cache is dropped there too.
+ *      the button: the cache is dropped there too, and nothing is refetched.
  *   3. The chat hand-offs in sessionStorage do not cross the sign-out — nor a
  *      sign-out in ANOTHER tab, which this tab only learns of from a 401 —
  *      while an anonymous 401 (the /setup wizard) keeps the cache.
@@ -153,7 +154,13 @@ function SecurityPage({ viewer }: { viewer: string }) {
   );
 }
 
-function Tab() {
+/** A read mounted outside the signed-in gate. Nothing in the dashboard is today: AuthGate unmounts every page on sign-out. */
+function HealthLine() {
+  const { sources } = useSecurityHealth();
+  return <p aria-label="left mounted">{sources?.map((s) => s.detail).join(", ")}</p>;
+}
+
+function Tab({ leftMounted = false }: { leftMounted?: boolean }) {
   const { user, isLoading, login, logout, setUserFromPasskey } = useAuth();
   const { toast } = useToast();
   if (isLoading) return <p>loading</p>;
@@ -161,6 +168,7 @@ function Tab() {
     <>
       {/* AuthGate's effect on sign-out: the page goes, /login shows. */}
       {user ? <SecurityPage viewer={user.username} /> : <p>signed out</p>}
+      {leftMounted && <HealthLine />}
       <button onClick={() => void logout()}>sign out</button>
       <button onClick={() => void login("alice", "correct horse")}>sign A back in</button>
       <button onClick={() => void login("bob", "correct horse")}>sign in as bob</button>
@@ -177,12 +185,12 @@ function Tab() {
   );
 }
 
-function renderTab() {
+function renderTab(props: { leftMounted?: boolean } = {}) {
   return render(
     <AuthProvider>
       <ToastProvider>
         <NotificationToaster />
-        <Tab />
+        <Tab {...props} />
       </ToastProvider>
     </AuthProvider>,
   );
@@ -284,6 +292,33 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     expect(cachedData()).not.toContain("Alice");
   });
 
+  it("sign-out asks the box for nothing after the logout POST — not even for a read still mounted when the cache empties", async () => {
+    // A read that refetched on the dead cookie would 401 its way through
+    // authFetch's bounce to /login?next=<A's page>, and whoever signed in
+    // next would be sent on to A's page.
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: { ...realLocation, pathname: "/security", search: "", assign },
+    });
+    renderTab({ leftMounted: true });
+    expect(await screen.findByText(ALICE_ROW)).toBeInTheDocument();
+    expect(screen.getByLabelText("left mounted").textContent).toBe(ALICE_SOURCE);
+
+    fireEvent.click(screen.getByText("sign out"));
+    expect(await screen.findByText("signed out")).toBeInTheDocument();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    expect(asked.slice(asked.lastIndexOf("/api/auth/logout") + 1)).toEqual([]);
+    expect(assign).not.toHaveBeenCalled();
+    // Emptied all the same: the mounted read shows nothing of A's.
+    expect(screen.getByLabelText("left mounted").textContent).toBe("");
+    expect(cachedData()).not.toContain("Alice");
+  });
+
   it("a session that dies under authFetch drops the cache before the bounce to /login", async () => {
     renderTab();
     expect(await screen.findByText(ALICE_ROW)).toBeInTheDocument();
@@ -297,12 +332,21 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
       writable: true,
       value: { ...realLocation, pathname: "/security", search: "", assign },
     });
+    const polled = asked.length;
     fireEvent.click(screen.getByText("refresh"));
 
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/login?next=%2Fsecurity"));
     expect(cachedData()).not.toContain("Alice");
     await waitFor(() => expect(screen.queryByText(ALICE_ROW)).not.toBeInTheDocument());
     expect(screen.queryByText(ALICE_SOURCE)).not.toBeInTheDocument();
+
+    // Emptying the cache refetched nothing. A's page is still up until the
+    // bounce lands, and a read now could only be one more 401 on the way.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    const reads = asked.slice(polled).filter((url) => url.startsWith("/api/security"));
+    expect(reads.map((url) => url.split("?")[0]).sort()).toEqual(["/api/security/events", "/api/security/health"]);
   });
 
   it("A's chat hand-offs do not survive A signing out", async () => {
