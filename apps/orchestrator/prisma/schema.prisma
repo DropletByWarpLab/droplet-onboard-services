@@ -8617,7 +8617,8 @@ enum SecurityEventSource {
 
 enum SecurityEventKind {
   /// A tracked object that cleared the ingest gate (best score >= 0.70 and
-  /// tracked >= 2 s). The only kind a baseline will count (P5).
+  /// tracked >= 2 s). The only kind a baseline will count (P5). (WARP-2980:
+  /// `source = frigate` only; lock rows never.)
   detection
   /// Below the gate, or a false positive. KEPT, not dropped, so the
   /// thresholds can be tuned against real data later.
@@ -8843,4 +8844,175 @@ model SecurityModeState {
   /// Bumped by every mode write AND by every hours/exception write (invalidates a tick that read old hours).
   version     Int                @default(0)
   updatedAt   DateTime           @updatedAt
+}
+
+// ── WARP-2980 (ADR-059 P5 §4.3): what normal looks like ──
+//
+// Derived data. Cells are REBUILT from SecurityEvent (kept 30 days) and the
+// coverage spans below; nobody edits them. Verdicts and suppressions (PR-B)
+// never write here (brief §4.4: baselines stay pure counts).
+//
+// The one input that cannot be rebuilt is COVERAGE: whether Droplet was
+// provably listening to a camera. The camera MQTT client uses a clean session,
+// so a disconnected orchestrator loses events without leaving a row. Coverage
+// is therefore recorded as it happens, one span per continuous stretch.
+//
+// Explicit enums, never IS NULL as state. Shape rules Prisma cannot express
+// are hand-written CHECKs and partial unique indexes in
+// 20260925010000_warp_2980_security_baselines.
+
+/// The SITE-LOCAL date's ISO weekday: 1–5 weekday, 6–7 weekend (brief §4.3).
+enum SecurityDayType {
+  weekday
+  weekend
+}
+
+/// Per camera. Explicit — never inferred from counts or timestamps.
+enum SecurityBaselineState {
+  /// Fewer than 14 fully observed days in the 28-day window. No pattern flag fires.
+  learning
+  /// At least 14 fully observed days, and observed within the last 48 h.
+  active
+  /// Not observed for more than 48 h (camera down or disabled, or Droplet not listening).
+  stale
+}
+
+enum SecurityCoverageSpanState {
+  /// Being extended by the orchestrator process that opened it.
+  open
+  /// Ended: the camera stopped being observed, or that process is gone.
+  closed
+}
+
+enum SecurityBaselineBuildState {
+  building
+  /// The one build the rules and the page read (partial unique index).
+  ready
+  superseded
+  failed
+}
+
+enum SecurityBaselineBuildTrigger {
+  first
+  nightly
+  timezone_changed
+  catch_up
+}
+
+enum SecurityBaselineKeyKind {
+  /// zoneKey `area:<SecurityZone.id>`: events matching the area's active links at build time.
+  area
+  /// zoneKey `camera:<frigateCamera>`: the camera's whole view.
+  camera
+}
+
+/// One continuous stretch during which Droplet could prove it was listening to one camera:
+/// ingest subscribed, Frigate online, the camera's detect stream online and unchanged, and no
+/// failed write. Only the process that opened a span extends it; a restart closes it.
+model SecurityCoverageSpan {
+  id           BigInt                    @id @default(autoincrement())
+  camera       String                    @db.VarChar(64)
+  state        SecurityCoverageSpanState
+  startedAt    DateTime
+  coveredUntil DateTime
+  /// Random per orchestrator boot (crypto.randomUUID()).
+  processId    String                    @db.Uuid
+  closedAt     DateTime?
+
+  // At most one OPEN span per camera: a partial unique index in raw migration SQL
+  // ("SecurityCoverageSpan_one_open"; Prisma cannot express WHERE-filtered uniques).
+  @@index([camera, coveredUntil])
+  @@index([coveredUntil])
+}
+
+/// Brief §5 SecurityBaselineSource: the learning state per camera.
+model SecurityBaselineSource {
+  /// `camera:<frigateCamera>`. P5c adds `activity:<kind>` (§10).
+  sourceKey      String                @id @db.VarChar(72)
+  camera         String                @db.VarChar(64)
+  state          SecurityBaselineState
+  /// Site-local dates in the current window with ≥ 1200 observed minutes, 0–28.
+  daysObserved   Int                   @db.SmallInt
+  firstSeenAt    DateTime
+  /// The last observed instant (max coveredUntil).
+  lastSeenAt     DateTime
+  stateChangedAt DateTime
+  updatedAt      DateTime              @updatedAt
+}
+
+/// One full build of the cells. Exactly one is `ready` (partial unique index), and at most one
+/// is `building` (the database-level single-flight guard).
+model SecurityBaselineBuild {
+  id             String                       @id @default(uuid())
+  state          SecurityBaselineBuildState
+  trigger        SecurityBaselineBuildTrigger
+  /// The IANA zone the slots were cut in. A different current zone forces a new full build.
+  timezone       String                       @db.VarChar(64)
+  /// Site-local window, inclusive: 28 complete dates, the last one being the day before the build.
+  windowFrom     String                       @db.VarChar(10)
+  windowTo       String                       @db.VarChar(10)
+  rulesetVersion Int                          @db.SmallInt
+  /// Bumped by every change to this build's cells (the full insert, each area rebuild).
+  /// The engine's cell cache is keyed on (id, cellsVersion).
+  cellsVersion   Int                          @default(0)
+  startedAt      DateTime                     @default(now())
+  finishedAt     DateTime?
+  cellCount      Int                          @default(0)
+  eventCount     Int                          @default(0)
+  error          String?                      @db.VarChar(500)
+  cells          SecurityBaselineCell[]
+
+  @@index([state, startedAt])
+}
+
+/// Brief §5 SecurityBaselineCell. RAW counts only; smoothing and scores are computed on read by
+/// lib/security-baseline-math.ts, so the stored row is a fact and the arithmetic is testable.
+/// Every kept (zoneKey, label) has all 48 (dayType, hour) rows, including never-observed hours
+/// (daysObserved = 0), so an unobserved hour is a stored value. A key with no observed slot at all
+/// in the window has no rows; the rules read that as the explicit gate `no_cell` (§6.8).
+model SecurityBaselineCell {
+  id              BigInt                  @id @default(autoincrement())
+  buildId         String
+  build           SecurityBaselineBuild   @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  /// `area:<SecurityZone.id>` or `camera:<frigateCamera>`.
+  zoneKey         String                  @db.VarChar(72)
+  keyKind         SecurityBaselineKeyKind
+  /// Set iff keyKind = area. No FK: derived rows, replaced nightly; areas are never row-deleted.
+  zoneId          String?
+  /// Set iff keyKind = camera.
+  camera          String?                 @db.VarChar(64)
+  /// area: SecurityZone.version when these rows were built. A link edit bumps the area's version,
+  /// which marks these rows out of date until the area is rebuilt (§6.7 step 6).
+  zoneVersion     Int?
+  /// The cameras whose events and coverage built this key, sorted. DS-005: an area key's numbers
+  /// are shown only to a viewer who can see every one of them.
+  cameras         String[]
+  label           String                  @db.VarChar(64)
+  dayType         SecurityDayType
+  hour            Int                     @db.SmallInt
+  /// n: window dates of this dayType on which this key was observed for ≥ 5/6 of the hour slot.
+  daysObserved    Int                     @db.SmallInt
+  /// d: of those, dates with ≥ 1 detection of `label`.
+  daysWithEvent   Int                     @db.SmallInt
+  /// c: detections of `label` in those observed slots.
+  eventCount      Int
+  /// m: Σ observed minutes over those slots (a fall-back hour holds up to 120).
+  observedMinutes Int
+  /// person only: detections with a duration in observed slots of hour−1, hour and hour+1 (same dayType).
+  dwellSamples    Int
+  /// percentile_disc(0.99) of those durations, seconds. NULL iff dwellSamples = 0 (CHECK).
+  durationP99Sec  Float?
+  computedAt      DateTime                @default(now())
+
+  @@unique([buildId, zoneKey, label, dayType, hour])
+  @@index([zoneId])
+}
+
+/// Job bookkeeping, one row. Created lazily on the first tick with a zone. (The spec's
+/// `SecurityBaselineState` model: renamed, because that name is the learning-state enum above.)
+model SecurityBaselineJobState {
+  id            String   @id @default("singleton")
+  /// End instant of the last site-local hour whose hourly step ran (§6.7 step 4).
+  hourlyThrough DateTime
+  updatedAt     DateTime @updatedAt
 }

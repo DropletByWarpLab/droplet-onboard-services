@@ -187,6 +187,7 @@ import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
+import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -1102,6 +1103,13 @@ async function main() {
   // reconciles SecurityModeState with the opening hours (level-triggered, on
   // its own advisory lock). Unconditional, like the jobs above.
   registerSecurityModeJobs(cronRuntime, prisma);
+  // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
+  // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
+  // later), keeps the learning state, and rebuilds what normal looks like
+  // nightly in the site's zone. One tick on its own advisory lock; database
+  // watermarks. Unconditional, like the jobs above (the DS-015 rule): the
+  // learning clock must not start from zero when the owner turns Security on.
+  registerSecurityBaselineJobs(cronRuntime, prisma);
 
   cronRuntime.scheduleCron(
     "0 3 * * *",

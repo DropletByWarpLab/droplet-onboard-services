@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
   snapshot: new Map<string | null, { health: "online" | "offline" | "disabled"; at: Date }>(),
   siteMode: { id: "site_mode", state: "ok", detail: "(slice A's copy)", lastSeenAt: null } as Record<string, unknown>,
   siteModeHealth: vi.fn(),
+  patterns: { id: "patterns", state: "quiet", detail: "(slice A3's copy)", lastSeenAt: null } as Record<string, unknown>,
+  patternsHealth: vi.fn(),
 }));
 
 vi.mock("../config.js", () => ({
@@ -41,6 +43,12 @@ vi.mock("../services/camera.service.js", () => ({
 // asks for it and where it lands.
 vi.mock("../services/security-mode.service.js", () => ({
   securitySiteModeHealth: h.siteModeHealth,
+}));
+
+// WARP-2980 — the baseline job owns the patterns row's copy; this file pins
+// that the header asks for it with the VIEWER's scope and where it lands.
+vi.mock("../services/security-baselines.service.js", () => ({
+  securityPatternsHealth: h.patternsHealth,
 }));
 
 import { createSecurityRouter } from "../routes/security.js";
@@ -104,6 +112,7 @@ beforeEach(() => {
   stateRow.mockReset().mockResolvedValue(null);
   zoneLinks.mockReset().mockResolvedValue([]);
   h.siteModeHealth.mockReset().mockImplementation(async () => h.siteMode);
+  h.patternsHealth.mockReset().mockImplementation(async () => h.patterns);
   h.snapshot.clear();
   _resetSecurityIngestHealthForTests();
 });
@@ -215,13 +224,35 @@ describe("GET /api/security/health", () => {
     const res = await request(app("owner")).get("/api/security/health");
     expect(res.status).toBe(200);
     // WARP-2977 P2b: `site_mode` joins the pinned order — deliberately red against P2a's list.
+    // WARP-2980: `patterns` joins it after site_mode (P3/P4 rows go between them when they land).
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "threat_mirror",
       "site_mode",
+      "patterns",
       "retention",
     ]);
+  });
+
+  it("WARP-2980: the patterns row is the baseline job's row, verbatim, asked for with the viewer's scope", async () => {
+    grants.mockResolvedValue([{ camera: { name: "front" } }]);
+    const res = await request(app("family")).get("/api/security/health");
+    expect(res.body.sources.find((s: { id: string }) => s.id === "patterns")).toEqual(h.patterns);
+    expect(h.patternsHealth).toHaveBeenCalledTimes(1);
+    const [, scope, now] = h.patternsHealth.mock.calls[0];
+    expect([...scope.visibleCameras]).toEqual(["front"]);
+    expect(now).toBeInstanceOf(Date);
+    const owner = await request(app("owner")).get("/api/security/health");
+    expect(owner.status).toBe(200);
+    expect(h.patternsHealth.mock.calls[1][1].visibleCameras).toBe("all");
+  });
+
+  it("WARP-2980: a viewer scope that cannot be read gives the patterns row nothing to count (null), never 'all' — and no 503", async () => {
+    grants.mockRejectedValue(new Error("db down"));
+    const res = await request(app("family")).get("/api/security/health");
+    expect(res.status).toBe(200);
+    expect(h.patternsHealth.mock.calls[0][1]).toBeNull();
   });
 
   it("the site_mode row is slice A's row, passed through verbatim (whatever its copy)", async () => {
@@ -231,12 +262,13 @@ describe("GET /api/security/health", () => {
     expect(h.siteModeHealth.mock.calls[0][1]).toBeInstanceOf(Date);
   });
 
-  it("family does not get a threat row for a feed they cannot see, but does get the site mode", async () => {
+  it("family does not get a threat row for a feed they cannot see, but does get the site mode and patterns", async () => {
     const res = await request(app("family")).get("/api/security/health");
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "site_mode",
+      "patterns",
       "retention",
     ]);
   });
