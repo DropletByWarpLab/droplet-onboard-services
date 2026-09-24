@@ -8804,7 +8804,7 @@ model SecurityModeState {
 // columns with P5, camera_offline_during_activity with P4, the door codes with ADR-055.
 //
 // Every shape rule Prisma cannot express is a hand-written CHECK in
-// 20260924050000_warp_2978_security_incidents — explicit enums, never IS NULL as state.
+// 20260924070000_warp_2978_security_incidents — explicit enums, never IS NULL as state.
 
 enum SecurityIncidentScope {
   /// One area. zoneId + zoneName + zoneKind are set (CHECK).
