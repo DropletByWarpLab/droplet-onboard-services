@@ -403,6 +403,16 @@ export type IncidentMemberView = Awaited<ReturnType<typeof listSecurityEvents>>[
 };
 
 export interface IncidentDetail extends IncidentSummary {
+  /**
+   * Whether this viewer can act on the incident right now — exactly when a
+   * resolve from them would change it (routes 19–20): their Security level is
+   * at least act (the level the act gate checks), the view is not partial and
+   * has a visible code (else 409 NOT_ACTIONABLE), and the incident is open or
+   * acknowledged (a resolved one answers both actions with 200 changed:false).
+   * Acknowledge follows it except once this viewer has acknowledged
+   * (`viewer.acknowledged`): then acknowledge is a 200 changed:false no-op.
+   */
+  actionable: boolean;
   reasons: IncidentReasonView[];
   /** Visible members while their events are kept, newest first (the feed row shape). */
   events: IncidentMemberView[];
@@ -582,6 +592,7 @@ export async function loadIncidentDetail(
   const lastAck = acks.length > 0 ? acks[acks.length - 1]! : null;
   return {
     ...summaryOf(p, lastAck),
+    actionable: p.actionable && level !== "view" && (p.state === "open" || p.state === "acknowledged"),
     reasons: p.reasons.map((r) => ({
       code: r.code,
       severity: r.severity,

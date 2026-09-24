@@ -732,6 +732,125 @@ describe("route 20 — resolve", () => {
   });
 });
 
+// ── route 18's `actionable` — pinned against routes 19–20 ─────────────────
+
+describe("route 18 `actionable` agrees with what routes 19 and 20 do for this viewer, right now", () => {
+  type Outcome = { status: number; changed?: boolean; code?: string };
+  const CASES: Array<{
+    name: string;
+    id: string;
+    role: Role;
+    level: Level;
+    setup?: (f: FakeSecurityPrisma) => void;
+    actionable: boolean;
+    acknowledge: Outcome;
+    resolve: Outcome;
+  }> = [
+    {
+      name: "a full viewer at act, open",
+      id: SHARED,
+      role: "family",
+      level: "act",
+      actionable: true,
+      acknowledge: { status: 200, changed: true },
+      resolve: { status: 200, changed: true },
+    },
+    {
+      name: "the owner at manage, open",
+      id: SHARED,
+      role: "owner",
+      level: "manage",
+      actionable: true,
+      acknowledge: { status: 200, changed: true },
+      resolve: { status: 200, changed: true },
+    },
+    {
+      name: "a view-only viewer (the act gate refuses)",
+      id: SHARED,
+      role: "family",
+      level: "view",
+      actionable: false,
+      acknowledge: { status: 404, code: "module_disabled" },
+      resolve: { status: 404, code: "module_disabled" },
+    },
+    {
+      name: "a partial viewer (her notice is visible, the alert above it is not)",
+      id: MIXED,
+      role: "family",
+      level: "act",
+      setup: (f) => withMixed(f, "open"),
+      actionable: false,
+      acknowledge: { status: 409, code: "NOT_ACTIONABLE" },
+      resolve: { status: 409, code: "NOT_ACTIONABLE" },
+    },
+    {
+      name: "plain activity (no visible code)",
+      id: HIDDEN_CODE,
+      role: "family",
+      level: "act",
+      actionable: false,
+      acknowledge: { status: 409, code: "NOT_ACTIONABLE" },
+      resolve: { status: 409, code: "NOT_ACTIONABLE" },
+    },
+    {
+      name: "a resolved incident (both actions are 200 no-ops)",
+      id: SHARED,
+      role: "family",
+      level: "act",
+      setup: (f) => Object.assign(f.world.securityIncident.find((i) => i.id === SHARED)!, { state: "resolved", grouping: "closed", closedAt: T, resolvedAt: T, resolvedById: STEFAN }),
+      actionable: false,
+      acknowledge: { status: 200, changed: false },
+      resolve: { status: 200, changed: false },
+    },
+    {
+      name: "already acknowledged by this viewer (acknowledge is a 200 no-op; resolve still acts)",
+      id: SHARED,
+      role: "family",
+      level: "act",
+      setup: (f) => {
+        Object.assign(f.world.securityIncident.find((i) => i.id === SHARED)!, { state: "acknowledged" });
+        f.world.securityIncidentAck.push({
+          id: "a-maria", incidentId: SHARED, action: "acknowledge", byUserId: MARIA, byName: "Maria", at: T,
+          sessionId: "s-m", sessionChecked: true, client: null, viaNotificationId: null, note: "",
+        });
+      },
+      actionable: true,
+      acknowledge: { status: 200, changed: false },
+      resolve: { status: 200, changed: true },
+    },
+  ];
+
+  const fresh = (c: (typeof CASES)[number]) => {
+    const f = world();
+    c.setup?.(f);
+    return { f, server: app(f, c.role, c.level).server };
+  };
+  const outcomeOf = (res: request.Response): Outcome =>
+    res.status === 200
+      ? { status: 200, changed: res.body.changed }
+      : { status: res.status, code: res.body.error?.code ?? res.body.error };
+
+  it.each(CASES)("$name → actionable $actionable", async (c) => {
+    const read = await request(fresh(c).server).get(`/api/security/incidents/${c.id}`);
+    expect(read.status).toBe(200);
+    expect(read.body.actionable).toBe(c.actionable);
+
+    // Each action on its own fresh world: what the page would get if it pressed that button now.
+    const ack = outcomeOf(await request(fresh(c).server).post(`/api/security/incidents/${c.id}/acknowledge`).send({}));
+    const res = await request(fresh(c).server).post(`/api/security/incidents/${c.id}/resolve`).send({});
+    const resolve = outcomeOf(res);
+    expect(ack).toEqual(c.acknowledge);
+    expect(resolve).toEqual(c.resolve);
+
+    // The invariant the dashboard relies on: actionable ⇔ resolve would change the incident.
+    expect(read.body.actionable).toBe(resolve.status === 200 && resolve.changed === true);
+    // …and an acknowledge that is accepted AND changes something implies actionable.
+    if (ack.status === 200 && ack.changed) expect(read.body.actionable).toBe(true);
+    // After a resolve that acted, the incident it answers with is no longer actionable.
+    if (resolve.changed) expect(res.body.incident.actionable).toBe(false);
+  });
+});
+
 // ── routes 21–22 ───────────────────────────────────────────────────────────
 
 describe("routes 21–22 — who is told about alerts", () => {
