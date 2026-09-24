@@ -2362,8 +2362,50 @@ model NotificationLog {
   /// (queued, no transport yet); never inferred from `channels`/`error`.
   pushOutcome PushOutcome?
   createdAt   DateTime         @default(now())
+  /// WARP-2804 — whether the recipient has seen it. Explicit, never inferred
+  /// from ackedAt. Rows written before WARP-2804 are `untracked` (backfilled
+  /// by the migration); every new row starts `unacked`.
+  ackState     NotificationAckState   @default(unacked)
+  ackedAt      DateTime?
+  ackMethod    NotificationAckMethod?
+  /// JWT `sid` of the sign-in that acked it: the session record
+  /// authMiddleware checks on every request. NULL when that token carried no
+  /// sid (grace/legacy tokens).
+  ackSessionId String?                @db.VarChar(64)
+  /// What the acking client SAID it was (X-Droplet-Client, else a coarse
+  /// User-Agent label). Reported, never proof. NULL when it said nothing
+  /// usable.
+  ackClient    String?                @db.VarChar(120)
 
   @@index([username, createdAt])
+  // WARP-2804 — the unread count and the `state=unacked` list.
+  @@index([username, ackState, createdAt])
+}
+
+/// WARP-2804 — whether the RECIPIENT has seen a notification. Set only by the
+/// recipient (never by someone else's act). Explicit — never inferred from
+/// ackedAt. The DB CHECK `NotificationLog_ack_shape` pins the columns to it.
+enum NotificationAckState {
+  /// Not seen yet. The only state counted as unread.
+  unacked
+  acked
+  /// Written before WARP-2804: nobody can say. Never counted as unread; can
+  /// still be acked.
+  untracked
+}
+
+/// WARP-2804 — the path that acknowledged a notification.
+enum NotificationAckMethod {
+  /// POST /notifications/:id/ack (the default)
+  inbox
+  /// POST /notifications/:id/ack {via:'opened'} — the client REPORTS the
+  /// person opened its link
+  opened
+  /// POST /notifications/ack-all
+  all
+  /// The recipient acknowledged the Security incident this notification was
+  /// about (WARP-2978). Never set by a notification route.
+  incident
 }
 
 /// WARP-2904 — the web-push leg of one sendNotification call.
