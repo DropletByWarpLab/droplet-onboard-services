@@ -139,6 +139,7 @@ EXCLUDED_VOLUMES=(
   openwrt-overlay    # single-box router overlay — re-provisioned
   switch-state       # managed-switch state — re-provisioned by setup
   workspace-checkouts # WARP-2896: working trees — `git clone` from workspace-git rebuilds them
+  extensions-installed # WARP-2900: installed extensions — re-exported from workspace-git on reconcile
 )
 
 # --- Source logging library if present (matches setup.sh convention) ------

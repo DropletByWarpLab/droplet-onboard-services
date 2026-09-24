@@ -40,5 +40,13 @@
 # The custody contract for both keys.
 /docs/security/device-identity.md                               @rjouffret
 
+# Where a promoted extension RUNS (WARP-2900 H2): the sandbox's install /
+# relay path, the supervisor's limits and env allowlist, the first-party MCP
+# host shims, and the trust notes that describe them.
+/services/sandbox/extensions.py                                 @rjouffret
+/services/sandbox/supervisor.py                                 @rjouffret
+/services/sandbox/ext_host/                                     @rjouffret
+/docs/security/extension-trust.md                               @rjouffret
+
 # This file.
 /.github/CODEOWNERS                                             @rjouffret

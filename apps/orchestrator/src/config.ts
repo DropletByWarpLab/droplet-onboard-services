@@ -1181,6 +1181,13 @@ const envSchema = z.object({
   // The output cap a transform may return. Exceeding it FAILS the step with
   // "output exceeded N bytes" — never a silent slice (ROUTINES brief §4.4).
   SANDBOX_OUTPUT_CAP_BYTES: z.coerce.number().int().min(1_024).max(4_194_304).default(262_144),
+  // WARP-2900 (ADR-056 slice H2) — how often the extension reconciler asks
+  // the sandbox whether every installed extension is still running, and
+  // reinstalls (re-verify the signed statement, rotate the bearer, start)
+  // any it lost — a sandbox restart forgets every process. One tick with no
+  // Extension rows dials nothing. Ships dark with the sandbox's
+  // SANDBOX_PROCESS_SUPERVISION=0: no extension can be promoted then.
+  EXTENSION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(60_000),
 
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),

@@ -49,10 +49,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY services/sandbox/ .
 COPY extensions/templates/ /app/templates/
 
-# The git store's two mount points (compose: workspace-git, workspace-checkouts),
+# The git store's two mount points (compose: workspace-git, workspace-checkouts)
+# and the installed-extensions dir (compose: extensions-installed, WARP-2900),
 # owned by the service user so a fresh volume is writable without an init hook.
-RUN mkdir -p /var/lib/workspace-git /var/lib/workspace && \
-    chown -R sandbox:sandbox /var/lib/workspace-git /var/lib/workspace
+# The MCP host shims (ext_host/) arrive with `COPY services/sandbox/ .` above.
+RUN mkdir -p /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext && \
+    chown -R sandbox:sandbox /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext
 
 # Sibling shape (doc-render / web-fetch): ship the FIPS-provider OpenSSL config
 # + shared helpers. NOT one of the provider-carrying images — compose pins

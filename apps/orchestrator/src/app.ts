@@ -59,6 +59,7 @@ import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
+import { createExtensionsRouter } from "./routes/extensions.js";
 // WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
 import { createBrainRouter } from "./routes/brain.js";
 import type { BrainPassTrigger } from "./services/brain/brain-pass-runner.js";
@@ -501,6 +502,12 @@ export function createApp(
   // reached as /git/* through nginx). Owner/admin, admitting the mcp
   // principal for a run bound to the workspace ("run owns workspace").
   app.use("/api", createWorkspaceRouter(prisma));
+  // WARP-2900 (ADR-056 slice H2) — promote a workshop proposal into a
+  // box-signed extension and install / disable / enable / uninstall it.
+  // Promote is OWNER only (never the mcp principal); the rest owner/admin
+  // reads and owner writes. Dark until SANDBOX_PROCESS_SUPERVISION=1: the
+  // sandbox 404s every extension route and the promote answers 503.
+  app.use("/api", createExtensionsRouter(prisma));
   app.use("/api", createBrainRouter(prisma, brainPassTrigger));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
