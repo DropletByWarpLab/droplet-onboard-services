@@ -570,16 +570,21 @@ export interface SecurityFeedQuery {
  * Who may see which rows. Camera rows follow CameraAccessGrant — a camera
  * outside the grant is absent, not redacted (DS-005). Mirrored threats point
  * at owner/admin-only ActivityRows, so they are owner/admin-only here too.
+ * Lock rows (WARP-2977 P2b-2, DS-019) carry no camera, so the grant cannot
+ * hide them: they need `mayReadLocks` (Devices view), else they are removed
+ * here — inside the same AND[0].
  */
 export function feedVisibilityWhere(
   visibleCameras: "all" | ReadonlySet<string>,
   mayReadThreats: boolean,
+  mayReadLocks: boolean,
 ): Prisma.SecurityEventWhereInput {
   const and: Prisma.SecurityEventWhereInput[] = [];
   if (visibleCameras !== "all") {
     and.push({ OR: [{ camera: null }, { camera: { in: [...visibleCameras] } }] });
   }
   if (!mayReadThreats) and.push({ source: { not: "activity_mirror" } });
+  if (!mayReadLocks) and.push({ source: { not: "matter_lock" } });
   return and.length > 0 ? { AND: and } : {};
 }
 
@@ -641,6 +646,12 @@ export async function listSecurityEvents(
       frigateEventId: r.source === "frigate" ? r.sourceRef.slice(r.sourceRef.indexOf("/") + 1) : null,
     })),
     nextCursor: rows.length > q.limit && tail ? `${tail.startedAt.getTime()}.${tail.id}` : null,
+    /**
+     * NOT wire data (WARP-2977 P2b-2): each row's sourceRef by row id, for the
+     * caller's area matching — a lock row joins its areas on it. Kept off the
+     * rows so the wire shape stays what it was; a Map serialises to `{}`.
+     */
+    sourceRefs: new Map(page.map((r) => [r.id.toString(), r.sourceRef])),
   };
 }
 

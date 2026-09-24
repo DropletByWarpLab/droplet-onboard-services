@@ -526,7 +526,7 @@ describe("listSecurityEvents — extraWhere narrows after the camera clause (WAR
   });
 
   it("visibility stays AND[0]; the extra clauses follow the camera clause; the cursor stays last", async () => {
-    const visibility = feedVisibilityWhere(new Set(["front"]), false);
+    const visibility = feedVisibilityWhere(new Set(["front"]), false, false);
     const zone = { camera: "front", OR: [{ kind: { in: ["camera_offline" as const, "camera_online" as const] } }] };
     const cursor = { startedAt: NOW, id: 9n };
     await listSecurityEvents(prisma, visibility, { limit: 10, includeLow: false, camera: "front", cursor }, [zone]);
@@ -567,23 +567,34 @@ describe("listSecurityEvents — extraWhere narrows after the camera clause (WAR
   });
 });
 
-describe("feedVisibilityWhere — DS-005 and the threat gate", () => {
-  it("owner/admin with every camera: no constraint", () => {
-    expect(feedVisibilityWhere("all", true)).toEqual({});
+describe("feedVisibilityWhere — DS-005, the threat gate and the lock gate", () => {
+  it("owner/admin with every camera and Devices view: no constraint", () => {
+    expect(feedVisibilityWhere("all", true, true)).toEqual({});
   });
 
   it("granted cameras: rows from those cameras or from no camera", () => {
-    expect(feedVisibilityWhere(new Set(["front"]), true)).toEqual({
+    expect(feedVisibilityWhere(new Set(["front"]), true, true)).toEqual({
       AND: [{ OR: [{ camera: null }, { camera: { in: ["front"] } }] }],
     });
   });
 
   it("no grants at all: only camera-less rows", () => {
-    expect(feedVisibilityWhere(new Set(), true)).toEqual({ AND: [{ OR: [{ camera: null }, { camera: { in: [] } }] }] });
+    expect(feedVisibilityWhere(new Set(), true, true)).toEqual({ AND: [{ OR: [{ camera: null }, { camera: { in: [] } }] }] });
   });
 
   it("not owner/admin: mirrored threats are removed", () => {
-    expect(feedVisibilityWhere("all", false)).toEqual({ AND: [{ source: { not: "activity_mirror" } }] });
+    expect(feedVisibilityWhere("all", false, true)).toEqual({ AND: [{ source: { not: "activity_mirror" } }] });
+  });
+
+  it("WARP-2977 P2b-2 (DS-019): without Devices view, lock rows are removed — inside the same clause, after the others", () => {
+    expect(feedVisibilityWhere("all", true, false)).toEqual({ AND: [{ source: { not: "matter_lock" } }] });
+    expect(feedVisibilityWhere(new Set(["front"]), false, false)).toEqual({
+      AND: [
+        { OR: [{ camera: null }, { camera: { in: ["front"] } }] },
+        { source: { not: "activity_mirror" } },
+        { source: { not: "matter_lock" } },
+      ],
+    });
   });
 });
 

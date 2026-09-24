@@ -30,6 +30,14 @@
  *     viewer's VISIBLE links of VISIBLE areas — a row never names an area the
  *     viewer cannot see.
  *   · `mode_changed` rows (the site mode's history) are a feed kind.
+ *
+ * WARP-2977 P2b-2 — door locks (DS-019: Security view AND Devices view):
+ *   · `lock_state` is a feed kind; each row says how it was `observed`
+ *     (`polled` = when Droplet's check found it, not when it happened);
+ *   · without `mayReadLocks` the lock rows are removed inside AND[0], their
+ *     lock links name no area, and the header has no `locks` row;
+ *   · a lock row joins its areas on its sourceRef, which the page hands over
+ *     beside the rows and which never reaches the wire.
  */
 import { Router, type Request, type Response } from "express";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -43,7 +51,13 @@ import {
   securityIngestHealthState,
 } from "../services/security-events.service.js";
 import { securityStatusSnapshot } from "../services/camera.service.js";
-import { mayReadThreats, securityViewerScope, type SecurityRouteDeps } from "../services/security-access.js";
+import {
+  mayReadLocksFor,
+  mayReadThreats,
+  securityViewerScope,
+  type SecurityRouteDeps,
+} from "../services/security-access.js";
+import { securityLockAdapter, securityLockHealthRow } from "../services/security-lock-adapter.js";
 import { securitySiteModeHealth } from "../services/security-mode.service.js";
 import { loadActiveLinks, viewerAreas, zoneFilterFor, zonesForEvent } from "../services/security-zones.service.js";
 import { config } from "../config.js";
@@ -63,6 +77,7 @@ const FEED_KINDS = [
   "source_online",
   "threat",
   "mode_changed",
+  "lock_state",
 ] as const;
 
 const feedQuerySchema = z
@@ -127,9 +142,9 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         }
         extraWhere.push(clause);
       }
-      const page = await listSecurityEvents(
+      const { sourceRefs, ...page } = await listSecurityEvents(
         prisma,
-        feedVisibilityWhere(visible, scope.mayReadThreats),
+        feedVisibilityWhere(visible, scope.mayReadThreats, scope.mayReadLocks),
         {
           limit: q.limit,
           cursor: cursor ?? undefined,
@@ -144,7 +159,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         ...page,
         events: page.events.map((e) => ({
           ...e,
-          zones: zonesForEvent(e, areas.index)
+          zones: zonesForEvent({ ...e, sourceRef: sourceRefs.get(e.id) }, areas.index)
             .map((id) => ({ id, name: areas.names.get(id) ?? "" }))
             .sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
         })),
@@ -159,13 +174,16 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
   router.get("/security/health", requireRole(...SECURITY_VIEW_ROLES), async (req: Request, res: Response) => {
     try {
       const now = deps.now?.() ?? new Date();
-      const [state, siteMode] = await Promise.all([
+      const [state, siteMode, mayReadLocks] = await Promise.all([
         prisma.securityIngestState.findUnique({
           where: { id: "singleton" },
           select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true },
         }),
         // Never throws: an unreadable mode is a `down` row, not a 503 of the header.
         securitySiteModeHealth(prisma, now),
+        // WARP-2977 P2b-2 (DS-019). A resolver failure rejects: a 503 of the
+        // header, never a header that guessed who may see locks.
+        mayReadLocksFor(req, deps.resolve),
       ]);
       const sources = buildSecurityHealth({
         frigateConfigured: Boolean(config.FRIGATE_URL && config.FRIGATE_URL.trim()),
@@ -173,6 +191,8 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         frigate: securityStatusSnapshot().get(null),
         state,
         siteMode,
+        // "Not running" when no adapter was started — shown, never omitted.
+        locks: mayReadLocks ? securityLockHealthRow((deps.locks ?? securityLockAdapter)()) : undefined,
         now,
       });
       // The threat source is only a row for the people who can see threats.

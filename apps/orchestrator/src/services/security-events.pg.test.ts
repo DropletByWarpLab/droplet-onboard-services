@@ -127,7 +127,7 @@ describe.skipIf(!RUN)("Security event store — real Postgres (WARP-2977)", () =
     expect(rows[0].endedAt!.getTime() - rows[0].startedAt.getTime()).toBe(9_000);
   });
 
-  it("a camera outside the grant is absent; camera-less rows stay; threats go for non-admins", async () => {
+  it("a camera outside the grant is absent; camera-less rows stay; threats go for non-admins; locks go without Devices view", async () => {
     await prisma.securityEvent.createMany({
       data: [
         ev("front"),
@@ -139,6 +139,16 @@ describe.skipIf(!RUN)("Security event store — real Postgres (WARP-2977)", () =
           sourceRef: "frigate/available",
         }),
         ev("threat", { source: "activity_mirror", kind: "threat", camera: null, sourceRef: "activity:0" }),
+        // WARP-2977 P2b-2: a lock row is camera-less too — only the lock gate can remove it.
+        ev("lock", {
+          source: "matter_lock",
+          kind: "lock_state",
+          camera: null,
+          sourceRef: "matter:2977000077/1",
+          labels: ["unlocked"],
+          score: null,
+          endedAt: null,
+        }),
       ],
     });
     const ours = { dedupeKey: { startsWith: `${TAG}:` } };
@@ -147,15 +157,17 @@ describe.skipIf(!RUN)("Security event store — real Postgres (WARP-2977)", () =
         .map((r) => r.dedupeKey.slice(TAG.length + 1))
         .sort();
 
-    expect(await keys(feedVisibilityWhere("all", true))).toEqual(["back", "frigate-down", "front", "threat"]);
-    expect(await keys(feedVisibilityWhere(new Set([FRONT]), false))).toEqual(["frigate-down", "front"]);
+    expect(await keys(feedVisibilityWhere("all", true, true))).toEqual(["back", "frigate-down", "front", "lock", "threat"]);
+    expect(await keys(feedVisibilityWhere("all", true, false))).toEqual(["back", "frigate-down", "front", "threat"]);
+    expect(await keys(feedVisibilityWhere(new Set([FRONT]), false, true))).toEqual(["frigate-down", "front", "lock"]);
+    expect(await keys(feedVisibilityWhere(new Set([FRONT]), false, false))).toEqual(["frigate-down", "front"]);
     // No grants at all: an empty IN must match nothing, not everything.
-    expect(await keys(feedVisibilityWhere(new Set(), false))).toEqual(["frigate-down"]);
+    expect(await keys(feedVisibilityWhere(new Set(), false, false))).toEqual(["frigate-down"]);
   });
 
   it("paging over rows that share a startedAt neither repeats nor skips", async () => {
     await prisma.securityEvent.createMany({ data: ["p1", "p2", "p3", "p4", "p5"].map((k) => ev(k)) });
-    const visibility = { AND: [feedVisibilityWhere(new Set([FRONT]), false), { dedupeKey: { startsWith: `${TAG}:p` } }] };
+    const visibility = { AND: [feedVisibilityWhere(new Set([FRONT]), false, false), { dedupeKey: { startsWith: `${TAG}:p` } }] };
     const seen: string[] = [];
     let cursor: { startedAt: Date; id: bigint } | undefined;
     for (let i = 0; i < 5; i++) {
