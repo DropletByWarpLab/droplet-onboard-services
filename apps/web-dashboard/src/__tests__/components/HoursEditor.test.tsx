@@ -13,7 +13,7 @@
  *   - below manage there is no control at all, only text.
  */
 import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
   COPY,
   HoursEditor,
@@ -82,6 +82,15 @@ const pill = (day: string, label: string) =>
 const opens = (day: string) => screen.getByLabelText(`Opens on ${day}`) as HTMLInputElement;
 const closes = (day: string) => screen.getByLabelText(`Closes on ${day}`) as HTMLInputElement;
 const saveButton = () => screen.getByRole("button", { name: COPY.save });
+/**
+ * Save is off through aria-disabled, never the real `disabled` — a pressed
+ * Save must keep keyboard focus while it saves and after it lands.
+ */
+const expectSaveOff = () => {
+  expect(saveButton()).toHaveAttribute("aria-disabled", "true");
+  expect(saveButton()).not.toBeDisabled();
+};
+const expectSaveOn = () => expect(saveButton()).not.toHaveAttribute("aria-disabled");
 
 describe("HoursEditor — presets", () => {
   it("fills the editor from a preset without saving anything", () => {
@@ -97,7 +106,7 @@ describe("HoursEditor — presets", () => {
     expect(pill("Saturday", "Closed")).toHaveAttribute("aria-pressed", "true");
     expect(pill("Sunday", "Closed")).toHaveAttribute("aria-pressed", "true");
     // Filled, not applied: Save is now possible, and still the owner's call.
-    expect(saveButton()).toBeEnabled();
+    expectSaveOn();
     expect(screen.getByText(COPY.unsaved)).toBeInTheDocument();
   });
 
@@ -179,7 +188,7 @@ describe("HoursEditor — a day's hours", () => {
     fireEvent.change(closes("Friday"), { target: { value: "02:00" } });
     expect(within(dayCard("Friday")).getByText("Closes at 2:00 AM the next day")).toBeInTheDocument();
     expect(within(dayCard("Monday")).queryByText(/the next day/)).toBeNull();
-    expect(saveButton()).toBeEnabled();
+    expectSaveOn();
   });
 
   it("refuses equal times inline and blocks Save", () => {
@@ -188,11 +197,11 @@ describe("HoursEditor — a day's hours", () => {
     const alert = within(dayCard("Monday")).getByRole("alert");
     expect(alert).toHaveTextContent(COPY.sameTimes);
     expect(opens("Monday")).toHaveAttribute("aria-invalid", "true");
-    expect(saveButton()).toBeDisabled();
+    expectSaveOff();
 
     fireEvent.change(closes("Monday"), { target: { value: "17:30" } });
     expect(within(dayCard("Monday")).queryByRole("alert")).toBeNull();
-    expect(saveButton()).toBeEnabled();
+    expectSaveOn();
   });
 
   it("refuses a cleared time and blocks Save", () => {
@@ -202,7 +211,7 @@ describe("HoursEditor — a day's hours", () => {
     expect(within(dayCard("Tuesday")).getByText(COPY.missingTimes)).toBeInTheDocument();
     expect(within(dayCard("Tuesday")).queryByRole("alert")).toBeNull();
     expect(opens("Tuesday")).toHaveAttribute("aria-invalid", "true");
-    expect(saveButton()).toBeDisabled();
+    expectSaveOff();
   });
 
   it("gives a day switched to Open default times, and keeps them across Closed and back", () => {
@@ -220,7 +229,52 @@ describe("HoursEditor — a day's hours", () => {
 describe("HoursEditor — saving", () => {
   it("keeps Save off until something changes", () => {
     setup();
-    expect(saveButton()).toBeDisabled();
+    expectSaveOff();
+  });
+
+  it("a press while Save is off sends nothing — unchanged or invalid", () => {
+    const { onSave } = setup();
+    fireEvent.click(saveButton());
+    fireEvent.change(closes("Monday"), { target: { value: "09:00" } });
+    expectSaveOff();
+    fireEvent.click(saveButton());
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("two presses before React re-renders send one save — the ref refuses what the stale canSave would let through", () => {
+    const onSave = vi.fn(() => new Promise<"saved">(() => {}));
+    setup({ onSave });
+    fireEvent.change(closes("Monday"), { target: { value: "18:00" } });
+    const save = saveButton();
+    // One act: both clicks run against the same render, where canSave is still true.
+    act(() => {
+      save.click();
+      save.click();
+    });
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it("the pressed Save keeps focus while it saves and after it lands, and a second press is refused", async () => {
+    let land!: (outcome: "saved") => void;
+    const onSave = vi.fn(() => new Promise<"saved">((r) => (land = r)));
+    const { rerender, props } = setup({ onSave });
+    fireEvent.change(closes("Monday"), { target: { value: "18:00" } });
+    const save = saveButton();
+    save.focus();
+    fireEvent.click(save);
+
+    await waitFor(() => expect(save).toHaveAttribute("aria-disabled", "true"));
+    expect(save).not.toBeDisabled();
+    expect(document.activeElement).toBe(save);
+    fireEvent.click(save);
+    expect(onSave).toHaveBeenCalledTimes(1);
+
+    land("saved");
+    rerender(<HoursEditor {...props} onSave={onSave} hours={view({ version: 5, days: WEEK_9_5.map((d) => (d.weekday === 1 ? { ...d, closes: "18:00" } : d)) })} />);
+    await waitFor(() => expect(screen.queryByText(COPY.unsaved)).toBeNull());
+    // Nothing left to save, and focus is still on the button that was pressed.
+    expectSaveOff();
+    expect(document.activeElement).toBe(saveButton());
   });
 
   it("PUTs exactly seven days, Monday first, with the draft's version", async () => {
@@ -263,7 +317,7 @@ describe("HoursEditor — saving", () => {
     rerender(<HoursEditor {...props} hours={saved} />);
     await waitFor(() => expect(screen.queryByText(COPY.unsaved)).toBeNull());
     expect(closes("Monday").value).toBe("18:00");
-    expect(saveButton()).toBeDisabled();
+    expectSaveOff();
   });
 
   it("keeps the draft on a conflict and loads the other person's hours only when asked", async () => {
@@ -367,7 +421,7 @@ describe("HoursEditor — saving", () => {
     fireEvent.change(closes("Monday"), { target: { value: "18:00" } });
     fireEvent.click(screen.getByRole("button", { name: COPY.discard }));
     expect(closes("Monday").value).toBe("17:00");
-    expect(saveButton()).toBeDisabled();
+    expectSaveOff();
   });
 
   it("clears the hours only through a confirmation, with the read version", async () => {
