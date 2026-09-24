@@ -89,6 +89,7 @@ export const INCIDENT_COPY = {
   noticeNotVisibleUnknown: "{name} · not told: can't see the camera involved",
   noticeCapped: "{name} · not told: too many alerts in the last hour",
   noticeNoAddress: "{name} · not told: this account can't receive notifications",
+  noticeUnknown: "{name} · Droplet can't tell whether it arrived",
   noticeFallback: "told because nobody chosen could be",
   or: " or ",
 
@@ -97,6 +98,8 @@ export const INCIDENT_COPY = {
   ackResolved: "{name} resolved",
   ackClient: "{client} (as the device reported it)",
   ackViaNotification: "from the alert notification",
+  ackSignInConfirmed: "Sign-in confirmed",
+  ackSignInNotConfirmed: "Sign-in not confirmed",
 
   // ── the empty list ──
   emptyAttention: "Nothing needs attention",
@@ -334,6 +337,9 @@ export function noticeLine(n: IncidentNoticeView, cameras: readonly string[], tz
     case "skipped_no_address":
       line = fill(INCIDENT_COPY.noticeNoAddress, { name });
       break;
+    case "outcome_unknown":
+      line = fill(INCIDENT_COPY.noticeUnknown, { name });
+      break;
     default:
       line = name;
   }
@@ -347,6 +353,8 @@ export function ackLine(a: IncidentAckView, tz: string, now: Date): string {
     formatSiteWhen(a.at, tz, now),
     a.client ? fill(INCIDENT_COPY.ackClient, { client: a.client }) : null,
     a.viaNotification ? INCIDENT_COPY.ackViaNotification : null,
+    // Owner/admin only, and only from a box that sends it.
+    a.sessionChecked === true ? INCIDENT_COPY.ackSignInConfirmed : a.sessionChecked === false ? INCIDENT_COPY.ackSignInNotConfirmed : null,
   ]
     .filter((p): p is string => Boolean(p))
     .join(" · ");

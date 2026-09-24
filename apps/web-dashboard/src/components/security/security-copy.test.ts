@@ -53,8 +53,13 @@ import * as ExpectedActivityCard from "./ExpectedActivityCard";
 import * as ExpectedActivityDialog from "./ExpectedActivityDialog";
 import * as HoursEditor from "./HoursEditor";
 import * as LearningList from "./LearningList";
+import * as AckHistory from "./AckHistory";
 import * as IncidentCard from "./IncidentCard";
 import * as IncidentList from "./IncidentList";
+import * as IncidentView from "./IncidentView";
+import * as NoticeList from "./NoticeList";
+import * as ReasonList from "./ReasonList";
+import * as ResolveDialog from "./ResolveDialog";
 import * as incidentCopy from "./incident-copy";
 import * as ModeCard from "./ModeCard";
 import * as PrecisionCard from "./PrecisionCard";
@@ -66,6 +71,7 @@ import * as SecurityPage from "@/app/security/page";
 import * as SecurityZonesPage from "@/app/security/zones/page";
 import * as SecuritySettingsPage from "@/app/security/settings/page";
 import * as SecurityPatternsPage from "@/app/security/patterns/page";
+import * as SecurityIncidentPage from "@/app/security/incidents/[id]/page";
 
 const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/AreaDialog.tsx": AreaDialog,
@@ -83,6 +89,11 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/IncidentCard.tsx": IncidentCard,
   "src/components/security/IncidentList.tsx": IncidentList,
   "src/components/security/incident-copy.ts": incidentCopy,
+  "src/components/security/IncidentView.tsx": IncidentView,
+  "src/components/security/ReasonList.tsx": ReasonList,
+  "src/components/security/NoticeList.tsx": NoticeList,
+  "src/components/security/AckHistory.tsx": AckHistory,
+  "src/components/security/ResolveDialog.tsx": ResolveDialog,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
   "src/components/security/TimezoneSelect.tsx": TimezoneSelect,
@@ -92,6 +103,7 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/app/security/zones/page.tsx": SecurityZonesPage,
   "src/app/security/settings/page.tsx": SecuritySettingsPage,
   "src/app/security/patterns/page.tsx": SecurityPatternsPage,
+  "src/app/security/incidents/[id]/page.tsx": SecurityIncidentPage,
 };
 
 const BANNED: ReadonlyArray<readonly [name: string, re: RegExp]> = [

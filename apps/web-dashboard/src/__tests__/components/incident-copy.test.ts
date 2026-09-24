@@ -235,6 +235,16 @@ describe("who was told", () => {
     expect(noticeLine(notice({ outcome: "queued", channels: "", settledAt: null }), cams, TZ, NOW)).toBe("Stefan · being sent");
   });
 
+  it("delivery status unknown says so — never 'sent', never 'not told' (PR-B review: outcome_unknown)", () => {
+    expect(noticeLine(notice({ outcome: "outcome_unknown", channels: "", pushOutcome: null, settledAt: null }), cams, TZ, NOW)).toBe(
+      "Stefan · Droplet can't tell whether it arrived",
+    );
+  });
+
+  it("an outcome a later box adds renders the name alone rather than a guess", () => {
+    expect(noticeLine(notice({ outcome: "something_new" as never }), cams, TZ, NOW)).toBe("Stefan");
+  });
+
   it("the owner told as the fallback says so", () => {
     expect(noticeLine(notice({ reason: "fallback_owner" }), cams, TZ, NOW)).toBe(
       "Stefan · sent to their phone at 2:15 AM · told because nobody chosen could be",
@@ -250,6 +260,13 @@ describe("acknowledgements", () => {
     expect(ackLine({ action: "resolve", byName: "Stefan", at: at("01:30"), client: null, viaNotification: false, note: "Cleaner" }, TZ, NOW)).toBe(
       "Stefan resolved · 2:30 AM",
     );
+  });
+
+  it("whether the sign-in was confirmed live — only when the box sent it (owner/admin)", () => {
+    const base = { action: "acknowledge" as const, byName: "Maria", at: at("01:17"), client: null, viaNotification: false, note: "" };
+    expect(ackLine({ ...base, sessionChecked: true }, TZ, NOW)).toBe("Maria acknowledged · 2:17 AM · Sign-in confirmed");
+    expect(ackLine({ ...base, sessionChecked: false }, TZ, NOW)).toBe("Maria acknowledged · 2:17 AM · Sign-in not confirmed");
+    expect(ackLine(base, TZ, NOW)).toBe("Maria acknowledged · 2:17 AM");
   });
 });
 

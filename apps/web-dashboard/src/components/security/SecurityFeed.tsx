@@ -40,6 +40,7 @@
  *     it above both tabs) says what alerts do, or what they still need —
  *     and nothing at all while that is unknown.
  */
+import type { ReactNode } from "react";
 import Link from "next/link";
 import {
   ArrowRight,
@@ -182,7 +183,7 @@ export function kindsForView(view: SecurityView, includeLow: boolean): SecurityE
  * One glyph per row. Exhaustive over `SecurityEventKind` — a new kind fails
  * the type check here (the `never` below) instead of rendering no icon.
  */
-export function iconFor(e: SecurityEvent): LucideIcon {
+export function iconFor(e: Pick<SecurityEvent, "kind" | "labels">): LucideIcon {
   switch (e.kind) {
     case "detection":
     case "detection_ongoing":
@@ -216,14 +217,16 @@ export function iconFor(e: SecurityEvent): LucideIcon {
   }
 }
 
+type RowEvent = Pick<SecurityEvent, "kind" | "camera" | "summary" | "labels" | "score">;
+
 /** Camera health reads better with the household's name for the camera in it. */
-function titleFor(e: SecurityEvent, cameraLabel: (name: string) => string): string {
+function titleFor(e: RowEvent, cameraLabel: (name: string) => string): string {
   if (e.camera && e.kind === "camera_offline") return `${cameraLabel(e.camera)} stopped reporting`;
   if (e.camera && e.kind === "camera_online") return `${cameraLabel(e.camera)} is reporting again`;
   return e.summary;
 }
 
-function subFor(e: SecurityEvent, cameraLabel: (name: string) => string): string {
+function subFor(e: RowEvent, cameraLabel: (name: string) => string): string {
   const parts: string[] = [];
   if (e.kind === "threat") parts.push(e.labels[0] === "auth" ? "Sign-in" : "Network");
   if (e.kind === "mode_changed") parts.push(COPY.modeRowSub);
@@ -478,68 +481,9 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
   return (
     <>
       <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
-        {props.events.map((e) => {
-          const Icon = iconFor(e);
-          const low = e.kind === "detection_low";
-          return (
-            <li className="lrow" key={e.id} data-kind={e.kind} style={low ? { opacity: 0.7 } : undefined}>
-              <span className={`ri${e.severity === "info" ? "" : " brand"}`} aria-hidden>
-                <Icon size={16} />
-              </span>
-              <span className="rt">
-                {/* The shell's row title is one ellipsised line; a security
-                    event's title is the part that must never be cut off. */}
-                <span className="nm" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
-                  {e.camera ? (
-                    <Link href={`/cameras/${encodeURIComponent(e.camera)}`}>{titleFor(e, cameraLabel)}</Link>
-                  ) : (
-                    titleFor(e, cameraLabel)
-                  )}
-                </span>
-                <span
-                  className="sub"
-                  style={e.zones.length > 0 ? { whiteSpace: "normal", overflowWrap: "anywhere" } : undefined}
-                >
-                  {/* In the second line, not beside the title: on a phone a
-                      badge column squeezes the headline to a word per line.
-                      The areas lead it (WARP-2977 P2b): where comes first. */}
-                  {e.zones.map((z) => (
-                    <span key={z.id} className="badge muted" data-area={z.id} style={{ margin: "0 6px 2px 0" }}>
-                      {z.name}
-                    </span>
-                  ))}
-                  {e.severity === "alert" && (
-                    <span className="badge danger" style={{ marginRight: 6 }}>
-                      Serious
-                    </span>
-                  )}
-                  {e.kind === "detection_ongoing" && (
-                    <span className="badge info" data-ongoing style={{ marginRight: 6 }}>
-                      {COPY.stillInView}
-                    </span>
-                  )}
-                  <span>{subFor(e, cameraLabel)}</span>
-                </span>
-                {/* WARP-2978 — the incident the engine grouped this row into (a row the viewer
-                    can see implies its incident is visible to them). */}
-                {e.incident && (
-                  <span className="sub">
-                    <Link
-                      href={`/security/incidents/${encodeURIComponent(e.incident.id)}`}
-                      style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--brand)" }}
-                    >
-                      {COPY.inIncident}
-                      <ArrowRight size={12} aria-hidden />
-                    </Link>
-                  </span>
-                )}
-              </span>
-              <time className="rmeta mono" dateTime={e.startedAt} title={new Date(e.startedAt).toLocaleString()}>
-                {formatRelativeTime(e.startedAt, props.now)}
-              </time>
-            </li>
-          );
-        })}
+        {props.events.map((e) => (
+          <SecurityEventRow key={e.id} event={e} cameraLabel={cameraLabel} now={props.now} />
+        ))}
       </ul>
       {props.hasMore && (
         <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
@@ -550,6 +494,86 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * One feed row. WARP-2978 — exported so the incident page renders its events
+ * with the same row. `zones` and `incident` are the feed route's decorations:
+ * an incident's member events arrive without them (route 18 adds `alsoIn`
+ * instead), so both are optional here. `children` go under the row's lines.
+ */
+export function SecurityEventRow({
+  event: e,
+  cameraLabel,
+  now,
+  children,
+  testId,
+}: {
+  event: Omit<SecurityEvent, "zones" | "incident"> & Partial<Pick<SecurityEvent, "zones" | "incident">>;
+  cameraLabel: (name: string) => string;
+  now: Date;
+  children?: ReactNode;
+  testId?: string;
+}) {
+  const Icon = iconFor(e);
+  const low = e.kind === "detection_low";
+  const zones = e.zones ?? [];
+  return (
+    <li className="lrow" data-kind={e.kind} data-testid={testId} style={low ? { opacity: 0.7 } : undefined}>
+      <span className={`ri${e.severity === "info" ? "" : " brand"}`} aria-hidden>
+        <Icon size={16} />
+      </span>
+      <span className="rt">
+        {/* The shell's row title is one ellipsised line; a security
+            event's title is the part that must never be cut off. */}
+        <span className="nm" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
+          {e.camera ? (
+            <Link href={`/cameras/${encodeURIComponent(e.camera)}`}>{titleFor(e, cameraLabel)}</Link>
+          ) : (
+            titleFor(e, cameraLabel)
+          )}
+        </span>
+        <span className="sub" style={zones.length > 0 ? { whiteSpace: "normal", overflowWrap: "anywhere" } : undefined}>
+          {/* In the second line, not beside the title: on a phone a
+              badge column squeezes the headline to a word per line.
+              The areas lead it (WARP-2977 P2b): where comes first. */}
+          {zones.map((z) => (
+            <span key={z.id} className="badge muted" data-area={z.id} style={{ margin: "0 6px 2px 0" }}>
+              {z.name}
+            </span>
+          ))}
+          {e.severity === "alert" && (
+            <span className="badge danger" style={{ marginRight: 6 }}>
+              Serious
+            </span>
+          )}
+          {e.kind === "detection_ongoing" && (
+            <span className="badge info" data-ongoing style={{ marginRight: 6 }}>
+              {COPY.stillInView}
+            </span>
+          )}
+          <span>{subFor(e, cameraLabel)}</span>
+        </span>
+        {/* WARP-2978 — the incident the engine grouped this row into (a row the viewer
+            can see implies its incident is visible to them). */}
+        {e.incident && (
+          <span className="sub">
+            <Link
+              href={`/security/incidents/${encodeURIComponent(e.incident.id)}`}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--brand)" }}
+            >
+              {COPY.inIncident}
+              <ArrowRight size={12} aria-hidden />
+            </Link>
+          </span>
+        )}
+        {children}
+      </span>
+      <time className="rmeta mono" dateTime={e.startedAt} title={new Date(e.startedAt).toLocaleString()}>
+        {formatRelativeTime(e.startedAt, now)}
+      </time>
+    </li>
   );
 }
 

@@ -4081,6 +4081,11 @@ export interface IncidentAckView {
   viaNotification: boolean;
   /** Resolve's note; "" when none. */
   note: string;
+  /**
+   * Whether the sign-in that acted was confirmed live on the box (WARP-2804).
+   * Owner/admin only, and only on a box that sends it — never assume it.
+   */
+  sessionChecked?: boolean;
 }
 
 export type SecurityNoticeOutcome =
@@ -4090,8 +4095,10 @@ export type SecurityNoticeOutcome =
   | "skipped_no_access"
   | "skipped_not_visible"
   | "skipped_capped"
-  | "skipped_no_address";
-/** `fallback_owner`: nobody chosen could be told, so an owner was told instead. */
+  | "skipped_no_address"
+  /** The delivery's status couldn't be established. */
+  | "outcome_unknown";
+/** `fallback_owner`: nobody chosen could be told (or see the camera), so an owner was told instead. */
 export type SecurityNoticeReason = "routed" | "fallback_owner";
 
 /** Who was told. Owner/admin receive every notice; anyone else only their own. */
@@ -4107,8 +4114,12 @@ export interface IncidentNoticeView {
   settledAt: string | null;
 }
 
-/** A visible member event: the feed row shape, plus the other visible areas it also matched. */
-export type IncidentMemberView = SecurityEvent & { alsoIn: SecurityZoneRef[] };
+/**
+ * A visible member event: the feed row as the store returns it — WITHOUT the
+ * feed route's `zones` and `incident` decorations (route 18 does not add them)
+ * — plus `alsoIn`, the other visible areas it matched when it was sorted.
+ */
+export type IncidentMemberView = Omit<SecurityEvent, "zones" | "incident"> & { alsoIn: SecurityZoneRef[] };
 
 /** GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike. */
 export interface IncidentDetail extends IncidentSummary {
@@ -4120,6 +4131,13 @@ export interface IncidentDetail extends IncidentSummary {
   acks: IncidentAckView[];
   notices: IncidentNoticeView[];
   eventsKept: SecurityIncidentEventsKept;
+  /**
+   * Whether THIS viewer may acknowledge or resolve it: false when the codes
+   * they can see don't carry its severity (then there are no acks, notices or
+   * lastAck for them, and the routes answer 409 NOT_ACTIONABLE). The controls
+   * render only when this is true.
+   */
+  actionable: boolean;
   /** The viewer's Security level on the box, and whether they have acknowledged or resolved this incident. */
   viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
 }
