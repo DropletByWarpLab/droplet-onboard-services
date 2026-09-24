@@ -125,7 +125,12 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 .droplet-shell .btn.danger { background: #ef4444; border-color: #ef4444; color: #fff; }
 .droplet-shell .btn.danger:hover { background: #dc2626; border-color: #dc2626; }
 .droplet-shell .btn.sm { height: 30px; padding: 0 11px; font-size: 12.5px; }
-.droplet-shell .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* aria-disabled reads as inert too: a button that must keep keyboard focus while
+   it can't act (Security's Save, Restore and mode controls) cannot use the real
+   `disabled`, which drops focus to <body>. Every other aria-disabled .btn also
+   sets `disabled`, so it looks the same as before. */
+.droplet-shell .btn:disabled,
+.droplet-shell .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 
 .droplet-shell .icon-btn { width: 36px; height: 36px; border-radius: var(--radius-input); display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); cursor: pointer;

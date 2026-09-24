@@ -13,7 +13,11 @@
  *     delete refuses while a run is active;
  *   - propose flips the row to `proposed` with the tag;
  *   - git: the mcp principal is 403, family and guest fetch (push flag off),
- *     owner pushes (push flag on), an unknown repo 404.
+ *     owner pushes (push flag on), an unknown repo 404;
+ *   - WARP-2899: export is a git bundle for an owner/admin PERSON only (the
+ *     mcp principal, a run, family and guest are 403), with one audit row
+ *     carrying the bundle's sha256; a connector draft's readback rides the
+ *     detail response and the propose activity.
  *
  * The sandbox is a recording fake: the routes are the unit, the container
  * has its own suite (services/sandbox/tests/test_workspaces.py).
@@ -21,6 +25,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
+import { createHash } from "node:crypto";
 
 vi.mock("../config.js", () => ({
   config: {
@@ -37,7 +42,8 @@ vi.mock("../services/notifications.service.js", () => ({
 }));
 
 import { createWorkspaceRouter, AGENT_RUN_HEADER } from "../routes/workspace.js";
-import { refuseRunArgv, type WorkspaceSandboxClient } from "../services/workspace.service.js";
+import { refuseRunArgv, WorkspaceSandboxError, type WorkspaceSandboxClient } from "../services/workspace.service.js";
+import type { ConnectorDraftFacts } from "../services/connector-draft.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -47,7 +53,18 @@ const admin: AuthUser = { id: "u-admin", username: "stefan", displayName: "Stefa
 const family: AuthUser = { id: "u-family", username: "kid", displayName: "Kid", role: "family" };
 const guest: AuthUser = { id: "u-guest", username: "guest", displayName: "Guest", role: "guest" };
 
-function fakeSandbox() {
+const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const BUNDLE = Buffer.from("# v2 git bundle\n0123 PACK bytes");
+const ACME: ConnectorDraftFacts = {
+  provider: "acme",
+  displayName: "Acme",
+  host: { kind: "static", hosts: ["api.acme.example"] },
+  files: {},
+  problems: [],
+};
+const ACME_READBACK = "drafts a connector for Acme; nothing on this box will dial api.acme.example until Warp Lab ships it";
+
+function fakeSandbox(draft: ConnectorDraftFacts | null = null) {
   const calls: Array<{ op: string; args: unknown[] }> = [];
   const rec = (op: string) => (...args: unknown[]) => {
     calls.push({ op, args });
@@ -64,7 +81,10 @@ function fakeSandbox() {
     }),
     op: vi.fn(async (id: string, op: string, body: Record<string, unknown>) => {
       rec(op)(id, body);
-      if (op === "propose") return { commit: "abc", tag: `proposal/${body.version as string}`, manifest: {} };
+      if (op === "propose" && draft) {
+        return { commit: "abc", tag: `proposal/${body.version as string}`, manifest: null, kind: "connector-draft", connectorDraft: draft };
+      }
+      if (op === "propose") return { commit: "abc", tag: `proposal/${body.version as string}`, manifest: {}, kind: "extension" };
       if (op === "run") return { argv: body.argv, exitCode: 0, timedOut: false, durationMs: 1, stdout: "", stderr: "", truncated: false };
       return { ok: true, op };
     }),
@@ -73,12 +93,24 @@ function fakeSandbox() {
       rec("git")(input);
       return { status: 200, headers: { "content-type": "application/x-git-upload-pack-advertisement" }, body: Buffer.from("001e# service") };
     }),
+    bundle: vi.fn(async (id: string) => {
+      rec("bundle")(id);
+      return { body: BUNDLE, head: HEAD };
+    }),
+    connectorDraft: vi.fn(async (id: string, ref: string) => {
+      rec("connectorDraft")(id, ref);
+      return draft;
+    }),
   };
   return { client, calls };
 }
 
-function buildApp(user: AuthUser, db = createAgentRunPrismaMock({ users: [owner, admin, family, guest] })) {
-  const sandbox = fakeSandbox();
+function buildApp(
+  user: AuthUser,
+  db = createAgentRunPrismaMock({ users: [owner, admin, family, guest] }),
+  draft: ConnectorDraftFacts | null = null,
+) {
+  const sandbox = fakeSandbox(draft);
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -285,6 +317,7 @@ describe("create / detail / delete", () => {
     const detail = await request(app).get("/api/workspace/ws-a");
     expect(detail.status).toBe(200);
     expect(detail.body.git).toMatchObject({ branch: "work" });
+    expect(detail.body.connectorDraft).toBeNull();
     expect(detail.body.runs.map((r: { id: string }) => r.id)).toEqual([runId]);
     expect((await request(app).delete("/api/workspace/ws-a")).status).toBe(409);
     await db.prisma.agentRun.updateMany({ where: { id: runId }, data: { status: "succeeded" } });
@@ -393,5 +426,174 @@ describe("git smart HTTP (/api/git)", () => {
     expect(call.body.toString()).toBe("0000PACK");
     expect(recordActivityMock).toHaveBeenCalledWith(expect.objectContaining({ what: "Workspace push" }));
     expect((await request(app).get("/api/git/templates.git/info/refs?service=git-upload-pack")).status).toBe(200);
+  });
+});
+
+// ── WARP-2899: connector drafts and the export ──────────────────────────────
+
+/** supertest's parser hook: buffer an octet-stream body (it hands over the raw IncomingMessage). */
+function binary(res: request.Response, done: (err: Error | null, body: unknown) => void): void {
+  const stream = res as unknown as NodeJS.ReadableStream;
+  const chunks: Buffer[] = [];
+  stream.on("data", (c: Buffer) => chunks.push(c));
+  stream.on("end", () => done(null, Buffer.concat(chunks)));
+}
+
+describe("the connector-draft readback (WARP-2899)", () => {
+  it("detail carries the readback, asked at the proposed tag when there is one, else at work", async () => {
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    const first = await request(app).get("/api/workspace/ws-a");
+    expect(first.body.connectorDraft).toEqual({ provider: "acme", displayName: "Acme", readback: ACME_READBACK, problems: [] });
+    expect(sandbox.calls.find((c) => c.op === "connectorDraft")?.args).toEqual(["ws-a", "work"]);
+    await db.prisma.workshopWorkspace.update({ where: { id: "ws-a" }, data: { status: "proposed", proposedTag: "proposal/0.2.0" } });
+    await request(app).get("/api/workspace/ws-a");
+    expect(sandbox.calls.filter((c) => c.op === "connectorDraft").at(-1)?.args).toEqual(["ws-a", "proposal/0.2.0"]);
+  });
+
+  it("a sandbox error reads as an error on the field, never fails the detail", async () => {
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    (sandbox.client.connectorDraft as unknown as { mockRejectedValueOnce: (e: Error) => void }).mockRejectedValueOnce(
+      new WorkspaceSandboxError("the sandbox could not be reached", 502, "UNREACHABLE"),
+    );
+    const detail = await request(app).get("/api/workspace/ws-a");
+    expect(detail.status).toBe(200);
+    expect(detail.body.connectorDraft).toEqual({ error: "the sandbox could not be reached", code: "UNREACHABLE" });
+  });
+
+  it("propose of a connector draft records 'Connector draft proposed' with the readback, and still ends the workspace", async () => {
+    const { app, db } = buildApp(mcp, undefined, ACME);
+    await seed(db);
+    const runId = await seedRun(db, "ws-a");
+    const res = await request(app)
+      .post("/api/workspace/ws-a/propose")
+      .set("X-Nextcloud-User", "romain")
+      .set(AGENT_RUN_HEADER, runId)
+      .send({ name: "Acme draft", version: "0.1.0", summary: "Drafts Acme." });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ kind: "connector-draft", manifest: null, readback: ACME_READBACK });
+    expect(db.workspaces[0]).toMatchObject({ status: "proposed", proposedTag: "proposal/0.1.0" });
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Connector draft proposed",
+        sub: ACME_READBACK,
+        refs: expect.objectContaining({ provider: "acme", tag: "proposal/0.1.0" }),
+      }),
+    );
+  });
+
+  it("an extension proposes exactly as before — no readback", async () => {
+    const { app, db } = buildApp(mcp);
+    await seed(db);
+    const runId = await seedRun(db, "ws-a");
+    const res = await request(app)
+      .post("/api/workspace/ws-a/propose")
+      .set("X-Nextcloud-User", "romain")
+      .set(AGENT_RUN_HEADER, runId)
+      .send({ name: "Word counter", version: "0.1.0", summary: "Counts." });
+    expect(res.body.readback).toBeUndefined();
+    expect(recordActivityMock).toHaveBeenCalledWith(expect.objectContaining({ what: "Extension proposed", sub: "Word counter 0.1.0" }));
+  });
+});
+
+describe("GET /api/workspace/:id/export (WARP-2899)", () => {
+  it.each([
+    ["owner", owner],
+    ["admin", admin],
+  ])("%s downloads the bundle as an attachment, and one audit row carries its sha256", async (_label, user) => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      const { app, db, sandbox } = buildApp(user, undefined, ACME);
+      await seed(db);
+      const res = await request(app).get("/api/workspace/ws-a/export").buffer(true).parse(binary);
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("application/octet-stream");
+      expect(res.headers["content-disposition"]).toBe('attachment; filename="ws-a-0123456.bundle"');
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      expect(res.headers["cache-control"]).toBe("no-store");
+      expect(Buffer.compare(res.body as Buffer, BUNDLE)).toBe(0);
+      // MUTATION: drop the recordActivity call → red.
+      const rows = recordActivityMock.mock.calls.filter((c) => (c[0] as { what?: string }).what === "Workspace exported");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]![0]).toMatchObject({
+        kind: "tool_run",
+        sub: "ws-a",
+        refs: {
+          workspaceId: "ws-a",
+          head: HEAD,
+          sha256: createHash("sha256").update(BUNDLE).digest("hex"),
+          bytes: BUNDLE.length,
+          proposedTag: null,
+          provider: "acme",
+        },
+      });
+      expect(sandbox.calls.filter((c) => c.op === "bundle")).toEqual([{ op: "bundle", args: ["ws-a"] }]);
+      // The orchestrator dials nothing but the sandbox — and the fake is the sandbox.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ["family", family],
+    ["guest", guest],
+    ["the mcp principal", mcp],
+  ])("%s is 403 and the sandbox is never asked", async (_label, user) => {
+    // MUTATION: guard the route with `gate` (requireRoleOrMcpService) instead
+    // of requireRole + the human check → the mcp case goes 200.
+    const { app, db, sandbox } = buildApp(user);
+    await seed(db);
+    const res = await request(app).get("/api/workspace/ws-a/export").set("X-Nextcloud-User", "romain");
+    expect(res.status).toBe(403);
+    expect(sandbox.calls).toEqual([]);
+    // (the denial itself is recorded — recordAccessDenied — but no export row)
+    expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Workspace exported" }));
+  });
+
+  it("an owner's request carrying a run header is 403 — a run does not export", async () => {
+    // MUTATION: drop the AGENT_RUN_HEADER check → 200.
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    const runId = await seedRun(db, "ws-a");
+    const res = await request(app).get("/api/workspace/ws-a/export").set(AGENT_RUN_HEADER, runId);
+    expect(res.status).toBe(403);
+    expect(sandbox.calls).toEqual([]);
+  });
+
+  it("an unknown workspace is 404 and a malformed id 400, without dialling the sandbox", async () => {
+    const { app, sandbox } = buildApp(owner);
+    expect((await request(app).get("/api/workspace/ws-nope/export")).status).toBe(404);
+    expect((await request(app).get("/api/workspace/Bad_Id/export")).status).toBe(400);
+    expect(sandbox.calls).toEqual([]);
+  });
+
+  it("a failed draft lookup never blocks the download; the provider is then null", async () => {
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    (sandbox.client.connectorDraft as unknown as { mockRejectedValueOnce: (e: Error) => void }).mockRejectedValueOnce(
+      new WorkspaceSandboxError("boom", 502, "SANDBOX_ERROR"),
+    );
+    const res = await request(app).get("/api/workspace/ws-a/export").buffer(true).parse(binary);
+    expect(res.status).toBe(200);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Workspace exported", refs: expect.objectContaining({ provider: null }) }),
+    );
+  });
+
+  it("asks for the draft at the proposed tag, and relays a sandbox refusal (413) with its status", async () => {
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    await db.prisma.workshopWorkspace.update({ where: { id: "ws-a" }, data: { status: "proposed", proposedTag: "proposal/0.1.0" } });
+    await request(app).get("/api/workspace/ws-a/export").buffer(true).parse(binary);
+    expect(sandbox.calls.find((c) => c.op === "connectorDraft")?.args).toEqual(["ws-a", "proposal/0.1.0"]);
+    recordActivityMock.mockClear();
+    (sandbox.client.bundle as unknown as { mockRejectedValueOnce: (e: Error) => void }).mockRejectedValueOnce(
+      new WorkspaceSandboxError("the workspace exceeds the 64 MB export ceiling", 413, "SANDBOX_ERROR"),
+    );
+    const res = await request(app).get("/api/workspace/ws-a/export");
+    expect(res.status).toBe(413);
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 });

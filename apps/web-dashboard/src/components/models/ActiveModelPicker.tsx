@@ -12,7 +12,9 @@
  *   - Members (non owner/admin) see the active model read-only, with a plain
  *     note about who can change it — buttons aren't shown as disabled walls.
  *   - One model installed → the selector still shows it (marked active) so the
- *     capability is visible; there's simply nothing else to switch to yet.
+ *     capability is visible; there's simply nothing else to switch to yet,
+ *     and the note points at "Available to install" (WARP-3048), which now
+ *     always says what can be added — or why nothing can.
  *   - "Takes effect on your next message" is stated, not hidden: switching
  *     only re-points the default; the model loads when chat next uses it.
  */
@@ -178,7 +180,16 @@ export function ActiveModelPicker({
           ? error
           : canManage
             ? models.length <= 1
-              ? "This is the only model installed on your Droplet right now, so there’s nothing else to switch to yet."
+              ? (
+                  <>
+                    This is the only model installed on your Droplet, so
+                    there’s nothing to switch to yet — see{" "}
+                    <a href="#models-catalog" style={{ color: "var(--brand)" }}>
+                      Available to install
+                    </a>{" "}
+                    below for what you can add.
+                  </>
+                )
               : "Switching takes effect on your next message — the first reply may take a moment while the model loads."
             : "Only owners and admins can change the model."}
       </p>

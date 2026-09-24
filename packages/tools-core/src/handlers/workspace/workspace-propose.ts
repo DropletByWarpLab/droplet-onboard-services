@@ -9,6 +9,11 @@
  *
  * A second proposal of the same version is refused (409), never
  * overwritten — bump the version.
+ *
+ * WARP-2899 — a workspace holding a connector draft (the `rest-profile`
+ * template) proposes WITHOUT a manifest: the result carries
+ * `kind: "connector-draft"` and the readback sentence. The tool's name,
+ * schema, tier and description are unchanged on purpose (no catalog churn).
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { bind, fail, isRefusal, relayError } from "./_shared.js";
@@ -50,7 +55,30 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     { headers: bound.headers },
   );
   if (!res.ok) return relayError(res, "propose from the workspace");
-  const data = (await res.json()) as { commit: string; tag: string; manifest: Record<string, unknown> };
+  const data = (await res.json()) as {
+    commit: string;
+    tag: string;
+    manifest: Record<string, unknown> | null;
+    kind?: "extension" | "connector-draft";
+    readback?: string;
+  };
+  // WARP-2899 — a connector draft is not an extension: no manifest, nothing
+  // to install. The model hears what it drafted and that nothing will dial
+  // the vendor; the route composed that sentence from the draft's own files.
+  if (data.kind === "connector-draft") {
+    const readback = typeof data.readback === "string" ? data.readback : "drafts a connector";
+    return {
+      ok: true,
+      data: {
+        workspace: bound.workspace,
+        commit: data.commit.slice(0, 12),
+        tag: data.tag,
+        kind: data.kind,
+        readback,
+        message: `Proposed a connector draft (${data.tag}): ${readback}. This run is finished; an owner exports it from the Workshop for a Warp Lab PR.`,
+      },
+    };
+  }
   return {
     ok: true,
     data: {

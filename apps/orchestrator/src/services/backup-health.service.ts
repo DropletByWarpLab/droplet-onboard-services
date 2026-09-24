@@ -176,8 +176,14 @@ export function createBackupHealthCheck(deps: {
         select: { username: true },
       });
       const body = backupStoppedBody(view);
+      // WARP-2911 — contained per recipient: one refused or failed send never
+      // costs the recipients after it the alert.
       for (const { username } of users) {
-        await sendNotification(prisma, { userId: username, kind: "system", title: BACKUP_STOPPED_TITLE, body, url: "/settings" });
+        try {
+          await sendNotification(prisma, { username, kind: "system", title: BACKUP_STOPPED_TITLE, body, url: "/settings" });
+        } catch (err) {
+          logger.error({ err, username }, "backup-health: alert to one recipient failed — continuing with the rest");
+        }
       }
       logger.warn({ health: view.health, recipients: users.length }, "backup-health: backups stopped — owner notified");
       return view;

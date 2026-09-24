@@ -111,6 +111,10 @@ describe("<ActiveModelPicker />", () => {
     expect(
       screen.getByRole("radio", { name: /gpt-oss:20b/i }),
     ).toHaveAttribute("aria-checked", "true");
+    // WARP-3048 — the note says what to do next, not just "nothing to do".
+    expect(
+      screen.getByRole("link", { name: "Available to install" }),
+    ).toHaveAttribute("href", "#models-catalog");
   });
 
   it("surfaces the error copy when the change fails", async () => {

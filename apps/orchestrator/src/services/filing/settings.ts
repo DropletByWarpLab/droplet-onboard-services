@@ -102,13 +102,31 @@ export async function permittedOwnerIds(
   prisma: PrismaClient,
   settings: ResolvedFilingSettings,
 ): Promise<string[]> {
-  if (!settings.enabledById) return [];
+  const username = await enablingOwnerUsername(prisma, settings);
+  if (!username) return [];
+  return [username, HOUSEHOLD_INDEX_USER];
+}
+
+/**
+ * WARP-2910 — the enabling owner's Nextcloud username (`User.username`), or
+ * null when filing has no enabling owner or that owner's row is gone.
+ *
+ * `enabledById` is a `User.id`: `routes/crm-filing.ts` stamps it from the
+ * session's `req.user.id`. The file index AND the notification subsystem are
+ * both keyed on the username, so every consumer that needs to reach the owner
+ * goes through this one lookup — the digest used to hand the id straight to
+ * `sendNotification` and notified nobody.
+ */
+export async function enablingOwnerUsername(
+  prisma: PrismaClient,
+  settings: ResolvedFilingSettings,
+): Promise<string | null> {
+  if (!settings.enabledById) return null;
   const user = await prisma.user.findUnique({
     where: { id: settings.enabledById },
     select: { username: true },
   });
-  if (!user?.username) return [];
-  return [user.username, HOUSEHOLD_INDEX_USER];
+  return user?.username || null;
 }
 
 /**

@@ -1,0 +1,38 @@
+{
+  "provider": "acme",
+  "displayName": "Acme Tasks",
+  "baseUrl": { "kind": "static", "origin": "@ORIGIN@" },
+  "auth": { "headerName": "Authorization", "valueTemplate": "Bearer {{token}}" },
+  "constantHeaders": { "Acme-Version": "2026-01-01" },
+  "probePath": "/v1/me",
+  "minRequestIntervalMs": 100,
+  "datasets": [
+    {
+      "dataset": "task",
+      "path": "/v1/tasks",
+      "watermark": { "name": "updated_since", "location": "query", "format": "iso", "complete": true },
+      "pagination": { "kind": "cursor", "nextCursorPath": "meta.next_cursor", "cursorParam": "cursor" },
+      "rowsPath": "data",
+      "fieldMap": { "task_id": "id", "status": "state", "title": "name", "updated_at": "updated_at" }
+    }
+  ],
+  "egress": { "dataClass": "user-content-on-request", "purpose": "Acme Tasks: read-only tasks, fetched on request under the owner's own token." },
+  "credential": {
+    "pastes": "A personal API token from the owner's own Acme settings",
+    "acceptedShape": "An opaque token in the Authorization header",
+    "fullPrivilegeAlternative": "",
+    "scopeGranularity": "read-only token kind",
+    "expires": "optional, owner-chosen",
+    "accept": "any non-empty token",
+    "reject": "nothing by shape",
+    "provisionedBy": "The account owner, in their own Acme settings"
+  },
+  "guide": {
+    "planPrerequisite": "Every plan, including Free",
+    "cost": "",
+    "clickPath": ["Settings", "API tokens", "Create token"],
+    "scopes": "read:tasks",
+    "rotation": "",
+    "revocation": "Delete the token under Settings, API tokens"
+  }
+}

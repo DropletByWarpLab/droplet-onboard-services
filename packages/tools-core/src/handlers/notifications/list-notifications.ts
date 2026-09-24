@@ -26,7 +26,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   }
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 30));
   const rows = (await ctx.prisma.notificationLog.findMany({
-    where: { userId: ctx.userId },
+    // WARP-2911 — `ctx.userId` is the caller's username; the column says so.
+    where: { username: ctx.userId },
     orderBy: { createdAt: "desc" },
     take: limit,
   })) as unknown as NotificationRow[];

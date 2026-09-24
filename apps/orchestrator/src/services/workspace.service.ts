@@ -17,6 +17,7 @@
  */
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { parseConnectorDraftFacts, type ConnectorDraftFacts } from "./connector-draft.js";
 
 const logger = createLogger("workspace");
 
@@ -101,6 +102,14 @@ export interface WorkspaceSandboxClient {
     user: string;
     allowPush: boolean;
   }): Promise<{ status: number; headers: Record<string, string>; body: Buffer }>;
+  /**
+   * WARP-2899 — the workspace as a `git bundle` (the `work` branch and every
+   * proposal tag), built by the sandbox from its local bare repo, plus the
+   * head of `work`. The export's only dial.
+   */
+  bundle(id: string): Promise<{ body: Buffer; head: string }>;
+  /** WARP-2899 — a connector draft's facts at `ref` (work, or a proposal tag); null when there is no draft. */
+  connectorDraft(id: string, ref: string): Promise<ConnectorDraftFacts | null>;
 }
 
 export type WorkspaceOp = "read" | "search" | "diff" | "log" | "write" | "commit" | "run" | "propose";
@@ -113,6 +122,9 @@ export interface WorkspaceSandboxClientOptions {
 
 const CALLER_TIMEOUT_GRACE_MS = 5_000;
 const DEFAULT_OP_TIMEOUT_MS = 30_000;
+const BUNDLE_TIMEOUT_MS = 120_000;
+/** A commit id — the export's filename is built from it, so nothing else passes. */
+const COMMIT_ID = /^[0-9a-f]{40,64}$/;
 export const RUN_DEFAULT_TIMEOUT_MS = 120_000;
 export const RUN_MAX_TIMEOUT_MS = 600_000;
 
@@ -213,6 +225,59 @@ export function createWorkspaceSandboxClient(opts: WorkspaceSandboxClientOptions
     async op(id, op, body, timeoutMs) {
       const budget = timeoutMs ?? (op === "run" ? RUN_DEFAULT_TIMEOUT_MS : DEFAULT_OP_TIMEOUT_MS);
       return unwrap(await call("POST", `/workspaces/${encodeURIComponent(id)}/${op}`, body, budget), op);
+    },
+    async bundle(id) {
+      const { baseUrl, token } = settings();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), BUNDLE_TIMEOUT_MS + CALLER_TIMEOUT_GRACE_MS);
+      let res: Response;
+      let body: Buffer;
+      try {
+        res = await fetchImpl(`${baseUrl}/workspaces/${encodeURIComponent(id)}/bundle`, {
+          method: "GET",
+          headers: { Accept: "application/octet-stream", Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        body = Buffer.from(await res.arrayBuffer());
+      } catch (err) {
+        if (controller.signal.aborted) {
+          throw new WorkspaceSandboxError(`the sandbox did not answer within ${BUNDLE_TIMEOUT_MS} ms`, 504, "TIMEOUT");
+        }
+        logger.warn({ err }, "workspace_bundle_unreachable");
+        throw new WorkspaceSandboxError("the sandbox could not be reached", 502, "UNREACHABLE");
+      } finally {
+        clearTimeout(timer);
+      }
+      if (res.status === 503) {
+        throw new WorkspaceSandboxError("the sandbox refused: its bearer is not configured", 503, "NOT_CONFIGURED");
+      }
+      if (res.status < 200 || res.status >= 300) {
+        let json: unknown = null;
+        try {
+          json = JSON.parse(body.toString("utf8"));
+        } catch {
+          json = null;
+        }
+        unwrap({ status: res.status, json }, "bundle");
+      }
+      const head = res.headers.get("x-bundle-head") ?? "";
+      if (!COMMIT_ID.test(head)) {
+        logger.warn({ id }, "workspace_bundle_bad_head");
+        throw new WorkspaceSandboxError("bundle: the sandbox named no commit for work", 502, "SANDBOX_ERROR");
+      }
+      return { body, head };
+    },
+    async connectorDraft(id, ref) {
+      const r = unwrap<{ draft?: unknown }>(
+        await call(
+          "GET",
+          `/workspaces/${encodeURIComponent(id)}/connector-draft?ref=${encodeURIComponent(ref)}`,
+          undefined,
+          DEFAULT_OP_TIMEOUT_MS,
+        ),
+        "connector draft",
+      );
+      return parseConnectorDraftFacts(r?.draft ?? null);
     },
     async output(id) {
       return unwrap(
