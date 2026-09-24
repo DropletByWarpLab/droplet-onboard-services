@@ -219,6 +219,8 @@ jobs:
               - "services/routing/**"
             switch:
               - "services/switch/**"
+            device-gateway:
+              - "services/device-gateway/**"
             camera-discovery:
               - "services/camera-discovery/**"
               # WARP-1918: this leg's pytest guards the baseline birdseye
@@ -369,7 +371,7 @@ jobs:
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
             "voice-io","device-identity-svc","erp-sql-bridge",
-            "inference-manager","doc-render","sandbox"]
+            "inference-manager","doc-render","sandbox","device-gateway"]
           ALL_STORAGE: '["storage"]'
           ALL_FIPS: '["fips"]'
           ALL_HADOLINT: '["hadolint"]'

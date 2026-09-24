@@ -198,6 +198,7 @@ jobs:
           - service: ai-gateway
           - service: routing
           - service: switch
+          - service: device-gateway
           - service: camera-discovery
           # WARP-970 coverage gate — keeps this list an exact mirror of
           # ci.yml's python matrix; same requirements-dev.txt + bare-pytest

@@ -1,0 +1,11 @@
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+# Field protocols — all permissive licences (checked 2026-09-24).
+bacpypes3==0.0.110  # BACnet/IP — MIT
+pymodbus==3.15.0    # Modbus TCP — BSD-3-Clause
+pysnmp==7.1.29      # SNMP v2c/v3 — BSD-2-Clause
+xknx==3.20.0        # KNX/IP — MIT
+# WARP-1023 — FIPS boot self-test probe reads cryptography's backend flag
+# (xknx also pulls it in); kept in lockstep with services/switch.
+cryptography>=50.0.1
