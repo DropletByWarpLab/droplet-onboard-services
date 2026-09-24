@@ -27,9 +27,11 @@ export const SECURITY_MIN_DURATION_SEC = 2;
  * Mirrors the Prisma `SecurityEventSource` enum. `site_mode` (WARP-2977 P2b)
  * rows are written in-transaction by the site-mode service, never through
  * `recordSecurityEvent`; the union carries them so every reader of a stored
- * row is exhaustive over what the store can hold.
+ * row is exhaustive over what the store can hold. `matter_lock` (P2b-2) rows
+ * come from the Matter lock adapter (security-lock-adapter.ts), through the
+ * one writer.
  */
-export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode";
+export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode" | "matter_lock";
 
 export type SecurityEventKind =
   | "detection"
@@ -39,10 +41,22 @@ export type SecurityEventKind =
   | "source_offline"
   | "source_online"
   | "threat"
-  /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource]; site-wide (camera null). */
-  | "mode_changed";
+  /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource, fromMode]; site-wide (camera null). */
+  | "mode_changed"
+  /**
+   * WARP-2977 P2b-2 — a door lock's reading changed (or was first seen).
+   * labels = [reading]; sourceRef = `matter:<nodeId>/<endpointId>`; camera null.
+   */
+  | "lock_state";
 
 export type SecuritySeverity = "info" | "notice" | "alert";
+
+/**
+ * Mirrors the Prisma `SecurityObservation` enum (WARP-2977 P2b-2).
+ * `live` = startedAt is when it happened; `polled` = when Droplet's 60 s check
+ * found it. Polled rows are never timing evidence (P4 co-occurrence, P5 dwell).
+ */
+export type SecurityObservation = "live" | "polled";
 
 /** One row's worth of `SecurityEvent`, before the database assigns an id. */
 export interface SecurityEventDraft {
@@ -62,6 +76,8 @@ export interface SecurityEventDraft {
   startedAt: Date;
   endedAt: Date | null;
   summary: string;
+  /** How `startedAt` was observed (WARP-2977 P2b-2). Every builder in this file is `live`. */
+  observed: SecurityObservation;
 }
 
 // Frigate ids look like `1695132000.123456-abc123`; camera and zone names are
@@ -145,6 +161,7 @@ export function frigateEndToDraft(message: unknown): SecurityEventDraft | null {
     startedAt,
     endedAt,
     summary: cameraZones.length > 0 ? `${humanLabel(label)} in ${cameraZones.join(", ")}` : humanLabel(label),
+    observed: "live",
   };
 }
 
@@ -226,6 +243,7 @@ export function statusTransitionToDraft(
       : offline
         ? "The camera system stopped reporting"
         : "The camera system is reporting again",
+    observed: "live",
   };
 }
 
@@ -253,5 +271,6 @@ export function threatRowToDraft(row: ThreatActivityRow): SecurityEventDraft {
     startedAt: row.at,
     endedAt: null,
     summary: row.what.slice(0, 500),
+    observed: "live",
   };
 }

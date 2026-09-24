@@ -53,6 +53,7 @@ describe("frigateEndToDraft — one row per tracked object, on end", () => {
       startedAt: new Date(START * 1000),
       endedAt: new Date((START + 12) * 1000),
       summary: "Person in porch",
+      observed: "live",
     });
   });
 
@@ -248,5 +249,16 @@ describe("threatRowToDraft — a pointer to the chain row, not a copy of it", ()
 
   it("a long `what` is capped", () => {
     expect(threatRowToDraft({ ...row, what: "x".repeat(2_000) }).summary).toHaveLength(500);
+  });
+});
+
+describe("observed (WARP-2977 P2b-2) — every P2a row is timed when it happened", () => {
+  it("detections, camera and Frigate status rows and mirrored threats are all `live`; only the lock sweep writes `polled`", () => {
+    expect(frigateEndToDraft(endMessage())!.observed).toBe("live");
+    expect(statusTransitionToDraft({ camera: "back_door", health: "offline" }, "online", new Date(0))!.observed).toBe("live");
+    expect(statusTransitionToDraft({ camera: null, health: "offline" }, "online", new Date(0))!.observed).toBe("live");
+    expect(
+      threatRowToDraft({ id: 1n, at: new Date(0), kind: "network", severity: "warn", what: "x" }).observed,
+    ).toBe("live");
   });
 });

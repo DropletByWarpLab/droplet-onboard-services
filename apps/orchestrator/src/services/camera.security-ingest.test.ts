@@ -241,7 +241,8 @@ describe("detections — one row per object, on end, never behind the gate", () 
       message("frigate/events", frigate("end", "x"));
       await flush();
       expect(events).toEqual(["detection", "detection_end"]);
-      expect(securityIngestHealthState().lastWriteError?.message).toBe("db down");
+      // WARP-2977 P2b-2: write health is per source; a detection is `frigate`.
+      expect(securityIngestHealthState().lastWriteError.get("frigate")?.message).toBe("db down");
     } finally {
       unsubscribe();
     }

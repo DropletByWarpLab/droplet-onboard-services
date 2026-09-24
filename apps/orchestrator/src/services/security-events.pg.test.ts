@@ -64,6 +64,7 @@ function ev(key: string, over: Partial<SecurityEventDraft> = {}): SecurityEventD
     startedAt: NOW,
     endedAt: NOW,
     summary: "Person",
+    observed: "live",
     ...over,
   };
 }
