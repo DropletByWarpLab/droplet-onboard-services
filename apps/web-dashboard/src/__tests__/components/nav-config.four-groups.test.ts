@@ -68,11 +68,10 @@ describe("the tree is four groups (WARP-2967)", () => {
 
   it("renders at most sixteen top-level rows with everything switched on", () => {
     // The ticket's ≤ 14, plus WARP-2977's Security row, plus WARP-3063's
-    // Workshop row (owner/admin only; family still sees fifteen).
+    // Workshop row. Workshop's owner/admin gate is pinned in
+    // workshop.nav.test.ts.
     const rows = NAV_GROUPS.flatMap((g) => visible(g.label)).length;
     expect(rows).toBeLessThanOrEqual(16);
-    const familyRows = NAV_GROUPS.flatMap((g) => visible(g.label, "family")).length;
-    expect(familyRows).toBeLessThanOrEqual(15);
   });
 
   it.each([

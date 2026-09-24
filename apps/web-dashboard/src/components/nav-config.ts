@@ -207,12 +207,13 @@ export type NavGroup = {
 /* ─────────── Nav definition ───────────────────────────────────────────────
    WARP-2967 — four groups and a Settings front door:
 
-     WORK      Overview · Ask AI · Files · Messages · Email · Calendar
+     WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
      BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
-     SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
+     SYSTEMS   Security · Cameras [Events] · Network [Voice, Remote access] · Devices
      ADMIN     Settings
 
-   ~14 rows all-on, ~11 on a typical box. Everything else keeps its route and
+   16 rows all-on for an owner: the ticket's ~14, plus Security (WARP-2977)
+   and Workshop (WARP-3063, owner/admin only). Everything else keeps its route and
    moves behind Settings as the WARP-1807 tuck — `hidden: true` plus a
    `settingsSection`, which is what `settingsGroups()` below renders from.
 
