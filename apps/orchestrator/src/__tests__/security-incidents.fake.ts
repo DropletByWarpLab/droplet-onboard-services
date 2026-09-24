@@ -351,12 +351,22 @@ function clone<T>(v: T): T {
   return structuredClone(v);
 }
 
-// ── the CHECK mirrors (20260925030000_warp_2978_security_incidents) ────────
+// ── the CHECK mirrors (20260925030000_warp_2978_security_incidents; PR-D's 20260925030200) ──
 
 function check(table: TableName, r: Row): void {
   const fail = (name: string) => {
     throw new FakePrismaError("P2010", `new row for relation "${table}" violates check constraint "${name}"`);
   };
+  if (table === "securityEvent" && r.kind === "detection_ongoing") {
+    // 20260925030200_warp_2978_security_event_ongoing_shape (PR-D).
+    const ok =
+      r.source === "frigate" &&
+      r.camera != null &&
+      r.endedAt == null &&
+      typeof r.dedupeKey === "string" &&
+      r.dedupeKey.startsWith("frigate-ongoing:");
+    if (!ok) fail("SecurityEvent_ongoing_shape");
+  }
   if (table === "securityIncident") {
     const codes = r.reasonCodes as unknown[];
     if (!Array.isArray(r.zoneLinkIds) || !Array.isArray(r.cameras) || !Array.isArray(codes)) fail("SecurityIncident_scope_shape");

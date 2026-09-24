@@ -29,6 +29,7 @@ import {
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
 import type { FeatureLevel } from "./access-catalog.js";
+import type { OngoingSource } from "./security-inflight.js";
 
 export interface SecurityViewerScope {
   /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
@@ -50,6 +51,12 @@ export interface SecurityRouteDeps {
   now?: () => Date;
   /** Frigate's `/api/config`, for the sources list and link checks (one fetch, with a timeout). */
   frigateConfig?: () => Promise<unknown>;
+  /**
+   * WARP-2978 PR-D — who Frigate is tracking now (camera.service's in-flight
+   * map), for the incidents' "still happening" (security-incident-view.ts).
+   * The incidents router reads camera.service's own when absent.
+   */
+  ongoing?: Pick<OngoingSource, "inView">;
 }
 
 /** Moved from routes/security.ts (P2a) with the same semantics: role-based. */

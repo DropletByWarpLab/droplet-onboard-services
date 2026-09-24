@@ -13,6 +13,10 @@
  *
  *   1. State. The engine's singleton row. On first sight it starts at the
  *      current max SecurityEvent id: history is never grouped (D16).
+ *      Then early presence (WARP-2978 PR-D, spec §6.12): every person the
+ *      in-flight map (security-inflight.ts) says has been tracked for 30 s
+ *      gets its ONE `detection_ongoing` row, through `recordSecurityEvent`
+ *      — before triage, so the row is triaged (and alerts) in this same tick.
  *   2. Triage. The events in (triageFloor, head] with no triage row (an
  *      anti-join), in id order, at most TRIAGE_BATCH, until TICK_BUDGET_MS is
  *      spent. Each in ONE READ COMMITTED transaction that writes its triage row
@@ -39,7 +43,12 @@
  *      settle after the last arrival have passed — and only when the backlog
  *      drained this tick, so queued events are never shut out of their own
  *      incident. camera_offline is judged once more first. A sealed incident
- *      never reopens (D22).
+ *      never reopens (D22). PR-D: an incident holding the ongoing row of a
+ *      person still in view is not sealed while their `end` row could still
+ *      join it (within MAX_SPAN_MS of its first activity) — one visit, one
+ *      incident, one alert. Who holds what is `presenceHolds`
+ *      (security-inflight.ts), the same answer a camera-limited viewer's
+ *      "still happening" reads (security-incident-view.ts).
  *   6. Notify (security-alerts.service.ts), then redeliver stuck notices.
  *   7. Health: lastOkAt when 1–6 completed; alerts health every 6th tick.
  *      A failed `incident.alerted` audit from step 6 is rethrown only after
@@ -57,6 +66,9 @@ import type { SecurityHealthRow } from "./security-events.service.js";
 import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import { loadActiveLinks, matchAreasForEvent, type ActiveZoneLink, type ZoneMatchableEvent } from "./security-zones.service.js";
 import { loadSiteHours } from "./security-mode.service.js";
+import { recordSecurityEvent } from "./security-events.service.js";
+import { frigateOngoingToDraft } from "./security-event-ingest.js";
+import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { notifyPendingIncidents, recomputeAlertsHealth, redeliverStuckNotices } from "./security-alerts.service.js";
 import { READ_COMMITTED_TX, REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 import {
@@ -125,6 +137,12 @@ export interface SecurityIncidentDeps {
   isSecurityModuleOn: () => Promise<boolean>;
   /** The §9 resolver — alert eligibility is re-checked at send time (§6.7). */
   resolveAccess: EffectiveAccessResolver;
+  /**
+   * WARP-2978 PR-D — the people Frigate is tracking right now
+   * (camera.service's in-flight map). Absent: no early presence, and nothing
+   * is held open — every alert waits for Frigate's `end`, as before PR-D.
+   */
+  ongoing?: OngoingSource;
   now?: () => Date;
 }
 
@@ -276,6 +294,38 @@ export async function loadModeTimeline(prisma: PrismaClient, from: Date, now: Da
       : DEFAULT_MODE;
     return { stored: fields, hours, rows };
   }, REPEATABLE_READ_TX);
+}
+
+// ── step 1b: early presence (PR-D, spec §6.12) ────────────────────────────
+
+/**
+ * One `detection_ongoing` row per person tracked for 30 s (the in-flight map
+ * decides who is due), through the one writer. A row that already exists (a
+ * restart re-learned the person; the key is unique) is found by its key and
+ * never written twice; a write that failed is retried next tick. Returns the
+ * rows written.
+ */
+export async function writeOngoingRows(
+  prisma: Pick<PrismaClient, "securityEvent">,
+  source: OngoingSource,
+  now: Date,
+): Promise<number> {
+  let written = 0;
+  for (const o of source.due(now)) {
+    const draft = frigateOngoingToDraft(o);
+    if (await recordSecurityEvent(prisma, draft)) {
+      source.markWritten(o.id);
+      written++;
+      continue;
+    }
+    try {
+      const stored = await prisma.securityEvent.findUnique({ where: { dedupeKey: draft.dedupeKey }, select: { id: true } });
+      if (stored) source.markWritten(o.id);
+    } catch (err) {
+      logger.warn({ err, dedupeKey: draft.dedupeKey }, "early presence: couldn't check for the ongoing row — retried next tick");
+    }
+  }
+  return written;
 }
 
 // ── step 2: triage ─────────────────────────────────────────────────────────
@@ -663,6 +713,8 @@ async function runTick(
 ): Promise<TickResult> {
   // 1. State.
   const state = await ensureEngineState(prisma, now);
+  // 1b. Early presence (PR-D) — before triage, so this tick triages the rows.
+  if (deps.ongoing) await writeOngoingRows(prisma, deps.ongoing, now);
 
   // 2. Triage.
   const { _max } = await prisma.securityEvent.aggregate({ _max: { id: true } });
@@ -739,9 +791,14 @@ async function runTick(
         lastActivityAt: { lte: new Date(now.getTime() - QUIET_MS - SETTLE_MS) },
         lastArrivalAt: { lte: new Date(now.getTime() - SETTLE_MS) },
       },
-      select: { id: true },
+      select: { id: true, firstActivityAt: true },
     });
-    for (const { id } of due) if (await updateCollecting(prisma, id, now, true)) sealed++;
+    // PR-D: a person still in view holds their incident open (presenceHolds).
+    const held = await presenceHolds(prisma, due, deps.ongoing, now);
+    for (const { id } of due) {
+      if (held.has(id)) continue;
+      if (await updateCollecting(prisma, id, now, true)) sealed++;
+    }
   }
 
   // 6. Notify, then redeliver — each stops at the tick's hard deadline (review #6).

@@ -10,8 +10,9 @@
  *                  a full build and for an area rebuild. This pins the SQL
  *                  matcher to P2b's (R6);
  *   only detections — detection_low, a camera's offline row, a threat, a mode
- *                  change and a non-Frigate "detection" in the fixture change
- *                  nothing;
+ *                  change, a non-Frigate "detection" and (WARP-2978 PR-D) a
+ *                  person's "still in view" row in the fixture change
+ *                  nothing — the person is counted once, by their `end` row;
  *   CHECKs       — each refuses its bad row;
  *   indexes      — a second ready build, a second building one;
  *   the swap     — a reader in a REPEATABLE READ snapshot sees only the old
@@ -102,6 +103,7 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
     await prisma.securityZoneLink.deleteMany({ where: { zoneId: { in: zones.map((z) => z.id) } } });
     await prisma.securityZone.deleteMany({ where: { id: { in: zones.map((z) => z.id) } } });
     await prisma.securityEvent.deleteMany({ where: { dedupeKey: { startsWith: `${TAG}:` } } });
+    await prisma.securityEvent.deleteMany({ where: { dedupeKey: { startsWith: `frigate-ongoing:${TAG}-` } } });
     await prisma.securityCoverageSpan.deleteMany({ where: { camera: { startsWith: `${TAG}_` } } });
   }
 
@@ -273,6 +275,26 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
         summary: "noise",
       });
     }
+    // WARP-2978 PR-D — people still in view 30 s in: confident, zoned, in observed
+    // slots. Baselines count detections only (their `end` rows), so none may count.
+    for (let i = 0; i < 12; i += 1) {
+      const startedAt = new Date(BOUNDS.start.getTime() + Math.floor(r() * (BOUNDS.end.getTime() - BOUNDS.start.getTime())));
+      const camera = pick(r, CAMS);
+      evRows.push({
+        source: "frigate",
+        kind: "detection_ongoing",
+        severity: "info",
+        camera,
+        sourceRef: `${camera}/ongoing-${i}`,
+        dedupeKey: `frigate-ongoing:${TAG}-ongoing-${i}`,
+        labels: ["person"],
+        cameraZones: ["porch"],
+        score: 0.95,
+        startedAt,
+        endedAt: null,
+        summary: "Person still in view after 30 s",
+      });
+    }
     evRows.push({
       source: "site_mode",
       kind: "mode_changed",
@@ -288,7 +310,11 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
       summary: "Closed",
     });
     await prisma.securityEvent.createMany({ data: evRows });
-    events = (await prisma.securityEvent.findMany({ where: { dedupeKey: { startsWith: `${TAG}:` } } })).map((e) => ({
+    events = (
+      await prisma.securityEvent.findMany({
+        where: { OR: [{ dedupeKey: { startsWith: `${TAG}:` } }, { dedupeKey: { startsWith: `frigate-ongoing:${TAG}-` } }] },
+      })
+    ).map((e) => ({
       id: e.id,
       source: e.source,
       kind: e.kind,
@@ -449,6 +475,7 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
     }).sort(cellOrder);
     expect(withNoise).toEqual(clean);
     expect(events.filter((e) => !(e.source === "frigate" && e.kind === "detection")).length).toBeGreaterThanOrEqual(40);
+    expect(events.filter((e) => e.kind === "detection_ongoing")).toHaveLength(12);
   }, 120_000);
 
   describe("CHECKs and partial unique indexes", () => {

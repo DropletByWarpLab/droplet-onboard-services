@@ -101,7 +101,7 @@ describe("zoneEventWhere — the feed clause for one area", () => {
         {
           camera: "back",
           OR: [
-            { kind: { in: ["detection", "detection_low"] }, cameraZones: { hasSome: ["door", "till"] } },
+            { kind: { in: ["detection", "detection_ongoing", "detection_low"] }, cameraZones: { hasSome: ["door", "till"] } },
             { kind: { in: ["camera_offline", "camera_online"] } },
           ],
         },
@@ -146,6 +146,19 @@ describe("zonesForEvent — the in-memory twin", () => {
   it("a part matches only detections in that part — other Frigate zones do not", () => {
     expect(zonesForEvent(row({ camera: "back", cameraZones: ["gate"] }), index)).toEqual(["yard"]);
     expect(zonesForEvent(row({ camera: "back", kind: "detection_low", cameraZones: ["till"] }), index)).toEqual([
+      "till",
+      "yard",
+    ]);
+  });
+
+  it("WARP-2978 PR-D — a person's still-in-view row lands in the same areas as their detection", () => {
+    // Otherwise it would group (and alert) somewhere other than the `end` row it precedes.
+    for (const cameraZones of [["till"], ["gate"], [], ["porch", "till"]]) {
+      expect(zonesForEvent(row({ camera: "back", kind: "detection_ongoing", cameraZones }), index)).toEqual(
+        zonesForEvent(row({ camera: "back", kind: "detection", cameraZones }), index),
+      );
+    }
+    expect(zonesForEvent(row({ camera: "back", kind: "detection_ongoing", cameraZones: ["till"] }), index)).toEqual([
       "till",
       "yard",
     ]);
@@ -478,7 +491,16 @@ describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank in
   const pick = <T,>(r: () => number, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
   const CAMS = ["c1", "c2", "c3"];
   const PARTS = ["porch", "drive", "yard", "till"];
-  const KINDS = ["detection", "detection_low", "camera_offline", "camera_online", "source_offline", "threat", "mode_changed"] as const;
+  const KINDS = [
+    "detection",
+    "detection_ongoing",
+    "detection_low",
+    "camera_offline",
+    "camera_online",
+    "source_offline",
+    "threat",
+    "mode_changed",
+  ] as const;
   const ZONES = ["z1", "z2", "z3", "z4"];
 
   it("agrees on zone ids with zonesForEvent over 200 generated events × random link sets", () => {

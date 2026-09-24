@@ -51,7 +51,8 @@ import type {
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
 import { retainsFootage } from "./camera-retention-defaults.js";
-import { frigateEndToDraft } from "./security-event-ingest.js";
+import { frigateEndToDraft, parseFrigateStatus } from "./security-event-ingest.js";
+import { createInflightTracker, type OngoingSource } from "./security-inflight.js";
 import {
   createStatusTracker,
   noteFrigateConnectionLost,
@@ -76,6 +77,20 @@ let _statusTracker: StatusTracker | null = null;
 /** WARP-2977 — the camera/Frigate health the /security header shows. */
 export function securityStatusSnapshot(): ReturnType<StatusTracker["snapshot"]> {
   return _statusTracker?.snapshot() ?? new Map();
+}
+
+/**
+ * WARP-2978 PR-D (ADR-059 P3 §6.12) — the people Frigate is tracking right
+ * now, fed from the raw `frigate/events` messages below (before the gate).
+ * The incident engine reads it each tick: a person in view for 30 s gets one
+ * `detection_ongoing` row, and their incident is held open until their `end`
+ * row joins it. In memory; a restart forgets it (then only `end` alerts).
+ */
+const _inflight = createInflightTracker();
+
+/** The in-flight map, as the incident engine reads it (index.ts wires it in). */
+export function securityOngoingSource(): OngoingSource {
+  return _inflight;
 }
 
 // SSE subscribers
@@ -137,8 +152,17 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
     // WARP-2977 — a dropped broker is an ingest that is down, not a quiet
     // site. mqtt.js reconnects on its own; the next `connect` resubscribes and
     // its SUBACK marks the feed live again.
-    _mqttClient.on("close", () => noteFrigateConnectionLost());
-    _mqttClient.on("offline", () => noteFrigateConnectionLost());
+    // WARP-2978 PR-D: an `end` sent while the broker was away is never
+    // redelivered (clean session), so the in-flight map starts over; a person
+    // still tracked is re-learned from Frigate's next `update`.
+    _mqttClient.on("close", () => {
+      noteFrigateConnectionLost();
+      _inflight.forgetCamera(null);
+    });
+    _mqttClient.on("offline", () => {
+      noteFrigateConnectionLost();
+      _inflight.forgetCamera(null);
+    });
   } catch (err) {
     logger.warn("Camera MQTT connection failed: %s", err);
   }
@@ -155,6 +179,7 @@ export async function shutdownCameraService(): Promise<void> {
   }
   _sseSubscribers.clear();
   _statusTracker = null;
+  _inflight.forgetCamera(null);
   _initialized = false;
 }
 
@@ -173,6 +198,12 @@ function handleMqttMessage(
   // reconnect replays the current state.
   if (topic === "frigate/available" || /^frigate\/[^/]+\/status\/detect$/.test(topic)) {
     noteFrigateMessage();
+    // WARP-2978 PR-D — a camera that is down (or switched off) is tracking
+    // nobody, and Frigate going offline ends every track without an `end`:
+    // forget those people now, so they neither get a late "still in view"
+    // row nor hold an incident open.
+    const reading = parseFrigateStatus(topic, raw);
+    if (reading && reading.health !== "online") _inflight.forgetCamera(reading.camera);
     void _statusTracker
       ?.observe(topic, raw)
       .then((observation) => {
@@ -208,6 +239,10 @@ function handleMqttMessage(
     // on `end`; a redelivered `end` is absorbed by the dedupe key.
     const securityDraft = frigateEndToDraft(data);
     if (securityDraft) void recordSecurityEvent(prisma, securityDraft);
+    // WARP-2978 PR-D — the same raw message keeps the in-flight map: `new` and
+    // `update` track a person, `end` forgets them. Nothing is written here;
+    // the incident engine writes the one "still in view" row.
+    _inflight.observe(data, new Date());
 
     const after = data.after as Record<string, unknown> | undefined;
     const before = data.before as Record<string, unknown> | undefined;

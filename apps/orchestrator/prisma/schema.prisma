@@ -8600,7 +8600,9 @@ enum BriefingTrigger {
 // Written by `security-events.service.ts` only. Frigate detections are
 // ingested on `end` (one row per object, with its duration, best score and
 // zones), from the RAW message — never behind camera-event-gate, which drops
-// concurrent and cooldown events for the toast/push surface.
+// concurrent and cooldown events for the toast/push surface. WARP-2978 PR-D
+// adds ONE `detection_ongoing` row for a person still tracked after 30 s
+// (early presence); the `end` row still follows.
 //
 // Columns land with their first writer: `correlationKey` with ADR-055's
 // AccessEvent. Incident membership lives in SecurityEventTriage (WARP-2978):
@@ -8638,6 +8640,13 @@ enum SecurityEventKind {
   threat
   /// The site mode changed. labels = [mode, modeSource, fromMode]; startedAt = the boundary instant.
   mode_changed
+  /// WARP-2978 PR-D (ADR-059 P3 §6.12, D35) — a person Frigate has tracked for
+  /// 30 s and has not ended yet, written ONCE per object by the incident engine
+  /// so an after-hours alert need not wait for `end`. endedAt is NULL and the
+  /// key is `frigate-ongoing:<frigate id>` (CHECK SecurityEvent_ongoing_shape);
+  /// the object's `end` is still its own `detection` row. Never a baseline
+  /// input (P5 counts `detection` only).
+  detection_ongoing
 }
 
 /// info < notice < alert. On an event this is the source's own weight; the

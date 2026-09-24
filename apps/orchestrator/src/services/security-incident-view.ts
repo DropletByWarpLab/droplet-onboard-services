@@ -35,6 +35,10 @@
  *     to what routes 19–20 actually do.
  *   · a non-owner/admin never sees a `skipped_not_visible` notice, not even
  *     their own: it says an alert was raised on a camera they cannot see.
+ *   · times and "still happening" come from the viewer's own cameras (review
+ *     #4). A person still in view holds an incident open (WARP-2978 PR-D):
+ *     it is still happening for a viewer who cannot see every camera only
+ *     when that person is on one she can see (`presenceHolds`).
  *   · counts and labels sum `countsByCamera` over the visible cameras (plus
  *     the site bucket `""` on a site-scope incident).
  *   · notices: owner/admin see every one; anyone else only their own (D34).
@@ -63,6 +67,7 @@ import type {
 import { feedVisibilityWhere, listSecurityEvents } from "./security-events.service.js";
 import { loadActiveLinks, viewerAreas, zoneChipsFor } from "./security-zones.service.js";
 import { projectedIncidentPage } from "./security-incident-page.js";
+import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { QUIET_MS, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 
@@ -157,12 +162,13 @@ export interface IncidentProjection {
   actionable: boolean;
   /** Visible events (from the counts snapshot, so it survives the trim). */
   eventCount: number;
-  /** Visible counts per label (`_status` / `_threat` for status and threat rows). */
+  /** Visible counts per label (`_status` / `_threat` for status and threat rows, `_ongoing` for a person still in view — PR-D). */
   labels: Record<string, number>;
   /**
    * Review #4 — the event-time span and whether it is still happening, from
    * the cameras THIS viewer can see (`spanByCamera`), so activity on a hidden
-   * camera never moves them. A viewer who sees every camera of the incident
+   * camera never moves them; a person still in view on one of her cameras
+   * keeps it happening (PR-D). A viewer who sees every camera of the incident
    * gets the stored values. `openedInMode` needs no projection: an event
    * joins only in the incident's own mode, so every member's start — hers
    * included — was in that mode.
@@ -202,27 +208,45 @@ export function projectedLastActivity(i: IncidentSpanRow, v: IncidentViewer): Da
   return shown ? new Date(Math.max(...shown.map((s) => s.last.getTime()))) : i.lastActivityAt;
 }
 
+const NOBODY_IN_VIEW: ReadonlySet<string> = new Set();
+
 /** The viewer's own span and grouping (review #4). */
 function viewerSpan(
   i: IncidentRowForView,
   v: IncidentViewer,
   now: Date,
+  heldBy: ReadonlySet<string>,
 ): { firstActivityAt: Date; lastActivityAt: Date; grouping: SecurityIncidentGrouping } {
   const shown = shownSpans(i, v);
   if (!shown) return { firstActivityAt: i.firstActivityAt, lastActivityAt: i.lastActivityAt, grouping: i.grouping };
   const first = new Date(Math.min(...shown.map((s) => s.first.getTime())));
   const last = projectedLastActivity(i, v);
-  // Her cameras quiet for quiet + settle: it has stopped happening, as far as she can know.
+  // Her cameras quiet for quiet + settle: it has stopped happening, as far as she can know…
   const quiet = now.getTime() >= last.getTime() + QUIET_MS + SETTLE_MS;
-  return { firstActivityAt: first, lastActivityAt: last, grouping: i.grouping === "closed" || quiet ? "closed" : "collecting" };
+  // …unless a person she can see is still in view there (PR-D): their stay
+  // holds the incident open, and their `end` row will move her times — so
+  // "stopped" now would read as reopened then (D22). A person on a camera she
+  // cannot see holds it for everyone else, never for her (DS-005).
+  const seenStaying = [...heldBy].some((camera) => seesCamera(v, camera));
+  return {
+    firstActivityAt: first,
+    lastActivityAt: last,
+    grouping: i.grouping === "closed" || (quiet && !seenStaying) ? "closed" : "collecting",
+  };
 }
 
-/** §6.8 — null when the viewer may not know the incident exists. `now` decides "still happening" for a partial camera view. */
+/**
+ * §6.8 — null when the viewer may not know the incident exists. `now` decides
+ * "still happening" for a partial camera view, with `heldBy`: the cameras
+ * where a person still in view holds the incident open (`presenceHolds`;
+ * none when omitted).
+ */
 export function projectIncident(
   i: IncidentRowForView,
   reasons: readonly ReasonRowForView[],
   v: IncidentViewer,
   now: Date,
+  heldBy: ReadonlySet<string> = NOBODY_IN_VIEW,
 ): IncidentProjection | null {
   if (!incidentVisible(i, v)) return null;
   const visible = reasons.filter((r) => reasonVisible(r, i, v));
@@ -273,7 +297,7 @@ export function projectIncident(
     actionable,
     eventCount,
     labels,
-    ...viewerSpan(i, v, now),
+    ...viewerSpan(i, v, now, heldBy),
   };
 }
 
@@ -408,7 +432,7 @@ export interface IncidentSummary {
   lastActivityAt: string;
   /** Visible events. */
   eventCount: number;
-  /** Visible counts per label; `_status` / `_threat` count status and threat rows. */
+  /** Visible counts per label; `_status` / `_threat` count status and threat rows, `_ongoing` a person's "still in view" row (PR-D). */
   labels: Record<string, number>;
   /** The latest acknowledgement, by anyone — only in an actionable view (never partial, never plain activity). */
   lastAck: IncidentAckSummary | null;
@@ -537,8 +561,33 @@ async function latestAcks(prisma: Db, ids: readonly string[]): Promise<Map<strin
   return out;
 }
 
+/** What the loaders read "still in view" from: camera.service's in-flight map (the routes pass it; absent, nobody is). */
+export type PresenceSource = Pick<OngoingSource, "inView">;
+
+/**
+ * The cameras holding each collecting incident open (PR-D) — asked only for a
+ * viewer who cannot see every camera: anyone else gets the stored grouping,
+ * which the engine's hold already keeps `collecting`.
+ */
+async function holdsFor(
+  prisma: Db,
+  rows: ReadonlyArray<Pick<IncidentRowForView, "id" | "grouping" | "firstActivityAt">>,
+  v: IncidentViewer,
+  presence: PresenceSource | undefined,
+  now: Date,
+): Promise<Map<string, Set<string>>> {
+  if (v.visibleCameras === "all") return new Map();
+  return presenceHolds(prisma, rows.filter((r) => r.grouping === "collecting"), presence, now);
+}
+
 /** Project a page of incidents with one reasons query and one acks query. Hidden rows (never expected after the SQL) are dropped. */
-async function summariesOf(prisma: Db, rows: readonly IncidentRowForView[], v: IncidentViewer, now: Date): Promise<IncidentSummary[]> {
+async function summariesOf(
+  prisma: Db,
+  rows: readonly IncidentRowForView[],
+  v: IncidentViewer,
+  now: Date,
+  presence: PresenceSource | undefined,
+): Promise<IncidentSummary[]> {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
   const reasons = await prisma.securityIncidentReason.findMany({
@@ -546,9 +595,10 @@ async function summariesOf(prisma: Db, rows: readonly IncidentRowForView[], v: I
     select: { incidentId: true, ...REASON_VIEW_SELECT },
   });
   const acks = await latestAcks(prisma, ids);
+  const holds = await holdsFor(prisma, rows, v, presence, now);
   const out: IncidentSummary[] = [];
   for (const row of rows) {
-    const p = projectIncident(row, reasons.filter((r) => r.incidentId === row.id), v, now);
+    const p = projectIncident(row, reasons.filter((r) => r.incidentId === row.id), v, now, holds.get(row.id));
     if (p) out.push(summaryOf(p, acks.get(row.id) ?? null));
   }
   return out;
@@ -571,6 +621,7 @@ export async function listIncidents(
   f: IncidentListFilters,
   limit: number,
   now: Date,
+  presence?: PresenceSource,
 ): Promise<{ incidents: IncidentSummary[]; nextCursor: string | null }> {
   if (v.visibleCameras === "all") {
     const rows = await prisma.securityIncident.findMany({
@@ -582,7 +633,7 @@ export async function listIncidents(
     const page = rows.slice(0, limit);
     const tail = page[page.length - 1];
     return {
-      incidents: await summariesOf(prisma, page, v, now),
+      incidents: await summariesOf(prisma, page, v, now, presence),
       nextCursor: rows.length > limit && tail ? `${tail.lastActivityAt.getTime()}.${tail.id}` : null,
     };
   }
@@ -594,7 +645,7 @@ export async function listIncidents(
   const ordered = page.map((k) => byId.get(k.id)).filter((r): r is IncidentRowForView => r !== undefined);
   const tail = page[page.length - 1];
   return {
-    incidents: await summariesOf(prisma, ordered, v, now),
+    incidents: await summariesOf(prisma, ordered, v, now, presence),
     nextCursor: keys.length > limit && tail ? `${tail.projectedLast.getTime()}.${tail.id}` : null,
   };
 }
@@ -604,11 +655,12 @@ export async function incidentsSummary(
   prisma: Db,
   v: IncidentViewer,
   now: Date,
+  presence?: PresenceSource,
 ): Promise<{ openAlerts: number; openNotices: number; latest: IncidentSummary[] }> {
   const [openAlerts, openNotices, latest] = await Promise.all([
     prisma.securityIncident.count({ where: incidentListWhere(v, { state: "attention", severity: "alert" }) }),
     prisma.securityIncident.count({ where: incidentListWhere(v, { state: "attention", severity: "notice" }) }),
-    listIncidents(prisma, v, { state: "attention" }, 3, now),
+    listIncidents(prisma, v, { state: "attention" }, 3, now, presence),
   ]);
   return { openAlerts, openNotices, latest: latest.incidents };
 }
@@ -624,6 +676,7 @@ export async function loadIncidentDetail(
   v: IncidentViewer,
   level: "view" | "act" | "manage",
   now: Date,
+  presence?: PresenceSource,
 ): Promise<IncidentDetail | null> {
   const row = await prisma.securityIncident.findUnique({ where: { id }, select: INCIDENT_VIEW_SELECT });
   if (!row) return null;
@@ -632,7 +685,7 @@ export async function loadIncidentDetail(
     orderBy: [{ evidenceAt: "asc" }, { id: "asc" }],
     select: REASON_VIEW_SELECT,
   });
-  const p = projectIncident(row, reasons, v, now);
+  const p = projectIncident(row, reasons, v, now, (await holdsFor(prisma, [row], v, presence, now)).get(row.id));
   if (!p) return null;
 
   // Every ack when actionable; in a PARTIAL view only the viewer's own (what
