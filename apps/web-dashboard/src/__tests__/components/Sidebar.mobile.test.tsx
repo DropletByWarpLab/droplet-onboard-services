@@ -204,8 +204,10 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     // WARP-2967 — and NOT the sixteen destinations that moved behind Settings.
     // The drawer flattens the nav definition, so a tuck that only held on the
     // desktop aside would show up right here.
-    for (const href of ["/users", "/admin", "/tools", "/models", "/health", "/help", "/trust", "/downloads", "/integrations", "/routines", "/workshop", "/admin/audit"])
+    for (const href of ["/users", "/admin", "/tools", "/models", "/health", "/help", "/trust", "/downloads", "/integrations", "/routines", "/admin/audit"])
       expect(dialog.querySelector(`a[href='${href}']`), href).toBeNull();
+    // WARP-3063 — Workshop is a Work row again, so the owner's drawer carries it.
+    expect(within(dialog).getByRole("link", { name: /^workshop$/i })).toHaveAttribute("href", "/workshop");
   });
 
   // ── WARP-1554 ────────────────────────────────────────────────────────
