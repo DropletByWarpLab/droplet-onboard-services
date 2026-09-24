@@ -472,7 +472,16 @@ describe("route 19 — acknowledge", () => {
       kind: "system",
       severity: "info",
       what: "Security: acknowledged an alert in Stock room",
-      refs: { surface: "security", action: "incident.acknowledge", incidentId: SHARED, severity: "alert", codes: ["after_hours_presence", "camera_offline"], state: "acknowledged" },
+      refs: {
+        surface: "security",
+        action: "incident.acknowledge",
+        incidentId: SHARED,
+        severity: "alert",
+        codes: ["after_hours_presence", "camera_offline"],
+        // Review b7e1: what Maria (front only) could see — the back notice is not hers.
+        visibleCodes: ["after_hours_presence"],
+        state: "acknowledged",
+      },
     });
     expect(audits()[0]!.refs.ackId).toBe(f.world.securityIncidentAck[0]!.id);
   });
@@ -889,6 +898,13 @@ describe("route 20 — resolve", () => {
     });
     expect(f.world.securityIncidentAck[0]).toMatchObject({ action: "resolve", note: "Cleaner, as expected" });
     expect(JSON.stringify(audits()[0]!.refs)).not.toContain("Cleaner");
+    // Review b7e1: the resolve records what she could see beside the incident-wide codes.
+    expect(audits()[0]!.refs).toMatchObject({
+      action: "incident.resolve",
+      codes: ["after_hours_presence", "camera_offline"],
+      visibleCodes: ["after_hours_presence"],
+      state: "resolved",
+    });
     const again = await request(app(f, "family", "act").server).post(`/api/security/incidents/${SHARED}/resolve`).send({});
     expect(again.body.changed).toBe(false);
   });

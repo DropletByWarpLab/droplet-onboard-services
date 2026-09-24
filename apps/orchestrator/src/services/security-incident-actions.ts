@@ -197,6 +197,11 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
           ackId: ack.id,
           severity: row.severity,
           codes: [...row.reasonCodes],
+          // Review b7e1: what the actor could SEE when they acted, beside the
+          // incident-wide codes (a hidden reason below the top severity is in
+          // `codes` and not here). Audit refs are read only through the
+          // owner/admin activity routes, who see every camera: no DS-005 leak.
+          visibleCodes: [...view.codes],
           state: write.state,
         },
       });
