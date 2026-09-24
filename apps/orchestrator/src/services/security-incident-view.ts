@@ -133,9 +133,13 @@ export interface IncidentProjection {
   severity: SecuritySeverity;
   /** The visible reasons' distinct codes, in declaration order. */
   codes: SecurityReasonCode[];
-  /** The stored state — or `no_action` when the viewer has no visible code. */
+  /**
+   * The stored state — `no_action` when the viewer has no visible code; for a
+   * partial view, `open` until the incident is resolved (an acknowledgement
+   * she cannot see must not show as `acknowledged`).
+   */
   state: SecurityIncidentState;
-  /** A visible code exists: the viewer may acknowledge / resolve, and sees acks and notices. */
+  /** A visible code exists AND the view is not partial: the viewer may acknowledge / resolve, and sees acks and notices. */
   actionable: boolean;
   /** Visible events (from the counts snapshot, so it survives the trim). */
   eventCount: number;
