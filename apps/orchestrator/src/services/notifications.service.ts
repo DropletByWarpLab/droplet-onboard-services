@@ -223,10 +223,17 @@ export async function sendNotification(
   // letting that populate `error` on every successful toast would make the
   // column uniformly non-null — at which point a real failure is invisible in
   // exactly the place someone would look for it.
+  //
+  // WARP-2904 — the push leg's result lands in `pushOutcome`, an explicit
+  // enum, so a dial refused by the `web_push` off-LAN gate is distinguishable
+  // from "no subscribers" and from "the push service failed". `channels` keeps
+  // its meaning ("push" only when a push was actually accepted) and a refusal
+  // never reaches `error`, where a delivered toast would hide it.
   let pushError: string | null = null;
+  let pushOutcome: $Enums.PushOutcome;
   try {
     await ensurePushDispatch(prisma);
-    const { sent } = await dispatchToUser(prisma, input.userId, {
+    const { sent, attempted, refused } = await dispatchToUser(prisma, input.userId, {
       title: input.title,
       body: input.body ?? "",
       url: input.url,
@@ -234,7 +241,15 @@ export async function sendNotification(
       tag: input.tag,
     });
     if (sent > 0) channels.push("push");
+    pushOutcome = refused
+      ? "refused_gate"
+      : sent > 0
+        ? "sent"
+        : attempted === 0
+          ? "no_subscribers"
+          : "failed";
   } catch (err) {
+    pushOutcome = "failed";
     pushError = `push: ${err instanceof Error ? err.message : String(err)}`;
     // Always visible to an operator, whether or not it reaches the row.
     logger.warn({ err, userId: input.userId }, "push notification failed");
@@ -253,6 +268,7 @@ export async function sendNotification(
       channels: channels.join(","),
       deliveredAt: delivered ? new Date() : null,
       error: errors.length > 0 ? errors.join(" | ") : null,
+      pushOutcome,
     },
   });
 

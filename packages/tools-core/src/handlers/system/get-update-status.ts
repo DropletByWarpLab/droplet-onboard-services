@@ -44,6 +44,9 @@ interface UpdateRowView {
   gitSha: string;
   builtAt: string;
   failureReason: string | null;
+  /** WARP-3007 — DeviceUpdateOutcome (not_applied | starting_services |
+   *  committed | services_start_failed | rolled_back | rollback_failed). */
+  outcome?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -160,6 +163,9 @@ async function handler(
             gitSha: current.gitSha,
             builtAt: current.builtAt,
             committedAt: current.updatedAt,
+            // WARP-3007 — e.g. services_start_failed: installed, but a new
+            // part of the release did not start.
+            outcome: current.outcome ?? null,
           }
         : null,
       ...(current
@@ -192,6 +198,7 @@ async function handler(
             status: lastVerdict.status,
             phase: phaseFor(lastVerdict.status),
             failureReason: lastVerdict.failureReason,
+            outcome: lastVerdict.outcome ?? null,
             at: lastVerdict.updatedAt,
           }
         : null,

@@ -273,7 +273,7 @@ verifies before pulling, and how anyone can verify independently.
 
 | Layer | What it authenticates | Key/identity | Where verified |
 |---|---|---|---|
-| **Keyless image signatures** (WARP-244) | "this individual image was built by our release CI" | GitHub Actions OIDC identity of `.github/workflows/publish-release.yml@refs/heads/main` (stable) or `@refs/heads/stage` (stage channel, WARP-1670), certificate from Fulcio, entry in the public Rekor transparency log | on-device before every `docker pull` (`scripts/lib/apply-update.sh`), in CI post-sign self-check, and by anyone (below) |
+| **Keyless image signatures** (WARP-244) | "this individual image was built by our release CI" | GitHub Actions OIDC identity of `.github/workflows/publish-release.yml@refs/heads/main` (stable) or `@refs/heads/stage` (stage channel, WARP-1670), certificate from Fulcio, entry in the public Rekor transparency log | on-device before every `docker pull` (`docker/ota/apply-update.sh`), in CI post-sign self-check, and by anyone (below) |
 | **Key-based release-manifest signature** (WARP-536) | "this exact set of image digests + configs constitutes release X" | org-held cosign keypair; public half baked into the orchestrator image at `apps/orchestrator/src/services/update-agent/cosign.pub` | on-device by the OTA update agent before a manifest byte is parsed |
 
 Images are referenced **by digest only** end to end (`…@sha256:…`), so a
@@ -321,8 +321,11 @@ deliberately not in the public log; the images are).
 ## What the appliance enforces at pull time
 
 The only path that ever pulls a first-party image is the OTA apply step
-(`scripts/lib/apply-update.sh`, `pull-images`). For each digest-pinned
-ref it runs, **before** `docker pull`:
+(`docker/ota/apply-update.sh`, `pull-images`). The helper runs on the host
+(WARP-3007), which has no cosign, so it runs the orchestrator image's
+vendored, checksum-pinned cosign in a throwaway `docker run --rm` off that
+image (pinned by image ID). For each digest-pinned ref it runs, **before**
+`docker pull`:
 
 ```bash
 cosign verify \

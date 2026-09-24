@@ -158,7 +158,8 @@ export interface OffLanChannelDefault {
     | "outbound_email"
     | "telemetry"
     | "web_fetch"
-    | "ambient_data";
+    | "ambient_data"
+    | "web_push";
   enabled: boolean;
   requiresAdmin: boolean;
 }
@@ -173,10 +174,17 @@ export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
   // Bank). Gates GET /api/web/weather + /api/web/rates. OFF by default,
   // same sovereignty posture as web_fetch: the operator opts in.
   { key: "ambient_data", enabled: false, requiresAdmin: true },
+  // WARP-2904 — Web Push (the push service run by Google, Apple or Mozilla
+  // that each subscribed browser names). Gates dispatchToUser. OFF by
+  // default: the payload is end-to-end encrypted, but the dial, its timing
+  // and the subscriber's endpoint are metadata leaving the box, so the
+  // owner opts in. Insert-or-skip below: an operator's choice is never
+  // clobbered.
+  { key: "web_push", enabled: false, requiresAdmin: true },
 ];
 
 /**
- * Insert the five canonical off-LAN channels if not already present.
+ * Insert the canonical off-LAN channels if not already present.
  * Same insert-or-skip posture as seedWorkspaceSettings — operator
  * mutations from the dashboard are never clobbered on subsequent
  * boots. `lastChangedBy` / `lastChangedAt` start blank/now on first

@@ -174,6 +174,23 @@ function sortValue(v: unknown): unknown {
 }
 
 /**
+ * WARP-3011: `refs` as the exact JSON text `canonicalizeRowContent` embeds
+ * in the string the HMAC runs over (JSON.stringify is compositional, so this
+ * is byte-identical to that substring). `null` for absent refs.
+ *
+ * The recorder stores THIS text (`$7::jsonb` in activity.service.ts), not the
+ * object through Prisma's Json write, which keeps 16 significant digits — so
+ * the column holds exactly what was signed, every number included.
+ */
+export function canonicalRefsJson(
+  refs: Record<string, unknown> | null | undefined,
+): string | null {
+  return refs === null || refs === undefined
+    ? null
+    : JSON.stringify(sortValue(refs));
+}
+
+/**
  * Base64-url SHA-256 of an input string. Used to compute
  * `prevSignatureHash` from the previous row's `signature` — the spec
  * calls for hashing the prior signature so the chain is one fixed-size

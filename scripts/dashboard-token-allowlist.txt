@@ -169,4 +169,3 @@ card-outer-margin app/network/page.tsx
 card-outer-margin components/events/EventFilterBar.tsx
 card-outer-margin components/events/ReviewFilterBar.tsx
 card-outer-margin components/FileManager/SelectionToolbar.tsx
-card-outer-margin components/notifications/PushSubscriptionCard.tsx

@@ -104,6 +104,8 @@ import {
   type RoleTemplateId,
 } from "../services/access-role-templates.js";
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
+import { toolLayers, type ToolLayers } from "../services/tool-layers.service.js";
+import { GRANTABLE_TOOL_DOMAINS } from "../services/access-catalog.js";
 
 // ── in-memory prisma stub ──────────────────────────────────────────
 
@@ -277,6 +279,9 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
       }),
     },
     accessRoleToolGrant: {
+      findMany: vi.fn(async ({ where: { roleId } }: any) =>
+        (roles.get(roleId)?.toolGrants ?? []).map((g: any) => ({ domain: g.domain })),
+      ),
       deleteMany: vi.fn(async ({ where: { roleId } }: any) => {
         const row = roles.get(roleId);
         if (row) row.toolGrants = [];
@@ -358,6 +363,7 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
 function buildApp(
   prismaMock: any,
   user: { id: string; username: string; role: string } = { id: "actor-1", username: "stefan", role: "owner" },
+  opts: { loadLayers?: () => Promise<ToolLayers> } = {},
 ) {
   const app = express();
   app.use(express.json());
@@ -365,7 +371,7 @@ function buildApp(
     (req as any).user = { ...user, displayName: user.username };
     next();
   });
-  app.use("/api", createAccessRouter(prismaMock));
+  app.use("/api", createAccessRouter(prismaMock, opts));
   return app;
 }
 
@@ -656,6 +662,8 @@ describe("route guards", () => {
     // secret, but it is part of the Access panel: a family caller has no use
     // for it and no business instantiating a role from it.
     expect((await request(app).get("/api/access/role-templates")).status).toBe(403);
+    // WARP-2897 — the tool-domain vocabulary is part of the Access panel too.
+    expect((await request(app).get("/api/access/tool-domains")).status).toBe(403);
     expect(
       (await request(app).post("/api/access/roles").send({ templateId: "front-desk" })).status,
     ).toBe(403);
@@ -847,7 +855,9 @@ describe("POST /api/access/roles (duplicate via sourceRoleId)", () => {
     expect(res.body.role.storageQuotaBytes).toBe("1000");
     expect(res.body.role.cloudModelsAllowed).toBe(true);
     expect(res.body.role.featureGrants).toEqual([{ moduleId: "files", level: "act" }]);
-    expect(res.body.role.toolGrants).toEqual([{ domain: "files", level: "use" }]);
+    expect(res.body.role.toolGrants).toEqual([
+      { domain: "files", level: "use", state: "live", deadReason: null },
+    ]);
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
     expect(res.body.role.peopleCount).toBe(0);
   });
@@ -944,7 +954,10 @@ describe("POST /api/access/roles (instantiate via templateId — WARP-2738)", ()
     expect(res.body.role.description).toBe(source.description);
     expect(res.body.role.startingPoint).toBe("family");
     expect(res.body.role.featureGrants).toEqual(expected.featureGrants);
-    expect(res.body.role.toolGrants).toEqual(expected.toolGrants);
+    // WARP-2897: every template grant is LIVE — none names an empty domain.
+    expect(res.body.role.toolGrants).toEqual(
+      expected.toolGrants.map((g) => ({ ...g, state: "live", deadReason: null })),
+    );
     expect(res.body.role.connectorGrants).toEqual([]);
     expect(res.body.role.peopleCount).toBe(0);
     expect(res.body.syncState).toBe("synced");
@@ -981,7 +994,9 @@ describe("POST /api/access/roles (instantiate via templateId — WARP-2738)", ()
       const expected = roleTemplateCreatePayload(t);
       expect(res.body.role.startingPoint).toBe(t.startingPoint);
       expect(res.body.role.featureGrants).toEqual(expected.featureGrants);
-      expect(res.body.role.toolGrants).toEqual(expected.toolGrants);
+      expect(res.body.role.toolGrants).toEqual(
+        expected.toolGrants.map((g) => ({ ...g, state: "live", deadReason: null })),
+      );
       expect(res.body.role.connectorGrants).toEqual([]);
       expect(res.body.role.mayOperateLocks).toBe(t.mayOperateLocks);
       expect(res.body.role.storageQuotaBytes).toBeNull();
@@ -1623,5 +1638,152 @@ describe("POST /api/access/roles/:id/assign", () => {
     expect(res.body.syncState).toBe("synced");
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
     expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains on the grant axis ─────
+
+describe("tool grants over both layers (WARP-2897)", () => {
+  /** A runtime layer with one tool in `ext-bookings` — a remote-MCP fixture
+   *  standing in for an extension until slice H names extension domains. */
+  const attached = async () =>
+    toolLayers([
+      { name: "bookings__list_slots", domain: "ext-bookings", requiresWrite: false, source: "runtime:bookings" },
+    ]);
+  const detached = async () => toolLayers([]);
+  const owner = { id: "actor-1", username: "stefan", role: "owner" };
+
+  it("POST with a runtime domain is 400 NAMING it when nothing provides it, and nothing is written", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner, { loadLayers: detached }))
+      .post("/api/access/roles")
+      .send(payload({ toolGrants: [{ domain: "ext-bookings", level: "view" }] }));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("TOOL_DOMAIN_NOT_GRANTABLE");
+    expect(res.body.domains).toEqual(["ext-bookings"]);
+    expect(res.body.error).toContain("ext-bookings");
+    // The refusal is raised inside the transaction, before any grant row.
+    expect(prisma.accessRoleToolGrant.createMany).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("POST with the same runtime domain is 200 while a runtime tool carries it", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner, { loadLayers: attached }))
+      .post("/api/access/roles")
+      .send(payload({ toolGrants: [{ domain: "ext-bookings", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.toolGrants).toEqual([
+      { domain: "ext-bookings", level: "view", state: "live", deadReason: null },
+    ]);
+  });
+
+  it("erp is refused by the writer with its code, runtime layer or not", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner, { loadLayers: attached }))
+      .post("/api/access/roles")
+      .send(payload({ toolGrants: [{ domain: "erp", level: "use" }] }));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("TOOL_DOMAIN_NOT_GRANTABLE");
+    expect(res.body.domains).toEqual(["erp"]);
+  });
+
+  it("GET /access/roles marks a grant DEAD once its runtime domain is gone (rows kept)", async () => {
+    const prisma = createPrismaMock({
+      roles: [
+        {
+          id: "r1",
+          name: "Front desk",
+          slug: "front-desk",
+          startingPoint: "family",
+          toolGrants: [
+            { domain: "files", level: "use" },
+            { domain: "ext-bookings", level: "view" },
+            { domain: "crm", level: "view" },
+          ],
+        },
+      ],
+    });
+    const live = await request(buildApp(prisma, owner, { loadLayers: attached })).get("/api/access/roles");
+    expect(live.body.roles[0].toolGrants).toEqual([
+      { domain: "files", level: "use", state: "live", deadReason: null },
+      { domain: "ext-bookings", level: "view", state: "live", deadReason: null },
+      { domain: "crm", level: "view", state: "dead", deadReason: "empty_domain" },
+    ]);
+    const dead = await request(buildApp(prisma, owner, { loadLayers: detached })).get("/api/access/roles");
+    expect(dead.body.roles[0].toolGrants[1]).toEqual({
+      domain: "ext-bookings",
+      level: "view",
+      state: "dead",
+      deadReason: "not_provided",
+    });
+    // Marked, not deleted.
+    expect(prisma.accessRoleToolGrant.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("PATCH may KEEP a dead grant the role holds, but may not INTRODUCE one", async () => {
+    const seed = () =>
+      createPrismaMock({
+        roles: [
+          {
+            id: "r1",
+            name: "Front desk",
+            slug: "front-desk",
+            startingPoint: "family",
+            toolGrants: [{ domain: "ext-bookings", level: "view" }],
+          },
+        ],
+      });
+    // The dashboard re-emits untouched rows verbatim: keeping the dead row
+    // while adding a compiled one must save.
+    const keep = seed();
+    const kept = await request(buildApp(keep, owner, { loadLayers: detached }))
+      .patch("/api/access/roles/r1")
+      .send({
+        toolGrants: [
+          { domain: "ext-bookings", level: "view" },
+          { domain: "files", level: "use" },
+        ],
+      });
+    expect(kept.status).toBe(200);
+    expect(kept.body.role.toolGrants.map((g: { domain: string }) => g.domain)).toEqual([
+      "ext-bookings",
+      "files",
+    ]);
+
+    const introduce = seed();
+    const refused = await request(buildApp(introduce, owner, { loadLayers: detached }))
+      .patch("/api/access/roles/r1")
+      .send({ toolGrants: [{ domain: "ext-other", level: "view" }] });
+    expect(refused.status).toBe(400);
+    expect(refused.body.domains).toEqual(["ext-other"]);
+  });
+
+  it("GET /access/tool-domains serves the compiled list and one entry per runtime-only domain", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(
+      buildApp(prisma, owner, {
+        loadLayers: async () =>
+          toolLayers([
+            { name: "bookings__list_slots", domain: "ext-bookings", requiresWrite: false, source: "runtime:bookings" },
+            { name: "bookings__book_slot", domain: "ext-bookings", requiresWrite: true, source: "runtime:bookings" },
+            // A runtime tool in a COMPILED domain is not an extra row.
+            { name: "atlassian__jira_get_issue", domain: "pm", requiresWrite: true, source: "runtime:atlassian" },
+          ]),
+      }),
+    ).get("/api/access/tool-domains");
+    expect(res.status).toBe(200);
+    expect(res.body.compiled).toEqual([...GRANTABLE_TOOL_DOMAINS]);
+    expect(res.body.runtime).toEqual([
+      { domain: "ext-bookings", sources: ["runtime:bookings"], tools: 2, populated: true, readable: true },
+    ]);
+  });
+
+  it("GET /access/tool-domains is admin-reachable and has no runtime rows on a box with none", async () => {
+    const res = await request(
+      buildApp(createPrismaMock(), { id: "a-1", username: "adm", role: "admin" }),
+    ).get("/api/access/tool-domains");
+    expect(res.status).toBe(200);
+    expect(res.body.runtime).toEqual([]);
   });
 });

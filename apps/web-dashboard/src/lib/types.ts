@@ -1497,8 +1497,36 @@ export interface AccessRole {
   /** Present where the mutation cascades to NC / session revocation. */
   syncState?: AccessSyncState;
   featureGrants: AccessRoleFeatureGrant[];
-  toolGrants: AccessRoleToolGrant[];
+  toolGrants: AccessRoleToolGrantWithState[];
   connectorGrants: AccessRoleConnectorGrant[];
+}
+
+/**
+ * WARP-2897 — a tool grant as GET /api/access/roles serves it: the row plus
+ * whether it reaches anything. `dead` + `not_provided` = a runtime domain no
+ * attached tool carries (its extension disabled); `dead` + `empty_domain` =
+ * a compiled landing slot (crm/pm) with no tool yet. Optional so older boxes
+ * (and hand-built fixtures) still type-check; never sent back on a write.
+ */
+export interface AccessRoleToolGrantWithState extends AccessRoleToolGrant {
+  state?: "live" | "dead";
+  deadReason?: "empty_domain" | "not_provided" | null;
+}
+
+/** WARP-2897 — GET /api/access/tool-domains. */
+export interface AccessToolDomainsResponse {
+  /** The compiled grantable domains (server GRANTABLE_TOOL_DOMAINS). */
+  compiled: string[];
+  /** One entry per runtime-only domain some attached tool carries. */
+  runtime: Array<{
+    domain: string;
+    /** `runtime:<serverId>` per contributing server. */
+    sources: string[];
+    tools: number;
+    populated: boolean;
+    /** Holds a tool classified read — reachable for Staff/Guest-based roles. */
+    readable: boolean;
+  }>;
 }
 
 /** POST/PATCH body for /api/access/roles — §2 shape flattened. */
@@ -3437,12 +3465,23 @@ export type SecurityEventKind =
   | "camera_online"
   | "source_offline"
   | "source_online"
-  | "threat";
+  | "threat"
+  /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource, fromMode]; site-wide. */
+  | "mode_changed";
+
+/** Mirrors the orchestrator's SecurityEventSource enum. */
+export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode";
+
+/** An area a feed row belongs to — only areas the viewer can see. */
+export interface SecurityZoneRef {
+  id: string;
+  name: string;
+}
 
 export interface SecurityEvent {
   /** BigInt id, serialised as a string. */
   id: string;
-  source: "frigate" | "frigate_status" | "activity_mirror";
+  source: SecurityEventSource;
   kind: SecurityEventKind;
   severity: "info" | "notice" | "alert";
   /** Frigate camera name; null for rows no camera produced. */
@@ -3455,6 +3494,12 @@ export interface SecurityEvent {
   summary: string;
   /** Set on detections — the clip/thumbnail routes key on it. */
   frigateEventId: string | null;
+  /**
+   * WARP-2977 P2b — the areas this row happened in, resolved at read time
+   * from the viewer's VISIBLE links of VISIBLE areas (never names a hidden
+   * area). Empty for site-wide rows (threats, Frigate health, mode changes).
+   */
+  zones: SecurityZoneRef[];
 }
 
 export interface SecurityEventsPage {
@@ -3462,10 +3507,252 @@ export interface SecurityEventsPage {
   nextCursor: string | null;
 }
 
-/** One line of the feed header: what the feed is listening to, and whether it is reporting. */
+/**
+ * One line of the feed header: what the feed is listening to, and whether it
+ * is reporting. Served in the order camera_ingest, camera_system,
+ * threat_mirror, site_mode, retention (PR-2 adds `locks` after camera_system).
+ */
 export interface SecurityHealthRow {
-  id: "camera_ingest" | "camera_system" | "threat_mirror" | "retention";
+  id: "camera_ingest" | "camera_system" | "threat_mirror" | "site_mode" | "retention";
   state: "ok" | "quiet" | "down" | "not_configured";
   detail: string;
   lastSeenAt: string | null;
+}
+
+// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
+// Wire shapes of /api/security/{zones,sources,mode,hours}. Mirrors the
+// orchestrator's views in services/security-zones.service.ts and
+// services/security-mode.service.ts. "Areas" in the UI, `zone` in code.
+
+export type SecurityZoneKind = "entry" | "interior" | "perimeter" | "parking" | "restricted";
+export type SecurityZoneState = "active" | "archived";
+/** PR-2 adds "lock". */
+export type SecurityZoneSourceKind = "camera" | "camera_zone";
+export type SecurityZoneLinkState = "active" | "removed";
+
+export interface SecurityZoneLinkView {
+  id: string;
+  sourceKind: SecurityZoneSourceKind;
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  sourceRef: string;
+  /**
+   * ALWAYS the CAMERA's display name — the live camera name when the camera
+   * exists, else the snapshot taken when it was linked — for camera AND
+   * camera_zone links alike. It NEVER includes the part: render a camera_zone
+   * link as "<label> (the '<part>' part of the view)", where the part is always
+   * `sourceRef.slice(sourceRef.indexOf("/") + 1)`. The server snapshots
+   * `sourceLabel` at link time as that same camera display name.
+   */
+  label: string;
+  state: SecurityZoneLinkState;
+  stateChangedAt: string;
+}
+
+export interface SecurityZoneView {
+  id: string;
+  name: string;
+  kind: SecurityZoneKind;
+  state: SecurityZoneState;
+  /** Send back as `expectedVersion` on every edit of this area or its links. */
+  version: number;
+  /** The viewer's visible active links only. */
+  links: SecurityZoneLinkView[];
+}
+
+/**
+ * GET /api/security/zones. `include=archived` is honoured only for an owner or
+ * admin whose Security level is manage (or has no per-person level at all);
+ * for anyone else it is ignored, not refused.
+ */
+export interface SecurityZonesResponse {
+  zones: SecurityZoneView[];
+}
+
+export type SecurityLinkStatus = "present" | "missing" | "unknown";
+
+/** GET /api/security/sources — what can be linked, and whether each link still points at something. */
+export interface SecuritySourcesView {
+  frigate: "ok" | "unavailable";
+  /** Visible cameras only. `parts` = the camera's Frigate zones ("parts of the camera's view"). */
+  cameras: Array<{ name: string; label: string; parts: string[] }>;
+  linkStatus: Array<{ linkId: string; status: SecurityLinkStatus }>;
+}
+
+/** POST /api/security/zones. */
+export interface SecurityZoneCreateBody {
+  name: string;
+  kind: SecurityZoneKind;
+}
+
+/** PATCH /api/security/zones/:id — at least one of name/kind. */
+export interface SecurityZonePatchBody {
+  name?: string;
+  kind?: SecurityZoneKind;
+  expectedVersion: number;
+}
+
+/** PUT /api/security/zones/:id/links — the whole desired set, at most 32. */
+export interface SecurityZoneLinksBody {
+  links: Array<{ sourceKind: SecurityZoneSourceKind; sourceRef: string }>;
+  expectedVersion: number;
+}
+
+/** POST /api/security/zones → 201. */
+export interface SecurityZoneCreated {
+  zone: SecurityZoneView;
+}
+
+/** PATCH, archive, unarchive and links → 200. `changed:false` = nothing to do (no audit row). */
+export interface SecurityZoneWriteResult {
+  zone: SecurityZoneView;
+  changed: boolean;
+}
+
+export type SecurityMode = "open" | "closed" | "away";
+export type SecurityModeSource = "schedule" | "manual";
+export type SecurityManualEnd = "none" | "next_opening" | "at_time" | "until_changed";
+
+/** GET /api/security/mode. `mode` is the EFFECTIVE mode. */
+export interface SecurityModeView {
+  mode: SecurityMode;
+  source: SecurityModeSource;
+  manualEnd: SecurityManualEnd;
+  /** When a manual mode ends (next_opening / at_time); null otherwise. */
+  until: string | null;
+  setBy: { id: string; name: string } | null;
+  setAt: string;
+  hours:
+    | { state: "not_set" }
+    | {
+        state: "set";
+        /** The SITE zone — format every time on this page in it, never the browser's. */
+        timezone: string;
+        scheduledMode: "open" | "closed";
+        upcoming: { at: string; mode: "open" | "closed" } | null;
+      };
+  /**
+   * The zone to format EVERY time on the mode card in (setAt, until, upcoming):
+   * the site timezone when the opening hours are set; else Workspace.tz when it
+   * is a valid IANA zone; else null — and then the dashboard formats in
+   * `deviceTimeZone()` (lib/security-time.ts). Never UTC.
+   */
+  displayTimezone: string | null;
+  /** The stored mode lags the effective one, or the opening-hours check is down. */
+  stale: boolean;
+  version: number;
+}
+
+/** POST /api/security/mode — an intent applied to the current state (no version). */
+export type SecurityModeAction =
+  | { action: "close" }
+  | { action: "open"; for: "1h" | "2h" | "4h" }
+  | { action: "away" }
+  | { action: "resume" };
+
+export interface SecurityModeActionResult {
+  mode: SecurityModeView;
+  /** false = already in that state; nothing was written. */
+  changed: boolean;
+}
+
+export type SecurityHoursState = "not_set" | "set";
+export type SecurityDayKind = "closed" | "open_all_day" | "hours";
+
+export interface SecurityHoursDay {
+  /** ISO weekday, 1 = Monday … 7 = Sunday. */
+  weekday: number;
+  kind: SecurityDayKind;
+  /** 'HH:MM' site-local; null unless kind = hours. closes < opens = closes the next day. */
+  opens: string | null;
+  closes: string | null;
+}
+
+export interface SecurityHoursException {
+  /** Site-local 'YYYY-MM-DD'. */
+  date: string;
+  kind: SecurityDayKind;
+  opens: string | null;
+  closes: string | null;
+  note: string;
+}
+
+/** GET /api/security/hours. */
+export interface SecurityHoursView {
+  state: SecurityHoursState;
+  timezone: string | null;
+  /** Send back as `expectedVersion` on every hours or special-day write. */
+  version: number;
+  /** 7 entries, Monday first. */
+  days: SecurityHoursDay[];
+  /** Upcoming special days (from site-local yesterday), at most 100. */
+  exceptions: SecurityHoursException[];
+  /** The next 7 days of open windows, computed by the server. */
+  preview: Array<{ startsAt: string; endsAt: string }>;
+  hint: {
+    /** The workspace's timezone, only when it is a valid IANA zone. */
+    workspaceTimezone: string | null;
+    /** The business profile's free-text typical day, read-only. "" below owner/admin (the profile's §15 audience ladder). */
+    typicalDay: string;
+  };
+}
+
+/** PUT /api/security/hours. */
+export type SecurityHoursBody =
+  | {
+      state: "set";
+      timezone: string;
+      /** Exactly 7, unique weekdays 1..7. opens/closes 'HH:MM', only for kind = hours. */
+      days: Array<{ weekday: number; kind: SecurityDayKind; opens?: string; closes?: string }>;
+      expectedVersion: number;
+    }
+  | { state: "not_set"; expectedVersion: number };
+
+/** PUT /api/security/hours/exceptions/:date. */
+export interface SecurityHoursExceptionBody {
+  kind: SecurityDayKind;
+  opens?: string;
+  closes?: string;
+  /** At most 80 characters. */
+  note?: string;
+  expectedVersion: number;
+}
+
+/**
+ * PUT /api/security/hours and PUT …/exceptions/:date → 200: both views, since
+ * the mode may move. Both null = SAVED (committed and audited), but the server
+ * could not read them back: re-read. Never an error — a 5xx means nothing changed.
+ */
+export interface SecurityHoursWriteResult {
+  hours: SecurityHoursView | null;
+  mode: SecurityModeView | null;
+}
+
+/** Every `error.code` the P2b Security routes answer with (`{error: {code, message, issues?}}`). */
+export type SecurityErrorCode =
+  | "VALIDATION_ERROR"
+  | "ZONES_UNAVAILABLE"
+  | "MODE_UNAVAILABLE"
+  | "HOURS_UNAVAILABLE"
+  | "MODE_CONFLICT"
+  | "AUDIT_UNAVAILABLE"
+  | "VERSION_CONFLICT"
+  | "ZONE_NOT_FOUND"
+  | "ZONE_NAME_TAKEN"
+  | "ZONE_LIMIT"
+  | "ZONE_ARCHIVED"
+  | "SOURCE_NOT_FOUND"
+  | "SOURCE_CHECK_UNAVAILABLE"
+  | "INVALID_TIMEZONE"
+  | "SAME_OPEN_CLOSE"
+  | "HOURS_NOT_SET"
+  | "EXCEPTION_NOT_FOUND"
+  | "EXCEPTION_LIMIT"
+  | "EXCEPTION_OUT_OF_RANGE"
+  // A 500: a programming error on the box (a refused audit precondition, a
+  // TypeError), never an outage — retrying the same request will not help.
+  | "INTERNAL_ERROR";
+
+/** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
+export interface SecurityApiErrorBody {
+  error: { code: SecurityErrorCode; message: string; issues?: unknown[]; archivedZoneId?: string };
 }

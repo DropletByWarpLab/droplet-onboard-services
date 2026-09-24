@@ -48,6 +48,7 @@ import {
   deleteAccessRole,
   duplicateAccessRole,
   listAccessRoles,
+  listAccessToolDomains,
 } from "@/lib/api";
 import type {
   AccessRole,
@@ -60,13 +61,17 @@ import type {
 import {
   ACCESS_FEATURES,
   TIER_RANK,
+  TOOL_DOMAIN_GROUPS,
   blankRoleDraft,
+  deadToolGrants,
   featureDef,
   formatStorageBytes,
   roleToDraft,
   templateToDraft,
   tierLabel,
+  toolDomainGroupsWith,
   type RoleDraft,
+  type ToolDomainGroup,
 } from "@/lib/access";
 import { ACCESS_COPY } from "./copy";
 import { AccessChip, GuardNote, SyncChip } from "./bits";
@@ -112,6 +117,9 @@ interface BuilderState {
   base: RoleDraft;
   /** Catalogue id the draft was seeded from — remount key + `initialDirty`. */
   templateId?: string;
+  /** WARP-2897 — the wire role an edit was opened from, for its dead-grant
+   *  badges (`deadToolGrants`). Absent on create. */
+  role?: AccessRole;
 }
 
 /**
@@ -449,8 +457,32 @@ export function RolesAccessPanel({
     [people],
   );
 
-  const openCreate = () => setBuilder({ mode: "create", base: blankRoleDraft("family") });
-  const openEdit = (role: AccessRole) => setBuilder({ mode: "edit", base: roleToDraft(role) });
+  // WARP-2897 — the tool rows the builder renders: the static compiled table
+  // plus one Extensions row per runtime domain this box has attached. Fetched
+  // once; a failure (or an older box without the endpoint) keeps the static
+  // table, which is exactly what a box with nothing attached renders anyway.
+  const [toolGroups, setToolGroups] = useState<readonly ToolDomainGroup[]>(TOOL_DOMAIN_GROUPS);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => listAccessToolDomains())
+      .then((res) => {
+        if (!cancelled && res && Array.isArray(res.runtime)) {
+          setToolGroups(toolDomainGroupsWith(res.runtime, res.compiled ?? []));
+        }
+      })
+      .catch(() => {
+        /* keep the static table — see above */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const openCreate = () =>
+    setBuilder({ mode: "create", base: blankRoleDraft("family", toolGroups) });
+  const openEdit = (role: AccessRole) =>
+    setBuilder({ mode: "edit", base: roleToDraft(role, toolGroups), role });
 
   // ── WARP-2738: the two ways out of a template card ──
 
@@ -462,7 +494,11 @@ export function RolesAccessPanel({
    *  and Escape. */
   const openTemplateBuilder = (template: RoleTemplate) => {
     setGalleryOpen(false);
-    setBuilder({ mode: "create", base: templateToDraft(template), templateId: template.id });
+    setBuilder({
+      mode: "create",
+      base: templateToDraft(template, toolGroups),
+      templateId: template.id,
+    });
   };
 
   /** "Use this template" — one click, but never a silent write: the create
@@ -1273,6 +1309,8 @@ export function RolesAccessPanel({
           // A template seed is already the operator's intent, so Save is live
           // immediately; a blank create still has to be typed into.
           initialDirty={builder.templateId !== undefined}
+          toolDomainGroups={toolGroups}
+          deadToolGrants={builder.role ? deadToolGrants(builder.role) : []}
           onSave={handleBuilderSave}
           onClose={() => setBuilder(null)}
           onOpenDepartments={onOpenDepartments}
