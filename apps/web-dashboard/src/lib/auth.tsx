@@ -8,6 +8,8 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
+import { useSWRConfig } from "swr";
 // NOTE: api.ts imports `authFetch` from this module, so this is a module
 // cycle. It is safe: `patchSetupReady` is only INVOKED at runtime (inside the
 // `completeSetup` callback), never during module evaluation, so the live
@@ -15,6 +17,7 @@ import {
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
 import { HELP_PATH } from "./routing";
+import { clearSignedInState } from "./session-reset";
 
 export interface AuthUser {
   id: string;
@@ -576,11 +579,23 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
 
   // Confirmed dead. Drop cached user and bounce to login so the UI doesn't
   // keep showing stale data while every call 401s.
+  //
+  // WARP-2992 — and forget what the dead session left in this tab: its SWR
+  // cache and chat hand-offs (lib/session-reset.ts). The bounce below is a
+  // full navigation, but the public-page branch does not navigate, and a
+  // client-side trip back to /login from there would carry the cache into the
+  // next sign-in. Only when a session was signed in here (its cached profile
+  // was present, or storage would not say): an anonymous visitor's 401 on
+  // /setup or /help ends nobody's session, and emptying the wizard's cache
+  // would blank its steps.
+  let hadSession = true;
   try {
+    hadSession = localStorage.getItem(USER_KEY) !== null;
     localStorage.removeItem(USER_KEY);
   } catch {
     /* ignore — privacy mode, etc. */
   }
+  if (hadSession) void clearSignedInState({ revalidate: false });
   // Public pages own their anonymous flow: a refresh failure on /setup (the
   // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
   // NOT hard-navigate to /login — AuthGate routes those contextually
@@ -836,6 +851,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
   }, [probeSetupState]);
 
+  // WARP-2992 — the cache in this provider's scope: SWR's default one, which
+  // every page reads (see lib/session-reset.ts).
+  const { cache: swrCache, mutate: swrMutate } = useSWRConfig();
+
   const logout = useCallback(async () => {
     try {
       await authFetch("/api/auth/logout", { method: "POST" });
@@ -843,8 +862,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // ignore — cookie will be cleared server-side; we clean up locally regardless
     }
     localStorage.removeItem(USER_KEY);
-    setUser(null);
-  }, []);
+    // WARP-2992 — every caller goes on to /login CLIENT-SIDE, so the heap
+    // survives the sign-out: empty the cache before the next person can
+    // render from it (lib/session-reset.ts).
+    //
+    // Sign the tree out FIRST, synchronously. AuthGate renders nothing on a
+    // protected route without a user, so once this commit lands no page is
+    // subscribed to the cache, and the clear can also drop SWR's dedupe
+    // markers (`revalidate: true`) without refetching anything. If a hook is
+    // ever left mounted, its refetch goes out on the dead cookie and 401s into
+    // authFetch's bounce — to /login, never back into this person's data.
+    // After the POST, not before: a poll that fires in between can only 401,
+    // and an answer already in flight is discarded when it lands.
+    flushSync(() => setUser(null));
+    await clearSignedInState({ cache: swrCache, mutate: swrMutate, revalidate: true });
+  }, [swrCache, swrMutate]);
 
   const completeSetup = useCallback(async (): Promise<boolean> => {
     setCompleteSetupError(null);
