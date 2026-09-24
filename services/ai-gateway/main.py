@@ -405,6 +405,26 @@ async def list_models():
     )
 
 
+@app.post("/ai/models/refresh")
+async def refresh_models():
+    """Drop the cached model listing; the next /ai/models re-lists providers.
+
+    WARP-3046: the orchestrator calls this the moment a model download
+    succeeds. Without it the registry's 60 s TTL (and the orchestrator's own
+    30 s caches behind it) kept the just-installed model out of both the
+    Models page and the chat picker for up to ~90 s — it had already dropped
+    out of "Available to install", so it looked like it had vanished.
+
+    Service-token gated like every /ai/* route (ServiceAuthMiddleware; not in
+    `_AUTH_EXEMPT_PATHS`). It only invalidates — it does not touch the
+    runtime or any model — so the same call is safe to repeat.
+    """
+    if not model_registry:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    model_registry.invalidate()
+    return {"status": "invalidated"}
+
+
 # --- Chat (stateless) ---
 
 
