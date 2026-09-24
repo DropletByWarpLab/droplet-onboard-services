@@ -61,7 +61,7 @@ const ny = (hhmm: string, ymd = "2026-09-23") => new Date(`${ymd}T${hhmm}:00-04:
 interface World {
   jobState: { id: string; hourlyThrough: Date } | null;
   ready: { id: string; timezone: string; windowFrom: string; windowTo: string; finishedAt: Date } | null;
-  newest: { state: string; startedAt: Date; error: string | null } | null;
+  newest: { state: string; startedAt: Date; error: string | null; timezone?: string } | null;
   areaCells: Array<{ zoneId: string; zoneVersion: number }>;
   liveAreas: Array<{ id: string; version: number }>;
 }
@@ -247,11 +247,24 @@ describe("tickSecurityBaselines — when a full build runs", () => {
 
   it("a build that failed less than an hour ago is not retried every minute; after an hour it is", async () => {
     const failed = (ago: number) =>
-      world({ ready: null, newest: { state: "failed", startedAt: new Date(ny("15:00").getTime() - ago), error: "canceling statement due to statement timeout" } });
+      world({
+        ready: null,
+        newest: { state: "failed", startedAt: new Date(ny("15:00").getTime() - ago), error: "canceling statement due to statement timeout", timezone: TZ },
+      });
     await tickSecurityBaselines(fakePrisma(failed(30 * 60_000)).prisma, ny("15:00"), deps(TZ));
     expect(h.runFullBuild).not.toHaveBeenCalled();
     await tickSecurityBaselines(fakePrisma(failed(BASELINE_BUILD_RETRY_AFTER_MS + 1)).prisma, ny("15:00"), deps(TZ));
     expect(h.runFullBuild).toHaveBeenCalledTimes(1);
+  });
+
+  it("a build that failed in ANOTHER zone never holds back the new zone's build (review #2352, finding 7)", async () => {
+    const w = world({
+      ready: { id: "b-1", timezone: "Europe/London", windowFrom: "2026-08-26", windowTo: "2026-09-22", finishedAt: ny("00:11") },
+      newest: { state: "failed", startedAt: ny("14:50"), error: "canceling statement due to statement timeout", timezone: "Europe/London" },
+    });
+    await tickSecurityBaselines(fakePrisma(w).prisma, ny("15:00"), deps(TZ));
+    expect(h.runFullBuild).toHaveBeenCalledTimes(1);
+    expect(h.runFullBuild.mock.calls[0]![1]).toBe("timezone_changed");
   });
 
   it("a build that did not complete (claimed elsewhere) does not recompute the sources", async () => {

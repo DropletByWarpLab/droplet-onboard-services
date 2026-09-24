@@ -228,9 +228,17 @@ async function fullBuildTrigger(prisma: JobDb, zone: string, now: Date): Promise
 
   const newest = await prisma.securityBaselineBuild.findFirst({
     orderBy: { startedAt: "desc" },
-    select: { state: true, startedAt: true },
+    select: { state: true, startedAt: true, timezone: true },
   });
-  if (newest?.state === "failed" && now.getTime() - newest.startedAt.getTime() < BASELINE_BUILD_RETRY_AFTER_MS) return null;
+  // The backoff is for retrying the SAME build: a build that failed in another
+  // zone never holds back the new zone's (review #2352).
+  if (
+    newest?.state === "failed" &&
+    newest.timezone === zone &&
+    now.getTime() - newest.startedAt.getTime() < BASELINE_BUILD_RETRY_AFTER_MS
+  ) {
+    return null;
+  }
   return trigger;
 }
 
