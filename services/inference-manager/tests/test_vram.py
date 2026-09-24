@@ -287,11 +287,20 @@ def _point_sysfs_at(tmp_path: Path, monkeypatch) -> None:
 
 
 def _nvidia_plus_igpu(tmp_path: Path, monkeypatch) -> None:
-    """The .195 tree: an NVIDIA dGPU with no node, an AMD iGPU carve-out."""
+    """The .195 tree: an NVIDIA dGPU with no node, an AMD iGPU carve-out.
+
+    MemTotal is pinned to .195's 30 GiB so that falling through to the
+    unified-memory path would read a confident 28 — an "unknown" result must
+    come from the NVIDIA rule, never from the test host lacking /proc/meminfo.
+    """
+    import vram
     _write_vendor(tmp_path, "card1", "0x10de")
     _write_vendor(tmp_path, "card2", "0x1002")
     _write_dgpu_node(tmp_path, "card2", IGPU_CARVE_OUT_BYTES)
     _point_sysfs_at(tmp_path, monkeypatch)
+    monkeypatch.setenv("VRAM_RESERVE_GB", "2")
+    meminfo = _write_meminfo(tmp_path, 30 * 1024 * 1024)
+    monkeypatch.setattr(vram, "_MEMINFO_PATH", str(meminfo))
 
 
 def _configure_bridge(monkeypatch, *, token_var: str = "SERVICE_TOKEN_DISPLAY") -> None:
@@ -364,8 +373,6 @@ def test_nvidia_card_without_a_configured_bridge_is_unknown(tmp_path, monkeypatc
     import vram
     monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
     _nvidia_plus_igpu(tmp_path, monkeypatch)
-    meminfo = _write_meminfo(tmp_path, 30 * 1024 * 1024)
-    monkeypatch.setattr(vram, "_MEMINFO_PATH", str(meminfo))
 
     assert vram.detected_vram_gb() is None
 
