@@ -31,8 +31,11 @@
  *      ONE AT A TIME, in pick order: while one is in flight the newest pick
  *      waits (replacing any older waiting pick) and is sent when it settles,
  *      so the box can never apply an older pick after a newer one. A failed
- *      PUT is a console.warn and nothing else: the local pick stands until
- *      the box next answers.
+ *      PUT is a console.warn and ONE retry after `PUT_RETRY_DELAY_MS` —
+ *      dropped if a newer pick replaces it (that one goes at once) or the
+ *      person changes. The pause counts as in flight, so a read meanwhile
+ *      does not adopt the box's older answer. If the retry fails too, the
+ *      local pick stands until the box next answers.
  *   5. An orchestrator older than the route (a 404 whose code is not
  *      DEPARTMENT_NOT_AVAILABLE) turns the sync off for the page's life,
  *      which is P1's behaviour.
@@ -112,6 +115,9 @@ export const DEPARTMENTS_KEY = "/api/departments";
  *  keyed by the person too, so an account switch without a reload never reads
  *  the previous person's answer out of the cache. */
 export const ACTIVE_DEPARTMENT_KEY = "/api/me/active-department";
+
+/** How long a failed PUT waits before its one retry (rule 4). */
+export const PUT_RETRY_DELAY_MS = 2_000;
 
 /** The profile read's SWR key. The department home mutates it on save, which
  *  is what makes the sidebar follow a Customize without a reload. */
@@ -274,28 +280,44 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
 
   // ── the box (WARP-2981) ────────────────────────────────────────────────────
   // Every local pick bumps `picks`; `putInFlight` is true from a pick's PUT
-  // until the last waiting pick has been sent and settled. A read records
-  // both when it starts, which is how rule 3 tells an answer older than a
-  // local pick from a current one.
+  // until the last waiting pick has been sent and settled, a retry's pause
+  // included. A read records both when it starts, which is how rule 3 tells
+  // an answer older than a local pick from a current one.
   const picks = useRef(0);
   const putInFlight = useRef(false);
-  // The newest pick not yet sent, while a PUT is in flight (rule 4).
-  const waitingPut = useRef<{ departmentId: string | null } | null>(null);
+  // The newest pick not yet sent, while a PUT is in flight (rule 4). `retry`
+  // marks a failed pick's one retry, which is not retried again.
+  const waitingPut = useRef<{ departmentId: string | null; retry?: true } | null>(null);
+  // The pause before that retry is sent.
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped when the person changes or the provider goes away: a PUT that
+  // fails after that is not retried.
+  const putOwner = useRef(0);
   // Off for the page's life once the box proves it has no such route (rule 5).
   const [serverSync, setServerSync] = useState(true);
 
   // A waiting pick belongs to the person who made it: a sign-out or an
-  // account switch drops it rather than sending it as the next person.
+  // account switch drops it rather than sending it as the next person — and
+  // so does a retry, paused or not yet scheduled; leaving the page does too.
   useEffect(() => {
     waitingPut.current = null;
+    return () => {
+      putOwner.current += 1;
+      if (retryTimer.current !== null) {
+        clearTimeout(retryTimer.current);
+        retryTimer.current = null;
+        putInFlight.current = false;
+      }
+    };
   }, [userId]);
 
   /** Send the waiting pick, then the next one to arrive meanwhile, one PUT at
-   *  a time, until nothing waits. Only `pick` starts it, and only when no PUT
-   *  is in flight. */
+   *  a time, until nothing waits. Only `pick` starts it, when no PUT is in
+   *  flight or a retry's pause is cut short, and the retry timer resumes it. */
   const sendWaitingPuts = useCallback(async () => {
     for (let next = waitingPut.current; next; next = waitingPut.current) {
       waitingPut.current = null;
+      const owner = putOwner.current;
       try {
         await putActiveDepartment(next.departmentId);
       } catch (err: unknown) {
@@ -304,8 +326,19 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
           setServerSync(false);
           break;
         }
-        // A display preference: the local pick stands, nothing else.
+        // A display preference: the local pick stands.
         console.warn("Couldn't save the department choice to Droplet; this browser keeps it.", err);
+        // One retry, after a pause, unless a newer pick has replaced this one
+        // or the person has changed. The pause still counts as in flight, so a
+        // read meanwhile does not adopt the box's older answer.
+        if (!next.retry && !waitingPut.current && putOwner.current === owner) {
+          waitingPut.current = { departmentId: next.departmentId, retry: true };
+          retryTimer.current = setTimeout(() => {
+            retryTimer.current = null;
+            void sendWaitingPuts();
+          }, PUT_RETRY_DELAY_MS);
+          return;
+        }
       }
     }
     putInFlight.current = false;
@@ -359,7 +392,13 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
         slug === null ? null : (choices.find((d) => d.slug === slug)?.id ?? undefined);
       if (departmentId === undefined) return;
       waitingPut.current = { departmentId };
-      if (putInFlight.current) return;
+      // A pick during a retry's pause replaces the retry and goes at once.
+      if (retryTimer.current !== null) {
+        clearTimeout(retryTimer.current);
+        retryTimer.current = null;
+      } else if (putInFlight.current) {
+        return;
+      }
       putInFlight.current = true;
       void sendWaitingPuts();
     },

@@ -13,8 +13,8 @@
  *   · the box's answer wins once it arrives, if it is a CHOSEN scope — never
  *     `unset`, so a P1 local choice survives a box nobody has told anything —
  *     and never over a local pick made after the read began or still on its
- *     way; a pick is PUT; a box without the route means P1's local-only
- *     behaviour.
+ *     way; a pick is PUT, and a failed PUT once more after a pause; a box
+ *     without the route means P1's local-only behaviour.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -54,6 +54,7 @@ import {
   activeDepartmentStorageKey,
   departmentChoices,
   isMissingRoute,
+  PUT_RETRY_DELAY_MS,
   resolveActive,
   shouldAdoptServerChoice,
   switcherChoiceCount,
@@ -693,6 +694,168 @@ describe("<ActiveDepartmentProvider>", () => {
       await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("whole"));
       while (b.inFlight.length) await b.settleNewestFirst();
       expect(putIds()).toEqual(["sal"]);
+    });
+  });
+
+  // Review of bfcb04b8: a failed PUT was a console.warn and nothing else, so
+  // after a transient failure the next focus read adopted the box's older
+  // answer and the switcher jumped back.
+  describe("a failed PUT is tried once more, after a pause", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A box holding `start` whose next `failures` PUTs fail with a 500. GET
+     *  answers whatever it holds. */
+    function flakyBox(start: ActiveDepartmentResponse, failures: number) {
+      const state = { box: start, failuresLeft: failures };
+      putActiveDepartmentMock.mockImplementation(async (id: string | null) => {
+        if (state.failuresLeft > 0) {
+          state.failuresLeft -= 1;
+          throw httpError(500, "INTERNAL_ERROR");
+        }
+        state.box = id === null ? WHOLE : onBox([security, sales].find((d) => d.id === id)!);
+        return state.box;
+      });
+      getActiveDepartmentMock.mockImplementation(async () => state.box);
+      return state;
+    }
+    const putIds = () => putActiveDepartmentMock.mock.calls.map((c) => c[0]);
+    const active = () => screen.getByTestId("active").textContent;
+    /** Let `ms` pass, and the page react. */
+    const pass = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    };
+    /** A focus re-read, answered and applied. */
+    async function focusRead() {
+      await pass(1);
+      const before = getActiveDepartmentMock.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      await waitFor(() => expect(getActiveDepartmentMock.mock.calls.length).toBeGreaterThan(before));
+      await pass(1);
+    }
+    /** Mounted, with the box's Security adopted. */
+    async function mounted() {
+      listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
+      const view = wrap(<Probe />);
+      await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("security"));
+      return view;
+    }
+
+    it("a transient failure then success: the box ends with the pick, and a later read does not jump back", async () => {
+      const b = flakyBox(onBox(security), 1);
+      await mounted();
+
+      await click("pick sales");
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+      expect(putIds()).toEqual(["sal"]);
+      // A read during the pause does not adopt the box's older answer.
+      await focusRead();
+      expect(active()).toBe("sales");
+
+      await pass(PUT_RETRY_DELAY_MS);
+      expect(putIds()).toEqual(["sal", "sal"]);
+      expect(b.box).toEqual(onBox(sales));
+      await focusRead();
+      expect(active()).toBe("sales");
+      expect(localStorage.getItem(U1_KEY)).toBe("sales");
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("two failures: one warning each, no third try, and the next read adopts the box's answer as it always has", async () => {
+      const b = flakyBox(onBox(security), Number.POSITIVE_INFINITY);
+      await mounted();
+
+      await click("pick sales");
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+      await pass(PUT_RETRY_DELAY_MS);
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+      await pass(PUT_RETRY_DELAY_MS * 10);
+      expect(putIds()).toEqual(["sal", "sal"]);
+      expect(warn).toHaveBeenCalledTimes(2);
+
+      // Nothing is on its way any more: the box still holds Security, and the
+      // read adopts it, exactly as after a failed PUT before the retry.
+      await focusRead();
+      expect(b.box).toEqual(onBox(security));
+      expect(active()).toBe("security");
+    });
+
+    it("a newer pick during the pause replaces the retry: only the newest is sent, at once", async () => {
+      const b = flakyBox(onBox(security), 1);
+      await mounted();
+
+      await click("pick sales");
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+      await click("whole");
+      expect(putIds()).toEqual(["sal", null]);
+      await pass(PUT_RETRY_DELAY_MS * 2);
+      expect(putIds()).toEqual(["sal", null]);
+      expect(b.box).toEqual(WHOLE);
+      await focusRead();
+      expect(active()).toBe("whole");
+    });
+
+    it("a person change during the pause drops the retry, and does not hold up the next person's reads", async () => {
+      flakyBox(onBox(security), 1);
+      const { rerender } = await mounted();
+
+      await click("pick sales");
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+      authRef.current = { role: "family", id: "u2" };
+      rerender(tree(<Probe />));
+      await waitFor(() => expect(getActiveDepartmentMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+      // Still inside u1's pause: nothing of u1's is on its way for u2.
+      await focusRead();
+      expect(active()).toBe("security");
+      await pass(PUT_RETRY_DELAY_MS * 2);
+      expect(putIds()).toEqual(["sal"]);
+    });
+
+    it("a failure that lands after the person changed is not retried as the next person", async () => {
+      flakyBox(onBox(security), 0);
+      const { rerender } = await mounted();
+      const write = deferred<ActiveDepartmentResponse>();
+      putActiveDepartmentMock.mockReturnValueOnce(write.promise);
+
+      await click("pick sales");
+      authRef.current = { role: "family", id: "u2" };
+      rerender(tree(<Probe />));
+      await act(async () => {
+        write.reject(httpError(500, "INTERNAL_ERROR"));
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      await pass(PUT_RETRY_DELAY_MS * 2);
+      expect(putIds()).toEqual(["sal"]);
+    });
+
+    it("leaving the page during the pause sends nothing more", async () => {
+      flakyBox(onBox(security), 1);
+      const { unmount } = await mounted();
+
+      await click("pick sales");
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+      unmount();
+      await pass(PUT_RETRY_DELAY_MS * 2);
+      expect(putIds()).toEqual(["sal"]);
+    });
+
+    it("a box without the route is never retried (rule 5)", async () => {
+      flakyBox(onBox(security), 0);
+      await mounted();
+      putActiveDepartmentMock.mockRejectedValueOnce(httpError(404));
+
+      await click("pick sales");
+      await pass(PUT_RETRY_DELAY_MS * 2);
+      expect(putIds()).toEqual(["sal"]);
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 
