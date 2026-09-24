@@ -18,6 +18,8 @@ const h = vi.hoisted(() => ({
   recorded: [] as Array<{ username: string; inTx: boolean }>,
   delivered: [] as Array<{ id: string; opts: unknown; txDepth: number; notifyState: unknown }>,
   deliverFails: false,
+  /** Review #7: #2353's delivery CLAIMS the row (error = outcome_unknown) before any transport, and the stamp overwrites it — unless it is lost. */
+  stampLost: false,
   audit: vi.fn(),
   inTxAudit: vi.fn(),
   gate: true,
@@ -37,6 +39,10 @@ vi.mock("./notifications.service.js", async (orig) => {
       h.delivered.push({ id, opts, txDepth: h.fake!.txDepth(), notifyState: incident?.notifyState });
       if (h.deliverFails) throw new Error("mqtt down");
       const row = w.notificationLog.find((r) => r.id === id)!;
+      // The real claim: only a row that is still queued can be delivered, once.
+      if (row.deliveredAt != null || row.error != null) return { id, channels: [], delivered: false, skipped: "already_delivered" };
+      row.error = "delivery: outcome_unknown";
+      if (h.stampLost) return { id, channels: ["toast"], delivered: true };
       Object.assign(row, { channels: "toast", deliveredAt: new Date(), pushOutcome: "no_subscribers", error: null });
       return { id, channels: ["toast"], delivered: true };
     },
@@ -191,6 +197,7 @@ beforeEach(() => {
   h.recorded = [];
   h.delivered = [];
   h.deliverFails = false;
+  h.stampLost = false;
   h.gate = true;
   h.audit.mockReset().mockResolvedValue({ id: 1n });
   h.inTxAudit.mockReset().mockResolvedValue({ id: 2n });
@@ -526,6 +533,40 @@ describe("redelivery", () => {
     await redeliverStuckNotices(client(f), NOW);
     expect(h.delivered).toEqual([expect.objectContaining({ id: "clog1", opts: { tag: incidentTag(INCIDENT), priority: "alert" } })]);
     expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "sent", channels: "toast", settledAt: NOW });
+  });
+
+  it("review #7: a delivery whose outcome was never recorded settles outcome_unknown — never 'not reached'", async () => {
+    const f = world();
+    h.stampLost = true;
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "outcome_unknown", settledAt: NOW, channels: "", pushOutcome: null });
+    const refs = (h.audit.mock.calls[0]![0] as { refs: { notices: Array<{ outcome: string }> } }).refs;
+    expect(refs.notices).toEqual([expect.objectContaining({ userId: STEFAN, outcome: "outcome_unknown" })]);
+  });
+
+  it("review #7: redelivery cannot re-send a claimed row — it settles it outcome_unknown from the row, and the send is not repeated", async () => {
+    const f = world(stuck(150_000));
+    f.world.notificationLog[0]!.error = "delivery: outcome_unknown";
+    await redeliverStuckNotices(client(f), NOW);
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "outcome_unknown", settledAt: NOW });
+    expect(f.world.notificationLog[0]).toMatchObject({ deliveredAt: null, error: "delivery: outcome_unknown" });
+  });
+
+  it("an outcome_unknown notice counts against the hourly cap (a row was written, and may have been sent)", async () => {
+    const prior = Array.from({ length: SECURITY_ALERT_HOURLY_CAP }, (_, k) => ({
+      id: `u${k}`,
+      incidentId: `00000000-0000-4000-8000-00000000020${k}`,
+      userId: STEFAN,
+      username: "stefan",
+      reason: "routed",
+      outcome: "outcome_unknown",
+      notificationLogId: `lu${k}`,
+      createdAt: plus(NOW, -(k + 1) * 60_000),
+      settledAt: plus(NOW, -(k + 1) * 60_000),
+    }));
+    const f = world({ securityIncidentNotice: prior });
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "skipped_capped" });
   });
 
   it("a younger one is left alone; a redelivery that still cannot stamp the row settles not_sent (never a loop)", async () => {

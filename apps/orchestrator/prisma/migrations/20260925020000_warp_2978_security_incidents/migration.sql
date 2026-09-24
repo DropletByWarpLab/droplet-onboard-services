@@ -56,7 +56,7 @@ CREATE TYPE "SecurityAlertRecipientOrigin" AS ENUM ('owner_default', 'chosen');
 CREATE TYPE "SecurityNoticeReason" AS ENUM ('routed', 'fallback_owner');
 
 -- CreateEnum
-CREATE TYPE "SecurityNoticeOutcome" AS ENUM ('queued', 'sent', 'not_sent', 'skipped_no_access', 'skipped_not_visible', 'skipped_capped', 'skipped_no_address');
+CREATE TYPE "SecurityNoticeOutcome" AS ENUM ('queued', 'sent', 'not_sent', 'outcome_unknown', 'skipped_no_access', 'skipped_not_visible', 'skipped_capped', 'skipped_no_address');
 
 -- CreateTable
 CREATE TABLE "SecurityIncident" (
@@ -314,10 +314,11 @@ ALTER TABLE "SecurityIncidentAck" ADD CONSTRAINT "SecurityIncidentAck_session" C
   NOT "sessionChecked" OR "sessionId" IS NOT NULL
 );
 
--- A NotificationLog row iff one was written (queued/sent/not_sent); settled
--- iff not queued; transport snapshots only on a transported notice.
+-- A NotificationLog row iff one was written (queued/sent/not_sent/outcome_unknown);
+-- settled iff not queued; transport snapshots only on a transported notice
+-- (an outcome_unknown notice has none: its stamp is what was lost).
 ALTER TABLE "SecurityIncidentNotice" ADD CONSTRAINT "SecurityIncidentNotice_shape" CHECK (
-  ("outcome" IN ('queued', 'sent', 'not_sent')) = ("notificationLogId" IS NOT NULL)
+  ("outcome" IN ('queued', 'sent', 'not_sent', 'outcome_unknown')) = ("notificationLogId" IS NOT NULL)
   AND ("outcome" = 'queued') = ("settledAt" IS NULL)
   AND ("outcome" IN ('sent', 'not_sent') OR ("channels" = '' AND "pushOutcome" IS NULL))
 );

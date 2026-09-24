@@ -383,7 +383,7 @@ function check(table: TableName, r: Row): void {
     if (r.sessionChecked === true && r.sessionId == null) fail("SecurityIncidentAck_session");
   }
   if (table === "securityIncidentNotice") {
-    const logged = r.outcome === "queued" || r.outcome === "sent" || r.outcome === "not_sent";
+    const logged = r.outcome === "queued" || r.outcome === "sent" || r.outcome === "not_sent" || r.outcome === "outcome_unknown";
     if (logged !== (r.notificationLogId != null)) fail("SecurityIncidentNotice_shape");
     if ((r.outcome === "queued") !== (r.settledAt == null)) fail("SecurityIncidentNotice_shape");
     if (!(r.outcome === "sent" || r.outcome === "not_sent") && (r.channels !== "" || r.pushOutcome != null)) {

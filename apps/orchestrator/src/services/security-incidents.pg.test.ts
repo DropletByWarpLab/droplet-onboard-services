@@ -247,6 +247,13 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       expect(await run(incident(alertCols), notice("skipped_capped", "log1", "now()"))).toEqual(rejectedBy("SecurityIncidentNotice_shape"));
       expect(await run(incident(alertCols), notice("skipped_not_visible", null, "now()", "'push'"))).toEqual(rejectedBy("SecurityIncidentNotice_shape"));
       expect(await run(incident(alertCols), notice("sent", "log1", "now()", "'toast,push'", "'sent'"))).toBe("inserted");
+      // Review #7: outcome_unknown — a row was written, settled, and nothing is known about its transport.
+      expect(await run(incident(alertCols), notice("outcome_unknown", "log1", "now()"))).toBe("inserted");
+      expect(await run(incident(alertCols), notice("outcome_unknown", null, "now()"))).toEqual(rejectedBy("SecurityIncidentNotice_shape"));
+      expect(await run(incident(alertCols), notice("outcome_unknown", "log1", "NULL"))).toEqual(rejectedBy("SecurityIncidentNotice_shape"));
+      expect(await run(incident(alertCols), notice("outcome_unknown", "log1", "now()", "'push'", "'sent'"))).toEqual(
+        rejectedBy("SecurityIncidentNotice_shape"),
+      );
     });
 
     const ack = (action: string, note: string, sid: string | null, checked: boolean) =>

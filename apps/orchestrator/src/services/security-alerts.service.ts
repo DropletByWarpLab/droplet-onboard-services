@@ -34,10 +34,24 @@
  *   6. `incident.alerted`, audited by the system after the commit — its throw
  *      reaches safeRun's canary (after every other incident is handled).
  * A throw in 1–4 counts an attempt; the third is terminal (`failed`, and the
- * alerts health row goes down). A notice still `queued` two minutes later
- * (the process died between commit and delivery, or the stamp failed) is
- * delivered once more with the same tag — the device collapses duplicates by
- * tag — and then settled either way, so it never loops.
+ * alerts health row goes down).
+ *
+ * SETTLING (review #7). WARP-2804's delivery CLAIMS a NotificationLog row
+ * (`error = 'delivery: outcome_unknown'`) before any transport and the stamp
+ * overwrites the claim — so a row is delivered at most once, and a retry by
+ * id is a no-op. A notice is settled from its row:
+ *   · delivered (`deliveredAt`) → `sent`;
+ *   · still carrying the claim → `outcome_unknown`: the transport ran (or
+ *     crashed mid-way) and its stamp was lost, so the person may or may not
+ *     have been reached. Never `not_sent` — the audit must not say they were
+ *     not reached when they may have been;
+ *   · stamped with nothing delivered → `not_sent`;
+ *   · never claimed → left `queued`.
+ * A notice still `queued` two minutes on (the process died between commit and
+ * delivery, or the tick hit its deadline) gets its delivery then — which
+ * only transports a row that was never claimed — and is settled either way,
+ * so it never loops: a row that still cannot be claimed or read settles
+ * `not_sent` (nothing was sent).
  */
 import type { DirectoryUserStatus, Prisma, PrismaClient, Role, SecurityNoticeOutcome, SecurityNoticeReason } from "@prisma/client";
 import { isUserIdShaped } from "@droplet/auth-policy";
@@ -72,7 +86,9 @@ const DAY_MS = 86_400_000;
 const SINGLETON = "singleton";
 const HOUSEHOLD_ROLES: readonly Role[] = ["owner", "admin", "family"];
 /** Notices that count against the hourly cap: a NotificationLog row was written for them. */
-const COUNTED: readonly SecurityNoticeOutcome[] = ["queued", "sent", "not_sent"];
+const COUNTED: readonly SecurityNoticeOutcome[] = ["queued", "sent", "not_sent", "outcome_unknown"];
+/** WARP-2804's claim on a row whose delivery started (notifications.service.ts). */
+const DELIVERY_CLAIMED = "delivery: outcome_unknown";
 
 /** What the engine hands the notifier. */
 export interface NotifierDeps {
@@ -198,7 +214,7 @@ async function alreadyNoticed(prisma: PrismaClient, incidentId: string): Promise
  * written (whatever its transport did), or the person was capped — they were
  * told about other alerts this hour and see this one in Security.
  */
-const REACHED: readonly SecurityNoticeOutcome[] = ["queued", "sent", "not_sent", "skipped_capped"];
+const REACHED: readonly SecurityNoticeOutcome[] = ["queued", "sent", "not_sent", "outcome_unknown", "skipped_capped"];
 
 /**
  * Steps 2–3: who is told, and each one's outcome and words. Reads only (plus
@@ -290,22 +306,23 @@ async function deliverAndSettle(prisma: PrismaClient, notice: SettleableNotice, 
   try {
     const row = await prisma.notificationLog.findUnique({
       where: { id: logId },
-      select: { channels: true, pushOutcome: true, deliveredAt: true },
+      select: { channels: true, pushOutcome: true, deliveredAt: true, error: true },
     });
-    const stamped = row !== null && (row.pushOutcome !== null || row.channels !== "" || row.deliveredAt !== null);
-    if (!stamped && !final && row !== null) return;
-    await prisma.securityIncidentNotice.updateMany({
-      where: { id: notice.id, outcome: "queued" },
-      data:
-        stamped && row
-          ? {
-              outcome: row.deliveredAt ? "sent" : "not_sent",
-              channels: row.channels.slice(0, 32),
-              pushOutcome: row.pushOutcome,
-              settledAt: now,
-            }
-          : { outcome: "not_sent", channels: "", pushOutcome: null, settledAt: now },
-    });
+    let data: Prisma.SecurityIncidentNoticeUpdateManyMutationInput;
+    if (row?.deliveredAt) {
+      data = { outcome: "sent", channels: row.channels.slice(0, 32), pushOutcome: row.pushOutcome, settledAt: now };
+    } else if (row?.error === DELIVERY_CLAIMED) {
+      // Claimed, never stamped: it may have gone out. It cannot be sent again.
+      data = { outcome: "outcome_unknown", channels: "", pushOutcome: null, settledAt: now };
+    } else if (row && (row.pushOutcome !== null || row.error !== null)) {
+      data = { outcome: "not_sent", channels: row.channels.slice(0, 32), pushOutcome: row.pushOutcome, settledAt: now };
+    } else if (final || row === null) {
+      // Never claimed (or gone): nothing was sent. Settled, so it never loops.
+      data = { outcome: "not_sent", channels: "", pushOutcome: null, settledAt: now };
+    } else {
+      return;
+    }
+    await prisma.securityIncidentNotice.updateMany({ where: { id: notice.id, outcome: "queued" }, data });
   } catch (err) {
     logger.warn({ err, noticeId: notice.id }, "security alert notice could not be settled — it stays queued");
   }

@@ -8895,6 +8895,9 @@ enum SecurityNoticeOutcome {
   queued
   sent
   not_sent
+  /// the delivery was claimed (WARP-2804) but its outcome never recorded: it may or may not have
+  /// reached the person, and it cannot be sent again. Never reported as "not reached".
+  outcome_unknown
   skipped_no_access
   skipped_not_visible
   skipped_capped
