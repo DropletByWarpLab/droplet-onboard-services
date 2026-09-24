@@ -263,18 +263,30 @@ describe("who was told", () => {
 describe("acknowledgements", () => {
   it("who, when, the device as it reported itself, and whether it came from the alert", () => {
     expect(
-      ackLine({ action: "acknowledge", byName: "Maria", at: at("01:17"), client: "Droplet for iPhone 1.4", viaNotification: true, note: "" }, TZ, NOW),
+      ackLine(
+        { action: "acknowledge", byName: "Maria", at: at("01:17"), client: "Droplet for iPhone 1.4", viaNotification: true, note: "", signIn: null },
+        TZ,
+        NOW,
+      ),
     ).toBe("Maria acknowledged · 2:17 AM · Droplet for iPhone 1.4 (as the device reported it) · from the alert notification");
-    expect(ackLine({ action: "resolve", byName: "Stefan", at: at("01:30"), client: null, viaNotification: false, note: "Cleaner" }, TZ, NOW)).toBe(
+    expect(ackLine({ action: "resolve", byName: "Stefan", at: at("01:30"), client: null, viaNotification: false, note: "Cleaner", signIn: null }, TZ, NOW)).toBe(
       "Stefan resolved · 2:30 AM",
     );
   });
 
-  it("whether the sign-in was confirmed live — only when the box sent it (owner/admin)", () => {
+  it("the sign-in behind it — only when the box sent `signIn` (owner/admin); never an id", () => {
     const base = { action: "acknowledge" as const, byName: "Maria", at: at("01:17"), client: null, viaNotification: false, note: "" };
-    expect(ackLine({ ...base, sessionChecked: true }, TZ, NOW)).toBe("Maria acknowledged · 2:17 AM · Sign-in confirmed");
-    expect(ackLine({ ...base, sessionChecked: false }, TZ, NOW)).toBe("Maria acknowledged · 2:17 AM · Sign-in not confirmed");
-    expect(ackLine(base, TZ, NOW)).toBe("Maria acknowledged · 2:17 AM");
+    expect(ackLine({ ...base, signIn: { recorded: true, confirmedLive: true } }, TZ, NOW)).toBe(
+      "Maria acknowledged · 2:17 AM · Sign-in confirmed",
+    );
+    expect(ackLine({ ...base, signIn: { recorded: true, confirmedLive: false } }, TZ, NOW)).toBe(
+      "Maria acknowledged · 2:17 AM · Sign-in not confirmed",
+    );
+    expect(ackLine({ ...base, signIn: { recorded: false, confirmedLive: false } }, TZ, NOW)).toBe(
+      "Maria acknowledged · 2:17 AM · No sign-in recorded",
+    );
+    // Anyone but owner/admin: null, and the line says nothing about sign-ins.
+    expect(ackLine({ ...base, signIn: null }, TZ, NOW)).toBe("Maria acknowledged · 2:17 AM");
   });
 });
 

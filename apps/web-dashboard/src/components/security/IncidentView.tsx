@@ -419,11 +419,17 @@ function WhatHappened({
   );
 }
 
-/** Thumbnail, Clip (or Clip expired) and the other areas this event was in. */
+/**
+ * Thumbnail, Clip (or Clip expired) and the other areas this event was in.
+ * An `alsoIn` area the row already names as a badge (its `zones`) isn't
+ * repeated.
+ */
 function EventMedia({ event: e, now }: { event: IncidentMemberView; now: Date }) {
   const [thumbGone, setThumbGone] = useState(false);
   const media = e.source === "frigate" && Boolean(e.frigateEventId) && (e.kind === "detection" || e.kind === "detection_low");
-  if (!media && e.alsoIn.length === 0) return null;
+  const shown = new Set((e.zones ?? []).map((z) => z.id));
+  const alsoIn = e.alsoIn.filter((z) => !shown.has(z.id));
+  if (!media && alsoIn.length === 0) return null;
   const expired = clipExpired(e.startedAt, now);
   const ref = e.frigateEventId ? encodeURIComponent(e.frigateEventId) : "";
   return (
@@ -449,7 +455,7 @@ function EventMedia({ event: e, now }: { event: IncidentMemberView; now: Date })
             {COPY.clip}
           </a>
         ))}
-      {e.alsoIn.length > 0 && <span>{fill(COPY.alsoIn, { areas: e.alsoIn.map((z) => z.name).join(", ") })}</span>}
+      {alsoIn.length > 0 && <span>{fill(COPY.alsoIn, { areas: alsoIn.map((z) => z.name).join(", ") })}</span>}
     </span>
   );
 }

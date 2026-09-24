@@ -74,6 +74,7 @@ function member(over: Partial<IncidentMemberView> = {}): IncidentMemberView {
     endedAt: at("01:15"),
     summary: "Person in aisle",
     frigateEventId: "1727140000.1-person",
+    zones: [{ id: "z1", name: "Stock room" }],
     alsoIn: [],
     ...over,
   };
@@ -161,6 +162,37 @@ describe("the page's order and content", () => {
     expect(row).toHaveStyle({ alignItems: "flex-start" });
   });
 
+  it("each event names its visible areas like the feed does; `Also in` never repeats one already shown (PR-B final wire)", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        events: [
+          member({
+            zones: [
+              { id: "z1", name: "Stock room" },
+              { id: "z2", name: "Till" },
+            ],
+            alsoIn: [
+              { id: "z2", name: "Till" },
+              { id: "z3", name: "Back office" },
+            ],
+          }),
+        ],
+      }),
+    );
+    renderView();
+    const row = await screen.findByTestId("incident-event-901");
+    expect([...row.querySelectorAll("[data-area]")].map((b) => b.textContent)).toEqual(["Stock room", "Till"]);
+    expect(row).toHaveTextContent("Also in Back office");
+    expect(row).not.toHaveTextContent("Also in Till");
+  });
+
+  it("an event with no visible area has no area badge", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ events: [member({ zones: [] })] }));
+    renderView();
+    const row = await screen.findByTestId("incident-event-901");
+    expect(row.querySelector("[data-area]")).toBeNull();
+  });
+
   it("after Frigate's 14 days: Clip expired, no dead link or thumbnail", async () => {
     const old = new Date(NOW.getTime() - 20 * 86_400_000).toISOString();
     h.getSecurityIncident.mockResolvedValue(detail({ events: [member({ startedAt: old })] }));
@@ -221,8 +253,8 @@ describe("the page's order and content", () => {
         state: "resolved",
         lastAck: { action: "resolve", byName: "Stefan", at: at("01:30") },
         acks: [
-          { action: "acknowledge", byName: "Maria", at: at("01:17"), client: "Droplet for iPhone 1.4", viaNotification: true, note: "" },
-          { action: "resolve", byName: "Stefan", at: at("01:30"), client: null, viaNotification: false, note: "It was the cleaner." },
+          { action: "acknowledge", byName: "Maria", at: at("01:17"), client: "Droplet for iPhone 1.4", viaNotification: true, note: "", signIn: { recorded: true, confirmedLive: true } },
+          { action: "resolve", byName: "Stefan", at: at("01:30"), client: null, viaNotification: false, note: "It was the cleaner.", signIn: null },
         ],
         viewer: { level: "act", acknowledged: true },
       }),
@@ -231,7 +263,7 @@ describe("the page's order and content", () => {
     const list = await screen.findByRole("list", { name: COPY.acksTitle });
     const items = within(list).getAllByRole("listitem");
     expect(items[0]).toHaveTextContent(
-      "Maria acknowledged · 2:17 AM · Droplet for iPhone 1.4 (as the device reported it) · from the alert notification",
+      "Maria acknowledged · 2:17 AM · Droplet for iPhone 1.4 (as the device reported it) · from the alert notification · Sign-in confirmed",
     );
     expect(items[1]).toHaveTextContent("Stefan resolved · 2:30 AM");
     expect(items[1]).toHaveTextContent("It was the cleaner.");
@@ -304,6 +336,18 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
     expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+  });
+
+  it("a partial view (a lower-severity code visible, the alert on a hidden camera): open, no buttons, no acks or notices — as the box sends it", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({ severity: "notice", reasonCodes: ["camera_offline"], state: "open", actionable: false, acks: [], notices: [], lastAck: null }),
+    );
+    renderView();
+    expect(await screen.findByText("Needs attention")).toHaveClass("badge", "warn");
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.queryByRole("heading", { name: COPY.toldTitle })).toBeNull();
+    expect(screen.queryByRole("heading", { name: COPY.acksTitle })).toBeNull();
   });
 
   it("a box that doesn't say it's actionable gets no buttons (fails closed)", async () => {

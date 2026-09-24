@@ -102,6 +102,7 @@ export const INCIDENT_COPY = {
   ackViaNotification: "from the alert notification",
   ackSignInConfirmed: "Sign-in confirmed",
   ackSignInNotConfirmed: "Sign-in not confirmed",
+  ackSignInNotRecorded: "No sign-in recorded",
 
   // ── the empty list ──
   emptyAttention: "Nothing needs attention",
@@ -350,6 +351,12 @@ export function noticeLine(n: IncidentNoticeView, cameras: readonly string[], tz
   return n.reason === "fallback_owner" ? `${line} · ${INCIDENT_COPY.noticeFallback}` : line;
 }
 
+function signInLine(s: IncidentAckView["signIn"] | undefined): string | null {
+  if (!s) return null;
+  if (!s.recorded) return INCIDENT_COPY.ackSignInNotRecorded;
+  return s.confirmedLive ? INCIDENT_COPY.ackSignInConfirmed : INCIDENT_COPY.ackSignInNotConfirmed;
+}
+
 /** `Maria acknowledged · 2:17 AM · Droplet for iPhone 1.4 (as the device reported it) · from the alert notification`. The note is shown apart. */
 export function ackLine(a: IncidentAckView, tz: string, now: Date): string {
   return [
@@ -357,8 +364,8 @@ export function ackLine(a: IncidentAckView, tz: string, now: Date): string {
     formatSiteWhen(a.at, tz, now),
     a.client ? fill(INCIDENT_COPY.ackClient, { client: a.client }) : null,
     a.viaNotification ? INCIDENT_COPY.ackViaNotification : null,
-    // Owner/admin only, and only from a box that sends it.
-    a.sessionChecked === true ? INCIDENT_COPY.ackSignInConfirmed : a.sessionChecked === false ? INCIDENT_COPY.ackSignInNotConfirmed : null,
+    // Owner/admin only: the box sends null to anyone else, and then nothing is said.
+    signInLine(a.signIn),
   ]
     .filter((p): p is string => Boolean(p))
     .join(" · ");

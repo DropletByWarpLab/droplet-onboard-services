@@ -113,6 +113,24 @@ describe("at manage", () => {
     expect(h.putAlertRouting).not.toHaveBeenCalled();
   });
 
+  it("someone who can't be told but is still set to receive: the switch shows it, and turning it off is allowed (clean-up)", async () => {
+    h.getAlertRouting.mockResolvedValue(
+      manageView([
+        person(),
+        person({ userId: "u-sam", name: "Sam", role: "family", state: "receiving", origin: "chosen", version: 4, eligible: false, ineligibleReason: "no_access" }),
+      ]),
+    );
+    h.putAlertRouting.mockResolvedValue({ person: person({ userId: "u-sam", name: "Sam", state: "not_receiving", eligible: false, ineligibleReason: "no_access", version: 5 }) });
+    render(<AlertRoutingPanel />, { wrapper: Wrap });
+    const sam = await waitFor(() => row("Sam"));
+    expect(sam).toHaveTextContent("Can't be told: no longer has access to Security");
+    const sw = within(sam).getByRole("switch", { name: "Tell Sam about alerts" });
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    expect(sw).not.toHaveAttribute("aria-disabled");
+    fireEvent.click(sw);
+    await waitFor(() => expect(h.putAlertRouting).toHaveBeenCalledWith("u-sam", { state: "not_receiving", expectedVersion: 4 }));
+  });
+
   it("turning someone on PUTs receiving with the version it read (null = no row yet), then re-reads", async () => {
     h.putAlertRouting.mockResolvedValue({ person: person({ userId: "u-maria", name: "Maria", version: 0 }) });
     render(<AlertRoutingPanel />, { wrapper: Wrap });

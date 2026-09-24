@@ -9,9 +9,11 @@
  * `Manages the Security department` chip (a suggestion from the department
  * set-up; it grants nothing), and how they'd hear (a phone set up for
  * notifications, or only while Droplet is open). Someone who can't be told
- * (no access to Security, an inactive account, …) says why, and their switch
- * is off and inert. When nobody chosen can be told, the owners are told
- * instead, and a banner says so.
+ * (no access to Security, an inactive account, …) says why, and can't be
+ * switched on; if they are still set to be told, their switch shows it and
+ * can be switched OFF — the clean-up the box always allows (PR-B review B).
+ * When nobody chosen can be told, the owners are told instead, and a banner
+ * says so.
  *
  * Below manage: the viewer's own line only. The box decides what is listed
  * (route 21 is a filter by level, not a gate); this renders exactly that.
@@ -71,6 +73,11 @@ function cantBeTold(p: AlertRoutingPerson): string {
   return (p.ineligibleReason && (ROUTING_COPY.cantBeTold as Record<string, string>)[p.ineligibleReason]) || ROUTING_COPY.cantBeToldUnknown;
 }
 
+/** Eligible: either way. Not eligible: only OFF, and only while still set to be told. */
+function switchable(p: AlertRoutingPerson): boolean {
+  return p.eligible || p.state === "receiving";
+}
+
 function initialsOf(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   const letters = parts.length > 1 ? parts[0]![0]! + parts[parts.length - 1]![0]! : name.slice(0, 2);
@@ -86,7 +93,8 @@ export function AlertRoutingPanel() {
   const busyRef = useRef(false);
 
   const toggle = async (p: AlertRoutingPerson) => {
-    if (busyRef.current || !p.eligible) return;
+    // Someone who can't be told can only be switched off.
+    if (busyRef.current || !switchable(p)) return;
     busyRef.current = true;
     const next = p.state === "receiving" ? "not_receiving" : "receiving";
     setPending({ userId: p.userId, state: next });
@@ -137,7 +145,8 @@ export function AlertRoutingPanel() {
         <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
           {routing.people.map((p) => {
             const mine = pending?.userId === p.userId;
-            const on = mine ? pending!.state === "receiving" : p.eligible && p.state === "receiving";
+            const on = mine ? pending!.state === "receiving" : p.state === "receiving";
+            const inert = pending !== null || !switchable(p);
             return (
               <li key={p.userId} className="lrow" data-user={p.userId} style={{ alignItems: "center" }}>
                 <span className="ava" aria-hidden>
@@ -160,8 +169,8 @@ export function AlertRoutingPanel() {
                     aria-checked={on}
                     aria-label={fill(ROUTING_COPY.switchLabel, { name: p.name })}
                     // aria-disabled, not disabled: the pressed switch keeps focus while its write is in flight.
-                    aria-disabled={pending !== null || !p.eligible || undefined}
-                    style={pending !== null || !p.eligible ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+                    aria-disabled={inert || undefined}
+                    style={inert ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
                     onClick={() => void toggle(p)}
                   >
                     <span className="ball" aria-hidden />
