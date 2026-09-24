@@ -448,21 +448,215 @@ def test_override_wins_over_the_bridge(tmp_path, monkeypatch, respx_mock):
     assert route.call_count == 0
 
 
-def test_lone_apu_carve_out_falls_through_to_unified_memory(tmp_path, monkeypatch):
+def test_lone_apu_carve_out_falls_through_to_the_capped_unified_budget(tmp_path, monkeypatch):
     """An APU-only Ryzen box (GPU_VENDOR=amd, no dGPU): the 512 MiB carve-out
     is the only node. It is not a dedicated card — the APU draws on system RAM
-    — so this is the unified-memory shape, not '0 GB of GPU'."""
+    — so this is the unified-memory shape, not '0 GB of GPU'. And the Raphael
+    iGPU is no ROCm target, so DMR runs on the CPU inside the `dmr` service's
+    4 GiB cgroup: the budget is that cap, not MemTotal - reserve (14), which
+    offered a 10 GB vision model that could only thrash or be OOM-killed."""
     import vram
     monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
     monkeypatch.setenv("VRAM_RESERVE_GB", "2")
+    monkeypatch.setenv("GPU_VENDOR", "amd")
+    monkeypatch.setenv("DMR_MEM_LIMIT", "4g")
     _write_vendor(tmp_path, "card0", "0x1002")
     _write_dgpu_node(tmp_path, "card0", IGPU_CARVE_OUT_BYTES)
     _point_sysfs_at(tmp_path, monkeypatch)
     meminfo = _write_meminfo(tmp_path, 16 * 1024 * 1024)
     monkeypatch.setattr(vram, "_MEMINFO_PATH", str(meminfo))
 
-    assert vram.detected_vram_gb() == 14
+    assert vram.detected_vram_gb() == 4
     assert vram.detected_vram_source() == vram.SOURCE_UNIFIED
+
+
+# ── WARP-3046 review: the unified budget is capped at the runtime's cgroup ──
+#
+# The unified-memory shapes on this repo's single-box — an APU-only Ryzen and a
+# GPU-less host — both run the `dmr` service, whose `mem_limit` defaults to 4g.
+# Model weights on those shapes live in THAT container's memory, so MemTotal
+# minus a reserve described RAM the runtime was never allowed to use.
+
+
+def test_gpu_less_host_is_capped_at_the_runtime_limit(tmp_path, monkeypatch):
+    """No DRM card at all (GPU_VENDOR=none): .195's 30 GiB of RAM read as a
+    28 GB budget — every catalog entry, the 24 GB one included — while DMR
+    was capped at 4 GiB."""
+    import vram
+    monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
+    monkeypatch.setenv("VRAM_RESERVE_GB", "2")
+    monkeypatch.setenv("GPU_VENDOR", "none")
+    monkeypatch.setenv("DMR_MEM_LIMIT", "4g")
+    _point_sysfs_at(tmp_path, monkeypatch)
+    meminfo = _write_meminfo(tmp_path, 30 * 1024 * 1024)
+    monkeypatch.setattr(vram, "_MEMINFO_PATH", str(meminfo))
+
+    assert vram.detect() == (4, vram.SOURCE_UNIFIED)
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected_gb"),
+    [
+        ("4g", 4),
+        ("4G", 4),
+        ("4gb", 4),
+        ("4GiB", 4),
+        ("4096m", 4),
+        ("4194304k", 4),
+        (str(4 * 1024**3), 4),
+        # Floored: a 4.75 GiB cap does not hold a 5 GB model.
+        ("4.75g", 4),
+        # A cap above what the host has is no cap at all: RAM - reserve wins.
+        ("64g", 14),
+        # Docker reads a zero limit as "unlimited".
+        ("0", 14),
+    ],
+)
+def test_unified_budget_is_the_smaller_of_ram_and_the_runtime_limit(
+    tmp_path, monkeypatch, limit, expected_gb
+):
+    """Every spelling compose accepts for `mem_limit` (docker's RAMInBytes:
+    binary units, optional `i`/`b`, case-insensitive) sizes the same cap."""
+    import vram
+    monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
+    monkeypatch.setenv("VRAM_RESERVE_GB", "2")
+    monkeypatch.setenv("DMR_MEM_LIMIT", limit)
+    meminfo = _write_meminfo(tmp_path, 16 * 1024 * 1024)
+    monkeypatch.setattr(vram, "_MEMINFO_PATH", str(meminfo))
+
+    assert vram.detected_vram_gb() == expected_gb
+
+
+def test_unreadable_runtime_limit_is_unknown_not_uncapped(tmp_path, monkeypatch):
+    """A limit we cannot parse is a limit we cannot honour. Compose would have
+    refused it for the `dmr` service too, so this is a broken environment —
+    say "unknown" rather than fall back to the uncapped RAM figure."""
+    import vram
+    monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
+    monkeypatch.setenv("VRAM_RESERVE_GB", "2")
+    monkeypatch.setenv("DMR_MEM_LIMIT", "lots")
+    meminfo = _write_meminfo(tmp_path, 16 * 1024 * 1024)
+    monkeypatch.setattr(vram, "_MEMINFO_PATH", str(meminfo))
+
+    assert vram.detect() == (None, None)
+    assert vram._cached_gb is None
+
+
+def test_runtime_limit_does_not_cap_a_dedicated_card(tmp_path, monkeypatch):
+    """On a dGPU the weights live in VRAM, not the container's RAM: the AMD
+    `dmr` shape keeps its 16 GB card budget under the same 4 GiB cgroup."""
+    import vram
+    monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
+    monkeypatch.setenv("DMR_MEM_LIMIT", "4g")
+    _write_vendor(tmp_path, "card0", "0x1002")
+    _write_dgpu_node(tmp_path, "card0", 17_095_983_104)
+    _point_sysfs_at(tmp_path, monkeypatch)
+
+    assert vram.detect() == (16, vram.SOURCE_DGPU)
+
+
+# ── WARP-3046 review: an NVIDIA card with no DRM node is still an NVIDIA box ──
+#
+# `/sys/class/drm` only lists the NVIDIA card when nvidia-drm is loaded — the
+# device-bridge names the card `nvidia<index>` for exactly the case where it
+# is not. Keyed on the DRM map alone, that box fell through to MemTotal (28 on
+# .195's RAM): the confident lie the unknown rule exists to prevent.
+
+
+def _pci_device(tmp_path: Path, slot: str, vendor: str, pci_class: str) -> None:
+    # The real slot names carry colons (`0000:01:00.0`), which a Windows dev
+    # checkout cannot create; the code only globs `*`, never parses the slot.
+    device = tmp_path / "pci" / slot.replace(":", "_")
+    device.mkdir(parents=True, exist_ok=True)
+    (device / "vendor").write_text(f"{vendor}\n")
+    (device / "class").write_text(f"{pci_class}\n")
+
+
+def _amd_igpu_only_in_drm(tmp_path: Path, monkeypatch) -> None:
+    """.195's tree with nvidia-drm unloaded: only the iGPU is a DRM card."""
+    import vram
+    _write_vendor(tmp_path, "card0", "0x1002")
+    _write_dgpu_node(tmp_path, "card0", IGPU_CARVE_OUT_BYTES)
+    _point_sysfs_at(tmp_path, monkeypatch)
+    monkeypatch.setattr(vram, "_PCI_DEVICE_GLOB", str(tmp_path / "pci" / "*"))
+    monkeypatch.setenv("VRAM_RESERVE_GB", "2")
+    meminfo = _write_meminfo(tmp_path, 30 * 1024 * 1024)
+    monkeypatch.setattr(vram, "_MEMINFO_PATH", str(meminfo))
+
+
+def test_gpu_vendor_nvidia_without_a_drm_node_is_unknown_when_the_bridge_is_down(
+    tmp_path, monkeypatch, respx_mock
+):
+    """setup.sh read the PCI bus and persisted GPU_VENDOR=nvidia (verified in
+    the running container on .195): that is an NVIDIA box whatever
+    /sys/class/drm lists, and an unsized NVIDIA box is UNKNOWN."""
+    import vram
+    _amd_igpu_only_in_drm(tmp_path, monkeypatch)
+    _configure_bridge(monkeypatch)
+    monkeypatch.setenv("GPU_VENDOR", "nvidia")
+    respx_mock.get(f"{BRIDGE_URL}/gpu").mock(side_effect=httpx.ConnectError("refused"))
+
+    assert vram.detect() == (None, None)
+
+
+def test_nvidia_pci_display_device_without_a_drm_node_is_unknown(tmp_path, monkeypatch):
+    """No GPU_VENDOR (a card swapped in after setup last ran): the live PCI
+    bus — .195's real functions — still says NVIDIA, so the answer is unknown."""
+    import vram
+    monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
+    _amd_igpu_only_in_drm(tmp_path, monkeypatch)
+    _pci_device(tmp_path, "0000:01:00.0", "0x10de", "0x030000")
+    _pci_device(tmp_path, "0000:0d:00.0", "0x1002", "0x030000")
+
+    assert vram.detect() == (None, None)
+
+
+def test_nvidia_non_display_pci_function_is_not_a_card(tmp_path, monkeypatch):
+    """Only a display-class function (0x03xxxx — VGA, 3D, display: the same
+    classes gpu.sh's `gpu_vendor_from_bus` matches) is a GPU. An NVIDIA audio
+    or bridge function alone does not make this an NVIDIA box."""
+    import vram
+    monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
+    _amd_igpu_only_in_drm(tmp_path, monkeypatch)
+    _pci_device(tmp_path, "0000:01:00.1", "0x10de", "0x040300")
+
+    assert vram.detect() == (28, vram.SOURCE_UNIFIED)
+
+
+def test_nvidia_without_a_drm_node_is_still_sized_by_the_bridge(
+    tmp_path, monkeypatch, respx_mock
+):
+    """The presence signals only decide what "no answer" means — a healthy
+    bridge naming `nvidia0` still sizes the card."""
+    import vram
+    _amd_igpu_only_in_drm(tmp_path, monkeypatch)
+    _configure_bridge(monkeypatch)
+    monkeypatch.setenv("GPU_VENDOR", "nvidia")
+    respx_mock.get(f"{BRIDGE_URL}/gpu").respond(
+        200, json={**NVIDIA_BRIDGE_SNAPSHOT, "card": "nvidia0"}
+    )
+
+    assert vram.detect() == (16, vram.SOURCE_BRIDGE)
+
+
+def test_bridge_call_is_bounded_well_inside_the_catalog_budget(
+    tmp_path, monkeypatch, respx_mock
+):
+    """The orchestrator gives the whole /models/eligible read 5 s
+    (model-catalog.service.ts CATALOG_BUDGET_MS) and the runtime's tags read
+    shares it. A bridge call bounded any looser turns a wedged bridge into a
+    dead catalog instead of an "unknown" one. httpx applies the bound per
+    phase; the realistic failure is one phase (a black-holed connect or a
+    wedged read), so every phase is held to 2 s."""
+    import vram
+    _nvidia_plus_igpu(tmp_path, monkeypatch)
+    _configure_bridge(monkeypatch)
+    route = respx_mock.get(f"{BRIDGE_URL}/gpu").respond(200, json=NVIDIA_BRIDGE_SNAPSHOT)
+
+    assert vram.detected_vram_gb() == 16
+    timeouts = route.calls.last.request.extensions["timeout"]
+    assert set(timeouts) == {"connect", "read", "write", "pool"}
+    assert all(v is not None and 0 < v <= 2.0 for v in timeouts.values()), timeouts
 
 
 def test_real_amd_dgpu_is_unchanged_even_with_a_bridge(tmp_path, monkeypatch, respx_mock):

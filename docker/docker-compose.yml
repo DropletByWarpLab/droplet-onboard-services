@@ -3306,6 +3306,16 @@ services:
       INFERENCE_RUNTIME_URL: http://dmr:12434
       MODEL_MANIFEST: /app/models/model-manifest.json
       VRAM_RESERVE_GB: ${VRAM_RESERVE_GB:-2}
+      # WARP-3046: the unified-memory VRAM budget (an APU-only or GPU-less box,
+      # both of which run the `dmr` service above on the CPU) is capped at the
+      # runtime's own cgroup — weights there live in THAT container's memory,
+      # and MemTotal offered models the 4 GiB default could only thrash on.
+      # 🔴 The default MUST equal the `dmr` service's `mem_limit` default: the
+      # same interpolation then yields the same value on every box, whichever
+      # env source compose resolves it from (tests/gpu-vendor-selection.test.sh
+      # asserts the two agree). `dmr-cuda`'s 16g never applies here — an
+      # NVIDIA box is sized by its card, or reported unknown.
+      DMR_MEM_LIMIT: ${DMR_MEM_LIMIT:-4g}
       # INFERENCE_AUTH_TOKEN is NOT listed here on purpose — it arrives via
       # `env_file: ../.env` below, and the vendored auth.py reads that exact
       # name. A `${INFERENCE_AUTH_TOKEN}` substitution here would resolve
@@ -3347,7 +3357,10 @@ services:
       # now sized by the host device-bridge's GET /gpu (DEVICE_BRIDGE_URL +
       # BRIDGE_AUTH_TOKEN/SERVICE_TOKEN_DISPLAY, from the env_file above), and
       # carve-out-sized nodes are skipped. Harmless when absent — detection
-      # falls back to /proc/meminfo, or reports the VRAM as unknown.
+      # falls back to /proc/meminfo, or reports the VRAM as unknown. (An
+      # NVIDIA card with no DRM node — nvidia-drm unloaded — is still seen:
+      # vram.py also reads GPU_VENDOR and the container's own
+      # /sys/bus/pci, which needs no mount.)
       - /sys/class/drm:/sys/class/drm:ro
     # Hardening: a FastAPI sidecar running as non-root that reads its own code
     # and makes outbound HTTP. It needs no capabilities and must not gain any.

@@ -59,7 +59,18 @@ def _reset_vram_cache(monkeypatch):
     monkeypatch.setattr(
         vram, "_DRM_VENDOR_GLOB", "/nonexistent-test-path/card*/device/vendor"
     )
-    for name in ("DEVICE_BRIDGE_URL", "BRIDGE_URL", "BRIDGE_AUTH_TOKEN", "SERVICE_TOKEN_DISPLAY"):
+    # ...and for the PCI-bus NVIDIA probe and the env the box's setup writes
+    # (GPU_VENDOR) or compose passes in (DMR_MEM_LIMIT) — a Linux CI runner
+    # has a real /sys/bus/pci, and a developer shell may export either name.
+    monkeypatch.setattr(vram, "_PCI_DEVICE_GLOB", "/nonexistent-test-path/pci/*")
+    for name in (
+        "DEVICE_BRIDGE_URL",
+        "BRIDGE_URL",
+        "BRIDGE_AUTH_TOKEN",
+        "SERVICE_TOKEN_DISPLAY",
+        "GPU_VENDOR",
+        "DMR_MEM_LIMIT",
+    ):
         monkeypatch.delenv(name, raising=False)
     yield
     vram._cached_gb = None

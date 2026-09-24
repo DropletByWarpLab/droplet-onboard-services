@@ -16,17 +16,27 @@ Three hardware shapes, resolved vendor-aware (WARP-3046):
   integrated GPU's BIOS carve-out, not a card, and are skipped.
 * **Unified memory** (Jetson, an APU-only Ryzen, a GPU-less host) — CPU/GPU
   share memory, so the right signal is ``MemTotal`` from ``/proc/meminfo`` minus
-  a reserve for the OS and sidecar services.
+  a reserve for the OS and sidecar services — capped at the runtime
+  container's own memory limit (``DMR_MEM_LIMIT``, passed in by compose with
+  the ``dmr`` service's default). On this repo's single-box both of those
+  shapes run the ``dmr`` service (the Raphael iGPU is no ROCm target, so DMR
+  runs on the CPU), whose weights live inside that cgroup: RAM it may not use
+  is not a budget. No limit set (upstream's Jetson shape, a host-native
+  runtime) means no cap.
 
 ``VRAM_OVERRIDE_GB`` wins over all of them, as before.
 
 **Unknown is not zero.** When no source can size the box — an NVIDIA card is
-present but the bridge is down/unauthorised/unconfigured, or ``/proc/meminfo``
-is unreadable — detection returns ``None``. ``0`` is a measurement the catalog
-renders as "nothing fits"; ``None`` is the honest "couldn't size this box".
-The NVIDIA case in particular must never fall through to the iGPU node (the
-.195 defect: 512 MiB → round(0.5) = 0) or to ``MemTotal`` (RAM the card cannot
-use).
+present but the bridge is down/unauthorised/unconfigured, ``/proc/meminfo``
+is unreadable, or the runtime's memory limit is set but unreadable — detection
+returns ``None``. ``0`` is a measurement the catalog renders as "nothing
+fits"; ``None`` is the honest "couldn't size this box". The NVIDIA case in
+particular must never fall through to the iGPU node (the .195 defect: 512 MiB
+→ round(0.5) = 0) or to ``MemTotal`` (RAM the card cannot use). An NVIDIA card
+counts as present on any of three signals: its DRM node's PCI vendor,
+``GPU_VENDOR=nvidia`` (what setup.sh read off the PCI bus), or a display-class
+NVIDIA function on the live PCI bus — the last two cover a card with no DRM
+node because nvidia-drm is not loaded.
 
 **Only a positive, sourced result is cached** (WARP-194 generalised): a card
 does not change size at runtime, but a bridge that is briefly down, a
@@ -85,6 +95,21 @@ _DRM_VENDOR_GLOB = "/sys/class/drm/card*/device/vendor"
 # `card*` also matches connectors (`card1-DP-3`); only `cardN` is a device.
 _DRM_CARD_NAME = re.compile(r"card\d+")
 _NVIDIA_VENDOR_ID = "0x10de"
+# Every PCI function on the host (sysfs is not namespaced, so the container
+# sees the host bus — verified in the running container on .195). Read to spot
+# an NVIDIA card that has no DRM node because nvidia-drm is not loaded.
+_PCI_DEVICE_GLOB = "/sys/bus/pci/devices/*"
+# PCI base class 0x03 — VGA (0x0300), 3D (0x0302), other display (0x0380): the
+# same three kinds gpu.sh's `gpu_vendor_from_bus` classifies from `lspci`. An
+# NVIDIA card's audio function (0x0403) is not a GPU.
+_PCI_DISPLAY_CLASS_PREFIX = "0x03"
+# The runtime container's memory limit, in compose's `mem_limit` spelling. The
+# unified-memory budget cannot exceed it (see the module docstring).
+_RUNTIME_MEM_LIMIT_ENV = "DMR_MEM_LIMIT"
+# docker's RAMInBytes grammar, which compose applies to `mem_limit`: a number,
+# an optional binary unit, an optional `i`, an optional `b`, any case.
+_MEM_LIMIT = re.compile(r"(\d+(?:\.\d+)?) ?([kmgtp])?i?b?", re.IGNORECASE)
+_MEM_LIMIT_UNITS = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4, "p": 1024**5}
 # The name device-bridge.py's `nvidia_snapshot` gives an NVIDIA GPU that has
 # no DRM node (nvidia-drm not loaded). Only that path produces it.
 _BRIDGE_NVIDIA_FALLBACK_CARD = re.compile(r"nvidia\d+")
@@ -147,6 +172,53 @@ def _drm_vendors() -> dict[str, str]:
         except OSError:
             continue
     return vendors
+
+
+def _pci_has_nvidia_display() -> bool:
+    """Whether the live PCI bus carries a display-class NVIDIA function."""
+    for device in sorted(glob.glob(_PCI_DEVICE_GLOB)):
+        try:
+            vendor = Path(device, "vendor").read_text().strip().lower()
+            pci_class = Path(device, "class").read_text().strip().lower()
+        except OSError:
+            continue
+        if vendor == _NVIDIA_VENDOR_ID and pci_class.startswith(_PCI_DISPLAY_CLASS_PREFIX):
+            return True
+    return False
+
+
+def _nvidia_present(vendors: dict[str, str]) -> bool:
+    """Whether an NVIDIA GPU is fitted, whether or not anything can size it.
+
+    The DRM vendor map alone misses a card whose nvidia-drm module is not
+    loaded — no ``/sys/class/drm`` entry at all (device-bridge.py names that
+    card ``nvidia<index>`` for the same reason). ``GPU_VENDOR`` is setup.sh's
+    PCI read, persisted to the ``.env`` this service loads; the live bus scan
+    catches a card fitted since setup last ran.
+    """
+    if _NVIDIA_VENDOR_ID in vendors.values():
+        return True
+    if (os.getenv("GPU_VENDOR") or "").strip().lower() == "nvidia":
+        return True
+    return _pci_has_nvidia_display()
+
+
+def _read_runtime_mem_limit_bytes() -> int | None:
+    """The runtime container's memory cap in bytes, or ``None`` for no cap.
+
+    Unset, blank or zero (docker's "unlimited") is no cap. Raises
+    ``ValueError`` for a value compose itself would refuse — the caller treats
+    that as "cannot size", never as "uncapped".
+    """
+    raw = (os.getenv(_RUNTIME_MEM_LIMIT_ENV) or "").strip()
+    if not raw:
+        return None
+    match = _MEM_LIMIT.fullmatch(raw)
+    if match is None:
+        raise ValueError(raw)
+    number, unit = match.groups()
+    limit = int(float(number) * _MEM_LIMIT_UNITS[(unit or "").lower()])
+    return limit if limit > 0 else None
 
 
 def _read_dgpu_vram_bytes(glob_pattern: str) -> int | None:
@@ -275,7 +347,7 @@ def _measure() -> tuple[int | None, str | None]:
         _struct_logger().info("vram_detected", source=SOURCE_BRIDGE, vram_gb=gb)
         return gb, SOURCE_BRIDGE
 
-    if _NVIDIA_VENDOR_ID in vendors.values():
+    if _nvidia_present(vendors):
         # An NVIDIA card is fitted and nothing could size it. Every remaining
         # source would describe a DIFFERENT memory — the iGPU carve-out or
         # system RAM — so the only true answer is "unknown".
@@ -307,8 +379,27 @@ def _measure() -> tuple[int | None, str | None]:
         )
         return None, None
 
+    try:
+        limit_bytes = _read_runtime_mem_limit_bytes()
+    except ValueError:
+        _struct_logger().warning(
+            "vram_detection_failed",
+            reason="runtime_mem_limit_unreadable",
+            value=os.getenv(_RUNTIME_MEM_LIMIT_ENV),
+            defaulting_to_gb=None,
+        )
+        return None, None
+
     gb = max(0, kb // (1024 * 1024) - reserve)
-    _struct_logger().info("vram_detected", source=SOURCE_UNIFIED, vram_gb=gb)
+    if limit_bytes is None:
+        _struct_logger().info("vram_detected", source=SOURCE_UNIFIED, vram_gb=gb)
+        return gb, SOURCE_UNIFIED
+    # WARP-3046: floored — a 4.75 GiB cgroup does not hold a 5 GB model.
+    limit_gb = limit_bytes // 1024**3
+    gb = min(gb, limit_gb)
+    _struct_logger().info(
+        "vram_detected", source=SOURCE_UNIFIED, vram_gb=gb, runtime_mem_limit_gb=limit_gb
+    )
     return gb, SOURCE_UNIFIED
 
 
@@ -318,10 +409,12 @@ def detect() -> tuple[int | None, str | None]:
     Resolution order:
         1. VRAM_OVERRIDE_GB env var (testing hatch).
         2. The host device-bridge, when it reports an NVIDIA card.
-        3. Any NVIDIA card with no answer from 2 → unknown.
+        3. Any NVIDIA card (DRM node, GPU_VENDOR=nvidia, or a display-class
+           NVIDIA PCI function) with no answer from 2 → unknown.
         4. Dedicated-GPU sysfs (`mem_info_vram_total`), carve-outs skipped,
            no reserve subtracted.
-        5. /proc/meminfo MemTotal minus VRAM_RESERVE_GB (default 2).
+        5. /proc/meminfo MemTotal minus VRAM_RESERVE_GB (default 2), capped
+           at DMR_MEM_LIMIT when that is set.
         6. Unknown if none of the above is readable.
 
     Unknown is ``(None, None)``. One pass answers both halves, so a caller
