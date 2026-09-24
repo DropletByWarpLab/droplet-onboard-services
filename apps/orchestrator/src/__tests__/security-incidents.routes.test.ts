@@ -391,7 +391,13 @@ describe("route 19 — acknowledge", () => {
     ]);
     expect(f.world.securityIncidentAck[0]).toMatchObject({ byUserId: MARIA, sessionId: "sess-1", sessionChecked: true, viaNotificationId: "log-maria" });
     expect(f.world.securityIncident.find((i) => i.id === SHARED)).toMatchObject({ state: "acknowledged", stateChangedById: MARIA, version: 5 });
-    expect(f.world.notificationLog.find((r) => r.id === "log-maria")).toMatchObject({ ackState: "acked", ackMethod: "incident", ackSessionId: "sess-1" });
+    expect(f.world.notificationLog.find((r) => r.id === "log-maria")).toMatchObject({
+      ackState: "acked",
+      ackMethod: "incident",
+      ackSessionId: "sess-1",
+      ackSessionChecked: true,
+      ackClient: "droplet-ios/1.4.0 (iOS 18.2)",
+    });
     expect(f.world.notificationLog.find((r) => r.id === "log-stefan")).toMatchObject({ ackState: "unacked", ackMethod: null });
     expect(audits()[0]).toMatchObject({
       kind: "system",

@@ -224,6 +224,7 @@ const DEFAULTS: Partial<Record<TableName, (now: Date) => Row>> = {
     ackedAt: null,
     ackMethod: null,
     ackSessionId: null,
+    ackSessionChecked: false,
     ackClient: null,
   }),
   activityRow: (now) => ({ id: ++seq, at: now, sub: null }),
@@ -339,7 +340,7 @@ function clone<T>(v: T): T {
   return structuredClone(v);
 }
 
-// ── the CHECK mirrors (20260924050000_warp_2978_security_incidents) ────────
+// ── the CHECK mirrors (20260924070000_warp_2978_security_incidents) ────────
 
 function check(table: TableName, r: Row): void {
   const fail = (name: string) => {

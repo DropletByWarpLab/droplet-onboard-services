@@ -3,7 +3,7 @@
  *
  * WHY THESE CASES RUN HERE AND NOT IN THE MOCKED LANE
  *
- *   the CHECKs    — every hand-written CHECK in 20260924050000_warp_2978_…
+ *   the CHECKs    — every hand-written CHECK in 20260924070000_warp_2978_…
  *                   refuses its bad row, with SQLSTATE 23514 AND the
  *                   constraint's own name (a row refused by the WRONG rule does
  *                   not count). They are invisible to `prisma migrate diff`.
@@ -342,7 +342,7 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       _resetIncidentHealthForTests();
     });
 
-    it("a person after closing → an alert incident with its evidence and membership, all CHECK-valid", async () => {
+    it("a person after closing → an alert incident with its evidence and membership, all CHECK-valid — grouped even with the module off", async () => {
       await engineAtHead();
       const e = await prisma.securityEvent.create({ data: person(T0) });
       await tickSecurityIncidents(prisma, deps(plus(T0, 30_000)));
@@ -355,7 +355,8 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
         openedInMode: "closed",
         severity: "alert",
         state: "open",
-        notifyState: "pending",
+        // The module is off in these cases (deps): grouped all the same, never sent (D29).
+        notifyState: "module_off",
         reasonCodes: ["after_hours_presence"],
         countsByCamera: { [CAM]: { person: 1 } },
       });

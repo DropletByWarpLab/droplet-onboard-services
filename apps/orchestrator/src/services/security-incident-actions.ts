@@ -168,7 +168,14 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
         // Only the ACTOR's rows (D7): keyed on their username as well as the ids.
         await tx.notificationLog.updateMany({
           where: { id: { in: ownLogIds }, username: actor.username, ackState: { in: ["unacked", "untracked"] } },
-          data: { ackState: "acked", ackedAt: now, ackMethod: "incident", ackSessionId: actor.sessionId, ackClient: actor.client },
+          data: {
+            ackState: "acked",
+            ackedAt: now,
+            ackMethod: "incident",
+            ackSessionId: actor.sessionId,
+            ackSessionChecked: actor.sessionId !== null && actor.sessionChecked,
+            ackClient: actor.client,
+          },
         });
       }
       // LAST: it takes the box-wide chain lock until commit; nothing may follow it here.

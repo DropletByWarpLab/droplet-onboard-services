@@ -134,8 +134,8 @@ function actorOf(req: Request) {
     role: user.role,
     displayName: user.displayName ?? "",
     sessionId,
-    // WARP-2804: true only when authMiddleware's live-session check ran on this request.
-    sessionChecked: sessionId !== null && (req as Request & { sessionChecked?: unknown }).sessionChecked === true,
+    // WARP-2804: true only when authMiddleware's live-session check confirmed this sign-in.
+    sessionChecked: sessionId !== null && req.sessionChecked === true,
     client: describeClient(req.get("user-agent"), req.get("x-droplet-client")),
   };
 }
