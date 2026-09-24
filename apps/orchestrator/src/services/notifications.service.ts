@@ -427,34 +427,6 @@ export async function notifyOwnersAndAdmins(
   return { notified, failed };
 }
 
-/** Recent notifications for a user (by USERNAME), newest-first. Used by the
- *  "Recent notifications" panel; the LLM `list_notifications` tool reads the
- *  same column directly. */
-export async function listRecentNotifications(
-  prisma: PrismaClient,
-  username: string,
-  limit = 50,
-): Promise<
-  Array<{
-    id: string;
-    kind: string;
-    title: string;
-    body: string | null;
-    url: string | null;
-    data: Prisma.JsonValue | null;
-    channels: string;
-    deliveredAt: Date | null;
-    error: string | null;
-    createdAt: Date;
-  }>
-> {
-  return prisma.notificationLog.findMany({
-    where: { username },
-    orderBy: { createdAt: "desc" },
-    take: Math.max(1, Math.min(200, limit)),
-  });
-}
-
 // ── WARP-2804: the recipient's side ─────────────────────────────────────────
 
 /**
