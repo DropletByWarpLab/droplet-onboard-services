@@ -134,6 +134,21 @@ const TURNS: Turn[] = [
     requires: "control_device",
   },
   {
+    label: "device gateway / office equipment status",
+    message: "is the printer by reception running low on toner?",
+    requires: "get_building_devices",
+  },
+  {
+    label: "device gateway / a building setpoint",
+    message: "can you bump the rooftop unit up to 22 degrees",
+    requires: "set_building_point",
+  },
+  {
+    label: "device gateway / a meter read",
+    message: "how much is the main electricity meter showing today?",
+    requires: "get_building_devices",
+  },
+  {
     label: "network / who is connected",
     message: "the internet is crawling, what's hogging it?",
     requires: "list_network_devices",

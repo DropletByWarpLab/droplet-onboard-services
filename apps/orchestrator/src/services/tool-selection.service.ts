@@ -223,6 +223,10 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // quietly.
   { pattern: /\b(leases?|agreements?|contracts?|statements?|warrant(y|ies)|quotes?|estimates?|reports?|manuals?|certificates?|licen[cs]es?|permits?|insurance|tax returns?)\b/i, domains: ["files"] },
   { pattern: /\b(lights?|lamps?|scenes?|thermostat|plugs?|sockets?|outlets?|switch(es)?|heating|cooling|air-?con(ditioning)?|fans?|temperature|dim|brightness|blinds?|curtains?|locks?|unlock|routines?|turn (on|off))\b/i, domains: ["smart-home"] },
+  // Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP): the building plant
+  // and office equipment a business asks about. Meters are named with what
+  // they meter — a bare "meter" would fire on every unit conversion.
+  { pattern: /\b(hvac|set-?points?|air[- ]?handl(ers?|ing)|ahus?|chillers?|boilers?|rooftop units?|rtus?|vavs?|ventilation|bacnet|modbus|knx|snmp|bms|building (systems?|management|controls?)|(energy|power|electric(ity)?|gas|water) meters?|meter readings?|kwh|printers?|toner|paper jams?|ups|battery backup|generators?|pumps?|compressors?)\b/i, domains: ["smart-home"] },
   { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|block(ed|s)?|unblock|bandwidth|devices?|online|offline|connected|guest|ethernet|vpn|slow)\b/i, domains: ["network"] },
   // The places a household points cameras, and the things it looks for —
   // NOT just the word "camera". See the WARP-1921 note above. Rename verbs

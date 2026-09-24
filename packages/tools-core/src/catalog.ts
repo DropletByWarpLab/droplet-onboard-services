@@ -181,6 +181,9 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "create_scene",
     // WARP-1447: room assignment (auto-creates the room when missing)
     "assign_device_room",
+    // Device gateway: BACnet/IP, Modbus TCP, SNMP, KNX/IP.
+    "get_building_devices",
+    "set_building_point",
   ],
   cameras: [
     "list_cameras",
@@ -396,6 +399,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   remove_device: "Remove a device you no longer use (asks first)",
   create_scene: "Save a new routine like 'open up' from a list of device actions",
   assign_device_room: "Put a device in a room, like 'the heater is in the conference room'",
+  get_building_devices: "See building systems like heating, meters, printers and UPSes, and their readings",
+  set_building_point: "Change a building setting, like a temperature setpoint (asks first)",
   // Cameras
   list_cameras: "See all your security cameras and their status",
   list_discovered_cameras: "See new cameras found but not yet added",
