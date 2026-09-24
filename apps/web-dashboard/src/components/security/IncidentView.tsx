@@ -24,6 +24,16 @@
  *     (D23: each person's first acknowledgement is recorded). Never rendered
  *     and then refused: a refused click is an auth/warn row the threat mirror
  *     would show as a threat.
+ *   · An open or acknowledged incident the box says is NOT actionable says
+ *     so in one sentence — the same sentence whatever the cause (a view-only
+ *     level, or a partial view: an alert on a camera this person can't see),
+ *     so the words never tell a hidden camera apart from a level (DS-005).
+ *     A partial view keeps this person's own acknowledgement: the box sends
+ *     it, and it is shown like any other.
+ *   · A person still in view (WARP-2978 PR-D, `detection_ongoing`) is its own
+ *     row, marked "Still in view": their picture while their finished row
+ *     isn't listed to carry it, and never a Clip — Frigate's clip is whole
+ *     only once they've left, on the finished row.
  *   · In flight, both buttons are aria-disabled — never `disabled` — and a ref
  *     refuses a second press. When the button that was pressed goes away
  *     (Acknowledge after acknowledging, both after resolving), focus moves to
@@ -65,6 +75,8 @@ export const COPY = {
   ...RESOLVE_COPY,
   back: "Security",
   acknowledge: "Acknowledge",
+  // One sentence for every reason the box gives `actionable: false` (DS-005).
+  cantAct: "You can't acknowledge or resolve this incident. An owner or admin can.",
   resolve: "Resolve…",
   acknowledgedToast: "Acknowledged",
   resolvedToast: "Resolved",
@@ -237,6 +249,9 @@ function IncidentBody({
   const live = i.state === "open" || i.state === "acknowledged";
   const showAck = canAct && live && !i.viewer.acknowledged;
   const showResolve = canAct && live;
+  // The box's answer alone decides the sentence, never the module level: that
+  // reads `view` while it loads, and the sentence would flash for someone who can act.
+  const cantAct = live && i.actionable !== true;
   const badge = severityBadge(i.severity);
   const chip = stateChip(i.state, i.severity);
   const title = incidentTitle(i, cameraLabel);
@@ -322,6 +337,11 @@ function IncidentBody({
           </span>
         )}
       </div>
+      {cantAct && (
+        <p data-testid="incident-cant-act" style={{ margin: 0, fontSize: 13, color: "var(--text-muted)", maxWidth: "70ch" }}>
+          {COPY.cantAct}
+        </p>
+      )}
 
       {i.reasons.length > 0 && (
         <>
@@ -395,13 +415,16 @@ function WhatHappened({
       </p>
     );
   }
+  // The Frigate events whose finished row is listed: a person's early "still
+  // in view" row leaves the picture to it.
+  const finished = new Set(i.events.filter((e) => isFinishedDetection(e) && e.frigateEventId).map((e) => e.frigateEventId));
   return (
     <>
       {i.events.length > 0 ? (
         <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
           {i.events.map((e) => (
             <SecurityEventRow key={e.id} event={e} cameraLabel={cameraLabel} now={now} testId={`incident-event-${e.id}`}>
-              <EventMedia event={e} now={now} />
+              <EventMedia event={e} now={now} finishedRowListed={finished.has(e.frigateEventId)} />
             </SecurityEventRow>
           ))}
         </ul>
@@ -419,22 +442,27 @@ function WhatHappened({
   );
 }
 
+const isFinishedDetection = (e: Pick<IncidentMemberView, "kind">): boolean => e.kind === "detection" || e.kind === "detection_low";
+
 /**
  * Thumbnail, Clip (or Clip expired) and the other areas this event was in.
  * An `alsoIn` area the row already names as a badge (its `zones`) isn't
- * repeated.
+ * repeated. A person still in view (PR-D) gets their picture only while their
+ * finished row isn't listed (that row carries it), and never a Clip.
  */
-function EventMedia({ event: e, now }: { event: IncidentMemberView; now: Date }) {
+function EventMedia({ event: e, now, finishedRowListed }: { event: IncidentMemberView; now: Date; finishedRowListed: boolean }) {
   const [thumbGone, setThumbGone] = useState(false);
-  const media = e.source === "frigate" && Boolean(e.frigateEventId) && (e.kind === "detection" || e.kind === "detection_low");
+  const fromFrigate = e.source === "frigate" && Boolean(e.frigateEventId);
+  const clip = fromFrigate && isFinishedDetection(e);
+  const thumb = clip || (fromFrigate && e.kind === "detection_ongoing" && !finishedRowListed);
   const shown = new Set((e.zones ?? []).map((z) => z.id));
   const alsoIn = e.alsoIn.filter((z) => !shown.has(z.id));
-  if (!media && alsoIn.length === 0) return null;
+  if (!thumb && alsoIn.length === 0) return null;
   const expired = clipExpired(e.startedAt, now);
   const ref = e.frigateEventId ? encodeURIComponent(e.frigateEventId) : "";
   return (
     <span className="sub" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px 12px", marginTop: 8, whiteSpace: "normal" }}>
-      {media && !expired && !thumbGone && (
+      {thumb && !expired && !thumbGone && (
         // A camera snapshot proxied by the box under its own camera guard; not a static asset next/image could optimise.
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -447,7 +475,7 @@ function EventMedia({ event: e, now }: { event: IncidentMemberView; now: Date })
           style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 8, background: "var(--inset)", flexShrink: 0 }}
         />
       )}
-      {media &&
+      {clip &&
         (expired ? (
           <span>{COPY.clipExpired}</span>
         ) : (

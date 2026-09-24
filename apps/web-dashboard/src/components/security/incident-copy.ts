@@ -13,6 +13,10 @@
  *
  * `INCIDENT_COPY` is plain strings with `{slot}`s filled by `fill()`, so the
  * Security copy lint scans every word.
+ *
+ * Nothing here reads `labels`: its `_`-keys (`_status`, `_threat`, and PR-D's
+ * `_ongoing`) are the box's bookkeeping, never a label. A card counts events
+ * (`eventCount`, every row the incident page lists), never people.
  */
 import { formatSiteTime, formatSiteWhen, siteDateOf } from "@/lib/security-time";
 import type {
@@ -268,7 +272,12 @@ function duration(sec: number): string {
   return m > 0 ? `${h} h ${m} min` : `${h} h`;
 }
 
-/** The evidence snapshot as one line: `Person · Back camera · 2:14 AM · Closed (opening hours)`. */
+/**
+ * The evidence snapshot as one line: `Person · Back camera · 2:14 AM · Closed (opening hours)`.
+ * Evidence from a person still in view (PR-D: the alert went out before they
+ * left) leads with the box's own words for it — `Person still in view after
+ * 30 s · Back camera · 2:14 AM · …`; the time is when they were first seen.
+ */
 export function evidenceLine(r: IncidentReasonView, cameraLabel: CameraLabel, tz: string, now: Date): string {
   const e = r.evidence;
   const time = formatSiteWhen(e.at, tz, now);
@@ -276,7 +285,7 @@ export function evidenceLine(r: IncidentReasonView, cameraLabel: CameraLabel, tz
   let parts: Array<string | null>;
   switch (r.code) {
     case "after_hours_presence":
-      parts = [labelWord(e.label), camera, time, modeWord(r)];
+      parts = [(e.kind === "detection_ongoing" && e.summary) || labelWord(e.label), camera, time, modeWord(r)];
       break;
     case "camera_offline": {
       const off = detailNumber(r, "offlineForSec");

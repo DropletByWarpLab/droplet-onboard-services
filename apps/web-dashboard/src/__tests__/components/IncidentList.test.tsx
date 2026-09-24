@@ -95,6 +95,22 @@ describe("IncidentCard", () => {
     expect(screen.getByRole("link")).not.toHaveTextContent("Needs attention");
   });
 
+  it("PR-D: the `_ongoing` count is the box's bookkeeping — never shown; the card counts the event rows (a 40-second visit is 2)", () => {
+    render(
+      <ul>
+        <IncidentCard
+          incident={incident({ severity: "info", state: "no_action", reasonCodes: [], eventCount: 2, labels: { person: 1, _ongoing: 1 }, grouping: "collecting" })}
+          timezone={TZ}
+          now={NOW}
+        />
+      </ul>,
+    );
+    const link = screen.getByRole("link");
+    expect(link).toHaveTextContent("2 events · 2:14 AM – 2:20 AM");
+    expect(link).toHaveTextContent(INCIDENT_COPY.stillHappening);
+    expect(link).not.toHaveTextContent(/ongoing|people/i);
+  });
+
   it("names a camera the household's way, and the site-wide scopes in words", () => {
     const label = (n: string) => (n === "back_cam" ? "Back camera" : n);
     const { rerender } = render(

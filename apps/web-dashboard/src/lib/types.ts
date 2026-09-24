@@ -4024,11 +4024,20 @@ export interface IncidentSummary {
   openedInMode: SecurityMode;
   firstActivityAt: string;
   lastActivityAt: string;
-  /** Visible events (survives the 30-day trim). */
+  /**
+   * Visible events (survives the 30-day trim) — every row the incident page
+   * lists, a person's "still in view" row (PR-D) included: a 40-second visit
+   * is 2 events, the early row and the finished one.
+   */
   eventCount: number;
-  /** Visible counts per label; `_status` / `_threat` count status and threat rows. */
+  /**
+   * Visible counts per label. Keys starting `_` are the box's bookkeeping,
+   * never a label to show: `_status` / `_threat` count status and threat rows,
+   * `_ongoing` a person's "still in view" row (PR-D) — that person is counted
+   * once, under their label, by their finished row.
+   */
   labels: Record<string, number>;
-  /** The latest acknowledgement, when the viewer has a visible code. */
+  /** The latest acknowledgement, by anyone — only in an actionable view: never a partial one, never plain activity. */
   lastAck: IncidentAckSummary | null;
 }
 
@@ -4130,19 +4139,27 @@ export interface IncidentDetail extends IncidentSummary {
   events: IncidentMemberView[];
   /** More visible members than `events` carries. */
   moreEvents: boolean;
+  /** Every acknowledgement when the view is actionable; in a partial view only this viewer's own; plain activity, none. */
   acks: IncidentAckView[];
   notices: IncidentNoticeView[];
   eventsKept: SecurityIncidentEventsKept;
   /**
    * Whether THIS viewer can act on it right now: their Security level is at
-   * least act, the view is not partial (a lower-severity code visible, the
-   * top severity on a camera they can't see — then no acks, notices or
-   * lastAck, the state is never `acknowledged`, and the routes answer 409
-   * NOT_ACTIONABLE), a code is visible, and it is open or acknowledged. The
-   * controls render only when this is true.
+   * least act, a code is visible, it is open or acknowledged, and the view is
+   * not PARTIAL. Partial: a reason at the incident's top severity is on a
+   * camera they can't see — then the box sends only their own
+   * acknowledgements, no notices and no lastAck, the state is `open` until
+   * someone resolves it (never `acknowledged`), and routes 19–20 answer 409
+   * NOT_ACTIONABLE. The wire has no `partial` flag, and the page never infers
+   * one: the controls render only when this is true, and when it is false on
+   * an open or acknowledged incident the page says the same thing whatever
+   * the cause.
    */
   actionable: boolean;
-  /** The viewer's Security level on the box, and whether they have acknowledged or resolved this incident. */
+  /**
+   * The viewer's Security level on the box, and whether they have acknowledged
+   * or resolved this incident — kept in a partial view too (their own act).
+   */
   viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
 }
 

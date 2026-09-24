@@ -928,9 +928,10 @@ describe("translateError — security incidents and alert routing (WARP-2978)", 
     expect(copy("INCIDENT_NOT_FOUND", 404)).toBe("That incident isn't there any more, or you can't see it. Refresh the page.");
   });
 
-  it("a lost acknowledge race says someone else moved it; nothing to act on says so", () => {
+  it("a lost acknowledge race says someone else moved it; a refused act says so — and never why (a partial view's hidden camera, DS-005)", () => {
     expect(copy("INCIDENT_CONFLICT", 409)).toMatch(/someone else/i);
-    expect(copy("NOT_ACTIONABLE", 409)).toMatch(/nothing here to acknowledge/i);
+    expect(copy("NOT_ACTIONABLE", 409)).toBe("You can't acknowledge or resolve this incident. Refresh the page to see where it stands.");
+    expect(copy("NOT_ACTIONABLE", 409)).not.toMatch(/camera|alert|can.t see/i);
   });
 
   it("the last person told can't be switched off: someone who can open Security has to be told", () => {

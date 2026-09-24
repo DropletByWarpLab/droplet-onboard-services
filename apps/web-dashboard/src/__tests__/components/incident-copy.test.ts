@@ -123,6 +123,18 @@ describe("the card's three lines", () => {
     expect(whatLine(summary({ reasonCodes: [], eventCount: 0 }), TZ, NOW)).toBe("2:14 AM – 2:20 AM");
   });
 
+  it("PR-D: a person still in view is counted as the event rows the page lists — a 40-second visit is 2 events — never as people, and `_ongoing` is never a word", () => {
+    const visit = summary({ reasonCodes: [], severity: "info", state: "no_action", eventCount: 2, labels: { person: 1, _ongoing: 1 } });
+    expect(whatLine(visit, TZ, NOW)).toBe("2 events · 2:14 AM – 2:20 AM");
+    // Still in view, their finished row not in yet: one row, one event.
+    const stillThere = summary({ reasonCodes: [], severity: "info", state: "no_action", eventCount: 1, labels: { _ongoing: 1 }, grouping: "collecting" });
+    expect(whatLine(stillThere, TZ, NOW)).toBe("1 event · 2:14 AM – 2:20 AM");
+    expect(stateLine(stillThere, TZ, NOW)).toBe("Still happening");
+    for (const line of [whatLine(visit, TZ, NOW), stateLine(visit, TZ, NOW), whatLine(stillThere, TZ, NOW)]) {
+      expect(line).not.toMatch(/ongoing|people|person/i);
+    }
+  });
+
   it("line 3: needs attention / acknowledged by whom and when / resolved by whom / still happening", () => {
     expect(stateLine(summary(), TZ, NOW)).toBe("Needs attention");
     expect(
@@ -190,6 +202,19 @@ describe("why Droplet flagged this", () => {
     );
     expect(evidenceLine(reason({ detail: { mode: "away", modeSource: "manual" } }), label, TZ, NOW)).toBe(
       "Person · Back camera · 2:14 AM · Away",
+    );
+  });
+
+  it("evidence from a person still in view (PR-D) leads with the box's words for it; the time is when they were first seen", () => {
+    const ongoing = reason({ evidence: { kind: "detection_ongoing", summary: "Person still in view after 30 s" } });
+    expect(evidenceLine(ongoing, label, TZ, NOW)).toBe("Person still in view after 30 s · Back camera · 2:14 AM · Closed (opening hours)");
+    // A box that sent no summary still says who.
+    expect(evidenceLine(reason({ evidence: { kind: "detection_ongoing", summary: "" } }), label, TZ, NOW)).toBe(
+      "Person · Back camera · 2:14 AM · Closed (opening hours)",
+    );
+    // Only the still-in-view kind reads the summary: a finished detection keeps the short label.
+    expect(evidenceLine(reason({ evidence: { summary: "Person in aisle" } }), label, TZ, NOW)).toBe(
+      "Person · Back camera · 2:14 AM · Closed (opening hours)",
     );
   });
 

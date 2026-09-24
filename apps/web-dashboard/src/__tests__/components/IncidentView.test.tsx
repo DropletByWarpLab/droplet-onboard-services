@@ -14,7 +14,12 @@
  *     sensible;
  *   · a failure is `translateError(err, "security")`, never the server's
  *     message, then a re-read;
- *   · Acknowledge carries the notification the page was opened from.
+ *   · Acknowledge carries the notification the page was opened from;
+ *   · an open incident the box says isn't actionable says so in ONE sentence,
+ *     the same for a view-only level and a partial view (DS-005), and a
+ *     partial view shows this person's own acknowledgement as the box sends it;
+ *   · a person still in view (PR-D) is a "Still in view" row: a picture while
+ *     their finished row isn't listed, never a Clip.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act as rtlAct, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -149,6 +154,61 @@ describe("the page's order and content", () => {
     expect(headings.indexOf(COPY.whyTitle)).toBeLessThan(headings.indexOf(COPY.whatTitle));
     expect(screen.getByText("Someone was seen inside while the site was closed")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("Person · Back camera · 2:14 AM · Closed (opening hours)")).toBeInTheDocument());
+  });
+
+  it("a person still in view (PR-D): a `Still in view` row with their picture — and no Clip, which Frigate finishes once they've left", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        grouping: "collecting",
+        eventCount: 1,
+        labels: { _ongoing: 1 },
+        events: [member({ id: "902", kind: "detection_ongoing", endedAt: null, score: 0.88, summary: "Person still in view after 30 s" })],
+      }),
+    );
+    renderView();
+    const row = await screen.findByTestId("incident-event-902");
+    expect(row).toHaveAttribute("data-kind", "detection_ongoing");
+    expect(row.querySelector("[data-ongoing]")).toHaveTextContent("Still in view");
+    expect(row).toHaveTextContent("Person still in view after 30 s");
+    expect(within(row).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
+    expect(within(row).queryByRole("link", { name: "Clip" })).toBeNull();
+    expect(row).not.toHaveTextContent(COPY.clipExpired);
+    // `_ongoing` is the box's bookkeeping, never a label on the page.
+    expect(document.body).not.toHaveTextContent("_ongoing");
+    expect(screen.getByTestId("incident-state")).toHaveTextContent(INCIDENT_COPY.stillHappening);
+  });
+
+  it("once their finished row is listed, it carries the picture and the Clip; the early row keeps its mark and no second picture", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        eventCount: 2,
+        labels: { person: 1, _ongoing: 1 },
+        events: [member({ id: "903", endedAt: at("01:15") }), member({ id: "902", kind: "detection_ongoing", endedAt: null, summary: "Person still in view after 30 s" })],
+      }),
+    );
+    renderView();
+    const early = await screen.findByTestId("incident-event-902");
+    const done = screen.getByTestId("incident-event-903");
+    expect(early.querySelector("[data-ongoing]")).toHaveTextContent("Still in view");
+    expect(within(early).queryByRole("img")).toBeNull();
+    expect(within(early).queryByRole("link", { name: "Clip" })).toBeNull();
+    expect(done.querySelector("[data-ongoing]")).toBeNull();
+    expect(within(done).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
+    expect(within(done).getByRole("link", { name: "Clip" })).toHaveAttribute("href", "/api/cameras/clips/event/1727140000.1-person");
+  });
+
+  it("another person's finished row doesn't take a still-in-view person's picture", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        events: [
+          member({ id: "903", frigateEventId: "1727140100.2-person" }),
+          member({ id: "902", kind: "detection_ongoing", endedAt: null, summary: "Person still in view after 30 s" }),
+        ],
+      }),
+    );
+    renderView();
+    const early = await screen.findByTestId("incident-event-902");
+    expect(within(early).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
   });
 
   it("each event: thumbnail, Clip, and the other areas it was also in", async () => {
@@ -305,15 +365,25 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
     expect(screen.getByRole("button", { name: COPY.resolve })).toBeInTheDocument();
   });
 
-  it("below act on the module level: neither button", async () => {
+  it("below act on the module level: neither button — and no can't-act sentence while the box says it's actionable (the level may still be loading)", async () => {
     h.level = "view";
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
     expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.queryByTestId("incident-cant-act")).toBeNull();
   });
 
-  it("below act on the box's own answer (viewer.level) — even when the module level says act: neither button", async () => {
+  it("view-only on the box (as it sends it: viewer.level view, actionable false): neither button, and the one can't-act sentence", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ actionable: false, viewer: { level: "view", acknowledged: false } }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
+  });
+
+  it("defence in depth: a box that says actionable at view level (never sent) still gets no buttons", async () => {
     h.getSecurityIncident.mockResolvedValue(detail({ viewer: { level: "view", acknowledged: false } }));
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
@@ -330,15 +400,16 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
     expect(ack).not.toHaveClass("primary");
   });
 
-  it("not actionable for this viewer (only lower-severity codes visible): neither button, even at act and open (PR-B review)", async () => {
+  it("not actionable for this viewer at act and open: neither button, and the sentence says so", async () => {
     h.getSecurityIncident.mockResolvedValue(detail({ actionable: false }));
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
     expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
   });
 
-  it("a partial view (a lower-severity code visible, the alert on a hidden camera): open, no buttons, no acks or notices — as the box sends it", async () => {
+  it("a partial view (a lower-severity code visible, an alert on a hidden camera): open, no buttons, no acks or notices — as the box sends it", async () => {
     h.getSecurityIncident.mockResolvedValue(
       detail({ severity: "notice", reasonCodes: ["camera_offline"], state: "open", actionable: false, acks: [], notices: [], lastAck: null }),
     );
@@ -348,15 +419,72 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
     expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
     expect(screen.queryByRole("heading", { name: COPY.toldTitle })).toBeNull();
     expect(screen.queryByRole("heading", { name: COPY.acksTitle })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
   });
 
-  it("a box that doesn't say it's actionable gets no buttons (fails closed)", async () => {
+  it("a partial view keeps this person's OWN acknowledgement (the box sends only theirs), still with no buttons", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        state: "open",
+        actionable: false,
+        lastAck: null,
+        notices: [],
+        acks: [{ action: "acknowledge", byName: "Jordan", at: at("01:17"), client: null, viaNotification: true, note: "", signIn: null }],
+        viewer: { level: "act", acknowledged: true },
+      }),
+    );
+    renderView();
+    const list = await screen.findByRole("list", { name: COPY.acksTitle });
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Jordan acknowledged · 2:17 AM · from the alert notification"]);
+    expect(screen.getByText("Needs attention")).toHaveClass("badge", "danger");
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
+  });
+
+  it("DS-005: the can't-act words are the same whatever the cause — a view-only level reads exactly like a hidden camera", async () => {
+    const texts: string[] = [];
+    for (const over of [
+      { actionable: false, viewer: { level: "view" as const, acknowledged: false } },
+      { actionable: false, severity: "notice" as const, reasonCodes: ["camera_offline" as const] },
+      { actionable: false, state: "acknowledged" as const },
+    ]) {
+      h.getSecurityIncident.mockResolvedValue(detail(over));
+      const { unmount } = renderView();
+      texts.push((await screen.findByTestId("incident-cant-act")).textContent ?? "");
+      unmount();
+    }
+    expect(new Set(texts)).toEqual(new Set([COPY.cantAct]));
+    expect(COPY.cantAct).toBe("You can't acknowledge or resolve this incident. An owner or admin can.");
+  });
+
+  it("no can't-act sentence where there's nothing to act on: resolved, or plain activity", async () => {
+    for (const over of [
+      { state: "resolved" as const, actionable: false },
+      { state: "no_action" as const, severity: "info" as const, reasonCodes: [], reasons: [], actionable: false },
+    ]) {
+      h.getSecurityIncident.mockResolvedValue(detail(over));
+      const { unmount } = renderView();
+      await screen.findByRole("heading", { level: 1, name: "Stock room" });
+      expect(screen.queryByTestId("incident-cant-act")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("actionable: the buttons, and no can't-act sentence", async () => {
+    renderView();
+    await screen.findByRole("button", { name: COPY.acknowledge });
+    expect(screen.queryByTestId("incident-cant-act")).toBeNull();
+  });
+
+  it("a box that doesn't say it's actionable gets no buttons (fails closed), and says so", async () => {
     const { actionable: _drop, ...rest } = detail();
     void _drop;
     h.getSecurityIncident.mockResolvedValue(rest);
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
   });
 
   it("already acknowledged by this person: only Resolve…", async () => {

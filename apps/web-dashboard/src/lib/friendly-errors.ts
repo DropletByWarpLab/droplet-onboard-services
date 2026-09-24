@@ -762,7 +762,9 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // (DS-005), so the copy never says which it was.
     INCIDENT_NOT_FOUND: "That incident isn't there any more, or you can't see it. Refresh the page.",
     INCIDENT_CONFLICT: "Someone else changed this incident at the same moment. Check it and try again.",
-    NOT_ACTIONABLE: "There's nothing here to acknowledge. Refresh the page to see where it stands.",
+    // Also what a view that went partial (an alert on a camera this person
+    // can't see) answers: the same words as the incident page's, never why.
+    NOT_ACTIONABLE: "You can't acknowledge or resolve this incident. Refresh the page to see where it stands.",
     INCIDENTS_UNAVAILABLE: "Droplet can't read the incidents right now. Try again in a moment.",
     NO_RECIPIENT:
       "Someone who can open Security has to be told about alerts. Turn someone else on first, then try again.",
