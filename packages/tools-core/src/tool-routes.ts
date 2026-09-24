@@ -293,7 +293,9 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("set_timer"), // ctx.prisma
 
   // ── notifications ───────────────────────────────────────────────────────
-  none("send_notification"), // ctx.prisma
+  // WARP-3060 — through the orchestrator's sendNotification (toast + push); a
+  // row written here through ctx.prisma was never delivered by anything.
+  { tool: "send_notification", client: "orchestrator", hops: [admit("post", "/api/notifications/send")] },
   none("list_notifications"), // ctx.prisma
 
   // ── system ──────────────────────────────────────────────────────────────
