@@ -334,7 +334,10 @@ async function claimAndNotify(
   const delivered: string[] = [];
   const failed: string[] = [];
   outgoing.forEach((o, i) => {
+    // WARP-2804 — the toast carries the id of the row recorded for it in the
+    // claim transaction, so the toaster can acknowledge exactly this one.
     const { channels } = publishNotificationToast({
+      id: logIds[i]!,
       username: o.username,
       kind: "event",
       title: o.title,

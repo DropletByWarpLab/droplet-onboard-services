@@ -23,8 +23,19 @@
  *   calls         sendNotification( / recordNotification( /
  *                 publishNotificationToast( / dispatchToUser( (web push's
  *                 own entry point; its recipient is the 2nd argument)
+ *   WARP-2804     ackNotification( / ackAllNotifications( (the acting
+ *                 person's username is the where-clause), countUnread( /
+ *                 listNotifications( (positional, 2nd argument) — a User.id
+ *                 there answers an empty inbox and a 404 on every ack
  *   direct writes notificationLog.create( / notificationLog.createMany( /
+ *                 notificationLog.update( / notificationLog.updateMany( /
  *                 pushSubscription.upsert( / pushSubscription.create(
+ *
+ * A direct NotificationLog UPDATE that names no `username` must be keyed by
+ * the row's own id (`where: { id: … }`, the delivery claim and stamps) — it
+ * then cannot reach another person's rows, and it may not write the recipient
+ * column. One that writes an `ack*` column (or spreads into `data`) must ALSO
+ * have `username` in its `where`: only the recipient acks (review F7).
  *
  * ## What it asserts, per site
  *
@@ -184,8 +195,13 @@ interface Site {
   label: string;
 }
 
-const CALL = /(?<![\w$.])(sendNotification|recordNotification|publishNotificationToast|dispatchToUser)\s*\(/g;
-const WRITE = /(?<![\w$])(notificationLog\.(?:createMany|create)|pushSubscription\.(?:upsert|create))\s*\(/g;
+const CALL =
+  /(?<![\w$.])(sendNotification|recordNotification|publishNotificationToast|dispatchToUser|ackNotification|ackAllNotifications|countUnread|listNotifications)\s*\(/g;
+const WRITE =
+  /(?<![\w$])(notificationLog\.(?:createMany|create|updateMany|update)|pushSubscription\.(?:upsert|create))\s*\(/g;
+
+/** Positional recipients: `fn(prisma, username, …)`. */
+const POSITIONAL = new Set(["dispatchToUser", "countUnread", "listNotifications"]);
 
 function sitesIn(file: SourceFile): Site[] {
   const out: Site[] = [];
@@ -213,8 +229,9 @@ const SITES = PRODUCTION.flatMap(sitesIn);
 /** Every `username` the site passes: `username: <expr>` and shorthand `username`. */
 function recipientsOf(site: Site): Array<{ expr: string; at: number }> {
   const out: Array<{ expr: string; at: number }> = [];
-  if (site.callee === "dispatchToUser") {
-    // `dispatchToUser(prisma, username, payload)` — positional.
+  if (POSITIONAL.has(site.callee)) {
+    // `dispatchToUser(prisma, username, payload)`, `countUnread(db, username)`,
+    // `listNotifications(prisma, username, opts)` — positional.
     const from = site.argsAt + scanTo(site.args, 0, ",") + 1;
     const end = scanTo(site.file.code, from, ",)");
     out.push({ expr: site.file.code.slice(from, end).trim(), at: from });
@@ -684,16 +701,53 @@ const ALLOWED: ReadonlyArray<{ file: string; expr: string; reason: string }> = [
 /** Sites whose argument is not an object literal — they forward an already-guarded input. */
 const FORWARDERS: ReadonlyArray<{ file: string; callee: string; reason: string }> = [
   {
+    // WARP-2804 — record, then deliver: sendNotification hands its input to
+    // the durable half, and deliverNotification reads the recipient back from
+    // that row (`row.username`, checked below like any other site).
     file: "orchestrator:services/notifications.service.ts",
-    callee: "publishNotificationToast",
-    reason: "sendNotification hands its own DispatchInput to the toast half after guarding it",
+    callee: "recordNotification",
+    reason: "sendNotification hands its own DispatchInput to the durable half after guarding it",
   },
 ];
 
 const allowed = (site: Site, expr: string) =>
   ALLOWED.some((a) => a.file === site.file.id && a.expr === expr);
+
+/** WARP-2804 — a NotificationLog update by the row's own id (a delivery claim or
+ *  stamp): no recipient to check. `where: { id: … }` or the shorthand `{ id, … }`. */
+const keyedByRowId = (site: Site) =>
+  /^notificationLog\.update(Many)?$/.test(site.callee) && /\bwhere\s*:\s*\{\s*id\s*[:,}]/.test(site.args);
 const forwarded = (site: Site) =>
   FORWARDERS.some((f) => f.file === site.file.id && f.callee === site.callee);
+
+/**
+ * WARP-2804 (review F7) — a NotificationLog update that writes an `ack*`
+ * column acknowledges SOMEONE's notification, and only the recipient may
+ * (`keyedByRowId` alone would pass an id-keyed ack of anybody's row — exactly
+ * P3's "ack my own rows for this incident" done wrong). So:
+ *   - `data` must be an object literal (otherwise what it writes is unseen);
+ *   - if it names an `ack*` column, or spreads something that could, the
+ *     `where` must be an object literal naming `username` — whose value the
+ *     sweep then checks like any other recipient.
+ */
+function ackWriteProblems(site: Site): string[] {
+  if (!/^notificationLog\.update(Many)?$/.test(site.callee)) return [];
+  const arg = splitTop(site.args, [","])[0] ?? "";
+  const data = propertyOf(arg, "data");
+  if (data === null || !data.trim().startsWith("{")) {
+    return ["a NotificationLog update whose `data` is not an object literal — the columns it writes (an ack?) cannot be seen"];
+  }
+  const body = data.trim().slice(1, scanTo(data.trim(), 1, "}"));
+  const entries = splitTop(body, [","]);
+  const writesAck = entries.some((e) => /^ack[A-Z]\w*\s*(:|$)/.test(e) || e.startsWith("..."));
+  if (!writesAck) return [];
+  const where = propertyOf(arg, "where");
+  if (where !== null && where.trim().startsWith("{") && propertyOf(where, "username") !== null) return [];
+  return [
+    "writes the ack columns without `username` in its `where` — it would ack another person's notification; " +
+      "only the recipient acks (WARP-2804)",
+  ];
+}
 
 /**
  * Everything wrong with one site, `[]` when nothing is. The sweep below and the
@@ -701,15 +755,20 @@ const forwarded = (site: Site) =>
  * is red for the same reason a production site would be.
  */
 function siteProblems(site: Site, universe: readonly SourceFile[]): string[] {
+  const acks = ackWriteProblems(site);
+  if (acks.length > 0) return acks;
   const recipients = recipientsOf(site);
   if (recipients.length === 0) {
     const legacy = site.args.match(/(?<![\w$.'"`])userId\s*:\s*([^,}\n]+)/);
     if (legacy) {
       return [`passes \`${legacy[0]}\` — the recipient field is \`username\` and takes a User.username, never a User.id (WARP-2911)`];
     }
-    return forwarded(site)
+    return forwarded(site) || keyedByRowId(site)
       ? []
-      : ["no `username` in the arguments — pass an object literal so the recipient is visible here, or add the site to FORWARDERS with a reason"];
+      : [
+          "no `username` in the arguments — pass an object literal so the recipient is visible here, key a " +
+            "NotificationLog update by the row's id, or add the site to FORWARDERS with a reason",
+        ];
   }
   return recipients.flatMap(({ expr, at }) =>
     allowed(site, expr) ? [] : problemsWith(site.file, expr, at, universe).map((p) => `username: ${expr} — ${p}`),
@@ -731,6 +790,7 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
       "orchestrator:services/activity-notify.service.ts",
       "orchestrator:services/reminders-poller.ts",
       "orchestrator:routes/device-clients.ts",
+      "orchestrator:routes/notifications.ts",
       "tools-core:handlers/notifications/send-notification.ts",
     ]) {
       expect(files, `the sweep found no site in ${f}`).toContain(f);
@@ -746,6 +806,23 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
         "toast topic, the PushSubscription lookup and both NotificationLog readers are keyed on " +
         "the username (WARP-2783, WARP-2813, WARP-2910).",
     ).toEqual([]);
+  });
+
+  it("WARP-2804: N1-N4 reach every username-keyed entry point with the caller's username", () => {
+    const routes = SITES.filter((s) => s.file.id === "orchestrator:routes/notifications.ts");
+    expect(new Set(routes.map((s) => s.callee))).toEqual(
+      new Set(["sendNotification", "listNotifications", "countUnread", "ackNotification", "ackAllNotifications"]),
+    );
+    for (const s of routes) {
+      for (const r of recipientsOf(s)) expect(r.expr, s.label).toMatch(/^(getUser\(req\)|username)$/);
+    }
+    // Every direct NotificationLog update is either keyed by the recipient or by the row's own id.
+    const updates = SITES.filter((s) => /^notificationLog\.update/.test(s.callee));
+    expect(updates.length).toBeGreaterThanOrEqual(4);
+    for (const s of updates) {
+      expect(recipientsOf(s).length > 0 || keyedByRowId(s), s.label).toBe(true);
+      expect(s.args, `${s.label} writes the recipient column`).not.toMatch(/\bdata\s*:\s*\{[^}]*\busername\b/);
+    }
   });
 
   it("the tools-core send_notification site is fed from `ctx.userId` only", () => {
@@ -991,9 +1068,58 @@ const KNOWN_BAD: ReadonlyArray<readonly [string, string]> = [
       await sendNotification(prisma, { userId: admin.id, kind: "system", title: "t" });
     }`,
   ],
+  // WARP-2804 (review F7) — writing `ack*` acks SOMEONE's notification, and
+  // only the recipient may: the where must carry the username. The first
+  // two are exactly P3's "ack my own rows for this incident" done wrong.
+  [
+    "an id-keyed update that writes the ack columns (acks whoever's row it is)",
+    `async function ackRow(prisma, id) {
+      await prisma.notificationLog.update({ where: { id }, data: { ackState: "acked", ackedAt: new Date(), ackMethod: "incident" } });
+    }`,
+  ],
+  [
+    "an id-list updateMany that acks without the recipient in its where",
+    `async function ackIncidentRows(prisma, ids, sid) {
+      await prisma.notificationLog.updateMany({
+        where: { id: { in: ids }, ackState: "unacked" },
+        data: { ackState: "acked", ackedAt: new Date(), ackMethod: "incident", ackSessionId: sid },
+      });
+    }`,
+  ],
+  [
+    "ack columns hidden behind a spread in `data`",
+    `async function ackRow(prisma, id, patch) {
+      await prisma.notificationLog.updateMany({ where: { id }, data: { ...patch } });
+    }`,
+  ],
+  [
+    "a `data` that is not an object literal",
+    `async function ackRow(prisma, id, patch) {
+      await prisma.notificationLog.update({ where: { id }, data: patch });
+    }`,
+  ],
 ];
 
 const KNOWN_GOOD: ReadonlyArray<readonly [string, string]> = [
+  // WARP-2804 (review F7) — the two NotificationLog update shapes that ARE right.
+  [
+    "an ack of the actor's OWN rows: the ids AND the actor's username in the where",
+    `async function ackOwn(prisma, ids, username) {
+      await prisma.notificationLog.updateMany({
+        where: { id: { in: ids }, username, ackState: { in: ["unacked", "untracked"] } },
+        data: { ackState: "acked", ackedAt: new Date(), ackMethod: "incident" },
+      });
+    }
+    async function onAck(prisma, req, ids) {
+      await ackOwn(prisma, ids, req.user.username);
+    }`,
+  ],
+  [
+    "a delivery stamp keyed by the row's id writes no ack column",
+    `async function stamp(prisma, id) {
+      await prisma.notificationLog.update({ where: { id }, data: { channels: "toast", deliveredAt: new Date(), error: null } });
+    }`,
+  ],
   [
     "a username selected and destructured in the loop",
     `async function run(prisma) {
