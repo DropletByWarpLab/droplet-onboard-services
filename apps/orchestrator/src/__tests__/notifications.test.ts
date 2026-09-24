@@ -575,8 +575,93 @@ describe("WARP-2804 — sendNotification records the row, then delivers it", () 
     (prisma.notificationLog.update as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("db blip"));
     const result = await sendNotification(prisma, { username: "alice", kind: "reminder", title: "Standup" });
     expect(result).toMatchObject({ delivered: true, channels: ["toast"] });
-    // The row stays as recorded: queued, unread, findable.
-    expect(prisma._created[0]).toMatchObject({ channels: "", deliveredAt: null, ackState: "unacked" });
+    // The row stays unread and findable, and says its outcome was never
+    // recorded — the claim's honest trace, never "queued" (which a retry
+    // would read as "not sent yet" and send again).
+    expect(prisma._created[0]).toMatchObject({
+      channels: "",
+      deliveredAt: null,
+      error: "delivery: outcome_unknown",
+      ackState: "unacked",
+    });
+  });
+
+  // Review F2 — once the row is committed, the caller must not see a throw:
+  // brain-notify re-sends on a throw (a duplicate, the first one orphaned
+  // unread), and backup-health / tls-notify / filing-digest de-duplicate on
+  // the row existing (so the alert is never re-sent — "backups stopped"
+  // reaches nobody).
+  it("MUTATION: never re-reads its own row — a read that fails after the commit costs nothing", async () => {
+    const prisma = makePushingPrismaStub();
+    (prisma.notificationLog.findUnique as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("db blip"));
+    const result = await sendNotification(prisma, PARKED);
+    expect(result).toMatchObject({ delivered: true, channels: ["toast", "push"] });
+    expect(prisma._created).toHaveLength(1);
+    expect(mqttPublish).toHaveBeenCalledTimes(1);
+    expect(prisma._created[0]).toMatchObject({ channels: "toast,push", pushOutcome: "sent" });
+  });
+
+  it("after the commit, no bookkeeping failure throws: a claim and a stamp that both fail still deliver", async () => {
+    const prisma = makePrismaStub();
+    (prisma.notificationLog.updateMany as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("db down"));
+    (prisma.notificationLog.update as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("db down"));
+    const result = await sendNotification(prisma, { username: "alice", kind: "system", title: "Backups stopped" });
+    expect(result).toMatchObject({ delivered: true, channels: ["toast"] });
+    expect(prisma._created).toHaveLength(1);
+    expect(mqttPublish).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Review F8 — delivery by id is idempotent. A retry (P3 re-driving a row after
+// a crash, a double call) must never re-publish the toast, re-push, or
+// overwrite the first stamp. The guard is a CLAIM: the one update that moves a
+// row out of "queued" before any transport, so two callers cannot both win.
+describe("WARP-2804 — delivery is claimed: a retry by id is a no-op", () => {
+  it("MUTATION: a second deliverNotification publishes nothing, pushes nothing and keeps the first stamp", async () => {
+    const prisma = makePushingPrismaStub();
+    const { id } = await recordNotification(prisma, PARKED);
+    const first = await deliverNotification(prisma, id);
+    const stamped = { ...prisma._created[0] };
+    const again = await deliverNotification(prisma, id);
+    expect(first).toMatchObject({ delivered: true, channels: ["toast", "push"] });
+    expect(again).toEqual({ id, channels: [], delivered: false, skipped: "already_delivered" });
+    expect(mqttPublish).toHaveBeenCalledTimes(1);
+    expect(webpushSend).toHaveBeenCalledTimes(1);
+    expect(prisma._created[0]).toEqual(stamped);
+  });
+
+  it("two concurrent deliveries of one row publish once", async () => {
+    const prisma = makePushingPrismaStub();
+    const { id } = await recordNotification(prisma, PARKED);
+    const results = await Promise.all([deliverNotification(prisma, id), deliverNotification(prisma, id)]);
+    expect(results.filter((r) => r.skipped === "already_delivered")).toHaveLength(1);
+    expect(mqttPublish).toHaveBeenCalledTimes(1);
+    expect(webpushSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("a delivery whose stamp was lost is not re-sent (outcome_unknown is not 'queued')", async () => {
+    const prisma = makePrismaStub();
+    (prisma.notificationLog.update as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("db blip"));
+    const { id } = await sendNotification(prisma, { username: "alice", kind: "reminder", title: "Standup" });
+    expect(await deliverNotification(prisma, id)).toMatchObject({ skipped: "already_delivered" });
+    expect(mqttPublish).toHaveBeenCalledTimes(1);
+  });
+
+  it("an activity-notify row whose toast already went out (channels set, pushOutcome NULL) is not re-sent", async () => {
+    const prisma = makePrismaStub();
+    const { id } = await recordNotification(prisma, { username: "alice", kind: "event", title: "Assigned" });
+    Object.assign(prisma._created[0]!, { channels: "toast", deliveredAt: new Date() });
+    expect(await deliverNotification(prisma, id)).toMatchObject({ skipped: "already_delivered" });
+    expect(mqttPublish).not.toHaveBeenCalled();
+  });
+
+  it("a claim that cannot be written still delivers (losing the notification is worse than a rare duplicate)", async () => {
+    const prisma = makePrismaStub();
+    const { id } = await recordNotification(prisma, { username: "alice", kind: "system", title: "x" });
+    (prisma.notificationLog.updateMany as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("db blip"));
+    const result = await deliverNotification(prisma, id);
+    expect(result).toMatchObject({ delivered: true, channels: ["toast"] });
+    expect(prisma._created[0]).toMatchObject({ channels: "toast", error: null });
   });
 });
 

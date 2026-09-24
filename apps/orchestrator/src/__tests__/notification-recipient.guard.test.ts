@@ -711,9 +711,10 @@ const FORWARDERS: ReadonlyArray<{ file: string; callee: string; reason: string }
 const allowed = (site: Site, expr: string) =>
   ALLOWED.some((a) => a.file === site.file.id && a.expr === expr);
 
-/** WARP-2804 — a NotificationLog update by the row's own id (a delivery stamp): no recipient to check. */
+/** WARP-2804 — a NotificationLog update by the row's own id (a delivery claim or
+ *  stamp): no recipient to check. `where: { id: … }` or the shorthand `{ id, … }`. */
 const keyedByRowId = (site: Site) =>
-  /^notificationLog\.update(Many)?$/.test(site.callee) && /\bwhere\s*:\s*\{\s*id\s*:/.test(site.args);
+  /^notificationLog\.update(Many)?$/.test(site.callee) && /\bwhere\s*:\s*\{\s*id\s*[:,}]/.test(site.args);
 const forwarded = (site: Site) =>
   FORWARDERS.some((f) => f.file === site.file.id && f.callee === site.callee);
 

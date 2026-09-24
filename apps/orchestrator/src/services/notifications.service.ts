@@ -146,6 +146,9 @@ export interface DispatchResult {
   channels: string[];
   delivered: boolean;
   error?: string;
+  /** WARP-2804 — `deliverNotification` on a row that was already delivered
+   *  (or whose delivery was started): nothing was published. */
+  skipped?: "already_delivered";
 }
 
 /** Safe MQTT publish — failures are logged but never thrown. The toast
@@ -267,36 +270,79 @@ export interface DeliverOptions {
   priority?: string;
 }
 
+/** Everything a transport carries, for one recorded row. */
+interface DeliverableRow {
+  id: string;
+  username: string;
+  kind: NotificationKind;
+  title: string;
+  body: string | null;
+  url?: string;
+  data?: DispatchInput["data"];
+}
+
 /**
- * WARP-2804 — the DELIVERY half: transport one recorded row, by id.
+ * The claim's provisional `error`: a delivery was started and its outcome was
+ * never recorded. The stamp overwrites it; if the stamp is lost (a crash, a DB
+ * blip after the transport), it stays — which is honest, and which keeps a
+ * retry from reading the row as "not sent yet" and sending it twice.
+ */
+const OUTCOME_UNKNOWN = "delivery: outcome_unknown";
+
+/**
+ * WARP-2804 (review F8) — claim a recorded row for delivery, exactly once.
  *
- *   1. Read the row (`id, username, kind, title, body, url, data`).
+ * "Queued" is the state `recordNotification` writes: no channels, no
+ * deliveredAt, no error, no pushOutcome. The claim is the ONE update that moves
+ * a row out of it, before any transport, so of two callers (a retry, a race)
+ * exactly one wins and the other is a no-op. A row activity-notify already
+ * toasted (`channels` set, `pushOutcome` NULL) or failed (`error` set) is not
+ * queued either.
+ *
+ * `true` = claimed or unclaimable-because-the-DB-failed (delivery goes ahead:
+ * losing a notification is worse than a rare duplicate); `false` = someone
+ * already delivered it.
+ */
+async function claimForDelivery(prisma: PrismaClient, id: string): Promise<boolean> {
+  try {
+    const { count } = await prisma.notificationLog.updateMany({
+      where: { id, channels: "", deliveredAt: null, error: null, pushOutcome: null },
+      data: { error: OUTCOME_UNKNOWN },
+    });
+    return count === 1;
+  } catch (err) {
+    logger.warn({ err, id }, "notification delivery claim failed — delivering anyway");
+    return true;
+  }
+}
+
+/**
+ * WARP-2804 — the DELIVERY half, for a row the caller already holds.
+ *
+ *   1. Claim the row (review F8: a second delivery is a no-op).
  *   2. Publish the toast with its `id`.
  *   3. Web push to the row's recipient with `notificationId: id`.
  *   4. Stamp `channels`, `deliveredAt`, `error` and `pushOutcome` on the row.
  *
- * Never throws on TRANSPORT — both channels are best-effort — and a stamp that
- * cannot be written is logged, not thrown: the notification already went out,
- * and the row stays queued and findable. Throws only when the row cannot be
- * read; then there is nothing to deliver, and nothing is published.
+ * TOTAL: it never throws. Both transports are best-effort, and every
+ * bookkeeping write (the claim, the stamp) is logged, not thrown — by the time
+ * this runs the row is committed, and a throw would tell the caller "nothing
+ * happened" about a notification that exists (review F2).
  */
-export async function deliverNotification(
+async function deliverRow(
   prisma: PrismaClient,
-  id: string,
-  opts: DeliverOptions = {},
+  row: DeliverableRow,
+  opts: DeliverOptions,
 ): Promise<DispatchResult> {
-  const row = await prisma.notificationLog.findUnique({ where: { id }, select: DELIVERY_SELECT });
-  if (!row) throw new Error(`notification_not_found: ${id}`);
+  if (!(await claimForDelivery(prisma, row.id))) {
+    return { id: row.id, channels: [], delivered: false, skipped: "already_delivered" };
+  }
 
   // WARP-2909 — delivery must not throw, so a link that fails the check
   // DEGRADES: both transports go without it, and the row records why. The
   // row's url/data were checked when it was recorded; in practice this is a
   // bad `tag` handed to deliverNotification directly.
-  let link: Pick<DispatchInput, "url" | "data" | "tag"> = {
-    url: row.url ?? undefined,
-    data: storedData(row.data),
-    tag: opts.tag,
-  };
+  let link: Pick<DispatchInput, "url" | "data" | "tag"> = { url: row.url, data: row.data, tag: opts.tag };
   let linkError: string | null = null;
   try {
     assertLinkFields({ username: row.username, kind: row.kind, title: row.title, ...link });
@@ -386,11 +432,41 @@ export async function deliverNotification(
 }
 
 /**
+ * WARP-2804 — deliver one recorded row, by id: read it, then `deliverRow`.
+ *
+ * For a caller that recorded the row inside its own transaction (activity
+ * notices, P3's security notifier) and delivers after commit. Idempotent: a
+ * row that was already delivered (or whose delivery was started) is a no-op,
+ * `skipped: "already_delivered"`. Never throws on transport or bookkeeping;
+ * throws only when the row cannot be read — then there is nothing to deliver,
+ * and nothing is published.
+ */
+export async function deliverNotification(
+  prisma: PrismaClient,
+  id: string,
+  opts: DeliverOptions = {},
+): Promise<DispatchResult> {
+  const row = await prisma.notificationLog.findUnique({ where: { id }, select: DELIVERY_SELECT });
+  if (!row) throw new Error(`notification_not_found: ${id}`);
+  return deliverRow(
+    prisma,
+    { ...row, url: row.url ?? undefined, data: storedData(row.data) },
+    opts,
+  );
+}
+
+/**
  * WARP-2804 — record, then deliver. Every caller keeps this signature.
  *
  * A `User.id` recipient or a bad link is the caller's bug (WARP-2911 /
  * WARP-2909): refused before the row and before any transport. A row that
  * cannot be written throws, and nothing is published.
+ *
+ * Review F2 — once the row is committed this NEVER throws, and never re-reads
+ * the row: it hands its own input straight to `deliverRow`. Callers
+ * de-duplicate on the row (backup-health, tls-notify, filing/digest skip when
+ * one exists; brain-notify re-sends when the send throws), so a throw after the
+ * commit meant either an alert never sent or a duplicate with an orphan.
  */
 export async function sendNotification(
   prisma: PrismaClient,
@@ -399,7 +475,25 @@ export async function sendNotification(
   assertRecipientIsUsername("sendNotification", input.username);
   assertLinkFields(input);
   const { id } = await recordNotification(prisma, input);
-  return deliverNotification(prisma, id, { tag: input.tag });
+  try {
+    return await deliverRow(
+      prisma,
+      {
+        id,
+        username: input.username,
+        kind: input.kind,
+        title: input.title,
+        body: input.body ?? null,
+        url: input.url,
+        data: input.data,
+      },
+      { tag: input.tag },
+    );
+  } catch (err) {
+    // deliverRow is total; this is the belt to its braces.
+    logger.error({ err, id }, "notification delivery failed after its row was recorded");
+    return { id, channels: [], delivered: false, error: "delivery: failed" };
+  }
 }
 
 /**
