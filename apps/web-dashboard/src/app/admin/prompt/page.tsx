@@ -23,6 +23,13 @@
  * turn calls. This file must never compute a verdict of its own — a second
  * opinion about a security boundary is the whole defect class the slice was
  * written to end.
+ *
+ * WARP-2900 (ADR-056 slice H4) — the table also carries runtime tools
+ * (promoted extensions, connected servers). Each row's source is on screen
+ * (`extension:<slug>@<version>`). A runtime tool whose every call dispatch
+ * refuses is still listed with what reaches the assistant — the real turn
+ * sends its schema, and only the call is refused — with the server's refusal
+ * sentence and the verdict badge on its row, and the KPI says how many.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -45,6 +52,7 @@ import type {
   ToolInspectRow,
 } from "@/lib/types";
 import { useAssistantInspect } from "@/lib/hooks/useAssistantInspect";
+import { classificationLabel } from "@/lib/runtime-tools";
 
 const ICON = <Bot size={15} />;
 const SUB = "The prompt and the tools each person's assistant actually receives.";
@@ -74,6 +82,15 @@ const GATE_ORDER: InspectGate[] = [
   "chat_policy",
   "turn_relevance",
 ];
+
+/**
+ * The row's meta: its area, plus where it comes from when that is not the
+ * compiled catalog. An older orchestrator sends no source; that reads as
+ * built-in, which is what every row it sends is.
+ */
+function sourceMeta(r: ToolInspectRow): string {
+  return r.source && r.source !== "built-in" ? `${r.domain} · ${r.source}` : r.domain;
+}
 
 /** Why an identity could not be established, in a sentence. */
 const UNRESOLVED_COPY: Record<string, string> = {
@@ -241,7 +258,15 @@ export default function AssistantInspectorPage() {
                 icon={<Wrench size={15} />}
                 label="Reach the assistant"
                 value={tools.state === "ok" ? tools.value.counts.advertised : UNKNOWN}
-                note={tools.state === "failed" ? "Unknown" : undefined}
+                note={
+                  tools.state === "failed"
+                    ? "Unknown"
+                    : tools.state === "ok" && (tools.value.counts.refusedAtDispatch ?? 0) > 0
+                      ? `${tools.value.counts.refusedAtDispatch} of these ${
+                          tools.value.counts.refusedAtDispatch === 1 ? "is" : "are"
+                        } refused when called`
+                      : undefined
+                }
               />
             </Card>
             <Card>
@@ -296,11 +321,16 @@ export default function AssistantInspectorPage() {
                   <Row
                     key={r.name}
                     title={r.homeDescription}
-                    sub={r.lockCaveat ?? r.name}
-                    subMono={!r.lockCaveat}
-                    meta={r.domain}
+                    sub={r.callRefusal ?? r.lockCaveat ?? r.name}
+                    subMono={!r.callRefusal && !r.lockCaveat}
+                    meta={sourceMeta(r)}
                     right={
-                      r.lockCaveat ? (
+                      r.callRefusal && r.classification ? (
+                        // Shown to the model, refused at the call (WARP-2900).
+                        <Badge kind={classificationLabel(r.classification).kind}>
+                          {classificationLabel(r.classification).label}
+                        </Badge>
+                      ) : r.lockCaveat ? (
                         <Badge kind="warn">Locks refused</Badge>
                       ) : (
                         <Badge kind="ok">Available</Badge>
@@ -333,7 +363,7 @@ export default function AssistantInspectorPage() {
                             title={r.homeDescription}
                             sub={r.name}
                             subMono
-                            meta={r.domain}
+                            meta={sourceMeta(r)}
                             right={
                               r.alsoWithheldBy.length > 0 ? (
                                 // The fact that makes this actionable: a tool

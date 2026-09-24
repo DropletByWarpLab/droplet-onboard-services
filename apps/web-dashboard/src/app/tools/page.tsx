@@ -24,18 +24,29 @@
  * would be a different, wrong answer. It used to list all 142 as if asking
  * for any of them would work, while 54 are withheld from chat by policy —
  * and the card seeded the composer for those too.
+ *
+ * WARP-2900 (ADR-056 slice H4) — an Extensions section lists the tools a
+ * promoted workshop extension adds at runtime (`useRuntimeTools` →
+ * `GET /api/llm/tools/runtime`). Same contract, stricter: a catalog, not a
+ * console. Its cards are not buttons and do not seed the composer — an
+ * extension tool is usable only once an owner has reviewed it, and the chip
+ * on each card says which state it is in. The endpoint sends no description,
+ * so the author's own words about a tool cannot appear here.
  */
 
 import { useMemo, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Pencil, Search, ShieldCheck, Wrench, XCircle } from "lucide-react";
+import { ArrowRight, Pencil, Puzzle, Search, ShieldCheck, Wrench, XCircle } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge } from "@/components/shell/primitives";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
+import { useRuntimeTools } from "@/lib/hooks/useRuntimeTools";
+import { classificationLabel, humanizeToolName as humanizeWireName } from "@/lib/runtime-tools";
 import { iconForDomain, labelForDomain, reachNote } from "@/lib/tool-domains";
 import {
   PENDING_COMPOSER_KEY,
   type PendingComposerPayload,
+  type RuntimeToolView,
   type ToolCatalogEntry,
 } from "@/lib/types";
 
@@ -235,7 +246,84 @@ export default function ToolsPage() {
           );
         })
       )}
+
+      <ExtensionsSection query={query} domainFilter={domainFilter} />
     </ShellPage>
+  );
+}
+
+/* ───────────────────────── WARP-2900: extensions ───────────────────────── */
+
+/**
+ * Tools promoted extensions add at runtime. Read-only by construction: the
+ * cards are plain `div`s with no handler, because the only way an extension
+ * tool should run is the assistant calling it, through dispatch, once an
+ * owner has reviewed it.
+ */
+function ExtensionsSection({ query, domainFilter }: { query: string; domainFilter: string }) {
+  const { tools, error } = useRuntimeTools();
+  const q = query.trim().toLowerCase();
+  const shown = tools.filter((t): t is RuntimeToolView & { extension: { id: string; version: string } } => {
+    if (!t.extension) return false;
+    if (domainFilter !== ALL && t.domain !== domainFilter) return false;
+    if (!q) return true;
+    return (
+      t.wireName.toLowerCase().includes(q) ||
+      t.extension.id.toLowerCase().includes(q) ||
+      labelForDomain(t.domain).toLowerCase().includes(q)
+    );
+  });
+
+  if (error) {
+    return (
+      <section aria-labelledby="tools-extensions">
+        <div className="sect">
+          <h2 id="tools-extensions">Extensions</h2>
+        </div>
+        <div className="card">
+          <p className="sub" role="alert" style={{ margin: 0 }}>
+            Couldn&rsquo;t read the tools extensions add. The built-in tools above are unaffected.
+          </p>
+        </div>
+      </section>
+    );
+  }
+  if (shown.length === 0) return null;
+
+  return (
+    <section aria-labelledby="tools-extensions">
+      <div className="sect">
+        <h2 id="tools-extensions" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <Puzzle size={16} strokeWidth={2} style={{ color: "var(--brand)" }} aria-hidden />
+          Extensions
+        </h2>
+        <span className="sx">{shown.length}</span>
+      </div>
+      <p className="sub" style={{ marginTop: 0 }}>
+        Tools promoted from the workshop and run by this box. They are listed here, never run from
+        here: the assistant can use one only after an owner reviews it as read-only.
+      </p>
+      <div className="grid c3">
+        {shown.map((t) => {
+          const chip = classificationLabel(t.classification);
+          return (
+            <div key={t.name} className="card ds-tool-card" style={CARD_STYLE} data-testid="extension-tool">
+              <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
+                {humanizeWireName(t.wireName)}
+              </span>
+              <p style={{ fontSize: 13, color: "var(--text)", opacity: 0.82, lineHeight: 1.5, flex: 1, margin: 0 }}>
+                {`From the ${t.extension.id} extension, version ${t.extension.version} · ${labelForDomain(t.domain)}`}
+              </p>
+              <div className="chiprow" style={{ gap: 6, paddingTop: 2 }}>
+                <span className={`badge ${chip.kind}`} title={chip.note}>
+                  {chip.label}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

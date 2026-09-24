@@ -16,6 +16,8 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createToolsRuntimeRouter } from "./routes/tools-runtime.js";
+import { resolveToolAccessScope } from "./services/tool-access.service.js";
 import { createTeamChatRouter } from "./routes/team-chat.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
@@ -123,7 +125,7 @@ import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { createToolsRouter } from "./routes/tools.js";
-import { detachRemoteMcp, mcpClient } from "./services/mcp-client.singleton.js";
+import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
@@ -373,7 +375,22 @@ export function createApp(
   // deliberately NOT under a module gate: no module in `module-registry.ts`
   // claims an `/api/admin` prefix, and a console that disappears when a module
   // is switched off is a console you cannot use to find out why.
-  app.use("/api", createAdminPromptInspectorRouter(prisma));
+  // WARP-2900 (H4) — the inspector's runtime rows ask the SAME dispatch
+  // policy the multiplexer calls, read lazily (route suites mock the
+  // singleton; see the extensions router below).
+  app.use("/api", createAdminPromptInspectorRouter(prisma, { remoteCallPolicy: (input) => remoteCallPolicy(input) }));
+  // WARP-2900 (H4) — GET /api/llm/tools/runtime: the runtime half of the tool
+  // universe for /tools (extensions, connected servers). Names, sources and
+  // the dispatch decision only; never a wire description.
+  app.use(
+    "/api",
+    createToolsRuntimeRouter({
+      policy: (input) => remoteCallPolicy(input),
+      // §3 — a custom role never reaches a runtime tool in chat, so it is
+      // not listed one here either.
+      resolveScope: (user) => resolveToolAccessScope(prisma, user),
+    }),
+  );
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the
