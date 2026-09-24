@@ -307,11 +307,13 @@ export async function checkSession(
 }
 
 /**
- * WARP-2981 (ADR-059 §6.2, D22) — when this sign-in ends: the record's
- * createdAt + the ABSOLUTE limit for the role it was minted with, the same
- * arithmetic checkSession enforces, so the time a client shows is the time
- * that will be applied. The idle deadline is deliberately not offered: any
- * client that polls keeps sliding it, so it would say nothing useful.
+ * WARP-2981 (ADR-059 §6.2, D22) — the latest this sign-in can last: the
+ * record's createdAt + the ABSOLUTE limit for the role it was minted with, the
+ * same arithmetic checkSession enforces. It can end sooner (idle expiry, the
+ * concurrent-session cap's eviction, revocation), so a client shows it as a
+ * latest time. The idle deadline is deliberately not offered: every
+ * authenticated request but /auth/refresh slides it, so it would say nothing
+ * useful.
  *
  * One Redis GET and nothing else. It never slides lastSeenAt, never destroys
  * or audits an expired record (enforcement is checkSession's, on the same

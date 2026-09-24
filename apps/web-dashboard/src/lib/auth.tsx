@@ -32,11 +32,17 @@ export interface AuthUser {
   // server-side regardless. Optional so a cached pre-WARP-824 profile is
   // treated as "not gated".
   mustChangePassword?: boolean;
-  // WARP-2981 (ADR-059 §6.2): when this sign-in ends — the absolute cap, fixed
-  // at sign-in and never extended (the idle deadline slides with every poll,
-  // so the box does not offer it). Only /auth/me carries it: absent after a
-  // login response or on an older orchestrator, null when the box cannot tell
-  // (a service principal, a grace-path token, an unreadable session record).
+  // WARP-2981 (ADR-059 §6.2): the LATEST this sign-in can last — createdAt +
+  // the absolute limit (12 h as shipped), never extended. It can end SOONER,
+  // and endsAt does not move when it does: after 30 min with no authenticated
+  // request (any request resets that clock, /auth/me included, but a token
+  // refresh does not — /auth/refresh checks with touch:false); when the
+  // person's next sign-in pushes them past 5 at once, which evicts the oldest;
+  // or on revocation (sign-out, password or role change, an admin ending it).
+  // So show it as "by … at the latest", never as the time it ends; a 401 ends
+  // it whatever endsAt says. Only /auth/me carries it: absent after a login
+  // response or on an older orchestrator, null when the box cannot tell (a
+  // service principal, a grace-path token, an unreadable session record).
   // Absent and null both mean "show nothing".
   session?: { endsAt: string } | null;
 }

@@ -64,17 +64,33 @@ is forced through before reaching anything else. Failure shapes (flat envelope, 
 (missing fields), `429 TOO_MANY_ATTEMPTS` (+ `retryAfterSeconds`, `Retry-After`
 header — progressive lock on repeated wrong current password).
 
-**When the sign-in ends (`session.endsAt`, WARP-2981).** `/auth/me` carries
-`session: { endsAt: "ISO-8601" }`: when this sign-in stops working, which is the
-sign-in time plus the absolute session limit (12 h for every role as shipped).
-Token refresh does not move it and nothing extends it, so an app can say when the
-person will be signed out and ask them to sign in again before then. The idle
-limit is **not** offered, because every request the app makes resets it.
+**The latest the sign-in can last (`session.endsAt`, WARP-2981).** `/auth/me`
+carries `session: { endsAt: "ISO-8601" }`: the sign-in time plus the **absolute**
+session limit (12 h for every role as shipped). Nothing extends it, token refresh
+included. It is a latest time, not a promise: the sign-in can end **sooner**, in
+any of three ways, and `endsAt` does not move when it does.
+
+- **Inactivity.** 30 minutes without an authenticated request ends it (every
+  role, as shipped). Any authenticated request resets that clock, `/auth/me`
+  included (the box records it at most every 30 s). **`/auth/refresh` does not
+  reset it**: a token refresh is not activity, so an app that only refreshes its
+  token in the background still goes idle, and its next refresh is refused. The
+  idle deadline is not offered, because every request moves it.
+- **Too many sign-ins.** One person holds at most 5 sign-ins at once. Their next
+  sign-in, on any device, ends the oldest one.
+- **Revocation.** Signing out; a password change or a newly enrolled second
+  factor (these end the person's other sign-ins); a role change; an admin ending
+  the person's sessions.
+
+So an app may warn as `endsAt` approaches, or say "you will be signed out by
+21:00 at the latest". It must not say "you will be signed out at 21:00", or treat
+a sign-in as good until then: the first `401` ends it, whatever `endsAt` said.
+The limits are read when used, so an operator changing them moves `endsAt` for
+sign-ins already open; read it again rather than keeping it from sign-in.
 `session` is `null` when the box cannot tell (a service token, a token minted
 before session records, the session store unreachable). Treat `null`, and a box
 too old to send the key, as "show nothing". Only `/auth/me` carries it; the login
-and refresh bodies do not. Signing out, or an admin ending the session, can still
-end it sooner.
+and refresh bodies do not.
 
 **Auth model (ADR-013 directory).** Login authenticates an **email +
 password (argon2id)** against the local directory — *not* Nextcloud

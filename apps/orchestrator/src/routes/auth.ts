@@ -2359,8 +2359,10 @@ export function createProtectedAuthRouter(
         }
       }
 
-      // WARP-2981 (ADR-059 §6.2) — when this sign-in ends (the absolute cap;
-      // the idle deadline slides with every poll, so it is not offered).
+      // WARP-2981 (ADR-059 §6.2) — the latest this sign-in can last (the
+      // absolute cap; idle expiry, the concurrent-session cap and revocation
+      // can end it sooner, and the idle deadline moves with every request, so
+      // it is not offered).
       // null = cannot tell: a sid-less grace-path token, a service principal
       // (no sign-in to end), or a record that is missing or unreadable. A
       // plain read — it never slides the idle clock and never fails /auth/me.
