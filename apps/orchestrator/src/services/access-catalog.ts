@@ -32,9 +32,15 @@
  * (AccessRoleConnectorGrant), never a tool grant.
  */
 import type { ModuleId } from "@prisma/client";
-import { TOOL_CATALOG, TOOL_DOMAINS, type ToolDomain } from "@droplet/tools-core";
+import { TOOL_DOMAINS, type ToolDomain } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import { MODULES } from "../modules/module-registry.js";
+import {
+  populatedDomains,
+  readableDomains,
+  toolLayers,
+  type ToolLayers,
+} from "./tool-layers.service.js";
 
 export type FeatureLevel = "view" | "act" | "manage";
 export type ToolLevel = "view" | "use";
@@ -345,6 +351,11 @@ export const FEATURE_UNGATED_TOOL_DOMAINS: Readonly<Partial<Record<ToolDomain, s
     "Stored ToolSpecs (WARP-2894). Not a module; every step a routine runs is re-checked " +
     "against this same scope by the ToolSpec runner (WARP-1580), so a routine reaches no " +
     "domain the role could not reach directly.",
+  workspace:
+    "The workshop's tools (WARP-2896). Not a module: they are excluded from chat and reach " +
+    "the model only inside a workshop run (bound_tool_domains), which only owner/admin may " +
+    "start, and /api/workspace refuses any call whose run is not the actor's, running, and " +
+    "bound to that workspace. The tool grant withholds the offer.",
   erp:
     "Connector reach is the §5.4 connectors axis (AccessRoleConnectorGrant), not a feature, " +
     "and erp is never a grantable tool domain.",
@@ -372,8 +383,24 @@ export function unmappedToolDomains(): string[] {
  * in the set (OR across owners), plus the declared
  * FEATURE_UNGATED_TOOL_DOMAINS. Everything else is denied.
  */
-export function domainsForFeatures(featureIds: ReadonlySet<ModuleId>): Set<string> {
+export function domainsForFeatures(
+  featureIds: ReadonlySet<ModuleId>,
+  /**
+   * WARP-2897 — runtime-only domains (tool-layers.service.ts
+   * `runtimeOnlyDomains`). They pass the feature term: the one exception to
+   * WARP-2742's fail-closed rule, and a deliberate one. They cannot be listed
+   * in FEATURE_UNGATED_TOOL_DOMAINS because an attached server or extension
+   * defines them at runtime, and no module toggle exists that could switch
+   * them off, so denying them here would make every such grant dead on
+   * arrival. Their reach is still governed by the role's own tool grant and
+   * the tier write filter, and a domain a module claims is left to the module.
+   */
+  runtimeDomains: Iterable<string> = [],
+): Set<string> {
   const out = new Set<string>();
+  for (const domain of runtimeDomains) {
+    if (!OWNERS_BY_DOMAIN.has(domain)) out.add(domain);
+  }
   for (const domain of TOOL_DOMAINS) {
     const owners = OWNERS_BY_DOMAIN.get(domain);
     if (owners !== undefined ? owners.some((m) => featureIds.has(m)) : isFeatureUngated(domain)) {
@@ -399,38 +426,60 @@ export const GRANTABLE_TOOL_DOMAINS: ReadonlyArray<string> = TOOL_DOMAINS.filter
 );
 
 /**
- * §3 `writeFilter(tier)` at domain granularity: the domains that still
- * contain at least one tool after the shipped role write-filter
- * (routes/llm.ts narrowAllowedToolsForRole — owner/admin keep everything,
- * family/guest lose every `requiresWrite` tool). A domain whose every tool
- * is a write tool is unreachable for the family/guest tiers.
+ * WARP-2897 — may a role hold a grant row on `domain`?
  *
- * AN EMPTY DOMAIN IS UNREACHABLE TOO, and that is a DIFFERENT statement this
- * function cannot tell apart from the one above: it adds a domain only on
- * FINDING a non-write tool in it, so a domain holding no tools at all reads
- * as "every tool here writes" when the truth is "no tool here yet". Today
- * that is `crm` and `pm` — ADR-045 slices C and D moved every CRM and PM tool
- * into `business`, and catalog.ts keeps the two declared but empty as the
- * landing slots for a remote catalog (HubSpot, Atlassian).
- *
- * WARP-2760/2761 resolved the collision that produced — five role templates
- * granting `crm` — by dropping those grants, NOT by returning empty domains
- * from here. This is a live term in the effective-access intersection
- * (effective-access.service.ts `reachable ∩ featureDomains ∩ granted`), so
- * widening it would leave family and guest holding a standing grant on every
- * toolless domain, and the FIRST tool a remote catalog registers into one may
- * be a write — the exact case this filter exists to catch. Deciding otherwise
- * is a change to the write filter and belongs in its own ticket;
- * `access-catalog.test.ts` pins the current answer so it cannot be reversed
- * by accident.
+ * The compiled grantable set (GRANTABLE_TOOL_DOMAINS) plus every domain the
+ * RUNTIME layer currently carries, minus `erp` in both. A runtime-only domain
+ * (an extension's, once slice H names them) is grantable exactly while some
+ * attached, non-denied runtime tool lives in it — the write paths validate
+ * against this at write time, so a grant on a domain nothing on this box
+ * provides is refused with the domain named rather than stored as a row
+ * that can never reach anything.
  */
-export function tierReachableDomains(tier: Role): Set<string> {
+export function isGrantableDomain(domain: string, layers: ToolLayers = toolLayers()): boolean {
+  if (domain === "erp") return false;
+  if (GRANTABLE_TOOL_DOMAINS.includes(domain)) return true;
+  return layers.runtime.some((t) => t.domain === domain);
+}
+
+/**
+ * §3 `writeFilter(tier)` at domain granularity, over BOTH tool layers
+ * (tool-layers.service.ts — the compiled catalog and the runtime registry as
+ * classified by the operator's RemoteToolClassification record).
+ *
+ *   • owner/admin keep write tools, so they reach every POPULATED domain —
+ *     every domain at least one tool in either layer lives in.
+ *   • family/guest lose every `requiresWrite` tool (routes/llm.ts
+ *     narrowAllowedToolsForRole), so they reach only READABLE domains — those
+ *     holding at least one non-write tool. A runtime tool counts as a write
+ *     unless its classification row says otherwise; the wire's own hints are
+ *     never read.
+ *
+ * AN EMPTY DOMAIN IS UNREACHABLE FOR EVERY TIER. `crm` and `pm` hold no tool
+ * (ADR-045 slices C and D moved every CRM and PM tool into `business`;
+ * catalog.ts keeps the two declared as landing slots for a remote catalog),
+ * and an extension's domain is empty the moment the extension is disabled.
+ *
+ * History, because this reverses a pinned decision. WARP-2760/2761 kept
+ * owner/admin on `new Set(TOOL_DOMAINS)` — every DECLARED domain, empty or not
+ * — and resolved the resulting template collision by dropping `crm` grants
+ * from the templates rather than by changing this function; its comment said
+ * reversing it "belongs in its own ticket". WARP-2897 is that ticket (ADR-056
+ * §5.4's two-layer reachability guard): with runtime domains in play, "admin
+ * reaches every declared domain" would call a disabled extension's domain
+ * reachable for every admin template. The family/guest half — never widen to
+ * a toolless domain, because the first tool a remote catalog registers there
+ * may be a write — is unchanged. `access-catalog.test.ts` pins both halves
+ * and names both mutations.
+ *
+ * `layers` defaults to the compiled catalog alone, which keeps every
+ * synchronous caller that has no runtime state to hand compiling and honest
+ * for the local-only world; the effective-access resolver passes the loaded
+ * runtime layer.
+ */
+export function tierReachableDomains(tier: Role, layers: ToolLayers = toolLayers()): Set<string> {
   if (tier === "owner" || tier === "admin") {
-    return new Set<string>(TOOL_DOMAINS);
+    return populatedDomains(layers);
   }
-  const out = new Set<string>();
-  for (const entry of TOOL_CATALOG) {
-    if (!entry.requiresWrite) out.add(entry.domain);
-  }
-  return out;
+  return readableDomains(layers);
 }

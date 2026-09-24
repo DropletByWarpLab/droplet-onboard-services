@@ -15,6 +15,11 @@ import {
 } from "./activity.service.js";
 import { _setActivityRecorderForTests } from "./activity.singleton.js";
 import { createHmacSigner } from "./audit-signing.service.js";
+import {
+  activityRowCreateTrap,
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "../__tests__/helpers/activity-row-insert.js";
 
 vi.mock("./notifications.service.js", () => ({
   sendNotification: vi.fn().mockResolvedValue({
@@ -41,20 +46,8 @@ function makeChainFake() {
   let nextId = 1n;
   const prisma = {
     activityRow: {
-      async create({ data }: { data: Record<string, unknown> }) {
-        const refs = data.refs as { _tag?: string } | null | undefined;
-        const row = {
-          id: nextId++,
-          ...data,
-          sub: (data.sub as string | null) ?? null,
-          refs:
-            refs && typeof refs === "object" && refs._tag === "Prisma.DbNull"
-              ? null
-              : (refs ?? null),
-        } as Record<string, unknown> & { id: bigint };
-        rows.push(row);
-        return row;
-      },
+      // The append's handle check wants it; the row goes in through the raw INSERT below (WARP-3011).
+      create: activityRowCreateTrap.create,
       async findMany(args: {
         where?: { id?: { gt?: bigint } };
         orderBy: { id: "asc" };
@@ -67,7 +60,12 @@ function makeChainFake() {
           .slice(0, args.take);
       },
     },
-    async $queryRawUnsafe<T>(query: string) {
+    async $queryRawUnsafe<T>(query: string, ...params: unknown[]) {
+      if (isActivityRowInsert(query)) {
+        const row = { ...activityRowFromInsert(nextId++, params) };
+        rows.push(row);
+        return [{ id: row.id }] as unknown as T;
+      }
       if (query.includes("pg_advisory_xact_lock")) {
         // WARP-2977 P2b: the append reads the isolation level in the same round-trip.
         // …and the transaction start time: the append checks the tail read ran in the same transaction.

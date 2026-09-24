@@ -27,6 +27,11 @@ import {
   type ActivityRowContent,
   type ActivityRowSigner,
 } from "../services/audit-signing.service.js";
+import {
+  activityRowCreateTrap,
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "./helpers/activity-row-insert.js";
 import { createTransactionSeam, type TransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 /** What `transaction_timestamp()::text` reports inside the fake transaction (WARP-2977 P2b). */
@@ -69,36 +74,14 @@ function makePrismaFake() {
   return {
     rows,
     prisma: {
-      activityRow: {
-        async create({ data }: { data: Record<string, unknown> }) {
-          const refsRaw = data.refs;
-          const refsValue =
-            refsRaw === undefined ||
-            (typeof refsRaw === "object" &&
-              refsRaw !== null &&
-              (refsRaw as { _tag?: string })._tag === "Prisma.DbNull")
-              ? null
-              : (refsRaw as Record<string, unknown> | null);
-          const row: StoredRow = {
-            id: nextId++,
-            at: data.at as Date,
-            severity: data.severity as StoredRow["severity"],
-            sourceIcon: data.sourceIcon as string,
-            what: data.what as string,
-            sub: (data.sub as string | null) ?? null,
-            kind: data.kind as StoredRow["kind"],
-            refs: refsValue,
-            signature: data.signature as string,
-            prevSignatureHash: data.prevSignatureHash as string,
-            actorType: (data.actorType as StoredRow["actorType"]) ?? null,
-            actorId: (data.actorId as string | null) ?? null,
-            schemaVersion: data.schemaVersion as number,
-          };
+      // The append's handle check wants it; the row goes in through the raw INSERT below (WARP-3011).
+      activityRow: activityRowCreateTrap,
+      async $queryRawUnsafe<T>(query: string, ...params: unknown[]): Promise<T> {
+        if (isActivityRowInsert(query)) {
+          const row = activityRowFromInsert(nextId++, params) as StoredRow;
           rows.push(row);
-          return row;
-        },
-      },
-      async $queryRawUnsafe<T>(query: string): Promise<T> {
+          return [{ id: row.id }] as unknown as T;
+        }
         // WARP-2977 P2b: the chain lock reports the isolation level in the
         // same round-trip; the append refuses anything but READ COMMITTED.
         if (query.includes("pg_advisory_xact_lock")) {

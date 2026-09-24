@@ -149,6 +149,77 @@ describe("agent-runs routes — roles (WARP-2180)", () => {
   });
 });
 
+describe("agent-runs routes — a workshop run is bound to one workspace (WARP-2896)", () => {
+  async function seedWorkspace(db: ReturnType<typeof createAgentRunPrismaMock>, id: string, status = "active") {
+    await db.prisma.workshopWorkspace.create({ data: { id, userId: "u-owner", name: id, status } });
+  }
+
+  it("binds the run to an existing, active workspace and echoes it", async () => {
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-a");
+    const res = await request(app).post("/api/agent-runs").send({ goal: "add a tool", workspaceId: "ws-a" });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ status: "queued", workspaceId: "ws-a" });
+    expect(db.row(res.body.id)).toMatchObject({ workspaceId: "ws-a" });
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ refs: expect.objectContaining({ workspaceId: "ws-a" }) }),
+    );
+  });
+
+  it("404 for a workspace that does not exist; 409 for one already proposed", async () => {
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-done", "proposed");
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g", workspaceId: "ws-none" })).status).toBe(404);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "g", workspaceId: "ws-done" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/proposed/);
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("409 while another run is live in the workspace; free again once it ends", async () => {
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-a");
+    const first = await request(app).post("/api/agent-runs").send({ goal: "one", workspaceId: "ws-a" });
+    expect(first.status).toBe(201);
+    for (const status of ["queued", "running", "awaiting_confirmation"]) {
+      db.row(first.body.id).status = status;
+      const res = await request(app).post("/api/agent-runs").send({ goal: "two", workspaceId: "ws-a" });
+      expect(res.status, status).toBe(409);
+      expect(res.body.error).toMatch(/already working/);
+    }
+    db.row(first.body.id).status = "succeeded";
+    expect((await request(app).post("/api/agent-runs").send({ goal: "two", workspaceId: "ws-a" })).status).toBe(201);
+    expect(db.rows).toHaveLength(2);
+  });
+
+  it("two starts racing past the count: the partial unique index's P2002 is the same 409, not a 500", async () => {
+    // The count saw nothing; by the time the create runs, another start has
+    // landed. Postgres refuses it through AgentRun_workspaceId_active_key and
+    // the route must answer as if the count had seen it.
+    // Mutation: drop the catch around enqueueAgentRun → 500.
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-a");
+    const clash = Object.assign(new Error("Unique constraint failed on the fields: (`workspaceId`)"), {
+      code: "P2002",
+      meta: { target: "AgentRun_workspaceId_active_key" },
+    });
+    db.prisma.agentRun.create.mockRejectedValueOnce(clash);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "two", workspaceId: "ws-a" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already working/);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a P2002 on an ORDINARY run is not a workspace clash — it stays an error", async () => {
+    // No workspace → no partial-index predicate can match; whatever tripped
+    // is a real fault and must not be dressed up as "workspace busy".
+    const { app, db } = buildApp(owner);
+    db.prisma.agentRun.create.mockRejectedValueOnce(Object.assign(new Error("clash"), { code: "P2002" }));
+    const res = await request(app).post("/api/agent-runs").send({ goal: "plain" });
+    expect(res.status).toBe(500);
+  });
+});
+
 describe("agent-runs routes — the mcp principal acts on behalf of a person (WARP-2180)", () => {
   it("attributes the run to the named user", async () => {
     const { app, db } = buildApp(mcpPrincipal);
@@ -304,6 +375,31 @@ describe("agent-runs routes — ownership, list, detail, cancel (WARP-2180)", ()
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ id, tool: "get_current_datetime", decision: "approved", status: "queued" });
     expect(db.row(id).status).toBe("queued");
+  });
+
+  it("WARP-3044: a second confirm on the same park is a 409 and changes nothing — one approval, one decision on the row", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "g", model: "m" });
+    const { app } = buildApp(owner, db);
+    Object.assign(db.row(id), {
+      status: "awaiting_confirmation",
+      pendingTool: "get_current_datetime",
+      pendingBindingHash: "h",
+      pendingArgs: {},
+      parkedAt: new Date(),
+    });
+    expect((await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "approved" })).status).toBe(200);
+    const decided = { ...db.row(id) };
+    const again = await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "approved" });
+    expect(again.status).toBe(409);
+    expect(again.body).toEqual({ error: "not_parked", id });
+    // A late denial cannot overwrite the approval either.
+    expect((await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "denied" })).status).toBe(409);
+    const row = db.row(id);
+    expect(row.status).toBe("queued");
+    expect(row.pendingDecision).toBe("approved");
+    expect(row.pendingDecidedAt).toEqual(decided.pendingDecidedAt);
+    expect(row.deadlineAt).toEqual(decided.deadlineAt);
   });
 });
 

@@ -1,22 +1,17 @@
 /**
- * WARP-2925 (ADR-056) — `/workshop`.
+ * WARP-2925 → WARP-2974 (ADR-056) — `/workshop` and `/workshop/<id>`.
  *
- *   1. Start a run: the goal is POSTed to /api/agent-runs as `{ goal }`, the
- *      field clears, and the panel opens the run the route answered with
- *      (its detail is fetched by id).
- *   2. A refused start (403 — the person's role may not start runs) renders
- *      the calm error with the cause in the title, and nothing crashes.
- *   3. `?run=<id>` opens that run on arrival — the deep link /admin/audit
- *      now forwards here.
- *   4. A family member reaching the page by URL gets honest copy and no form.
- *   5. The Start button stays disabled until there is a goal to send.
- *   6. While auth is still loading, nobody gets the form or the runs panel —
- *      the page shows the same loading card /admin/audit does, and the panel's
- *      mount fetches (GET /api/agent-runs, /api/agent-runs/schedules) never
- *      fire before the role is known.
+ *   1. An owner gets the space (the composer is there; `?run=` opens a run).
+ *   2. A family member reaching the page by URL gets honest copy, no
+ *      composer, and no fetch.
+ *   3. While auth is still loading, nobody gets the space — the loading card
+ *      renders and the space's mount fetches (GET /api/agent-runs,
+ *      /api/workspace, the schedules) never fire before the role is known.
+ *   4. `/workshop/<id>` forwards to `/workshop?workspace=<id>`; a malformed
+ *      id forwards to the bare Workshop.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup } from "@testing-library/react";
 import React from "react";
 
 const authFetchMock = vi.fn();
@@ -28,9 +23,12 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 let mockSearchParamsString = "";
+let mockParams: Record<string, string> = { workspaceId: "ws-a" };
+const replaceMock = vi.fn();
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(mockSearchParamsString),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useParams: () => mockParams,
+  useRouter: () => ({ push: vi.fn(), replace: replaceMock }),
   usePathname: () => "/workshop",
 }));
 
@@ -47,31 +45,11 @@ vi.mock("@/components/shell/ShellPage", () => ({
 }));
 
 import WorkshopPage from "@/app/workshop/page";
-import type { AgentRunDetail } from "@/components/workshop/agent-runs/api";
+import WorkspaceForward from "@/app/workshop/[workspaceId]/page";
+import { forwardTarget } from "@/components/workshop/forward";
 
 function okJson(body: unknown, status = 200) {
   return { ok: status < 400, status, json: async () => body };
-}
-
-function detail(id: string, goal: string): AgentRunDetail {
-  return {
-    id,
-    goal,
-    model: "m",
-    status: "queued",
-    iteration: 0,
-    maxIter: 30,
-    attempts: 0,
-    createdAt: "2026-09-19T10:00:00.000Z",
-    startedAt: null,
-    endedAt: null,
-    deadlineAt: null,
-    result: null,
-    stopReason: null,
-    error: null,
-    pending: null,
-    trace: [],
-  };
 }
 
 function calls(prefix: string) {
@@ -82,100 +60,81 @@ beforeEach(() => {
   mockRole = "owner";
   mockAuthLoading = false;
   mockSearchParamsString = "";
+  mockParams = { workspaceId: "ws-a" };
+  replaceMock.mockReset();
   authFetchMock.mockReset();
-  authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-    if (url === "/api/agent-runs" && init?.method === "POST") return okJson({ id: "run-new", status: "queued" }, 201);
-    if (url.startsWith("/api/agent-runs/schedules")) return okJson({ items: [] });
+  authFetchMock.mockImplementation(async (url: string) => {
+    if (url.startsWith("/api/agent-runs/schedules")) return okJson({ schedules: [] });
     if (url.startsWith("/api/agent-runs/")) {
       const id = decodeURIComponent(url.slice("/api/agent-runs/".length));
-      return okJson(detail(id, `goal of ${id}`));
+      return okJson({
+        id,
+        goal: `goal of ${id}`,
+        model: "m",
+        status: "queued",
+        iteration: 0,
+        maxIter: 30,
+        attempts: 0,
+        createdAt: "2026-09-19T10:00:00.000Z",
+        startedAt: null,
+        endedAt: null,
+        deadlineAt: null,
+        result: null,
+        stopReason: null,
+        error: null,
+        pending: null,
+        trace: [],
+      });
     }
     if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
+    if (url === "/api/workspace") return okJson({ workspaces: [] });
     return okJson({});
   });
 });
 
 afterEach(() => cleanup());
 
-describe("/workshop (WARP-2925)", () => {
-  it("starts a run: POSTs the goal, clears the field and opens the new run", async () => {
-    render(<WorkshopPage />);
-    const field = screen.getByLabelText("What should your Droplet do?") as HTMLTextAreaElement;
-    const start = screen.getByRole("button", { name: /start run/i });
-    expect(start).toBeDisabled();
-
-    fireEvent.change(field, { target: { value: "  sort last week's scans  " } });
-    expect(start).toBeEnabled();
-    fireEvent.click(start);
-
-    await waitFor(() => {
-      expect(calls("/api/agent-runs").some((c) => (c[1] as RequestInit | undefined)?.method === "POST")).toBe(true);
-    });
-    const post = calls("/api/agent-runs").find((c) => (c[1] as RequestInit | undefined)?.method === "POST")!;
-    expect(JSON.parse(String((post[1] as RequestInit).body))).toEqual({ goal: "sort last week's scans" });
-
-    await waitFor(() => expect(field.value).toBe(""));
-    expect(await screen.findByText(/run queued/i)).toBeInTheDocument();
-    // The panel opened the run the route answered with.
-    await waitFor(() => expect(calls("/api/agent-runs/run-new").length).toBeGreaterThan(0));
-    expect(await screen.findByTestId("agent-run-detail")).toHaveTextContent("goal of run-new");
-  });
-
-  it("renders the calm error, with the cause in the title, when the start is refused", async () => {
-    authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (url === "/api/agent-runs" && init?.method === "POST")
-        return okJson({ error: "Forbidden: role not permitted to use background runs" }, 403);
-      if (url.startsWith("/api/agent-runs/schedules")) return okJson({ items: [] });
-      return okJson({ items: [], nextCursor: null });
-    });
-    render(<WorkshopPage />);
-    fireEvent.change(screen.getByLabelText("What should your Droplet do?"), { target: { value: "do a thing" } });
-    fireEvent.click(screen.getByRole("button", { name: /start run/i }));
-
-    const status = await screen.findByText("Something went wrong on the box. Try again in a moment.");
-    expect(status).toHaveAttribute("title", expect.stringContaining("Forbidden"));
-    // No run was opened — nothing to open.
-    expect(calls("/api/agent-runs/run-").length).toBe(0);
-    // The goal is kept so the person can try again, not silently discarded.
-    expect((screen.getByLabelText("What should your Droplet do?") as HTMLTextAreaElement).value).toBe("do a thing");
-  });
-
-  it("?run=<id> opens that run on arrival", async () => {
+describe("/workshop (WARP-2974)", () => {
+  it("an owner gets the space, and ?run=<id> opens that run on arrival", async () => {
     mockSearchParamsString = "run=run-7";
     render(<WorkshopPage />);
+    expect(screen.getByLabelText("What should your Droplet do?")).toBeInTheDocument();
     await waitFor(() => expect(calls("/api/agent-runs/run-7").length).toBeGreaterThan(0));
     expect(await screen.findByTestId("agent-run-detail")).toHaveTextContent("goal of run-7");
   });
 
-  it("tells a family member the page is for owners and admins, and offers no form", () => {
+  it("tells a family member the page is for owners and admins, and offers no composer", () => {
     mockRole = "family";
     render(<WorkshopPage />);
     expect(screen.getByRole("status")).toHaveTextContent(/owner and admins/i);
     expect(screen.queryByLabelText("What should your Droplet do?")).toBeNull();
-    expect(calls("/api/agent-runs").length).toBe(0);
+    expect(calls("/api/").length).toBe(0);
   });
 
-  it.each(["family", "guest"])(
-    "while auth is still loading, a %s visitor sees the loading card — no form, no runs panel, no panel fetches",
-    (role) => {
-      mockRole = role;
-      mockAuthLoading = true;
-      render(<WorkshopPage />);
+  it.each(["family", "guest", "owner"])("while auth is still loading, a %s visitor sees the loading card and nothing is fetched", (role) => {
+    mockRole = role;
+    mockAuthLoading = true;
+    render(<WorkshopPage />);
+    const loading = screen.getByText("Loading…");
+    expect(loading).toHaveAttribute("aria-busy", "true");
+    expect(loading).toHaveClass("card");
+    expect(screen.queryByLabelText("What should your Droplet do?")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(calls("/api/").length).toBe(0);
+  });
+});
 
-      // The same loading card /admin/audit shows in its auth-loading window.
-      const loading = screen.getByText("Loading…");
-      expect(loading).toHaveAttribute("aria-busy", "true");
-      expect(loading).toHaveClass("card");
+describe("/workshop/<id> forwards into the space (WARP-2974)", () => {
+  it("replaces the route with ?workspace=<id>", async () => {
+    render(<WorkspaceForward />);
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/workshop?workspace=ws-a"));
+    expect(calls("/api/").length).toBe(0);
+  });
 
-      // Neither the form nor the denied copy — the role is not known yet.
-      expect(screen.queryByRole("form", { name: "Start a run" })).toBeNull();
-      expect(screen.queryByLabelText("What should your Droplet do?")).toBeNull();
-      expect(screen.queryByRole("status")).toBeNull();
-
-      // AgentRunsPanel is not mounted, so its mount effects never hit the box.
-      expect(screen.queryByRole("list", { name: "Background runs" })).toBeNull();
-      expect(calls("/api/agent-runs").length).toBe(0);
-      expect(calls("/api/agent-runs/schedules").length).toBe(0);
-    },
-  );
+  it("a malformed id forwards to the bare Workshop, never to a query it could not satisfy", () => {
+    expect(forwardTarget("../etc")).toBe("/workshop");
+    expect(forwardTarget("")).toBe("/workshop");
+    expect(forwardTarget(undefined)).toBe("/workshop");
+    expect(forwardTarget("ws-a")).toBe("/workshop?workspace=ws-a");
+  });
 });

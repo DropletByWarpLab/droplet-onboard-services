@@ -65,13 +65,24 @@
  *
  * On approval (`decideAgentRun`, which re-checks the run's principal can
  * still reach the tool — confirmation is not an escalation path) the run is
- * re-queued and resumed from its checkpoint. The model re-issues the call;
- * `beforeToolCall` recognises the approved binding and performs the
- * interceptor handshake itself — one dispatch without a token to obtain a
- * FRESH challenge (minted now, seconds after the human decided, redeemed in
- * the same breath) and one with it. The interceptor stays the single gate;
- * the human's decision is what authorises this worker to redeem. On denial
- * the model receives a `CONFIRMATION_DENIED` tool result and adapts.
+ * re-queued. On resume the worker runs THE STORED CALL ITSELF, before the
+ * model is asked anything (WARP-3044): the tool and args exactly as parked,
+ * checked against the parked binding and against the principal's reach at
+ * this claim, redeemed through the interceptor handshake — one dispatch
+ * without a token to obtain a FRESH challenge (minted now, seconds after the
+ * human decided, redeemed in the same breath) and one with it. The
+ * interceptor stays the single gate; the human's decision is what authorises
+ * this worker to redeem. The call and its result are appended to the
+ * conversation and the checkpoint advanced past the parked iteration, so the
+ * model resumes with the result in front of it. On denial the same happens
+ * with a `CONFIRMATION_DENIED` result and nothing dispatched.
+ *
+ * The model is never asked to re-issue the call. It used to be, and the
+ * binding matched only a byte-identical re-issue: gpt-oss rewords free text
+ * on every ask, so on the house unit a run re-parked after each of three
+ * approvals and never ran the call (run 1efa11c8). A byte-identical re-issue
+ * AFTER the decided call is answered from the trace, never dispatched or
+ * parked again (`decidedBefore` in `beforeToolCall`).
  *
  * Tier-3 (a tool outside the run's pool, or one the interceptor's deny tier
  * refuses) is refused exactly as in chat, never parked.
@@ -99,7 +110,14 @@
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { TOOL_CATALOG, confirmationBindingHash, confirmationOwnerOf } from "@droplet/tools-core";
+import {
+  TOOL_CATALOG,
+  TOOL_ROUTES,
+  confirmationBindingHash,
+  confirmationOwnerOf,
+  redactConfirmationTokensForModel,
+  type ToolDomain,
+} from "@droplet/tools-core";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type { ChatMessage } from "../types/index.js";
@@ -115,7 +133,9 @@ import {
   narrowToolNamesForPrincipal,
   resolveAttributedToolAccess,
   toolAllowedForPrincipal,
+  toolDispatchDenial,
 } from "./tool-access.service.js";
+import { boundToolResultForModel } from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
@@ -157,6 +177,36 @@ export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notifica
  * saturates the model. Structural refusal here; the handler refuses too.
  */
 export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run"]);
+
+/**
+ * WARP-2896 (ADR-056 slice G) — the workshop's tools, derived from the
+ * tool→route manifest rather than named: every tool whose EVERY hop lands
+ * under `/api/workspace/`. That prefix is the sandbox's git store, reached
+ * through routes/workspace.ts, where "run owns workspace" is enforced —
+ * the blast radius of `workspace_write` is one checkout on the internal-
+ * only network, not the box. So these are the one family of ungated writes
+ * a run may carry (see {@link runToolPool}), and only a run that HAS a
+ * workspace carries them. A tool that adds a hop elsewhere leaves the set
+ * by itself; `agent-run-worker.workshop.test.ts` enumerates the members.
+ */
+export const WORKSPACE_TOOLS: ReadonlySet<string> = new Set(
+  TOOL_ROUTES.filter(
+    (e) => e.hops.length > 0 && e.hops.every((h) => h.pathPattern.startsWith("/api/workspace/")),
+  ).map((e) => e.tool),
+);
+
+/**
+ * WARP-2896 — the selection domains of {@link WORKSPACE_TOOLS}, read off the
+ * catalog (today exactly `["workspace"]`). A workshop run hands them to the
+ * loop as `bound_tool_domains` so "domains" selection advertises the
+ * workshop's tools on every turn: no keyword rule reaches them (chat must
+ * never be promised them) and a workshop goal need not name them. Without
+ * this the bench-box live proof (2026-09-23) offered the model none of the
+ * eight and the run ended `model_done` with zero tool calls.
+ */
+export const WORKSPACE_TOOL_DOMAINS: readonly ToolDomain[] = [
+  ...new Set(TOOL_CATALOG.filter((t) => WORKSPACE_TOOLS.has(t.name)).map((t) => t.domain)),
+];
 
 /**
  * WARP-2749 — a run's inference requests carry the gateway's "background"
@@ -224,13 +274,18 @@ function gatewayBusy(threw: unknown, result: AgentResult | null): boolean {
  * (remote, ADR-043) tools are never in a run's `allowed_tools`, so a tool the
  * catalog does not know cannot reach a run at all.
  */
-export function runToolPool(): string[] {
+export function runToolPool(opts: { workspace?: boolean } = {}): string[] {
   return TOOL_CATALOG.filter(
     (t) =>
       !RUN_EXCLUDED_TOOLS.has(t.name) &&
       confirmationOwnerOf(t) !== "route" &&
       (RUN_READMITTED_TOOLS.has(t.name) ||
-        (!EXCLUDED_FROM_CHAT_TOOLS.has(t.name) && !(t.requiresWrite && !t.requiresConfirmation))),
+        // WARP-2896 — the workshop's tools ride a run bound to a workspace and
+        // no other: their writes land on that workspace's checkout alone.
+        (opts.workspace === true && WORKSPACE_TOOLS.has(t.name)) ||
+        (!EXCLUDED_FROM_CHAT_TOOLS.has(t.name) &&
+          !WORKSPACE_TOOLS.has(t.name) &&
+          !(t.requiresWrite && !t.requiresConfirmation))),
   ).map((t) => t.name);
 }
 
@@ -276,11 +331,21 @@ export function redispatchSafe(tool: string, prior: { confirmation?: string }): 
   const entry = TOOL_CATALOG.find((t) => t.name === tool);
   if (!entry) return false;
   if (!entry.requiresWrite && !entry.requiresConfirmation) return true;
+  // WARP-2896 — a workspace write repeats onto the same checkout: `write`
+  // is idempotent by contract (same bytes, `changed: false`), `commit` finds
+  // nothing to commit, `run` runs the tests again. Re-dispatch, loudly (the
+  // caller logs `agent_run_redispatch_unknown_outcome`). `propose` is gated
+  // and takes the confirming branch below.
+  if (WORKSPACE_TOOLS.has(tool) && !entry.requiresConfirmation) return true;
   if (!entry.requiresConfirmation) return false;
   return prior.confirmation !== "confirmed";
 }
 
-/** WARP-2179 — the parked-call columns, always cleared together. */
+/**
+ * WARP-2179 — the parked-call columns, always cleared together: by the write
+ * that consumes a decision, and by EVERY terminal write, so no decision
+ * outlives the run it was made for (WARP-2720).
+ */
 const CLEAR_PENDING: Prisma.AgentRunUpdateManyMutationInput = {
   pendingTool: null,
   pendingBindingHash: null,
@@ -369,6 +434,9 @@ export interface EnqueueAgentRunInput {
   /** WARP-2877 — set by the schedule ticker, so its overlap guard can find
    *  this run on the next fire. Absent for a run started from chat. */
   scheduleId?: string | null;
+  /** WARP-2896 — the workshop workspace this run works in. Absent for every
+   *  ordinary run; the route checked it exists and belongs to the person. */
+  workspaceId?: string | null;
 }
 
 /** Create a `queued` run. The worker's next tick claims it. */
@@ -389,6 +457,7 @@ export async function enqueueAgentRun(
       sessionId: input.sessionId ?? null,
       maxIter,
       scheduleId: input.scheduleId ?? null,
+      workspaceId: input.workspaceId ?? null,
       ...(input.runAfter ? { runAfter: input.runAfter } : {}),
     },
     select: { id: true },
@@ -433,7 +502,9 @@ export type DecideAgentRunResult =
  * loop applies at dispatch), or the approval is refused and the run stays
  * parked. Only the run's owner (or an `owner`-role principal) may decide.
  * The decision is recorded on the row and the run re-queued; the worker
- * consumes it on resume. `deadlineAt` is extended by the time spent parked,
+ * consumes it on resume by running — or, denied, answering — the STORED call
+ * itself (WARP-3044). A second decision finds the run no longer parked and
+ * changes nothing. `deadlineAt` is extended by the time spent parked,
  * so waiting for a human is not charged against the wall clock.
  */
 export async function decideAgentRun(
@@ -511,7 +582,19 @@ export async function decideAgentRun(
 }
 
 /** Why an execution stopped before the loop finished on its own. */
-type StopReason = "cancelled" | "deadline" | "fenced" | "parked" | "unknown_outcome";
+type StopReason = "cancelled" | "deadline" | "fenced" | "parked" | "unknown_outcome" | "proposed";
+
+/**
+ * WARP-2896 — `workspace_propose` ENDS the run. A proposal is the workshop
+ * run's terminal act: the manifest is written, the commit tagged, the
+ * review surface (slice I) takes it from there, and nothing the model does
+ * after that belongs to the same run. The worker reads the tool's own
+ * result — a successful, non-envelope `workspace_propose` — and stops the
+ * loop with `proposed`, which the terminal write records as `succeeded`
+ * with the proposal as the run's result. The model is not asked to stop
+ * itself; it would not, reliably.
+ */
+const PROPOSE_TOOL = "workspace_propose";
 
 class AgentRunStopped extends Error {
   constructor(
@@ -631,6 +714,42 @@ const canonical = (v: unknown): string => {
   return JSON.stringify(v) ?? "null";
 };
 
+/** `pendingArgs` as the park wrote it: a JSON object, or nothing usable. */
+function storedArgs(v: unknown): Record<string, unknown> | null {
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+/** WARP-2179 — what the model is handed for a call the human declined. */
+function deniedResultText(tool: string): string {
+  return JSON.stringify({
+    status: "error",
+    error: {
+      code: "CONFIRMATION_DENIED",
+      message:
+        `The user declined '${tool}' for this run. Do not retry it; ` +
+        "adapt, or finish with what you have and say what was not done.",
+    },
+  });
+}
+
+/**
+ * WARP-3044 — what the model is handed when it re-issues, byte for byte, a
+ * call that was approved and has already run. The loop's own vocabulary for
+ * a repeated call (`REPEATED_CALL`), so the model reads it the way it reads
+ * the loop's nudge.
+ */
+function alreadyRunText(tool: string): string {
+  return JSON.stringify({
+    status: "error",
+    error: {
+      code: "REPEATED_CALL",
+      message:
+        `'${tool}' was approved by the user and has already run with these exact arguments; ` +
+        "its result is in the conversation above. Do not call it again — use that result or finish.",
+    },
+  });
+}
+
 export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
   const { prisma } = deps;
   const limits = deps.limits ?? config.agentRuns;
@@ -699,6 +818,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
               `(AGENT_RUN_MAX_ATTEMPTS=${limits.maxAttempts}); last worker ` +
               `${row.claimedBy ?? "unknown"} stopped heartbeating at ` +
               `${row.heartbeatAt?.toISOString() ?? "unknown"}`,
+            // WARP-2720 — a run claimed with a decided park it never got to
+            // consume must not end with that decision still on the row.
+            ...CLEAR_PENDING,
           },
         });
         if (res.count === 1) {
@@ -870,7 +992,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           pendingTool: string | null;
           pendingBindingHash: string | null;
           pendingArgs: unknown;
+          pendingToolCallId: string | null;
           pendingDecision: "approved" | "denied" | null;
+          workspaceId: string | null;
         }
       | null;
     const lease = leases.get(runId);
@@ -893,6 +1017,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         status: "failed",
         endedAt: at,
         error: `attribution_failed:${access.unresolved}`,
+        ...CLEAR_PENDING,
       });
       await recordActivity({
         kind: "tool_run",
@@ -960,7 +1085,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     }
     const offLanProvider = await resolveOffLanProvider({ user: principal, model: run.model });
     const principalTools = narrowToolNamesForPrincipal(
-      runToolPool(),
+      runToolPool({ workspace: run.workspaceId !== null }),
       access.tier ?? undefined,
       access.scope,
     );
@@ -972,10 +1097,24 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     const toolCallContext = {
       ...(user ? { userId: user.username, userRole: user.role } : {}),
       agentRunId: runId,
+      // WARP-2896 — the workshop's tools read this to address their
+      // workspace; the route re-checks the binding from the run id.
+      ...(run.workspaceId ? { workspaceId: run.workspaceId } : {}),
+    };
+    // WARP-2896 — set when `workspace_propose` succeeds; the terminal write
+    // below turns it into the run's result.
+    let proposal: string | null = null;
+    const endOnProposal = (tool: string, text: string, isError: boolean): void => {
+      if (tool !== PROPOSE_TOOL || isError || isConfirmationEnvelope(text)) return;
+      proposal = text;
+      stop(runId, "proposed");
+      throw new AgentRunStopped("proposed", "the run proposed its extension");
     };
 
     // ── Resume state ────────────────────────────────────────────────────
-    const base = run.iteration;
+    // `let`: consuming a decided park completes the parked iteration and
+    // advances the checkpoint past it (WARP-3044, `resumeDecidedCall`).
+    let base = run.iteration;
     const messages = Array.isArray(run.messages)
       ? (run.messages as ChatMessage[])
       : initialRunMessages(run.goal, offLanProvider !== null);
@@ -996,14 +1135,23 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         endedAt: at,
         stopReason: "iteration_limit",
         error: `iteration_limit: ${base} of ${maxIter} iterations used, no final answer`,
+        ...CLEAR_PENDING,
       });
       return;
     }
 
     // ── WARP-2179: a decided park to consume, and a park to record ──────
-    let pending: { tool: string; bindingHash: string; decision: "approved" | "denied" } | null =
-      run.pendingTool && run.pendingBindingHash && run.pendingDecision
-        ? { tool: run.pendingTool, bindingHash: run.pendingBindingHash, decision: run.pendingDecision }
+    // The STORED call, exactly as the park wrote it (WARP-3044): the worker
+    // runs this, never whatever the model would say on being asked again.
+    const decided =
+      run.pendingTool && run.pendingDecision
+        ? {
+            tool: run.pendingTool,
+            args: storedArgs(run.pendingArgs),
+            bindingHash: run.pendingBindingHash,
+            toolCallId: run.pendingToolCallId,
+            decision: run.pendingDecision,
+          }
         : null;
     let lastDispatch: { tool: string; tool_call_id: string; iteration: number } | null = null;
     // WARP-2877 — the tool whose outcome was lost, named in the terminal row.
@@ -1058,6 +1206,224 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       }
     };
 
+    const fenced = (): never => {
+      stop(runId, "fenced");
+      throw new AgentRunStopped("fenced", "lease no longer held");
+    };
+
+    // Wrapped the way the loop wraps a live dispatch (ORCH-05): a thrown
+    // dispatch is a bounded tool error the model can recover from, never the
+    // death of a run whose whole point is surviving transient failures.
+    const dispatch = async (
+      tool: string,
+      args: Record<string, unknown>,
+      ctx: typeof toolCallContext & { confirmationToken?: string },
+    ): Promise<{ text: string; isError: boolean }> => {
+      try {
+        const r = await deps.agent.mcp.callTool(tool, args, ctx);
+        return { text: r.content[0]?.text ?? "{}", isError: Boolean(r.isError) };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          text: JSON.stringify({ error: "tool_dispatch_failed", tool, message: message.slice(0, 500) }),
+          isError: true,
+        };
+      }
+    };
+
+    // The interceptor handshake, both legs here. Leg 1 asks without a token
+    // and receives a FRESH challenge — minted now, seconds after the human
+    // decided. Leg 2 presents it. Anything other than a challenge on leg 1
+    // (deny tier, a tool that no longer confirms, an error) is the box's
+    // honest answer and is handed back as-is. A refused token on leg 2 comes
+    // back as the interceptor's `confirmation_required` envelope, which is an
+    // error for this run's purposes: the tool did not run.
+    const redeem = async (
+      tool: string,
+      args: Record<string, unknown>,
+    ): Promise<{ text: string; isError: boolean }> => {
+      const first = await dispatch(tool, args, toolCallContext);
+      const token = first.isError ? null : interceptorTokenOf(first.text);
+      const outcome = token
+        ? await dispatch(tool, args, { ...toolCallContext, confirmationToken: token })
+        : first;
+      const ran = !outcome.isError && !isConfirmationEnvelope(outcome.text);
+      return { text: outcome.text, isError: !ran };
+    };
+
+    // The loop's two dispatch-time predicates, applied to the stored call: the
+    // run's pool as narrowed for the principal at THIS claim (the approval is
+    // not an escalation path, and reach can shrink between decision and
+    // claim), then the args-dependent rule (§3 locks).
+    const reachRefusal = (
+      tool: string,
+      args: Record<string, unknown>,
+    ): { code: string; message: string } | null => {
+      const denial = toolDispatchDenial(tool, args, access.scope);
+      if (denial || allowedTools.includes(tool)) return denial;
+      return {
+        code: "TOOL_UNAVAILABLE",
+        message:
+          `'${tool}' is no longer available to this run, so the approved call was not run. ` +
+          "Do not retry it; finish and say what was not done.",
+      };
+    };
+
+    // What the model is handed as the stored call's result: the loop's own
+    // treatment of a tool result (llm-agent.service.ts) — no confirmation
+    // token ever (WARP-2002), bounded at the same cap (WARP-2203).
+    const modelFacing = (tool: string, text: string): string =>
+      boundToolResultForModel(
+        isConfirmationEnvelope(text) ? redactConfirmationTokensForModel(text) : text,
+        tool,
+        (refusal) => {
+          logger.warn(
+            { runId, tool, input_chars: refusal.inputChars, reason: refusal.reason },
+            "agent_tool_result_refused",
+          );
+        },
+        config.AGENT_TOOL_RESULT_CAP_CHARS,
+      );
+
+    /**
+     * WARP-3044 — consume a decided park BEFORE the model is asked anything.
+     *
+     * The checkpoint is the top of the parked iteration. The model's call is
+     * not in it and is not asked for again: the worker takes the STORED call
+     * (tool, args and `tool_call_id` as parked), runs it on an approval or
+     * answers it with `CONFIRMATION_DENIED` on a denial, and appends the call
+     * and its result to the conversation. The checkpoint then advances past
+     * the parked iteration, so the loop resumes with the result in front of
+     * the model — one iteration later, as if the call had run when first made.
+     *
+     * An approved call must still be the call that was parked (its stored
+     * args carry the parked binding) and still in the principal's reach at
+     * this claim. Either failing, nothing is dispatched: the model is told,
+     * and the audit row says "approved but did not run".
+     *
+     * CRASH SAFETY. A dispatch is preceded by a write that records the entry
+     * and clears the pending columns (the replay guard's discipline), so a
+     * crash can never leave `pendingDecision = approved` behind for a resumed
+     * worker to redeem a second time. The result, the conversation and the
+     * advanced checkpoint then land in ONE write. A crash between the two
+     * leaves a `confirmed` entry with no result at the checkpoint's iteration;
+     * the next claim finds it here and re-parks THAT call — not the model's
+     * rewording of it — with the notification saying it may already have run
+     * (WARP-2877). A denial or a refusal dispatches nothing, so it needs only
+     * the one write.
+     *
+     * Returns false when the run must not enter the loop (it re-parked).
+     */
+    const resumeDecidedCall = async (): Promise<boolean> => {
+      if (!decided) {
+        const lost = trace.find(
+          (e) =>
+            e.iteration === base &&
+            e.confirmation === "confirmed" &&
+            e.text === undefined &&
+            !e.unknownOutcome,
+        );
+        if (!lost) return true;
+        lost.unknownOutcome = true;
+        park.request = {
+          tool: lost.tool,
+          args: lost.args,
+          bindingHash: confirmationBindingHash(lost.tool, lost.args),
+          tool_call_id: lost.tool_call_id,
+        };
+        logger.warn(
+          { runId, tool: lost.tool, priorCallId: lost.tool_call_id, iteration: base },
+          "agent_run_reask_unknown_outcome",
+        );
+        stop(runId, "parked");
+        return false;
+      }
+
+      const observed = await observe(runId, now());
+      if (observed) throw new AgentRunStopped(observed, `run stopped: ${observed}`);
+
+      const { tool, args, decision } = decided;
+      const toolCallId = decided.toolCallId ?? `${runId}:${base}:decided`;
+      const entry: AgentRunTraceEntry = {
+        tool_call_id: toolCallId,
+        tool,
+        args: args ?? {},
+        iteration: base,
+        dispatchedAt: now().toISOString(),
+        confirmation: decision === "approved" ? "confirmed" : "denied",
+      };
+      trace.push(entry);
+
+      let outcome: { text: string; isError: boolean };
+      if (decision === "denied") {
+        outcome = { text: deniedResultText(tool), isError: true };
+      } else {
+        // What runs is what the human was shown: the stored args must still
+        // carry the binding the park computed.
+        const verified =
+          args !== null &&
+          decided.bindingHash !== null &&
+          confirmationBindingHash(tool, args) === decided.bindingHash
+            ? args
+            : null;
+        const refusal =
+          verified === null
+            ? {
+                code: "APPROVED_CALL_MISMATCH",
+                message:
+                  `The approved '${tool}' call no longer matches what was parked, so it was not run. ` +
+                  "Do not retry it; finish and say what was not done.",
+              }
+            : reachRefusal(tool, verified);
+        if (verified !== null && refusal === null) {
+          const consumed = await finish(runId, {
+            trace: trace as unknown as Prisma.InputJsonValue,
+            heartbeatAt: now(),
+            ...CLEAR_PENDING,
+          });
+          if (!consumed) fenced();
+          outcome = await redeem(tool, verified);
+        } else {
+          outcome = { text: JSON.stringify({ status: "error", error: refusal }), isError: true };
+        }
+      }
+
+      entry.text = scrubInterceptorToken(outcome.text);
+      entry.isError = outcome.isError;
+      entry.completedAt = now().toISOString();
+      messages.push(
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: toolCallId, type: "function", function: { name: tool, arguments: JSON.stringify(entry.args) } },
+          ],
+        },
+        { role: "tool", tool_call_id: toolCallId, content: modelFacing(tool, outcome.text) },
+      );
+      base += 1;
+      const completed = await finish(runId, {
+        trace: trace as unknown as Prisma.InputJsonValue,
+        messages: messages as unknown as Prisma.InputJsonValue,
+        iteration: base,
+        heartbeatAt: now(),
+        ...CLEAR_PENDING,
+      });
+      if (!completed) fenced();
+      await auditConfirmation(
+        tool,
+        decision === "denied" ? "denied" : outcome.isError ? "confirmed_failed" : "confirmed",
+      );
+      if (decision === "approved" && !outcome.isError) {
+        logger.info({ runId, tool, iteration: entry.iteration }, "agent_run_tool_confirmed");
+      }
+      // WARP-2896 — an approved `workspace_propose` that ran ENDS the run
+      // here, before the model is asked anything: it throws the `proposed`
+      // stop, which the caller's `try` hands to the terminal write.
+      endOnProposal(tool, outcome.text, outcome.isError);
+      return true;
+    };
+
     const checkpoint: AgentCheckpointPort = {
       async onIteration(iter, msgs) {
         const observed = await observe(runId, now());
@@ -1079,120 +1445,51 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         lastDispatch = { tool: call.tool, tool_call_id: call.tool_call_id, iteration: abs };
         const key = canonical(call.args);
 
-        // ── WARP-2179: the model re-issued the call a human decided on ──
-        if (
-          pending &&
-          pending.tool === call.tool &&
-          pending.bindingHash === confirmationBindingHash(call.tool, call.args)
-        ) {
-          const decision = pending.decision;
-          pending = null;
-          // The challenge entries the park left behind must never be
-          // replayed as a live result.
-          for (const e of trace) {
-            if (e.iteration === abs && e.tool === call.tool && canonical(e.args) === key) {
-              replayed.add(e.tool_call_id);
-            }
-          }
-          // The entry for this call is written BEFORE anything is dispatched and
-          // the decision is consumed in the same write — the replay guard's own
-          // discipline. A crash between a dispatch and the completion write must
-          // never leave `pendingDecision = approved` behind: the resumed run would
-          // re-run the confirmed write. Consumed first, a crash leaves an entry
-          // with no result; the resume re-dispatches it WITHOUT a token, the
-          // interceptor challenges again and the run parks again — a human sees
-          // a second prompt instead of a silent duplicate.
-          const entry: AgentRunTraceEntry = {
+        // ── WARP-3044: a call the owner already decided is not put to them again ──
+        // The decided call ran (or was declined) before the model resumed, and
+        // its result is in the conversation. A model that sends it again with
+        // the binding the owner decided on (`confirmed` aside, as the
+        // interceptor binds) gets the recorded answer: never a second
+        // dispatch, never a second park. A REWORDED call is a different call
+        // and parks for its own approval, as any new write does — and so does
+        // an identical call whose approved dispatch did NOT run the tool: that
+        // approval is spent and nothing happened, so a person decides again.
+        const binding = confirmationBindingHash(call.tool, call.args);
+        const decidedBefore = trace.find(
+          (e) =>
+            e.tool === call.tool &&
+            e.text !== undefined &&
+            (e.confirmation === "denied" || (e.confirmation === "confirmed" && e.isError === false)) &&
+            confirmationBindingHash(e.tool, e.args) === binding,
+        );
+        if (decidedBefore) {
+          const text =
+            decidedBefore.confirmation === "denied" ? decidedBefore.text! : alreadyRunText(call.tool);
+          const servedAt = now().toISOString();
+          trace.push({
             tool_call_id: call.tool_call_id,
             tool: call.tool,
             args: call.args,
             iteration: abs,
-            dispatchedAt: now().toISOString(),
-          };
-          const consume = async (confirmation: "confirmed" | "denied") => {
-            entry.confirmation = confirmation;
-            trace.push(entry);
-            const ok = await finish(runId, {
-              trace: trace as unknown as Prisma.InputJsonValue,
-              heartbeatAt: now(),
-              ...CLEAR_PENDING,
-            });
-            if (!ok) {
-              stop(runId, "fenced");
-              throw new AgentRunStopped("fenced", "lease no longer held");
-            }
-          };
-          const complete = async (text: string, isError: boolean) => {
-            entry.text = scrubInterceptorToken(text);
-            entry.isError = isError;
-            entry.completedAt = now().toISOString();
-            await persistTrace();
-            const decided = entry.confirmation ?? "confirmed";
-            await auditConfirmation(
-              call.tool,
-              decided === "confirmed" && isError ? "confirmed_failed" : decided,
-            );
-          };
-          // Both legs wrapped the way the loop wraps a live dispatch (ORCH-05):
-          // a thrown dispatch is a bounded tool error the model can recover
-          // from, never the death of a run whose whole point is surviving
-          // transient failures.
-          const dispatch = async (ctx: typeof toolCallContext & { confirmationToken?: string }) => {
-            try {
-              const r = await deps.agent.mcp.callTool(call.tool, call.args, ctx);
-              return { text: r.content[0]?.text ?? "{}", isError: Boolean(r.isError) };
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              return {
-                text: JSON.stringify({
-                  error: "tool_dispatch_failed",
-                  tool: call.tool,
-                  message: message.slice(0, 500),
-                }),
-                isError: true,
-              };
-            }
-          };
-          if (decision === "denied") {
-            const text = JSON.stringify({
-              status: "error",
-              error: {
-                code: "CONFIRMATION_DENIED",
-                message:
-                  `The user declined '${call.tool}' for this run. Do not retry it; ` +
-                  "adapt, or finish with what you have and say what was not done.",
-              },
-            });
-            await consume("denied");
-            await complete(text, true);
-            return { text, isError: true };
-          }
-          // Approved: the interceptor handshake, both legs here. Leg 1 asks
-          // without a token and receives a FRESH challenge — minted now,
-          // seconds after the human decided. Leg 2 presents it. Anything
-          // other than a challenge on leg 1 (deny tier, a tool that no
-          // longer confirms, an error) is the box's honest answer and is
-          // handed back as-is. A refused token on leg 2 comes back as the
-          // interceptor's `confirmation_required` envelope, which is an error
-          // for this run's purposes: the tool did not run.
-          await consume("confirmed");
-          const first = await dispatch(toolCallContext);
-          const token = first.isError ? null : interceptorTokenOf(first.text);
-          const outcome = token
-            ? await dispatch({ ...toolCallContext, confirmationToken: token })
-            : first;
-          const ran = !outcome.isError && !isConfirmationEnvelope(outcome.text);
-          await complete(outcome.text, !ran);
-          if (ran) logger.info({ runId, tool: call.tool, iteration: abs }, "agent_run_tool_confirmed");
-          return { text: outcome.text, isError: !ran };
+            dispatchedAt: servedAt,
+            text,
+            isError: true,
+            completedAt: servedAt,
+            replayOf: decidedBefore.tool_call_id,
+          });
+          await persistTrace();
+          logger.info(
+            { runId, tool: call.tool, decidedCallId: decidedBefore.tool_call_id, iteration: abs },
+            "agent_run_decided_call_not_repeated",
+          );
+          return { text, isError: true };
         }
 
         // Replay: a completed entry from an interrupted segment of THIS
         // iteration, same tool, same args, not yet served. A confirmation
-        // envelope is never a result: the park's own challenge entry must not
-        // be served back after a crashed handshake (the resumed worker's
-        // `replayed` set is empty), or the model would be told the tool is
-        // "waiting for approval" while the approved decision is already spent.
+        // envelope is never a result: a park's challenge entry must not be
+        // served back, or the model would be told the tool is "waiting for
+        // approval" while the decision on it is already spent.
         const hit = trace.find(
           (e) =>
             e.iteration === abs &&
@@ -1250,6 +1547,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
             // may already have run. (The park notification says exactly that
             // — "Nothing has been done yet" would be a lie here.) Halting
             // would take that choice away and leave a dead run.
+            //
+            // WARP-3044 — an approved call is now consumed before the loop and
+            // a lost one re-parked THERE, as the stored call
+            // (`resumeDecidedCall`), so a model's rewording cannot dodge it.
+            // This branch is the backstop should a `confirmed` entry without
+            // a result ever surface at a loop iteration.
             if (unknownOutcome.confirmation === "confirmed") {
               logger.warn(
                 { runId, tool: call.tool, priorCallId: unknownOutcome.tool_call_id, iteration: abs },
@@ -1299,6 +1602,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           entry.completedAt = now().toISOString();
         }
         await persistTrace();
+        endOnProposal(call.tool, call.text, call.isError);
       },
     };
 
@@ -1326,8 +1630,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           summary: summarizeToolArguments(input.tool, input.args),
         };
       },
-      // Redemption happens inside `beforeToolCall`, where the decision and
-      // the binding are both known; the loop never attaches a token itself.
+      // Redemption happens in `resumeDecidedCall`, on the stored call, before
+      // the loop runs (WARP-3044); the loop never attaches a token itself.
       claimGrant() {
         return null;
       },
@@ -1338,21 +1642,34 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     let stopped: AgentRunStopped | null = null;
     let threw: unknown = null;
     try {
-      result = await runAgent(
-        { mcp: deps.agent.mcp, aiGateway: runGateway(deps.agent.aiGateway), approvals, maxIterCap },
-        {
-          model: run.model,
-          messages,
-          max_iter: remaining,
-          allowed_tools: allowedTools,
-          toolAccessScope: access.scope,
-          toolCallContext,
-          context_window: contextWindow,
-          tool_selection_mode: toolSelectionMode,
-          signal: controller.signal,
-          checkpoint,
-        },
-      );
+      if (await resumeDecidedCall()) {
+        // The decided call completed the parked iteration. If that was the
+        // run's last, there is no iteration left to ask the model in: the run
+        // ends on its cap, as a turn whose last iteration dispatched a tool
+        // does — never one model call past it.
+        const left = maxIter - base;
+        result =
+          left > 0
+            ? await runAgent(
+                { mcp: deps.agent.mcp, aiGateway: runGateway(deps.agent.aiGateway), approvals, maxIterCap },
+                {
+                  model: run.model,
+                  messages,
+                  max_iter: left,
+                  allowed_tools: allowedTools,
+                  toolAccessScope: access.scope,
+                  toolCallContext,
+                  context_window: contextWindow,
+                  tool_selection_mode: toolSelectionMode,
+                  // WARP-2896 — the run's binding, not its sentence, admits the
+                  // workshop's tools to every turn's advertisement.
+                  ...(run.workspaceId ? { bound_tool_domains: WORKSPACE_TOOL_DOMAINS } : {}),
+                  signal: controller.signal,
+                  checkpoint,
+                },
+              )
+            : { message: { role: "assistant", content: "" }, trace: [], iterations: 0, stop_reason: "iteration_limit" };
+      }
     } catch (err) {
       if (err instanceof AgentRunStopped) stopped = err;
       else threw = err;
@@ -1385,12 +1702,16 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     if (reason === "parked" && park.request) {
       const parkRequest = park.request;
       // The iteration's own checkpoint already holds the conversation at its
-      // top, so `iteration` is left alone: the resume re-runs this iteration
-      // and the model re-issues the call. The lease is released; a parked
-      // run holds nothing. The challenge's trace entry is marked so the
-      // run-detail view can show where the run stopped.
+      // top, so `iteration` is left alone: the resume consumes the decision on
+      // the stored call and completes this iteration with it (WARP-3044). The
+      // lease is released; a parked run holds nothing. The challenge's trace
+      // entry is marked so the run-detail view can show where the run
+      // stopped — only an entry with no decision on it: a re-park of a lost
+      // approved call keeps that entry's `confirmed`.
       for (const e of trace) {
-        if (e.tool_call_id === parkRequest.tool_call_id) e.confirmation = "parked";
+        if (e.tool_call_id === parkRequest.tool_call_id && e.confirmation === undefined) {
+          e.confirmation = "parked";
+        }
       }
       const ok = await finish(runId, {
         status: "awaiting_confirmation",
@@ -1440,6 +1761,36 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         });
       }
       logger.info({ runId, tool: parkRequest.tool }, "agent_run_parked");
+      return;
+    }
+    if (reason === "proposed") {
+      // WARP-2896 — the run's terminal act. `succeeded`, with the proposal
+      // (the tool's own result: commit, tag, manifest) as the run's result,
+      // and `stopReason: proposed` so the workshop page can say which
+      // ending this was without parsing the result.
+      const text = proposal ?? "{}";
+      await finish(runId, {
+        status: "succeeded",
+        endedAt,
+        iteration: base + (result?.iterations ?? 0),
+        stopReason: "proposed",
+        result: text,
+        error: null,
+        ...CLEAR_PENDING,
+      });
+      await audit(runId, run.userId, "succeeded", "Agent run proposed an extension", undefined,
+        user ? { username: user.username, goal: run.goal, result: text } : undefined);
+      if (user) {
+        const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
+        await sendNotification(prisma, {
+          userId: user.username,
+          kind: "ai",
+          title: "Extension proposed",
+          body: `Background run "${goal}" finished with a proposal. Open the Workshop to review it.`,
+        }).catch((err) => {
+          logger.warn({ err, runId }, "agent_run_proposal_notification_failed");
+        });
+      }
       return;
     }
     if (reason === "unknown_outcome") {

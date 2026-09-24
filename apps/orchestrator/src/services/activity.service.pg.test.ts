@@ -7,6 +7,10 @@
  * re-checks only the locked row; it never re-scans for a newer, higher-id
  * tail). Only a real Postgres reproduces it.
  *
+ * WARP-3011: the same goes for what the INSERT stores. Prisma's Json write
+ * rounding a refs number to 16 digits happens inside the query engine, so
+ * the exactness cases below need the real client and a real jsonb column.
+ *
  * Gated behind RUN_PG_INTEGRATION=1 + DATABASE_URL so the default
  * `npm run test:orchestrator` lane (no DB) skips. Run locally via
  * scripts/test-orchestrator-pg.sh; in CI via the `pg-integration` job in
@@ -22,7 +26,7 @@ import {
 } from "./activity.service.js";
 import { createHmacSigner, hashSignature } from "./audit-signing.service.js";
 import { verifyActivityChain } from "./audit-verify.service.js";
-import { _setActivityRecorderForTests } from "./activity.singleton.js";
+import { _setActivityRecorderForTests, recordActivityInTx } from "./activity.singleton.js";
 import {
   SecurityAuditUnavailableError,
   auditSecurityInTx,
@@ -131,6 +135,103 @@ describe.skipIf(!RUN)(
       const genesisRows = rows.filter((r) => r.prevSignatureHash === "");
       expect(genesisRows).toHaveLength(1);
       expect(genesisRows[0]!.id).toBe(rows[0]!.id);
+    });
+
+    // WARP-3011 — Prisma 5.22's Json WRITE keeps 16 significant digits, so a
+    // refs number that needs 17 was stored as a different value (0.1 + 0.2
+    // as 0.3, 1.7976931348623157e308 as null) while the signature covers the
+    // original: verification failed on that row, and so on the whole chain
+    // after it, forever. The recorder now binds the canonical text itself.
+    it("refs numbers that need 17 significant digits are stored exactly, and the chain verifies (WARP-3011)", async () => {
+      const recorder = createActivityRecorder({ prisma, signer });
+      const refs = {
+        sum: 0.1 + 0.2,
+        // An openWakeWord float32 score widened to a double, as routes/voice.ts
+        // records it — about one in four of those needs 17 digits.
+        score: Math.fround(0.123),
+        nested: { list: [123.45600000000002, 5e-324, -1.5e-30] },
+        max: 1.7976931348623157e308,
+        big: 2 ** 64,
+      };
+      const row = await recorder.record({
+        kind: "voice",
+        severity: "info",
+        sourceIcon: "mic",
+        what: "Wake word heard",
+        refs,
+        actor: { type: "system" },
+      });
+
+      // The column holds every digit...
+      const raw = await prisma.$queryRawUnsafe<Array<{ t: string }>>(
+        'SELECT "refs"::text AS t FROM "ActivityRow" WHERE "id" = $1',
+        row.id,
+      );
+      expect(JSON.parse(raw[0]!.t)).toEqual(refs);
+      // ...Prisma reads it back exactly...
+      const found = await prisma.activityRow.findUnique({ where: { id: row.id } });
+      expect(found!.refs).toEqual(refs);
+      expect((found!.refs as { sum: number }).sum).toBe(0.1 + 0.2);
+      expect(row.refs).toEqual(refs);
+      // ...and the chain verifies.
+      await expect(verifyActivityChain(prisma, signer)).resolves.toEqual({
+        ok: true,
+        rowsChecked: 1,
+        brokenAtId: null,
+      });
+    });
+
+    it("every other column lands exactly as Prisma's own write stored it (WARP-3011)", async () => {
+      const recorder = createActivityRecorder({ prisma, signer });
+      const at = new Date("2026-09-23T12:34:56.789Z");
+      const actorId = "11111111-1111-4111-8111-111111111111";
+      const row = await recorder.record({
+        kind: "auth",
+        severity: "warn",
+        sourceIcon: "log-in",
+        what: "Sign-in throttled",
+        sub: "from 192.168.50.42",
+        actor: { type: "user", id: actorId },
+        at,
+      });
+      expect(typeof row.id).toBe("bigint");
+
+      const found = await prisma.activityRow.findUnique({ where: { id: row.id } });
+      expect(found).toEqual({
+        id: row.id,
+        at,
+        severity: "warn",
+        sourceIcon: "log-in",
+        what: "Sign-in throttled",
+        sub: "from 192.168.50.42",
+        kind: "auth",
+        refs: null,
+        signature: row.signature,
+        prevSignatureHash: "",
+        actorType: "user",
+        actorId,
+        schemaVersion: 2,
+      });
+      // No refs is SQL NULL, never the JSON value null.
+      const isNull = await prisma.$queryRawUnsafe<Array<{ n: boolean }>>(
+        'SELECT "refs" IS NULL AS n FROM "ActivityRow" WHERE "id" = $1',
+        row.id,
+      );
+      expect(isNull[0]!.n).toBe(true);
+      await expect(verifyActivityChain(prisma, signer)).resolves.toMatchObject({ ok: true });
+    });
+
+    it("`at` bound as ISO text is stored as UTC wall-clock whatever the session TimeZone", async () => {
+      // The recorder's INSERT casts `$1::timestamp(3)`; that cast ignores the
+      // `Z` rather than converting through the session TimeZone.
+      const rows = await prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe("SET LOCAL TIME ZONE 'Pacific/Kiritimati'");
+        return tx.$queryRawUnsafe<Array<{ t: string }>>(
+          "SELECT $1::timestamp(3)::text AS t",
+          "2026-09-23T12:34:56.789Z",
+        );
+      });
+      expect(rows[0]!.t).toBe("2026-09-23 12:34:56.789");
     });
 
     // ── WARP-2977 P2b: the in-transaction append (one code path) ──────────
@@ -735,7 +836,7 @@ describe.skipIf(!RUN)(
       expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
     });
 
-    it("safe-integer refs round-trip through Prisma's Json write and verify; a 17-digit double is refused before any statement", async () => {
+    it("safe-integer refs round-trip through a Security audit and verify; a 17-digit double is refused by securityRefs before any statement", async () => {
       _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
       try {
         const refs = { max: Number.MAX_SAFE_INTEGER, min: Number.MIN_SAFE_INTEGER, zero: 0, negZero: -0, minutes: 90, list: [1, -2, 3] };
@@ -753,8 +854,10 @@ describe.skipIf(!RUN)(
         expect(text[0]!.t).toContain("-9007199254740991");
         expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
 
-        // Prisma would store 0.30000000000000004 as 0.3 while the signer signed
-        // the original: refused as bad input (a 500), never AUDIT_UNAVAILABLE.
+        // securityRefs keeps Security refs to safe integers (minutes, versions,
+        // counts): a fraction is refused as bad input (a 500), never
+        // AUDIT_UNAVAILABLE. (The chain itself stores any finite double exactly
+        // since WARP-3011 — see the float32 cases above.)
         const bad = prisma.$transaction(
           (tx) => auditSecurityInTx(tx, USER_REQ, { action: "hours.set", what: "x", refs: { n: 0.1 + 0.2 } }),
           READ_COMMITTED_TX,
@@ -765,6 +868,84 @@ describe.skipIf(!RUN)(
       } finally {
         _setActivityRecorderForTests(null, null);
       }
+    });
+
+    // ── WARP-3011 on the in-transaction path ─────────────────────────────
+    //
+    // record() and every in-tx caller (recordActivityInTx, so auditSecurityInTx
+    // and the Security services) share appendActivityRowInTx's one INSERT. A
+    // float32 value widened to a double — an openWakeWord score — needs 17
+    // significant digits; Prisma's Json write kept 16 and broke the chain.
+
+    it("a float32 ref appended in a caller's transaction is stored exactly and the chain verifies (golden)", async () => {
+      const recorder = createActivityRecorder({ prisma, signer });
+      _setActivityRecorderForTests(recorder, signer);
+      try {
+        await recorder.record(sys("seed"));
+        // The golden value: 0.1 as a float32, widened to a double.
+        const score = Math.fround(0.1);
+        expect(score).toBe(0.10000000149011612);
+        const refs = { score, threshold: Math.fround(0.5), sum: 0.1 + 0.2, nested: { list: [Math.fround(0.123), 2 ** 64] } };
+        const voice = (what: string, r: Record<string, unknown>): RecordParams => ({
+          kind: "voice",
+          severity: "info",
+          sourceIcon: "mic",
+          what,
+          refs: r,
+          actor: { type: "system" },
+        });
+
+        // Straight through appendActivityRowInTx, and through the singleton's
+        // recordActivityInTx (the Security audit path) — one transaction each.
+        const direct = await prisma.$transaction((tx) => appendActivityRowInTx(tx, signer, voice("in-tx", refs)), READ_COMMITTED_TX);
+        const viaSingleton = await prisma.$transaction(
+          (tx) => recordActivityInTx(tx, voice("in-tx via recordActivityInTx", { score: Math.fround(0.3) })),
+          READ_COMMITTED_TX,
+        );
+
+        // The column holds every digit…
+        const raw = await prisma.$queryRawUnsafe<Array<{ t: string }>>(
+          'SELECT "refs"::text AS t FROM "ActivityRow" WHERE "id" = $1',
+          direct.id,
+        );
+        expect(raw[0]!.t).toContain("0.10000000149011612");
+        expect(JSON.parse(raw[0]!.t)).toEqual(refs);
+        // …Prisma reads it back exactly, and the returned row says the same.
+        const found = await prisma.activityRow.findUniqueOrThrow({ where: { id: direct.id } });
+        expect((found.refs as { score: number }).score).toBe(0.10000000149011612);
+        expect(found.refs).toEqual(refs);
+        expect(direct.refs).toEqual(refs);
+        const foundSingleton = await prisma.activityRow.findUniqueOrThrow({ where: { id: viaSingleton.id } });
+        expect((foundSingleton.refs as { score: number }).score).toBe(Math.fround(0.3));
+        expect(Math.fround(0.3)).toBe(0.30000001192092896);
+
+        // A record() after them chains from the last, and the whole chain verifies.
+        await recorder.record(voice("record() after", { score: Math.fround(0.7) }));
+        expect((await stored()).map((r) => r.what)).toEqual(["seed", "in-tx", "in-tx via recordActivityInTx", "record() after"]);
+        expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 4, brokenAtId: null });
+      } finally {
+        _setActivityRecorderForTests(null, null);
+      }
+    });
+
+    it("a handle assembled from the real tx's id and raw method plus the BARE client's activityRow writes IN the transaction: the caller's rollback removes it", async () => {
+      // Before WARP-3011 the INSERT went through `activityRow.create`, so on
+      // this handle it autocommitted and outlived the rollback. Every
+      // statement now rides `$queryRawUnsafe`, the transaction's own method.
+      await createActivityRecorder({ prisma, signer }).record(sys("seed"));
+      const rollback = new Error("the caller rolls back");
+      const attempt = prisma.$transaction(async (tx) => {
+        const assembled = {
+          $queryRawUnsafe: tx.$queryRawUnsafe.bind(tx),
+          activityRow: prisma.activityRow,
+          [PRISMA_TX_ID]: (tx as unknown as Record<symbol, unknown>)[PRISMA_TX_ID],
+        };
+        await appendActivityRowInTx(assembled as never, signer, sys("assembled"));
+        throw rollback;
+      }, READ_COMMITTED_TX);
+      await expect(attempt).rejects.toBe(rollback);
+      expect((await stored()).map((r) => r.what)).toEqual(["seed"]);
+      expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
     });
 
     it("a caller transaction that expires waiting for the chain lock is AUDIT_UNAVAILABLE (cause P2028) and writes nothing", async () => {

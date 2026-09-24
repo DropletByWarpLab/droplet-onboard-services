@@ -23,6 +23,12 @@ The API
     POST /processes                    slice H's seam; gated, see supervisor.py
     GET  /processes/{id}
     DELETE /processes/{id}
+    POST /workspaces                   slice G (WARP-2896): the git store, see
+    GET  /workspaces/templates         gitstore.py + workspace.py
+    GET|DELETE /workspaces/{id}
+    POST /workspaces/{id}/{read,search,diff,log,write,commit,run,propose}
+    GET  /workspaces/{id}/output
+    ANY  /git/{repo}.git/...           `git http-backend`, proxied by the orchestrator
 
 Every `/transform` is ONE child process (runner.py), killed on completion or
 at the deadline. The deadline is enforced HERE and by the orchestrator caller
@@ -46,13 +52,16 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+import gitstore
 import supervisor
+import workspace
 
 SANDBOX_SERVICE_TOKEN = os.getenv("SANDBOX_SERVICE_TOKEN", "").strip()
 
@@ -111,16 +120,29 @@ class TransformRequest(BaseModel):
     outputCapBytes: int = Field(default=256_000, ge=1_024, le=MAX_OUTPUT_CAP_BYTES)
 
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # The git store's one boot-time job: templates.git exists after the
+    # first start, and is never re-seeded over an operator's commits.
+    try:
+        seeded = gitstore.seed_templates()
+        print(f"[sandbox] git store at {gitstore.REPOS_DIR} (templates {'seeded' if seeded else 'present'})", flush=True)
+    except gitstore.StoreError as exc:
+        print(f"[sandbox] git store: templates not seeded: {exc}", flush=True)
+    yield
+
+
 app = FastAPI(
     title="Droplet Sandbox Service",
-    version="1.0.0",
+    version="1.1.0",
     dependencies=[Depends(require_bearer)],
+    lifespan=_lifespan,
 )
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "processes": supervisor.SUPERVISION_ENABLED}
+    return {"status": "ok", "processes": supervisor.SUPERVISION_ENABLED, "workspaces": gitstore.REPOS_DIR.is_dir()}
 
 
 def _read_capped(stream, cap: int) -> tuple[bytes, bool]:
@@ -280,3 +302,186 @@ async def stop_process(proc_id: str):
     if status is None:
         raise HTTPException(status_code=404, detail="No such process")
     return status
+
+
+# ── Slice G (WARP-2896): workspaces + the git store ────────────────────────
+#
+# Every route here is an internal call from the orchestrator, which has
+# already resolved the human, checked the run owns the workspace and refused
+# any argv outside the allow-list. This end validates shape, confines paths
+# and refuses the allow-list a second time (workspace.py).
+
+
+class WorkspaceAuthor(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=254)
+
+    def pair(self) -> gitstore.Author:
+        return (self.name, self.email)
+
+
+class CreateWorkspaceRequest(BaseModel):
+    id: str = Field(pattern=gitstore.WORKSPACE_ID.pattern)
+    template: str | None = Field(default=None, max_length=64)
+    author: WorkspaceAuthor
+
+
+class ReadRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=256)
+
+
+class SearchRequest(BaseModel):
+    pattern: str = Field(min_length=1, max_length=256)
+    glob: str | None = Field(default=None, max_length=256)
+
+
+class DiffRequest(BaseModel):
+    base: str | None = Field(default=None, max_length=64)
+
+
+class LogRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=workspace.MAX_LOG_ENTRIES)
+
+
+class WriteRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=256)
+    content: str = Field(max_length=workspace.MAX_WRITE_BYTES)
+
+
+class CommitRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    author: WorkspaceAuthor
+
+
+class RunRequest(BaseModel):
+    argv: list[str] = Field(min_length=1, max_length=16)
+    timeoutMs: int = Field(default=workspace.RUN_DEFAULT_TIMEOUT_MS, ge=1000, le=workspace.RUN_MAX_TIMEOUT_MS)
+
+
+class ProposeRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    version: str = Field(min_length=5, max_length=64)
+    summary: str = Field(min_length=1, max_length=2000)
+    author: WorkspaceAuthor
+
+
+def _store(fn, *args):
+    try:
+        return fn(*args)
+    except gitstore.StoreError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="git timed out") from exc
+
+
+async def _in_thread(fn, *args):
+    import anyio
+
+    return await anyio.to_thread.run_sync(_store, fn, *args)
+
+
+@app.get("/workspaces/templates")
+async def list_templates():
+    return {"templates": await _in_thread(gitstore.list_templates)}
+
+
+@app.post("/workspaces")
+async def create_workspace(req: CreateWorkspaceRequest):
+    return await _in_thread(gitstore.create_workspace, req.id, req.template, req.author.pair())
+
+
+@app.get("/workspaces/{workspace_id}")
+async def workspace_status(workspace_id: str):
+    return await _in_thread(gitstore.status, workspace_id)
+
+
+@app.delete("/workspaces/{workspace_id}")
+async def delete_workspace(workspace_id: str):
+    existed = await _in_thread(gitstore.delete_workspace, workspace_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail=f"no workspace {workspace_id}")
+    return {"id": workspace_id, "deleted": True}
+
+
+@app.post("/workspaces/{workspace_id}/read")
+async def workspace_read(workspace_id: str, req: ReadRequest):
+    return await _in_thread(workspace.read, workspace_id, req.path)
+
+
+@app.post("/workspaces/{workspace_id}/search")
+async def workspace_search(workspace_id: str, req: SearchRequest):
+    return await _in_thread(workspace.search, workspace_id, req.pattern, req.glob)
+
+
+@app.post("/workspaces/{workspace_id}/diff")
+async def workspace_diff(workspace_id: str, req: DiffRequest):
+    return await _in_thread(workspace.diff, workspace_id, req.base)
+
+
+@app.post("/workspaces/{workspace_id}/log")
+async def workspace_log(workspace_id: str, req: LogRequest):
+    return await _in_thread(workspace.log, workspace_id, req.limit)
+
+
+@app.post("/workspaces/{workspace_id}/write")
+async def workspace_write(workspace_id: str, req: WriteRequest):
+    return await _in_thread(workspace.write, workspace_id, req.path, req.content)
+
+
+@app.post("/workspaces/{workspace_id}/commit")
+async def workspace_commit(workspace_id: str, req: CommitRequest):
+    return await _in_thread(workspace.commit, workspace_id, req.message, req.author.pair())
+
+
+@app.post("/workspaces/{workspace_id}/run")
+async def workspace_run(workspace_id: str, req: RunRequest):
+    return await _in_thread(workspace.run, workspace_id, req.argv, req.timeoutMs)
+
+
+@app.get("/workspaces/{workspace_id}/output")
+async def workspace_output(workspace_id: str):
+    return {"lastRun": await _in_thread(workspace.last_run, workspace_id)}
+
+
+@app.post("/workspaces/{workspace_id}/propose")
+async def workspace_propose(workspace_id: str, req: ProposeRequest):
+    return await _in_thread(workspace.propose, workspace_id, req.name, req.version, req.summary, req.author.pair())
+
+
+# The smart-HTTP transport. The orchestrator forwards /git/<repo>.git/* here
+# with two headers it alone sets: X-Droplet-Git-User (the resolved actor) and
+# X-Droplet-Git-Push (1 when that actor may push). Nothing else on the box
+# can reach this route (compose network), so the headers are the contract.
+
+MAX_GIT_BODY_BYTES = 64 * 1024 * 1024
+
+
+@app.api_route("/git/{path:path}", methods=["GET", "POST"])
+async def git_http(path: str, request: Request):
+    body = await request.body()
+    if len(body) > MAX_GIT_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="push too large")
+    remote_user = request.headers.get("x-droplet-git-user", "").strip()
+    allow_push = request.headers.get("x-droplet-git-push", "").strip() == "1"
+    if not remote_user:
+        raise HTTPException(status_code=401, detail="no actor")
+
+    def _cgi():
+        return gitstore.http_backend(
+            method=request.method,
+            path_info="/" + path,
+            query=request.url.query,
+            content_type=request.headers.get("content-type"),
+            content_encoding=request.headers.get("content-encoding"),
+            body=body,
+            remote_user=remote_user,
+            allow_push=allow_push,
+        )
+
+    import anyio
+
+    try:
+        status_code, headers, payload = await anyio.to_thread.run_sync(_cgi)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="git http-backend timed out") from exc
+    return Response(content=payload, status_code=status_code, headers=headers)

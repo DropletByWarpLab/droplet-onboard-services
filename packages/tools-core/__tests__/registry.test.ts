@@ -205,6 +205,16 @@ const EXPECTED_TOOL_NAMES = [
   "routine_draft",
   "routine_list",
   "routine_run",
+  // workspace (WARP-2896, ADR-056 §6.2) — four reads, three ungated writes
+  // (one checkout in the sandbox is their whole reach), one Tier-2 propose.
+  "workspace_read",
+  "workspace_search",
+  "workspace_diff",
+  "workspace_log",
+  "workspace_write",
+  "workspace_commit",
+  "workspace_run",
+  "workspace_propose",
 ];
 
 describe("TOOLS registry", () => {
@@ -245,6 +255,19 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("routine_list")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("routine_run")?.requiresWrite).toBe(true);
     expect(TOOLS.get("routine_run")?.requiresConfirmation).toBe(true);
+    // WARP-2896 — the workshop's tiers. The three ungated writes are what
+    // the run worker's WORKSPACE_TOOLS exemption exists for; propose is the
+    // one confirming call, because it is what a person reviews.
+    for (const name of ["workspace_read", "workspace_search", "workspace_diff", "workspace_log"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(false);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
+    for (const name of ["workspace_write", "workspace_commit", "workspace_run"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(true);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
+    expect(TOOLS.get("workspace_propose")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("workspace_propose")?.requiresConfirmation).toBe(true);
     // Interceptor-owned, not route-owned: `DELETE /api/files` runs no Tier-2
     // gate of its own, so there is no route challenge to stand down for.
     expect(TOOLS.get("delete_file")?.confirmationOwner).toBeUndefined();
