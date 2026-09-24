@@ -378,7 +378,7 @@ describe("AreaLinksDialog — door locks (WARP-2977 P2b-2)", () => {
     fireEvent.click(box);
     fireEvent.click(saveButton());
     await waitFor(() => expect(props.onSave).toHaveBeenCalledTimes(1));
-    expect(props.onSave.mock.calls[0][1].links).not.toContainEqual({ sourceKind: "lock", sourceRef: "matter:7/1" });
+    expect(vi.mocked(props.onSave).mock.calls[0]![1].links).not.toContainEqual({ sourceKind: "lock", sourceRef: "matter:7/1" });
   });
 
   it("the locks couldn't be checked: says so, and keeps a linked lock under Couldn't check these — never as gone", () => {
