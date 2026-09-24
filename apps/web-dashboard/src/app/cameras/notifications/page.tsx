@@ -19,6 +19,7 @@ import {
   updateCameraNotifications,
 } from "@/lib/api";
 import { PushSubscriptionCard } from "@/components/notifications/PushSubscriptionCard";
+import { PushDeliveryChannel } from "@/components/notifications/PushDeliveryChannel";
 import { ShellPage } from "@/components/shell/ShellPage";
 import type { CameraInfo, NotificationPrefs } from "@/lib/types";
 
@@ -166,6 +167,7 @@ export default function NotificationsPage() {
 
   return (
     <ShellPage
+      rhythm
       icon={<Bell size={15} />}
       label="Notifications"
       title="Notifications"
@@ -182,7 +184,11 @@ export default function NotificationsPage() {
     >
       {/* Push subscription state — handles its own permission flow.
           Lives above the per-camera prefs grid so the operator
-          enables push first, then dials in what triggers it. */}
+          enables push first, then dials in what triggers it.
+          WARP-2904 — the box-wide off-LAN switch sits right above it.
+          `rhythm` owns the gap between every card here; none carries an
+          outer margin of its own. */}
+      <PushDeliveryChannel />
       <PushSubscriptionCard />
 
       {dirtyCount > 0 && (
