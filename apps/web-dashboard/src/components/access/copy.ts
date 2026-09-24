@@ -36,6 +36,11 @@ export const ACCESS_COPY = {
   settingsAlwaysOn: "Everyone can reach their own settings.",
   homeAlwaysOn: "Home is where everyone lands.",
   toolAutoOff: (feature: string) => `Turned off with ${feature}.`,
+  // WARP-2897 — a grant on a runtime domain nothing on this box provides any
+  // more (its extension disabled or its server detached). Authored here on the
+  // T9 precedent; flagged for design-packet ratification.
+  deadToolGrant: "Nothing on this Droplet provides these tools right now. The grant is kept and works again if they come back.",
+  deadToolGrantRemoved: "Removed when you save. It will not come back if these tools return.",
   cloudConsequence:
     "This is the only setting that sends a person's chat with the assistant off this Droplet — to the cloud AI provider they choose. It's off by default.",
   floorBlockedNetwork: "Network changes are for admins.",

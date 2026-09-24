@@ -61,6 +61,7 @@ interface RowSeed {
   gitSha?: string;
   builtAt?: Date;
   failureReason?: string | null;
+  outcome?: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -72,6 +73,7 @@ function seedRow(seed: RowSeed) {
     gitSha: GIT_SHA_A,
     builtAt: new Date("2026-07-01T00:00:00Z"),
     failureReason: null,
+    outcome: "not_applied",
     createdAt: new Date("2026-07-01T01:00:00Z"),
     updatedAt: new Date("2026-07-01T01:00:00Z"),
     // manifestJson deliberately present in the store so a leak through
@@ -332,6 +334,18 @@ describe("GET /api/updates/history", () => {
     expect(res.body.updates.map((u: any) => u.id)).toEqual(["du-new", "du-old"]);
     expect(res.body.updates[0].manifestJson).toBeUndefined();
     expect(res.body.updates[0].manifestSha256).toBeUndefined();
+  });
+
+  it("WARP-3007 — every row carries its explicit apply outcome", async () => {
+    const prisma = createPrismaMock([
+      seedRow({ id: "du-1", status: "committed", outcome: "services_start_failed" }),
+    ]);
+    const app = buildApp(prisma, createDepsMock());
+    const history = await request(app).get("/api/updates/history");
+    expect(history.body.updates[0].outcome).toBe("services_start_failed");
+    const status = await request(app).get("/api/updates/status");
+    expect(status.body.current.outcome).toBe("services_start_failed");
+    expect(status.body.lastVerdict.outcome).toBe("services_start_failed");
   });
 
   it("clamps ?limit to the bounds", async () => {

@@ -174,6 +174,28 @@ export function inCameraScope(scope: CameraScope, cameraName: string): boolean {
 }
 
 /**
+ * WARP-3013 — Frigate's face library keeps its recent recognition attempts
+ * in a folder named `train`, next to the people someone named. Those are
+ * face crops from EVERY camera (`{event_id}-{timestamp}-{sub_label}-{score}.webp`,
+ * frigate/data_processing/real_time/face.py @ 0.17.1), not a roster anyone
+ * curated, and `/api/faces` lists the folder like a person.
+ */
+export const FRIGATE_FACE_TRAIN_FOLDER = "train";
+
+/**
+ * May this scope see (or remove images in) this face-library folder?
+ *
+ * `train` is for a caller who sees every camera. A grant on every CURRENT
+ * camera is still not "all": a camera added tomorrow would be ungranted,
+ * and its crops would land in the same folder. Named people stay
+ * household-wide. Exact match: folder names are case-sensitive on the box,
+ * so `Train` is someone's name, not Frigate's folder.
+ */
+export function canSeeFaceFolder(scope: CameraScope, folder: string): boolean {
+  return scope === "all" || folder !== FRIGATE_FACE_TRAIN_FOLDER;
+}
+
+/**
  * WARP-2982 — narrow a caller-supplied camera filter to the scope, BEFORE
  * it reaches Frigate, so `limit` and cursor pagination count only cameras
  * the caller may see.

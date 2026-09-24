@@ -9,6 +9,7 @@ import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
+import { sendNotification } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
@@ -92,7 +93,7 @@ import {
   applyWindowTick,
   resumeInterruptedApply,
 } from "./services/update-agent/apply.js";
-import { createHostComposeRunner } from "./services/update-agent/host-compose-runner.js";
+import { getOtaHost, initOtaHost } from "./services/update-agent/host-exec.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
@@ -183,6 +184,7 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { registerSecurityJobs } from "./services/security-events.service.js";
+import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -1084,6 +1086,10 @@ async function main() {
   // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
   // the ingest itself: the module toggle decides the surface, not the capture.
   registerSecurityJobs(cronRuntime, prisma);
+  // WARP-2977 P2b (ADR-059 §3.6) — the site-mode ticker: every 60 s it
+  // reconciles SecurityModeState with the opening hours (level-triggered, on
+  // its own advisory lock). Unconditional, like the jobs above.
+  registerSecurityModeJobs(cronRuntime, prisma);
 
   cronRuntime.scheduleCron(
     "0 3 * * *",
@@ -1132,9 +1138,11 @@ async function main() {
       // captured to <updatesDir>/<id>/self-swap-helper.log; running helpers
       // and in-flight update ids are never touched. Gated like the apply
       // window: no apply script provisioned → no docker surface → no-op.
-      const helperPurge = config.DROPLET_OTA_APPLY_SCRIPT
+      const otaHost = getOtaHost();
+      const helperPurge = otaHost
         ? await purgeSelfSwapHelpers(prisma, {
-            scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
+            scriptPath: otaHost.helperPath,
+            exec: otaHost.exec,
             updatesDir: config.DROPLET_OTA_UPDATES_DIR,
           })
         : { removed: 0, logsCaptured: 0 };
@@ -1342,43 +1350,69 @@ async function main() {
   // other cron in this file (checkForUpdate + applyWindowTick return typed
   // outcomes for expected failures; only genuine bugs throw).
   const updateAgentSettings = await getUpdateAgentSettings(prisma);
+  // WARP-3007 — DROPLET_OTA_APPLY_SCRIPT is the enable flag; the helper is
+  // always the release-shipped docker/ota/apply-update.sh, run ON THE HOST
+  // (host-exec.ts). A box whose host context can't be resolved keeps apply off.
   const otaApplyRunner = config.DROPLET_OTA_APPLY_SCRIPT
-    ? createHostComposeRunner({
-        scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
-        composeFile: config.DROPLET_OTA_COMPOSE_FILE,
-        updatesDir: config.DROPLET_OTA_UPDATES_DIR,
-      })
+    ? ((
+        await initOtaHost({
+          composeFile: config.DROPLET_OTA_COMPOSE_FILE,
+          configRoot: config.DROPLET_OTA_CONFIG_ROOT,
+          updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+          githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        })
+      )?.runner ?? null)
     : null;
+  // WARP-3017 — resolved in the server.listen callback below.
+  let markListening: () => void = () => undefined;
+  const whenListening = new Promise<void>((resolve) => {
+    markListening = resolve;
+  });
   const otaApplyOpts = otaApplyRunner
     ? {
         prisma,
         runner: otaApplyRunner,
         releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        notifyOwners: async (title: string, body: string) => {
+          const owners = await prisma.user.findMany({
+            where: { role: { in: ["owner", "admin"] } },
+            select: { username: true },
+          });
+          for (const { username } of owners) {
+            await sendNotification(prisma, { userId: username, kind: "system", title, body });
+          }
+        },
       }
     : null;
-
   // onStart resume hook: if the previous orchestrator process died mid-apply,
   // this boot is either the freshly-swapped orchestrator (health-gate all +
   // commit) or the old one after a detached rollback (write the rolled_back /
-  // failed verdict). Runs BEFORE the window cron so a resumed apply settles
-  // before a new window can start. No-op when the row set is clean or apply is
-  // disabled on this box.
-  if (otaApplyOpts) {
-    try {
-      const resumed = await resumeInterruptedApply(otaApplyOpts);
-      if (resumed.outcome !== "nothing_to_resume") {
-        logger.info(
-          { event: "update.resume", outcome: resumed.outcome },
-          "OTA apply resume hook ran at boot",
-        );
-      }
-    } catch (err) {
-      // A resume failure must not block orchestrator boot — log loudly and
-      // let the next window retry (the row's status is still an exact cursor).
-      logger.error({ err, event: "update.resume_failed" }, "OTA apply resume hook threw at boot");
-    }
-  }
+  // failed verdict). No-op when the row set is clean or apply is disabled.
+  //
+  // WARP-3017 — NOT awaited here: its gates probe THIS process, which only
+  // answers after server.listen below, so they wait (bounded) on
+  // `whenListening` instead. The apply window awaits `otaResume` so a resumed
+  // apply still settles before a new window can start. A committed resume
+  // starts the newly-enabled services (WARP-2970) — by then we listen.
+  const otaResume: Promise<void> = otaApplyOpts
+    ? resumeInterruptedApply({ ...otaApplyOpts, whenListening })
+        .then((resumed) => {
+          if (resumed.outcome !== "nothing_to_resume") {
+            logger.info(
+              { event: "update.resume", outcome: resumed.outcome },
+              "OTA apply resume hook ran at boot",
+            );
+          }
+          // Never throws (it logs + notifies on its own failure).
+          if (resumed.outcome === "committed") void resumed.startNewServices();
+        })
+        .catch((err: unknown) => {
+          // A resume failure must not take the orchestrator down — log loudly
+          // and let the next window retry (the row's status is an exact cursor).
+          logger.error({ err, event: "update.resume_failed" }, "OTA apply resume hook threw at boot");
+        })
+    : Promise.resolve();
 
   cronRuntime.scheduleInterval(
     config.DROPLET_OTA_POLL_INTERVAL * 1000,
@@ -1399,6 +1433,7 @@ async function main() {
         // keeps tracking pending releases; the swap just never fires here.
         return;
       }
+      await otaResume;
       await applyWindowTick(otaApplyOpts);
     },
     { lockKey: "droplet:update-agent.apply-window" },
@@ -1952,6 +1987,7 @@ async function main() {
   attachWsBridge(server);
   server.listen(config.PORT, () => {
     logger.info("API server listening on port %d", config.PORT);
+    markListening();
   });
 
   // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their

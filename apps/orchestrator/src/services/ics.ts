@@ -48,6 +48,8 @@
  *  - Attendees / RSVP: parse ATTENDEE lines into a separate table.
  */
 
+import { zoneFormatter, zonedWallClockToUtc } from "../lib/zoned-time.js";
+
 export interface IcsEvent {
   uid: string;
   summary: string;
@@ -108,117 +110,11 @@ function parseLine(
   return { name, params, value };
 }
 
-/** The offset, in ms, that `tz` was running at the given instant —
- *  `utcInstant + offset === wall clock in tz`. Positive east of UTC.
- *
- *  Derived by formatting the instant *in* the zone and reading the wall-clock
- *  fields back, which is the only offset source available without a tz
- *  database dependency. Throws `RangeError` for a zone the runtime cannot
- *  resolve — callers must handle that rather than defaulting to UTC. */
-/** One `Intl.DateTimeFormat` per zone, reused. Constructing a formatter is the
- *  expensive part, and resolving a feed costs several offset probes per event
- *  (two per DTSTART/DTEND, plus one per candidate) — a 500-event feed would
- *  otherwise build thousands of throwaway formatters on a box that is also
- *  running everything else. Keyed by zone; the set of zones a box ever sees is
- *  tiny and bounded by its subscriptions, so this never grows unboundedly. */
-const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function zoneFormatter(tz: string): Intl.DateTimeFormat {
-  const hit = zoneFormatters.get(tz);
-  if (hit) return hit;
-  // Throws RangeError for a zone the runtime cannot resolve — deliberately not
-  // caught here, so callers keep the drop-rather-than-guess behaviour.
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    // `hourCycle: h23` — `hour12: false` reports midnight as hour 24 on some
-    // ICU builds, which would silently shift a midnight event by a day.
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  zoneFormatters.set(tz, fmt);
-  return fmt;
-}
-
-function timeZoneOffsetMs(utcInstantMs: number, tz: string): number {
-  const parts = zoneFormatter(tz).formatToParts(new Date(utcInstantMs));
-  const field = (type: string): number => {
-    const p = parts.find((x) => x.type === type);
-    return p ? Number(p.value) : NaN;
-  };
-  const asIfUtc = Date.UTC(
-    field("year"),
-    field("month") - 1,
-    field("day"),
-    field("hour"),
-    field("minute"),
-    field("second"),
-  );
-  return asIfUtc - utcInstantMs;
-}
-
-/** Resolve a wall clock in a named IANA zone to the UTC instant it denotes.
- *  Returns an Invalid Date if `tz` is not resolvable by the runtime — never a
- *  UTC guess, because a plausible wrong instant is worse than a dropped event
- *  (WARP-2764).
- *
- *  RFC 5545 §3.3.5 specifies both awkward cases, and they need opposite
- *  treatment, which is why this is not a single subtraction:
- *
- *   - **Repeated** local time (autumn fall-back — the hour occurs twice):
- *     *"the DATE-TIME value refers to the first occurrence"*. So: the EARLIER
- *     of the two valid instants.
- *   - **Nonexistent** local time (spring-forward gap — the hour never occurs):
- *     *"interpreted using the UTC offset before the gap in local times"*. That
- *     is the pre-gap offset, which shifts the event forward past the gap — the
- *     same answer Temporal's `compatible`, luxon and java.time give.
- *
- *  Method: an instant denotes wall clock `w` in `tz` iff `instant +
- *  offset(instant) === w`. Probe the offset a day either side (a single probe
- *  at the wall clock cannot see both sides of a transition — in the ambiguous
- *  hour the second reading always agrees with the first), build a candidate per
- *  distinct offset, and keep only those that actually round-trip. Zero
- *  survivors means the wall clock is in a gap, and the pre-gap offset is the
- *  spec's answer. Two survivors is the repeated hour, and `Math.min` is "first
- *  occurrence".
- *
- *  🔴 Do not "simplify" this back to correct-once-and-return. That version
- *  resolved the gap BACKWARD (a 02:30 New York start became 01:30 EST, two
- *  hours early) and, in the three zones whose transition is at midnight
- *  (America/Santiago, America/Havana, Atlantic/Azores), moved a 00:00 event to
- *  the PREVIOUS CALENDAR DAY. It also returned the LATER occurrence of the
- *  repeated hour in every zone east of UTC — 73 of 130 DST zones — which is a
- *  §3.3.5 violation, not a defensible policy choice. */
-function zonedWallClockToUtc(
-  y: number,
-  mo: number,
-  d: number,
-  h: number,
-  mi: number,
-  s: number,
-  tz: string,
-): Date {
-  const wallAsUtc = Date.UTC(y, mo - 1, d, h, mi, s);
-  const DAY_MS = 86_400_000;
-  let offsetBefore: number;
-  let offsetAfter: number;
-  try {
-    offsetBefore = timeZoneOffsetMs(wallAsUtc - DAY_MS, tz);
-    offsetAfter = timeZoneOffsetMs(wallAsUtc + DAY_MS, tz);
-  } catch {
-    return new Date(NaN);
-  }
-  const valid = [...new Set([offsetBefore, offsetAfter])]
-    .map((off) => wallAsUtc - off)
-    .filter((instant) => timeZoneOffsetMs(instant, tz) === wallAsUtc - instant);
-  // No candidate round-trips ⇒ the local time does not exist ⇒ §3.3.5's
-  // "UTC offset before the gap".
-  return new Date(valid.length > 0 ? Math.min(...valid) : wallAsUtc - offsetBefore);
-}
+// The RFC 5545 wall-clock converter (`zoneFormatter`, `timeZoneOffsetMs`,
+// `zonedWallClockToUtc`) moved VERBATIM to lib/zoned-time.ts (WARP-2977 P2b)
+// so the Security opening hours resolve wall clocks through the SAME code this
+// parser does. Its RFC 5545 §3.3.5 rationale lives there now; this file's
+// tests (src/__tests__/ics.test.ts) still pin it.
 
 /** Normalize a TZID parameter value to a zone `Intl` can resolve.
  *

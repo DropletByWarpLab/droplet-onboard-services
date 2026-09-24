@@ -379,6 +379,9 @@ describe("WARP-462 — Tool spec CRUD", () => {
     expect((await request(app).post("/api/tools").send(body)).status).toBe(201);
     const second = await request(app).post("/api/tools").send(body);
     expect(second.status).toBe(409);
+    // WARP-2897 — the service throws a typed error on the collision; the
+    // route maps it to the same body the dashboard has always rendered.
+    expect(second.body).toEqual({ error: "Slug already in use", slug: "dupe" });
   });
 
   it("filters list by ?status=", async () => {

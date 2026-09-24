@@ -61,6 +61,14 @@ import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
  * are out of THIS ticket's scope (which is the Drive) and adding them
  * silently would be a scope change disguised as a constant. They want their
  * own ticket and their own product decision about what a cloud model is for.
+ *
+ * DECIDED, NOT WITHHELD: `workspace` (WARP-2896, Stefan 2026-09-23). A
+ * workshop run's repository is code its owner is writing, not stored
+ * customer material, and the run already passed the per-person cloud gate
+ * (`decideCloudTurn` at every claim) — so a person cleared for cloud models
+ * may build with one, and the repository and command output go to that
+ * provider. Withholding the domain would leave a cloud workshop run with no
+ * tools at all: a run that can only fail, not a privacy boundary.
  */
 export const OFF_LAN_WITHHELD_DOMAINS: ReadonlySet<ToolDomain> = new Set<ToolDomain>([
   "files",
