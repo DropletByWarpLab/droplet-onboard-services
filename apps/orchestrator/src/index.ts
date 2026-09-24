@@ -2088,6 +2088,10 @@ async function main() {
     // production, but explicit stop keeps shutdown ordering predictable).
     stopScreenQRPoller();
     shutdownDeviceRegistration();
+    // WARP-2977 P2b-2 — drop the lock adapter's subscriptions to the Matter
+    // bridge before the bridge goes: no lock frame starts a write during
+    // teardown (the sweep already stopped with the cron runtime). Never throws.
+    securityLocks.stop();
     await shutdownMatterService();
     await shutdownCameraService();
     // Stop the MCP stdio child first so it doesn't keep its Prisma

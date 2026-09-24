@@ -63,4 +63,10 @@ describe("the Matter lock adapter is wired into boot (WARP-2977 P2b-2)", () => {
   it("the started adapter is the one whose sweep is registered", () => {
     expect(index).toMatch(/const securityLocks = startSecurityLockAdapter\(\{/);
   });
+
+  it("graceful shutdown stops it right before the Matter bridge it subscribes to (rjouffret, review of 4fa950c8)", () => {
+    const teardown = between("const shutdown = createShutdownRunner(logger, async () => {", "await prisma.$disconnect();");
+    // Its own statement, directly before the bridge's shutdown: nothing awaits between them.
+    expect(teardown).toMatch(/\n\s*securityLocks\.stop\(\);\n\s*await shutdownMatterService\(\);/);
+  });
 });
