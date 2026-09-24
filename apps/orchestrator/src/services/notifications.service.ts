@@ -541,3 +541,94 @@ export async function listNotifications(
   const nextCursor = rows.length > limit ? encodeNotificationCursor(page[page.length - 1]!) : null;
   return { rows: page, nextCursor };
 }
+
+/**
+ * The device facts of one acknowledgement (spec §A.2). `sessionId` is the
+ * JWT `sid` — PROVEN: authMiddleware checks the session record on every
+ * request that carries one — or null for a token without one (grace/legacy).
+ * `client` is `describeClient(...)` — REPORTED, never proof — or null.
+ */
+export interface AckAttribution {
+  sessionId: string | null;
+  client: string | null;
+}
+
+export interface AckNotificationInput extends AckAttribution {
+  id: string;
+  /** The acting person's USERNAME. Only the recipient can ack: it is in the where-clause. */
+  username: string;
+  /** `all` is ack-all's alone; `incident` is WARP-2978's. The routes pass `inbox` or `opened`. */
+  method: Exclude<NotificationAckMethod, "all">;
+}
+
+/**
+ * WARP-2804 — the recipient acknowledges one notification.
+ *
+ *   - Only the recipient: `username` is in BOTH where-clauses, so someone
+ *     else's id acks nothing and reads nothing — it answers exactly like a
+ *     missing id (null → the route's 404), never confirming the row exists.
+ *   - First ack wins and is idempotent: the update only matches a row that is
+ *     not yet acked, so a second ack changes nothing (`changed: false`) and the
+ *     original `ackedAt` / `ackMethod` / sign-in stand.
+ *   - `untracked` rows (written before WARP-2804) can be acked.
+ *
+ * Returns the row as `NotificationRow` (never the device facts), or null.
+ */
+export async function ackNotification(
+  db: NotificationDb,
+  input: AckNotificationInput,
+): Promise<{ changed: boolean; row: NotificationRow } | null> {
+  const { count } = await db.notificationLog.updateMany({
+    where: { id: input.id, username: input.username, ackState: { in: ["unacked", "untracked"] } },
+    data: {
+      ackState: "acked",
+      ackedAt: new Date(),
+      ackMethod: input.method,
+      ackSessionId: input.sessionId,
+      ackClient: input.client,
+    },
+  });
+  const row = await db.notificationLog.findFirst({
+    where: { id: input.id, username: input.username },
+    select: NOTIFICATION_ROW_SELECT,
+  });
+  if (!row) return null;
+  return { changed: count === 1, row };
+}
+
+export interface AckAllInput extends AckAttribution {
+  username: string;
+  /** The newest `createdAt` the client showed. A row created after it is never swept. */
+  before: Date;
+}
+
+/**
+ * WARP-2804 — "mark all read": the recipient's `unacked` rows created at or
+ * before `before`, with `ackMethod: 'all'`.
+ *
+ * `before` is required so a notification that arrived after the person looked
+ * is never swept unseen. `untracked` rows are left alone — they were never
+ * unread — and an acked row keeps its first ack. Returns how many it acked and
+ * the unread count left over (what the badge should now say).
+ */
+export async function ackAllNotifications(
+  db: NotificationDb,
+  input: AckAllInput,
+): Promise<{ acked: number; unread: number }> {
+  const { count } = await db.notificationLog.updateMany({
+    where: { username: input.username, ackState: "unacked", createdAt: { lte: input.before } },
+    data: {
+      ackState: "acked",
+      ackedAt: new Date(),
+      ackMethod: "all",
+      ackSessionId: input.sessionId,
+      ackClient: input.client,
+    },
+  });
+  return { acked: count, unread: await countUnread(db, input.username) };
+}
+
+/** WARP-2804 — the badge: the recipient's `unacked` rows. Never `untracked`, never `acked`. */
+export function countUnread(db: NotificationDb, username: string): Promise<number> {
+  return db.notificationLog.count({ where: { username, ackState: "unacked" } });
+}
