@@ -1,12 +1,17 @@
 "use client";
 
-import useSWR from "swr";
+import { useCallback } from "react";
+import useSWR, { useSWRConfig } from "swr";
 import { fetchModels } from "../api";
 import type { ModelsResponse } from "../types";
 
+/** WARP-3048 — the one SWR key every chat-model consumer shares (/chat,
+ *  Home, the composer's ModelSelector). */
+export const LLM_MODELS_KEY = "/api/llm/models";
+
 export function useModels() {
   const { data, error, isLoading, mutate } = useSWR<ModelsResponse>(
-    "/api/llm/models",
+    LLM_MODELS_KEY,
     fetchModels,
     {
       refreshInterval: 30000,
@@ -23,4 +28,27 @@ export function useModels() {
     isLoading,
     refresh: mutate,
   };
+}
+
+/**
+ * WARP-3048 — refill the shared `/api/llm/models` cache after something
+ * changed its answer: a PATCH /models/active, or a finished download.
+ *
+ * A bare `mutate(key)` is not enough. In SWR 2.5 it only revalidates hooks
+ * that are MOUNTED, and on /models neither /chat nor Home is — so the next
+ * client-side visit to /chat was served the OLD defaultModel from cache and
+ * opened on the model the owner had just switched away from. Writing a
+ * freshly fetched payload into the cache works whether or not anyone is
+ * listening. If that refetch fails, the entry is evicted instead, so the
+ * next mount fetches rather than trusting the stale answer.
+ */
+export function useRefreshLlmModels(): () => Promise<void> {
+  const { mutate } = useSWRConfig();
+  return useCallback(async () => {
+    try {
+      await mutate(LLM_MODELS_KEY, fetchModels(), { revalidate: false });
+    } catch {
+      await mutate(LLM_MODELS_KEY, undefined, { revalidate: false });
+    }
+  }, [mutate]);
 }

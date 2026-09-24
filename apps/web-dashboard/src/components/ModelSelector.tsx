@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useModels } from "@/lib/hooks/useModels";
 import { isLocalProvider } from "@/lib/provider";
 
@@ -20,11 +21,28 @@ const providerBadge: Record<string, { className: string; label: string }> = {
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const { models, isLoading } = useModels();
 
-  // Design handoff: when only one model is available there's nothing to
-  // choose, so don't show the picker/pill in the input zone at all. The
-  // page's auto-select already pins that single model. (Still render while
-  // loading, when we don't yet know the count.)
-  if (!isLoading && models.length <= 1) return null;
+  // No model at all: the chat page's empty state says so and links to
+  // /models. (Still render while loading, when we don't yet know the count.)
+  if (!isLoading && models.length === 0) return null;
+
+  // WARP-3048 — one model: there is nothing to choose here, but hiding the
+  // pill left the composer naming no model at all. The models brief
+  // (WARP-1116) asks for a read-only chip instead — dot + name — that leads
+  // to /models, where models are installed and switched.
+  if (!isLoading && models.length === 1) {
+    const only = models[0];
+    return (
+      <Link
+        href="/models"
+        className="chat-model chat-model-link"
+        aria-label={`Model: ${only.name} — manage on Models`}
+        title="Manage models"
+      >
+        <span className="dot" aria-hidden="true" />
+        <span className="chat-model-name">{only.name}</span>
+      </Link>
+    );
+  }
 
   const selected = models.find((m) => m.id === value);
   const provider = selected?.provider ?? "";

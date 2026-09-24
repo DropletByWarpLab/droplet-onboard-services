@@ -13,6 +13,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
@@ -106,6 +107,14 @@ export default function ChatPage() {
   // may still be fetching on a cold deep-link — the effect below applies
   // it once both sides are ready, then clears.
   const [pendingRestoredModel, setPendingRestoredModel] = useState<string | null>(null);
+  // WARP-3048 — who chose the model the composer is on. 'auto' follows the
+  // box's active model (defaultModel) for as long as the chat is fresh, so
+  // a switch on /models reaches a /chat that is already open or was served a
+  // stale cache; 'user' (a composer pick) and 'restored' (a reopened thread)
+  // are never overridden by it. New chat goes back to 'auto'.
+  const [selectionSource, setSelectionSource] = useState<
+    "auto" | "user" | "restored"
+  >("auto");
   // WARP-845 — the project the NEXT new chat is filed under (set by the
   // sidebar's per-project "+"). Ref-mirrored so the URL-clear reset
   // effect can seed the project persona without dep churn.
@@ -279,6 +288,8 @@ export default function ChatPage() {
       // a plain new chat starts blank.
       setSystemPrompt(activeProjectRef.current?.systemPrompt ?? "");
       setChatId(`chat-${Date.now()}`);
+      // WARP-3048 — a fresh chat follows the box's active model again.
+      setSelectionSource("auto");
     }
     // Intentionally only depend on urlConversationId. Including
     // conversationId / loadConversation / clearMessages would re-fire
@@ -303,7 +314,12 @@ export default function ChatPage() {
     window.history.replaceState(null, "", next.toString());
   }, [conversationId]);
   const chatInputRef = useRef<ChatInputHandle>(null);
-  const { models, defaultModel } = useModels();
+  const {
+    models,
+    defaultModel,
+    isLoading: modelsLoading,
+    error: modelsError,
+  } = useModels();
   // The chat composer's "/" slash menu lists these tools; picking one seeds
   // the composer + pins the "Ready to use X" indicator (same as /tools).
   //
@@ -362,15 +378,37 @@ export default function ChatPage() {
   // model, then any model. `defaultModel` names the model the household chose
   // on /models — honour it so a new chat opens on that model instead of just
   // "the first one in the list".
+  //
+  // WARP-3048 — this used to run only while nothing was selected, so the
+  // FIRST answer stuck: a stale cached defaultModel on a client-side visit,
+  // or a switch on /models while /chat was open, never reached the composer.
+  // Now a fresh 'auto' chat (no messages, no conversation) re-applies
+  // defaultModel whenever it changes. Anything else keeps its model — a 30s
+  // poll must never move a thread mid-conversation — unless that model has
+  // left the list, where keeping it would only fail every send.
   useEffect(() => {
-    if (!selectedModel && models.length > 0) {
-      const preferred =
-        (defaultModel && models.find((m) => m.id === defaultModel)) ||
-        models.find((m) => isLocalProvider(m.provider)) ||
-        models[0];
-      setSelectedModel(preferred.id);
-    }
-  }, [models, defaultModel, selectedModel]);
+    if (models.length === 0) return;
+    const current = selectedModel
+      ? models.find((m) => m.id === selectedModel)
+      : undefined;
+    const freshAuto =
+      selectionSource === "auto" && messages.length === 0 && !conversationId;
+    if (current && !freshAuto) return;
+    const preferred =
+      (defaultModel && models.find((m) => m.id === defaultModel)) ||
+      models.find((m) => isLocalProvider(m.provider)) ||
+      models[0];
+    if (preferred.id !== selectedModel) setSelectedModel(preferred.id);
+    // A pick that is gone from the list is no longer anyone's choice.
+    if (!current && selectionSource !== "auto") setSelectionSource("auto");
+  }, [
+    models,
+    defaultModel,
+    selectedModel,
+    selectionSource,
+    messages.length,
+    conversationId,
+  ]);
 
   // Restore the model a loaded conversation was held in — but only when
   // that model is still available on the gateway (an old chat may name a
@@ -382,6 +420,9 @@ export default function ChatPage() {
     if (models.some((m) => m.id === pendingRestoredModel)) {
       setSelectedModel(pendingRestoredModel);
     }
+    // WARP-3048 — a reopened thread keeps its model; defaultModel no
+    // longer steers it.
+    setSelectionSource("restored");
     setPendingRestoredModel(null);
   }, [pendingRestoredModel, models]);
 
@@ -608,6 +649,9 @@ export default function ChatPage() {
     clearAttachments();
     setSystemPrompt("");
     setChatId(`chat-${Date.now()}`);
+    // WARP-3048 — a new chat opens on the box's active model again, not on
+    // whatever the last thread was switched to.
+    setSelectionSource("auto");
   }, [clearMessages, clearAttachments]);
 
   // WARP-331: history panel interaction handlers.
@@ -626,6 +670,8 @@ export default function ChatPage() {
     // never fires — without this a just-seeded project persona would
     // silently ride into a plain "New chat".
     setSystemPrompt("");
+    // WARP-3048 — same URL no-op, same reason: reset the model source here.
+    setSelectionSource("auto");
     router.push("/chat");
   }, [router]);
 
@@ -636,6 +682,7 @@ export default function ChatPage() {
       setMobileHistoryOpen(false);
       setActiveProject(project);
       setSystemPrompt(project.systemPrompt ?? "");
+      setSelectionSource("auto"); // WARP-3048 — see handleNewChatFromPanel
       router.push("/chat");
     },
     [router],
@@ -764,6 +811,8 @@ export default function ChatPage() {
   const handleModelChange = useCallback(
     (id: string) => {
       setSelectedModel(id);
+      // WARP-3048 — an explicit pick is never moved by a defaultModel change.
+      setSelectionSource("user");
       const target = models.find((m) => m.id === id);
       if (!conversationId || !target || isLocalProvider(target.provider)) return;
       const convo = conversationId;
@@ -1004,9 +1053,23 @@ export default function ChatPage() {
               </div>
               <p className="h">Ask Droplet anything</p>
               <p className="s">
-                {selectedModel
-                  ? "Your local AI is ready — nothing leaves the device."
-                  : "Select a model above to get started."}
+                {/* WARP-3048 — there is no picker "above": name the real
+                    reason nothing is selected, and where models live. */}
+                {selectedModel ? (
+                  "Your local AI is ready — nothing leaves the device."
+                ) : modelsLoading ? (
+                  "Checking which AI model is ready…"
+                ) : modelsError ? (
+                  "Couldn’t reach this Droplet’s AI models — it keeps checking."
+                ) : (
+                  <>
+                    No AI model is ready on this Droplet yet —{" "}
+                    <Link href="/models" className="text-accent hover:underline">
+                      see Models
+                    </Link>
+                    .
+                  </>
+                )}
               </p>
               {!isPrivileged && isBusinessBox && (
                 <p className="type-caption-1 text-label-quaternary mt-1">

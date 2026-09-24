@@ -100,3 +100,41 @@ describe("ModelSelector — cloud key-gating (reuses /api/llm/models)", () => {
     ).toBeInTheDocument();
   });
 });
+
+// ── WARP-3048: one model → a read-only chip that leads to /models ──
+//
+// Hiding the pill when there was nothing to choose left a single-model box's
+// composer naming no model at all, with no hint where models are managed.
+// The models brief (WARP-1116) asks for a read-only chip linking to /models.
+describe("ModelSelector — single-model chip (WARP-3048)", () => {
+  it("renders a read-only chip linking to /models when exactly one model exists", () => {
+    state.models = [LOCAL];
+    state.isLoading = false;
+    render(<ModelSelector value="mistral:7b-instruct" onChange={() => {}} />);
+
+    const chip = screen.getByRole("link", {
+      name: "Model: Mistral 7B — manage on Models",
+    });
+    expect(chip).toHaveAttribute("href", "/models");
+    expect(chip).toHaveTextContent("Mistral 7B");
+    // Read-only: nothing to pick from.
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("keeps the <select> for two or more models", () => {
+    state.models = [LOCAL, VISION];
+    state.isLoading = false;
+    render(<ModelSelector value="mistral:7b-instruct" onChange={() => {}} />);
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeInTheDocument();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("renders nothing when no model is available (the page's empty state explains)", () => {
+    state.models = [];
+    state.isLoading = false;
+    const { container } = render(
+      <ModelSelector value="" onChange={() => {}} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+});
