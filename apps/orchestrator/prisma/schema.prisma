@@ -2877,6 +2877,9 @@ model User {
   departmentMemberships DepartmentMembership[]
   // WARP-1255: per-user storage/usage policy (quota, upload cap, LLM cap).
   usagePolicy           UserUsagePolicy?
+  // WARP-2981 (DS-003): the department this person's shell is arranged
+  // around. Absent = Whole business, the default for everyone (DS-014).
+  activeDepartmentChoice ActiveDepartmentChoice?
 
   // ADR-032 / WARP-1525 (RBAC v2): optional custom access role. Null = plain
   // built-in tier — today's world, fully backward compatible. Assigning a
@@ -6729,6 +6732,9 @@ model Department {
   /// never a template inferred from the department's name. Only DEPARTMENT rows
   /// carry one: a TEAM reads its parent's, HOUSEHOLD has none.
   profile           DepartmentProfile?
+  /// WARP-2981 (DS-003): the people whose shell is arranged around this
+  /// department. Back-relation only; a row cascades away with the department.
+  activeChoices     ActiveDepartmentChoice[]
 
   @@index([state])
   /// WARP-2634: declared to match `Department_parentId_idx`, which
@@ -6757,6 +6763,43 @@ model DepartmentProfile {
   updatedBy    String
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
+}
+
+/// WARP-2981 (ADR-059 DS-003) — the department a person's shell is arranged
+/// around, on every device (web, Android, the Windows WebView).
+///
+/// The row IS the person's choice, and `scope` says which: Whole business or a
+/// department. No row means they have never chosen, on any device. The box
+/// then shows Whole business (DS-014) without claiming they picked it, so a
+/// browser still holding a P1 choice keeps it. Choosing Whole business writes
+/// a `whole_business` row; only the cascades delete one.
+///
+/// `departmentId` is set exactly when `scope = department`: the
+/// `ActiveDepartmentChoice_scope_shape` CHECK in the migration (Prisma cannot
+/// declare it).
+///
+/// SHOWS, never grants (§2.5). The department must be choosable when written
+/// (PUT) and is re-checked when read (GET): a person removed from it, or a
+/// department archived since, reads as Whole business. The row is left in
+/// place on read (GET never writes); the next PUT replaces it.
+///
+/// Last write wins across devices; no version column — two devices racing to
+/// arrange one person's own shell is not a conflict worth a 409.
+model ActiveDepartmentChoice {
+  userId       String                @id
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scope        ActiveDepartmentScope
+  departmentId String?
+  department   Department?           @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  updatedAt    DateTime              @updatedAt
+
+  @@index([departmentId])
+}
+
+/// WARP-2981 — what a person chose to arrange their shell around.
+enum ActiveDepartmentScope {
+  whole_business
+  department
 }
 
 /// WARP-1255: department membership — explicit access rights for a user in a
