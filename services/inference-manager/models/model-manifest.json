@@ -4,9 +4,10 @@
       "name": "gpt-oss:20b",
       "version": "1.0",
       "format": "gguf",
-      "quantization": "MXFP4",
+      "quantization": "F16",
       "source": "ollama",
       "pull_tag": "gpt-oss:20b",
+      "oci": "ai/gpt-oss:20B-F16",
       "min_vram_gb": 14,
       "class": "smart",
       "default": true,
@@ -24,23 +25,25 @@
       "quantization": "Q4_K_M",
       "source": "ollama",
       "pull_tag": "gemma4:26b",
-      "min_vram_gb": 14,
+      "oci": "ai/gemma4:26b-a4b-q4_K_M",
+      "min_vram_gb": 20,
       "class": "smart",
       "default": false,
       "display_name": "Gemma 4 26B",
       "maker": "Google",
-      "description": "Best image understanding on capable hardware — reads photos, documents, and charts. Bench-gated on this box's VRAM (WARP-1114); min_vram_gb here is a pre-bench estimate.",
+      "description": "Best image understanding on capable hardware — reads photos, documents, and charts. Needs a 20 GB card: its Q4_K_M weights alone are 18.1 GB.",
       "capabilities": ["vision", "tools"],
       "roles": ["vision"],
-      "disk_gb": 17.0
+      "disk_gb": 18.1
     },
     {
       "name": "qwen3-vl:8b",
       "version": "1.0",
       "format": "gguf",
-      "quantization": "Q4_K_M",
+      "quantization": "UD-Q4_K_XL",
       "source": "ollama",
       "pull_tag": "qwen3-vl:8b",
+      "oci": "ai/qwen3-vl:8B-UD-Q4_K_XL",
       "min_vram_gb": 10,
       "class": "balanced",
       "default": false,
@@ -49,7 +52,7 @@
       "description": "Balanced image understanding — the guaranteed-fit vision fallback.",
       "capabilities": ["vision", "tools", "thinking"],
       "roles": ["vision"],
-      "disk_gb": 6.5
+      "disk_gb": 6.3
     },
     {
       "name": "llama3.2:3b",
@@ -58,6 +61,7 @@
       "quantization": "Q4_K_M",
       "source": "ollama",
       "pull_tag": "llama3.2:3b",
+      "oci": "ai/llama3.2:3B-Q4_K_M",
       "min_vram_gb": 4,
       "class": "balanced",
       "default": false,
@@ -72,9 +76,10 @@
       "name": "qwen3-vl:32b",
       "version": "1.0",
       "format": "gguf",
-      "quantization": "Q4_K_M",
+      "quantization": "UD-Q4_K_XL",
       "source": "ollama",
       "pull_tag": "qwen3-vl:32b",
+      "oci": "ai/qwen3-vl:32B-UD-Q4_K_XL",
       "min_vram_gb": 24,
       "class": "smart",
       "default": false,
@@ -83,7 +88,7 @@
       "description": "Higher-fidelity vision for future >=24 GB hardware. Gated off on today's 16 GB box by design.",
       "capabilities": ["vision", "tools", "thinking"],
       "roles": ["vision"],
-      "disk_gb": 21.0
+      "disk_gb": 21.3
     },
     {
       "name": "glm-4.7-flash:31b",
@@ -110,6 +115,7 @@
       "quantization": "Q4_K_M",
       "source": "ollama",
       "pull_tag": "gemma4:31b",
+      "oci": "ai/gemma4:31b-q4_K_M",
       "min_vram_gb": 20,
       "class": "smart",
       "default": false,
@@ -118,7 +124,7 @@
       "description": "Chat + vision for future >=20 GB hardware. Gated off on today's 16 GB box by design.",
       "capabilities": ["vision", "tools"],
       "roles": ["chat", "vision"],
-      "disk_gb": 20.0
+      "disk_gb": 19.5
     }
   ]
 }

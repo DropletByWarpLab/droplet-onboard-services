@@ -127,6 +127,36 @@ These are edits, not omissions. Re-apply them on every re-sync.
 8. **`test_shipped_manifest_agrees_with_oci_sources` is not vendored.**
    `models/oci-sources.json` is a build-time packaging input that belongs
    upstream; that cross-check stays there.
+9. **VRAM detection is vendor-aware (WARP-3046).** Upstream `vram.py` (blob
+   `1e7c520f`, unchanged since 2026-08-09) sizes the GPU from amdgpu's
+   `mem_info_vram_total` alone, "largest node wins". On an NVIDIA box that
+   node does not exist for the card, so the iGPU's 512 MiB carve-out won,
+   rounded to 0, and was cached — an empty catalog on .195. Here:
+   - an NVIDIA card is sized from the host device-bridge's `GET /gpu`
+     (`DEVICE_BRIDGE_URL`, `BRIDGE_AUTH_TOKEN` → `SERVICE_TOKEN_DISPLAY`,
+     header `X-Droplet-Auth`), trusted only when it names an NVIDIA card;
+     an NVIDIA card nothing can size is UNKNOWN (`None`), never the iGPU;
+   - amdgpu nodes under 2 GiB are carve-outs, skipped (BIOS-UMA caveat in
+     `vram.py`), so an APU-only box falls through to unified memory;
+   - detection returns `None` for unknown instead of `0`, caches only a
+     positive sourced result, and exposes `detect()` / `detect_async()`;
+   - `/models/eligible` emits `detected_vram_gb: null` plus `vram_source`,
+     and `Manifest.eligible(None)` is empty.
+   Upstream has no device-bridge, so the bridge source does not port as-is;
+   the `None`-not-`0` contract and the carve-out skip do, and should be
+   upstreamed.
+10. **`pulled` is tag-exact for pinned builds (WARP-3046).** New adapter method
+    `pinned_id` (`runtime/base.py`, `runtime/dmr.py`); `eligible.py` compares a
+    pinned entry on the identifier its pull addresses, and keeps upstream's
+    repository-level `comparable_id` membership only for entries that pin
+    nothing. Upstream still folds every build of a repository together.
+11. **Every shipped manifest entry declares a verified `oci` tag (WARP-3046)**,
+    checked against the Docker Hub tag list on 2026-09-23, with `disk_gb` /
+    `min_vram_gb` / `quantization` corrected to that build (gemma4:26b's
+    Q4_K_M is 18.1 GB, so it needs a 20 GB card). `gpt-oss:20b` pins
+    `ai/gpt-oss:20B-F16`, the build `single-box.sh` seeds
+    (`DROPLET_DEFAULT_DMR_MODEL`); a test ties the two together. Upstream's
+    manifest declares `oci` only for glm-4.7-flash.
 
 ## Re-syncing
 

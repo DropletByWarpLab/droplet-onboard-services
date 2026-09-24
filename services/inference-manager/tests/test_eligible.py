@@ -297,3 +297,124 @@ async def test_eligible_pulled_true_when_installed_under_pull_tag(
     resp = await client.get("/models/eligible")
     assert resp.status_code == 200
     assert resp.json()["models"][0]["pulled"] is True
+
+
+# ── WARP-3046: unknown VRAM is reported, not disguised as 0 ──────────────
+
+
+async def test_eligible_reports_unknown_vram_as_null_with_no_source(
+    client, respx_mock, manifest_path, monkeypatch, tmp_path
+):
+    """Nothing could size the box: the list is empty, and the payload SAYS it
+    is empty because the VRAM is unknown — `detected_vram_gb: null`, not the
+    `0` that read as "this Droplet has no GPU" on .195."""
+    import vram
+    monkeypatch.delenv("VRAM_OVERRIDE_GB", raising=False)
+    monkeypatch.setattr(vram, "_MEMINFO_PATH", str(tmp_path / "unreadable"))
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": []})
+    )
+
+    resp = await client.get("/models/eligible")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["detected_vram_gb"] is None
+    assert data["vram_source"] is None
+    assert data["models"] == []
+
+
+async def test_eligible_names_the_vram_source(client, respx_mock, manifest_path):
+    import vram
+    vram._cached_gb = 16
+    vram._cached_source = vram.SOURCE_BRIDGE
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": []})
+    )
+
+    data = (await client.get("/models/eligible")).json()
+    assert data["detected_vram_gb"] == 16
+    assert data["vram_source"] == "device_bridge"
+
+
+# ── WARP-3046: `pulled` is tag-exact for an entry that pins a build ──────
+#
+# `comparable_id` folds every build of a repository onto one key. With the tag
+# dropped on the wire as well, that at least agreed with itself; with `oci`
+# pinning builds it does not: after "Gemma 4 26B" pulled `ai/gemma4:latest`
+# (the 12B), BOTH gemma4 entries read `pulled: true`, their cards vanished,
+# and the orchestrator's `already_pulled` 409 made the real 26B uninstallable.
+
+
+def _two_gemma_builds() -> str:
+    return json.dumps({
+        "models": [
+            {"name": "gemma4:26b", "pull_tag": "gemma4:26b",
+             "oci": "ai/gemma4:26b-a4b-q4_K_M", "format": "gguf",
+             "quantization": "Q4_K_M", "min_vram_gb": 4},
+            {"name": "gemma4:31b", "pull_tag": "gemma4:31b",
+             "oci": "ai/gemma4:31b-q4_K_M", "format": "gguf",
+             "quantization": "Q4_K_M", "min_vram_gb": 4},
+        ]
+    })
+
+
+async def test_eligible_sibling_builds_are_not_pulled_by_another_build(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    import main
+    import vram
+    vram._cached_gb = 16
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    manifest_path.write_text(_two_gemma_builds())
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": [{"name": "docker.io/ai/gemma4:latest"}]})
+    )
+
+    pulled = {m["name"]: m["pulled"] for m in (await client.get("/models/eligible")).json()["models"]}
+    assert pulled == {"gemma4:26b": False, "gemma4:31b": False}
+
+
+async def test_eligible_installing_one_build_marks_only_that_build(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    import main
+    import vram
+    vram._cached_gb = 16
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    manifest_path.write_text(_two_gemma_builds())
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(
+            200, json={"models": [{"name": "docker.io/ai/gemma4:26b-a4b-q4_K_M"}]}
+        )
+    )
+
+    pulled = {m["name"]: m["pulled"] for m in (await client.get("/models/eligible")).json()["models"]}
+    assert pulled == {"gemma4:26b": True, "gemma4:31b": False}
+
+
+async def test_eligible_shipped_manifest_on_the_16gb_dmr_box(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    """The REAL manifest against .195's real inventory (one model,
+    `docker.io/ai/gpt-oss:20B-F16`) at 16 GB: the serving model reads
+    installed, nothing else does, and only builds that fit are offered."""
+    from pathlib import Path
+
+    import main
+    import vram
+    vram._cached_gb = 16
+    shipped = Path(__file__).resolve().parents[1] / "models" / "model-manifest.json"
+    monkeypatch.setattr(main, "MANIFEST_PATH", str(shipped))
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": [{"name": "docker.io/ai/gpt-oss:20B-F16"}]})
+    )
+
+    data = (await client.get("/models/eligible")).json()
+    pulled = {m["name"]: m["pulled"] for m in data["models"]}
+    assert pulled == {
+        "gpt-oss:20b": True,
+        "qwen3-vl:8b": False,
+        "llama3.2:3b": False,
+        "glm-4.7-flash:31b": False,
+    }

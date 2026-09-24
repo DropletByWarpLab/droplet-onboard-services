@@ -221,6 +221,21 @@ class DmrRuntime(OllamaWireRuntime):
         """
         return _normalize_oci_reference(to_runtime_id(model), drop_tag=True)
 
+    def pinned_id(self, model: str) -> str | None:
+        """``ai/<repo>:<tag>`` when ``model`` addresses one build, else ``None``.
+
+        WARP-3046. The same reduction as :meth:`comparable_id` MINUS the tag
+        drop: a declared ``ai/gemma4:26b-a4b-q4_K_M`` and the reported
+        ``docker.io/ai/gemma4:26b-a4b-q4_K_M`` fold onto one key, while the
+        ``docker.io/ai/gemma4:latest`` sibling does not. ``:latest``, an
+        untagged reference and a bare Ollama id (whose tag
+        :func:`to_runtime_id` drops) pin nothing, so they return ``None`` and
+        keep repository-level membership.
+        """
+        reference = _normalize_oci_reference(to_runtime_id(model))
+        _repository, _, tag = reference.rpartition("/")[2].partition(":")
+        return reference if tag else None
+
     def _pull_body(self, model: str, *, stream: bool) -> dict[str, object]:
         # Both `model` and `name` are sent. DMR's ollama-compat layer accepts
         # either spelling where we have verified it (`/api/chat` takes

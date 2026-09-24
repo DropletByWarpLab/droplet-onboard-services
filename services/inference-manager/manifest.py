@@ -144,7 +144,12 @@ class Manifest(BaseModel):
                 return m
         return None
 
-    def eligible(self, detected_vram_gb: int) -> list[ManifestEntry]:
+    def eligible(self, detected_vram_gb: int | None) -> list[ManifestEntry]:
+        # WARP-3046: `None` is UNKNOWN VRAM. Nothing is offered — a download
+        # sized against a guess can land weights the card cannot load — but
+        # /models/eligible reports the unknown as such instead of as a 0.
+        if detected_vram_gb is None:
+            return []
         return [m for m in self.models if m.min_vram_gb <= detected_vram_gb]
 
 

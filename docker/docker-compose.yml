@@ -3339,11 +3339,15 @@ services:
       # Read-only: the disk preflight only needs stat/traverse on the mount to
       # read the filesystem's free-space counters, never the model blobs.
       - dmr-models:/data/models:ro
-      # Read-only: vram.py reads
-      # /sys/class/drm/card*/device/mem_info_vram_total to size the VRAM gate,
-      # taking the MAX across cards so this box's 512 MiB iGPU cannot win over
-      # the 16 GB dGPU. Harmless when absent — detection falls back to
-      # /proc/meminfo.
+      # Read-only: vram.py reads each card's PCI vendor and, for an AMD card,
+      # /sys/class/drm/cardN/device/mem_info_vram_total to size the VRAM gate.
+      # WARP-3046: that memory node is amdgpu-only — an NVIDIA card publishes
+      # none, and the old "max across cards" rule then sized .195's RTX 5060 Ti
+      # from the 512 MiB Raphael iGPU (0 GB, empty catalog). An NVIDIA card is
+      # now sized by the host device-bridge's GET /gpu (DEVICE_BRIDGE_URL +
+      # BRIDGE_AUTH_TOKEN/SERVICE_TOKEN_DISPLAY, from the env_file above), and
+      # carve-out-sized nodes are skipped. Harmless when absent — detection
+      # falls back to /proc/meminfo, or reports the VRAM as unknown.
       - /sys/class/drm:/sys/class/drm:ro
     # Hardening: a FastAPI sidecar running as non-root that reads its own code
     # and makes outbound HTTP. It needs no capabilities and must not gain any.

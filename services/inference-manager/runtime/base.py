@@ -159,6 +159,19 @@ class InferenceRuntime(Protocol):
         """
         ...
 
+    def pinned_id(self, model: str) -> str | None:
+        """The TAG-EXACT identity of ``model`` when it pins one build, else None.
+
+        WARP-3046. :meth:`comparable_id` answers "is SOME build of this
+        repository installed?" — right for an entry that addresses the
+        daemon's default build, wrong for one that pins a build: installing
+        ``ai/gemma4:latest`` (the 12B) made the pinned 26B entry read
+        installed too. `/models/eligible` compares a pinned entry through this
+        instead, both sides reduced the same way. ``None`` means "no build is
+        pinned here — fall back to :meth:`comparable_id`".
+        """
+        ...
+
 
 class OllamaWireRuntime:
     """Shared base for backends that speak Ollama's wire format on tags/ps.
@@ -204,6 +217,12 @@ class OllamaWireRuntime:
         was, not a normalisation that merely happens to agree.
         """
         return (model or "").strip()
+
+    def pinned_id(self, model: str) -> str | None:
+        """``None`` — :meth:`comparable_id` is identity here, so it is already
+        tag-exact and there is nothing finer to compare. DMR overrides this
+        (WARP-3046)."""
+        return None
 
     async def list_installed(self) -> dict[str, Any]:
         resp = await self._client.get(TAGS_PATH)

@@ -280,9 +280,17 @@ async def list_eligible():
     # manifest. WARP-1743 fixed that same comparison on /models/sync and scoped
     # itself to the four lifecycle operations, which left this one reporting
     # `pulled: false` for every entry on a DMR box, the serving model included.
+    #
+    # WARP-3046: detection may ask the host device-bridge (an NVIDIA card has
+    # no sysfs memory node) — a blocking call, so `detect_async` runs it off
+    # the event loop and a slow bridge stalls this request only, never
+    # /health. One pass answers the number and its source; an unknown result
+    # is re-measured on the next call, not cached.
+    detected_gb, vram_source = await vram.detect_async()
     result = await build_eligible(
         manifest=manifest,
-        detected_vram_gb=vram.detected_vram_gb(),
+        detected_vram_gb=detected_gb,
+        vram_source=vram_source,
         runtime=runtime,
     )
     # WARP-195 finding 2: surface the resilient loader's fallback so a corrupt
