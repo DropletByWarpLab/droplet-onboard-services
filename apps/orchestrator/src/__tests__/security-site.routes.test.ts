@@ -120,12 +120,13 @@ function app(
   role: Role | null | "",
   level: Level | null,
   now: Date = NOW,
-  opts: { devices?: boolean; locks?: KnownLockFixture[] | null } = {},
+  opts: { devices?: boolean; locks?: KnownLockFixture[] | null; lockHealth?: "ok" | "down" | "not_configured" } = {},
 ) {
   const resolve = vi.fn(async (_userId: string) => access(level, role === "owner" ? "owner" : "family", opts.devices === true));
   const prisma = fakePrisma(w);
   const knownLocks = vi.fn(() => opts.locks ?? []);
-  const reader = opts.locks === null ? null : { knownLocks, listLocks: vi.fn(), health: vi.fn() };
+  const health = vi.fn(() => ({ id: "locks", state: opts.lockHealth ?? "ok", detail: "(the adapter's copy)", lastSeenAt: null }));
+  const reader = opts.locks === null ? null : { knownLocks, listLocks: vi.fn(), health };
   const server = express();
   server.use(express.json());
   server.use((req: Request, _res: Response, next: NextFunction) => {
@@ -139,7 +140,7 @@ function app(
     "/api",
     createSecuritySiteRouter(prisma as unknown as PrismaClient, { resolve, now: () => now, locks: () => reader as never }),
   );
-  return { server, resolve, prisma, knownLocks };
+  return { server, resolve, prisma, knownLocks, health };
 }
 
 const HOURS_BODY = {
@@ -447,12 +448,13 @@ describe("POST /api/security/mode — unlockedLocks", () => {
     lock("6", "Annex", null),
   ];
 
-  it.each(["close", "away"] as const)("%s, with Devices view: the connected locks last heard open, by name, sorted", async (action) => {
+  it.each(["close", "away"] as const)("%s, with Devices view: the connected locks last heard open, by name, sorted — and checked", async (action) => {
     const { server, resolve } = app(seeded(), "family", "act", NOW, { devices: true, locks: LOCKS });
     const res = await request(server).post("/api/security/mode").send({ action });
     expect(res.status).toBe(200);
     expect(res.body.changed).toBe(true);
     expect(res.body.unlockedLocks).toEqual(["Back door lock", "Side gate"]);
+    expect(res.body.locksChecked).toBe(true);
     expect(resolve).toHaveBeenCalledWith(USER_ID);
   });
 
@@ -460,15 +462,46 @@ describe("POST /api/security/mode — unlockedLocks", () => {
     const { server } = app(seeded(), "family", "act", NOW, { devices: true, locks: LOCKS });
     await request(server).post("/api/security/mode").send({ action: "close" });
     const again = await request(server).post("/api/security/mode").send({ action: "close" });
-    expect(again.body).toMatchObject({ changed: false, unlockedLocks: ["Back door lock", "Side gate"] });
+    expect(again.body).toMatchObject({ changed: false, unlockedLocks: ["Back door lock", "Side gate"], locksChecked: true });
   });
 
-  it("without Devices view the field is ABSENT — not even an empty list says a lock exists", async () => {
-    const { server, knownLocks } = app(seeded(), "family", "act", NOW, { devices: false, locks: LOCKS });
+  it("nothing known open, locks reporting: an empty list — and checked, so it is not 'couldn't check'", async () => {
+    const { server } = app(seeded(), "family", "act", NOW, { devices: true, locks: [lock("2", "Front door lock", "locked")] });
+    const res = await request(server).post("/api/security/mode").send({ action: "close" });
+    expect(res.body).toMatchObject({ unlockedLocks: [], locksChecked: true });
+  });
+
+  it("without Devices view both fields are ABSENT — nothing says a lock exists", async () => {
+    const { server, knownLocks, health } = app(seeded(), "family", "act", NOW, { devices: false, locks: LOCKS });
     const res = await request(server).post("/api/security/mode").send({ action: "close" });
     expect(res.status).toBe(200);
     expect(res.body).not.toHaveProperty("unlockedLocks");
+    expect(res.body).not.toHaveProperty("locksChecked");
     expect(knownLocks).not.toHaveBeenCalled();
+    expect(health).not.toHaveBeenCalled();
+  });
+
+  // Review F4: the names are only as good as the adapter's word. When the
+  // locks row is down (the smart-home service unreachable, sweeps failing, a
+  // lock not reporting, nothing checked yet) the readings may be an hour old —
+  // naming "still unlocked" could be false, and an empty list would read as
+  // "none open". The answer says it could not check instead.
+  it("the locks row is DOWN: no names at all — locksChecked:false (never a stale 'still unlocked', never an empty 'none open')", async () => {
+    const w = seeded();
+    const { server, knownLocks } = app(w, "family", "act", NOW, { devices: true, locks: LOCKS, lockHealth: "down" });
+    const res = await request(server).post("/api/security/mode").send({ action: "close" });
+    expect(res.status).toBe(200);
+    expect(res.body.locksChecked).toBe(false);
+    expect(res.body).not.toHaveProperty("unlockedLocks");
+    expect(knownLocks).not.toHaveBeenCalled();
+    expect(w.mode).toMatchObject({ mode: "closed" });
+  });
+
+  it("no door locks paired (not_configured): checked, and an empty list", async () => {
+    const res = await request(app(seeded(), "family", "act", NOW, { devices: true, locks: [], lockHealth: "not_configured" }).server)
+      .post("/api/security/mode")
+      .send({ action: "close" });
+    expect(res.body).toMatchObject({ unlockedLocks: [], locksChecked: true });
   });
 
   it.each([
@@ -483,27 +516,32 @@ describe("POST /api/security/mode — unlockedLocks", () => {
     expect(res.body).not.toHaveProperty("unlockedLocks");
   });
 
-  it("no lock adapter running → an empty list (nothing known to be open), never an error after the change committed", async () => {
+  it("no lock adapter running → locksChecked:false (not an empty list, which would read as 'none open'), never an error after the commit", async () => {
     const w = seeded();
     const res = await request(app(w, "family", "act", NOW, { devices: true, locks: null }).server)
       .post("/api/security/mode")
       .send({ action: "close" });
     expect(res.status).toBe(200);
-    expect(res.body.unlockedLocks).toEqual([]);
+    expect(res.body.locksChecked).toBe(false);
+    expect(res.body).not.toHaveProperty("unlockedLocks");
     expect(w.mode).toMatchObject({ mode: "closed", modeSource: "manual" });
   });
 
-  it("a lock reader that throws AFTER the commit still answers 200 with the committed mode — every 5xx means nothing changed", async () => {
-    const w = seeded();
-    const { server, knownLocks } = app(w, "family", "act", NOW, { devices: true, locks: LOCKS });
-    knownLocks.mockImplementation(() => {
-      throw new Error("adapter state unreadable");
-    });
-    const res = await request(server).post("/api/security/mode").send({ action: "close" });
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ changed: true, unlockedLocks: [] });
-    expect(w.mode).toMatchObject({ mode: "closed" });
-  });
+  it.each(["knownLocks", "health"] as const)(
+    "a lock reader whose %s throws AFTER the commit → 200, locksChecked:false — every 5xx means nothing changed",
+    async (which) => {
+      const w = seeded();
+      const fixture = app(w, "family", "act", NOW, { devices: true, locks: LOCKS });
+      fixture[which].mockImplementation(() => {
+        throw new Error("adapter state unreadable");
+      });
+      const res = await request(fixture.server).post("/api/security/mode").send({ action: "close" });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ changed: true, locksChecked: false });
+      expect(res.body).not.toHaveProperty("unlockedLocks");
+      expect(w.mode).toMatchObject({ mode: "closed" });
+    },
+  );
 });
 
 // Spec §6.3's row "open {for} when not_set or S=open → resume to schedule

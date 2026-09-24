@@ -28,12 +28,15 @@
  * committed but cannot be read back answers 200 `{hours: null, mode: null}`.
  * User text is checked with `chainSafeText` BEFORE the transaction.
  *
- * WARP-2977 P2b-2 — a Close up or Away answer carries `unlockedLocks`: the
- * names of the door locks last heard open (DS-019: only for someone who may
- * read locks; for anyone else the field is absent). It never says "all
- * locked" — a lock that is locked, unknown, never heard or not reporting is
- * simply not named. Read from the adapter's memory AFTER the commit, so it
- * can never turn a committed change into an error.
+ * WARP-2977 P2b-2 — a Close up or Away answer carries, for someone who may
+ * read locks (DS-019; for anyone else both fields are absent):
+ *   · `locksChecked: true` + `unlockedLocks`: the names of the door locks
+ *     last heard open. It never says "all locked" — a lock that is locked,
+ *     unknown, never heard or not reporting is simply not named;
+ *   · `locksChecked: false` and no names, when the adapter is not running or
+ *     its `locks` row is down: its readings may be stale (review F4).
+ * Read from the adapter's memory AFTER the commit, so it can never turn a
+ * committed change into an error.
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -272,16 +275,25 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
   });
 
   /**
-   * WARP-2977 P2b-2 — the locks a Close up / Away answer names. In-memory
-   * (the last sweep's locks and the readings last heard), and it runs after
-   * the commit: a failure here is an empty list and a log line, never a 5xx.
+   * WARP-2977 P2b-2 — what a Close up / Away answer says about the door locks.
+   * In-memory (the last sweep's locks and the readings last heard), run after
+   * the commit, so a failure here is never a 5xx.
+   *
+   * Review F4: the names are only as good as the adapter's word. With no
+   * adapter, or its `locks` row down (the smart-home service unreachable,
+   * sweeps failing, a lock not reporting, nothing checked yet), the readings
+   * may be stale: naming a lock "still unlocked" could be false, and an empty
+   * list would read as "none open". The answer is then `locksChecked: false`
+   * with no names — "nothing is reporting" never looks like "nothing is open".
    */
-  const unlockedLocksNow = (): string[] => {
+  const doorLocksNow = (): { unlockedLocks: string[]; locksChecked: true } | { locksChecked: false } => {
     try {
-      return stillUnlockedLocks((deps.locks ?? securityLockAdapter)()?.knownLocks() ?? []);
+      const reader = (deps.locks ?? securityLockAdapter)();
+      if (!reader || reader.health().state === "down") return { locksChecked: false };
+      return { unlockedLocks: stillUnlockedLocks(reader.knownLocks()), locksChecked: true };
     } catch (err) {
-      logger.warn({ err }, "site mode changed; the door-lock list could not be read for the answer");
-      return [];
+      logger.warn({ err }, "site mode changed; the door locks could not be read for the answer");
+      return { locksChecked: false };
     }
   };
 
@@ -305,7 +317,7 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
       res.json({
         mode: result.mode,
         changed: result.changed,
-        ...(mayReadLocks ? { unlockedLocks: unlockedLocksNow() } : {}),
+        ...(mayReadLocks ? doorLocksNow() : {}),
       });
     } catch (err) {
       writeFailed(res, err, "MODE_UNAVAILABLE", "site mode change");

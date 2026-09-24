@@ -22,6 +22,7 @@ import {
   COPY,
   MODE_DISCLAIMER,
   ModeCard,
+  doorLocksLine,
   modeReason,
   modeToast,
   openUpEnds,
@@ -762,11 +763,29 @@ describe("the toast names the doors still open (WARP-2977 P2b-2)", () => {
   });
 
   it("an empty list adds nothing — the toast never says the doors are locked", async () => {
-    h.postSecurityMode.mockResolvedValueOnce({ ...result(closedUpByStefan()), unlockedLocks: [] });
+    h.postSecurityMode.mockResolvedValueOnce({ ...result(closedUpByStefan()), unlockedLocks: [], locksChecked: true });
     renderCard();
     fireEvent.click(await screen.findByRole("button", { name: COPY.closeUp }));
     const toast = await screen.findByText("Closed until 9:00 AM tomorrow.");
     expect(toast.closest("[data-toast]")).not.toHaveTextContent(/locked/i);
+  });
+
+  // Review F4: the server could not vouch for the locks (the smart-home service
+  // is down, or nothing checked yet) — the toast says so, never "none open".
+  it("the locks couldn't be checked: the toast says so after the mode's line", async () => {
+    h.postSecurityMode.mockResolvedValueOnce({ ...result(closedUpByStefan()), locksChecked: false });
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.closeUp }));
+    expect(await screen.findByText(`Closed until 9:00 AM tomorrow. ${COPY.locksNotChecked}`)).toBeInTheDocument();
+    expect(COPY.locksNotChecked).toBe("Droplet couldn't check the door locks.");
+  });
+
+  it("doorLocksLine: not checked wins over any names; no fields at all (no Devices view) adds nothing", () => {
+    expect(doorLocksLine({ locksChecked: false })).toBe(COPY.locksNotChecked);
+    expect(doorLocksLine({ locksChecked: false, unlockedLocks: ["Back door lock"] })).toBe(COPY.locksNotChecked);
+    expect(doorLocksLine({ locksChecked: true, unlockedLocks: ["Back door lock"] })).toBe("Back door lock is still unlocked.");
+    expect(doorLocksLine({ locksChecked: true, unlockedLocks: [] })).toBeNull();
+    expect(doorLocksLine({})).toBeNull();
   });
 });
 

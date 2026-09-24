@@ -3531,10 +3531,17 @@ export interface SecurityModeActionResult {
   changed: boolean;
   /**
    * WARP-2977 P2b-2 — on a Close up or Away, for people with Devices view:
-   * the door locks last heard open, by name. Absent otherwise. Never read as
-   * "all locked" — a lock Droplet can't vouch for is simply not named.
+   * the door locks last heard open, by name, when `locksChecked` is true.
+   * Never read as "all locked" — a lock Droplet can't vouch for is simply not
+   * named. Absent when `locksChecked` is false, and for everyone else.
    */
   unlockedLocks?: string[];
+  /**
+   * WARP-2977 P2b-2 (review F4) — false when Droplet could not vouch for the
+   * lock readings (no lock adapter, or its `locks` row is down): say so, never
+   * "none open". Absent for people without Devices view.
+   */
+  locksChecked?: boolean;
 }
 
 export type SecurityHoursState = "not_set" | "set";

@@ -107,6 +107,8 @@ export const COPY = {
   stillUnlockedOne: "{lock} is still unlocked.",
   stillUnlockedTwo: "{a} and {b} are still unlocked.",
   stillUnlockedMany: "{a} and {n} other locks are still unlocked.",
+  // The server could not vouch for the lock readings: never read as "none open".
+  locksNotChecked: "Droplet couldn't check the door locks.",
 } as const;
 
 /**
@@ -279,6 +281,17 @@ export function unlockedLocksLine(names: readonly string[] | undefined): string 
   return fill(COPY.stillUnlockedMany, { a: names[0]!, n: String(names.length - 1) });
 }
 
+/**
+ * The door-lock line of a Close up / Away toast, from the server's answer:
+ * "Droplet couldn't check the door locks." when it could not vouch for the
+ * readings (`locksChecked: false`, review F4), else the names still open, else
+ * nothing. Both fields are absent for people without Devices view.
+ */
+export function doorLocksLine(r: Pick<SecurityModeActionResult, "unlockedLocks" | "locksChecked">): string | null {
+  if (r.locksChecked === false) return COPY.locksNotChecked;
+  return unlockedLocksLine(r.unlockedLocks);
+}
+
 /** The stale warning, read off the `site_mode` health row's lastSeenAt. */
 export function staleLine(row: SecurityHealthRow | null, view: SecurityModeView, now: Date): string {
   if (!row) return COPY.staleUnknown;
@@ -322,7 +335,7 @@ export function ModeCard({ onModeChanged, now: nowProp }: ModeCardProps) {
         // started FROM the opening hours — and only when something changed.
         const undoable = action.action !== "resume" && r.changed && prior.source === "schedule";
         // WARP-2977 P2b-2 — the door locks still open follow the mode's own line.
-        const locksLine = unlockedLocksLine(r.unlockedLocks);
+        const locksLine = doorLocksLine(r);
         const line = modeToast(action.action, r.mode, nowProp ?? new Date());
         toast(
           locksLine ? `${line} ${locksLine}` : line,
