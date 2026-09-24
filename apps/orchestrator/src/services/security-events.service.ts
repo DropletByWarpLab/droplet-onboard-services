@@ -20,6 +20,7 @@ import {
   type SourceHealth,
   type StatusReading,
 } from "./security-event-ingest.js";
+import { trimSecurityIncidents } from "./security-incidents.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("security-events");
@@ -274,10 +275,14 @@ export async function trimSecurityEvents(
 /**
  * Both jobs on the orchestrator's cron runtime, each single-flighted on its
  * own advisory lock. No new container, no bare setInterval, no while(true).
+ *
+ * WARP-2978 (§6.10): the retention leg trims incidents right after the
+ * events, with the events' own `before`, so an incident's `eventsKept` says
+ * exactly what the trim removed.
  */
 export function registerSecurityJobs(
   cronRuntime: Pick<CronRuntime, "scheduleInterval" | "scheduleCron">,
-  prisma: SecurityPrisma,
+  prisma: PrismaClient,
 ): void {
   cronRuntime.scheduleInterval(
     SECURITY_THREAT_MIRROR_INTERVAL_MS,
@@ -290,8 +295,11 @@ export function registerSecurityJobs(
   cronRuntime.scheduleCron(
     SECURITY_RETENTION_CRON,
     async () => {
-      const r = await trimSecurityEvents(prisma);
+      const now = new Date();
+      const r = await trimSecurityEvents(prisma, SECURITY_EVENT_RETENTION_DAYS, now);
       if (r.deleted > 0) logger.info(r, "security event retention trim");
+      const i = await trimSecurityIncidents(prisma, r.before, now);
+      if (i.marked > 0 || i.deleted > 0) logger.info(i, "security incident retention trim");
     },
     { lockKey: SECURITY_RETENTION_LOCK_KEY },
   );
@@ -371,10 +379,18 @@ export type SourceState = "ok" | "quiet" | "down" | "not_configured";
 
 /**
  * The header's rows, in the pinned display order
- * `camera_ingest, camera_system, (locks — PR-2), threat_mirror, site_mode, retention`.
- * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row.
+ * `camera_ingest, camera_system, (locks — PR-2), threat_mirror, site_mode, incidents, alerts, retention`.
+ * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `incidents`
+ * and `alerts` (WARP-2978) are the incident engine's and the notifier's.
  */
-export type SecurityHealthId = "camera_ingest" | "camera_system" | "threat_mirror" | "site_mode" | "retention";
+export type SecurityHealthId =
+  | "camera_ingest"
+  | "camera_system"
+  | "threat_mirror"
+  | "site_mode"
+  | "incidents"
+  | "alerts"
+  | "retention";
 
 export interface SecurityHealthRow {
   id: SecurityHealthId;
@@ -401,6 +417,13 @@ export function buildSecurityHealth(input: {
    * the header is exactly P2a's.
    */
   siteMode?: SecurityHealthRow;
+  /**
+   * WARP-2978 — the incident engine's row (every viewer) and the alerts row
+   * (owner/admin only: it names who is told), placed after `site_mode`. Each
+   * optional and placed on its own.
+   */
+  incidents?: SecurityHealthRow;
+  alerts?: SecurityHealthRow;
   now: Date;
 }): SecurityHealthRow[] {
   const { ingest, now } = input;
@@ -460,6 +483,8 @@ export function buildSecurityHealth(input: {
   });
 
   if (input.siteMode) rows.push(input.siteMode);
+  if (input.incidents) rows.push(input.incidents);
+  if (input.alerts) rows.push(input.alerts);
 
   const retentionRan = input.state?.retentionRanAt ?? null;
   rows.push({

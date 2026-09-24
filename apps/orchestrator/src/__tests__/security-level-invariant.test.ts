@@ -40,6 +40,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 import { createSecurityRouter } from "../routes/security.js";
 import { createSecurityZonesRouter } from "../routes/security-zones.js";
 import { createSecuritySiteRouter } from "../routes/security-site.js";
+import { createSecurityIncidentsRouter } from "../routes/security-incidents.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
@@ -94,6 +95,8 @@ const ROUTERS = [
   ["createSecurityRouter", createSecurityRouter(PRISMA, {})],
   ["createSecurityZonesRouter", createSecurityZonesRouter(PRISMA, {})],
   ["createSecuritySiteRouter", createSecuritySiteRouter(PRISMA, {})],
+  // WARP-2978 (P3) — mounted after the site router; its routes (16–22) join the TABLE with slice D.
+  ["createSecurityIncidentsRouter", createSecurityIncidentsRouter(PRISMA, {})],
 ] as const;
 
 function routesOf(name: string, router: unknown): RouteInfo[] {

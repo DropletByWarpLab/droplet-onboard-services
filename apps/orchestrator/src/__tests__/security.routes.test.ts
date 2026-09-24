@@ -47,6 +47,7 @@ import { createSecurityRouter } from "../routes/security.js";
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 import { MODULE_BY_ID } from "../modules/module-registry.js";
 import { _resetSecurityIngestHealthForTests, registerSecurityJobs } from "../services/security-events.service.js";
+import { _resetIncidentHealthForTests } from "../services/security-incidents.service.js";
 
 type Role = "owner" | "admin" | "family" | "guest";
 
@@ -54,6 +55,7 @@ const findMany = vi.fn();
 const grants = vi.fn();
 const stateRow = vi.fn();
 const zoneLinks = vi.fn();
+const triage = vi.fn();
 
 function app(role: Role | null = "owner") {
   const prisma = {
@@ -61,6 +63,7 @@ function app(role: Role | null = "owner") {
     cameraAccessGrant: { findMany: grants },
     securityIngestState: { findUnique: stateRow },
     securityZoneLink: { findMany: zoneLinks },
+    securityEventTriage: { findMany: triage },
   };
   const server = express();
   server.use((req: Request, _res: Response, next: NextFunction) => {
@@ -103,6 +106,8 @@ beforeEach(() => {
   grants.mockReset().mockResolvedValue([{ camera: { name: "front" } }]);
   stateRow.mockReset().mockResolvedValue(null);
   zoneLinks.mockReset().mockResolvedValue([]);
+  triage.mockReset().mockResolvedValue([]);
+  _resetIncidentHealthForTests();
   h.siteModeHealth.mockReset().mockImplementation(async () => h.siteMode);
   h.snapshot.clear();
   _resetSecurityIngestHealthForTests();
@@ -179,6 +184,12 @@ describe("GET /api/security/events — query and paging", () => {
     expect(res.body.events[0]).toMatchObject({ frigateEventId: "1711.5-abc", camera: "front", kind: "detection" });
   });
 
+  it("WARP-2978: every row carries `incident` — null for an event no incident holds", async () => {
+    findMany.mockResolvedValue([dbRow(1), dbRow(2)]);
+    const res = await request(app()).get("/api/security/events");
+    expect(res.body.events.map((e: { incident: unknown }) => e.incident)).toEqual([null, null]);
+  });
+
   it("a cursor narrows to rows strictly after it in feed order", async () => {
     await request(app()).get("/api/security/events?cursor=1790000000000.42");
     expect(findMany.mock.calls[0][0].where.AND).toContainEqual({
@@ -215,13 +226,24 @@ describe("GET /api/security/health", () => {
     const res = await request(app("owner")).get("/api/security/health");
     expect(res.status).toBe(200);
     // WARP-2977 P2b: `site_mode` joins the pinned order — deliberately red against P2a's list.
+    // WARP-2978: `incidents` and `alerts` join it after site_mode — deliberately red against P2b's.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "threat_mirror",
       "site_mode",
+      "incidents",
+      "alerts",
       "retention",
     ]);
+  });
+
+  it("WARP-2978: the incidents row says DOWN 'Not running' while the engine is not registered (§7's boot assertion)", async () => {
+    const res = await request(app("family")).get("/api/security/health");
+    expect(res.body.sources.find((s: { id: string }) => s.id === "incidents")).toMatchObject({
+      state: "down",
+      detail: "Not running",
+    });
   });
 
   it("the site_mode row is slice A's row, passed through verbatim (whatever its copy)", async () => {
@@ -233,10 +255,12 @@ describe("GET /api/security/health", () => {
 
   it("family does not get a threat row for a feed they cannot see, but does get the site mode", async () => {
     const res = await request(app("family")).get("/api/security/health");
+    // WARP-2978: nor the alerts row (it names who is told); the incidents row is everyone's.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "site_mode",
+      "incidents",
       "retention",
     ]);
   });

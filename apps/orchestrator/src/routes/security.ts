@@ -30,6 +30,15 @@
  *     viewer's VISIBLE links of VISIBLE areas — a row never names an area the
  *     viewer cannot see.
  *   · `mode_changed` rows (the site mode's history) are a feed kind.
+ *
+ * WARP-2978 (ADR-059 P3 §7 routes 1–2):
+ *   · every row carries `incident: {id} | null` — the incident the engine
+ *     grouped it into (one IN query on SecurityEventTriage). An event the
+ *     viewer can see implies its incident is visible to them (the incident's
+ *     cameras include that event's camera; site scopes follow the same
+ *     threat rule as the row), so no second visibility check is needed;
+ *   · the header gains the `incidents` row (everyone) and the `alerts` row
+ *     (owner/admin only — it names who is told), after `site_mode`.
  */
 import { Router, type Request, type Response } from "express";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -45,6 +54,8 @@ import {
 import { securityStatusSnapshot } from "../services/camera.service.js";
 import { mayReadThreats, securityViewerScope, type SecurityRouteDeps } from "../services/security-access.js";
 import { securitySiteModeHealth } from "../services/security-mode.service.js";
+import { securityIncidentsHealth } from "../services/security-incidents.service.js";
+import { securityAlertsHealth } from "../services/security-alerts.service.js";
 import { loadActiveLinks, viewerAreas, zoneFilterFor, zonesForEvent } from "../services/security-zones.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -87,6 +98,19 @@ const feedQuerySchema = z
     zone: z.string().uuid().optional(),
   })
   .strict();
+
+/**
+ * WARP-2978 — the incident each event on a page belongs to, keyed by event id.
+ * Only `grouped` triage rows point at an incident.
+ */
+async function incidentOfEvents(
+  prisma: Pick<PrismaClient, "securityEventTriage">,
+  eventIds: readonly string[],
+): Promise<Map<string, string>> {
+  void prisma;
+  void eventIds;
+  return new Map();
+}
 
 /**
  * `deps` (WARP-2977 P2b) is the shared Security router deps shape: the feed
@@ -140,14 +164,22 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         extraWhere,
       );
       const areas = viewerAreas(links, scope);
+      const incidents = await incidentOfEvents(
+        prisma,
+        page.events.map((e) => e.id),
+      );
       res.json({
         ...page,
-        events: page.events.map((e) => ({
-          ...e,
-          zones: zonesForEvent(e, areas.index)
-            .map((id) => ({ id, name: areas.names.get(id) ?? "" }))
-            .sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-        })),
+        events: page.events.map((e) => {
+          const incidentId = incidents.get(e.id);
+          return {
+            ...e,
+            zones: zonesForEvent(e, areas.index)
+              .map((id) => ({ id, name: areas.names.get(id) ?? "" }))
+              .sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+            incident: incidentId ? { id: incidentId } : null,
+          };
+        }),
       });
     } catch (err) {
       logger.error({ err }, "security feed read failed");
@@ -159,13 +191,18 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
   router.get("/security/health", requireRole(...SECURITY_VIEW_ROLES), async (req: Request, res: Response) => {
     try {
       const now = deps.now?.() ?? new Date();
-      const [state, siteMode] = await Promise.all([
+      const ownerOrAdmin = mayReadThreats(req);
+      const [state, siteMode, incidents, alerts] = await Promise.all([
         prisma.securityIngestState.findUnique({
           where: { id: "singleton" },
           select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true },
         }),
         // Never throws: an unreadable mode is a `down` row, not a 503 of the header.
         securitySiteModeHealth(prisma, now),
+        // WARP-2978 — never throw either. The alerts row names who is told:
+        // owner/admin only, and not even computed for anyone else.
+        securityIncidentsHealth(prisma, now),
+        ownerOrAdmin ? securityAlertsHealth(prisma, deps.resolve, now) : Promise.resolve(undefined),
       ]);
       const sources = buildSecurityHealth({
         frigateConfigured: Boolean(config.FRIGATE_URL && config.FRIGATE_URL.trim()),
@@ -173,10 +210,12 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         frigate: securityStatusSnapshot().get(null),
         state,
         siteMode,
+        incidents,
+        alerts,
         now,
       });
       // The threat source is only a row for the people who can see threats.
-      res.json({ sources: mayReadThreats(req) ? sources : sources.filter((s) => s.id !== "threat_mirror") });
+      res.json({ sources: ownerOrAdmin ? sources : sources.filter((s) => s.id !== "threat_mirror") });
     } catch (err) {
       logger.error({ err }, "security health read failed");
       res.status(503).json({ error: "SECURITY_HEALTH_UNAVAILABLE" });

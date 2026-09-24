@@ -84,7 +84,18 @@ export type SecurityAuditAction =
   | "zone.archive"
   | "zone.unarchive"
   /** refs `{zoneId, added: string[], removed: string[], reactivated: string[]}`. */
-  | "zone.links";
+  | "zone.links"
+  /**
+   * WARP-2978 (ADR-059 P3 §6.9). A person acknowledged / resolved an incident
+   * (in-tx, last). refs `{incidentId, ackId, severity, codes, state}` — never
+   * the resolve note (user text stays off the chain).
+   */
+  | "incident.acknowledge"
+  | "incident.resolve"
+  /** System actor, after the notices commit. refs `{incidentId, notices: [{userId, outcome, reason}]}`. */
+  | "incident.alerted"
+  /** A person chose who is told about alerts (in-tx, last). refs `{userId, state, eligibleReceivers}`. */
+  | "alert_routing.set";
 
 /** A JSON value exactly as the chain signs and stores it. */
 export type SecurityRefValue =

@@ -2901,6 +2901,8 @@ model User {
   brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
   // WARP-2251: the user's own morning briefings, one per box-local day.
   morningBriefings   MorningBriefing[]
+  // WARP-2978: whether this person is told about Security alerts (no row = not told, except owners).
+  securityAlertRecipient SecurityAlertRecipient?
 
   @@index([role])
   @@index([accessRoleId])
@@ -8541,9 +8543,11 @@ enum BriefingTrigger {
 // zones), from the RAW message — never behind camera-event-gate, which drops
 // concurrent and cooldown events for the toast/push surface.
 //
-// Columns land with their first writer: `incidentId` with P3,
-// `correlationKey` with ADR-055's AccessEvent. Zones resolve at read time
-// from SecurityZoneLink (camera, cameraZones, sourceRef); no zoneId column
+// Columns land with their first writer: `correlationKey` with ADR-055's
+// AccessEvent. Incident membership lives in SecurityEventTriage (WARP-2978):
+// SecurityEvent is append-only — a BEFORE UPDATE trigger refuses every
+// UPDATE — and never gains an incidentId. Zones resolve at read time from
+// SecurityZoneLink (camera, cameraZones, sourceRef); no zoneId column
 // (WARP-2977 P2b).
 
 /// Where a SecurityEvent came from. Explicit enum — never inferred from
@@ -8606,6 +8610,8 @@ model SecurityEvent {
   endedAt     DateTime?
   summary     String
   createdAt   DateTime            @default(now())
+  /// WARP-2978 — the engine's exactly-once marker and the incident membership.
+  triage      SecurityEventTriage?
 
   @@index([startedAt])
   @@index([camera, startedAt])
@@ -8674,6 +8680,8 @@ model SecurityZone {
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
   links       SecurityZoneLink[]
+  /// WARP-2978 — incidents scoped to this area (Restrict: areas are archived, never deleted).
+  incidents   SecurityIncident[]
 
   @@index([state])
 }
@@ -8784,4 +8792,287 @@ model SecurityModeState {
   /// Bumped by every mode write AND by every hours/exception write (invalidates a tick that read old hours).
   version     Int                @default(0)
   updatedAt   DateTime           @updatedAt
+}
+
+// ── WARP-2978 (ADR-059 §3.5, §3.7): incidents, reason codes, alert routing, acknowledgement ──
+//
+// Membership is SecurityEventTriage (one row per SecurityEvent, the exactly-once marker);
+// SecurityEvent stays append-only (a BEFORE UPDATE trigger refuses any update).
+// Values land with their first writer: out_of_place / unusual_volume / long_dwell and the verdict
+// columns with P5, camera_offline_during_activity with P4, the door codes with ADR-055.
+//
+// Every shape rule Prisma cannot express is a hand-written CHECK in
+// 20260924050000_warp_2978_security_incidents — explicit enums, never IS NULL as state.
+
+enum SecurityIncidentScope {
+  /// One area. zoneId + zoneName + zoneKind are set (CHECK).
+  area
+  /// A camera no active area covered when its first event was triaged. scopeCamera is set.
+  camera
+  /// Mirrored network / sign-in warnings. Owner/admin only, like the rows they come from.
+  site_threat
+  /// The camera system as a whole (source_offline / source_online, camera NULL).
+  site_camera_system
+}
+
+/// Whether the incident still accepts events. Explicit — never inferred from closedAt.
+enum SecurityIncidentGrouping {
+  collecting
+  closed
+}
+
+enum SecurityIncidentState {
+  /// Ordinary activity: no reason code. Nothing to acknowledge. Iff severity = info (CHECK).
+  no_action
+  open
+  acknowledged
+  resolved
+}
+
+enum SecurityIncidentNotify {
+  /// severity < alert
+  not_needed
+  /// reached alert; the notifier has not written its notices yet
+  pending
+  /// notices written (per-recipient outcomes on SecurityIncidentNotice)
+  done
+  /// the security module was off box-wide when it would have notified. Terminal.
+  module_off
+  /// the notifier failed SECURITY_NOTIFY_MAX_ATTEMPTS times. Terminal; shown on the alerts health row.
+  failed
+}
+
+enum SecurityIncidentEvents {
+  kept
+  partly_removed
+  removed
+}
+
+enum SecurityReasonCode {
+  after_hours_presence
+  camera_offline
+  threat_signal
+}
+
+enum SecurityTriageOutcome {
+  /// member of incidentId
+  grouped
+  /// detection_low — kept in the store, never grouped
+  low
+  /// never grouped: mode_changed, a lone camera_online/source_online, a kind P3 does not group
+  context
+  /// the triage transaction threw; `error` says why. Never retried automatically.
+  failed
+}
+
+enum SecurityIncidentAckAction {
+  acknowledge
+  resolve
+}
+
+enum SecurityAlertRecipientState {
+  receiving
+  not_receiving
+}
+
+enum SecurityAlertRecipientOrigin {
+  /// created lazily for an owner (the default recipient)
+  owner_default
+  /// created by a person in /security/settings
+  chosen
+}
+
+enum SecurityNoticeReason {
+  routed
+  /// no routed recipient could be told; the owner was told instead
+  fallback_owner
+}
+
+enum SecurityNoticeOutcome {
+  /// NotificationLog row written, transport not yet stamped
+  queued
+  sent
+  not_sent
+  skipped_no_access
+  skipped_not_visible
+  skipped_capped
+  skipped_no_address
+}
+
+model SecurityIncident {
+  id               String                   @id @default(uuid())
+  scope            SecurityIncidentScope
+  zoneId           String?
+  zone             SecurityZone?            @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  /// Snapshots when the incident opened (brief §3.4 as built): renames, kind changes and link
+  /// changes after this never move the incident.
+  zoneName         String?                  @db.VarChar(60)
+  zoneKind         SecurityZoneKind?
+  /// The area's ACTIVE link ids at open.
+  zoneLinkIds      String[]
+  scopeCamera      String?                  @db.VarChar(64)
+  /// The site mode at the first event's start. An event in another mode never joins.
+  openedInMode     SecurityMode
+  grouping         SecurityIncidentGrouping @default(collecting)
+  state            SecurityIncidentState    @default(no_action)
+  /// max over reasons; info when none. Never lowered.
+  severity         SecuritySeverity         @default(info)
+  /// distinct codes, sorted; mirrors SecurityIncidentReason (maintained in the same tx)
+  reasonCodes      SecurityReasonCode[]
+  notifyState      SecurityIncidentNotify   @default(not_needed)
+  notifyAttempts   Int                      @default(0) @db.SmallInt
+  rulesetVersion   Int                      @db.SmallInt
+  /// Event-time span: min startedAt, max(endedAt ?? startedAt) over members.
+  firstActivityAt  DateTime
+  lastActivityAt   DateTime
+  /// createdAt of the newest member — the sealing clock's arrival half.
+  lastArrivalAt    DateTime
+  eventCount       Int
+  /// {"<camera>": {"<label>": n, "_status": n}, "": {"_threat": n, "_status": n}} — DS-005 counts that
+  /// survive the 30-day event trim. Shape validated in code.
+  countsByCamera   Json
+  /// distinct member cameras — DS-005 visibility after the trim
+  cameras          String[]
+  eventsKept       SecurityIncidentEvents   @default(kept)
+  openedAt         DateTime                 @default(now())
+  closedAt         DateTime?
+  alertedAt        DateTime?
+  stateChangedAt   DateTime                 @default(now())
+  /// User.id (no FK: users are deletable; the ack rows and the chain are the record)
+  stateChangedById String?
+  resolvedAt       DateTime?
+  resolvedById     String?
+  /// CAS for the engine and for people. Bumped by every write.
+  version          Int                      @default(0)
+  updatedAt        DateTime                 @updatedAt
+
+  reasons SecurityIncidentReason[]
+  members SecurityEventTriage[]
+  acks    SecurityIncidentAck[]
+  notices SecurityIncidentNotice[]
+
+  @@index([grouping, scope, zoneId, scopeCamera])
+  @@index([state, lastActivityAt])
+  @@index([lastActivityAt])
+  @@index([zoneId, lastActivityAt])
+  @@index([notifyState])
+}
+
+model SecurityIncidentReason {
+  id              String              @id @default(uuid())
+  incidentId      String
+  incident        SecurityIncident    @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  code            SecurityReasonCode
+  severity        SecuritySeverity
+  rulesetVersion  Int                 @db.SmallInt
+  /// The SecurityEvent that satisfied the rule. No FK: events are trimmed at 30 d, reasons live
+  /// with the incident.
+  evidenceEventId BigInt
+  /// Snapshots of the evidence: DS-005 per viewer/recipient, and the page after the trim.
+  /// NULL = site-wide (a threat, the camera system).
+  evidenceCamera  String?             @db.VarChar(64)
+  evidenceSource  SecurityEventSource
+  evidenceKind    SecurityEventKind
+  evidenceLabel   String?             @db.VarChar(64)
+  evidenceAt      DateTime
+  evidenceSummary String              @db.VarChar(500)
+  /// The rule's numbers, per code (validated in code): after_hours_presence {mode, modeSource,
+  /// nonOpenAt, zoneKind}; camera_offline {offlineForSec|null, backAt|null}; threat_signal {activityId, kind}.
+  detail          Json
+  createdAt       DateTime            @default(now())
+
+  @@unique([incidentId, code, evidenceEventId])
+  @@index([incidentId])
+}
+
+/// One row per SecurityEvent the engine has looked at. The exactly-once marker AND the membership.
+model SecurityEventTriage {
+  eventId        BigInt                @id
+  event          SecurityEvent         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  outcome        SecurityTriageOutcome
+  incidentId     String?
+  /// Restrict: an incident is never deleted while a member still points at it (retention deletes
+  /// events first, and only memberless incidents after).
+  incident       SecurityIncident?     @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+  /// Area scope: the incident area's links that matched this event at triage.
+  matchedLinkIds String[]
+  /// Other active areas the event also matched at triage (display "also in Till").
+  alsoZoneIds    String[]
+  rulesetVersion Int                   @db.SmallInt
+  error          String?               @db.VarChar(500)
+  triagedAt      DateTime              @default(now())
+
+  @@index([incidentId])
+  @@index([outcome, triagedAt])
+}
+
+model SecurityIncidentAck {
+  id                String                    @id @default(uuid())
+  incidentId        String
+  incident          SecurityIncident          @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  action            SecurityIncidentAckAction
+  byUserId          String
+  /// User.displayName at the time, display-safe.
+  byName            String                    @db.VarChar(120)
+  at                DateTime                  @default(now())
+  /// The sign-in's id from the signed token (JWT `sid`). NULL when the token carried none.
+  sessionId         String?                   @db.VarChar(64)
+  /// Whether authMiddleware's live-session check actually ran on the request that acked (WARP-2804
+  /// `req.sessionChecked`). Explicit — never inferred from sessionId. True only with a sessionId (CHECK).
+  sessionChecked    Boolean                   @default(false)
+  /// What the device SAID it was (lib/client-descriptor.ts). Reported, never proof.
+  client            String?                   @db.VarChar(120)
+  /// The actor's own alert notification for THIS incident, verified via SecurityIncidentNotice.
+  /// Stored only when verified.
+  viaNotificationId String?                   @db.VarChar(64)
+  /// resolve only (CHECK)
+  note              String                    @default("") @db.VarChar(280)
+
+  @@index([incidentId, at])
+}
+
+model SecurityIncidentNotice {
+  id                String                @id @default(uuid())
+  incidentId        String
+  incident          SecurityIncident      @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  /// Recipient User.id. No FK: the notice is history.
+  userId            String
+  /// The address used (NotificationLog.username, WARP-2911).
+  username          String                @db.VarChar(120)
+  reason            SecurityNoticeReason
+  outcome           SecurityNoticeOutcome
+  /// Set iff a NotificationLog row was written. No FK: NotificationLog is purged at 90 d.
+  notificationLogId String?               @db.VarChar(64)
+  /// Snapshots of the transport outcome, so "who was told, how" survives the 90-day log purge.
+  channels          String                @default("") @db.VarChar(32)
+  pushOutcome       PushOutcome?
+  createdAt         DateTime              @default(now())
+  settledAt         DateTime?
+
+  @@unique([incidentId, userId])
+  @@index([userId, createdAt])
+  @@index([outcome, createdAt])
+}
+
+model SecurityAlertRecipient {
+  userId  String                       @id
+  user    User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  state   SecurityAlertRecipientState
+  origin  SecurityAlertRecipientOrigin
+  version Int                          @default(0)
+  /// NULL until a person changes it (owner_default rows are created by the system).
+  setById String?
+  setAt   DateTime                     @default(now())
+}
+
+/// Engine bookkeeping, one row. Every SecurityEvent id ≤ triageFloor is triaged or will never
+/// exist; ids ≤ startedAtId predate the engine and are never triaged.
+model SecurityIncidentEngineState {
+  id               String   @id @default("singleton")
+  startedAtId      BigInt
+  startedAt        DateTime @default(now())
+  triageFloor      BigInt
+  floorCandidate   BigInt
+  floorCandidateAt DateTime
+  updatedAt        DateTime @updatedAt
 }

@@ -390,6 +390,32 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     const rows = buildSecurityHealth({ ...base, frigateConfigured: false, ingest: ingest(), siteMode });
     expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "site_mode", "retention"]);
   });
+
+  // WARP-2978 (ADR-059 P3 §6.11) — the pinned order grows:
+  // camera_ingest, camera_system, (locks), threat_mirror, site_mode, incidents, alerts, retention.
+  it("WARP-2978: incidents and alerts sit after site_mode and before retention, verbatim", () => {
+    const siteMode = { id: "site_mode" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const incidents = { id: "incidents" as const, state: "down" as const, detail: "Not running", lastSeenAt: null };
+    const alerts = { id: "alerts" as const, state: "ok" as const, detail: "Alerts go to Stefan", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode, incidents, alerts });
+    expect(rows.map((r) => r.id)).toEqual([
+      "camera_ingest",
+      "camera_system",
+      "threat_mirror",
+      "site_mode",
+      "incidents",
+      "alerts",
+      "retention",
+    ]);
+    expect(row(rows, "incidents")).toBe(incidents);
+    expect(row(rows, "alerts")).toBe(alerts);
+  });
+
+  it("WARP-2978: each of the two rows is placed on its own (alerts is owner/admin only and may be absent)", () => {
+    const incidents = { id: "incidents" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, frigateConfigured: false, ingest: ingest(), incidents });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "incidents", "retention"]);
+  });
 });
 
 describe("listSecurityEvents — extraWhere narrows after the camera clause (WARP-2977 P2b)", () => {
