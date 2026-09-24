@@ -302,6 +302,65 @@ def status(workspace_id: str) -> dict[str, Any]:
     return {"id": workspace_id, "branch": branch, "head": head, "dirty": dirty, "tags": tags[:20]}
 
 
+# ── proposals → extensions (WARP-2900 H2) ───────────────────────────────────
+#
+# The promote route reads a proposal FROM THE BARE REPOSITORY (the truth),
+# never from the checkout a run is still editing: the commit a tag points at,
+# its tree, and the manifest exactly as committed. Install exports that same
+# commit, and refuses unless its tree is the tree the signed statement names.
+
+PROPOSAL_TAG = re.compile(r"^proposal/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
+MANIFEST_PATH = "extension-manifest.json"
+MAX_MANIFEST_BYTES = 256 * 1024
+
+
+def read_at_tag(workspace_id: str, tag: str) -> dict[str, Any]:
+    """{commit, tree, manifest: bytes | None} for `tag` in the bare repo.
+    `manifest` is None when the commit carries no extension-manifest.json
+    (a connector draft is not promotable)."""
+    bare = bare_path(workspace_id)
+    if not bare.is_dir():
+        raise StoreError(404, f"no workspace {workspace_id}")
+    if not PROPOSAL_TAG.match(tag or ""):
+        raise StoreError(400, "tag must be proposal/<semver>")
+    cp = git(["rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"], bare)
+    if cp.returncode != 0:
+        raise StoreError(404, f"no tag {tag} in workspace {workspace_id}")
+    commit = cp.stdout.strip()
+    tree = must(git(["rev-parse", f"{commit}^{{tree}}"], bare), "rev-parse tree").stdout.strip()
+    shown = git(["cat-file", "blob", f"{commit}:{MANIFEST_PATH}"], bare, binary=True)
+    manifest: bytes | None = shown.stdout if shown.returncode == 0 else None
+    if manifest is not None and len(manifest) > MAX_MANIFEST_BYTES:
+        raise StoreError(413, f"{MANIFEST_PATH} exceeds {MAX_MANIFEST_BYTES} bytes")
+    return {"commit": commit, "tree": tree, "manifest": manifest}
+
+
+def export_commit(workspace_id: str, commit: str, tree: str, dest: Path) -> None:
+    """Extract exactly `commit` into `dest` (which must not exist), after
+    checking that its tree is `tree`. Argv-only git, the store's GIT_ENV."""
+    bare = bare_path(workspace_id)
+    if not bare.is_dir():
+        raise StoreError(404, f"no workspace {workspace_id}")
+    if not _SHA.match(commit or "") or not _SHA.match(tree or ""):
+        raise StoreError(400, "commit and tree must be 40-hex object ids")
+    cp = git(["rev-parse", "-q", "--verify", f"{commit}^{{tree}}"], bare)
+    if cp.returncode != 0:
+        raise StoreError(404, f"no commit {commit} in workspace {workspace_id}")
+    actual = cp.stdout.strip()
+    if actual != tree:
+        raise StoreError(409, f"commit {commit[:12]} has tree {actual[:12]}, the signed statement names {tree[:12]}")
+    archive = git(["archive", "--format=tar", commit], bare, binary=True, timeout=120)
+    if archive.returncode != 0:
+        raise StoreError(500, "could not export the commit")
+    dest.mkdir(parents=True, exist_ok=False)
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
+        tar.extractall(dest, filter="data")
+
+
+# ── connector drafts: export + readback (WARP-2899) ────────────────────────
+
+
 def _bare_or_404(workspace_id: str) -> Path:
     bare = bare_path(workspace_id)
     if not bare.is_dir():

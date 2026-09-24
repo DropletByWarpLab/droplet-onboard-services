@@ -143,6 +143,15 @@ describe("/admin — Overview", () => {
     await waitFor(() => expect(screen.getByText("Healthy")).toBeInTheDocument());
     expect(screen.getByText("2 / 2")).toBeInTheDocument();
   });
+
+  it("links the Extensions area (WARP-2900)", async () => {
+    // A new console page nothing links to is reachable only by typing its
+    // URL — the defect this page was built to end.
+    render(<AdminOverviewPage />);
+    await waitFor(() => expect(screen.getByText("Healthy")).toBeInTheDocument());
+    const link = screen.getByText("Extensions").closest("a");
+    expect(link?.getAttribute("href")).toBe("/admin/extensions");
+  });
 });
 
 describe("/admin — nav entry", () => {

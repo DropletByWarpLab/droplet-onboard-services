@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { getRequestId } from "../lib/request-context.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { markModelListChanged, modelListGeneration } from "./model-list-generation.js";
 import type {
   ChatRequest,
   ChatStreamChunk,
@@ -93,17 +94,21 @@ let _modelsCache: { at: number; models: ModelInfo[] } | null = null;
 const MODELS_CACHE_TTL_MS = 30_000;
 
 /**
- * Resolve one model's info from the TTL-cached model list, refreshing the
- * cache when stale. Returns `undefined` when the model is unknown OR the
- * gateway is unreachable and the cache was never populated — callers must
- * treat that as "unknown" and degrade, never block the turn.
+ * WARP-3047 — the model list behind every cached lookup in this module,
+ * refreshed when stale. `degradedProviders` is non-empty only for a one-off
+ * PARTIAL list served because no complete snapshot exists yet; a cached or
+ * stale-but-complete snapshot always reports `[]`. Null when the gateway is
+ * unreachable and the cache was never populated.
  */
-async function findModelInfo(
-  model: string,
-  now: number,
-): Promise<ModelInfo | undefined> {
+export interface CachedModelListing {
+  models: ModelInfo[];
+  degradedProviders: string[];
+}
+
+async function modelListing(now: number): Promise<CachedModelListing | null> {
   if (!_modelsCache || now - _modelsCache.at > MODELS_CACHE_TTL_MS) {
     try {
+      const generation = modelListGeneration();
       const res = await listModels();
       if (res.degraded_providers?.length) {
         // WARP-1289: a degraded fan-out (some provider raised while the
@@ -114,17 +119,84 @@ async function findModelInfo(
         // already hold a (stale but complete) snapshot — then serve stale,
         // same posture as the catch path below.
         if (!_modelsCache) {
-          return res.models.find((m) => m.id === model);
+          return { models: res.models, degradedProviders: res.degraded_providers };
         }
-      } else {
+      } else if (generation === modelListGeneration()) {
+        // WARP-3046: a download finished while this read was in flight, so
+        // its list may predate the new model — never cache it (see
+        // model-list-generation.ts). The lookup below then reads "unknown"
+        // once, the same degrade as an unreachable gateway.
         _modelsCache = { at: now, models: res.models };
       }
     } catch {
-      if (!_modelsCache) return undefined; // never populated → unknown
+      if (!_modelsCache) return null; // never populated → unknown
       // else: serve stale rather than failing the turn
     }
   }
-  return _modelsCache?.models.find((m) => m.id === model);
+  return _modelsCache ? { models: _modelsCache.models, degradedProviders: [] } : null;
+}
+
+/**
+ * Resolve one model's info from the TTL-cached model list, refreshing the
+ * cache when stale. Returns `undefined` when the model is unknown OR the
+ * gateway is unreachable and the cache was never populated — callers must
+ * treat that as "unknown" and degrade, never block the turn.
+ */
+async function findModelInfo(
+  model: string,
+  now: number,
+): Promise<ModelInfo | undefined> {
+  return (await modelListing(now))?.models.find((m) => m.id === model);
+}
+
+/**
+ * WARP-3047 — the installed-model list for `resolveActiveModel`, from the
+ * SAME 30 s snapshot vision routing uses (no second cache): the resolver
+ * runs inside chat turns, tool back-ends and pre-auth warm triggers, so it
+ * must not cost a gateway round-trip each time. The caller decides whether
+ * `degradedProviders` makes the list untrustworthy for its purpose.
+ */
+export async function getCachedModelListing(
+  now: number = Date.now(),
+): Promise<CachedModelListing | null> {
+  return modelListing(now);
+}
+
+/**
+ * WARP-3046 — the installed model set just changed (a download finished):
+ * make every model listing re-read it now instead of after its TTL.
+ *
+ * Two caches, both invalidated here: the gateway's ModelRegistry (60 s, via
+ * its service-token-gated POST /ai/models/refresh) and this module's own
+ * `_modelsCache` (30 s), which per-turn vision routing reads — without the
+ * local clear a just-installed vision model reads as "unknown capabilities"
+ * for its first turns. The local cache is dropped AFTER the gateway call, and
+ * dropped even when that call fails: the local list is stale either way.
+ *
+ * Dropping a cache does not stop a read that was already in flight from
+ * writing the pre-pull list back into it — the gateway hands a fan-out begun
+ * before its invalidation to the callers already awaiting it. So this also
+ * bumps the model-list generation, in the one slot that closes that window:
+ * after the gateway dropped its listing, before the caller busts its own
+ * caches (model-list-generation.ts has the full argument). Every writer of a
+ * model-list cache skips the write when the generation moved under its read.
+ * Throws on a gateway failure so the caller can log it; it never has to
+ * fail the pull that triggered it.
+ */
+export async function refreshModels(): Promise<void> {
+  try {
+    const res = await internalFetch(`${BASE_URL}/ai/models/refresh`, {
+      method: "POST",
+      headers: authHeaders(),
+      signal: timeout(),
+    });
+    if (!res.ok) throw new Error(`AI Gateway error: ${res.status}`);
+  } catch (err) {
+    throw wrapTimeout(err, "refreshModels", DEFAULT_GATEWAY_TIMEOUT_MS);
+  } finally {
+    _modelsCache = null;
+    markModelListChanged();
+  }
 }
 
 export async function getModelCapabilities(

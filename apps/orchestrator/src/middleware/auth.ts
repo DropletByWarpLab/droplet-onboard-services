@@ -9,6 +9,8 @@ import { isUserDenied } from "../services/auth-denylist.service.js";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import { EXTENSION_TOKEN_PREFIX } from "../services/extension-token.js";
+import { resolveExtensionPrincipal } from "../services/extension-principal.js";
 
 const logger = createLogger("auth");
 
@@ -40,6 +42,13 @@ export interface AuthUser {
    * argument in services/tool-access.service.ts.
    */
   accessRoleId?: string | null;
+  /**
+   * WARP-2900 — set only on an extension's call-back principal
+   * (`_service:ext:<slug>`): the slug of the promoted extension whose `dxt_`
+   * bearer authenticated the request. `extension-principal-guard.ts`
+   * confines such a principal to its own two routes.
+   */
+  extensionId?: string;
 }
 
 declare global {
@@ -206,6 +215,14 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : gitBasicToken;
   const token = cookieToken || headerToken;
 
+  // WARP-2900 — an extension's bearer is a header credential and nothing
+  // else. In a cookie it is refused outright, before any other token path
+  // sees it.
+  if (cookieToken?.startsWith(EXTENSION_TOKEN_PREFIX)) {
+    res.status(401).json({ error: "Missing or invalid authentication" });
+    return;
+  }
+
   if (!token) {
     if (req.path.startsWith("/api/git/")) {
       // The challenge the git CLI needs before it will ask for credentials.
@@ -229,6 +246,31 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       next();
       return;
     }
+  }
+
+  // WARP-2900 (ADR-056 slice H3) — a promoted extension calling back. Its
+  // `dxt_` bearer is minted per process start and stored only as a sha256 on
+  // its Extension row, so the lookup is by that hash (a unique column; the
+  // plaintext never reaches the database). It resolves to the
+  // `_service:ext:<slug>` principal, which extension-principal-guard.ts
+  // confines to the extension's own routes. A `dxt_` bearer that does not
+  // resolve is a 401 HERE: it never falls through to the JWT path. The
+  // lookup reads its own Prisma binding (services/extension-principal.ts).
+  if (headerToken?.startsWith(EXTENSION_TOKEN_PREFIX)) {
+    void resolveExtensionPrincipal(headerToken)
+      .then((principal) => {
+        if (!principal) {
+          res.status(401).json({ error: "Missing or invalid authentication" });
+          return;
+        }
+        req.user = principal;
+        next();
+      })
+      .catch((err) => {
+        logger.error({ err }, "Extension bearer lookup failed");
+        res.status(500).json({ error: "Authentication service error" });
+      });
+    return;
   }
 
   // Try JWT first — self-verifying signature, no network call. WARP-247:
@@ -345,6 +387,8 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
   if (!token) return null;
+  // WARP-2900 — an extension never opens a WebSocket.
+  if (token.startsWith(EXTENSION_TOKEN_PREFIX)) return null;
 
   // Try JWT first. WARP-247: a sid-carrying token must also present a live
   // session record — a WS upgrade is user activity, so the default sliding

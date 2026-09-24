@@ -420,7 +420,11 @@ reach. `runAfter` on the enqueued run is the fire time. An unparseable RRULE
 disables the schedule with a `system` row. No second clock. A due schedule whose owner row is gone
 is disabled inside the fire transaction with a `system` activity row
 (`reason: user_missing`) instead of enqueuing a run that could only fail —
-`AgentRunSchedule.userId` carries no FK (WARP-2744 item 4).
+`AgentRunSchedule.userId` carries no FK (WARP-2744 item 4). A schedule
+created without a `model` is stored `followsActiveModel` and runs on the
+box's active model as resolved at each fire (tools-capable), so switching
+the model on the Models page reaches it; an explicit `model` stays pinned
+(WARP-3047).
 
 **Completion** — a terminal status notifies the owner over the same
 `droplet/notifications/<username>` topic the park uses, with the result

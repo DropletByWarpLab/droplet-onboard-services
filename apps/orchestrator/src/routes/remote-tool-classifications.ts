@@ -36,6 +36,9 @@ const classifySchema = z.object({
   requiresWrite: z.boolean(),
   requiresConfirmation: z.boolean(),
   denied: z.boolean(),
+  // WARP-2900 — the input-schema hash of the tool the owner was shown
+  // (sha256 hex, from the GET). A reset in between → 409 STALE_REVIEW.
+  inputSchemaHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 
 /** Same bounds the multiplexer applies to what it will namespace. */
@@ -89,14 +92,17 @@ export function createRemoteToolClassificationsRouter(
           return;
         }
         const reviewedBy = req.user?.username ?? "";
+        const { inputSchemaHash, ...decision } = parsed.data;
         const result = await classifyRemoteTool(db, {
           serverId,
           toolName,
-          ...parsed.data,
+          ...decision,
           reviewedBy,
+          ...(inputSchemaHash !== undefined ? { expectedInputSchemaHash: inputSchemaHash } : {}),
         });
         if (!result.ok) {
-          res.status(result.code === "NOT_FOUND" ? 404 : 400).json({ error: result.code, message: result.message });
+          const status = result.code === "NOT_FOUND" ? 404 : result.code === "STALE_REVIEW" ? 409 : 400;
+          res.status(status).json({ error: result.code, message: result.message });
           return;
         }
         // The policy reads the cache; the decision is live from this request on.

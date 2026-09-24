@@ -36,6 +36,11 @@ import {
   stopMcp,
 } from "./services/mcp-client.singleton.js";
 import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
+import {
+  createExtensionLifecycle,
+  EXTENSION_RECONCILE_LOCK_KEY,
+} from "./services/extension-lifecycle.service.js";
+import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
@@ -137,6 +142,7 @@ import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-
 import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
+import { createExtensionAttacher } from "./services/extension-attach.service.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
@@ -191,6 +197,7 @@ import {
   migrateBrainMemoryDirectoryLayout,
 } from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { initAnalytics, analytics } from "./services/analytics/index.js";
 import { forwardHealthSnapshot } from "./services/analytics/service-health.js";
 import { createLogger } from "./lib/logger.js";
@@ -457,8 +464,9 @@ async function main() {
   // dashboard ~20 min after first boot without any manual `ollama pull`.
   // Non-blocking — the orchestrator is fully serving requests while the
   // model downloads in the background. See model-readiness.service.ts.
+  // WARP-3047: the boot warm is of the ACTIVE model, not LLM_MODEL.
   try {
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(() => resolveActiveModel(prisma));
   } catch (err) {
     logger.warn(
       "Model readiness check failed: %s (orchestrator continues serving requests)",
@@ -509,6 +517,40 @@ async function main() {
   // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
   // without dialling anything at all.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
+
+  // WARP-2900 (ADR-056 slice H2) — the extension reconciler, both ways. A
+  // sandbox restart forgets every extension process and a dead one is never
+  // restarted in place; each tick reinstalls any `installed`/`live`
+  // extension the sandbox no longer runs — re-verifying its signed statement
+  // and rotating its bearer first (install()), a bounded number of times for
+  // a process that keeps dying — and stops any process the sandbox runs for
+  // a row that must not run (review #2323). Same clock, its own lock key
+  // (the sandbox is one shared resource), never a `while True`. No Extension
+  // rows → the tick dials nothing, so a box with
+  // SANDBOX_PROCESS_SUPERVISION=0 (the shipped default) never calls out.
+  // H3: the same tick re-attaches every running extension this process has
+  // not attached (after an orchestrator restart the sandbox's processes
+  // outlive the in-memory attachment), and each restarted child gets the
+  // call-back URL.
+  const extensionSandbox = createExtensionSandboxClient();
+  const extensionIdentity = createDeviceIdentityClient();
+  const extensionLifecycle = createExtensionLifecycle({
+    prisma,
+    sandbox: extensionSandbox,
+    identity: extensionIdentity,
+    attach: createExtensionAttacher({ prisma, mux: mcpClient, sandbox: extensionSandbox, identity: extensionIdentity }),
+    orchestratorUrl: config.EXTENSION_CALLBACK_URL,
+  });
+  void extensionLifecycle.refreshInstalledIds().catch((err) => {
+    logger.warn({ err }, "extension installed-id refresh failed at boot");
+  });
+  cronRuntime.scheduleInterval(
+    config.EXTENSION_RECONCILE_INTERVAL_MS,
+    async () => {
+      await extensionLifecycle.reconcile();
+    },
+    { lockKey: EXTENSION_RECONCILE_LOCK_KEY },
+  );
 
   // Router-dependent schedulers only run when routing supervision is active.
   // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
@@ -692,10 +734,10 @@ async function main() {
     await seedBrainPasses(prisma);
 
     // Same resolution the agent-run routes use. Read at CALL time, not once at
-    // boot: `DEFAULT_MODEL` is what the box is configured with now, and a
-    // process that started before the operator set one should pick it up.
-    const resolveBrainModel = () =>
-      (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+    // boot: WARP-3047 — the pass follows the box's ACTIVE model, so a switch
+    // on the Models page moves the hourly pass too instead of it reloading
+    // the env model next to the active one.
+    const resolveBrainModel = async () => (await resolveActiveModel(prisma)) ?? "";
 
     // WARP-2850 — the pass BODIES, named once. The interval tick, the boot run
     // and the operator's "check now" are three callers of the same function
@@ -735,7 +777,7 @@ async function main() {
       // box has already recorded and the route has already reported started.
       [CORPUS_PASS_KEY]: async () => {
         const outcome = await runCorpusPass(
-          { prisma, chat: aiGateway.chat, model: resolveBrainModel() },
+          { prisma, chat: aiGateway.chat, model: await resolveBrainModel() },
           { limit: config.brain.corpusUnitsPerRun },
         );
         if (outcome.errors.length > 0) {
@@ -750,8 +792,8 @@ async function main() {
       // Corpus only. The detector pass is bounded indexed SQL and re-running
       // it costs the box nothing anyone would notice.
       manualMinIntervalMs: { [CORPUS_PASS_KEY]: config.brain.manualMinIntervalMs },
-      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and `DEFAULT_MODEL` are
-      // independent env vars with no cross-validation, so "brain on, no model
+      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and the active model are
+      // independent with no cross-validation, so "brain on, no model
       // configured" is a reachable box. On one of those, a check living inside
       // the runner would run only AFTER `claimPass` had stamped
       // `runState: "running"` and `lastRunAt` — the operator gets a 202 and
@@ -780,7 +822,7 @@ async function main() {
           (await isBrainEnabled(prisma)) ? null : "disabled",
         [CORPUS_PASS_KEY]: async () => {
           if (!(await isBrainEnabled(prisma))) return "disabled";
-          return resolveBrainModel() ? null : "no_model";
+          return (await resolveBrainModel()) ? null : "no_model";
         },
       },
     });
