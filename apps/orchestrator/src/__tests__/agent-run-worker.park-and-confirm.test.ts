@@ -894,6 +894,44 @@ describe("agent runs — an approved park runs the STORED call; the model never 
     expect(lost[0]).toMatchObject({ tool: TOOL, args: PARKED, confirmation: "confirmed" });
   });
 
+  it("a consumed denial is consumed once: a crash right after the completion write resumes past it, not through it again", async () => {
+    let clock = new Date("2026-09-04T03:00:00Z");
+    const now = () => clock;
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model, { now });
+    expect(await decide(db, id, "denied", clock)).toMatchObject({ ok: true });
+
+    // The completion write lands; the DB dies on the very next write.
+    let landed = false;
+    let dead = false;
+    db.setFailOn((op, args) => {
+      if (dead) return true;
+      if (op !== "updateMany") return false;
+      if (landed) {
+        dead = true;
+        return true;
+      }
+      const data = (args as { data?: { messages?: unknown; trace?: AgentRunTraceEntry[] } }).data;
+      if (data?.messages !== undefined && data.trace?.some((e) => e.confirmation === "denied" && e.completedAt)) landed = true;
+      return false;
+    });
+    await resume(db, mcp, model, { now });
+    db.setFailOn(null);
+    expect(db.row(id).status).toBe("running");
+
+    clock = new Date(clock.getTime() + 61_000);
+    expect((await resume(db, mcp, model, { workerId: "C", now })).reclaimed).toBe(1);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("Not saved, as you asked.");
+    expect(mcp.executed).toHaveLength(0);
+    expect((done.trace as AgentRunTraceEntry[]).filter((e) => e.confirmation === "denied")).toHaveLength(1);
+    const denials = (done.messages as Msg[]).filter((m) => m.role === "tool" && String(m.content).includes("CONFIRMATION_DENIED"));
+    expect(denials).toHaveLength(1);
+    expectPendingCleared(done);
+  });
+
   it("the approval does not outlive the principal's reach: narrowed between approval and claim, the stored call is not run", async () => {
     const writes = vi.fn(async () => ({
       scope: { domains: new Set(["memory"]), writeDomains: new Set(["memory"]), locks: false },
