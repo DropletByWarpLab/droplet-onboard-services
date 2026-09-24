@@ -18,7 +18,13 @@ vi.mock("./camera-access.service.js", () => ({
   visibleCameraNames: h.visible,
 }));
 
-import { mayListArchivedZones, mayReadThreats, securityLevelFor, securityViewerScope } from "./security-access.js";
+import {
+  mayListArchivedZones,
+  mayReadLocksFor,
+  mayReadThreats,
+  securityLevelFor,
+  securityViewerScope,
+} from "./security-access.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import type { EffectiveAccessResult } from "./effective-access.service.js";
 
@@ -45,22 +51,82 @@ describe("mayReadThreats", () => {
 });
 
 describe("securityViewerScope", () => {
-  it("passes the request's principal to the camera grant and composes the threat gate", async () => {
+  /** No local User row: nothing narrows, so the role decides (the AUTH_ENABLED=false session). */
+  const unresolved = vi.fn(async () => null);
+
+  it("passes the request's principal to the camera grant and composes the threat and lock gates", async () => {
     const granted = new Set(["front"]);
     h.visible.mockResolvedValue(granted);
-    const scope = await securityViewerScope({} as never, req("family"));
-    expect(scope).toEqual({ visibleCameras: granted, mayReadThreats: false });
+    const scope = await securityViewerScope({} as never, req("family"), unresolved);
+    expect(scope).toEqual({ visibleCameras: granted, mayReadThreats: false, mayReadLocks: false });
     expect(h.visible.mock.calls[0]![1]).toMatchObject({ id: "u-family", role: "family" });
   });
 
-  it("an owner sees every camera and the threats", async () => {
+  it("an owner sees every camera, the threats and the locks", async () => {
     h.visible.mockResolvedValue("all");
-    expect(await securityViewerScope({} as never, req("owner"))).toEqual({ visibleCameras: "all", mayReadThreats: true });
+    expect(await securityViewerScope({} as never, req("owner"), unresolved)).toEqual({
+      visibleCameras: "all",
+      mayReadThreats: true,
+      mayReadLocks: true,
+    });
+  });
+
+  it("a family member granted Devices (smart_home) at view reads locks through the scope", async () => {
+    h.visible.mockResolvedValue(new Set());
+    const resolve = vi.fn(async () => resolved([{ moduleId: "smart_home", level: "view" }]));
+    expect((await securityViewerScope({} as never, req("family"), resolve)).mayReadLocks).toBe(true);
+    expect(resolve).toHaveBeenCalledWith("u-family");
   });
 
   it("a grant lookup failure propagates (the route answers 503, never an unfiltered page)", async () => {
     h.visible.mockRejectedValue(new Error("db down"));
-    await expect(securityViewerScope({} as never, req("family"))).rejects.toThrow("db down");
+    await expect(securityViewerScope({} as never, req("family"), unresolved)).rejects.toThrow("db down");
+  });
+});
+
+describe("mayReadLocksFor (WARP-2977 P2b-2, DS-019) — Security view AND Devices (smart_home) view", () => {
+  it("smart_home at any level → true; the owner's resolved catalog holds it (the §3 bypass)", async () => {
+    for (const level of ["view", "act", "manage"] as const) {
+      const resolve = vi.fn(async () => resolved([{ moduleId: "security", level: "view" }, { moduleId: "smart_home", level }]));
+      expect(await mayReadLocksFor(req("family"), resolve), level).toBe(true);
+    }
+  });
+
+  it("resolved without smart_home → false for EVERY role — an admin narrowed off Devices included", async () => {
+    for (const role of ["owner", "admin", "family"]) {
+      const resolve = vi.fn(async () => resolved([{ moduleId: "security", level: "manage" }, { moduleId: "cameras", level: "manage" }]));
+      expect(await mayReadLocksFor(req(role), resolve), role).toBe(false);
+    }
+  });
+
+  it("unresolved (no local row) fails closed to owner/admin", async () => {
+    const resolve = vi.fn(async () => null);
+    expect(await mayReadLocksFor(req("owner"), resolve)).toBe(true);
+    expect(await mayReadLocksFor(req("admin"), resolve)).toBe(true);
+    expect(await mayReadLocksFor(req("family"), resolve)).toBe(false);
+    expect(await mayReadLocksFor(req("guest"), resolve)).toBe(false);
+  });
+
+  it("no principal, or a service principal: nothing to resolve, and neither is owner/admin → false", async () => {
+    const untouched = vi.fn(async () => resolved([{ moduleId: "smart_home", level: "manage" }]));
+    expect(await mayReadLocksFor(req(), untouched)).toBe(false);
+    expect(await mayReadLocksFor(req("service"), untouched)).toBe(false);
+    expect(untouched).not.toHaveBeenCalled();
+  });
+
+  it("shares the per-request memo with the feature gate — one resolver read per request", async () => {
+    const resolve = vi.fn(async () => resolved([{ moduleId: "security", level: "view" }, { moduleId: "smart_home", level: "view" }]));
+    const r = req("family");
+    const gate = requireFeatureAccess("security", "view", resolve);
+    await new Promise<void>((done) => void gate(r, {} as never, () => done()));
+    expect(await mayReadLocksFor(r, resolve)).toBe(true);
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("a resolver failure rejects (the route answers 503; it never guesses)", async () => {
+    await expect(mayReadLocksFor(req("admin"), vi.fn(async () => Promise.reject(new Error("db down"))))).rejects.toThrow(
+      "db down",
+    );
   });
 });
 

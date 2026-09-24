@@ -54,6 +54,13 @@ const findMany = vi.fn();
 const grants = vi.fn();
 const stateRow = vi.fn();
 const zoneLinks = vi.fn();
+/**
+ * The §9 resolver (`deps.resolve`). This file mounts the router alone, so
+ * nothing has memoised a resolution for the request; by default the user has
+ * no local row (null), so the role decides — P2a's semantics. The lock cases
+ * (WARP-2977 P2b-2) override it per test.
+ */
+const resolve = vi.fn();
 
 function app(role: Role | null = "owner") {
   const prisma = {
@@ -68,7 +75,7 @@ function app(role: Role | null = "owner") {
     next();
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  server.use("/api", createSecurityRouter(prisma as any));
+  server.use("/api", createSecurityRouter(prisma as any, { resolve }));
   return server;
 }
 
@@ -103,6 +110,7 @@ beforeEach(() => {
   grants.mockReset().mockResolvedValue([{ camera: { name: "front" } }]);
   stateRow.mockReset().mockResolvedValue(null);
   zoneLinks.mockReset().mockResolvedValue([]);
+  resolve.mockReset().mockResolvedValue(null);
   h.siteModeHealth.mockReset().mockImplementation(async () => h.siteMode);
   h.snapshot.clear();
   _resetSecurityIngestHealthForTests();
