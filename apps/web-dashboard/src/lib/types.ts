@@ -3176,6 +3176,14 @@ export interface ToolCatalogResponse {
 export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 
 /**
+ * The hero hand-off: `sessionStorage[PENDING_PROMPT_KEY]` holds a prompt typed
+ * on Home or /help, and the next fresh `/chat` AUTO-SENDS it. WARP-2992 clears
+ * it (and PENDING_COMPOSER_KEY) on sign-out — a named key, so the writers,
+ * the reader and that purge cannot drift apart.
+ */
+export const PENDING_PROMPT_KEY = "droplet.pendingPrompt";
+
+/**
  * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
  * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
  * contract and change together.
