@@ -97,18 +97,20 @@ export const DEPARTMENT_TEMPLATES: readonly DepartmentTemplateDef[] = [
   {
     id: "security",
     label: "Security",
-    description: "Cameras, their events, the network and the devices on it.",
+    description: "The Security feed, cameras and their events, the network and the devices on it.",
     icon: "shield-check",
-    navHrefs: ["/cameras", "/events", "/network", "/devices", "/integrations"],
+    // WARP-2977 — /security (the command center: the feed, the site mode, and
+    // its Areas and Opening hours children) leads, as it does in the sidebar.
+    navHrefs: ["/security", "/cameras", "/events", "/network", "/devices", "/integrations"],
     homeWidgets: [
       { widget: "cameras", size: "m" },
       { widget: "quick-links", size: "m" },
       { widget: "members", size: "s" },
       { widget: "files", size: "s" },
     ],
-    // ADR-059 §2.4 wants detections in the last 24 h, which needs P2's
-    // SecurityEvent store. Until it exists the tile shows the camera fleet it
-    // CAN read: how many cameras are online.
+    // ADR-059 §2.4 wants detections in the last 24 h. P2a's SecurityEvent
+    // store now holds them, but no headline figure reads it yet; until one
+    // does, the tile shows the camera fleet: how many cameras are online.
     headline: "cameras_online",
   },
   {

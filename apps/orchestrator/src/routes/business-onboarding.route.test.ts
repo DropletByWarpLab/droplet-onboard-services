@@ -26,6 +26,14 @@ import {
   INTERVIEW_SESSION_TITLE,
   ONBOARDING_FACTS_ADDED_BY,
 } from "../services/business-onboarding.service.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
+
+/** What `transaction_timestamp()::text` reports inside the fake transaction (WARP-2977 P2b). */
+const FAKE_TXTS = "2026-09-24 09:00:00.000001+00";
+/** Where Prisma puts its transaction's id on an interactive-transaction client; the chain append requires it and keys its queue on it (WARP-2977 P2b). */
+const PRISMA_TX_ID = Symbol.for("prisma.client.transaction.id");
+/** Like Prisma, every `$transaction` hands its callback a FRESH handle with a unique transaction id. */
+let fakeTxSeq = 0;
 
 const TEST_KEY = Buffer.alloc(32, 7);
 
@@ -185,16 +193,18 @@ function makePrisma(initial: Partial<ProfileRow> | null = {}) {
     },
     async $queryRawUnsafe<T>(query: string): Promise<T> {
       if (query.includes("pg_advisory_xact_lock")) {
-        return [{ locked: true }] as unknown as T;
+        // WARP-2977 P2b: the append reads the isolation level in the same round-trip.
+        // …and the transaction start time: the append checks the tail read ran in the same transaction.
+        return [{ locked: true, iso: "read committed", txts: FAKE_TXTS }] as unknown as T;
       }
-      if (activityRows.length === 0) return [] as unknown as T;
+      // The tail read: one row even when empty (a scalar subquery), same transaction.
       return [
-        { signature: activityRows[activityRows.length - 1]!.signature },
+        { txts: FAKE_TXTS, signature: activityRows[activityRows.length - 1]?.signature ?? null },
       ] as unknown as T;
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async $transaction(fn: (tx: any) => Promise<unknown>) {
-      return fn(prisma);
+    async $transaction(fn: (tx: any) => Promise<unknown>, options?: unknown): Promise<unknown> {
+      return seam.$transaction(fn, options);
     },
     activityRow: {
       create: async ({ data }: { data: Record<string, unknown> }) => {
@@ -221,6 +231,18 @@ function makePrisma(initial: Partial<ProfileRow> | null = {}) {
       },
     },
   };
+  // WARP-1570: the shared transaction seam,
+  // never a hand-rolled stub — it records the options argument, and record()
+  // opens its transaction with READ_COMMITTED_TX. Like Prisma, every
+  // transaction hands its callback a FRESH handle with a unique transaction id
+  // and no `$transaction` (the chain append requires both, WARP-2977 P2b).
+  const seam = createTransactionSeam({
+    client: () => {
+      const tx: Record<string | symbol, unknown> = { ...prisma, [PRISMA_TX_ID]: `fake-tx-${++fakeTxSeq}` };
+      delete tx.$transaction;
+      return tx;
+    },
+  });
   return prisma;
 }
 

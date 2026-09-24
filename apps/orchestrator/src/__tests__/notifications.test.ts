@@ -9,6 +9,11 @@ vi.mock("../services/mqtt.service.js", () => ({
   publish: (...a: unknown[]) => mqttPublish(...a),
 }));
 
+// WARP-2904: the dial-time DNS check resolves push hosts; keep it offline.
+vi.mock("node:dns/promises", () => ({
+  lookup: async () => [{ address: "142.250.0.1", family: 4 }],
+}));
+
 // WARP-2909 — web-push itself is mocked so a test can capture the exact
 // payload the push channel would encrypt and send.
 const webpushSend = vi.fn(async () => ({}));
@@ -52,8 +57,14 @@ function makePushingPrismaStub() {
   stub.systemFlag = {
     findUnique: vi.fn(async () => ({ valueJson: { publicKey: "pub", privateKey: "priv" } })),
   };
+  // WARP-2904 — the web_push off-LAN channel is open for these cases.
+  stub.offLanAllowlistChannel = {
+    findUnique: vi.fn(async () => ({ key: "web_push", enabled: true })),
+  };
   stub.pushSubscription = {
-    findMany: vi.fn(async () => [{ endpoint: "https://push.example/1", p256dhKey: "p", authKey: "a" }]),
+    // WARP-2904: only a real push-service host is dialled.
+    findMany: vi.fn(async () => [{ endpoint: "https://fcm.googleapis.com/fcm/send/1", p256dhKey: "p", authKey: "a" }]),
+    count: vi.fn(async () => 1),
     deleteMany: vi.fn(async () => ({ count: 0 })),
     updateMany: vi.fn(async () => ({ count: 1 })),
   };
@@ -175,6 +186,57 @@ describe("listRecentNotifications", () => {
   });
 });
 
+// WARP-2904 — the push leg's outcome is an explicit enum on the row, so a dial
+// refused by the `web_push` off-LAN gate is distinguishable from "no
+// subscribers" and from "push failed" — and never hides in `error` behind a
+// delivered toast.
+describe("sendNotification — NotificationLog.pushOutcome", () => {
+  const vapid = { publicKey: "pub", privateKey: "priv" };
+  function stubWithPush(gateEnabled: boolean | "throws") {
+    const stub = makePrismaStub() as any;
+    stub.systemFlag = { findUnique: vi.fn(async () => ({ valueJson: vapid })) };
+    stub.offLanAllowlistChannel = {
+      findUnique: vi.fn(async () => {
+        if (gateEnabled === "throws") throw new Error("db down");
+        return { key: "web_push", enabled: gateEnabled };
+      }),
+    };
+    stub.pushSubscription = {
+      findMany: vi.fn(async () => []),
+      count: vi.fn(async () => 0),
+      deleteMany: vi.fn(),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    };
+    return stub;
+  }
+
+  for (const gate of [false, "throws"] as const) {
+    it(`gate ${String(gate)} → refused_gate; toast still delivered, error stays null`, async () => {
+      const prisma = stubWithPush(gate);
+      const result = await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+      expect(result.channels).toEqual(["toast"]);
+      expect(prisma._created[0].pushOutcome).toBe("refused_gate");
+      expect(prisma._created[0].error).toBeNull();
+      expect(prisma.pushSubscription.findMany).not.toHaveBeenCalled();
+    });
+  }
+
+  it("gate on, no subscriptions → no_subscribers", async () => {
+    const prisma = stubWithPush(true);
+    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    expect(prisma._created[0].pushOutcome).toBe("no_subscribers");
+    expect(prisma._created[0].channels).toBe("toast");
+  });
+
+  it("a throwing push leg → failed", async () => {
+    const prisma = stubWithPush(true);
+    prisma.pushSubscription.findMany.mockRejectedValueOnce(new Error("db down"));
+    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    expect(prisma._created[0].pushOutcome).toBe("failed");
+    expect(prisma._created[0].error).toBeNull(); // the toast carried it
+  });
+});
+
 // ── WARP-2909: deep links ───────────────────────────────────────────────────
 
 describe("assertNotificationLink (WARP-2909)", () => {
@@ -265,6 +327,23 @@ describe("sendNotification deep link (WARP-2909)", () => {
     expect(push.tag).toBeUndefined();
     expect(push.url).toBeUndefined();
     expect(prisma._created[0]).toMatchObject({ url: null });
+  });
+});
+
+// WARP-2904 × WARP-2909 — the gate runs before the payload is built into a
+// push: a refused dial sends nothing, so the deep link never leaves the box
+// by push, while the toast and the row still carry it.
+describe("deep link behind a closed web_push gate", () => {
+  it("nothing is pushed, url included; toast + row keep the link; outcome refused_gate", async () => {
+    const prisma = makePushingPrismaStub();
+    (prisma as any).offLanAllowlistChannel.findUnique.mockResolvedValue({ key: "web_push", enabled: false });
+    const result = await sendNotification(prisma, PARKED);
+
+    expect(webpushSend).not.toHaveBeenCalled();
+    expect((prisma as any).pushSubscription.findMany).not.toHaveBeenCalled();
+    expect(result.channels).toEqual(["toast"]);
+    expect(mqttPublish.mock.calls[0]![1]).toMatchObject({ url: PARKED.url });
+    expect(prisma._created[0]).toMatchObject({ url: PARKED.url, pushOutcome: "refused_gate", error: null });
   });
 });
 

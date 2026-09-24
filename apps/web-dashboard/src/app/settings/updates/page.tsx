@@ -10,7 +10,9 @@
  *     (disabled with an honest note on boxes without the apply helper)
  *     and "Skip this release" (two-step inline confirm);
  *   · degraded red banner — the WARP-539 rollback-also-failed verdict;
- *   · history table — every tracked release and its verdict;
+ *   · partial-install banner — WARP-3007: the running release committed but
+ *     a service new to this box did not start (DeviceUpdate.outcome);
+ *   · history table — every tracked release, its verdict and its outcome;
  *   · settings card — apply window + auto-apply (WARP-538 knobs).
  *
  * Copy honesty (recurring "fallback copy masks outages" defect class):
@@ -61,6 +63,16 @@ const STATUS_BADGE: Record<UpdateRelease["status"], { kind: BadgeKind; label: st
   rolled_back: { kind: "warn", label: "Rolled back" },
   failed: { kind: "danger", label: "Failed" },
   rejected: { kind: "danger", label: "Rejected" },
+};
+
+/** WARP-3007 — plain-language apply outcome for the history table. */
+const OUTCOME_LABEL: Record<UpdateRelease["outcome"], string> = {
+  not_applied: "—",
+  starting_services: "Starting new services",
+  committed: "Installed",
+  services_start_failed: "Installed; a new part didn't start",
+  rolled_back: "Previous release restored",
+  rollback_failed: "Rollback didn't restore health",
 };
 
 /** "0 3 * * *" → "03:00"; null for anything not a simple daily spec. */
@@ -329,6 +341,30 @@ export default function UpdatesSettingsPage() {
                     : ""}
                   . Some services may be down. Check the Health page and consider
                   contacting support — this state does not clear itself.
+                </p>
+              </div>
+            )}
+
+            {/* ── WARP-3007: committed, but a newly-enabled service didn't start ── */}
+            {status.current?.outcome === "services_start_failed" && (
+              <div
+                role="alert"
+                className="card border border-system-orange/40"
+                style={{ padding: 16, marginBottom: 16 }}
+              >
+                <p
+                  className="flex items-center gap-2"
+                  style={{ fontSize: 15, lineHeight: "20px", color: "var(--text)" }}
+                >
+                  <AlertTriangle size={16} /> Part of the last update didn&apos;t start
+                </p>
+                <p
+                  className="mt-1"
+                  style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+                >
+                  The update installed and your Droplet is running normally, but a new
+                  part of it did not start, so the features that use it are unavailable
+                  for now. Contact support if this doesn&apos;t clear up.
                 </p>
               </div>
             )}
@@ -641,6 +677,7 @@ export default function UpdatesSettingsPage() {
                         <th className="font-medium pb-2 pr-4">Release</th>
                         <th className="font-medium pb-2 pr-4">Commit</th>
                         <th className="font-medium pb-2 pr-4">Status</th>
+                        <th className="font-medium pb-2 pr-4">Outcome</th>
                         <th className="font-medium pb-2 pr-4">Detail</th>
                         <th className="font-medium pb-2">Tracked</th>
                       </tr>
@@ -665,6 +702,9 @@ export default function UpdatesSettingsPage() {
                             <Badge kind={STATUS_BADGE[row.status].kind}>
                               {STATUS_BADGE[row.status].label}
                             </Badge>
+                          </td>
+                          <td className="py-2 pr-4" style={{ color: "var(--text-muted)" }}>
+                            {OUTCOME_LABEL[row.outcome] ?? row.outcome}
                           </td>
                           <td
                             className="py-2 pr-4 font-mono"

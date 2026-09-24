@@ -23,7 +23,13 @@
 export const SECURITY_MIN_SCORE = 0.7;
 export const SECURITY_MIN_DURATION_SEC = 2;
 
-export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror";
+/**
+ * Mirrors the Prisma `SecurityEventSource` enum. `site_mode` (WARP-2977 P2b)
+ * rows are written in-transaction by the site-mode service, never through
+ * `recordSecurityEvent`; the union carries them so every reader of a stored
+ * row is exhaustive over what the store can hold.
+ */
+export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode";
 
 export type SecurityEventKind =
   | "detection"
@@ -32,7 +38,9 @@ export type SecurityEventKind =
   | "camera_online"
   | "source_offline"
   | "source_online"
-  | "threat";
+  | "threat"
+  /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource]; site-wide (camera null). */
+  | "mode_changed";
 
 export type SecuritySeverity = "info" | "notice" | "alert";
 
@@ -59,7 +67,13 @@ export interface SecurityEventDraft {
 // Frigate ids look like `1695132000.123456-abc123`; camera and zone names are
 // config keys. Anything else is not from Frigate and is not stored.
 const FRIGATE_ID = /^[a-zA-Z0-9._-]{1,128}$/;
-const FRIGATE_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
+/**
+ * A Frigate camera or zone name (a config key). Exported (WARP-2977 P2b) so
+ * the area links, the sources list and the `SecurityZoneLink_ref` CHECK all
+ * use the one grammar the ingest stores — a link to a name the ingest would
+ * refuse could never match a row.
+ */
+export const FRIGATE_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 const MAX_ZONES = 16;
 
 function isRecord(v: unknown): v is Record<string, unknown> {

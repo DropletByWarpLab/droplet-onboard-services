@@ -25,7 +25,13 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
-import { requireFeatureAccess, resolveEffectiveAccessForRequest } from "./feature-gate.js";
+import {
+  FEATURE_GATE_META,
+  readFeatureGateMeta,
+  requireFeatureAccess,
+  resolveEffectiveAccessForRequest,
+} from "./feature-gate.js";
+import { requireRole } from "./auth.js";
 import type { AuthUser } from "./auth.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 
@@ -226,5 +232,55 @@ describe("requireFeatureAccess — failure posture + cost", () => {
     expect(await resolveEffectiveAccessForRequest(req, resolve)).toBeNull();
     expect(await resolveEffectiveAccessForRequest({} as Request, resolve)).toBeNull();
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-2977 P2b — the Security level invariant walks router stacks and asks
+// each mounted handler what it enforces. The marker must say exactly what the
+// gate checks, stay invisible to everything else, and change nothing about
+// how the gate behaves.
+describe("requireFeatureAccess — the meta marker (WARP-2977 P2b)", () => {
+  it("carries exactly {moduleId, level} for every level", () => {
+    expect(readFeatureGateMeta(requireFeatureAccess("security", "act"))).toEqual({ moduleId: "security", level: "act" });
+    expect(readFeatureGateMeta(requireFeatureAccess("security", "manage"))).toEqual({
+      moduleId: "security",
+      level: "manage",
+    });
+    expect(readFeatureGateMeta(requireFeatureAccess("cameras", "view"))).toEqual({ moduleId: "cameras", level: "view" });
+  });
+
+  it("defaults to view, the level the gate itself defaults to", () => {
+    expect(readFeatureGateMeta(requireFeatureAccess("security"))).toEqual({ moduleId: "security", level: "view" });
+  });
+
+  it("is null for anything that is not a feature gate", () => {
+    expect(readFeatureGateMeta(requireRole("owner"))).toBeNull();
+    expect(readFeatureGateMeta(() => undefined)).toBeNull();
+    expect(readFeatureGateMeta(undefined)).toBeNull();
+    expect(readFeatureGateMeta({ [FEATURE_GATE_META]: { moduleId: "security", level: "act" } })).toBeNull();
+  });
+
+  it("is non-enumerable, frozen and not writable", () => {
+    const gate = requireFeatureAccess("security", "act");
+    const descriptor = Object.getOwnPropertyDescriptor(gate, FEATURE_GATE_META);
+    expect(descriptor).toMatchObject({ enumerable: false, writable: false, configurable: false });
+    // An object spread copies enumerable symbol keys too — the marker must not travel.
+    expect(Object.getOwnPropertySymbols({ ...gate })).not.toContain(FEATURE_GATE_META);
+    const meta = readFeatureGateMeta(gate)!;
+    expect(Object.isFrozen(meta)).toBe(true);
+    expect(() => {
+      (gate as unknown as Record<symbol, unknown>)[FEATURE_GATE_META] = { moduleId: "security", level: "view" };
+    }).toThrow();
+    expect(readFeatureGateMeta(gate)).toEqual({ moduleId: "security", level: "act" });
+  });
+
+  it("a marked gate still enforces its level (behaviour unchanged)", async () => {
+    const resolve = vi.fn(async () => result([{ moduleId: "cameras", level: "view" }]));
+    const gate = requireFeatureAccess("cameras", "act", resolve);
+    expect(readFeatureGateMeta(gate)?.level).toBe("act");
+    const res = await request(appWith(STAFF, resolve, [gate])).get("/api/cameras");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "cameras" });
+    expect(resolve).toHaveBeenCalledWith("u-staff");
   });
 });
