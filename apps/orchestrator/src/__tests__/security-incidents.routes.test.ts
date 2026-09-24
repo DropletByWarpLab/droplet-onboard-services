@@ -66,6 +66,27 @@ const BACK_ONLY = "1c8d0e2f-3a4b-4c5d-9e6f-8091a2b3c4d5";
 /** On both cameras, but its only code is on back: plain activity for Maria. */
 const HIDDEN_CODE = "2d9e1f3a-4b5c-4d6e-8f70-91a2b3c4d5e6";
 const MISSING = "9f9f9f9f-9f9f-4f9f-8f9f-9f9f9f9f9f9f";
+/** Review #1: a notice on front (Maria sees it) and an ALERT on back (hidden from her). */
+const MIXED = "3e0f2a4b-5c6d-4e7f-8091-a2b3c4d5e6f7";
+
+/** Add the mixed-visibility incident: acknowledged by the owner, Maria's own notice skipped_not_visible. */
+function withMixed(f: FakeSecurityPrisma, state: "open" | "acknowledged" = "acknowledged"): void {
+  f.world.securityIncident.push(
+    incident(MIXED, { state, reasonCodes: ["after_hours_presence", "camera_offline"], lastActivityAt: new Date(T.getTime() + 120_000) }),
+  );
+  f.world.securityIncidentReason.push(
+    { id: "r-mixed-1", createdAt: T, ...reason(MIXED, "after_hours_presence", "back", "alert", 11n) },
+    { id: "r-mixed-2", createdAt: T, ...reason(MIXED, "camera_offline", "front", "notice", 12n) },
+  );
+  f.world.securityIncidentAck.push({
+    id: "a-mixed", incidentId: MIXED, action: "acknowledge", byUserId: STEFAN, byName: "Stefan", at: T,
+    sessionId: "s-st", sessionChecked: true, client: null, viaNotificationId: null, note: "",
+  });
+  f.world.securityIncidentNotice.push(
+    { id: "n-mixed-m", incidentId: MIXED, userId: MARIA, username: "maria", reason: "routed", outcome: "skipped_not_visible", notificationLogId: null, channels: "", pushOutcome: null, createdAt: T, settledAt: T },
+    { id: "n-mixed-s", incidentId: MIXED, userId: STEFAN, username: "stefan", reason: "routed", outcome: "sent", notificationLogId: "log-x", channels: "toast", pushOutcome: null, createdAt: T, settledAt: T },
+  );
+}
 
 function access(level: Level | null, tier: EffectiveAccessResult["tier"] = "family"): EffectiveAccessResult {
   return {
@@ -505,6 +526,63 @@ describe("route 19 — acknowledge", () => {
   it("a strict body", async () => {
     const res = await request(app(world(), "family", "act").server).post(`/api/security/incidents/${SHARED}/acknowledge`).send({ via: "x" });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("review #1 (DS-005) — a viewer who sees only a LOWER code (front notice; the back alert is hidden)", () => {
+  it("route 18: reads `open` though the owner acknowledged it; no acks, no notices, no lastAck, not acknowledged", async () => {
+    const f = world();
+    withMixed(f);
+    const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${MIXED}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ state: "open", severity: "notice", reasonCodes: ["camera_offline"], lastAck: null, acks: [], notices: [] });
+    expect(res.body.viewer).toEqual({ level: "act", acknowledged: false });
+    expect(JSON.stringify(res.body)).not.toMatch(/skipped_not_visible|after_hours_presence|back/);
+  });
+
+  it("routes 19 and 20: 409 NOT_ACTIONABLE — the same body as plain activity — and nothing written", async () => {
+    const f = world();
+    withMixed(f, "open");
+    const { server } = app(f, "family", "act");
+    for (const action of ["acknowledge", "resolve"]) {
+      const res = await request(server).post(`/api/security/incidents/${MIXED}/${action}`).send({});
+      expect(res.status, action).toBe(409);
+      expect(res.body).toEqual({ error: { code: "NOT_ACTIONABLE", message: "There's nothing here to acknowledge." } });
+    }
+    expect(f.world.securityIncident.find((i) => i.id === MIXED)).toMatchObject({ state: "open", grouping: "collecting", version: 4 });
+    expect(f.world.securityIncidentAck.filter((a) => a.incidentId === MIXED)).toHaveLength(1);
+    expect(h.inTx).not.toHaveBeenCalled();
+  });
+
+  it("route 16: in her Needs attention while unresolved, never in her Acknowledged list, and counted as a notice", async () => {
+    const f = world();
+    withMixed(f);
+    const { server } = app(f, "family", "act");
+    const attention = await request(server).get("/api/security/incidents?state=attention");
+    expect(attention.body.incidents.map((i: { id: string }) => i.id)).toContain(MIXED);
+    const acked = await request(server).get("/api/security/incidents?state=acknowledged");
+    expect(acked.body.incidents.map((i: { id: string }) => i.id)).not.toContain(MIXED);
+    const summary = await request(server).get("/api/security/incidents/summary");
+    expect(summary.body).toMatchObject({ openAlerts: 1, openNotices: 1 });
+  });
+
+  it("the owner still sees it as stored, with every ack and notice", async () => {
+    const f = world();
+    withMixed(f);
+    const res = await request(app(f, "owner", "manage").server).get(`/api/security/incidents/${MIXED}`);
+    expect(res.body).toMatchObject({ state: "acknowledged", severity: "alert" });
+    expect(res.body.acks).toHaveLength(1);
+    expect(res.body.notices.map((n: { outcome: string }) => n.outcome).sort()).toEqual(["sent", "skipped_not_visible"]);
+  });
+
+  it("a non-admin's own skipped_not_visible notice is never returned, even once they can see an alert code", async () => {
+    const f = world();
+    f.world.securityIncidentNotice.find((n) => n.id === "n-maria")!.outcome = "skipped_not_visible";
+    f.world.securityIncidentNotice.find((n) => n.id === "n-maria")!.notificationLogId = null;
+    f.world.securityIncidentNotice.find((n) => n.id === "n-maria")!.channels = "";
+    const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${SHARED}`);
+    expect(res.body.severity).toBe("alert");
+    expect(res.body.notices).toEqual([]);
   });
 });
 

@@ -14,6 +14,16 @@
  *     viewer's SEVERITY is the max over those, info when none.
  *   · no visible code → the viewer sees PLAIN ACTIVITY: state `no_action`, no
  *     acks, no notices, nothing to act on (409 NOT_ACTIONABLE).
+ *   · a PARTIAL view — visible codes, but the incident's top severity is on a
+ *     camera the viewer cannot see (a notice on `front`, the alert on `back`)
+ *     — is not actionable either (409 NOT_ACTIONABLE, the same body): acting
+ *     would acknowledge or resolve an alert she cannot see. She gets no acks,
+ *     no notices and no lastAck (each would reveal the hidden alert), and the
+ *     state her visible codes justify: `resolved` once a person resolved the
+ *     incident, else `open` — never the stored `acknowledged`, which a hidden
+ *     escalation flips back to `open` (D22) with no cause she could see.
+ *   · a non-owner/admin never sees a `skipped_not_visible` notice, not even
+ *     their own: it says an alert was raised on a camera they cannot see.
  *   · counts and labels sum `countsByCamera` over the visible cameras (plus
  *     the site bucket `""` on a site-scope incident).
  *   · notices: owner/admin see every one; anyone else only their own (D34).
@@ -114,6 +124,8 @@ export function reasonVisible(r: Pick<ReasonRowForView, "evidenceCamera">, i: Pi
 
 export interface IncidentProjection {
   incident: IncidentRowForView;
+  /** Visible codes, but the stored (top) severity is on a hidden camera. Never actionable. */
+  partial: boolean;
   /** The viewer's visible reasons. */
   reasons: ReasonRowForView[];
   /** Max over the visible reasons; info when none. */
@@ -148,13 +160,17 @@ export function projectIncident(i: IncidentRowForView, reasons: readonly ReasonR
       eventCount += n;
     }
   }
-  const actionable = codes.length > 0;
+  const partial = codes.length > 0 && severity !== i.severity;
+  const actionable = codes.length > 0 && !partial;
+  const state: SecurityIncidentState =
+    codes.length === 0 ? "no_action" : partial ? (i.state === "resolved" ? "resolved" : "open") : i.state;
   return {
     incident: i,
+    partial,
     reasons: visible,
     severity,
     codes,
-    state: actionable ? i.state : "no_action",
+    state,
     actionable,
     eventCount,
     labels,
@@ -193,20 +209,39 @@ export interface IncidentListFilters {
 /**
  * Route 16's where: visibility at AND[0]; the state and severity filters
  * count only VISIBLE codes, so "Alerts" and "Needs attention" never count a
- * hidden camera's code. `attention` is an open incident (nobody on it yet);
- * `activity` is one with no visible code.
+ * hidden camera's code, and they select exactly the rows `projectIncident`
+ * gives that state. `attention` is an open incident (nobody on it yet);
+ * `activity` is one with no visible code. For a viewer who cannot see every
+ * camera, a PARTIAL row (stored alert, no visible alert code) reads `open`
+ * while it is open or acknowledged — and is never `acknowledged`.
  */
 export function incidentListWhere(v: IncidentViewer, f: IncidentListFilters): Prisma.SecurityIncidentWhereInput {
   const vis = visibleReasonWhere(v);
   const and: Prisma.SecurityIncidentWhereInput[] = [incidentVisibilityWhere(v)];
+  const everything = v.visibleCameras === "all" && v.mayReadThreats;
+  const visibleAlert: Prisma.SecurityIncidentWhereInput = { reasons: { some: { AND: [vis, { severity: "alert" }] } } };
+  /** Not partial: the top severity is visible (every stored alert has a visible alert code). */
+  const full: Prisma.SecurityIncidentWhereInput = { OR: [{ severity: { not: "alert" } }, visibleAlert] };
   switch (f.state) {
     case "attention":
     case "open":
-      and.push({ state: "open", reasons: { some: vis } });
+      and.push(
+        everything
+          ? { state: "open", reasons: { some: vis } }
+          : {
+              reasons: { some: vis },
+              OR: [
+                { state: "open", ...full },
+                { state: { in: ["open", "acknowledged"] }, severity: "alert", reasons: { none: { AND: [vis, { severity: "alert" }] } } },
+              ],
+            },
+      );
       break;
     case "acknowledged":
+      and.push(everything ? { state: "acknowledged", reasons: { some: vis } } : { state: "acknowledged", reasons: { some: vis }, ...full });
+      break;
     case "resolved":
-      and.push({ state: f.state, reasons: { some: vis } });
+      and.push({ state: "resolved", reasons: { some: vis } });
       break;
     case "activity":
       and.push({ OR: [{ state: "no_action" }, { reasons: { none: vis } }] });
@@ -438,9 +473,12 @@ export async function loadIncidentDetail(
   const acks = p.actionable
     ? await prisma.securityIncidentAck.findMany({ where: { incidentId: id }, orderBy: [{ at: "asc" }, { id: "asc" }] })
     : [];
+  // Owner/admin: every notice. Anyone else: their own — and never a
+  // skipped_not_visible one, which says an alert was raised on a camera they
+  // cannot see (DS-005, review #1).
   const notices = p.actionable
     ? await prisma.securityIncidentNotice.findMany({
-        where: { incidentId: id, ...(v.ownerOrAdmin ? {} : { userId: v.userId }) },
+        where: { incidentId: id, ...(v.ownerOrAdmin ? {} : { userId: v.userId, outcome: { not: "skipped_not_visible" } }) },
         orderBy: [{ createdAt: "asc" }, { userId: "asc" }],
       })
     : [];
