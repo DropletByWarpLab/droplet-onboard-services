@@ -119,6 +119,19 @@ import webpush from "web-push";
 import type { CameraSSEEvent } from "../types/camera.js";
 
 const GRANTS: Record<string, string[]> = { "u-family": ["front_door"] };
+
+// WARP-2911 — the people behind the push prefs carry real `User.id` shapes
+// (UUIDs) and DISTINCT usernames, as production rows do. Web push is keyed by
+// the username; a fan-out that regressed to the id would now also trip the
+// runtime NOTIFICATION_RECIPIENT_IS_ID refusal, not just miss a subscription.
+const OWNER_ID = "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f";
+const FAMILY_ID = "7a1b3c5d-9e0f-4a2b-8c4d-6e8f0a2b4c6d";
+const PUSH_PEOPLE: Record<string, { id: string; role: string; username: string }> = {
+  [OWNER_ID]: { id: OWNER_ID, role: "owner", username: "nc-owner" },
+  [FAMILY_ID]: { id: FAMILY_ID, role: "family", username: "nc-family" },
+};
+// The family member's grants, under the id the grant check actually uses.
+GRANTS[FAMILY_ID] = ["front_door"];
 const grantFindMany = vi.fn(async ({ where }: { where: { userId: string } }) =>
   (GRANTS[where.userId] ?? []).map((name) => ({ camera: { name } })),
 );
@@ -139,14 +152,14 @@ const prisma = {
     // WARP-2911 — DISTINCT id and username, as production rows are: the pref
     // names its person by `User.id`, web push is keyed by `User.username`.
     findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
-      where.id.in.map((id) => ({ id, role: id.slice(2), username: `nc-${id.slice(2)}` })),
+      where.id.in.map((id) => PUSH_PEOPLE[id] ?? { id, role: id.slice(2), username: `nc-${id.slice(2)}` }),
     ),
   },
   cameraNotificationPref: {
     // Both people asked to be told about the bedroom.
     findMany: vi.fn(async () => [
-      { userId: "u-family", cameraId: "id-bedroom" },
-      { userId: "u-owner", cameraId: "id-bedroom" },
+      { userId: FAMILY_ID, cameraId: "id-bedroom" },
+      { userId: OWNER_ID, cameraId: "id-bedroom" },
     ]),
   },
   pushSubscription: {

@@ -136,7 +136,9 @@ const DIGEST_SETTING = {
   mode: "propose",
   level: "links_only",
   vertical: "general",
-  enabledById: "u-owner",
+  // A real `User.id` shape (WARP-2911): handed to the notification slot by
+  // mistake, it is exactly what the runtime refusal catches.
+  enabledById: "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f",
   enabledAt: new Date("2026-01-01T00:00:00Z"),
   folders: [],
   pathDenylist: null,
@@ -167,8 +169,8 @@ function digestPrisma(over: {
     // assertion here still passed.
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
-        over.ownerExists !== false && where.id === "u-owner"
-          ? { id: "u-owner", username: "owner" }
+        over.ownerExists !== false && where.id === DIGEST_SETTING.enabledById
+          ? { id: "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f", username: "owner" }
           : null,
       ),
     },
