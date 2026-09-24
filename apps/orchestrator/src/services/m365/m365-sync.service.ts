@@ -527,3 +527,16 @@ export async function discoverResources(
 
   return { registered, skipped, notGranted };
 }
+
+/**
+ * #2347 review — true when a person's grant covers no workload at all.
+ *
+ * `notGranted` is not a fault and is not logged: for To Do it is the expected
+ * outcome of what the connector requests. But when EVERY workload is in it (an
+ * empty or unreadable `grantedScopes`, or a consent that named no workload),
+ * the box syncs nothing for that person, and without a line saying so that
+ * looks exactly like a mailbox with no mail. The scheduler logs it.
+ */
+export function grantCoversNoWorkload(found: { registered: number; notGranted: string[] }): boolean {
+  return found.registered === 0 && found.notGranted.length === M365_WORKLOADS.length;
+}

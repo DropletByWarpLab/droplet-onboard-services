@@ -11,6 +11,12 @@
  * success, a throttle, a dead delta token, and a dead grant. `sync-policy.ts`
  * makes the decisions; this applies them to state. Prisma is injected, so the
  * whole lifecycle is testable without a database.
+ *
+ * Every write to a cursor is `updateMany` by id, never `update` (#2347
+ * review). A disconnect deletes the person's cursors while a tick may be
+ * running one, and `update` throws on a missing row (P2025): the throw escaped
+ * `syncCursor` and skipped the rest of the tick, other people's cursors
+ * included. For a cursor that no longer exists, writing nothing is correct.
  */
 import type { PrismaClient } from "@prisma/client";
 
@@ -122,7 +128,7 @@ export async function recordSuccess(
   deltaLink: string | null,
   now: Date = new Date(),
 ): Promise<void> {
-  await prisma.m365DeltaCursor.update({
+  await prisma.m365DeltaCursor.updateMany({
     where: { id: cursorId },
     data: {
       deltaLink,
@@ -153,7 +159,7 @@ export async function recordCheckpoint(
   cursorId: string,
   resumeLink: string,
 ): Promise<void> {
-  await prisma.m365DeltaCursor.update({
+  await prisma.m365DeltaCursor.updateMany({
     where: { id: cursorId },
     data: {
       resumeLink,
@@ -205,7 +211,7 @@ export async function recordFailure(
   const kind = classifySyncFailure(err);
 
   if (kind === "RESYNC_REQUIRED") {
-    await prisma.m365DeltaCursor.update({
+    await prisma.m365DeltaCursor.updateMany({
       where: { id: cursorId },
       data: {
         state: "RESYNC_REQUIRED",
@@ -228,7 +234,7 @@ export async function recordFailure(
   const failures = (current[0]?.consecutiveFailures ?? 0) + 1;
 
   if (kind === "FATAL") {
-    await prisma.m365DeltaCursor.update({
+    await prisma.m365DeltaCursor.updateMany({
       where: { id: cursorId },
       data: {
         state: "FAILED",
@@ -242,7 +248,7 @@ export async function recordFailure(
 
   // TRANSIENT and AUTH both wait. AUTH keeps its delta link deliberately.
   const waitMs = computeBackoffMs(failures, parseRetryAfter(retryAfterHeader, now));
-  await prisma.m365DeltaCursor.update({
+  await prisma.m365DeltaCursor.updateMany({
     where: { id: cursorId },
     data: {
       state: "BACKOFF",

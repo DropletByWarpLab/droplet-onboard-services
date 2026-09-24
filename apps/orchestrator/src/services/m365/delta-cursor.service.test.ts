@@ -77,11 +77,19 @@ function fakePrisma(seed: Array<Record<string, unknown>> = [], connected: string
         }
         return out.slice(0, take ?? out.length).map((r) => ({ ...r }));
       }),
+      // Throws on a missing row, as Prisma does (P2025).
       update: vi.fn(async ({ where, data }: any) => {
         const i = rows.findIndex((r) => r.id === where.id);
         if (i < 0) throw new Error("not found");
         rows[i] = { ...rows[i], ...data };
         return { ...rows[i] };
+      }),
+      // A missing row is `count: 0`, not a throw.
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        const i = rows.findIndex((r) => r.id === where.id);
+        if (i < 0) return { count: 0 };
+        rows[i] = { ...rows[i], ...data };
+        return { count: 1 };
       }),
       upsert: vi.fn(async ({ where, create, update }: any) => {
         const key = where.userId_workload_resourceId;
@@ -344,6 +352,36 @@ describe("purgeCursorsForUser (WARP-3059)", () => {
     ]);
     expect(await purgeCursorsForUser(prisma as never, USER)).toBe(2);
     expect(prisma.__rows().map((r: any) => r.id)).toEqual(["c3"]);
+  });
+});
+
+describe("a cursor purged while its run was in flight (#2347 review)", () => {
+  // A disconnect deletes the person's cursors while the tick may be holding
+  // one. The run's closing write must find nothing and move on: a throw here
+  // (Prisma's P2025 on `update`) escaped `syncCursor` and skipped every other
+  // cursor in the tick, other people's included.
+  const GONE = "c-deleted";
+
+  it("recordSuccess writes nothing and does not throw", async () => {
+    const prisma = fakePrisma([cursor()]);
+    await expect(recordSuccess(prisma as never, GONE, "https://graph.microsoft.com/v1.0/x?$deltatoken=D", NOW)).resolves.toBeUndefined();
+    expect(prisma.__rows()).toEqual([cursor()]);
+  });
+
+  it("recordCheckpoint writes nothing and does not throw", async () => {
+    const prisma = fakePrisma([cursor()]);
+    await expect(recordCheckpoint(prisma as never, GONE, "https://graph.microsoft.com/v1.0/x?$skiptoken=p")).resolves.toBeUndefined();
+    expect(prisma.__rows()).toEqual([cursor()]);
+  });
+
+  it.each([
+    ["a resync", { statusCode: 410 }],
+    ["a broken request", { statusCode: 400 }],
+    ["a throttle", { statusCode: 429 }],
+  ])("recordFailure after %s writes nothing and does not throw", async (_label, err) => {
+    const prisma = fakePrisma([cursor()]);
+    await expect(recordFailure(prisma as never, GONE, err, "5", NOW)).resolves.toBeUndefined();
+    expect(prisma.__rows()).toEqual([cursor()]);
   });
 });
 

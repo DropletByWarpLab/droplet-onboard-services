@@ -33,9 +33,14 @@ vi.mock("./m365-auth.service.js", async (importOriginal) => {
   };
 });
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import {
   MAX_PAGES_PER_TICK,
   discoverResources,
+  grantCoversNoWorkload,
+  runSyncTick,
   syncCursor,
   type M365SyncDeps,
 } from "./m365-sync.service.js";
@@ -78,22 +83,39 @@ function row(over: Partial<Row> = {}): Row {
   };
 }
 
-function fakePrisma(seed: Row[]) {
-  const rows = seed.map((r) => ({ ...r }));
+function fakePrisma(seed: Row[], connected: string[] = [USER]) {
+  let rows = seed.map((r) => ({ ...r }));
   return {
     __first: () => rows[0],
+    __rows: () => rows,
+    /** What a disconnect does to the person's cursors (WARP-3059). */
+    __purge: (userId: string) => {
+      rows = rows.filter((r) => r.userId !== userId);
+    },
+    m365Connection: {
+      findMany: vi.fn(async () => connected.map((userId) => ({ userId }))),
+    },
     m365DeltaCursor: {
-      findMany: vi.fn(async ({ where, take }: { where?: { id?: string }; take?: number } = {}) =>
-        rows
-          .filter((r) => !where?.id || r.id === where.id)
-          .slice(0, take ?? rows.length)
-          .map((r) => ({ ...r })),
+      findMany: vi.fn(
+        async ({ where, take }: { where?: { id?: string; userId?: { in: string[] } }; take?: number } = {}) =>
+          rows
+            .filter((r) => !where?.id || r.id === where.id)
+            .filter((r) => !where?.userId?.in || where.userId.in.includes(r.userId))
+            .slice(0, take ?? rows.length)
+            .map((r) => ({ ...r })),
       ),
+      // Throws on a missing row, as Prisma does (P2025).
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
         const i = rows.findIndex((r) => r.id === where.id);
         if (i < 0) throw new Error("not found");
         rows[i] = { ...rows[i], ...data };
         return { ...rows[i] };
+      }),
+      updateMany: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
+        const i = rows.findIndex((r) => r.id === where.id);
+        if (i < 0) return { count: 0 };
+        rows[i] = { ...rows[i], ...data };
+        return { count: 1 };
       }),
     },
   };
@@ -386,5 +408,108 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
     );
     expect(found.notGranted).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
     expect(client.getPage).not.toHaveBeenCalled();
+  });
+});
+
+// --- #2347 review: a disconnect during a tick -------------------------------
+
+describe("runSyncTick — a person disconnects while the tick holds their cursor (#2347 review)", () => {
+  it("finishes the tick, and syncs everyone else's cursors", async () => {
+    // disconnect() deletes the person's cursors while the tick may be running
+    // one. The run's closing write used to be an `update` by id, which throws
+    // on a missing row: syncCursor threw, and every cursor after it in the
+    // tick, other people's included, waited for the next one.
+    const OTHER = "user-2";
+    const prisma = fakePrisma(
+      [row({ id: "c1", userId: USER, state: "IDLE" }), row({ id: "c2", userId: OTHER, state: "IDLE" })],
+      [USER, OTHER],
+    );
+    const tick = await runSyncTick(
+      deps(prisma, {
+        handlePage: async (cursor) => {
+          if (cursor.userId === USER) prisma.__purge(USER); // Disconnect, mid-run
+        },
+      }),
+    );
+
+    expect(tick.cursorsClaimed).toBe(2);
+    expect(prisma.__rows()).toEqual([
+      expect.objectContaining({ id: "c2", userId: OTHER, deltaLink: `${DELTA}-next`, state: "IDLE" }),
+    ]);
+  });
+});
+
+// --- #2347 review: a grant that covers nothing ------------------------------
+
+describe("a grant that covers no workload says so (#2347 review)", () => {
+  function prismaWithGrant(grantedScopes: string | null) {
+    return {
+      m365Connection: { findUnique: vi.fn(async () => ({ grantedScopes })) },
+      m365DeltaCursor: { upsert: vi.fn(async () => ({})) },
+    };
+  }
+  const discover = (grantedScopes: string | null) =>
+    discoverResources(
+      {
+        prisma: prismaWithGrant(grantedScopes) as never,
+        client: {
+          getPage: vi.fn(async () => ({ items: [], links: { nextLink: null, deltaLink: null }, raw: {} })),
+        } as unknown as M365SyncDeps["client"],
+        entra: {} as never,
+        initialUrlFor: () => null,
+        now: () => NOW,
+      },
+      USER,
+    );
+
+  it.each([
+    ["no recorded grant", null],
+    ["an empty grant", ""],
+    ["a grant naming no workload", "offline_access User.Read openid profile"],
+  ])("is true for %s", async (_label, scopes) => {
+    expect(grantCoversNoWorkload(await discover(scopes))).toBe(true);
+  });
+
+  it("is false for the scopes the connector requests, where only To Do is not granted", async () => {
+    const found = await discover(
+      "offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite Files.ReadWrite.All",
+    );
+    expect(found.notGranted).toEqual(["todo"]);
+    expect(grantCoversNoWorkload(found)).toBe(false);
+  });
+
+  it("is false when the grant covers a workload discovery could not list — that is logged as skipped", async () => {
+    const found = await discoverResources(
+      {
+        prisma: prismaWithGrant("Mail.Read") as never,
+        client: {
+          getPage: vi.fn(async () => {
+            throw new GraphRequestError({ statusCode: 404, code: "MailboxNotEnabledForRESTAPI", message: "no mailbox" });
+          }),
+        } as unknown as M365SyncDeps["client"],
+        entra: {} as never,
+        initialUrlFor: () => null,
+        now: () => NOW,
+      },
+      USER,
+    );
+    expect(found).toMatchObject({ registered: 0, skipped: ["mail"] });
+    expect(grantCoversNoWorkload(found)).toBe(false);
+  });
+
+  it("is false when the token could not be produced — that is reported as skipped, not as the grant", async () => {
+    getAccessTokenMock.mockRejectedValue(new M365NotConnectedError("NEEDS_RECONNECT"));
+    expect(grantCoversNoWorkload(await discover(null))).toBe(false);
+  });
+
+  it("the scheduler logs it: index.ts is the only caller, and the unit lane cannot run it", () => {
+    // `notGranted` is never logged on its own (for To Do it is the expected
+    // outcome), so without this line a box whose grant covers nothing syncs
+    // nothing and nothing says so. A source pin, as brain-pass-trigger-wiring
+    // does: index.ts opens sockets and connects to Postgres on import.
+    const index = readFileSync(resolve(__dirname, "../../index.ts"), "utf8");
+    const block = index.slice(index.indexOf("discoverResources(m365Deps, userId)"), index.indexOf("runSyncTick(m365Deps)"));
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toMatch(/if \(grantCoversNoWorkload\(found\)\)\s*\{\s*logger\.warn\(/);
   });
 });
