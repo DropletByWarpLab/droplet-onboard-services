@@ -27,6 +27,14 @@
  *
  * Changing any number in RULESET needs a SECURITY_RULESET_VERSION bump
  * (lib/ruleset-fingerprint.test.ts fails otherwise).
+ *
+ * Version 2 (WARP-2978 PR-D, spec §6.12): early presence. A person Frigate is
+ * still tracking 30 s in gets one `detection_ongoing` row; it groups like a
+ * detection (same camera, same areas), counts as `_ongoing` (not a second
+ * person), spans `[startedAt, createdAt]` (it was still in view when it was
+ * written), and after_hours_presence accepts it — so the alert goes out at
+ * about 30 s instead of at Frigate's `end`, and the later `end` row joins the
+ * same incident.
  */
 import type {
   SecurityIncidentScope,
@@ -39,10 +47,16 @@ import type {
 } from "@prisma/client";
 import { nonOpenWithin, type ModeTimeline } from "./security-mode-history.js";
 
-export const SECURITY_RULESET_VERSION = 1;
+export const SECURITY_RULESET_VERSION = 2;
 
 export const RULESET = {
-  after_hours_presence: { severity: "alert", label: "person", zoneKinds: ["interior", "restricted"] },
+  after_hours_presence: {
+    severity: "alert",
+    label: "person",
+    /** v2 (PR-D): a person still in view at 30 s alerts without waiting for their `end`. */
+    kinds: ["detection", "detection_ongoing"],
+    zoneKinds: ["interior", "restricted"],
+  },
   camera_offline: { severity: "notice", minOfflineMs: 60_000 },
   threat_signal: { severity: "notice", ignoreActivitySubs: ["web_push"] },
 } as const;
@@ -56,9 +70,10 @@ export const MAX_SPAN_MS = 3_600_000;
 /** Evidence rows kept per (incident, code, evidence camera) — per camera, so a hidden camera's evidence never crowds out a visible one's (DS-005). */
 export const EVIDENCE_PER_CAMERA = 5;
 
-/** The kinds P3 groups (PR-D would add `detection_ongoing`). Anything else is `context`. */
+/** The kinds P3 groups (PR-D added `detection_ongoing`). Anything else is `context`. */
 export const GROUPABLE_KINDS = [
   "detection",
+  "detection_ongoing",
   "camera_offline",
   "camera_online",
   "source_offline",
@@ -151,7 +166,7 @@ export function rankPick(matches: readonly AreaMatch[]): AreaMatch {
   )[0]!;
 }
 
-const CAMERA_KINDS: ReadonlySet<string> = new Set(["detection", "camera_offline", "camera_online"]);
+const CAMERA_KINDS: ReadonlySet<string> = new Set(["detection", "detection_ongoing", "camera_offline", "camera_online"]);
 
 /** §6.2's table. `matches` are the active areas the event matched (camera rows only). */
 export function scopeFor(event: TriageEvent, matches: readonly AreaMatch[]): ScopeDecision {
@@ -192,15 +207,22 @@ export function scopeFor(event: TriageEvent, matches: readonly AreaMatch[]): Sco
 
 // ── join (§6.3) ───────────────────────────────────────────────────────────
 
-/** An event's event-time span: `[startedAt, endedAt ?? startedAt]`, never backwards. */
+/**
+ * An event's event-time span: `[startedAt, endedAt ?? startedAt]`, never
+ * backwards. A `detection_ongoing` row has no end yet, but it is written only
+ * while its person is still tracked, so it spans `[startedAt, createdAt]`:
+ * the presence it proves (PR-D).
+ */
 export interface EventSpan {
   s: Date;
   e: Date;
 }
 
-export function eventSpan(event: Pick<TriageEvent, "startedAt" | "endedAt">): EventSpan {
+export function eventSpan(
+  event: Pick<TriageEvent, "startedAt" | "endedAt"> & Partial<Pick<TriageEvent, "kind" | "createdAt">>,
+): EventSpan {
   const s = event.startedAt;
-  const end = event.endedAt;
+  const end = event.endedAt ?? (event.kind === "detection_ongoing" ? (event.createdAt ?? null) : null);
   return { s, e: end && end.getTime() > s.getTime() ? end : s };
 }
 
@@ -255,7 +277,11 @@ export function planTriage<T extends GroupableIncident>(
 
 // ── counts (DS-005 after the trim) ────────────────────────────────────────
 
-/** `{"<camera>": {"<label>": n, "_status": n}, "": {"_threat": n, "_status": n}}`. */
+/**
+ * `{"<camera>": {"<label>": n, "_status": n, "_ongoing": n}, "": {"_threat": n, "_status": n}}`.
+ * A person's "still in view" row (PR-D) is `_ongoing`, not a second `person`:
+ * their `end` row counts them.
+ */
 export type CountsByCamera = Record<string, Record<string, number>>;
 
 /** The stored Json as counts: plain objects of non-negative integers only; anything else is dropped. */
@@ -278,6 +304,7 @@ export function countKey(event: Pick<TriageEvent, "kind" | "camera" | "labels">)
   const camera = event.camera ?? "";
   if (event.kind === "threat") return { camera, label: "_threat" };
   if (event.kind === "detection") return { camera, label: event.labels[0] || "_other" };
+  if (event.kind === "detection_ongoing") return { camera, label: "_ongoing" };
   return { camera, label: "_status" };
 }
 
@@ -419,6 +446,8 @@ function evidenceOf(
  * restricted area whose `[startedAt, endedAt]` touches an instant the site was
  * not open — checked at the start, at every mode row inside, and at the end.
  * `zoneKind` is the INCIDENT's snapshot (the most sensitive area, D12).
+ * v2 (PR-D): a `detection_ongoing` row counts too, over `[startedAt,
+ * createdAt]` (`eventSpan`) — the person was in view that whole time.
  */
 export function afterHoursPresence(input: {
   scope: SecurityIncidentScope;
@@ -430,7 +459,7 @@ export function afterHoursPresence(input: {
   const { event } = input;
   if (input.scope !== "area" || input.zoneKind === null) return null;
   if (!(rule.zoneKinds as readonly string[]).includes(input.zoneKind)) return null;
-  if (event.kind !== "detection" || !event.labels.includes(rule.label)) return null;
+  if (!(rule.kinds as readonly string[]).includes(event.kind) || !event.labels.includes(rule.label)) return null;
   const span = eventSpan(event);
   const nonOpen = nonOpenWithin(input.timeline, span.s, span.e);
   if (!nonOpen) return null;

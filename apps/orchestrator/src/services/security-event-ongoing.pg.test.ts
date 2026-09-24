@@ -16,6 +16,14 @@
  * case asserts SQLSTATE 23514 AND the constraint that fired, so a row refused
  * by the WRONG rule (or by a NOT NULL, or a missing enum value) does not pass.
  *
+ * Then the engine on real rows — the §6.12 box proof in miniature: a person
+ * still in view after closing gets ONE ongoing row at 30 s and an alert
+ * incident in the same tick, never a second row, the incident is held open
+ * while they stay, and their `end` row joins it. The clock is the real one
+ * (the row's `createdAt` is the database's `now()`), so "31 s ago" is
+ * relative to it, and the site is closed by a manual mode that holds at any
+ * hour.
+ *
  * Every probe runs in a transaction that ALWAYS rolls back; fixtures are
  * tagged `warp2978d` and swept (scoped) before and after, belt and braces.
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL, like every *.pg.test.ts.
@@ -23,8 +31,10 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { MIGRATIONS_DIR } from "../__tests__/helpers/test-paths.js";
+import { tickSecurityIncidents, _resetIncidentHealthForTests, type SecurityIncidentDeps } from "./security-incidents.service.js";
+import { createInflightTracker } from "./security-inflight.js";
 
 // The global unit setup mocks @prisma/client; this file needs the real one.
 vi.unmock("@prisma/client");
@@ -197,5 +207,159 @@ describe.skipIf(!RUN)("the detection_ongoing row in Postgres (WARP-2978 PR-D)", 
       });
     }
     expect(await probe()).toEqual(before);
+  });
+
+  describe("the engine on real rows: a person still in view alerts at 30 s, and their end joins", () => {
+    const CAM = `${TAG}_back`;
+    let zoneId = "";
+    let savedEngine: Prisma.SecurityIncidentEngineStateGetPayload<Record<string, never>> | null = null;
+    let savedMode: unknown = null;
+    let savedHours: unknown = null;
+    let savedDays: unknown[] = [];
+    const deps = (now: Date, ongoing: ReturnType<typeof createInflightTracker>): SecurityIncidentDeps => ({
+      // The module is off: grouped all the same, never sent (D29) — no notifier I/O here.
+      isSecurityModuleOn: async () => false,
+      resolveAccess: async () => null,
+      ongoing,
+      now: () => now,
+    });
+
+    async function sweepEngine(): Promise<void> {
+      const incidents = await prisma.securityIncident.findMany({ where: { cameras: { has: CAM } }, select: { id: true } });
+      // Events first: their triage rows cascade, and then nothing holds the incidents (Restrict).
+      await prisma.securityEvent.deleteMany({ where: { camera: CAM } });
+      await prisma.securityEventTriage.deleteMany({ where: { incidentId: { in: incidents.map((i) => i.id) } } });
+      await prisma.securityIncident.deleteMany({ where: { id: { in: incidents.map((i) => i.id) } } });
+      const zones = await prisma.securityZone.findMany({ where: { name: { startsWith: TAG } }, select: { id: true } });
+      await prisma.securityZoneLink.deleteMany({ where: { zoneId: { in: zones.map((z) => z.id) } } });
+      await prisma.securityZone.deleteMany({ where: { id: { in: zones.map((z) => z.id) } } });
+    }
+
+    beforeAll(async () => {
+      savedEngine = await prisma.securityIncidentEngineState.findUnique({ where: { id: "singleton" } });
+      savedMode = await prisma.securityModeState.findUnique({ where: { id: "singleton" } });
+      savedHours = await prisma.securitySiteHours.findUnique({ where: { id: "singleton" } });
+      savedDays = await prisma.securitySchedule.findMany();
+      await sweepEngine();
+      // Closed at any hour: a manual close with no hours set (until changed).
+      await prisma.securitySchedule.deleteMany({});
+      await prisma.securitySiteHours.deleteMany({});
+      await prisma.securityModeState.deleteMany({});
+      await prisma.securityModeState.create({
+        data: { id: "singleton", mode: "closed", modeSource: "manual", manualEnd: "until_changed", setAt: new Date() },
+      });
+      const zone = await prisma.securityZone.create({ data: { name: `${TAG} Stock room`, nameKey: `${TAG} stock room`, kind: "interior" } });
+      zoneId = zone.id;
+      await prisma.securityZoneLink.create({ data: { zoneId, sourceKind: "camera", sourceRef: CAM, sourceLabel: "Back", state: "active" } });
+    });
+
+    afterAll(async () => {
+      await sweepEngine();
+      await prisma.securityIncidentEngineState.deleteMany({});
+      if (savedEngine) await prisma.securityIncidentEngineState.create({ data: savedEngine });
+      await prisma.securitySchedule.deleteMany({});
+      if (savedDays.length) await prisma.securitySchedule.createMany({ data: savedDays as Prisma.SecurityScheduleCreateManyInput[] });
+      await prisma.securitySiteHours.deleteMany({});
+      if (savedHours) await prisma.securitySiteHours.create({ data: savedHours as Prisma.SecuritySiteHoursCreateInput });
+      await prisma.securityModeState.deleteMany({});
+      if (savedMode) await prisma.securityModeState.create({ data: savedMode as Prisma.SecurityModeStateCreateInput });
+    });
+
+    it("one ongoing row at 30 s → an alert incident in the same tick; never a second row; held open; the end joins it", async () => {
+      _resetIncidentHealthForTests();
+      // The floor at the store's head: only this case's rows are triaged.
+      const { _max } = await prisma.securityEvent.aggregate({ _max: { id: true } });
+      const head = _max.id ?? 0n;
+      await prisma.securityIncidentEngineState.deleteMany({});
+      await prisma.securityIncidentEngineState.create({
+        data: { id: "singleton", startedAtId: head, triageFloor: head, floorCandidate: head, floorCandidateAt: new Date(Date.now() - 600_000) },
+      });
+
+      const startSec = Math.floor(Date.now() / 1000) - 31;
+      const fid = `${startSec}.5-${TAG}`;
+      const startedAt = new Date(startSec * 1000);
+      const track = (type: "new" | "update" | "end") => ({
+        type,
+        before: {},
+        after: { id: fid, camera: CAM, label: "person", start_time: startSec, end_time: null, top_score: 0.88, false_positive: false, entered_zones: [] },
+      });
+      const map = createInflightTracker();
+      map.observe(track("new"), new Date());
+
+      // Tick 1, 31 s into the track: the row is written AND triaged.
+      await tickSecurityIncidents(prisma, deps(new Date(), map));
+      const rows = await prisma.securityEvent.findMany({ where: { camera: CAM, kind: "detection_ongoing" } });
+      expect(rows).toEqual([
+        expect.objectContaining({
+          source: "frigate",
+          dedupeKey: `frigate-ongoing:${fid}`,
+          startedAt,
+          endedAt: null,
+          labels: ["person"],
+          score: 0.88,
+          summary: "Person still in view after 30 s",
+        }),
+      ]);
+      const ongoing = rows[0]!;
+      const t = await prisma.securityEventTriage.findUniqueOrThrow({
+        where: { eventId: ongoing.id },
+        include: { incident: { include: { reasons: true } } },
+      });
+      expect(t).toMatchObject({ outcome: "grouped" });
+      expect(t.incident).toMatchObject({
+        scope: "area",
+        zoneId,
+        severity: "alert",
+        state: "open",
+        reasonCodes: ["after_hours_presence"],
+        notifyState: "module_off",
+        firstActivityAt: startedAt,
+        countsByCamera: { [CAM]: { _ongoing: 1 } },
+      });
+      expect(t.incident!.reasons).toEqual([
+        expect.objectContaining({ code: "after_hours_presence", evidenceEventId: ongoing.id, evidenceKind: "detection_ongoing" }),
+      ]);
+      const incidentId = t.incidentId!;
+      const alertedAt = t.incident!.alertedAt;
+
+      // Ticks 2-3: Frigate keeps updating; no second row.
+      map.observe(track("update"), new Date());
+      await tickSecurityIncidents(prisma, deps(new Date(), map));
+      await tickSecurityIncidents(prisma, deps(new Date(Date.now() + 10_000), map));
+      expect(await prisma.securityEvent.count({ where: { camera: CAM, kind: "detection_ongoing" } })).toBe(1);
+
+      // Eight minutes on, still in view: past quiet + settle, but held open.
+      await tickSecurityIncidents(prisma, deps(new Date(Date.now() + 8 * 60_000), map));
+      expect(await prisma.securityIncident.findUniqueOrThrow({ where: { id: incidentId } })).toMatchObject({ grouping: "collecting" });
+
+      // Nine minutes on, Frigate ends the object: the ingest's own `end` row joins the SAME incident.
+      const endAt = new Date(Date.now() + 9 * 60_000);
+      map.observe(track("end"), endAt);
+      const end = await prisma.securityEvent.create({
+        data: {
+          source: "frigate",
+          kind: "detection",
+          severity: "info",
+          camera: CAM,
+          sourceRef: `${CAM}/${fid}`,
+          dedupeKey: `frigate:${fid}`,
+          labels: ["person"],
+          cameraZones: [],
+          score: 0.88,
+          startedAt,
+          endedAt: endAt,
+          summary: "Person",
+        },
+      });
+      await tickSecurityIncidents(prisma, deps(new Date(endAt.getTime() + 5_000), map));
+      expect(await prisma.securityEventTriage.findUniqueOrThrow({ where: { eventId: end.id } })).toMatchObject({ outcome: "grouped", incidentId });
+      expect(await prisma.securityIncident.count({ where: { cameras: { has: CAM } } })).toBe(1);
+      expect(await prisma.securityIncident.findUniqueOrThrow({ where: { id: incidentId } })).toMatchObject({
+        eventCount: 2,
+        countsByCamera: { [CAM]: { _ongoing: 1, person: 1 } },
+        lastActivityAt: endAt,
+        alertedAt,
+      });
+    });
   });
 });

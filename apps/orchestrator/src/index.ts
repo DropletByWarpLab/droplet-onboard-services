@@ -12,7 +12,7 @@ import { connectMqtt } from "./services/mqtt.service.js";
 import { notifyOwnersAndAdmins } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
-import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
+import { initCameraService, securityOngoingSource, shutdownCameraService } from "./services/camera.service.js";
 import { attachWsBridge } from "./services/ws-bridge.service.js";
 import { attachClientDispatchBridge } from "./services/client-dispatch.service.js";
 import {
@@ -1115,6 +1115,9 @@ async function main() {
   registerSecurityIncidentJobs(cronRuntime, prisma, {
     isSecurityModuleOn: () => getEffectiveModuleIds(prisma, config).then((ids) => ids.has("security")),
     resolveAccess: resolveEffectiveAccess,
+    // WARP-2978 PR-D — the people Frigate is tracking now (camera.service's
+    // in-flight map): a person in view for 30 s alerts before their `end`.
+    ongoing: securityOngoingSource(),
   });
   // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
   // cameras Droplet can prove it is listening to (coverage cannot be rebuilt

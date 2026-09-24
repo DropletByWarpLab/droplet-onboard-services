@@ -28,8 +28,9 @@ describe("the ruleset fingerprint", () => {
   it("RULESET is pinned to its version", () => {
     const fingerprint = createHash("sha256").update(canonical(RULESET)).digest("hex");
     expect({ version: SECURITY_RULESET_VERSION, fingerprint }).toEqual({
-      version: 1,
-      fingerprint: "f16dcbbbdc8f6a9efaab17b8b1286718749ed0312f7a5aac2b744bf90c06aac6",
+      // v2 — WARP-2978 PR-D: after_hours_presence accepts `detection_ongoing` (a person still in view at 30 s).
+      version: 2,
+      fingerprint: "ba5c80e441be07f803ea6b3d6bb1cbe08e89a50d3baaecee5cb6b40ed2b4c380",
     });
   });
 

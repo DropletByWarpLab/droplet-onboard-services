@@ -53,6 +53,7 @@ import {
   type SecurityIncidentDeps,
 } from "./security-incidents.service.js";
 import { areaRows, createFakeSecurityPrisma, eventRow, officeHours, type FakeSecurityPrisma, type FakeWorld } from "../__tests__/security-incidents.fake.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 
 /** 22:14 in London (BST) on Wednesday 2026-09-23 — the site closed at 17:00. */
 const T0 = new Date("2026-09-23T21:14:00Z");
@@ -147,7 +148,7 @@ describe("triage: one person in the Stock room after closing", () => {
       reasonCodes: ["after_hours_presence"],
       notifyState: "pending",
       alertedAt: T0,
-      rulesetVersion: 1,
+      rulesetVersion: SECURITY_RULESET_VERSION,
       eventCount: 1,
       cameras: ["back"],
       countsByCamera: { back: { person: 1 } },
@@ -172,7 +173,7 @@ describe("triage: one person in the Stock room after closing", () => {
       incidentId: i.id,
       matchedLinkIds: [`${STOCK.slice(0, 8)}-l0`],
       alsoZoneIds: [],
-      rulesetVersion: 1,
+      rulesetVersion: SECURITY_RULESET_VERSION,
     });
   });
 

@@ -14,6 +14,9 @@
  *      would lose exactly the busy moments.
  *   3. A refused subscription is recorded as the ingest being DOWN, which
  *      /security shows, rather than a quiet feed.
+ *   4. WARP-2978 PR-D — the in-flight map (who is still in view) is fed from
+ *      the same RAW messages, before the gate, and forgets people when their
+ *      camera, Frigate or the broker goes away.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -68,7 +71,7 @@ vi.mock("./push-dispatch.service.js", () => ({
   dispatchDetectionEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { initCameraService, shutdownCameraService, subscribeCameraEvents } from "./camera.service.js";
+import { initCameraService, securityOngoingSource, shutdownCameraService, subscribeCameraEvents } from "./camera.service.js";
 import type { CameraSSEEvent } from "../types/camera.js";
 import { resetCameraEventGateForTests } from "./camera-event-gate.js";
 import { _resetSecurityIngestHealthForTests, securityIngestHealthState } from "./security-events.service.js";
@@ -310,5 +313,54 @@ describe("camera health — transitions only, and the dashboard hears them again
     expect(securityIngestHealthState().lastFrigateMessageAt).toBeNull(); // not a topic we read
     message("frigate/available", "online");
     expect(securityIngestHealthState().lastFrigateMessageAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("WARP-2978 PR-D — the in-flight map is fed from the raw messages, before the gate", () => {
+  /** Tracking that started 40 s ago (the map drops anything older than 6 h, so this is relative to the real clock). */
+  const startedSec = () => Math.floor(Date.now() / 1000) - 40;
+  const dueIds = () => securityOngoingSource().due(new Date()).map((o) => o.id).sort();
+
+  it("a person the gate DROPS (a second one while the first is tracked) is still in the map", () => {
+    const start_time = startedSec();
+    message("frigate/events", frigate("new", "first", { start_time }));
+    message("frigate/events", frigate("new", "second", { start_time })); // gate: drop_active
+    message("frigate/events", frigate("update", "second", { start_time }));
+    expect(dueIds()).toEqual(["first", "second"]);
+    // camera.service itself writes nothing for a track — the incident engine does.
+    expect(createMany).not.toHaveBeenCalled();
+  });
+
+  it("end forgets the person", () => {
+    const start_time = startedSec();
+    message("frigate/events", frigate("new", "p", { start_time }));
+    message("frigate/events", frigate("end", "p", { start_time }));
+    expect(dueIds()).toEqual([]);
+  });
+
+  it("their camera going offline or disabled forgets its people; Frigate's LWT going offline forgets everyone", () => {
+    const start_time = startedSec();
+    message("frigate/events", frigate("new", "a", { start_time }));
+    message("frigate/events", frigate("new", "b", { start_time, camera: "yard" }));
+    message("frigate/events", frigate("new", "c", { start_time, camera: "till" }));
+    message("frigate/front_door/status/detect", "offline");
+    expect(dueIds()).toEqual(["b", "c"]);
+    message("frigate/yard/status/detect", "disabled");
+    expect(dueIds()).toEqual(["c"]);
+    message("frigate/till/status/detect", "online");
+    expect(dueIds()).toEqual(["c"]);
+    message("frigate/available", "offline");
+    expect(dueIds()).toEqual([]);
+  });
+
+  it("a dropped broker forgets everyone (an `end` sent meanwhile is never redelivered)", () => {
+    const start_time = startedSec();
+    message("frigate/events", frigate("new", "a", { start_time }));
+    (handlers.close as () => void)();
+    expect(dueIds()).toEqual([]);
+    message("frigate/events", frigate("update", "a", { start_time }));
+    expect(dueIds()).toEqual(["a"]);
+    (handlers.offline as () => void)();
+    expect(dueIds()).toEqual([]);
   });
 });

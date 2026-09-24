@@ -116,6 +116,47 @@ describe("after_hours_presence (alert) — a person inside while the site is not
   ] as const)("does not fire for %s", (_n, over, scope, zoneKind, tl) => {
     expect(afterHoursPresence({ scope, zoneKind, event: ev(over as Partial<TriageEvent>), timeline: tl })).toBeNull();
   });
+
+  // WARP-2978 PR-D (ruleset v2) — a person still in view 30 s in.
+  const ongoing = (over: Partial<TriageEvent> = {}): TriageEvent => {
+    const startedAt = over.startedAt ?? WED_2214;
+    return ev({
+      kind: "detection_ongoing",
+      endedAt: null,
+      createdAt: plus(startedAt, 30_000),
+      summary: "Person still in view after 30 s",
+      ...over,
+    });
+  };
+
+  it("fires for a person STILL in view (detection_ongoing) — the alert need not wait for their end", () => {
+    const e = ongoing();
+    expect(afterHoursPresence({ scope: "area", zoneKind: "interior", event: e, timeline: scheduleTl() })).toMatchObject({
+      code: "after_hours_presence",
+      severity: "alert",
+      evidenceEventId: e.id,
+      evidenceKind: "detection_ongoing",
+      evidenceAt: e.startedAt,
+      detail: { mode: "closed", nonOpenAt: e.startedAt.toISOString() },
+    });
+    expect(RULESET.after_hours_presence.kinds).toEqual(["detection", "detection_ongoing"]);
+  });
+
+  it("an ongoing row covers [startedAt, when it was written]: arrived before closing, still there after it", () => {
+    const e = ongoing({ startedAt: plus(WED_17, -10_000), createdAt: plus(WED_17, 20_000) });
+    const tl = scheduleTl([{ at: WED_17, mode: "closed", source: "schedule", fromMode: "open" }]);
+    expect(afterHoursPresence({ scope: "area", zoneKind: "interior", event: e, timeline: tl })?.detail).toMatchObject({
+      nonOpenAt: WED_17.toISOString(),
+    });
+  });
+
+  it.each([
+    ["in opening hours", { startedAt: WED_NOON, createdAt: plus(WED_NOON, 30_000) }, "interior"],
+    ["in an entry area", {}, "entry"],
+    ["for a car", { labels: ["car"] }, "interior"],
+  ] as const)("an ongoing row does not fire %s", (_n, over, zoneKind) => {
+    expect(afterHoursPresence({ scope: "area", zoneKind, event: ongoing(over as Partial<TriageEvent>), timeline: scheduleTl() })).toBeNull();
+  });
 });
 
 describe("camera_offline (notice) — a camera down for more than a minute", () => {

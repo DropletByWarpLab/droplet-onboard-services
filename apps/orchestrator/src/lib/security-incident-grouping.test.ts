@@ -255,3 +255,40 @@ describe("the counts that survive the event trim (DS-005)", () => {
     expect(parseCounts({ back: { person: -1, car: 1.5, bike: 2 }, x: "y" })).toEqual({ back: { bike: 2 } });
   });
 });
+
+describe("WARP-2978 PR-D — a person's still-in-view row groups like their detection", () => {
+  const ongoing = (over: Partial<TriageEvent> = {}) =>
+    ev({ kind: "detection_ongoing", endedAt: null, createdAt: plus(T0, 30_000), summary: "Person still in view after 30 s", ...over });
+
+  it("groups under the same scope as the detection — an area, or the camera no area covers", () => {
+    const areas = [area("b", "entry"), area("a", "interior")];
+    expect(scopeFor(ongoing(), areas)).toEqual(scopeFor(ev(), areas));
+    expect(scopeFor(ongoing(), [])).toMatchObject({ outcome: "group", key: { scope: "camera", scopeCamera: "back" }, joinOnly: false });
+  });
+
+  it("spans [startedAt, createdAt] — still in view when written — while a detection without an end spans its start", () => {
+    expect(eventSpan(ongoing())).toEqual({ s: T0, e: plus(T0, 30_000) });
+    expect(eventSpan(ev({ endedAt: null, createdAt: plus(T0, 30_000) }))).toEqual({ s: T0, e: T0 });
+    // Never backwards.
+    expect(eventSpan(ongoing({ createdAt: plus(T0, -1_000) }))).toEqual({ s: T0, e: T0 });
+  });
+
+  it("the end row fits the incident the ongoing row opened, however long the person stayed within the span cap", () => {
+    const first = ongoing();
+    const i = { ...incident(), ...openingFields(first, eventSpan(first)) };
+    for (const stayed of [45_000, 10 * 60_000, MAX_SPAN_MS]) {
+      const end = ev({ startedAt: T0, endedAt: plus(T0, stayed) });
+      expect(pickIncident([i], eventSpan(end), "closed")).toBe(i);
+    }
+    expect(pickIncident([i], eventSpan(ev({ startedAt: T0, endedAt: plus(T0, MAX_SPAN_MS + 1) })), "closed")).toBeNull();
+  });
+
+  it("counts as _ongoing, never as a second person: with its end, one person and one ongoing row", () => {
+    const first = ongoing();
+    const opened = openingFields(first, eventSpan(first));
+    expect(opened.countsByCamera).toEqual({ back: { _ongoing: 1 } });
+    const i = { ...incident(), ...opened };
+    const end = ev({ startedAt: T0, endedAt: plus(T0, 45_000) });
+    expect(joinPatch(i, end, eventSpan(end)).countsByCamera).toEqual({ back: { _ongoing: 1, person: 1 } });
+  });
+});
