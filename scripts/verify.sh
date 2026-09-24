@@ -292,9 +292,14 @@ check_warn "ROUTING_SERVICE_TOKEN set" \
 # SERVICE_TOKEN_EMAIL, compose must ACTUALLY resolve the container. Reads
 # `config --services`, not `ps`, so it is a fact about the composition rather
 # than about what happens to be running this second.
+#
+# WARP-2970: email-indexer is now default-on (no profile), so `config` always
+# lists it and that check could no longer fail. The remaining tell is a token
+# for a service that is not RUNNING (e.g. an OTA-upgraded box before its
+# post-commit start, or a crash loop), so ask `ps`.
 if [ -n "${SERVICE_TOKEN_EMAIL:-}" ]; then
-  check_warn "email-indexer in the active compose profiles" \
-    bash -c 'docker compose -f "'"$COMPOSE_FILE"'" --env-file "'"$COMPOSE_ENV_FILE"'" config --services 2>/dev/null | grep -qx email-indexer'
+  check_warn "email-indexer running" \
+    bash -c 'docker compose -f "'"$COMPOSE_FILE"'" --env-file "'"$COMPOSE_ENV_FILE"'" ps --status running --services 2>/dev/null | grep -qx email-indexer'
 fi
 
 # =============================================================================

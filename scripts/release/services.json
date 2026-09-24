@@ -1,5 +1,5 @@
 {
-  "$comment": "WARP-536 — canonical OTA release service list. Single source of truth for which images publish-release.yml builds/pushes and which entries land in release.json (design schema v1). Contexts/dockerfiles mirror docker/docker-compose.yml build blocks (context is repo-root-relative). healthcheck is what the device-side update agent will probe after a swap: `http` entries are the service's own auth-exempt liveness endpoint on its container-internal port; `none` means the service has no HTTP surface (device-identity-svc is a Unix-socket gRPC sidecar; the openwrt AP container is probed at the network layer, not HTTP). rag-eval is deliberately absent — it is the RAG evaluation harness, not an appliance service. OpenWrt FIRMWARE A/B updates are phase 2 (WARP-534 epic exclusion); the openwrt entry here is the in-container AP image only.",
+  "$comment": "WARP-536 — canonical OTA release service list. Single source of truth for which images publish-release.yml builds/pushes and which entries land in release.json (design schema v1). Contexts/dockerfiles mirror docker/docker-compose.yml build blocks (context is repo-root-relative). WARP-3001: every compose service with a `build:` block must be listed here or in `excluded` (name -> reason); scripts/release/check_services_drift.py fails the PR lane and the publish gate otherwise. Profile-gated services ARE listed: a box pulls every image, recreates only what it runs, and starts a service only when its own COMPOSE_PROFILES enables it. rag-eval is listed because `eval` is in the default Linux COMPOSE_PROFILES, so boxes run it. healthcheck is what the device-side update agent probes after a swap: `http` entries are the service's own auth-exempt liveness endpoint on its container-internal port; `none` means no plain-HTTP health surface (device-identity-svc is a Unix-socket gRPC sidecar; the openwrt AP container is probed at the network layer; gateway serves TLS only; fleet-agent has no HTTP server). OpenWrt FIRMWARE A/B updates are phase 2 (WARP-534 epic exclusion); the openwrt entry here is the in-container AP image only.",
   "services": [
     {
       "name": "orchestrator",
@@ -86,10 +86,65 @@
       "healthcheck": { "type": "http", "port": 8087, "path": "/healthz" }
     },
     {
+      "name": "gateway",
+      "context": ".",
+      "dockerfile": "docker/nginx/Dockerfile",
+      "healthcheck": { "type": "http", "port": 9981, "path": "/healthz" }
+    },
+    {
+      "name": "doc-render",
+      "context": ".",
+      "dockerfile": "services/doc-render/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8020, "path": "/health" }
+    },
+    {
+      "name": "sandbox",
+      "context": ".",
+      "dockerfile": "services/sandbox/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8030, "path": "/health" }
+    },
+    {
+      "name": "web-fetch",
+      "context": ".",
+      "dockerfile": "services/web-fetch/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8010, "path": "/health" }
+    },
+    {
+      "name": "mcp-bridge",
+      "context": ".",
+      "dockerfile": "services/mcp-bridge/Dockerfile",
+      "healthcheck": { "type": "http", "port": 9096, "path": "/health" }
+    },
+    {
+      "name": "erp-sql-bridge",
+      "context": ".",
+      "dockerfile": "services/erp-sql-bridge/Dockerfile",
+      "healthcheck": { "type": "http", "port": 9095, "path": "/health" }
+    },
+    {
+      "name": "inference-manager",
+      "context": ".",
+      "dockerfile": "services/inference-manager/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8002, "path": "/health" }
+    },
+    {
+      "name": "fleet-agent",
+      "context": ".",
+      "dockerfile": "services/fleet-agent/Dockerfile",
+      "healthcheck": { "type": "none" }
+    },
+    {
+      "name": "rag-eval",
+      "context": ".",
+      "dockerfile": "services/rag-eval/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8090, "path": "/health" }
+    },
+    {
       "name": "openwrt",
       "context": "openwrt",
       "dockerfile": "singlebox-image/Dockerfile",
       "healthcheck": { "type": "none" }
     }
-  ]
+  ],
+  "excluded": {}
 }

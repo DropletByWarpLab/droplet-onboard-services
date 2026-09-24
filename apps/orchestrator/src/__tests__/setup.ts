@@ -268,6 +268,7 @@ vi.mock("@prisma/client", () => {
       telemetry: "telemetry",
       web_fetch: "web_fetch",
       ambient_data: "ambient_data",
+      web_push: "web_push",
     },
     // WARP-181: actor attribution on ActivityRow. Mirrors the schema's
     // `enum ActivityActorType` — keep in lockstep or ~200 suites cascade

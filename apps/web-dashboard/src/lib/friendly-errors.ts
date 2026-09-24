@@ -608,9 +608,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Droplet won't connect to that address — it points somewhere inside this Droplet's own network rather than out to a mail server.",
     email_address_already_connected:
       "That mailbox is already connected. Disconnect it first if you want to reconnect it with new details.",
-    // Not the owner's fault and not fixable on this form.
+    // Not the owner's fault and not fixable on this form. WARP-2970: the old
+    // copy sent the owner to "turn Email on in Settings" — that page is the
+    // outbound SMTP relay and cannot start the mail service. The service is
+    // default-on, so reaching this means it is down, not switched off.
     email_indexer_unavailable:
-      "Droplet's mail service isn't running on this Droplet, so it can't check the mailbox. An owner can turn Email on in Settings.",
+      "Droplet's mail service isn't running right now, so it can't check the mailbox. Try again in a few minutes; if it keeps happening, restart the Droplet.",
     human_required:
       "Only a person signed in to this Droplet can connect a mailbox.",
     account_not_found:

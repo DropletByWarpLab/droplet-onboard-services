@@ -1,29 +1,49 @@
 #!/usr/bin/env bash
 # =============================================================================
-# WARP-539 — OTA apply host helper (compose-over-socket)
+# WARP-539 / WARP-3007 — OTA apply host helper
 # =============================================================================
 #
-# The ONE host-side executor the orchestrator's OTA apply path (WARP-539,
-# apps/orchestrator/src/services/update-agent/host-compose-runner.ts) shells
-# out to. It is the single audited surface between the orchestrator and the
-# host Docker daemon: every daemon operation the apply/rollback state machine
-# needs is a FIXED subcommand here, invoked by execFile with an argv array
-# (never a shell string), so a manifest field can never become a command.
+# The ONE executor behind the orchestrator's OTA apply path (WARP-539,
+# apps/orchestrator/src/services/update-agent/host-compose-runner.ts). Every
+# daemon operation the apply/rollback state machine needs is a FIXED
+# subcommand here, invoked with an argv array (never a shell string), so a
+# manifest field can never become a command.
 #
-# UNLIKE the other scripts/lib/*.sh files, this one is EXECUTED directly
-# (with an absolute path), not sourced — so it is fully self-contained:
-# its own `set -euo pipefail`, its own arg parsing, its own `docker compose`
-# invocations against the mounted socket.
+# ── WHERE IT RUNS (WARP-3007) ──
+# ON THE HOST, never inside the orchestrator. The orchestrator creates a
+# one-shot container over its docker socket (host-exec.ts): its OWN image,
+# pinned by image ID, `--network none`, `-v /:/host`, entrypoint
+# `chroot /host`, argv `/bin/bash <this file> <subcommand> …`. So every
+# `docker compose` below runs with the host's docker CLI and reads the host's
+# `.env` — the orchestrator image has no docker CLI, and compose run inside it
+# silently dropped every `env_file` (WARP-3007 a/b).
+#
+# WHY IT LIVES UNDER docker/: a release's configs.tar.gz is
+# `git archive HEAD docker`, so this file ships inside every release
+# (WARP-3007 c). Which copy runs:
+#   * before stage-configs — the helper already installed on the box;
+#   * from stage-configs on — the RELEASE's own helper (just unpacked);
+#   * after a rollback's restore-configs — the PREVIOUS release's helper
+#     (the pre-image brings it back); the self-swap rollback execs it.
+# The subcommand surface is therefore a cross-version contract: an older
+# orchestrator calls a newer helper. Add flags; never repurpose one.
 #
 # ── SECURITY POSTURE ──
-# The orchestrator container mounts /var/run/docker.sock (see the WARP-539
-# volume + comment in docker/docker-compose.yml, orchestrator service ONLY).
-# A Docker socket is root-equivalent on the host. The fence:
+# Host root. That is exactly what the orchestrator's docker socket already
+# grants (docker/docker-compose.yml, orchestrator service ONLY); running here
+# adds no capability, it only stops the compose CLI from running blind. The
+# fence:
 #   - only a cosign-verified (WARP-537) release whose configs.tar.gz sha256
 #     matches the signed manifest (apply.ts) ever reaches this script;
 #   - the subcommand surface is fixed — there is no passthrough `docker`;
 #   - --services values are validated to be a comma list of compose service
-#     names; --target is one of {release,previous}; nothing is eval'd.
+#     names; --target is one of {release,previous} (+ grow for
+#     recreate-services); nothing is eval'd;
+#   - the one-shot container has no network. The only networked step is
+#     pull-images' cosign verify (a nested `docker run --rm` of the same
+#     pinned image, WARP-244), which must reach ghcr.io exactly as it did
+#     from inside the orchestrator.
+# Security review of the host-execution model: WARP-2924.
 #
 # ── PER-TARGET DIGEST PINNING (why recreates ride a compose OVERRIDE) ──
 # The appliance compose file defines the first-party services (orchestrator,
@@ -47,6 +67,15 @@
 # locally (previous). A missing override is a HARD ERROR — recreating
 # unpinned is exactly the bug this contract exists to kill.
 #
+# ── ENVIRONMENT (set by host-exec.ts, explicit allowlist) ──
+#   DROPLET_OTA_UPDATES_DIR   HOST path of the orchestrator's ota-updates
+#                             volume (default /data/updates for tests).
+#   DROPLET_OTA_CONFIG_ROOT   repo root (default: two levels above compose).
+#   DROPLET_OTA_HOST_IMAGE    the pinned image the one-shot runs off; reused
+#                             for the detached self-swap and for cosign.
+#   DROPLET_OTA_GITHUB_TOKEN  pull-images only (private GHCR, pre-GA).
+#   DROPLET_OTA_SELF_HEALTH_{ATTEMPTS,INTERVAL_SECONDS}  self-swap wait.
+#
 # ── SUBCOMMANDS (the ApplyRunner port contract) ──
 #   current-image-refs  --services a,b,c
 #       Print a JSON map {service: <running image ref or null>} for the box.
@@ -55,7 +84,7 @@
 #       DIR (the runner has already written previous-refs.json, manifest.json
 #       and the per-target overrides + services.txt one level up).
 #   pull-images         --images REF [REF ...]
-#       `docker pull` every pinned image ref (by digest).
+#       cosign-verify, then `docker pull`, every pinned image ref (by digest).
 #   stage-configs       --update-id ID --configs-tar PATH
 #       Unpack the (already sha256-verified) configs tarball over the host
 #       config tree; the pre-image lives in the backup dir from `snapshot`.
@@ -65,19 +94,39 @@
 #       `docker compose -f <base> -f override-<target>.yml up -d --no-deps
 #       --no-build --pull never --force-recreate` each named service — i.e.
 #       ACTUALLY pinned to the release (manifest) or previous (backup) refs.
+#   recreate-services   ... --target grow
+#       WARP-2970: the same loop pinned to override-grow.yml — post-commit,
+#       starts release services this box enables but has no container for.
+#       A service that HAS a container (even a stopped one: an operator's
+#       `docker stop`) is skipped, never recreated; stdout then also carries
+#       {"failed":[…],"skipped":[…]}.
+#   enabled-services   [--profiles a,b]
+#       `docker compose config --services`: the services the staged compose
+#       file enables, one per line. WARP-2995: --profiles is the box's real
+#       COMPOSE_PROFILES (from the reconcile-env report), passed as explicit
+#       --profile flags plus a match-nothing sentinel.
+#   reconcile-env       --update-id ID [--image REF]
+#       WARP-2995: run the staged docker/ota/env-reconcile.sh (we are already
+#       on the host). Additive, idempotent .env backfill + boot-unit profile
+#       flags. Its one-line JSON report (key NAMES only) is printed and kept
+#       as <updatesDir>/<ID>/env-reconcile.json. --image is accepted for
+#       older callers and ignored.
 #   restore-configs     ID
 #       Restore the backed-up host config tree (rollback step 8).
 #   recreate-self-detached --update-id ID --target release|previous
-#       Launch a DETACHED helper container (docker:27-cli, socket + compose
-#       file + updates volume mounted) that: recreates the orchestrator
-#       pinned to override-<target>.yml, waits BOUNDED on the recreated
-#       container's healthcheck (DROPLET_OTA_SELF_HEALTH_ATTEMPTS ×
-#       DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS, default 24 × 5s ≈ the TS
-#       health-gate posture), and on timeout rolls EVERY service in
-#       services.txt back to the previous refs — all OUTSIDE the orchestrator
-#       process, so the swap (and its rollback) survive the orchestrator's
-#       own recreation. The DB verdict is written by whichever orchestrator
-#       boots next (resumeInterruptedApply).
+#       Launch a DETACHED supervisor container (DROPLET_OTA_HOST_IMAGE,
+#       `chroot /host`, no network) running `self-swap-supervise`, then
+#       return. It outlives the orchestrator's own recreation.
+#   self-swap-supervise --update-id ID --target release|previous
+#       (the detached container's program; never called by the
+#       orchestrator directly) recreates the orchestrator pinned to
+#       override-<target>.yml, waits BOUNDED on its container healthcheck
+#       (DROPLET_OTA_SELF_HEALTH_ATTEMPTS × _INTERVAL_SECONDS, default
+#       60 × 5 s — the new orchestrator's boot runs the guarded migrations
+#       first), and on timeout restores the config pre-image (release target)
+#       and execs the RESTORED helper's `recreate-services --target previous`
+#       over services.txt. The DB verdict is written by whichever
+#       orchestrator boots next (resumeInterruptedApply).
 #   list-self-swap-helpers
 #       Print one {"name","status","finishedAt"} JSON object per line for
 #       every droplet-ota-self-swap-* helper container, running or exited
@@ -169,28 +218,58 @@ setup_registry_auth() {
   export DOCKER_CONFIG="$REGISTRY_AUTH_DIR"
 }
 
+# The cosign argv prefix. The host has no cosign; the orchestrator image
+# vendors a checksum-pinned one (WARP-537), so run THAT in a throwaway
+# container off the same pinned image. It is the one networked step (the
+# signature bundle lives on ghcr.io). DROPLET_COSIGN_BIN (tests, dev) runs a
+# local binary instead.
+COSIGN=()
+cosign_cmd() {
+  if [ -n "${DROPLET_COSIGN_BIN:-}" ]; then
+    COSIGN=("$DROPLET_COSIGN_BIN")
+    return 0
+  fi
+  host_image
+  COSIGN=(docker run --rm --entrypoint /usr/local/bin/cosign)
+  if [ -n "$REGISTRY_AUTH_DIR" ]; then
+    COSIGN+=(-v "$REGISTRY_AUTH_DIR:/ota-registry-auth:ro" -e DOCKER_CONFIG=/ota-registry-auth)
+  fi
+  COSIGN+=("$HOST_IMAGE")
+}
+
 verify_image_signature() {
   local img="$1"
-  local cosign_bin="${DROPLET_COSIGN_BIN:-cosign}"
   log "verify $img"
   # Under dry-run the `run` helper only PRINTS the command it would execute
   # (to stdout, prefixed DRY-RUN:) — keep that line visible. On the real
   # path cosign's verification bundle (JSON) is noise, so drop its stdout.
   if [ -n "$DRY_RUN" ]; then
-    run "$cosign_bin" verify \
+    run "${COSIGN[@]}" verify \
       --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
       --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
       --offline=true \
       "$img"
     return 0
   fi
-  if ! run "$cosign_bin" verify \
+  if ! run "${COSIGN[@]}" verify \
       --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
       --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
       --offline=true \
       "$img" >/dev/null; then
     die "image-verify: cosign rejected $img — only images signed by the publish-release workflow may be pulled (WARP-244, docs/SECURITY.md)"
   fi
+}
+
+# The image the host-exec one-shot runs off (host-exec.ts pins it by image
+# ID). The detached self-swap and the cosign container reuse it, so nothing
+# here ever pulls an unpinned image (the old supervisor pulled docker:27-cli).
+HOST_IMAGE=""
+host_image() {
+  HOST_IMAGE="${DROPLET_OTA_HOST_IMAGE:-}"
+  [ -n "$HOST_IMAGE" ] || die "DROPLET_OTA_HOST_IMAGE is not set (host-exec.ts pins it)"
+  case "$HOST_IMAGE" in
+    *[!A-Za-z0-9._:@/-]*) die "invalid DROPLET_OTA_HOST_IMAGE: $HOST_IMAGE" ;;
+  esac
 }
 
 COMPOSE_FILE=""
@@ -200,6 +279,9 @@ SERVICES=""
 TARGET=""
 CONFIGS_TAR=""
 IMAGES=()
+IMAGE=""
+PROFILES=""
+PROFILES_SET=
 
 # --- Validators -------------------------------------------------------------
 
@@ -220,6 +302,24 @@ validate_target() {
 validate_update_id() {
   case "$1" in
     *[!a-zA-Z0-9._-]*) die "invalid --update-id: $1" ;;
+  esac
+}
+
+validate_profiles() {
+  # Comma list of compose profile names; empty is valid (no profiles).
+  case "$1" in
+    *[!a-z0-9,_-]*) die "invalid --profiles value: $1" ;;
+  esac
+}
+
+validate_image_ref() {
+  # One digest-pinned registry ref, the shape the signed manifest carries.
+  case "$1" in
+    *@sha256:*) : ;;
+    *) die "invalid --image: $1 (expected a digest-pinned ref)" ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._:@/-]*) die "invalid --image: $1" ;;
   esac
 }
 
@@ -391,6 +491,7 @@ config_subdir() {
 cmd_pull_images() {
   [ "${#IMAGES[@]}" -gt 0 ] || die "pull-images needs at least one --images REF"
   setup_registry_auth
+  cosign_cmd
   local img
   for img in "${IMAGES[@]}"; do
     # WARP-244: verify-then-pull. The ref is digest-pinned (manifest schema
@@ -420,7 +521,8 @@ cmd_migrate_deploy() {
 cmd_recreate_services() {
   validate_update_id "$UPDATE_ID"
   validate_services "$SERVICES"
-  validate_target "$TARGET"
+  # `grow` (WARP-2970) is recreate-services-only: never a self-swap target.
+  [ "$TARGET" = "grow" ] || validate_target "$TARGET"
   local override
   override="$(override_file "$UPDATE_ID" "$TARGET")"
   require_pin_file "$override" "per-target override"
@@ -432,10 +534,19 @@ cmd_recreate_services() {
   # EVERY service, collect the ones that failed, and return the list to the
   # caller (JSON on stdout + non-zero exit) so the outcome is actionable.
   local svc rc=0
-  local failed=()
+  local failed=() skipped=()
   local IFS=','
   for svc in $SERVICES; do
     [ -z "$svc" ] && continue
+    # grow starts only a service that has NEVER had a container here. The
+    # orchestrator's "not running" (current-image-refs, `ps -q`) also covers
+    # a container someone stopped on purpose; `ps -a -q` tells them apart.
+    if [ "$TARGET" = "grow" ] && \
+       [ -n "$(run_capture docker compose -f "$COMPOSE_FILE" ps -a -q "$svc")" ]; then
+      log "grow: $svc already has a container (stopped?) — leaving it as it is"
+      skipped+=("$svc")
+      continue
+    fi
     # --no-deps: recreate ONLY this service (its deps are already up);
     # --no-build: NEVER fall back to the local build — the override's image:
     #   pin is the whole point (build:-only services would otherwise reuse
@@ -460,14 +571,76 @@ cmd_recreate_services() {
   for f in ${failed[@]+"${failed[@]}"}; do
     [ -z "$joined" ] && joined="\"$f\"" || joined="$joined,\"$f\""
   done
-  printf '{"failed":[%s]}\n' "$joined"
+  if [ "$TARGET" = "grow" ]; then
+    local sk=""
+    for f in ${skipped[@]+"${skipped[@]}"}; do
+      [ -z "$sk" ] && sk="\"$f\"" || sk="$sk,\"$f\""
+    done
+    printf '{"failed":[%s],"skipped":[%s]}\n' "$joined" "$sk"
+  else
+    printf '{"failed":[%s]}\n' "$joined"
+  fi
   return "$rc"
+}
+
+# WARP-2970 — read-only. Lets the post-commit step tell "not running because
+# its profile is off here" from "not running because it is new to the default
+# set". Fails loudly (non-zero) rather than printing an empty set.
+cmd_enabled_services() {
+  local flags=()
+  if [ -n "$PROFILES_SET" ]; then
+    validate_profiles "$PROFILES"
+    # The sentinel makes "no profiles" explicit too: a --profile flag always
+    # beats COMPOSE_PROFILES from this container's environment.
+    flags=(--profile droplet-ota-no-profile)
+    local p
+    local IFS=','
+    for p in $PROFILES; do [ -n "$p" ] && flags+=(--profile "$p"); done
+    unset IFS
+  fi
+  [ -n "$DRY_RUN" ] && { run docker compose -f "$COMPOSE_FILE" ${flags[@]+"${flags[@]}"} config --services; return 0; }
+  dc ${flags[@]+"${flags[@]}"} config --services
+}
+
+# WARP-2995 — the host-side .env reconcile. The script comes from the STAGED
+# config tree (stage-configs already unpacked this release's docker/), so the
+# release that needs a key ships the code that adds it. This helper already
+# runs on the host (WARP-3007), so it just runs it — no nested container.
+# Fails loudly: apply.ts refuses the update (before any swap) on non-zero.
+cmd_reconcile_env() {
+  validate_update_id "$UPDATE_ID"
+  # --image is what an older orchestrator passes; still refuse a bad one.
+  [ -z "$IMAGE" ] || validate_image_ref "$IMAGE"
+  local root report
+  root="$(config_root)"
+  report="$(updates_dir)/$UPDATE_ID/env-reconcile.json"
+  log "reconcile-env $UPDATE_ID (host .env under $root)"
+  if [ -n "$DRY_RUN" ]; then
+    run /bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID"
+    return 0
+  fi
+  local out
+  out="$(/bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID")" \
+    || die "env-reconcile failed on the host for $UPDATE_ID"
+  mkdir -p "$(dirname "$report")"
+  printf '%s\n' "$out" > "$report"
+  printf '%s\n' "$out"
 }
 
 cmd_restore_configs() {
   validate_update_id "$UPDATE_ID"
   local pre="${DROPLET_OTA_UPDATES_DIR:-/data/updates}/$UPDATE_ID/backup/configs-pre-image.tar.gz"
   log "restore-configs $UPDATE_ID from $pre"
+  # WARP-2995 (#2320 review): undo this update's .env + boot-unit changes
+  # FIRST, with the release's own env-reconcile.sh (it made the backups, and
+  # the pre-image unpacked below may carry an older copy). No backups → no-op.
+  # A failure is logged, not fatal: the config + image rollback matter more.
+  local reconcile
+  reconcile="$(config_root)/docker/ota/env-reconcile.sh"
+  if [ -f "$reconcile" ] || [ -n "$DRY_RUN" ]; then
+    run /bin/sh "$reconcile" --restore "$(config_root)" "$UPDATE_ID" >&2 \
+      || log "restore-configs: .env / boot-unit restore FAILED for $UPDATE_ID — continuing"
+  fi
   if [ -f "$pre" ] || [ -n "$DRY_RUN" ]; then
     run tar -xzf "$pre" -C "$(config_root)"
   else
@@ -475,120 +648,118 @@ cmd_restore_configs() {
   fi
 }
 
-# The POSIX-sh supervisor program the detached self-swap helper container
-# runs (docker:27-cli is Alpine/busybox — NO bash, so this must stay POSIX).
-# Single-quoted ON PURPOSE: every $VAR expands INSIDE the helper from the
-# `-e` environment the launch below pins, never in this shell. Behaviour:
-#   1. recreate the orchestrator pinned to the target override;
-#   2. wait BOUNDED on the recreated container's healthcheck;
-#   3. healthy   → exit; the new orchestrator's resume hook commits;
-#      timeout   → roll EVERY service in services.txt back to the previous
-#                  refs; the resumed OLD orchestrator writes the verdict.
-readonly SELF_SWAP_SUPERVISOR='
-set -eu
-say() { echo "[ota-self-swap] $*"; }
-say "recreating the orchestrator (override: $DROPLET_OTA_TARGET_OVERRIDE)"
-docker compose -f "$DROPLET_OTA_COMPOSE_FILE" -f "$DROPLET_OTA_TARGET_OVERRIDE" \
-  up -d --no-deps --no-build --pull never --force-recreate orchestrator
-attempt=0
-while [ "$attempt" -lt "$DROPLET_OTA_SELF_HEALTH_ATTEMPTS" ]; do
-  cid="$(docker compose -f "$DROPLET_OTA_COMPOSE_FILE" ps -q orchestrator 2>/dev/null || true)"
-  if [ -n "$cid" ]; then
-    health="$(docker inspect --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}" "$cid" 2>/dev/null || echo unknown)"
-    if [ "$health" = "healthy" ]; then
-      say "orchestrator healthy on the recreated image — swap holds"
-      exit 0
-    fi
-  fi
-  attempt=$((attempt + 1))
-  sleep "$DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS"
-done
-say "orchestrator never went healthy — rolling EVERY service back to the previous refs"
-rc=0
-while IFS= read -r svc; do
-  [ -n "$svc" ] || continue
-  say "rollback: recreating $svc on the previous ref"
-  docker compose -f "$DROPLET_OTA_COMPOSE_FILE" -f "$DROPLET_OTA_PREVIOUS_OVERRIDE" \
-    up -d --no-deps --no-build --pull never --force-recreate "$svc" || rc=1
-done < "$DROPLET_OTA_SERVICES_FILE"
-exit "$rc"
-'
+# Self-swap bounded-wait knobs. 60 × 5 s by default (WARP-3017): the
+# recreated orchestrator runs the WARP-573 guarded migrations (with a
+# pre-migrate pg_dump) before it can listen, and its container healthcheck
+# only flips to healthy after it listens.
+self_health_knobs() {
+  SELF_ATTEMPTS="${DROPLET_OTA_SELF_HEALTH_ATTEMPTS:-60}"
+  SELF_INTERVAL="${DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS:-5}"
+  validate_positive_int "DROPLET_OTA_SELF_HEALTH_ATTEMPTS" "$SELF_ATTEMPTS"
+  validate_positive_int "DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS" "$SELF_INTERVAL"
+}
+
+# The helper must be ABLE to roll back before it is allowed to swap: refuse
+# without the target override, the previous override and services.txt.
+require_self_swap_material() {
+  require_pin_file "$(override_file "$UPDATE_ID" "$TARGET")" "target override"
+  require_pin_file "$(override_file "$UPDATE_ID" previous)" "previous override"
+  require_pin_file "$(services_file "$UPDATE_ID")" "rollback services list"
+}
 
 cmd_recreate_self_detached() {
   validate_update_id "$UPDATE_ID"
   validate_target "$TARGET"
-  local attempts="${DROPLET_OTA_SELF_HEALTH_ATTEMPTS:-24}"
-  local interval="${DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS:-5}"
-  validate_positive_int "DROPLET_OTA_SELF_HEALTH_ATTEMPTS" "$attempts"
-  validate_positive_int "DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS" "$interval"
+  self_health_knobs
+  require_self_swap_material
+  host_image
 
-  # The helper must be ABLE to roll back before it is allowed to swap:
-  # refuse to launch without the target override, the previous override,
-  # and the rollback services list.
-  local target_override previous_override svc_file
-  target_override="$(override_file "$UPDATE_ID" "$TARGET")"
-  previous_override="$(override_file "$UPDATE_ID" previous)"
-  svc_file="$(services_file "$UPDATE_ID")"
-  require_pin_file "$target_override" "target override"
-  require_pin_file "$previous_override" "previous override"
-  require_pin_file "$svc_file" "rollback services list"
+  # This file's own HOST path — the supervisor runs the same subcommand
+  # surface. For target=release that is the staged release helper.
+  local self
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-  # The helper outlives THIS container, so it cannot read the overrides
-  # through our filesystem — it needs the updates volume mounted itself.
-  # Resolve whatever backs $(updates_dir) on this container (named volume
-  # preferred; bind-mount source as the fallback) via the socket.
-  local updates_src="ota-updates"
-  if [ -z "$DRY_RUN" ]; then
-    local self_cid
-    self_cid="$(run_capture docker compose -f "$COMPOSE_FILE" ps -q orchestrator)"
-    [ -n "$self_cid" ] || die "cannot resolve the orchestrator's own container id"
-    updates_src="$(run_capture docker inspect \
-      --format '{{range .Mounts}}{{.Name}}|{{.Source}}|{{.Destination}}{{printf "\n"}}{{end}}' \
-      "$self_cid" \
-      | awk -F'|' -v dest="$(updates_dir)" \
-          '$3 == dest { if ($1 != "") { print $1 } else { print $2 }; exit }')"
-    [ -n "$updates_src" ] || die "cannot resolve the volume behind $(updates_dir)"
-  fi
-
-  log "recreate-self-detached $UPDATE_ID target=$TARGET (launching detached helper)"
-  # A detached helper container (docker:cli image, socket mounted) runs the
-  # SELF_SWAP_SUPERVISOR above. It MUST outlive this process AND the
-  # orchestrator's own recreation, so it runs as its own `docker run -d`
-  # against the host daemon — not a compose service. The DB verdict is
-  # written later by whichever orchestrator boots (resumeInterruptedApply).
+  log "recreate-self-detached $UPDATE_ID target=$TARGET (launching detached supervisor)"
   local helper_name="droplet-ota-self-swap-$UPDATE_ID"
 
   # Collision guard: a retried apply for the SAME update id would hit a name
   # clash on the still-present (see below) previous helper. Remove any prior
   # helper of this name first — force so a stuck one doesn't block the retry.
-  # Best-effort: no prior helper is the normal case, so a failure here (none
-  # to remove) must not abort the launch.
+  # Best-effort: no prior helper is the normal case.
   run_capture docker rm -f "$helper_name"
 
   # NOTE: intentionally NOT `--rm`. On an unattended fleet the helper's own
-  # logs are the ONLY forensic trail if the ROLLBACK itself fails (the DB
-  # verdict is written by the resumed orchestrator, but a failed rollback may
-  # leave no orchestrator to write it). `--rm` would delete that container —
-  # and its logs — the instant it exits. The container is instead reaped by
-  # the collision guard above on the next apply, so `docker logs
-  # droplet-ota-self-swap-<id>` survives for post-mortem in between. Helpers
-  # from OLDER update ids (which the collision guard never touches) are GC'd
-  # by the orchestrator's daily purge cron once past backup retention, logs
-  # captured to the update's state dir first (WARP-1044, the
-  # list/capture/rm-self-swap subcommands below + purge-self-swap-helpers.ts).
+  # logs are the ONLY forensic trail if the ROLLBACK itself fails. Helpers
+  # from OLDER update ids are GC'd by the orchestrator's daily purge cron once
+  # past backup retention, logs captured first (WARP-1044,
+  # purge-self-swap-helpers.ts).
+  #
+  # WARP-3007: the supervisor runs ON THE HOST like this one-shot does —
+  # `chroot /host` off the same pinned image, no network — so its compose
+  # calls read the host .env, and the host path of the updates volume is just
+  # a path (no mount resolution, no docker:cli image to pull).
   run docker run -d \
     --name "$helper_name" \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "$COMPOSE_FILE:$COMPOSE_FILE:ro" \
-    -v "$updates_src:$(updates_dir):ro" \
-    -e "DROPLET_OTA_COMPOSE_FILE=$COMPOSE_FILE" \
-    -e "DROPLET_OTA_TARGET_OVERRIDE=$target_override" \
-    -e "DROPLET_OTA_PREVIOUS_OVERRIDE=$previous_override" \
-    -e "DROPLET_OTA_SERVICES_FILE=$svc_file" \
-    -e "DROPLET_OTA_SELF_HEALTH_ATTEMPTS=$attempts" \
-    -e "DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=$interval" \
-    docker:27-cli \
-    /bin/sh -c "$SELF_SWAP_SUPERVISOR"
+    --network none \
+    --user 0:0 \
+    --entrypoint chroot \
+    -v /:/host \
+    -e "DROPLET_OTA_UPDATES_DIR=$(updates_dir)" \
+    -e "DROPLET_OTA_CONFIG_ROOT=$(config_root)" \
+    -e "DROPLET_OTA_HOST_IMAGE=$HOST_IMAGE" \
+    -e "DROPLET_OTA_SELF_HEALTH_ATTEMPTS=$SELF_ATTEMPTS" \
+    -e "DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=$SELF_INTERVAL" \
+    "$HOST_IMAGE" \
+    /host /bin/bash "$self" self-swap-supervise \
+    --compose-file "$COMPOSE_FILE" --update-id "$UPDATE_ID" --target "$TARGET"
+}
+
+# The detached supervisor's program (never called by the orchestrator):
+#   1. recreate the orchestrator pinned to the target override;
+#   2. wait BOUNDED on the recreated container's healthcheck;
+#   3. healthy → exit; the new orchestrator's resume hook commits;
+#      timeout → restore the config pre-image (release target — a previous
+#      target was already restored by the resume that launched us), then
+#      exec the RESTORED helper's recreate-services --target previous over
+#      services.txt: the rollback runs with the previous release's own code.
+cmd_self_swap_supervise() {
+  validate_update_id "$UPDATE_ID"
+  validate_target "$TARGET"
+  self_health_knobs
+  require_self_swap_material
+  local self
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+  log "self-swap: recreating the orchestrator (target=$TARGET)"
+  if dc_pinned "$(override_file "$UPDATE_ID" "$TARGET")" \
+      up -d --no-deps --no-build --pull never --force-recreate orchestrator; then
+    local attempt=0 cid health
+    while [ "$attempt" -lt "$SELF_ATTEMPTS" ]; do
+      cid="$(run_capture docker compose -f "$COMPOSE_FILE" ps -q orchestrator)"
+      if [ -n "$cid" ]; then
+        health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$cid" 2>/dev/null || echo unknown)"
+        if [ "$health" = "healthy" ]; then
+          log "self-swap: orchestrator healthy on the $TARGET image — swap holds"
+          return 0
+        fi
+      fi
+      attempt=$((attempt + 1))
+      sleep "$SELF_INTERVAL"
+    done
+    log "self-swap: orchestrator never went healthy — rolling EVERY service back"
+  else
+    log "self-swap: recreating the orchestrator failed — rolling EVERY service back"
+  fi
+  # A failed restore must not stop the image rollback (die exits, hence the
+  # subshell): previous images on the release configs beat a half-swapped box.
+  if [ "$TARGET" = "release" ]; then
+    ( cmd_restore_configs ) || log "self-swap: config restore FAILED — rolling images back anyway"
+  fi
+  local csv
+  csv="$(awk 'NF { printf "%s%s", sep, $1; sep = "," }' "$(services_file "$UPDATE_ID")")"
+  # exec: the restored file is read fresh (tar replaced the inode we run from).
+  exec bash "$self" recreate-services --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --services "$csv" --target previous
 }
 
 # ── WARP-1044: GC surface for exited self-swap helper containers ─────────────
@@ -675,6 +846,8 @@ while [ "$#" -gt 0 ]; do
     --services) SERVICES="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
     --configs-tar) CONFIGS_TAR="$2"; shift 2 ;;
+    --image) IMAGE="$2"; shift 2 ;;
+    --profiles) PROFILES="$2"; PROFILES_SET=1; shift 2 ;;
     --images) shift; while [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; do IMAGES+=("$1"); shift; done ;;
     # A bare positional (restore-configs ID).
     --*) die "unknown flag: $1" ;;
@@ -689,8 +862,11 @@ case "$SUBCOMMAND" in
   stage-configs) cmd_stage_configs ;;
   migrate-deploy) cmd_migrate_deploy ;;
   recreate-services) cmd_recreate_services ;;
+  enabled-services) cmd_enabled_services ;;
+  reconcile-env) cmd_reconcile_env ;;
   restore-configs) cmd_restore_configs ;;
   recreate-self-detached) cmd_recreate_self_detached ;;
+  self-swap-supervise) cmd_self_swap_supervise ;;
   list-self-swap-helpers) cmd_list_self_swap_helpers ;;
   capture-self-swap-logs) cmd_capture_self_swap_logs ;;
   rm-self-swap-helper) cmd_rm_self_swap_helper ;;
