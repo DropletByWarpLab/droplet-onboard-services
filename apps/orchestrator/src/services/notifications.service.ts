@@ -289,16 +289,20 @@ export async function deliverNotification(
   if (!row) throw new Error(`notification_not_found: ${id}`);
 
   // WARP-2909 — delivery must not throw, so a link that fails the check
-  // DEGRADES: both transports go without it, and the toast half records why.
+  // DEGRADES: both transports go without it, and the row records why. The
+  // row's url/data were checked when it was recorded; in practice this is a
+  // bad `tag` handed to deliverNotification directly.
   let link: Pick<DispatchInput, "url" | "data" | "tag"> = {
     url: row.url ?? undefined,
     data: storedData(row.data),
     tag: opts.tag,
   };
+  let linkError: string | null = null;
   try {
     assertLinkFields({ username: row.username, kind: row.kind, title: row.title, ...link });
   } catch {
     link = {};
+    linkError = "delivery: invalid_link";
   }
 
   const { channels, errors } = publishNotificationToast({
@@ -359,6 +363,7 @@ export async function deliverNotification(
     logger.warn({ err, username: row.username }, "push notification failed");
   }
   if (pushError && channels.length === 0) errors.push(pushError);
+  if (linkError) errors.push(linkError);
 
   const delivered = channels.length > 0;
   const error = errors.length > 0 ? errors.join(" | ") : null;

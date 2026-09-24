@@ -621,13 +621,14 @@ describe("WARP-2804 — deliverNotification(prisma, id)", () => {
     expect(String(prisma._created[0]!.error)).toMatch(/toast: mqtt_unavailable/);
   });
 
-  it("a bad tag degrades (the push goes out without it) instead of throwing", async () => {
+  it("a bad tag degrades (the push goes out without it) instead of throwing, and the row says why", async () => {
     const prisma = makePushingPrismaStub();
     const { id } = await recordNotification(prisma, { username: "alice", kind: "system", title: "x" });
     const result = await deliverNotification(prisma, id, { tag: "has space" });
     expect(result.channels).toEqual(["toast", "push"]);
     const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
     expect(push.tag).toBeUndefined();
+    expect(String(prisma._created[0]!.error)).toContain("delivery: invalid_link");
   });
 
   it("accepts a priority (WARP-2978 fills it) and ignores it here", async () => {
