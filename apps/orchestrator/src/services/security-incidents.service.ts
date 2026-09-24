@@ -17,8 +17,15 @@
  *      anti-join), in id order, at most TRIAGE_BATCH, until TICK_BUDGET_MS is
  *      spent. Each in ONE READ COMMITTED transaction that writes its triage row
  *      (the exactly-once marker — the PK is the claim), the incident change and
- *      the reason rows together. A throwing triage is recorded `failed` in a
- *      separate transaction and never blocks the queue (D17).
+ *      the reason rows together. A triage that throws for a reason of its OWN
+ *      (a CHECK, a bad row) is recorded `failed` in a separate transaction and
+ *      never blocks the queue (D17). A TRANSIENT database error (a pool or
+ *      transaction timeout, a dropped connection, a deadlock, a lost CAS) is
+ *      not the event's fault: nothing is recorded, the tick stops triaging
+ *      there (so the batch is not drained and the floor cannot pass the
+ *      event), and the next tick retries it — up to TRIAGE_TRANSIENT_ATTEMPTS
+ *      ticks, after which it is recorded `failed` so a poison event still
+ *      cannot block the queue.
  *   3. Floor. Advanced only when the batch drained AND the floor candidate was
  *      seen at least FLOOR_SETTLE_MS ago: every id at or below a head read two
  *      minutes ago is committed or rolled back by now (every SecurityEvent
@@ -98,6 +105,8 @@ export const SECURITY_INCIDENT_RETENTION_DAYS = 365;
 export const INCIDENT_HEALTH_STALE_MS = 120_000;
 /** The alerts health row is recomputed on the first tick and every this-many ticks after (§6.11). */
 export const ALERTS_HEALTH_EVERY_TICKS = 6;
+/** Ticks an event may fail TRANSIENTLY before it is recorded `failed` (review #3). */
+export const TRIAGE_TRANSIENT_ATTEMPTS = 3;
 
 const SINGLETON = "singleton";
 const DAY_MS = 86_400_000;
@@ -125,6 +134,8 @@ export interface IncidentHealthState {
 
 const incidentHealth: IncidentHealthState = { registeredAt: null, lastOkAt: null, lastError: null, failedLastDay: 0 };
 let ticks = 0;
+/** Event id → transient failures so far. In memory: a restart just gives an event its attempts again. */
+const transientAttempts = new Map<string, number>();
 
 export function incidentHealthState(): Readonly<IncidentHealthState> {
   return incidentHealth;
@@ -139,6 +150,7 @@ export function _resetIncidentHealthForTests(): void {
     failedLastDay: 0,
   } satisfies IncidentHealthState);
   ticks = 0;
+  transientAttempts.clear();
 }
 
 /**
@@ -445,6 +457,39 @@ export async function triageOne(
   }, READ_COMMITTED_TX);
 }
 
+/** Prisma error codes that say nothing about the event: the pool, the connection, the transaction. */
+const TRANSIENT_PRISMA_CODES: ReadonlySet<string> = new Set([
+  "P1001", // can't reach the database server
+  "P1002", // the database server timed out
+  "P1008", // operation timed out
+  "P1017", // the server closed the connection
+  "P2024", // timed out fetching a connection from the pool
+  "P2028", // transaction API error (expired, or could not start within maxWait)
+  "P2034", // write conflict or deadlock — retry
+]);
+
+/** SQLSTATE classes that are about the server, not the row: connection (08), rollback (40 — deadlock, serialization), resources (53), operator intervention (57P). */
+const TRANSIENT_SQLSTATE = /^(08|40|53|57P)/;
+
+/**
+ * Whether a triage failure is the database's, not the event's (review #3).
+ * Keyed on Prisma's code, a raw query's SQLSTATE, or — for an unknown request
+ * error, which carries the SQLSTATE only in its message — the message text.
+ */
+export function isTransientTriageError(err: unknown): boolean {
+  if (err instanceof IncidentConflictError) return true;
+  const e = err as { code?: unknown; name?: unknown; meta?: { code?: unknown }; message?: unknown } | null | undefined;
+  if (!e) return false;
+  if (e.name === "PrismaClientInitializationError" || e.name === "PrismaClientRustPanicError") return true;
+  if (typeof e.code === "string" && TRANSIENT_PRISMA_CODES.has(e.code)) return true;
+  if (typeof e.meta?.code === "string" && TRANSIENT_SQLSTATE.test(e.meta.code)) return true;
+  if (e.name === "PrismaClientUnknownRequestError" && typeof e.message === "string") {
+    const m = /code: "([0-9A-Z]{5})"/.exec(e.message);
+    if (m && TRANSIENT_SQLSTATE.test(m[1]!)) return true;
+  }
+  return false;
+}
+
 /** A triage that threw: its `failed` row, in its own transaction. False when the event already had a row (another engine won). */
 async function recordFailed(prisma: PrismaClient, eventId: bigint, err: unknown): Promise<boolean> {
   const message = (err instanceof Error ? err.message : String(err)).replace(/\u0000/g, "").slice(0, 500) || "unknown error";
@@ -580,10 +625,23 @@ async function runTick(prisma: PrismaClient, deps: SecurityIncidentDeps, now: Da
     const timeline = await loadModeTimeline(prisma, from, now);
     for (const row of rows) {
       if (Date.now() > deadline) break;
+      const key = row.id.toString();
       try {
         const r = await triageOne(prisma, row, { links, timeline, now });
+        transientAttempts.delete(key);
         if (r !== "already") triaged++;
       } catch (err) {
+        if (isTransientTriageError(err)) {
+          const attempts = (transientAttempts.get(key) ?? 0) + 1;
+          if (attempts < TRIAGE_TRANSIENT_ATTEMPTS) {
+            // Not the event's fault. Stop here: the batch is not drained, so
+            // neither the floor nor sealing moves past it; the next tick retries.
+            transientAttempts.set(key, attempts);
+            logger.warn({ err, eventId: key, attempts }, "security incident triage hit a transient database error — retried next tick");
+            break;
+          }
+          transientAttempts.delete(key);
+        }
         if (await recordFailed(prisma, row.id, err)) {
           failed++;
           logger.error({ err, eventId: row.id.toString() }, "security incident triage failed — recorded as failed; the queue continues");

@@ -40,6 +40,9 @@ import {
   SECURITY_INCIDENT_LOCK_KEY,
   SETTLE_MS,
   TRIAGE_BATCH,
+  TRIAGE_TRANSIENT_ATTEMPTS,
+  IncidentConflictError,
+  isTransientTriageError,
   _resetIncidentHealthForTests,
   incidentHealthRow,
   incidentHealthState,
@@ -249,11 +252,12 @@ describe("triage: one person in the Stock room after closing", () => {
 });
 
 describe("exactly once, and never blocked", () => {
-  it("a failing triage is recorded `failed` with why, and the next event still triages", async () => {
+  it("a PERMANENT triage failure is recorded `failed` with why, and the next event still triages", async () => {
     const f = world({ securityEvent: [eventRow({ id: 1n }), eventRow({ id: 2n, camera: "yard", sourceRef: "yard/2.5-a" })] });
-    f.failOn("securityIncident", "create", undefined, { error: new Error("disk full") });
+    const permanent = new Error('new row for relation "SecurityIncident" violates check constraint "SecurityIncident_span"');
+    f.failOn("securityIncident", "create", undefined, { error: permanent });
     await tick(f);
-    expect(triage(f, 1n)).toMatchObject({ outcome: "failed", incidentId: null, error: expect.stringContaining("disk full") });
+    expect(triage(f, 1n)).toMatchObject({ outcome: "failed", incidentId: null, error: expect.stringContaining("SecurityIncident_span") });
     expect(triage(f, 2n)).toMatchObject({ outcome: "grouped" });
     // The failed transaction left nothing behind: one incident (event 2's).
     expect(incidents(f)).toHaveLength(1);
@@ -272,7 +276,7 @@ describe("exactly once, and never blocked", () => {
     expect(incidents(f)[0]).toMatchObject({ eventCount: 2 });
   });
 
-  it("losing the CAS twice records the event failed rather than looping", async () => {
+  it("losing the CAS twice is transient: nothing recorded this tick, and the next tick groups the event", async () => {
     const f = world({ securityEvent: [eventRow({ id: 1n })] });
     await tick(f);
     f.world.securityEvent.push(eventRow({ id: 2n, startedAt: plus(T0, 60_000) }));
@@ -282,8 +286,68 @@ describe("exactly once, and never blocked", () => {
     f.onCall("securityIncident", "updateMany", bump);
     f.onCall("securityIncident", "updateMany", bump);
     await tick(f, plus(T0, 90_000));
-    expect(triage(f, 2n)).toMatchObject({ outcome: "failed", error: expect.stringMatching(/changed/) });
+    expect(triage(f, 2n)).toBeUndefined();
     expect(incidents(f)[0]).toMatchObject({ eventCount: 1 });
+    await tick(f, plus(T0, 100_000));
+    expect(triage(f, 2n)).toMatchObject({ outcome: "grouped", incidentId: incidents(f)[0]!.id });
+    expect(incidents(f)[0]).toMatchObject({ eventCount: 2 });
+  });
+
+  // Review #3: a pool timeout, a dropped connection or a deadlock is not the event's fault.
+  describe("transient database errors are retried, never recorded as the event's failure", () => {
+    const transient = (code: string) => Object.assign(new Error(`transient ${code}`), { code, name: "PrismaClientKnownRequestError" });
+
+    it.each(["P2028", "P2024", "P1001", "P1017", "P2034"])("%s: nothing recorded, the tick stops triaging (order kept), the next tick groups it", async (code) => {
+      const f = world({
+        securityEvent: [eventRow({ id: 1n }), eventRow({ id: 2n, camera: "yard", sourceRef: "yard/2.5-a" })],
+        securityIncidentEngineState: [engineState(0n, plus(T0, -FLOOR_SETTLE_MS - 60_000))],
+      });
+      f.failOn("securityIncident", "create", undefined, { error: transient(code) });
+      await tick(f);
+      expect(f.world.securityEventTriage).toHaveLength(0);
+      // Not drained: the floor stays below the untriaged event.
+      expect(f.world.securityIncidentEngineState[0]).toMatchObject({ triageFloor: 0n, floorCandidate: 0n });
+      await tick(f, plus(T0, 10_000));
+      expect(triage(f, 1n)).toMatchObject({ outcome: "grouped" });
+      expect(triage(f, 2n)).toMatchObject({ outcome: "grouped" });
+      expect(incidentHealthState().failedLastDay).toBe(0);
+    });
+
+    it("a deadlock reported inside an unknown request error (40P01) is transient too", async () => {
+      const f = world({ securityEvent: [eventRow({ id: 1n })] });
+      const deadlock = Object.assign(new Error('ConnectorError { code: "40P01", message: "deadlock detected" }'), { name: "PrismaClientUnknownRequestError" });
+      f.failOn("securityIncident", "create", undefined, { error: deadlock });
+      await tick(f);
+      expect(triage(f, 1n)).toBeUndefined();
+      await tick(f, plus(T0, 10_000));
+      expect(triage(f, 1n)).toMatchObject({ outcome: "grouped" });
+    });
+
+    it(`a transient error that persists for ${TRIAGE_TRANSIENT_ATTEMPTS} ticks is recorded failed, and the queue moves on`, async () => {
+      const f = world({ securityEvent: [eventRow({ id: 1n }), eventRow({ id: 2n, camera: "yard", sourceRef: "yard/2.5-a" })] });
+      f.failOn("securityIncident", "create", (a) => (a as { data: { scopeCamera?: string } }).data.scopeCamera !== "yard", {
+        always: true,
+        error: transient("P1017"),
+      });
+      for (let n = 0; n < TRIAGE_TRANSIENT_ATTEMPTS - 1; n++) {
+        await tick(f, plus(T0, n * 10_000));
+        expect(f.world.securityEventTriage, `tick ${n + 1}`).toHaveLength(0);
+      }
+      await tick(f, plus(T0, TRIAGE_TRANSIENT_ATTEMPTS * 10_000));
+      expect(triage(f, 1n)).toMatchObject({ outcome: "failed", error: expect.stringContaining("P1017") });
+      expect(triage(f, 2n)).toMatchObject({ outcome: "grouped" });
+    });
+
+    it("the classifier: transient codes and SQLSTATEs yes; a CHECK violation, a TypeError, a unique clash no", () => {
+      expect(isTransientTriageError(transient("P2028"))).toBe(true);
+      expect(isTransientTriageError(new IncidentConflictError("x"))).toBe(true);
+      expect(isTransientTriageError(Object.assign(new Error("x"), { name: "PrismaClientInitializationError" }))).toBe(true);
+      expect(isTransientTriageError(Object.assign(new Error("boom"), { code: "P2010", meta: { code: "57P01" } }))).toBe(true);
+      expect(isTransientTriageError(Object.assign(new Error("boom"), { code: "P2010", meta: { code: "23514" } }))).toBe(false);
+      expect(isTransientTriageError(transient("P2002"))).toBe(false);
+      expect(isTransientTriageError(new TypeError("x"))).toBe(false);
+      expect(isTransientTriageError(new Error("disk full"))).toBe(false);
+    });
   });
 });
 
