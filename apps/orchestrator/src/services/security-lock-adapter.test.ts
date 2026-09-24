@@ -1641,6 +1641,35 @@ describe("a reading Droplet heard but could not save, on a lock the list cannot 
     ]);
   });
 
+  it("a re-offer made from an OLDER reading never lands after a newer live frame queued behind a slow write (the t0 guard)", async () => {
+    const { adapter, store, emitter, c } = started([TWO_EP]);
+    await adapter.sweep();
+    // A: unlocked, heard live; its history read fails → unsaved.
+    store.lastReading.mockRejectedValueOnce(new Error("db down"));
+    emitter.emit("state_changed", frame(2));
+    await flush();
+    // B: locked, heard live; its history read is slow — B holds the key's chain.
+    const slow = deferred<Awaited<ReturnType<typeof store.lastReading>>>();
+    store.lastReading.mockImplementationOnce(() => slow.promise);
+    c.advance(1000);
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    // The sweep starts; C (unlocked) is heard at t0, queued behind B. The
+    // sweep's re-offer is made from what was last heard: B's "locked".
+    c.advance(60_000);
+    const sweeping = adapter.sweep();
+    emitter.emit("state_changed", frame(2));
+    await flush();
+    slow.resolve(null);
+    await sweeping;
+    await flush();
+    // B then C, both live — and no stale "locked" re-offer after C.
+    expect(store.rows.map((r) => [r.draft.labels[0], r.draft.observed])).toEqual([
+      ["locked", "live"],
+      ["unlocked", "live"],
+    ]);
+  });
+
   it("a live frame at or after the sweep started wins over the re-offer (the t0 guard)", async () => {
     const { adapter, store, emitter, c } = started([TWO_EP]);
     await adapter.sweep();
