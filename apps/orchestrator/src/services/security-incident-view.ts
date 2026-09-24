@@ -41,6 +41,7 @@ import type {
 } from "@prisma/client";
 import { feedVisibilityWhere, listSecurityEvents } from "./security-events.service.js";
 import { loadActiveLinks, viewerAreas } from "./security-zones.service.js";
+import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { parseCounts } from "../lib/security-rules.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
@@ -505,7 +506,8 @@ export async function loadIncidentDetail(
     })),
     notices: notices.map((n) => ({
       userId: n.userId,
-      name: names.get(n.userId) ?? n.username,
+      // A self-edited display name, shown to every owner/admin: no controls, line separators or bidi.
+      name: stripUnsafeDisplayChars(names.get(n.userId) ?? n.username).trim() || n.username,
       outcome: n.outcome,
       reason: n.reason,
       channels: n.channels,

@@ -361,6 +361,13 @@ describe("reading incidents — DS-005", () => {
     expect((await request(server).get("/api/security/incidents/not-a-uuid")).status).toBe(400);
   });
 
+  it("route 18: a person-controlled name in the notices is display-safe (no bidi overrides or controls)", async () => {
+    const f = world();
+    f.world.user.find((u) => u.id === MARIA)!.displayName = "Ma‮ria";
+    const owner = await request(app(f, "owner", "manage").server).get(`/api/security/incidents/${SHARED}`);
+    expect(owner.body.notices.map((n: { name: string }) => n.name).sort()).toEqual(["Maria", "Stefan"]);
+  });
+
   it("route 18: family sees their own notice only; the owner sees every notice; visible reasons only", async () => {
     const f = world();
     const family = await request(app(f, "family", "act").server).get(`/api/security/incidents/${SHARED}`);
