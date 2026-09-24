@@ -12,7 +12,7 @@
  * `authFetch("/api/calendar/places", { signal })` (a non-auth URL + signal), so
  * the test drives that path.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { authFetch } from "@/lib/auth";
 
 describe("authFetch — post-refresh retry uses a fresh signal (onboard#477)", () => {
@@ -285,5 +285,81 @@ describe("authFetch — 403 PASSWORD_CHANGE_REQUIRED routes to remediation (F8)"
     await Promise.resolve();
     await Promise.resolve();
     expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-3048 — the retry's budget ends when the HEADERS arrive ──────────
+//
+// The post-refresh retry used `AbortSignal.timeout(6s)`, which keeps ticking
+// after `fetch` resolves and aborts the BODY mid-read. A model download's
+// NDJSON progress stream that happened to need the 401→refresh→retry path
+// (access tokens last 15 minutes) died six seconds in.
+describe("authFetch — the retry timeout bounds only the headers (WARP-3048)", () => {
+  // The pre-fix path used `AbortSignal.timeout`, whose timer the fakes do
+  // not drive; hiding it sends that path through the setTimeout fallback so
+  // a regression is observable under fake timers.
+  const realTimeout = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Object.defineProperty(AbortSignal, "timeout", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    if (realTimeout) Object.defineProperty(AbortSignal, "timeout", realTimeout);
+  });
+
+  function stubPullAfterRefresh(retry: (init?: RequestInit) => Promise<Response>) {
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === "/api/auth/refresh") {
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        attempts += 1;
+        return attempts === 1
+          ? Promise.resolve(new Response("", { status: 401 }))
+          : retry(init);
+      }),
+    );
+  }
+
+  it("a streamed body outlives the retry budget once the headers are in", async () => {
+    let retrySignal: AbortSignal | undefined;
+    stubPullAfterRefresh((init) => {
+      retrySignal = init?.signal ?? undefined;
+      return Promise.resolve(new Response("{\"status\":\"pulling\"}\n", { status: 200 }));
+    });
+
+    const res = await authFetch("/api/models/qwen3%3A14b/pull", { method: "POST" });
+    expect(res.status).toBe(200);
+
+    // A multi-GB download streams for minutes.
+    vi.advanceTimersByTime(60_000);
+    expect(retrySignal).toBeDefined();
+    expect(retrySignal!.aborted).toBe(false);
+  });
+
+  it("still gives up on a retry whose headers never arrive", async () => {
+    stubPullAfterRefresh(
+      (init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("TimeoutError", "TimeoutError")),
+          );
+        }),
+    );
+
+    const pending = authFetch("/api/models/qwen3%3A14b/pull", { method: "POST" });
+    const settled = expect(pending).rejects.toThrow(/TimeoutError/);
+    await vi.advanceTimersByTimeAsync(6_000);
+    await settled;
   });
 });
