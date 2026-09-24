@@ -4277,6 +4277,12 @@ model AgentRunSchedule {
   userId      String
   goal        String
   model       String
+  /// WARP-3047 — true when the schedule was created WITHOUT a model: each
+  /// fire runs on the box's active model, resolved by the ticker at that
+  /// moment, so a switch reaches it. `model` then holds the model that was
+  /// active at creation — the fallback when nothing resolves at fire. False
+  /// (every schedule before this column) = pinned to `model`.
+  followsActiveModel Boolean @default(false)
   maxIter     Int
   rrule       String
   timezone    String    @default("UTC")

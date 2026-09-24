@@ -422,5 +422,20 @@ else
   ok "inference-manager declares no depends_on (cannot invalidate the project on either shape)"
 fi
 
+# WARP-3046: the model catalog's unified-memory budget is capped at the `dmr`
+# service's memory limit, which compose hands inference-manager as
+# DMR_MEM_LIMIT. Both are `${DMR_MEM_LIMIT:-<default>}`, so an operator's
+# override reaches both identically — but the two DEFAULTS are separate
+# literals, and a drift between them makes the catalog promise memory the
+# runtime is not allowed (or hide memory it is). Compare them.
+_dmr_default="$(grep -vE '^[[:space:]]*#' <<<"$(_block '/^  dmr:/,/^  dmr-cuda:/')" \
+  | sed -nE 's/^[[:space:]]*mem_limit: \$\{DMR_MEM_LIMIT:-([^}]*)\}.*/\1/p')"
+_im_default="$(sed -nE 's/^[[:space:]]*DMR_MEM_LIMIT: \$\{DMR_MEM_LIMIT:-([^}]*)\}.*/\1/p' <<<"$_im_code")"
+if [ -n "$_dmr_default" ] && [ "$_dmr_default" = "$_im_default" ]; then
+  ok "inference-manager's DMR_MEM_LIMIT default matches the dmr service's mem_limit ($_dmr_default)"
+else
+  bad "inference-manager's DMR_MEM_LIMIT default ('$_im_default') differs from the dmr service's mem_limit ('$_dmr_default') — the catalog would size models against the wrong cap"
+fi
+
 printf '\n  %d passed, %d failed\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

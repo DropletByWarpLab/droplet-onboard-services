@@ -33,6 +33,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { resolveActiveModel } from "../services/active-model.service.js";
 import {
   recordAccessDenied,
   requireRoleOrMcpService,
@@ -155,9 +156,18 @@ function encodeCursor(row: { createdAt: Date; id: string }): string {
   return `${row.createdAt.toISOString()}|${row.id}`;
 }
 
-function defaultModel(): string | null {
-  const m = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
-  return m.length > 0 ? m : null;
+/**
+ * WARP-3047 — a run with no explicit `model` runs on the box's ACTIVE model
+ * (tools-capable: an active model that states it cannot call tools falls back
+ * to LLM_MODEL), not env DEFAULT_MODEL/LLM_MODEL — on DMR a run on another
+ * model than chat is a second model competing for one GPU. A run resolves it
+ * when QUEUED (`AgentRun.model` is non-null; a run is claimed seconds later).
+ * A schedule with no model is stored `followsActiveModel` and the ticker
+ * resolves it again at every FIRE (agent-run-schedule-ticker.service.ts), so
+ * a switch reaches it; the value resolved here is only its fallback.
+ */
+function defaultModel(prisma: PrismaClient): Promise<string | null> {
+  return resolveActiveModel(prisma, { requireTools: true });
 }
 
 interface RunRow {
@@ -322,9 +332,9 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
-      const model = parsed.data.model ?? defaultModel();
+      const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
-        res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
+        res.status(400).json({ error: "model is required (no active model is installed and LLM_MODEL is not set)" });
         return;
       }
       if (!(await cloudAllowedOr451(res, actor, model))) return;
@@ -453,6 +463,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         id: string;
         goal: string;
         model: string;
+        followsActiveModel: boolean;
         maxIter: number;
         rrule: string;
         timezone: string;
@@ -466,6 +477,9 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           id: s.id,
           goal: s.goal,
           model: s.model,
+          // WARP-3047 — additive: true = runs on whatever model is active
+          // when it fires; `model` is then only the creation-time fallback.
+          followsActiveModel: s.followsActiveModel === true,
           maxIter: s.maxIter,
           rrule: s.rrule,
           timezone: s.timezone,
@@ -501,9 +515,13 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "Invalid timezone" });
         return;
       }
-      const model = parsed.data.model ?? defaultModel();
+      // WARP-3047 — no `model` = the schedule FOLLOWS the active model: the
+      // ticker resolves it at every fire. `model` still stores today's
+      // answer, as the fallback when nothing resolves at fire.
+      const followsActiveModel = parsed.data.model === undefined;
+      const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
-        res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
+        res.status(400).json({ error: "model is required (no active model is installed and LLM_MODEL is not set)" });
         return;
       }
       if (!(await cloudAllowedOr451(res, actor, model))) return;
@@ -521,6 +539,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           userId: actor.id,
           goal: parsed.data.goal,
           model,
+          followsActiveModel,
           maxIter: Math.max(1, Math.min(parsed.data.maxIter ?? cap, cap)),
           rrule: parsed.data.rrule,
           timezone,

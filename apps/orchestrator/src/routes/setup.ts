@@ -92,7 +92,7 @@ import { checkSession } from "../services/session.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
-import { warmDefaultModel } from "../services/model-readiness.service.js";
+import { warmActiveModel } from "../services/active-model.service.js";
 import { createLogger } from "../lib/logger.js";
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 
@@ -340,8 +340,9 @@ export function createSetupRouter(
      *  survives); tests inject a fake so they never touch the real config. */
     getEnvBoxName?: () => string;
     /** WARP-1041 — fire-and-forget model pre-warm. Defaults to the
-     *  production `warmDefaultModel` (debounced, error-swallowing); route
-     *  tests inject a spy so no Ollama is touched. */
+     *  production `warmActiveModel` (WARP-3047: the box's ACTIVE model,
+     *  resolved from the cached gateway listing; debounced per model,
+     *  error-swallowing); route tests inject a spy so no Ollama is touched. */
     warmDefaultModel?: () => Promise<void>;
   },
 ): Router {
@@ -352,7 +353,7 @@ export function createSetupRouter(
   const releaseBoxNameFromHq = deps?.releaseBoxName ?? createBoxNameReleaser();
   const reissueTls = deps?.reissueTls ?? reissueTlsNow;
   const getEnvBoxName = deps?.getEnvBoxName ?? (() => config.DROPLET_BOX_NAME);
-  const warmModel = deps?.warmDefaultModel ?? warmDefaultModel;
+  const warmModel = deps?.warmDefaultModel ?? (() => warmActiveModel(prisma));
 
   // ── GET /api/setup/state ───────────────────────────────────────
   router.get("/setup/state", async (_req: Request, res, next) => {

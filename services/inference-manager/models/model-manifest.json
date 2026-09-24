@@ -4,9 +4,11 @@
       "name": "gpt-oss:20b",
       "version": "1.0",
       "format": "gguf",
-      "quantization": "MXFP4",
+      "quantization": "F16",
       "source": "ollama",
       "pull_tag": "gpt-oss:20b",
+      "oci": "ai/gpt-oss:20B-F16",
+      "oci_digest": "sha256:c8b0e86df701b13bc71e79bc04ae25eb34b73e6d852e2c7e958af8cb6674c2c4",
       "min_vram_gb": 14,
       "class": "smart",
       "default": true,
@@ -24,23 +26,27 @@
       "quantization": "Q4_K_M",
       "source": "ollama",
       "pull_tag": "gemma4:26b",
-      "min_vram_gb": 14,
+      "oci": "ai/gemma4:26b-a4b-q4_K_M",
+      "oci_digest": "sha256:5290d23664774b4379a483bc45e3cebabad09f3aaf5998e4037883909f51700a",
+      "min_vram_gb": 20,
       "class": "smart",
       "default": false,
       "display_name": "Gemma 4 26B",
       "maker": "Google",
-      "description": "Best image understanding on capable hardware — reads photos, documents, and charts. Bench-gated on this box's VRAM (WARP-1114); min_vram_gb here is a pre-bench estimate.",
+      "description": "Best image understanding on capable hardware — reads photos, documents, and charts. Needs a 20 GB card: its Q4_K_M weights alone are 18.1 GB.",
       "capabilities": ["vision", "tools"],
       "roles": ["vision"],
-      "disk_gb": 17.0
+      "disk_gb": 18.1
     },
     {
       "name": "qwen3-vl:8b",
       "version": "1.0",
       "format": "gguf",
-      "quantization": "Q4_K_M",
+      "quantization": "UD-Q4_K_XL",
       "source": "ollama",
       "pull_tag": "qwen3-vl:8b",
+      "oci": "ai/qwen3-vl:8B-UD-Q4_K_XL",
+      "oci_digest": "sha256:a18971a77b8fda79c555f603c4f94ca0183cb40499f336dc2825659504e29fc5",
       "min_vram_gb": 10,
       "class": "balanced",
       "default": false,
@@ -49,7 +55,7 @@
       "description": "Balanced image understanding — the guaranteed-fit vision fallback.",
       "capabilities": ["vision", "tools", "thinking"],
       "roles": ["vision"],
-      "disk_gb": 6.5
+      "disk_gb": 6.3
     },
     {
       "name": "llama3.2:3b",
@@ -58,6 +64,8 @@
       "quantization": "Q4_K_M",
       "source": "ollama",
       "pull_tag": "llama3.2:3b",
+      "oci": "ai/llama3.2:3B-Q4_K_M",
+      "oci_digest": "sha256:436bb282b41968a83638482999980267ca8d7e8b5574604460efa9efff11cf59",
       "min_vram_gb": 4,
       "class": "balanced",
       "default": false,
@@ -72,9 +80,11 @@
       "name": "qwen3-vl:32b",
       "version": "1.0",
       "format": "gguf",
-      "quantization": "Q4_K_M",
+      "quantization": "UD-Q4_K_XL",
       "source": "ollama",
       "pull_tag": "qwen3-vl:32b",
+      "oci": "ai/qwen3-vl:32B-UD-Q4_K_XL",
+      "oci_digest": "sha256:45de167cc0fdb9af0830bebb4f0d23bfca89cbca1c4d27102125a235dcae73ba",
       "min_vram_gb": 24,
       "class": "smart",
       "default": false,
@@ -83,7 +93,7 @@
       "description": "Higher-fidelity vision for future >=24 GB hardware. Gated off on today's 16 GB box by design.",
       "capabilities": ["vision", "tools", "thinking"],
       "roles": ["vision"],
-      "disk_gb": 21.0
+      "disk_gb": 21.3
     },
     {
       "name": "glm-4.7-flash:31b",
@@ -93,6 +103,7 @@
       "source": "oci",
       "pull_tag": "glm-4.7-flash:31b",
       "oci": "ai/glm-4.7-flash:reap-q4_K_M",
+      "oci_digest": "sha256:7f76e8a96b4b294c0f32233bea3faa862e1254181cd11096c667df97c1eab392",
       "min_vram_gb": 14,
       "class": "smart",
       "default": false,
@@ -110,6 +121,8 @@
       "quantization": "Q4_K_M",
       "source": "ollama",
       "pull_tag": "gemma4:31b",
+      "oci": "ai/gemma4:31b-q4_K_M",
+      "oci_digest": "sha256:bf9c1591634c7df2a3f8eb59c29552d206a5f7057ac17601ab5f4a2739cecbbc",
       "min_vram_gb": 20,
       "class": "smart",
       "default": false,
@@ -118,7 +131,7 @@
       "description": "Chat + vision for future >=20 GB hardware. Gated off on today's 16 GB box by design.",
       "capabilities": ["vision", "tools"],
       "roles": ["chat", "vision"],
-      "disk_gb": 20.0
+      "disk_gb": 19.5
     }
   ]
 }
