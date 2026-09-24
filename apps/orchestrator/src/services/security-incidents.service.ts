@@ -12,6 +12,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { CronRuntime } from "./cron-runtime.service.js";
 import type { SecurityHealthRow } from "./security-events.service.js";
 import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
+import { RULESET } from "../lib/security-rules.js";
 
 export const SECURITY_INCIDENT_INTERVAL_MS = 10_000;
 export const SECURITY_INCIDENT_LOCK_KEY = "droplet:security-incidents";
@@ -21,16 +22,10 @@ export const TRIAGE_BATCH = 200;
 export const TICK_BUDGET_MS = 30_000;
 /** The floor only advances to a head seen at least this long ago (§6.1 step 3). */
 export const FLOOR_SETTLE_MS = 120_000;
-/** Event-time quiet that ends an incident (D13). */
-export const QUIET_MS = 300_000;
-/** The settle: how far before an incident's first activity an event may start and still join, and how long sealing waits after the last arrival (D13). */
-export const SETTLE_MS = 90_000;
-/** An incident never spans more than this in event time (D13). */
-export const MAX_SPAN_MS = 3_600_000;
-/** camera_offline: a camera must stay down this long (§6.5). */
-export const OFFLINE_MIN_MS = 60_000;
-/** Evidence rows kept per (incident, code, camera) (§6.5). */
-export const EVIDENCE_PER_CAMERA = 5;
+/** The grouping numbers (D13) and the evidence cap live with the rules they belong to (lib/security-rules.ts). */
+export { QUIET_MS, SETTLE_MS, MAX_SPAN_MS, EVIDENCE_PER_CAMERA } from "../lib/security-rules.js";
+/** camera_offline: a camera must stay down this long (§6.5) — the ruleset's number. */
+export const OFFLINE_MIN_MS = RULESET.camera_offline.minOfflineMs;
 /** Every sealed/plain incident follows its events (30 d); a coded one is kept a year (D30). */
 export const SECURITY_INCIDENT_RETENTION_DAYS = 365;
 
