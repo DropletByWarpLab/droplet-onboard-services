@@ -604,6 +604,11 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     /* ignore — privacy mode, etc. */
   }
   clearChatHandoffs();
+  // The module-level `unload` always targets SWR's DEFAULT cache, while
+  // logout() and the sign-in check use `useSWRConfig().unload` (the
+  // provider's cache). They are the same cache only because the app mounts no
+  // `<SWRConfig provider>`; adding one would leave this path emptying a cache
+  // nobody reads.
   if (hadSession) unload({ revalidate: false });
   // Public pages own their anonymous flow: a refresh failure on /setup (the
   // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
@@ -793,7 +798,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [isLoading, setupProbeError, setupState, setupRetryAttempt, probeSetupState]);
 
   // WARP-2992 — the SWR cache in this provider's scope: SWR's default one,
-  // which every page reads (see lib/session-reset.ts).
+  // which every page reads (no `<SWRConfig provider>` is mounted; authFetch's
+  // dead path relies on that, see its note).
   const { unload: unloadSwrCache } = useSWRConfig();
 
   // WARP-2992 — a sign-in as someone other than the cached profile empties
