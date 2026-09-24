@@ -27,7 +27,10 @@
  *      way when it started. A newer local pick is never clobbered by an older
  *      answer (D5).
  *   4. A pick — the switcher, or arriving at /d/<slug> — applies at once and
- *      is PUT with the department's id (null for Whole business). A failed
+ *      is PUT with the department's id (null for Whole business). PUTs go
+ *      ONE AT A TIME, in pick order: while one is in flight the newest pick
+ *      waits (replacing any older waiting pick) and is sent when it settles,
+ *      so the box can never apply an older pick after a newer one. A failed
  *      PUT is a console.warn and nothing else: the local pick stands until
  *      the box next answers.
  *   5. An orchestrator older than the route (a 404 whose code is not
@@ -225,8 +228,8 @@ function writeStored(userId: string, slug: string | null): void {
 interface ServerChoiceRead {
   /** `picks.current` when the read started. */
   pickSeqAtStart: number;
-  /** PUTs still on their way when the read started. */
-  pendingAtStart: number;
+  /** A PUT was still on its way when the read started. */
+  putPendingAtStart: boolean;
   answer: ActiveDepartmentResponse;
 }
 
@@ -270,13 +273,43 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
   const isLoaded = data !== undefined || error !== undefined;
 
   // ── the box (WARP-2981) ────────────────────────────────────────────────────
-  // Every local pick bumps `picks`; `pendingPuts` counts PUTs in flight. A read
-  // records both when it starts, which is how rule 3 tells an answer older
-  // than a local pick from a current one.
+  // Every local pick bumps `picks`; `putInFlight` is true from a pick's PUT
+  // until the last waiting pick has been sent and settled. A read records
+  // both when it starts, which is how rule 3 tells an answer older than a
+  // local pick from a current one.
   const picks = useRef(0);
-  const pendingPuts = useRef(0);
+  const putInFlight = useRef(false);
+  // The newest pick not yet sent, while a PUT is in flight (rule 4).
+  const waitingPut = useRef<{ departmentId: string | null } | null>(null);
   // Off for the page's life once the box proves it has no such route (rule 5).
   const [serverSync, setServerSync] = useState(true);
+
+  // A waiting pick belongs to the person who made it: a sign-out or an
+  // account switch drops it rather than sending it as the next person.
+  useEffect(() => {
+    waitingPut.current = null;
+  }, [userId]);
+
+  /** Send the waiting pick, then the next one to arrive meanwhile, one PUT at
+   *  a time, until nothing waits. Only `pick` starts it, and only when no PUT
+   *  is in flight. */
+  const sendWaitingPuts = useCallback(async () => {
+    for (let next = waitingPut.current; next; next = waitingPut.current) {
+      waitingPut.current = null;
+      try {
+        await putActiveDepartment(next.departmentId);
+      } catch (err: unknown) {
+        if (isMissingRoute(err)) {
+          // Rule 5: nothing more goes to this box, the waiting pick included.
+          setServerSync(false);
+          break;
+        }
+        // A display preference: the local pick stands, nothing else.
+        console.warn("Couldn't save the department choice to Droplet; this browser keeps it.", err);
+      }
+    }
+    putInFlight.current = false;
+  }, []);
 
   // Keyed by the person: SWR only ever hands this hook the answer read for
   // the user signed in NOW, so an account switch without a reload cannot
@@ -285,9 +318,9 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
     userId && serverSync ? [ACTIVE_DEPARTMENT_KEY, userId] : null,
     async () => {
       const pickSeqAtStart = picks.current;
-      const pendingAtStart = pendingPuts.current;
+      const putPendingAtStart = putInFlight.current;
       const answer = await getActiveDepartment();
-      return { pickSeqAtStart, pendingAtStart, answer };
+      return { pickSeqAtStart, putPendingAtStart, answer };
     },
     { revalidateOnFocus: true, shouldRetryOnError: false },
   );
@@ -301,7 +334,7 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
     const { answer } = serverChoice;
     const adopt = shouldAdoptServerChoice({
       pickedSince:
-        serverChoice.pickSeqAtStart !== picks.current || serverChoice.pendingAtStart !== 0,
+        serverChoice.pickSeqAtStart !== picks.current || serverChoice.putPendingAtStart,
       scope: answer.scope,
     });
     if (!adopt) return;
@@ -325,21 +358,12 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
       const departmentId =
         slug === null ? null : (choices.find((d) => d.slug === slug)?.id ?? undefined);
       if (departmentId === undefined) return;
-      pendingPuts.current += 1;
-      putActiveDepartment(departmentId)
-        .catch((err: unknown) => {
-          if (isMissingRoute(err)) {
-            setServerSync(false);
-            return;
-          }
-          // A display preference: the local pick stands, nothing else.
-          console.warn("Couldn't save the department choice to Droplet; this browser keeps it.", err);
-        })
-        .finally(() => {
-          pendingPuts.current -= 1;
-        });
+      waitingPut.current = { departmentId };
+      if (putInFlight.current) return;
+      putInFlight.current = true;
+      void sendWaitingPuts();
     },
-    [userId, serverSync, choices],
+    [userId, serverSync, choices, sendWaitingPuts],
   );
 
   // Visiting /d/<slug> makes that department active — but only a slug the

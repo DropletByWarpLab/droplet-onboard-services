@@ -569,6 +569,133 @@ describe("<ActiveDepartmentProvider>", () => {
     });
   });
 
+  // Review finding: every pick used to PUT at once, with nothing ordering the
+  // requests. A box that applied an older PUT last kept the older pick, and
+  // the next read (nothing in flight any more) adopted it — an older answer
+  // clobbering a newer local pick (D5).
+  describe("picks reach the box one PUT at a time, in pick order", () => {
+    /** A box that applies each PUT when the test settles it, and answers GET
+     *  with whatever it holds at that moment. */
+    function boxThatAppliesOnSettle() {
+      const state = { box: UNSET as ActiveDepartmentResponse, maxInFlight: 0 };
+      const inFlight: Array<{ settle: () => void; fail: (err: unknown) => void }> = [];
+      putActiveDepartmentMock.mockImplementation(
+        (id: string | null) =>
+          new Promise<ActiveDepartmentResponse>((resolve, reject) => {
+            const entry = {
+              settle: () => {
+                state.box = id === null ? WHOLE : onBox([security, sales].find((d) => d.id === id)!);
+                resolve(state.box);
+              },
+              fail: reject,
+            };
+            inFlight.push(entry);
+            state.maxInFlight = Math.max(state.maxInFlight, inFlight.length);
+          }),
+      );
+      getActiveDepartmentMock.mockImplementation(async () => state.box);
+      /** Settle every PUT in flight, NEWEST first, and let the page react. */
+      const settleNewestFirst = async () => {
+        await act(async () => {
+          for (const p of inFlight.splice(0).reverse()) p.settle();
+          await new Promise((r) => setTimeout(r, 0));
+        });
+      };
+      /** Fail the oldest PUT in flight. */
+      const failOldest = async (err: unknown) => {
+        await act(async () => {
+          inFlight.shift()!.fail(err);
+          await new Promise((r) => setTimeout(r, 0));
+        });
+      };
+      return { state, inFlight, settleNewestFirst, failOldest };
+    }
+    const putIds = () => putActiveDepartmentMock.mock.calls.map((c) => c[0]);
+
+    async function mounted() {
+      listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
+      const view = wrap(<Probe />);
+      await waitFor(() => expect(screen.getByTestId("count")).toHaveTextContent("2"));
+      await waitFor(() => expect(getActiveDepartmentMock).toHaveBeenCalledTimes(1));
+      return view;
+    }
+
+    it("pick sales then security, the box answering in REVERSE order — the next read still says security", async () => {
+      const b = boxThatAppliesOnSettle();
+      await mounted();
+
+      await click("pick sales");
+      await click("pick security");
+      while (b.inFlight.length) await b.settleNewestFirst();
+
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      await waitFor(() => expect(getActiveDepartmentMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(screen.getByTestId("active")).toHaveTextContent("security");
+      expect(localStorage.getItem(U1_KEY)).toBe("security");
+      expect(b.state.box).toEqual(onBox(security));
+      expect(putIds()).toEqual(["sal", "sec"]);
+      expect(b.state.maxInFlight).toBe(1);
+    });
+
+    it("while one is in flight only the LATEST waiting pick is sent next", async () => {
+      const b = boxThatAppliesOnSettle();
+      await mounted();
+
+      await click("pick sales");
+      await click("pick security");
+      await click("whole");
+      expect(putIds()).toEqual(["sal"]);
+      while (b.inFlight.length) await b.settleNewestFirst();
+      expect(putIds()).toEqual(["sal", null]);
+      expect(b.state.box).toEqual(WHOLE);
+      expect(screen.getByTestId("active")).toHaveTextContent("whole");
+    });
+
+    it("a PUT that fails still lets the waiting pick through", async () => {
+      const b = boxThatAppliesOnSettle();
+      await mounted();
+
+      await click("pick sales");
+      await click("pick security");
+      await b.failOldest(httpError(500, "INTERNAL_ERROR"));
+      expect(warn).toHaveBeenCalled();
+      expect(putIds()).toEqual(["sal", "sec"]);
+      while (b.inFlight.length) await b.settleNewestFirst();
+      expect(b.state.box).toEqual(onBox(security));
+    });
+
+    it("a PUT that finds no route drops the waiting pick: nothing more is sent (rule 5)", async () => {
+      const b = boxThatAppliesOnSettle();
+      await mounted();
+
+      await click("pick sales");
+      await click("pick security");
+      await b.failOldest(httpError(404));
+      expect(putIds()).toEqual(["sal"]);
+      expect(b.inFlight).toHaveLength(0);
+      expect(screen.getByTestId("active")).toHaveTextContent("security");
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("a pick still waiting when the person changes is never sent as the next person", async () => {
+      const b = boxThatAppliesOnSettle();
+      const { rerender } = await mounted();
+
+      await click("pick sales");
+      await click("pick security");
+      authRef.current = { role: "family", id: "u2" };
+      rerender(tree(<Probe />));
+      await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("whole"));
+      while (b.inFlight.length) await b.settleNewestFirst();
+      expect(putIds()).toEqual(["sal"]);
+    });
+  });
+
   describe("an orchestrator without the route (P1's behaviour)", () => {
     it("a 404 on the read turns the sync off: picks stay local, nothing is PUT, nothing re-read", async () => {
       getActiveDepartmentMock.mockRejectedValue(httpError(404));
