@@ -3510,7 +3510,13 @@ export type SecurityEventKind =
   | "source_online"
   | "threat"
   /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource, fromMode]; site-wide. */
-  | "mode_changed";
+  | "mode_changed"
+  /**
+   * WARP-2978 PR-D — a person Frigate has tracked for 30 s and not ended yet:
+   * one row per person, endedAt null; their `end` is still its own
+   * `detection` row. Shown as "Still in view".
+   */
+  | "detection_ongoing";
 
 /** Mirrors the orchestrator's SecurityEventSource enum. */
 export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode";

@@ -33,6 +33,7 @@ import {
   type SourceCatalog,
   type ZoneMatchableEvent,
   type ZoneRecord,
+  matchAreasForEvent,
 } from "./security-zones.service.js";
 
 const onlyFront = { visibleCameras: new Set(["front"]) as ReadonlySet<string> };
@@ -100,7 +101,7 @@ describe("zoneEventWhere — the feed clause for one area", () => {
         {
           camera: "back",
           OR: [
-            { kind: { in: ["detection", "detection_low"] }, cameraZones: { hasSome: ["door", "till"] } },
+            { kind: { in: ["detection", "detection_ongoing", "detection_low"] }, cameraZones: { hasSome: ["door", "till"] } },
             { kind: { in: ["camera_offline", "camera_online"] } },
           ],
         },
@@ -145,6 +146,19 @@ describe("zonesForEvent — the in-memory twin", () => {
   it("a part matches only detections in that part — other Frigate zones do not", () => {
     expect(zonesForEvent(row({ camera: "back", cameraZones: ["gate"] }), index)).toEqual(["yard"]);
     expect(zonesForEvent(row({ camera: "back", kind: "detection_low", cameraZones: ["till"] }), index)).toEqual([
+      "till",
+      "yard",
+    ]);
+  });
+
+  it("WARP-2978 PR-D — a person's still-in-view row lands in the same areas as their detection", () => {
+    // Otherwise it would group (and alert) somewhere other than the `end` row it precedes.
+    for (const cameraZones of [["till"], ["gate"], [], ["porch", "till"]]) {
+      expect(zonesForEvent(row({ camera: "back", kind: "detection_ongoing", cameraZones }), index)).toEqual(
+        zonesForEvent(row({ camera: "back", kind: "detection", cameraZones }), index),
+      );
+    }
+    expect(zonesForEvent(row({ camera: "back", kind: "detection_ongoing", cameraZones: ["till"] }), index)).toEqual([
       "till",
       "yard",
     ]);
@@ -457,5 +471,87 @@ describe("Prisma error shapes the writes map", () => {
       }),
     ).toBe(true);
     expect(isZoneNameCheckViolation({ message: 'violates check constraint "SecurityZoneLink_ref"' })).toBe(false);
+  });
+});
+
+// ── WARP-2978 (ADR-059 P3 §6.2): the engine's matcher agrees with the feed's ──
+
+describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank inputs", () => {
+  /** Deterministic PRNG (mulberry32): a failure reproduces from its seed. */
+  function rng(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const pick = <T,>(r: () => number, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
+  const CAMS = ["c1", "c2", "c3"];
+  const PARTS = ["porch", "drive", "yard", "till"];
+  const KINDS = [
+    "detection",
+    "detection_ongoing",
+    "detection_low",
+    "camera_offline",
+    "camera_online",
+    "source_offline",
+    "threat",
+    "mode_changed",
+  ] as const;
+  const ZONES = ["z1", "z2", "z3", "z4"];
+
+  it("agrees on zone ids with zonesForEvent over 200 generated events × random link sets", () => {
+    const r = rng(2978);
+    for (let round = 0; round < 20; round++) {
+      const links: ActiveZoneLink[] = [];
+      for (const zoneId of ZONES) {
+        const n = Math.floor(r() * 4);
+        for (let k = 0; k < n; k++) {
+          const camera = pick(r, CAMS);
+          const whole = r() < 0.4;
+          links.push({
+            linkId: `${zoneId}-${round}-${k}`,
+            zoneId,
+            zoneName: zoneId,
+            zoneKind: "interior",
+            sourceKind: whole ? "camera" : "camera_zone",
+            sourceRef: whole ? camera : `${camera}/${pick(r, PARTS)}`,
+          });
+        }
+      }
+      const index = buildZoneIndex(links);
+      for (let e = 0; e < 10; e++) {
+        const kind = pick(r, KINDS);
+        const siteWide = kind === "source_offline" || kind === "threat" || kind === "mode_changed";
+        const row = {
+          source: "frigate" as const,
+          kind,
+          camera: siteWide ? null : pick(r, CAMS),
+          cameraZones: PARTS.filter(() => r() < 0.3),
+        };
+        const got = matchAreasForEvent(row, links).map((m) => m.zoneId);
+        expect(got, JSON.stringify({ row, links })).toEqual(zonesForEvent(row, index));
+      }
+    }
+  });
+
+  it("carries the matched link ids and 'part' when a part-of-view link matched", () => {
+    const links: ActiveZoneLink[] = [
+      { linkId: "a1", zoneId: "za", zoneName: "Shop", zoneKind: "interior", sourceKind: "camera", sourceRef: "front" },
+      { linkId: "b1", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/till" },
+      { linkId: "b2", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/porch" },
+    ];
+    expect(matchAreasForEvent({ source: "frigate", kind: "detection", camera: "front", cameraZones: ["till"] }, links)).toEqual([
+      { zoneId: "za", zoneName: "Shop", zoneKind: "interior", linkIds: ["a1"], specificity: "whole" },
+      { zoneId: "zb", zoneName: "Till", zoneKind: "restricted", linkIds: ["b1"], specificity: "part" },
+    ]);
+    // A camera's own offline row reaches every part of its view.
+    expect(
+      matchAreasForEvent({ source: "frigate_status", kind: "camera_offline", camera: "front", cameraZones: [] }, links).find((m) => m.zoneId === "zb"),
+    ).toMatchObject({ linkIds: ["b1", "b2"], specificity: "part" });
+    expect(matchAreasForEvent({ source: "activity_mirror", kind: "threat", camera: null, cameraZones: [] }, links)).toEqual([]);
   });
 });

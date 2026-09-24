@@ -79,6 +79,7 @@ import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cam
 import { createSecurityRouter } from "./routes/security.js";
 import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
+import { createSecurityIncidentsRouter } from "./routes/security-incidents.js";
 import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -601,6 +602,11 @@ export function createApp(
   // add requireFeatureAccess at the route.
   app.use("/api", createSecurityZonesRouter(prisma));
   app.use("/api", createSecuritySiteRouter(prisma));
+  // WARP-2978 (ADR-059 P3) — incidents, acknowledgement and alert routing
+  // (routes 16–22), after the site router, under the same module gate; the
+  // act/manage write routes add requireFeatureAccess at the route. Literal
+  // paths (`/incidents/summary`) are declared before `/incidents/:id`.
+  app.use("/api", createSecurityIncidentsRouter(prisma));
   // WARP-2980 (ADR-059 P5) — "what normal looks like", read-only (routes
   // 29–31). Same /api/security module gate; the last Security router.
   app.use("/api", createSecurityPatternsRouter(prisma));
