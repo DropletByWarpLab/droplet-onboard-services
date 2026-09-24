@@ -259,3 +259,48 @@ describe("validateTokenForWs — WARP-247 session enforcement", () => {
     expect(checkSession).not.toHaveBeenCalled();
   });
 });
+
+// WARP-2804 (review F3) — whether THIS request's session record was actually
+// confirmed live. The `sid` itself always comes from the signed token, but the
+// live-session check is skipped when the session store is unreachable (fail
+// open) and on sid-less grace tokens. An acknowledgement records which one it
+// was (`ackSessionChecked`), so "acked from that sign-in" is never claimed
+// stronger than the box could check.
+describe("authMiddleware — WARP-2804 req.sessionChecked", () => {
+  it("true only when the session store confirmed the sign-in is live", async () => {
+    verifyAccessToken.mockReturnValue(payloadWithSid);
+    checkSession.mockResolvedValue({
+      kind: "ok",
+      record: { userId: "u-uuid-1", role: "family", createdAt: 0, lastSeenAt: 0 },
+    });
+    const req = cookieReq();
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(req, mockRes(), next);
+    await flush();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.sessionChecked).toBe(true);
+  });
+
+  it("MUTATION: false when the store is unreachable and the request is let through on the signed token alone", async () => {
+    verifyAccessToken.mockReturnValue(payloadWithSid);
+    checkSession.mockResolvedValue({ kind: "error" });
+    const req = cookieReq();
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(req, mockRes(), next);
+    await flush();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.user?.sid).toBe("sid-abc");
+    expect(req.sessionChecked).toBe(false);
+  });
+
+  it("false on a sid-less grace token (no session record to check)", async () => {
+    const { sid: _sid, ...noSid } = payloadWithSid;
+    verifyAccessToken.mockReturnValue(noSid);
+    const req = headerReq();
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(req, mockRes(), next);
+    await flush();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.sessionChecked).toBe(false);
+  });
+});

@@ -179,6 +179,11 @@ export interface PushPayload {
    *  session cookie. */
   imageUrl?: string;
   data?: Record<string, unknown>;
+  /** WARP-2804 — the NotificationLog row this push is for. The service worker
+   *  acknowledges it (`POST /api/notifications/<id>/ack {via:'opened'}`) when
+   *  the person taps the notification. Absent on the camera detection
+   *  fan-out, which writes no row. */
+  notificationId?: string;
 }
 
 /** WARP-2904 — what one push dial (or refusal) did, for the audit row. */
