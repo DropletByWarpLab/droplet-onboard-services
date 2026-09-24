@@ -42,6 +42,7 @@ import {
   type LockLogger,
   type LockObservation,
   type LockReading,
+  type LockStore,
 } from "./security-lock-adapter.js";
 import { SECURITY_EVENT_RETENTION_DAYS, writeSecurityEvent } from "./security-events.service.js";
 
@@ -131,18 +132,51 @@ describe.skipIf(!RUN)("Matter lock adapter store — real Postgres (WARP-2977 P2
     expect(rows[1]).toMatchObject({ severity: "notice", dedupeKey: `matter_lock:${node(2)}/1:after:${stored!.id}:not_fully_locked` });
   });
 
-  it("two trackers (two bridges) seeing the same change write exactly ONE row — the dedupeKey is deterministic", async () => {
-    const store = createPrismaLockStore(prisma);
+  /**
+   * A store whose writes wait until `parties` writers have arrived, then all
+   * go at once: both trackers have read the same history and built the same
+   * dedupeKey before either inserts — the race the key exists for, forced
+   * rather than left to timing.
+   */
+  function barrierStore(inner: LockStore, parties: number): LockStore {
+    let waiting: Array<() => void> = [];
+    return {
+      lastReading: (r) => inner.lastReading(r),
+      idByDedupeKey: (k) => inner.idByDedupeKey(k),
+      async write(draft) {
+        await new Promise<void>((release) => {
+          waiting.push(release);
+          if (waiting.length === parties) {
+            for (const go of waiting) go();
+            waiting = [];
+          }
+        });
+        return inner.write(draft);
+      },
+    };
+  }
+
+  it("two trackers (two bridges) inserting the same change at once write exactly ONE row — recorded + duplicate", async () => {
+    const store = barrierStore(createPrismaLockStore(prisma), 2);
     const a = createLockTracker({ store, logger: quiet });
     const b = createLockTracker({ store, logger: quiet });
-    const outcomes = await Promise.all([a.observe(obs(3, "unlatched"), "live"), b.observe(obs(3, "unlatched"), "live")]);
-    expect([...outcomes].sort()).toEqual(["duplicate", "recorded"]);
+    const first = await Promise.all([a.observe(obs(3, "unlatched"), "live"), b.observe(obs(3, "unlatched"), "live")]);
+    expect([...first].sort()).toEqual(["duplicate", "recorded"]);
     expect(await rowsOf(ref(3))).toHaveLength(1);
 
-    // …and both chain the NEXT change after the same row, so it too is one row.
-    await Promise.all([a.observe(obs(3, "locked"), "live"), b.observe(obs(3, "locked"), "live")]);
+    // …and both read the one row's id back, so the NEXT change is one row too.
+    const next = await Promise.all([a.observe(obs(3, "locked"), "live"), b.observe(obs(3, "locked"), "live")]);
+    expect([...next].sort()).toEqual(["duplicate", "recorded"]);
     const rows = await rowsOf(ref(3));
     expect(rows.map((r) => r.labels[0])).toEqual(["unlatched", "locked"]);
+    expect(rows[1]!.dedupeKey).toBe(`matter_lock:${node(3)}/1:after:${rows[0]!.id}:locked`);
+  });
+
+  it("two trackers one after the other: the second reads the first's row back and writes nothing", async () => {
+    const store = createPrismaLockStore(prisma);
+    expect(await createLockTracker({ store, logger: quiet }).observe(obs(8, "unlatched"), "live")).toBe("recorded");
+    expect(await createLockTracker({ store, logger: quiet }).observe(obs(8, "unlatched"), "live")).toBe("unchanged");
+    expect(await rowsOf(ref(8))).toHaveLength(1);
   });
 
   it("writeSecurityEvent: recorded, then duplicate on the same key, and failed when the CHECK refuses — never conflated", async () => {
