@@ -9,12 +9,14 @@
  *
  * The shape now:
  *
- *   WORK      Overview · Ask AI · Files · Messages · Email · Calendar
+ *   WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
  *   BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
  *   SYSTEMS   Security · Cameras [Events] · Network [Voice, Remote access] · Devices
  *
  * Security (WARP-2977, ADR-059) landed on stage after this tree was cut and is
  * its own module, so it is a fifteenth row rather than a child of Cameras.
+ * Workshop (WARP-3063) is the sixteenth, and only owner/admin see it: the
+ * tuck behind Settings had removed it from the product.
  *   ADMIN     Settings
  *
  * Everything else keeps its route and moves behind Settings as the WARP-1807
@@ -64,14 +66,17 @@ describe("the tree is four groups (WARP-2967)", () => {
     ]);
   });
 
-  it("renders at most fifteen top-level rows with everything switched on", () => {
-    // The ticket's ≤ 14 plus WARP-2977's Security row.
+  it("renders at most sixteen top-level rows with everything switched on", () => {
+    // The ticket's ≤ 14, plus WARP-2977's Security row, plus WARP-3063's
+    // Workshop row (owner/admin only; family still sees fifteen).
     const rows = NAV_GROUPS.flatMap((g) => visible(g.label)).length;
-    expect(rows).toBeLessThanOrEqual(15);
+    expect(rows).toBeLessThanOrEqual(16);
+    const familyRows = NAV_GROUPS.flatMap((g) => visible(g.label, "family")).length;
+    expect(familyRows).toBeLessThanOrEqual(15);
   });
 
   it.each([
-    ["Work", ["/", "/chat", "/files", "/messages", "/email", "/calendar"]],
+    ["Work", ["/", "/chat", "/files", "/messages", "/email", "/calendar", "/workshop"]],
     ["Business", ["/business", "/customers", "/projects", "/practice"]],
     ["Systems", ["/security", "/cameras", "/network", "/devices"]],
     ["Admin", ["/settings"]],
@@ -160,7 +165,6 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
         "/tools",
         "/trust",
         "/users",
-        "/workshop",
       ].sort(),
     );
   });
@@ -238,7 +242,8 @@ describe("isSettingsContext — which routes swap the sidebar (WARP-2967)", () =
     },
   );
 
-  it.each(["/", "/files", "/files/trash", "/cameras", "/network", "/settingsomething"])(
+  // WARP-3063 — /workshop is a Work row, so arriving there keeps the main tree.
+  it.each(["/", "/files", "/files/trash", "/cameras", "/network", "/settingsomething", "/workshop"])(
     "%s is not",
     (pathname) => {
       expect(isSettingsContext(pathname)).toBe(false);
