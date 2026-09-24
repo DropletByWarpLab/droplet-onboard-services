@@ -84,6 +84,8 @@ export const BASELINE_FRESH_WINDOW_DAYS = 2;
  * why the new one failed.
  */
 export const BASELINE_BUILD_RETRY_AFTER_MS = 60 * 60_000;
+/** An area rebuild that failed is not retried within this long for the same (build, area version). */
+export const BASELINE_AREA_REBUILD_RETRY_AFTER_MS = 60 * 60_000;
 /** `scheduleInterval` has no immediate tick: a freshly registered job gets this long before "hasn't checked" reads as down. */
 export const SECURITY_BASELINE_GRACE_MS = 3 * 60_000;
 /** Frigate's /api/stats, read every tick for coverage: short, so a slow Frigate cannot eat the tick. */
@@ -99,9 +101,15 @@ export interface BaselineHealthState {
   /** The last tick that ran every step. */
   lastOkAt: Date | null;
   lastError: { at: Date; message: string } | null;
+  /**
+   * The last time an area rebuild failed, while any area still waits out its
+   * backoff; null once they are all rebuilt. A failed rebuild never fails the
+   * tick (review #2352), so it is shown here instead.
+   */
+  areaRebuildFailedAt?: Date | null;
 }
 
-const baselineHealth: BaselineHealthState = { registeredAt: null, lastOkAt: null, lastError: null };
+const baselineHealth: BaselineHealthState = { registeredAt: null, lastOkAt: null, lastError: null, areaRebuildFailedAt: null };
 
 export function baselineHealthState(): Readonly<BaselineHealthState> {
   return baselineHealth;
@@ -109,7 +117,12 @@ export function baselineHealthState(): Readonly<BaselineHealthState> {
 
 /** Test seam — module state survives between tests otherwise. */
 export function _resetBaselineHealthForTests(): void {
-  Object.assign(baselineHealth, { registeredAt: null, lastOkAt: null, lastError: null } satisfies BaselineHealthState);
+  Object.assign(baselineHealth, {
+    registeredAt: null,
+    lastOkAt: null,
+    lastError: null,
+    areaRebuildFailedAt: null,
+  } satisfies BaselineHealthState);
 }
 
 // ── the tick ──────────────────────────────────────────────────────────────
@@ -126,11 +139,19 @@ let coverageSeeds = new Map<string | null, Date>();
  * minute. A restart forgets it: at most one extra rebuild per such area.
  */
 const noCellAreas = new Map<string, string>();
+/**
+ * Areas whose last rebuild FAILED, `zoneId → {key: "<buildId>:<version>", at}`.
+ * The same key waits BASELINE_AREA_REBUILD_RETRY_AFTER_MS: a rebuild that
+ * times out would otherwise re-run its full statement every minute. A new
+ * version (someone changed the links) or a new build retries at once.
+ */
+const failedAreaRebuilds = new Map<string, { key: string; at: number }>();
 
 /** Test seam. */
 export function _resetBaselineJobForTests(): void {
   bootClosed.clear();
   noCellAreas.clear();
+  failedAreaRebuilds.clear();
   coverageSeeds = new Map();
 }
 
@@ -227,6 +248,13 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
   ]);
   const builtVersion = new Map(built.filter((b) => b.zoneId !== null).map((b) => [b.zoneId!, b.zoneVersion]));
   const liveVersion = new Map(live.map((z) => [z.id, z.version]));
+  const keyOf = (id: string) => `${ready.id}:${liveVersion.get(id) ?? "gone"}`;
+  // A failure whose key moved (new build, new version) is stale: retry it now.
+  for (const [id, f] of failedAreaRebuilds) if (f.key !== keyOf(id)) failedAreaRebuilds.delete(id);
+  const waiting = (id: string) => {
+    const f = failedAreaRebuilds.get(id);
+    return f !== undefined && now.getTime() - f.at < BASELINE_AREA_REBUILD_RETRY_AFTER_MS;
+  };
   const ids: string[] = [];
   for (const [id, version] of liveVersion) {
     const had = builtVersion.get(id);
@@ -237,24 +265,40 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
     }
   }
   for (const id of builtVersion.keys()) if (!liveVersion.has(id)) ids.push(id);
-  if (ids.length === 0) return [];
+  const due = ids.filter((id) => !waiting(id));
+  if (due.length === 0) {
+    if (failedAreaRebuilds.size === 0) baselineHealth.areaRebuildFailedAt = null;
+    return [];
+  }
 
-  const r = await rebuildAreas(prisma, ids);
+  let r: Awaited<ReturnType<typeof rebuildAreas>>;
+  try {
+    r = await rebuildAreas(prisma, due);
+  } catch (err) {
+    // Never fails the tick: coverage, the hourly step and lastOkAt stand. The
+    // areas wait out the backoff; the patterns row says so meanwhile.
+    for (const id of due) failedAreaRebuilds.set(id, { key: keyOf(id), at: now.getTime() });
+    baselineHealth.areaRebuildFailedAt = now;
+    logger.error({ err, areas: due }, "security baselines: area rebuild failed — retrying within the hour");
+    return [];
+  }
+  for (const id of due) failedAreaRebuilds.delete(id);
+  if (failedAreaRebuilds.size === 0) baselineHealth.areaRebuildFailedAt = null;
   if (r.status === "rebuilt") {
     const withCells = await prisma.securityBaselineCell.findMany({
-      where: { buildId: r.buildId, keyKind: "area", zoneId: { in: ids } },
+      where: { buildId: r.buildId, keyKind: "area", zoneId: { in: due } },
       distinct: ["zoneId"],
       select: { zoneId: true },
     });
     const has = new Set(withCells.map((c) => c.zoneId));
-    for (const id of ids) {
+    for (const id of due) {
       const version = liveVersion.get(id);
       if (version !== undefined && !has.has(id)) noCellAreas.set(id, `${r.buildId}:${version}`);
       else noCellAreas.delete(id);
     }
-    logger.info({ areas: ids, inserted: r.inserted }, "security baselines: areas rebuilt after a link change");
+    logger.info({ areas: due, inserted: r.inserted }, "security baselines: areas rebuilt after a link change");
   }
-  return ids;
+  return due;
 }
 
 /** Frigate's stats for this tick, or null when they did not answer (or Frigate is not set up). Never throws. */
@@ -447,6 +491,9 @@ export function patternsHealthRow(
   if (db.ready && outOfDate) {
     const when = db.ready.finishedAt ? siteDayCopy(db.ready.finishedAt, tz, now) : "a while ago";
     return row("down", `What normal looks like is out of date (last worked out ${when})`);
+  }
+  if (state.areaRebuildFailedAt && nowMs - state.areaRebuildFailedAt.getTime() < BASELINE_AREA_REBUILD_RETRY_AFTER_MS * 2) {
+    return row("down", "Couldn't update what's usual after an area's cameras changed; trying again within the hour");
   }
 
   const active = sources.filter((s) => s.state === "active");

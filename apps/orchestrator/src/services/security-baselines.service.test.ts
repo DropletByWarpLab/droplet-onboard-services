@@ -315,6 +315,35 @@ describe("tickSecurityBaselines — area rebuilds when links change (D2)", () =>
   });
 });
 
+describe("area rebuild failures back off and never fail the tick (review #2352, finding 3)", () => {
+  it("a failing rebuild: the tick still completes (lastOkAt moves), the failure is noted, the same versions wait an hour", async () => {
+    const w = world({ liveAreas: [{ id: "z-1", version: 1 }] });
+    const f = fakePrisma(w);
+    h.rebuildAreas.mockRejectedValueOnce(new Error("canceling statement due to statement timeout"));
+    await expect(tickSecurityBaselines(f.prisma, ny("15:00"), deps(TZ))).resolves.toBeDefined();
+    expect(baselineHealthState().lastOkAt).toEqual(ny("15:00"));
+    expect(baselineHealthState().lastError).toBeNull();
+    expect(baselineHealthState().areaRebuildFailedAt).toEqual(ny("15:00"));
+    await tickSecurityBaselines(f.prisma, ny("15:01"), deps(TZ));
+    await tickSecurityBaselines(f.prisma, ny("15:59"), deps(TZ));
+    expect(h.rebuildAreas).toHaveBeenCalledTimes(1);
+    // An hour on, it is tried again; a success clears the note.
+    await tickSecurityBaselines(f.prisma, ny("16:01"), deps(TZ));
+    expect(h.rebuildAreas).toHaveBeenCalledTimes(2);
+    expect(baselineHealthState().areaRebuildFailedAt).toBeNull();
+  });
+
+  it("the area's version moving (someone fixed the link) retries at once", async () => {
+    const w = world({ liveAreas: [{ id: "z-1", version: 1 }] });
+    const f = fakePrisma(w);
+    h.rebuildAreas.mockRejectedValueOnce(new Error("boom"));
+    await tickSecurityBaselines(f.prisma, ny("15:00"), deps(TZ));
+    w.liveAreas = [{ id: "z-1", version: 2 }];
+    await tickSecurityBaselines(f.prisma, ny("15:01"), deps(TZ));
+    expect(h.rebuildAreas).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("tickSecurityBaselines — health bookkeeping", () => {
   it("a throw records lastError and rethrows into safeRun's canary", async () => {
     h.recordCoverage.mockRejectedValueOnce(new Error("db down"));
@@ -443,6 +472,13 @@ describe("patternsHealthRow — every state (§6.14)", () => {
       db({ sources: [{ camera: "front", state: "stale", daysObserved: 20 }] }),
       ALL,
       { state: "quiet", detail: "No camera has reported for more than 2 days" },
+    ],
+    [
+      "an area rebuild failed within the hour (the area's flags wait for it)",
+      running({ areaRebuildFailedAt: new Date(NOW.getTime() - 20 * 60_000) }),
+      db(),
+      ALL,
+      { state: "down", detail: "Couldn't update what's usual after an area's cameras changed; trying again within the hour" },
     ],
     [
       "ok, with the trial note",

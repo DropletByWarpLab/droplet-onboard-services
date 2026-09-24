@@ -243,6 +243,16 @@ describe("rebuildAreas — one area's cells rebuilt from the ready build's own w
     });
   });
 
+  it("an area rebuild reads only its linked cameras' coverage and events — never a full-cost scan (review #2352, finding 3)", async () => {
+    const f = fake({ ready: READY });
+    await rebuildAreas(f.prisma, ["z-1"]);
+    const sql = (f.log.find((c) => c.op === "tx.$executeRaw")!.args as { sql: string }).sql;
+    expect(sql).toMatch(/p\.only_zone_ids IS NULL OR sp\.camera IN \(SELECT camera FROM link\)/);
+    expect(sql).toMatch(/p\.only_zone_ids IS NULL OR e\.camera IN \(SELECT camera FROM link\)/);
+    // `link` is defined before the CTEs that read it.
+    expect(sql.indexOf("link AS (")).toBeLessThan(sql.indexOf("cam_obs AS ("));
+  });
+
   it("no ready build → nothing to rebuild", async () => {
     const f = fake({ ready: null });
     expect(await rebuildAreas(f.prisma, ["z-1"])).toEqual({ status: "no_ready_build" });

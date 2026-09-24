@@ -98,15 +98,6 @@ slot AS (
          u.s_start::timestamp(3) AS s_start, u.s_end::timestamp(3) AS s_end
   FROM p CROSS JOIN LATERAL unnest(p.ymds, p.hours, p.day_types, p.starts, p.ends) AS u(ymd, hour, day_type, s_start, s_end)
 ),
-cam_obs AS (
-  -- observed minutes per camera per slot, from coverage spans; keep slots observed for >= 5/6 of their length
-  SELECT sp.camera, s.ymd, s.hour, s.day_type,
-         SUM(EXTRACT(EPOCH FROM LEAST(sp."coveredUntil", s.s_end) - GREATEST(sp."startedAt", s.s_start))) / 60.0 AS mins
-  FROM slot s JOIN "SecurityCoverageSpan" sp ON sp."startedAt" < s.s_end AND sp."coveredUntil" > s.s_start
-  GROUP BY sp.camera, s.ymd, s.hour, s.day_type, s.s_start, s.s_end
-  HAVING SUM(EXTRACT(EPOCH FROM LEAST(sp."coveredUntil", s.s_end) - GREATEST(sp."startedAt", s.s_start)))
-         >= EXTRACT(EPOCH FROM s.s_end - s.s_start) * 5.0 / 6.0
-),
 link AS (
   -- parseLinkRef in SQL: active camera / camera_zone links of active areas
   SELECT l."zoneId" AS zone_id, z.version AS zone_version,
@@ -115,6 +106,17 @@ link AS (
   FROM "SecurityZoneLink" l JOIN "SecurityZone" z ON z.id = l."zoneId" CROSS JOIN p
   WHERE l.state = 'active' AND z.state = 'active' AND l."sourceKind" IN ('camera', 'camera_zone')
     AND (p.only_zone_ids IS NULL OR l."zoneId" = ANY(p.only_zone_ids))
+),
+cam_obs AS (
+  -- observed minutes per camera per slot, from coverage spans; keep slots observed for >= 5/6 of their length.
+  -- An area rebuild reads only its linked cameras (review #2352): never a full-build scan for one link edit.
+  SELECT sp.camera, s.ymd, s.hour, s.day_type,
+         SUM(EXTRACT(EPOCH FROM LEAST(sp."coveredUntil", s.s_end) - GREATEST(sp."startedAt", s.s_start))) / 60.0 AS mins
+  FROM p CROSS JOIN slot s JOIN "SecurityCoverageSpan" sp ON sp."startedAt" < s.s_end AND sp."coveredUntil" > s.s_start
+  WHERE p.only_zone_ids IS NULL OR sp.camera IN (SELECT camera FROM link)
+  GROUP BY sp.camera, s.ymd, s.hour, s.day_type, s.s_start, s.s_end
+  HAVING SUM(EXTRACT(EPOCH FROM LEAST(sp."coveredUntil", s.s_end) - GREATEST(sp."startedAt", s.s_start)))
+         >= EXTRACT(EPOCH FROM s.s_end - s.s_start) * 5.0 / 6.0
 ),
 area AS (
   SELECT zone_id, max(zone_version) AS zone_version,
@@ -141,6 +143,7 @@ ev AS (
     AND e."startedAt" >= p.window_start AND e."startedAt" < p.window_end
     AND e.camera IS NOT NULL
     AND e.labels[1] ~ '^[a-zA-Z0-9_-]{1,64}$'
+    AND (p.only_zone_ids IS NULL OR e.camera IN (SELECT camera FROM link))
 ),
 ev_key AS (
   -- zonesForEvent's rules for detections; DISTINCT: two links into one area count an event once
