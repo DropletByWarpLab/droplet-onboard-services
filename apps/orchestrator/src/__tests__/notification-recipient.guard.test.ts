@@ -54,10 +54,11 @@
  * `tell(prisma, username)` fed `admin.id` is the same bug one call away. A site
  * that still passes `userId:` is red too.
  *
- * Two recipients ending in `Id` ARE usernames and are allow-listed below with
- * the reason. Neither reason is taken on trust: the reminders one is checked by
- * following every Reminder writer, the tools-core one is pinned to exactly
- * `ctx.userId`, and an entry that stops matching a site fails.
+ * One recipient ending in `Id` IS a username and is allow-listed below with the
+ * reason. The reason is not taken on trust: it is checked by following every
+ * Reminder writer, and an entry that stops matching a site fails. (The second,
+ * tools-core `send_notification`'s `ctx.userId`, went with WARP-3060: tools-core
+ * writes no NotificationLog row at all now, and a case below keeps it so.)
  *
  * The run output enumerates every site it found (one case per site). The
  * scanner is itself tested (bottom of the file) on the shapes it must flag
@@ -689,13 +690,6 @@ const ALLOWED: ReadonlyArray<{ file: string; expr: string; reason: string }> = [
       "`Reminder.userId` is a username: every Reminder writer stores `getUser(req)` " +
       "(= req.user.username) or tools-core's `ctx.userId` — followed below",
   },
-  {
-    file: "tools-core:handlers/notifications/send-notification.ts",
-    expr: "ctx.userId",
-    reason:
-      "`ToolContext.userId` is the calling user's username (routes/llm.ts, MCP `_meta.userId`) — " +
-      "the same key list_notifications reads with",
-  },
 ];
 
 /** Sites whose argument is not an object literal — they forward an already-guarded input. */
@@ -791,7 +785,6 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
       "orchestrator:services/reminders-poller.ts",
       "orchestrator:routes/device-clients.ts",
       "orchestrator:routes/notifications.ts",
-      "tools-core:handlers/notifications/send-notification.ts",
       // WARP-2978 — the Security alert notifier (record-then-deliver).
       "orchestrator:services/security-alerts.service.ts",
     ]) {
@@ -816,7 +809,9 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
       new Set(["sendNotification", "listNotifications", "countUnread", "ackNotification", "ackAllNotifications"]),
     );
     for (const s of routes) {
-      for (const r of recipientsOf(s)) expect(r.expr, s.label).toMatch(/^(getUser\(req\)|username)$/);
+      // WARP-3060 — /send's recipient is `recipientFor(prisma, req)`'s: the
+      // caller, or for the send_notification tool the person it acts for.
+      for (const r of recipientsOf(s)) expect(r.expr, s.label).toMatch(/^(getUser\(req\)|username|recipient\.username)$/);
     }
     // Every direct NotificationLog update is either keyed by the recipient or by the row's own id.
     const updates = SITES.filter((s) => /^notificationLog\.update/.test(s.callee));
@@ -834,10 +829,14 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
     expect(sites[0]!.file.code).toMatch(/const USER_SELECT = \{[^}]*\busername: true/);
   });
 
-  it("the tools-core send_notification site is fed from `ctx.userId` only", () => {
-    const sites = SITES.filter((s) => s.file.id === "tools-core:handlers/notifications/send-notification.ts");
-    expect(sites.map((s) => s.callee)).toEqual(["notificationLog.create"]);
-    expect(sites.flatMap((s) => recipientsOf(s).map((r) => r.expr))).toEqual(["ctx.userId"]);
+  it("🔴 WARP-3060 tools-core writes no NotificationLog row — nothing would ever deliver it", () => {
+    // `send_notification` used to insert its row through ctx.prisma with
+    // `channels: ""`; no toast, no push, and (since WARP-2804) an unread item
+    // for a notification that was never sent. A notification is SENT through
+    // the orchestrator (POST /api/notifications/send → sendNotification), which
+    // records the row and carries it in one call.
+    const writes = SITES.filter((s) => s.file.id.startsWith("tools-core:") && s.callee.startsWith("notificationLog."));
+    expect(writes.map((s) => s.label)).toEqual([]);
   });
 
   it("every allow-list entry still matches a site (no stale allowances)", () => {
