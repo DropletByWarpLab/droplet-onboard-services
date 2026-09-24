@@ -25,6 +25,13 @@
  * Presentational: the Areas panel does the write and shows failures; this
  * stays open on a rejection. A right-edge side panel (a sheet on a phone), so
  * it owns a labelled Close control (WARP-1787).
+ *
+ * WARP-2977 P2b-2 — for people with Devices view, a "Door locks" group lists
+ * every paired lock by name (its room, and "Not reporting" when it isn't, as
+ * its description). A linked lock the smart-home service no longer lists is
+ * gone like a camera; one it couldn't check stays under "Couldn't check
+ * these". Without Devices view the server sends no locks and no lock links,
+ * and nothing about locks is shown.
  */
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { Loader2, RefreshCw, X } from "lucide-react";
@@ -60,6 +67,12 @@ export const COPY = {
   save: "Save",
   wholeViewPhrase: "{camera} (whole view)",
   partPhrase: "{camera} (the '{part}' part of the view)",
+  // WARP-2977 P2b-2 — door locks.
+  locksLegend: "Door locks",
+  locksHint: "Tick the locks on this area's doors.",
+  locksDown: "Droplet couldn't check the door locks just now.",
+  lockNotReporting: "Not reporting",
+  lockPhrase: "{lock} (door lock)",
 } as const;
 
 /** Fill `{name}`-style holes in a COPY template. */
@@ -84,6 +97,7 @@ export function partOf(sourceRef: string): string {
  * (the wire contract on SecurityZoneLinkView.label).
  */
 export function linkPhrase(link: Pick<SecurityZoneLinkView, "sourceKind" | "sourceRef" | "label">): string {
+  if (link.sourceKind === "lock") return fillCopy(COPY.lockPhrase, { lock: link.label });
   return link.sourceKind === "camera_zone"
     ? fillCopy(COPY.partPhrase, { camera: link.label, part: partOf(link.sourceRef) })
     : fillCopy(COPY.wholeViewPhrase, { camera: link.label });
@@ -145,8 +159,9 @@ export function AreaLinksDialog({
   }, [open, zone?.id, zone?.version]);
 
   // Every option in display order: each camera's whole view then its parts,
-  // then the links that couldn't be checked, then the ones that are gone.
-  const { cameraGroups, unchecked, gone, options } = useMemo(() => {
+  // then the door locks, then the links that couldn't be checked, then the
+  // ones that are gone.
+  const { cameraGroups, lockOptions, unchecked, gone, options } = useMemo(() => {
     const partOption = (camera: string, part: string) => ({
       part,
       option: {
@@ -162,11 +177,16 @@ export function AreaLinksDialog({
       parts: c.parts.map((p) => partOption(c.name, p)),
     }));
     const byCamera = new Map(groups.map((g) => [g.name, g]));
+    const locks = (sources?.locks.state === "ok" ? sources.locks.items : []).map((lock) => ({
+      lock,
+      option: { key: keyOf("lock", lock.ref), sourceKind: "lock" as const, sourceRef: lock.ref },
+    }));
     const listed = new Set<string>();
     for (const g of groups) {
       listed.add(g.whole.key);
       for (const p of g.parts) listed.add(p.option.key);
     }
+    for (const l of locks) listed.add(l.option.key);
     const status = new Map<string, SecurityLinkStatus>((sources?.linkStatus ?? []).map((s) => [s.linkId, s.status]));
     const goneLinks: SecurityZoneLinkView[] = [];
     const uncheckedLinks: SecurityZoneLinkView[] = [];
@@ -192,10 +212,11 @@ export function AreaLinksDialog({
       all.push(g.whole);
       for (const p of g.parts) all.push(p.option);
     }
+    for (const l of locks) all.push(l.option);
     for (const l of [...uncheckedLinks, ...goneLinks]) {
       all.push({ key: keyOf(l.sourceKind, l.sourceRef), sourceKind: l.sourceKind, sourceRef: l.sourceRef });
     }
-    return { cameraGroups: groups, unchecked: uncheckedLinks, gone: goneLinks, options: all };
+    return { cameraGroups: groups, lockOptions: locks, unchecked: uncheckedLinks, gone: goneLinks, options: all };
   }, [sources, zone]);
 
   const dirty = selected.size !== base.keys.size || [...selected].some((k) => !base.keys.has(k));
@@ -230,18 +251,24 @@ export function AreaLinksDialog({
     }
   };
 
-  const checkbox = (id: string, key: string, label: string) => (
+  const checkbox = (id: string, key: string, label: string, hint?: string) => (
     <div key={key} style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 32 }}>
       <input
         id={id}
         type="checkbox"
         checked={selected.has(key)}
         onChange={() => toggle(key)}
+        aria-describedby={hint ? `${id}-hint` : undefined}
         style={{ width: 18, height: 18, flexShrink: 0, accentColor: "var(--brand)" }}
       />
       <label htmlFor={id} style={{ fontSize: 13.5, color: "var(--text)", overflowWrap: "anywhere" }}>
         {label}
       </label>
+      {hint && (
+        <span id={`${id}-hint`} style={{ fontSize: 12.5, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
+          {hint}
+        </span>
+      )}
     </div>
   );
 
@@ -295,6 +322,21 @@ export function AreaLinksDialog({
             )}
           </fieldset>
         ))}
+        {sources.locks.state === "unavailable" && <p style={noteStyle}>{COPY.locksDown}</p>}
+        {lockOptions.length > 0 && (
+          <fieldset style={fieldsetStyle} data-locks="true">
+            <legend style={legendStyle}>{COPY.locksLegend}</legend>
+            <p style={{ ...noteStyle, marginBottom: 4 }}>{COPY.locksHint}</p>
+            {lockOptions.map(({ lock, option }, k) =>
+              checkbox(
+                `${uid}-k${k}`,
+                option.key,
+                lock.label,
+                [lock.room, lock.connected ? null : COPY.lockNotReporting].filter(Boolean).join(" · ") || undefined,
+              ),
+            )}
+          </fieldset>
+        )}
         {unchecked.length > 0 && (
           <fieldset style={fieldsetStyle} data-unchecked="true">
             <legend style={legendStyle}>{COPY.uncheckedLegend}</legend>

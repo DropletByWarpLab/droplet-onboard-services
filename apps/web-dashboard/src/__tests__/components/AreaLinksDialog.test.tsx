@@ -34,6 +34,8 @@ const SOURCES: SecuritySourcesView = {
     { name: "yard_cam", label: "Yard camera", parts: [] },
   ],
   linkStatus: [],
+  // WARP-2977 P2b-2: a viewer without Devices view — no door locks anywhere.
+  locks: { state: "hidden", items: [] },
 };
 
 const ZONE: SecurityZoneView = {
@@ -248,6 +250,7 @@ describe("AreaLinksDialog", () => {
         { linkId: "l1", status: "present" },
         { linkId: "l2", status: "unknown" },
       ],
+      locks: { state: "hidden", items: [] },
     };
     const { props } = renderDialog({ sources: down });
     expect(screen.queryByRole("group", { name: COPY.goneLegend })).toBeNull();
@@ -316,5 +319,92 @@ describe("link wording", () => {
     expect(linkPhrase(link("b", "camera_zone", "back_cam/till", "Back camera"))).toBe(
       "Back camera (the 'till' part of the view)",
     );
+  });
+});
+
+// ── WARP-2977 P2b-2: door locks ──────────────────────────────────────────
+
+describe("AreaLinksDialog — door locks (WARP-2977 P2b-2)", () => {
+  const LOCK_A = "matter:4660/1";
+  const LOCK_B = "matter:99/2";
+  const WITH_LOCKS: SecuritySourcesView = {
+    ...SOURCES,
+    locks: {
+      state: "ok",
+      items: [
+        { ref: LOCK_B, nodeId: "99", endpointId: 2, label: "Annex lock", room: null, connected: false },
+        { ref: LOCK_A, nodeId: "4660", endpointId: 1, label: "Back door lock", room: "Hall", connected: true },
+      ],
+    },
+  };
+  const locked = (over: Partial<SecurityZoneView> = {}): SecurityZoneView => ({
+    ...ZONE,
+    links: [...ZONE.links, link("l9", "lock", LOCK_A, "Back door lock")],
+    ...over,
+  });
+  const doors = () => screen.getByRole("group", { name: COPY.locksLegend });
+
+  it("lists every paired lock by name under Door locks, ticked from the area's lock links, with its room and whether it reports", () => {
+    renderDialog({ zone: locked(), sources: WITH_LOCKS });
+    const group = within(doors());
+    expect(group.getByLabelText("Back door lock")).toBeChecked();
+    expect(group.getByLabelText("Annex lock")).not.toBeChecked();
+    expect(group.getByLabelText("Back door lock")).toHaveAccessibleDescription("Hall");
+    expect(group.getByLabelText("Annex lock")).toHaveAccessibleDescription(COPY.lockNotReporting);
+  });
+
+  it("saves lock links with the cameras, after them, in the one PUT", async () => {
+    const { props } = renderDialog({ zone: locked(), sources: WITH_LOCKS });
+    fireEvent.click(within(doors()).getByLabelText("Annex lock"));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(props.onSave).toHaveBeenCalledTimes(1));
+    expect(props.onSave).toHaveBeenCalledWith("z-front", {
+      links: [
+        { sourceKind: "camera", sourceRef: "front_cam" },
+        { sourceKind: "camera_zone", sourceRef: "back_cam/till" },
+        { sourceKind: "lock", sourceRef: LOCK_B },
+        { sourceKind: "lock", sourceRef: LOCK_A },
+      ],
+      expectedVersion: 3,
+    });
+  });
+
+  it("a lock the smart-home service no longer lists (missing) sits under Not set up any more, ticked, until unticked", async () => {
+    const zone = locked({ links: [...ZONE.links, link("l9", "lock", "matter:7/1", "Old gate lock")] });
+    const { props } = renderDialog({ zone, sources: { ...WITH_LOCKS, linkStatus: [{ linkId: "l9", status: "missing" }] } });
+    const gone = screen.getByRole("group", { name: COPY.goneLegend });
+    const box = within(gone).getByLabelText("Old gate lock (door lock)");
+    expect(box).toBeChecked();
+    fireEvent.click(box);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(props.onSave).toHaveBeenCalledTimes(1));
+    expect(props.onSave.mock.calls[0][1].links).not.toContainEqual({ sourceKind: "lock", sourceRef: "matter:7/1" });
+  });
+
+  it("the locks couldn't be checked: says so, and keeps a linked lock under Couldn't check these — never as gone", () => {
+    renderDialog({
+      zone: locked(),
+      sources: { ...SOURCES, locks: { state: "unavailable", items: [] }, linkStatus: [{ linkId: "l9", status: "unknown" }] },
+    });
+    expect(screen.getByText(COPY.locksDown)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: COPY.locksLegend })).toBeNull();
+    const unchecked = screen.getByRole("group", { name: COPY.uncheckedLegend });
+    expect(within(unchecked).getByLabelText("Back door lock (door lock)")).toBeChecked();
+    expect(screen.queryByRole("group", { name: COPY.goneLegend })).toBeNull();
+  });
+
+  it("without Devices view there is no Door locks section at all", () => {
+    renderDialog();
+    expect(screen.queryByRole("group", { name: COPY.locksLegend })).toBeNull();
+    expect(screen.queryByText(COPY.locksDown)).toBeNull();
+  });
+
+  it("no lock paired: no empty Door locks section", () => {
+    renderDialog({ sources: { ...SOURCES, locks: { state: "ok", items: [] } } });
+    expect(screen.queryByRole("group", { name: COPY.locksLegend })).toBeNull();
+  });
+
+  it("a lock link reads as '<name> (door lock)'", () => {
+    expect(linkPhrase({ sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" })).toBe("Back door lock (door lock)");
   });
 });
