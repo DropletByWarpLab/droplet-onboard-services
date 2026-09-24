@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PACKAGE_ROOT } from "../__tests__/helpers/test-paths.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 import {
   BASELINE_BUILDS_KEPT,
   BASELINE_BUILD_CLAIM_STALE_MS,
@@ -72,10 +73,11 @@ function fake(opts: { claimFails?: unknown; buildFails?: unknown; inserted?: num
       }),
     },
   };
+  const seam = createTransactionSeam({ client: () => tx });
   const prisma = {
-    $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<unknown>, o: unknown) => {
+    $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<unknown>, o?: unknown) => {
       push("$transaction")(o);
-      return fn(tx);
+      return seam.$transaction(fn as never, o);
     }),
     securityBaselineBuild: {
       updateMany: vi.fn(async (a: unknown) => {
