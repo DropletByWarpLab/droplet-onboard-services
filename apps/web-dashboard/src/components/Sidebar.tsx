@@ -846,6 +846,7 @@ function DrawerLink({
       href={item.href}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
+      aria-label={item.ariaLabel}
       className={`
         flex items-center gap-3 min-h-[44px] rounded-lg
         type-subheadline transition-all duration-200 ease-smooth
@@ -969,6 +970,7 @@ function NavLink({
                 key={sub.href}
                 href={sub.href}
                 aria-current={subActive ? "page" : undefined}
+                aria-label={sub.ariaLabel}
                 className={`
                   flex items-center gap-2 px-2 h-8 rounded-md
                   type-footnote transition-all duration-200 ease-smooth

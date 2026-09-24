@@ -67,7 +67,8 @@ export function ResolveDialog({
         style={{ display: "flex", flexDirection: "column", gap: 14 }}
         onSubmit={(e) => {
           e.preventDefault();
-          if (!busy) onConfirm(note);
+          // The page's in-flight ref refuses a second submit.
+          onConfirm(note);
         }}
       >
         <div>

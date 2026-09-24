@@ -223,6 +223,9 @@ describe("workspace-nav-config — Level 3 views", () => {
     const views = dest("/security")?.views ?? [];
     // WARP-2978 — /security/settings holds the opening hours AND who is told about alerts.
     expect(views.map((v) => v.label)).toEqual(["Security", "Areas", "Patterns", "Settings"]);
+    // Out of context "Settings" would collide with the app's own Settings link:
+    // its accessible name says whose settings they are (and contains the visible label).
+    expect(views.find((v) => v.href === "/security/settings")?.ariaLabel).toBe("Security settings");
     expect(views.map((v) => v.href)).toEqual(["/security", "/security/zones", "/security/patterns", "/security/settings"]);
     // The section pill is exact, so it does not stay lit on its sub-pages.
     expect(views[0]?.exact).toBe(true);

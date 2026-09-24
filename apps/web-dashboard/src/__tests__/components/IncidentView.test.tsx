@@ -367,8 +367,11 @@ describe("Acknowledge", () => {
     expect(ack).toHaveFocus();
     fireEvent.click(ack);
     expect(h.acknowledgeSecurityIncident).toHaveBeenCalledTimes(1);
-    // Resolve… is inert too while the acknowledge is in flight.
-    expect(screen.getByRole("button", { name: COPY.resolve })).toHaveAttribute("aria-disabled", "true");
+    // Resolve… is inert too while the acknowledge is in flight: it doesn't open.
+    const resolve = screen.getByRole("button", { name: COPY.resolve });
+    expect(resolve).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(resolve);
+    expect(screen.queryByRole("dialog")).toBeNull();
     await rtlAct(async () => finish({ incident: detail(), changed: true }));
   });
 

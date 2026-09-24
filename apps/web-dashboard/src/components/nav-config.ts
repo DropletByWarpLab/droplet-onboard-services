@@ -82,6 +82,13 @@ export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 export type NavItem = {
   href: string;
   label: string;
+  /**
+   * WARP-2978 — the accessible name, when the visible label alone would
+   * collide out of context (Security's "Settings" child beside the app's own
+   * Settings link in the mobile drawer). Must CONTAIN the visible label
+   * (WCAG 2.5.3). Default: the label is the name.
+   */
+  ariaLabel?: string;
   icon: LucideIcon;
   /** Restrict visibility by role. Default: visible to all. */
   roles?: Array<NonNullable<AuthRole>>;
@@ -526,7 +533,7 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           { href: "/security/zones", label: "Areas", icon: MapPin },
           { href: "/security/patterns", label: "Patterns", icon: Activity },
-          { href: "/security/settings", label: "Settings", icon: SlidersHorizontal },
+          { href: "/security/settings", label: "Settings", ariaLabel: "Security settings", icon: SlidersHorizontal },
         ],
       },
       {

@@ -37,7 +37,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { ChevronLeft, Loader2, RefreshCw } from "lucide-react";
-import { Phead, Sect } from "@/components/shell/primitives";
+import { Phead } from "@/components/shell/primitives";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
@@ -267,10 +267,7 @@ function IncidentBody({
             type="button"
             className={i.state === "open" ? "btn primary" : "btn"}
             aria-disabled={busy !== null || undefined}
-            onClick={() => {
-              if (busyRef.current) return;
-              onAcknowledge();
-            }}
+            onClick={onAcknowledge}
           >
             {COPY.acknowledge}
           </button>
@@ -366,10 +363,7 @@ function IncidentBody({
           onClose={() => {
             if (!busyRef.current) setDialogOpen(false);
           }}
-          onConfirm={(note) => {
-            if (busyRef.current) return;
-            onResolve(note);
-          }}
+          onConfirm={onResolve}
         />
       )}
     </>
