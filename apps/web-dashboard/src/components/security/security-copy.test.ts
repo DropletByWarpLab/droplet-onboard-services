@@ -53,6 +53,9 @@ import * as ExpectedActivityCard from "./ExpectedActivityCard";
 import * as ExpectedActivityDialog from "./ExpectedActivityDialog";
 import * as HoursEditor from "./HoursEditor";
 import * as LearningList from "./LearningList";
+import * as IncidentCard from "./IncidentCard";
+import * as IncidentList from "./IncidentList";
+import * as incidentCopy from "./incident-copy";
 import * as ModeCard from "./ModeCard";
 import * as PrecisionCard from "./PrecisionCard";
 import * as SecurityFeed from "./SecurityFeed";
@@ -76,6 +79,10 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/HoursEditor.tsx": HoursEditor,
   // WARP-2980 (P5 PR-A) — the patterns page.
   "src/components/security/LearningList.tsx": LearningList,
+  // WARP-2978 (ADR-059 P3 §8).
+  "src/components/security/IncidentCard.tsx": IncidentCard,
+  "src/components/security/IncidentList.tsx": IncidentList,
+  "src/components/security/incident-copy.ts": incidentCopy,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
   "src/components/security/TimezoneSelect.tsx": TimezoneSelect,

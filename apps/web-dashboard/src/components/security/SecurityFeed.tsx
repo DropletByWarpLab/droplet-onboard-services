@@ -338,8 +338,8 @@ export function SecurityFeed(props: SecurityFeedProps) {
   );
 }
 
-/** "All areas / <area>…" — a native select, so it behaves the same on a phone. */
-function AreaSelect({
+/** "All areas / <area>…" — a native select, so it behaves the same on a phone. WARP-2978: the Incidents tab reuses it. */
+export function AreaSelect({
   areas,
   zone,
   onChange,
