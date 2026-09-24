@@ -39,6 +39,12 @@ vi.mock("../services/activity.singleton.js", () => ({
 
 vi.mock("../services/off-lan-gate.service.js", () => ({ webPushGate: async () => true }));
 
+// Review R1: a camera-limited viewer's page is ordered in SQL; this lane runs the
+// reference it is pinned to in the pg lane (security-incident-list.pg.test.ts).
+vi.mock("../services/security-incident-page.js", async () => ({
+  projectedIncidentPage: (await import("./security-incidents.fake.js")).referenceProjectedIncidentPage,
+}));
+
 import { createSecurityIncidentsRouter } from "../routes/security-incidents.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 import { _resetAlertsHealthForTests } from "../services/security-alerts.service.js";

@@ -158,6 +158,7 @@ function incident(over: Record<string, unknown> = {}) {
     eventCount: 1,
     countsByCamera: { back: { person: 1 } },
     cameras: ["back"],
+    spanByCamera: {},
     version: 2,
     ...over,
   };

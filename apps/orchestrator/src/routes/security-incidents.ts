@@ -162,7 +162,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
   const actGate = [sensitiveRateLimit, requireRole(...ACT_ROLES), requireFeatureAccess("security", "act", deps.resolve)];
   const manageGate = [sensitiveRateLimit, requireRole(...MANAGE_ROLES), requireFeatureAccess("security", "manage", deps.resolve)];
 
-  // 16 — the incident list, (lastActivityAt desc, id desc).
+  // 16 — the incident list, (the viewer's own last activity desc, id desc) — review R1.
   router.get("/security/incidents", requireRole(...VIEW_ROLES), async (req: Request, res: Response) => {
     const q = listQuerySchema.safeParse(req.query);
     const cursor = q.success && q.data.cursor ? parseIncidentCursor(q.data.cursor) : undefined;

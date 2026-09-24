@@ -204,6 +204,7 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       ["a NULL code array", { reasonCodes: "NULL" }, "SecurityIncident_scope_shape"],
       ["a backwards span", { lastActivityAt: "now() - interval '1 minute'" }, "SecurityIncident_span"],
       ["zero events", { eventCount: "0" }, "SecurityIncident_span"],
+      ["a span map that is not an object", { spanByCamera: "'[]'::jsonb" }, "SecurityIncident_span"],
       ["11 notify attempts", { notifyAttempts: "11" }, "SecurityIncident_span"],
     ])("SecurityIncident: %s", async (_n, over, constraint) => {
       expect(await run(incident(over))).toEqual(rejectedBy(constraint));

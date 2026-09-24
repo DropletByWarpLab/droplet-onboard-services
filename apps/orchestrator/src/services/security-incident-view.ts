@@ -51,6 +51,7 @@ import type {
 } from "@prisma/client";
 import { feedVisibilityWhere, listSecurityEvents } from "./security-events.service.js";
 import { loadActiveLinks, viewerAreas, zoneChipsFor } from "./security-zones.service.js";
+import { projectedIncidentPage } from "./security-incident-page.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { QUIET_MS, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 
@@ -158,18 +159,46 @@ export interface IncidentProjection {
   grouping: SecurityIncidentGrouping;
 }
 
+/** The columns the viewer's span is projected from. */
+export type IncidentSpanRow = Pick<IncidentRowForView, "scope" | "spanByCamera" | "lastActivityAt">;
+
+/**
+ * The span entries this viewer sees — or null when the STORED span is theirs:
+ * they see every camera (the list keeps the stored column for them), every
+ * entry of this incident, or none of its entries. A `""` entry (a camera-less
+ * event) is seen only on a site-scoped incident.
+ *
+ * The SQL twin is `projectedIncidentPage` (security-incident-page.ts); the
+ * pg lane pins the two to the same order (review R1).
+ */
+function shownSpans(i: IncidentSpanRow, v: IncidentViewer): Array<{ first: Date; last: Date }> | null {
+  if (v.visibleCameras === "all") return null;
+  const spans = Object.entries(parseSpans(i.spanByCamera));
+  const shown = spans.filter(([camera]) => (camera === "" ? SITE_SCOPES.includes(i.scope) : seesCamera(v, camera)));
+  if (shown.length === 0 || shown.length === spans.length) return null;
+  return shown.map(([, s]) => s);
+}
+
+/**
+ * The viewer's own last activity (review R1): the time their summary shows,
+ * and the key route 16 orders and pages by — so activity on a camera they
+ * cannot see never moves an incident in their list.
+ */
+export function projectedLastActivity(i: IncidentSpanRow, v: IncidentViewer): Date {
+  const shown = shownSpans(i, v);
+  return shown ? new Date(Math.max(...shown.map((s) => s.last.getTime()))) : i.lastActivityAt;
+}
+
 /** The viewer's own span and grouping (review #4). */
 function viewerSpan(
   i: IncidentRowForView,
   v: IncidentViewer,
   now: Date,
 ): { firstActivityAt: Date; lastActivityAt: Date; grouping: SecurityIncidentGrouping } {
-  const stored = { firstActivityAt: i.firstActivityAt, lastActivityAt: i.lastActivityAt, grouping: i.grouping };
-  const spans = Object.entries(parseSpans(i.spanByCamera));
-  const shown = spans.filter(([camera]) => (camera === "" ? SITE_SCOPES.includes(i.scope) : seesCamera(v, camera)));
-  if (shown.length === 0 || shown.length === spans.length) return stored;
-  const first = new Date(Math.min(...shown.map(([, s]) => s.first.getTime())));
-  const last = new Date(Math.max(...shown.map(([, s]) => s.last.getTime())));
+  const shown = shownSpans(i, v);
+  if (!shown) return { firstActivityAt: i.firstActivityAt, lastActivityAt: i.lastActivityAt, grouping: i.grouping };
+  const first = new Date(Math.min(...shown.map((s) => s.first.getTime())));
+  const last = projectedLastActivity(i, v);
   // Her cameras quiet for quiet + settle: it has stopped happening, as far as she can know.
   const quiet = now.getTime() >= last.getTime() + QUIET_MS + SETTLE_MS;
   return { firstActivityAt: first, lastActivityAt: last, grouping: i.grouping === "closed" || quiet ? "closed" : "collecting" };
@@ -303,7 +332,7 @@ export function incidentListWhere(v: IncidentViewer, f: IncidentListFilters): Pr
 
 const CURSOR_RE = /^(\d{1,15})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
-/** `<lastActivityAt ms>.<uuid>` — the keyset position of a page's last incident. */
+/** `<the viewer's last activity, ms>.<uuid>` — the keyset position of a page's last incident (review R1). */
 export function parseIncidentCursor(raw: string): { at: Date; id: string } | null {
   const m = CURSOR_RE.exec(raw);
   if (!m) return null;
@@ -481,10 +510,15 @@ async function summariesOf(prisma: Db, rows: readonly IncidentRowForView[], v: I
 }
 
 /**
- * Route 16: one page, `(lastActivityAt desc, id desc)` on the STORED last
- * activity. Known residual (review #4): for a viewer who cannot see every
- * camera, the ORDER (and so the cursor) can still move when a hidden camera
- * is active; the times shown are hers.
+ * Route 16: one page, `(last activity desc, id desc)` by the VIEWER's last
+ * activity — the time each summary shows (review R1). The cursor is
+ * `<that time in ms>.<id>`, so a camera the viewer cannot see never reorders
+ * their list or moves their page boundary.
+ *
+ *   · a viewer who sees every camera: their projection IS the stored column,
+ *     so Prisma pages on `lastActivityAt` and its indexes;
+ *   · anyone else: `projectedIncidentPage` orders in SQL by the projection
+ *     over the cameras they can see, then the page's rows are read by id.
  */
 export async function listIncidents(
   prisma: Db,
@@ -493,17 +527,30 @@ export async function listIncidents(
   limit: number,
   now: Date,
 ): Promise<{ incidents: IncidentSummary[]; nextCursor: string | null }> {
-  const rows = await prisma.securityIncident.findMany({
-    where: incidentListWhere(v, f),
-    orderBy: [{ lastActivityAt: "desc" }, { id: "desc" }],
-    take: limit + 1,
-    select: INCIDENT_VIEW_SELECT,
-  });
-  const page = rows.slice(0, limit);
+  if (v.visibleCameras === "all") {
+    const rows = await prisma.securityIncident.findMany({
+      where: incidentListWhere(v, f),
+      orderBy: [{ lastActivityAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+      select: INCIDENT_VIEW_SELECT,
+    });
+    const page = rows.slice(0, limit);
+    const tail = page[page.length - 1];
+    return {
+      incidents: await summariesOf(prisma, page, v, now),
+      nextCursor: rows.length > limit && tail ? `${tail.lastActivityAt.getTime()}.${tail.id}` : null,
+    };
+  }
+  const keys = await projectedIncidentPage(prisma, { ...v, visibleCameras: v.visibleCameras }, f, limit + 1);
+  const page = keys.slice(0, limit);
+  const rows = await prisma.securityIncident.findMany({ where: { id: { in: page.map((k) => k.id) } }, select: INCIDENT_VIEW_SELECT });
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  // A row removed between the two reads (retention) is simply absent.
+  const ordered = page.map((k) => byId.get(k.id)).filter((r): r is IncidentRowForView => r !== undefined);
   const tail = page[page.length - 1];
   return {
-    incidents: await summariesOf(prisma, page, v, now),
-    nextCursor: rows.length > limit && tail ? `${tail.lastActivityAt.getTime()}.${tail.id}` : null,
+    incidents: await summariesOf(prisma, ordered, v, now),
+    nextCursor: keys.length > limit && tail ? `${tail.projectedLast.getTime()}.${tail.id}` : null,
   };
 }
 

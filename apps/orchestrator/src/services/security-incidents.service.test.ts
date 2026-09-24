@@ -610,6 +610,7 @@ describe("retention (§6.10, D30)", () => {
       eventCount: 1,
       countsByCamera: {},
       cameras: ["yard"],
+      spanByCamera: {},
       eventsKept: "kept",
       version: 0,
       ...over,

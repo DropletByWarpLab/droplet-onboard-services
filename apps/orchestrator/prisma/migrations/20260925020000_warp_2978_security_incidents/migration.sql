@@ -278,8 +278,11 @@ ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_state_shape" CHE
   AND ("severity" = 'alert') = ("alertedAt" IS NOT NULL)
 );
 
+-- The span map is a JSON object (camera -> {first, last}): route 16 orders a
+-- camera-limited viewer's list with jsonb_each over it (review R1).
 ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_span" CHECK (
   "lastActivityAt" >= "firstActivityAt"
+  AND jsonb_typeof("spanByCamera") = 'object'
   AND "eventCount" >= 1
   AND "rulesetVersion" >= 1
   AND "notifyAttempts" BETWEEN 0 AND 10

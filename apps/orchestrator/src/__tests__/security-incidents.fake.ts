@@ -34,6 +34,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
+import type { IncidentListFilters, IncidentViewer } from "../services/security-incident-view.js";
 
 type Row = Record<string, unknown>;
 type Where = Record<string, unknown> | undefined;
@@ -241,6 +242,11 @@ const SEED_LISTS: Partial<Record<TableName, string[]>> = {
   securityEventTriage: ["matchedLinkIds", "alsoZoneIds"],
 };
 
+/** Required JSON-object columns a seeded row may leave out (a `create` must still give them, as in Prisma). */
+const SEED_OBJECTS: Partial<Record<TableName, string[]>> = {
+  securityIncident: ["spanByCamera"],
+};
+
 class FakePrismaError extends Error {
   constructor(
     readonly code: string,
@@ -368,6 +374,8 @@ function check(table: TableName, r: Row): void {
     if ((r.severity === "alert") !== (r.notifyState !== "not_needed")) fail("SecurityIncident_state_shape");
     if ((r.severity === "alert") !== (r.alertedAt != null)) fail("SecurityIncident_state_shape");
     if (cmp(r.lastActivityAt, r.firstActivityAt) < 0 || (r.eventCount as number) < 1) fail("SecurityIncident_span");
+    const spans = r.spanByCamera;
+    if (spans === null || typeof spans !== "object" || Array.isArray(spans)) fail("SecurityIncident_span");
     if ((r.rulesetVersion as number) < 1 || (r.notifyAttempts as number) < 0 || (r.notifyAttempts as number) > 10) fail("SecurityIncident_span");
   }
   if (table === "securityIncidentReason") {
@@ -432,7 +440,7 @@ export function createFakeSecurityPrisma(init: Partial<FakeWorld> = {}, start: D
   // Seeded rows get the same column defaults a create would give them.
   const world: FakeWorld = emptyWorld();
   for (const [t, rows] of Object.entries(clone(init as FakeWorld)) as Array<[TableName, Row[]]>) {
-    const lists = Object.fromEntries((SEED_LISTS[t] ?? []).map((k) => [k, []]));
+    const lists = Object.fromEntries([...(SEED_LISTS[t] ?? []).map((k) => [k, []]), ...(SEED_OBJECTS[t] ?? []).map((k) => [k, {}])]);
     world[t] = rows.map((r) => ({ ...(DEFAULTS[t]?.(start) ?? {}), ...lists, ...r }));
   }
   let clock = start;
@@ -834,4 +842,35 @@ export function officeHours(tz = "Europe/London"): { header: Row; days: Row[] } 
         : { weekday, kind: "closed", opensMin: null, closesMin: null },
     ),
   };
+}
+
+// ── the reference for projectedIncidentPage (review R1) ─────────────────────
+
+/**
+ * What `projectedIncidentPage` (the SQL in security-incident-page.ts) must
+ * return, built from pieces the mocked lanes can run: Prisma's
+ * `incidentListWhere` (without its stored-column cursor) and
+ * `projectedLastActivity`, sorted `(projectedLast desc, id desc)` and cut
+ * after the `(projectedLast, id)` cursor. The mocked lanes substitute it for
+ * the SQL (`vi.mock`); the pg lane pins the SQL to it.
+ */
+export async function referenceProjectedIncidentPage(
+  prisma: unknown,
+  v: IncidentViewer,
+  f: IncidentListFilters,
+  take: number,
+): Promise<Array<{ id: string; projectedLast: Date }>> {
+  const view = await import("../services/security-incident-view.js");
+  const db = prisma as { securityIncident: { findMany(a: unknown): Promise<Array<Parameters<typeof view.projectedLastActivity>[0] & { id: string }>> } };
+  const rows = await db.securityIncident.findMany({
+    where: view.incidentListWhere(v, { ...f, cursor: undefined }),
+    select: { id: true, scope: true, lastActivityAt: true, spanByCamera: true },
+  });
+  const keyed = rows.map((r) => ({ id: r.id, projectedLast: view.projectedLastActivity(r, v) }));
+  const c = f.cursor;
+  const kept = c
+    ? keyed.filter((k) => k.projectedLast.getTime() < c.at.getTime() || (k.projectedLast.getTime() === c.at.getTime() && k.id < c.id))
+    : keyed;
+  kept.sort((a, b) => b.projectedLast.getTime() - a.projectedLast.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  return kept.slice(0, take);
 }

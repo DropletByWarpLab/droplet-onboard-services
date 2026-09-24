@@ -10,6 +10,7 @@ import {
   incidentListWhere,
   incidentVisibilityWhere,
   projectIncident,
+  projectedLastActivity,
   visibleReasonWhere,
   type IncidentRowForView,
   type IncidentViewer,
@@ -160,6 +161,28 @@ describe("projectIncident — the span and the grouping a viewer may know", () =
   it("a viewer who can see every camera of THIS incident gets the stored values too", () => {
     const onlyFront = incident({ cameras: ["front"], spanByCamera: { front: span(T, plus(T, 60_000)) }, lastActivityAt: plus(T, 60_000) });
     expect(projectIncident(onlyFront, [reason("camera_offline", "front", "notice")], frontOnly, plus(T, 3_600_000))!.grouping).toBe("collecting");
+  });
+
+  describe("projectedLastActivity — the key route 16 orders and pages her list by (review R1)", () => {
+    it("her cameras only: a hidden camera's later activity never moves it", () => {
+      expect(projectedLastActivity(i, frontOnly)).toEqual(plus(T, 60_000));
+      expect(projectedLastActivity(i, frontOnly)).toEqual(projectIncident(i, codes, frontOnly, NOW)!.lastActivityAt);
+    });
+
+    it("the stored column for a viewer who sees every camera, every entry, or none of them", () => {
+      expect(projectedLastActivity(i, owner)).toEqual(i.lastActivityAt);
+      expect(projectedLastActivity(i, { ...frontOnly, visibleCameras: new Set(["front", "back"]) })).toEqual(i.lastActivityAt);
+      expect(projectedLastActivity(i, { ...frontOnly, visibleCameras: new Set(["side"]) })).toEqual(i.lastActivityAt);
+      expect(projectedLastActivity(incident({ spanByCamera: {}, lastActivityAt: plus(T, 5_000) }), frontOnly)).toEqual(plus(T, 5_000));
+    });
+
+    it("a camera-less (`\"\"`) entry counts only on a site-scoped incident", () => {
+      const withSite = { front: span(T, plus(T, 60_000)), back: span(T, plus(T, 900_000)), "": span(T, plus(T, 300_000)) };
+      const site = incident({ scope: "site_camera_system", zoneId: null, zoneName: null, zoneKind: null, spanByCamera: withSite, lastActivityAt: plus(T, 900_000) });
+      expect(projectedLastActivity(site, frontOnly)).toEqual(plus(T, 300_000));
+      const area = incident({ spanByCamera: withSite, lastActivityAt: plus(T, 900_000) });
+      expect(projectedLastActivity(area, frontOnly)).toEqual(plus(T, 60_000));
+    });
   });
 });
 
