@@ -44,7 +44,16 @@ import { securityIngestHealthState, type SecurityHealthRow } from "./security-ev
 import type { SecurityViewerScope } from "./security-access.js";
 import { securityStatusSnapshot } from "./camera.service.js";
 import { resolveSecurityTimezone } from "./security-mode.service.js";
-import { recordCoverage, refreshBaselineSources, type CoverageObservation } from "./security-coverage.js";
+import {
+  parseFrigateStats,
+  recordCoverage,
+  refreshBaselineSources,
+  withStatsSeeds,
+  type CoverageObservation,
+  type FrigateStatsView,
+} from "./security-coverage.js";
+import { fetchStats } from "./frigate.client.js";
+import { config } from "../config.js";
 import { rebuildAreas, runFullBuild, type FullBuildOutcome } from "./security-baseline-build.js";
 import { BASELINE, PATTERN_RELEASE } from "../lib/security-baseline-math.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
@@ -77,6 +86,8 @@ export const BASELINE_FRESH_WINDOW_DAYS = 2;
 export const BASELINE_BUILD_RETRY_AFTER_MS = 60 * 60_000;
 /** `scheduleInterval` has no immediate tick: a freshly registered job gets this long before "hasn't checked" reads as down. */
 export const SECURITY_BASELINE_GRACE_MS = 3 * 60_000;
+/** Frigate's /api/stats, read every tick for coverage: short, so a slow Frigate cannot eat the tick. */
+export const SECURITY_BASELINE_STATS_TIMEOUT_MS = 3_000;
 
 const SINGLETON = "singleton";
 
@@ -107,6 +118,8 @@ export function _resetBaselineHealthForTests(): void {
 const BOOT_PROCESS_ID = randomUUID();
 /** Processes whose first tick (the boot close) has run. */
 const bootClosed = new Set<string>();
+/** Coverage seeds from Frigate's stats (key → since), per process; see security-coverage.ts. */
+let coverageSeeds = new Map<string | null, Date>();
 /**
  * Areas whose last rebuild produced no cells (nothing observed yet), keyed
  * `zoneId → "<buildId>:<version>"`, so a quiet area is not rebuilt every
@@ -118,19 +131,22 @@ const noCellAreas = new Map<string, string>();
 export function _resetBaselineJobForTests(): void {
   bootClosed.clear();
   noCellAreas.clear();
+  coverageSeeds = new Map();
 }
 
 export interface BaselineJobDeps {
   /** The zone the slots are cut in. Default: `resolveSecurityTimezone(prisma)`. */
   zone?: () => Promise<string | null>;
   /** What the ingest and the status tracker say right now. Default: the live module state. */
-  observe?: () => CoverageObservation;
+  observe?: () => Omit<CoverageObservation, "stats">;
+  /** Frigate's /api/stats body. Default: `fetchStats` with a short timeout. A throw = no stats this tick. */
+  stats?: () => Promise<unknown>;
   /** Default: this boot's random id. */
   processId?: string;
 }
 
 /** The live ingest + tracker state, as coverage reads it. */
-function liveObservation(): CoverageObservation {
+function liveObservation(): Omit<CoverageObservation, "stats"> {
   const ingest = securityIngestHealthState();
   return {
     ingest: {
@@ -241,6 +257,22 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
   return ids;
 }
 
+/** Frigate's stats for this tick, or null when they did not answer (or Frigate is not set up). Never throws. */
+async function readFrigateStats(deps: BaselineJobDeps, now: Date): Promise<FrigateStatsView | null> {
+  const read =
+    deps.stats ??
+    (() =>
+      config.FRIGATE_URL && config.FRIGATE_URL.trim()
+        ? fetchStats({ timeoutMs: SECURITY_BASELINE_STATS_TIMEOUT_MS })
+        : Promise.reject(new Error("no camera system is set up")));
+  try {
+    return parseFrigateStats(await read(), now);
+  } catch (err) {
+    logger.debug({ err }, "baseline tick: Frigate stats unavailable — nothing seeded, no new coverage span");
+    return null;
+  }
+}
+
 export async function tickSecurityBaselines(
   prisma: JobDb,
   now: Date = new Date(),
@@ -250,7 +282,11 @@ export async function tickSecurityBaselines(
   const result: BaselineTickResult = { zone: null, hourly: false, trigger: null, build: null, rebuiltAreas: [] };
   try {
     const bootClose = !bootClosed.has(processId);
-    await recordCoverage(prisma, (deps.observe ?? liveObservation)(), processId, now, { bootClose });
+    const stats = await readFrigateStats(deps, now);
+    const tracker = (deps.observe ?? liveObservation)();
+    const seeded = withStatsSeeds(tracker.readings, stats, coverageSeeds);
+    coverageSeeds = seeded.seeds;
+    await recordCoverage(prisma, { ingest: tracker.ingest, readings: seeded.readings, stats }, processId, now, { bootClose });
     bootClosed.add(processId);
 
     const zone = await (deps.zone ?? (() => resolveSecurityTimezone(prisma)))();
@@ -314,6 +350,10 @@ export interface PatternsHealthDb {
   sources: ReadonlyArray<{ camera: string; state: SecurityBaselineState; daysObserved: number }>;
   ready: { finishedAt: Date | null; windowTo: string } | null;
   newest: { state: SecurityBaselineBuildState; error: string | null } | null;
+  /** Camera rows (names). */
+  cameras: readonly string[];
+  /** Cameras with an OPEN coverage span: Droplet can hear them right now. */
+  openSpanCameras: readonly string[];
 }
 
 /** A stored build error, in words the Sources card can show verbatim. Never the raw database text. */
@@ -348,7 +388,11 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
  *     (site clock; "for N minutes" without a zone);
  *   · down "Couldn't read what normal looks like" — the rows (or the
  *     viewer's grants) could not be read;
- *   · not_configured — no zone; no visible camera reporting yet;
+ *   · not_configured — no zone; no camera the viewer may see is set up;
+ *   · (no source row yet) quiet "Learning … 0 of 14 days" when a visible
+ *     camera is being heard; else down "Can't confirm Droplet is hearing any
+ *     camera yet" (quiet "Checking …" before the first tick) — cameras set up
+ *     but none confirmed is a fault, never a harmless not_configured;
  *   · down — the newest build failed and there is no ready build or it is
  *     out of date; or the ready build is out of date (the rules pause);
  *   · quiet — learning ("9 of 14 days", the most any visible camera has), or
@@ -385,8 +429,15 @@ export function patternsHealthRow(
   if (!tz) return row("not_configured", "Needs the site's timezone. Set the opening hours to choose it.");
 
   const cams = scope.visibleCameras;
-  const sources = db.sources.filter((s) => cams === "all" || cams.has(s.camera));
-  if (sources.length === 0) return row("not_configured", "No cameras are reporting yet");
+  const canSee = (camera: string) => cams === "all" || cams.has(camera);
+  const sources = db.sources.filter((s) => canSee(s.camera));
+  if (sources.length === 0) {
+    if (db.openSpanCameras.some(canSee)) {
+      return row("quiet", `Learning what normal looks like — 0 of ${BASELINE.learningDays} days`);
+    }
+    if (!db.cameras.some(canSee)) return row("not_configured", "No cameras are set up yet");
+    return lastOk ? row("down", "Can't confirm Droplet is hearing any camera yet") : row("quiet", "Checking which cameras Droplet can hear");
+  }
 
   const today = localPartsOf(now, tz).ymd;
   const outOfDate = db.ready !== null && db.ready.windowTo < ymdAddDays(today, -BASELINE_FRESH_WINDOW_DAYS);
@@ -424,13 +475,20 @@ export async function securityPatternsHealth(
 ): Promise<SecurityHealthRow> {
   if (!scope) return patternsHealthRow(baselineHealth, null, null, now);
   try {
-    const [timezone, sources, ready, newest] = await Promise.all([
+    const [timezone, sources, ready, newest, cameraRows, open] = await Promise.all([
       resolveSecurityTimezone(prisma),
       prisma.securityBaselineSource.findMany({ select: { camera: true, state: true, daysObserved: true } }),
       prisma.securityBaselineBuild.findFirst({ where: { state: "ready" }, select: { finishedAt: true, windowTo: true } }),
       prisma.securityBaselineBuild.findFirst({ orderBy: { startedAt: "desc" }, select: { state: true, error: true } }),
+      prisma.camera.findMany({ select: { name: true } }),
+      prisma.securityCoverageSpan.findMany({ where: { state: "open" }, select: { camera: true } }),
     ]);
-    return patternsHealthRow(baselineHealth, { timezone, sources, ready, newest }, scope, now);
+    return patternsHealthRow(
+      baselineHealth,
+      { timezone, sources, ready, newest, cameras: cameraRows.map((c) => c.name), openSpanCameras: open.map((s) => s.camera) },
+      scope,
+      now,
+    );
   } catch (err) {
     logger.warn({ err }, "patterns health read failed");
     return patternsHealthRow(baselineHealth, null, scope, now);

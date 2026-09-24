@@ -46,10 +46,13 @@ import type { CoverageObservation } from "./security-coverage.js";
 
 const TZ = "America/New_York";
 const PID = "0b9f3c3e-7d0a-4b5e-9d64-1f2a3b4c5d6e";
-const OBS: CoverageObservation = {
+/** What the tracker says: subscribed, and no status message yet (the orchestrator just restarted). */
+const OBS: Omit<CoverageObservation, "stats"> = {
   ingest: { frigateSubscribed: true, frigateSubscribedAt: new Date(0), lastRecordedAt: null, lastWriteError: null },
   readings: new Map(),
 };
+/** Frigate's /api/stats body: one camera streaming. */
+const STATS = { cameras: { front: { camera_fps: 5, detection_enabled: true } }, detectors: {} };
 /** A New York wall clock on 2026-09-23 (EDT, UTC−4) as an instant. */
 const ny = (hhmm: string, ymd = "2026-09-23") => new Date(`${ymd}T${hhmm}:00-04:00`);
 
@@ -107,7 +110,12 @@ function fakePrisma(w: World) {
   };
 }
 
-const deps = (zone: string | null) => ({ zone: async () => zone, observe: () => OBS, processId: PID });
+const deps = (zone: string | null, stats: () => Promise<unknown> = async () => STATS) => ({
+  zone: async () => zone,
+  observe: () => OBS,
+  stats,
+  processId: PID,
+});
 
 beforeEach(() => {
   _resetBaselineHealthForTests();
@@ -124,7 +132,7 @@ describe("tickSecurityBaselines — coverage every tick, zone or not", () => {
     const now = ny("12:30");
     await tickSecurityBaselines(f.prisma, now, deps(null));
     expect(h.recordCoverage).toHaveBeenCalledTimes(1);
-    expect(h.recordCoverage.mock.calls[0]!.slice(1)).toEqual([OBS, PID, now, { bootClose: true }]);
+    expect(h.recordCoverage.mock.calls[0]!.slice(2)).toEqual([PID, now, { bootClose: true }]);
     expect(f.jobState.findUnique).not.toHaveBeenCalled();
     expect(h.runFullBuild).not.toHaveBeenCalled();
     expect(h.refreshBaselineSources).not.toHaveBeenCalled();
@@ -141,6 +149,40 @@ describe("tickSecurityBaselines — coverage every tick, zone or not", () => {
     expect(f.jobState.findUniqueOrThrow).toHaveBeenCalled();
     // The hour that just started is not a completed hour: no hourly step yet.
     expect(f.jobState.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("tickSecurityBaselines — coverage reads Frigate's stats every tick (review #2352, finding 2)", () => {
+  const observed = (call: number) => h.recordCoverage.mock.calls[call]![1] as CoverageObservation;
+
+  it("a restart with Frigate up and no status message: Frigate and the streaming camera are seeded from stats", async () => {
+    const now = ny("12:30");
+    await tickSecurityBaselines(fakePrisma(world()).prisma, now, deps(TZ));
+    const o = observed(0);
+    expect(o.stats?.at).toEqual(now);
+    expect([...(o.stats?.cameras.keys() ?? [])]).toEqual(["front"]);
+    expect(o.readings.get(null)).toEqual({ health: "online", at: now, since: now });
+    expect(o.readings.get("front")).toEqual({ health: "online", at: now, since: now });
+  });
+
+  it("the seed is kept across ticks (its `since` does not move)", async () => {
+    const f = fakePrisma(world());
+    await tickSecurityBaselines(f.prisma, ny("12:30"), deps(TZ));
+    await tickSecurityBaselines(f.prisma, ny("12:31"), deps(TZ));
+    expect(observed(1).readings.get("front")!.since).toEqual(ny("12:30"));
+  });
+
+  it("stats that fail or do not parse: `stats` null, nothing seeded, and the seeds are forgotten", async () => {
+    const f = fakePrisma(world());
+    await tickSecurityBaselines(f.prisma, ny("12:30"), deps(TZ));
+    await tickSecurityBaselines(f.prisma, ny("12:31"), deps(TZ, async () => Promise.reject(new Error("ECONNREFUSED"))));
+    expect(observed(1).stats).toBeNull();
+    expect(observed(1).readings.has("front")).toBe(false);
+    await tickSecurityBaselines(f.prisma, ny("12:32"), deps(TZ, async () => "not json"));
+    expect(observed(2).stats).toBeNull();
+    // Back: a fresh seed, from the new read — never from before the outage.
+    await tickSecurityBaselines(f.prisma, ny("12:33"), deps(TZ));
+    expect(observed(3).readings.get("front")!.since).toEqual(ny("12:33"));
   });
 });
 
@@ -313,6 +355,8 @@ const db = (over: Partial<PatternsHealthDb> = {}): PatternsHealthDb => ({
   ],
   ready: { finishedAt: ny("00:11"), windowTo: "2026-09-22" },
   newest: { state: "ready", error: null },
+  cameras: ["front", "back", "yard", "drive"],
+  openSpanCameras: ["front", "back", "yard", "drive"],
   ...over,
 });
 const ALL = { visibleCameras: "all" as const };
@@ -336,7 +380,35 @@ describe("patternsHealthRow — every state (§6.14)", () => {
     ],
     ["the rows couldn't be read", running(), null, ALL, { state: "down", detail: "Couldn't read what normal looks like" }],
     ["no zone", running(), db({ timezone: null }), ALL, { state: "not_configured", detail: "Needs the site's timezone. Set the opening hours to choose it." }],
-    ["no visible source", running(), db(), { visibleCameras: new Set(["porch"]) }, { state: "not_configured", detail: "No cameras are reporting yet" }],
+    ["no visible camera is set up", running(), db(), { visibleCameras: new Set(["porch"]) }, { state: "not_configured", detail: "No cameras are set up yet" }],
+    [
+      "cameras exist, none confirmed (no source, no open span) — after a tick has run",
+      running(),
+      db({ sources: [], openSpanCameras: [] }),
+      ALL,
+      { state: "down", detail: "Can't confirm Droplet is hearing any camera yet" },
+    ],
+    [
+      "cameras exist, none confirmed, and no tick has run yet (the start-up grace)",
+      running({ registeredAt: new Date(NOW.getTime() - 60_000), lastOkAt: null }),
+      db({ sources: [], openSpanCameras: [] }),
+      ALL,
+      { state: "quiet", detail: "Checking which cameras Droplet can hear" },
+    ],
+    [
+      "no source row yet, but a camera is being heard (a span is open)",
+      running(),
+      db({ sources: [], openSpanCameras: ["front"] }),
+      ALL,
+      { state: "quiet", detail: "Learning what normal looks like — 0 of 14 days" },
+    ],
+    [
+      "a hidden camera's open span is not the viewer's evidence (DS-005)",
+      running(),
+      db({ sources: [], openSpanCameras: ["back"] }),
+      { visibleCameras: new Set(["front"]) },
+      { state: "down", detail: "Can't confirm Droplet is hearing any camera yet" },
+    ],
     [
       "the newest build failed and there is no ready one",
       running(),

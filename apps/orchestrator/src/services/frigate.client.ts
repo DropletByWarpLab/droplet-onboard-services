@@ -175,8 +175,9 @@ export async function fetchEventsFiltered(
 
 // --- Stats ---
 
-export async function fetchStats(): Promise<Record<string, unknown>> {
-  const resp = await fetch(`${FRIGATE_URL}/api/stats`, { signal: timeout() });
+/** `timeoutMs` — WARP-2980: the baseline job's per-minute read uses a short one. */
+export async function fetchStats(opts: { timeoutMs?: number } = {}): Promise<Record<string, unknown>> {
+  const resp = await fetch(`${FRIGATE_URL}/api/stats`, { signal: timeout(opts.timeoutMs) });
   if (!resp.ok) throw new Error(`Frigate stats: ${resp.status}`);
   return resp.json();
 }

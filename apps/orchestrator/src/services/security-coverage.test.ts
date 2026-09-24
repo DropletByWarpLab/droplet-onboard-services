@@ -18,12 +18,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   observingCameras,
+  parseFrigateStats,
   planCoverage,
   recordCoverage,
   refreshBaselineSources,
   sourceStates,
+  withStatsSeeds,
   type CoverageObservation,
   type CoverageReading,
+  type FrigateStatsView,
   type OpenCoverageSpan,
 } from "./security-coverage.js";
 
@@ -42,11 +45,14 @@ function obs(over: {
   writeError?: Date | null;
   frigate?: CoverageReading | null;
   cameras?: Record<string, CoverageReading>;
+  /** Frigate's /api/stats. Default: every camera above streaming; null = stats unavailable. */
+  stats?: FrigateStatsView | null;
 } = {}): CoverageObservation {
   const readings = new Map<string | null, CoverageReading>();
   const frigate = over.frigate === undefined ? online(ago(60 * MIN)) : over.frigate;
   if (frigate) readings.set(null, frigate);
-  for (const [name, r] of Object.entries(over.cameras ?? { front: online(ago(60 * MIN)) })) readings.set(name, r);
+  const cameras = over.cameras ?? { front: online(ago(60 * MIN)) };
+  for (const [name, r] of Object.entries(cameras)) readings.set(name, r);
   return {
     ingest: {
       frigateSubscribed: over.subscribed ?? true,
@@ -55,7 +61,15 @@ function obs(over: {
       lastWriteError: over.writeError ? { at: over.writeError } : null,
     },
     readings,
+    stats: over.stats === undefined ? statsOf(Object.keys(cameras)) : over.stats,
   };
+}
+
+/** Stats in which every named camera streams at 5 fps with detection on. */
+function statsOf(live: string[], at: Date = ago(10_000), extra: Record<string, { fps: number; detectionEnabled: boolean | null }> = {}): FrigateStatsView {
+  const cameras = new Map(live.map((n) => [n, { fps: 5, detectionEnabled: true as boolean | null }]));
+  for (const [n, s] of Object.entries(extra)) cameras.set(n, s);
+  return { at, cameras };
 }
 
 const span = (over: Partial<OpenCoverageSpan> = {}): OpenCoverageSpan => ({
@@ -165,6 +179,102 @@ describe("planCoverage — extend only what provably continued", () => {
     const o = obs({ frigate: { health: "offline", at: ago(MIN), since: ago(MIN) } });
     const plan = planCoverage([span(), span({ id: 2n, camera: "back" })], o, PID, NOW);
     expect(plan).toEqual({ extend: [], close: [1n, 2n], open: [] });
+  });
+});
+
+describe("Frigate's /api/stats — coverage does not rest on an MQTT retain nobody verified (review #2352, finding 2)", () => {
+  const T = ago(10_000);
+  const tracker = (entries: Array<[string | null, CoverageReading]>) => new Map<string | null, CoverageReading>(entries);
+  const ingest = { frigateSubscribed: true, frigateSubscribedAt: ago(90 * MIN), lastRecordedAt: ago(2 * MIN), lastWriteError: null };
+
+  it("parseFrigateStats reads `cameras`: fps as a number, detection_enabled when present, names Frigate could send only", () => {
+    const view = parseFrigateStats(
+      {
+        cameras: {
+          front: { camera_fps: 5.1, detection_enabled: true },
+          back: { camera_fps: "0", detection_enabled: false },
+          yard: { camera_fps: 4 },
+          "bad name": { camera_fps: 5 },
+        },
+        detectors: {},
+      },
+      T,
+    );
+    expect(view.at).toEqual(T);
+    expect([...view.cameras]).toEqual([
+      ["front", { fps: 5.1, detectionEnabled: true }],
+      ["back", { fps: 0, detectionEnabled: false }],
+      ["yard", { fps: 4, detectionEnabled: null }],
+    ]);
+    expect(parseFrigateStats({}, T).cameras.size).toBe(0);
+    expect(() => parseFrigateStats(null, T)).toThrow();
+  });
+
+  it("an orchestrator restart with Frigate up and NO status message: Frigate and every streaming camera are seeded from stats", () => {
+    const seeds = new Map<string | null, Date>();
+    const r = withStatsSeeds(tracker([]), statsOf(["front", "back"], T), seeds);
+    expect(r.readings.get(null)).toEqual({ health: "online", at: T, since: T });
+    expect(r.readings.get("front")).toEqual({ health: "online", at: T, since: T });
+    const o: CoverageObservation = { ingest, readings: r.readings, stats: statsOf(["front", "back"], T) };
+    expect([...observingCameras(o).keys()].sort()).toEqual(["back", "front"]);
+    // From the stats read: the latest proof (the subscription is older).
+    expect(planCoverage([], o, PID, NOW).open).toEqual([
+      { camera: "front", startedAt: T },
+      { camera: "back", startedAt: T },
+    ]);
+  });
+
+  it("a seed keeps its `since` across ticks, so the seeded span extends instead of restarting every minute", () => {
+    const first = withStatsSeeds(tracker([]), statsOf(["front"], ago(2 * MIN)), new Map());
+    const second = withStatsSeeds(tracker([]), statsOf(["front"], ago(MIN)), first.seeds);
+    expect(second.readings.get("front")!.since).toEqual(ago(2 * MIN));
+    const o: CoverageObservation = { ingest: { ...ingest, frigateSubscribedAt: ago(3 * MIN) }, readings: second.readings, stats: statsOf(["front"], ago(MIN)) };
+    expect(planCoverage([span({ startedAt: ago(2 * MIN), coveredUntil: ago(MIN) })], o, PID, NOW)).toEqual({ extend: [1n], close: [], open: [] });
+  });
+
+  it("a real tracker reading wins over a seed (and replaces it)", () => {
+    const seeded = withStatsSeeds(tracker([]), statsOf(["front"], ago(5 * MIN)), new Map());
+    const offline: CoverageReading = { health: "offline", at: ago(MIN), since: ago(MIN) };
+    const r = withStatsSeeds(tracker([["front", offline]]), statsOf(["front"], ago(MIN)), seeded.seeds);
+    expect(r.readings.get("front")).toEqual(offline);
+    expect(r.seeds.has("front")).toBe(false);
+  });
+
+  it("a ghost — the tracker still says online, but the camera is ABSENT from stats — is not observing, and its span closes", () => {
+    const o = obs({ cameras: { front: online(ago(60 * MIN)), gone: online(ago(60 * MIN)) }, stats: statsOf(["front"]) });
+    expect([...observingCameras(o).keys()]).toEqual(["front"]);
+    expect(planCoverage([span({ camera: "gone" })], o, PID, NOW).close).toEqual([1n]);
+  });
+
+  it("a camera at 0 fps, or with detection turned off in Frigate, is not observing whatever the tracker says", () => {
+    const o = obs({
+      cameras: { front: online(ago(60 * MIN)), dark: online(ago(60 * MIN)), off: online(ago(60 * MIN)) },
+      stats: statsOf(["front"], ago(10_000), { dark: { fps: 0, detectionEnabled: true }, off: { fps: 5, detectionEnabled: false } }),
+    });
+    expect([...observingCameras(o).keys()]).toEqual(["front"]);
+    // …and neither is seeded.
+    const r = withStatsSeeds(tracker([]), statsOf([], T, { dark: { fps: 0, detectionEnabled: true }, off: { fps: 5, detectionEnabled: false } }), new Map());
+    expect(r.readings.has("dark")).toBe(false);
+    expect(r.readings.has("off")).toBe(false);
+  });
+
+  it("a stats outage: nothing is seeded (seeds are forgotten), no NEW span opens, a span continues only while the tracker says online", () => {
+    const seeds = new Map<string | null, Date>([[null, ago(30 * MIN)], ["seeded", ago(30 * MIN)]]);
+    const r = withStatsSeeds(tracker([[null, online(ago(60 * MIN))], ["front", online(ago(60 * MIN))], ["fresh", online(ago(60 * MIN))]]), null, seeds);
+    expect(r.seeds.size).toBe(0);
+    expect(r.readings.has("seeded")).toBe(false);
+    const o: CoverageObservation = { ingest, readings: r.readings, stats: null };
+    const plan = planCoverage([span({ id: 1n, camera: "front" }), span({ id: 2n, camera: "seeded" })], o, PID, NOW);
+    expect(plan.extend).toEqual([1n]);
+    expect(plan.close).toEqual([2n]);
+    // "fresh" is online in the tracker but has no span: without stats it may be a ghost — nothing opens.
+    expect(plan.open).toEqual([]);
+  });
+
+  it("after an outage the seed restarts at the new stats read, so a span never claims the outage", () => {
+    const outage = withStatsSeeds(tracker([]), null, new Map([["front", ago(60 * MIN)]]));
+    const back = withStatsSeeds(tracker([]), statsOf(["front"], ago(MIN)), outage.seeds);
+    expect(back.readings.get("front")!.since).toEqual(ago(MIN));
   });
 });
 

@@ -42,6 +42,7 @@ function obs(cameraSince: Record<string, Date>, subscribedAt = at(-120), frigate
   return {
     ingest: { frigateSubscribed: true, frigateSubscribedAt: subscribedAt, lastRecordedAt: at(-1), lastWriteError: null },
     readings,
+    stats: { at: at(0), cameras: new Map(Object.keys(cameraSince).map((c) => [c, { fps: 5, detectionEnabled: true }])) },
   };
 }
 

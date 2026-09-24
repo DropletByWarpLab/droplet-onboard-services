@@ -33,6 +33,26 @@
  *
  * The first tick of a process closes every span another process left open:
  * nobody can prove the old process kept listening until it died.
+ *
+ * FRIGATE'S /api/stats (review #2352). The tracker only knows a camera once
+ * `frigate/<cam>/status/detect` arrives, and whether Frigate retains that
+ * topic is not verified. Not retained: every orchestrator restart with
+ * Frigate up would leave live cameras unheard (no span) for as long as their
+ * status never changes. Retained: a removed or renamed camera would keep a
+ * ghost `online` forever. So each tick also reads Frigate's stats:
+ *   · a camera streaming (`camera_fps > 0`, detection not turned off) with
+ *     no tracker reading is SEEDED online, `since` = the first stats read
+ *     that saw it — kept across ticks, forgotten the moment it stops
+ *     streaming or stats go unanswered. Frigate itself is seeded the same way
+ *     when the tracker has no `frigate/available` reading. A real tracker
+ *     reading always wins, and replaces the seed;
+ *   · when stats answered, a camera absent from them, at 0 fps, or with
+ *     detection off is NOT observing, whatever the tracker says (the ghost);
+ *   · when stats did not answer, nothing is seeded, no new span opens (a
+ *     tracker `online` may be a ghost), and an open span continues only while
+ *     the tracker itself says online and nothing changed — a seed-only span
+ *     closes at its last confirmation. The next seed starts at the next
+ *     stats read, so no span ever claims the outage.
  */
 import type { PrismaClient, SecurityBaselineState } from "@prisma/client";
 import { FRIGATE_NAME, type SourceHealth } from "./security-event-ingest.js";
@@ -58,10 +78,70 @@ export interface CoverageIngest {
   lastWriteError: { at: Date } | null;
 }
 
-/** What one tick sees: the ingest state and every reading (null key = Frigate itself). */
+/** One camera in Frigate's /api/stats. */
+export interface FrigateCameraStat {
+  fps: number;
+  /** `detection_enabled`, when this Frigate reports it; null when it does not. */
+  detectionEnabled: boolean | null;
+}
+
+/** Frigate's /api/stats as coverage reads it, and when it was read. */
+export interface FrigateStatsView {
+  at: Date;
+  cameras: ReadonlyMap<string, FrigateCameraStat>;
+}
+
+/** What one tick sees: the ingest state, every reading (null key = Frigate itself), and Frigate's stats. */
 export interface CoverageObservation {
   ingest: CoverageIngest;
   readings: ReadonlyMap<string | null, CoverageReading>;
+  /** null = Frigate's stats did not answer this tick. */
+  stats: FrigateStatsView | null;
+}
+
+/** Throws when the body is not an object (the caller treats that as "stats did not answer"). */
+export function parseFrigateStats(raw: unknown, at: Date): FrigateStatsView {
+  if (raw === null || typeof raw !== "object") throw new TypeError("Frigate stats: not an object");
+  const map = (raw as { cameras?: unknown }).cameras;
+  const cameras = new Map<string, FrigateCameraStat>();
+  if (map && typeof map === "object") {
+    for (const [name, s] of Object.entries(map as Record<string, unknown>)) {
+      if (!FRIGATE_NAME.test(name) || !s || typeof s !== "object") continue;
+      const fps = Number((s as { camera_fps?: unknown }).camera_fps ?? 0);
+      const de = (s as { detection_enabled?: unknown }).detection_enabled;
+      cameras.set(name, { fps: Number.isFinite(fps) ? fps : 0, detectionEnabled: typeof de === "boolean" ? de : null });
+    }
+  }
+  return { at, cameras };
+}
+
+/** Frigate is running this camera's detector on live frames. */
+export function statsSaysLive(stat: FrigateCameraStat | undefined): boolean {
+  return stat !== undefined && stat.fps > 0 && stat.detectionEnabled !== false;
+}
+
+/**
+ * Pure. The tracker's readings with stats seeds laid over the gaps (see the
+ * file header). `seeds` — last tick's seeds (key → since); the returned
+ * `seeds` replace them.
+ */
+export function withStatsSeeds(
+  tracker: ReadonlyMap<string | null, CoverageReading>,
+  stats: FrigateStatsView | null,
+  seeds: ReadonlyMap<string | null, Date>,
+): { readings: Map<string | null, CoverageReading>; seeds: Map<string | null, Date> } {
+  const readings = new Map(tracker);
+  const next = new Map<string | null, Date>();
+  if (!stats) return { readings, seeds: next };
+  const seed = (key: string | null) => {
+    if (tracker.has(key)) return;
+    const since = seeds.get(key) ?? stats.at;
+    readings.set(key, { health: "online", at: stats.at, since });
+    next.set(key, since);
+  };
+  seed(null);
+  for (const [name, stat] of stats.cameras) if (statsSaysLive(stat)) seed(name);
+  return { readings, seeds: next };
 }
 
 /** An open span as the tick reads it. */
@@ -92,7 +172,7 @@ const latest = (...ds: Array<Date | null | undefined>): Date =>
  */
 export function observingCameras(obs: CoverageObservation): Map<string, Date> {
   const out = new Map<string, Date>();
-  const { ingest, readings } = obs;
+  const { ingest, readings, stats } = obs;
   if (!ingest.frigateSubscribed || !ingest.frigateSubscribedAt) return out;
   const frigate = readings.get(null);
   if (!frigate || frigate.health !== "online") return out;
@@ -101,6 +181,8 @@ export function observingCameras(obs: CoverageObservation): Map<string, Date> {
   if (failing) return out;
   for (const [camera, reading] of readings) {
     if (camera === null || reading.health !== "online" || !FRIGATE_NAME.test(camera)) continue;
+    // Stats answered: only a camera Frigate is actually running counts (no ghosts).
+    if (stats && !statsSaysLive(stats.cameras.get(camera))) continue;
     out.set(camera, latest(reading.since, frigate.since, ingest.frigateSubscribedAt, ingest.lastWriteError?.at));
   }
   return out;
@@ -144,6 +226,8 @@ export function planCoverage(
 
   for (const [camera, provenSince] of observing) {
     if (continuing.has(camera)) continue;
+    // No stats this tick: a tracker `online` may be a ghost — never open on it alone.
+    if (!obs.stats) continue;
     const startedAt = latest(provenSince, lastCoveredUntil.get(camera), closedUntil.get(camera));
     plan.open.push({ camera, startedAt: startedAt > now ? now : startedAt });
   }
