@@ -417,6 +417,63 @@ describe("escalation (D22)", () => {
   });
 });
 
+// Review R4 (rjouffret): `pending` used to be set once, when the incident
+// first reached alert — so a person skipped because they could see none of
+// that evidence was never told when later alert evidence came from a camera
+// they CAN see. The notifier's re-plan is pinned in security-alerts.service.test.ts.
+describe("review R4 — late alert evidence re-opens the notifier for a skipped person", () => {
+  const MARIA = "22222222-2222-4222-8222-222222222222";
+  /** Stock room on back AND front; a person on back alerted; the notifier ran; Maria (optionally) skipped. */
+  async function alerted(opts: { skipped?: boolean; notifyState?: string } = {}): Promise<FakeSecurityPrisma> {
+    const stock = areaRows(STOCK, "Stock room", "interior", ["back", "front"]);
+    const f = world({ securityZone: [stock.zone], securityZoneLink: stock.links, securityEvent: [eventRow({ id: 1n })] });
+    await tick(f, plus(T0, 30_000));
+    const i = incidents(f)[0]!;
+    expect(i).toMatchObject({ severity: "alert", notifyState: "pending" });
+    Object.assign(i, { notifyState: opts.notifyState ?? "done" });
+    if (opts.skipped ?? true) {
+      f.world.securityIncidentNotice.push({
+        id: "n-maria", incidentId: i.id, userId: MARIA, username: "maria", reason: "routed", outcome: "skipped_not_visible",
+        notificationLogId: null, channels: "", pushOutcome: null, createdAt: plus(T0, 30_000), settledAt: plus(T0, 30_000),
+      });
+    }
+    return f;
+  }
+  const personOn = (camera: string, id: bigint) => eventRow({ id, camera, sourceRef: `${camera}/${id}.5-abc`, startedAt: plus(T0, 60_000) });
+
+  it("alert evidence on a camera with none yet, while someone is skipped_not_visible → pending again", async () => {
+    const f = await alerted();
+    f.world.securityEvent.push(personOn("front", 2n));
+    await tick(f, plus(T0, 100_000));
+    expect(triage(f, 2n)).toMatchObject({ outcome: "grouped", incidentId: incidents(f)[0]!.id });
+    expect(incidents(f)[0]).toMatchObject({ notifyState: "pending", alertedAt: plus(T0, 30_000), state: "open" });
+  });
+
+  it("…not when nobody was skipped as not visible", async () => {
+    const f = await alerted({ skipped: false });
+    f.world.securityEvent.push(personOn("front", 2n));
+    await tick(f, plus(T0, 100_000));
+    expect(incidents(f)[0]).toMatchObject({ notifyState: "done" });
+  });
+
+  it("…not when the camera already had alert evidence (a skipped person could not see it then either)", async () => {
+    const f = await alerted();
+    f.world.securityEvent.push(personOn("back", 2n));
+    await tick(f, plus(T0, 100_000));
+    expect(f.world.securityIncidentReason.filter((r) => r.evidenceCamera === "back")).toHaveLength(2);
+    expect(incidents(f)[0]).toMatchObject({ notifyState: "done" });
+  });
+
+  it("…and never out of module_off or failed", async () => {
+    for (const notifyState of ["module_off", "failed"]) {
+      const f = await alerted({ notifyState });
+      f.world.securityEvent.push(personOn("front", 2n));
+      await tick(f, plus(T0, 100_000));
+      expect(incidents(f)[0]!.notifyState, notifyState).toBe(notifyState);
+    }
+  });
+});
+
 describe("camera_offline at the tick", () => {
   const offline = (id: bigint, at: Date) =>
     eventRow({ id, kind: "camera_offline", source: "frigate_status", labels: [], endedAt: null, startedAt: at, createdAt: at, summary: "Camera back stopped reporting" });

@@ -361,6 +361,29 @@ function reasonRows(incidentId: string, drafts: readonly ReasonDraft[]): Prisma.
 const PLAIN: ReasonState = { severity: "info", reasonCodes: [], state: "no_action", notifyState: "not_needed", alertedAt: null };
 
 /**
+ * Review R4 — late evidence. `pending` is set when an incident first reaches
+ * alert; a person the notifier skipped then because they could see none of
+ * its evidence (`skipped_not_visible`) would never hear of it again. So an
+ * alert already notified (`done`) that gains alert evidence on a camera none
+ * of its alert evidence was on goes back to `pending` while such a notice
+ * exists — and the notifier re-plans exactly those people
+ * (security-alerts.service). `module_off` and `failed` are left alone; so is
+ * an incident not yet notified (`pending` already plans everyone).
+ */
+async function lateEvidencePatch(
+  tx: Tx,
+  i: Pick<Candidate, "id" | "severity" | "notifyState">,
+  existing: ReadonlyArray<{ severity: string; evidenceCamera: string | null }>,
+  kept: readonly ReasonDraft[],
+): Promise<{ notifyState?: "pending" }> {
+  if (i.severity !== "alert" || i.notifyState !== "done") return {};
+  const had = new Set(existing.filter((r) => r.severity === "alert").map((r) => r.evidenceCamera));
+  if (!kept.some((d) => d.severity === "alert" && d.evidenceCamera !== null && !had.has(d.evidenceCamera))) return {};
+  const skipped = await tx.securityIncidentNotice.count({ where: { incidentId: i.id, outcome: "skipped_not_visible" } });
+  return skipped > 0 ? { notifyState: "pending" } : {};
+}
+
+/**
  * Triage ONE event in ONE READ COMMITTED transaction (§6.2–6.5): its scope,
  * the incident it joins (CAS on version, one re-read on a lost race) or opens,
  * the reasons it earns, and its triage row — together or not at all. The
@@ -447,13 +470,14 @@ export async function triageOne(
       const i = plan.incident;
       const existing = await tx.securityIncidentReason.findMany({
         where: { incidentId: i.id },
-        select: { code: true, evidenceCamera: true, evidenceEventId: true },
+        select: { code: true, severity: true, evidenceCamera: true, evidenceEventId: true },
       });
       const drafts = await triageReasons(tx, event, { scope: i.scope, zoneKind: i.zoneKind }, ctx.timeline);
       const kept = capEvidence(existing, drafts);
+      const late = await lateEvidencePatch(tx, i, existing, kept);
       const { count } = await tx.securityIncident.updateMany({
         where: { id: i.id, version: i.version, grouping: "collecting" },
-        data: { ...joinPatch(i, event, span), ...reasonPatch(i, kept, ctx.now), version: { increment: 1 } },
+        data: { ...joinPatch(i, event, span), ...reasonPatch(i, kept, ctx.now), ...late, version: { increment: 1 } },
       });
       if (count !== 1) continue;
       if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(i.id, kept), skipDuplicates: true });

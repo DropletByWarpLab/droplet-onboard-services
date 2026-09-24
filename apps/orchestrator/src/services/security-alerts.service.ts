@@ -20,7 +20,11 @@
  *   1. module off box-wide → notifyState module_off (D29). Grouped, never sent.
  *   2. the recipients: every receiving row (eligible or not — an ineligible one
  *      gets a `skipped_*` notice, so "who was told" can say why), plus the
- *      eligible owners when no routed person is eligible (`fallback_owner`);
+ *      eligible owners when no routed person is reached (`fallback_owner`).
+ *      A RE-PLAN (review R4: the engine set an already-notified alert pending
+ *      again because alert evidence arrived on a new camera) plans only the
+ *      people whose notice is `skipped_not_visible`, updating that notice in
+ *      place — still one notice, one notification at most, per person;
  *   3. per recipient, DS-005 (D27): the alert evidence on cameras they can
  *      see (`visibleCameraNames`). None → `skipped_not_visible`. The copy is
  *      built from that visible evidence only. ≥ 6 alert notifications to them
@@ -189,6 +193,8 @@ interface PlannedNotice {
   reason: SecurityNoticeReason;
   outcome: SecurityNoticeOutcome;
   copy: { title: string; body: string } | null;
+  /** A re-plan (review R4): the id of this person's `skipped_not_visible` notice, updated in place — never a second notice. */
+  replaces?: string;
 }
 
 const INCIDENT_SELECT = {
@@ -205,16 +211,18 @@ const INCIDENT_SELECT = {
 } as const satisfies Prisma.SecurityIncidentSelect;
 type NotifyIncident = Prisma.SecurityIncidentGetPayload<{ select: typeof INCIDENT_SELECT }>;
 
-/** The people this incident already has a notice for (User.id — an exclusion set, never a recipient). */
-async function alreadyNoticed(prisma: PrismaClient, incidentId: string): Promise<Set<string>> {
-  const rows = await prisma.securityIncidentNotice.findMany({ where: { incidentId }, select: { userId: true } });
-  return new Set(rows.map((n) => n.userId));
-}
-
 /**
  * Notices that mean the incident reached someone: a NotificationLog row was
  * written (whatever its transport did), or the person was capped — they were
  * told about other alerts this hour and see this one in Security.
+ *
+ * Why a cap counts as reached (and so never triggers the owner fallback): the
+ * cap (D28) damps a storm — six alerts to one person in an hour. If capping
+ * everyone routed woke the owners instead, the storm would move to exactly
+ * the people who chose not to be told, at the moment alerts are most
+ * frequent. The fallback is for an alert NOBODY routed could be told about
+ * (nobody eligible, or nobody who can see its camera — review #2), which is
+ * the rule's wording "every routed person skipped_not_visible → fall back".
  */
 const REACHED: readonly SecurityNoticeOutcome[] = ["queued", "sent", "not_sent", "outcome_unknown", "skipped_capped"];
 
@@ -227,10 +235,28 @@ const REACHED: readonly SecurityNoticeOutcome[] = ["queued", "sent", "not_sent",
  * camera (review #2: eligibility is about Security, not about cameras) — the
  * eligible owners not already planned are added with `fallback_owner`, so an
  * alert never goes to nobody.
+ *
+ * A RE-PLAN (review R4) — the incident already has notices, and the engine set
+ * it pending again because alert evidence arrived on a new camera — plans
+ * only the routed people whose notice is `skipped_not_visible`, and moves only
+ * one who can now see alert evidence (told, or capped): their notice is
+ * updated in place (`replaces`), so it is still one notice, and at most one
+ * notification, per person per incident. Nobody routed since is added.
  */
-async function planNotices(prisma: PrismaClient, deps: NotifierDeps, incident: NotifyIncident, now: Date): Promise<PlannedNotice[]> {
+async function planNotices(
+  prisma: PrismaClient,
+  deps: NotifierDeps,
+  incident: NotifyIncident,
+  now: Date,
+): Promise<{ planned: PlannedNotice[]; replan: boolean }> {
   await ensureOwnerRecipients(prisma);
-  const already = await alreadyNoticed(prisma, incident.id);
+  const existing = await prisma.securityIncidentNotice.findMany({
+    where: { incidentId: incident.id },
+    select: { id: true, userId: true, outcome: true, reason: true },
+  });
+  // User.id — an exclusion set, never a recipient.
+  const already = new Set(existing.map((n) => n.userId));
+  const replan = existing.length > 0;
   const reachedBefore = await prisma.securityIncidentNotice.count({ where: { incidentId: incident.id, outcome: { in: [...REACHED] } } });
   const routed = await prisma.securityAlertRecipient.findMany({
     where: { state: "receiving" },
@@ -272,8 +298,14 @@ async function planNotices(prisma: PrismaClient, deps: NotifierDeps, incident: N
 
   const out: PlannedNotice[] = [];
   for (const { user } of routed) {
-    if (already.has(user.id)) continue;
-    out.push(await plan(user, "routed", await eligibilityOf(user, deps.resolveAccess)));
+    const mine = existing.find((n) => n.userId === user.id);
+    if (!mine) {
+      if (!replan) out.push(await plan(user, "routed", await eligibilityOf(user, deps.resolveAccess)));
+      continue;
+    }
+    if (mine.outcome !== "skipped_not_visible") continue;
+    const again = await plan(user, mine.reason, await eligibilityOf(user, deps.resolveAccess));
+    if (again.outcome === "queued" || again.outcome === "skipped_capped") out.push({ ...again, replaces: mine.id });
   }
   if (reachedBefore === 0 && !out.some((o) => REACHED.includes(o.outcome))) {
     const owners = await prisma.user.findMany({ where: { role: "owner" }, select: USER_SELECT, orderBy: { id: "asc" } });
@@ -283,7 +315,7 @@ async function planNotices(prisma: PrismaClient, deps: NotifierDeps, incident: N
       if (eligibility.eligible) out.push(await plan(owner, "fallback_owner", eligibility));
     }
   }
-  return out;
+  return { planned: out, replan };
 }
 
 interface SettleableNotice {
@@ -347,6 +379,8 @@ async function notifyIncident(
   const incident = await prisma.securityIncident.findUnique({ where: { id: incidentId }, select: INCIDENT_SELECT });
   if (!incident || incident.notifyState !== "pending") return false;
   let written: Array<{ id: string; userId: string; outcome: SecurityNoticeOutcome; reason: SecurityNoticeReason; notificationLogId: string | null }> | null;
+  // False only for a re-plan that moved nobody: the incident goes back to done, and nothing is audited.
+  let changed = true;
   try {
     if (!(await deps.isSecurityModuleOn())) {
       await prisma.securityIncident.updateMany({
@@ -355,7 +389,8 @@ async function notifyIncident(
       });
       return false;
     }
-    const planned = await planNotices(prisma, deps, incident, now);
+    const { planned, replan } = await planNotices(prisma, deps, incident, now);
+    changed = planned.length > 0 || !replan;
     written = await prisma.$transaction(async (tx) => {
       const { count } = await tx.securityIncident.updateMany({
         where: { id: incident.id, version: incident.version, notifyState: "pending" },
@@ -375,6 +410,15 @@ async function notifyIncident(
             data: { incidentId: incident.id },
           });
           notificationLogId = id;
+        }
+        if (recipient.replaces) {
+          // Review R4: the skipped notice becomes this outcome, dated now (the cap and redelivery read createdAt).
+          const { count: moved } = await tx.securityIncidentNotice.updateMany({
+            where: { id: recipient.replaces, incidentId: incident.id, outcome: "skipped_not_visible" },
+            data: { outcome: recipient.outcome, notificationLogId, createdAt: now, settledAt: recipient.outcome === "queued" ? null : now },
+          });
+          if (moved !== 1) throw new Error("security notice changed while it was re-planned");
+          continue;
         }
         rows.push({
           incidentId: incident.id,
@@ -408,7 +452,7 @@ async function notifyIncident(
     });
     return false;
   }
-  if (!written) return false;
+  if (!written || !changed) return false;
 
   for (const n of written) {
     if (n.outcome !== "queued") continue;

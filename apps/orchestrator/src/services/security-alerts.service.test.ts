@@ -493,6 +493,90 @@ describe("the notifier (§6.7)", () => {
 });
 
 // Review #6: a tick must never outlive its 60 s lock — notify and redelivery stop at the deadline.
+// Review R4 (rjouffret): Maria (sees front) was skipped — the first alert
+// evidence was on back. Alert evidence on front joins later; the engine sets
+// the incident pending again (security-incidents.service.test.ts pins that).
+describe("review R4 — late alert evidence on a camera a skipped person can see", () => {
+  const LATER = plus(NOW, 60_000);
+  const routedMaria = { userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN };
+
+  /** The first run (Maria skipped_not_visible, Stefan told), then alert evidence on `camera` and the engine's `pending`. */
+  async function firstRunThenLate(f: FakeSecurityPrisma, camera = "front"): Promise<void> {
+    LEVELS[MARIA] = "act";
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_not_visible" });
+    f.world.securityIncidentReason.push({ id: "r-late", createdAt: LATER, ...reason(camera, plus(NOW, 30_000), { evidenceEventId: 777n }) });
+    Object.assign(f.world.securityIncident[0]!, { notifyState: "pending", cameras: ["back", camera].sort() });
+  }
+
+  it("her skipped notice becomes her one notification — by username, delivered, settled, dated now; the owner is not told twice", async () => {
+    const f = world({ securityAlertRecipient: [routedMaria] });
+    await firstRunThenLate(f);
+    await notifyPendingIncidents(client(f), deps(), LATER);
+    expect(notices(f).filter((n) => n.userId === MARIA)).toHaveLength(1);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "sent", reason: "routed", createdAt: LATER, settledAt: LATER, notificationLogId: expect.any(String) });
+    expect(f.world.notificationLog.map((r) => r.username)).toEqual(["stefan", "maria"]);
+    expect(f.world.notificationLog.find((r) => r.username === "maria")!.body).toBe("Front door saw someone at 10:20 PM. The site was closed.");
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "sent", createdAt: NOW });
+    expect(f.world.securityIncident[0]).toMatchObject({ notifyState: "done" });
+    expect(h.audit).toHaveBeenCalledTimes(2);
+  });
+
+  it("a re-plan never adds someone routed AFTER the alert: only skipped people are planned again", async () => {
+    const f = world({ securityAlertRecipient: [routedMaria] });
+    await firstRunThenLate(f);
+    f.world.securityAlertRecipient.push({ userId: JORDAN, state: "receiving", origin: "chosen", version: 1, setById: STEFAN, setAt: NOW });
+    await notifyPendingIncidents(client(f), deps(), LATER);
+    expect(noticeOf(f, JORDAN)).toBeUndefined();
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "sent" });
+  });
+
+  it("still nothing she can see (the late evidence is on another hidden camera): her notice is left as it was, and nothing is audited", async () => {
+    const f = world({
+      securityAlertRecipient: [routedMaria],
+      camera: [
+        { id: "cam-back", name: "back", displayName: "Back camera" },
+        { id: "cam-front", name: "front", displayName: "Front door" },
+        { id: "cam-side", name: "side", displayName: "Side gate" },
+      ],
+    });
+    await firstRunThenLate(f, "side");
+    await notifyPendingIncidents(client(f), deps(), LATER);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_not_visible", createdAt: NOW, notificationLogId: null });
+    expect(f.world.notificationLog.map((r) => r.username)).toEqual(["stefan"]);
+    expect(f.world.securityIncident[0]).toMatchObject({ notifyState: "done" });
+    expect(h.audit).toHaveBeenCalledTimes(1);
+  });
+
+  it("the hourly cap still applies: capped at the re-plan → skipped_capped, no notification", async () => {
+    const prior = Array.from({ length: SECURITY_ALERT_HOURLY_CAP }, (_, k) => ({
+      id: `p${k}`,
+      incidentId: `00000000-0000-4000-8000-00000000010${k}`,
+      userId: MARIA,
+      username: "maria",
+      reason: "routed",
+      outcome: "sent",
+      notificationLogId: `lp${k}`,
+      channels: "toast",
+      createdAt: plus(NOW, -(k + 1) * 60_000),
+      settledAt: plus(NOW, -(k + 1) * 60_000),
+    }));
+    const f = world({ securityAlertRecipient: [routedMaria], securityIncidentNotice: prior });
+    await firstRunThenLate(f);
+    await notifyPendingIncidents(client(f), deps(), LATER);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_capped", notificationLogId: null });
+    expect(f.world.notificationLog.map((r) => r.username)).toEqual(["stefan"]);
+  });
+
+  it("switched off since the alert → not planned again", async () => {
+    const f = world({ securityAlertRecipient: [routedMaria] });
+    await firstRunThenLate(f);
+    f.world.securityAlertRecipient.find((r) => r.userId === MARIA)!.state = "not_receiving";
+    await notifyPendingIncidents(client(f), deps(), LATER);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_not_visible" });
+  });
+});
+
 describe("the tick's deadline", () => {
   /** A deadline that has not passed for the first `n` checks, and has after. */
   const passedAfter = (n: number) => {
