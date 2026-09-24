@@ -8,7 +8,8 @@
  * old pick. These tests drive the selection source: 'auto' follows
  * defaultModel while the chat is fresh; a user pick and a reopened thread
  * do not follow it; New chat goes back to 'auto'; a model that leaves the
- * list falls back.
+ * list falls back — but a started thread only ever to a LOCAL model, and a
+ * degraded (incomplete) list moves nothing.
  *
  * NB: a <select> whose value matches no option DISPLAYS its first option,
  * so every expectation below names a model that is not first in the list
@@ -64,7 +65,12 @@ vi.mock("@/lib/hooks/useChat", () => ({
 
 // ── useModels mock — the list and the household default, per test ────────
 const modelsRef: {
-  current: { models: Model[]; defaultModel: string | null; isLoading?: boolean };
+  current: {
+    models: Model[];
+    defaultModel: string | null;
+    isLoading?: boolean;
+    degraded?: boolean;
+  };
 } = { current: { models: [], defaultModel: null } };
 vi.mock("@/lib/hooks/useModels", () => ({
   useModels: () => modelsRef.current,
@@ -114,8 +120,21 @@ const A: Model = { id: "model-a", provider: "local", name: "Model A" };
 const B: Model = { id: "model-b", provider: "local", name: "Model B" };
 const C: Model = { id: "model-c", provider: "local", name: "Model C" };
 
+const GPT4O: Model = { id: "gpt-4o", provider: "openai", name: "GPT-4o" };
+const GPT4O_MINI: Model = { id: "gpt-4o-mini", provider: "openai", name: "GPT-4o mini" };
+
 function picker(): HTMLSelectElement {
   return screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement;
+}
+
+/** Type a turn into the composer and send it; returns the model it carried. */
+function sendTyped(text: string): string | undefined {
+  fireEvent.change(screen.getByPlaceholderText("Ask Droplet anything…"), {
+    target: { value: text },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  const call = sendMessageMock.mock.calls.at(-1);
+  return call?.[1] as string | undefined;
 }
 
 beforeEach(() => {
@@ -232,7 +251,145 @@ describe("/chat model selection source (WARP-3048)", () => {
   });
 });
 
+// ── WARP-3048 review — a list that is incomplete or lost the local model ──
+//
+// When the local runtime fails to answer the listing (a hotswap's
+// unload+load can do exactly that), the gateway still lists the cloud
+// models and the orchestrator stamps `degraded: true`. The fallback for "the
+// selected model left the list" used to take that list at face value and
+// move the thread to whatever was first — a cloud model — and keep it there
+// after the local runtime came back.
+describe("/chat never moves a thread to the cloud behind the owner's back (WARP-3048)", () => {
+  it("an in-progress thread holds its local model through a degraded list", async () => {
+    openThread();
+    modelsRef.current = { models: [A, GPT4O, GPT4O_MINI], defaultModel: "model-a" };
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-a"));
+    expect(sendTyped("first")).toBe("model-a");
+
+    // The local runtime stops answering mid-swap: only the cloud is listed.
+    modelsRef.current = {
+      models: [GPT4O, GPT4O_MINI],
+      defaultModel: "model-a",
+      degraded: true,
+    };
+    rerender(<ChatPage />);
+    await act(async () => {});
+    // The composer still names the model the thread is on.
+    expect(picker().value).toBe("model-a");
+
+    // …and it comes back.
+    modelsRef.current = { models: [A, GPT4O, GPT4O_MINI], defaultModel: "model-a" };
+    rerender(<ChatPage />);
+    await act(async () => {});
+    expect(sendTyped("second")).toBe("model-a");
+  });
+
+  it("a fresh chat holds its model through a degraded list too", async () => {
+    modelsRef.current = { models: [A, GPT4O, GPT4O_MINI], defaultModel: "model-a" };
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-a"));
+
+    modelsRef.current = {
+      models: [GPT4O, GPT4O_MINI],
+      defaultModel: "model-a",
+      degraded: true,
+    };
+    rerender(<ChatPage />);
+    await act(async () => {});
+    expect(picker().value).toBe("model-a");
+
+    modelsRef.current = { models: [A, GPT4O, GPT4O_MINI], defaultModel: "model-a" };
+    rerender(<ChatPage />);
+    await act(async () => {});
+    expect(sendTyped("hi")).toBe("model-a");
+  });
+
+  it("never falls an in-progress thread back from local to cloud, even on a whole list", async () => {
+    openThread();
+    modelsRef.current = { models: [A, GPT4O, GPT4O_MINI], defaultModel: "model-a" };
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-a"));
+
+    // Model A is gone and no local model is left: the only candidates are
+    // cloud ones, and moving there needs the owner's say-so (WARP-2991).
+    modelsRef.current = { models: [GPT4O, GPT4O_MINI], defaultModel: null };
+    rerender(<ChatPage />);
+    await act(async () => {});
+    expect(picker().value).toBe("model-a");
+    expect(sendTyped("still here?")).toBe("model-a");
+  });
+
+  it("an in-progress thread whose local model left falls back to another LOCAL model", async () => {
+    openThread();
+    modelsRef.current = { models: [A, GPT4O, B], defaultModel: "model-a" };
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-a"));
+
+    modelsRef.current = { models: [GPT4O, B], defaultModel: "model-a" };
+    rerender(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-b"));
+    expect(sendTyped("next")).toBe("model-b");
+  });
+
+  it("…and among local models, prefers the box's active one", async () => {
+    openThread();
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-a"));
+
+    // A was removed and the owner made C active: C is already loaded, so
+    // it answers without a swap; B is merely listed first.
+    modelsRef.current = { models: [B, C], defaultModel: "model-c" };
+    rerender(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-c"));
+  });
+
+  it("a thread with messages but no conversation id yet keeps its model", async () => {
+    // The first turn before X-Conversation-Id arrives, or a thread whose
+    // persistence failed and never gets an id.
+    chatRef.current = {
+      conversationId: null,
+      messages: [{ id: "m1", role: "user", content: "hello" }],
+    };
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-a"));
+
+    modelsRef.current = { models: [A, B, C], defaultModel: "model-b" };
+    rerender(<ChatPage />);
+    await act(async () => {});
+    expect(picker().value).toBe("model-a");
+  });
+
+  it("an empty reopened thread (conversation id, no messages yet) keeps its model", async () => {
+    searchParamsRef.current = new URLSearchParams("c=c1");
+    chatRef.current = { conversationId: "c1", messages: [] };
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(picker().value).toBe("model-a"));
+
+    modelsRef.current = { models: [A, B, C], defaultModel: "model-b" };
+    rerender(<ChatPage />);
+    await act(async () => {});
+    expect(picker().value).toBe("model-a");
+  });
+});
+
 describe("/chat single-model box and empty state (WARP-3048)", () => {
+  it("names an AI-service outage as an outage, not as 'no model'", async () => {
+    // WARP-1284 — an unreachable gateway answers 200 {models:[], degraded}.
+    modelsRef.current = {
+      models: [],
+      defaultModel: null,
+      isLoading: false,
+      degraded: true,
+    };
+    render(<ChatPage />);
+
+    expect(
+      screen.getByText(/couldn.t reach this droplet.s ai service/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/no ai model is ready/i)).toBeNull();
+  });
+
   it("shows a read-only model chip that links to /models", async () => {
     modelsRef.current = { models: [A], defaultModel: "model-a" };
     render(<ChatPage />);

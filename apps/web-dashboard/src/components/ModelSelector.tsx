@@ -25,11 +25,18 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   // /models. (Still render while loading, when we don't yet know the count.)
   if (!isLoading && models.length === 0) return null;
 
+  // WARP-3048 — /chat holds a thread's model while the list is degraded and
+  // never falls a thread back to the cloud, so `value` can name a model that
+  // is not listed right now. A <select> whose value matches no option
+  // DISPLAYS its first one — the composer would name a model the thread is
+  // not on — so the held model gets an option of its own.
+  const held = Boolean(value) && !isLoading && !models.some((m) => m.id === value);
+
   // WARP-3048 — one model: there is nothing to choose here, but hiding the
   // pill left the composer naming no model at all. The models brief
   // (WARP-1116) asks for a read-only chip instead — dot + name — that leads
   // to /models, where models are installed and switched.
-  if (!isLoading && models.length === 1) {
+  if (!isLoading && models.length === 1 && !held) {
     const only = models[0];
     return (
       <Link
@@ -62,6 +69,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
           {!isLoading && models.length === 0 && (
             <option>No models available</option>
           )}
+          {held && <option value={value}>{value} · unavailable</option>}
           {models.map((m) => (
             // Native <option> can't render a badge, so mark vision-capable
             // models inline so they're distinguishable in the dropdown.

@@ -95,3 +95,20 @@ describe("useRefreshLlmModels (WARP-3048)", () => {
     expect(second.result.current.defaultModel).toBeNull();
   });
 });
+
+// WARP-3048 review — /chat must tell an INCOMPLETE list (the local runtime
+// didn't answer, WARP-1284) from a model that really left, so the hook
+// surfaces the orchestrator's `degraded` flag instead of dropping it.
+describe("useModels — degraded (WARP-3048)", () => {
+  it.each([
+    [{ degraded: true }, true],
+    [{ degraded: false }, false],
+    [{}, false],
+  ])("maps %o to degraded=%s", async (extra, expected) => {
+    const wrapper = wrapperWith(new Map());
+    fetchModelsMock.mockResolvedValue({ ...payload("model-a"), ...extra });
+    const { result } = renderHook(() => useModels(), { wrapper });
+    await vi.waitFor(() => expect(result.current.defaultModel).toBe("model-a"));
+    expect(result.current.degraded).toBe(expected);
+  });
+});

@@ -24,6 +24,10 @@ export function useModels() {
     // WARP-1112 — the box's active local model (set from /models). The chat
     // page defaults its picker to this instead of "the first model listed".
     defaultModel: data?.defaultModel ?? null,
+    // WARP-1284 — the list is known to be INCOMPLETE: the gateway was
+    // unreachable, or the box's own runtime failed to answer (a model swap
+    // can do that). A model missing from a degraded list has not left it.
+    degraded: data?.degraded === true,
     error,
     isLoading,
     refresh: mutate,

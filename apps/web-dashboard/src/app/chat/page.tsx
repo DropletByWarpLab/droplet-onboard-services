@@ -320,6 +320,7 @@ export default function ChatPage() {
     defaultModel,
     isLoading: modelsLoading,
     error: modelsError,
+    degraded: modelsDegraded,
   } = useModels();
   // The chat composer's "/" slash menu lists these tools; picking one seeds
   // the composer + pins the "Ready to use X" indicator (same as /tools).
@@ -387,18 +388,30 @@ export default function ChatPage() {
   // defaultModel whenever it changes. Anything else keeps its model — a 30s
   // poll must never move a thread mid-conversation — unless that model has
   // left the list, where keeping it would only fail every send.
+  //
+  // Two limits on that fallback. A DEGRADED list is known to be incomplete
+  // (the box's runtime didn't answer — a model swap can do that — but the
+  // cloud still listed), so a model missing from it hasn't left: hold every
+  // selection until the list is whole. And a thread that has started only
+  // ever falls back to a LOCAL model: moving it to the cloud is the owner's
+  // call (WARP-2991 asks them), never a side effect of a listing.
   useEffect(() => {
     if (models.length === 0) return;
     const current = selectedModel
       ? models.find((m) => m.id === selectedModel)
       : undefined;
-    const freshAuto =
-      selectionSource === "auto" && messages.length === 0 && !conversationId;
+    const fresh = messages.length === 0 && !conversationId;
+    const freshAuto = selectionSource === "auto" && fresh;
     if (current && !freshAuto) return;
-    const preferred =
-      (defaultModel && models.find((m) => m.id === defaultModel)) ||
-      models.find((m) => isLocalProvider(m.provider)) ||
-      models[0];
+    if (modelsDegraded && selectedModel) return;
+    const isLocal = (m: { provider: string }) => isLocalProvider(m.provider);
+    const preferred = fresh
+      ? (defaultModel && models.find((m) => m.id === defaultModel)) ||
+        models.find(isLocal) ||
+        models[0]
+      : models.find((m) => m.id === defaultModel && isLocal(m)) ||
+        models.find(isLocal);
+    if (!preferred) return;
     if (preferred.id !== selectedModel) setSelectedModel(preferred.id);
     // A pick that is gone from the list is no longer anyone's choice.
     if (!current && selectionSource !== "auto") setSelectionSource("auto");
@@ -409,6 +422,7 @@ export default function ChatPage() {
     selectionSource,
     messages.length,
     conversationId,
+    modelsDegraded,
   ]);
 
   // Restore the model a loaded conversation was held in — but only when
@@ -1052,13 +1066,16 @@ export default function ChatPage() {
               <p className="h">Ask Droplet anything</p>
               <p className="s">
                 {/* WARP-3048 — there is no picker "above": name the real
-                    reason nothing is selected, and where models live. */}
-                {selectedModel ? (
+                    reason nothing is selected, and where models live. A
+                    degraded list is an outage (WARP-1284), never "no model". */}
+                {selectedModel && !modelsDegraded ? (
                   "Your local AI is ready — nothing leaves the device."
                 ) : modelsLoading ? (
                   "Checking which AI model is ready…"
                 ) : modelsError ? (
                   "Couldn’t reach this Droplet’s AI models — it keeps checking."
+                ) : modelsDegraded ? (
+                  "Couldn’t reach this Droplet’s AI service — it keeps checking."
                 ) : (
                   <>
                     No AI model is ready on this Droplet yet —{" "}
