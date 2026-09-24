@@ -25,14 +25,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
 const fetchUsersMock = vi.fn();
-const listProviderKeysMock = vi.fn();
 const fetchBusinessProfileMock = vi.fn();
 const fetchPersonaMock = vi.fn();
 
 const fetchWorkspaceLocationsMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
-  listProviderKeys: (...a: any[]) => listProviderKeysMock(...a),
   fetchWorkspaceLocations: (...a: any[]) => fetchWorkspaceLocationsMock(...a),
   createWorkspaceLocation: vi.fn(),
   updateWorkspaceLocation: vi.fn(),
@@ -41,6 +39,9 @@ vi.mock("@/lib/api", () => ({
   createUser: vi.fn(),
   deleteUser: vi.fn(),
   fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
+  // WARP-2967: the Settings page derives its tucked-surface rows from
+  // nav-config and resolves their capability gates through this probe.
+  fetchCapabilities: () => Promise.resolve({ claudeActivity: false, ragEval: false }),
   fetchBusinessProfile: (...a: any[]) => fetchBusinessProfileMock(...a),
   patchBusinessProfile: vi.fn(),
   startBusinessOnboarding: vi.fn(),
@@ -58,18 +59,12 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   useDevice: () => ({ device: null, devices: [], health: null, isLoading: false, error: null }),
 }));
 
-vi.mock("@/components/ProviderKeyForm", () => ({
-  ProviderKeyForm: ({ provider }: { provider: string }) => (
-    <div data-testid={`provider-key-${provider}`} />
-  ),
-}));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
 
 import SettingsPage from "@/app/settings/page";
 
 beforeEach(() => {
   vi.clearAllMocks();
-  listProviderKeysMock.mockResolvedValue([]);
   fetchUsersMock.mockResolvedValue({ users: [] });
   fetchPersonaMock.mockResolvedValue({
     preset: "warm_friendly",
@@ -140,8 +135,9 @@ describe("Settings — Workspace group placement (WARP-2667)", () => {
     async (_name, testId) => {
       render(<SettingsPage />);
       const card = await screen.findByTestId(testId);
+      // WARP-2871 — the key forms moved to /models; the section is now a link row.
       await waitFor(() =>
-        expect(screen.getByTestId("provider-key-gemini")).toBeInTheDocument(),
+        expect(screen.getByRole("link", { name: /cloud model keys/i })).toBeInTheDocument(),
       );
 
       const headings = Array.from(document.querySelectorAll("h2"));

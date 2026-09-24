@@ -15,7 +15,9 @@ const runCeremony = vi.fn();
 const verify = vi.fn();
 const cancelCeremony = vi.fn();
 const isPasskeySupported = vi.fn();
-vi.mock("@/lib/webauthn", () => ({
+vi.mock("@/lib/webauthn", async () => ({
+  // WARP-1157: the real classifier/origin helpers; only the wire + ceremony are faked.
+  ...(await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn")),
   getPasskeyAuthenticationOptions: (...a: unknown[]) => getOptions(...a),
   runPasskeyAuthenticationCeremony: (...a: unknown[]) => runCeremony(...a),
   verifyPasskeyAuthentication: (...a: unknown[]) => verify(...a),
@@ -120,7 +122,14 @@ describe("/login/passkey — waiting + cancel", () => {
     const heading = await screen.findByRole("heading", { name: /approve this sign-in/i });
     expect(heading).toBeInTheDocument();
     // A11y: focus moves to the status heading on the transition.
-    expect(heading).toHaveFocus();
+    //
+    // WARP-2958 — awaited, not synchronous. The page moves focus in a passive
+    // useEffect on state change (page.tsx `headingRef.current?.focus(...)`),
+    // and `findByRole` resolves as soon as the heading is in the DOM — under
+    // CI load that is BEFORE the effect flushes. The synchronous form failed
+    // ~1-2% of `ci` runs on three unrelated branches; waiting is the
+    // assertion's real contract.
+    await waitFor(() => expect(heading).toHaveFocus());
 
     fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
     expect(cancelCeremony).toHaveBeenCalledTimes(1);
@@ -248,5 +257,57 @@ describe("/login/passkey — reassurance footer", () => {
     render(<PasskeyApprovalPage />);
     await screen.findByRole("heading", { name: /you're in/i });
     expect(screen.queryByText(/nothing leaves the box/i)).not.toBeInTheDocument();
+  });
+});
+
+// =====================================================================
+// WARP-1157 — an address that can't use passkeys gets an honest `blocked`
+// state with the password as the way forward, never "Try again".
+// =====================================================================
+describe("/login/passkey — address can't use passkeys (WARP-1157)", () => {
+  it("plain http: explains the connection (not the browser) and never starts a ceremony", async () => {
+    // On http the browser hides WebAuthn, so support is false too.
+    isPasskeySupported.mockReturnValue(false);
+    Object.defineProperty(window, "isSecureContext", { value: false, configurable: true });
+    try {
+      render(<PasskeyApprovalPage />);
+      expect(
+        await screen.findByRole("heading", { name: /can't be used at this address/i }),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/secure connection/i)).toBeInTheDocument();
+      expect(screen.queryByText(/browser doesn't support/i)).not.toBeInTheDocument();
+      expect(getOptions).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: /try again/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /use your password instead/i })).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    }
+  });
+
+  it("box refuses the address (origin_unsupported) → blocked, not a network error", async () => {
+    const { PasskeyServerError } = await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn");
+    getOptions.mockRejectedValue(new PasskeyServerError(400, "origin_unsupported", "x"));
+    render(<PasskeyApprovalPage />);
+    expect(
+      await screen.findByRole("heading", { name: /can't be used at this address/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/IP address/i)).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't reach your Droplet/i)).not.toBeInTheDocument();
+  });
+
+  it("box is reachable but refuses for another reason → 'can't take sign-ins', not network", async () => {
+    const { PasskeyServerError } = await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn");
+    getOptions.mockRejectedValue(new PasskeyServerError(503, "directory_unavailable", "x"));
+    render(<PasskeyApprovalPage />);
+    expect(await screen.findByText(/can't take passkey sign-ins right now/i)).toBeInTheDocument();
+  });
+
+  it("Chrome's certificate refusal → blocked with certificate copy, not 'cancelled'", async () => {
+    runCeremony.mockRejectedValue(
+      new DOMException("WebAuthn is not supported on sites with TLS certificate errors.", "NotAllowedError"),
+    );
+    render(<PasskeyApprovalPage />);
+    expect(await screen.findByText(/doesn't trust this connection's certificate/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /try again/i })).not.toBeInTheDocument();
   });
 });

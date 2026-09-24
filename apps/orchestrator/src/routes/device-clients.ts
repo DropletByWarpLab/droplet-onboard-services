@@ -17,8 +17,10 @@ import {
   getPublicVapidKey,
 } from "../services/push-dispatch.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
+import { buildPairUrl, servedCertPin } from "../lib/served-cert-pin.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
+import { PushEndpointRejected, vetPushEndpoint } from "../lib/push-endpoint.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -248,7 +250,13 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       }
 
       const server = (await webdavBaseUrl(req)).replace(/\/nextcloud$/, "");
-      const pairUrl = `droplet://pair?server=${encodeURIComponent(server)}&code=${code}`;
+      // WARP-2954 / ADR-058: the link carries the served certificate's key
+      // fingerprint (`spki=`), so a native client can pair to THIS box with
+      // no public CA and no HQ — the box's own dashboard, shown to a logged-in
+      // owner, is the channel that makes the pin an anchor (a LAN host cannot
+      // rewrite it). Omitted (same link as before) when the leaf is unreadable.
+      // The unauthenticated /api/tls/status deliberately does not carry it.
+      const pairUrl = buildPairUrl(server, code, servedCertPin());
 
       // Stash pending metadata so /pair/claim knows what device the user
       // intended — the native client only sends the code + its own locally
@@ -606,6 +614,26 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return res
           .status(400)
           .json({ error: "Invalid subscription", details: parsed.error.flatten() });
+      }
+      // WARP-2904: the orchestrator will POST to this URL, so it is an SSRF
+      // primitive before it is egress. vetPushEndpoint requires https on the
+      // default port with no userinfo, a plain host that both URL parsers
+      // agree on (web-push dials the LEGACY parser's host), and a real push
+      // service host. dispatchToUser re-runs the check at dial time and adds
+      // a DNS check. The error names the rule, never the endpoint.
+      try {
+        vetPushEndpoint(parsed.data.endpoint);
+      } catch (err) {
+        if (err instanceof PushEndpointRejected) {
+          // `blocked_destination` is the WARP-2022 registration error for a
+          // refused destination; https_required keeps its own self-describing
+          // code. `reason` names which rule refused it.
+          return res.status(400).json({
+            error: err.reason === "https_required" ? "https_required" : "blocked_destination",
+            reason: err.reason,
+          });
+        }
+        throw err;
       }
       const userId = getUser(req);
 

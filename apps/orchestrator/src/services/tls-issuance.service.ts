@@ -362,12 +362,45 @@ export interface TlsIssuanceDeps {
    * pre-existing posture without setting it.
    */
   provisionToken?: string;
+  /** WARP-2944 — see `TlsNotifier`. Optional; no-op when absent. */
+  notifier?: TlsNotifier;
 }
 
 export interface TlsIssuanceService {
   /** One cron tick. See the file header for the state machine. */
   runOnce(): Promise<void>;
 }
+
+/**
+ * WARP-2944 (ADR-058 slice 7) — the owner hears about the two lifecycle
+ * events that need a human: renewal has started failing, and the certificate
+ * is about to expire. Both fire from `runOnce`, which is the ONLY place the
+ * state row changes, so "one notification per transition" is a property of
+ * the state machine rather than of a timer:
+ *
+ *   - `renewFailed` — on the transition INTO `LE_RENEW_FAILED` from any other
+ *     state. A box that stays failed tick after tick was already failed at
+ *     the start of each later tick, so it is not called again until the row
+ *     leaves the state (a successful renewal) and fails afresh.
+ *   - `expiringSoon` — every tick while fewer than `EXPIRY_WARNING_DAYS`
+ *     remain; the implementation dedupes per certificate (its `notAfter`),
+ *     because this service keeps no "notified" column (a schema migration is
+ *     the wrong price for a reminder — see orchestrator-migration-failure-
+ *     darkens-the-box).
+ *
+ * Optional + no-op by default: dev/CI and the injected-fakes harness need no
+ * notifier, and a notifier failure must never abort a tick (each call is
+ * awaited inside its own try/catch and logged).
+ */
+export interface TlsNotifier {
+  renewFailed(input: { fqdn: string; notAfter: string | null; daysLeft: number | null }): Promise<void>;
+  expiringSoon(input: { fqdn: string; notAfter: string; daysLeft: number }): Promise<void>;
+}
+
+/** Fewer than this many days left → `expiringSoon`. Distinct from the 30-day
+ *  RENEW window: renewal is the box's job and starts silently; this is the
+ *  point at which the owner needs to act (the box needs outbound internet). */
+export const EXPIRY_WARNING_DAYS = 7;
 
 /** Network-ish failure → degrade gracefully (keep cert, mark LE_RENEW_FAILED,
  *  warn, no throw). Anything else (TypeError, programming bugs) propagates. */
@@ -1069,7 +1102,30 @@ export function createTlsIssuanceService(
     dns,
     requestedName,
     provisionToken = "",
+    notifier,
   } = deps;
+
+  // WARP-2944 — a notifier failure is logged and never aborts the tick: the
+  // certificate work matters more than the message about it.
+  async function notifyRenewFailed(seed: string, notAfter: string | null) {
+    if (!notifier || !seed) return;
+    try {
+      const days = notAfter ? Math.floor(daysUntil(notAfter)) : null;
+      await notifier.renewFailed({ fqdn: seed, notAfter, daysLeft: days });
+    } catch (err) {
+      logger.warn({ err, fqdn: seed }, "tls-issuance: renew-failed notification failed (non-fatal)");
+    }
+  }
+  async function notifyExpiringSoon(seed: string, notAfter: string | null) {
+    if (!notifier || !seed || !notAfter) return;
+    const days = daysUntil(notAfter);
+    if (!(days < EXPIRY_WARNING_DAYS)) return;
+    try {
+      await notifier.expiringSoon({ fqdn: seed, notAfter, daysLeft: Math.max(0, Math.floor(days)) });
+    } catch (err) {
+      logger.warn({ err, fqdn: seed }, "tls-issuance: expiring-soon notification failed (non-fatal)");
+    }
+  }
 
   // WARP-983 — self-provision is enabled only when a non-empty token is
   // configured. Guard/trim like the other config-sourced strings so a
@@ -1358,6 +1414,11 @@ export function createTlsIssuanceService(
         state = existing?.state ?? "BOOTSTRAP_SELF_SIGNED";
         existingNotAfter = existing?.notAfter ?? null;
 
+        // WARP-2944 — inside the last week the owner needs to know, whatever
+        // this tick goes on to do (a renewal that succeeds below makes the
+        // next tick's check a no-op: the new notAfter is months away).
+        await notifyExpiringSoon(seed, existingNotAfter);
+
         // Decide: issue, renew, or no-op.
         if (state === "BOOTSTRAP_SELF_SIGNED") {
           mode = "issue";
@@ -1440,6 +1501,12 @@ export function createTlsIssuanceService(
             { err, fqdn: seed, mode },
             "tls-issuance: HQ unreachable or order not ready — keeping current cert (LE_RENEW_FAILED)",
           );
+          // WARP-2944 — the TRANSITION is the event. `state` is what the row
+          // said at the start of this tick (LE_RENEWING is set mid-tick and
+          // is not a "was already failing" state).
+          if (state !== "LE_RENEW_FAILED") {
+            await notifyRenewFailed(seed, existingNotAfter);
+          }
           return;
         }
         // Unexpected error — let it propagate so the cron canary increments.

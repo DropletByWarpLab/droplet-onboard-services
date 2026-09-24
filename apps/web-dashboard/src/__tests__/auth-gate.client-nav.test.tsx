@@ -47,6 +47,20 @@ beforeEach(() => {
   pathnameValue = "/";
 });
 
+describe("AuthGate — content column follows the sidebar width (WARP-2956)", () => {
+  it("offsets <main> by the --sidebar-w variable, never a hard-coded 260px", () => {
+    useAuthMock.mockReturnValue(READY_OWNER);
+    const { container } = render(
+      <AuthGate>
+        <div>HOME CONTENT</div>
+      </AuthGate>,
+    );
+    const main = container.querySelector("main#main") as HTMLElement;
+    expect(main.className).toContain("lg:ml-[var(--sidebar-w)]");
+    expect(main.className).not.toContain("260");
+  });
+});
+
 describe("AuthGate — protected page renders on client navigation", () => {
   it("renders the target protected page's content after a pathname change (no refresh)", () => {
     useAuthMock.mockReturnValue(READY_OWNER);

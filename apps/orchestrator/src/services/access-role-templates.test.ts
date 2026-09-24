@@ -244,8 +244,9 @@ describe("access-role-templates — the resolver keeps what the template grants"
 
   /**
    * `domainsForFeatures` is the feature intersection: a CLAIMED domain passes
-   * only when its owning module is held, and every UNCLAIMED domain passes
-   * unconditionally (see the unclaimed-domain spec below).
+   * only when its owning module is held, a domain declared in
+   * FEATURE_UNGATED_TOOL_DOMAINS passes unconditionally, and anything else is
+   * denied (WARP-2742 — see the ungated-domain spec below).
    */
   it.each(PAYLOADS)("%s grants only tool domains its features reach", (_id, payload) => {
     const featureIds = new Set<ModuleId>(payload.featureGrants.map((g) => g.moduleId));
@@ -258,30 +259,36 @@ describe("access-role-templates — the resolver keeps what the template grants"
   });
 
   /**
-   * What is actually true about the unclaimed domains, stated rather than
-   * assumed — because four templates lean on it.
+   * What is actually true about the feature-ungated domains, stated rather
+   * than assumed — because several templates lean on it.
    *
-   * `money`, `business`, `data` and `system` are NOT module-gated: no module
-   * declares them in `toolDomains`, so `domainsForFeatures` passes them for
-   * ANY feature set, including the empty one. (`money` is the surprising one:
-   * the Money MODULE exists and is feature-gated, but it claims no tool
-   * domain — WARP-2581 kept `money_list_open_documents` out of the chat pool
-   * — so the `money` tool domain rides the other axes only.)
+   * `data` and `system` are declared FEATURE-UNGATED
+   * (access-catalog.ts FEATURE_UNGATED_TOOL_DOMAINS), so `domainsForFeatures`
+   * passes them for ANY feature set, including the empty one. Granting them is
+   * a real grant on the tool axis, but it is NOT narrowed by the feature
+   * grants, so the templates must not treat a feature grant as the thing that
+   * authorises them.
    *
-   * The consequence for this catalogue: granting those domains is a real
-   * grant on the tool axis (the role's grant set is still an intersection
-   * term), but it is NOT narrowed by the feature grants, so the templates
-   * must not treat a feature grant as the thing that authorises them.
+   * `business` is NOT among them either (WARP-2988): it is claimed by `crm`
+   * AND `projects` and passes when either is held.
+   *
+   * `money` is NOT among them any more (WARP-2742): the Money module claims
+   * the domain, so the Bookkeeper-shaped templates that grant the `money`
+   * tool domain also have to grant the Money feature, and the per-template
+   * "features reach" spec above holds them to it.
    */
-  it("the unclaimed domains this catalogue relies on pass with no features at all", () => {
+  it("the ungated domains this catalogue relies on pass with no features at all", () => {
     const noFeatures = domainsForFeatures(new Set<ModuleId>());
-    for (const domain of ["money", "business", "data", "system"]) {
-      expect(noFeatures.has(domain), `${domain} should be unclaimed`).toBe(true);
+    for (const domain of ["data", "system"]) {
+      expect(noFeatures.has(domain), `${domain} should be feature-ungated`).toBe(true);
     }
     // …and a claimed domain does not, which is what makes the above a real
     // distinction rather than "domainsForFeatures returns everything".
     expect(noFeatures.has("files")).toBe(false);
     expect(noFeatures.has("crm")).toBe(false);
+    expect(noFeatures.has("money")).toBe(false);
+    // WARP-2988 — `business` needs CRM or Projects.
+    expect(noFeatures.has("business")).toBe(false);
   });
 });
 

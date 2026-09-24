@@ -17,14 +17,22 @@
  * Data: `useToolCatalog` → `GET /api/llm/tools/catalog`. Re-skinned to the
  * indigo `.droplet-shell` design language (WARP design handoff); the catalog
  * logic and the SEED-not-run contract are unchanged.
+ *
+ * WARP-2969 — a tool a chat turn cannot reach gets a muted chip saying so,
+ * and its card stops offering "Use in chat". The page still LISTS every tool:
+ * a withheld tool is callable from its own screen or over MCP, so hiding it
+ * would be a different, wrong answer. It used to list all 142 as if asking
+ * for any of them would work, while 54 are withheld from chat by policy —
+ * and the card seeded the composer for those too.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Pencil, Search, ShieldCheck, Wrench, XCircle } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { Badge } from "@/components/shell/primitives";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
-import { iconForDomain, labelForDomain } from "@/lib/tool-domains";
+import { iconForDomain, labelForDomain, reachNote } from "@/lib/tool-domains";
 import {
   PENDING_COMPOSER_KEY,
   type PendingComposerPayload,
@@ -252,9 +260,18 @@ function FilterChip({
   );
 }
 
+/** Shared by both card shapes below — the only difference is the wrapper. */
+const CARD_STYLE: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
 function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
   const router = useRouter();
   const title = humanizeToolName(tool.name);
+  // WARP-2969 — null unless chat policy withholds this tool.
+  const note = reachNote(tool);
 
   // WARP-829: picking a tool primes the chat composer — it never runs the tool.
   const useInChat = () => {
@@ -274,43 +291,31 @@ function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
     router.push("/chat");
   };
 
-  return (
-    <button
-      type="button"
-      onClick={useInChat}
-      aria-label={`Use ${title} in chat`}
-      className="card hover ds-tool-card"
-      style={{
-        font: "inherit",
-        textAlign: "left",
-        width: "100%",
-        cursor: "pointer",
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-      }}
-    >
+  const body = (
+    <>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
         <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{title}</span>
-        <span
-          aria-hidden
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 4,
-            fontSize: 11,
-            color: "var(--brand)",
-            flexShrink: 0,
-          }}
-        >
-          Use in chat
-          <ArrowRight size={12} strokeWidth={2.5} />
-        </span>
+        {!note && (
+          <span
+            aria-hidden
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: 11,
+              color: "var(--brand)",
+              flexShrink: 0,
+            }}
+          >
+            Use in chat
+            <ArrowRight size={12} strokeWidth={2.5} />
+          </span>
+        )}
       </div>
       <p style={{ fontSize: 13, color: "var(--text)", opacity: 0.82, lineHeight: 1.5, flex: 1, margin: 0 }}>
         {tool.homeDescription}
       </p>
-      {(tool.requiresWrite || tool.requiresConfirmation) && (
+      {(tool.requiresWrite || tool.requiresConfirmation || note) && (
         <div className="chiprow" style={{ gap: 6, paddingTop: 2 }}>
           {tool.requiresWrite && (
             <span className="badge warn" title="This tool can change something on your Droplet.">
@@ -322,8 +327,40 @@ function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
               <ShieldCheck size={11} aria-hidden /> Asks first
             </span>
           )}
+          {note && <Badge kind="muted">{note}</Badge>}
         </div>
       )}
+    </>
+  );
+
+  // WARP-2969 — a tool chat cannot reach is READABLE but not actionable. The
+  // whole card used to be the "Use in chat" button regardless, so picking a
+  // withheld tool seeded the composer with a request that could only ever
+  // come back refused. It stays listed (MCP can still call it); it just stops
+  // being an offer.
+  if (note) {
+    return (
+      <div className="card ds-tool-card" style={CARD_STYLE}>
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={useInChat}
+      aria-label={`Use ${title} in chat`}
+      className="card hover ds-tool-card"
+      style={{
+        ...CARD_STYLE,
+        font: "inherit",
+        textAlign: "left",
+        width: "100%",
+        cursor: "pointer",
+      }}
+    >
+      {body}
     </button>
   );
 }

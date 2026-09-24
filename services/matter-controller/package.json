@@ -17,13 +17,13 @@
     "@matter/main": "0.17.9",
     "@matter/nodejs-ble": "0.17.9",
     "@project-chip/matter.js": "0.17.9",
-    "express": "^4.22.2",
+    "express": "^4.22.3",
     "pino": "^10.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
-    "@types/node": "^20.12.12",
+    "@types/node": "^20.19.43",
     "@types/supertest": "^7.2.1",
     "supertest": "^7.0.0",
     "tsx": "^4.23.13",

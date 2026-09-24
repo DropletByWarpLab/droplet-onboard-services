@@ -278,6 +278,41 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
       },
     ],
   },
+  // WARP-2977 (ADR-059 §6). Value-identical to the orchestrator's catalog:
+  // view and act floored at family (presence data — no guest tier), manage
+  // at admin (zones, hours and what counts as expected are business policy).
+  // Camera rows inside it still need a camera grant.
+  {
+    moduleId: "security",
+    label: "Security",
+    description: "One feed for cameras, camera health, and network warnings",
+    levels: [
+      {
+        value: "view",
+        label: "View",
+        grants: "The security feed, for the cameras they can already see",
+        minTier: FAMILY,
+        dropNoun: "See the security feed",
+        dropVerb: "see the security feed",
+      },
+      {
+        value: "act",
+        label: "Respond",
+        grants: "Everything in View, plus acknowledge and set the mode",
+        minTier: FAMILY,
+        dropNoun: "Respond to security events",
+        dropVerb: "respond to security events",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Zones, opening hours and what counts as expected",
+        minTier: ADMIN,
+        dropNoun: "Manage security",
+        dropVerb: "manage security",
+      },
+    ],
+  },
   {
     moduleId: "smart_home",
     label: "Devices",
@@ -1004,8 +1039,8 @@ export function roleToDraft(role: AccessRole): RoleDraft {
  *      group's gating feature is off.
  *   2. `originalToolGrants` carries the template's rows VERBATIM, and that is
  *      the only thing that can carry three of them. TOOL_DOMAIN_GROUPS covers
- *      16 of the 19 grantable domains — `money`, `team_chat` and `agent_runs`
- *      belong to NO group, and `draftToRolePayload` emits an ungrouped domain
+ *      16 of the 20 grantable domains — `money`, `team_chat`, `agent_runs`
+ *      and `routines` (WARP-2894) belong to NO group, and `draftToRolePayload` emits an ungrouped domain
  *      only from this array. blankRoleDraft sets it to [], which would silently
  *      drop a Bookkeeper's `money` tools and an Office Manager's `team_chat`
  *      tools on the way to the wire. (WARP-2760: `crm` was a fourth entry here

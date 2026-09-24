@@ -6,7 +6,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
+  cameraScopeOf,
   canAccessCamera,
+  canSeeFaceFolder,
+  inCameraScope,
+  narrowCameraFilter,
   principalFromRequest,
   filterVisibleCameras,
   requireCameraAccess,
@@ -33,13 +37,20 @@ function prismaWith(grantsByUser: Record<string, string[]>) {
       ),
     },
     user: {
-      findUnique: vi.fn(async ({ where }: { where: { nextcloudUsername: string } }) => {
+      findUnique: vi.fn(async ({ where }: { where: { nextcloudUsername?: string; id?: string } }) => {
+        if (where.id) {
+          const roles: Record<string, string> = { "u-sam": "family", "u-owner": "owner" };
+          return roles[where.id] ? { id: where.id, role: roles[where.id] } : null;
+        }
         const dir: Record<string, { id: string; role: string }> = {
           sam: { id: "u-sam", role: "family" },
           stefan: { id: "u-owner", role: "owner" },
         };
-        return dir[where.nextcloudUsername] ?? null;
+        return dir[where.nextcloudUsername ?? ""] ?? null;
       }),
+    },
+    cameraNotificationPref: {
+      deleteMany: vi.fn(async (args: unknown) => args),
     },
     $transaction: vi.fn(async (ops: unknown[]) => ops),
   } as never;
@@ -120,9 +131,9 @@ describe("the camera list agrees with what playback allows", () => {
 
 describe("the route guard", () => {
   function run(user: unknown, name: string, prisma = PRISMA()) {
-    const req = { params: { name }, user } as never;
+    const req = { params: { name }, user, route: { path: "/cameras/:name" } } as never;
     const json = vi.fn();
-    const res = { status: vi.fn(() => ({ json })), json } as never;
+    const res = { status: vi.fn(() => ({ json })), json, locals: {} } as never;
     const next = vi.fn();
     return { promise: requireCameraAccess(prisma)(req, res, next), res, next, json };
   }
@@ -239,5 +250,153 @@ describe("principalFromRequest", () => {
       header: () => "   ",
     });
     expect(p.assertedNextcloudUser).toBeNull();
+  });
+});
+
+describe("WARP-2982: the guard covers routes that name no camera", () => {
+  const EVENTS: Record<string, string> = { "ev-front": "front_door", "ev-bed": "bedroom" };
+  const REVIEWS: Record<string, string> = { "rv-front": "front_door", "rv-bed": "bedroom" };
+  const resolvers = {
+    eventCamera: vi.fn(async (id: string) => EVENTS[id] ?? null),
+    reviewCamera: vi.fn(async (id: string) => REVIEWS[id] ?? null),
+  };
+
+  function run(
+    user: unknown,
+    params: Record<string, string>,
+    routePath: string,
+    opts: { resolvers?: typeof resolvers | Record<string, never>; prisma?: unknown } = {},
+  ) {
+    const req = { params, user, route: { path: routePath } } as never;
+    const json = vi.fn();
+    const status = vi.fn(() => ({ json }));
+    const res = { status, json, locals: {} as Record<string, unknown> };
+    const next = vi.fn();
+    requireCameraAccess(
+      (opts.prisma ?? PRISMA()) as never,
+      (opts.resolvers ?? resolvers) as never,
+    )(req, res as never, next);
+    return { res, status, next };
+  }
+
+  it("leaves the resolved scope for a cross-camera handler to narrow with", async () => {
+    const { res, next } = run(SAM, {}, "/cameras/events");
+    await vi.waitFor(() => expect(next).toHaveBeenCalled());
+    expect([...(cameraScopeOf(res as never) as Set<string>)].sort()).toEqual([
+      "driveway",
+      "front_door",
+    ]);
+  });
+
+  it("resolves an event id to its camera and 404s one on an ungranted camera", async () => {
+    const ok = run(SAM, { eventId: "ev-front" }, "/cameras/events/:eventId/thumbnail");
+    await vi.waitFor(() => expect(ok.next).toHaveBeenCalled());
+
+    const denied = run(SAM, { eventId: "ev-bed" }, "/cameras/events/:eventId/thumbnail");
+    await vi.waitFor(() => expect(denied.status).toHaveBeenCalledWith(404));
+    expect(denied.next).not.toHaveBeenCalled();
+  });
+
+  it("answers an unknown event id exactly like a forbidden one", async () => {
+    const { status, next } = run(SAM, { eventId: "ev-nope" }, "/cameras/events/:eventId/snapshot");
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(404));
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("resolves a review id to its camera", async () => {
+    const ok = run(SAM, { reviewId: "rv-front" }, "/cameras/reviews/:reviewId/preview");
+    await vi.waitFor(() => expect(ok.next).toHaveBeenCalled());
+    const denied = run(SAM, { reviewId: "rv-bed" }, "/cameras/reviews/:reviewId/preview");
+    await vi.waitFor(() => expect(denied.status).toHaveBeenCalledWith(404));
+  });
+
+  it("does not look the event up for an owner — no extra Frigate hop", async () => {
+    const { next } = run(OWNER, { eventId: "ev-bed" }, "/cameras/events/:eventId/thumbnail");
+    await vi.waitFor(() => expect(next).toHaveBeenCalled());
+    expect(resolvers.eventCamera).not.toHaveBeenCalled();
+  });
+
+  it("reads :name as a camera only on /cameras/:name routes", async () => {
+    // /cameras/faces/:name names a PERSON; treating it as a camera would
+    // 404 every face route for a scoped user.
+    const { next } = run(
+      SAM,
+      { name: "bedroom", eventId: "ev-front" },
+      "/cameras/faces/:name/from-event/:eventId",
+    );
+    await vi.waitFor(() => expect(next).toHaveBeenCalled());
+  });
+
+  it("fails CLOSED when an id route has no resolver wired", async () => {
+    const { status, next } = run(
+      SAM,
+      { eventId: "ev-front" },
+      "/cameras/events/:eventId/thumbnail",
+      { resolvers: {} },
+    );
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(503));
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("refuses to hand a handler a scope the guard never resolved", () => {
+    expect(() => cameraScopeOf({ locals: {} } as never)).toThrow(/cameraAccessGuard/);
+  });
+});
+
+describe("WARP-2982: narrowing a camera filter to the scope", () => {
+  it("passes an owner's filter through untouched", () => {
+    expect(narrowCameraFilter("all", undefined)).toBeUndefined();
+    expect(narrowCameraFilter("all", ["bedroom"])).toEqual(["bedroom"]);
+  });
+
+  it("turns 'no filter' into exactly the granted cameras", () => {
+    expect(narrowCameraFilter(new Set(["front_door"]), undefined)).toEqual(["front_door"]);
+  });
+
+  it("drops requested cameras outside the scope, down to an empty list", () => {
+    const scope = new Set(["front_door"]);
+    expect(narrowCameraFilter(scope, ["front_door", "bedroom"])).toEqual(["front_door"]);
+    // [] is "nothing" — the Frigate client answers it without querying.
+    expect(narrowCameraFilter(scope, ["bedroom"])).toEqual([]);
+  });
+
+  it("scopes membership", () => {
+    expect(inCameraScope("all", "bedroom")).toBe(true);
+    expect(inCameraScope(new Set(["front_door"]), "bedroom")).toBe(false);
+  });
+});
+
+describe("WARP-3013: Frigate's `train` face folder", () => {
+  it("is visible only to an all-camera scope", () => {
+    expect(canSeeFaceFolder("all", "train")).toBe(true);
+    expect(canSeeFaceFolder(new Set(["front_door", "bedroom"]), "train")).toBe(false);
+    expect(canSeeFaceFolder(new Set(), "train")).toBe(false);
+  });
+
+  it("leaves the curated roster household-wide", () => {
+    expect(canSeeFaceFolder(new Set(), "Alice")).toBe(true);
+    // Folder names are case-sensitive on the box's filesystem: `Train` is a
+    // person someone named, not Frigate's crop folder.
+    expect(canSeeFaceFolder(new Set(), "Train")).toBe(true);
+  });
+});
+
+describe("WARP-2982: revoking a camera stops its push notifications", () => {
+  it("deletes the person's prefs on cameras they no longer hold", async () => {
+    const prisma = PRISMA();
+    await setGrantsForUser(prisma, "u-sam", ["driveway"]);
+    expect(
+      (prisma as unknown as { cameraNotificationPref: { deleteMany: ReturnType<typeof vi.fn> } })
+        .cameraNotificationPref.deleteMany,
+    ).toHaveBeenCalledWith({ where: { userId: "u-sam", cameraId: { notIn: ["id-driveway"] } } });
+  });
+
+  it("leaves an owner's prefs alone — owners draw no access from grants", async () => {
+    const prisma = PRISMA();
+    await setGrantsForUser(prisma, "u-owner", []);
+    expect(
+      (prisma as unknown as { cameraNotificationPref: { deleteMany: ReturnType<typeof vi.fn> } })
+        .cameraNotificationPref.deleteMany,
+    ).not.toHaveBeenCalled();
   });
 });

@@ -106,47 +106,43 @@ and the argument hash is computed over untouched tool arguments.
 
 If the token verifies, the interceptor spends it and the handler runs.
 
-### The legacy confirming call — `confirmed: true`
+### `confirmed: true` approves nothing (WARP-2002)
 
-The chat surface cannot carry a token back. `_meta` is set by the
-orchestrator; the thing that re-issues a confirming call is the *model*,
-and it only ever sees a tool's own input schema. Requiring the secret
-there would make all 16 hand-rolled two-phase tools challenge forever —
-a production break, and a violation of "all 37 still complete their
-two-phase flow".
+Until WARP-2002 a second confirming shape was accepted: `confirmed: true`
+against a *live challenge* for the same tool and arguments. It was retired
+because the live challenge was the one the interceptor had just minted in
+reply to the model's own first call, so the model could re-issue the call
+with the flag set, in the same turn, and write with no human involved:
 
-So a second confirming shape is accepted, for tools whose input schema
-**declares `confirmed`** (i.e. the ones that already had a working
-two-phase contract):
-
-```jsonc
-{ "name": "memory_forget", "arguments": { "id": "f1", "confirmed": true } }
+```text
+model → remove_device{nodeId:7}                  → challenged
+model → remove_device{nodeId:7, confirmed:true}  → accepted, device unpaired
 ```
 
-This is accepted **only against a live challenge**. The interceptor must
-have challenged this exact tool with these exact arguments, within the
-TTL, and the challenge is spent on use. So:
+Binding, expiry and single use did not help, because the model supplied
+both halves. Since #1830 (§14), chat has a real token path, so the
+workaround is no longer needed.
 
-- `confirmed: true` on a call nothing challenged is **refused**;
-- a challenge for `delete_file("/tmp/x")` cannot approve
-  `delete_file("/payroll")`;
-- a challenge for one tool cannot approve another;
-- one thumbs-up cannot drive two writes;
-- an approval offered long after the challenge is refused.
+Now a confirming call is admitted **only** by a verified token on `_meta`.
+Tokens reach `_meta` only from a human decision:
 
-It is **weaker than the token** and says so: it proves the call was
-challenged, not that the approver held a secret — the model can emit the
-boolean itself. It is **strictly stronger than what shipped before**,
-which accepted the bare boolean with no challenge, no binding, no expiry
-and no single-use.
+- the chat grant, `POST /api/llm/confirm/:challengeId` (§14);
+- the parked-run confirm route, `/api/agent-runs/:id/confirm`;
+- an external MCP client's own approval UI.
 
-**Tools with no handler-side gate get no legacy path.** The 8 registry
-tools listed in §7 and every WARP-320 remote tool must present a real
-token. Fail-closed is the correct direction for a write that nothing was
-guarding.
+A call carrying `confirmed: true` and no token gets a fresh challenge.
+Surfaces with no approval channel (voice, ToolSpec runs) fail closed.
 
-Retiring the legacy path means giving the chat surface a way to return a
-token from a human approval — see §13.
+`confirmed` stays excluded from the binding hash (§4), so a human-approved
+token still matches a re-issue that carries the flag. Tools whose schema
+declares `confirmed` still receive `confirmed: true` from the interceptor
+on a verified token (§5), so their own gates pass.
+
+The model also never *sees* a token. The agent loop replaces every
+`confirmationToken` in a challenge with `[withheld]` before appending the
+tool result to the model's context (`redactConfirmationTokensForModel`).
+Otherwise the model could repeat it into the transcript, which is the
+#1830 leak class.
 
 ## 4. Argument binding
 
@@ -412,7 +408,6 @@ model or the interceptor produces reaches the store by itself. That is
 the same reasoning §3 gives, now with a human in the middle instead of a
 missing arrow.
 
-What remains open: the legacy `confirmed: true` acceptance (§3) is not
-yet retired, so the hand-rolled two-phase tools still complete that way.
-Route-owned tools (§13) never enter this flow at all — their approval
+The legacy `confirmed: true` acceptance was retired by WARP-2002 (§3):
+this round-trip is now the only way a chat write completes. Route-owned tools (§13) never enter this flow at all — their approval
 happens in the dashboard, on the route's own token.

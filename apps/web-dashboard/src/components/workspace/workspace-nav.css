@@ -1,0 +1,495 @@
+/* ============================================================
+   Droplet — Workspace navigation layout (WARP-2971).
+
+   The handoff's three-level top-tab shell, built on the SAME indigo token
+   ramp as every shell page: `.droplet-workspace` is a token scope declared
+   in `components/shell/indigo-tokens.css` next to `.droplet-shell`, so
+   nothing below names a colour, radius or easing — it reads the ramp, and
+   the dark theme arrives through `.dark .droplet-workspace` for free.
+
+   Every class carries the `ws-` prefix; the three overrides at the bottom
+   that reach into pages are scoped under `.droplet-workspace` and exist
+   only because those pages size themselves to the viewport.
+
+   Chrome geometry (kept in the two custom properties so the viewport-locked
+   pages can subtract it):
+     desktop  header 56 + spaces 46 + chips 52 = 154 on top, strip 32 below
+     phone    header 56 + chips 52 = 108 on top, tab bar 56 + safe area below
+   ============================================================ */
+
+.droplet-workspace {
+  --ws-top: 154px;
+  --ws-bottom: 32px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+/* Paint the desk on <body> as the shell pages do (`body:has(.droplet-shell)`
+   in droplet-shell.css) — the tokens are scoped, so the hex pair is restated
+   here in lockstep with indigo-tokens.css, exactly as that file does. */
+body:has(.droplet-workspace) {
+  background: #f5f6fb;
+}
+.dark body:has(.droplet-workspace) {
+  background: #0f1117;
+}
+
+/* ── Sticky chrome: header + spaces + chips ─────────────────────────── */
+.ws-chrome {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+.ws-head {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+}
+.ws-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-input);
+  color: var(--brand);
+  flex: none;
+}
+.ws-mark:focus-visible,
+.ws-icon-btn:focus-visible,
+.ws-space:focus-visible,
+.ws-chip:focus-visible,
+.ws-view:focus-visible,
+.ws-bottom-item:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+.ws-greet {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  flex: none;
+  white-space: nowrap;
+  min-width: 0;
+}
+.ws-greet .g {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.ws-greet .g b {
+  color: var(--text);
+  font-weight: 600;
+}
+.ws-greet .d {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 1px;
+}
+.ws-spring {
+  flex: 1;
+  min-width: 8px;
+}
+.ws-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--text);
+  flex: none;
+  white-space: nowrap;
+}
+.ws-status .dot,
+.ws-strip-health .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  flex: none;
+}
+/* Same three tones the shell chip uses (droplet-shell.css `.pt-chip.is-*`). */
+.ws-status.is-degraded .dot,
+.ws-strip-health.is-degraded .dot {
+  background: #d9a35c;
+}
+.ws-status.is-down .dot,
+.ws-strip-health.is-down .dot {
+  background: #ef4444;
+}
+.ws-status.is-unknown .dot,
+.ws-strip-health.is-unknown .dot {
+  background: var(--text-muted);
+}
+.ws-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: none;
+}
+.ws-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-size: 11.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.ws-user-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-input);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  transition: background 180ms var(--ease), color 180ms var(--ease);
+}
+.ws-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.ws-icon-btn:active {
+  transform: scale(0.96);
+}
+
+/* ── Level 1: space tabs ─────────────────────────────────────────────── */
+.ws-spaces {
+  height: 46px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ws-spaces::-webkit-scrollbar {
+  display: none;
+}
+.ws-space {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.1px;
+  color: var(--text-muted);
+  padding: 0 14px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 180ms var(--ease);
+}
+.ws-space:hover {
+  color: var(--text);
+}
+.ws-space.is-active {
+  font-weight: 600;
+  color: var(--text);
+  border-bottom-color: var(--brand);
+}
+/* Attention dot — derived from the chips' badges (teamChatUnread today);
+   omitted entirely when nothing needs attention. */
+.ws-attn {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand);
+  flex: none;
+}
+
+/* ── Level 2: destination chips ──────────────────────────────────────── */
+.ws-chips {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ws-chips::-webkit-scrollbar {
+  display: none;
+}
+.ws-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 13px;
+  border-radius: var(--radius-pill);
+  color: var(--nav-link);
+  white-space: nowrap;
+  text-decoration: none;
+  transition: background 180ms var(--ease), color 180ms var(--ease);
+}
+.ws-chip:hover {
+  background: var(--hover);
+}
+.ws-chip.is-active {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+/* The Sidebar's NavBadge rides along; on the brand fill its accent tint would
+   vanish, so the active chip re-inks it. `ml-auto` is a no-op in a chip. */
+.ws-chip.is-active [aria-hidden="true"] {
+  background: rgba(255, 255, 255, 0.22);
+  color: inherit;
+}
+
+/* ── Level 3: view pills — top of the page column ───────────────────── */
+.ws-views {
+  padding: 16px 36px 0;
+}
+.ws-views-inner {
+  max-width: 1160px;
+  margin: 0 auto;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ws-views-inner::-webkit-scrollbar {
+  display: none;
+}
+.ws-view {
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 7px 13px;
+  border-radius: var(--radius-input);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--nav-link);
+  white-space: nowrap;
+  text-decoration: none;
+  transition: background 180ms var(--ease), color 180ms var(--ease),
+    border-color 180ms var(--ease);
+}
+.ws-view:hover {
+  background: var(--surface-2);
+}
+.ws-view.is-active {
+  background: var(--brand-subtle);
+  border-color: color-mix(in srgb, var(--brand) 35%, transparent);
+  color: var(--brand-deep);
+}
+
+/* ── Page column ─────────────────────────────────────────────────────── */
+.ws-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ws-main:focus {
+  outline: none;
+}
+
+/* ── Status strip (desktop) ──────────────────────────────────────────── */
+.ws-strip {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ws-strip-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.ws-strip-meta,
+.ws-strip-keys {
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.ws-strip-keys {
+  color: var(--text-faint);
+}
+
+/* ── Phone tab bar ───────────────────────────────────────────────────── */
+.ws-bottom {
+  display: none;
+}
+
+@media (max-width: 1023.98px) {
+  .droplet-workspace {
+    --ws-top: 108px;
+    --ws-bottom: calc(56px + env(safe-area-inset-bottom));
+  }
+  .ws-spaces,
+  .ws-strip,
+  .ws-user-name {
+    display: none;
+  }
+  .ws-status .lbl {
+    display: none;
+  }
+  .ws-status {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+  /* The header keeps mark · greeting · health dot · avatar · sign out. The
+     greeting is the one flexible thing: it takes the width the fixed-size
+     controls leave and ellipsizes, so the row can never push the document
+     wider than the phone (measured 472px on a 375px viewport before this). */
+  .ws-head {
+    gap: 10px;
+    padding: 0 16px;
+  }
+  .ws-greet {
+    flex: 1 1 auto;
+  }
+  .ws-greet .g,
+  .ws-greet .d {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ws-head .ws-spring {
+    display: none;
+  }
+  .ws-chips {
+    padding: 0 16px;
+  }
+  .ws-views {
+    padding: 12px 16px 0;
+  }
+  .ws-main {
+    padding-bottom: var(--ws-bottom);
+  }
+  .ws-bottom {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 40;
+    display: flex;
+    align-items: stretch;
+    height: 56px;
+    padding-bottom: env(safe-area-inset-bottom);
+    box-sizing: content-box;
+    border-top: 1px solid var(--border);
+    background: var(--glass);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+  }
+  .ws-bottom-item {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    min-height: 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    border: 0;
+    background: none;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 180ms var(--ease);
+  }
+  .ws-bottom-item span:not(.ws-attn) {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ws-bottom-item.is-active {
+    color: var(--brand);
+  }
+  .ws-bottom-item .ws-attn {
+    position: absolute;
+    top: 8px;
+    right: calc(50% - 16px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-space,
+  .ws-chip,
+  .ws-view,
+  .ws-icon-btn,
+  .ws-bottom-item {
+    transition: none;
+  }
+}
+
+/* ── Pages under this shell ──────────────────────────────────────────────
+   Three reaches into page styling, each because the page assumed the
+   sidebar layout's geometry:
+
+   1. ShellPage's slim `.page-top` (section label + health chip) duplicates
+      the header + chips above it — hidden here; the page's `Phead` is the
+      handoff's page head.
+   2. The Home board's own greeting + status chip duplicate the header —
+      hidden; its edit/density buttons stay.
+   3. Surfaces that lock to the viewport (`100dvh`) must subtract this
+      shell's chrome or their bottom (the chat composer, the email preview)
+      falls below the fold. Each keeps its own formula, minus the chrome. */
+.droplet-workspace .droplet-shell .page-top {
+  display: none;
+}
+.droplet-workspace .droplet-home .dh-greet,
+.droplet-workspace .droplet-home .dh-m-greet,
+.droplet-workspace .droplet-home .dh-status-chip {
+  display: none;
+}
+.droplet-workspace .droplet-shell.chat-app,
+.droplet-workspace .droplet-shell.email-app {
+  height: calc(100dvh - var(--ws-top) - var(--ws-bottom));
+}
+@media (min-width: 1024px) {
+  .droplet-workspace .droplet-home {
+    height: calc(100dvh - var(--ws-top) - var(--ws-bottom));
+  }
+}

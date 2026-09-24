@@ -220,3 +220,34 @@ describe("describeRoutine", () => {
     expect(r.actions).toEqual(["run a step this box cannot read"]);
   });
 });
+
+describe("describeRoutine — transform / when steps (WARP-2895)", () => {
+  const steps: RoutineStep[] = [
+    callStep(0, "list_recent_files", "recent"),
+    { id: "s1", idx: 1, kind: "transform", args: { code: "output = len(inputs['recent'])", inputs: { recent: "${steps.recent}" }, as: "n" } },
+    { id: "s2", idx: 2, kind: "when", args: { code: "output = inputs['n'] > 0", inputs: { n: "${steps.n}" } } },
+    { id: "s3", idx: 3, kind: "summarize", args: {} },
+  ];
+
+  it("says the routine runs code, and carries the code for the promote screen", () => {
+    const r = describeRoutine({ steps, catalog: CATALOG, writes: false, reversible: true });
+    expect(r.actions).toEqual([
+      "read your recent files",
+      "run code you wrote to shape the results",
+      "run code you wrote to decide whether to continue",
+      "write you a summary of what it found",
+    ]);
+    expect(r.code).toEqual([
+      { kind: "transform", code: "output = len(inputs['recent'])" },
+      { kind: "when", code: "output = inputs['n'] > 0" },
+    ]);
+    // A transform dispatches no tool: it can never appear among the writers.
+    expect(r.writeTools).toEqual([]);
+    expect(r.impact).toBe("reads");
+  });
+
+  it("carries no code for a routine without such steps", () => {
+    const r = describeRoutine({ steps: [callStep(0, "list_recent_files")], catalog: CATALOG, writes: false, reversible: true });
+    expect(r.code).toEqual([]);
+  });
+});

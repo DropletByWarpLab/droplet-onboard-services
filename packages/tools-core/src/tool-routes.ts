@@ -489,4 +489,10 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // behalf of the named chat user (requireRoleOrMcpService).
   { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
   { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs")] },
+  // WARP-2894 — the ToolSpec router admits the mcp principal on exactly these
+  // three routes and resolves the acting human from X-Nextcloud-User /
+  // onBehalfOf (routes/tools.ts resolveActor); the other seven stay browser-only.
+  { tool: "routine_draft", client: "orchestrator", hops: [admit("post", "/api/tools")] },
+  { tool: "routine_list", client: "orchestrator", hops: [admit("get", "/api/tools")] },
+  { tool: "routine_run", client: "orchestrator", hops: [admit("post", "/api/tools/:slug/runs")] },
 ];

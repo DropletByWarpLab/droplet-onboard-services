@@ -10,6 +10,7 @@ import request from "supertest";
 import { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
+import { completeOnce } from "../services/llm-complete.service.js";
 import { initDeviceService } from "../services/device.service.js";
 
 vi.mock("../middleware/auth.js", () => ({
@@ -112,11 +113,85 @@ function okChatResponse(content: string, model = "mistral:7b-instruct") {
   };
 }
 
+/** Same, minus `finish_reason` — some providers omit it entirely. */
+function okChatResponseNoFinish(content: string) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      id: "cmpl-1",
+      object: "chat.completion",
+      model: "m",
+      choices: [{ index: 0, message: { role: "assistant", content } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+  };
+}
+
 // The route resolves the default model from env at request time; clear the
 // triad's env vars per test so each case is deterministic regardless of
 // the host shell / .env.
 const MODEL_ENV_KEYS = ["DEFAULT_MODEL", "LLM_MODEL"] as const;
 let savedEnv: Record<string, string | undefined> = {};
+
+/**
+ * WARP-2964 — `completeOnce` called directly, because the route only ever
+ * forwards `content`/`model` and the bug lived in what it DROPPED: a
+ * reasoning model can spend its whole budget in the analysis channel and
+ * hand back `content:""` with `finish_reason:"length"`. Without the
+ * provider's verdict the caller cannot tell that from a quiet answer.
+ */
+describe("completeOnce", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("surfaces the reasoning channel and finish_reason alongside empty content", async () => {
+    mockChat.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: "cmpl-1",
+        object: "chat.completion",
+        model: "gpt-oss:20b",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "", reasoning_content: "thinking…" },
+            finish_reason: "length",
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 700, total_tokens: 701 },
+      }),
+    });
+
+    await expect(completeOnce({ text: "hi", model: "gpt-oss:20b" })).resolves.toEqual({
+      content: "",
+      model: "gpt-oss:20b",
+      reasoning: "thinking…",
+      finishReason: "length",
+    });
+  });
+
+  it("defaults reasoning to '' and finishReason to null when the provider omits them", async () => {
+    mockChat.mockResolvedValueOnce(okChatResponseNoFinish("Hello"));
+    const r = await completeOnce({ text: "hi", model: "m" });
+    expect(r.reasoning).toBe("");
+    expect(r.finishReason).toBeNull();
+  });
+
+  it("forwards reasoningEffort as `reasoning_effort` on the gateway body", async () => {
+    mockChat.mockResolvedValueOnce(okChatResponse("Hello"));
+    await completeOnce({ text: "hi", model: "gpt-oss:20b", reasoningEffort: "low" });
+    expect(mockChat.mock.calls[0][0].reasoning_effort).toBe("low");
+  });
+
+  it("sends NO `reasoning_effort` key when unset — every other call stays byte-for-byte", async () => {
+    mockChat.mockResolvedValueOnce(okChatResponse("Hello"));
+    await completeOnce({ text: "hi", model: "m" });
+    expect(Object.keys(mockChat.mock.calls[0][0])).not.toContain("reasoning_effort");
+  });
+});
 
 describe("POST /api/llm/complete", () => {
   let app: ReturnType<typeof createApp>;

@@ -317,7 +317,7 @@ export default function RecordingsPage() {
             setHour(null);
           }}
           max={localDayString(new Date())}
-          className="flex-1 h-9 px-3 type-subheadline outline-none focus:border-[var(--brand)]"
+          className="flex-1 h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
           style={{
             background: "var(--surface)",
             border: "1px solid var(--border)",

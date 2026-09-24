@@ -47,6 +47,10 @@ import { TOOLS, type ToolDomain } from "@droplet/tools-core";
 import { createLogger } from "../lib/logger.js";
 import type { McpToolDescriptor } from "./mcp-client.port.js";
 import {
+  recordDiscoveredRemoteTools,
+  type ClassificationPrisma,
+} from "./remote-tool-classification.service.js";
+import {
   parseNamespacedToolName,
   type McpToolMultiplexer,
   type RemoteRejection,
@@ -287,6 +291,15 @@ export interface AttachAtlassianDeps {
   openCredentials?: (connectionId: string, blob: string) => Record<string, string>;
   registry?: RemoteCatalogSyncOptions["registry"];
   /**
+   * WARP-2426 — records every advertised tool as a confirming write (the one
+   * import path into `RemoteToolClassification`). Injectable so the attach
+   * tests keep their narrow prisma; defaults to the real writer, which needs
+   * the wider client in `classificationPrisma`.
+   */
+  recordClassifications?: (serverId: string, tools: McpToolDescriptor[]) => Promise<unknown>;
+  /** The Prisma surface the default `recordClassifications` writes through. */
+  classificationPrisma?: ClassificationPrisma;
+  /**
    * WARP-2651 — the catalog a previous attach vetted, handed to the bridge so
    * a RE-open still detects a surface that moved while we were apart.
    *
@@ -486,6 +499,40 @@ export async function attachAtlassianRemote(
     operatorDomain: ATLASSIAN_OPERATOR_DOMAIN,
     ...(deps.registry ? { registry: deps.registry } : {}),
   });
+
+  // WARP-2426 — every tool the server advertised (the vetted catalog,
+  // shadowed names included: a person may want to block one) lands in the
+  // classification record as a confirming write, keyed by WIRE name — the
+  // multiplexer's catalog carries the NAMESPACED name, and the call policy
+  // looks rows up by `(serverId, wireName)`; recording the namespaced form
+  // would leave every row unmatchable and every tool "unclassified" forever
+  // (the attach test pins the names that cross). The attach does not fail if
+  // the record write does: a tool with no row is refused at dispatch as
+  // unclassified, so the failure costs capability, never safety — and it is
+  // logged at error so it costs it loudly.
+  const advertised = deps.mux.remoteCatalog(serverId).map((t) => ({
+    ...t,
+    name: parseNamespacedToolName(t.name)?.wireName ?? t.name,
+  }));
+  const record =
+    deps.recordClassifications ??
+    (deps.classificationPrisma
+      ? (id: string, tools: McpToolDescriptor[]) =>
+          recordDiscoveredRemoteTools(
+            deps.classificationPrisma as ClassificationPrisma,
+            id,
+            tools.map((t) => ({ wireName: t.name, description: t.description })),
+          )
+      : undefined);
+  if (record) {
+    try {
+      await record(serverId, advertised);
+    } catch (err) {
+      logger.error({ err, serverId, tools: advertised.length }, "remote_tool_classification_record_failed");
+    }
+  } else {
+    logger.error({ serverId, tools: advertised.length }, "remote_tool_classification_recorder_missing");
+  }
   const vettedTools = client.lastAdvertisedToolNames();
   // An EMPTY list here is not a vetted surface. `lastAdvertisedToolNames()` is
   // set only by a listing that succeeded, and the multiplexer swallows a

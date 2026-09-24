@@ -59,6 +59,8 @@ const SERVICE_LABELS: Record<string, string> = {
   display: "Front display",
   // WARP-1146 — degraded/failed RAID pools surface through the monitor.
   storage: "Storage pools",
+  // WARP-2548 — the MQTT broker the services message over.
+  mqtt: "Messaging (MQTT broker)",
 };
 
 function serviceLabel(name: string): string {
@@ -172,13 +174,18 @@ function HealthBody({ health }: { health: SystemHealth }) {
                 />
                 <span className="rt">
                   <span className="nm">{serviceLabel(c.name)}</span>
+                  {/* WARP-2548 — say WHY a service is down (the probe's
+                      error summary), so a crash-looping broker reads as
+                      "connect ECONNREFUSED …" rather than a bare red dot. */}
+                  {!up && c.error && <span className="sub mono">{c.error}</span>}
                 </span>
                 {/* WARP-1146 — a flagged storage pool is actionable: point the
-                    owner straight at the Drives page that shows which pool
-                    dropped a member and what to do about it. */}
+                    owner straight at the storage page that shows which pool
+                    dropped a member and what to do about it. (WARP-2959 moved
+                    it to Settings → Storage.) */}
                 {c.name === "storage" && !up && (
                   <Link
-                    href="/files/drives"
+                    href="/settings/storage"
                     className="rmeta text-[var(--brand)]"
                     style={{ textDecoration: "none" }}
                   >

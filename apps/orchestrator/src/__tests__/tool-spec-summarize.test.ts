@@ -211,6 +211,32 @@ describe("summarize step (WARP-1996)", () => {
     expect(outcome.trace).toHaveLength(1);
   });
 
+  it("carries the summarizer's attributed message verbatim into the trace and the row", async () => {
+    // WARP-2964 — the summarizer now names WHY the answer was empty
+    // (finish_reason, reasoning size). That string is the whole diagnostic,
+    // and it reaches the owner through these two fields with no schema
+    // change, so nothing along the way may reword or truncate it.
+    const attributed =
+      "the model returned an empty summary (model=gpt-oss:20b finish_reason=length reasoning_chars=2518)";
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async () => {
+        throw new Error(attributed);
+      }),
+    };
+    const p = fakePrisma();
+
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [summarizeStep(7)],
+      triggeredBy: null,
+      summarizer,
+    });
+
+    expect(outcome.trace[0].error).toBe(attributed);
+    expect(p.created[0].error).toBe(`step 7 (summarize): ${attributed}`);
+  });
+
   it("contributes NO tool name to the pre-flight — there is nothing to authorize", () => {
     // If a summarize step leaked a name into this list, the §3 pre-flight
     // would try to authorize a tool that does not exist and refuse the spec.
@@ -248,5 +274,128 @@ describe("summarize step (WARP-1996)", () => {
     expect(outcome.status).toBe("ok");
     expect(outcome.trace).toHaveLength(1);
     expect(outcome.trace[0].tool).toBe("get_system_health");
+  });
+});
+
+describe("optional steps — one unreadable source does not kill the narrative", () => {
+  const optionalStep = (idx: number, tool: string) => ({
+    id: `s${idx}`,
+    idx,
+    kind: "call",
+    args: { tool, args: {}, optional: true },
+  });
+
+  it("records a failed OPTIONAL step and keeps walking to the summarize step", async () => {
+    // The daily report reads sources a box may not have (no cameras, no
+    // ERP). Before this, the first such failure halted the run and the tile
+    // showed "Couldn't write the report" with no prose at all.
+    const summarizer: Summarizer = { summarize: vi.fn(async () => "prose") };
+    const dispatcher: StepDispatcher = {
+      call: vi.fn(async (tool: string) => {
+        if (tool === "get_camera_health") throw new Error("no cameras configured");
+        return { ok: true };
+      }),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcher, {
+      specId: "s",
+      specName: "n",
+      steps: [
+        optionalStep(0, "get_system_health"),
+        optionalStep(1, "get_camera_health"),
+        optionalStep(2, "list_recent_files"),
+        summarizeStep(3),
+      ],
+      triggeredBy: null,
+      summarizer,
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.trace.map((t) => [t.tool, t.ok])).toEqual([
+      ["get_system_health", true],
+      ["get_camera_health", false],
+      ["list_recent_files", true],
+      [SUMMARIZE_PSEUDO_TOOL, true],
+    ]);
+    // The failure is a FACT the summarizer sees, not something dropped.
+    const facts = (summarizer.summarize as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(facts.find((f: { tool: string }) => f.tool === "get_camera_health")).toMatchObject({
+      ok: false,
+      error: "no cameras configured",
+    });
+  });
+
+  it("leaves a deterministic signal when an optional read failed: activity `warn` + refs.failedSteps", async () => {
+    // Run `ok`, HTTP 200, chip dropped — without this the only trace of a
+    // Nextcloud outage was the model's choice of words.
+    const summarizer: Summarizer = { summarize: vi.fn(async () => "prose") };
+    const dispatcher: StepDispatcher = {
+      call: vi.fn(async (tool: string) => {
+        if (tool === "list_recent_files") throw new Error("nextcloud returned 503");
+        return { ok: true };
+      }),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcher, {
+      specId: "s",
+      specName: "n",
+      steps: [optionalStep(0, "get_system_health"), optionalStep(1, "list_recent_files"), summarizeStep(2)],
+      triggeredBy: null,
+      summarizer,
+    });
+    expect(outcome.status).toBe("ok");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: "warn",
+        refs: expect.objectContaining({ status: "ok", failedSteps: ["list_recent_files"] }),
+      }),
+    );
+  });
+
+  it("emits no failedSteps and stays `ok` severity when every step succeeded", async () => {
+    const p = fakePrisma();
+    await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [optionalStep(0, "get_system_health")],
+      triggeredBy: null,
+    });
+    const call = recordActivityMock.mock.calls[0][0];
+    expect(call.severity).toBe("ok");
+    expect(call.refs).not.toHaveProperty("failedSteps");
+  });
+
+  it("still HALTS on a failed step that is not marked optional", async () => {
+    const summarizer: Summarizer = { summarize: vi.fn(async () => "prose") };
+    const dispatcher: StepDispatcher = {
+      call: vi.fn(async () => {
+        throw new Error("boom");
+      }),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcher, {
+      specId: "s",
+      specName: "n",
+      steps: [callStep(0, "get_system_health"), summarizeStep(1)],
+      triggeredBy: null,
+      summarizer,
+    });
+    expect(outcome.status).toBe("failed");
+    expect(summarizer.summarize).not.toHaveBeenCalled();
+  });
+
+  it("forwards the caller's identity to every tool call when given one", async () => {
+    // Per-user tools (calendar, email) are `ctx.userId`-gated; without this
+    // a spec run could never read anything the person had connected.
+    const dispatcher: StepDispatcher = { call: vi.fn(async () => ({})) };
+    const p = fakePrisma();
+    await runToolSpec(p.client, dispatcher, {
+      specId: "s",
+      specName: "n",
+      steps: [callStep(0, "list_events")],
+      triggeredBy: "romain",
+      callContext: { userId: "romain", userRole: "owner" },
+    });
+    expect(dispatcher.call).toHaveBeenCalledWith("list_events", {}, { userId: "romain", userRole: "owner" });
   });
 });

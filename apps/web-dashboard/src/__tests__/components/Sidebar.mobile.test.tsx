@@ -199,24 +199,33 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     expect(within(dialog).getByRole("link", { name: /events/i })).toHaveAttribute("href", "/events");
     expect(within(dialog).getByRole("link", { name: /network/i })).toHaveAttribute("href", "/network");
     expect(within(dialog).getByRole("link", { name: /remote access/i })).toHaveAttribute("href", "/remote-access");
-    expect(within(dialog).getByRole("link", { name: /users/i })).toHaveAttribute("href", "/users");
-    expect(within(dialog).getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
+    expect(within(dialog).getByRole("link", { name: /^settings$/i })).toHaveAttribute("href", "/settings");
+
+    // WARP-2967 — and NOT the sixteen destinations that moved behind Settings.
+    // The drawer flattens the nav definition, so a tuck that only held on the
+    // desktop aside would show up right here.
+    for (const href of ["/users", "/admin", "/tools", "/models", "/health", "/help", "/trust", "/downloads", "/integrations", "/routines", "/workshop", "/admin/audit"])
+      expect(dialog.querySelector(`a[href='${href}']`), href).toBeNull();
   });
 
   // ── WARP-1554 ────────────────────────────────────────────────────────
   // /files owns a bottom tab, and the drawer used to drop a primary's
-  // children along with the primary's own row. That left Drives, Recents,
-  // Favorites, Shared, Trash and Sync Devices with NO mobile navigation path
-  // whatsoever — the desktop sub-nav lives in a `hidden lg:flex` <aside>, so
-  // it is no fallback. These cases pin mobile reachability so the regression
-  // cannot happen silently again.
+  // children along with the primary's own row. That left the Files sub-views
+  // with NO mobile navigation path whatsoever — the desktop sub-nav lives in a
+  // `hidden lg:flex` <aside>, so it is no fallback. These cases pin mobile
+  // reachability so the regression cannot happen silently again.
+  //
+  // The list shrinks as surfaces MOVE, never as they vanish, and each move
+  // brings its new door in the same change:
+  //   · WARP-2959 — Drives → Settings → Storage.
+  //   · WARP-2966 — Sync devices → Settings → Advanced (addendum §2.3), and
+  //     Favorites → the /files toolbar (it is a filter over the places below,
+  //     not a place). Settings is itself a drawer row, so both stay reachable
+  //     on a phone; neither is a Files sub-view any more, which is the point.
   const FILES_SUBVIEWS: Array<[string, RegExp, string]> = [
-    ["Drives", /^drives$/i, "/files/drives"],
-    ["Recents", /^recents$/i, "/files/recents"],
-    ["Favorites", /^favorites$/i, "/files/favorites"],
+    ["Recent", /^recent$/i, "/files/recents"],
     ["Shared", /^shared$/i, "/files/shared"],
     ["Trash", /^trash$/i, "/files/trash"],
-    ["Sync Devices", /^sync devices$/i, "/files/devices"],
   ];
 
   it.each(FILES_SUBVIEWS)(
@@ -276,8 +285,26 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
       within(dialog).getByRole("link", { name: /^trash$/i }),
     ).toHaveAttribute("aria-current", "page");
     expect(
-      within(dialog).getByRole("link", { name: /^favorites$/i }),
+      within(dialog).getByRole("link", { name: /^recent$/i }),
     ).not.toHaveAttribute("aria-current");
+  });
+
+  // WARP-2966 — the two surfaces that left Files must not have left the phone.
+  it("keeps the moved Files surfaces reachable via the drawer's Settings row (WARP-2966)", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    // Tucked out of the nav — the drawer must not offer a second, stale door…
+    expect(dialog.querySelector("a[href='/files/devices']")).toBeNull();
+    expect(dialog.querySelector("a[href='/files/favorites']")).toBeNull();
+    // …and Settings, which carries the Sync devices row, is one tap away.
+    expect(
+      within(dialog).getByRole("link", { name: /^settings$/i }),
+    ).toHaveAttribute("href", "/settings");
   });
 
   it("keeps the non-primary Cameras parent as a real link with its child flattened after it (WARP-1554 regression guard)", () => {
@@ -514,14 +541,17 @@ describe("<Sidebar> desktop branch a11y (WARP-290)", () => {
   });
 
   it("sets aria-current='page' on the active desktop nav item", () => {
-    pathnameRef.current = "/settings";
+    // WARP-2967: /settings swaps the aside for the contextual Settings panel,
+    // which has no Settings row of its own, so this asks a working route
+    // instead — the property under test is the active marking, not Settings.
+    pathnameRef.current = "/cameras";
     render(<Sidebar />);
     const aside = document.querySelector(
       "aside[aria-label='Primary navigation']",
     ) as HTMLElement;
     expect(aside).not.toBeNull();
-    const settingsLink = within(aside).getByRole("link", { name: /settings/i });
-    expect(settingsLink).toHaveAttribute("aria-current", "page");
+    const camerasLink = within(aside).getByRole("link", { name: /^cameras$/i });
+    expect(camerasLink).toHaveAttribute("aria-current", "page");
     const overviewLink = within(aside).getByRole("link", { name: /overview/i });
     expect(overviewLink).not.toHaveAttribute("aria-current");
   });
@@ -534,34 +564,33 @@ describe("Sidebar — admin capability nav-gating (#14/#15)", () => {
     capsRef.current = { claudeActivity: false, ragEval: false };
   });
 
-  it("hides Activity + RAG eval when their capabilities are off", () => {
+  // WARP-2967 tucked both behind Settings, so the surface that offers them is
+  // the contextual Settings panel. The CAPABILITY gate is what #14/#15 is
+  // about, and it must hold wherever the row is rendered — that is the point
+  // of asking the panel rather than deleting these cases.
+  const settingsPanel = () => {
+    pathnameRef.current = "/settings";
     render(<Sidebar />);
-    const bottomNav = screen.getByRole("navigation", {
-      name: /bottom navigation/i,
-    });
-    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
-    const dialog = screen.getByRole("dialog");
-    expect(
-      within(dialog).queryByRole("link", { name: /^activity$/i }),
-    ).toBeNull();
-    expect(
-      within(dialog).queryByRole("link", { name: /rag eval/i }),
-    ).toBeNull();
+    const el = document.querySelector(
+      "aside[aria-label='Primary navigation']",
+    ) as HTMLElement;
+    return within(el).getByRole("navigation", { name: /settings/i });
+  };
+
+  it("hides Activity + RAG eval when their capabilities are off", () => {
+    const panel = settingsPanel();
+    expect(panel.querySelector("a[href='/admin/claude-activity']")).toBeNull();
+    expect(panel.querySelector("a[href='/admin/rag-eval']")).toBeNull();
   });
 
   it("shows Activity + RAG eval once their capabilities are wired", () => {
     capsRef.current = { claudeActivity: true, ragEval: true };
-    render(<Sidebar />);
-    const bottomNav = screen.getByRole("navigation", {
-      name: /bottom navigation/i,
-    });
-    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
-    const dialog = screen.getByRole("dialog");
+    const panel = settingsPanel();
     expect(
-      within(dialog).getByRole("link", { name: /^activity$/i }),
+      within(panel).getByRole("link", { name: /^activity$/i }),
     ).toHaveAttribute("href", "/admin/claude-activity");
     expect(
-      within(dialog).getByRole("link", { name: /rag eval/i }),
+      within(panel).getByRole("link", { name: /rag eval/i }),
     ).toHaveAttribute("href", "/admin/rag-eval");
   });
 });

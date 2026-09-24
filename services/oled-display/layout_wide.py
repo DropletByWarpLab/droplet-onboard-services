@@ -765,6 +765,32 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
 
 
+# WARP-2944 — the screen's one-line certificate status. The ticket's rule:
+# speak when fewer than this many days remain AND renewal is failing; a
+# healthy box, a box mid-renewal with weeks to go, and a self-signed box all
+# say nothing here (the self-signed box's story is the rail's SCAN TO PAIR).
+TLS_SCREEN_WARNING_DAYS = 14
+
+
+def tls_warning_line(tls: dict) -> str:
+    """The footer's warning for the orchestrator's tls-status snapshot, or ""
+    when there is nothing an owner must act on. Pure, so every branch is a
+    test without a render."""
+    if not isinstance(tls, dict):
+        return ""
+    state = tls.get("state")
+    days = tls.get("daysLeft")
+    if state != "LE_RENEW_FAILED" or not isinstance(days, (int, float)):
+        return ""
+    if days < 0:
+        return "CERTIFICATE EXPIRED · renewal failing · needs internet"
+    if days < TLS_SCREEN_WARNING_DAYS:
+        n = int(days)
+        return "CERTIFICATE · renewal failing · {} day{} left · needs internet".format(
+            n, "" if n == 1 else "s")
+    return ""
+
+
 def _render_foot(disp, draw, v: dict) -> None:
     d = _d()
     g = geom()
@@ -777,6 +803,14 @@ def _render_foot(disp, draw, v: dict) -> None:
     ))
     d._v3_text(draw, left, g.left, g.band_c_y, font=d._get_font(11),
                fill=d.V3_LABEL4)
+    # WARP-2944 — a certificate that needs the owner outranks the last event:
+    # it is the one line on the screen that says what to do about it.
+    warning = tls_warning_line(v.get("tls") or {})
+    if warning:
+        d._v3_text(draw, warning, g.content_r, g.band_c_y,
+                   font=d._get_font(11, weight="bold"), fill=d.V3_ORANGE,
+                   anchor="ra")
+        return
     event = v.get("last_event")
     if event:
         d._v3_text(draw, str(event), g.content_r, g.band_c_y,
@@ -1235,6 +1269,10 @@ def render_status(disp, now=None, state: str = "live") -> Image.Image:
         state = "alert"
     elif svc_status == "degraded" or (svc.get("degraded") or []):
         state = "degraded"
+    elif tls_warning_line(v.get("tls") or {}):
+        # WARP-2944 — the box is doing its job, but its padlock is running
+        # out and it cannot fix that alone: DEGRADED, never ALERT.
+        state = "degraded"
 
     _render_chrome(disp, draw, now, state)
 
@@ -1276,6 +1314,23 @@ def _rail_content(disp, v: dict) -> dict:
     faces = 2 if (d.RAIL_WIFI_QR and wifi_payload) else 1
 
     if faces == 1 or disp.rail_face() != "wifi":
+        # WARP-2954 / ADR-058: once the bridge has vouched for the box's
+        # certificate key, the default face is the APP-PAIRING link — the
+        # box's own key, from the one channel no network attacker can reach.
+        # Scanned with the Droplet app (or the phone camera, which hands the
+        # droplet:// link to the app) it pairs to exactly this box with no
+        # public certificate and nothing installed. The typed fallback stays
+        # the address, so a browser user is no worse off than before; the
+        # dashboard link returns only while the bridge has no pin to offer.
+        pair_payload = disp.pair_qr_payload()
+        if pair_payload:
+            # ECC L: the 63-byte pin-only link is a version-4 code only at
+            # L (v5 at M — 45 modules, 3px, below the floor). A clean render
+            # on glass, not a printed label, so 7% correction is enough; the
+            # Wi-Fi face keeps M.
+            return dict(payload=pair_payload, ecc="L",
+                        caption="SCAN TO PAIR", headline="Droplet app",
+                        fallback=host, faces=faces, face_index=0)
         return dict(payload=f"https://{host}/dashboard",
                     caption="SCAN TO OPEN", headline="Dashboard",
                     fallback=host, faces=faces, face_index=0)

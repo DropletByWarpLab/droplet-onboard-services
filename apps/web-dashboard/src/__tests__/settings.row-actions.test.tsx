@@ -19,16 +19,17 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 
 const fetchUsersMock = vi.fn();
-const listProviderKeysMock = vi.fn();
 const deleteUserMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
-  listProviderKeys: (...a: any[]) => listProviderKeysMock(...a),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: vi.fn(),
   deleteUser: (...a: any[]) => deleteUserMock(...a),
   // ShellPage's status chip reads /api/orchestrator/health via this fetcher.
   fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
+  // WARP-2967: the Settings page derives its tucked-surface rows from
+  // nav-config and resolves their capability gates through this probe.
+  fetchCapabilities: () => Promise.resolve({ claudeActivity: false, ragEval: false }),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -52,11 +53,6 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   }),
 }));
 
-// ProviderKeyForm pulls in fetch wrappers and isn't the subject under test.
-vi.mock("@/components/ProviderKeyForm", () => ({
-  ProviderKeyForm: () => null,
-}));
-
 vi.mock("@/components/ThemeToggle", () => ({
   ThemeToggle: () => null,
 }));
@@ -65,9 +61,7 @@ import SettingsPage from "@/app/settings/page";
 
 beforeEach(() => {
   fetchUsersMock.mockReset();
-  listProviderKeysMock.mockReset();
   deleteUserMock.mockReset();
-  listProviderKeysMock.mockResolvedValue([]);
 });
 
 describe("Settings page — user-row delete action (WARP-292)", () => {

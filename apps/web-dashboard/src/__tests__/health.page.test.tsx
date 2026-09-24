@@ -96,10 +96,11 @@ describe("HealthStatusView (PR #382)", () => {
     expect(banner).toHaveTextContent(/needs attention/i);
   });
 
-  it("surfaces a flagged storage pool with a link to Drives (WARP-1146)", () => {
+  it("surfaces a flagged storage pool with a link to Storage (WARP-1146)", () => {
     // The monitor's `storage` component goes down when a RAID pool is
     // degraded/failed. The row must render the friendly label AND point the
-    // owner at the Drives page that explains which pool dropped a member.
+    // owner at the Storage page that explains which pool dropped a member
+    // (WARP-2959 moved it from /files/drives to Settings -> Storage).
     const health = makeHealth({
       status: "degraded",
       components: [
@@ -111,7 +112,34 @@ describe("HealthStatusView (PR #382)", () => {
     const list = screen.getByRole("list", { name: /service health/i });
     expect(within(list).getByText(/storage pools/i)).toBeInTheDocument();
     const link = within(list).getByRole("link", { name: /view drives/i });
-    expect(link).toHaveAttribute("href", "/files/drives");
+    expect(link).toHaveAttribute("href", "/settings/storage");
+  });
+
+  it("shows why a service is down — the broker crash loop reads as a reason, not a bare red dot (WARP-2548)", () => {
+    render(
+      <HealthStatusView
+        health={makeHealth({
+          status: "degraded",
+          components: [
+            { name: "db", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
+            {
+              name: "mqtt",
+              status: "down",
+              latencyMs: 0,
+              lastCheckedAt: "2026-05-31T00:00:00Z",
+              error: "MQTT broker connecting: connect ECONNREFUSED 172.18.0.9:8883",
+            },
+          ],
+        })}
+        isLoading={false}
+        error={undefined}
+      />,
+    );
+    const list = screen.getByRole("list", { name: /service health/i });
+    expect(within(list).getByText(/messaging \(mqtt broker\)/i)).toBeInTheDocument();
+    expect(within(list).getByText(/ECONNREFUSED 172\.18\.0\.9:8883/)).toBeInTheDocument();
+    // An up service carries no error line.
+    expect(within(list).queryAllByText(/ECONNREFUSED/)).toHaveLength(1);
   });
 
   it("renders a loading state without crashing when health is undefined", () => {

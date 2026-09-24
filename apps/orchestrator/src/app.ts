@@ -8,7 +8,6 @@ import { requestLogger } from "./middleware/request-logger.js";
 import { requestIdMiddleware } from "./middleware/request-id.js";
 import {
   authMiddleware,
-  setAuthPrisma,
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
@@ -69,6 +68,9 @@ import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createSecurityRouter } from "./routes/security.js";
+import { createSecurityZonesRouter } from "./routes/security-zones.js";
+import { createSecuritySiteRouter } from "./routes/security-site.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
@@ -86,12 +88,14 @@ import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createAdminChatFeedbackRouter } from "./routes/admin-chat-feedback.js";
 import { createChatProjectsRouter } from "./routes/chat-projects.js";
 import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
+import { createRemoteToolClassificationsRouter } from "./routes/remote-tool-classifications.js";
 import { createCapabilitiesRouter } from "./routes/capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
 import { createModuleGate } from "./middleware/module-gate.js";
-import { mountModuleGates } from "./modules/module-mounts.js";
+import { mountModuleGates, mountMcpActingUserGates } from "./modules/module-mounts.js";
+import { actingUserAccessResolver } from "./middleware/mcp-acting-user-gate.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
@@ -106,6 +110,8 @@ import {
 } from "./services/scope-loader.service.js";
 import { initEffectiveAccess } from "./services/effective-access.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
+import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
+import { createBackupStatusRouter } from "./routes/backup-status.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
@@ -116,6 +122,7 @@ import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
+import { createBriefingsRouter } from "./routes/briefings.js";
 import { createTlsStatusPublicRouter } from "./routes/tls-status.public.route.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
@@ -127,6 +134,7 @@ import {
   seedOffLanChannels,
 } from "./services/workspace-settings.service.js";
 import { revokePendingOwnerInvites } from "./services/owner-invite-sweep.service.js";
+import { seedDailyReportSpec } from "./services/daily-report-spec.service.js";
 import { createLogger } from "./lib/logger.js";
 
 // One limiter for the process (module scope, not per createApp): tests build
@@ -186,6 +194,14 @@ export function createApp(
   // sends the latter for /scim/v2/* — without it, req.body would arrive empty
   // and every SCIM create/update would 400). The explicit `type` list keeps
   // the default JSON behavior intact for every other route.
+  //
+  // WARP-2093: the upload route's JSON transport (write_file /
+  // create_document) carries up to 10 MB of DECODED bytes as base64 (~13.4 MB
+  // on the wire). body-parser's 100 kb default killed anything past ~75 KB
+  // before the route's own 10 MB ceiling could answer, so this one path gets
+  // an explicit limit; body-parser skips an already-parsed body, so the
+  // global parser below leaves it alone and keeps its default elsewhere.
+  app.use("/api/files/upload", express.json({ limit: "16mb" }));
   app.use(express.json({ type: ["application/json", "application/scim+json"] }));
 
   // Public auth routes (setup + login + invite-accept) — no authentication required.
@@ -217,8 +233,9 @@ export function createApp(
   app.use(createScimRouter(prisma));
 
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
-  // without a session cookie. Token in the query string is the auth (HMAC
-  // of DEVICE_SECRET + username, see routes/calendar.ts publishToken).
+  // without a session cookie. Token in the query string is the auth (a
+  // stored, per-user, expiring credential — WARP-2767,
+  // services/calendar-feed-token.service.ts).
   // Mount BEFORE the auth middleware so it doesn't require a session.
   app.use("/api", createCalendarPublicRouter(prisma));
   // Public clip-share endpoint — recipient of a shared link doesn't have a
@@ -245,16 +262,8 @@ export function createApp(
   // orchestrator's internal namespace, parallel to other operator probes.
   app.use(createFipsRouter("orchestrator"));
 
-  // WARP-485 — wire the Prisma client into the auth middleware so the
-  // OCS fallback can resolve `ocs.data.id` (Nextcloud username) to the
-  // local `User.id` UUID. Must run before `app.use(authMiddleware)` so
-  // the very first request after boot gets a populated singleton; pre-
-  // boot requests fall into the fail-closed `USER_NOT_PROVISIONED`
-  // branch instead of regressing the OCS-username-as-id leak.
-  setAuthPrisma(prisma);
-
   // WARP-455 — bind the scope-loader singleton to the same Prisma client
-  // before the first request, for the same reason as setAuthPrisma above:
+  // before the first request:
   // requireScope()'s injected loader (loadUserEffectiveScopes) reads
   // ScopeBinding/GuestExpiry through this singleton, and the very first
   // post-boot request to a scope-guarded route must find it populated.
@@ -312,8 +321,26 @@ export function createApp(
   // prefix-matching `/api/files/knowledge` and `/api/files/docs`, collapsing
   // three independent toggles onto one enforcement), not in either gate.
   // Specs: docs/superpowers/specs/2026-07-07-module-toggles-design.md, ADR-032.
+  // WARP-268: runtime egress-audit collector pushes unlisted-destination /
+  // allowlist-unavailable anomalies here (service-principal only) → signed
+  // activity log → /admin/audit.
+  //
+  // Mounted BEFORE the module gates, on purpose (WARP-2977 review). Its path,
+  // POST /api/security/egress-anomaly, sits under the `security` module's
+  // prefix, and that module is off by default: behind the gate, every box
+  // without Security switched on would 404 the collector, the collector's
+  // sink suppresses repeats, and the egress audit — one of the threat
+  // mirror's own sources — would go silent. This is host plumbing that must
+  // never depend on a dashboard toggle. Pinned by
+  // src/__tests__/security-prefix-composition.test.ts.
+  app.use("/api", createEgressAuditRouter());
+
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
+  // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
+  // the CRM / PM routes are narrowed by the ACTING user's §3 tool scope
+  // (`business` needs CRM or Projects). Humans are untouched by this mount.
+  mountMcpActingUserGates(app, actingUserAccessResolver(prisma));
 
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
 
@@ -476,15 +503,21 @@ export function createApp(
   // WARP-468: Phase E2 — off-LAN egress byte counter read + sampler push.
   // GET aggregator is admin/family/guest read; sample push is service-only.
   app.use("/api", createOffLanNetworkRouter(prisma));
-  // WARP-268: runtime egress-audit collector pushes unlisted-destination /
-  // allowlist-unavailable anomalies here (service-principal only) → signed
-  // activity log → /admin/audit.
-  app.use("/api", createEgressAuditRouter());
   // WARP-1436: ambient web data (weather / currency rates). Gate on the
   // `ambient_data` off-LAN channel, Redis-cached, audited per request;
   // proxies the services/web-fetch allowlisted fetcher.
   app.use("/api", createWebRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
+  // WARP-2977 (ADR-059 P2) — the Security command center's feed. The
+  // `security` module gate (toggle + per-person view) is mounted above by
+  // mountModuleGates off the registry prefix /api/security.
+  app.use("/api", createSecurityRouter(prisma));
+  // WARP-2977 P2b — areas (routes/security-zones.ts) and the site mode +
+  // opening hours (routes/security-site.ts). Separate routers, not nested,
+  // under the same /api/security module gate; their act/manage write routes
+  // add requireFeatureAccess at the route.
+  app.use("/api", createSecurityZonesRouter(prisma));
+  app.use("/api", createSecuritySiteRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
@@ -527,6 +560,9 @@ export function createApp(
   // Admin capabilities probe — drives nav-gating for optional admin surfaces
   // (Activity, RAG eval) so they hide when their integration is unconfigured.
   app.use("/api", createAdminCapabilitiesRouter());
+  // WARP-2426 — the operator-owned classification record for remote tools:
+  // owner/admin read it, the owner alone demotes or blocks a tool.
+  app.use("/api", createRemoteToolClassificationsRouter(prisma));
   // WARP-1154/WARP-1155 — module-capability probe for every authenticated
   // principal. The dashboard drives the Projects nav entry + /projects route
   // off this explicit flag (never off request errors). WARP-1306: the flag
@@ -585,6 +621,15 @@ export function createApp(
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
 
+  // WARP-2944: the certificate lifecycle for Settings → Device information
+  // (days left, when the box renews, whether renewal is failing). Owner +
+  // admin, read-only; the public /api/tls/status stays the pre-login minimum.
+  app.use("/api", createTlsCertificateRouter(prisma));
+
+  // WARP-1405: backup health for Settings → Device information (last success,
+  // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
+  app.use("/api", createBackupStatusRouter());
+
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.
   // Owner+admin only (reads included, voice-proxy posture); every mutation
@@ -619,8 +664,8 @@ export function createApp(
   // dispatch the same registry as chat tool calls. The walker halts
   // on the first failure; per-step trace returned to the caller.
   const toolStepDispatcher: StepDispatcher = {
-    async call(tool, args) {
-      const result = await mcpClient.callTool(tool, args);
+    async call(tool, args, context) {
+      const result = await mcpClient.callTool(tool, args, context);
       if (result.isError) {
         const detail = result.content?.[0]?.text ?? "tool reported error";
         throw new Error(typeof detail === "string" ? detail : String(detail));
@@ -645,6 +690,8 @@ export function createApp(
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).
   // Per-user Redis cache with 30s TTL.
   app.use("/api", createHomeRouter(prisma));
+  // WARP-2270 — the caller's own morning briefing (self-only).
+  app.use("/api", createBriefingsRouter(prisma));
 
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
@@ -698,6 +745,15 @@ export function createApp(
       { err },
       "off-LAN allowlist seeder failed (channels table may be unbootstrapped)",
     );
+  });
+
+  // The `daily-report` ToolSpec the Reports tile runs. Until now this was
+  // seeded ONLY by `prisma/seed.ts`, which nothing on a box ever executes
+  // (no boot hook, no Dockerfile step, no compose command), so every box in
+  // the field answered "Spec not found". Same insert-or-skip posture as the
+  // seeders above: an operator-edited spec is never overwritten.
+  seedDailyReportSpec(prisma).catch((err) => {
+    seedLogger.warn({ err }, "daily-report spec seeder failed (toolSpec table may be unbootstrapped)");
   });
 
   // WARP-1565: revoke any pending `role="owner"` invite. Rail 7 stopped new

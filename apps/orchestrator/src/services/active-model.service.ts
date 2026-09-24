@@ -43,18 +43,27 @@ export async function readActiveChatModel(
 }
 
 /**
- * Identifiers (id + name) of installed LOCAL (on-box) models — the only
- * models eligible to be the active local chat model. Cloud providers are
- * excluded: the active-local-model choice never points off-box.
+ * WARP-2882 — the id/name/provider triple is all resolution needs, so both
+ * the gateway's `ModelInfo` and the page payload's `LocalModelInfo` qualify.
  */
-export function localModelIdentifiers(models: ModelInfo[]): Set<string> {
-  const ids = new Set<string>();
+export type LocalModelRef = Pick<ModelInfo, "id" | "name" | "provider">;
+
+/**
+ * WARP-2882 — resolve a caller-supplied reference (the runtime `id`, or the
+ * gateway's DISPLAY `name` that older dashboards send) to the runtime id of
+ * an installed LOCAL model. Null when nothing local matches. Every write and
+ * daemon probe must use the returned id: the display name ("Gpt-oss 20B F16")
+ * is not a model the runtime knows.
+ */
+export function resolveLocalModelId(
+  models: LocalModelRef[],
+  ref: string,
+): string | null {
   for (const m of models) {
     if (!isLocalProvider(m.provider)) continue;
-    if (m.id) ids.add(m.id);
-    if (m.name) ids.add(m.name);
+    if (m.id === ref || m.name === ref) return m.id;
   }
-  return ids;
+  return null;
 }
 
 /**
@@ -86,4 +95,33 @@ export function resolveActiveChatModel(
   if (stored && installed.has(stored)) return stored;
   const [fallback] = installed;
   return fallback ?? null;
+}
+
+/**
+ * WARP-2882 — THE read path for `ai.model.chat`: every consumer
+ * (`GET /api/models`, `GET /api/llm/models` `defaultModel`, the filing
+ * worker) goes through here so they all answer the same runtime id for the
+ * same row.
+ *
+ * The stored value may be a legacy DISPLAY name — boxes that used the
+ * picker before WARP-2882 hold "Gpt-oss 20B F16", and the row is never
+ * rewritten on read (docs/MODEL_ID_MIGRATION.md §6). It is resolved through
+ * `resolveLocalModelId` FIRST, then handed to `resolveActiveChatModel` with
+ * an ids-only installed set for the WARP-1511 blank/stale fallback. Resolving
+ * against ids alone silently re-pointed every such box at the first installed
+ * model. `models === null` keeps the "couldn't confirm the installed set"
+ * pass-through.
+ */
+export function resolveStoredChatModel(
+  stored: string | null,
+  models: LocalModelRef[] | null,
+): string | null {
+  if (models === null) return stored;
+  const ids = new Set(
+    models.filter((m) => isLocalProvider(m.provider)).map((m) => m.id),
+  );
+  return resolveActiveChatModel(
+    stored ? resolveLocalModelId(models, stored) : null,
+    ids,
+  );
 }

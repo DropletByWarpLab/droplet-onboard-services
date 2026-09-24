@@ -120,8 +120,20 @@ import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
 import { summarizeToolArguments } from "./confirmation-summary.js";
+import { decideCloudTurn, resolveOffLanProvider } from "./cloud-access.service.js";
+import {
+  OFF_LAN_WITHHELD_NOTICE,
+  withholdStoredContentTools,
+} from "./stored-content-egress.service.js";
 
 const logger = createLogger("agent-run-worker");
+
+/** WARP-2909 — a run's deep link. `/workshop?run=` is the canonical run view
+ *  (WARP-2925; `/admin/audit?run=` only forwards there). `run` is the only
+ *  query key, and the tag collapses every notification about one run. */
+function agentRunLink(runId: string): { url: string; tag: string } {
+  return { url: `/workshop?run=${encodeURIComponent(runId)}`, tag: `agent-run:${runId}` };
+}
 
 export const AGENT_RUN_LOCK_KEY = "droplet:agent-run-worker";
 
@@ -318,9 +330,22 @@ export const AGENT_RUN_SYSTEM_PROMPT =
   "is done, reply with a concise final report of what you did and what you " +
   "found. If it cannot be completed, say exactly what blocked you.";
 
-export function initialRunMessages(goal: string): ChatMessage[] {
+/**
+ * WARP-2997 — the run's system prompt for where its model runs. A cloud run
+ * gets chat's `OFF_LAN_WITHHELD_NOTICE` so it says plainly that stored
+ * content stays on the box instead of inventing a reason it cannot help.
+ *
+ * The prompt carries none of the stored-content blocks chat injects (memory,
+ * brain, business profile, pins), so `withholdPromptBlocksForOffLan` has
+ * nothing to blank here. Any such block added to a run MUST go through it.
+ */
+export function runSystemPrompt(offLan: boolean): string {
+  return offLan ? `${AGENT_RUN_SYSTEM_PROMPT}\n\n${OFF_LAN_WITHHELD_NOTICE}` : AGENT_RUN_SYSTEM_PROMPT;
+}
+
+export function initialRunMessages(goal: string, offLan = false): ChatMessage[] {
   return [
-    { role: "system", content: AGENT_RUN_SYSTEM_PROMPT },
+    { role: "system", content: runSystemPrompt(offLan) },
     { role: "user", content: goal },
   ];
 }
@@ -907,11 +932,43 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       return;
     }
 
-    const allowedTools = narrowToolNamesForPrincipal(
+    // ── WARP-2997: the cloud gate and the stored-content gate ──────────
+    // Here, at EVERY claim, not at enqueue: a start, a resume after a park,
+    // a reclaim and every schedule fire all come through this line, so a
+    // revoked cloud grant stops the next fire and no enqueue caller (the
+    // schedule ticker, the morning briefing) can skip it. The same two
+    // questions chat asks, asked the same way (routes/llm.ts): "may this
+    // person use cloud?" and, separately, "is this request leaving the box?".
+    const principal = { id: run.userId, role: user.role };
+    const cloudDecision = await decideCloudTurn({ user: principal, model: run.model });
+    if (cloudDecision.kind === "refused") {
+      const cloudGate = cloudDecision.status === 451 ? "cloud_refused" : "cloud_unverified";
+      const error = `${cloudDecision.body.error}: ${cloudDecision.body.message}`;
+      await finish(runId, {
+        status: "failed",
+        endedAt: at,
+        stopReason: cloudGate,
+        cloudGate,
+        offLanProvider: cloudDecision.body.provider,
+        error,
+        ...CLEAR_PENDING,
+      });
+      await audit(runId, run.userId, "failed", "Agent run refused (cloud access)", error,
+        { username: user.username, goal: run.goal },
+        { cloudGate, offLanProvider: cloudDecision.body.provider });
+      return;
+    }
+    const offLanProvider = await resolveOffLanProvider({ user: principal, model: run.model });
+    const principalTools = narrowToolNamesForPrincipal(
       runToolPool(),
       access.tier ?? undefined,
       access.scope,
     );
+    const allowedTools = offLanProvider ? withholdStoredContentTools(principalTools) : principalTools;
+    const offLanWithheldTools = principalTools.filter((t) => !allowedTools.includes(t));
+    const cloudGate = offLanProvider ? "cloud_allowed" : "local";
+    if (!(await finish(runId, { cloudGate, offLanProvider, offLanWithheldTools }))) return;
+    const offLanRefs = offLanProvider ? { cloudGate, offLanProvider, offLanWithheldTools } : { cloudGate };
     const toolCallContext = {
       ...(user ? { userId: user.username, userRole: user.role } : {}),
       agentRunId: runId,
@@ -921,7 +978,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     const base = run.iteration;
     const messages = Array.isArray(run.messages)
       ? (run.messages as ChatMessage[])
-      : initialRunMessages(run.goal);
+      : initialRunMessages(run.goal, offLanProvider !== null);
+    // A resumed run re-derives its system prompt from THIS claim's verdict,
+    // never from the checkpoint: the notice follows where the model runs now.
+    if (messages[0]?.role === "system") {
+      messages[0] = { role: "system", content: runSystemPrompt(offLanProvider !== null) };
+    }
     const trace: AgentRunTraceEntry[] = Array.isArray(run.trace)
       ? (run.trace as AgentRunTraceEntry[])
       : [];
@@ -1317,7 +1379,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ["cancelled"],
       );
       await audit(runId, run.userId, "cancelled", "Agent run cancelled", undefined,
-        user ? { username: user.username, goal: run.goal } : undefined);
+        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
       return;
     }
     if (reason === "parked" && park.request) {
@@ -1368,6 +1430,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
               ? ". You approved this before and the run was interrupted mid-call, so it MAY ALREADY " +
                 "have happened — check before approving it again."
               : ". Open the run to approve or deny it. Nothing has been done yet."),
+          // WARP-2909 — the link opens the run; approving it is redeemed ONLY
+          // by POST /api/agent-runs/:id/confirm from that page. No token, no
+          // hash, no args (they can carry customer data) ride on the payload.
+          ...agentRunLink(runId),
+          data: { agentRunId: runId, pendingTool: parkRequest.tool, needsDecision: true },
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_park_notification_failed");
         });
@@ -1396,7 +1463,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run halted (outcome unknown)", error,
-        user ? { username: user.username, goal: run.goal } : undefined);
+        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
       return;
     }
     if (reason === "deadline") {
@@ -1410,7 +1477,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined);
+        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
       return;
     }
     if (gatewayBusy(threw, result)) {
@@ -1438,7 +1505,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const error = threw instanceof Error ? threw.message : String(threw ?? "no result");
       await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000), ...CLEAR_PENDING });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined);
+        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
       return;
     }
 
@@ -1458,7 +1525,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "succeeded", "Agent run completed", undefined,
-          user ? { username: user.username, goal: run.goal, result: text } : undefined);
+          user ? { username: user.username, goal: run.goal, result: text } : undefined, offLanRefs);
         return;
       }
       case "iteration_limit": {
@@ -1472,7 +1539,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined);
+          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
         return;
       }
       case "error":
@@ -1487,7 +1554,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined);
+          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
         return;
       }
     }
@@ -1502,6 +1569,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // WARP-2180 — on a terminal status the owner is told over the same
     // ws-bridge topic the park notification uses, with the result summary.
     notify?: { username: string; goal: string; result?: string | null },
+    // WARP-2997 — the cloud gate's verdict and what it withheld, on the
+    // signed row, as chat records `offLanProvider` on its turn row.
+    offLan?: Record<string, unknown>,
   ): Promise<void> {
     // The person who cancelled a run does not need a toast saying so; the
     // cancel route's audit row records it (WARP-2744 item 6).
@@ -1516,6 +1586,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         kind: "ai",
         title: status === "succeeded" ? `Background run finished: ${goal}` : `Background run failed: ${goal}`,
         body,
+        // WARP-2909 — same link and tag as the park, so the finish replaces
+        // the approval prompt in the tray. No `needsDecision` here.
+        ...agentRunLink(runId),
+        data: { agentRunId: runId, status },
       }).catch((err) => {
         logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
       });
@@ -1529,7 +1603,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       // `actorId` (unlike the dispatch rows, whose `userId` is a username).
       actor: { type: "ai", id: userId },
       sub: error ? error.slice(0, 200) : null,
-      refs: { agentRunId: runId, status, workerId },
+      refs: { agentRunId: runId, status, workerId, ...offLan },
     });
   }
 

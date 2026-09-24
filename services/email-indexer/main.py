@@ -9,7 +9,14 @@ Lifespan responsibilities:
   6. Iterate EmailAccount rows → start one IDLE loop per account.
   7. Schedule the outbound poller (every 10s).
   8. Refresh-accounts cron (every 5 min) — picks up newly-added
-     accounts without a service restart.
+     accounts without a service restart, and stops the loop of any
+     account the operator has since disconnected.
+
+WARP-2957 additions: `POST /accounts/refresh` lets the orchestrator start a
+freshly provisioned account's loop within seconds instead of waiting for the
+cron, and every IDLE cycle reports its outcome back through
+`orchestrator_client.report_account_status`, which is how the dashboard's
+"Connected" label became a fact rather than the schema default.
 
 Shutdown reverses the above. Failures in any non-load-bearing step
 (MQTT, individual account IDLE) are logged but don't fail-fast — the
@@ -60,7 +67,7 @@ import db
 import mqtt_bridge
 import orchestrator_client
 import provision as provisioning
-from idle import IdleDeps, start_account_idle_loop
+from idle import IdleDeps, start_account_idle_loop, stop_account_idle_loop, get_account_job_ids
 from outbound import StatusCallback, send_one_draft
 from outbound_gate import OutboundGate
 
@@ -87,19 +94,32 @@ _outbound_gate = OutboundGate()
 _idle_deps = IdleDeps(
     ingest=orchestrator_client.ingest_message,
     publish_new_mail=mqtt_bridge.publish_new_mail,
+    report_status=orchestrator_client.report_account_status,
 )
 
 
-async def _refresh_accounts() -> None:
-    """Re-scan EmailAccount and start IDLE for new ones. Existing
-    IDLE jobs are left alone (replace_existing=True in
-    start_account_idle_loop is a no-op for the same id)."""
+async def _refresh_accounts() -> int:
+    """Re-scan EmailAccount: start IDLE for new rows, stop it for rows that
+    are gone. Existing IDLE jobs are left alone (start_account_idle_loop
+    refuses to re-register a live job — IDX-001).
+
+    The stop half is WARP-2957: `stop_account_idle_loop` existed "for when
+    the operator removes an account" and nothing called it, so a
+    disconnected mailbox kept logging in on schedule until the next service
+    restart — with a credential the owner believed was gone from this box.
+    Returns the number of active accounts.
+    """
     if _scheduler is None:
-        return
+        return 0
     accounts = await db.list_accounts()
+    live = {a.id for a in accounts}
+    for stale_id in [aid for aid in get_account_job_ids() if aid not in live]:
+        stop_account_idle_loop(_scheduler, stale_id)
+        logger.info("account %s disconnected: IDLE loop stopped", stale_id)
     for account in accounts:
         start_account_idle_loop(_scheduler, account, _idle_deps)
     logger.info("account refresh complete: %d accounts active", len(accounts))
+    return len(accounts)
 
 
 async def _drain_outbound() -> None:
@@ -232,6 +252,19 @@ class ProvisionRequest(BaseModel):
     useTls: bool = True
     username: str = Field(min_length=1, max_length=320)
     password: str = Field(min_length=1, max_length=1024)
+
+
+@app.post("/accounts/refresh")
+async def refresh_accounts() -> dict[str, int]:
+    """WARP-2957 — re-scan EmailAccount now rather than on the next cron.
+
+    The orchestrator calls this right after `connectMailbox` writes the row,
+    so the new mailbox's first sync starts within seconds. Idempotent and
+    cheap: one SELECT, and `start_account_idle_loop` is a no-op for accounts
+    already running. Behind the service token like every other route here.
+    """
+    active = await _refresh_accounts()
+    return {"active": active}
 
 
 @app.post("/accounts/provision")

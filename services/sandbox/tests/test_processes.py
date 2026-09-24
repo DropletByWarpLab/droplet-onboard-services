@@ -1,0 +1,114 @@
+"""The supervision seam (slice H) — gated off by default, closed in shape, real when on.
+
+Off: every /processes route is 404 (undiscoverable). On: argv[0] must be a
+bare interpreter name the image ships, the entrypoint must live under the
+extensions directory, arguments carry a conservative charset — and then a
+long-lived child is started, read and stopped. State is explicit, never
+inferred from a missing pid.
+
+The tests point SANDBOX_PYTHON_BIN at this interpreter and
+SANDBOX_EXTENSIONS_DIR at a temp dir holding tiny entrypoint scripts, so the
+seam runs REAL processes on the Linux CI runner and a Windows dev checkout.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+import supervisor
+
+
+@pytest.fixture()
+def ext(tmp_path: Path, monkeypatch):
+    """An extensions dir with three entrypoints, and the seam pointed at it."""
+    (tmp_path / "sleeper.py").write_text("import time\ntime.sleep(30)\n")
+    (tmp_path / "exit3.py").write_text("raise SystemExit(3)\n")
+    (tmp_path / "ok.py").write_text("pass\n")
+    monkeypatch.setattr(supervisor, "EXTENSIONS_DIR", os.path.realpath(str(tmp_path)))
+    monkeypatch.setattr(supervisor, "INTERPRETERS", {"python": sys.executable, "python3": sys.executable, "node": "/usr/local/bin/node"})
+    return tmp_path
+
+
+def _wait_for(sup: supervisor.Supervisor, proc_id: str, states: set[str], timeout_s: float = 10.0) -> dict:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        st = sup.status(proc_id)
+        if st and st["state"] in states:
+            return st
+        time.sleep(0.05)
+    return sup.status(proc_id) or {}
+
+
+def test_gated_off_by_default_every_route_is_404(client, auth, monkeypatch):
+    monkeypatch.setattr(supervisor, "SUPERVISION_ENABLED", False)
+    body = {"id": "ext-a", "argv": ["python", "ok.py"]}
+    assert client.post("/processes", json=body, headers=auth).status_code == 404
+    assert client.get("/processes/ext-a", headers=auth).status_code == 404
+    assert client.delete("/processes/ext-a", headers=auth).status_code == 404
+    assert client.get("/health").json()["processes"] is False
+
+
+def test_the_seam_is_closed_in_shape(ext):
+    # MUTATION: pass the request's argv straight to Popen and every case
+    # below goes green-for-the-wrong-reason (it would run) — except the
+    # first, which pins that a path is never accepted as the interpreter.
+    r = supervisor.resolve_argv
+    with pytest.raises(supervisor.SupervisorError):
+        r([sys.executable, "ok.py"], None)  # a PATH, not a bare name
+    with pytest.raises(supervisor.SupervisorError):
+        r(["bash", "ok.py"], None)  # not an interpreter the image ships
+    with pytest.raises(supervisor.SupervisorError):
+        r(["python"], None)  # no entrypoint
+    with pytest.raises(supervisor.SupervisorError):
+        r(["python", "../../etc/passwd"], None)  # escapes the extensions dir
+    with pytest.raises(supervisor.SupervisorError):
+        r(["python", "/etc/passwd"], None)  # absolute, outside
+    with pytest.raises(supervisor.SupervisorError):
+        r(["python", "ok.py", "; rm -rf /"], None)  # metacharacters
+    with pytest.raises(supervisor.SupervisorError):
+        r(["python", "ok.py"], "/")  # cwd outside the extensions dir
+    argv, cwd = r(["python", "ok.py", "--port=8100"], None)
+    assert argv[0] == sys.executable
+    assert argv[1] == os.path.join(supervisor.EXTENSIONS_DIR, "ok.py")
+    assert argv[2] == "--port=8100"
+    assert cwd == supervisor.EXTENSIONS_DIR
+
+
+def test_start_status_stop_when_enabled(client, auth, monkeypatch, ext):
+    monkeypatch.setattr(supervisor, "SUPERVISION_ENABLED", True)
+    monkeypatch.setattr(supervisor, "SUPERVISOR", supervisor.Supervisor())
+    body = {"id": "ext-b", "argv": ["python", "sleeper.py"], "restart": "never"}
+    r = client.post("/processes", json=body, headers=auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "running"
+    assert r.json()["pid"]
+
+    assert client.post("/processes", json=body, headers=auth).status_code == 409
+    assert client.post("/processes", json={"id": "ext-x", "argv": ["bash", "x"]}, headers=auth).status_code == 400
+
+    assert client.get("/processes/ext-b", headers=auth).json()["state"] == "running"
+
+    d = client.delete("/processes/ext-b", headers=auth).json()
+    assert d["state"] == "stopped"
+    assert client.get("/processes/nope", headers=auth).status_code == 404
+
+
+def test_on_failure_restarts_up_to_the_budget_then_reports_failed(ext):
+    sup = supervisor.Supervisor()
+    snap = sup.start("ext-c", ["python", "exit3.py"], cwd=None, restart="on-failure", max_restarts=2, env={})
+    assert snap["id"] == "ext-c"
+    st = _wait_for(sup, "ext-c", {"failed"})
+    assert st["state"] == "failed"
+    assert st["restarts"] == 2
+    assert st["exitCode"] == 3
+
+
+def test_a_clean_exit_with_never_is_exited_not_failed(ext):
+    sup = supervisor.Supervisor()
+    sup.start("ext-d", ["python", "ok.py"], cwd=None, restart="never", max_restarts=3, env={})
+    assert _wait_for(sup, "ext-d", {"exited", "failed"})["state"] == "exited"

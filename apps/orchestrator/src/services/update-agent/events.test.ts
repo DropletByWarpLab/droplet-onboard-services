@@ -22,6 +22,7 @@ const EMITTING_SOURCES = [
   "transitions.ts",
   "settings.ts",
   "host-compose-runner.ts",
+  "host-exec.ts",
   "purge-update-backups.ts",
   "purge-self-swap-helpers.ts",
   "../../index.ts",

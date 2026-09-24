@@ -50,6 +50,7 @@ import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
+import { reachableInChat } from "@/lib/tool-domains";
 import { useAuth } from "@/lib/auth";
 import {
   PENDING_COMPOSER_KEY,
@@ -58,7 +59,13 @@ import {
   type PendingComposerToolPayload,
   type ToolCatalogEntry,
 } from "@/lib/types";
-import { createContextPin } from "@/lib/api";
+import {
+  createContextPin,
+  fetchCloudHistory,
+  setCloudHistoryConsent,
+  type CloudHistorySummary,
+} from "@/lib/api";
+import { CloudHistoryConsentDialog } from "@/components/chat/CloudHistoryConsentDialog";
 import type { ChatProject } from "@/lib/api";
 // WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
 // shared shell set; chat-indigo.css carries the chat-specific surface.
@@ -299,7 +306,14 @@ export default function ChatPage() {
   const { models, defaultModel } = useModels();
   // The chat composer's "/" slash menu lists these tools; picking one seeds
   // the composer + pins the "Ready to use X" indicator (same as /tools).
-  const { tools: slashTools } = useToolCatalog();
+  //
+  // WARP-2969 — narrowed to what a turn can actually reach. `/tools` still
+  // SHOWS the withheld ones, with a chip saying why, because an MCP client
+  // can still call them; this menu cannot, because every row in it is an
+  // offer to act, and offering a tool chat policy withholds only ever buys
+  // the user a message that comes back "I can't do that".
+  const { tools: allTools } = useToolCatalog();
+  const slashTools = useMemo(() => allTools.filter(reachableInChat), [allTools]);
   const [selectedModel, setSelectedModel] = useState("");
   // WARP-904 — the provider backing the currently-selected model, looked
   // up from the same gated `/api/llm/models` list ModelSelector reads.
@@ -313,6 +327,13 @@ export default function ChatPage() {
   );
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  // WARP-2991 — the consent prompt at a local→cloud switch. The server
+  // enforces the rule on every turn; this is how the owner says yes.
+  const [historyPrompt, setHistoryPrompt] = useState<{
+    conversationId: string;
+    summary: CloudHistorySummary;
+    modelLabel: string;
+  } | null>(null);
   // WARP-829: the tool the composer was primed for via the /tools "Use in
   // chat" hand-off (null when the chat wasn't opened from a tool).
   // WARP-2582 — narrowed to the TOOL variant now that the hand-off payload is a
@@ -740,6 +761,25 @@ export default function ChatPage() {
     const flat = first.replace(/\s+/g, " ");
     return flat.length > 64 ? `${flat.slice(0, 63)}…` : flat;
   }, [messages]);
+  const handleModelChange = useCallback(
+    (id: string) => {
+      setSelectedModel(id);
+      const target = models.find((m) => m.id === id);
+      if (!conversationId || !target || isLocalProvider(target.provider)) return;
+      const convo = conversationId;
+      fetchCloudHistory(convo)
+        .then((summary) => {
+          if (summary.unaskedOnBoxAnswers > 0) {
+            setHistoryPrompt({ conversationId: convo, summary, modelLabel: target.name || id });
+          }
+        })
+        // Unreadable state: no prompt, and the server keeps sending only the
+        // user's own messages — the fail-closed default.
+        .catch(() => {});
+    },
+    [models, conversationId],
+  );
+
   const isLocalModel = useMemo(
     () => isLocalProvider(models.find((m) => m.id === selectedModel)?.provider),
     [models, selectedModel],
@@ -1207,7 +1247,7 @@ export default function ChatPage() {
           // scrolls it out of reach.
           modelSelector={
             <>
-              <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+              <ModelSelector value={selectedModel} onChange={handleModelChange} />
               {isLocalModel && <span className="chat-tag">local · on-device</span>}
             </>
           }
@@ -1286,6 +1326,17 @@ export default function ChatPage() {
           />
         </div>
       </Dialog>
+      <CloudHistoryConsentDialog
+        open={historyPrompt !== null}
+        summary={historyPrompt?.summary ?? null}
+        modelLabel={historyPrompt?.modelLabel ?? ""}
+        onDecide={(decision) =>
+          historyPrompt
+            ? setCloudHistoryConsent(historyPrompt.conversationId, decision)
+            : Promise.resolve()
+        }
+        onClose={() => setHistoryPrompt(null)}
+      />
     </div>
   );
 }

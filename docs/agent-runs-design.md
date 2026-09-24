@@ -262,6 +262,13 @@ run is never more expensive than the original at the same iteration
   level and aggregate by `tool`. The lab box was unreachable when this landed,
   so the numbers are recorded on WARP-2178 as they are gathered; until then
   the default stays at the historical value.
+  WARP-2921 takes those numbers on the bench box, together with the
+  per-turn `agent_tool_pool_size` line (the schema side of the same window),
+  and records them in the ADR-056 brief's measurement appendix.
+  Two aggregation traps: an over-ceiling advertisement logs only the
+  error-level `tool_budget_exceeded` line (no pool line; it carries the same
+  `turn_id` / `agent_run_id` join keys), so it must be counted as the worst turn; and `iter` restarts at 0 when a run
+  resumes, so a run's iteration count comes from the AgentRun row or trace.
 
 **Not done, deliberately.** History compaction (a sliding window or a
 summarising manager over *older* iterations, the Strands shape) is not built:
@@ -388,9 +395,15 @@ is disabled inside the fire transaction with a `system` activity row
 `droplet/notifications/<username>` topic the park uses, with the result
 summary (or the error).
 
-**Dashboard** — `AgentRunsPanel` on `/admin/audit`, the signed activity log,
-which is the Activity surface (`/admin/claude-activity` under the "Activity"
-nav label is the unrelated engineer feed). Not a nav item. List on the left
+**Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056), a
+Workspace nav item after Routines, owner/admin — the roles that may start a
+run. It shipped on `/admin/audit` and was deliberately not a nav item
+(WARP-2180); ADR-056 made the run the unit of every agentic slice that
+follows, so the panel moved to a surface with a door. Above it, the first
+dashboard caller of `POST /api/agent-runs`: a goal field whose copy says what
+a run may do (reads on its own, anything that changes something parks for
+approval, cancel at any time). `/admin/audit?run=<id>` forwards to
+`/workshop?run=<id>`, so the deep link never broke. List on the left
 with state pills; the selected run on the right: goal, state, step count,
 result or error, the trace, and — when parked — the confirm prompt with
 provenance: the run's goal, the tool, the PHI-free argument summary, when it

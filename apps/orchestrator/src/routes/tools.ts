@@ -25,7 +25,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService, type AuthUser } from "../middleware/auth.js";
 import {
   plannedToolNames,
   referencedStepNames,
@@ -34,16 +34,97 @@ import {
   type Summarizer,
 } from "../services/tool-spec-runner.service.js";
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
+import { createSandboxTransformer, type Transformer } from "../services/sandbox.client.js";
+import {
+  DAILY_REPORT_SLUG,
+  seedDailyReportSpec,
+} from "../services/daily-report-spec.service.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
+import type { McpCallContext } from "../services/mcp-client.service.js";
 import {
   firstToolDeniedForPrincipal,
   hasWriteTool,
   resolveToolAccessScope,
+  unknownToolsIn,
   writeToolsIn,
 } from "../services/tool-access.service.js";
 import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
+
+const MCP_PRINCIPAL_ID = "_service:mcp";
+
+/** The roles that may list, draft and run routines — the `requireRole` floor
+ *  the three tool-reachable routes carry, restated so the mcp principal's
+ *  acting human is held to exactly the same bar. */
+const ROUTINE_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family"]);
+
+interface Actor {
+  id: string;
+  username: string;
+  role: string;
+}
+
+/**
+ * WARP-2894 — the person this request acts for.
+ *
+ * The `routine_*` tools reach these routes as `_service:mcp`, and
+ * `requireRoleOrMcpService` admits that principal BEFORE any role check
+ * (middleware/auth.ts). A route that then reads `req.user` filters on the
+ * literal string `_service:mcp`: `ownerId` matches no row that can exist,
+ * `resolveToolAccessScope` sees role `service` and returns the un-narrowed
+ * scope, and `triggeredBy` records a robot. That is the WARP-2810 defect
+ * class (`/api/brain/*` answered empty 200s to everyone for this reason),
+ * so the resolution is done here, once, the way `routes/agent-runs.ts` does
+ * it: the mcp-server's orchestrator client stamps `X-Nextcloud-User` on
+ * every call (`context.ts withActingUser`); an explicit `onBehalfOf` wins
+ * when both are present; `null` when nobody can be established, and the
+ * caller answers 403 — never a wider identity, never an empty 200.
+ *
+ * A browser caller is themselves, byte-for-byte as before.
+ */
+async function resolveActor(
+  prisma: PrismaClient,
+  req: Request,
+  onBehalfOf: unknown,
+): Promise<Actor | null> {
+  const user = (req as Request & { user?: AuthUser }).user;
+  if (!user) return null;
+  if (user.id === MCP_PRINCIPAL_ID && user.role === "service") {
+    const header = req.header("x-nextcloud-user");
+    const explicit =
+      typeof onBehalfOf === "string" && onBehalfOf.trim().length > 0 ? onBehalfOf.trim() : undefined;
+    const named = explicit ?? (header && header.trim().length > 0 ? header.trim() : undefined);
+    if (!named) return null;
+    const row = (await prisma.user.findFirst({
+      where: { username: named },
+      select: { id: true, username: true, role: true },
+    })) as Actor | null;
+    return row;
+  }
+  return { id: user.id, username: user.username, role: user.role };
+}
+
+/** Resolve the actor or answer 403 — the mcp principal passed the role guard
+ *  on its own account; the PERSON it acts for must clear the same bar. */
+async function actorOr403(
+  prisma: PrismaClient,
+  req: Request,
+  res: Response,
+  onBehalfOf: unknown,
+): Promise<Actor | null> {
+  const actor = await resolveActor(prisma, req, onBehalfOf);
+  if (!actor) {
+    res.status(403).json({ error: "Forbidden: no principal to act for" });
+    return null;
+  }
+  if (!ROUTINE_ROLES.has(actor.role)) {
+    res.status(403).json({ error: "Forbidden: role not permitted to use routines" });
+    return null;
+  }
+  return actor;
+}
 
 const SPEC_STATUSES = ["live", "draft", "suggested"] as const;
 type SpecStatus = (typeof SPEC_STATUSES)[number];
@@ -75,6 +156,8 @@ const callStepSchema = z.object({
   tool: z.string().min(1).max(64),
   args: z.record(z.unknown()).optional(),
   as: outputNameSchema,
+  /** A failure of this step is recorded and the walk continues. */
+  optional: z.boolean().optional(),
 });
 
 const summarizeStepSchema = z.object({
@@ -84,7 +167,32 @@ const summarizeStepSchema = z.object({
   as: outputNameSchema,
 });
 
-const stepSchema = z.union([callStepSchema, summarizeStepSchema]);
+/**
+ * WARP-2895 — a `transform` step runs customer-written Python over the run's
+ * named results in services/sandbox and publishes `output`; a `when` step is
+ * the same call whose truthiness decides whether the walk continues. Neither
+ * names a tool: nothing for the §3 scope check to authorize, nothing for the
+ * `writes` derivation to count (`writeToolNamesIn` reads `plannedToolNames`,
+ * which ignores both kinds — pinned by tool-spec-runner.transform.test.ts).
+ *
+ * `code` is bounded here at 64 KB (the service refuses more); `inputs` is an
+ * object whose values may carry `${steps.x}` references.
+ */
+const transformStepSchema = z.object({
+  kind: z.literal("transform"),
+  code: z.string().min(1).max(64_000),
+  inputs: z.record(z.unknown()).optional(),
+  as: outputNameSchema,
+});
+
+const whenStepSchema = z.object({
+  kind: z.literal("when"),
+  code: z.string().min(1).max(64_000),
+  inputs: z.record(z.unknown()).optional(),
+  as: outputNameSchema,
+});
+
+const stepSchema = z.union([callStepSchema, summarizeStepSchema, transformStepSchema, whenStepSchema]);
 
 type ParsedStep = z.infer<typeof stepSchema>;
 
@@ -106,7 +214,10 @@ function storedArgsFor(s: ParsedStep): Record<string, unknown> {
   if (s.kind === "summarize") {
     return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
   }
-  return { tool: s.tool, args: s.args ?? {}, ...named };
+  if (s.kind === "transform" || s.kind === "when") {
+    return { code: s.code, inputs: s.inputs ?? {}, ...named };
+  }
+  return { tool: s.tool, args: s.args ?? {}, ...(s.optional ? { optional: true } : {}), ...named };
 }
 
 /**
@@ -236,6 +347,8 @@ function writesDisagreementBody(writeTools: string[]): Record<string, unknown> {
 }
 
 const createSpecSchema = z.object({
+  /** WARP-2894 — username the mcp principal acts for. Ignored for everyone else. */
+  onBehalfOf: z.string().trim().min(1).max(200).optional(),
   slug: z.string().min(2).max(80).regex(SLUG_RE),
   name: z.string().min(1).max(200),
   category: z.string().max(64).optional(),
@@ -387,14 +500,67 @@ export function createToolsRouter(
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
   summarizer: Summarizer = createToolSpecSummarizer(),
+  /**
+   * WARP-2895 — injected so tests can drive a `transform` / `when` step
+   * without a sandbox container, the same reason `summarizer` is a
+   * parameter. Defaults to the sandbox client; a spec with no such step
+   * never calls it.
+   */
+  transformer: Transformer = createSandboxTransformer(),
 ): Router {
   const router = Router();
 
+  /**
+   * Every by-slug lookup goes through here. The `daily-report` spec is
+   * box-provided rather than user-authored, so when it is missing the fix is
+   * to create it, not to tell the person "Spec not found" about a thing they
+   * never made. Seed-then-retry; a genuinely unknown slug still returns null.
+   */
+  async function findSpec<T>(
+    slug: string,
+    query: (where: { slug: string }) => Promise<T | null>,
+  ): Promise<T | null> {
+    const found = await query({ slug });
+    if (found || slug !== DAILY_REPORT_SLUG) return found;
+    await seedDailyReportSpec(prisma);
+    return query({ slug });
+  }
+
+  /**
+   * The identity a run-now executes as — the same three fields chat forwards
+   * on every tool call, so a spec run can read what the person has connected
+   * (calendar, email, memory are all `ctx.userId`-gated in tools-core).
+   *
+   * WARP-2894 — `routine_run` reaches the route as the mcp principal acting
+   * for a person, so the identity is the resolved ACTOR, never `req.user`:
+   * the robot has no calendar, no mail and no memory, and role `service`
+   * would reach every `userRole`-keyed tool as nobody. The Nextcloud token is
+   * still the request's own — the robot carries none, and the person's is
+   * never borrowed on their behalf.
+   */
+  async function runCallContext(
+    req: Request,
+    actor: Pick<Actor, "username" | "role">,
+  ): Promise<McpCallContext | undefined> {
+    const userId = actor.username;
+    const role = actor.role;
+    const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
+    if (!userId && !role && !ncToken) return undefined;
+    return {
+      ...(userId ? { userId } : {}),
+      ...(role ? { userRole: role } : {}),
+      ...(ncToken ? { ncToken } : {}),
+    };
+  }
+
   router.get(
     "/tools",
-    requireRole("owner", "admin", "family"),
+    // WARP-2894 — `routine_list` reaches this as the mcp principal.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const actor = await actorOr403(prisma, req, res, req.query.onBehalfOf);
+        if (!actor) return;
         const status = req.query.status;
         const category = req.query.category;
         const where: { status?: SpecStatus; category?: string } = {};
@@ -410,12 +576,22 @@ export function createToolsRouter(
         if (typeof category === "string" && category.length > 0) {
           where.category = category;
         }
+        // WARP-2894 — schedules ride on the list row (additive). The model's
+        // routine_list needs them to answer "when does this run" without a
+        // call per slug, and the dashboard's list ignores keys it does not
+        // read. Select, not include-all: the row shape is the wire contract.
         const rows = (await prisma.toolSpec.findMany({
           where: where as any,
           orderBy: { updatedAt: "desc" },
-          include: { _count: { select: { steps: true, runs: true } } },
+          include: {
+            _count: { select: { steps: true, runs: true } },
+            schedules: { select: { rrule: true, timezone: true, enabled: true, nextFireAt: true } },
+          },
         })) as unknown as Array<
-          SpecRow & { _count: { steps: number; runs: number } }
+          SpecRow & {
+            _count: { steps: number; runs: number };
+            schedules?: Array<{ rrule: string; timezone: string; enabled: boolean; nextFireAt: Date }>;
+          }
         >;
         res.json({
           specs: rows.map((r) => ({
@@ -435,6 +611,7 @@ export function createToolsRouter(
             updatedAt: r.updatedAt,
             stepCount: r._count.steps,
             runCount: r._count.runs,
+            schedules: r.schedules ?? [],
           })),
         });
       } catch (err) {
@@ -448,10 +625,12 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const spec = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-          include: { steps: { orderBy: { idx: "asc" } } },
-        })) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+        const spec = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({
+            where,
+            include: { steps: { orderBy: { idx: "asc" } } },
+          }),
+        )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
         if (!spec) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -465,7 +644,11 @@ export function createToolsRouter(
 
   router.post(
     "/tools",
-    requireRole("owner", "admin", "family"),
+    // WARP-2894 — `routine_draft` reaches this as the mcp principal. It can
+    // only ever CREATE a draft: `createSpecSchema` has no `status` field and
+    // the row is born `draft` by schema default, so the model has no path to
+    // `live` short of a person pressing Promote on /routines.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = createSpecSchema.safeParse(req.body);
@@ -475,12 +658,31 @@ export function createToolsRouter(
             .json({ error: "Invalid spec", details: parsed.error.flatten() });
           return;
         }
+        const who = await actorOr403(prisma, req, res, parsed.data.onBehalfOf);
+        if (!who) return;
+
+        // WARP-2894 — a step naming a tool this box does not have is refused
+        // here, where the author (a person or the model) can fix it, rather
+        // than at the first run. POST only: PATCH edits carry names the
+        // route tests seed as placeholders, and a stored spec's names are
+        // re-checked by the run pre-flight regardless.
+        const unknown = unknownToolsIn(
+          parsed.data.steps.flatMap((st) => (st.kind === "call" ? [st.tool] : [])),
+        );
+        if (unknown.length > 0) {
+          res.status(400).json({
+            error: "unknown_tools",
+            detail: "these steps name tools this box does not have",
+            tools: unknown,
+          });
+          return;
+        }
         // WARP-485: ownerId is a UUID (User.id), not the Nextcloud
         // username. Storing the username would break any
         // `WHERE ownerId = <User.id>` join (returns zero rows) and
         // diverge from cameras / network-firewall / reminders which
         // all key on req.user.id.
-        const actor = req.user?.id ?? null;
+        const actor = who.id;
 
         // WARP-2670 — refuse a reference graph the walker could not satisfy.
         const refError = stepReferenceError(parsed.data.steps);
@@ -557,10 +759,12 @@ export function createToolsRouter(
         // patch that replaces the steps must re-derive even when it says
         // nothing about `writes` — that second case is how a read-only spec
         // silently grew a write step before this.
-        const existing = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-          include: { steps: { orderBy: { idx: "asc" } } },
-        })) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+        const existing = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({
+            where,
+            include: { steps: { orderBy: { idx: "asc" } } },
+          }),
+        )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
         if (!existing) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -672,13 +876,21 @@ export function createToolsRouter(
 
   router.post(
     "/tools/:slug/runs",
-    requireRole("owner", "admin", "family"),
+    // WARP-2894 — `routine_run` reaches this as the mcp principal. The
+    // interceptor has already confirmed THAT call (Tier-2); the 409 below for
+    // a destructive, non-reversible spec is a second, separate gate the tool
+    // does not pass on the person's behalf — it relays it.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const spec = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-          include: { steps: { orderBy: { idx: "asc" } } },
-        })) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+        const actor = await actorOr403(prisma, req, res, req.body?.onBehalfOf ?? req.query.onBehalfOf);
+        if (!actor) return;
+        const spec = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({
+            where,
+            include: { steps: { orderBy: { idx: "asc" } } },
+          }),
+        )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
         if (!spec) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -753,12 +965,14 @@ export function createToolsRouter(
         // Same predicate as chat, from the same module (never a second copy
         // — two copies of a tool filter is how these two surfaces came to
         // disagree in the first place).
-        const scope = await resolveToolAccessScope(prisma, req.user);
+        // WARP-2894 — the ACTOR, never `req.user`: for the mcp principal that
+        // would be role `service`, which the resolver treats as un-narrowed.
+        const scope = await resolveToolAccessScope(prisma, actor);
         // Pre-flight so a forbidden spec is refused with an honest 403 and
         // NO ToolRun row, rather than half-running to the offending step.
         const denied = firstToolDeniedForPrincipal(
           plannedToolNames(spec.steps),
-          req.user?.role,
+          actor.role,
           scope,
         );
         if (denied !== null) {
@@ -777,7 +991,7 @@ export function createToolsRouter(
           return;
         }
 
-        const triggeredBy = req.user?.username ?? null;
+        const triggeredBy = actor.username;
         const { runId, outcome } = await runToolSpec(prisma, dispatcher, {
           specId: spec.id,
           specName: spec.name,
@@ -785,6 +999,8 @@ export function createToolsRouter(
           triggeredBy,
           scope,
           summarizer,
+          callContext: await runCallContext(req, actor),
+          transformer,
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({
@@ -810,9 +1026,9 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const spec = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-        })) as unknown as SpecRow | null;
+        const spec = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({ where }),
+        )) as unknown as SpecRow | null;
         if (!spec) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -824,8 +1040,16 @@ export function createToolsRouter(
             Number.parseInt(String(req.query.limit ?? "20"), 10) || 20,
           ),
         );
+        // A run executes AS the person who pressed Run, so its trace holds
+        // their calendar titles, meeting links and file paths. The archive is
+        // shared across owner/admin/family, so only the runs this person
+        // triggered — plus the ticker's, which run with no session and hold
+        // no per-user data — may come back. Never the newest run regardless.
         const rows = (await prisma.toolRun.findMany({
-          where: { specId: spec.id },
+          where: {
+            specId: spec.id,
+            triggeredBy: { in: [req.user?.username ?? "", "scheduler"] },
+          },
           orderBy: { startedAt: "desc" },
           take: limit,
         })) as unknown as RunRow[];
@@ -873,9 +1097,9 @@ export function createToolsRouter(
     req: Request,
     res: Response,
   ): Promise<{ spec: SpecRow; schedule: ScheduleRow | null } | null> {
-    const spec = (await prisma.toolSpec.findUnique({
-      where: { slug: req.params.slug },
-    })) as unknown as SpecRow | null;
+    const spec = (await findSpec(req.params.slug, (where) =>
+      prisma.toolSpec.findUnique({ where }),
+    )) as unknown as SpecRow | null;
     if (!spec) {
       res.status(404).json({ error: "Spec not found" });
       return null;

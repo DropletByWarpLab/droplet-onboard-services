@@ -18,10 +18,20 @@ import { createLogger } from "../lib/logger.js";
 const logger = createLogger("tool-spec-summarizer");
 
 /**
- * Prose, not JSON — so the ceiling is generous enough for five short
- * paragraphs without inviting an essay. The brief caps the tile at 2–5.
+ * Prose, not JSON — generous enough for five short paragraphs without
+ * inviting an essay. The brief caps the tile at 2–5.
+ *
+ * WARP-2964 — it was 700, which is what five paragraphs COST but not what
+ * they take to produce. On a reasoning model the budget is spent on the
+ * harmony analysis channel first, and `content` only starts once that is
+ * done: replaying a real daily report on gpt-oss:20B burned all 700 tokens
+ * in `reasoning_content`, returned `finish_reason: "length"` with zero
+ * characters of prose, and failed the run. The same prompt finished in
+ * ~1150 completion tokens when given room. 2100 leaves headroom for a
+ * longer day; this is one call every 24 h, so the ceiling costs nothing
+ * when it is not used.
  */
-const MAX_TOKENS = 700;
+const MAX_TOKENS = 2_100;
 
 /**
  * Low but not zero. Deterministic-sounding prose across seven days reads as
@@ -41,12 +51,43 @@ const TEMPERATURE = 0.3;
  */
 const MAX_RESULT_CHARS = 2_000;
 
+/**
+ * Error codes that mean "this source was never set up", not "this source
+ * broke": ERP with no connector, or a per-user source in a run that has no
+ * person to read it for (a scheduled fire). Decided HERE, by code, so the
+ * model is never the one reading an error message and choosing whether the
+ * owner should hear about it.
+ */
+const NOT_CONNECTED_CODES = new Set(["ERP_NOT_CONNECTED", "AUTH_REQUIRED"]);
+
+/** The dispatcher throws the MCP error envelope verbatim (app.ts); pull the
+ *  code and message back out. Anything else is a plain message. */
+function parseToolError(error: string | undefined): { code?: string; message: string } {
+  if (!error) return { message: "unknown error" };
+  try {
+    const e = (JSON.parse(error) as { error?: { code?: unknown; message?: unknown } }).error;
+    if (e && typeof e === "object") {
+      return {
+        ...(typeof e.code === "string" ? { code: e.code } : {}),
+        message: typeof e.message === "string" ? e.message : error,
+      };
+    }
+  } catch {
+    // not the envelope — a thrown Error's message, used as is
+  }
+  return { message: error };
+}
+
 function renderFact(t: RunStepTrace): string {
   if (!t.ok) {
     // Failures are facts too, and the ones most worth saying out loud. A
     // narrative that silently omits the step that failed is exactly the
-    // dishonesty this surface is built against.
-    return `- ${t.tool}: COULD NOT BE READ (${t.error ?? "unknown error"})`;
+    // dishonesty this surface is built against. The two markers are the
+    // prompt's vocabulary: NOT CONNECTED is left out, COULD NOT BE READ is
+    // said plainly.
+    const { code, message } = parseToolError(t.error);
+    if (code && NOT_CONNECTED_CODES.has(code)) return `- ${t.tool}: NOT CONNECTED`;
+    return `- ${t.tool}: COULD NOT BE READ (${message})`;
   }
   let body: string;
   try {
@@ -78,8 +119,10 @@ const SYSTEM = [
   "Rules you must follow:",
   "- Use ONLY figures that appear in the results. Never estimate, infer, or",
   "  carry a number over from general knowledge.",
-  "- If a result says it could not be read, say so plainly in one clause.",
+  "- If a source is marked COULD NOT BE READ, say so plainly in one clause.",
   "  Do not omit it and do not guess what it would have said.",
+  "- If a source is marked NOT CONNECTED, leave it out entirely. Something",
+  "  the owner never connected is not news.",
   "- Write prose. No bullet points, no headings, no markdown.",
   "- Second person, plain language, no exclamation marks.",
   "- If there is nothing of note, say that briefly rather than padding.",
@@ -91,22 +134,50 @@ export function createToolSpecSummarizer(): Summarizer {
       const model =
         process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "mistral:7b-instruct";
 
-      const result = await completeOnce({
-        system: SYSTEM,
-        text: `${prompt}\n\nResults:\n${renderFacts(facts)}`,
-        model,
-        temperature: TEMPERATURE,
-        maxTokens: MAX_TOKENS,
-      });
+      const text = `${prompt}\n\nResults:\n${renderFacts(facts)}`;
+      const ask = (maxTokens: number, reasoningEffort?: "low") =>
+        completeOnce({
+          system: SYSTEM,
+          text,
+          model,
+          temperature: TEMPERATURE,
+          maxTokens,
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+        });
 
-      const content = result.content.trim();
+      let result = await ask(MAX_TOKENS);
+      let content = result.content.trim();
+      if (!content) {
+        // WARP-2964 — one retry, because the cause is nearly always the
+        // budget: the model thought until it was cut off. Double the room and
+        // ask for less thinking (the gateway scopes `reasoning_effort` to the
+        // gpt-oss family and DMR may ignore it — harmless either way). A
+        // non-blank first answer never gets here, so the daily cost is still
+        // one call.
+        logger.warn(
+          {
+            model,
+            factCount: facts.length,
+            finishReason: result.finishReason,
+            reasoningChars: result.reasoning.length,
+          },
+          "summarizer returned empty content; retrying with a doubled budget",
+        );
+        result = await ask(MAX_TOKENS * 2, "low");
+        content = result.content.trim();
+      }
       if (!content) {
         // `completeOnce` treats empty content as a non-error. Here it is one:
         // an empty narrative would render as a report with nothing to say,
         // which is indistinguishable from a quiet day. Fail so the tile shows
-        // its failure state instead.
-        logger.warn({ model, factCount: facts.length }, "summarizer returned empty content");
-        throw new Error("the model returned an empty summary");
+        // its failure state instead — and say WHY, because this string is the
+        // whole of what the owner and the next debugger get: the runner puts
+        // it verbatim into `trace[n].error` and `ToolRun.error`.
+        throw new Error(
+          `the model returned an empty summary (model=${model} ` +
+            `finish_reason=${result.finishReason ?? "unknown"} ` +
+            `reasoning_chars=${result.reasoning.length})`,
+        );
       }
       return content;
     },

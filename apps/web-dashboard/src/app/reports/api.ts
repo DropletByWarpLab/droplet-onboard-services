@@ -211,9 +211,13 @@ export function reportFromRun(run: ToolRunRow): DailyReport | null {
     runId: run.id,
     at: run.endedAt ?? run.startedAt,
     prose: summary.result.trim(),
-    // Every tool that actually ran, in run order. Derived so a spec change
-    // updates the chips without anyone editing the tile.
-    sources: trace.filter((t) => t.tool !== SUMMARIZE_PSEUDO_TOOL).map((t) => t.tool),
+    // Every tool that actually FED the report, in run order. Derived so a
+    // spec change updates the chips without anyone editing the tile. A step
+    // that failed (an unconnected source, an unreadable one) contributed
+    // nothing, so it is not provenance.
+    sources: trace
+      .filter((t) => t.ok && t.tool !== SUMMARIZE_PSEUDO_TOOL)
+      .map((t) => t.tool),
     status: run.status,
   };
 }
@@ -304,5 +308,132 @@ export async function fetchChainVerify(): Promise<VerifySummary> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to verify chain: ${res.status}`);
   }
+  return res.json();
+}
+
+// ── /api/briefings — the caller's own morning briefing (WARP-2270) ───────
+//
+// Self-only: every route answers for the signed-in user and takes no user
+// parameter. Floor is owner/admin/family, the same PHI_TIER the page uses;
+// a guest gets 403 → ForbiddenError → the tile's locked state.
+
+export type BriefingStatus = "pending" | "running" | "ready" | "failed" | "skipped";
+export type BriefingVibe =
+  | "calm"
+  | "focused"
+  | "busy"
+  | "urgent"
+  | "celebratory"
+  | "quiet"
+  | "stormy"
+  | "fresh";
+
+export interface BriefingAction {
+  rank: number;
+  title: string;
+  why: string;
+  suggestion: string;
+  /** Internal route only — the runner drops anything else (WARP-2248). */
+  href?: string;
+  sourceTools: string[];
+}
+
+/** The no-action branch: workflow ideas instead of actions. */
+export interface BriefingSuggestion {
+  title: string;
+  why?: string;
+  suggestion?: string;
+  sourceTools?: string[];
+}
+
+/** The validated output contract (WARP-2248/2255). Null until `ready`. */
+export interface BriefingBody {
+  headline?: string;
+  vibe?: BriefingVibe;
+  /** Plain text; paragraphs separated by blank lines. No markdown. */
+  summary?: string;
+  actions?: BriefingAction[];
+  suggestions?: BriefingSuggestion[];
+  imageTheme?: string;
+  photoCredit?: { photographer: string; photographerUrl: string };
+}
+
+export interface Briefing {
+  id: string;
+  /** Box-local `YYYY-MM-DD`. */
+  forDate: string;
+  status: BriefingStatus;
+  skipReason: string | null;
+  failureReason: string | null;
+  headline: string | null;
+  vibe: BriefingVibe | null;
+  body: BriefingBody | null;
+  /** Tool names actually called, from the agent trace. */
+  sources: string[] | null;
+  model: string | null;
+  iterations: number | null;
+  artKind: "ascii" | "svg" | "photo";
+  photoStatus: "none" | "fetched" | "fetch_failed" | "disabled";
+  photoRef: string | null;
+  triggeredBy: "scheduler" | "user";
+  startedAt: string | null;
+  endedAt: string | null;
+  readAt: string | null;
+}
+
+/** 429 on a rewrite: one already in flight, or the 10-minute cooldown. */
+export class BriefingRateLimited extends Error {
+  constructor(
+    readonly reason: "briefing_run_in_progress" | "briefing_run_too_soon",
+    readonly retryAfterSec: number | null,
+  ) {
+    super(reason);
+    this.name = "BriefingRateLimited";
+  }
+}
+
+async function briefingError(res: Response, what: string): Promise<Error> {
+  if (res.status === ACTIVITY_FORBIDDEN) return new ForbiddenError();
+  const body = await res.json().catch(() => ({}));
+  return new Error(body.error || `${what}: ${res.status}`);
+}
+
+/** Today's row, or null when none exists yet (404 is "not written", not an error). */
+export async function fetchTodayBriefing(): Promise<Briefing | null> {
+  const res = await authFetch("/api/briefings/today");
+  if (res.status === 404) return null;
+  if (!res.ok) throw await briefingError(res, "Failed to fetch briefing");
+  return res.json();
+}
+
+export async function fetchBriefingHistory(limit = 7): Promise<Briefing[]> {
+  const res = await authFetch(`/api/briefings?limit=${limit}`);
+  if (!res.ok) throw await briefingError(res, "Failed to fetch briefings");
+  return ((await res.json()).items ?? []) as Briefing[];
+}
+
+export async function fetchBriefingUnreadCount(): Promise<number> {
+  const res = await authFetch("/api/briefings/unread-count");
+  if (!res.ok) throw await briefingError(res, "Failed to fetch briefing count");
+  return (await res.json()).total ?? 0;
+}
+
+export async function markBriefingRead(id: string): Promise<string> {
+  const res = await authFetch(`/api/briefings/${encodeURIComponent(id)}/read`, { method: "POST" });
+  if (!res.ok) throw await briefingError(res, "Failed to mark briefing read");
+  return (await res.json()).readAt;
+}
+
+/** Enqueue (202). The tile then polls `fetchTodayBriefing`. */
+export async function requestBriefingRewrite(): Promise<{ briefingId: string; status: BriefingStatus }> {
+  const res = await authFetch("/api/briefings/today/run", { method: "POST" });
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({}));
+    throw new BriefingRateLimited(
+      body.error === "briefing_run_too_soon" ? "briefing_run_too_soon" : "briefing_run_in_progress",
+      typeof body.retryAfterSec === "number" ? body.retryAfterSec : null,
+    );
+  }
+  if (!res.ok) throw await briefingError(res, "Couldn't request a briefing");
   return res.json();
 }

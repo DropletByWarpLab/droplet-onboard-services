@@ -25,6 +25,7 @@ import path from "node:path";
 import { ncCreateDirectory, ncUploadFile } from "./nextcloud.client.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { isWeakDeviceSecret } from "../lib/device-secret.js";
 
 const logger = createLogger("clips");
 
@@ -149,7 +150,9 @@ interface SharePayload {
 
 function signingKey(): Buffer {
   const k = process.env.DEVICE_SECRET;
-  if (!k) {
+  // WARP-2985: a publicly-known value (`change-me`, a dev literal) is as
+  // forgeable as none at all.
+  if (isWeakDeviceSecret(k)) {
     // Fail loud regardless of NODE_ENV. A dev fallback constant would be
     // identical on every install — anyone who reads the source could forge
     // a token and exercise the pre-auth share endpoint. Tests set
@@ -157,7 +160,7 @@ function signingKey(): Buffer {
     // env, add `DEVICE_SECRET=any-string-you-want` to your .env.
     throw new Error("DEVICE_SECRET must be set to sign or verify share URLs");
   }
-  return Buffer.from(k);
+  return Buffer.from(k as string);
 }
 
 function b64url(buf: Buffer): string {

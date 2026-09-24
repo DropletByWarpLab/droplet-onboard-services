@@ -89,6 +89,7 @@ import {
   type ApiCrmContactRow,
   type FindEntity,
 } from "./_graph.js";
+import { OrchPmError } from "../pm/pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -297,7 +298,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         }
         for (const p of rec.projects ?? []) wanted.add(p.id);
         let projects: ReturnType<typeof toPlaneProject>[] = [];
-        if (wanted.size > 0) {
+        // WARP-2988 review — the project lookup is ENRICHMENT of a CRM record.
+        // When the Projects side refuses it (`module_disabled`: switched off
+        // box-wide, or not reachable for the person the assistant acts for),
+        // the customer is still the answer: return it without projects rather
+        // than failing the whole call as "Projects is switched off".
+        if (wanted.size > 0) try {
           const page = await callOrch<{ projects?: Parameters<typeof toPlaneProject>[0][] }>(
             ctx,
             "get",
@@ -322,6 +328,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
             ),
           );
           projects = [...listed, ...direct.map((d) => d.project)].map(toPlaneProject);
+        } catch (err) {
+          if (!(err instanceof OrchPmError && err.message === "module_disabled")) throw err;
+          projects = [];
         }
         const contactRows = (contacts.contacts ?? []).map(toGraphContact);
         // Both lists are pages of `limit`, and each route says how big the
@@ -637,7 +646,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       }
     }
   } catch (err) {
-    return businessError(err, entity);
+    return businessError(err);
   }
 }
 

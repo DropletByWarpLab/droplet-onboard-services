@@ -74,7 +74,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn(),
   touchNcToken: vi.fn(),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -95,6 +95,10 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+// WARP-2993: the /auth/users routes call Nextcloud as the box service
+// account, never with the caller's own NC credential ("caller-nc-token").
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+const SERVICE_NC_TOKEN = adminBasicToken();
 
 // ── In-memory userInvite + user store ──
 function createPrismaMock() {
@@ -177,7 +181,9 @@ function createPrismaMock() {
         let count = 0;
         for (let i = 0; i < userRows.length; i += 1) {
           const u = userRows[i];
+          // WARP-2858: the edit-user route pins its write by the resolved id.
           const match =
+            (where?.id !== undefined && u.id === where.id) ||
             (where?.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
             (where?.username !== undefined && u.username === where.username);
           if (match) {
@@ -622,7 +628,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     expect(Array.isArray(setCookie) ? setCookie.join(";") : String(setCookie)).toMatch(/droplet_session=/);
   });
 
-  it("creates an admin invitee in the admin group", async () => {
+  it("creates an admin invitee in droplet-admins, not NC instance admin (WARP-2993)", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
     // ADR-013: email required; username ("carla") is derived server-side.
@@ -639,7 +645,12 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
 
     const callArgs = (nc.ncCreateUser as any).mock.calls[0];
     const groups = callArgs[4] ?? [];
-    expect(groups).toContain("admin");
+    // WARP-2993: admin tier = droplet-admins, never NC instance admin; and
+    // the create runs as the box service account (a `basic:` token, not the
+    // old prefix-less base64 that went out as a Bearer).
+    expect(groups).toContain("droplet-admins");
+    expect(groups).not.toContain("admin");
+    expect(callArgs[0]).toMatch(/^basic:/);
   });
 
   it("rejects a password that doesn't meet the policy", async () => {
@@ -880,7 +891,7 @@ describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () =
 
     expect(res.status).toBe(200);
     expect(nc.ncUpdateUser).toHaveBeenCalledWith(
-      "test-nc-token",
+      SERVICE_NC_TOKEN,
       "alice",
       "email",
       "alice@example.com",

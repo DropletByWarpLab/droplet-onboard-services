@@ -74,6 +74,9 @@ import { resolveToolAccessScope } from "../services/tool-access.service.js";
 import type { StepDispatcher } from "../services/tool-spec-runner.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 
+/** The run-now route forwards the caller's identity to every tool call. */
+const AS_CALLER = expect.objectContaining({ userId: expect.any(String) });
+
 // ── fixtures ───────────────────────────────────────────────────────
 //
 // Names come off the LIVE catalog, never hand-typed: `requiresWrite` is the
@@ -308,7 +311,7 @@ describe("WARP-1621 — run-now applies the ADR-004 write-tier gate", () => {
     const res = await request(app).post("/api/tools/goodnight/runs");
 
     expect(res.status).toBe(200);
-    expect(dispatcher.call).toHaveBeenCalledWith(FILES_READ, { path: "/" });
+    expect(dispatcher.call).toHaveBeenCalledWith(FILES_READ, { path: "/" }, AS_CALLER);
   });
 
   it("leaves owner and admin at full reach — the tier gate stops at privileged", async () => {
@@ -327,7 +330,7 @@ describe("WARP-1621 — run-now applies the ADR-004 write-tier gate", () => {
       expect(dispatcher.call).toHaveBeenCalledWith(SMART_HOME_WRITE, {
         node_id: "n1",
         command: "turn_on",
-      });
+      }, AS_CALLER);
     }
   });
 });

@@ -14,17 +14,18 @@ import { render, screen, waitFor } from "@testing-library/react";
 import type { HealthResponse } from "@/lib/types";
 
 const fetchUsersMock = vi.fn();
-const listProviderKeysMock = vi.fn();
 
 /** Mutated per-test, read by the useDevice mock below. */
 let healthValue: HealthResponse | null = null;
 
 vi.mock("@/lib/api", () => ({
-  listProviderKeys: (...a: any[]) => listProviderKeysMock(...a),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: vi.fn(),
   deleteUser: vi.fn(),
   fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
+  // WARP-2967: the Settings page derives its tucked-surface rows from
+  // nav-config and resolves their capability gates through this probe.
+  fetchCapabilities: () => Promise.resolve({ claudeActivity: false, ragEval: false }),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -43,11 +44,6 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   }),
 }));
 
-vi.mock("@/components/ProviderKeyForm", () => ({
-  ProviderKeyForm: ({ provider }: { provider: string }) => (
-    <div data-testid={`provider-key-${provider}`} />
-  ),
-}));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
 
 import SettingsPage from "@/app/settings/page";
@@ -74,8 +70,6 @@ function health(runtime?: "dmr" | "ollama"): HealthResponse {
 beforeEach(() => {
   healthValue = null;
   fetchUsersMock.mockReset();
-  listProviderKeysMock.mockReset();
-  listProviderKeysMock.mockResolvedValue([]);
   fetchUsersMock.mockResolvedValue({ users: [] });
 });
 

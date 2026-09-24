@@ -170,6 +170,16 @@ model ChatSession {
   /// its original chronological spot, not to "Today".
   pinned          Boolean           @default(false)
   pinnedAt        DateTime?
+  /// WARP-2991 — may this conversation's on-box answers be replayed to a
+  /// cloud model? Explicit enum, never inferred from the timestamp. The
+  /// server replays assistant history to a cloud provider ONLY when this is
+  /// `granted` AND `cloudHistoryConsentAt` is later than every on-box answer
+  /// in the thread; anything else replays the user's own messages only.
+  /// A CHECK ties the state to its actor pair (not_asked ⇔ both NULL).
+  cloudHistoryConsent   CloudHistoryConsent @default(not_asked)
+  cloudHistoryConsentAt DateTime?
+  /// Username of the person who decided (ChatSession.userId is a username too).
+  cloudHistoryConsentBy String?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @default(now()) @updatedAt
   messages        ChatMessage[]
@@ -939,6 +949,15 @@ model ChatMessage {
   @@index([sessionId, status])
 }
 
+/// WARP-2991 — the owner's answer to "send this conversation's earlier
+/// on-box answers to the cloud model?". `not_asked` and `declined` both
+/// replay the user's own messages only; the difference is audit, not effect.
+enum CloudHistoryConsent {
+  not_asked
+  granted
+  declined
+}
+
 /// WARP-844 — thumbs rating on an assistant message.
 enum ChatMessageFeedback {
   up
@@ -1130,6 +1149,16 @@ enum Role {
 enum DirectoryUserStatus {
   ACTIVE
   DEACTIVATED
+}
+
+// WARP-2858 — how a User row came to exist. LOCAL: /auth/setup, admin
+// create, invite accept (the box owns the credential). SSO: just-in-time
+// created by an OIDC sign-in (sso.ts). SCIM: pushed by the IdP's directory
+// sync (scim.service.ts provisionUser).
+enum UserProvisionSource {
+  LOCAL
+  SSO
+  SCIM
 }
 
 /// WARP-1202: explicit pairing-code lifecycle. Persistent state lives in this
@@ -1995,6 +2024,41 @@ model Note {
 // `source = "local"` and are publishable via the /api/calendar/publish/... ICS
 // feed, so phones can subscribe without needing OAuth.
 
+/// WARP-2767: lifecycle of a calendar feed link. Persistent state lives in
+/// this enum, never inferred from a nullable timestamp (PairingCodeStatus is
+/// the precedent).
+///   - active  — the feed answers. `expiresAt` stays authoritative in real
+///               time: the feed refuses an overdue active row and stamps it
+///               `expired` on the spot.
+///   - rotated — replaced by a newer link via POST /calendar/publish/rotate.
+///   - revoked — turned off via POST /calendar/publish/revoke.
+///   - expired — past `expiresAt`.
+enum CalendarFeedTokenState {
+  active
+  rotated
+  revoked
+  expired
+}
+
+/// WARP-2767: a bearer credential for the pre-auth ICS feed at
+/// /api/calendar/publish/:user.ics. The URL token is `<id>.<secret>`; only
+/// sha256(secret) is stored, so a database read never yields a working link.
+/// Bound to exactly one account by FK — the feed also requires the URL's
+/// username to be that account's current username.
+model CalendarFeedToken {
+  id         String                 @id @default(uuid())
+  userId     String
+  secretHash String
+  state      CalendarFeedTokenState @default(active)
+  createdAt  DateTime               @default(now())
+  expiresAt  DateTime
+  /// Set when the row leaves `active` (rotated / revoked / expired).
+  endedAt    DateTime?
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, state])
+}
+
 model CalendarEvent {
   id           String   @id @default(uuid())
   userId       String // Nextcloud username
@@ -2283,13 +2347,34 @@ model NotificationLog {
   kind        NotificationKind
   title       String
   body        String?
+  // WARP-2909 — deep link: a same-origin dashboard path (validated by
+  // assertNotificationLink) and small flat PHI-free client context.
+  url         String?
+  data        Json?
   // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
   error       String?
+  /// WARP-2904 — what the web-push leg did, explicitly. NULL only on rows
+  /// written before this column existed and on `recordNotification` rows
+  /// (queued, no transport yet); never inferred from `channels`/`error`.
+  pushOutcome PushOutcome?
   createdAt   DateTime         @default(now())
 
   @@index([userId, createdAt])
+}
+
+/// WARP-2904 — the web-push leg of one sendNotification call.
+///   sent           at least one subscription accepted the push
+///   no_subscribers the user has no (valid) PushSubscription row
+///   refused_gate   the `web_push` off-LAN channel is off (or unreadable)
+///   failed         subscribers existed and nothing was accepted, or the
+///                  push leg threw
+enum PushOutcome {
+  sent
+  no_subscribers
+  refused_gate
+  failed
 }
 
 // ── WARP-446: Coverage extender APs (auto-onboarded OpenWrt APs) ──
@@ -2671,6 +2756,13 @@ model User {
   // back to ACTIVE on re-activate. The login route + SSO callback fail
   // closed when this is DEACTIVATED. Explicit enum, never IS-NULL-derived.
   directoryStatus    DirectoryUserStatus @default(ACTIVE)
+  // WARP-2858: where this account was CREATED — written once, by the path
+  // that minted the row, never inferred from a null `passwordHash` or
+  // `nextcloudUsername`. SSO / SCIM rows authenticate through the IdP only:
+  // the box refuses to set, change or verify a local password on them,
+  // because a local password is a login the IdP's disable/deprovision cannot
+  // reach. A LOCAL row that later links an SSO identity stays LOCAL.
+  provisionSource    UserProvisionSource @default(LOCAL)
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was
@@ -2716,6 +2808,10 @@ model User {
   // was supplied up front). Anonymous passwordless-authenticate challenges
   // have a null userId, so they are NOT in this relation.
   webauthnChallenges  WebAuthnChallenge[]
+  // WARP-2767: calendar ICS feed links ("subscribe on my phone"). Deleting
+  // the user cascades them, so a reused username can never inherit an old
+  // link (see CalendarFeedToken).
+  calendarFeedTokens  CalendarFeedToken[]
 
   // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the
@@ -2752,6 +2848,8 @@ model User {
   // access-control key, where an assignment is mere provenance.
   brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
   brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
+  // WARP-2251: the user's own morning briefings, one per box-local day.
+  morningBriefings   MorningBriefing[]
 
   @@index([role])
   @@index([accessRoleId])
@@ -2963,6 +3061,21 @@ enum DepartmentRight {
   manager // + create shares on dept content, manage dept membership (absorbs WARP-1245)
 }
 
+/// WARP-2976 (ADR-059 P1): which arrangement a department's profile starts
+/// from. A template is DATA — default nav destinations and home widgets the
+/// dashboard seeds a profile with; the owner or the department's manager edits
+/// both afterwards. It grants nothing: what a person may reach is still ADR-032
+/// + CameraAccessGrant. `custom` is an explicit choice, not a fallback.
+enum DepartmentTemplate {
+  security
+  sales
+  finance
+  operations
+  front_desk
+  it
+  custom
+}
+
 /// WARP-1255: department hierarchy kind. Departments are top-level; teams nest
 /// one level deep inside them. Household is the legacy WS-5 system department.
 enum DepartmentKind {
@@ -3143,6 +3256,11 @@ model WebAuthnCredential {
   // hybrid"). Optional — older authenticators omit it. Used only as a UX
   // hint to the browser on the next authenticate ceremony.
   transports   String?
+  // WARP-1157: owner-chosen label shown in Settings. NULL until renamed.
+  name         String?
+  // WARP-1157: the RP ID (host) this passkey was created on — passkeys only
+  // work on that address. NULL only for rows enrolled before it was recorded.
+  rpId         String?
   createdAt    DateTime  @default(now())
   // Bumped on every successful assertion so the dashboard can show
   // "last used 3 days ago" without a separate audit query.
@@ -3223,12 +3341,20 @@ model File {
   // Cached path for display. Refreshed from the file-indexer's MQTT
   // bridge when Nextcloud renames or moves the file.
   path         String?
+  // WARP-2096: SHA-256 (hex) of the bytes, computed while the upload streams
+  // through, and their length. Null for rows written before it or outside
+  // POST /files/upload. The (owner, sha256) index is deliberately NOT unique:
+  // a second copy of the same bytes is a legitimate file, so duplicates are
+  // reported to the uploader, never refused by the database.
+  sha256       String?
+  sizeBytes    BigInt?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@index([ownerUserId])
   @@index([scope])
   @@index([departmentId])
+  @@index([ownerUserId, sha256])
 }
 
 // ── WARP-456: signed append-only activity log ──
@@ -3945,6 +4071,16 @@ model AgentRun {
   /// runs rather than deleting the runs with it.
   scheduleId         String?
   schedule           AgentRunSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  /// WARP-2997 — the per-person cloud gate's verdict at the LATEST claim.
+  /// Explicit, like `status`: `unchecked` until the worker first claims the
+  /// row, never inferred from `offLanProvider` being NULL.
+  cloudGate          AgentRunCloudGate        @default(unchecked)
+  /// WARP-2997 — the non-local provider the run's model resolved to at the
+  /// latest claim; NULL when it stays on the box (`cloudGate` says which).
+  offLanProvider     String?
+  /// WARP-2997 — the stored-content tools withheld from the run's pool at
+  /// the latest claim (`withholdStoredContentTools`). Empty on a local run.
+  offLanWithheldTools String[]                @default([])
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
@@ -3971,6 +4107,19 @@ enum AgentRunStatus {
   succeeded
   failed
   cancelled
+}
+
+/// WARP-2997 — where a run's model runs, and whether its owner may use it.
+/// `unchecked` (never claimed yet), `local` (on the box; nothing withheld),
+/// `cloud_allowed` (cloud model, person permitted; stored-content tools
+/// withheld), `cloud_refused` (451: the person may not use cloud models),
+/// `cloud_unverified` (503: the gate could not be read; fail-closed).
+enum AgentRunCloudGate {
+  unchecked
+  local
+  cloud_allowed
+  cloud_refused
+  cloud_unverified
 }
 
 /// WARP-2180 — a recurring background run: the same RRULE vocabulary as
@@ -4134,6 +4283,10 @@ enum OffLanChannelKey {
   /// Bank)": the /api/web/weather + /api/web/rates routes' egress gate,
   /// fronting the services/web-fetch allowlisted fetcher.
   ambient_data
+  /// WARP-2904 — Web Push delivery: the dial to whichever push service
+  /// (Google / Apple / Mozilla) a PushSubscription row names. Read by
+  /// `webPushGate` in dispatchToUser, the one dial site, on every call.
+  web_push
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.
@@ -4345,6 +4498,11 @@ enum ModuleId {
   /// module because a box that keeps its books elsewhere should have no
   /// /money surface at all, rather than an empty one.
   money
+  /// WARP-2977 (ADR-059 DS-004) — the Security command center. Its own
+  /// module, not part of `cameras`: threats (and, with ADR-055, doors) are
+  /// in it too, and folding it into cameras would hide those behind a camera
+  /// grant. Camera grants still filter every camera row inside it (DS-005).
+  security
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -5249,6 +5407,27 @@ enum DeviceUpdateStatus {
   rejected
 }
 
+/// WARP-3007 follow-up (Stefan on #2302; Romain approved 2026-09-23): what an
+/// apply actually did to the box, recorded as an explicit column instead of
+/// being read out of status + failureReason + logs. `status` stays the
+/// advance-only lifecycle; `outcome` is the verdict an operator acts on —
+/// notably a committed update whose post-commit start of a newly-enabled
+/// service failed, which `status` (committed, final) cannot say.
+enum DeviceUpdateOutcome {
+  /// No swap outcome yet: pending, verifying, applying, rejected, superseded.
+  not_applied
+  /// Committed; the post-commit start of services new to this box is running.
+  starting_services
+  /// Committed; every service this box enables is running.
+  committed
+  /// Committed, but a newly-enabled service did not start or never went healthy.
+  services_start_failed
+  /// A health gate failed; the previous release is back and healthy.
+  rolled_back
+  /// The rollback's own health gate failed too (status failed, degraded_health).
+  rollback_failed
+}
+
 /// One row per release the update agent decided to track (signature-verified
 /// at discovery time — a release that fails signature verification writes NO
 /// row, only an `update.signature_failed` log event, per WARP-538).
@@ -5281,8 +5460,10 @@ model DeviceUpdate {
   /// apply-time verdict such as `degraded_health` (WARP-539). Null while the
   /// row is healthy.
   failureReason  String?
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  /// WARP-3007 — explicit apply outcome (see DeviceUpdateOutcome).
+  outcome        DeviceUpdateOutcome @default(not_applied)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   @@index([status, createdAt])
   @@index([gitSha])
@@ -6344,6 +6525,11 @@ model Department {
   // membership test, so an access key must never dangle.
   brainDigests      BrainDigest[]
   brainFindings     BrainFinding[]
+  /// WARP-2976 (ADR-059 P1): how this department is ARRANGED in the dashboard
+  /// (switcher, /d/<slug> home). Absent = "not set up" — a state the UI names,
+  /// never a template inferred from the department's name. Only DEPARTMENT rows
+  /// carry one: a TEAM reads its parent's, HOUSEHOLD has none.
+  profile           DepartmentProfile?
 
   @@index([state])
   /// WARP-2634: declared to match `Department_parentId_idx`, which
@@ -6351,6 +6537,27 @@ model Department {
   /// not auto-index FK columns and the reconciler reads teams by parentId, so
   /// the index is doing real work — the datamodel was the side that was wrong.
   @@index([parentId])
+}
+
+/// WARP-2976 (ADR-059 P1) — a department's dashboard arrangement. Shows,
+/// never grants: `navHrefs` is intersected with the viewer's existing nav gates
+/// (role / capability / module) on the client, so a destination the person may
+/// not reach stays hidden and an href that no longer exists renders nothing.
+/// The server validates SHAPE only; the nav definition lives in the dashboard.
+model DepartmentProfile {
+  departmentId String             @id
+  department   Department         @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  template     DepartmentTemplate
+  /// lucide icon name, lowercase-dash (validated by the route's zod schema)
+  icon         String
+  /// ordered dashboard hrefs, e.g. ["/cameras", "/events"]
+  navHrefs     String[]
+  /// ordered [{ widget, size }] — unknown widget ids are skipped by the client
+  homeWidgets  Json
+  /// local User.id of the last writer (the ActivityRow carries the audit)
+  updatedBy    String
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
 }
 
 /// WARP-1255: department membership — explicit access rights for a user in a
@@ -8006,4 +8213,378 @@ model EntityLink {
   @@index([dealId, isArchived])
   @@index([projectId, isArchived])
   @@index([workItemId, isArchived])
+}
+
+/// WARP-2426 (ADR-043 §2, ADR-056 I4) — the operator-owned classification
+/// record for a tool this box did not author: a remote MCP server's today, a
+/// desktop-hosted server's or a customer extension's tomorrow.
+///
+/// One row per (server, wire tool name), written by exactly ONE import path
+/// (`remote-tool-classification.service.ts` `recordDiscoveredRemoteTools`),
+/// and every row that path creates is a CONFIRMING WRITE — `requiresWrite`
+/// and `requiresConfirmation` both true — whatever the wire says the tool is.
+/// A server can declare `search_issues` with `readOnlyHint: true` and thereby
+/// choose its own privilege level; this row is what refuses to let it. The
+/// default costs a click, never data.
+///
+/// Demoting a tool (to a read, or to blocked) is a person's act: `reviewedBy`
+/// and `reviewedAt` are set by the owner route and nothing else. A row with
+/// no reviewer is the import default and reads as one. `denied` is explicit
+/// state, never inferred from a missing row — a missing row means "never
+/// seen", which the call policy refuses with its own code.
+///
+/// `wireDescription` is recorded for the operator's eyes and is never read as
+/// truth by any policy (ADR-043 §2: the wire's annotations are not read).
+model RemoteToolClassification {
+  id                   String    @id @default(uuid())
+  serverId             String
+  toolName             String
+  requiresWrite        Boolean   @default(true)
+  requiresConfirmation Boolean   @default(true)
+  denied               Boolean   @default(false)
+  reviewedBy           String?
+  reviewedAt           DateTime?
+  wireDescription      String?
+  firstSeenAt          DateTime  @default(now())
+  lastSeenAt           DateTime  @default(now())
+
+  @@unique([serverId, toolName])
+  @@index([serverId])
+}
+
+/// WARP-2251 — morning briefing: one agent-written day plan per user per
+/// box-local day. Self-only: every read is scoped by `userId` (decision 2,
+/// 2026-08-27). Status is an explicit enum (CLAUDE.md "No guessing"): never
+/// derive readiness from `body IS NOT NULL` or failure from `endedAt IS NULL`.
+/// `body` is NOT encrypted at rest in v1 (decision 1); 30-day retention.
+model MorningBriefing {
+  id            String              @id @default(uuid())
+  userId        String
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Box-local calendar date the briefing is FOR (not when it ran).
+  forDate       DateTime            @db.Date
+  status        BriefingStatus      @default(pending)
+  skipReason    String?
+  failureReason String?
+  headline      String?
+  vibe          BriefingVibe?
+  /// The validated output contract (WARP-2248). Null until status = ready.
+  body          Json?
+  /// Tool names actually called, from the agent trace.
+  sources       Json?
+  model         String?
+  iterations    Int?
+  artKind       BriefingArtKind     @default(ascii)
+  photoStatus   BriefingPhotoStatus @default(none)
+  /// "<YYYY-MM-DD>/<theme>/<pexelsId>" (WARP-2263); null when no photo.
+  photoRef      String?
+  triggeredBy   BriefingTrigger     @default(scheduler)
+  startedAt     DateTime?
+  endedAt       DateTime?
+  readAt        DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@unique([userId, forDate])
+  @@index([userId, forDate(sort: Desc)])
+  @@index([status, forDate])
+}
+
+enum BriefingStatus {
+  pending
+  running
+  ready
+  failed
+  skipped
+}
+
+enum BriefingVibe {
+  calm
+  focused
+  busy
+  urgent
+  celebratory
+  quiet
+  stormy
+  fresh
+}
+
+enum BriefingArtKind {
+  ascii
+  svg
+  photo
+}
+
+enum BriefingPhotoStatus {
+  none
+  fetched
+  fetch_failed
+  disabled
+}
+
+enum BriefingTrigger {
+  scheduler
+  user
+}
+
+// ── WARP-2977 (ADR-059 §3.3): the Security command center's event store ──
+//
+// One row per OBSERVATION: a tracked object Frigate finished following, a
+// camera's detect stream going down or coming back, a warn/err network or
+// auth ActivityRow. Append-only — a correction is a new row, never an update.
+//
+// NOT ActivityRow. That table is an HMAC hash chain recording who did what on
+// the box; detections are high-volume machine observations. Putting them in
+// the chain would sign every one, bury the audit trail in noise, and make the
+// 30-day retention below a deletion from a tamper-evident log. The chain
+// keeps the human-level facts (incident acknowledged, link changed — P3/P4).
+//
+// Written by `security-events.service.ts` only. Frigate detections are
+// ingested on `end` (one row per object, with its duration, best score and
+// zones), from the RAW message — never behind camera-event-gate, which drops
+// concurrent and cooldown events for the toast/push surface.
+//
+// Columns land with their first writer: `incidentId` with P3,
+// `correlationKey` with ADR-055's AccessEvent. Zones resolve at read time
+// from SecurityZoneLink (camera, cameraZones, sourceRef); no zoneId column
+// (WARP-2977 P2b).
+
+/// Where a SecurityEvent came from. Explicit enum — never inferred from
+/// which columns are null.
+enum SecurityEventSource {
+  frigate
+  frigate_status
+  activity_mirror
+  /// WARP-2977 P2b — a change of the site mode (SecurityModeState). One row per change.
+  site_mode
+}
+
+enum SecurityEventKind {
+  /// A tracked object that cleared the ingest gate (best score >= 0.70 and
+  /// tracked >= 2 s). The only kind a baseline will count (P5).
+  detection
+  /// Below the gate, or a false positive. KEPT, not dropped, so the
+  /// thresholds can be tuned against real data later.
+  detection_low
+  camera_offline
+  camera_online
+  /// Frigate as a whole (its `frigate/available` LWT) — every camera is
+  /// blind while this is the latest word. "Nothing reporting" must never
+  /// read as "all clear".
+  source_offline
+  source_online
+  /// A mirrored warn/err `network` or `auth` ActivityRow.
+  threat
+  /// The site mode changed. labels = [mode, modeSource, fromMode]; startedAt = the boundary instant.
+  mode_changed
+}
+
+/// info < notice < alert. On an event this is the source's own weight; the
+/// incident severity P3 derives from reason codes is a separate column.
+enum SecuritySeverity {
+  info
+  notice
+  alert
+}
+
+model SecurityEvent {
+  id          BigInt              @id @default(autoincrement())
+  source      SecurityEventSource
+  kind        SecurityEventKind
+  severity    SecuritySeverity
+  /// Frigate camera name. Every row with a camera is filtered by the
+  /// viewer's CameraAccessGrant — hidden entirely, counts included (DS-005).
+  camera      String?
+  /// `<camera>/<frigateId>`, `<camera>/status/detect`, `frigate/available`,
+  /// `activity:<ActivityRow.id>`.
+  sourceRef   String
+  /// Unique per observation. MQTT QoS 1 redelivers; a redelivered `end`
+  /// lands on this and adds nothing.
+  dedupeKey   String              @unique
+  labels      String[]
+  /// Frigate's in-frame zones the object entered. P2b's zone links join here.
+  cameraZones String[]
+  score       Float?
+  startedAt   DateTime
+  endedAt     DateTime?
+  summary     String
+  createdAt   DateTime            @default(now())
+
+  @@index([startedAt])
+  @@index([camera, startedAt])
+  @@index([kind, startedAt])
+}
+
+/// Ingest bookkeeping — one row. The threat mirror's cursor is the last
+/// ActivityRow id it has read (ids are appended under the chain's advisory
+/// lock, so they are monotonic in commit order). The retention fields are
+/// what /security's health header shows for "last cleaned".
+model SecurityIngestState {
+  id                String    @id @default("singleton")
+  threatCursor      BigInt    @default(0)
+  threatMirrorRanAt DateTime?
+  retentionRanAt    DateTime?
+  retentionDeleted  Int       @default(0)
+  updatedAt         DateTime  @updatedAt
+}
+
+// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
+//
+// Areas resolve against SecurityEvent at READ time — SecurityEvent gets no zoneId.
+// Values land with their first writer: link states proposed/rejected, origin,
+// evidence and confidence arrive with P4; the `lock` source kind with the Matter
+// adapter (P2b-2); departmentId when something reads it.
+//
+// Every shape rule below that Prisma cannot express is a hand-written CHECK in
+// 20260924000100_warp_2977_security_zones_hours_mode — explicit enums, never
+// IS NULL as state.
+
+enum SecurityZoneKind {
+  entry
+  interior
+  perimeter
+  parking
+  restricted
+}
+
+/// Areas are never row-deleted: P3 incidents and P5 suppressions will FK here with Restrict.
+enum SecurityZoneState {
+  active
+  archived
+}
+
+enum SecurityZoneSourceKind {
+  camera
+  camera_zone
+}
+
+/// `removed` = a person unlinked it. Kept (never deleted) so P4 never re-proposes it.
+enum SecurityZoneLinkState {
+  active
+  removed
+}
+
+model SecurityZone {
+  id          String             @id @default(uuid())
+  name        String             @db.VarChar(60)
+  /// lower(btrim(name)). Case-insensitive uniqueness in the database, not an app pre-check. CHECKed.
+  nameKey     String             @unique @db.VarChar(60)
+  kind        SecurityZoneKind
+  state       SecurityZoneState  @default(active)
+  /// Lost-update guard for the edit form and the link set. Bumped by every write to the area or its links.
+  version     Int                @default(0)
+  createdById String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  links       SecurityZoneLink[]
+
+  @@index([state])
+}
+
+model SecurityZoneLink {
+  id             String                 @id @default(uuid())
+  zoneId         String
+  zone           SecurityZone           @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  sourceKind     SecurityZoneSourceKind
+  /// camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. Names, never a Camera FK:
+  /// SecurityEvent.camera, CameraAccessGrant reads and Frigate all key on the name, and a Cascade FK
+  /// would drop links unaudited (a Restrict one breaks DELETE /cameras/:name after Frigate was edited).
+  sourceRef      String                 @db.VarChar(160)
+  /// Display snapshot at link time. Shown only when the source no longer exists; never matched on.
+  sourceLabel    String                 @db.VarChar(120)
+  state          SecurityZoneLinkState
+  createdById    String?
+  createdAt      DateTime               @default(now())
+  decidedById    String?
+  stateChangedAt DateTime               @default(now())
+
+  @@unique([zoneId, sourceKind, sourceRef])
+  @@index([sourceKind, sourceRef, state])
+  @@index([zoneId, state])
+}
+
+enum SecurityHoursState {
+  not_set
+  set
+}
+
+enum SecurityDayKind {
+  closed
+  open_all_day
+  hours
+}
+
+enum SecurityMode {
+  open
+  closed
+  away
+}
+
+enum SecurityModeSource {
+  schedule
+  manual
+}
+
+/// How a manual mode ends. Explicit — never inferred from manualUntil (a CHECK ties them).
+enum SecurityManualEnd {
+  none          // modeSource = schedule
+  next_opening  // closed until the opening hours next open the site; recomputed when the hours change
+  at_time       // open until manualUntil (Open up: now + 1/2/4 h, capped at the next opening)
+  until_changed // away; or closed when no opening lies ahead (no hours set, or never open)
+}
+
+/// Opening-hours header, one row. The ONLY zone the evaluator uses — never Workspace.tz at
+/// runtime, never the process zone (the container sets no TZ).
+model SecuritySiteHours {
+  id          String             @id @default("singleton")
+  state       SecurityHoursState @default(not_set)
+  /// Canonical IANA zone (Intl resolvedOptions().timeZone). Set iff state = set (CHECK).
+  timezone    String?            @db.VarChar(64)
+  /// Bumped by every hours AND every exception write: the form's lost-update guard.
+  version     Int                @default(0)
+  updatedById String?
+  updatedAt   DateTime           @updatedAt
+}
+
+/// Brief §5 SecuritySchedule: one weekday's usual hours. Exactly 7 rows iff SecuritySiteHours.state = set.
+model SecuritySchedule {
+  /// ISO weekday of the site-local date the window OPENS on: 1 = Monday … 7 = Sunday.
+  weekday   Int             @id @db.SmallInt
+  kind      SecurityDayKind
+  /// Minutes since site-local midnight, 0–1439; set iff kind = hours (CHECK).
+  /// closesMin < opensMin ⇒ closes the next day. Equal is refused (that is open_all_day).
+  opensMin  Int?            @db.SmallInt
+  closesMin Int?            @db.SmallInt
+  updatedAt DateTime        @updatedAt
+}
+
+/// A date whose hours differ (holiday, late night). Replaces that date's OWN window only;
+/// the previous evening's past-midnight tail still ends when it normally would.
+model SecurityScheduleException {
+  /// Site-local 'YYYY-MM-DD'. A string, never @db.Date (which round-trips as UTC midnight).
+  date        String          @id @db.VarChar(10)
+  kind        SecurityDayKind
+  opensMin    Int?            @db.SmallInt
+  closesMin   Int?            @db.SmallInt
+  note        String          @default("") @db.VarChar(80)
+  createdById String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+/// Brief §5 SecurityModeState, one row. Writers: the act-level mode route, the hours routes and
+/// the mode ticker, all by compare-and-set on `version`. Readers resolve the EFFECTIVE mode with
+/// resolveMode(), so an expired manual mode reads as expired even before the ticker writes it.
+model SecurityModeState {
+  id          String             @id @default("singleton")
+  mode        SecurityMode       @default(open)
+  modeSource  SecurityModeSource @default(schedule)
+  manualEnd   SecurityManualEnd  @default(none)
+  manualUntil DateTime?
+  /// User.id of whoever set a manual mode (no FK: users are deletable; the audit chain is the record).
+  setById     String?
+  setAt       DateTime           @default(now())
+  /// Bumped by every mode write AND by every hours/exception write (invalidates a tick that read old hours).
+  version     Int                @default(0)
+  updatedAt   DateTime           @updatedAt
 }

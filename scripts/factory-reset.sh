@@ -673,6 +673,9 @@ VOLUMES=(
   # WARP-573: pre-migration DB snapshots from the orchestrator's guarded boot
   # entrypoint. Wiped on reset so factory-reset truly returns to out-of-box.
   "migration-snapshots"
+  # WARP-1401: the `cache` Redis AOF: session records, refresh denylist and
+  # Nextcloud app-passwords. A reset box must boot with zero sessions/tokens.
+  "cache-data"
   # --- Rebuildable caches / regenerated state (device-backup.sh EXCLUDED_VOLUMES:
   #     wiped but intentionally not backed up — regenerated on reinstall). ---
   "frigate-config"
@@ -1247,6 +1250,14 @@ fi
 if [ -f /usr/local/sbin/droplet-tls-reload.sh ]; then
   sudo rm -f /usr/local/sbin/droplet-tls-reload.sh 2>/dev/null || true
   log_success "Removed TLS-reload host executor"
+fi
+
+# Bootstrap-certificate refresh host executor (WARP-2944). Same posture: it
+# only regenerates the self-signed cert's SAN around the existing key, so
+# removing it touches no certs or data; install-device-bridge.sh reinstalls it.
+if [ -f /usr/local/sbin/droplet-tls-bootstrap-refresh.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-tls-bootstrap-refresh.sh 2>/dev/null || true
+  log_success "Removed bootstrap-certificate refresh host executor"
 fi
 
 # Public-FQDN write-back host executor (ADR-023 PR-1). Remove so a reset truly

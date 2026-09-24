@@ -71,7 +71,7 @@ export default function BusinessPage(): JSX.Element {
   const pipeline = crmEnabled ? pipelines?.find((p) => p.isDefault) ?? pipelines?.[0] ?? null : null;
   const { stages, error: sumErr, isLoading: sumLoading } = useCrmSummary(pipeline?.id ?? null);
   const { deals, error: dealErr, isLoading: dealLoading } = useDeals(pipeline?.id ?? null);
-  const { summary: pm, error: pmErr, isLoading: pmLoading } = useSummary();
+  const { summary: pm, error: pmErr, isLoading: pmLoading } = useSummary(projectsEnabled);
   const { connection, schedule, isLoading: erpLoading } = useEaglesoft();
 
   // The practice tile needs BOTH: a connection that carries data, and a
@@ -147,8 +147,11 @@ export default function BusinessPage(): JSX.Element {
   return (
     <ShellPage
       icon={<Sparkles size={15} />}
-      label="Planning"
-      title="Planning"
+      // WARP-2967 — "Insights", matching the nav row. It was "Planning" while
+      // it was a lone entry; it now heads Brief and Reports, and "Planning"
+      // named only the first of the three tenses the section carries.
+      label="Insights"
+      title="Insights"
       sub={SUB}
     >
       <div className="droplet-business">

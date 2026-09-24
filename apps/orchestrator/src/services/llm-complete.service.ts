@@ -54,6 +54,13 @@ export interface CompleteOnceArgs {
    * scoping (WARP-561); omitted → shared/device namespace.
    */
   userId?: string;
+  /**
+   * WARP-2964 — gpt-oss reasoning-effort control, passed straight through as
+   * a top-level `reasoning_effort` (the gateway scopes it to the gpt-oss
+   * family, so it is a no-op elsewhere). Unset → the key is never sent and
+   * the request body stays byte-for-byte what it was.
+   */
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 export interface CompleteOnceResult {
@@ -61,6 +68,18 @@ export interface CompleteOnceResult {
   content: string;
   /** The model that was requested (echoed for the response contract). */
   model: string;
+  /**
+   * WARP-2964 — the provider's separate reasoning channel (`reasoning_content`;
+   * gpt-oss's harmony "analysis"), trimmed; "" when there was none.
+   *
+   * Empty `content` on a reasoning model is ambiguous on its own: the model
+   * may have had nothing to say, or it may have spent the entire `max_tokens`
+   * budget thinking and been cut off before writing a word. A fat `reasoning`
+   * next to `finishReason: "length"` is what tells those two apart.
+   */
+  reasoning: string;
+  /** The provider's verdict for the choice (`stop` | `length` | …); null when absent. */
+  finishReason: string | null;
 }
 
 /**
@@ -87,6 +106,7 @@ export async function completeOnce(
         stream: false,
         temperature: args.temperature ?? DEFAULT_TEMPERATURE,
         max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
+        ...(args.reasoningEffort ? { reasoning_effort: args.reasoningEffort } : {}),
         // NO `tools` / `tool_choice` — this call path is non-agentic by
         // contract; nothing here may ever advertise a tool to the model.
       },
@@ -108,8 +128,11 @@ export async function completeOnce(
     throw new Error(`AI Gateway error ${res.status}`);
   }
   const data = (await res.json()) as ChatResponse;
+  const choice = data.choices?.[0];
   return {
-    content: contentToText(data.choices?.[0]?.message?.content),
+    content: contentToText(choice?.message?.content),
     model: args.model,
+    reasoning: (choice?.message?.reasoning_content ?? "").trim(),
+    finishReason: choice?.finish_reason ?? null,
   };
 }

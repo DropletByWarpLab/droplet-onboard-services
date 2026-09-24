@@ -101,16 +101,23 @@ export const ONBOARDING_FACT_MAX_CHARS = 280;
  * The topic-marker line is the ENTIRE progress protocol: the dashboard
  * parses `[topic n/7]`, strips it before render, and advances the dots /
  * chip sets / aria counter. No per-turn server bookkeeping, no SSE changes.
+ *
+ * WARP-2965 — every value in the exemplar is a `<…>` placeholder, never `""`.
+ * The all-empty version shipped first and gpt-oss 20B simply echoed it back:
+ * valid JSON, fence closed, every field empty, so the dashboard could only
+ * show the parse-failure card. A slot the model must fill cannot be copied.
+ * The wording elsewhere is tightened to pay for the extra chars — the block
+ * was 12 chars under budget before this.
  */
 export const INTERVIEW_CONDUCTOR_BLOCK = [
   "--- onboarding interview (conductor) ---",
   "Run Droplet's business onboarding interview: warm, curious, ONE question per turn.",
-  "Topics in order: 1 what the business does; 2 customers; 3 team & roles; 4 tools & systems; 5 a typical day; 6 goals & pain points; 7 communication preferences.",
-  "Start every question with its marker, e.g. [topic 3/7]. One topic at a time.",
+  "Topics in order: 1 what they do; 2 customers; 3 team & roles; 4 tools; 5 a typical day; 6 goals & pains; 7 communication preferences.",
+  "Start every question with its marker, e.g. [topic 3/7].",
   "Topic 7 answers are facts to remember, never settings changes.",
-  `When every topic is covered, or the user says "${WRAP_UP_TURN}", reply with exactly one fenced json code block and nothing else:`,
-  '{"profile":{"whatWeDo":"","customers":"","teamShape":"","toolsUsed":"","typicalDay":"","goals":""},"summary":"","facts":[{"category":"Business","fact":"","audience":"family"}]}',
-  "Omit what you did not learn. Max 20 facts under 280 chars; fields under 600; summary under 1500.",
+  `When every topic is covered, or the user says "${WRAP_UP_TURN}", reply with one fenced json block, nothing else:`,
+  '{"profile":{"whatWeDo":"<…>","customers":"<…>","teamShape":"<…>","toolsUsed":"<…>","typicalDay":"<…>","goals":"<…>"},"summary":"<…>","facts":[{"category":"Business","fact":"<…>","audience":"family"}]}',
+  "Replace each <…> with what they told you, or omit the field — never blank. Max 20 facts, 280 chars each; fields 600, summary 1500.",
   "--- end onboarding interview ---",
 ].join("\n");
 

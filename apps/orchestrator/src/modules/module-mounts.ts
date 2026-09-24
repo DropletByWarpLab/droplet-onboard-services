@@ -60,6 +60,10 @@ import {
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import {
+  requireMcpActingUserToolDomain,
+  type ActingUserAccessResolver,
+} from "../middleware/mcp-acting-user-gate.js";
 
 /** The `app.use(path, handler)` surface — structural so tests can pass a bare
  *  Express app or a Router without pulling the whole app type in. */
@@ -111,6 +115,9 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   // so `gateScopeFor` returns null for both and no sibling surface is caught.
   "crm",
   "money",
+  // WARP-2977 (ADR-059 §6) — gated from the day it exists, so a custom role
+  // narrowed away from Security never reaches `/api/security`.
+  "security",
 ]);
 
 /**
@@ -173,6 +180,56 @@ export function mountModuleGates(
         app.use(
           prefix,
           scopeToOwnedPaths(requireFeatureAccess(def.id, "view", resolve), applies),
+        );
+      }
+    }
+  }
+}
+
+/**
+ * WARP-2988 — tool domains whose routes narrow the `_service:mcp` principal by
+ * the ACTING user's §3 tool scope (middleware/mcp-acting-user-gate.ts).
+ *
+ * `business` only, deliberately: it is the domain Romain's "CRM or Projects"
+ * decision is about, and the one whose routes sit under two modules. The gate
+ * mounts on the prefixes of every module that CLAIMS the domain — derived from
+ * the registry, never hand-listed — and `middleware/mcp-acting-user-gate.test.ts`
+ * pins that every tool hop under those prefixes (tools-core TOOL_ROUTES) is a
+ * tool of this domain, so the gate can never refuse another domain's tool.
+ *
+ * `business` hops OUTSIDE those prefixes, which this gate does not see (the
+ * same test pins this list, so a new one fails until it is added here):
+ *   - `business_find` → GET /api/brain/findings, GET /api/brain/digests.
+ *     routes/brain.ts is `requireRoleOrMcpService("owner", "admin")` and
+ *     re-resolves the acting user from the same header for its own scope
+ *     filter.
+ *   - `business_profile_get` reads through `ctx.prisma`, no HTTP hop at all.
+ * Both rely on the tool-level gate (the chat / runner dispatch check).
+ */
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business"];
+
+/** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
+export function mountMcpActingUserGates(
+  app: ModuleGateMountTarget,
+  resolve: ActingUserAccessResolver,
+  features: EffectiveAccessResolver = resolveEffectiveAccess,
+): void {
+  for (const domain of MCP_ACTING_USER_GATED_DOMAINS) {
+    for (const def of MODULES) {
+      if (!def.toolDomains.includes(domain)) continue;
+      for (const prefix of def.routePrefixes) {
+        app.use(
+          prefix,
+          scopeToOwnedPaths(
+            // Browser parity: the feature check only where humans get one.
+            requireMcpActingUserToolDomain(
+              domain,
+              def.id,
+              resolve,
+              FEATURE_GATED_MODULES.has(def.id) ? features : null,
+            ),
+            gateScopeFor(def, prefix),
+          ),
         );
       }
     }

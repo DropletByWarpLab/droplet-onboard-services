@@ -1,0 +1,57 @@
+name: sandbox-tests
+
+# Pytest for services/sandbox (WARP-2895). Path-filtered. The suite spawns the
+# REAL child interpreter (runner.py) for every transform case — the import
+# allowlist, the deadline and the output cap are what customer-written code
+# meets, so they are exercised end to end, never mocked. No network, no
+# credentials; the scratch dir is the runner's temp.
+
+on:
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `sandbox` leg, same split as ops-console / email-indexer. Push-to-main
+  # stays as an independent post-merge canary and to satisfy
+  # scripts/check-ci-coverage.sh.
+  push:
+    branches: [main]
+    paths:
+      - "services/sandbox/**"
+      - ".github/workflows/sandbox-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# The job only checks out and runs pytest, so read is all the GITHUB_TOKEN
+# needs. Stated explicitly because CodeQL's actions/missing-workflow-permissions
+# flags an unset block — the default is write-heavy, and a new workflow should
+# not inherit that by omission.
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Plain pytest suite — 15 min is a generous ceiling.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: services/sandbox
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/sandbox/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v

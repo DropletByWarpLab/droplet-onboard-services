@@ -25,12 +25,23 @@ import type {
  */
 
 /** Connected mailboxes. Polls modestly — IMAP status drifts (idle ↔ reconnecting). */
+/** WARP-2957 — a mailbox between "connected" and "first cycle done". */
+export function isAwaitingFirstSync(a: EmailAccount): boolean {
+  return a.lastIdleAt === null && (a.imapStatus === "idle" || a.imapStatus === "reconnecting");
+}
+
+const ACCOUNTS_REFRESH_MS = 30_000;
+const FIRST_SYNC_REFRESH_MS = 5_000;
+
 export function useEmailAccounts() {
   const { data, error, isLoading, mutate } = useSWR<EmailAccount[]>(
     "/api/email/accounts",
     fetchEmailAccounts,
     {
-      refreshInterval: 30_000,
+      // Tighter while a freshly connected mailbox has not reported its first
+      // cycle, so "Fetching your mail" resolves without a reload.
+      refreshInterval: (latest) =>
+        latest?.some(isAwaitingFirstSync) ? FIRST_SYNC_REFRESH_MS : ACCOUNTS_REFRESH_MS,
       revalidateOnFocus: false,
     },
   );
@@ -55,7 +66,10 @@ export function useEmailThreads(
     accountId ? (["email-threads", accountId, filter] as const) : null,
     () => fetchEmailThreads(accountId as string, filter),
     {
-      refreshInterval: 30_000,
+      // An empty list refreshes on the first-sync cadence: the backfill lands
+      // within the first cycle, and a 30 s wait after that reads as broken.
+      refreshInterval: (latest) =>
+        latest !== undefined && latest.length === 0 ? FIRST_SYNC_REFRESH_MS : ACCOUNTS_REFRESH_MS,
       revalidateOnFocus: false,
       keepPreviousData: true,
     },

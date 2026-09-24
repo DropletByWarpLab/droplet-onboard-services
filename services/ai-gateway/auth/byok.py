@@ -34,18 +34,24 @@ async def validate_key_format(provider: str, api_key: str) -> bool:
     return True
 
 
+# WARP-561 scoped these to the calling user; WARP-2871 made cloud keys
+# box-wide and admin-managed, so the keystore ignores `user_id` on every
+# operation. The parameter stays because callers still forward the request
+# principal — see auth/keystore.py for why it is no longer honoured.
+
+
 async def save_api_key(provider: str, api_key: str, user_id: str | None = None) -> None:
-    """Validate and store an API key in the caller's namespace (WARP-561)."""
+    """Validate and store the box-wide API key for a provider (WARP-2871)."""
     if not await validate_key_format(provider, api_key):
         raise ValueError(f"Invalid API key format for {provider}")
     await keystore.store_key(provider, api_key, user_id=user_id)
 
 
 async def get_api_key(provider: str, user_id: str | None = None) -> str | None:
-    """Retrieve a stored API key from the caller's namespace (WARP-561)."""
+    """Retrieve the box-wide API key for a provider (WARP-2871)."""
     return await keystore.get_key(provider, user_id=user_id)
 
 
 async def delete_api_key(provider: str, user_id: str | None = None) -> bool:
-    """Remove a stored API key from the caller's namespace (WARP-561)."""
+    """Remove the box-wide API key for a provider (WARP-2871)."""
     return await keystore.delete_key(provider, user_id=user_id)

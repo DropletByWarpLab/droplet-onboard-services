@@ -94,6 +94,16 @@ describe("seedDailyReportSpec", () => {
     for (const tool of called) expect(known.has(tool)).toBe(true);
   });
 
+  it("marks every read OPTIONAL — one source a box lacks must not kill the narrative", async () => {
+    // The runner halts on the first failed step unless the step opts out.
+    // A box with no cameras or no ERP is the common case, not the edge.
+    const p = fakePrisma(null);
+    await seedDailyReportSpec(p.client);
+    const reads = createArg(p.create).data.steps.create.filter((s) => s.kind === "call");
+    expect(reads.length).toBeGreaterThan(0);
+    for (const s of reads) expect((s.args as { optional?: boolean }).optional).toBe(true);
+  });
+
   it("numbers its steps from zero, in order", async () => {
     const p = fakePrisma(null);
     await seedDailyReportSpec(p.client);

@@ -46,6 +46,9 @@ export type ErrorDomain =
   | "calendar"
   | "subscription"
   | "provider-key"
+  // WARP-2871 — the Models-page switch for the workspace cloud_model_escape
+  // channel. Its own domain so a 403 names the roles that can flip it.
+  | "cloud-access"
   | "push"
   | "knowledge"
   | "media"
@@ -102,6 +105,8 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't reach that calendar subscription right now. Try again in a moment.",
   "provider-key":
     "We couldn't save that API key right now. Try again in a moment.",
+  "cloud-access":
+    "We couldn’t change cloud access right now. Try again in a moment.",
   push:
     "We couldn't update push notifications right now. Try again in a moment.",
   knowledge:
@@ -376,6 +381,14 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We couldn't save that API key right now. Try again in a moment.",
     DELETE_FAILED:
       "We couldn't remove that API key right now. Try again in a moment.",
+    // WARP-2871 — keys are admin-only on the wire.
+    "403": "Only owners and admins can manage keys.",
+  },
+  "cloud-access": {
+    "403": "Only owners and admins can change this.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   push: {
     PERMISSION_DENIED:
@@ -595,9 +608,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Droplet won't connect to that address — it points somewhere inside this Droplet's own network rather than out to a mail server.",
     email_address_already_connected:
       "That mailbox is already connected. Disconnect it first if you want to reconnect it with new details.",
-    // Not the owner's fault and not fixable on this form.
+    // Not the owner's fault and not fixable on this form. WARP-2970: the old
+    // copy sent the owner to "turn Email on in Settings" — that page is the
+    // outbound SMTP relay and cannot start the mail service. The service is
+    // default-on, so reaching this means it is down, not switched off.
     email_indexer_unavailable:
-      "Droplet's mail service isn't running on this Droplet, so it can't check the mailbox. An owner can turn Email on in Settings.",
+      "Droplet's mail service isn't running right now, so it can't check the mailbox. Try again in a few minutes; if it keeps happening, restart the Droplet.",
     human_required:
       "Only a person signed in to this Droplet can connect a mailbox.",
     account_not_found:

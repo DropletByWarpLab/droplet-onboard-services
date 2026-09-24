@@ -264,10 +264,19 @@ export interface ModelsResponse {
 
 /** One local LLM served on the box. */
 export interface LocalModelRow {
+  /** WARP-2882 — the runtime id ("docker.io/ai/gpt-oss:20B-F16"): what every
+   *  write and probe sends. Optional only for an orchestrator that predates
+   *  the field; then `name` doubles as the id, exactly as before. */
+  id?: string;
+  /** Display name ("Gpt-oss 20B F16") — for reading, never for sending. */
   name: string;
   family: string;
   provider: string;
   contextLength: number | null;
+  /** WARP-2882 (additive; optional so an older orchestrator still parses) —
+   *  the context length the model was TRAINED with. Display only: the window
+   *  the box actually serves is an operator setting, not this. */
+  trainedContextLength?: number | null;
   /** GB on disk — null until ai-gateway exposes per-model disk usage. */
   gbOnDisk: number | null;
   /** "chat" | "embed" | "vision" | … — null until ai-gateway tags models. */
@@ -359,16 +368,31 @@ export interface ModelsCatalogPayload {
   models: CatalogModelEntry[];
 }
 
-/** One opt-in cloud provider. Read-only on this surface — enabling a provider
- *  happens in Settings (the off-LAN allowlist), never here. */
+/** One opt-in cloud provider on the Models page. WARP-2871 — the page is the
+ *  ONE place for cloud models: the escape switch and the keys live here. */
 export interface CloudProviderRow {
-  provider: "anthropic" | "openai" | "gemini";
-  /** Always false today (cloud escape default-off per FEATURES.md §8). */
+  /** WARP-2871: gemini removed — no gateway provider exists for it. */
+  provider: "anthropic" | "openai";
+  /** Box-wide usable: `escapeEnabled && hasKey === true`. */
   enabled: boolean;
+  /** WARP-2871: null = the gateway could not be asked (render "Unknown",
+   *  never "Not set up" — absence of an answer is not absence of a key). */
+  hasKey: boolean | null;
   /** ISO timestamp of the last cloud-escape call, or null. */
   lastUsedAt: string | null;
   /** Cumulative spend this billing period; 0 until egress aggregation lands. */
   spendUsd: number;
+}
+
+/** WARP-2871 — the workspace `cloud_model_escape` channel as the caller sees
+ *  it. `allowedForYou` is the caller's EFFECTIVE verdict (escape && role);
+ *  null = unknown, and the page must not guess. */
+export interface CloudAccessInfo {
+  escapeEnabled: boolean;
+  escapeChangedBy: string | null;
+  /** ISO */
+  escapeChangedAt: string | null;
+  allowedForYou: boolean | null;
 }
 
 /**
@@ -410,15 +434,30 @@ export interface ModelsGpuInfo {
  */
 export type ModelsGpuReason = "unreachable" | "no_card" | null;
 
+/** WARP-2883 — one round-trip per inference endpoint, ms; null = no answer. */
+export interface EndpointLatencyMs {
+  local: number | null;
+  anthropic: number | null;
+  openai: number | null;
+}
+
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
+  /** WARP-2871 — escape state + the caller's verdict, for the Cloud section. */
+  cloudAccess: CloudAccessInfo;
   gpu: ModelsGpuInfo | null;
   /** WARP-1861 (additive; optional so an older orchestrator that predates the
    *  field still parses). Absent ⇒ we know nothing about why, and the tile
    *  must not guess — see `ModelsGpuReason`. */
   gpuReason?: ModelsGpuReason;
+  /** WARP-2883: mean round-trip over the enabled inference endpoints, ms;
+   *  0 = nothing answered (render "—", never "0 ms"). */
   avgLatencyMs: number;
+  /** WARP-2883 (additive; optional so an older orchestrator still parses):
+   *  the per-endpoint samples behind `avgLatencyMs`. null per endpoint =
+   *  did not answer; null/absent overall = the gateway could not be asked. */
+  endpointLatencyMs?: EndpointLatencyMs | null;
   cloudSpendUsd: number;
   /** WARP-1112 (additive): the installed local model the box answers with by
    *  default (`ai.model.chat`). null when unset or the stored tag is no longer
@@ -580,6 +619,70 @@ export interface Department {
    *  batch lookup for the whole list). Null on any read failure or before
    *  discovery — never a fabricated 0. */
   usedBytes: string | null;
+  /**
+   * WARP-2976 (ADR-059 §2.2) — the row's OWN profile summary. `null` is a
+   * real state: the department is not set up yet, and the UI says so rather
+   * than guessing a template from the name. Optional because the key is
+   * absent (not null) on rows the server did not load it for — team
+   * summaries inside a detail read, or an orchestrator older than P1 — and
+   * absent must never be read as "not set up".
+   */
+  profile?: DepartmentProfileSummary | null;
+}
+
+// ── WARP-2976 (ADR-059 P1): department profiles ──
+
+/** The seven templates. A template is data — default nav hrefs, default home
+ *  widgets and a headline figure (`lib/departments/templates.ts`). */
+export type DepartmentTemplate =
+  | "security"
+  | "sales"
+  | "finance"
+  | "operations"
+  | "front_desk"
+  | "it"
+  | "custom";
+
+export type DepartmentWidgetSize = "s" | "m" | "l";
+
+/** One tile on a department home. `widget` is validated for SHAPE only on the
+ *  server; the dashboard skips an id its widget registry does not know. */
+export interface DepartmentHomeWidget {
+  widget: string;
+  size: DepartmentWidgetSize;
+}
+
+/** What GET /api/departments carries per row: enough to label the switcher. */
+export interface DepartmentProfileSummary {
+  template: DepartmentTemplate;
+  /** A lucide icon name (kebab-case); unknown names render a fallback glyph. */
+  icon: string;
+}
+
+/** The full profile — GET/PUT /api/departments/:id/profile. It ARRANGES what a
+ *  department shows; it grants nothing (ADR-059 §2.5). */
+export interface DepartmentProfile extends DepartmentProfileSummary {
+  departmentId: string;
+  /** Ordered nav hrefs. An href that is not in NAV_GROUPS never renders. */
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface DepartmentProfileResponse {
+  profile: DepartmentProfile | null;
+  /** Set for a TEAM: the parent department whose profile this is. */
+  inheritedFrom: string | null;
+  /** Owner/admin, or a manager of this department (or of its parent). */
+  canEdit: boolean;
+}
+
+export interface PutDepartmentProfilePayload {
+  template: DepartmentTemplate;
+  icon: string;
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
 }
 
 export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
@@ -1191,6 +1294,32 @@ export interface RosterUser extends AuthUser {
    *  orchestrator older than this field sends nothing, and `undefined` must
    *  read as enabled rather than painting the whole roster deactivated. */
   enabled?: boolean;
+  /** WARP-2984 — where the account comes from. `local`/`sso`/`scim` read the
+   *  local row's explicit provisionSource; `nextcloud` is a Nextcloud user
+   *  with no local row. Optional: an older orchestrator sends nothing, and the
+   *  UI then renders no source chip rather than guessing. */
+  source?: RosterSource;
+  /** WARP-2984 — false when the account has no Nextcloud user, i.e. no file
+   *  storage: storage/upload limits don't apply. Optional for the same
+   *  reason; only an explicit false hides the storage controls. */
+  hasStorage?: boolean;
+}
+
+/** WARP-2984 — see RosterUser.source. */
+export type RosterSource = "local" | "sso" | "scim" | "nextcloud";
+
+/** WARP-2984 — roster chip copy per source. */
+export const ROSTER_SOURCE_LABEL: Record<RosterSource, string> = {
+  local: "Local",
+  sso: "SSO",
+  scim: "SCIM",
+  nextcloud: "Nextcloud only",
+};
+
+/** WARP-2984 / WARP-2858 — the IdP owns the credential: the box refuses to set
+ *  a local password (409 SSO_MANAGED_ACCOUNT), so the UI never offers one. */
+export function isIdpManaged(u: { source?: RosterSource }): boolean {
+  return u.source === "sso" || u.source === "scim";
 }
 
 // ── WARP-217 invite types ──
@@ -1325,7 +1454,9 @@ export type AccessModuleId =
   | "contacts"
   | "crm"
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
-  | "money";
+  | "money"
+  /** WARP-2977 — the Security command center (ADR-059). */
+  | "security";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -2816,6 +2947,26 @@ export interface ScheduleEvent {
 // from `@droplet/tools-core`'s TOOL_CATALOG. `domain` is one of the
 // orchestrator's declared tool domains; it arrives as a string so the
 // dashboard never has to stay in lockstep with the registry's union.
+/**
+ * WARP-2969 — whether a chat turn can reach this tool at all.
+ *
+ * `excluded` is the chat-scope policy list (`EXCLUDED_FROM_CHAT_TOOLS`),
+ * which withholds a tool from ASKING while leaving it callable from its own
+ * screen or by an MCP client. It is "not by asking", never "unavailable".
+ *
+ * ONE AXIS. A `module` axis was cut before it shipped: §6 module gating is
+ * not applied to the chat pool for an owner or anybody holding no AccessRole,
+ * so a "Module off" chip would have been a confident false statement on every
+ * shipped box. WARP-2972 wires that gate; the axis returns here after it.
+ *
+ * The per-person axes (role grants, off-LAN withholding, turn relevance) need
+ * a resolved principal and a modelled turn, and live on `/admin/prompt`'s
+ * inspector instead.
+ */
+export interface ToolReach {
+  chat: "allowed" | "excluded";
+}
+
 export interface ToolCatalogEntry {
   name: string;
   /** Agent-facing description from the registry (may contain jargon). */
@@ -2825,6 +2976,14 @@ export interface ToolCatalogEntry {
   domain: string;
   requiresWrite: boolean;
   requiresConfirmation: boolean;
+  /**
+   * WARP-2969. Optional because the field is additive and an orchestrator
+   * from before it shipped answers without one — absence means "no evidence
+   * this is withheld", which is the pre-WARP-2969 behaviour, not "withheld".
+   * Read it through `reachableInChat` / `reachNote` (lib/tool-domains), never
+   * by hand, so both surfaces agree on what absence means.
+   */
+  reach?: ToolReach;
 }
 
 // ── WARP-2823: the admin console's prompt + tool inspector ────────────────
@@ -2885,7 +3044,8 @@ export type PromptBlockStatus =
   | "absent"
   | "errored"
   | "dropped"
-  | "not_modelled";
+  | "not_modelled"
+  | "withheld_off_lan";
 
 export interface PromptBlockView {
   key: string;
@@ -3088,9 +3248,11 @@ export type RoutineStatus = "live" | "draft" | "suggested";
 export interface RoutineStep {
   id: string;
   idx: number;
-  /** "call" | "summarize" — a plain String column, extensible by design. */
+  /** "call" | "summarize" | "transform" | "when" — a plain String column,
+   *  extensible by design (WARP-2895 added the two sandbox kinds). */
   kind: string;
-  /** `{tool, args}` for a call, `{prompt?}` for a summarize. */
+  /** `{tool, args}` for a call, `{prompt?}` for a summarize, `{code, inputs?}`
+   *  for a transform / when. */
   args: Record<string, unknown> | null;
 }
 
@@ -3135,4 +3297,47 @@ export interface RoutineSchedule {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center feed ──
+
+/** Mirrors the orchestrator's SecurityEventKind enum. */
+export type SecurityEventKind =
+  | "detection"
+  | "detection_low"
+  | "camera_offline"
+  | "camera_online"
+  | "source_offline"
+  | "source_online"
+  | "threat";
+
+export interface SecurityEvent {
+  /** BigInt id, serialised as a string. */
+  id: string;
+  source: "frigate" | "frigate_status" | "activity_mirror";
+  kind: SecurityEventKind;
+  severity: "info" | "notice" | "alert";
+  /** Frigate camera name; null for rows no camera produced. */
+  camera: string | null;
+  labels: string[];
+  cameraZones: string[];
+  score: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  summary: string;
+  /** Set on detections — the clip/thumbnail routes key on it. */
+  frigateEventId: string | null;
+}
+
+export interface SecurityEventsPage {
+  events: SecurityEvent[];
+  nextCursor: string | null;
+}
+
+/** One line of the feed header: what the feed is listening to, and whether it is reporting. */
+export interface SecurityHealthRow {
+  id: "camera_ingest" | "camera_system" | "threat_mirror" | "retention";
+  state: "ok" | "quiet" | "down" | "not_configured";
+  detail: string;
+  lastSeenAt: string | null;
 }

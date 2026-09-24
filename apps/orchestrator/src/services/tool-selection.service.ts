@@ -510,6 +510,14 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // WARP-2180 — durable background runs. Word boundaries on purpose; the
   // vocabulary is how a person hands work off, not the work's subject.
   { pattern: /\b(background (run|task|job)s?|agent runs?|in the background|while (i'?m|i am) (away|out|asleep|gone)|keep working on (this|it)|work on (this|it) (later|overnight)|long[- ]running (task|job))\b/i, domains: ["agent_runs"] },
+  // WARP-2894 (ADR-056 §5.1) — routines. The vocabulary is how a person asks
+  // for something RECURRING or AUTOMATED, not the word "routine" alone:
+  // "every morning", "each Friday", "automate this", "set this up to run",
+  // "schedule this". Word-bounded; `every`/`each` needs a cadence noun after
+  // it, so "every file" or "every camera" stays with its own domain.
+  // `schedule` alone belongs to calendar; here it needs `this|it|that` after
+  // it — "schedule this" is an automation ask, "my schedule" is not.
+  { pattern: /\b(routines?|automat(e|ed|ion|ically)|(every|each)\s+(day|morning|evening|night|week|weekday|weekend|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday|hour|\d+\s*(minutes?|hours?|days?|weeks?))|daily|weekly|nightly|monthly|schedule\s+(this|it|that)|set\s+(this|it|that)\s+up\s+to\s+run|on\s+a\s+schedule|recurring)\b/i, domains: ["routines"] },
 ];
 
 /**
