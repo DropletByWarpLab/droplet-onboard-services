@@ -52,7 +52,9 @@ export async function projectedIncidentPage(
   take: number,
 ): Promise<ProjectedIncidentKey[]> {
   const vis = [...v.visibleCameras];
-  // visibleReasonWhere: a visible camera's code, or a camera-less one.
+  // visibleReasonWhere: a visible camera's code, or a camera-less one: site-wide
+  // evidence (CHECK SecurityIncidentReason_site_evidence) that §6.2 groups only
+  // into a site scope, where `reasonVisible` shows it too.
   const visReason = Prisma.sql`(r."evidenceCamera" = ANY(${vis}::text[]) OR r."evidenceCamera" IS NULL)`;
   const reasons = (extra: Prisma.Sql) =>
     Prisma.sql`EXISTS (SELECT 1 FROM "SecurityIncidentReason" r WHERE r."incidentId" = i."id" AND ${visReason}${extra})`;

@@ -128,3 +128,47 @@ describe("the incident fake's SecurityEvent_ongoing_shape mirror", () => {
     expect(f.world.securityEvent).toHaveLength(0);
   });
 });
+
+/**
+ * Review 383d647e item 4 — the fake mirrors SecurityIncidentReason_site_evidence
+ * (20260925030000), so an engine bug that would write a camera-less reason on
+ * an area or camera incident fails in the mocked lane as Postgres refuses it.
+ */
+describe("the incident fake's SecurityIncidentReason_site_evidence mirror", () => {
+  type Reasons = { securityIncidentReason: { createMany(a: unknown): Promise<{ count: number }> } };
+  const reason = (code: string, severity: string, evidenceKind: string, evidenceCamera: string | null) => ({
+    incidentId: "00000000-0000-4000-8000-0000000029a1",
+    code,
+    severity,
+    rulesetVersion: 1,
+    evidenceEventId: 1n,
+    evidenceCamera,
+    evidenceSource: "frigate_status",
+    evidenceKind,
+    evidenceAt: new Date("2026-09-23T21:14:00Z"),
+    evidenceSummary: "x",
+    detail: {},
+  });
+
+  it.each([
+    ["a camera's alert", reason("after_hours_presence", "alert", "detection", "back")],
+    ["a camera's offline notice", reason("camera_offline", "notice", "camera_offline", "back")],
+    ["the camera system's offline notice", reason("camera_offline", "notice", "source_offline", null)],
+    ["a threat", reason("threat_signal", "notice", "threat", null)],
+  ])("accepts %s", async (_name, row) => {
+    const f = createFakeSecurityPrisma();
+    await expect((f.client as unknown as Reasons).securityIncidentReason.createMany({ data: [row] })).resolves.toEqual({ count: 1 });
+  });
+
+  it.each([
+    ["an alert without a camera", reason("after_hours_presence", "alert", "detection", null)],
+    ["a camera's offline notice without the camera", reason("camera_offline", "notice", "camera_offline", null)],
+    ["a threat code on a camera's row", reason("threat_signal", "notice", "source_offline", null)],
+  ])("refuses %s", async (_name, row) => {
+    const f = createFakeSecurityPrisma();
+    await expect((f.client as unknown as Reasons).securityIncidentReason.createMany({ data: [row] })).rejects.toThrow(
+      /SecurityIncidentReason_site_evidence/,
+    );
+    expect(f.world.securityIncidentReason).toHaveLength(0);
+  });
+});

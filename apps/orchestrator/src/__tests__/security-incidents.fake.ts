@@ -393,6 +393,11 @@ function check(table: TableName, r: Row): void {
       (r.code === "after_hours_presence" && r.severity === "alert") ||
       ((r.code === "camera_offline" || r.code === "threat_signal") && r.severity === "notice");
     if (!ok) fail("SecurityIncidentReason_code_severity");
+    const siteWide =
+      r.evidenceCamera != null ||
+      (r.code === "threat_signal" && r.evidenceKind === "threat") ||
+      (r.code === "camera_offline" && r.evidenceKind === "source_offline");
+    if (!siteWide) fail("SecurityIncidentReason_site_evidence");
   }
   if (table === "securityEventTriage") {
     if ((r.outcome === "grouped") !== (r.incidentId != null)) fail("SecurityEventTriage_shape");

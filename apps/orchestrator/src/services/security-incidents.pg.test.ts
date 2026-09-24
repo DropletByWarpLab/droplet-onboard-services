@@ -234,16 +234,31 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       expect(await run(incident(over))).toEqual(rejectedBy(constraint));
     });
 
-    const reason = (code: string, severity: string, camera: string | null = CAM) =>
+    const reason = (code: string, severity: string, camera: string | null = CAM, kind = "detection") =>
       `INSERT INTO "SecurityIncidentReason" ("id","incidentId","code","severity","rulesetVersion","evidenceEventId","evidenceCamera","evidenceSource","evidenceKind","evidenceAt","evidenceSummary","detail")
-       VALUES (gen_random_uuid()::text,${q(INC)},'${code}','${severity}',1,1,${q(camera)},'frigate','detection',now(),'x','{}'::jsonb)`;
+       VALUES (gen_random_uuid()::text,${q(INC)},'${code}','${severity}',1,1,${q(camera)},'frigate','${kind}',now(),'x','{}'::jsonb)`;
 
     it("SecurityIncidentReason: severity follows the code (D18), and the camera is a Frigate name", async () => {
       expect(await run(incident(alertCols), reason("after_hours_presence", "alert"))).toBe("inserted");
       expect(await run(incident(alertCols), reason("after_hours_presence", "notice"))).toEqual(rejectedBy("SecurityIncidentReason_code_severity"));
       expect(await run(incident(alertCols), reason("camera_offline", "alert"))).toEqual(rejectedBy("SecurityIncidentReason_code_severity"));
-      expect(await run(incident(alertCols), reason("threat_signal", "alert", null))).toEqual(rejectedBy("SecurityIncidentReason_code_severity"));
+      expect(await run(incident(alertCols), reason("threat_signal", "alert", null, "threat"))).toEqual(rejectedBy("SecurityIncidentReason_code_severity"));
       expect(await run(incident(alertCols), reason("camera_offline", "notice", "a b"))).toEqual(rejectedBy("SecurityIncidentReason_camera"));
+    });
+
+    // Review 383d647e item 4: a camera-less reason on an area/camera incident is
+    // the one row the visibility twins read differently; only site-wide evidence may lack a camera.
+    it("SecurityIncidentReason: only a threat or the camera system's own offline row is camera-less", async () => {
+      expect(await run(incident(alertCols), reason("threat_signal", "notice", null, "threat"))).toBe("inserted");
+      expect(await run(incident(alertCols), reason("camera_offline", "notice", null, "source_offline"))).toBe("inserted");
+      expect(await run(incident(alertCols), reason("camera_offline", "notice", CAM, "camera_offline"))).toBe("inserted");
+      expect(await run(incident(alertCols), reason("after_hours_presence", "alert", null))).toEqual(rejectedBy("SecurityIncidentReason_site_evidence"));
+      expect(await run(incident(alertCols), reason("camera_offline", "notice", null, "camera_offline"))).toEqual(
+        rejectedBy("SecurityIncidentReason_site_evidence"),
+      );
+      expect(await run(incident(alertCols), reason("threat_signal", "notice", null, "source_offline"))).toEqual(
+        rejectedBy("SecurityIncidentReason_site_evidence"),
+      );
     });
 
     const EV = `${TAG}:check-ev`;

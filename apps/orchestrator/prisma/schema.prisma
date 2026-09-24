@@ -9217,7 +9217,8 @@ model SecurityIncidentReason {
   /// with the incident.
   evidenceEventId BigInt
   /// Snapshots of the evidence: DS-005 per viewer/recipient, and the page after the trim.
-  /// NULL = site-wide (a threat, the camera system).
+  /// NULL = site-wide: a threat, or the camera system's own offline row — never on an area/camera
+  /// incident (CHECK SecurityIncidentReason_site_evidence).
   evidenceCamera  String?             @db.VarChar(64)
   evidenceSource  SecurityEventSource
   evidenceKind    SecurityEventKind

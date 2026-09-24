@@ -439,6 +439,22 @@ ALTER TABLE "SecurityIncidentReason" ADD CONSTRAINT "SecurityIncidentReason_came
   "evidenceCamera" IS NULL OR "evidenceCamera" ~ '^[a-zA-Z0-9_-]{1,64}$'
 );
 
+-- A camera-less reason is site-wide evidence, and only the two the engine
+-- writes: a threat (threat_signal) or the camera system's own offline row
+-- (camera_offline on source_offline). §6.2 groups those two kinds only into
+-- site_threat and site_camera_system, and never groups a camera-less row into
+-- an area or camera incident — so an area/camera incident holds no
+-- camera-less reason, the one row the viewer's visibility twins would read
+-- differently (`reasonVisible` hides it; `visibleReasonWhere` and the list
+-- SQL's `visReason` show it — review 383d647e item 4). P4/P5 widen this as
+-- their site-wide codes land.
+ALTER TABLE "SecurityIncidentReason" DROP CONSTRAINT IF EXISTS "SecurityIncidentReason_site_evidence";
+ALTER TABLE "SecurityIncidentReason" ADD CONSTRAINT "SecurityIncidentReason_site_evidence" CHECK (
+  "evidenceCamera" IS NOT NULL
+  OR ("code" = 'threat_signal' AND "evidenceKind" = 'threat')
+  OR ("code" = 'camera_offline' AND "evidenceKind" = 'source_offline')
+);
+
 -- A member iff grouped; an error iff failed; link and area lists only on a member.
 ALTER TABLE "SecurityEventTriage" DROP CONSTRAINT IF EXISTS "SecurityEventTriage_shape";
 ALTER TABLE "SecurityEventTriage" ADD CONSTRAINT "SecurityEventTriage_shape" CHECK (

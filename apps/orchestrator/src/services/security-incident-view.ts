@@ -136,7 +136,12 @@ export function incidentVisible(i: Pick<IncidentRowForView, "scope" | "cameras">
   return i.cameras.some((c) => seesCamera(v, c));
 }
 
-/** Whether this viewer may see one reason: its evidence camera, or the incident's own scope rule for a camera-less one. */
+/**
+ * Whether this viewer may see one reason: its evidence camera, or the incident's own scope rule for a camera-less one.
+ * A camera-less reason exists only on a site scope (CHECK SecurityIncidentReason_site_evidence; §6.2 routes its evidence
+ * nowhere else), where this and the SQL twins (`visibleReasonWhere`, the list's `visReason`) agree. On area/camera this
+ * says hidden and they say shown — a row that cannot exist (review 383d647e item 4).
+ */
 export function reasonVisible(r: Pick<ReasonRowForView, "evidenceCamera">, i: Pick<IncidentRowForView, "scope">, v: IncidentViewer): boolean {
   if (r.evidenceCamera === null) return i.scope === "site_threat" ? v.mayReadThreats : SITE_SCOPES.includes(i.scope);
   return seesCamera(v, r.evidenceCamera);
@@ -315,7 +320,11 @@ export function incidentVisibilityWhere(v: IncidentViewer): Prisma.SecurityIncid
   };
 }
 
-/** A reason the viewer may see — on an incident the visibility clause already let through. */
+/**
+ * A reason the viewer may see — on an incident the visibility clause already let through. A camera-less reason is
+ * shown: it is site-wide evidence (CHECK SecurityIncidentReason_site_evidence) that §6.2 groups only into a site scope,
+ * where `reasonVisible` shows it too.
+ */
 export function visibleReasonWhere(v: IncidentViewer): Prisma.SecurityIncidentReasonWhereInput {
   if (v.visibleCameras === "all") return {};
   return { OR: [{ evidenceCamera: { in: [...v.visibleCameras] } }, { evidenceCamera: null }] };

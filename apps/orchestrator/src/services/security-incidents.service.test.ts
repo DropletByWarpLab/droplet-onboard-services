@@ -502,6 +502,41 @@ describe("camera_offline at the tick", () => {
   });
 });
 
+// Review 383d647e item 4: a camera-less reason on an area/camera incident is
+// the one row `reasonVisible` hides while `visibleReasonWhere` and the list
+// SQL show it. CHECK SecurityIncidentReason_site_evidence refuses it at the
+// row; this pins that the engine never tries.
+describe("a camera-less reason is site-wide, never on an area or camera incident", () => {
+  it("every evidence kind that earns a reason: area and camera reasons carry their camera; only a threat and the camera system's own offline row are camera-less", async () => {
+    const status = { source: "frigate_status", labels: [], endedAt: null, createdAt: T0 };
+    const f = world({
+      activityRow: [{ id: 70n, sub: "login", kind: "auth", severity: "warn" }],
+      securityEvent: [
+        eventRow({ id: 1n }),
+        eventRow({ id: 2n, kind: "detection_ongoing", endedAt: null, dedupeKey: "frigate-ongoing:2.5-abc", startedAt: plus(T0, 1_000) }),
+        eventRow({ id: 3n, kind: "camera_offline", ...status }),
+        eventRow({ id: 4n, kind: "camera_offline", ...status, camera: "yard", sourceRef: "yard/status/detect" }),
+        eventRow({ id: 5n, kind: "source_offline", ...status, camera: null, sourceRef: "frigate/available" }),
+        eventRow({ id: 6n, kind: "threat", source: "activity_mirror", camera: null, sourceRef: "activity:70", labels: ["auth"], endedAt: null }),
+      ],
+    });
+    await tick(f, plus(T0, 61_000));
+    expect(f.world.securityEventTriage.map((t) => t.outcome)).toEqual(Array(6).fill("grouped"));
+    const scopeOf = new Map(incidents(f).map((i) => [i.id, i.scope]));
+    const written = f.world.securityIncidentReason
+      .map((r) => ({ scope: scopeOf.get(r.incidentId as string), code: r.code, kind: r.evidenceKind, camera: r.evidenceCamera }))
+      .sort((a, b) => String(a.kind).localeCompare(String(b.kind)) || String(a.camera).localeCompare(String(b.camera)));
+    expect(written).toEqual([
+      { scope: "area", code: "camera_offline", kind: "camera_offline", camera: "back" },
+      { scope: "camera", code: "camera_offline", kind: "camera_offline", camera: "yard" },
+      { scope: "area", code: "after_hours_presence", kind: "detection", camera: "back" },
+      { scope: "area", code: "after_hours_presence", kind: "detection_ongoing", camera: "back" },
+      { scope: "site_camera_system", code: "camera_offline", kind: "source_offline", camera: null },
+      { scope: "site_threat", code: "threat_signal", kind: "threat", camera: null },
+    ]);
+  });
+});
+
 describe("sealing (§6.1 step 5): quiet + settle, the last arrival, and a drained backlog", () => {
   it("seals at lastActivity + 5 min + 90 s, not a second before", async () => {
     const f = world({ securityEvent: [eventRow({ id: 1n })] });
