@@ -253,6 +253,13 @@ export interface McpCallContext {
    */
   agentRunId?: string;
   /**
+   * WARP-2896 — the workshop workspace the run works in, when it has one.
+   * Read by the `workspace_*` handlers to address their workspace; the
+   * orchestrator route re-derives the binding from `agentRunId`, so this is
+   * an address, never an authorisation. Stdio-trusted, like `agentRunId`.
+   */
+  workspaceId?: string;
+  /**
    * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
    * paraphrase vectors, filename filter, search overrides). Set by the
    * agent loop right before dispatching `search_content`. Routed via

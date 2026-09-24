@@ -58,6 +58,7 @@ import { createCrmFilingRouter } from "./routes/crm-filing.js";
 import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
+import { createWorkspaceRouter } from "./routes/workspace.js";
 // WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
 import { createBrainRouter } from "./routes/brain.js";
 import type { BrainPassTrigger } from "./services/brain/brain-pass-runner.js";
@@ -495,6 +496,11 @@ export function createApp(
   // + recurring schedules. Owner/admin, admitting the mcp principal on behalf
   // of a named chat user (the `start_agent_run` / `list_agent_runs` tools).
   app.use("/api", createAgentRunsRouter(prisma));
+  // WARP-2896 (ADR-056 slice G) — the workshop's workspaces over the
+  // sandbox's git store, plus the git smart-HTTP transport (/api/git/*,
+  // reached as /git/* through nginx). Owner/admin, admitting the mcp
+  // principal for a run bound to the workspace ("run owns workspace").
+  app.use("/api", createWorkspaceRouter(prisma));
   app.use("/api", createBrainRouter(prisma, brainPassTrigger));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6

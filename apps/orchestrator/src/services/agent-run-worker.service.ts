@@ -99,7 +99,13 @@
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { TOOL_CATALOG, confirmationBindingHash, confirmationOwnerOf } from "@droplet/tools-core";
+import {
+  TOOL_CATALOG,
+  TOOL_ROUTES,
+  confirmationBindingHash,
+  confirmationOwnerOf,
+  type ToolDomain,
+} from "@droplet/tools-core";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type { ChatMessage } from "../types/index.js";
@@ -157,6 +163,36 @@ export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notifica
  * saturates the model. Structural refusal here; the handler refuses too.
  */
 export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run"]);
+
+/**
+ * WARP-2896 (ADR-056 slice G) — the workshop's tools, derived from the
+ * tool→route manifest rather than named: every tool whose EVERY hop lands
+ * under `/api/workspace/`. That prefix is the sandbox's git store, reached
+ * through routes/workspace.ts, where "run owns workspace" is enforced —
+ * the blast radius of `workspace_write` is one checkout on the internal-
+ * only network, not the box. So these are the one family of ungated writes
+ * a run may carry (see {@link runToolPool}), and only a run that HAS a
+ * workspace carries them. A tool that adds a hop elsewhere leaves the set
+ * by itself; `agent-run-worker.workshop.test.ts` enumerates the members.
+ */
+export const WORKSPACE_TOOLS: ReadonlySet<string> = new Set(
+  TOOL_ROUTES.filter(
+    (e) => e.hops.length > 0 && e.hops.every((h) => h.pathPattern.startsWith("/api/workspace/")),
+  ).map((e) => e.tool),
+);
+
+/**
+ * WARP-2896 — the selection domains of {@link WORKSPACE_TOOLS}, read off the
+ * catalog (today exactly `["workspace"]`). A workshop run hands them to the
+ * loop as `bound_tool_domains` so "domains" selection advertises the
+ * workshop's tools on every turn: no keyword rule reaches them (chat must
+ * never be promised them) and a workshop goal need not name them. Without
+ * this the bench-box live proof (2026-09-23) offered the model none of the
+ * eight and the run ended `model_done` with zero tool calls.
+ */
+export const WORKSPACE_TOOL_DOMAINS: readonly ToolDomain[] = [
+  ...new Set(TOOL_CATALOG.filter((t) => WORKSPACE_TOOLS.has(t.name)).map((t) => t.domain)),
+];
 
 /**
  * WARP-2749 — a run's inference requests carry the gateway's "background"
@@ -224,13 +260,18 @@ function gatewayBusy(threw: unknown, result: AgentResult | null): boolean {
  * (remote, ADR-043) tools are never in a run's `allowed_tools`, so a tool the
  * catalog does not know cannot reach a run at all.
  */
-export function runToolPool(): string[] {
+export function runToolPool(opts: { workspace?: boolean } = {}): string[] {
   return TOOL_CATALOG.filter(
     (t) =>
       !RUN_EXCLUDED_TOOLS.has(t.name) &&
       confirmationOwnerOf(t) !== "route" &&
       (RUN_READMITTED_TOOLS.has(t.name) ||
-        (!EXCLUDED_FROM_CHAT_TOOLS.has(t.name) && !(t.requiresWrite && !t.requiresConfirmation))),
+        // WARP-2896 — the workshop's tools ride a run bound to a workspace and
+        // no other: their writes land on that workspace's checkout alone.
+        (opts.workspace === true && WORKSPACE_TOOLS.has(t.name)) ||
+        (!EXCLUDED_FROM_CHAT_TOOLS.has(t.name) &&
+          !WORKSPACE_TOOLS.has(t.name) &&
+          !(t.requiresWrite && !t.requiresConfirmation))),
   ).map((t) => t.name);
 }
 
@@ -276,6 +317,12 @@ export function redispatchSafe(tool: string, prior: { confirmation?: string }): 
   const entry = TOOL_CATALOG.find((t) => t.name === tool);
   if (!entry) return false;
   if (!entry.requiresWrite && !entry.requiresConfirmation) return true;
+  // WARP-2896 — a workspace write repeats onto the same checkout: `write`
+  // is idempotent by contract (same bytes, `changed: false`), `commit` finds
+  // nothing to commit, `run` runs the tests again. Re-dispatch, loudly (the
+  // caller logs `agent_run_redispatch_unknown_outcome`). `propose` is gated
+  // and takes the confirming branch below.
+  if (WORKSPACE_TOOLS.has(tool) && !entry.requiresConfirmation) return true;
   if (!entry.requiresConfirmation) return false;
   return prior.confirmation !== "confirmed";
 }
@@ -369,6 +416,9 @@ export interface EnqueueAgentRunInput {
   /** WARP-2877 — set by the schedule ticker, so its overlap guard can find
    *  this run on the next fire. Absent for a run started from chat. */
   scheduleId?: string | null;
+  /** WARP-2896 — the workshop workspace this run works in. Absent for every
+   *  ordinary run; the route checked it exists and belongs to the person. */
+  workspaceId?: string | null;
 }
 
 /** Create a `queued` run. The worker's next tick claims it. */
@@ -389,6 +439,7 @@ export async function enqueueAgentRun(
       sessionId: input.sessionId ?? null,
       maxIter,
       scheduleId: input.scheduleId ?? null,
+      workspaceId: input.workspaceId ?? null,
       ...(input.runAfter ? { runAfter: input.runAfter } : {}),
     },
     select: { id: true },
@@ -511,7 +562,19 @@ export async function decideAgentRun(
 }
 
 /** Why an execution stopped before the loop finished on its own. */
-type StopReason = "cancelled" | "deadline" | "fenced" | "parked" | "unknown_outcome";
+type StopReason = "cancelled" | "deadline" | "fenced" | "parked" | "unknown_outcome" | "proposed";
+
+/**
+ * WARP-2896 — `workspace_propose` ENDS the run. A proposal is the workshop
+ * run's terminal act: the manifest is written, the commit tagged, the
+ * review surface (slice I) takes it from there, and nothing the model does
+ * after that belongs to the same run. The worker reads the tool's own
+ * result — a successful, non-envelope `workspace_propose` — and stops the
+ * loop with `proposed`, which the terminal write records as `succeeded`
+ * with the proposal as the run's result. The model is not asked to stop
+ * itself; it would not, reliably.
+ */
+const PROPOSE_TOOL = "workspace_propose";
 
 class AgentRunStopped extends Error {
   constructor(
@@ -871,6 +934,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           pendingBindingHash: string | null;
           pendingArgs: unknown;
           pendingDecision: "approved" | "denied" | null;
+          workspaceId: string | null;
         }
       | null;
     const lease = leases.get(runId);
@@ -960,7 +1024,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     }
     const offLanProvider = await resolveOffLanProvider({ user: principal, model: run.model });
     const principalTools = narrowToolNamesForPrincipal(
-      runToolPool(),
+      runToolPool({ workspace: run.workspaceId !== null }),
       access.tier ?? undefined,
       access.scope,
     );
@@ -972,6 +1036,18 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     const toolCallContext = {
       ...(user ? { userId: user.username, userRole: user.role } : {}),
       agentRunId: runId,
+      // WARP-2896 — the workshop's tools read this to address their
+      // workspace; the route re-checks the binding from the run id.
+      ...(run.workspaceId ? { workspaceId: run.workspaceId } : {}),
+    };
+    // WARP-2896 — set when `workspace_propose` succeeds; the terminal write
+    // below turns it into the run's result.
+    let proposal: string | null = null;
+    const endOnProposal = (tool: string, text: string, isError: boolean): void => {
+      if (tool !== PROPOSE_TOOL || isError || isConfirmationEnvelope(text)) return;
+      proposal = text;
+      stop(runId, "proposed");
+      throw new AgentRunStopped("proposed", "the run proposed its extension");
     };
 
     // ── Resume state ────────────────────────────────────────────────────
@@ -1184,6 +1260,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           const ran = !outcome.isError && !isConfirmationEnvelope(outcome.text);
           await complete(outcome.text, !ran);
           if (ran) logger.info({ runId, tool: call.tool, iteration: abs }, "agent_run_tool_confirmed");
+          endOnProposal(call.tool, outcome.text, !ran);
           return { text: outcome.text, isError: !ran };
         }
 
@@ -1299,6 +1376,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           entry.completedAt = now().toISOString();
         }
         await persistTrace();
+        endOnProposal(call.tool, call.text, call.isError);
       },
     };
 
@@ -1349,6 +1427,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           toolCallContext,
           context_window: contextWindow,
           tool_selection_mode: toolSelectionMode,
+          // WARP-2896 — the run's binding, not its sentence, admits the
+          // workshop's tools to every turn's advertisement.
+          ...(run.workspaceId ? { bound_tool_domains: WORKSPACE_TOOL_DOMAINS } : {}),
           signal: controller.signal,
           checkpoint,
         },
@@ -1440,6 +1521,36 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         });
       }
       logger.info({ runId, tool: parkRequest.tool }, "agent_run_parked");
+      return;
+    }
+    if (reason === "proposed") {
+      // WARP-2896 — the run's terminal act. `succeeded`, with the proposal
+      // (the tool's own result: commit, tag, manifest) as the run's result,
+      // and `stopReason: proposed` so the workshop page can say which
+      // ending this was without parsing the result.
+      const text = proposal ?? "{}";
+      await finish(runId, {
+        status: "succeeded",
+        endedAt,
+        iteration: base + (result?.iterations ?? 0),
+        stopReason: "proposed",
+        result: text,
+        error: null,
+        ...CLEAR_PENDING,
+      });
+      await audit(runId, run.userId, "succeeded", "Agent run proposed an extension", undefined,
+        user ? { username: user.username, goal: run.goal, result: text } : undefined);
+      if (user) {
+        const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
+        await sendNotification(prisma, {
+          userId: user.username,
+          kind: "ai",
+          title: "Extension proposed",
+          body: `Background run "${goal}" finished with a proposal. Open the Workshop to review it.`,
+        }).catch((err) => {
+          logger.warn({ err, runId }, "agent_run_proposal_notification_failed");
+        });
+      }
       return;
     }
     if (reason === "unknown_outcome") {

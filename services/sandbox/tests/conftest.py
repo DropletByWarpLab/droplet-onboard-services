@@ -18,19 +18,28 @@ from pathlib import Path
 
 os.environ.setdefault("SANDBOX_SERVICE_TOKEN", "pytest-fake-token")
 os.environ.setdefault("SANDBOX_SCRATCH_DIR", tempfile.gettempdir())
+# The git store (WARP-2896) defaults to /var/lib paths that must not exist on
+# a dev checkout; the workspace fixture re-points them per test.
+_STORE_ROOT = tempfile.mkdtemp(prefix="sandbox-store-")
+os.environ.setdefault("SANDBOX_REPOS_DIR", os.path.join(_STORE_ROOT, "git"))
+os.environ.setdefault("SANDBOX_WORK_DIR", os.path.join(_STORE_ROOT, "work"))
+os.environ.setdefault(
+    "SANDBOX_TEMPLATES_SRC",
+    str(Path(__file__).resolve().parents[3] / "extensions" / "templates"),
+)
 
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 if str(_SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVICE_DIR))
 
-import pytest  # noqa: E402
+import pytest
 
 
 @pytest.fixture()
 def client():
     from fastapi.testclient import TestClient
 
-    import main  # noqa: E402
+    import main
 
     return TestClient(main.app)
 
@@ -38,3 +47,14 @@ def client():
 @pytest.fixture()
 def auth():
     return {"Authorization": "Bearer pytest-fake-token"}
+
+
+@pytest.fixture()
+def store(tmp_path: Path, monkeypatch):
+    """A fresh git store per test, seeded with the repo's real templates."""
+    import gitstore
+
+    monkeypatch.setattr(gitstore, "REPOS_DIR", tmp_path / "git")
+    monkeypatch.setattr(gitstore, "WORK_DIR", tmp_path / "work")
+    assert gitstore.seed_templates() is True
+    return gitstore

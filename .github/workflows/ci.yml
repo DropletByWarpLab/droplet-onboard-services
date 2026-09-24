@@ -256,6 +256,9 @@ jobs:
             # code meets, so they are exercised end to end, never mocked.
             sandbox:
               - "services/sandbox/**"
+              # WARP-2896: the suite seeds templates.git from these and runs
+              # their tests inside a workspace — a template edit is a sandbox change.
+              - "extensions/templates/**"
             # WARP-1988: the factory-reset bulk-storage wipe and the
             # storage-pool host script are default-ON data-destroying paths;
             # their shell unit suites (<10s, no root/disks/Docker) must run at

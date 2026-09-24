@@ -25,6 +25,7 @@
  * a horizontal scroll (the WARP-1785..1793 sweep's rule).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { Bot, ShieldAlert } from "lucide-react";
 import {
   AGENT_RUN_STATUSES,
@@ -400,6 +401,15 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
                 {detail.endedAt ? ` · ended ${when(detail.endedAt)}` : ""}
                 {detail.attempts > 0 ? ` · resumed ${detail.attempts}×` : ""}
                 {live ? " · updating" : ""}
+                {detail.workspaceId ? (
+                  <>
+                    {" · in workspace "}
+                    <Link href={`/workshop/${encodeURIComponent(detail.workspaceId)}`} data-testid="run-workspace-link">
+                      {detail.workspaceId}
+                    </Link>
+                    {detail.stopReason === "proposed" ? " · ended with a proposal" : ""}
+                  </>
+                ) : null}
               </p>
 
               {parked && detail.pending && (

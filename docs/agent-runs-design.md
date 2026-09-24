@@ -427,6 +427,101 @@ worker keeps `start_agent_run` out of every run's pool (structural) and the
 handler refuses when `ctx.agentRunId` is set (the mcp-server maps the
 stdio-trusted `_meta.agentRunId` onto the context for exactly this check).
 
+## 8a. The workshop run (WARP-2896, ADR-056 §6.2)
+
+A run started with a `workspaceId` is a **workshop run**: the same durable
+loop, bound for its whole life to one **workspace** — a bare git repository
+on the sandbox's `workspace-git` volume plus a working checkout on
+`workspace-checkouts` — in which it reads, edits, tests and finally
+**proposes** an extension. Nothing it builds runs on the box; a proposal is
+a tagged commit the review surface (slice I) picks up.
+
+**The store, not a forge.** `services/sandbox` (`gitstore.py`,
+`workspace.py`) holds the repositories and does every git operation: create
+from `templates.git` (seeded at first start from `extensions/templates/`,
+never re-seeded over an operator's commits), read / search / diff / log,
+write, commit (as the person, pushed to the bare repo at once — so the
+backup set is always current and a lost checkout is a `git clone` away),
+`run` of an **allow-listed** command (`npm test`, `npm run build`, `pytest`,
+`ruff`, `tsc`, plain arguments), and propose (manifest with `egress: none`
+pinned whatever the tree says, commit, `proposal/<version>` tag, push).
+`git http-backend` serves smart HTTP at `/git/<repo>.git` through the
+orchestrator's `/api/git/*` (nginx rewrites `/git/`), with the push decision
+made by the orchestrator (owner/admin push, family fetches, guest and the
+mcp principal nothing) and forwarded as a header — git's own default, which
+enables push the moment `REMOTE_USER` is set, is never relied on. The git
+CLI speaks Basic only, so on that prefix alone the auth middleware reads the
+credential's second slot as the session JWT.
+
+**Run owns workspace.** The eight `workspace_*` tools (four reads; `write`,
+`commit`, `run` as Write-tier with NO confirmation; `propose` Tier-2) reach
+`/api/workspace/:id/<op>` as the mcp principal with `X-Nextcloud-User` and
+`X-Droplet-Agent-Run`. The route loads the run and refuses unless it belongs
+to that person, is `running`, and carries THIS workspace's id — a column the
+route reads, never an argument the model supplies. Each handler refuses
+without a run id and a workspace id on its context (`_meta.workspaceId`,
+stdio-trusted like `agentRunId`), so a chat turn or an HTTP MCP client never
+reaches the route. The `run` allow-list is applied by the route BEFORE the
+sandbox is dialled, and again by the sandbox.
+
+**The checkout follows the repository.** The bare repository is the truth:
+an owner may push to `<id>.git` over `/git/` at any time (the AC's "push for
+owner/admin"), with nothing in the sandbox watching. So every workspace
+operation first fast-forwards the checkout onto `origin/work` — a local
+fetch, the bare is a path on the same volume. Fast-forward only: a checkout
+that has moved ahead is left alone (its next commit pushes again), and a
+checkout with uncommitted work, or one that has diverged, while the
+repository also moved is a **409** the run hears about at its next call —
+never a merge nobody asked for, never a commit over the owner's push
+refused later as a non-fast-forward.
+
+**One live run per workspace, held by the database.** Two runs on one
+checkout would commit over each other, so `POST /api/agent-runs` refuses a
+`workspaceId` that already has a `queued` / `running` /
+`awaiting_confirmation` run (409). The count it does first is the friendly
+answer; the guard that survives two starts racing past that count is the
+partial unique index `AgentRun_workspaceId_active_key` — `UNIQUE
+("workspaceId") WHERE "workspaceId" IS NOT NULL AND status IN (the three
+active statuses)` — in the migration's raw SQL (Prisma cannot express a
+filtered unique index; `PmCycle_projectId_active_key` is the precedent). The
+route maps its P2002 onto the same 409. A finished run releases the
+workspace by leaving the predicate; ordinary runs (NULL `workspaceId`) never
+match it. `agent-run-claim.pg.test.ts` shows Postgres raising and releasing
+it.
+
+**The pool exemption is structural.** `WORKSPACE_TOOLS` is derived from
+`TOOL_ROUTES`: every tool whose every hop is under `/api/workspace/`. A run
+WITH a workspace carries them on top of the ordinary pool; a run without
+carries none. They are the one family of ungated writes a run may hold
+besides `send_notification`, on the ground that their whole reach is one
+checkout on the internal-only network; `agent-run-worker.workshop.test.ts`
+enumerates the members, so a tool that grows a hop elsewhere is a visible
+diff. **Replay:** `write` is idempotent by contract (same bytes → `changed:
+false`), `commit` with nothing to commit is `changed: false`, `run` runs the
+tests again — all three re-dispatch loudly after a lost result instead of
+halting the run as `unknown_outcome`; `propose` is gated and follows the
+confirming rule.
+
+**Propose ends the run.** The worker reads `workspace_propose`'s own
+success (in `afterToolCall`, and in the approved handshake of a resumed
+park) and stops the loop with `proposed`; the terminal write is `succeeded`
+with `stopReason: proposed` and the proposal as the run's result, the
+person is notified, and the model is never asked for a final answer — it
+would not stop itself reliably. The workspace row flips to `proposed` with
+the tag and takes no more writes.
+
+**Dashboard.** `/workshop` gains a "Work in" picker on the start form and a
+Workspaces section (list, create from a template); `/workshop/<id>` shows
+the branch and head, the proposal tag, the runs that worked there, the
+history, the uncommitted diff and the last command's output, all read from
+the store through `/api/workspace/:id/{log,diff,output}`, plus the clone URL.
+The write path is the run's alone; a person who wants to edit by hand
+clones and pushes.
+
+**Backup and reset.** `workspace-git` joins `DATA_VOLUMES` (the customer's
+extension work); `workspace-checkouts` joins `EXCLUDED_VOLUMES`
+(rebuildable); both are in factory-reset's wipe list.
+
 ## 9. Out of scope for the epic
 
 Parallel tool dispatch within an iteration; sub-agents / delegation; the

@@ -495,4 +495,16 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "routine_draft", client: "orchestrator", hops: [admit("post", "/api/tools")] },
   { tool: "routine_list", client: "orchestrator", hops: [admit("get", "/api/tools")] },
   { tool: "routine_run", client: "orchestrator", hops: [admit("post", "/api/tools/:slug/runs")] },
+  // WARP-2896 — the workshop router admits the mcp principal on every op
+  // route and binds it to the run named in X-Droplet-Agent-Run (routes/
+  // workspace.ts bindRun). The run worker derives its workspace-tool set
+  // from THESE rows: a tool whose every hop is under /api/workspace/.
+  { tool: "workspace_read", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/read")] },
+  { tool: "workspace_search", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/search")] },
+  { tool: "workspace_diff", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/diff")] },
+  { tool: "workspace_log", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/log")] },
+  { tool: "workspace_write", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/write")] },
+  { tool: "workspace_commit", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/commit")] },
+  { tool: "workspace_run", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/run")] },
+  { tool: "workspace_propose", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/propose")] },
 ];

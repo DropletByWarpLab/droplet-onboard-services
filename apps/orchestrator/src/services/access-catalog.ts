@@ -345,6 +345,11 @@ export const FEATURE_UNGATED_TOOL_DOMAINS: Readonly<Partial<Record<ToolDomain, s
     "Stored ToolSpecs (WARP-2894). Not a module; every step a routine runs is re-checked " +
     "against this same scope by the ToolSpec runner (WARP-1580), so a routine reaches no " +
     "domain the role could not reach directly.",
+  workspace:
+    "The workshop's tools (WARP-2896). Not a module: they are excluded from chat and reach " +
+    "the model only inside a workshop run (bound_tool_domains), which only owner/admin may " +
+    "start, and /api/workspace refuses any call whose run is not the actor's, running, and " +
+    "bound to that workspace. The tool grant withholds the offer.",
   erp:
     "Connector reach is the §5.4 connectors axis (AccessRoleConnectorGrant), not a feature, " +
     "and erp is never a grantable tool domain.",

@@ -31,7 +31,7 @@
  * (blocking `chat()` and streaming `chatStream()`) now agree on this.
  */
 
-import type { PrivateEnhancement } from "@droplet/tools-core";
+import type { PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
 import { redactConfirmationTokensForModel } from "@droplet/tools-core";
 
 import { config } from "../config.js";
@@ -412,6 +412,17 @@ export interface AgentRequest {
    * (allowed_tools / chat scope) — RBAC is decided before this field.
    */
   tool_selection_mode?: "off" | "domains";
+  /**
+   * WARP-2896 — tool domains the CALLER's binding admits on every turn under
+   * "domains" selection, whatever the sentence says. Set by the agent-run
+   * worker for a workshop run (`["workspace"]`, from `run.workspaceId`) and by
+   * no route: chat builds this request field by field and never sets it, so a
+   * chat client cannot reach it. Still bounded by the resolved pool — it
+   * admits a domain, never a tool the pool does not hold.
+   * See `effectiveAdvertisedToolNames` (`boundDomains`) for why this is not a
+   * keyword rule or pool membership.
+   */
+  bound_tool_domains?: readonly ToolDomain[];
   /**
    * WARP-1921 — tool names already used EARLIER in this conversation, read
    * server-side from the persisted trace by the route.
@@ -1435,6 +1446,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // registers a remote server, and selection is byte-identical to its
       // pre-WARP-2443 behaviour while it is.
       runtimeTools: runtimeToolRegistry.list(),
+      boundDomains: req.bound_tool_domains,
     });
     activeTools = filtered.filter((t) => selected.has(t.name));
   }

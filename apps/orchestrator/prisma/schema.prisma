@@ -4071,6 +4071,23 @@ model AgentRun {
   /// runs rather than deleting the runs with it.
   scheduleId         String?
   schedule           AgentRunSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  /// WARP-2896 (ADR-056 slice G) — the workspace a WORKSHOP run works in.
+  /// NULL for every ordinary run. Set once at enqueue and never changed: the
+  /// `/api/workspace/:id/*` routes check that the run named in the request
+  /// carries THIS id ("run owns workspace"), so a run cannot reach any
+  /// workspace but its own. `onDelete: SetNull` — deleting a workspace keeps
+  /// the runs that worked in it, as the schedule FK above does.
+  ///
+  /// ONE LIVE RUN PER WORKSPACE is a partial unique index —
+  /// `AgentRun_workspaceId_active_key`, `UNIQUE ("workspaceId") WHERE
+  /// "workspaceId" IS NOT NULL AND "status" IN (queued, running,
+  /// awaiting_confirmation)` — in the warp_2896_workspace migration's raw SQL,
+  /// because Prisma cannot express a WHERE-filtered unique index (the
+  /// `PmCycle_projectId_active_key` pattern). `POST /api/agent-runs` still
+  /// counts first for the friendlier 409, and maps the index's P2002 onto the
+  /// same 409 when two starts race past the count.
+  workspaceId        String?
+  workspace          WorkshopWorkspace?       @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   /// WARP-2997 — the per-person cloud gate's verdict at the LATEST claim.
   /// Explicit, like `status`: `unchecked` until the worker first claims the
   /// row, never inferred from `offLanProvider` being NULL.
@@ -4088,6 +4105,8 @@ model AgentRun {
   @@index([status, runAfter])
   // WARP-2877 — the ticker's overlap probe: has this schedule an active run?
   @@index([scheduleId, status])
+  // WARP-2896 — a workspace's runs, for the workshop's extension page.
+  @@index([workspaceId, createdAt(sort: Desc)])
   // Reclaim scan: `status = running AND heartbeatAt < now() - threshold`.
   @@index([status, heartbeatAt])
   // "My runs", newest first — the list route in WARP-2180.
@@ -4107,6 +4126,48 @@ enum AgentRunStatus {
   succeeded
   failed
   cancelled
+}
+
+/// WARP-2896 (ADR-056 §6.2) — a workshop workspace: one bare git repository
+/// on the sandbox's `workspace-git` volume plus its working checkout, in
+/// which a workshop run reads, writes, commits, runs the allow-listed
+/// commands and finally PROPOSES. The row is the orchestrator's index of
+/// what the sandbox holds — the repository itself never lives in Postgres.
+///
+/// Named for the surface (the singleton `Workspace` below is the box itself —
+/// the org, its name, its slug; a WorkshopWorkspace is one extension's
+/// repository). `id` doubles as the repository name (`<id>.git`) and the sandbox's
+/// workspace id, so it is constrained to the sandbox's id grammar
+/// (`^[a-z0-9][a-z0-9-]{0,63}$`) at the route, not a uuid.
+///
+/// `status` is explicit: `active` (a run may work in it), `proposed` (a
+/// proposal tag exists; the review surface — slice I — reads it), `archived`
+/// (kept for history, no run may be started in it). Never inferred from the
+/// presence of a tag.
+model WorkshopWorkspace {
+  id          String          @id
+  /// The owning person (`User.id`). Runs in this workspace are attributed to
+  /// them; the dashboard shows an owner their own, an admin everyone's.
+  userId      String
+  name        String
+  /// The `templates.git` directory it was created from, when one was.
+  template    String?
+  status      WorkshopWorkspaceStatus @default(active)
+  /// The `proposal/<version>` tag the last `workspace_propose` wrote.
+  proposedTag String?
+  proposedAt  DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  runs        AgentRun[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+enum WorkshopWorkspaceStatus {
+  active
+  proposed
+  archived
 }
 
 /// WARP-2997 — where a run's model runs, and whether its owner may use it.
