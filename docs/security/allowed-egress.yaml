@@ -292,6 +292,43 @@ entries:
       purpose and in ADR-036 — declared so the gate can check it, and so it
       stays a known hole rather than a silent one. (WARP-2452)
 
+  - id: dmr-model-registry
+    kind: egress
+    service: dmr
+    destination:
+      # Measured 2026-09-23 with an anonymous pull of ai/llama3.2:3B-Q4_K_M:
+      # token from auth.docker.io, manifest + blob requests to
+      # registry-1.docker.io, which 307-redirects every blob to
+      # production.cloudfront.docker.com. production.cloudflare.docker.com is
+      # Docker Hub's other documented blob CDN (the redirect target varies by
+      # region). index.docker.io is deliberately absent: it is the NAME
+      # `docker.io/ai/...` normalises to, not a host the pull dials.
+      hosts: [auth.docker.io, registry-1.docker.io, production.cloudfront.docker.com, production.cloudflare.docker.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Model-weight download when an owner/admin installs a catalog model from
+      the Models page (WARP-1827 → inference-manager POST /models/pull → the
+      DMR daemon's POST /api/pull). The daemon (docker/model-runner, the
+      `dmr`/`dmr-cuda` service, container droplet-dmr) pulls the entry's
+      pinned `ai/<repo>:<tag>` OCI artifact anonymously from Docker Hub.
+      Inbound weights only — no box data is sent. Registered because without
+      it every UI-driven install is recorded by the WARP-268 audit as an
+      unlisted_destination anomaly (WARP-3046). This is the runtime DMR
+      channel only: the orchestrator->registry.ollama.ai row above and the
+      build-phase image pulls below are separate (service, host) tuples.
+    ticket: WARP-3046
+    added: 2026-09-23
+    review_by: 2027-09-23
+    code_refs: [services/inference-manager/runtime/dmr.py, services/inference-manager/models/model-manifest.json]
+    no_code_literal: >-
+      The DMR daemon owns the registry resolution: our code (runtime/dmr.py)
+      only hands it an `ai/<repo>:<tag>` reference from the manifest, and
+      docker/model-runner resolves the `ai/` namespace against Docker Hub
+      itself. No Droplet source names these hosts. (WARP-3046)
+
   - id: cloud-llm-providers-optin
     kind: egress
     service: ai-gateway

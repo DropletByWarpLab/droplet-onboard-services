@@ -5,9 +5,16 @@
  * subscriptions — which require a publicly reachable HTTPS endpoint — are not
  * available to us. Delta-query polling is therefore the sync mechanism **by
  * design**, which ADR-041 records as an architectural choice rather than a
- * limitation. Microsoft built delta query for exactly this shape, and the
- * budget is generous: Outlook allows 10,000 requests per 10 minutes per
- * mailbox, so a one-minute poll across ten folders spends about 1% of it.
+ * limitation. Microsoft built delta query for exactly this shape.
+ *
+ * The pacing is NOT planned against a request quota (WARP-2706). An earlier
+ * version of this comment justified it with "10,000 requests per 10 minutes
+ * per mailbox"; Microsoft's current throttling page publishes no such
+ * per-mailbox figure, only a global per-application ceiling (which is why each
+ * customer signs in through their own app, WARP-2705) and `429` responses
+ * carrying `Retry-After`. So the engine polls at a modest cadence, walks
+ * cursors one at a time, and obeys `Retry-After` exactly — pacing by what
+ * Microsoft says on each response rather than by a number nobody can cite.
  *
  * Everything here is pure — no I/O, no clock of its own, no randomness that
  * isn't injectable — because these are the decisions that fail quietly on a

@@ -162,8 +162,9 @@ describe("the egress-audit collector is not behind the Security toggle", () => {
     // collector's. A new one appearing here must be deliberately placed
     // before or after the gate.
     const routes = join(SRC, "routes");
-    // WARP-2978 adds incidents, acknowledgement and alert routing (security-incidents.ts).
-    const SECURITY_MODULE_ROUTERS = new Set(["security.ts", "security-zones.ts", "security-site.ts", "security-incidents.ts"]);
+    // WARP-2978 adds incidents, acknowledgement and alert routing (security-incidents.ts);
+    // WARP-2980 adds "what normal looks like" (security-patterns.ts).
+    const SECURITY_MODULE_ROUTERS = new Set(["security.ts", "security-zones.ts", "security-site.ts", "security-incidents.ts", "security-patterns.ts"]);
     const offenders = readdirSync(routes)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
       .filter((f) => !SECURITY_MODULE_ROUTERS.has(f) && f !== "egress-audit.ts")
@@ -182,7 +183,10 @@ describe("the egress-audit collector is not behind the Security toggle", () => {
       'app.use("/api", createSecurityRouter(prisma))',
       'app.use("/api", createSecurityZonesRouter(prisma))',
       'app.use("/api", createSecuritySiteRouter(prisma))',
+      // WARP-2978 (P3) — incidents, acknowledgement and alert routing.
       'app.use("/api", createSecurityIncidentsRouter(prisma))',
+      // WARP-2980 (P5) — "what normal looks like".
+      'app.use("/api", createSecurityPatternsRouter(prisma))',
     ]) {
       expect(src.indexOf(mount), mount).toBeGreaterThan(gates);
     }

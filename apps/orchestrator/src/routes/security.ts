@@ -56,6 +56,7 @@ import { mayReadThreats, securityViewerScope, type SecurityRouteDeps } from "../
 import { securitySiteModeHealth } from "../services/security-mode.service.js";
 import { securityIncidentsHealth } from "../services/security-incidents.service.js";
 import { securityAlertsHealth } from "../services/security-alerts.service.js";
+import { securityPatternsHealth } from "../services/security-baselines.service.js";
 import { loadActiveLinks, viewerAreas, zoneChipsFor, zoneFilterFor } from "../services/security-zones.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -193,13 +194,23 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
     try {
       const now = deps.now?.() ?? new Date();
       const ownerOrAdmin = mayReadThreats(req);
-      const [state, siteMode, incidents, alerts] = await Promise.all([
+      const [state, siteMode, patterns, incidents, alerts] = await Promise.all([
         prisma.securityIngestState.findUnique({
           where: { id: "singleton" },
           select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true, retentionIncidentsDeleted: true },
         }),
         // Never throws: an unreadable mode is a `down` row, not a 503 of the header.
         securitySiteModeHealth(prisma, now),
+        // WARP-2980 — never throws either. Visible to every viewer, with its
+        // counts scoped to the viewer's cameras (DS-005); a scope that cannot
+        // be read gives the row nothing to count (null), never "all".
+        securityViewerScope(prisma, req, deps.resolve).then(
+          (scope) => securityPatternsHealth(prisma, scope, now),
+          (err: unknown) => {
+            logger.warn({ err }, "security health: viewer scope unreadable for the patterns row");
+            return securityPatternsHealth(prisma, null, now);
+          },
+        ),
         // WARP-2978 — never throw either. The alerts row names who is told:
         // owner/admin only, and not even computed for anyone else.
         securityIncidentsHealth(prisma, now),
@@ -211,6 +222,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         frigate: securityStatusSnapshot().get(null),
         state,
         siteMode,
+        patterns,
         incidents,
         alerts,
         now,

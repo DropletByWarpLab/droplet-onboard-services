@@ -2,10 +2,10 @@
  * WARP-2977 P2b (spec §7, §9 "Invariant") — the act / manage level table of
  * every Security route, read off the REAL router stacks.
  *
- * The three routers mounted at "/api" in app.ts (createSecurityRouter,
- * createSecurityZonesRouter, createSecuritySiteRouter) are walked layer by
- * layer, so what is pinned is the middleware that actually runs, not what a
- * comment claims:
+ * The four routers mounted at "/api" in app.ts (createSecurityRouter,
+ * createSecurityZonesRouter, createSecuritySiteRouter and — WARP-2980 —
+ * createSecurityPatternsRouter) are walked layer by layer, so what is pinned
+ * is the middleware that actually runs, not what a comment claims:
  *
  *   · the exact method + path → level + role table below (§7). Every write
  *     carries `requireFeatureAccess('security', act|manage)` — a write with
@@ -22,15 +22,18 @@
  *     principal, so no route is `requireRoleOrMcpService` (checked in the
  *     source too);
  *   · no parameterised path precedes a literal sibling it would swallow,
- *     across the three routers in app.ts's mount order;
- *   · the write-route count is 12 and the GET count 10, so the table cannot
- *     pass over empty stubs or a dropped route.
+ *     across the routers in app.ts's mount order;
+ *   · the write-route count is 12 and the GET count 13 (P2b's 9 writes and 6
+ *     GETs, WARP-2978's 3 writes and 4 GETs, WARP-2980's 3 GETs), so the table
+ *     cannot pass over empty stubs or a dropped route. P4 and P5 PR-B each add
+ *     their own rows.
  *
- * WARP-2978 (P3 §7): a fourth router, createSecurityIncidentsRouter (routes
- * 16–22), mounted after the site router. Acknowledge and resolve are act;
- * choosing who is told is manage (and family can never pass its role floor,
- * even with a manage resolver); every GET stays at view, and the literal
- * `/incidents/summary` is declared before `/incidents/:id`.
+ * WARP-2978 (P3 §7): createSecurityIncidentsRouter (routes 16–22), mounted
+ * after the site router. Acknowledge and resolve are act; choosing who is told
+ * is manage (and family can never pass its role floor, even with a manage
+ * resolver); every GET stays at view, and the literal `/incidents/summary` is
+ * declared before `/incidents/:id`. WARP-2980 (P5 PR-A):
+ * createSecurityPatternsRouter (routes 29–31, all view), mounted last.
  */
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -47,6 +50,7 @@ import { createSecurityRouter } from "../routes/security.js";
 import { createSecurityZonesRouter } from "../routes/security-zones.js";
 import { createSecuritySiteRouter } from "../routes/security-site.js";
 import { createSecurityIncidentsRouter } from "../routes/security-incidents.js";
+import { createSecurityPatternsRouter } from "../routes/security-patterns.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
@@ -58,7 +62,7 @@ const VIEW_ROLES: readonly Role[] = ["owner", "admin", "family"];
 const ACT_ROLES: readonly Role[] = ["owner", "admin", "family"];
 const MANAGE_ROLES: readonly Role[] = ["owner", "admin"];
 
-/** Spec §7, in app.ts mount order (security, zones, site), each router in declaration order. */
+/** Spec §7, in app.ts mount order (security, zones, site, incidents, patterns), each router in declaration order. */
 const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly Role[]]> = [
   // createSecurityRouter (P2a)
   ["GET /security/events", "view", VIEW_ROLES],
@@ -86,11 +90,18 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["POST /security/incidents/:id/resolve", "act", ACT_ROLES],
   ["GET /security/alert-routing", "view", VIEW_ROLES],
   ["PUT /security/alert-routing/:userId", "manage", MANAGE_ROLES],
+  // createSecurityPatternsRouter (WARP-2980, routes 29–31): read-only; all literal paths
+  ["GET /security/patterns", "view", VIEW_ROLES],
+  ["GET /security/patterns/cells", "view", VIEW_ROLES],
+  ["GET /security/patterns/explain", "view", VIEW_ROLES],
 ];
 
-/** P2b PR-1 has 9 write routes and 6 GETs; WARP-2978 adds 3 writes (19, 20, 22) and 4 GETs (16, 17, 18, 21). */
+/**
+ * P2b spec §9's 9 write routes and 6 GETs; WARP-2978 adds 3 writes (19, 20, 22)
+ * and 4 GETs (16, 17, 18, 21); WARP-2980 adds 3 GETs (29–31) and no write.
+ */
 const WRITE_ROUTES = 12;
-const GET_ROUTES = 10;
+const GET_ROUTES = 13;
 
 type Handle = (req: unknown, res: unknown, next: () => void) => unknown;
 interface Layer {
@@ -111,6 +122,8 @@ const ROUTERS = [
   ["createSecuritySiteRouter", createSecuritySiteRouter(PRISMA, {})],
   // WARP-2978 (P3) — mounted after the site router.
   ["createSecurityIncidentsRouter", createSecurityIncidentsRouter(PRISMA, {})],
+  // WARP-2980 (P5 PR-A) — the last Security router.
+  ["createSecurityPatternsRouter", createSecurityPatternsRouter(PRISMA, {})],
 ] as const;
 
 function routesOf(name: string, router: unknown): RouteInfo[] {
@@ -213,7 +226,7 @@ describe("Security level invariant — the four routers' real stacks (spec §7, 
   });
 
   it("no route source uses requireRoleOrMcpService / requireRoleOrService (comments aside)", () => {
-    for (const file of ["security.ts", "security-zones.ts", "security-site.ts", "security-incidents.ts"]) {
+    for (const file of ["security.ts", "security-zones.ts", "security-site.ts", "security-incidents.ts", "security-patterns.ts"]) {
       const code = readFileSync(resolve(__dirname, "../routes", file), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "");
@@ -239,7 +252,7 @@ describe("Security level invariant — the four routers' real stacks (spec §7, 
     expect(keys.indexOf("GET /security/incidents/summary")).toBeLessThan(keys.indexOf("GET /security/incidents/:id"));
   });
 
-  it("app.ts mounts the four routers at /api in the order this table assumes", () => {
+  it("app.ts mounts the Security routers at /api in the order this table assumes", () => {
     const app = readFileSync(resolve(__dirname, "../app.ts"), "utf8");
     const mounts = [...app.matchAll(/app\.use\(\s*"\/api"\s*,\s*(createSecurity\w*Router)\(/g)].map((m) => m[1]);
     expect(mounts).toEqual(ROUTERS.map(([name]) => name));

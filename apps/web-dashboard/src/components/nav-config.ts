@@ -498,7 +498,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // controls), and live under /security, never /settings (ALWAYS_ON,
       // which would escape ModuleRouteGuard). Not destinations in SPACES, so
       // the Workspace shell shows them as the view pills
-      // "Security · Areas · Opening hours".
+      // "Security · Areas · Patterns · Opening hours".
+      //
+      // WARP-2980 (P5) — Patterns: what normal looks like for each area and
+      // camera. Read-only at view, like Areas.
       {
         href: "/security",
         label: "Security",
@@ -506,6 +509,7 @@ export const NAV_GROUPS: NavGroup[] = [
         requiresModule: "security",
         children: [
           { href: "/security/zones", label: "Areas", icon: MapPin },
+          { href: "/security/patterns", label: "Patterns", icon: Activity },
           { href: "/security/settings", label: "Opening hours", icon: Clock },
         ],
       },

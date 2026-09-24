@@ -22,8 +22,18 @@
  * it a job that outran its period piled up — N copies of one goal, each
  * holding an inference slot, racing each other over the same files — and a
  * run parked on an unanswered Tier-2 approval did it every single tick.
+ *
+ * WARP-3047 — A SCHEDULE CREATED WITHOUT A MODEL FOLLOWS THE ACTIVE ONE.
+ * `followsActiveModel` rows resolve the box's active model at every fire
+ * (tools-capable: an agent run calls tools), so an owner's switch reaches
+ * the next run instead of every schedule asking for the old model — on DMR a
+ * second model next to the active one. Resolved BEFORE the fire transaction
+ * (it reads the gateway's cached listing; no network inside a transaction).
+ * Nothing resolvable falls back to the schedule's stored `model` — a slot is
+ * never lost to a listing hiccup.
  */
 import type { PrismaClient } from "@prisma/client";
+import { resolveActiveModel } from "./active-model.service.js";
 import { ACTIVE_AGENT_RUN_STATUSES, enqueueAgentRun } from "./agent-run-worker.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
@@ -38,6 +48,7 @@ interface ScheduleRow {
   userId: string;
   goal: string;
   model: string;
+  followsActiveModel: boolean;
   maxIter: number;
   rrule: string;
   timezone: string;
@@ -91,6 +102,9 @@ export async function tickAgentRunSchedules(
     // fire time, not the next one's, so a ticker that wakes late still orders
     // the runs it creates correctly.
     const fireAt = schedule.nextFireAt;
+    const model = schedule.followsActiveModel
+      ? ((await resolveActiveModel(prisma, { requireTools: true })) ?? schedule.model)
+      : schedule.model;
     let outcome: FireOutcome;
     try {
       outcome = await prisma.$transaction<FireOutcome>(async (tx) => {
@@ -140,7 +154,7 @@ export async function tickAgentRunSchedules(
         const created = await enqueueAgentRun(tx, {
           userId: schedule.userId,
           goal: schedule.goal,
-          model: schedule.model,
+          model,
           maxIter: schedule.maxIter,
           runAfter: fireAt,
           scheduleId: schedule.id,

@@ -18,6 +18,7 @@ import {
   decideVisionRoute,
 } from "../services/vision-attachments.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { modelListGeneration } from "../services/model-list-generation.js";
 import { completeOnce } from "../services/llm-complete.service.js";
 import {
   runAgent,
@@ -76,7 +77,9 @@ import { decryptChunkRows } from "../services/file-search.service.js";
 import { probeColdModel } from "../services/model-readiness.service.js";
 import {
   readActiveChatModel,
+  resolveActiveModel,
   resolveStoredChatModel,
+  resolveTurnSideModel,
 } from "../services/active-model.service.js";
 import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
@@ -479,7 +482,7 @@ type ReasoningEffort = "low" | "medium" | "high";
  * spoken sentence, so the gpt-oss reasoning channel is wasted decode latency;
  * defaulting to "low" trims the inaudible reasoning-token overhead WITHOUT any
  * voice-io change (the whole knob stays server-side). Read from
- * `VOICE_REASONING_EFFORT` at call time (like DEFAULT_MODEL below) so it's
+ * `VOICE_REASONING_EFFORT` at call time so it's
  * per-deployment overridable and testable. Anything other than a valid level
  * falls back to "low" — the point is trimming voice latency, so a misconfigured
  * env must not silently restore heavy reasoning.
@@ -930,6 +933,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
 
       let models: ModelsResponse;
+      const generation = modelListGeneration();
       try {
         models = await aiGateway.listModels();
       } catch (err) {
@@ -972,7 +976,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.json(await forCaller(await stampDefault({ ...models, degraded: true }, true)));
         return;
       }
-      await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
+      // WARP-3046: a download that finished while this read was in flight
+      // has already busted this key; its list predates the new model, so
+      // serve it without caching it (model-list-generation.ts).
+      if (generation === modelListGeneration()) {
+        await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
+      }
       res.json(await forCaller(await stampDefault(models)));
     } catch (err) {
       next(err);
@@ -1372,19 +1381,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
       // default no-enhancement path runs (byte-for-byte WARP-286).
-      // `DEFAULT_MODEL` matches `routes/admin-retrieval-eval.ts` which
-      // already canonicalised the env var name for the eval harness.
       const aiGatewayGrpcUrl =
         process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
-      // Fall back to LLM_MODEL (the model the box actually pulls —
-      // single-box.sh writes it to .env, and the orchestrator loads
-      // .env via env_file) before the historic hardcoded name, which
-      // production Ollama does not host. Without this, HyDE/multi-query
-      // rewrites would 404 upstream and silently no-op.
-      const defaultChatModel =
-        process.env.DEFAULT_MODEL ??
-        process.env.LLM_MODEL ??
-        "mistral:7b-instruct";
+      // WARP-3047 — HyDE / multi-query rewrites run on the model THIS turn
+      // is using when that model is local (it is already resident; asking
+      // for any other local model mid-turn is the DMR load collision — two
+      // runners on one GPU), else on the box's ACTIVE model. Never env
+      // DEFAULT_MODEL/LLM_MODEL. Asked lazily (only when a rewrite runs) and
+      // reads `agentModel` at that moment, so a vision auto-route below is
+      // honoured.
+      const resolveEnhancementModel = (): Promise<string | null> =>
+        resolveTurnSideModel(prisma, { model: agentModel, provider: agentProvider });
 
       const deps: AgentDeps = {
         mcp: mcpClient,
@@ -1408,7 +1415,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
-          defaultModel: defaultChatModel,
+          resolveModel: resolveEnhancementModel,
         }),
         // WARP-473 — fire-and-forget file citation enqueue. Only
         // wired when the turn is persisted (conversationId +
@@ -2515,14 +2522,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         return;
       }
       const body = parsed.data;
-      // Same default-model triad as the query-enhancement wiring in
-      // /llm/chat: DEFAULT_MODEL (canonical), then LLM_MODEL (what the box
-      // actually pulled), then the historic hardcoded name.
-      const model =
-        body.model ??
-        process.env.DEFAULT_MODEL ??
-        process.env.LLM_MODEL ??
-        "mistral:7b-instruct";
+      // WARP-3047 — no `model` means the box's ACTIVE model. The callers
+      // (translate_text / summarize_file) run INSIDE a chat turn on the
+      // active model, so this keeps them on the model that is already
+      // resident; env DEFAULT_MODEL/LLM_MODEL loaded a second model next to
+      // it on DMR, which fails once the GPU is full. Nothing resolvable is
+      // the same stable `llm_unavailable` every other failure maps to —
+      // never a hardcoded tag the box does not host.
+      const model = body.model ?? (await resolveActiveModel(prisma));
+      if (!model) {
+        res.status(502).json({ error: "llm_unavailable" });
+        return;
+      }
 
       // WARP-1530 — the same per-person cloud gate as /llm/chat. `model` is
       // caller-supplied here too, so without this a person denied cloud could

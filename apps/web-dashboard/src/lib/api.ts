@@ -150,6 +150,8 @@ import type {
   SecurityHoursExceptionBody,
   SecurityHoursView,
   SecurityHoursWriteResult,
+  SecurityPatternCells,
+  SecurityPatternsOverview,
   SecurityModeAction,
   SecurityModeActionResult,
   SecurityModeView,
@@ -9263,6 +9265,23 @@ export function putSecurityHoursException(
     `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}`,
     jsonBody("PUT", body),
   );
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like — routes 29–30 ──
+// View-level, read-only, through `securityFetch` (typed `.code`); a failure is
+// rendered with `translateError(err, "security")`.
+
+export const SECURITY_PATTERNS_PATH = "/api/security/patterns";
+
+/** 29 — the learning list, the keys the viewer may see, and the release of each flag. */
+export function getSecurityPatterns(): Promise<SecurityPatternsOverview> {
+  return securityFetch<SecurityPatternsOverview>(`${BASE}${SECURITY_PATTERNS_PATH}`);
+}
+
+/** 30 — one key's 48 hour cells for one label. 404 PATTERN_NOT_FOUND when missing or hidden. */
+export function getSecurityPatternCells(key: string, label: string): Promise<SecurityPatternCells> {
+  const qs = new URLSearchParams({ key, label }).toString();
+  return securityFetch<SecurityPatternCells>(`${BASE}${SECURITY_PATTERNS_PATH}/cells?${qs}`);
 }
 
 /** 15 (manage) — 204. `version` is the hours version the page read. */

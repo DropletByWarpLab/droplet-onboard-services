@@ -4328,6 +4328,12 @@ model AgentRunSchedule {
   userId      String
   goal        String
   model       String
+  /// WARP-3047 — true when the schedule was created WITHOUT a model: each
+  /// fire runs on the box's active model, resolved by the ticker at that
+  /// moment, so a switch reaches it. `model` then holds the model that was
+  /// active at creation — the fallback when nothing resolves at fire. False
+  /// (every schedule before this column) = pinned to `model`.
+  followsActiveModel Boolean @default(false)
   maxIter     Int
   rrule       String
   timezone    String    @default("UTC")
@@ -7252,8 +7258,9 @@ model WorkspaceLocation {
 enum M365ConnectionState {
   /// No Microsoft account linked. The default, and where a disconnect returns.
   DISCONNECTED
-  /// A sign-in is in flight and Microsoft is waiting for the person to approve
-  /// it on another device. Expires — see `pendingFlowExpiresAt`.
+  /// A sign-in is in flight: the person is at Microsoft's sign-in page
+  /// (authorization code, WARP-2704) or approving a code on another device
+  /// (device code, the fallback). Expires — see `pendingFlowExpiresAt`.
   PENDING_CONSENT
   /// Usable. A refresh token is held and the last refresh succeeded.
   CONNECTED
@@ -7292,6 +7299,36 @@ model M365Connection {
   /// case where someone reconnects a DIFFERENT tenant than before.
   tenantId String?
 
+  /// WARP-2705 — the Application (client) id of the CUSTOMER'S OWN Entra app
+  /// registration this link signs in through. Not a secret: a public-client id
+  /// is designed to ship inside the client, and the flows use no client
+  /// secret. Per connection rather than one box-wide id, because a single
+  /// Warp-Lab multitenant app is the PARTNER_GATED shape ADR-042 §3 rules out
+  /// and pools Graph's per-app throttling ceiling across every customer.
+  ///
+  /// Survives a disconnect on purpose: it is configuration, not a credential,
+  /// and keeping it is what makes "connect again" one click.
+  appClientId String?
+
+  /// WARP-2705 — the tenant that app is registered in (a GUID or a verified
+  /// domain). The sign-in authority is `${M365_AUTHORITY_HOST}/${appTenantId}`:
+  /// a single-tenant registration only issues tokens on its own tenant
+  /// authority, never on `/organizations`. Survives a disconnect, like
+  /// `appClientId`. `tenantId` above is what Microsoft REPORTS for the
+  /// signed-in account; this is what the owner CONFIGURED.
+  appTenantId String?
+
+  /// WARP-2704 — SHA-256 (hex) of the OAuth `state` of an in-flight
+  /// authorization-code sign-in. The callback finds the row by it; the raw
+  /// value only ever travels in the redirect and an httpOnly cookie. Cleared
+  /// the moment a callback claims it, so a replayed callback finds nothing.
+  pendingStateHash String? @unique
+
+  /// WARP-2704 — `dcv1:` blob of the in-flight sign-in's PKCE code verifier,
+  /// nonce and redirect URI, sealed under the token-cache key with its own
+  /// AAD. Cleared together with `pendingStateHash`.
+  pendingFlowEnc String?
+
   /// User principal name (e.g. `sam@practice.com`), shown in the dashboard so
   /// the owner can see which account is connected. Not a secret.
   accountUpn String?
@@ -7312,10 +7349,23 @@ model M365Connection {
   /// workloads it is allowed to attempt.
   grantedScopes String?
 
+  /// WARP-3059 (#2347 review) — which link this person's M365DeltaCursor rows
+  /// were built under: a SHA-256 (hex) of the app client id, homeAccountId and
+  /// tenantId of the sign-in that last connected. A delta link and a folder id
+  /// are positions in one mailbox read through one app, so a sign-in that
+  /// completes as anything else purges the cursors before the row turns
+  /// CONNECTED; the same link keeps them. Unlike the account columns it
+  /// survives a sign-in STARTING, because the cursors do. A hash, so a
+  /// DISCONNECTED row still names no account through it. Cleared with the
+  /// cursors on disconnect; NULL means "not known" and counts as a change.
+  cursorLinkHash String?
+
   /// When the in-flight sign-in stops being valid. Microsoft expires a device
-  /// code in ~15 minutes. A PENDING_CONSENT row past this is swept back to
-  /// DISCONNECTED — an orchestrator restart drops the in-memory flow, and
-  /// without this the row would sit "pending" forever.
+  /// code in ~15 minutes, and an authorization-code sign-in gets the same
+  /// window. A PENDING_CONSENT row past this is swept back to DISCONNECTED —
+  /// an orchestrator restart drops the in-memory device-code flow, a person can
+  /// close the Microsoft tab, and without this the row would sit "pending"
+  /// forever.
   pendingFlowExpiresAt DateTime?
 
   /// First successful connect. Kept across a NEEDS_RECONNECT round-trip so the
@@ -7379,6 +7429,15 @@ model M365DeltaCursor {
   /// missing data rather than as a bad URL. Null = nothing synced yet, or a
   /// resync is pending (see `state`, which is what actually distinguishes them).
   deltaLink String?
+
+  /// WARP-3059 — where an enumeration too big for one tick resumes: the
+  /// `@odata.nextLink` of the last page the run HANDLED before its page budget
+  /// ran out. Separate from `deltaLink` on purpose — the cursor still advances
+  /// only when a run reaches its deltaLink; this is a checkpoint inside one run,
+  /// written only after every page before it was handled. Without it a folder
+  /// over the budget re-read the same pages every tick and never finished.
+  /// Cleared on completion and on a resync. Stored verbatim, never logged.
+  resumeLink String?
 
   state M365SyncState @default(IDLE)
 
@@ -8562,7 +8621,8 @@ enum SecurityEventSource {
 
 enum SecurityEventKind {
   /// A tracked object that cleared the ingest gate (best score >= 0.70 and
-  /// tracked >= 2 s). The only kind a baseline will count (P5).
+  /// tracked >= 2 s). The only kind a baseline will count (P5). (WARP-2980:
+  /// `source = frigate` only; lock rows never.)
   detection
   /// Below the gate, or a false positive. KEPT, not dropped, so the
   /// thresholds can be tuned against real data later.
@@ -8794,6 +8854,177 @@ model SecurityModeState {
   /// Bumped by every mode write AND by every hours/exception write (invalidates a tick that read old hours).
   version     Int                @default(0)
   updatedAt   DateTime           @updatedAt
+}
+
+// ── WARP-2980 (ADR-059 P5 §4.3): what normal looks like ──
+//
+// Derived data. Cells are REBUILT from SecurityEvent (kept 30 days) and the
+// coverage spans below; nobody edits them. Verdicts and suppressions (PR-B)
+// never write here (brief §4.4: baselines stay pure counts).
+//
+// The one input that cannot be rebuilt is COVERAGE: whether Droplet was
+// provably listening to a camera. The camera MQTT client uses a clean session,
+// so a disconnected orchestrator loses events without leaving a row. Coverage
+// is therefore recorded as it happens, one span per continuous stretch.
+//
+// Explicit enums, never IS NULL as state. Shape rules Prisma cannot express
+// are hand-written CHECKs and partial unique indexes in
+// 20260925010000_warp_2980_security_baselines.
+
+/// The SITE-LOCAL date's ISO weekday: 1–5 weekday, 6–7 weekend (brief §4.3).
+enum SecurityDayType {
+  weekday
+  weekend
+}
+
+/// Per camera. Explicit — never inferred from counts or timestamps.
+enum SecurityBaselineState {
+  /// Fewer than 14 fully observed days in the 28-day window. No pattern flag fires.
+  learning
+  /// At least 14 fully observed days, and observed within the last 48 h.
+  active
+  /// Not observed for more than 48 h (camera down or disabled, or Droplet not listening).
+  stale
+}
+
+enum SecurityCoverageSpanState {
+  /// Being extended by the orchestrator process that opened it.
+  open
+  /// Ended: the camera stopped being observed, or that process is gone.
+  closed
+}
+
+enum SecurityBaselineBuildState {
+  building
+  /// The one build the rules and the page read (partial unique index).
+  ready
+  superseded
+  failed
+}
+
+enum SecurityBaselineBuildTrigger {
+  first
+  nightly
+  timezone_changed
+  catch_up
+}
+
+enum SecurityBaselineKeyKind {
+  /// zoneKey `area:<SecurityZone.id>`: events matching the area's active links at build time.
+  area
+  /// zoneKey `camera:<frigateCamera>`: the camera's whole view.
+  camera
+}
+
+/// One continuous stretch during which Droplet could prove it was listening to one camera:
+/// ingest subscribed, Frigate online, the camera's detect stream online and unchanged, and no
+/// failed write. Only the process that opened a span extends it; a restart closes it.
+model SecurityCoverageSpan {
+  id           BigInt                    @id @default(autoincrement())
+  camera       String                    @db.VarChar(64)
+  state        SecurityCoverageSpanState
+  startedAt    DateTime
+  coveredUntil DateTime
+  /// Random per orchestrator boot (crypto.randomUUID()).
+  processId    String                    @db.Uuid
+  closedAt     DateTime?
+
+  // At most one OPEN span per camera: a partial unique index in raw migration SQL
+  // ("SecurityCoverageSpan_one_open"; Prisma cannot express WHERE-filtered uniques).
+  @@index([camera, coveredUntil])
+  @@index([coveredUntil])
+}
+
+/// Brief §5 SecurityBaselineSource: the learning state per camera.
+model SecurityBaselineSource {
+  /// `camera:<frigateCamera>`. P5c adds `activity:<kind>` (§10).
+  sourceKey      String                @id @db.VarChar(72)
+  camera         String                @db.VarChar(64)
+  state          SecurityBaselineState
+  /// Site-local dates in the current window with ≥ 1200 observed minutes, 0–28.
+  daysObserved   Int                   @db.SmallInt
+  firstSeenAt    DateTime
+  /// The last observed instant (max coveredUntil).
+  lastSeenAt     DateTime
+  stateChangedAt DateTime
+  updatedAt      DateTime              @updatedAt
+}
+
+/// One full build of the cells. Exactly one is `ready` (partial unique index), and at most one
+/// is `building` (the database-level single-flight guard).
+model SecurityBaselineBuild {
+  id             String                       @id @default(uuid())
+  state          SecurityBaselineBuildState
+  trigger        SecurityBaselineBuildTrigger
+  /// The IANA zone the slots were cut in. A different current zone forces a new full build.
+  timezone       String                       @db.VarChar(64)
+  /// Site-local window, inclusive: 28 complete dates, the last one being the day before the build.
+  windowFrom     String                       @db.VarChar(10)
+  windowTo       String                       @db.VarChar(10)
+  rulesetVersion Int                          @db.SmallInt
+  /// Bumped by every change to this build's cells (the full insert, each area rebuild).
+  /// The engine's cell cache is keyed on (id, cellsVersion).
+  cellsVersion   Int                          @default(0)
+  startedAt      DateTime                     @default(now())
+  finishedAt     DateTime?
+  cellCount      Int                          @default(0)
+  eventCount     Int                          @default(0)
+  error          String?                      @db.VarChar(500)
+  cells          SecurityBaselineCell[]
+
+  @@index([state, startedAt])
+}
+
+/// Brief §5 SecurityBaselineCell. RAW counts only; smoothing and scores are computed on read by
+/// lib/security-baseline-math.ts, so the stored row is a fact and the arithmetic is testable.
+/// Every kept (zoneKey, label) has all 48 (dayType, hour) rows, including never-observed hours
+/// (daysObserved = 0), so an unobserved hour is a stored value. A key with no observed slot at all
+/// in the window has no rows; the rules read that as the explicit gate `no_cell` (§6.8).
+model SecurityBaselineCell {
+  id              BigInt                  @id @default(autoincrement())
+  buildId         String
+  build           SecurityBaselineBuild   @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  /// `area:<SecurityZone.id>` or `camera:<frigateCamera>`.
+  zoneKey         String                  @db.VarChar(72)
+  keyKind         SecurityBaselineKeyKind
+  /// Set iff keyKind = area. No FK: derived rows, replaced nightly; areas are never row-deleted.
+  zoneId          String?
+  /// Set iff keyKind = camera.
+  camera          String?                 @db.VarChar(64)
+  /// area: SecurityZone.version when these rows were built. A link edit bumps the area's version,
+  /// which marks these rows out of date until the area is rebuilt (§6.7 step 6).
+  zoneVersion     Int?
+  /// The cameras whose events and coverage built this key, sorted. DS-005: an area key's numbers
+  /// are shown only to a viewer who can see every one of them.
+  cameras         String[]
+  label           String                  @db.VarChar(64)
+  dayType         SecurityDayType
+  hour            Int                     @db.SmallInt
+  /// n: window dates of this dayType on which this key was observed for ≥ 5/6 of the hour slot.
+  daysObserved    Int                     @db.SmallInt
+  /// d: of those, dates with ≥ 1 detection of `label`.
+  daysWithEvent   Int                     @db.SmallInt
+  /// c: detections of `label` in those observed slots.
+  eventCount      Int
+  /// m: Σ observed minutes over those slots (a fall-back hour holds up to 120).
+  observedMinutes Int
+  /// person only: detections with a duration in observed slots of hour−1, hour and hour+1 (same dayType).
+  dwellSamples    Int
+  /// percentile_disc(0.99) of those durations, seconds. NULL iff dwellSamples = 0 (CHECK).
+  durationP99Sec  Float?
+  computedAt      DateTime                @default(now())
+
+  @@unique([buildId, zoneKey, label, dayType, hour])
+  @@index([zoneId])
+}
+
+/// Job bookkeeping, one row. Created lazily on the first tick with a zone. (The spec's
+/// `SecurityBaselineState` model: renamed, because that name is the learning-state enum above.)
+model SecurityBaselineJobState {
+  id            String   @id @default("singleton")
+  /// End instant of the last site-local hour whose hourly step ran (§6.7 step 4).
+  hourlyThrough DateTime
+  updatedAt     DateTime @updatedAt
 }
 
 // ── WARP-2978 (ADR-059 §3.5, §3.7): incidents, reason codes, alert routing, acknowledgement ──

@@ -43,12 +43,16 @@ import * as AreaLinksDialog from "./AreaLinksDialog";
 import * as AreasPanel from "./AreasPanel";
 import * as ExceptionsEditor from "./ExceptionsEditor";
 import * as HoursEditor from "./HoursEditor";
+import * as LearningList from "./LearningList";
 import * as ModeCard from "./ModeCard";
 import * as SecurityFeed from "./SecurityFeed";
 import * as TimezoneSelect from "./TimezoneSelect";
+import * as UsualGrid from "./UsualGrid";
+import * as PatternsCopy from "./patterns-copy";
 import * as SecurityPage from "@/app/security/page";
 import * as SecurityZonesPage from "@/app/security/zones/page";
 import * as SecuritySettingsPage from "@/app/security/settings/page";
+import * as SecurityPatternsPage from "@/app/security/patterns/page";
 
 const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/AreaDialog.tsx": AreaDialog,
@@ -56,12 +60,17 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/AreasPanel.tsx": AreasPanel,
   "src/components/security/ExceptionsEditor.tsx": ExceptionsEditor,
   "src/components/security/HoursEditor.tsx": HoursEditor,
+  // WARP-2980 (P5 PR-A) — the patterns page.
+  "src/components/security/LearningList.tsx": LearningList,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
   "src/components/security/TimezoneSelect.tsx": TimezoneSelect,
+  "src/components/security/UsualGrid.tsx": UsualGrid,
+  "src/components/security/patterns-copy.ts": PatternsCopy,
   "src/app/security/page.tsx": SecurityPage,
   "src/app/security/zones/page.tsx": SecurityZonesPage,
   "src/app/security/settings/page.tsx": SecuritySettingsPage,
+  "src/app/security/patterns/page.tsx": SecurityPatternsPage,
 };
 
 const BANNED: ReadonlyArray<readonly [name: string, re: RegExp]> = [

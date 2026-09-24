@@ -866,6 +866,20 @@ describe("<ModelsPage /> catalog section (WARP-1827)", () => {
     expectOnlyNote(/couldn.t measure this droplet.s gpu memory/i);
   });
 
+  // vram.py's failed-read path can hand back `0` with source `None`; a 0 that
+  // no source vouches for is still unknown, not "nothing fits".
+  it("says the memory couldn't be measured for a 0 with a null source (WARP-3048)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      data: { detected_vram_gb: 0, vram_source: null, models: [] },
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expectOnlyNote(/couldn.t measure this droplet.s gpu memory/i);
+  });
+
   it("treats a sourced 0 as a measurement — nothing fits (WARP-3048)", () => {
     ready();
     useModelsCatalogMock.mockReturnValue({

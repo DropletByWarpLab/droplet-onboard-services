@@ -41,6 +41,7 @@ import {
   readHoursView,
   readModeView,
   registerSecurityModeJobs,
+  resolveSecurityTimezone,
   securitySiteModeHealth,
   siteModeHealthRow,
   siteModeHealthState,
@@ -1072,5 +1073,49 @@ describe("summaryName", () => {
     expect(summaryName("می\u200Cخواهم")).toBe("می\u200Cخواهم");
     expect(summaryName("Sam \u{1F469}\u200D\u{1F4BB}")).toBe("Sam \u{1F469}\u200D\u{1F4BB}");
     expect(summaryName("Maria\u200F")).toBe("Maria\u200F");
+  });
+});
+
+// ── WARP-2980 (P5 §6.2, D20): the one display-zone rule ──────────────────
+
+describe("resolveSecurityTimezone — site zone, else a valid Workspace.tz, else nothing; never UTC", () => {
+  it.each([
+    ["the site zone wins over the workspace's", { state: "set", timezone: "Europe/London" }, "America/Chicago", "Europe/London"],
+    ["no hours: a valid Workspace.tz, canonicalised", null, "us/eastern", "America/New_York"],
+    ["no hours: an invalid Workspace.tz → null", null, "Mars/Base", null],
+    ["no hours, no Workspace.tz → null (never UTC)", null, null, null],
+    ["hours not_set: the workspace's", { state: "not_set", timezone: null }, "Europe/Berlin", "Europe/Berlin"],
+    // The site's declared zone is never silently replaced by another one: a
+    // zone the runtime cannot read means "no zone", not a fallback.
+    ["hours set with a zone the runtime can't read → null, not the workspace's", { state: "set", timezone: "Mars/Base" }, "Europe/Paris", null],
+  ] as const)("%s", async (_l, hours, workspaceTz, expected) => {
+    const w = newWorld({ workspaceTz, hours: hours ? defaultHours(hours as never) : null });
+    expect(await resolveSecurityTimezone(db(w).prisma)).toBe(expected);
+  });
+
+  it("with the hours already read (the mode view's snapshot), the header is not read again", async () => {
+    const w = newWorld({ workspaceTz: "Europe/Paris", hours: defaultHours({ state: "set", timezone: "Europe/London" }) });
+    const { prisma } = db(w);
+    expect(await resolveSecurityTimezone(prisma, { state: "set", timezone: "Asia/Tokyo" })).toBe("Asia/Tokyo");
+    expect(await resolveSecurityTimezone(prisma, { state: "not_set" })).toBe("Europe/Paris");
+    expect((prisma as unknown as { securitySiteHours: { findUnique: { mock: { calls: unknown[] } } } }).securitySiteHours.findUnique.mock.calls).toHaveLength(0);
+  });
+
+  it("review #2352 (finding 12): ModeView.displayTimezone is unchanged for a site zone the runtime rejects — no view is ever built from one", async () => {
+    // Every path into the mode view (readModeView, both actOnMode returns) reads
+    // the hours through loadSiteHours, which refuses such a zone first — the
+    // P2b behaviour, kept. resolveSecurityTimezone's null for it is what the
+    // BASELINES read: the site's declared zone is never swapped for the workspace's.
+    const w = world({}, { hours: defaultHours({ state: "set", timezone: "Mars/Base" }), workspaceTz: "Europe/Paris" });
+    const { prisma } = db(w);
+    await expect(readModeView(prisma, at("2026-09-23", "12:00"))).rejects.toThrow(/can't be read|isn't one Droplet knows/);
+    await expect(actOnMode(prisma, WHO, { action: "close" }, at("2026-09-23", "12:00"))).rejects.toThrow(/isn't one Droplet knows/);
+    expect(await resolveSecurityTimezone(prisma)).toBeNull();
+  });
+
+  it("ModeView.displayTimezone goes through it (the site zone when set)", async () => {
+    const w = world({}, { hours: defaultHours({ state: "set", timezone: "Europe/London" }), days: weekRows(["09:00-17:00", "09:00-17:00", "09:00-17:00", "09:00-17:00", "09:00-17:00", "closed", "closed"]), workspaceTz: "Asia/Tokyo" });
+    const v = await readModeView(db(w).prisma, at("2026-09-23", "12:00"));
+    expect(v.displayTimezone).toBe("Europe/London");
   });
 });
