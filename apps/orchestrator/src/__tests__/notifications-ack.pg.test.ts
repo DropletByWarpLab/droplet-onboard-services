@@ -213,18 +213,30 @@ describe.skipIf(!RUN)("notification acknowledgement — real Postgres (WARP-2804
     expect(await prisma.notificationLog.findUnique({ where: { id } })).toMatchObject({ ackState: "unacked", ackSessionId: null });
   });
 
-  it("ack-all racing an insert newer than `before` leaves the newer one unacked", async () => {
+  it("MUTATION: ack-all never sweeps a row newer than `before` — one that arrived while the person looked, or one racing the sweep", async () => {
     const t0 = new Date(Date.now() - 60_000);
     const before = new Date(t0.getTime() + 10_000);
     await prisma.notificationLog.createMany({
-      data: [0, 1, 2].map((i) => ({
-        id: `${PREFIX}old-${i}`,
-        username: u("stefan"),
-        kind: "system" as const,
-        title: `old ${i}`,
-        channels: "",
-        createdAt: new Date(t0.getTime() + i * 1000),
-      })),
+      data: [
+        ...[0, 1, 2].map((i) => ({
+          id: `${PREFIX}old-${i}`,
+          username: u("stefan"),
+          kind: "system" as const,
+          title: `old ${i}`,
+          channels: "",
+          createdAt: new Date(t0.getTime() + i * 1000),
+        })),
+        // Arrived after the list was drawn and before "mark all read" was
+        // clicked: already committed when the sweep runs (D5).
+        {
+          id: `${PREFIX}arrived`,
+          username: u("stefan"),
+          kind: "system" as const,
+          title: "arrived while looking",
+          channels: "",
+          createdAt: new Date(before.getTime() + 5_000),
+        },
+      ],
     });
     const [out] = await Promise.all([
       ackAllNotifications(prisma, { username: u("stefan"), before, sessionId: "sid-1", client: null }),
@@ -233,8 +245,9 @@ describe.skipIf(!RUN)("notification acknowledgement — real Postgres (WARP-2804
       }),
     ]);
     expect(out.acked).toBe(3);
-    const fresh = await prisma.notificationLog.findUnique({ where: { id: `${PREFIX}new` } });
-    expect(fresh?.ackState).toBe("unacked");
-    expect(await countUnread(prisma, u("stefan"))).toBe(1);
+    for (const id of [`${PREFIX}arrived`, `${PREFIX}new`]) {
+      expect((await prisma.notificationLog.findUnique({ where: { id } }))?.ackState, id).toBe("unacked");
+    }
+    expect(await countUnread(prisma, u("stefan"))).toBe(2);
   });
 });
