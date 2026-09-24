@@ -473,7 +473,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
+  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_device_gateway service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -531,6 +531,11 @@ generate_env() {
   # MUST read the same value; compose wires both ends to
   # ${SERVICE_TOKEN_SWITCH}.
   service_token_switch=$(openssl rand -hex 32)
+  # Bearer the orchestrator presents to services/device-gateway (BACnet,
+  # Modbus, SNMP, KNX). device-gateway.client.ts and the gateway container's
+  # SERVICE_SECRET MUST read the same value; compose wires both ends to
+  # ${SERVICE_TOKEN_DEVICE_GATEWAY}.
+  service_token_device_gateway=$(openssl rand -hex 32)
   # WARP-560: bearer the orchestrator presents on every outbound call to
   # the ai-gateway. The gateway's ServiceAuthMiddleware requires it on all
   # /ai/* routes (except /ai/health) — before this the gateway had NO
@@ -885,6 +890,13 @@ SERVICE_TOKEN_DISPLAY=$service_token_display
 # container's SERVICE_SECRET MUST read the same value; compose wires
 # both ends to \${SERVICE_TOKEN_SWITCH}.
 SERVICE_TOKEN_SWITCH=$service_token_switch
+
+# --- Device gateway bearer (orchestrator → device-gateway HTTP) ---
+# The gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) runs network_mode: host
+# and fails CLOSED without it. device-gateway.client.ts and the gateway
+# container's SERVICE_SECRET MUST read the same value; compose wires both
+# ends to \${SERVICE_TOKEN_DEVICE_GATEWAY}.
+SERVICE_TOKEN_DEVICE_GATEWAY=$service_token_device_gateway
 
 # --- AI gateway service bearer (orchestrator → ai-gateway HTTP) ---
 # WARP-560. Required by the ai-gateway's ServiceAuthMiddleware on every
@@ -1358,6 +1370,8 @@ migrate_env() {
   # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
   # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
   _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
+  # Device-gateway backfill: installs that predate services/device-gateway.
+  _migrate_ensure_key SERVICE_TOKEN_DEVICE_GATEWAY "$(openssl rand -hex 32)"
   # WARP-2131 backfill: existing installs predate the inference-manager
   # sidecar. Without this key its AUTH_TOKEN would expand empty, which is
   # PERMISSIVE mode rather than a startup failure — so the gap would be silent.

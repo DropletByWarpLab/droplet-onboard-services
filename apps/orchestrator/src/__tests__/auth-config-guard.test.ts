@@ -25,6 +25,7 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
     "DEVICE_SECRET_KEY",
     "DEVICE_SECRET",
     "SERVICE_TOKEN_SWITCH",
+    "SERVICE_TOKEN_DEVICE_GATEWAY",
     "SERVICE_TOKEN_AI_GATEWAY",
     "SERVICE_TOKEN_VOICE",
     "SERVICE_TOKEN_MCP",

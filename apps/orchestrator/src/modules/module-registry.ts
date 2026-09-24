@@ -302,14 +302,16 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "smart_home", label: "Devices",
-    description: "Device control over Matter.",
+    description: "Device control over Matter, BACnet, Modbus, SNMP and KNX.",
     // Gate ONLY the Matter/smart-home surface. "/api/devices" is deliberately
     // NOT gated here: it hosts the appliance/fleet device registry, device
     // pairing (/api/devices/pair*), push-notification subscribe
     // (/api/devices/push/*), and network device-clients (/api/devices/clients*)
     // — none of which are smart-home. Toggling this module off must never 404
     // pairing or push app-wide. Matter devices live under /api/matter/devices.
-    category: "operations", routePrefixes: ["/api/matter"], navHrefs: ["/devices"],
+    // `/api/building` is the device gateway (BACnet/Modbus/SNMP/KNX): the same
+    // Device control surface, so the same toggle and access grant gate it.
+    category: "operations", routePrefixes: ["/api/matter", "/api/building"], navHrefs: ["/devices"],
     // WARP-1527: the tools-core domain is "smart-home" ("matter"/"devices"
     // were never catalog values, so the module-off drop was a silent no-op).
     toolDomains: ["smart-home"], core: false, defaultEnabled: false,

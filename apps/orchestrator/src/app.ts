@@ -81,6 +81,7 @@ import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
 import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
 import { createSwitchRouter } from "./routes/switch.js";
+import { createBuildingRouter } from "./routes/building.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
 import { createNotesRouter } from "./routes/notes.js";
@@ -604,6 +605,8 @@ export function createApp(
   // 29–31). Same /api/security module gate; the last Security router.
   app.use("/api", createSecurityPatternsRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
+  // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).
+  app.use("/api", createBuildingRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
   app.use("/api", createNotesRouter(prisma));
