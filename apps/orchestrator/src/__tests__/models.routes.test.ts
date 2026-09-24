@@ -27,9 +27,12 @@ const fetchLatencyMock = vi.fn().mockResolvedValue(null);
 // WARP-2871 — the box-wide key listing behind `cloud[].hasKey`. Called with
 // NO user id (shared namespace); the spy records the args so that is pinned.
 const listKeysMock = vi.fn();
+// WARP-3046 — a successful pull asks the gateway to drop its model listing.
+const refreshModelsMock = vi.fn();
 vi.mock("../services/ai-gateway.client.js", () => ({
   listModels: () => listModelsMock(),
   listKeys: (...a: unknown[]) => listKeysMock(...a),
+  refreshModels: () => refreshModelsMock(),
   // WARP-2883: the latency probe is best-effort; null = gateway not asked.
   fetchLatency: () => fetchLatencyMock(),
 }));
@@ -86,11 +89,18 @@ const { fetchEligibleCatalogMock, openPullStreamMock } = vi.hoisted(() => ({
   fetchEligibleCatalogMock: vi.fn(),
   openPullStreamMock: vi.fn(),
 }));
-vi.mock("../services/model-catalog.service.js", () => ({
-  fetchEligibleCatalog: () => fetchEligibleCatalogMock(),
-  openPullStream: (model: string, signal: AbortSignal) =>
-    openPullStreamMock(model, signal),
-}));
+// WARP-3046: `readPullRefusal` stays REAL — the refusal mapping is exactly
+// what the pull-route tests below pin, so it must not be mocked away.
+vi.mock("../services/model-catalog.service.js", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../services/model-catalog.service.js")>();
+  return {
+    ...actual,
+    fetchEligibleCatalog: () => fetchEligibleCatalogMock(),
+    openPullStream: (model: string, signal: AbortSignal) =>
+      openPullStreamMock(model, signal),
+  };
+});
 
 // WARP-1861 — stub the device-bridge probe (network), keep the real
 // `bytesToGiB` so the payload's arithmetic is exercised rather than mocked.
@@ -183,6 +193,7 @@ beforeEach(() => {
   resolveEffectiveAccessMock.mockResolvedValue(null);
   // Default: no bridge → no GPU. Cases that want a card say so explicitly.
   fetchGpuTelemetryMock.mockResolvedValue(null);
+  refreshModelsMock.mockResolvedValue(undefined);
 });
 
 describe("WARP-471 — models page payload", () => {
@@ -952,6 +963,26 @@ describe("WARP-1827 — GET /api/models/catalog", () => {
     expect(res.body.models[1].pulled).toBe(false);
   });
 
+  it("passes the honesty fields through (contract C1, WARP-3046)", async () => {
+    fetchEligibleCatalogMock.mockResolvedValue({
+      detected_vram_gb: null,
+      vram_source: null,
+      tags_unreachable: false,
+      degraded_manifest: true,
+      models: [],
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).get("/api/models/catalog");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      detected_vram_gb: null,
+      vram_source: null,
+      tags_unreachable: false,
+      degraded_manifest: true,
+      models: [],
+    });
+  });
+
   it("503s ai_service_unreachable when the sidecar can't be reached", async () => {
     fetchEligibleCatalogMock.mockRejectedValue(new Error("connection refused"));
     const app = buildApp({ username: "stefan", role: "owner" });
@@ -1001,22 +1032,30 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
     expect(openPullStreamMock).not.toHaveBeenCalled();
   });
 
-  it("passes an upstream 409 (disk preflight) through verbatim", async () => {
-    const preflight = {
-      error: "insufficient_disk",
-      detail: "Needs 9.0 GB free; 2.1 GB available.",
-    };
+  it("maps the sidecar's disk-preflight 409 to a typed insufficient_disk body (WARP-3046)", async () => {
+    // The REAL sidecar shape: FastAPI wraps the preflight's object in
+    // `detail`. Relayed verbatim, the dashboard rendered that object as a
+    // React child and the /models page crashed. The old mock sent a string
+    // here, which is why no test ever saw it.
     openPullStreamMock.mockResolvedValue({
       ok: false,
       status: 409,
-      json: async () => preflight,
+      text: async () =>
+        JSON.stringify({
+          detail: { error: "insufficient_disk", needed_gb: 28.1, free_gb: 12.4 },
+        }),
     });
     const app = buildApp({ username: "stefan", role: "owner" });
     const res = await request(app).post("/api/models/qwen3%3A14b/pull");
     expect(res.status).toBe(409);
-    expect(res.body).toEqual(preflight);
-    // The attempt was still audited as started — the sidecar refused it after.
-    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(res.body.error).toBe("insufficient_disk");
+    expect(typeof res.body.detail).toBe("string");
+    expect(res.body.needed_gb).toBe(28.1);
+    expect(res.body.free_gb).toBe(12.4);
+    // Started, then failed — the refusal closes the audit trail it opened.
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
+    expect(recordActivityMock.mock.calls[1][0].refs.reason).toBe("insufficient_disk");
   });
 
   it("502s pull_failed on any other upstream error", async () => {
@@ -1029,6 +1068,68 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
     const res = await request(app).post("/api/models/qwen3%3A14b/pull");
     expect(res.status).toBe(502);
     expect(res.body.error).toBe("pull_failed");
+  });
+
+  it("carries DMR's own pre-stream reason through as the 502 detail (WARP-3046)", async () => {
+    // DMR resolves the registry manifest before writing a byte; a bad tag,
+    // no egress or a rate limit comes back 500 {"error":"Failed to pull
+    // model: …"}, which the sidecar relays as a string `detail`.
+    const reason = "Failed to pull model: reading model from registry: not found";
+    openPullStreamMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => JSON.stringify({ detail: JSON.stringify({ error: reason }) }),
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({ error: "pull_failed", detail: reason });
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
+    expect(recordActivityMock.mock.calls[1][0].severity).toBe("warn");
+    expect(recordActivityMock.mock.calls[1][0].refs.reason).toBe(reason);
+  });
+
+  it("audits a transport failure opening the stream as failed (WARP-3046)", async () => {
+    openPullStreamMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe("pull_failed");
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
+  });
+
+  it("503s catalog_unconfirmed while the sidecar can't read the installed list (WARP-3046)", async () => {
+    // tags_unreachable => every `pulled` flag reads false, so the
+    // already_pulled guard can't fire and the serving model would be
+    // offered — and downloaded — again.
+    fetchEligibleCatalogMock.mockResolvedValue({
+      ...eligibleCatalog(),
+      tags_unreachable: true,
+      models: eligibleCatalog().models.map((m) => ({ ...m, pulled: false })),
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/pull");
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("catalog_unconfirmed");
+    expect(typeof res.body.detail).toBe("string");
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a stream that ends without a terminal success is audited as failed (WARP-3046)", async () => {
+    openPullStreamMock.mockResolvedValue(
+      streamResponse(['{"status":"pulling manifest"}', '{"status":"downloading","completed":1}']),
+    );
+    const { cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(vi.mocked(cacheDel)).not.toHaveBeenCalled();
+    expect(refreshModelsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
   });
 
   it("streams the NDJSON body through and busts the page cache on success", async () => {
@@ -1046,6 +1147,15 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
     expect(res.text).toBe(lines.map((l) => `${l}\n`).join(""));
     // Terminal success → page cache busted + started/finished audited.
     expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+    // WARP-3046: …and the chat picker's list, and the gateway's registry —
+    // or the model just installed is missing from both for ~90 s.
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("llm:models");
+    expect(refreshModelsMock).toHaveBeenCalledTimes(1);
+    // The gateway is refreshed BEFORE our caches are dropped, so a read
+    // racing the bust can't re-cache the gateway's pre-pull listing.
+    expect(refreshModelsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(cacheDel).mock.invocationCallOrder[0],
+    );
     expect(recordActivityMock).toHaveBeenCalledTimes(2);
     expect(recordActivityMock.mock.calls[0][0].what).toBe(
       "Model download started",
@@ -1082,6 +1192,18 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
       "Model download failed",
     );
     expect(recordActivityMock.mock.calls[1][0].severity).toBe("warn");
+  });
+
+  it("a failed gateway refresh never fails a finished download (WARP-3046)", async () => {
+    refreshModelsMock.mockRejectedValue(new Error("AI Gateway error: 503"));
+    openPullStreamMock.mockResolvedValue(streamResponse(['{"status":"success"}']));
+    const { cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("llm:models");
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download finished");
   });
 
   it("tolerates unparseable NDJSON lines while watching for the terminal", async () => {

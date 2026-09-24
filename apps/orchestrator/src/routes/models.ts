@@ -53,6 +53,7 @@ import {
 import {
   fetchEligibleCatalog,
   openPullStream,
+  readPullRefusal,
   type EligibleCatalog,
 } from "../services/model-catalog.service.js";
 
@@ -60,6 +61,10 @@ const logger = createLogger("models-route");
 
 const MODELS_PAGE_CACHE_KEY = "models:page";
 const MODELS_PAGE_CACHE_TTL = 30;
+// WARP-3046: GET /api/llm/models' cache (the chat picker's list). Same literal
+// as routes/llm.ts `MODELS_CACHE_KEY`, restated here the way llm.ts restates
+// MODELS_PAGE_CACHE_KEY, rather than importing a route module into another.
+const LLM_MODELS_CACHE_KEY = "llm:models";
 
 export function createModelsRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -330,10 +335,13 @@ export function createModelsRouter(prisma: PrismaClient): Router {
   // through to the client. owner/admin only. Install-only by design
   // (ADR-003): a pull never changes the active model — that stays the
   // separate PATCH above. Validation happens against the LIVE eligible
-  // catalog (never a cache): unreachable sidecar → 503, unknown model →
-  // 400 not_eligible, already installed → 409 already_pulled. The
-  // sidecar's own 409 (disk preflight, `insufficient_disk`) passes
-  // through verbatim so the dashboard can show its detail message.
+  // catalog (never a cache): unreachable sidecar → 503, installed list
+  // unreadable → 503 catalog_unconfirmed, unknown model → 400 not_eligible,
+  // already installed → 409 already_pulled. A refusal from the sidecar is
+  // translated, not relayed (WARP-3046, see `readPullRefusal`): its disk
+  // preflight → 409 insufficient_disk, anything else → 502 pull_failed
+  // carrying the runtime's own reason. Every exit after "started" that is
+  // not a success records "Model download failed".
   router.post(
     "/models/:name/pull",
     requireRole("owner", "admin"),
@@ -353,6 +361,17 @@ export function createModelsRouter(prisma: PrismaClient): Router {
             error: "ai_service_unreachable",
             detail:
               "Couldn't reach the AI service to confirm the model is available. Try again in a moment.",
+          });
+        }
+        // WARP-3046: the sidecar couldn't read the runtime's installed list,
+        // so every `pulled` flag reads false — including the model that is
+        // serving right now. The already_pulled guard below would wave a
+        // second multi-GB copy of it through. Refuse until it can confirm.
+        if (catalog.tags_unreachable) {
+          return res.status(503).json({
+            error: "catalog_unconfirmed",
+            detail:
+              "Couldn't confirm which models are already installed on this Droplet, so downloads are paused. Try again in a moment.",
           });
         }
         const entry = catalog.models.find((m) => m.name === name);
@@ -395,6 +414,21 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           refs: { actor: req.user?.username ?? null, model: name },
         });
 
+        // WARP-3046: the "started" row above must always be closed. Every
+        // exit below that is not a success records this, with the reason in
+        // `refs` — before, a refusal or an interrupted stream left the
+        // download looking like it was still running.
+        const recordFailed = (reason: string) =>
+          recordActivity({
+            kind: "system",
+            severity: "warn",
+            sourceIcon: "cpu",
+            what: "Model download failed",
+            sub: name,
+            actor: actorFromRequest(req),
+            refs: { actor: req.user?.username ?? null, model: name, reason },
+          });
+
         // The upstream is aborted if OUR client goes away mid-stream, so a
         // closed dashboard tab doesn't leave the proxy leg running headless.
         const upstreamAbort = new AbortController();
@@ -403,29 +437,28 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           upstream = await openPullStream(pullTag, upstreamAbort.signal);
         } catch (err) {
           logger.warn({ err, model: name }, "POST /models/pull: open stream failed");
+          await recordFailed("inference_manager_unreachable");
           return res.status(502).json({
             error: "pull_failed",
             detail: "The download couldn't be started. Try again in a moment.",
           });
         }
 
-        if (upstream.status === 409) {
-          // Disk preflight (`insufficient_disk`) — status + body verbatim.
-          const body = await upstream
-            .json()
-            .catch(() => ({ error: "insufficient_disk" }));
-          return res.status(409).json(body);
-        }
         if (!upstream.ok || !upstream.body) {
-          const detail = await upstream.text?.().catch(() => "");
+          // Refused before any progress. Translated, never relayed: the disk
+          // preflight's FastAPI body is an OBJECT the dashboard used to
+          // render as a React child, and a runtime failure (bad tag, no
+          // egress, rate limit) was flattened into "try again". See
+          // readPullRefusal / contract C2.
+          const refusal = await readPullRefusal(upstream);
           logger.warn(
-            { status: upstream.status, detail, model: name },
+            { status: upstream.status, refusal: refusal.body, model: name },
             "POST /models/pull: upstream refused",
           );
-          return res.status(502).json({
-            error: "pull_failed",
-            detail: "The download couldn't be started. Try again in a moment.",
-          });
+          await recordFailed(
+            refusal.status === 409 ? refusal.body.error : refusal.body.detail,
+          );
+          return res.status(refusal.status).json(refusal.body);
         }
 
         res.status(200);
@@ -455,13 +488,19 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         let lineBuffer = "";
         let sawSuccess = false;
         let sawError = false;
+        // WARP-3046: the runtime's own words for the failure, for the audit
+        // row's `refs.reason` (the client already gets the line itself).
+        let errorReason: string | null = null;
         const watchLine = (line: string): void => {
           const trimmed = line.trim();
           if (!trimmed) return;
           try {
             const parsed = JSON.parse(trimmed) as Record<string, unknown>;
             if (parsed.status === "success") sawSuccess = true;
-            if (parsed.error != null) sawError = true;
+            if (parsed.error != null) {
+              sawError = true;
+              errorReason ??= String(parsed.error).slice(0, 500);
+            }
           } catch {
             /* not JSON — forwarded anyway, nothing to watch */
           }
@@ -498,7 +537,24 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         // Terminal accounting BEFORE res.end() so a client that saw the
         // stream finish can immediately re-read a busted cache.
         if (sawSuccess) {
-          await cacheDel(MODELS_PAGE_CACHE_KEY);
+          // WARP-3046: every listing that shows installed models must see
+          // the new one NOW. Busting only `models:page` let the dashboard's
+          // immediate re-read re-cache the gateway's 60 s-old listing, and
+          // the chat picker's `llm:models` was never busted — the model had
+          // just left "Available to install", so it looked like it vanished
+          // for ~90 s. The gateway goes FIRST: dropping our caches before it
+          // lets a racing read re-fill them from the pre-pull listing.
+          try {
+            await aiGateway.refreshModels();
+          } catch (err) {
+            // Best-effort: the pull itself succeeded. The gateway's own TTL
+            // still bounds the staleness if this one call misses.
+            logger.warn({ err, model: name }, "POST /models/pull: gateway model refresh failed");
+          }
+          await Promise.all([
+            cacheDel(MODELS_PAGE_CACHE_KEY),
+            cacheDel(LLM_MODELS_CACHE_KEY),
+          ]);
           await recordActivity({
             kind: "system",
             severity: "info",
@@ -508,16 +564,18 @@ export function createModelsRouter(prisma: PrismaClient): Router {
             actor: actorFromRequest(req),
             refs: { actor: req.user?.username ?? null, model: name },
           });
-        } else if (sawError) {
-          await recordActivity({
-            kind: "system",
-            severity: "warn",
-            sourceIcon: "cpu",
-            what: "Model download failed",
-            sub: name,
-            actor: actorFromRequest(req),
-            refs: { actor: req.user?.username ?? null, model: name },
-          });
+        } else {
+          // Not a success, whatever else happened: an error line, the tab
+          // closing (which cancels the download — see the out-of-scope
+          // server-side job), or a stream that just stopped.
+          await recordFailed(
+            errorReason ??
+              (sawError
+                ? "runtime_error"
+                : clientGone
+                  ? "client_disconnected"
+                  : "stream_ended_without_success"),
+          );
         }
         if (!clientGone) res.end();
       } catch (err) {
