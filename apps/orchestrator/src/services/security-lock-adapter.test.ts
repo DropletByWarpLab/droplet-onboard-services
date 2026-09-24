@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   LOCK_READINGS,
   MATTER_DOOR_LOCK_CLUSTER_ID,
+  SECURITY_LOCK_GONE_AFTER_LISTS,
   SECURITY_LOCK_LIST_TIMEOUT_MS,
   SECURITY_LOCK_SWEEP_INTERVAL_MS,
   SECURITY_LOCK_SWEEP_LOCK_KEY,
@@ -735,14 +736,19 @@ describe("sweep — finds what the live stream missed", () => {
     expect(store.write).not.toHaveBeenCalled();
   });
 
-  it("a node gone from a SUCCESSFUL list is forgotten with no row; if it returns, its history is read again", async () => {
+  it(`a node gone from ${SECURITY_LOCK_GONE_AFTER_LISTS} SUCCESSFUL lists in a row is forgotten with no row; if it returns, its history is read again`, async () => {
     const devices = [lockDevice()];
     const { adapter, store } = adapterWith({ source: staticSource(() => Promise.resolve(devices)) });
     await adapter.sweep();
     expect(store.rows).toHaveLength(1);
     expect(store.lastReading).toHaveBeenCalledTimes(1);
 
+    // Review F5: the sidecar's listDevices silently skips a node whose info
+    // build throws — one absence is not "unpaired".
     devices.length = 0;
+    for (let i = 1; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) {
+      await expect(adapter.sweep()).resolves.toMatchObject({ status: "ok", locks: 1, dropped: 0 });
+    }
     await expect(adapter.sweep()).resolves.toMatchObject({ status: "ok", locks: 0, dropped: 1 });
     expect(store.rows).toHaveLength(1);
     expect(adapter.knownLocks()).toEqual([]);
@@ -1082,7 +1088,7 @@ describe("the adapter's health, end to end", () => {
     await flush();
     expect(adapter.health().state).toBe("down");
     devices.length = 0;
-    await adapter.sweep();
+    for (let i = 0; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) await adapter.sweep();
     expect(adapter.health()).toMatchObject({ state: "not_configured", detail: "No door locks paired" });
   });
 
@@ -1446,5 +1452,96 @@ describe("createPrismaLockStore — the LockStore over the one writer", () => {
     expect(await store.idByDedupeKey("k")).toBe("9007199254740993");
     expect(p.securityEvent.findUnique).toHaveBeenCalledWith({ where: { dedupeKey: "k" }, select: { id: true } });
     expect(await store.idByDedupeKey("k")).toBeNull();
+  });
+});
+
+// ── review F5: one missing list is not "unpaired" ────────────────────────
+
+describe(`a lock is gone only after ${SECURITY_LOCK_GONE_AFTER_LISTS} successful lists in a row lack it (review F5)`, () => {
+  // The sidecar's listDevices skips a node whose device-info build throws
+  // (controller.ts listDevices' per-node catch), so one list can lack a lock
+  // that is still paired.
+  const OTHER = lockDevice({ nodeId: "77", friendlyName: "Side gate", endpoints: [{ endpointId: 1, deviceTypes: [], clusters: [257] }] });
+
+  function sweeping(initial: LockSourceDevice[]) {
+    const devices = [...initial];
+    const ctx = adapterWith({ source: staticSource(() => Promise.resolve(devices)) });
+    ctx.adapter.start();
+    ctx.adapter.noteSweepScheduled();
+    return { ...ctx, devices };
+  }
+
+  it("a sole lock skipped by ONE list: still known (not reporting), never 'No door locks paired', so the Doors view stays", async () => {
+    const { adapter, devices } = sweeping([lockDevice()]);
+    await adapter.sweep();
+    devices.length = 0;
+    await expect(adapter.sweep()).resolves.toMatchObject({ status: "ok", locks: 1, dropped: 0 });
+    expect(adapter.knownLocks()).toEqual([expect.objectContaining({ ref: REF, name: "Back door lock", connected: false })]);
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Back door lock isn't reporting" });
+    expect(adapter.sweepState().lastSweepLockCount).toBe(1);
+  });
+
+  it("the fresh list (Areas page, link checks) keeps it too — present, not 'isn't paired any more', and linkable", async () => {
+    const { adapter, devices } = sweeping([lockDevice(), OTHER]);
+    await adapter.sweep();
+    devices.splice(0, 1); // the sidecar skips the Back door lock this time
+    const fresh = await adapter.listLocks();
+    expect(fresh.map((l) => [l.ref, l.connected])).toEqual([
+      ["matter:77/1", true],
+      [REF, false],
+    ]);
+  });
+
+  it(`gone at the ${SECURITY_LOCK_GONE_AFTER_LISTS}th list in a row: forgotten, and a sole lock then reads 'No door locks paired'`, async () => {
+    const { adapter, devices } = sweeping([lockDevice()]);
+    await adapter.sweep();
+    devices.length = 0;
+    for (let i = 1; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) await adapter.sweep();
+    expect(adapter.knownLocks()).toHaveLength(1);
+    await adapter.sweep();
+    expect(adapter.knownLocks()).toEqual([]);
+    expect(adapter.health()).toMatchObject({ state: "not_configured", detail: "No door locks paired" });
+    await expect(adapter.listLocks()).resolves.toEqual([]);
+  });
+
+  it("the count is CONSECUTIVE: a list that has it again resets it", async () => {
+    const { adapter, devices } = sweeping([lockDevice()]);
+    await adapter.sweep();
+    for (let round = 0; round < 3; round++) {
+      devices.length = 0;
+      for (let i = 1; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) await adapter.sweep();
+      devices.push(lockDevice());
+      await adapter.sweep();
+      expect(adapter.knownLocks()).toEqual([expect.objectContaining({ ref: REF, connected: true })]);
+    }
+  });
+
+  it("a FAILED list is not an absence", async () => {
+    let fail = false;
+    const devices = [lockDevice()];
+    const { adapter } = adapterWith({
+      source: staticSource(async () => {
+        if (fail) throw new Error("sidecar 503");
+        return devices;
+      }),
+    });
+    await adapter.sweep();
+    devices.length = 0;
+    for (let i = 1; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) await adapter.sweep();
+    fail = true;
+    for (let i = 0; i < 5; i++) await adapter.sweep();
+    expect(adapter.knownLocks()).toHaveLength(1);
+  });
+
+  it("while it is kept, a live frame is still compared against what the store holds (its memory is not dropped)", async () => {
+    const { adapter, devices, store, emitter } = sweeping([lockDevice()]);
+    await adapter.sweep();
+    expect(store.lastReading).toHaveBeenCalledTimes(1);
+    devices.length = 0;
+    await adapter.sweep();
+    emitter.emit("state_changed", frame(2)); // unlocked, as the store already says
+    await flush();
+    expect(store.lastReading).toHaveBeenCalledTimes(1);
+    expect(store.rows).toHaveLength(1);
   });
 });

@@ -40,6 +40,9 @@
  *   · The sweep (60 s, cron runtime, advisory lockKey) finds changes the live
  *     stream missed, as `polled` rows. Its t0 guard skips a key that heard a
  *     live frame at or after the sweep started: the list may predate it.
+ *   · A known lock is gone only after SECURITY_LOCK_GONE_AFTER_LISTS
+ *     successful lists in a row lack it; until then it is kept as not
+ *     reporting (the sidecar skips a node whose info build throws).
  *   · The subscriber can never throw synchronously — a throw inside the
  *     EventEmitter callback would tear down the SSE bridge for every consumer.
  *   · Health never reads `not_configured` on a smart-home service that has
@@ -76,6 +79,14 @@ export const SECURITY_LOCK_SWEEP_FAILURES_DOWN = 3;
  * sweep keeps the service's own timeout: nobody waits on it.
  */
 export const SECURITY_LOCK_LIST_TIMEOUT_MS = 5_000;
+/**
+ * A known lock is GONE (forgotten, "isn't paired any more", not counted) only
+ * after this many consecutive SUCCESSFUL lists lack it — about 3 minutes of
+ * sweeps. The sidecar's listDevices skips a node whose device-info build
+ * throws (review F5), so one absence is not "unpaired". Until then it is kept
+ * as not reporting. A failed list is not an absence.
+ */
+export const SECURITY_LOCK_GONE_AFTER_LISTS = 3;
 
 const NODE_ID = /^\d{1,20}$/;
 const UINT64_MAX = 18_446_744_073_709_551_615n;
@@ -787,6 +798,8 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
   const log = deps.logger ?? defaultLogger;
   let names = new Map<string, string>();
   let snapshot: KnownLock[] = [];
+  /** Consecutive successful lists that lacked a known lock, by ref (review F5). */
+  const missedLists = new Map<string, number>();
   const multiLogged = new Set<string>();
   const state: LockSweepState = {
     lastSweepOkAt: null,
@@ -836,24 +849,42 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
       );
     }
 
+    // A known lock this (successful) list lacks is KEPT, as not reporting,
+    // until SECURITY_LOCK_GONE_AFTER_LISTS lists in a row have lacked it:
+    // the sidecar skips a node whose info build throws (review F5).
+    const listedRefs = new Set(known.map((l) => l.ref));
+    const kept: KnownLock[] = [];
+    for (const prev of snapshot) {
+      if (listedRefs.has(prev.ref)) continue;
+      const misses = (missedLists.get(prev.ref) ?? 0) + 1;
+      if (misses >= SECURITY_LOCK_GONE_AFTER_LISTS) {
+        missedLists.delete(prev.ref);
+        continue;
+      }
+      missedLists.set(prev.ref, misses);
+      kept.push({ ...prev, connected: false });
+    }
+    for (const ref of listedRefs) missedLists.delete(ref);
+    const locks = [...known, ...kept];
+
     // Names first, so this sweep's rows and every later live frame snapshot
-    // the current name. A node missing from this (successful) list is
-    // decommissioned: forgotten, with no row.
-    names = new Map(known.map((l) => [l.ref, l.name]));
-    const dropped = await tracker.forgetNodesExcept(present);
+    // the current name. A node that is neither listed nor kept is gone:
+    // forgotten, with no row.
+    names = new Map(locks.map((l) => [l.ref, l.name]));
+    const dropped = await tracker.forgetNodesExcept(new Set([...present, ...kept.map((l) => l.nodeId)]));
     const outcomes = await Promise.all(
       polledReadings.map((obs) => tracker.observe(obs, "polled", { sweepStartedAt: t0 })),
     );
 
-    snapshot = known;
+    snapshot = locks;
     state.lastSweepOkAt = now();
     if (state.consecutiveSweepFailures > 0) log.info({ after: state.consecutiveSweepFailures }, "security lock sweep recovered");
     state.consecutiveSweepFailures = 0;
-    state.lastSweepLockCount = known.length;
+    state.lastSweepLockCount = locks.length;
     const count = (o: LockObserveOutcome) => outcomes.filter((x) => x === o).length;
     const result = {
       status: "ok" as const,
-      locks: known.length,
+      locks: locks.length,
       observed: outcomes.length,
       recorded: count("recorded"),
       failed: count("failed"),
@@ -920,7 +951,12 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
         clearTimeout(timer);
       }
       if (!Array.isArray(listed)) throw new Error("the smart-home service returned no device list");
-      return readDeviceList(listed).known.map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
+      const fresh = readDeviceList(listed).known;
+      // A lock the sweep still keeps (not yet gone, review F5) but this list
+      // lacks is still paired as far as Droplet knows: listed, as not reporting.
+      const freshRefs = new Set(fresh.map((l) => l.ref));
+      const kept = snapshot.filter((l) => !freshRefs.has(l.ref)).map((l) => ({ ...l, connected: false }));
+      return [...fresh, ...kept].map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
     },
     knownLocks() {
       return snapshot.map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
