@@ -136,6 +136,24 @@ describe.skipIf(!RUN)("notification acknowledgement — real Postgres (WARP-2804
       await expect(insertRaw({ ...base("bad"), ...cols })).rejects.toThrow(/NotificationLog_ack_shape/);
     });
 
+    // Review F3 — "the session store confirmed that sign-in was live" only on
+    // an acked row that names a sign-in.
+    it.each([
+      ["a confirmed sign-in on an unacked row", { ackState: "unacked", ackSessionChecked: true }],
+      [
+        "a confirmed sign-in on an acked row that names no sign-in",
+        { ackState: "acked", ackedAt: new Date(), ackMethod: "inbox", ackSessionChecked: true },
+      ],
+    ])("refuses %s", async (_label, cols) => {
+      await expect(insertRaw({ ...base("bad"), ...cols })).rejects.toThrow(/NotificationLog_ack_session_checked/);
+    });
+
+    it("a confirmed sign-in on an acked row with a sid inserts; an unconfirmed one too", async () => {
+      const acked = { ackState: "acked", ackedAt: new Date(), ackMethod: "inbox", ackSessionId: "sid-1" };
+      await expect(insertRaw({ ...base("chk1"), ...acked, ackSessionChecked: true })).resolves.toBe(1);
+      await expect(insertRaw({ ...base("chk2"), ...acked, ackSessionChecked: false })).resolves.toBe(1);
+    });
+
     it("a raw INSERT that names no ackState lands `unacked` (the default after the migration)", async () => {
       await insertRaw({ ...base("default") });
       const row = await prisma.notificationLog.findUnique({ where: { id: `${PREFIX}default` } });
@@ -194,13 +212,20 @@ describe.skipIf(!RUN)("notification acknowledgement — real Postgres (WARP-2804
       await cleanup();
       const { id } = await recordNotification(prisma, { username: u("stefan"), kind: "system", title: `race ${round}` });
       const [a, b] = await Promise.all([
-        ackNotification(prisma, { id, username: u("stefan"), method: "inbox", sessionId: "sid-a", client: "a" }),
-        ackNotification(prisma, { id, username: u("stefan"), method: "opened", sessionId: "sid-b", client: "b" }),
+        ackNotification(prisma, { id, username: u("stefan"), method: "inbox", sessionId: "sid-a", client: "a", sessionChecked: true }),
+        ackNotification(prisma, { id, username: u("stefan"), method: "opened", sessionId: "sid-b", client: "b", sessionChecked: false }),
       ]);
       expect([a!.changed, b!.changed].filter(Boolean)).toHaveLength(1);
-      const winner = a!.changed ? { method: "inbox", sid: "sid-a" } : { method: "opened", sid: "sid-b" };
+      const winner = a!.changed
+        ? { method: "inbox", sid: "sid-a", checked: true }
+        : { method: "opened", sid: "sid-b", checked: false };
       const stored = await prisma.notificationLog.findUnique({ where: { id } });
-      expect(stored).toMatchObject({ ackState: "acked", ackMethod: winner.method, ackSessionId: winner.sid });
+      expect(stored).toMatchObject({
+        ackState: "acked",
+        ackMethod: winner.method,
+        ackSessionId: winner.sid,
+        ackSessionChecked: winner.checked,
+      });
       // Both answered with the same, stored ack.
       expect(a!.row.ackedAt).toEqual(stored!.ackedAt);
       expect(b!.row.ackedAt).toEqual(stored!.ackedAt);
@@ -209,7 +234,9 @@ describe.skipIf(!RUN)("notification acknowledgement — real Postgres (WARP-2804
 
   it("another person's id acks nothing in the database", async () => {
     const { id } = await recordNotification(prisma, { username: u("maria"), kind: "system", title: "hers" });
-    expect(await ackNotification(prisma, { id, username: u("stefan"), method: "inbox", sessionId: "s", client: null })).toBeNull();
+    expect(
+      await ackNotification(prisma, { id, username: u("stefan"), method: "inbox", sessionId: "s", client: null, sessionChecked: true }),
+    ).toBeNull();
     expect(await prisma.notificationLog.findUnique({ where: { id } })).toMatchObject({ ackState: "unacked", ackSessionId: null });
   });
 
@@ -239,7 +266,7 @@ describe.skipIf(!RUN)("notification acknowledgement — real Postgres (WARP-2804
       ],
     });
     const [out] = await Promise.all([
-      ackAllNotifications(prisma, { username: u("stefan"), before, sessionId: "sid-1", client: null }),
+      ackAllNotifications(prisma, { username: u("stefan"), before, sessionId: "sid-1", client: null, sessionChecked: false }),
       prisma.notificationLog.create({
         data: { id: `${PREFIX}new`, username: u("stefan"), kind: "system", title: "new", channels: "", createdAt: new Date(before.getTime() + 1) },
       }),

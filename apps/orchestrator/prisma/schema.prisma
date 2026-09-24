@@ -2368,14 +2368,21 @@ model NotificationLog {
   ackState     NotificationAckState   @default(unacked)
   ackedAt      DateTime?
   ackMethod    NotificationAckMethod?
-  /// JWT `sid` of the sign-in that acked it: the session record
-  /// authMiddleware checks on every request. NULL when that token carried no
-  /// sid (grace/legacy tokens).
+  /// The sign-in's id (JWT `sid`) from the signed token that acked it: it
+  /// names the right sign-in, but its live-session check can be skipped when
+  /// the session store is unreachable — `ackSessionChecked` says whether it
+  /// ran. NULL when that token carried no sid (grace/legacy tokens).
   ackSessionId String?                @db.VarChar(64)
   /// What the acking client SAID it was (X-Droplet-Client, else a coarse
   /// User-Agent label). Reported, never proof. NULL when it said nothing
   /// usable.
   ackClient    String?                @db.VarChar(120)
+  /// Whether the session store CONFIRMED that sign-in was live when it acked
+  /// (authMiddleware `req.sessionChecked`). False when the check was skipped
+  /// (store unreachable, no sid) and on every row not acked. DB CHECK
+  /// `NotificationLog_ack_session_checked`: true only on an acked row with a
+  /// sid.
+  ackSessionChecked Boolean             @default(false)
 
   @@index([username, createdAt])
   // WARP-2804 — the unread count and the `state=unacked` list.

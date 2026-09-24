@@ -17,11 +17,13 @@
  * Behind authMiddleware (core, not module-gated). Errors on N1–N4 are
  * `{error: {code, message}}`; /send keeps its original shape.
  *
- * The ack records the sign-in that did it (`req.user.sid`: authMiddleware
- * copies it from the verified JWT and checks the session record before this
- * handler runs) and what the client SAID it was (`describeClient`, reported,
- * never proof). Neither is ever returned by any route here. The iOS inbox is
- * the other consumer of N1–N4 and sends `X-Droplet-Client`.
+ * The ack records the sign-in that did it — the sign-in's id from the signed
+ * token (`req.user.sid`); its live-session check can be skipped when the
+ * session store is unreachable, so whether it ran (`req.sessionChecked`) is
+ * recorded beside it — and what the client SAID it was (`describeClient`,
+ * reported, never proof). None of the three is ever returned by any route
+ * here. The iOS inbox is the other consumer of N1–N4 and sends
+ * `X-Droplet-Client`.
  */
 
 import { Router, type Request, type Response } from "express";
@@ -35,6 +37,7 @@ import {
   ackAllNotifications,
   parseNotificationCursor,
   NOTIFICATION_LIST_MAX,
+  type AckAttribution,
   type NotificationKind,
 } from "../services/notifications.service.js";
 import { describeClient } from "../lib/client-descriptor.js";
@@ -109,9 +112,10 @@ function refuseServicePrincipal(req: Request, res: Response): boolean {
 }
 
 /** The ack's device facts: the checked sign-in, and what the client said it was. */
-function attribution(req: Request): { sessionId: string | null; client: string | null } {
+function attribution(req: Request): AckAttribution {
   return {
     sessionId: req.user?.sid ?? null,
+    sessionChecked: req.sessionChecked === true,
     client: describeClient(req.get("user-agent"), req.get("x-droplet-client")),
   };
 }

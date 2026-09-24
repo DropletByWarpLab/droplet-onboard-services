@@ -55,6 +55,16 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthUser;
+      /**
+       * WARP-2804 — true only when THIS request's session record was confirmed
+       * live by the session store (`checkSession` → `ok`). `user.sid` always
+       * comes from the signed token, so it names the right sign-in; but the
+       * live check is skipped when the store is unreachable (fail open, below),
+       * on sid-less grace tokens, for service principals and with auth off.
+       * Anything that records "done from this sign-in" (a notification ack,
+       * WARP-2978's incident ack) records this beside the sid.
+       */
+      sessionChecked?: boolean;
     }
   }
 }
@@ -95,6 +105,8 @@ function gitBasicSessionToken(b64: string): string | null {
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
+  // WARP-2804 — false unless the session record is confirmed live below.
+  req.sessionChecked = false;
   if (!config.AUTH_ENABLED) {
     req.user = { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
     next();
@@ -339,6 +351,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
           // valid ≤15-min credential and a cache restart must not brick
           // every route (same availability posture as
           // requirePasswordChangeGate). session.service already logged it.
+          // WARP-2804 — only "ok" CONFIRMED the sign-in is live.
+          req.sessionChecked = result.kind === "ok";
           req.user = user;
           next();
           return;

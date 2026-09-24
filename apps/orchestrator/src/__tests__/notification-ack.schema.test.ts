@@ -53,6 +53,13 @@ describe("🔴 WARP-2804 NotificationLog carries the recipient's acknowledgement
     expect(body).toMatch(/\n\s+ackClient\s+String\?\s+@db\.VarChar\(120\)/);
   });
 
+  it("review F3: whether the ack's sign-in was confirmed live is its own NOT NULL flag, default false", () => {
+    const body = block("model", "NotificationLog");
+    expect(body).toMatch(/\n\s+ackSessionChecked\s+Boolean\s+@default\(false\)/);
+    // The sid comment no longer claims more than the box can check.
+    expect(body).not.toMatch(/PROVEN/);
+  });
+
   it("the unread index leads with the recipient and the state", () => {
     const body = block("model", "NotificationLog");
     expect(body).toContain("@@index([username, createdAt])");
@@ -101,6 +108,18 @@ describe("🔴 WARP-2804 the migration", () => {
     expect(flat).toContain(`("ackState" = 'acked' OR ("ackSessionId" IS NULL AND "ackClient" IS NULL))`);
   });
 
+  it("review F3: ackSessionChecked is added NOT NULL DEFAULT false, and a second CHECK holds it to an acked row with a sign-in", () => {
+    expect(code).toMatch(/ADD COLUMN IF NOT EXISTS "ackSessionChecked" BOOLEAN NOT NULL DEFAULT false/);
+    const flat = code.replace(/\s+/g, " ");
+    expect(flat).toContain(`CONSTRAINT "NotificationLog_ack_session_checked" CHECK (`);
+    expect(flat).toContain(
+      `CHECK ( NOT "ackSessionChecked" OR ("ackState" = 'acked' AND "ackSessionId" IS NOT NULL) )`,
+    );
+    expect(flat).toContain(
+      `FROM pg_constraint WHERE conname = 'NotificationLog_ack_session_checked' AND conrelid = '"NotificationLog"'::regclass`,
+    );
+  });
+
   it("is re-runnable: types and the CHECK are guarded, columns and the index use IF NOT EXISTS", () => {
     // Repo idiom (WARP-2896's folder): a migration is safe to run twice —
     // a re-stamped folder, a hand re-run — so a second run is a no-op rather
@@ -109,7 +128,7 @@ describe("🔴 WARP-2804 the migration", () => {
     expect(code.replace(/\s+/g, " ")).toContain(
       `FROM pg_constraint WHERE conname = 'NotificationLog_ack_shape' AND conrelid = '"NotificationLog"'::regclass`,
     );
-    expect(code.match(/ADD COLUMN IF NOT EXISTS/g)).toHaveLength(5);
+    expect(code.match(/ADD COLUMN IF NOT EXISTS/g)).toHaveLength(6);
     expect(code).not.toMatch(/ADD COLUMN (?!IF NOT EXISTS)/);
   });
 

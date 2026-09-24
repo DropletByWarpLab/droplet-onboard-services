@@ -3,8 +3,10 @@
  *
  * An acknowledgement records two device facts (spec §A.2):
  *
- *   ackSessionId  the JWT `sid`, checked by authMiddleware on every request —
- *                 PROVEN, and not this module's business;
+ *   ackSessionId  the sign-in's id from the signed token; its live-session
+ *                 check can be skipped when the session store is unreachable
+ *                 (`ackSessionChecked` records whether it ran). Not this
+ *                 module's business;
  *   ackClient     this module's output — REPORTED, never proof, and every
  *                 surface that shows it must say "the device said".
  *

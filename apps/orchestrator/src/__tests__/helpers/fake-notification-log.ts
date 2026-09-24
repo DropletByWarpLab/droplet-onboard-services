@@ -35,6 +35,7 @@ export interface FakeNotificationRow {
   ackMethod: string | null;
   ackSessionId: string | null;
   ackClient: string | null;
+  ackSessionChecked: boolean;
 }
 
 type Where = Record<string, unknown>;
@@ -141,6 +142,7 @@ export function makeFakeNotificationLog(start = new Date("2026-09-24T08:00:00.00
     ackMethod: null,
     ackSessionId: null,
     ackClient: null,
+    ackSessionChecked: false,
     ...over,
   });
 

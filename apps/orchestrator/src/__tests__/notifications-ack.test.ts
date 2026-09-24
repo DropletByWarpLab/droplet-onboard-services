@@ -37,7 +37,7 @@ beforeEach(() => {
   prisma = { notificationLog: log.delegate } as unknown as PrismaClient;
 });
 
-const SAID = { sessionId: "sid-stefan-phone", client: "droplet-ios/1.4.0 (iOS 18.2)" };
+const SAID = { sessionId: "sid-stefan-phone", client: "droplet-ios/1.4.0 (iOS 18.2)", sessionChecked: true };
 
 describe("ackNotification", () => {
   it("acks the recipient's own unread row: state, time, method, sign-in and client", async () => {
@@ -70,11 +70,12 @@ describe("ackNotification", () => {
       method: "inbox",
       sessionId: "sid-stefan-laptop",
       client: "Edge on Windows",
+      sessionChecked: false,
     });
     expect(second?.changed).toBe(false);
     expect(second?.row.ackedAt).toEqual(first!.row.ackedAt);
     expect(second?.row.ackMethod).toBe("opened");
-    expect(log.rows[0]).toMatchObject({ ackSessionId: SAID.sessionId, ackClient: SAID.client });
+    expect(log.rows[0]).toMatchObject({ ackSessionId: SAID.sessionId, ackClient: SAID.client, ackSessionChecked: true });
   });
 
   it("an `untracked` row (written before WARP-2804) can still be acked", async () => {
@@ -93,8 +94,48 @@ describe("ackNotification", () => {
 
   it("a token without a sid and a client that said nothing store NULLs", async () => {
     const row = log.seed({ username: "stefan" });
-    await ackNotification(prisma, { id: row.id, username: "stefan", method: "inbox", sessionId: null, client: null });
-    expect(log.rows[0]).toMatchObject({ ackState: "acked", ackSessionId: null, ackClient: null });
+    await ackNotification(prisma, {
+      id: row.id,
+      username: "stefan",
+      method: "inbox",
+      sessionId: null,
+      client: null,
+      sessionChecked: false,
+    });
+    expect(log.rows[0]).toMatchObject({ ackState: "acked", ackSessionId: null, ackClient: null, ackSessionChecked: false });
+  });
+
+  // Review F3 — the sid names the right sign-in (it comes from the signed
+  // token), but whether that sign-in was confirmed LIVE is its own fact.
+  it("records whether the sign-in was confirmed live: checked", async () => {
+    const row = log.seed({ username: "stefan" });
+    await ackNotification(prisma, { id: row.id, username: "stefan", method: "inbox", ...SAID });
+    expect(log.rows[0]).toMatchObject({ ackSessionId: SAID.sessionId, ackSessionChecked: true });
+  });
+
+  it("records whether the sign-in was confirmed live: unchecked (session store unreachable)", async () => {
+    const row = log.seed({ username: "stefan" });
+    await ackNotification(prisma, { id: row.id, username: "stefan", method: "inbox", ...SAID, sessionChecked: false });
+    expect(log.rows[0]).toMatchObject({ ackSessionId: SAID.sessionId, ackSessionChecked: false });
+  });
+
+  it("never claims a check of a sign-in it cannot name (no sid → unchecked)", async () => {
+    const row = log.seed({ username: "stefan" });
+    await ackNotification(prisma, {
+      id: row.id,
+      username: "stefan",
+      method: "inbox",
+      sessionId: null,
+      client: null,
+      sessionChecked: true,
+    });
+    expect(log.rows[0]).toMatchObject({ ackSessionId: null, ackSessionChecked: false });
+  });
+
+  it("the check flag is stored, never returned", async () => {
+    const row = log.seed({ username: "stefan" });
+    const out = await ackNotification(prisma, { id: row.id, username: "stefan", method: "inbox", ...SAID });
+    expect(out!.row).not.toHaveProperty("ackSessionChecked");
   });
 });
 
@@ -123,7 +164,13 @@ describe("ackAllNotifications", () => {
   it("an already-acked row keeps its first ack", async () => {
     const row = log.seed({ username: "stefan", createdAt: at(0) });
     await ackNotification(prisma, { id: row.id, username: "stefan", method: "opened", ...SAID });
-    const out = await ackAllNotifications(prisma, { username: "stefan", before: at(30), sessionId: "sid-2", client: null });
+    const out = await ackAllNotifications(prisma, {
+      username: "stefan",
+      before: at(30),
+      sessionId: "sid-2",
+      client: null,
+      sessionChecked: false,
+    });
     expect(out.acked).toBe(0);
     expect(log.rows[0]).toMatchObject({ ackMethod: "opened", ackSessionId: SAID.sessionId });
   });

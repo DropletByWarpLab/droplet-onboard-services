@@ -630,14 +630,31 @@ export async function listNotifications(
 }
 
 /**
- * The device facts of one acknowledgement (spec §A.2). `sessionId` is the
- * JWT `sid` — PROVEN: authMiddleware checks the session record on every
- * request that carries one — or null for a token without one (grace/legacy).
- * `client` is `describeClient(...)` — REPORTED, never proof — or null.
+ * The device facts of one acknowledgement (spec §A.2).
+ *
+ *   sessionId       the sign-in's id from the signed token (`req.user.sid`), or
+ *                   null for a token without one (grace/legacy). It names the
+ *                   right sign-in, but its live-session check can be skipped
+ *                   when the session store is unreachable — so:
+ *   sessionChecked  whether the session store CONFIRMED that sign-in was live
+ *                   (`req.sessionChecked`). Stored as false whenever there is
+ *                   no sid: nothing can be confirmed about a sign-in the
+ *                   request does not name.
+ *   client          `describeClient(...)` — REPORTED, never proof — or null.
  */
 export interface AckAttribution {
   sessionId: string | null;
+  sessionChecked: boolean;
   client: string | null;
+}
+
+/** The ack's device columns, from its attribution. */
+function ackFacts(a: AckAttribution): { ackSessionId: string | null; ackSessionChecked: boolean; ackClient: string | null } {
+  return {
+    ackSessionId: a.sessionId,
+    ackSessionChecked: a.sessionId !== null && a.sessionChecked,
+    ackClient: a.client,
+  };
 }
 
 export interface AckNotificationInput extends AckAttribution {
@@ -671,8 +688,7 @@ export async function ackNotification(
       ackState: "acked",
       ackedAt: new Date(),
       ackMethod: input.method,
-      ackSessionId: input.sessionId,
-      ackClient: input.client,
+      ...ackFacts(input),
     },
   });
   const row = await db.notificationLog.findFirst({
@@ -708,8 +724,7 @@ export async function ackAllNotifications(
       ackState: "acked",
       ackedAt: new Date(),
       ackMethod: "all",
-      ackSessionId: input.sessionId,
-      ackClient: input.client,
+      ...ackFacts(input),
     },
   });
   return { acked: count, unread: await countUnread(db, input.username) };

@@ -108,7 +108,11 @@ function makeAckApp() {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as unknown as { user: unknown }).user = PEOPLE[String(req.headers["x-test-as"] ?? "stefan")];
+    const person = PEOPLE[String(req.headers["x-test-as"] ?? "stefan")]!;
+    (req as unknown as { user: unknown }).user = person;
+    // What authMiddleware sets (review F3): true only when the session store
+    // confirmed the sign-in live; `x-test-session-store: down` is its fail-open.
+    req.sessionChecked = Boolean(person.sid) && req.headers["x-test-session-store"] !== "down";
     next();
   });
   app.use("/api", createNotificationsRouter(prisma));
@@ -140,12 +144,29 @@ describe("N3 POST /api/notifications/:id/ack (WARP-2804)", () => {
     expect(log.rows[0]!.ackClient).toBe("Safari on iPhone");
   });
 
-  it("a token with no sid stores a NULL session", async () => {
+  it("a token with no sid stores a NULL session, unchecked", async () => {
     const { app, log } = makeAckApp();
     const row = log.seed({ username: "legacy" });
     const res = await request(app).post(`/api/notifications/${row.id}/ack`).set("x-test-as", "legacy").send({});
     expect(res.status).toBe(200);
-    expect(log.rows[0]!.ackSessionId).toBeNull();
+    expect(log.rows[0]).toMatchObject({ ackSessionId: null, ackSessionChecked: false });
+  });
+
+  // Review F3 — the sid comes from the signed token either way; whether the
+  // session store confirmed it live is recorded beside it, never returned.
+  it("MUTATION: a sign-in the session store confirmed live is stored as checked", async () => {
+    const { app, log } = makeAckApp();
+    const row = log.seed({ username: "stefan" });
+    const res = await request(app).post(`/api/notifications/${row.id}/ack`).send({});
+    expect(log.rows[0]).toMatchObject({ ackSessionId: "sid-stefan-1", ackSessionChecked: true });
+    expect(res.body.notification).not.toHaveProperty("ackSessionChecked");
+  });
+
+  it("with the session store unreachable, the sid is stored but NOT as checked", async () => {
+    const { app, log } = makeAckApp();
+    const row = log.seed({ username: "stefan" });
+    await request(app).post(`/api/notifications/${row.id}/ack`).set("x-test-session-store", "down").send({});
+    expect(log.rows[0]).toMatchObject({ ackSessionId: "sid-stefan-1", ackSessionChecked: false });
   });
 
   it("a second ack → 200 changed:false with the original ackedAt and method", async () => {
