@@ -1349,7 +1349,7 @@ async function main() {
             select: { username: true },
           });
           for (const { username } of owners) {
-            await sendNotification(prisma, { userId: username, kind: "system", title, body });
+            await sendNotification(prisma, { username, kind: "system", title, body });
           }
         },
       }

@@ -148,9 +148,9 @@ const prisma = {
     ]),
   },
   pushSubscription: {
-    findMany: vi.fn(async ({ where }: { where: { userId: string } }) => [
+    findMany: vi.fn(async ({ where }: { where: { username: string } }) => [
       // WARP-2904: only a real push-service host is dialled.
-      { endpoint: `https://fcm.googleapis.com/fcm/send/${where.userId}`, p256dhKey: "k", authKey: "a" },
+      { endpoint: `https://fcm.googleapis.com/fcm/send/${where.username}`, p256dhKey: "k", authKey: "a" },
     ]),
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),

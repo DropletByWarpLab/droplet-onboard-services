@@ -147,7 +147,7 @@ const DIGEST_SETTING = {
 
 /** A NotificationLog row the digest already wrote today, keyed the way the
  *  real table is: by the recipient's USERNAME. */
-type SentRow = { id: string; userId: string; kind: string; title: string };
+type SentRow = { id: string; username: string; kind: string; title: string };
 
 function digestPrisma(over: {
   setting?: unknown;
@@ -175,10 +175,10 @@ function digestPrisma(over: {
     // HONOURS `where`: a row keyed by anyone else is not this owner's digest.
     notificationLog: {
       findFirst: vi.fn(
-        async ({ where }: { where: { userId: string; kind: string; title: { startsWith: string } } }) =>
+        async ({ where }: { where: { username: string; kind: string; title: { startsWith: string } } }) =>
           sentToday.find(
             (r) =>
-              r.userId === where.userId &&
+              r.username === where.username &&
               r.kind === where.kind &&
               r.title.startsWith(where.title.startsWith),
           ) ?? null,
@@ -187,9 +187,9 @@ function digestPrisma(over: {
   };
 }
 
-const SENT_THIS_MORNING = (userId: string): SentRow => ({
+const SENT_THIS_MORNING = (username: string): SentRow => ({
   id: "n0",
-  userId,
+  username,
   kind: "ai",
   title: `${DIGEST_TITLE_PREFIX} 3 things need a look`,
 });
@@ -227,8 +227,8 @@ describe("🔴 the digest speaks only when there is something to say", () => {
     await runFilingDigest(digestPrisma({ pending: 3 }) as never, atEight());
     expect(sendNotificationMock).toHaveBeenCalledTimes(1);
     const input = sendNotificationMock.mock.calls[0][1];
-    expect(input.userId).toBe("owner");
-    expect(input.userId).not.toBe(DIGEST_SETTING.enabledById);
+    expect(input.username).toBe("owner");
+    expect(input.username).not.toBe(DIGEST_SETTING.enabledById);
   });
 
   it("MUTATION: drop the already-sent read — a restart re-sends every hour", async () => {
@@ -247,7 +247,7 @@ describe("🔴 the digest speaks only when there is something to say", () => {
     const r = await runFilingDigest(db as never, atEight());
     expect(r).toMatchObject({ sent: false, reason: "already_sent" });
     expect(db.notificationLog.findFirst).toHaveBeenCalledTimes(1);
-    expect(db.notificationLog.findFirst.mock.calls[0]![0].where.userId).toBe("owner");
+    expect(db.notificationLog.findFirst.mock.calls[0]![0].where.username).toBe("owner");
     expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 

@@ -177,7 +177,7 @@ export function createBackupHealthCheck(deps: {
       });
       const body = backupStoppedBody(view);
       for (const { username } of users) {
-        await sendNotification(prisma, { userId: username, kind: "system", title: BACKUP_STOPPED_TITLE, body, url: "/settings" });
+        await sendNotification(prisma, { username, kind: "system", title: BACKUP_STOPPED_TITLE, body, url: "/settings" });
       }
       logger.warn({ health: view.health, recipients: users.length }, "backup-health: backups stopped — owner notified");
       return view;

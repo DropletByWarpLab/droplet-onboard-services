@@ -62,7 +62,7 @@ export function createTlsNotifier(prisma: PrismaClient): TlsNotifier {
   async function fanOut(title: string, body: string): Promise<void> {
     const users = await recipients();
     for (const username of users) {
-      await sendNotification(prisma, { userId: username, kind: "system", title, body });
+      await sendNotification(prisma, { username, kind: "system", title, body });
     }
     logger.info({ title, recipients: users.length }, "tls-notify: sent");
   }

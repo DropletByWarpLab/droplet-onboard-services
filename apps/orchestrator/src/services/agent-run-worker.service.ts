@@ -1501,7 +1501,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         // person deciding is the one who needs to know.
         const mayHaveRun = trace.some((e) => e.unknownOutcome && e.tool === parkRequest.tool);
         await sendNotification(prisma, {
-          userId: user.username,
+          username: user.username,
           kind: "ai",
           title: `Approval needed: ${parkRequest.tool}`,
           body:
@@ -1543,7 +1543,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       if (user) {
         const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
         await sendNotification(prisma, {
-          userId: user.username,
+          username: user.username,
           kind: "ai",
           title: "Extension proposed",
           body: `Background run "${goal}" finished with a proposal. Open the Workshop to review it.`,
@@ -1693,7 +1693,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ? (notify.result ?? "").slice(0, 300) || "Finished."
           : `Failed: ${(error ?? "unknown error").slice(0, 300)}`;
       await sendNotification(prisma, {
-        userId: notify.username,
+        username: notify.username,
         kind: "ai",
         title: status === "succeeded" ? `Background run finished: ${goal}` : `Background run failed: ${goal}`,
         body,

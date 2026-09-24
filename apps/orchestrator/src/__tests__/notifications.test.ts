@@ -72,7 +72,7 @@ function makePushingPrismaStub() {
 }
 
 const PARKED = {
-  userId: "romain",
+  username: "romain",
   kind: "ai" as const,
   title: "Approval needed: delete_file",
   body: "Open the run to approve or deny it.",
@@ -89,7 +89,7 @@ describe("sendNotification", () => {
   it("publishes to MQTT and logs success", async () => {
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "reminder",
       title: "Standup",
       body: "Daily 10am",
@@ -103,6 +103,9 @@ describe("sendNotification", () => {
     expect((prisma as any)._created[0].channels).toBe("toast");
     expect((prisma as any)._created[0].deliveredAt).toBeInstanceOf(Date);
     expect((prisma as any)._created[0].error).toBeNull();
+    // WARP-2911 — the row is keyed by the column's real name.
+    expect((prisma as any)._created[0].username).toBe("alice");
+    expect((prisma as any)._created[0]).not.toHaveProperty("userId");
   });
 
   // WARP-2752 — web push is a SECOND channel, and its failures must not be
@@ -117,7 +120,7 @@ describe("sendNotification", () => {
   it("a push failure does NOT mask a delivered toast", async () => {
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "ai",
       title: "Acme is 90 days past due",
     });
@@ -135,7 +138,7 @@ describe("sendNotification", () => {
     });
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "ai",
       title: "Acme is 90 days past due",
     });
@@ -147,7 +150,7 @@ describe("sendNotification", () => {
   it("publishes even without a body field", async () => {
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "ai",
       title: "Hello",
     });
@@ -161,7 +164,7 @@ describe("sendNotification", () => {
       throw new Error("mqtt unavailable");
     });
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "system",
       title: "x",
     });
@@ -178,6 +181,10 @@ describe("listRecentNotifications", () => {
     await listRecentNotifications(prisma, "alice", 9999);
     expect(prisma.notificationLog.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 200 }),
+    );
+    // WARP-2911 — read back by the recipient's username.
+    expect(prisma.notificationLog.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { username: "alice" } }),
     );
     await listRecentNotifications(prisma, "alice", 0);
     expect(prisma.notificationLog.findMany).toHaveBeenLastCalledWith(
@@ -213,7 +220,7 @@ describe("sendNotification — NotificationLog.pushOutcome", () => {
   for (const gate of [false, "throws"] as const) {
     it(`gate ${String(gate)} → refused_gate; toast still delivered, error stays null`, async () => {
       const prisma = stubWithPush(gate);
-      const result = await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+      const result = await sendNotification(prisma, { username: "alice", kind: "ai", title: "x" });
       expect(result.channels).toEqual(["toast"]);
       expect(prisma._created[0].pushOutcome).toBe("refused_gate");
       expect(prisma._created[0].error).toBeNull();
@@ -223,7 +230,7 @@ describe("sendNotification — NotificationLog.pushOutcome", () => {
 
   it("gate on, no subscriptions → no_subscribers", async () => {
     const prisma = stubWithPush(true);
-    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    await sendNotification(prisma, { username: "alice", kind: "ai", title: "x" });
     expect(prisma._created[0].pushOutcome).toBe("no_subscribers");
     expect(prisma._created[0].channels).toBe("toast");
   });
@@ -231,7 +238,7 @@ describe("sendNotification — NotificationLog.pushOutcome", () => {
   it("a throwing push leg → failed", async () => {
     const prisma = stubWithPush(true);
     prisma.pushSubscription.findMany.mockRejectedValueOnce(new Error("db down"));
-    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    await sendNotification(prisma, { username: "alice", kind: "ai", title: "x" });
     expect(prisma._created[0].pushOutcome).toBe("failed");
     expect(prisma._created[0].error).toBeNull(); // the toast carried it
   });
@@ -308,6 +315,8 @@ describe("sendNotification deep link (WARP-2909)", () => {
     expect(push).toEqual({ title: PARKED.title, body: PARKED.body, url: PARKED.url, data: PARKED.data, tag: PARKED.tag });
 
     expect(prisma._created[0]).toMatchObject({ url: PARKED.url, data: PARKED.data });
+    // WARP-2911 — the push leg looks subscriptions up by the same username.
+    expect((prisma as any).pushSubscription.findMany).toHaveBeenCalledWith({ where: { username: "romain" } });
 
     // The redemption contract: nothing that could approve the run rides on
     // any of the three, and the link's only query key is `run`.
@@ -322,7 +331,7 @@ describe("sendNotification deep link (WARP-2909)", () => {
 
   it("no tag supplied → the push carries tag: undefined (none is derived)", async () => {
     const prisma = makePushingPrismaStub();
-    await sendNotification(prisma, { userId: "alice", kind: "reminder", title: "Standup" });
+    await sendNotification(prisma, { username: "alice", kind: "reminder", title: "Standup" });
     const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
     expect(push.tag).toBeUndefined();
     expect(push.url).toBeUndefined();

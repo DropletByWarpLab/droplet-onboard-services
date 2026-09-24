@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type Dispatch = { userId: string; kind: string; title: string; body?: string | null };
+type Dispatch = { username: string; kind: string; title: string; body?: string | null };
 const sendNotification = vi.fn(async (_prisma: unknown, _input: Dispatch) => ({
   id: "n1",
   channels: ["toast"],
@@ -50,8 +50,8 @@ describe("tls-notify — who hears it", () => {
   it("renewFailed reaches every owner and admin by username, and nobody else", async () => {
     const { prisma } = makePrisma();
     await createTlsNotifier(prisma).renewFailed({ fqdn: "mybox.droplet-us.com", notAfter: null, daysLeft: 12 });
-    const userIds = sendNotification.mock.calls.map((c) => c[1].userId).sort();
-    expect(userIds).toEqual(["romain", "stefan"]);
+    const usernames = sendNotification.mock.calls.map((c) => c[1].username).sort();
+    expect(usernames).toEqual(["romain", "stefan"]);
     for (const call of sendNotification.mock.calls) {
       const input = call[1];
       expect(input.kind).toBe("system");

@@ -246,7 +246,9 @@ export interface DispatchOutcome {
 }
 
 /**
- * Send a push to every active subscription for `userId`. Subscriptions
+ * Send a push to every active subscription for `username` — the recipient's
+ * Nextcloud username (`User.username`), never `User.id` (WARP-2911): that is
+ * what `PushSubscription.username` stores. Subscriptions
  * that come back with 404 or 410 are deleted — those are the standard
  * "this endpoint is dead, give up" status codes per the Web Push spec.
  *
@@ -258,7 +260,7 @@ export interface DispatchOutcome {
  */
 export async function dispatchToUser(
   prisma: PrismaClient,
-  userId: string,
+  username: string,
   payload: PushPayload,
 ): Promise<DispatchOutcome> {
   if (!(await webPushGate(prisma))) {
@@ -269,13 +271,13 @@ export async function dispatchToUser(
     // while the gate is closed. If the count cannot be read, the refusal is
     // audited anyway.
     const pending = await prisma.pushSubscription
-      .count({ where: { userId } })
+      .count({ where: { username } })
       .catch(() => 1);
-    if (pending > 0) auditPushEgress(userId, "refused_gate");
+    if (pending > 0) auditPushEgress(username, "refused_gate");
     return { sent: 0, pruned: 0, attempted: 0, refused: "egress_disabled" };
   }
   if (!configured) initPushDispatch();
-  const rows = await prisma.pushSubscription.findMany({ where: { userId } });
+  const rows = await prisma.pushSubscription.findMany({ where: { username } });
 
   // Refuse (and prune) any stored endpoint that fails the push-endpoint guard.
   const blocked: string[] = [];
@@ -285,7 +287,7 @@ export async function dispatchToUser(
     if (vetted) subs.push({ ...r, ...vetted });
     else {
       blocked.push(r.endpoint);
-      auditPushEgress(userId, "refused_endpoint");
+      auditPushEgress(username, "refused_endpoint");
     }
   }
 
@@ -311,14 +313,14 @@ export async function dispatchToUser(
           { TTL: 60, timeout: PUSH_DIAL_TIMEOUT_MS },
         );
         sent++;
-        auditPushEgress(userId, "allowed", s.host);
+        auditPushEgress(username, "allowed", s.host);
       } catch (err) {
         const status = (err as { statusCode?: number })?.statusCode;
         if (status === 404 || status === 410) {
           deadEndpoints.push(s.endpoint);
-          auditPushEgress(userId, "pruned", s.host);
+          auditPushEgress(username, "pruned", s.host);
         } else {
-          auditPushEgress(userId, "provider_error", s.host);
+          auditPushEgress(username, "provider_error", s.host);
           logger.warn({ err, host: s.host }, "push send failed");
         }
       }
@@ -336,7 +338,7 @@ export async function dispatchToUser(
   // Non-blocking: bump lastFiredAt for monitoring. Failure here is fine.
   prisma.pushSubscription
     .updateMany({
-      where: { userId, endpoint: { notIn: deadEndpoints } },
+      where: { username, endpoint: { notIn: deadEndpoints } },
       data: { lastFiredAt: new Date() },
     })
     .catch(() => {});

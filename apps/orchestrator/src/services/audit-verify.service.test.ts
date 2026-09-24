@@ -179,7 +179,7 @@ describe("verifyActivityChain / runNightlyChainVerification", () => {
 
   it("keys the alert by username, so the toast and the stored row actually reach an admin", async () => {
     // Regression pin. `sendNotification` publishes to
-    // `droplet/notifications/${userId}`, ws-bridge subscribes
+    // `droplet/notifications/${username}`, ws-bridge subscribes
     // `droplet/notifications/${user.username}`, and both readers of the
     // persisted NotificationLog filter by username. Passing `User.id` here
     // made the one alert that must never be missed reach nobody: the broker
@@ -189,7 +189,7 @@ describe("verifyActivityChain / runNightlyChainVerification", () => {
 
     const keys = vi
       .mocked(sendNotification)
-      .mock.calls.map((call) => (call[1] as { userId: string }).userId);
+      .mock.calls.map((call) => (call[1] as { username: string }).username);
     expect(keys).toEqual(["admin-1", "owner-1"]);
     for (const key of keys) {
       expect(key).not.toContain("uuid");

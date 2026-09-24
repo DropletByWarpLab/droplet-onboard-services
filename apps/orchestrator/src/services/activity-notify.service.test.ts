@@ -169,7 +169,7 @@ describe("the cut", () => {
     await runActivityNotifySweep(prisma, opts);
     expect(recordMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ userId: "bob", kind: "event", title: "Assigned to you" }),
+      expect.objectContaining({ username: "bob", kind: "event", title: "Assigned to you" }),
     );
   });
 });
@@ -204,7 +204,7 @@ describe("who", () => {
       departmentWatchers: async () =>
         new Map([["w1", ["u-carol", "u-bob", "u-dave"]]]),
     });
-    const recipients = recordMock.mock.calls.map((c: any) => c[1].userId).sort();
+    const recipients = recordMock.mock.calls.map((c: any) => c[1].username).sort();
     expect(recipients).toEqual(["bob", "carol"]);
   });
 
@@ -239,7 +239,7 @@ describe("coalescing", () => {
     await runActivityNotifySweep(prisma, opts);
     expect(recordMock).toHaveBeenCalledOnce();
     expect(recordMock.mock.calls[0][1]).toMatchObject({
-      userId: "bob",
+      username: "bob",
       title: "200 updates on your work",
       body: "200 assigned",
     });

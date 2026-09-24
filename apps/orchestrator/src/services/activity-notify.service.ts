@@ -216,7 +216,7 @@ function tally(words: string[]): string {
 }
 
 interface Outgoing {
-  /** NotificationLog.userId is a USERNAME, not a User.id — the MQTT topic
+  /** NotificationLog.username is a USERNAME, not a User.id — the MQTT topic
    *  ws-bridge subscribes to is `droplet/notifications/{username}`
    *  (ws-bridge.service.ts) and routes/notifications.ts keys the panel the
    *  same way. Same clause as team-chat-reminders.service.ts. */
@@ -283,7 +283,7 @@ async function claimAndNotify(
     const ids: string[] = [];
     for (const o of outgoing) {
       const log = await recordNotification(tx, {
-        userId: o.username,
+        username: o.username,
         kind: "event",
         title: o.title,
         body: o.body,
@@ -302,7 +302,7 @@ async function claimAndNotify(
   const failed: string[] = [];
   outgoing.forEach((o, i) => {
     const { channels } = publishNotificationToast({
-      userId: o.username,
+      username: o.username,
       kind: "event",
       title: o.title,
       body: o.body,

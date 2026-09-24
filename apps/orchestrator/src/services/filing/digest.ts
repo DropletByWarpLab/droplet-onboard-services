@@ -147,7 +147,7 @@ export async function runFilingDigest(
   startOfDay.setHours(0, 0, 0, 0);
   const already = await prisma.notificationLog.findFirst({
     where: {
-      userId: owner,
+      username: owner,
       kind: "ai",
       createdAt: { gte: startOfDay },
       title: { startsWith: DIGEST_TITLE_PREFIX },
@@ -157,7 +157,7 @@ export async function runFilingDigest(
   if (already) return { sent: false, pending, reason: "already_sent" };
 
   await sendNotification(prisma, {
-    userId: owner,
+    username: owner,
     kind: "ai",
     title:
       pending === 1

@@ -48,7 +48,7 @@ describe("/api/notifications deep link (WARP-2909)", () => {
     const { app, created } = makeApp();
     created.push({
       id: "n1",
-      userId: "romain",
+      username: "romain",
       kind: "ai",
       title: "Approval needed: delete_file",
       body: null,

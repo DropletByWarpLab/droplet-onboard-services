@@ -265,7 +265,7 @@ describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
     expect(b.chat).toHaveBeenCalledTimes(1);
     expect(sendNotificationMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ userId: "romain", title: "Extension proposed" }),
+      expect.objectContaining({ username: "romain", title: "Extension proposed" }),
     );
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({ what: "Agent run proposed an extension", refs: expect.objectContaining({ agentRunId: id }) }),

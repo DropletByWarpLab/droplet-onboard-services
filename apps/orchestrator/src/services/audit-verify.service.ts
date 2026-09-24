@@ -176,7 +176,7 @@ export async function runNightlyChainVerification(
   });
   for (const admin of admins) {
     await sendNotification(prisma, {
-      userId: admin.username,
+      username: admin.username,
       kind: "system",
       title: "Audit log integrity check failed",
       body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,

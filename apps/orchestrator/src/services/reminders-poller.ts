@@ -64,7 +64,7 @@ async function dispatchDueReminders(prisma: PrismaClient): Promise<void> {
         data: { notifiedAt: new Date() },
       });
       await sendNotification(prisma, {
-        userId: r.userId,
+        username: r.userId,
         kind: "reminder",
         title: r.title,
         body: r.body,

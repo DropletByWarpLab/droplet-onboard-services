@@ -64,7 +64,7 @@ export function createNotificationsRouter(prisma: PrismaClient): Router {
         return;
       }
       const result = await sendNotification(prisma, {
-        userId: getUser(req),
+        username: getUser(req),
         kind: parsed.data.kind,
         title: parsed.data.title,
         body: parsed.data.body,

@@ -41,7 +41,12 @@ export type NotificationKind = $Enums.NotificationKind;
 type NotificationDb = PrismaClient | Prisma.TransactionClient;
 
 export interface DispatchInput {
-  userId: string;
+  /** WARP-2911 — the recipient's Nextcloud username (`User.username`), NEVER
+   *  `User.id`. It is the key at every hop: the toast topic
+   *  `droplet/notifications/<username>` (ws-bridge subscribes on the username
+   *  only), the `PushSubscription.username` lookup, and both
+   *  `NotificationLog.username` readers. A `User.id` here reaches nobody. */
+  username: string;
   kind: NotificationKind;
   title: string;
   body?: string | null;
@@ -153,7 +158,7 @@ export function publishNotificationToast(input: DispatchInput): {
   }
   // Channel 1: toast. Always attempted because the ws-bridge is the cheapest
   // delivery path and the user always has a dashboard tab nearby.
-  const toastOk = safePublish(`droplet/notifications/${input.userId}`, {
+  const toastOk = safePublish(`droplet/notifications/${input.username}`, {
     kind: input.kind,
     title: input.title,
     body: input.body ?? null,
@@ -185,7 +190,7 @@ export async function recordNotification(
   assertLinkFields(input);
   const row = await db.notificationLog.create({
     data: {
-      userId: input.userId,
+      username: input.username,
       kind: input.kind,
       title: input.title,
       body: input.body ?? null,
@@ -233,7 +238,7 @@ export async function sendNotification(
   let pushOutcome: $Enums.PushOutcome;
   try {
     await ensurePushDispatch(prisma);
-    const { sent, attempted, refused } = await dispatchToUser(prisma, input.userId, {
+    const { sent, attempted, refused } = await dispatchToUser(prisma, input.username, {
       title: input.title,
       body: input.body ?? "",
       url: input.url,
@@ -252,14 +257,14 @@ export async function sendNotification(
     pushOutcome = "failed";
     pushError = `push: ${err instanceof Error ? err.message : String(err)}`;
     // Always visible to an operator, whether or not it reaches the row.
-    logger.warn({ err, userId: input.userId }, "push notification failed");
+    logger.warn({ err, username: input.username }, "push notification failed");
   }
   if (pushError && channels.length === 0) errors.push(pushError);
 
   const delivered = channels.length > 0;
   const log = await prisma.notificationLog.create({
     data: {
-      userId: input.userId,
+      username: input.username,
       kind: input.kind,
       title: input.title,
       body: input.body ?? null,
@@ -280,11 +285,12 @@ export async function sendNotification(
   };
 }
 
-/** Recent notifications for a user, newest-first. Used by the LLM
- *  `list_notifications` tool and the "Recent notifications" panel. */
+/** Recent notifications for a user (by USERNAME), newest-first. Used by the
+ *  "Recent notifications" panel; the LLM `list_notifications` tool reads the
+ *  same column directly. */
 export async function listRecentNotifications(
   prisma: PrismaClient,
-  userId: string,
+  username: string,
   limit = 50,
 ): Promise<
   Array<{
@@ -301,7 +307,7 @@ export async function listRecentNotifications(
   }>
 > {
   return prisma.notificationLog.findMany({
-    where: { userId },
+    where: { username },
     orderBy: { createdAt: "desc" },
     take: Math.max(1, Math.min(200, limit)),
   });

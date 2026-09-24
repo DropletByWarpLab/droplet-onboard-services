@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type Dispatch = { userId: string; kind: string; title: string; body?: string | null; url?: string };
+type Dispatch = { username: string; kind: string; title: string; body?: string | null; url?: string };
 const sendNotification = vi.fn(async (_prisma: unknown, _input: Dispatch) => ({ id: "n", channels: ["toast"], delivered: true }));
 vi.mock("./notifications.service.js", () => ({
   sendNotification: (prisma: unknown, input: Dispatch) => sendNotification(prisma, input),
@@ -138,7 +138,7 @@ describe("createBackupHealthCheck — exactly one notification per outage", () =
     }
 
     expect(sendNotification).toHaveBeenCalledTimes(2); // one per recipient, one round
-    expect(sendNotification.mock.calls.map((c) => c[1].userId).sort()).toEqual(["romain", "stefan"]);
+    expect(sendNotification.mock.calls.map((c) => c[1].username).sort()).toEqual(["romain", "stefan"]);
     const input = sendNotification.mock.calls[0][1];
     expect(input).toMatchObject({ kind: "system", title: BACKUP_STOPPED_TITLE, url: "/settings" });
     expect(input.body).toContain("writing the snapshot");
