@@ -268,3 +268,55 @@ describe("WARP-1803 home hero inline chat", () => {
     expect(sendMessageMock).not.toHaveBeenCalled();
   });
 });
+
+// ── WARP-3048: the hero model pill is a real control, not a fake dropdown ──
+describe("WARP-3048 home hero model pill", () => {
+  const M2 = { id: "m2", provider: "ollama", name: "qwen3" };
+
+  it("with 2+ models, the pill is a picker and the chosen model answers", async () => {
+    modelsRef.current = {
+      models: [{ id: "m1", provider: "ollama", name: "llama3.2" }, M2],
+      defaultModel: "m1",
+    };
+    render(<ChatTile w={8} h={5} />);
+
+    const pill = screen.getByRole("combobox", { name: "Model" });
+    expect((pill as HTMLSelectElement).value).toBe("m1"); // defaultModel first
+    fireEvent.change(pill, { target: { value: "m2" } });
+
+    typeAndSubmit("what's on my network?");
+
+    await waitFor(() =>
+      expect(sendMessageMock).toHaveBeenCalledWith(
+        "what's on my network?",
+        "m2",
+        undefined,
+        "ollama",
+      ),
+    );
+  });
+
+  it("follows a defaultModel change until the user picks", () => {
+    modelsRef.current = {
+      models: [{ id: "m1", provider: "ollama", name: "llama3.2" }, M2],
+      defaultModel: "m1",
+    };
+    const { rerender } = render(<ChatTile w={8} h={5} />);
+    modelsRef.current = { ...modelsRef.current, defaultModel: "m2" };
+    rerender(<ChatTile w={8} h={5} />);
+    expect(
+      (screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement)
+        .value,
+    ).toBe("m2");
+  });
+
+  it("with one model, the pill links to /models and offers no picker", () => {
+    render(<ChatTile w={8} h={5} />);
+
+    const link = screen.getByRole("link", {
+      name: "Model: llama3.2 — manage on Models",
+    });
+    expect(link).toHaveAttribute("href", "/models");
+    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
+  });
+});

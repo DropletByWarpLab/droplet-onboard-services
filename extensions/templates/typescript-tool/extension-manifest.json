@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "",
+  "name": "",
+  "version": "0.1.0",
+  "egress": "none",
+  "provides": { "tools": [], "routines": [] },
+  "footprint": { "memoryMb": 256, "cpus": 0.5, "processes": 1 }
+}

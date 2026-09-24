@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "word-count",
+  "name": "Word count",
+  "version": "0.1.0",
+  "kind": "extension",
+  "runtime": "node20",
+  "entrypoint": "dist/index.js",
+  "provides": {
+    "tools": [
+      {
+        "name": "word_count",
+        "description": "Count the words in a piece of text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        },
+        "export": "run",
+        "classificationProposal": {
+          "requiresWrite": false,
+          "requiresConfirmation": false
+        }
+      }
+    ],
+    "routineDrafts": [],
+    "proposedGrants": []
+  },
+  "resources": {
+    "memoryMb": 128,
+    "processes": 1
+  },
+  "egress": "none"
+}

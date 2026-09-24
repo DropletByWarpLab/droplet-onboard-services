@@ -278,6 +278,8 @@ jobs:
             sandbox:
               - *py-shared
               - "services/sandbox/**"
+              # WARP-2896: the image bakes the extension templates in.
+              - "extensions/templates/**"
             email-indexer:
               - *py-shared
               - "services/email-indexer/**"

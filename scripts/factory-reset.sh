@@ -670,6 +670,7 @@ VOLUMES=(
   "brain-memory-data"    # assistant memory: extracted text + embeddings of personal files
   "nvrdata"
   "ops-audit"            # WARP-337 append-only audit trail
+  "workspace-git"        # WARP-2896 workshop git store: the customer's extension work
   # WARP-573: pre-migration DB snapshots from the orchestrator's guarded boot
   # entrypoint. Wiped on reset so factory-reset truly returns to out-of-box.
   "migration-snapshots"
@@ -697,6 +698,7 @@ VOLUMES=(
   "openwrt-config"
   "openwrt-overlay"
   "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*
+  "workspace-checkouts"  # WARP-2896 working trees — rebuilt from workspace-git
   # INFRA-004: both are declared in docker-compose.yml but were missing here —
   # in the swallowed-`down -v` scenario this fallback exists for, they SURVIVED
   # a "factory reset" AND the verify gate (built from this same list) read clean.

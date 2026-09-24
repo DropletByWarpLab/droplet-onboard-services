@@ -143,6 +143,25 @@
   border-radius: 50%;
   background: var(--success);
 }
+/* WARP-3048 — the pill as a real control: a native <select> inside it with
+   2+ models (the browser supplies the chevron + list), a link to /models
+   with one. Same pill, same size; the name still ellipsises. */
+.droplet-home .w-chat-model-control {
+  text-decoration: none;
+}
+.droplet-home .w-chat-model-control:hover {
+  color: var(--text);
+}
+.droplet-home .w-chat-model select {
+  min-width: 0;
+  max-width: 180px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
 .droplet-home .w-chat-send {
   margin-left: auto;
   height: 36px;
@@ -1464,6 +1483,7 @@
   .droplet-home .w-cal-cell { aspect-ratio: 1; min-height: 44px; }
   .droplet-home .w-cal-nav { width: 44px; height: 44px; }
   .droplet-home .w-chat-iconbtn { width: 44px; height: 44px; }
+  .droplet-home .w-chat-model-control { height: 44px; }
   .droplet-home .w-chat-send { height: 44px; }
   .droplet-home .w-sug { height: 44px; }
   /* The conversation head wraps to two rows on a phone (see the `@container

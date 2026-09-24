@@ -202,7 +202,9 @@ describe("POST /api/tools as the mcp principal (routine_draft)", () => {
     const created = prisma.toolSpec.create.mock.calls[0]![0].data as Record<string, unknown>;
     expect(created.ownerId).toBe("u-admin");
     expect(Object.keys(created)).not.toContain("onBehalfOf");
-    expect(Object.keys(created)).not.toContain("status");
+    // WARP-2897: the draft service writes `status: "draft"` EXPLICITLY — the
+    // body's "live" above never reaches the row.
+    expect(created.status).toBe("draft");
   });
 
   it("refuses a draft naming a tool this box does not have, with the names", async () => {

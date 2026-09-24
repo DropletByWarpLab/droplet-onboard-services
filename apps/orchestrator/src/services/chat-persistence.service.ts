@@ -510,16 +510,33 @@ export class ChatPersistenceService {
     if (args.conversationId) {
       const existing = await this.prisma.chatSession.findFirst({
         where: { id: args.conversationId, userId: args.userId },
-        select: { id: true, systemPrompt: true },
+        select: { id: true, systemPrompt: true, model: true },
       });
       if (existing) {
+        const data: {
+          systemPrompt?: string | null;
+          model?: string;
+          provider?: string | null;
+        } = {};
         if (
           args.systemPrompt !== undefined &&
           existing.systemPrompt !== args.systemPrompt
         ) {
+          data.systemPrompt = args.systemPrompt;
+        }
+        // WARP-3048 — the latest turn's model wins, like the prompt above.
+        // The chat page restores its picker from this column, so stamping
+        // it only at creation reopened every thread on its FIRST turn's
+        // model and silently undid a mid-conversation switch. The provider
+        // moves with it so the pair never goes internally inconsistent.
+        if (args.model && existing.model !== args.model) {
+          data.model = args.model;
+          data.provider = args.provider ?? null;
+        }
+        if (Object.keys(data).length > 0) {
           await this.prisma.chatSession.update({
             where: { id: existing.id },
-            data: { systemPrompt: args.systemPrompt },
+            data,
           });
         }
         return { id: existing.id, created: false };

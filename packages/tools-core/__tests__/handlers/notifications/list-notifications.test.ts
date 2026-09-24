@@ -18,7 +18,7 @@ describe("list_notifications", () => {
     const findMany = vi.fn().mockResolvedValue([]);
     await listNotifications.handler({}, ctxWith(findMany));
     expect(findMany).toHaveBeenCalledWith({
-      where: { userId: "alice" },
+      where: { username: "alice" },
       orderBy: { createdAt: "desc" },
       take: 30,
     });

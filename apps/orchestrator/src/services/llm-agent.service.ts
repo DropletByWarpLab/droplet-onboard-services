@@ -31,7 +31,7 @@
  * (blocking `chat()` and streaming `chatStream()`) now agree on this.
  */
 
-import type { PrivateEnhancement } from "@droplet/tools-core";
+import type { PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
 import { redactConfirmationTokensForModel } from "@droplet/tools-core";
 
 import { config } from "../config.js";
@@ -67,6 +67,7 @@ import {
   toolNamesForDomain,
 } from "./tool-selection.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
+import { currentRuntimeToolLookup } from "./tool-layers.service.js";
 // WARP-2544 — output-side guard on tool use: does the finished answer match
 // what the tools actually did? Deterministic, no inference call.
 import {
@@ -412,6 +413,17 @@ export interface AgentRequest {
    * (allowed_tools / chat scope) — RBAC is decided before this field.
    */
   tool_selection_mode?: "off" | "domains";
+  /**
+   * WARP-2896 — tool domains the CALLER's binding admits on every turn under
+   * "domains" selection, whatever the sentence says. Set by the agent-run
+   * worker for a workshop run (`["workspace"]`, from `run.workspaceId`) and by
+   * no route: chat builds this request field by field and never sets it, so a
+   * chat client cannot reach it. Still bounded by the resolved pool — it
+   * admits a domain, never a tool the pool does not hold.
+   * See `effectiveAdvertisedToolNames` (`boundDomains`) for why this is not a
+   * keyword rule or pool membership.
+   */
+  bound_tool_domains?: readonly ToolDomain[];
   /**
    * WARP-1921 — tool names already used EARLIER in this conversation, read
    * server-side from the persisted trace by the route.
@@ -1389,12 +1401,22 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // absent-scope case — the estimate side in `routes/llm.ts` narrows via the
   // same call, so the two cannot drift apart the way they did in the
   // WARP-2497 × WARP-2552 conflict (WARP-2556).
+  //
+  // WARP-2897 — and through the SAME runtime lookup routes/llm.ts's catalog
+  // build (`narrowAllowedToolsForRole`) resolves by default
+  // (`currentRuntimeToolLookup`, one helper for both), so a role grant
+  // on a runtime tool's domain admits that tool to a scoped person — and the
+  // dispatch gate below refuses it with the identical answer. Snapshotted
+  // once per turn: the advertisement and every dispatch decision in this turn
+  // read the same registry/classification state.
   const scoped = req.toolAccessScope;
+  const runtimeLookup = currentRuntimeToolLookup();
   const filtered = narrowToolsToScope(
     req.allowed_tools
       ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
       : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
     scoped,
+    runtimeLookup,
   );
   const toSpec = (t: (typeof filtered)[number]) => ({
     type: "function" as const,
@@ -1435,6 +1457,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // registers a remote server, and selection is byte-identical to its
       // pre-WARP-2443 behaviour while it is.
       runtimeTools: runtimeToolRegistry.list(),
+      boundDomains: req.bound_tool_domains,
     });
     activeTools = filtered.filter((t) => selected.has(t.name));
   }
@@ -2078,12 +2101,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // Unregistered names deliberately fall THROUGH to the WARP-642 guard,
       // which answers them with the valid-tool list so the model can
       // self-correct.
-      const denial = toolDispatchDenial(call.function.name, args, scoped);
+      const denial = toolDispatchDenial(call.function.name, args, scoped, runtimeLookup);
       if (denial) {
         // No sanitising pass here (unlike FINDING 3 below): a denial only
-        // fires for a name that IS in the tools-core catalog, so the string
-        // reflected back to the model is one of the registry's own fixed
-        // names, never model-authored text.
+        // fires for a name that IS in the tools-core catalog or (WARP-2897)
+        // exactly matches a REGISTERED runtime tool — whose namespaced name
+        // the multiplexer vetted at registration — so the string reflected
+        // back to the model is a registry name, never model-authored text.
         lastBadToolName = call.function.name;
         lastBadToolReason = "forbidden tool";
         const denialError = { status: "error" as const, error: denial };

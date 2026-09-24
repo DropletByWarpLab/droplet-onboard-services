@@ -32,6 +32,8 @@ interface RunItem {
   error: string | null;
   result: string | null;
   pending: { tool: string; parkedAt: string | null } | null;
+  /** WARP-2896 — set on a workshop run. */
+  workspaceId?: string | null;
 }
 
 function fail(code: string, message: string): ToolResult {
@@ -64,6 +66,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     createdAt: r.createdAt,
     endedAt: r.endedAt,
     steps: `${r.iteration}/${r.maxIter}`,
+    ...(r.workspaceId ? { workspace: r.workspaceId } : {}),
     ...(r.error ? { error: r.error } : {}),
     ...(r.result ? { resultPreview: r.result.slice(0, 300) } : {}),
     ...(r.status === "awaiting_confirmation" && r.pending

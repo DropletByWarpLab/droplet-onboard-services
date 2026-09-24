@@ -35,6 +35,11 @@ const inputSchema = {
       minimum: 1,
       description: "Optional step budget for the run.",
     },
+    workspace: {
+      type: "string",
+      description:
+        "Optional. The id of a Workshop workspace to work in. The run then builds an extension there — reading, editing, testing and finally proposing it for review — instead of doing ordinary work.",
+    },
   },
   required: ["goal"],
   additionalProperties: false,
@@ -60,19 +65,36 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (typeof args.max_iter === "number" && Number.isInteger(args.max_iter) && args.max_iter > 0) {
     body.maxIter = args.max_iter;
   }
+  // WARP-2896 — a workshop run. The route checks the workspace exists, is
+  // active and idle; the id grammar is checked here so a typo is a legible
+  // refusal rather than a 400 the model cannot read.
+  const workspace = typeof args.workspace === "string" ? args.workspace.trim() : "";
+  if (workspace) {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(workspace)) {
+      return fail("INVALID_ARGS", "workspace must be a workspace id (lowercase letters, digits, dashes)");
+    }
+    body.workspaceId = workspace;
+  }
   const res = await ctx.http.orchestrator.post("/api/agent-runs", body, {
     headers: { Accept: "application/json" },
   });
   if (res.status === 403) return fail("FORBIDDEN", "Your role cannot start background runs.");
+  if (res.status === 404 && workspace) return fail("NOT_FOUND", `No workspace "${workspace}" on this box.`);
+  if (res.status === 409 && workspace) {
+    const err = (await res.json().catch(() => null)) as { error?: string } | null;
+    return fail("WORKSPACE_BUSY", err?.error ?? `Workspace "${workspace}" cannot take a run right now.`);
+  }
   if (!res.ok) return fail("AGENT_RUN_START_FAILED", `orchestrator returned ${res.status}`);
-  const data = (await res.json()) as { id: string; status: string };
+  const data = (await res.json()) as { id: string; status: string; workspaceId?: string | null };
   return {
     ok: true,
     data: {
       runId: data.id,
       status: data.status,
-      message:
-        "Started in the background. You will be notified when it finishes, or if it needs your approval for an action.",
+      ...(data.workspaceId ? { workspace: data.workspaceId } : {}),
+      message: data.workspaceId
+        ? "Started in the Workshop. You will be notified when it proposes its extension, or if it needs your approval for an action."
+        : "Started in the background. You will be notified when it finishes, or if it needs your approval for an action.",
     },
   };
 }

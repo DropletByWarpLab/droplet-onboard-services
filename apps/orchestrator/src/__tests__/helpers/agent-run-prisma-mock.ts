@@ -50,6 +50,8 @@ export interface AgentRunRow {
   pendingDecidedBy: string | null;
   /** WARP-2877 — the schedule that fired this run, when one did. */
   scheduleId: string | null;
+  /** WARP-2896 — the workshop workspace a run works in, when it has one. */
+  workspaceId: string | null;
   /** WARP-2997 — the cloud gate's verdict at the latest claim. */
   cloudGate: string;
   offLanProvider: string | null;
@@ -58,7 +60,7 @@ export interface AgentRunRow {
   updatedAt: Date;
 }
 
-export type MockOp = "create" | "findMany" | "findFirst" | "findUnique" | "updateMany";
+export type MockOp = "create" | "findMany" | "findFirst" | "findUnique" | "updateMany" | "count";
 
 function matches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
   for (const [key, cond] of Object.entries(where)) {
@@ -211,6 +213,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         pendingDecidedAt: null,
         pendingDecidedBy: null,
         scheduleId: (args.data.scheduleId as string | null) ?? null,
+        workspaceId: (args.data.workspaceId as string | null) ?? null,
         cloudGate: "unchecked",
         offLanProvider: null,
         offLanWithheldTools: [],
@@ -260,6 +263,11 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
       }
       return { count };
     }),
+    /** WARP-2896 — "is a run working in this workspace?" */
+    count: vi.fn(async (args: { where: Record<string, unknown> }) => {
+      guard("count", args);
+      return rows.filter((r) => matches(r as unknown as Record<string, unknown>, args.where)).length;
+    }),
   };
 
   const user = {
@@ -270,6 +278,54 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     findFirst: vi.fn(async (args: { where: { username?: string }; select?: Record<string, boolean> }) => {
       const u = [...users.values()].find((x) => x.username === args.where.username);
       return u ? pick(u as unknown as Record<string, unknown>, args.select) : null;
+    }),
+  };
+
+  /** WARP-2896 — the workshop's workspaces. */
+  const workspaces: Array<Record<string, unknown>> = [];
+  const withRuns = (row: Record<string, unknown>, include?: { runs?: { take?: number; select?: Record<string, boolean> } }) => {
+    if (!include?.runs) return { ...row };
+    const runs = rows
+      .filter((r) => r.workspaceId === row.id)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, include.runs.take ?? rows.length)
+      .map((r) => pick(r as unknown as Record<string, unknown>, include.runs!.select));
+    return { ...row, runs };
+  };
+  const workshopWorkspace = {
+    create: vi.fn(async (args: { data: Record<string, unknown> }) => {
+      const row = {
+        template: null,
+        status: "active",
+        proposedTag: null,
+        proposedAt: null,
+        createdAt: now(),
+        updatedAt: now(),
+        ...args.data,
+      };
+      workspaces.push(row);
+      return { ...row };
+    }),
+    findUnique: vi.fn(async (args: { where: { id: string }; select?: Record<string, boolean>; include?: { runs?: { take?: number; select?: Record<string, boolean> } } }) => {
+      const row = workspaces.find((r) => r.id === args.where.id);
+      if (!row) return null;
+      return args.select ? pick(row, args.select) : withRuns(row, args.include);
+    }),
+    findMany: vi.fn(async (args: { orderBy?: unknown; take?: number; include?: { runs?: { take?: number; select?: Record<string, boolean> } } }) => {
+      const out = [...workspaces].sort(comparator(args.orderBy));
+      return (args.take ? out.slice(0, args.take) : out).map((r) => withRuns(r, args.include));
+    }),
+    update: vi.fn(async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      const row = workspaces.find((r) => r.id === args.where.id);
+      if (!row) throw new Error("no workspace");
+      applyData(row, args.data);
+      return { ...row };
+    }),
+    delete: vi.fn(async (args: { where: { id: string } }) => {
+      const i = workspaces.findIndex((r) => r.id === args.where.id);
+      if (i < 0) throw new Error("no workspace");
+      const [row] = workspaces.splice(i, 1);
+      return row;
     }),
   };
 
@@ -315,6 +371,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
   const prisma = {
     agentRun,
     agentRunSchedule,
+    workshopWorkspace,
     user,
     // Rolls back on a throw, like the real thing: the ticker's enqueue+advance
     // atomicity test depends on a failed advance leaving no run behind.
@@ -335,6 +392,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     /** Typed as the real client for the service, and as the mock for tests. */
     prisma: prisma as unknown as PrismaClient & typeof prisma,
     rows,
+    workspaces,
     schedules,
     row: (id: string) => {
       const r = rows.find((x) => x.id === id);
