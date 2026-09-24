@@ -219,9 +219,10 @@ describe("workspace-nav-config — Level 3 views", () => {
     expect(dest("/cameras")?.views).toEqual([]);
   });
 
-  it("Security's Areas, Patterns and Opening hours are its views, the section itself first (WARP-2977 P2b, WARP-2980)", () => {
+  it("Security's Areas, Patterns and Settings are its views, the section itself first (WARP-2977 P2b, WARP-2980, WARP-2978)", () => {
     const views = dest("/security")?.views ?? [];
-    expect(views.map((v) => v.label)).toEqual(["Security", "Areas", "Patterns", "Opening hours"]);
+    // WARP-2978 — /security/settings holds the opening hours AND who is told about alerts.
+    expect(views.map((v) => v.label)).toEqual(["Security", "Areas", "Patterns", "Settings"]);
     expect(views.map((v) => v.href)).toEqual(["/security", "/security/zones", "/security/patterns", "/security/settings"]);
     // The section pill is exact, so it does not stay lit on its sub-pages.
     expect(views[0]?.exact).toBe(true);
@@ -234,7 +235,7 @@ describe("workspace-nav-config — Level 3 views", () => {
   it("Security's views follow the security module, not a role (both pages read at view)", () => {
     const family = resolveSpaces("family", NO_CAPS, allOn);
     const sec = family.flatMap((s) => s.destinations).find((d) => d.item.href === "/security");
-    expect(sec?.views.map((v) => v.label)).toEqual(["Security", "Areas", "Patterns", "Opening hours"]);
+    expect(sec?.views.map((v) => v.label)).toEqual(["Security", "Areas", "Patterns", "Settings"]);
     const off = resolveSpaces("owner", ALL_CAPS, (m) => m !== "security");
     expect(off.flatMap((s) => s.destinations).find((d) => d.item.href === "/security")).toBeUndefined();
   });

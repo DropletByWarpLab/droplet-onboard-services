@@ -3549,6 +3549,12 @@ export interface SecurityEvent {
    * area). Empty for site-wide rows (threats, Frigate health, mode changes).
    */
   zones: SecurityZoneRef[];
+  /**
+   * WARP-2978 (ADR-059 P3 route 1) — the incident the engine grouped this row
+   * into, or null. A row the viewer can see implies its incident is visible
+   * to them. Absent from a box older than P3.
+   */
+  incident?: { id: string } | null;
 }
 
 export interface SecurityEventsPage {
@@ -3559,11 +3565,21 @@ export interface SecurityEventsPage {
 /**
  * One line of the feed header: what the feed is listening to, and whether it
  * is reporting. Served in the order camera_ingest, camera_system,
- * threat_mirror, site_mode, patterns, retention (PR-2 adds `locks` after
- * camera_system). `patterns` (WARP-2980) is the baseline job's row.
+ * threat_mirror, site_mode, incidents, alerts, patterns, retention (PR-2 adds
+ * `locks` after camera_system). WARP-2978: `incidents` is every viewer's;
+ * `alerts` (who alerts reach) is owner/admin only. `patterns` (WARP-2980) is
+ * the baseline job's row.
  */
 export interface SecurityHealthRow {
-  id: "camera_ingest" | "camera_system" | "threat_mirror" | "site_mode" | "patterns" | "retention";
+  id:
+    | "camera_ingest"
+    | "camera_system"
+    | "threat_mirror"
+    | "site_mode"
+    | "incidents"
+    | "alerts"
+    | "patterns"
+    | "retention";
   state: "ok" | "quiet" | "down" | "not_configured";
   detail: string;
   lastSeenAt: string | null;
@@ -3811,7 +3827,16 @@ export type SecurityErrorCode =
   | "SUPPRESSIONS_UNAVAILABLE"
   | "SUPPRESSION_NOT_FOUND"
   | "SUPPRESSION_TARGET_NOT_FOUND"
-  | "SUPPRESSION_LIMIT";
+  | "SUPPRESSION_LIMIT"
+  // WARP-2978 (ADR-059 P3 §7 routes 16–22): incidents and who is told about alerts.
+  | "INCIDENT_NOT_FOUND"
+  | "INCIDENT_CONFLICT"
+  | "NOT_ACTIONABLE"
+  | "INCIDENTS_UNAVAILABLE"
+  | "NO_RECIPIENT"
+  | "NOT_ELIGIBLE"
+  | "ROUTING_UNAVAILABLE"
+  | "USER_NOT_FOUND";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
@@ -3952,6 +3977,188 @@ export interface SecuritySuppressionCreateBody {
   codes: SecurityPatternCode[];
   reason: string;
   expiresInDays: number;
+}
+
+// ── WARP-2978 (ADR-059 P3 §7, P6 §7.5): incidents, acknowledgement, alert routing ──
+// Wire shapes of routes 16–22, mirrored from the orchestrator's
+// services/security-incident-view.ts and services/security-alerts.service.ts.
+// P6's native clients decode the same shapes. Everything is VIEWER-PROJECTED
+// on the box (DS-005): a hidden camera's codes, counts, acks and notices are
+// simply absent, and the page renders what it is given — it never fills in.
+// The unions are what P3 sends; the copy helpers still render an unknown
+// value (a later code or scope) as a generic line rather than nothing.
+
+export type SecuritySeverity = "info" | "notice" | "alert";
+export type SecurityIncidentScope = "area" | "camera" | "site_threat" | "site_camera_system";
+/** `no_action` = ordinary activity (or no code the viewer can see): nothing to acknowledge. */
+export type SecurityIncidentState = "no_action" | "open" | "acknowledged" | "resolved";
+/** Whether the incident still takes events. Explicit — never inferred from times. */
+export type SecurityIncidentGrouping = "collecting" | "closed";
+export type SecurityReasonCode = "after_hours_presence" | "camera_offline" | "threat_signal";
+/** Whether the events behind the incident are still kept (they are trimmed after 30 days; the incident stays a year). */
+export type SecurityIncidentEventsKept = "kept" | "partly_removed" | "removed";
+export type SecurityIncidentAckAction = "acknowledge" | "resolve";
+
+export interface IncidentAckSummary {
+  action: SecurityIncidentAckAction;
+  byName: string;
+  at: string;
+}
+
+/** Route 16's row, route 17's `latest`, and the head of route 18. */
+export interface IncidentSummary {
+  id: string;
+  scope: SecurityIncidentScope;
+  /** The area as it was when the incident opened (a snapshot). */
+  zone: { id: string; name: string; kind: SecurityZoneKind } | null;
+  /** The Frigate camera of a `camera`-scope incident. */
+  camera: string | null;
+  /** Viewer-projected. */
+  state: SecurityIncidentState;
+  /** The viewer's visible severity. */
+  severity: SecuritySeverity;
+  /** The viewer's visible codes. */
+  reasonCodes: SecurityReasonCode[];
+  grouping: SecurityIncidentGrouping;
+  /** The site mode at the first event. */
+  openedInMode: SecurityMode;
+  firstActivityAt: string;
+  lastActivityAt: string;
+  /** Visible events (survives the 30-day trim). */
+  eventCount: number;
+  /** Visible counts per label; `_status` / `_threat` count status and threat rows. */
+  labels: Record<string, number>;
+  /** The latest acknowledgement, when the viewer has a visible code. */
+  lastAck: IncidentAckSummary | null;
+}
+
+/** GET /api/security/incidents — `(lastActivityAt desc, id desc)`. */
+export interface IncidentsPage {
+  incidents: IncidentSummary[];
+  nextCursor: string | null;
+}
+
+/** GET /api/security/incidents/summary. */
+export interface IncidentsSummary {
+  /** Open incidents whose visible severity is alert. */
+  openAlerts: number;
+  /** Open incidents whose visible severity is notice. */
+  openNotices: number;
+  /** At most 3 that need attention, newest first. */
+  latest: IncidentSummary[];
+  /** Opening hours set AND an Inside / Staff only area with a camera: after-hours alerts can fire. */
+  alertsReady: boolean;
+}
+
+export interface IncidentReasonView {
+  code: SecurityReasonCode;
+  severity: SecuritySeverity;
+  /** A snapshot of the event that triggered the code — it outlives the event. */
+  evidence: {
+    eventId: string;
+    camera: string | null;
+    source: string;
+    kind: string;
+    label: string | null;
+    at: string;
+    summary: string;
+  };
+  /**
+   * The rule's numbers: after_hours_presence `{mode, modeSource, nonOpenAt,
+   * zoneKind}`; camera_offline `{offlineForSec, backAt}`; threat_signal
+   * `{activityId, kind}`.
+   */
+  detail: Record<string, string | number | null> | null;
+}
+
+export interface IncidentAckView {
+  action: SecurityIncidentAckAction;
+  byName: string;
+  at: string;
+  /** What the device SAID it was — reported, never proof. */
+  client: string | null;
+  /** The ack came from this person's own alert notification for the incident (verified on the box). */
+  viaNotification: boolean;
+  /** Resolve's note; "" when none. */
+  note: string;
+}
+
+export type SecurityNoticeOutcome =
+  | "queued"
+  | "sent"
+  | "not_sent"
+  | "skipped_no_access"
+  | "skipped_not_visible"
+  | "skipped_capped"
+  | "skipped_no_address";
+/** `fallback_owner`: nobody chosen could be told, so an owner was told instead. */
+export type SecurityNoticeReason = "routed" | "fallback_owner";
+
+/** Who was told. Owner/admin receive every notice; anyone else only their own. */
+export interface IncidentNoticeView {
+  userId: string;
+  name: string;
+  outcome: SecurityNoticeOutcome;
+  reason: SecurityNoticeReason;
+  /** The channels that took it: "toast", "push" or "toast,push". */
+  channels: string;
+  pushOutcome: "sent" | "no_subscribers" | "refused_gate" | "failed" | null;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+/** A visible member event: the feed row shape, plus the other visible areas it also matched. */
+export type IncidentMemberView = SecurityEvent & { alsoIn: SecurityZoneRef[] };
+
+/** GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike. */
+export interface IncidentDetail extends IncidentSummary {
+  reasons: IncidentReasonView[];
+  /** Visible members while their events are kept, newest first. */
+  events: IncidentMemberView[];
+  /** More visible members than `events` carries. */
+  moreEvents: boolean;
+  acks: IncidentAckView[];
+  notices: IncidentNoticeView[];
+  eventsKept: SecurityIncidentEventsKept;
+  /** The viewer's Security level on the box, and whether they have acknowledged or resolved this incident. */
+  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
+}
+
+/** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
+export interface IncidentActionResult {
+  incident: IncidentDetail;
+  changed: boolean;
+}
+
+/** Why a person can't be told about alerts right now. */
+export type AlertIneligibleReason = "inactive" | "role" | "no_address" | "no_access";
+
+export interface AlertRoutingPerson {
+  userId: string;
+  name: string;
+  role: string;
+  state: "receiving" | "not_receiving";
+  /** `owner_default`: an owner, told by default. null = nobody chose yet (not receiving). */
+  origin: "owner_default" | "chosen" | null;
+  /** Send back as `expectedVersion`; null = no row yet (create). */
+  version: number | null;
+  eligible: boolean;
+  ineligibleReason: AlertIneligibleReason | null;
+  /** Manages a department made from the Security template — a suggestion only, it grants nothing. */
+  managesSecurityDepartment: boolean;
+  /** `push`: a phone is set up and phone notifications are on; else only while Droplet is open. */
+  delivery: "push" | "in_app_only";
+}
+
+/** GET /api/security/alert-routing — the whole list at manage; below it, the viewer's own line. */
+export type AlertRoutingView =
+  | { level: "manage"; people: AlertRoutingPerson[]; fallbackActive: boolean }
+  | { level: "view" | "act"; self: { state: "receiving" | "not_receiving"; eligible: boolean } };
+
+/** PUT /api/security/alert-routing/:userId (manage). */
+export interface AlertRoutingSetBody {
+  state: "receiving" | "not_receiving";
+  expectedVersion: number | null;
 }
 
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──

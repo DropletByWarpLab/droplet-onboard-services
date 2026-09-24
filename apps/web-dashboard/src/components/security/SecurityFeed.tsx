@@ -31,9 +31,18 @@
  * WARP-2978 PR-D — a person Frigate is still tracking 30 s in gets one
  * `detection_ongoing` row before their `end`: it reads "Still in view", sits
  * with the detections, and their later `end` is its own row.
+ *
+ * WARP-2978 (ADR-059 P3 §8) — this feed is the "Everything" tab under the
+ * Incidents one. Unchanged apart from:
+ *   - a row the engine grouped carries `In an incident →` to its incident;
+ *   - the header names the `incidents` and `alerts` rows;
+ *   - P2a's "Alerts come later" line is gone. `AlertsLine` (the page renders
+ *     it above both tabs) says what alerts do, or what they still need —
+ *     and nothing at all while that is unknown.
  */
 import Link from "next/link";
 import {
+  ArrowRight,
   Car,
   Loader2,
   Moon,
@@ -54,7 +63,12 @@ import type { SecurityEvent, SecurityEventKind, SecurityHealthRow, SecurityZoneR
 export type SecurityView = "all" | "detections" | "health" | "network";
 
 export const COPY = {
-  notAlarm: "Droplet shows what happened here. Alerts come later.",
+  // WARP-2978 (ADR-059 P3 §8) — replaces P2a's "Alerts come later." line.
+  alertsLine:
+    "Droplet alerts the people chosen in Security settings when someone is seen inside after hours. It doesn't call anyone.",
+  alertsNotReady:
+    "Droplet shows what happened here. Alerts need opening hours and an area marked Inside or Staff only.",
+  inIncident: "In an incident",
   sourcesTitle: "What this feed is listening to",
   feedTitle: "Activity",
   feedDown: "The security feed isn't answering",
@@ -98,6 +112,9 @@ export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
   threat_mirror: "Network and sign-in warnings",
   // WARP-2977 P2b — the ticker that follows the opening hours (the site mode).
   site_mode: "Opening hours",
+  // WARP-2978 — the engine that sorts events into incidents (every viewer), and who alerts reach (owner/admin).
+  incidents: "Incidents",
+  alerts: "Alerts",
   // WARP-2980 (P5) — the job that learns what normal looks like.
   patterns: "Patterns",
   retention: "Record keeping",
@@ -252,6 +269,20 @@ export interface SecurityFeedProps {
   now?: Date;
 }
 
+/**
+ * WARP-2978 — the line under the mode card: what alerts do when they can fire
+ * (`alertsReady`, from the incidents summary), what they still need when they
+ * can't — and nothing while that is unknown. It never guesses either way.
+ */
+export function AlertsLine({ alertsReady }: { alertsReady: boolean | null }) {
+  if (alertsReady === null) return null;
+  return (
+    <p className="security-note" data-alerts-ready={alertsReady} style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>
+      {alertsReady ? COPY.alertsLine : COPY.alertsNotReady}
+    </p>
+  );
+}
+
 export function SecurityFeed(props: SecurityFeedProps) {
   const now = props.now ?? new Date();
   const views: SecurityView[] = props.canSeeThreats
@@ -262,10 +293,6 @@ export function SecurityFeed(props: SecurityFeedProps) {
 
   return (
     <div className="security-feed" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <p className="security-note" style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>
-        {COPY.notAlarm}
-      </p>
-
       <SourcesCard sources={props.sources} error={props.healthError} now={now} />
 
       <section className="card" aria-labelledby="security-feed-title">
@@ -493,6 +520,19 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
                   )}
                   <span>{subFor(e, cameraLabel)}</span>
                 </span>
+                {/* WARP-2978 — the incident the engine grouped this row into (a row the viewer
+                    can see implies its incident is visible to them). */}
+                {e.incident && (
+                  <span className="sub">
+                    <Link
+                      href={`/security/incidents/${encodeURIComponent(e.incident.id)}`}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--brand)" }}
+                    >
+                      {COPY.inIncident}
+                      <ArrowRight size={12} aria-hidden />
+                    </Link>
+                  </span>
+                )}
               </span>
               <time className="rmeta mono" dateTime={e.startedAt} title={new Date(e.startedAt).toLocaleString()}>
                 {formatRelativeTime(e.startedAt, props.now)}

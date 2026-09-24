@@ -17,8 +17,14 @@ import { useMemo, useState } from "react";
 import { Shield } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ModeCard } from "@/components/security/ModeCard";
-import { SecurityFeed, kindsForView, type SecurityView } from "@/components/security/SecurityFeed";
-import { useCameraDisplayNames, useSecurityFeed, useSecurityHealth, useSecurityZones } from "@/lib/hooks/useSecurity";
+import { AlertsLine, SecurityFeed, kindsForView, type SecurityView } from "@/components/security/SecurityFeed";
+import {
+  useCameraDisplayNames,
+  useSecurityFeed,
+  useSecurityHealth,
+  useSecurityIncidentSummary,
+  useSecurityZones,
+} from "@/lib/hooks/useSecurity";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
 import { useAuth } from "@/lib/auth";
 
@@ -60,6 +66,8 @@ export default function SecurityPage() {
   const feed = useSecurityFeed(filter);
   const health = useSecurityHealth();
   const cameraLabel = useCameraDisplayNames();
+  // WARP-2978 — whether after-hours alerts can fire; unknown (loading or failed) says nothing.
+  const summary = useSecurityIncidentSummary();
 
   return (
     <ShellPage icon={<Shield size={15} />} label="Security" title="Security" sub={PAGE_SUB}>
@@ -74,6 +82,7 @@ export default function SecurityPage() {
             health.refresh();
           }}
         />
+        <AlertsLine alertsReady={summary.summary ? summary.summary.alertsReady : null} />
         <SecurityFeed
           sources={health.sources}
           healthError={health.error}

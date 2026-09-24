@@ -169,6 +169,13 @@ import type {
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
+  AlertRoutingPerson,
+  AlertRoutingSetBody,
+  AlertRoutingView,
+  IncidentActionResult,
+  IncidentDetail,
+  IncidentsPage,
+  IncidentsSummary,
 } from "./types";
 import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
@@ -9315,6 +9322,94 @@ export async function deleteSecurityHoursException(date: string, version: number
   await securityFetch<unknown>(
     `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}?version=${encodeURIComponent(String(version))}`,
     { method: "DELETE" },
+  );
+}
+
+// ── WARP-2978 (ADR-059 P3 §7 routes 16–22): incidents and who is told about alerts ──
+// Every call goes through `securityFetch`: a failure throws with `.code` (the
+// server's `error.code`) and `.status` — render it with
+// `translateError(err, "security")`, never `err.message`. Reads are view-level
+// for every household role and never produce a feature-gate denial (the threat
+// mirror would show one as a threat); acknowledge/resolve are act, the routing
+// PUT is manage, and the page renders those controls only at that level.
+// Everything a read returns is already projected for the viewer (DS-005).
+
+export const SECURITY_INCIDENTS_PATH = "/api/security/incidents";
+export const SECURITY_INCIDENT_SUMMARY_PATH = "/api/security/incidents/summary";
+export const SECURITY_ALERT_ROUTING_PATH = "/api/security/alert-routing";
+
+export interface SecurityIncidentsQuery {
+  /** `attention` = open incidents nobody is on yet (visible codes only). The box defaults to `all`. */
+  state?: "attention" | "open" | "acknowledged" | "resolved" | "activity" | "all";
+  severity?: "alert" | "notice";
+  /** An area id. A hidden or missing area answers an empty page, never an error. */
+  zone?: string;
+  /** 1–100; the box defaults to 30. */
+  limit?: number;
+  /** `nextCursor` from the previous page. */
+  cursor?: string | null;
+}
+
+export function securityIncidentsPath(q: SecurityIncidentsQuery = {}): string {
+  const p = new URLSearchParams();
+  if (q.state) p.set("state", q.state);
+  if (q.severity) p.set("severity", q.severity);
+  if (q.zone) p.set("zone", q.zone);
+  if (q.limit) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  const qs = p.toString();
+  return `${SECURITY_INCIDENTS_PATH}${qs ? `?${qs}` : ""}`;
+}
+
+/** 16 — a page of incidents, newest activity first. A 503 is an outage, never an empty list. */
+export function getSecurityIncidents(q: SecurityIncidentsQuery = {}): Promise<IncidentsPage> {
+  return securityFetch<IncidentsPage>(`${BASE}${securityIncidentsPath(q)}`);
+}
+
+/** 17 — open alerts / notices for this viewer, the latest three, and whether alerts can fire. */
+export function getSecurityIncidentSummary(): Promise<IncidentsSummary> {
+  return securityFetch<IncidentsSummary>(`${BASE}${SECURITY_INCIDENT_SUMMARY_PATH}`);
+}
+
+/** 18 — one incident. 404 INCIDENT_NOT_FOUND answers a missing AND a hidden incident alike. */
+export function getSecurityIncident(id: string): Promise<IncidentDetail> {
+  return securityFetch<IncidentDetail>(`${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 19 (act) — "someone is on it". `notificationId` is the alert notification
+ * the page was opened from (`?n=`); the box records it only when it is this
+ * person's own notice for this incident, and otherwise drops it.
+ */
+export function acknowledgeSecurityIncident(
+  id: string,
+  opts: { notificationId?: string | null } = {},
+): Promise<IncidentActionResult> {
+  return securityFetch<IncidentActionResult>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/acknowledge`,
+    jsonBody("POST", opts.notificationId ? { notificationId: opts.notificationId } : {}),
+  );
+}
+
+/** 20 (act) — done, with an optional note of at most 280 characters. The body is strict: no empty note is sent. */
+export function resolveSecurityIncident(id: string, opts: { note?: string } = {}): Promise<IncidentActionResult> {
+  const note = (opts.note ?? "").trim();
+  return securityFetch<IncidentActionResult>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/resolve`,
+    jsonBody("POST", note ? { note } : {}),
+  );
+}
+
+/** 21 — who is told: everyone at manage, the viewer's own line below it (a filter, not a gate). */
+export function getAlertRouting(): Promise<AlertRoutingView> {
+  return securityFetch<AlertRoutingView>(`${BASE}${SECURITY_ALERT_ROUTING_PATH}`);
+}
+
+/** 22 (manage) — tell or stop telling one person. 409 NO_RECIPIENT when it would leave nobody who can be told. */
+export function putAlertRouting(userId: string, body: AlertRoutingSetBody): Promise<{ person: AlertRoutingPerson }> {
+  return securityFetch<{ person: AlertRoutingPerson }>(
+    `${BASE}${SECURITY_ALERT_ROUTING_PATH}/${encodeURIComponent(userId)}`,
+    jsonBody("PUT", body),
   );
 }
 

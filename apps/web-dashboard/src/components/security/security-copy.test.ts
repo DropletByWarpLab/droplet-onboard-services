@@ -28,14 +28,14 @@
  *     nodes and the aria-label / title / placeholder / alt / label string
  *     attributes of every file in both folders.
  *
- * NEGATION: an explicit ALLOW-LIST, not a negation-aware matcher. There are
- * exactly two exceptions, each pinned to the one place it lives and checked
- * to still exist, so a stale entry fails instead of silently widening:
+ * NEGATION: an explicit ALLOW-LIST, not a negation-aware matcher. There is
+ * exactly one exception, pinned to the one place it lives and checked to
+ * still exist, so a stale entry fails instead of silently widening:
  *   · MODE_DISCLAIMER's sentence "It doesn't lock doors, arm anything, or call
  *     anyone." — it has to name "arm" to deny it. Only that exact sentence is
  *     cut out; the rest of the disclaimer is scanned like everything else.
- *   · P2a's COPY KEY `notAlarm` in SecurityFeed (a key name, never shown; its
- *     value is scanned).
+ * (WARP-2978 removed the second one, P2a's COPY key `notAlarm`, with the key:
+ * its line became `alertsLine` / `alertsNotReady`. No key is exempt now.)
  * A negation-aware rule was rejected: "doesn't … arm" and "isn't armed" read
  * the same to a regex as "arm it" after a clause break, so it would let
  * positive claims through whenever a "not" appears earlier in the sentence.
@@ -111,8 +111,8 @@ const ALLOWED_SENTENCES: ReadonlyArray<{ where: string; sentence: string }> = [
     sentence: "It doesn't lock doors, arm anything, or call anyone.",
   },
 ];
-/** Keys of exported COPY objects that are allowed to hold a banned word (never shown). */
-const ALLOWED_KEYS: ReadonlyArray<string> = ["src/components/security/SecurityFeed.tsx COPY.notAlarm"];
+/** Keys of exported COPY objects that are allowed to hold a banned word (never shown). None since WARP-2978. */
+const ALLOWED_KEYS: ReadonlyArray<string> = [];
 
 interface Found {
   where: string;
@@ -209,14 +209,15 @@ describe("Security copy lint (spec §8)", () => {
     expect(values).toContainEqual({ where: "src/components/security/ModeCard.tsx MODE_DISCLAIMER", text: ModeCard.MODE_DISCLAIMER });
     expect(values.some((v) => v.where.startsWith("src/components/security/AreasPanel.tsx COPY."))).toBe(true);
     expect(values.some((v) => v.where.startsWith("src/components/security/HoursEditor.tsx COPY."))).toBe(true);
-    expect(keys.some((k) => k.where === "src/components/security/SecurityFeed.tsx COPY.notAlarm")).toBe(true);
+    expect(keys.some((k) => k.where === "src/components/security/SecurityFeed.tsx COPY.alertsLine")).toBe(true);
+    expect(keys.some((k) => k.where.endsWith("COPY.notAlarm"))).toBe(false);
   });
 
   it("no exported string says monitor, armed, arm, alarm, secure, protected, guard, space or zone", () => {
     expect(violations(collect().values)).toEqual([]);
   });
 
-  it("no COPY key says them either (apart from the allow-listed notAlarm)", () => {
+  it("no COPY key says them either", () => {
     expect(violations(collect().keys, ALLOWED_KEYS)).toEqual([]);
   });
 
