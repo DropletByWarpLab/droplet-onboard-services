@@ -37,6 +37,7 @@ import {
   securityLockHealthRow,
   startSecurityLockAdapter,
   stillUnlockedLocks,
+  type KnownLock,
   type LockDeviceSource,
   type LockHealthInput,
   type LockLogger,
@@ -1271,7 +1272,7 @@ describe("adapter.listLocks — a FRESH list of the paired door-lock endpoints, 
 });
 
 describe("stillUnlockedLocks — the names a Close up / Away answer lists (never 'all locked')", () => {
-  const known = (over: Partial<Parameters<typeof stillUnlockedLocks>[0][number]>) => ({
+  const known = (over: Partial<KnownLock>): KnownLock => ({
     ref: REF,
     nodeId: NODE,
     endpointId: 1,
