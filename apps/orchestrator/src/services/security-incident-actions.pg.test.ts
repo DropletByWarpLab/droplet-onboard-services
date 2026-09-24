@@ -151,6 +151,9 @@ describe.skipIf(!RUN)("Incident acknowledgement against real Postgres (WARP-2978
     const rows = await prisma.activityRow.findMany({ where: afterFloor(floor) });
     const mine = rows.filter((r) => (r.refs as Record<string, unknown> | null)?.incidentId === id);
     expect(mine).toHaveLength(2);
+    // Review b7e1: each signed row carries what its actor could see beside the incident-wide codes.
+    expect(mine.map((r) => (r.refs as Record<string, unknown>).visibleCodes)).toEqual([["camera_offline"], ["camera_offline"]]);
+    expect(mine.map((r) => (r.refs as Record<string, unknown>).codes)).toEqual([["camera_offline"], ["camera_offline"]]);
     expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
   });
 

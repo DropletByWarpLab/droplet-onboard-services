@@ -7,10 +7,14 @@
  * and the alert notification it came from (stored only when verified).
  *
  * The table (§6.6), judged on the VIEWER's projection (DS-005: a viewer whose
- * visible codes are empty sees plain activity and can act on nothing):
+ * visible codes are empty sees plain activity and can act on nothing; a
+ * PARTIAL viewer — a reason at the incident's top severity is on a camera
+ * they cannot see, `projectIncident` — acts on nothing either, because both
+ * actions settle the whole incident for everyone):
  *
  *   from \ action  | acknowledge                                   | resolve
  *   no visible code| 409 NOT_ACTIONABLE                            | 409 NOT_ACTIONABLE
+ *   or partial     |                                               |
  *   open           | → acknowledged, ack row                        | → resolved + sealed, ack row
  *   acknowledged   | this person has no row yet → ack row (state    | → resolved + sealed, ack row
  *                  | unchanged, D23: every person's first ack is    |
@@ -193,6 +197,11 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
           ackId: ack.id,
           severity: row.severity,
           codes: [...row.reasonCodes],
+          // Review b7e1: what the actor could SEE when they acted, beside the
+          // incident-wide codes (a hidden reason below the top severity is in
+          // `codes` and not here). Audit refs are read only through the
+          // owner/admin activity routes, who see every camera: no DS-005 leak.
+          visibleCodes: [...view.codes],
           state: write.state,
         },
       });

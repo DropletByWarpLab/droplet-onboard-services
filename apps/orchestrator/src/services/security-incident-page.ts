@@ -59,8 +59,13 @@ export async function projectedIncidentPage(
   const someVisible = reasons(Prisma.empty);
   const visibleAlert = reasons(Prisma.sql` AND r."severity" = 'alert'`);
   const visibleNotice = reasons(Prisma.sql` AND r."severity" = 'notice'`);
-  // Not partial: the top severity is visible.
-  const full = Prisma.sql`(i."severity" <> 'alert' OR ${visibleAlert})`;
+  // PARTIAL — `projectIncident`'s rule (review b7e1): a reason AT THE
+  // INCIDENT'S OWN (top) SEVERITY whose evidence the viewer cannot see. Per
+  // reason, not per code (the same code on a hidden camera counts), and at
+  // every top severity (a hidden notice under a notice-level incident too).
+  const topHidden = Prisma.sql`EXISTS (SELECT 1 FROM "SecurityIncidentReason" r WHERE r."incidentId" = i."id" AND r."severity" = i."severity" AND NOT ${visReason})`;
+  // Not partial: every reason at the top severity is visible.
+  const full = Prisma.sql`(NOT ${topHidden})`;
 
   // incidentVisibilityWhere for a camera list.
   const where: Prisma.Sql[] = [
@@ -72,7 +77,7 @@ export async function projectedIncidentPage(
     case "attention":
     case "open":
       where.push(
-        Prisma.sql`(${someVisible} AND ((i."state" = 'open' AND ${full}) OR (i."state" IN ('open', 'acknowledged') AND i."severity" = 'alert' AND NOT ${visibleAlert})))`,
+        Prisma.sql`(${someVisible} AND ((i."state" = 'open' AND ${full}) OR (i."state" IN ('open', 'acknowledged') AND ${topHidden})))`,
       );
       break;
     case "acknowledged":

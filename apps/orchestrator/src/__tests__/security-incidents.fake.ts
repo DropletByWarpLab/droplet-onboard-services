@@ -351,7 +351,7 @@ function clone<T>(v: T): T {
   return structuredClone(v);
 }
 
-// ── the CHECK mirrors (20260925020000_warp_2978_security_incidents; PR-D's 20260925030100) ──
+// ── the CHECK mirrors (20260925030000_warp_2978_security_incidents; PR-D's 20260925030100) ──
 
 function check(table: TableName, r: Row): void {
   const fail = (name: string) => {

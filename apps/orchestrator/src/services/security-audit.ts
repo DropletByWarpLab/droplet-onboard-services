@@ -87,8 +87,9 @@ export type SecurityAuditAction =
   | "zone.links"
   /**
    * WARP-2978 (ADR-059 P3 §6.9). A person acknowledged / resolved an incident
-   * (in-tx, last). refs `{incidentId, ackId, severity, codes, state}` — never
-   * the resolve note (user text stays off the chain).
+   * (in-tx, last). refs `{incidentId, ackId, severity, codes, visibleCodes,
+   * state}`: `codes` incident-wide, `visibleCodes` the ones the actor could
+   * see (review b7e1). Never the resolve note (user text stays off the chain).
    */
   | "incident.acknowledge"
   | "incident.resolve"

@@ -18,9 +18,10 @@
 -- read — never upsert({update:{}}), which Prisma 5 runs as read-then-insert.
 --
 -- RE-RUNNABLE (review R2; the repo idiom, WARP-2896's and WARP-2804's). This
--- folder has been re-stamped twice (20260924050000 → 20260924070000 →
--- 20260925020000) while it was unmerged, so a dev box that applied an earlier
--- stamp runs it again under the new name. Every statement is therefore a
+-- folder has been re-stamped three times (20260924050000 → 20260924070000 →
+-- 20260925020000 → 20260925030000, past #2357's 20260925020000_warp_3060)
+-- while it was unmerged, so a dev box that applied an earlier stamp runs it
+-- again under the new name. Every statement is therefore a
 -- no-op the second time, and a box that applied the pre-review shape is
 -- brought to this one rather than left behind:
 --   · the types are created in a DO block that swallows duplicate_object;
@@ -182,6 +183,16 @@ CREATE TABLE IF NOT EXISTS "SecurityIncident" (
 
 -- Added in review (#4): an incident created before it has no per-camera span
 -- (`{}` — every viewer then sees the stored times). No default afterwards.
+--
+-- CONVERGED OLD-STAMP ROWS (review b7e1). Only a box that applied an earlier
+-- stamp of this folder (the pre-review shape) holds incidents from before
+-- this column, and this folder was never on stage or a shipped box: dev boxes
+-- only. Those rows get `{}` and are not backfilled. With no entry to project,
+-- `shownSpans` (security-incident-view.ts) and `projectedIncidentPage` fall
+-- back to the STORED first/last activity and grouping for every viewer, a
+-- camera-limited one included: on those rows a hidden camera's activity can
+-- still move her times and her list order (the pre-review #4 behaviour).
+-- Every incident the engine opens from here on carries its spans.
 ALTER TABLE "SecurityIncident" ADD COLUMN IF NOT EXISTS "spanByCamera" JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE "SecurityIncident" ALTER COLUMN "spanByCamera" DROP DEFAULT;
 

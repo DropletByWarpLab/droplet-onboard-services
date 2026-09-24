@@ -91,7 +91,7 @@ describe("projectIncident — what one viewer may know", () => {
       expect(projectIncident(incident({ state: "resolved", grouping: "closed" }), mixed, frontOnly, NOW)!.state).toBe("resolved");
     });
 
-    it("a viewer who can see the alert code is a FULL viewer: stored state, actionable", () => {
+    it("a viewer who can see every alert is a FULL viewer — a hidden notice BELOW the top severity does not matter: stored state, actionable", () => {
       const flipped = [reason("after_hours_presence", "front", "alert"), reason("camera_offline", "back", "notice")];
       expect(projectIncident(incident({ state: "acknowledged" }), flipped, frontOnly, NOW)).toMatchObject({
         partial: false,
@@ -99,6 +99,58 @@ describe("projectIncident — what one viewer may know", () => {
         severity: "alert",
         state: "acknowledged",
       });
+    });
+  });
+
+  // Review b7e1 (blocking): reasons are per (code, evidence), so the SAME code on
+  // a hidden camera is a hidden reason. Stock room, closed: a person on `front`
+  // (Maria sees it) and a second person on `back` (she does not).
+  describe("the same code on a hidden camera — a PARTIAL view", () => {
+    const twoAlerts = [reason("after_hours_presence", "front", "alert"), reason("after_hours_presence", "back", "alert")];
+
+    it("front-only viewer of [after_hours_presence@front, after_hours_presence@back]: partial, not actionable, open", () => {
+      for (const state of ["open", "acknowledged"] as const) {
+        const p = projectIncident(incident({ state, reasonCodes: ["after_hours_presence"] }), twoAlerts, frontOnly, NOW)!;
+        expect(p, state).toMatchObject({
+          partial: true,
+          actionable: false,
+          state: "open",
+          severity: "alert",
+          codes: ["after_hours_presence"],
+        });
+        expect(p.reasons.map((r) => r.evidenceCamera)).toEqual(["front"]);
+      }
+      const resolved = incident({ state: "resolved", grouping: "closed", reasonCodes: ["after_hours_presence"] });
+      expect(projectIncident(resolved, twoAlerts, frontOnly, NOW)).toMatchObject({ partial: true, actionable: false, state: "resolved" });
+    });
+
+    it("a viewer who sees both cameras, and the owner, are full", () => {
+      const both = { ...frontOnly, visibleCameras: new Set(["front", "back"]) };
+      const i = incident({ state: "acknowledged", reasonCodes: ["after_hours_presence"] });
+      expect(projectIncident(i, twoAlerts, both, NOW)).toMatchObject({ partial: false, actionable: true, state: "acknowledged" });
+      expect(projectIncident(i, twoAlerts, owner, NOW)).toMatchObject({ partial: false, actionable: true, state: "acknowledged" });
+    });
+
+    // The notice twin: acknowledge / resolve settle the incident for everyone at
+    // ANY top severity, so a hidden notice under a notice-level incident counts.
+    it("notice level: [camera_offline@front, camera_offline@back] with top severity notice is partial for a front-only viewer", () => {
+      const twoNotices = [reason("camera_offline", "front", "notice"), reason("camera_offline", "back", "notice")];
+      const i = incident({ severity: "notice", state: "acknowledged", reasonCodes: ["camera_offline"] });
+      expect(projectIncident(i, twoNotices, frontOnly, NOW)).toMatchObject({
+        partial: true,
+        actionable: false,
+        state: "open",
+        severity: "notice",
+        codes: ["camera_offline"],
+      });
+      // …and a notice-level incident whose every notice she sees is hers to act on.
+      expect(projectIncident(i, [reason("camera_offline", "front", "notice")], frontOnly, NOW)).toMatchObject({ partial: false, actionable: true });
+    });
+
+    it("a hidden reason BELOW the top severity never makes it partial, whatever its code", () => {
+      const i = incident({ state: "open" });
+      const below = [reason("after_hours_presence", "front", "alert"), reason("camera_offline", "back", "notice"), reason("camera_offline", "front", "notice")];
+      expect(projectIncident(i, below, frontOnly, NOW)).toMatchObject({ partial: false, actionable: true, codes: ["after_hours_presence", "camera_offline"] });
     });
   });
 
@@ -208,19 +260,29 @@ describe("the list's SQL mirrors the projection (DS-005 in the query, visibility
   it("`attention` is an open incident with a visible code — for a PARTIAL view, open or acknowledged (it reads open); `activity` is no visible code at all", () => {
     const attention = incidentListWhere(frontOnly, { state: "attention" }) as { AND: unknown[] };
     const vis = visibleReasonWhere(frontOnly);
+    // Partial: a reason at the incident's own severity on a hidden camera (review b7e1).
+    const full = {
+      OR: [
+        { severity: "info" },
+        { severity: "alert", reasons: { none: { severity: "alert", NOT: vis } } },
+        { severity: "notice", reasons: { none: { severity: "notice", NOT: vis } } },
+      ],
+    };
+    const topHidden = {
+      OR: [
+        { severity: "alert", reasons: { some: { severity: "alert", NOT: vis } } },
+        { severity: "notice", reasons: { some: { severity: "notice", NOT: vis } } },
+      ],
+    };
     expect(attention.AND).toContainEqual({
       reasons: { some: vis },
       OR: [
-        { state: "open", OR: [{ severity: { not: "alert" } }, { reasons: { some: { AND: [vis, { severity: "alert" }] } } }] },
-        { state: { in: ["open", "acknowledged"] }, severity: "alert", reasons: { none: { AND: [vis, { severity: "alert" }] } } },
+        { state: "open", ...full },
+        { state: { in: ["open", "acknowledged"] }, ...topHidden },
       ],
     });
     const acknowledged = incidentListWhere(frontOnly, { state: "acknowledged" }) as { AND: unknown[] };
-    expect(acknowledged.AND).toContainEqual({
-      state: "acknowledged",
-      reasons: { some: vis },
-      OR: [{ severity: { not: "alert" } }, { reasons: { some: { AND: [vis, { severity: "alert" }] } } }],
-    });
+    expect(acknowledged.AND).toContainEqual({ state: "acknowledged", reasons: { some: vis }, ...full });
     // The owner can never be partial: the plain filters.
     expect((incidentListWhere(owner, { state: "attention" }) as { AND: unknown[] }).AND).toContainEqual({ state: "open", reasons: { some: {} } });
     const activity = incidentListWhere(frontOnly, { state: "activity" }) as { AND: unknown[] };

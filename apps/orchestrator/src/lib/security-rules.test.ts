@@ -266,7 +266,7 @@ describe("threat_signal (notice) — a mirrored network or sign-in warning", () 
 describe("the database pins D18: the CHECK's code/severity pairs are exactly the RULESET's", () => {
   it("SecurityIncidentReason_code_severity matches RULESET", () => {
     const sql = readFileSync(
-      path.join(PACKAGE_ROOT, "prisma", "migrations", "20260925020000_warp_2978_security_incidents", "migration.sql"),
+      path.join(PACKAGE_ROOT, "prisma", "migrations", "20260925030000_warp_2978_security_incidents", "migration.sql"),
       "utf8",
     );
     const check = /"SecurityIncidentReason_code_severity" CHECK \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? "";
