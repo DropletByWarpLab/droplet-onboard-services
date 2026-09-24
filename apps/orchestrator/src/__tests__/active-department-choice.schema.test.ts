@@ -85,7 +85,7 @@ describe("WARP-2981 schema: ActiveDepartmentChoice", () => {
     expect(model("Department")).toMatch(/\bactiveChoices\s+ActiveDepartmentChoice\[\]/);
   });
 
-  it("is stamped 20260925040000 — after stage's newest and the stamps the open ADR-059 PRs reserved", () => {
+  it("is stamped 20260925040000 — after stage's newest, clear of the stamps the open ADR-059 PRs hold", () => {
     expect(migrationFolder()).toBe("20260925040000_warp_2981_active_department_choice");
   });
 

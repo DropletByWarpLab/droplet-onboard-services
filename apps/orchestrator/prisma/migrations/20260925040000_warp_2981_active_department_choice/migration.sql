@@ -13,9 +13,10 @@
 -- choice is a first-paint cache, not migrated. A box with the P1 tables and no
 -- rows here reads "never chosen" for everyone, which is today's behaviour.
 --
--- Stamped after stage's newest (20260925020000) and after the stamps the open
--- ADR-059 PRs reserved (000000/000100 locks, 030000/030100 early presence), so
--- the PRs merge in any order.
+-- Stamped after stage's newest (20260925020000) and clear of the stamps the
+-- other open ADR-059 PRs hold: 030000 incidents (#2354), 030100/030200 early
+-- presence (#2360, squashed into #2354), 050000/050100 door locks (#2350). So
+-- no two collide, and the PRs merge in any order.
 --
 -- CHANGED IN PLACE (review of the P6 PR, before it reached stage). The first
 -- version had no `scope`: a row was always a department and Whole business was
