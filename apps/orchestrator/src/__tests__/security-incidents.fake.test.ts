@@ -89,7 +89,7 @@ describe("the incident fake's transactions (the WARP-1570 seam)", () => {
 
 /**
  * WARP-2978 PR-D — the fake mirrors SecurityEvent_ongoing_shape
- * (20260925030100), so an engine bug that would write an ill-formed ongoing
+ * (20260925030200), so an engine bug that would write an ill-formed ongoing
  * row fails in the mocked lane the way Postgres would refuse it.
  */
 describe("the incident fake's SecurityEvent_ongoing_shape mirror", () => {

@@ -4,10 +4,10 @@
  * is as append-only as every SecurityEvent, and both migration folders re-run
  * as no-ops.
  *
- *   20260925030000_warp_2978_security_event_ongoing_value — the enum value,
+ *   20260925030100_warp_2978_security_event_ongoing_value — the enum value,
  *     in its own folder (Postgres will not let one transaction USE a value it
  *     added, and the next folder's CHECK compares against it);
- *   20260925030100_warp_2978_security_event_ongoing_shape — the CHECK:
+ *   20260925030200_warp_2978_security_event_ongoing_shape — the CHECK:
  *     an ongoing row is a Frigate row with a camera, no end yet, and a key in
  *     the `frigate-ongoing:` namespace.
  *
@@ -45,8 +45,8 @@ const RUN =
   process.env.DATABASE_URL.length > 0;
 
 const TAG = "warp2978d";
-const VALUE_FOLDER = "20260925030000_warp_2978_security_event_ongoing_value";
-const SHAPE_FOLDER = "20260925030100_warp_2978_security_event_ongoing_shape";
+const VALUE_FOLDER = "20260925030100_warp_2978_security_event_ongoing_value";
+const SHAPE_FOLDER = "20260925030200_warp_2978_security_event_ongoing_shape";
 
 /** Thrown to roll a probe transaction back after a successful insert. */
 class Rollback extends Error {}

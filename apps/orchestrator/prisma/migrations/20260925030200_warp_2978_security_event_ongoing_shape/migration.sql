@@ -15,6 +15,12 @@
 -- re-run replaces the definition rather than failing on the name. Re-adding
 -- re-validates SecurityEvent (30 days of rows); every existing row passes,
 -- because no row can hold the new kind before this folder's sibling added it.
+--
+-- Re-stamped 20260925030100 → 20260925030200 while unmerged, behind its
+-- sibling (20260925030100_warp_2978_security_event_ongoing_value), which the
+-- incidents backend's move to 20260925030000 pushed along. A dev box that
+-- applied the old stamp runs this again under the new name: DROP IF EXISTS +
+-- ADD makes that a no-op.
 
 ALTER TABLE "SecurityEvent" DROP CONSTRAINT IF EXISTS "SecurityEvent_ongoing_shape";
 ALTER TABLE "SecurityEvent"
