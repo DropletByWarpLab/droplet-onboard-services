@@ -18,6 +18,27 @@ export const WORKSPACE_STATUS_LABELS: Record<WorkspaceStatus, string> = {
   archived: "Archived",
 };
 
+/**
+ * WARP-2974 — what the box's templates are called to a person (the Workshop
+ * design brief §3.5). Keyed by the directory name under
+ * `extensions/templates/`; an unknown template shows its raw id.
+ */
+export const TEMPLATE_LABELS: Record<string, { label: string; blurb: string }> = {
+  "typescript-tool": {
+    label: "TypeScript MCP server (Node 20)",
+    blurb: "Composes tools this box already has and shapes their data.",
+  },
+  "python-tool": {
+    label: "Python MCP server (3.12)",
+    blurb: "Composes tools this box already has and shapes their data.",
+  },
+};
+
+export function templateLabel(id: string | null | undefined): string {
+  if (!id) return "an empty workspace";
+  return TEMPLATE_LABELS[id]?.label ?? id;
+}
+
 export interface WorkspaceRunRef {
   id: string;
   status: string;

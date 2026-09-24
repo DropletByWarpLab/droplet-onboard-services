@@ -25,10 +25,12 @@ export const AGENT_RUN_STATUSES: readonly AgentRunStatus[] = [
   "cancelled",
 ];
 
+// WARP-2974 — one vocabulary for a parked run on every viewport (the Workshop
+// design brief's D-1): `Needs your OK` · `Approve and continue` · `Decline`.
 export const STATUS_LABELS: Record<AgentRunStatus, string> = {
   queued: "Queued",
   running: "Running",
-  awaiting_confirmation: "Needs approval",
+  awaiting_confirmation: "Needs your OK",
   succeeded: "Finished",
   failed: "Failed",
   cancelled: "Cancelled",
