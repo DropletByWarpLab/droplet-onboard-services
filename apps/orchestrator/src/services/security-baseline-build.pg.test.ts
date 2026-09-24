@@ -512,6 +512,43 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
       expect(await prisma.securityBaselineBuild.findUniqueOrThrow({ where: { id: live.id } })).toMatchObject({ state: "failed", error: "interrupted" });
     }, 180_000);
 
+    it("two rebuilds of one area at once both succeed and leave one consistent set of cells (the cells lock; review #2352)", async () => {
+      await sweepBuilds();
+      const b = await runFullBuild(prisma, "first", TZ, NOW);
+      const buildId = (b as { buildId: string }).buildId;
+      const key = `area:${zoneIds[0]}`;
+      const before = await prisma.securityBaselineCell.count({ where: { buildId, zoneKey: key } });
+      expect(before).toBeGreaterThan(0);
+      // Hold one of the area's cells, so both rebuilds are inside their transactions at the same time.
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let isLocked!: () => void;
+      const locked = new Promise<void>((r) => (isLocked = r));
+      const blocker = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRawUnsafe(
+            'SELECT id FROM "SecurityBaselineCell" WHERE "buildId" = $1 AND "zoneKey" = $2 ORDER BY id LIMIT 1 FOR UPDATE',
+            buildId,
+            key,
+          );
+          isLocked();
+          await held;
+        },
+        { timeout: 60_000 },
+      );
+      await locked;
+      const both = Promise.allSettled([rebuildAreas(prisma, [zoneIds[0]!]), rebuildAreas(prisma, [zoneIds[0]!])]);
+      await new Promise((r) => setTimeout(r, 700));
+      release();
+      await blocker;
+      const results = await both;
+      expect(results.map((r) => (r.status === "rejected" ? String(r.reason).slice(0, 120) : r.status))).toEqual(["fulfilled", "fulfilled"]);
+      const after = await prisma.securityBaselineCell.findMany({ where: { buildId, zoneKey: key } });
+      expect(after).toHaveLength(before);
+      expect(new Set(after.map((c) => `${c.label}:${c.dayType}:${c.hour}`)).size).toBe(after.length);
+      expect((await prisma.securityBaselineBuild.findUniqueOrThrow({ where: { id: buildId } })).cellsVersion).toBe(3);
+    }, 180_000);
+
     it("rebuildAreas moves an area to its new version and bumps cellsVersion; an archived area's cells are dropped", async () => {
       await sweepBuilds();
       const b = await runFullBuild(prisma, "first", TZ, NOW);

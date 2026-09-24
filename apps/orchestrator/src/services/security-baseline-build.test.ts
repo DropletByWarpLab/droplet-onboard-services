@@ -5,6 +5,9 @@
  * reference built on `zonesForEvent` — is security-baseline-build.pg.test.ts.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PACKAGE_ROOT } from "../__tests__/helpers/test-paths.js";
 import {
   BASELINE_BUILDS_KEPT,
   BASELINE_BUILD_CLAIM_STALE_MS,
@@ -34,6 +37,10 @@ function fake(opts: { claimFails?: unknown; buildFails?: unknown; inserted?: num
     $executeRawUnsafe: vi.fn(async (sql: string) => {
       push("tx.$executeRawUnsafe")(sql);
       return 0;
+    }),
+    $queryRawUnsafe: vi.fn(async (sql: string) => {
+      push("tx.$queryRawUnsafe")(sql);
+      return [{ locked: false }];
     }),
     $executeRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       push("tx.$executeRaw")({ sql: strings.join("?"), values });
@@ -225,6 +232,7 @@ describe("rebuildAreas — one area's cells rebuilt from the ready build's own w
       "build.findFirst",
       "$transaction",
       "tx.$executeRawUnsafe",
+      "tx.$queryRawUnsafe", // the cells lock: concurrent rebuilds of one area take turns
       "tx.cell.deleteMany",
       "tx.$executeRaw",
       "tx.cell.count",
@@ -253,10 +261,28 @@ describe("rebuildAreas — one area's cells rebuilt from the ready build's own w
     expect(sql.indexOf("link AS (")).toBeLessThan(sql.indexOf("cam_obs AS ("));
   });
 
+  it("concurrent area rebuilds take turns on one transaction-level advisory lock, taken before the delete (review #2352, finding 5)", async () => {
+    const f = fake({ ready: READY });
+    await rebuildAreas(f.prisma, ["z-1"]);
+    const lock = f.log.find((c) => c.op === "tx.$queryRawUnsafe")!.args as string;
+    expect(lock).toMatch(/pg_advisory_xact_lock\(hashtext\('droplet:security-baseline-cells'\)\)/);
+  });
+
   it("no ready build → nothing to rebuild", async () => {
     const f = fake({ ready: null });
     expect(await rebuildAreas(f.prisma, ["z-1"])).toEqual({ status: "no_ready_build" });
     expect(f.ops()).toEqual(["build.findFirst"]);
+  });
+});
+
+describe("a build fits inside the tick's advisory lock (review #2352, finding 5)", () => {
+  it("40 s per statement, 50 s per transaction: under the cron runtime's 60 s lock with room for the rest of the tick", () => {
+    expect(BASELINE_BUILD_STATEMENT_TIMEOUT).toBe("40s");
+    expect(BASELINE_BUILD_TX_TIMEOUT_MS).toBe(50_000);
+    const cron = readFileSync(join(PACKAGE_ROOT, "src", "services", "cron-runtime.service.ts"), "utf8");
+    const lockMs = Number(/\{ timeout: ([0-9_]+) \}/.exec(cron)![1]!.replace(/_/g, ""));
+    expect(lockMs).toBe(60_000);
+    expect(BASELINE_BUILD_TX_TIMEOUT_MS).toBeLessThan(lockMs);
   });
 });
 

@@ -88,6 +88,13 @@ export const BASELINE_BUILD_RETRY_AFTER_MS = 60 * 60_000;
 export const BASELINE_AREA_REBUILD_RETRY_AFTER_MS = 60 * 60_000;
 /** `scheduleInterval` has no immediate tick: a freshly registered job gets this long before "hasn't checked" reads as down. */
 export const SECURITY_BASELINE_GRACE_MS = 3 * 60_000;
+/**
+ * A full build or an area rebuild starts only within this long of the tick's
+ * start: with BASELINE_BUILD_TX_TIMEOUT_MS it must end before the cron
+ * runtime's 60 s advisory-lock transaction does (review #2352). A slow tick
+ * leaves its build to the next one.
+ */
+export const SECURITY_BASELINE_BUILD_START_BUDGET_MS = 5_000;
 /** Frigate's /api/stats, read every tick for coverage: short, so a slow Frigate cannot eat the tick. */
 export const SECURITY_BASELINE_STATS_TIMEOUT_MS = 3_000;
 
@@ -164,6 +171,8 @@ export interface BaselineJobDeps {
   stats?: () => Promise<unknown>;
   /** Default: this boot's random id. */
   processId?: string;
+  /** Wall-clock milliseconds for the tick's start budget. Default: Date.now. */
+  clock?: () => number;
 }
 
 /** The live ingest + tracker state, as coverage reads it. */
@@ -330,6 +339,9 @@ export async function tickSecurityBaselines(
   deps: BaselineJobDeps = {},
 ): Promise<BaselineTickResult> {
   const processId = deps.processId ?? BOOT_PROCESS_ID;
+  const clock = deps.clock ?? Date.now;
+  const tickStart = clock();
+  const mayStartBuild = () => clock() - tickStart <= SECURITY_BASELINE_BUILD_START_BUDGET_MS;
   const result: BaselineTickResult = { zone: null, hourly: false, trigger: null, build: null, rebuiltAreas: [] };
   try {
     const bootClose = !bootClosed.has(processId);
@@ -360,11 +372,13 @@ export async function tickSecurityBaselines(
     }
 
     result.trigger = await fullBuildTrigger(prisma, zone, now);
-    if (result.trigger) {
+    if (result.trigger && !mayStartBuild()) {
+      logger.info({ trigger: result.trigger }, "baseline tick ran long: the full build waits for the next tick");
+    } else if (result.trigger) {
       result.build = await runFullBuild(prisma, result.trigger, zone, now);
       if (result.build.status === "built") await refreshBaselineSources(prisma, zone, now);
     }
-    if (result.build?.status !== "built") result.rebuiltAreas = await rebuildChangedAreas(prisma, zone, now);
+    if (result.build?.status !== "built" && mayStartBuild()) result.rebuiltAreas = await rebuildChangedAreas(prisma, zone, now);
 
     baselineHealth.lastOkAt = now;
     return result;

@@ -35,9 +35,23 @@ import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("security-baseline-build");
 
-/** Bounds the build statement inside its transaction (§6.7, R10). */
-export const BASELINE_BUILD_STATEMENT_TIMEOUT = "45s";
-export const BASELINE_BUILD_TX_TIMEOUT_MS = 55_000;
+/**
+ * Bounds the build statement inside its transaction (§6.7, R10). 40 s / 50 s,
+ * not the spec's 45 s / 55 s (review #2352): the whole tick runs inside the
+ * cron runtime's 60 s advisory-lock transaction, and the build starts only in
+ * the tick's first few seconds (SECURITY_BASELINE_BUILD_START_BUDGET_MS), so
+ * a build always ends while its tick still holds the lock.
+ */
+export const BASELINE_BUILD_STATEMENT_TIMEOUT = "40s";
+export const BASELINE_BUILD_TX_TIMEOUT_MS = 50_000;
+/**
+ * Area rebuilds of one build take turns (a tick that outlived its lock can
+ * overlap the next): both would delete, then both insert, and the second
+ * insert dies on the cell unique key. A transaction-level advisory lock,
+ * taken before the delete, makes the second wait and then replace the
+ * first's rows.
+ */
+export const BASELINE_CELLS_LOCK_KEY = "droplet:security-baseline-cells";
 /** A `building` claim older than this is a dead process's: it is failed as 'interrupted'. */
 export const BASELINE_BUILD_CLAIM_STALE_MS = 10 * 60_000;
 /** Superseded (and failed) builds kept besides the ready one; their cells cascade. */
@@ -381,6 +395,8 @@ export async function rebuildAreas(
   const inserted = await prisma.$transaction(
     async (tx) => {
       await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${BASELINE_BUILD_STATEMENT_TIMEOUT}'`);
+      // Released at commit or rollback; bounded by the statement timeout above.
+      await tx.$queryRawUnsafe(`SELECT (pg_advisory_xact_lock(hashtext('${BASELINE_CELLS_LOCK_KEY}')) IS NULL) AS locked`);
       await tx.securityBaselineCell.deleteMany({
         where: { buildId: ready.id, zoneKey: { in: zoneIds.map((id) => `area:${id}`) } },
       });

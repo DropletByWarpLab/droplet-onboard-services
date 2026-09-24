@@ -451,6 +451,20 @@ describe("refreshBaselineSources — writes the learning state, keeps firstSeenA
     expect(src.deleteMany).toHaveBeenCalledWith({ where: { sourceKey: { notIn: ["camera:front", "camera:back"] } } });
   });
 
+  it("a source row another tick created first (P2002 — a tick that outlived its lock) is not an error (review #2352, finding 5)", async () => {
+    const spans = [{ camera: "front", startedAt: ago(90 * MIN), coveredUntil: ago(MIN) }];
+    const src = {
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockRejectedValue(Object.assign(new Error("unique"), { code: "P2002" })),
+      update: vi.fn(),
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    };
+    const prisma = { securityBaselineSource: src, securityCoverageSpan: { findMany: vi.fn().mockResolvedValue(spans) } } as never;
+    await expect(refreshBaselineSources(prisma, "America/New_York", NOW)).resolves.toMatchObject({ created: 0 });
+    src.create.mockRejectedValue(new Error("db down"));
+    await expect(refreshBaselineSources(prisma, "America/New_York", NOW)).rejects.toThrow("db down");
+  });
+
   it("a state change stamps stateChangedAt", async () => {
     const spans = [{ camera: "front", startedAt: ago(50 * 3_600_000), coveredUntil: ago(49 * 3_600_000) }];
     const src = {

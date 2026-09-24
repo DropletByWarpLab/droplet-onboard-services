@@ -416,18 +416,23 @@ export async function refreshBaselineSources(
     keys.push(sourceKey);
     const row = existing.get(sourceKey);
     if (!row) {
-      await prisma.securityBaselineSource.create({
-        data: {
-          sourceKey,
-          camera: s.camera,
-          state: s.state,
-          daysObserved: s.daysObserved,
-          firstSeenAt: s.firstSeenAt,
-          lastSeenAt: s.lastSeenAt,
-          stateChangedAt: now,
-        },
-      });
-      result.created += 1;
+      try {
+        await prisma.securityBaselineSource.create({
+          data: {
+            sourceKey,
+            camera: s.camera,
+            state: s.state,
+            daysObserved: s.daysObserved,
+            firstSeenAt: s.firstSeenAt,
+            lastSeenAt: s.lastSeenAt,
+            stateChangedAt: now,
+          },
+        });
+        result.created += 1;
+      } catch (err) {
+        // Another tick (one that outlived its lock) created it first: its row is as good as this one.
+        if (!isUniqueViolation(err)) throw err;
+      }
       continue;
     }
     await prisma.securityBaselineSource.update({

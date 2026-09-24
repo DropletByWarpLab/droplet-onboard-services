@@ -27,8 +27,10 @@ vi.mock("./security-baseline-build.js", async (importOriginal) => {
 });
 vi.mock("./camera.service.js", () => ({ securityStatusSnapshot: () => new Map() }));
 
+import { BASELINE_BUILD_TX_TIMEOUT_MS } from "./security-baseline-build.js";
 import {
   BASELINE_BUILD_RETRY_AFTER_MS,
+  SECURITY_BASELINE_BUILD_START_BUDGET_MS,
   SECURITY_BASELINE_GRACE_MS,
   SECURITY_BASELINE_INTERVAL_MS,
   SECURITY_BASELINE_LOCK_KEY,
@@ -256,6 +258,38 @@ describe("tickSecurityBaselines — when a full build runs", () => {
     h.runFullBuild.mockResolvedValueOnce({ status: "claimed_elsewhere" });
     await tickSecurityBaselines(fakePrisma(world({ ready: null })).prisma, ny("15:00"), deps(TZ));
     expect(h.refreshBaselineSources).not.toHaveBeenCalled();
+  });
+});
+
+describe("a tick never starts a build it cannot finish inside its 60 s lock (review #2352, finding 5)", () => {
+  it("the start budget plus a build's transaction stays under the lock, with time to spare", () => {
+    expect(SECURITY_BASELINE_BUILD_START_BUDGET_MS + BASELINE_BUILD_TX_TIMEOUT_MS).toBeLessThanOrEqual(57_000);
+  });
+
+  it("when the earlier steps took longer than the budget, the full build waits for the next tick", async () => {
+    let t = 1_000_000;
+    const clock = () => {
+      const v = t;
+      t += SECURITY_BASELINE_BUILD_START_BUDGET_MS + 1;
+      return v;
+    };
+    await tickSecurityBaselines(fakePrisma(world({ ready: null })).prisma, ny("15:00"), { ...deps(TZ), clock });
+    expect(h.runFullBuild).not.toHaveBeenCalled();
+    expect(baselineHealthState().lastOkAt).toEqual(ny("15:00"));
+    // A tick that is on time builds.
+    await tickSecurityBaselines(fakePrisma(world({ ready: null })).prisma, ny("15:01"), deps(TZ));
+    expect(h.runFullBuild).toHaveBeenCalledTimes(1);
+  });
+
+  it("the same budget holds for area rebuilds", async () => {
+    let t = 1_000_000;
+    const clock = () => {
+      const v = t;
+      t += SECURITY_BASELINE_BUILD_START_BUDGET_MS + 1;
+      return v;
+    };
+    await tickSecurityBaselines(fakePrisma(world({ liveAreas: [{ id: "z-1", version: 1 }] })).prisma, ny("15:00"), { ...deps(TZ), clock });
+    expect(h.rebuildAreas).not.toHaveBeenCalled();
   });
 });
 
