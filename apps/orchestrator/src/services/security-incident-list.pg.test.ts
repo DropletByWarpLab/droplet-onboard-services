@@ -10,7 +10,11 @@
  *   parity        — `projectedIncidentPage` (the SQL) orders and pages
  *                   exactly like the reference (Prisma's `incidentListWhere`
  *                   + `projectedLastActivity` in JS), for generated incidents
- *                   × viewers × every filter.
+ *                   × viewers × every filter; and every filter holds exactly
+ *                   the incidents the pure `projectIncident` gives that state
+ *                   and severity (review b7e1: the PARTIAL rule has three
+ *                   copies — pure, Prisma, SQL — and this pins them together,
+ *                   with the same code on two cameras always in the set).
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL. Every camera, area, event and
  * incident here is tagged `warp2978l`; the engine / mode / hours singletons
@@ -24,9 +28,14 @@ vi.unmock("@prisma/client");
 
 import { tickSecurityIncidents, _resetIncidentHealthForTests, type SecurityIncidentDeps } from "./security-incidents.service.js";
 import {
+  INCIDENT_VIEW_SELECT,
+  REASON_VIEW_SELECT,
   listIncidents,
   loadIncidentDetail,
+  projectIncident,
   type IncidentListFilters,
+  type IncidentProjection,
+  type IncidentRowForView,
   type IncidentStateFilter,
   type IncidentViewer,
 } from "./security-incident-view.js";
@@ -171,7 +180,7 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
 
   // ── his test ──────────────────────────────────────────────────────────────
 
-  it("her summary and detail of a front+back incident equal those of the same incident built from front's events alone", async () => {
+  it("her summary and detail of a front+back incident equal those of the same incident built from front's events alone — except that she may not act on it", async () => {
     // Front quiet for quiet + settle by NOW; back, later, is not — so the stored incident is still collecting.
     const NOW = plus(T0, 600_000);
     const view = async () => {
@@ -208,7 +217,14 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
     expect(stored).toMatchObject({ cameras: [BACK, FRONT], grouping: "collecting", eventCount: 2 });
     const both = await view();
 
-    expect(normalized(both, [both.summary.id, a1])).toEqual(normalized(alone, [alone.summary.id, b1]));
+    // Review b7e1: the one difference. The back person is an after_hours_presence
+    // alert on a camera she cannot see, so acknowledging or resolving would settle
+    // it for everyone: her view is PARTIAL and refuses to act (the accepted
+    // residual — a view that may not act has to say so).
+    expect(alone.detail.actionable).toBe(true);
+    expect(both.detail.actionable).toBe(false);
+    const refusalAside = (x: typeof both) => ({ ...x, detail: { ...x.detail, actionable: null } });
+    expect(normalized(refusalAside(both), [both.summary.id, a1])).toEqual(normalized(refusalAside(alone), [alone.summary.id, b1]));
   });
 
   it("her order and paging do not move when the hidden camera fires; the owner's follow the stored activity", async () => {
@@ -265,6 +281,79 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       };
     }
 
+    type Code = { code: "after_hours_presence" | "camera_offline" | "threat_signal"; severity: "alert" | "notice"; camera: string | null };
+    /** One incident to insert: the CHECKs are derived from it (severity, reason codes, notify state, closedAt). */
+    interface Spec {
+      scope: (typeof SCOPES)[number];
+      cams: string[];
+      spans: Record<string, { first: string; last: string }>;
+      codes: Code[];
+      /** Ignored (no_action) when there is no code. */
+      state: "open" | "acknowledged" | "resolved";
+      closed: boolean;
+      zoneId: string | null;
+    }
+    const ORDER = ["after_hours_presence", "camera_offline", "threat_signal"];
+
+    async function insert(s: Spec, k: number): Promise<string> {
+      const times = Object.values(s.spans);
+      const first = Math.min(...times.map((t) => Date.parse(t.first)));
+      const last = Math.max(...times.map((t) => Date.parse(t.last)));
+      const severity = s.codes.some((c) => c.severity === "alert") ? "alert" : s.codes.length ? "notice" : "info";
+      const state = severity === "info" ? "no_action" : s.state;
+      const resolved = state === "resolved";
+      const closed = resolved || s.closed;
+      const reasonCodes = [...new Set(s.codes.map((c) => c.code))].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
+      const id = randomUUID();
+      await prisma.securityIncident.create({
+        data: {
+          id,
+          scope: s.scope,
+          zoneId: s.zoneId,
+          zoneName: s.scope === "area" ? `${TAG} Area` : null,
+          zoneKind: s.scope === "area" ? "interior" : null,
+          zoneLinkIds: s.scope === "area" ? ["l0"] : [],
+          scopeCamera: s.scope === "camera" ? s.cams[0]! : null,
+          openedInMode: "closed",
+          grouping: closed ? "closed" : "collecting",
+          closedAt: closed ? new Date(last + 600_000) : null,
+          state,
+          severity,
+          reasonCodes,
+          notifyState: severity === "alert" ? "module_off" : "not_needed",
+          alertedAt: severity === "alert" ? new Date(last) : null,
+          rulesetVersion: SEEDED,
+          firstActivityAt: new Date(first),
+          lastActivityAt: new Date(last),
+          lastArrivalAt: new Date(last + 1000),
+          eventCount: Object.keys(s.spans).length,
+          countsByCamera: Object.fromEntries(Object.keys(s.spans).map((key) => [key, { person: 1 }])),
+          cameras: s.cams,
+          spanByCamera: s.spans,
+          ...(resolved ? { resolvedAt: T0, resolvedById: OWNER.userId, stateChangedById: OWNER.userId } : {}),
+        } as Prisma.SecurityIncidentUncheckedCreateInput,
+      });
+      for (const [j, c] of s.codes.entries()) {
+        await prisma.securityIncidentReason.create({
+          data: {
+            incidentId: id,
+            code: c.code,
+            severity: c.severity,
+            rulesetVersion: 1,
+            evidenceEventId: BigInt(1_000_000 + k * 10 + j),
+            evidenceCamera: c.camera,
+            evidenceSource: c.code === "threat_signal" ? "activity_mirror" : "frigate",
+            evidenceKind: c.code === "camera_offline" ? "camera_offline" : c.code === "threat_signal" ? "threat" : "detection",
+            evidenceLabel: c.code === "after_hours_presence" ? "person" : null,
+            evidenceAt: T0,
+            evidenceSummary: "x",
+            detail: {},
+          },
+        });
+      }
+      return id;
+    }
+
     /** Legal incidents (every CHECK holds) with random scopes, cameras, spans, states and reasons. */
     async function seed(count: number, seedNo: number): Promise<string[]> {
       const r = rng(seedNo);
@@ -278,16 +367,12 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
         const keys = [...cams, ...(site && r() < 0.5 ? [""] : [])];
         if (keys.length === 0) keys.push("");
         const spans: Record<string, { first: string; last: string }> = {};
-        let first = Infinity;
-        let last = -Infinity;
         for (const key of keys) {
           const s = T0.getTime() + Math.floor(r() * 6) * 60_000; // coarse: ties happen, so the id breaks them
           const e = s + Math.floor(r() * 4) * 60_000;
           spans[key] = { first: new Date(s).toISOString(), last: new Date(e).toISOString() };
-          first = Math.min(first, s);
-          last = Math.max(last, e);
         }
-        const codes: Array<{ code: "after_hours_presence" | "camera_offline" | "threat_signal"; severity: "alert" | "notice"; camera: string | null }> = [];
+        const codes: Code[] = [];
         if (scope === "site_threat") {
           if (r() < 0.6) codes.push({ code: "threat_signal", severity: "notice", camera: null });
         } else {
@@ -296,60 +381,31 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
             if (r() < 0.3) codes.push({ code: "camera_offline", severity: "notice", camera: cam });
           }
         }
-        const severity = codes.some((c) => c.severity === "alert") ? "alert" : codes.length ? "notice" : "info";
-        const state = severity === "info" ? "no_action" : pick(["open", "acknowledged", "resolved"] as const);
-        const resolved = state === "resolved";
-        const ORDER = ["after_hours_presence", "camera_offline", "threat_signal"];
-        const reasonCodes = [...new Set(codes.map((c) => c.code))].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
-        const closed = resolved || r() < 0.5;
-        const id = randomUUID();
-        await prisma.securityIncident.create({
-          data: {
-            id,
-            scope,
-            zoneId: scope === "area" ? (r() < 0.5 ? stockRoom : office) : null,
-            zoneName: scope === "area" ? `${TAG} Area` : null,
-            zoneKind: scope === "area" ? "interior" : null,
-            zoneLinkIds: scope === "area" ? ["l0"] : [],
-            scopeCamera: scope === "camera" ? cams[0]! : null,
-            openedInMode: "closed",
-            grouping: closed ? "closed" : "collecting",
-            closedAt: closed ? new Date(last + 600_000) : null,
-            state,
-            severity,
-            reasonCodes,
-            notifyState: severity === "alert" ? "module_off" : "not_needed",
-            alertedAt: severity === "alert" ? new Date(last) : null,
-            rulesetVersion: SEEDED,
-            firstActivityAt: new Date(first),
-            lastActivityAt: new Date(last),
-            lastArrivalAt: new Date(last + 1000),
-            eventCount: keys.length,
-            countsByCamera: Object.fromEntries(keys.map((key) => [key, { person: 1 }])),
-            cameras: cams,
-            spanByCamera: spans,
-            ...(resolved ? { resolvedAt: T0, resolvedById: OWNER.userId, stateChangedById: OWNER.userId } : {}),
-          } as Prisma.SecurityIncidentUncheckedCreateInput,
-        });
-        for (const [j, c] of codes.entries()) {
-          await prisma.securityIncidentReason.create({
-            data: {
-              incidentId: id,
-              code: c.code,
-              severity: c.severity,
-              rulesetVersion: 1,
-              evidenceEventId: BigInt(1_000_000 + k * 10 + j),
-              evidenceCamera: c.camera,
-              evidenceSource: c.code === "threat_signal" ? "activity_mirror" : "frigate",
-              evidenceKind: c.code === "camera_offline" ? "camera_offline" : c.code === "threat_signal" ? "threat" : "detection",
-              evidenceLabel: c.code === "after_hours_presence" ? "person" : null,
-              evidenceAt: T0,
-              evidenceSummary: "x",
-              detail: {},
-            },
-          });
-        }
-        out.push(id);
+        const state = codes.length ? pick(["open", "acknowledged", "resolved"] as const) : "open";
+        const closed = state === "resolved" || r() < 0.5;
+        const zoneId = scope === "area" ? (r() < 0.5 ? stockRoom : office) : null;
+        out.push(await insert({ scope, cams, spans, codes, state, closed, zoneId }, k));
+      }
+      return out;
+    }
+
+    /**
+     * Review b7e1 (blocking): the same code on two cameras — the generator may
+     * or may not draw one, so these are always there. Stock room on FRONT and
+     * BACK; every viewer below sees at most one of the two unless it sees all.
+     */
+    const SAME_CODE = {
+      alertsAcknowledged: [{ code: "after_hours_presence", severity: "alert", camera: FRONT }, { code: "after_hours_presence", severity: "alert", camera: BACK }],
+      noticesAcknowledged: [{ code: "camera_offline", severity: "notice", camera: FRONT }, { code: "camera_offline", severity: "notice", camera: BACK }],
+      hiddenBelowTop: [{ code: "after_hours_presence", severity: "alert", camera: FRONT }, { code: "camera_offline", severity: "notice", camera: BACK }],
+    } satisfies Record<string, Code[]>;
+
+    async function seedSameCode(): Promise<Record<keyof typeof SAME_CODE, string>> {
+      const spans = { [FRONT]: { first: T0.toISOString(), last: plus(T0, 60_000).toISOString() }, [BACK]: { first: T0.toISOString(), last: plus(T0, 120_000).toISOString() } };
+      const out = {} as Record<keyof typeof SAME_CODE, string>;
+      let k = 900;
+      for (const [name, codes] of Object.entries(SAME_CODE) as Array<[keyof typeof SAME_CODE, Code[]]>) {
+        out[name] = await insert({ scope: "area", cams: [BACK, FRONT], spans, codes, state: "acknowledged", closed: false, zoneId: stockRoom }, k++);
       }
       return out;
     }
@@ -363,25 +419,77 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
     ];
     const STATES: IncidentStateFilter[] = ["all", "attention", "open", "acknowledged", "resolved", "activity"];
 
-    it("every viewer × state × severity × area: the same ids, in the same order, with the same keys", async () => {
-      const mine = new Set(await seed(60, 2978));
+    /** Whether `projectIncident` (the pure rule) puts this incident in the list `f` asks for. */
+    function pureHolds(p: IncidentProjection | null, row: IncidentRowForView, f: IncidentListFilters): boolean {
+      if (!p) return false;
+      const byState: Record<IncidentStateFilter, boolean> = {
+        all: true,
+        attention: p.state === "open",
+        open: p.state === "open",
+        acknowledged: p.state === "acknowledged",
+        resolved: p.state === "resolved",
+        activity: p.state === "no_action",
+      };
+      return byState[f.state] && (f.severity === undefined || p.severity === f.severity) && (f.zoneId === undefined || row.zoneId === f.zoneId);
+    }
+
+    /** The pure projection of each of `ids`, for `v`. */
+    async function projections(ids: ReadonlySet<string>, v: IncidentViewer): Promise<Array<{ row: IncidentRowForView; p: IncidentProjection | null }>> {
+      const rows = await prisma.securityIncident.findMany({ where: { id: { in: [...ids] } }, select: INCIDENT_VIEW_SELECT });
+      const reasons = await prisma.securityIncidentReason.findMany({ where: { incidentId: { in: [...ids] } }, select: { incidentId: true, ...REASON_VIEW_SELECT } });
+      return rows.map((row) => ({ row, p: projectIncident(row, reasons.filter((r) => r.incidentId === row.id), v, plus(T0, 3_600_000)) }));
+    }
+
+    it("every viewer × state × severity × area: the same ids, in the same order, with the same keys — and the ids the PURE projection gives that filter", async () => {
+      const mine = new Set([...(await seed(60, 2978)), ...Object.values(await seedSameCode())]);
       let compared = 0;
+      let partials = 0;
       for (const v of VIEWERS) {
+        const projected = await projections(mine, v);
+        partials += projected.filter((x) => x.p?.partial).length;
         for (const state of STATES) {
           for (const severity of [undefined, "alert", "notice"] as const) {
             for (const zoneId of [undefined, stockRoom]) {
               const f: IncidentListFilters = { state, severity, zoneId };
+              const label = JSON.stringify({ v: [...(v.visibleCameras as ReadonlySet<string>)], f });
               const sql = (await projectedIncidentPage(prisma, v as CameraLimitedViewer, f, 1000)).filter((k) => mine.has(k.id));
               const ref = (await referenceProjectedIncidentPage(prisma as never, v, f, 1000)).filter((k) => mine.has(k.id));
-              expect(sql.map((k) => [k.id, k.projectedLast.toISOString()]), JSON.stringify({ v: [...(v.visibleCameras as ReadonlySet<string>)], f })).toEqual(
-                ref.map((k) => [k.id, k.projectedLast.toISOString()]),
-              );
+              expect(sql.map((k) => [k.id, k.projectedLast.toISOString()]), label).toEqual(ref.map((k) => [k.id, k.projectedLast.toISOString()]));
+              // Pure/SQL parity (review b7e1): the list holds exactly the incidents `projectIncident` gives that state and severity.
+              const pure = projected.filter(({ row, p }) => pureHolds(p, row, f)).map(({ row }) => row.id);
+              expect(sql.map((k) => k.id).sort(), label).toEqual(pure.sort());
               compared += ref.length;
             }
           }
         }
       }
       expect(compared).toBeGreaterThan(300); // not vacuous
+      expect(partials).toBeGreaterThan(10); // partial views were exercised
+    });
+
+    // Review b7e1 (blocking): the same code on two cameras.
+    it("the same code on a hidden camera makes the view partial — in her Needs attention, never in her Acknowledged, at alert and at notice", async () => {
+      const ids = await seedSameCode();
+      const mine = new Set(Object.values(ids));
+      const list = async (v: IncidentViewer, state: IncidentStateFilter) =>
+        (await projectedIncidentPage(prisma, v as CameraLimitedViewer, { state }, 1000)).map((k) => k.id).filter((id) => mine.has(id)).sort();
+      const sorted = (...xs: string[]) => [...xs].sort();
+      const front: IncidentViewer = { ...MARIA, visibleCameras: new Set([FRONT]) };
+      const back: IncidentViewer = { ...MARIA, visibleCameras: new Set([BACK]) };
+      const both: IncidentViewer = { ...MARIA, visibleCameras: new Set([FRONT, BACK]) };
+
+      // FRONT only: the two same-code incidents are partial (read open); the hidden notice under a visible alert is not.
+      expect(await list(front, "attention")).toEqual(sorted(ids.alertsAcknowledged, ids.noticesAcknowledged));
+      expect(await list(front, "acknowledged")).toEqual([ids.hiddenBelowTop]);
+      // BACK only: her notice is below the hidden front alert — partial too.
+      expect(await list(back, "attention")).toEqual(sorted(ids.alertsAcknowledged, ids.noticesAcknowledged, ids.hiddenBelowTop));
+      expect(await list(back, "acknowledged")).toEqual([]);
+      // Both cameras: every one of them is hers, as stored.
+      expect(await list(both, "attention")).toEqual([]);
+      expect(await list(both, "acknowledged")).toEqual(sorted(...mine));
+
+      const p = (await projections(mine, front)).find((x) => x.row.id === ids.alertsAcknowledged)!.p!;
+      expect(p).toMatchObject({ partial: true, actionable: false, state: "open", severity: "alert", codes: ["after_hours_presence"] });
     });
 
     it("the order, the keys and the cursor do not depend on the session TimeZone (no time is converted in SQL)", async () => {

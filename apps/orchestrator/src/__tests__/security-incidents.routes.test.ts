@@ -75,6 +75,41 @@ const MISSING = "9f9f9f9f-9f9f-4f9f-8f9f-9f9f9f9f9f9f";
 /** Review #1: a notice on front (Maria sees it) and an ALERT on back (hidden from her). */
 const MIXED = "3e0f2a4b-5c6d-4e7f-8091-a2b3c4d5e6f7";
 
+/** Review b7e1: the SAME code on front (Maria sees it) and on back (hidden from her). */
+const SAME_CODE = "4f1a3b5c-6d7e-4f80-9102-b3c4d5e6f708";
+
+/**
+ * Add the same-code incident — after_hours_presence on front AND on back
+ * (`severity` alert), or camera_offline on both (`severity` notice, the
+ * notice twin) — acknowledged by the owner, with Maria's own sent notice.
+ */
+function withSameCode(f: FakeSecurityPrisma, state: "open" | "acknowledged" = "acknowledged", severity: "alert" | "notice" = "alert"): void {
+  const code = severity === "alert" ? "after_hours_presence" : "camera_offline";
+  f.world.securityIncident.push(
+    incident(SAME_CODE, {
+      state,
+      severity,
+      reasonCodes: [code],
+      ...(severity === "notice" ? { notifyState: "not_needed", alertedAt: null } : {}),
+      spanByCamera: {},
+    }),
+  );
+  f.world.securityIncidentReason.push(
+    { id: "r-same-front", createdAt: T, ...reason(SAME_CODE, code, "front", severity, 21n) },
+    { id: "r-same-back", createdAt: T, ...reason(SAME_CODE, code, "back", severity, 22n) },
+  );
+  if (state === "acknowledged") {
+    f.world.securityIncidentAck.push({
+      id: "a-same", incidentId: SAME_CODE, action: "acknowledge", byUserId: STEFAN, byName: "Stefan", at: T,
+      sessionId: "s-st", sessionChecked: true, client: null, viaNotificationId: null, note: "",
+    });
+  }
+  f.world.securityIncidentNotice.push(
+    { id: "n-same-m", incidentId: SAME_CODE, userId: MARIA, username: "maria", reason: "routed", outcome: "sent", notificationLogId: "log-same-m", channels: "toast", pushOutcome: null, createdAt: T, settledAt: T },
+  );
+  f.world.notificationLog.push({ id: "log-same-m", username: "maria", kind: "event", title: "t", channels: "toast", ackState: "unacked" });
+}
+
 /** Add the mixed-visibility incident: acknowledged by the owner, Maria's own notice skipped_not_visible. */
 function withMixed(f: FakeSecurityPrisma, state: "open" | "acknowledged" = "acknowledged"): void {
   f.world.securityIncident.push(
@@ -609,6 +644,71 @@ describe("review #1 (DS-005) — a viewer who sees only a LOWER code (front noti
   });
 });
 
+// Review b7e1 (blocking): reasons are per (code, evidence). Stock room, closed:
+// Maria (act, front only) sees a person on front; a second person on back is an
+// alert reason she never saw. Resolving would seal it for every owner.
+describe("review b7e1 (DS-005) — the SAME code on a camera she cannot see (front and back after_hours_presence)", () => {
+  it("route 18: partial — reads `open` though the owner acknowledged it; no acks, no notices, no lastAck; not actionable", async () => {
+    const f = world();
+    withSameCode(f);
+    const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${SAME_CODE}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      state: "open",
+      severity: "alert",
+      reasonCodes: ["after_hours_presence"],
+      lastAck: null,
+      acks: [],
+      notices: [],
+      actionable: false,
+    });
+    expect(res.body.viewer).toEqual({ level: "act", acknowledged: false });
+    expect(res.body.reasons.map((r: { evidence: { camera: string } }) => r.evidence.camera)).toEqual(["front"]);
+    expect(JSON.stringify(res.body)).not.toMatch(/"back"|Stefan|log-same-m/);
+  });
+
+  it.each([
+    ["alert", "open"],
+    ["alert", "acknowledged"],
+    ["notice", "open"],
+    ["notice", "acknowledged"],
+  ] as const)("routes 19 and 20 (%s, %s): 409 NOT_ACTIONABLE — nothing written: no ack row, no audit, no state change, no notification ack", async (severity, state) => {
+    const f = world();
+    withSameCode(f, state, severity);
+    const before = JSON.stringify(f.world, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+    const { server } = app(f, "family", "act");
+    for (const action of ["acknowledge", "resolve"]) {
+      const res = await request(server).post(`/api/security/incidents/${SAME_CODE}/${action}`).send(action === "resolve" ? { note: "It was my son" } : { notificationId: "log-same-m" });
+      expect(res.status, action).toBe(409);
+      expect(res.body).toEqual({ error: { code: "NOT_ACTIONABLE", message: "There's nothing here to acknowledge." } });
+    }
+    expect(JSON.stringify(f.world, (_k, v) => (typeof v === "bigint" ? v.toString() : v))).toBe(before);
+    expect(f.txLevels).toHaveLength(0);
+    expect(h.inTx).not.toHaveBeenCalled();
+  });
+
+  it("the owner (both cameras) acts as before: resolved and sealed", async () => {
+    const f = world();
+    withSameCode(f);
+    const res = await request(app(f, "owner", "manage").server).post(`/api/security/incidents/${SAME_CODE}/resolve`).send({});
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.changed).toBe(true);
+    expect(f.world.securityIncident.find((i) => i.id === SAME_CODE)).toMatchObject({ state: "resolved", grouping: "closed" });
+  });
+
+  it.each(["alert", "notice"] as const)("route 16 (%s): in her Needs attention while unresolved, never in her Acknowledged list; a viewer of both cameras sees it acknowledged", async (severity) => {
+    const f = world();
+    withSameCode(f, "acknowledged", severity);
+    const maria = app(f, "family", "act").server;
+    const ids = async (s: express.Express, q: string) => (await request(s).get(`/api/security/incidents?${q}`)).body.incidents.map((i: { id: string }) => i.id);
+    expect(await ids(maria, "state=attention")).toContain(SAME_CODE);
+    expect(await ids(maria, "state=acknowledged")).not.toContain(SAME_CODE);
+    f.world.cameraAccessGrant.push({ id: "g2", userId: MARIA, cameraId: "cam-back" });
+    expect(await ids(maria, "state=acknowledged")).toContain(SAME_CODE);
+    expect(await ids(maria, "state=attention")).not.toContain(SAME_CODE);
+  });
+});
+
 describe("review A — incident events carry `zones`, like feed rows (the viewer's visible areas only)", () => {
   const TILL = "7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c82";
   const YARD = "8b3c4d5e-6f70-4b2c-9d3e-4f5a6b7c8d93";
@@ -785,6 +885,26 @@ describe("route 18 `actionable` agrees with what routes 19 and 20 do for this vi
       role: "family",
       level: "act",
       setup: (f) => withMixed(f, "open"),
+      actionable: false,
+      acknowledge: { status: 409, code: "NOT_ACTIONABLE" },
+      resolve: { status: 409, code: "NOT_ACTIONABLE" },
+    },
+    {
+      name: "a partial viewer — the same alert code on a camera she cannot see (review b7e1)",
+      id: SAME_CODE,
+      role: "family",
+      level: "act",
+      setup: (f) => withSameCode(f, "open"),
+      actionable: false,
+      acknowledge: { status: 409, code: "NOT_ACTIONABLE" },
+      resolve: { status: 409, code: "NOT_ACTIONABLE" },
+    },
+    {
+      name: "a partial viewer — the notice twin: a notice-level incident, the same notice on a hidden camera",
+      id: SAME_CODE,
+      role: "family",
+      level: "act",
+      setup: (f) => withSameCode(f, "acknowledged", "notice"),
       actionable: false,
       acknowledge: { status: 409, code: "NOT_ACTIONABLE" },
       resolve: { status: 409, code: "NOT_ACTIONABLE" },
