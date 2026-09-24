@@ -129,4 +129,37 @@ describe.skipIf(!RUN)("AgentRun claim is exclusive on Postgres (WARP-2177)", () 
     expect(second.count).toBe(0);
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: row.id } })).claimedBy).toBe("A");
   });
+
+  // WARP-2896 — one live run per workspace is held by the DATABASE, through
+  // the partial unique index `AgentRun_workspaceId_active_key` that exists
+  // only in the migration's raw SQL. The mocked route suite shows the 409 the
+  // route answers with; this shows Postgres actually raising it, and letting
+  // go once the run ends. Mutation: drop the index from the migration and the
+  // second create succeeds.
+  it("a second ACTIVE run in one workspace is refused by the index; a finished one releases it; ordinary runs are unconstrained", async () => {
+    const ws = await prisma.workshopWorkspace.create({ data: { id: `ws-pg-${Date.now()}`, userId: "u", name: "race" } });
+    try {
+      const mk = (workspaceId: string | null) =>
+        prisma.agentRun.create({ data: { userId: "u", goal: "g", model: "m", maxIter: 3, workspaceId } });
+      const first = await mk(ws.id);
+      created.push(first.id);
+
+      await expect(mk(ws.id)).rejects.toMatchObject({ code: "P2002" });
+
+      await prisma.agentRun.update({ where: { id: first.id }, data: { status: "awaiting_confirmation" } });
+      await expect(mk(ws.id)).rejects.toMatchObject({ code: "P2002" });
+
+      await prisma.agentRun.update({ where: { id: first.id }, data: { status: "succeeded" } });
+      const second = await mk(ws.id);
+      created.push(second.id);
+
+      // NULL workspaceId is every ordinary run: the predicate never matches.
+      const plain = await Promise.all([mk(null), mk(null)]);
+      created.push(...plain.map((r) => r.id));
+    } finally {
+      await prisma.agentRun.deleteMany({ where: { id: { in: created } } });
+      created.length = 0;
+      await prisma.workshopWorkspace.delete({ where: { id: ws.id } });
+    }
+  });
 });

@@ -1,5 +1,4 @@
 -r requirements.txt
-pytest==9.1.1
 pytest-asyncio==1.4.0
 # TestClient lives behind httpx in starlette's test surface.
 httpx==0.28.1

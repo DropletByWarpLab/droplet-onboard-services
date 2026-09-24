@@ -32,7 +32,10 @@ import {
   recordNotification,
   assertNotificationLink,
   assertNotificationData,
+  NotificationRecipientError,
+  notifyOwnersAndAdmins,
 } from "../services/notifications.service.js";
+import { isReservedUserId, isUserIdShaped } from "@droplet/auth-policy";
 
 function makePrismaStub() {
   const created: Array<Record<string, unknown>> = [];
@@ -72,7 +75,7 @@ function makePushingPrismaStub() {
 }
 
 const PARKED = {
-  userId: "romain",
+  username: "romain",
   kind: "ai" as const,
   title: "Approval needed: delete_file",
   body: "Open the run to approve or deny it.",
@@ -89,7 +92,7 @@ describe("sendNotification", () => {
   it("publishes to MQTT and logs success", async () => {
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "reminder",
       title: "Standup",
       body: "Daily 10am",
@@ -103,6 +106,9 @@ describe("sendNotification", () => {
     expect((prisma as any)._created[0].channels).toBe("toast");
     expect((prisma as any)._created[0].deliveredAt).toBeInstanceOf(Date);
     expect((prisma as any)._created[0].error).toBeNull();
+    // WARP-2911 — the row is keyed by the column's real name.
+    expect((prisma as any)._created[0].username).toBe("alice");
+    expect((prisma as any)._created[0]).not.toHaveProperty("userId");
   });
 
   // WARP-2752 — web push is a SECOND channel, and its failures must not be
@@ -117,7 +123,7 @@ describe("sendNotification", () => {
   it("a push failure does NOT mask a delivered toast", async () => {
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "ai",
       title: "Acme is 90 days past due",
     });
@@ -135,7 +141,7 @@ describe("sendNotification", () => {
     });
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "ai",
       title: "Acme is 90 days past due",
     });
@@ -147,7 +153,7 @@ describe("sendNotification", () => {
   it("publishes even without a body field", async () => {
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "ai",
       title: "Hello",
     });
@@ -161,7 +167,7 @@ describe("sendNotification", () => {
       throw new Error("mqtt unavailable");
     });
     const result = await sendNotification(prisma, {
-      userId: "alice",
+      username: "alice",
       kind: "system",
       title: "x",
     });
@@ -178,6 +184,10 @@ describe("listRecentNotifications", () => {
     await listRecentNotifications(prisma, "alice", 9999);
     expect(prisma.notificationLog.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 200 }),
+    );
+    // WARP-2911 — read back by the recipient's username.
+    expect(prisma.notificationLog.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { username: "alice" } }),
     );
     await listRecentNotifications(prisma, "alice", 0);
     expect(prisma.notificationLog.findMany).toHaveBeenLastCalledWith(
@@ -213,7 +223,7 @@ describe("sendNotification — NotificationLog.pushOutcome", () => {
   for (const gate of [false, "throws"] as const) {
     it(`gate ${String(gate)} → refused_gate; toast still delivered, error stays null`, async () => {
       const prisma = stubWithPush(gate);
-      const result = await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+      const result = await sendNotification(prisma, { username: "alice", kind: "ai", title: "x" });
       expect(result.channels).toEqual(["toast"]);
       expect(prisma._created[0].pushOutcome).toBe("refused_gate");
       expect(prisma._created[0].error).toBeNull();
@@ -223,7 +233,7 @@ describe("sendNotification — NotificationLog.pushOutcome", () => {
 
   it("gate on, no subscriptions → no_subscribers", async () => {
     const prisma = stubWithPush(true);
-    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    await sendNotification(prisma, { username: "alice", kind: "ai", title: "x" });
     expect(prisma._created[0].pushOutcome).toBe("no_subscribers");
     expect(prisma._created[0].channels).toBe("toast");
   });
@@ -231,7 +241,7 @@ describe("sendNotification — NotificationLog.pushOutcome", () => {
   it("a throwing push leg → failed", async () => {
     const prisma = stubWithPush(true);
     prisma.pushSubscription.findMany.mockRejectedValueOnce(new Error("db down"));
-    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    await sendNotification(prisma, { username: "alice", kind: "ai", title: "x" });
     expect(prisma._created[0].pushOutcome).toBe("failed");
     expect(prisma._created[0].error).toBeNull(); // the toast carried it
   });
@@ -308,6 +318,8 @@ describe("sendNotification deep link (WARP-2909)", () => {
     expect(push).toEqual({ title: PARKED.title, body: PARKED.body, url: PARKED.url, data: PARKED.data, tag: PARKED.tag });
 
     expect(prisma._created[0]).toMatchObject({ url: PARKED.url, data: PARKED.data });
+    // WARP-2911 — the push leg looks subscriptions up by the same username.
+    expect((prisma as any).pushSubscription.findMany).toHaveBeenCalledWith({ where: { username: "romain" } });
 
     // The redemption contract: nothing that could approve the run rides on
     // any of the three, and the link's only query key is `run`.
@@ -322,7 +334,7 @@ describe("sendNotification deep link (WARP-2909)", () => {
 
   it("no tag supplied → the push carries tag: undefined (none is derived)", async () => {
     const prisma = makePushingPrismaStub();
-    await sendNotification(prisma, { userId: "alice", kind: "reminder", title: "Standup" });
+    await sendNotification(prisma, { username: "alice", kind: "reminder", title: "Standup" });
     const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
     expect(push.tag).toBeUndefined();
     expect(push.url).toBeUndefined();
@@ -377,5 +389,125 @@ describe("listRecentNotifications deep link (WARP-2909)", () => {
     await sendNotification(prisma, PARKED);
     const [row] = await listRecentNotifications(prisma, "romain");
     expect(row).toMatchObject({ url: PARKED.url, data: PARKED.data });
+  });
+});
+
+// ── WARP-2911: the recipient is a username, never a User.id ─────────────────
+//
+// A `User.id` (`@default(uuid())`) handed to the recipient slot fails SILENTLY
+// and completely — the broker drops the toast, no PushSubscription matches, and
+// no reader can see the row. It shipped three times (WARP-2783, WARP-2813,
+// WARP-2910), each time behind a green test whose fake had `id === username`.
+// So all three entry points refuse a UUID-shaped recipient by THROWING, with
+// the caller's file in the error, before anything is published or written.
+describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIENT_IS_ID)", () => {
+  const USER_ID = "3b7d0195-6c1e-4f2a-9d8b-2a4c6e8f0a1b";
+  const to = (username: string) => ({ username, kind: "system" as const, title: "Audit log integrity check failed" });
+
+  it("sendNotification throws before the toast, the push and the row", async () => {
+    const prisma = makePushingPrismaStub();
+    const err = await sendNotification(prisma, to(USER_ID)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NotificationRecipientError);
+    expect(err).toMatchObject({ code: "NOTIFICATION_RECIPIENT_IS_ID" });
+    expect(mqttPublish).not.toHaveBeenCalled();
+    expect(webpushSend).not.toHaveBeenCalled();
+    expect(prisma._created).toHaveLength(0);
+  });
+
+  it("publishNotificationToast throws instead of publishing to a topic nobody subscribes", () => {
+    expect(() => publishNotificationToast(to(USER_ID))).toThrow(NotificationRecipientError);
+    expect(mqttPublish).not.toHaveBeenCalled();
+  });
+
+  it("recordNotification throws before the row write (inside a caller's transaction, that aborts it)", async () => {
+    const prisma = makePrismaStub();
+    await expect(recordNotification(prisma, to(USER_ID))).rejects.toMatchObject({
+      code: "NOTIFICATION_RECIPIENT_IS_ID",
+    });
+    expect(prisma._created).toHaveLength(0);
+  });
+
+  it("upper-case hex is still an id", () => {
+    expect(() => publishNotificationToast(to(USER_ID.toUpperCase()))).toThrow(/NOTIFICATION_RECIPIENT_IS_ID/);
+  });
+
+  it("the error names the caller's file, so the log line says where the id came from", () => {
+    let err: unknown;
+    try {
+      publishNotificationToast(to(USER_ID));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NotificationRecipientError);
+    const e = err as NotificationRecipientError;
+    expect(e.caller).toMatch(/notifications\.test\.ts/);
+    expect(e.message).toContain(e.caller!);
+    expect(e.toJSON()).toMatchObject({ code: "NOTIFICATION_RECIPIENT_IS_ID", caller: e.caller });
+  });
+
+  it("refuses EXACTLY what @droplet/auth-policy refuses to mint — creation and refusal cannot drift", () => {
+    // Every place a username is created refuses `isReservedUserId`, which
+    // includes `isUserIdShaped`. If the refusal here drifted from that shape,
+    // either a creatable username would be refused every notification, or an
+    // id would slip through. One predicate, asserted from both sides.
+    const samples = [USER_ID, USER_ID.toUpperCase(), `${USER_ID}-2`, `sso-${USER_ID}`, "dev", "alice", USER_ID.slice(1)];
+    for (const username of samples) {
+      let refused = false;
+      try {
+        publishNotificationToast(to(username));
+      } catch (e) {
+        refused = e instanceof NotificationRecipientError;
+      }
+      expect(refused, username).toBe(isUserIdShaped(username));
+      expect(isReservedUserId(username) || !refused, username).toBe(true);
+    }
+  });
+
+  it.each(["dev", "_service:mcp", "alice", "romain.jouffret@example.com"])(
+    "%s is a username: all three accept it",
+    async (username) => {
+      const prisma = makePrismaStub();
+      await expect(sendNotification(prisma, to(username))).resolves.toMatchObject({ channels: ["toast"] });
+      expect(() => publishNotificationToast(to(username))).not.toThrow();
+      await expect(recordNotification(prisma, to(username))).resolves.toHaveProperty("id");
+      expect(mqttPublish).toHaveBeenCalledWith(`droplet/notifications/${username}`, expect.anything());
+    },
+  );
+});
+
+// WARP-2911 — the OTA path's owner/admin fan-out (index.ts `notifyOwners`),
+// here so it can be tested: one refused recipient (an account whose username
+// predates the ban on the User.id shape) never costs the others the alert.
+describe("notifyOwnersAndAdmins (WARP-2911)", () => {
+  const LEGACY = "5f0c2a1e-7b3d-4c9e-8a21-0e6d4b9c3f70";
+
+  function ownersStub(usernames: string[]) {
+    const stub = makePrismaStub() as unknown as Record<string, unknown>;
+    stub.user = {
+      findMany: vi.fn(async ({ where }: { where: { role: { in: string[] } } }) => {
+        expect(where.role.in.sort()).toEqual(["admin", "owner"]);
+        return usernames.map((username) => ({ username }));
+      }),
+    };
+    return stub as unknown as PrismaClient & { _created: Array<Record<string, unknown>>; user: { findMany: ReturnType<typeof vi.fn> } };
+  }
+
+  it("notifies every owner and admin by username", async () => {
+    const prisma = ownersStub(["stefan", "romain"]);
+    await notifyOwnersAndAdmins(prisma, "Update rolled back", "It is running the previous version.");
+    expect(mqttPublish.mock.calls.map((c) => c[0])).toEqual([
+      "droplet/notifications/stefan",
+      "droplet/notifications/romain",
+    ]);
+    expect(prisma._created.map((r) => r.username)).toEqual(["stefan", "romain"]);
+  });
+
+  it("🔴 a refused recipient is skipped and logged; the ones after it are still told", async () => {
+    const prisma = ownersStub([LEGACY, "romain"]);
+    await expect(
+      notifyOwnersAndAdmins(prisma, "Update rolled back", "It is running the previous version."),
+    ).resolves.toEqual({ notified: ["romain"], failed: [LEGACY] });
+    expect(mqttPublish.mock.calls.map((c) => c[0])).toEqual(["droplet/notifications/romain"]);
+    expect(prisma._created.map((r) => r.username)).toEqual(["romain"]);
   });
 });

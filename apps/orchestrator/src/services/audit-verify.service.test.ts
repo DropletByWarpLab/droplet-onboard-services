@@ -15,6 +15,11 @@ import {
 } from "./activity.service.js";
 import { _setActivityRecorderForTests } from "./activity.singleton.js";
 import { createHmacSigner } from "./audit-signing.service.js";
+import {
+  activityRowCreateTrap,
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "../__tests__/helpers/activity-row-insert.js";
 
 vi.mock("./notifications.service.js", () => ({
   sendNotification: vi.fn().mockResolvedValue({
@@ -24,6 +29,7 @@ vi.mock("./notifications.service.js", () => ({
   }),
 }));
 import { sendNotification } from "./notifications.service.js";
+import { NotificationRecipientError } from "./notification-recipient.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 /** What `transaction_timestamp()::text` reports inside the fake transaction (WARP-2977 P2b). */
@@ -41,20 +47,8 @@ function makeChainFake() {
   let nextId = 1n;
   const prisma = {
     activityRow: {
-      async create({ data }: { data: Record<string, unknown> }) {
-        const refs = data.refs as { _tag?: string } | null | undefined;
-        const row = {
-          id: nextId++,
-          ...data,
-          sub: (data.sub as string | null) ?? null,
-          refs:
-            refs && typeof refs === "object" && refs._tag === "Prisma.DbNull"
-              ? null
-              : (refs ?? null),
-        } as Record<string, unknown> & { id: bigint };
-        rows.push(row);
-        return row;
-      },
+      // The append's handle check wants it; the row goes in through the raw INSERT below (WARP-3011).
+      create: activityRowCreateTrap.create,
       async findMany(args: {
         where?: { id?: { gt?: bigint } };
         orderBy: { id: "asc" };
@@ -67,7 +61,12 @@ function makeChainFake() {
           .slice(0, args.take);
       },
     },
-    async $queryRawUnsafe<T>(query: string) {
+    async $queryRawUnsafe<T>(query: string, ...params: unknown[]) {
+      if (isActivityRowInsert(query)) {
+        const row = { ...activityRowFromInsert(nextId++, params) };
+        rows.push(row);
+        return [{ id: row.id }] as unknown as T;
+      }
       if (query.includes("pg_advisory_xact_lock")) {
         // WARP-2977 P2b: the append reads the isolation level in the same round-trip.
         // …and the transaction start time: the append checks the tail read ran in the same transaction.
@@ -179,7 +178,7 @@ describe("verifyActivityChain / runNightlyChainVerification", () => {
 
   it("keys the alert by username, so the toast and the stored row actually reach an admin", async () => {
     // Regression pin. `sendNotification` publishes to
-    // `droplet/notifications/${userId}`, ws-bridge subscribes
+    // `droplet/notifications/${username}`, ws-bridge subscribes
     // `droplet/notifications/${user.username}`, and both readers of the
     // persisted NotificationLog filter by username. Passing `User.id` here
     // made the one alert that must never be missed reach nobody: the broker
@@ -189,11 +188,24 @@ describe("verifyActivityChain / runNightlyChainVerification", () => {
 
     const keys = vi
       .mocked(sendNotification)
-      .mock.calls.map((call) => (call[1] as { userId: string }).userId);
+      .mock.calls.map((call) => (call[1] as { username: string }).username);
     expect(keys).toEqual(["admin-1", "owner-1"]);
     for (const key of keys) {
       expect(key).not.toContain("uuid");
     }
+  });
+
+  it("🔴 WARP-2911 one admin whose notification is refused does not cost the others the alert", async () => {
+    // A username with the shape of a User.id (an account from before creation
+    // refused it) is refused by sendNotification. Without a per-recipient
+    // catch that throw ended the loop, and every admin after it never heard
+    // that the audit chain was broken.
+    vi.mocked(sendNotification).mockRejectedValueOnce(NotificationRecipientError.isId("sendNotification", null));
+    fake.rows[2]!.what = "tampered";
+    const res = await runNightlyChainVerification(fake.prisma);
+    expect(res?.ok).toBe(false);
+    const keys = vi.mocked(sendNotification).mock.calls.map((call) => (call[1] as { username: string }).username);
+    expect(keys).toEqual(["admin-1", "owner-1"]);
   });
 
   it("nightly job on an intact chain appends nothing and notifies nobody", async () => {

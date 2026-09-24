@@ -25,10 +25,12 @@ export const AGENT_RUN_STATUSES: readonly AgentRunStatus[] = [
   "cancelled",
 ];
 
+// WARP-2974 — one vocabulary for a parked run on every viewport (the Workshop
+// design brief's D-1): `Needs your OK` · `Approve and continue` · `Decline`.
 export const STATUS_LABELS: Record<AgentRunStatus, string> = {
   queued: "Queued",
   running: "Running",
-  awaiting_confirmation: "Needs approval",
+  awaiting_confirmation: "Needs your OK",
   succeeded: "Finished",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -76,6 +78,8 @@ export interface AgentRunSummary {
   id: string;
   goal: string;
   model: string;
+  /** WARP-2896 — set on a workshop run: the workspace it works in. */
+  workspaceId?: string | null;
   status: AgentRunStatus;
   iteration: number;
   maxIter: number;
@@ -115,14 +119,20 @@ export async function listAgentRuns(params: {
 // mints the run for the signed-in person (owner/admin — RUN_STARTER_ROLES) and
 // answers `{ id, status: "queued" }`; the worker picks it up on its own. The
 // model is the box's default when omitted, exactly as the chat tool's path.
-export async function startAgentRun(goal: string): Promise<{ id: string; status: AgentRunStatus }> {
+//
+// WARP-2896 — with `workspaceId`, a WORKSHOP run: bound to that workspace
+// for its whole life, carrying the workspace tools, ending on a proposal.
+export async function startAgentRun(
+  goal: string,
+  opts: { workspaceId?: string } = {},
+): Promise<{ id: string; status: AgentRunStatus; workspaceId?: string | null }> {
   const res = await authFetch("/api/agent-runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ goal }),
+    body: JSON.stringify({ goal, ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}) }),
   });
   if (!res?.ok) throw await readError(res, "Couldn't start this run");
-  return (await res.json()) as { id: string; status: AgentRunStatus };
+  return (await res.json()) as { id: string; status: AgentRunStatus; workspaceId?: string | null };
 }
 
 export async function getAgentRun(id: string): Promise<AgentRunDetail> {

@@ -84,6 +84,23 @@ describe("ws-bridge subscription topics (WARP-493)", () => {
     expect(topics).toContain("droplet/chat/alice-nc/#");
   });
 
+  it("WARP-2911: notifications are subscribed on the USERNAME only — no User.id twin", async () => {
+    // `sendNotification` publishes `droplet/notifications/<username>`, so this
+    // is the one topic the toast can arrive on. A `${user.id}` twin here would
+    // be the "dual subscribe" option WARP-2911 rejected: it would make a
+    // UUID-keyed send look delivered in a tab while push and both
+    // NotificationLog readers still missed it. The string stays byte-identical
+    // for the dashboard's NotificationToaster and droplet-windows' push_bridge.
+    const topics = await connectOnce({
+      id: "9f8e7d6c-5b4a-4210-aedc-ba9876543210",
+      username: "alice-nc",
+    });
+    expect(topics.filter((t) => t.startsWith("droplet/notifications/"))).toEqual([
+      "droplet/notifications/alice-nc",
+    ]);
+    expect(topics.some((t) => t.includes("9f8e7d6c-5b4a-4210-aedc-ba9876543210") && t.includes("notifications"))).toBe(false);
+  });
+
   it("does not double-subscribe when id === username (dev shape)", async () => {
     const topics = await connectOnce({ id: "dev", username: "dev" });
     expect(
