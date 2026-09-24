@@ -241,12 +241,27 @@ async function fetchWithHeaderTimeout(
   url: string,
   init: RequestInit,
   ms: number,
+  cancel?: AbortSignal | null,
 ): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(
     () => ctrl.abort(new DOMException("TimeoutError", "TimeoutError")),
     ms,
   );
+  // WARP-3048 — the caller's CANCEL (chat Stop, a superseded lookup) still
+  // reaches the request, headers and body alike; the caller's CLOCK does
+  // not. A timeout aborts with a `TimeoutError` reason — `AbortSignal.timeout`
+  // and every house deadline (`timeoutSignal`, the Matter browse) — and that
+  // budget was spent on the first attempt + the refresh (onboard#477).
+  if (cancel) {
+    const forward = () => {
+      const reason: unknown = cancel.reason;
+      if ((reason as { name?: unknown } | undefined)?.name === "TimeoutError") return;
+      ctrl.abort(reason);
+    };
+    if (cancel.aborted) forward();
+    else cancel.addEventListener("abort", forward, { once: true });
+  }
   try {
     return await fetch(url, { ...init, signal: ctrl.signal });
   } finally {
@@ -524,11 +539,13 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     // Give the retry a FRESH timeout instead of inheriting `init.signal`
     // (onboard#477): the caller's signal may already be spent by the initial
     // request + refresh, and spreading it here would abort the retry instantly.
-    const { signal: _staleSignal, ...rest } = init ?? {};
+    // WARP-3048 — only its timeout is dropped; a cancel is still forwarded.
+    const { signal: callerSignal, ...rest } = init ?? {};
     return fetchWithHeaderTimeout(
       url,
       { ...withRid(rest), credentials: "same-origin" },
       AUTHFETCH_RETRY_TIMEOUT_MS,
+      callerSignal,
     );
   }
 
