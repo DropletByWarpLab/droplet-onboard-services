@@ -29,6 +29,7 @@ import {
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
+import type { SecurityLockReader } from "./security-lock-adapter.js";
 
 export interface SecurityViewerScope {
   /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
@@ -52,6 +53,14 @@ export interface SecurityRouteDeps {
   now?: () => Date;
   /** Frigate's `/api/config`, for the sources list and link checks (one fetch, with a timeout). */
   frigateConfig?: () => Promise<unknown>;
+  /**
+   * WARP-2977 P2b-2 — the Matter lock adapter, read at request time (a
+   * fresh lock list for the Areas page and link checks, the last sweep's
+   * locks for labels and a Close up's `unlockedLocks`, the `locks` health
+   * row). Default: the one index.ts started (`securityLockAdapter`); null =
+   * none is running.
+   */
+  locks?: () => SecurityLockReader | null;
 }
 
 /** Moved from routes/security.ts (P2a) with the same semantics: role-based. */
