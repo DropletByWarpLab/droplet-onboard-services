@@ -56,8 +56,27 @@ export function nthUserIdCandidate(base: string, n: number): string {
   return base.slice(0, USERID_MAX - suffix.length) + suffix;
 }
 
+/**
+ * WARP-2911 — the shape of a `User.id` (Prisma `@default(uuid())`).
+ *
+ * The orchestrator's notification subsystem is keyed on the USERNAME and
+ * refuses a recipient with this shape: that is how a `User.id` handed to the
+ * username slot is caught (it shipped three times before the refusal existed).
+ * So a username must never have it — `isReservedUserId` below refuses it at
+ * every place one is minted, and the refusal imports this same constant, so
+ * the two can never drift apart. No `g`/`y` flag: `.test()` stays stateless.
+ */
+export const USER_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUserIdShaped(value: string): boolean {
+  return USER_ID_SHAPE.test(value);
+}
+
+/** Reserved: the fixed names above, and anything shaped like a `User.id`
+ *  (WARP-2911). A derivation skips to the next candidate (`<uuid>-2`); a
+ *  validator refuses it. */
 export function isReservedUserId(candidate: string): boolean {
-  return RESERVED_USERNAMES.includes(candidate.toLowerCase());
+  return RESERVED_USERNAMES.includes(candidate.toLowerCase()) || isUserIdShaped(candidate);
 }
 
 /**

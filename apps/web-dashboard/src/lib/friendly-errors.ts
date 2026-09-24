@@ -77,6 +77,11 @@ export type ErrorDomain =
   | "search-name"
   | "search-keyword"
   | "search-semantic"
+  // WARP-2977 P2b — the Security pages' writes: the site mode, the opening
+  // hours and areas. Every code is one of the orchestrator's typed
+  // `error.code`s for routes 3–15, so the copy can say exactly what happened
+  // (someone else changed it, the change could not be recorded, …).
+  | "security"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -149,6 +154,10 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "Keyword search isn't working right now. Try again in a moment, or switch to Name search.",
   "search-semantic":
     "Semantic search isn't available right now. Name and Keyword search still work — try again in a moment.",
+  // WARP-2977 P2b. Says nothing was changed only where the server guarantees
+  // it (the typed codes below); an unknown failure might have landed.
+  security:
+    "We couldn't make that change right now. Refresh the page to see where things stand, then try again.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -695,6 +704,73 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We can't reach this Droplet right now. Check the connection and try again.",
     TIMEOUT: "That search took too long. Try again in a moment.",
   },
+  // WARP-2977 P2b — the orchestrator's typed codes for the Security routes
+  // (areas, opening hours, the site mode). "Area" is the UI noun; never
+  // "zone", and none of the copy promises the site is watched over.
+  security: {
+    MODE_CONFLICT:
+      "Someone else changed the mode just now. Check the mode and try again.",
+    VERSION_CONFLICT:
+      "Someone else changed this while you were editing. Refresh to see their changes, then try again.",
+    AUDIT_UNAVAILABLE:
+      "Droplet couldn't record that change in its activity log, so nothing was changed. Try again in a moment.",
+    ZONE_NAME_TAKEN: "There's already an area with that name. Pick another name.",
+    // Not a server code: ZONE_NAME_TAKEN whose body carries `archivedZoneId`
+    // (the holder is a REMOVED area, which the person cannot see in the list).
+    // translateError picks it; `archivedZoneIdOf` lets the page offer Restore.
+    ZONE_NAME_TAKEN_ARCHIVED:
+      "A removed area already has that name. Restore it instead, or pick another name.",
+    // A 500: something on the box broke (not an outage, so retrying the same
+    // thing won't help). It may have landed after its commit — never claim
+    // it didn't.
+    INTERNAL_ERROR:
+      "Something went wrong on this Droplet. Refresh the page to see whether the change went through. If it keeps happening, contact support.",
+    ZONE_LIMIT: "You've reached the limit of 64 areas. Remove one before adding another.",
+    ZONE_NOT_FOUND: "That area doesn't exist any more. Refresh the page.",
+    ZONE_ARCHIVED: "That area was removed. Restore it before changing it.",
+    SOURCE_NOT_FOUND:
+      "One of those cameras or camera parts isn't set up any more, so nothing was changed. Refresh the list and try again.",
+    SOURCE_CHECK_UNAVAILABLE:
+      "Droplet couldn't check the camera system just now, so nothing was changed. Try again in a moment.",
+    INVALID_TIMEZONE: "Droplet doesn't recognise that timezone. Pick one from the list.",
+    SAME_OPEN_CLOSE:
+      "Opening and closing times can't be the same. For a day that never closes, choose Open all day.",
+    HOURS_NOT_SET: "Set the usual opening hours before adding special days.",
+    EXCEPTION_LIMIT:
+      "There are already 100 upcoming special days. Remove one before adding another.",
+    EXCEPTION_OUT_OF_RANGE: "Special days can be set from yesterday up to a year ahead.",
+    EXCEPTION_NOT_FOUND: "That special day was already removed.",
+    MODE_UNAVAILABLE: "Droplet can't tell the site's mode right now. Try again in a moment.",
+    HOURS_UNAVAILABLE: "Droplet couldn't load the opening hours right now. Try again in a moment.",
+    ZONES_UNAVAILABLE: "Droplet couldn't load the areas right now. Try again in a moment.",
+    VALIDATION_ERROR: "Some of that isn't quite right. Check what you entered and try again.",
+    // A route-level feature gate answers 404 module_disabled (a flat body, so
+    // apiFetch carries no typed code — the status entry catches it): this
+    // person's level changed under the page, or Security was switched off.
+    module_disabled: "You can't make that change any more. Refresh the page.",
+    "404": "You can't make that change any more. Refresh the page.",
+    // The P2b helpers go through authFetch, which refreshes an expired access
+    // token and retries. A 401 that still reaches the page is NOT proof the
+    // session ended: authFetch also hands back the original 401 when the
+    // refresh was transient (a rotation race, a network blip) or when
+    // /api/auth/me could not confirm the session is dead — and the session is
+    // fine in both. A real end is already on its way to /login. So: say the
+    // change didn't land (the auth gate answers before any write), and name
+    // signing in again only as the remedy for a 401 that keeps coming back.
+    "401": "Droplet couldn't confirm you're signed in, so nothing was changed. Try again, and sign in again if this keeps happening.",
+    "403": "You don't have permission to make that change.",
+    "409": "Someone else changed this just now. Refresh the page and try again.",
+    "429": "That's a lot of changes at once. Wait a moment and try again.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    // securityFetch's own code for a request that never answered. Keyed here
+    // so the copy doesn't hang on inferCodeFromMessage matching the browser's
+    // wording ("Failed to fetch" in Chrome, "NetworkError …" in Firefox,
+    // "Load failed" in Safari — which matches nothing).
+    NETWORK_ERROR:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Refresh the page to see whether it went through.",
+  },
   generic: {
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
@@ -757,6 +833,22 @@ function inferCodeFromMessage(
 }
 
 /**
+ * WARP-2977 P2b — the removed area that already holds a name, from a
+ * `ZONE_NAME_TAKEN` refusal: the orchestrator puts `archivedZoneId` in the
+ * error envelope when the holder is archived, and `apiFetch` keeps the whole
+ * body on the thrown error as `body`. Null for anything else (an active
+ * holder, another code, a non-apiFetch error).
+ */
+export function archivedZoneIdOf(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+  const e = err as { code?: unknown; body?: unknown };
+  if (e.code !== "ZONE_NAME_TAKEN") return null;
+  const envelope = (e.body as { error?: { archivedZoneId?: unknown } } | null | undefined)?.error;
+  const id = envelope?.archivedZoneId;
+  return typeof id === "string" && id !== "" ? id : null;
+}
+
+/**
  * Translate an unknown error into plain home-user copy.
  *
  * Dispatch order:
@@ -788,6 +880,11 @@ export function translateError(err: unknown, domain: ErrorDomain): string {
 
   const domainCodes = CODES[domain];
 
+  // WARP-2977 P2b — the name belongs to a REMOVED area: "pick another name"
+  // alone would baffle (no area in the list has it), so say where it is.
+  if (domain === "security" && code === "ZONE_NAME_TAKEN" && archivedZoneIdOf(err) !== null) {
+    return domainCodes.ZONE_NAME_TAKEN_ARCHIVED!;
+  }
   if (code && domainCodes[code]) return domainCodes[code];
   // WARP-1659 × WARP-1658 — `share-bulk` alone infers BEFORE it dispatches on
   // status. Both tickets are right and the default order cannot serve both.

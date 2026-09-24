@@ -39,7 +39,6 @@ import {
   Brain,
   Calendar,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Cloud,
@@ -396,7 +395,14 @@ function InlineChat({
 
 function ChatWidget({ w, h }: WidgetProps) {
   const router = useRouter();
-  const model = usePreferredModel();
+  const { models } = useModels();
+  const preferred = usePreferredModel();
+  // WARP-3048 — the hero's own pick from its model pill. Null follows the
+  // preferred model (so a switch on /models still reaches Home); a pick
+  // that leaves the list falls back the same way.
+  const [pickedId, setPickedId] = useState<string | null>(null);
+  const model =
+    (pickedId && models.find((m) => m.id === pickedId)) || preferred;
   const greeting = greetingNow();
   const fs = w >= 6 ? 33 : w >= 5 ? 29 : w >= 4 ? 25 : 22;
   const nSug = h >= 6 ? 4 : h >= 5 ? 3 : h >= 4 ? 2 : 1;
@@ -465,12 +471,39 @@ function ChatWidget({ w, h }: WidgetProps) {
           placeholder="Ask Droplet anything — your files, cameras, network, devices…"
         />
         <div className="w-chat-cap-row">
-          {model ? (
-            <span className="w-chat-model" title={model.name}>
-              <span className="dot" />
+          {/* WARP-3048 — the pill used to be a <span> with a dropdown
+              chevron and no handler. 2+ models: a real picker that feeds
+              the inline chat's model. 1 model: nothing to pick, so it leads
+              to /models (the models brief's composer chip, WARP-1116). */}
+          {model && models.length > 1 ? (
+            <label
+              className="w-chat-model w-chat-model-control"
+              title={model.name}
+            >
+              <span className="dot" aria-hidden />
+              <select
+                aria-label="Model"
+                value={model.id}
+                onChange={(e) => setPickedId(e.target.value)}
+              >
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                    {m.capabilities?.vision ? " · vision" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : model ? (
+            <Link
+              href="/models"
+              className="w-chat-model w-chat-model-control"
+              title="Manage models"
+              aria-label={`Model: ${model.name} — manage on Models`}
+            >
+              <span className="dot" aria-hidden />
               <span className="nm">{model.name}</span>
-              <ChevronDown size={10} />
-            </span>
+            </Link>
           ) : (
             <span className="w-chat-model" style={{ opacity: 0.6 }}>
               <span className="dot" style={{ background: "var(--text-muted)" }} />

@@ -32,6 +32,7 @@ import {
   Wrench,
   type LucideIcon,
   Repeat,
+  Hammer,
 } from "lucide-react";
 
 import type { ToolCatalogEntry } from "./types";
@@ -83,6 +84,9 @@ export const DOMAIN_META: Record<string, DomainMeta> = {
   erp: { label: "Practice", icon: Stethoscope },
   // WARP-2581 — money_list_open_documents (invoices and bills).
   money: { label: "Invoices", icon: Receipt },
+  // WARP-2896 (ADR-056) — the workshop's workspace tools. Label matches the
+  // /workshop nav entry for the same reason.
+  workspace: { label: "Workshop", icon: Hammer },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

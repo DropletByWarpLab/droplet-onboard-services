@@ -55,6 +55,9 @@ describe("env preflight guard (WARP-1872)", () => {
       "src/services/update-agent/manifest.test.ts",
       "src/services/update-agent/apply.test.ts",
       "src/services/update-agent/verify.toctou.test.ts",
+      // WARP-2900: the box-key paths and the TOCTOU pin never spawn cosign.
+      "src/services/update-agent/extension-verify.test.ts",
+      "src/services/update-agent/extension-verify.toctou.test.ts",
     ]) {
       expect(
         isCosignDependent(path.join(ORCHESTRATOR_ROOT, rel)),

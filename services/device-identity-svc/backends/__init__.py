@@ -45,6 +45,17 @@ class Backend(Protocol):
         {resealed, sealed_at, new_pcr_snapshot_indices}."""
         ...
 
+    def sign_extension(self, statement: bytes) -> bytes:
+        """WARP-2900: sign EXTENSION_STATEMENT_PREFIX || statement with the
+        EXTENSION key (never the device-id key). Raises StatementRefused for a
+        non-extension statement, RuntimeError when unprovisioned and
+        NotImplementedError when the backend holds no extension key."""
+        ...
+
+    def extension_public_key(self) -> tuple[bytes, str] | None:
+        """(SPKI DER, "sha256:<hex>") of the extension key, or None."""
+        ...
+
 
 import os
 

@@ -825,3 +825,188 @@ describe("completeAuthCodeConnect (WARP-2704)", () => {
     expect(prisma.__row()).toMatchObject({ state: "DISCONNECTED" });
   });
 });
+
+// --- #2344 review: no credential outlives the link it belonged to ----------
+//
+// DISCONNECTED means "no Microsoft account linked" (schema docstring), and
+// `disconnect()` purges accordingly. A CONNECTED person who presses Connect
+// again (a new app, say) and then cancels, lets it lapse, or hits a network
+// error also ends DISCONNECTED, and until this review the old account's
+// sealed refresh token stayed on that row.
+
+/** A live link through APP, holding a sealed refresh token. */
+function connectedRow() {
+  return {
+    id: "row-1",
+    userId: USER,
+    state: "CONNECTED",
+    accountUpn: "old@practice.com",
+    homeAccountId: "old.uid.utid",
+    tenantId: "tenant-old",
+    grantedScopes: "Mail.ReadWrite",
+    connectedAt: new Date("2026-09-01T00:00:00Z"),
+    lastRefreshOkAt: new Date("2026-09-20T00:00:00Z"),
+    tokenCacheEnc: sealTokenCache(USER, CACHE),
+    ...APP_COLUMNS,
+  };
+}
+
+/** What a row that names no Microsoft account must not hold. */
+const NO_ACCOUNT = {
+  tokenCacheEnc: null,
+  homeAccountId: null,
+  accountUpn: null,
+  tenantId: null,
+  grantedScopes: null,
+  connectedAt: null,
+};
+
+describe("a reconnect leaves no credential of the old link behind (#2344 review)", () => {
+  it("drops the old link's credential the moment a new browser sign-in starts", async () => {
+    const prisma = fakePrisma(connectedRow());
+    const { state } = await started(prisma);
+
+    expect(prisma.__row()).toMatchObject({ state: "PENDING_CONSENT", ...NO_ACCOUNT, ...APP_COLUMNS });
+
+    // So nothing can refresh the old grant while the person is at Microsoft's
+    // page: a sync tick that asks for a token is refused without calling
+    // Microsoft, and the sign-in in flight is left for its callback.
+    const entra = fakeEntra();
+    await expect(getAccessToken(prisma as never, entra, USER)).rejects.toBeInstanceOf(
+      M365NotConnectedError,
+    );
+    expect(entra.acquireSilent).not.toHaveBeenCalled();
+    expect(prisma.__row()).toMatchObject({ state: "PENDING_CONSENT", pendingStateHash: sha256(state) });
+  });
+
+  it("drops the old link's credential when a device-code sign-in starts", async () => {
+    const prisma = fakePrisma(connectedRow());
+    const entra = fakeEntra({
+      acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
+        onCode({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://microsoft.com/devicelogin",
+          expiresAt: new Date(Date.now() + 900_000),
+          message: "enter the code",
+        });
+        return await new Promise<EntraAuthResult>(() => {});
+      }),
+    });
+
+    await beginDeviceCodeConnect(prisma as never, entra, USER);
+    expect(prisma.__row()).toMatchObject({ state: "PENDING_CONSENT", ...NO_ACCOUNT, ...APP_COLUMNS });
+  });
+
+  it("ends a cancelled reconnect DISCONNECTED with nothing of the old account on the row", async () => {
+    const prisma = fakePrisma(connectedRow());
+    const { state, entra } = await started(prisma);
+    const outcome = await completeAuthCodeConnect(prisma as never, entra, {
+      state,
+      browserState: state,
+      error: "access_denied",
+    });
+
+    expect(outcome).toBe("cancelled");
+    expect(prisma.__row()).toMatchObject({ state: "DISCONNECTED", ...NO_ACCOUNT, ...APP_COLUMNS });
+    expect(await getConnectionView(prisma as never, USER)).toMatchObject({
+      state: "DISCONNECTED",
+      accountUpn: null,
+      app: APP,
+    });
+  });
+
+  it("ends an expired reconnect DISCONNECTED with nothing of the old account on the row", async () => {
+    const prisma = fakePrisma(connectedRow());
+    const { state, entra } = await started(prisma);
+    (prisma.__row() as any).pendingFlowExpiresAt = new Date(Date.now() - 1000);
+
+    const outcome = await completeAuthCodeConnect(prisma as never, entra, {
+      state,
+      browserState: state,
+      code: "c",
+    });
+
+    expect(outcome).toBe("expired");
+    expect(prisma.__row()).toMatchObject({ state: "DISCONNECTED", ...NO_ACCOUNT, ...APP_COLUMNS });
+  });
+
+  it("ends a reconnect that hit a network wobble DISCONNECTED with nothing of the old account on the row", async () => {
+    const prisma = fakePrisma(connectedRow());
+    const { state } = await started(prisma);
+    const entra = fakeEntra({
+      acquireByAuthorizationCode: vi.fn(async () => {
+        throw { errorCode: "network_error", errorMessage: "socket hang up" };
+      }),
+    });
+
+    const outcome = await completeAuthCodeConnect(prisma as never, entra, {
+      state,
+      browserState: state,
+      code: "c",
+    });
+
+    expect(outcome).toBe("failed");
+    expect(prisma.__row()).toMatchObject({ state: "DISCONNECTED", ...NO_ACCOUNT, ...APP_COLUMNS });
+  });
+
+  it("clears a sign-in parked by an earlier build, still holding its old token, when it ends DISCONNECTED", async () => {
+    // Rows that went PENDING_CONSENT before this change kept the old link's
+    // token. Every way back to DISCONNECTED clears it, not only disconnect().
+    const state = "parked-state";
+    const prisma = fakePrisma({
+      ...connectedRow(),
+      state: "PENDING_CONSENT",
+      pendingStateHash: sha256(state),
+      pendingFlowEnc: sealPendingFlow(USER, { codeVerifier: "v", nonce: "n", redirectUri: REDIRECT }),
+      pendingFlowExpiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const outcome = await completeAuthCodeConnect(prisma as never, fakeEntra(), {
+      state,
+      browserState: state,
+      error: "access_denied",
+    });
+
+    expect(outcome).toBe("cancelled");
+    expect(prisma.__row()).toMatchObject({ state: "DISCONNECTED", ...NO_ACCOUNT, ...APP_COLUMNS });
+  });
+
+  it("does not let a device-code sign-in that lapses later undo a link made in the browser meanwhile", async () => {
+    // The device-code poll outlives the person's interest in it: they start
+    // it, switch to the browser sign-in and finish there. When the forgotten
+    // code lapses, "put the connection back where it started" must apply only
+    // to the sign-in in flight. It must not disconnect, or purge, the new link.
+    const prisma = fakePrisma(null);
+    let lapse!: (err: unknown) => void;
+    const deviceEntra = fakeEntra({
+      acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
+        onCode({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://microsoft.com/devicelogin",
+          expiresAt: new Date(Date.now() + 900_000),
+          message: "enter the code",
+        });
+        return await new Promise<EntraAuthResult>((_resolve, reject) => {
+          lapse = reject;
+        });
+      }),
+    });
+    await beginDeviceCodeConnect(prisma as never, deviceEntra, USER, { app: APP });
+
+    const { state, entra } = await started(prisma);
+    expect(
+      await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, code: "c" }),
+    ).toBe("connected");
+
+    lapse({ errorCode: "expired_token", errorMessage: "the code expired" });
+    await vi.waitFor(() =>
+      expect(prisma.m365Connection.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ state: "DISCONNECTED" }) }),
+      ),
+    );
+
+    const row = prisma.__row() as any;
+    expect(row).toMatchObject({ state: "CONNECTED", accountUpn: "sam@practice.com" });
+    expect(row.tokenCacheEnc).toBeTruthy();
+  });
+});

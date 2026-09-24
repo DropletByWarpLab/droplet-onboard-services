@@ -18,7 +18,7 @@ vi.mock("framer-motion", async () => {
 });
 
 import { RoleBuilderSheet } from "./RoleBuilderSheet";
-import { blankRoleDraft, roleToDraft } from "@/lib/access";
+import { blankRoleDraft, roleToDraft, toolDomainGroupsWith } from "@/lib/access";
 import { ACCESS_COPY } from "./copy";
 import type { AccessRole } from "@/lib/types";
 
@@ -578,5 +578,82 @@ describe("WARP-2738 — initialDirty", () => {
     // Named but untouched: `blankRoleDraft` + a name is still identical to
     // `base`, so only an explicit `initialDirty` may unlock this.
     expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains ──────────────────────
+
+describe("Extensions rows and dead grants (WARP-2897)", () => {
+  const groups = toolDomainGroupsWith([{ domain: "ext-bookings" }]);
+
+  it("renders no Extensions section when nothing is attached", () => {
+    renderSheet();
+    expect(screen.queryByTestId("access-tools-extensions")).toBeNull();
+  });
+
+  it("renders one Extensions row per runtime domain, starting Off on a new role", () => {
+    renderSheet({ base: blankRoleDraft("family", groups), toolDomainGroups: groups });
+    const row = screen.getByTestId("access-tools-ext:ext-bookings");
+    expect(within(row).getByText("ext-bookings")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Off" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("a row the draft has no entry for (domains loaded after the sheet's seed) shows Off", () => {
+    // The panel fetches /api/access/tool-domains asynchronously, so a draft
+    // seeded before it answered has no key for the extension row. Off — never
+    // View — is the only honest display: nothing is granted until chosen.
+    renderSheet({ base: blankRoleDraft("family"), toolDomainGroups: groups });
+    const row = screen.getByTestId("access-tools-ext:ext-bookings");
+    expect(within(row).getByRole("button", { name: "Off" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("choosing View on an Extensions row saves exactly that grant", () => {
+    const { onSave } = renderSheet({ base: blankRoleDraft("family", groups), toolDomainGroups: groups });
+    fireEvent.change(screen.getByLabelText(/role name/i), { target: { value: "Front desk" } });
+    const row = screen.getByTestId("access-tools-ext:ext-bookings");
+    fireEvent.click(within(row).getByRole("button", { name: "View" }));
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    const payload = onSave.mock.calls[0]![0];
+    expect(payload.toolGrants).toContainEqual({ domain: "ext-bookings", level: "view" });
+  });
+
+  it("badges a grant whose domain nothing provides any more — and still saves it back", () => {
+    const role = makeRole({
+      toolGrants: [{ domain: "ext-bookings", level: "view", state: "dead", deadReason: "not_provided" }],
+    });
+    const { onSave } = renderSheet({
+      mode: "edit",
+      base: roleToDraft(role),
+      deadToolGrants: [{ domain: "ext-bookings", deadReason: "not_provided" }],
+    });
+    const dead = screen.getByTestId("access-tools-dead-ext-bookings");
+    expect(within(dead).getByText("Reaches nothing")).toBeTruthy();
+    expect(within(dead).getByText(ACCESS_COPY.deadToolGrant)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/role name/i), { target: { value: "Finance 2" } });
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[0]![0].toolGrants).toEqual([{ domain: "ext-bookings", level: "view" }]);
+  });
+
+  /** The dead row's Remove is the only way to revoke it: it has no Off.
+   *  MUTATION: Remove does not record the domain in the draft -> red. */
+  it("Remove on a dead grant drops it from the save; Keep brings it back", () => {
+    const role = makeRole({
+      toolGrants: [{ domain: "ext-bookings", level: "use", state: "dead", deadReason: "not_provided" }],
+    });
+    const { onSave } = renderSheet({
+      mode: "edit",
+      base: roleToDraft(role),
+      deadToolGrants: [{ domain: "ext-bookings", deadReason: "not_provided" }],
+    });
+    fireEvent.change(screen.getByLabelText(/role name/i), { target: { value: "Finance 2" } });
+    const dead = screen.getByTestId("access-tools-dead-ext-bookings");
+    fireEvent.click(within(dead).getByRole("button", { name: "Remove ext-bookings grant" }));
+    expect(within(dead).getByText(ACCESS_COPY.deadToolGrantRemoved)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[0]![0].toolGrants).toEqual([]);
+
+    fireEvent.click(within(dead).getByRole("button", { name: "Keep ext-bookings grant" }));
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[1]![0].toolGrants).toEqual([{ domain: "ext-bookings", level: "use" }]);
   });
 });

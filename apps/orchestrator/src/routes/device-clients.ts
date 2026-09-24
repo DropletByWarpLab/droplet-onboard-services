@@ -635,7 +635,9 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         }
         throw err;
       }
-      const userId = getUser(req);
+      // WARP-2911 — PushSubscription is keyed by USERNAME, the key
+      // sendNotification dispatches on.
+      const username = getUser(req);
 
       // Upsert by endpoint so re-subscribing doesn't create duplicates.
       // We trust the keys to be fresh on every subscribe (browsers
@@ -643,14 +645,14 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       const row = await prisma.pushSubscription.upsert({
         where: { endpoint: parsed.data.endpoint },
         create: {
-          userId,
+          username,
           endpoint: parsed.data.endpoint,
           p256dhKey: parsed.data.keys.p256dh,
           authKey: parsed.data.keys.auth,
           deviceClientId: parsed.data.deviceClientId,
         },
         update: {
-          userId,
+          username,
           p256dhKey: parsed.data.keys.p256dh,
           authKey: parsed.data.keys.auth,
           deviceClientId: parsed.data.deviceClientId,
@@ -668,11 +670,11 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       if (!endpoint || endpoint.length > 2048) {
         return res.status(400).json({ error: "endpoint required" });
       }
-      const userId = getUser(req);
+      const username = getUser(req);
       // Defensive: only delete the operator's own subscriptions, even
       // if they happened to send someone else's endpoint.
       await prisma.pushSubscription.deleteMany({
-        where: { endpoint, userId },
+        where: { endpoint, username },
       });
       res.status(204).end();
     } catch (err) {
@@ -682,8 +684,8 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
 
   router.post("/devices/push/test", async (req, res, next) => {
     try {
-      const userId = getUser(req);
-      const result = await dispatchToUser(prisma, userId, {
+      const username = getUser(req);
+      const result = await dispatchToUser(prisma, username, {
         title: "Droplet test notification",
         body: "If you can read this, push is working.",
         url: "/",

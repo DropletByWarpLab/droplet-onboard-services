@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from release_verify import (
     SUPPORTED_SCHEMA_VERSION,
     TRUST_ANCHOR_PLACEHOLDER_MARKER,
@@ -223,6 +225,71 @@ def test_parse_rejects_non_string_scope_values():
     assert not res.ok
     assert res.failure_reason == "schema_invalid"
     assert "scope" in res.detail
+
+
+# WARP-2898 (ADR-056 slice K1): mirrors manifest.test.ts "a non-release kind
+# or a key-usage field is refused" — an extension document never parses as a
+# release in either port.
+@pytest.mark.parametrize(
+    ("extra", "detail"),
+    [
+        ({"kind": "extension"}, 'kind "extension" is not a release'),
+        ({"kind": "Release"}, 'kind "Release" is not a release'),
+        ({"kind": None}, "kind null is not a release"),
+        ({"usage": "extension"}, "usage is an extension-signing field"),
+        ({"keyUsage": "extension"}, "keyUsage is an extension-signing field"),
+        ({"kind": "release", "usage": "release"}, "usage is an extension-signing field"),
+    ],
+)
+def test_parse_refuses_a_non_release_kind_or_key_usage_field(extra, detail):
+    doc = {**_valid_doc(), **extra}
+    res = parse_release_manifest(json.dumps(doc))
+    assert not res.ok
+    assert res.failure_reason == "schema_invalid"
+    assert detail in res.detail
+
+
+def test_parse_kind_verdict_comes_before_the_version_gates():
+    doc = {**_valid_doc(), "kind": "extension", "schemaVersion": 0}
+    res = parse_release_manifest(json.dumps(doc))
+    assert not res.ok
+    assert res.failure_reason == "schema_invalid"
+    assert "is not a release" in res.detail
+
+
+@pytest.mark.parametrize("name", ["extension.valid.json", "extension.manifest.json"])
+def test_parse_refuses_the_h1_extension_fixtures_as_not_a_release(name):
+    res = parse_release_manifest(fx(name))
+    assert not res.ok
+    assert res.failure_reason == "schema_invalid"
+    assert 'kind "extension" is not a release' in res.detail
+
+
+def test_parse_accepts_an_explicit_kind_release():
+    res = parse_release_manifest(json.dumps({**_valid_doc(), "kind": "release"}))
+    assert res.ok, res.detail
+
+
+# The detail is byte-identical to manifest.ts, which renders the kind with
+# JSON.stringify: no space after "," or ":" (json.dumps' default separators
+# add one) and non-ASCII left as-is. manifest.test.ts pins the same strings.
+@pytest.mark.parametrize(
+    ("kind", "rendered"),
+    [
+        (["extension", "release"], '["extension","release"]'),
+        ({"type": "extension", "v": 1}, '{"type":"extension","v":1}'),
+        ([{"a": [1, 2]}, None, True], '[{"a":[1,2]},null,true]'),
+        ({"k": "é"}, '{"k":"é"}'),
+    ],
+)
+def test_parse_renders_a_non_string_kind_as_json_stringify_does(kind, rendered):
+    res = parse_release_manifest(json.dumps({**_valid_doc(), "kind": kind}))
+    assert not res.ok
+    assert res.failure_reason == "schema_invalid"
+    assert res.detail == (
+        f"kind {rendered} is not a release — an extension document never "
+        "parses as a release manifest"
+    )
 
 
 def test_parse_does_not_gate_min_orchestrator_schema():

@@ -39,6 +39,7 @@ import {
   type AuthUser,
 } from "../middleware/auth.js";
 import {
+  ACTIVE_AGENT_RUN_STATUSES,
   cancelAgentRun,
   decideAgentRun,
   enqueueAgentRun,
@@ -47,6 +48,7 @@ import {
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { summarizeToolArguments } from "../services/confirmation-summary.js";
+import { WORKSPACE_ID } from "../services/workspace.service.js";
 import { decideCloudTurn } from "../services/cloud-access.service.js";
 import {
   isSupportedRrule,
@@ -57,11 +59,20 @@ import {
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 
+/** Prisma's unique-constraint failure (`P2002`), without importing the class
+ *  — the unit suites stub the client, and a structural check is what a raw
+ *  `Prisma.PrismaClientKnownRequestError` satisfies too. */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
+}
+
 const startRunSchema = z.object({
   goal: z.string().trim().min(1).max(4000),
   model: z.string().trim().min(1).max(200).optional(),
   sessionId: z.string().trim().min(1).max(200).optional(),
   maxIter: z.coerce.number().int().positive().optional(),
+  /** WARP-2896 — a WORKSHOP run: bound to this workspace for its whole life. */
+  workspaceId: z.string().regex(WORKSPACE_ID).optional(),
   /** Username the mcp principal acts for. Ignored for everyone else. */
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
 });
@@ -73,6 +84,8 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   /** Opaque: `<createdAt ISO>|<id>` of the previous page's tail row. */
   cursor: z.string().min(1).max(300).optional(),
+  /** WARP-2896 — only the runs that worked in this workspace. */
+  workspaceId: z.string().regex(WORKSPACE_ID).optional(),
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
 });
 
@@ -173,6 +186,7 @@ interface RunRow {
   parkedAt: Date | null;
   pendingDecision: string | null;
   pendingDecidedAt: Date | null;
+  workspaceId: string | null;
   cloudGate: string;
   offLanProvider: string | null;
   offLanWithheldTools: string[];
@@ -201,6 +215,8 @@ function serializeRun(r: RunRow, withTrace: boolean) {
     result: r.result,
     stopReason: r.stopReason,
     error: r.error,
+    // WARP-2896 — the workshop workspace, for the run list and the run page.
+    workspaceId: r.workspaceId,
     // WARP-2997 — where the model ran, and what it was not given.
     cloudGate: r.cloudGate,
     offLanProvider: r.offLanProvider,
@@ -252,6 +268,7 @@ const RUN_SELECT = {
   parkedAt: true,
   pendingDecision: true,
   pendingDecidedAt: true,
+  workspaceId: true,
   cloudGate: true,
   offLanProvider: true,
   offLanWithheldTools: true,
@@ -311,13 +328,55 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         return;
       }
       if (!(await cloudAllowedOr451(res, actor, model))) return;
-      const { id } = await enqueueAgentRun(prisma, {
-        userId: actor.id,
-        goal: parsed.data.goal,
-        model,
-        sessionId: parsed.data.sessionId ?? null,
-        maxIter: parsed.data.maxIter,
-      });
+      // WARP-2896 — a workshop run needs a workspace that exists, is still
+      // active (a proposed one is read-only until reviewed) and has no other
+      // run working in it: two runs on one checkout would commit over each
+      // other. The binding is set once, here, and never changed. The count
+      // below is the friendly answer; the DURABLE guard is the partial unique
+      // index `AgentRun_workspaceId_active_key` (one active run per
+      // workspace), whose P2002 the create maps onto the same 409 when two
+      // starts race past the count.
+      if (parsed.data.workspaceId) {
+        const ws = await prisma.workshopWorkspace.findUnique({
+          where: { id: parsed.data.workspaceId },
+          select: { id: true, status: true },
+        });
+        if (!ws) {
+          res.status(404).json({ error: "No such workspace" });
+          return;
+        }
+        if (ws.status !== "active") {
+          res.status(409).json({ error: `workspace is ${ws.status}; start a new one to keep working` });
+          return;
+        }
+        const busy = await prisma.agentRun.count({
+          where: { workspaceId: ws.id, status: { in: [...ACTIVE_AGENT_RUN_STATUSES] } },
+        });
+        if (busy > 0) {
+          res.status(409).json({ error: "A run is already working in this workspace" });
+          return;
+        }
+      }
+      let id: string;
+      try {
+        ({ id } = await enqueueAgentRun(prisma, {
+          userId: actor.id,
+          goal: parsed.data.goal,
+          model,
+          sessionId: parsed.data.sessionId ?? null,
+          maxIter: parsed.data.maxIter,
+          workspaceId: parsed.data.workspaceId ?? null,
+        }));
+      } catch (err) {
+        // The only unique constraint a workshop run's create can trip is the
+        // one-active-run-per-workspace index: the row's own id is a fresh
+        // cuid. So a P2002 here IS the race the count above could not see.
+        if (parsed.data.workspaceId && isUniqueViolation(err)) {
+          res.status(409).json({ error: "A run is already working in this workspace" });
+          return;
+        }
+        throw err;
+      }
       await recordActivity({
         kind: "tool_run",
         severity: "info",
@@ -325,9 +384,14 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         what: "Agent run queued",
         sub: parsed.data.goal.length > 120 ? `${parsed.data.goal.slice(0, 117)}…` : parsed.data.goal,
         actor: actorFromRequest(req),
-        refs: { agentRunId: id, userId: actor.username, status: "queued" },
+        refs: {
+          agentRunId: id,
+          userId: actor.username,
+          status: "queued",
+          ...(parsed.data.workspaceId ? { workspaceId: parsed.data.workspaceId } : {}),
+        },
       });
-      res.status(201).json({ id, status: "queued" });
+      res.status(201).json({ id, status: "queued", workspaceId: parsed.data.workspaceId ?? null });
     } catch (err) {
       next(err);
     }
@@ -342,7 +406,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
-      const { status, limit, cursor } = parsed.data;
+      const { status, limit, cursor, workspaceId } = parsed.data;
       const after = cursor ? parseCursor(cursor) : null;
       if (cursor && !after) {
         res.status(400).json({ error: "Invalid cursor" });
@@ -352,6 +416,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         where: {
           userId: actor.id,
           ...(status ? { status } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
           ...(after
             ? {
                 OR: [

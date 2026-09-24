@@ -24,6 +24,7 @@
 import type { $Enums, Prisma, PrismaClient } from "@prisma/client";
 import { publish } from "./mqtt.service.js";
 import { dispatchToUser, ensurePushDispatch } from "./push-dispatch.service.js";
+import { assertRecipientIsUsername } from "./notification-recipient.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("notifications");
@@ -41,7 +42,14 @@ export type NotificationKind = $Enums.NotificationKind;
 type NotificationDb = PrismaClient | Prisma.TransactionClient;
 
 export interface DispatchInput {
-  userId: string;
+  /** WARP-2911 — the recipient's Nextcloud username (`User.username`), NEVER
+   *  `User.id`. It is the key at every hop: the toast topic
+   *  `droplet/notifications/<username>` (ws-bridge subscribes on the username
+   *  only), the `PushSubscription.username` lookup, and both
+   *  `NotificationLog.username` readers. A `User.id` here reaches nobody, so
+   *  every entry point refuses one (`NOTIFICATION_RECIPIENT_IS_ID`, below) and
+   *  `__tests__/notification-recipient.guard.test.ts` sweeps every call site. */
+  username: string;
   kind: NotificationKind;
   title: string;
   body?: string | null;
@@ -102,6 +110,17 @@ export function assertNotificationData(data: Record<string, unknown>): void {
   }
 }
 
+// ── WARP-2911: the recipient is a username ──────────────────────────────────
+//
+// The check, the error and its shape live in `./notification-recipient.ts` (a
+// leaf: push-dispatch runs the same check, and this module imports
+// push-dispatch). The shape itself is `@droplet/auth-policy`'s — the one every
+// place a username is minted refuses — so creation and refusal cannot drift.
+export {
+  NotificationRecipientError,
+  type NotificationRecipientErrorCode,
+} from "./notification-recipient.js";
+
 /** The one check every entry point runs on the optional link fields. */
 function assertLinkFields(input: DispatchInput): void {
   if (input.url !== undefined) assertNotificationLink(input.url);
@@ -133,16 +152,19 @@ function safePublish(topic: string, payload: Record<string, unknown>): boolean {
  * WARP-2587 — the TRANSPORT half of a dispatch, on its own.
  *
  * Extracted so a caller that must write the log row transactionally can still
- * publish the toast afterwards. Never throws: the toast is best-effort by
- * design and the log row is the durable record.
+ * publish the toast afterwards. Never throws on a TRANSPORT problem: the toast
+ * is best-effort by design and the log row is the durable record. It does
+ * throw on a caller bug — a `User.id` recipient (WARP-2911), which would
+ * publish to a topic nobody subscribes to.
  */
 export function publishNotificationToast(input: DispatchInput): {
   channels: string[];
   errors: string[];
 } {
+  assertRecipientIsUsername("publishNotificationToast", input.username);
   const channels: string[] = [];
   const errors: string[] = [];
-  // WARP-2909 — this function must not throw, so a bad link DEGRADES: the
+  // WARP-2909 — this function must not throw on a bad link: it DEGRADES, the
   // toast still goes out, without the link, and the row records why.
   let link: Pick<DispatchInput, "url" | "data"> = { url: input.url, data: input.data };
   try {
@@ -153,7 +175,7 @@ export function publishNotificationToast(input: DispatchInput): {
   }
   // Channel 1: toast. Always attempted because the ws-bridge is the cheapest
   // delivery path and the user always has a dashboard tab nearby.
-  const toastOk = safePublish(`droplet/notifications/${input.userId}`, {
+  const toastOk = safePublish(`droplet/notifications/${input.username}`, {
     kind: input.kind,
     title: input.title,
     body: input.body ?? null,
@@ -180,12 +202,13 @@ export async function recordNotification(
   db: NotificationDb,
   input: DispatchInput,
 ): Promise<{ id: string }> {
-  // WARP-2909 — before the write: inside a caller's transaction a throw here
-  // aborts it before anything commits.
+  // WARP-2909 / WARP-2911 — before the write: inside a caller's transaction a
+  // throw here aborts it before anything commits.
+  assertRecipientIsUsername("recordNotification", input.username);
   assertLinkFields(input);
   const row = await db.notificationLog.create({
     data: {
-      userId: input.userId,
+      username: input.username,
       kind: input.kind,
       title: input.title,
       body: input.body ?? null,
@@ -204,7 +227,9 @@ export async function sendNotification(
   prisma: PrismaClient,
   input: DispatchInput,
 ): Promise<DispatchResult> {
-  // WARP-2909 — a bad link is the caller's bug: refuse before any transport.
+  // WARP-2911 / WARP-2909 — a `User.id` recipient or a bad link is the
+  // caller's bug: refuse before any transport or row.
+  assertRecipientIsUsername("sendNotification", input.username);
   assertLinkFields(input);
   const { channels, errors } = publishNotificationToast(input);
 
@@ -233,7 +258,7 @@ export async function sendNotification(
   let pushOutcome: $Enums.PushOutcome;
   try {
     await ensurePushDispatch(prisma);
-    const { sent, attempted, refused } = await dispatchToUser(prisma, input.userId, {
+    const { sent, attempted, refused } = await dispatchToUser(prisma, input.username, {
       title: input.title,
       body: input.body ?? "",
       url: input.url,
@@ -252,14 +277,14 @@ export async function sendNotification(
     pushOutcome = "failed";
     pushError = `push: ${err instanceof Error ? err.message : String(err)}`;
     // Always visible to an operator, whether or not it reaches the row.
-    logger.warn({ err, userId: input.userId }, "push notification failed");
+    logger.warn({ err, username: input.username }, "push notification failed");
   }
   if (pushError && channels.length === 0) errors.push(pushError);
 
   const delivered = channels.length > 0;
   const log = await prisma.notificationLog.create({
     data: {
-      userId: input.userId,
+      username: input.username,
       kind: input.kind,
       title: input.title,
       body: input.body ?? null,
@@ -280,11 +305,42 @@ export async function sendNotification(
   };
 }
 
-/** Recent notifications for a user, newest-first. Used by the LLM
- *  `list_notifications` tool and the "Recent notifications" panel. */
+/**
+ * WARP-2911 — a `system` notification to every owner and admin, by username,
+ * contained PER RECIPIENT: one refused or failed send (e.g. an account whose
+ * username predates the ban on the `User.id` shape) is logged and skipped,
+ * and never costs the recipients after it the alert. The OTA apply path's
+ * `notifyOwners` (index.ts) is this.
+ */
+export async function notifyOwnersAndAdmins(
+  prisma: PrismaClient,
+  title: string,
+  body: string,
+): Promise<{ notified: string[]; failed: string[] }> {
+  const owners = await prisma.user.findMany({
+    where: { role: { in: ["owner", "admin"] } },
+    select: { username: true },
+  });
+  const notified: string[] = [];
+  const failed: string[] = [];
+  for (const { username } of owners) {
+    try {
+      await sendNotification(prisma, { username, kind: "system", title, body });
+      notified.push(username);
+    } catch (err) {
+      failed.push(username);
+      logger.error({ err, username, title }, "owner/admin alert to one recipient failed — continuing with the rest");
+    }
+  }
+  return { notified, failed };
+}
+
+/** Recent notifications for a user (by USERNAME), newest-first. Used by the
+ *  "Recent notifications" panel; the LLM `list_notifications` tool reads the
+ *  same column directly. */
 export async function listRecentNotifications(
   prisma: PrismaClient,
-  userId: string,
+  username: string,
   limit = 50,
 ): Promise<
   Array<{
@@ -301,7 +357,7 @@ export async function listRecentNotifications(
   }>
 > {
   return prisma.notificationLog.findMany({
-    where: { userId },
+    where: { username },
     orderBy: { createdAt: "desc" },
     take: Math.max(1, Math.min(200, limit)),
   });

@@ -61,8 +61,14 @@ export function createTlsNotifier(prisma: PrismaClient): TlsNotifier {
 
   async function fanOut(title: string, body: string): Promise<void> {
     const users = await recipients();
+    // WARP-2911 — contained per recipient: one refused or failed send never
+    // costs the recipients after it the alert.
     for (const username of users) {
-      await sendNotification(prisma, { userId: username, kind: "system", title, body });
+      try {
+        await sendNotification(prisma, { username, kind: "system", title, body });
+      } catch (err) {
+        logger.error({ err, username, title }, "tls-notify: alert to one recipient failed — continuing with the rest");
+      }
     }
     logger.info({ title, recipients: users.length }, "tls-notify: sent");
   }

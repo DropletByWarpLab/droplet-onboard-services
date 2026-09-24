@@ -186,6 +186,36 @@ interface ConnectionRow {
   pendingFlowEnc?: string | null;
 }
 
+/**
+ * The columns that name a Microsoft account: the sealed credential and the
+ * account it belongs to. Cleared together, never one at a time.
+ *
+ * #2344 review — DISCONNECTED is "no Microsoft account linked" and
+ * `disconnect()` purges these, but a person who was CONNECTED and pressed
+ * Connect again reached DISCONNECTED another way (cancel, expiry, a network
+ * wobble on the callback) with the old account's refresh token still sealed on
+ * the row. So a new sign-in drops them the moment it starts, and every way
+ * into DISCONNECTED clears them again. `appClientId` / `appTenantId` are not
+ * here on purpose (WARP-2705): configuration, not a credential.
+ */
+const NO_ACCOUNT = {
+  tokenCacheEnc: null,
+  homeAccountId: null,
+  accountUpn: null,
+  tenantId: null,
+  grantedScopes: null,
+  connectedAt: null,
+} as const;
+
+/** A DISCONNECTED row: no account, and no sign-in in flight. */
+const UNLINKED = {
+  state: "DISCONNECTED",
+  ...NO_ACCOUNT,
+  pendingStateHash: null,
+  pendingFlowEnc: null,
+  pendingFlowExpiresAt: null,
+} as const;
+
 /** The stored app registration, or null when the row predates WARP-2705. */
 function storedApp(row: ConnectionRow | null): EntraAppRegistration | null {
   if (!row?.appClientId || !row.appTenantId) return null;
@@ -336,6 +366,11 @@ function sameSecret(a: string, b: string): boolean {
  * raw `state` goes back to the caller once, for the redirect and the browser
  * cookie that ties the callback to this browser.
  *
+ * A link already on the row is dropped here (NO_ACCOUNT): a person who presses
+ * Connect is starting over, and nothing may refresh the old grant while they
+ * are at Microsoft's page — a refresh would write CONNECTED over the sign-in
+ * in flight, and its callback would find nothing to claim.
+ *
  * Connecting IS the consent event (ADR-041).
  */
 export async function beginAuthCodeConnect(
@@ -365,6 +400,7 @@ export async function beginAuthCodeConnect(
   const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
   const pending = {
     state: "PENDING_CONSENT" as const,
+    ...NO_ACCOUNT,
     appClientId: app.clientId,
     appTenantId: app.tenantId,
     pendingStateHash: hashState(state),
@@ -476,7 +512,12 @@ export async function completeAuthCodeConnect(
   return (await persistConnected(prisma, userId, result)) ? "connected" : "cancelled";
 }
 
-/** Put an in-flight sign-in back to DISCONNECTED — and only an in-flight one. */
+/**
+ * Put an in-flight sign-in back to DISCONNECTED — and only an in-flight one,
+ * so a stale flow ending late cannot unlink a connection made since. Clears
+ * the account columns too (UNLINKED): a row parked PENDING_CONSENT before the
+ * sign-in started dropping them still holds the old link's token.
+ */
 async function returnToDisconnected(
   prisma: PrismaClient,
   userId: string,
@@ -484,13 +525,7 @@ async function returnToDisconnected(
 ): Promise<void> {
   await prisma.m365Connection.updateMany({
     where: { userId, state: "PENDING_CONSENT" },
-    data: {
-      state: "DISCONNECTED",
-      pendingStateHash: null,
-      pendingFlowEnc: null,
-      pendingFlowExpiresAt: null,
-      lastError,
-    },
+    data: { ...UNLINKED, lastError },
   });
 }
 
@@ -542,8 +577,10 @@ export async function beginDeviceCodeConnect(
 
   // An authorization-code attempt left open in another tab is superseded:
   // its hash and sealed flow go, so its callback can no longer claim the row.
+  // A link already on the row goes too, as in beginAuthCodeConnect.
   const pending = {
     state: "PENDING_CONSENT" as const,
+    ...NO_ACCOUNT,
     appClientId: app.clientId,
     appTenantId: app.tenantId,
     pendingStateHash: null,
@@ -661,18 +698,11 @@ async function persistFailure(
   }
 
   // The person closed the tab or pressed Cancel. Nothing failed; put the
-  // connection back where it started so they can simply try again.
+  // connection back where it started so they can simply try again. Only a
+  // sign-in still in flight: a device-code poll that lapses after the person
+  // finished in the browser instead must not unlink what they just made.
   if (kind === "ABANDONED") {
-    await prisma.m365Connection.updateMany({
-      where: { userId },
-      data: {
-        state: "DISCONNECTED",
-        pendingStateHash: null,
-        pendingFlowEnc: null,
-        pendingFlowExpiresAt: null,
-        lastError: null,
-      },
-    });
+    await returnToDisconnected(prisma, userId, null);
     return;
   }
 
@@ -743,16 +773,7 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
   await prisma.m365Connection.update({
     where: { userId },
     data: {
-      state: "DISCONNECTED",
-      tokenCacheEnc: null,
-      homeAccountId: null,
-      accountUpn: null,
-      tenantId: null,
-      grantedScopes: null,
-      pendingStateHash: null,
-      pendingFlowEnc: null,
-      pendingFlowExpiresAt: null,
-      connectedAt: null,
+      ...UNLINKED,
       lastError: null,
       // appClientId / appTenantId are kept on purpose (WARP-2705): they are
       // configuration, not a credential, and they make reconnecting one click.

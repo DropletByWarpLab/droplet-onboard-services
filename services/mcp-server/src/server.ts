@@ -179,6 +179,14 @@ export function createServer(
       meta.agentRunId.length > 0
         ? meta.agentRunId
         : undefined;
+    // WARP-2896 — the run's workshop workspace. Same posture.
+    const metaWorkspaceId =
+      trustedPrincipal &&
+      meta &&
+      typeof meta.workspaceId === "string" &&
+      meta.workspaceId.length > 0
+        ? meta.workspaceId
+        : undefined;
     const metaEnhancement =
       trustedPrincipal &&
       meta &&
@@ -196,6 +204,7 @@ export function createServer(
       metaEnhancement,
       metaUserRole,
       metaAgentRunId,
+      metaWorkspaceId,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 

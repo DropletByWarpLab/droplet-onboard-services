@@ -121,7 +121,7 @@ export async function notifyFindings(
   let immediate = 0;
   for (const f of urgent) {
     await sendNotification(prisma, {
-      userId: to,
+      username: to,
       kind: "ai",
       title: f.title,
       body: f.rationale.slice(0, 300),
@@ -154,7 +154,7 @@ export async function notifyFindings(
   ].filter(Boolean);
 
   await sendNotification(prisma, {
-    userId: to,
+    username: to,
     kind: "ai",
     title: `Your business brief: ${parts.join(", ")}`,
     // The top item by impact, so the notification says something specific
