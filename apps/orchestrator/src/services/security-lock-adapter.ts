@@ -3,18 +3,21 @@
  * adapter CORE: turns what the smart-home service says about DoorLock
  * endpoints into `lock_state` rows for the Security feed.
  *
- * ── Owning slice: C (built in phase 1, ships in PR-2 with L0). ──
- * This file has no Prisma and no Prisma enums on purpose: the shared unions
- * (`SecurityEventSource`, `SecurityEventKind`, `SecurityHealthId`) gain
- * `matter_lock` / `lock_state` / `locks` only in L0. Until then everything is
- * a LOCAL type that L0 maps onto the shared ones:
- *   · `LockRowDraft`  → `SecurityEventDraft` + `observed` (live | polled);
- *   · `LockHealth`    → `SecurityHealthRow` with id `locks`;
- *   · `LockStore`     → L0's Prisma-backed store (over `recordSecurityEvent`);
+ * ── Slice C (the core) + L0 (the wiring), WARP-2977 PR-2. ──
+ * The core is built against injected interfaces; L0 supplies them:
+ *   · `LockRowDraft`  — a `SecurityEventDraft` (source `matter_lock`, kind
+ *     `lock_state`, `observed` live | polled), written through the one
+ *     writer by `createPrismaLockStore` below;
+ *   · `LockHealth`    — a `SecurityHealthRow` with id `locks`;
  *   · `LockDeviceSource` → `matterLockDeviceSource(...)` below, fed the
- *     existing matter.service exports by index.ts.
- * It does NOT import matter.service: index.ts injects the functions, so the
- * route tests that mock matter.service with explicit factories stay green.
+ *     existing matter.service exports by index.ts;
+ *   · `SecurityLockReader` — what the /security routes read (a fresh lock
+ *     list for the Areas page and link checks, the last sweep's locks for a
+ *     Close up's `unlockedLocks`, the health row).
+ * No Prisma ENUM is imported here (the store passes the draft's string
+ * unions straight to the writer). It does NOT import matter.service: index.ts
+ * injects the functions, so the route tests that mock matter.service with
+ * explicit factories stay green.
  *
  * The rules this file holds (spec §6.8):
  *   · A frame is a lock reading only on the REAL wire path — an OBJECT
@@ -47,7 +50,10 @@
  *     space; rows never claim a cause (no "someone unlocked").
  *   · Canary (WARP-2203): no `next…` / `…Cursor` keys in this file.
  */
+import type { PrismaClient } from "@prisma/client";
 import type { CronRuntime } from "./cron-runtime.service.js";
+import type { SecurityEventDraft } from "./security-event-ingest.js";
+import { writeSecurityEvent } from "./security-events.service.js";
 import type { MatterCommissionedDevice, MatterGrouped } from "../types/smart-home.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -85,11 +91,11 @@ export interface LockObservation {
 }
 
 /**
- * One `lock_state` row before the database assigns an id. Field-for-field a
- * `SecurityEventDraft` (source `matter_lock`, kind `lock_state`) plus the
- * PR-2 `observed` column.
+ * One `lock_state` row before the database assigns an id: a
+ * `SecurityEventDraft` narrowed to source `matter_lock`, kind `lock_state`
+ * (the `extends` makes the compiler hold it to that shape).
  */
-export interface LockRowDraft {
+export interface LockRowDraft extends SecurityEventDraft {
   source: "matter_lock";
   kind: "lock_state";
   severity: "info" | "notice";
@@ -114,13 +120,12 @@ export interface StoredLockReading {
 export type LockWriteOutcome = "recorded" | "duplicate" | "failed";
 
 /**
- * Persistence, injected. L0 implements it over Prisma:
+ * Persistence, injected. `createPrismaLockStore` (below) is the real one:
  *   · `lastReading` — `source matter_lock, sourceRef = ref`, orderBy
  *     `[startedAt desc, id desc]`, `labels[0]` as the reading. THROWS on a
  *     read failure (the tracker then writes nothing and retries).
- *   · `write` — through `recordSecurityEvent`. Must tell `duplicate` (the
- *     dedupeKey already exists) from `failed`: recordSecurityEvent's boolean
- *     alone conflates them.
+ *   · `write` — through the one writer, `writeSecurityEvent`, which tells
+ *     `duplicate` (the dedupeKey already exists) from `failed`.
  *   · `idByDedupeKey` — the row's id, or null.
  */
 export interface LockStore {
@@ -176,6 +181,21 @@ function endpointIdOf(v: unknown): number | null {
 
 export function lockRef(nodeId: string, endpointId: number): string {
   return `matter:${nodeId}/${endpointId}`;
+}
+
+/**
+ * A lock link's `sourceRef` → its endpoint, or null. Only the CANONICAL form
+ * `lockRef` writes is accepted (no leading zeros, a uint64 node, endpoint
+ * 1..65534): a link is joined to lock rows by exact string equality, so a
+ * ref in any other spelling could never match a row.
+ */
+export function parseLockRef(ref: string): { nodeId: string; endpointId: number } | null {
+  const m = REF.exec(ref);
+  if (!m) return null;
+  const nodeId = canonicalNodeId(m[1]);
+  const endpointId = endpointIdOf(Number(m[2]));
+  if (nodeId === null || endpointId === null) return null;
+  return lockRef(nodeId, endpointId) === ref ? { nodeId, endpointId } : null;
 }
 
 /** RAW DoorLock.LockState → reading; `undefined` when the value is not one. */
@@ -503,8 +523,8 @@ export function lockFrameSubscriber(
  * Adapts the existing matter.service exports (injected by index.ts — this
  * file never imports matter.service). EVERY group is flattened: a lock is
  * found by its cluster, and the sidecar's category is derived from device
- * types. L0 passes `getCommissionedDevices` wrapped in `enrichGrouped` so the
- * DeviceAlias name and room ride along as `friendlyName` / `roomName`.
+ * types. index.ts passes `getCommissionedDevices` wrapped in `enrichGrouped`
+ * so the DeviceAlias name and room ride along as `friendlyName` / `roomName`.
  */
 export function matterLockDeviceSource(deps: {
   getCommissionedDevices: () => Promise<MatterGrouped>;
@@ -552,6 +572,84 @@ export interface KnownLock {
   reading: LockReading | null;
   /** False for a node with several DoorLock endpoints: the list merges their attributes, so only live frames cover it. */
   polled: boolean;
+}
+
+/** What one successful device list says about door locks. Pure. */
+interface DeviceListReading {
+  /** Every well-formed node id in the list (a lock or not): a node absent from it is decommissioned. */
+  present: Set<string>;
+  /** Every DoorLock endpoint, in list order; `reading` is null here (the caller fills in what was heard). */
+  known: KnownLock[];
+  /** The reading the list gives for each single-endpoint, connected lock — the sweep's polled observations. */
+  polledReadings: LockObservation[];
+  /** Nodes with several DoorLock endpoints (the sweep logs each once). */
+  multi: Array<{ nodeId: string; endpoints: number[] }>;
+}
+
+function readDeviceList(devices: readonly unknown[]): DeviceListReading {
+  const out: DeviceListReading = { present: new Set(), known: [], polledReadings: [], multi: [] };
+  for (const d of devices) {
+    if (!isRecord(d)) continue;
+    const nodeId = canonicalNodeId(d.nodeId);
+    if (nodeId === null) continue;
+    out.present.add(nodeId);
+    // A lock is an endpoint that serves the DoorLock CLUSTER — never a device type or category.
+    const lockEndpoints = (Array.isArray(d.endpoints) ? d.endpoints : [])
+      .filter(
+        (ep) => isRecord(ep) && Array.isArray(ep.clusters) && ep.clusters.includes(MATTER_DOOR_LOCK_CLUSTER_ID),
+      )
+      .map((ep) => endpointIdOf((ep as { endpointId: unknown }).endpointId))
+      .filter((id): id is number => id !== null);
+    if (lockEndpoints.length === 0) continue;
+
+    const name = lockDisplayName({
+      nodeId,
+      friendlyName: d.friendlyName as string | null | undefined,
+      name: d.name as string | null | undefined,
+    });
+    const room = cleanName(d.roomName) || null;
+    const connected = d.connectionState === "connected";
+    const polled = lockEndpoints.length === 1;
+    for (const endpointId of lockEndpoints) {
+      out.known.push({ ref: lockRef(nodeId, endpointId), nodeId, endpointId, name, room, connected, reading: null, polled });
+    }
+
+    if (!polled) {
+      // The sidecar merges attributes across endpoints, so the list cannot
+      // say which of these locks `lockState` belongs to. Live frames carry
+      // the endpoint and still cover them.
+      out.multi.push({ nodeId, endpoints: lockEndpoints });
+      continue;
+    }
+    if (!connected) continue;
+    const attributes = isRecord(d.attributes) ? d.attributes : {};
+    const reading = lockReadingFromRaw(attributes.lockState);
+    if (reading === undefined) continue;
+    const endpointId = lockEndpoints[0];
+    out.polledReadings.push({ nodeId, endpointId, ref: lockRef(nodeId, endpointId), reading });
+  }
+  return out;
+}
+
+/** The readings a Close up / Away answer names as still open. `unknown` is not one: it is not known to be open. */
+const STILL_OPEN: ReadonlySet<LockReading> = new Set<LockReading>(["unlocked", "not_fully_locked", "unlatched"]);
+
+/**
+ * Route 7's `unlockedLocks`: the names of the locks that are REPORTING (the
+ * device is connected) and were last heard unlocked, not fully locked or
+ * unlatched. One name per device, sorted. Never phrased — or computed — as
+ * "all locked": a lock that is locked, unknown, never heard, or not
+ * reporting is simply not named.
+ */
+export function stillUnlockedLocks(
+  known: ReadonlyArray<Pick<KnownLock, "nodeId" | "name" | "connected" | "reading">>,
+): string[] {
+  const byNode = new Map<string, string>();
+  for (const l of known) {
+    if (!l.connected || l.reading === null || !STILL_OPEN.has(l.reading)) continue;
+    if (!byNode.has(l.nodeId)) byNode.set(l.nodeId, l.name);
+  }
+  return [...byNode.values()].sort((a, b) => a.localeCompare(b));
 }
 
 export type LockSweepResult =
@@ -655,6 +753,13 @@ export interface SecurityLockAdapter {
   stop(): void;
   /** One reconcile pass. Never throws. */
   sweep(): Promise<LockSweepResult>;
+  /**
+   * A FRESH list of every paired DoorLock endpoint (with the reading last
+   * heard for each), for the Areas page and route 12's link check. Writes no
+   * row and leaves the sweep's state alone. THROWS when the smart-home
+   * service cannot answer — never an empty list.
+   */
+  listLocks(): Promise<KnownLock[]>;
   /** Called by `registerSecurityLockJobs` once the sweep is on the cron runtime. */
   noteSweepScheduled(): void;
   /** DoorLock endpoints from the last successful list, with their last-heard readings. */
@@ -707,64 +812,23 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
       return { status: "failed", message };
     }
 
-    const present = new Set<string>();
-    const known: KnownLock[] = [];
-    const freshNames = new Map<string, string>();
-    const toObserve: LockObservation[] = [];
-
-    for (const d of devices) {
-      if (!isRecord(d)) continue;
-      const nodeId = canonicalNodeId(d.nodeId);
-      if (nodeId === null) continue;
-      present.add(nodeId);
-      // A lock is an endpoint that serves the DoorLock CLUSTER — never a device type or category.
-      const lockEndpoints = (Array.isArray(d.endpoints) ? d.endpoints : [])
-        .filter(
-          (ep) =>
-            isRecord(ep) && Array.isArray(ep.clusters) && ep.clusters.includes(MATTER_DOOR_LOCK_CLUSTER_ID),
-        )
-        .map((ep) => endpointIdOf((ep as { endpointId: unknown }).endpointId))
-        .filter((id): id is number => id !== null);
-      if (lockEndpoints.length === 0) continue;
-
-      const name = lockDisplayName({ nodeId, friendlyName: d.friendlyName, name: d.name });
-      const room = cleanName(d.roomName) || null;
-      const connected = d.connectionState === "connected";
-      const polled = lockEndpoints.length === 1;
-      for (const endpointId of lockEndpoints) {
-        const ref = lockRef(nodeId, endpointId);
-        freshNames.set(ref, name);
-        known.push({ ref, nodeId, endpointId, name, room, connected, reading: null, polled });
-      }
-
-      if (!polled) {
-        // The sidecar merges attributes across endpoints, so the list cannot
-        // say which of these locks `lockState` belongs to. Live frames carry
-        // the endpoint and still cover them.
-        if (!multiLogged.has(nodeId)) {
-          multiLogged.add(nodeId);
-          log.warn(
-            { nodeId, endpoints: lockEndpoints },
-            "security lock sweep skips a node with several door-lock endpoints — live changes still recorded",
-          );
-        }
-        continue;
-      }
-      if (!connected) continue;
-      const attributes = isRecord(d.attributes) ? d.attributes : {};
-      const reading = lockReadingFromRaw(attributes.lockState);
-      if (reading === undefined) continue;
-      const endpointId = lockEndpoints[0];
-      toObserve.push({ nodeId, endpointId, ref: lockRef(nodeId, endpointId), reading });
+    const { present, known, polledReadings, multi } = readDeviceList(devices);
+    for (const m of multi) {
+      if (multiLogged.has(m.nodeId)) continue;
+      multiLogged.add(m.nodeId);
+      log.warn(
+        { nodeId: m.nodeId, endpoints: m.endpoints },
+        "security lock sweep skips a node with several door-lock endpoints — live changes still recorded",
+      );
     }
 
     // Names first, so this sweep's rows and every later live frame snapshot
     // the current name. A node missing from this (successful) list is
     // decommissioned: forgotten, with no row.
-    names = freshNames;
+    names = new Map(known.map((l) => [l.ref, l.name]));
     const dropped = await tracker.forgetNodesExcept(present);
     const outcomes = await Promise.all(
-      toObserve.map((obs) => tracker.observe(obs, "polled", { sweepStartedAt: t0 })),
+      polledReadings.map((obs) => tracker.observe(obs, "polled", { sweepStartedAt: t0 })),
     );
 
     snapshot = known;
@@ -825,6 +889,11 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
     noteSweepScheduled() {
       sweepScheduled = true;
     },
+    async listLocks() {
+      const listed: unknown = await deps.source.list();
+      if (!Array.isArray(listed)) throw new Error("the smart-home service returned no device list");
+      return readDeviceList(listed).known.map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
+    },
     knownLocks() {
       return snapshot.map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
     },
@@ -849,17 +918,55 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
   return adapter;
 }
 
-// ── wiring shapes (L0 calls these from index.ts; nothing calls them yet) ─
+// ── the store over Prisma ────────────────────────────────────────────────
+
+const READING_SET: ReadonlySet<string> = new Set(LOCK_READINGS);
+
+/**
+ * The real `LockStore`: reads a lock's history back from SecurityEvent (on
+ * the `(sourceRef, startedAt)` index) and writes through the one writer,
+ * `writeSecurityEvent`, whose write health is per source — a lock write can
+ * never clear a failing Frigate write.
+ */
+export function createPrismaLockStore(prisma: Pick<PrismaClient, "securityEvent">): LockStore {
+  return {
+    async lastReading(ref) {
+      const row = await prisma.securityEvent.findFirst({
+        where: { source: "matter_lock", sourceRef: ref },
+        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        select: { id: true, labels: true },
+      });
+      if (!row) return null;
+      const reading = row.labels[0];
+      // SecurityEvent_lock_shape makes this unreachable; if it ever is, the
+      // tracker must not write a transition from a reading it cannot name.
+      if (reading === undefined || !READING_SET.has(reading)) {
+        throw new Error(`security lock row ${row.id} holds no reading`);
+      }
+      return { id: row.id.toString(), reading: reading as LockReading };
+    },
+    write: (draft) => writeSecurityEvent(prisma, draft),
+    async idByDedupeKey(dedupeKey) {
+      const row = await prisma.securityEvent.findUnique({ where: { dedupeKey }, select: { id: true } });
+      return row ? row.id.toString() : null;
+    },
+  };
+}
+
+// ── wiring (index.ts calls these; the /security routes read the adapter) ─
+
+/** What the /security routes read from the adapter (injectable through the routers' `deps.locks`). */
+export type SecurityLockReader = Pick<SecurityLockAdapter, "listLocks" | "knownLocks" | "health">;
 
 let active: SecurityLockAdapter | null = null;
 
 /**
- * Right after the Matter init block in index.ts (L0). Runs whether or not the
- * security or smart_home module is on: capture is independent of display.
- * Replaces (and stops) any adapter already started.
+ * Right after the Matter init block in index.ts. Runs whether or not the
+ * security or smart_home module is on: capture is independent of display
+ * (the DS-015 analogue). Replaces (and stops) any adapter already started.
  *
  *   startSecurityLockAdapter({
- *     store: createPrismaLockStore(prisma),               // L0
+ *     store: createPrismaLockStore(prisma),
  *     source: matterLockDeviceSource({
  *       getCommissionedDevices: async () => enrichGrouped(prisma, await getCommissionedDevices()),
  *       isMatterInitialized,
@@ -875,7 +982,7 @@ export function startSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securit
   return adapter;
 }
 
-/** Beside `registerSecurityJobs` in index.ts (L0). The sweep is single-flighted on its advisory lock. */
+/** Beside `registerSecurityJobs` in index.ts. The sweep is single-flighted on its advisory lock. */
 export function registerSecurityLockJobs(
   cronRuntime: Pick<CronRuntime, "scheduleInterval">,
   adapter: SecurityLockAdapter,
@@ -903,10 +1010,13 @@ const NOT_RUNNING: Readonly<LockSweepState> = {
   lastSweepLockCount: null,
 };
 
-/** The header row; "Not running" when no adapter was started. */
-export function securityLockHealthRow(): LockHealth {
-  return active
-    ? active.health()
+/**
+ * The header row of `reader` (default: the started adapter); "Not running"
+ * when there is none. The /security route passes its injected reader.
+ */
+export function securityLockHealthRow(reader: Pick<SecurityLockReader, "health"> | null = active): LockHealth {
+  return reader
+    ? reader.health()
     : lockHealthRow({
         ...NOT_RUNNING,
         started: false,

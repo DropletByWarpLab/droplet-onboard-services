@@ -22,6 +22,7 @@ import {
   SECURITY_LOCK_SWEEP_LOCK_KEY,
   _resetSecurityLockAdapterForTests,
   createLockTracker,
+  createPrismaLockStore,
   createSecurityLockAdapter,
   lockDedupeKey,
   lockDisplayName,
@@ -30,10 +31,12 @@ import {
   lockRowDraft,
   matterLockDeviceSource,
   parseLockFrame,
+  parseLockRef,
   registerSecurityLockJobs,
   securityLockAdapter,
   securityLockHealthRow,
   startSecurityLockAdapter,
+  stillUnlockedLocks,
   type LockDeviceSource,
   type LockHealthInput,
   type LockLogger,
@@ -1187,5 +1190,174 @@ describe("matterLockDeviceSource — over the matter.service exports", () => {
         },
       }).bridgeUp(),
     ).toBe(false);
+  });
+});
+
+// ── L0 (WARP-2977 P2b-2): what the routes and the store read ─────────────
+
+describe("parseLockRef — a lock link's ref is exactly a lock row's sourceRef", () => {
+  it("reads a canonical matter:<node>/<endpoint>, the largest uint64 node and endpoint 65534 included", () => {
+    expect(parseLockRef("matter:4660/1")).toEqual({ nodeId: "4660", endpointId: 1 });
+    expect(parseLockRef("matter:18446744073709551615/65534")).toEqual({ nodeId: "18446744073709551615", endpointId: 65534 });
+  });
+
+  it.each([
+    ["matter:04660/1", "a leading zero — the rows are keyed on the canonical id, so it could never match one"],
+    ["matter:4660/01", "a leading zero on the endpoint"],
+    ["matter:4660/0", "the root endpoint"],
+    ["matter:4660/65535", "the wildcard endpoint"],
+    ["matter:18446744073709551616/1", "a node past uint64"],
+    ["matter:4660", "no endpoint"],
+    ["matter:4660/1/2", "an extra segment"],
+    ["matter:x/1", "a non-numeric node"],
+    ["lock:4660/1", "another scheme"],
+    ["front_door", "a camera"],
+    ["", "nothing"],
+  ])("refuses %j (%s)", (ref) => {
+    expect(parseLockRef(ref)).toBeNull();
+  });
+
+  it("round-trips with lockRef", () => {
+    const p = parseLockRef(REF)!;
+    expect(`matter:${p.nodeId}/${p.endpointId}`).toBe(REF);
+  });
+});
+
+describe("adapter.listLocks — a FRESH list of the paired door-lock endpoints, for the Areas page and link checks", () => {
+  it("names each DoorLock endpoint (alias, room, connection) with the reading last heard; writes nothing", async () => {
+    const { adapter, store, emitter } = adapterWith({
+      source: staticSource([
+        lockDevice(),
+        lockDevice({
+          nodeId: "99",
+          friendlyName: null,
+          name: "Double door",
+          roomName: null,
+          connectionState: "disconnected",
+          endpoints: [
+            { endpointId: 1, deviceTypes: [], clusters: [257] },
+            { endpointId: 2, deviceTypes: [], clusters: [257] },
+          ],
+        }),
+        lockDevice({ nodeId: "5", endpoints: [{ endpointId: 1, deviceTypes: [{ deviceType: 0x0101, revision: 1 }], clusters: [6, 8] }] }),
+      ]),
+    });
+    adapter.start();
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    const writesBefore = store.write.mock.calls.length;
+    const locks = await adapter.listLocks();
+    expect(locks).toEqual([
+      { ref: REF, nodeId: NODE, endpointId: 1, name: "Back door lock", room: "Hall", connected: true, reading: "locked", polled: true },
+      { ref: "matter:99/1", nodeId: "99", endpointId: 1, name: "Double door", room: null, connected: false, reading: null, polled: false },
+      { ref: "matter:99/2", nodeId: "99", endpointId: 2, name: "Double door", room: null, connected: false, reading: null, polled: false },
+    ]);
+    expect(store.write.mock.calls.length).toBe(writesBefore);
+    // The sweep's own state is untouched: listing is not a sweep.
+    expect(adapter.sweepState().lastSweepOkAt).toBeNull();
+  });
+
+  it("throws when the smart-home service cannot answer — never an empty list", async () => {
+    const { adapter } = adapterWith({
+      source: staticSource(async () => {
+        throw new Error("sidecar 503");
+      }),
+    });
+    await expect(adapter.listLocks()).rejects.toThrow("sidecar 503");
+    await expect(
+      adapterWith({ source: staticSource(async () => "nope" as never) }).adapter.listLocks(),
+    ).rejects.toThrow();
+  });
+});
+
+describe("stillUnlockedLocks — the names a Close up / Away answer lists (never 'all locked')", () => {
+  const known = (over: Partial<Parameters<typeof stillUnlockedLocks>[0][number]>) => ({
+    ref: REF,
+    nodeId: NODE,
+    endpointId: 1,
+    name: "Back door lock",
+    room: null,
+    connected: true,
+    reading: "unlocked" as LockReading | null,
+    polled: true,
+    ...over,
+  });
+
+  it("connected locks last heard unlocked, not fully locked or unlatched — one name per device, sorted", () => {
+    expect(
+      stillUnlockedLocks([
+        known({ name: "Side gate", nodeId: "2", ref: "matter:2/1", reading: "unlatched" }),
+        known({}),
+        known({ name: "Cellar", nodeId: "3", ref: "matter:3/1", reading: "not_fully_locked" }),
+        // A second endpoint of the same device: one name.
+        known({ endpointId: 2, ref: `matter:${NODE}/2` }),
+      ]),
+    ).toEqual(["Back door lock", "Cellar", "Side gate"]);
+  });
+
+  it("never a lock that is locked, unknown, never heard, or not reporting — a stale reading is not 'still unlocked'", () => {
+    expect(
+      stillUnlockedLocks([
+        known({ reading: "locked" }),
+        known({ reading: "unknown", nodeId: "2" }),
+        known({ reading: null, nodeId: "3" }),
+        known({ connected: false, nodeId: "4" }),
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("createPrismaLockStore — the LockStore over the one writer", () => {
+  function prismaFake() {
+    return {
+      securityEvent: {
+        findFirst: vi.fn(),
+        findUnique: vi.fn(),
+        createMany: vi.fn(),
+      },
+    };
+  }
+
+  it("lastReading reads the latest matter_lock row of that ref, newest first with the id as tiebreak", async () => {
+    const p = prismaFake();
+    p.securityEvent.findFirst.mockResolvedValue({ id: 41n, labels: ["unlatched"] });
+    const store = createPrismaLockStore(p as never);
+    expect(await store.lastReading(REF)).toEqual({ id: "41", reading: "unlatched" });
+    expect(p.securityEvent.findFirst).toHaveBeenCalledWith({
+      where: { source: "matter_lock", sourceRef: REF },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      select: { id: true, labels: true },
+    });
+    p.securityEvent.findFirst.mockResolvedValue(null);
+    expect(await store.lastReading(REF)).toBeNull();
+  });
+
+  it("a stored label that is not a reading is a failed read (the tracker then writes nothing and retries), never a guess", async () => {
+    const p = prismaFake();
+    p.securityEvent.findFirst.mockResolvedValue({ id: 41n, labels: ["Locked"] });
+    await expect(createPrismaLockStore(p as never).lastReading(REF)).rejects.toThrow();
+  });
+
+  it("write goes through writeSecurityEvent and reports recorded / duplicate / failed", async () => {
+    const p = prismaFake();
+    p.securityEvent.createMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 })
+      .mockRejectedValueOnce(new Error("pool exhausted"));
+    const store = createPrismaLockStore(p as never);
+    const draft = lockRowDraft({ obs: obs("unlocked"), prevId: null, name: "Back door lock", via: "polled", at: new Date(T0) });
+    expect(await store.write(draft)).toBe("recorded");
+    expect(await store.write(draft)).toBe("duplicate");
+    expect(await store.write(draft)).toBe("failed");
+    expect(p.securityEvent.createMany).toHaveBeenCalledWith({ data: [draft], skipDuplicates: true });
+  });
+
+  it("idByDedupeKey reads the row's id as a decimal string, or null", async () => {
+    const p = prismaFake();
+    p.securityEvent.findUnique.mockResolvedValueOnce({ id: 9_007_199_254_740_993n }).mockResolvedValueOnce(null);
+    const store = createPrismaLockStore(p as never);
+    expect(await store.idByDedupeKey("k")).toBe("9007199254740993");
+    expect(p.securityEvent.findUnique).toHaveBeenCalledWith({ where: { dedupeKey: "k" }, select: { id: true } });
+    expect(await store.idByDedupeKey("k")).toBeNull();
   });
 });
