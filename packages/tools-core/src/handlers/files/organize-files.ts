@@ -32,6 +32,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { filesUnavailable } from "./_unavailable.js";
 import { ncHeaders } from "./_render.js";
 import {
   CLEANUP_CONCURRENCY,
@@ -92,6 +93,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   );
   if (!listed) return err("CANCELLED", "the request was cancelled before the folder was read");
   const listing = await readListing(listed);
+  if (listing.unavailable) return filesUnavailable();
   if (listing.status === 404) return err("NOT_FOUND", `folder not found: ${v.path}`);
   if (!listing.ok) return err("LIST_FAILED", `nextcloud returned ${listing.status}`);
   const entries = listing.entries;

@@ -57,6 +57,7 @@
 import { posix as posixPath } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { filesUnavailable } from "./_unavailable.js";
 import { ncHeaders } from "./_render.js";
 import {
   CLEANUP_CONCURRENCY,
@@ -126,6 +127,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   });
   /** `null`: the read was cancelled, before it was sent or while in flight. */
   const listings = new Map<string, Listing | null>(parents.map((dir, i) => [dir, answers[i]]));
+  // WARP-3077 — a parent read from the outage fallback means the file
+  // service is down: nothing below could be resolved or deleted, so say
+  // that plainly instead of a per-path "could not read" list.
+  if (answers.some((l) => l?.unavailable)) return filesUnavailable();
 
   type Outcome =
     | { kind: "deletable" }
