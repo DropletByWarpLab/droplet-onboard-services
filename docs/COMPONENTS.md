@@ -322,6 +322,13 @@ network. Host-published ports and host-network services are called out.
   section.
 - **gRPC consumers:** file-indexer (`EmbedText`), orchestrator/mcp-server
   (`Rerank`, `ClassifyQuery` for adaptive RAG routing).
+- **Planned — Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):**
+  a `Decide` RPC (WARP-3070) proxying to `droplet-local-LLM`'s `decision-model`
+  sidecar (`:8009`, profile `decision`, off by default): calibrated yes/no /
+  choice / score answers, no generated text. It is the **only** way in: nothing
+  else calls `:8009`. Consumers fail soft to today's behaviour and never sit on the
+  write-approval path. Not built until the bench-box go/no-go (WARP-3069) passes.
+  Full picture: `docs/agentic-workflows.md` § "Decision model (Kev)".
 - **Gotchas:** does **not** dispatch tools (forwards `tools[]` as-is, returns raw
   `tool_calls` to the orchestrator). Embed/rerank models lazy-load from HF on first
   call (cold start). Sessions are in-memory (lost on restart).
