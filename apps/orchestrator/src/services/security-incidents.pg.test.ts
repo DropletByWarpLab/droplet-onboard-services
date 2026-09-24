@@ -29,7 +29,10 @@
  * left behind are never triaged here.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { PrismaClient, Prisma } from "@prisma/client";
+import { MIGRATIONS_DIR } from "../__tests__/helpers/test-paths.js";
 
 vi.unmock("@prisma/client");
 
@@ -55,6 +58,27 @@ const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
 
 /** Thrown to roll a probe transaction back after a successful insert. */
 class Rollback extends Error {}
+
+const MIGRATION_SQL = readFileSync(join(MIGRATIONS_DIR, "20260925020000_warp_2978_security_incidents", "migration.sql"), "utf8");
+
+/** The migration's statements, split at top-level `;` (a `DO $$ … $$` body keeps its own) — WARP-2804's splitter. */
+function statements(sql: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inDollar = false;
+  for (const line of sql.replace(/\r\n/g, "\n").split("\n")) {
+    if (line.trim().startsWith("--") && !inDollar) continue;
+    cur += line + "\n";
+    inDollar = (line.match(/\$\$/g)?.length ?? 0) % 2 === 1 ? !inDollar : inDollar;
+    if (!inDollar && line.trimEnd().endsWith(";")) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = "";
+    }
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
 type Outcome = "inserted" | { sqlstate: string; constraint: string | null };
 const rejectedBy = (constraint: string): Outcome => ({ sqlstate: "23514", constraint });
 const q = (v: string | null): string => (v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`);
@@ -281,6 +305,85 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
   });
 
   // ── append-only ───────────────────────────────────────────────────────────
+
+  // Review R2: the folder was re-stamped twice while unmerged, so a dev box that
+  // applied an earlier stamp runs it again under the new name.
+  it("the migration re-runs as a no-op, and brings a box on the pre-review shape to this one (review R2)", async () => {
+    const SCRATCH = "warp2978_rerun";
+    const constraintsIn = (tx: Prisma.TransactionClient, schema: string) =>
+      tx.$queryRawUnsafe<Array<{ name: string; def: string }>>(
+        `SELECT c.conname AS name, pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+           JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = '${schema}' AND t.relname IN ('SecurityIncident','SecurityIncidentReason','SecurityEventTriage','SecurityIncidentAck','SecurityIncidentNotice','SecurityAlertRecipient','SecurityIncidentEngineState')
+          ORDER BY 1`,
+      );
+    const unqualified = (rows: Array<{ name: string; def: string }>) =>
+      rows.map((r) => ({ name: r.name, def: r.def.replace(new RegExp(`\\b(public|${SCRATCH})\\.`, "g"), "") }));
+    const outcome = await prisma
+      .$transaction(
+        async (tx) => {
+          const expected = unqualified(await constraintsIn(tx, "public"));
+          await tx.$executeRawUnsafe(`CREATE SCHEMA ${SCRATCH}`);
+          await tx.$executeRawUnsafe(`SET LOCAL search_path TO ${SCRATCH}, public`);
+          // The pre-review shape: the notice outcome without `outcome_unknown` …
+          await tx.$executeRawUnsafe(
+            `CREATE TYPE "SecurityNoticeOutcome" AS ENUM ('queued', 'sent', 'not_sent', 'skipped_no_access', 'skipped_not_visible', 'skipped_capped', 'skipped_no_address')`,
+          );
+          for (const pass of [1, 2]) {
+            for (const stmt of statements(MIGRATION_SQL)) {
+              if (pass === 1 && stmt.startsWith('CREATE TABLE IF NOT EXISTS "SecurityIncident" (')) {
+                // … SecurityIncident without `spanByCamera`, holding an incident …
+                const old = stmt.replace(/\n\s*"spanByCamera" JSONB NOT NULL,/, "");
+                expect(old).not.toContain("spanByCamera");
+                await tx.$executeRawUnsafe(old);
+                await tx.$executeRawUnsafe(
+                  `INSERT INTO "SecurityIncident" ("id","scope","zoneLinkIds","scopeCamera","openedInMode","rulesetVersion","firstActivityAt","lastActivityAt","lastArrivalAt","eventCount","countsByCamera","cameras","reasonCodes","updatedAt")
+                   VALUES ('before-review','camera','{}','back','closed',1,now(),now(),now(),1,'{}','{back}','{}',now())`,
+                );
+                // The pre-review span CHECK (no jsonb_typeof).
+                await tx.$executeRawUnsafe(
+                  `ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_span" CHECK ("lastActivityAt" >= "firstActivityAt" AND "eventCount" >= 1 AND "rulesetVersion" >= 1 AND "notifyAttempts" BETWEEN 0 AND 10)`,
+                );
+                continue;
+              }
+              await tx.$executeRawUnsafe(stmt);
+              if (pass === 1 && stmt.startsWith('CREATE TABLE IF NOT EXISTS "SecurityIncidentNotice" (')) {
+                // The pre-review notice CHECK (no outcome_unknown).
+                await tx.$executeRawUnsafe(
+                  `ALTER TABLE "SecurityIncidentNotice" ADD CONSTRAINT "SecurityIncidentNotice_shape" CHECK (("outcome" IN ('queued', 'sent', 'not_sent')) = ("notificationLogId" IS NOT NULL) AND ("outcome" = 'queued') = ("settledAt" IS NULL) AND ("outcome" IN ('sent', 'not_sent') OR ("channels" = '' AND "pushOutcome" IS NULL)))`,
+                );
+              }
+            }
+          }
+          const rows = await tx.$queryRawUnsafe<Array<{ id: string; span: unknown }>>(`SELECT "id", "spanByCamera" AS span FROM "SecurityIncident"`);
+          const column = await tx.$queryRawUnsafe<Array<{ nullable: string; dflt: string | null }>>(
+            `SELECT is_nullable AS nullable, column_default AS dflt FROM information_schema.columns WHERE table_schema = '${SCRATCH}' AND table_name = 'SecurityIncident' AND column_name = 'spanByCamera'`,
+          );
+          const labels = await tx.$queryRawUnsafe<Array<{ l: string }>>(
+            `SELECT enumlabel AS l FROM pg_enum WHERE enumtypid = '${SCRATCH}."SecurityNoticeOutcome"'::regtype ORDER BY enumsortorder`,
+          );
+          const triggers = await tx.$queryRawUnsafe<Array<{ n: bigint }>>(
+            `SELECT count(*) AS n FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = 'public."SecurityEvent"'::regclass AND tgname = 'SecurityEvent_append_only'`,
+          );
+          const got = unqualified(await constraintsIn(tx, SCRATCH));
+          throw new Rollback(JSON.stringify({ rows, column, labels: labels.map((x) => x.l), triggers: Number(triggers[0]!.n), got, expected }));
+        },
+        { timeout: 60_000 },
+      )
+      .catch((err: unknown) => {
+        if (err instanceof Rollback) return JSON.parse(err.message);
+        throw err;
+      });
+    expect(outcome.rows).toEqual([{ id: "before-review", span: {} }]);
+    expect(outcome.column).toEqual([{ nullable: "NO", dflt: null }]);
+    expect(outcome.labels).toEqual(["queued", "sent", "not_sent", "outcome_unknown", "skipped_no_access", "skipped_not_visible", "skipped_capped", "skipped_no_address"]);
+    expect(outcome.triggers).toBe(1);
+    // Every PK, FK and CHECK, with the definition the migrated database has — none twice.
+    expect(outcome.got).toEqual(outcome.expected);
+    expect(outcome.expected.length).toBeGreaterThanOrEqual(24);
+    const left = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(`SELECT count(*) AS n FROM information_schema.schemata WHERE schema_name = '${SCRATCH}'`);
+    expect(Number(left[0]!.n)).toBe(0);
+  });
 
   it("SecurityEvent is append-only: UPDATE is refused by the trigger, DELETE still works (D11)", async () => {
     const e = await prisma.securityEvent.create({

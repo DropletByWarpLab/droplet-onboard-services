@@ -1,9 +1,9 @@
 -- WARP-2978 (ADR-059 P3, §3.5, §3.7) — incidents, reason codes, alert routing
 -- and acknowledgement.
 --
--- Additive only. The Prisma-generated half (12 CREATE TYPE, 7 CREATE TABLE,
--- indexes, FKs) comes first; the hand-written CHECKs and the append-only
--- trigger follow. Both are invisible to `prisma migrate diff`, so
+-- Additive only. The Prisma-generated half (12 types, 7 tables, indexes,
+-- FKs — each guarded, see RE-RUNNABLE) comes first; the hand-written CHECKs
+-- and the append-only trigger follow. Both are invisible to `prisma migrate diff`, so
 -- check-schema-drift cannot see them — the WARP-2978 pg-lane tests pin them.
 --
 -- MEMBERSHIP. An event's incident is recorded in SecurityEventTriage (one row
@@ -17,49 +17,133 @@
 -- INSERT … ON CONFLICT DO NOTHING (createMany + skipDuplicates) and then a
 -- read — never upsert({update:{}}), which Prisma 5 runs as read-then-insert.
 --
+-- RE-RUNNABLE (review R2; the repo idiom, WARP-2896's and WARP-2804's). This
+-- folder has been re-stamped twice (20260924050000 → 20260924070000 →
+-- 20260925020000) while it was unmerged, so a dev box that applied an earlier
+-- stamp runs it again under the new name. Every statement is therefore a
+-- no-op the second time, and a box that applied the pre-review shape is
+-- brought to this one rather than left behind:
+--   · the types are created in a DO block that swallows duplicate_object;
+--     `outcome_unknown` (added in review) is ADD VALUE IF NOT EXISTS;
+--   · tables and indexes use IF NOT EXISTS; `spanByCamera` (added in review)
+--     is ADD COLUMN IF NOT EXISTS — `{}` for any existing incident, then the
+--     default is dropped again (schema.prisma has none);
+--   · the foreign keys are added only when pg_constraint lacks them;
+--   · the hand-written CHECKs are DROP IF EXISTS + ADD, so a box holding an
+--     older definition gets this one (a guard on the name alone would keep
+--     the old text). Re-adding re-validates the rows; these tables are small;
+--   · the trigger function is CREATE OR REPLACE; the trigger is DROP IF
+--     EXISTS + CREATE.
+-- Prisma runs the file as one transaction, so a value added by ALTER TYPE …
+-- ADD VALUE cannot be USED later in it: the one CHECK naming
+-- `outcome_unknown` compares the column as text.
+--
 -- NULL discipline (p2b-spec §14.4): a CHECK whose expression evaluates to NULL
 -- PASSES. Every CHECK below compares nullable columns with IS [NOT] NULL only,
 -- and every array column a CHECK reads is itself required to be NOT NULL (a
 -- NULL array would make cardinality() NULL and wave the row through).
 
 -- CreateEnum
-CREATE TYPE "SecurityIncidentScope" AS ENUM ('area', 'camera', 'site_threat', 'site_camera_system');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityIncidentScope" AS ENUM ('area', 'camera', 'site_threat', 'site_camera_system');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityIncidentGrouping" AS ENUM ('collecting', 'closed');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityIncidentGrouping" AS ENUM ('collecting', 'closed');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityIncidentState" AS ENUM ('no_action', 'open', 'acknowledged', 'resolved');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityIncidentState" AS ENUM ('no_action', 'open', 'acknowledged', 'resolved');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityIncidentNotify" AS ENUM ('not_needed', 'pending', 'done', 'module_off', 'failed');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityIncidentNotify" AS ENUM ('not_needed', 'pending', 'done', 'module_off', 'failed');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityIncidentEvents" AS ENUM ('kept', 'partly_removed', 'removed');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityIncidentEvents" AS ENUM ('kept', 'partly_removed', 'removed');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityReasonCode" AS ENUM ('after_hours_presence', 'camera_offline', 'threat_signal');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityReasonCode" AS ENUM ('after_hours_presence', 'camera_offline', 'threat_signal');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityTriageOutcome" AS ENUM ('grouped', 'low', 'context', 'failed');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityTriageOutcome" AS ENUM ('grouped', 'low', 'context', 'failed');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityIncidentAckAction" AS ENUM ('acknowledge', 'resolve');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityIncidentAckAction" AS ENUM ('acknowledge', 'resolve');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityAlertRecipientState" AS ENUM ('receiving', 'not_receiving');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityAlertRecipientState" AS ENUM ('receiving', 'not_receiving');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityAlertRecipientOrigin" AS ENUM ('owner_default', 'chosen');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityAlertRecipientOrigin" AS ENUM ('owner_default', 'chosen');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityNoticeReason" AS ENUM ('routed', 'fallback_owner');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityNoticeReason" AS ENUM ('routed', 'fallback_owner');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- CreateEnum
-CREATE TYPE "SecurityNoticeOutcome" AS ENUM ('queued', 'sent', 'not_sent', 'outcome_unknown', 'skipped_no_access', 'skipped_not_visible', 'skipped_capped', 'skipped_no_address');
+DO $$
+BEGIN
+  CREATE TYPE "SecurityNoticeOutcome" AS ENUM ('queued', 'sent', 'not_sent', 'outcome_unknown', 'skipped_no_access', 'skipped_not_visible', 'skipped_capped', 'skipped_no_address');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Added in review (#7): a box that created the type before it gets it here.
+ALTER TYPE "SecurityNoticeOutcome" ADD VALUE IF NOT EXISTS 'outcome_unknown' AFTER 'not_sent';
 
 -- CreateTable
-CREATE TABLE "SecurityIncident" (
+CREATE TABLE IF NOT EXISTS "SecurityIncident" (
     "id" TEXT NOT NULL,
     "scope" "SecurityIncidentScope" NOT NULL,
     "zoneId" TEXT,
@@ -96,8 +180,13 @@ CREATE TABLE "SecurityIncident" (
     CONSTRAINT "SecurityIncident_pkey" PRIMARY KEY ("id")
 );
 
+-- Added in review (#4): an incident created before it has no per-camera span
+-- (`{}` — every viewer then sees the stored times). No default afterwards.
+ALTER TABLE "SecurityIncident" ADD COLUMN IF NOT EXISTS "spanByCamera" JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE "SecurityIncident" ALTER COLUMN "spanByCamera" DROP DEFAULT;
+
 -- CreateTable
-CREATE TABLE "SecurityIncidentReason" (
+CREATE TABLE IF NOT EXISTS "SecurityIncidentReason" (
     "id" TEXT NOT NULL,
     "incidentId" TEXT NOT NULL,
     "code" "SecurityReasonCode" NOT NULL,
@@ -117,7 +206,7 @@ CREATE TABLE "SecurityIncidentReason" (
 );
 
 -- CreateTable
-CREATE TABLE "SecurityEventTriage" (
+CREATE TABLE IF NOT EXISTS "SecurityEventTriage" (
     "eventId" BIGINT NOT NULL,
     "outcome" "SecurityTriageOutcome" NOT NULL,
     "incidentId" TEXT,
@@ -131,7 +220,7 @@ CREATE TABLE "SecurityEventTriage" (
 );
 
 -- CreateTable
-CREATE TABLE "SecurityIncidentAck" (
+CREATE TABLE IF NOT EXISTS "SecurityIncidentAck" (
     "id" TEXT NOT NULL,
     "incidentId" TEXT NOT NULL,
     "action" "SecurityIncidentAckAction" NOT NULL,
@@ -148,7 +237,7 @@ CREATE TABLE "SecurityIncidentAck" (
 );
 
 -- CreateTable
-CREATE TABLE "SecurityIncidentNotice" (
+CREATE TABLE IF NOT EXISTS "SecurityIncidentNotice" (
     "id" TEXT NOT NULL,
     "incidentId" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
@@ -165,7 +254,7 @@ CREATE TABLE "SecurityIncidentNotice" (
 );
 
 -- CreateTable
-CREATE TABLE "SecurityAlertRecipient" (
+CREATE TABLE IF NOT EXISTS "SecurityAlertRecipient" (
     "userId" TEXT NOT NULL,
     "state" "SecurityAlertRecipientState" NOT NULL,
     "origin" "SecurityAlertRecipientOrigin" NOT NULL,
@@ -177,7 +266,7 @@ CREATE TABLE "SecurityAlertRecipient" (
 );
 
 -- CreateTable
-CREATE TABLE "SecurityIncidentEngineState" (
+CREATE TABLE IF NOT EXISTS "SecurityIncidentEngineState" (
     "id" TEXT NOT NULL DEFAULT 'singleton',
     "startedAtId" BIGINT NOT NULL,
     "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -190,73 +279,109 @@ CREATE TABLE "SecurityIncidentEngineState" (
 );
 
 -- CreateIndex
-CREATE INDEX "SecurityIncident_grouping_scope_zoneId_scopeCamera_idx" ON "SecurityIncident"("grouping", "scope", "zoneId", "scopeCamera");
+CREATE INDEX IF NOT EXISTS "SecurityIncident_grouping_scope_zoneId_scopeCamera_idx" ON "SecurityIncident"("grouping", "scope", "zoneId", "scopeCamera");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncident_state_lastActivityAt_idx" ON "SecurityIncident"("state", "lastActivityAt");
+CREATE INDEX IF NOT EXISTS "SecurityIncident_state_lastActivityAt_idx" ON "SecurityIncident"("state", "lastActivityAt");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncident_lastActivityAt_idx" ON "SecurityIncident"("lastActivityAt");
+CREATE INDEX IF NOT EXISTS "SecurityIncident_lastActivityAt_idx" ON "SecurityIncident"("lastActivityAt");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncident_zoneId_lastActivityAt_idx" ON "SecurityIncident"("zoneId", "lastActivityAt");
+CREATE INDEX IF NOT EXISTS "SecurityIncident_zoneId_lastActivityAt_idx" ON "SecurityIncident"("zoneId", "lastActivityAt");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncident_notifyState_idx" ON "SecurityIncident"("notifyState");
+CREATE INDEX IF NOT EXISTS "SecurityIncident_notifyState_idx" ON "SecurityIncident"("notifyState");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncidentReason_incidentId_idx" ON "SecurityIncidentReason"("incidentId");
+CREATE INDEX IF NOT EXISTS "SecurityIncidentReason_incidentId_idx" ON "SecurityIncidentReason"("incidentId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "SecurityIncidentReason_incidentId_code_evidenceEventId_key" ON "SecurityIncidentReason"("incidentId", "code", "evidenceEventId");
+CREATE UNIQUE INDEX IF NOT EXISTS "SecurityIncidentReason_incidentId_code_evidenceEventId_key" ON "SecurityIncidentReason"("incidentId", "code", "evidenceEventId");
 
 -- CreateIndex
-CREATE INDEX "SecurityEventTriage_incidentId_idx" ON "SecurityEventTriage"("incidentId");
+CREATE INDEX IF NOT EXISTS "SecurityEventTriage_incidentId_idx" ON "SecurityEventTriage"("incidentId");
 
 -- CreateIndex
-CREATE INDEX "SecurityEventTriage_outcome_triagedAt_idx" ON "SecurityEventTriage"("outcome", "triagedAt");
+CREATE INDEX IF NOT EXISTS "SecurityEventTriage_outcome_triagedAt_idx" ON "SecurityEventTriage"("outcome", "triagedAt");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncidentAck_incidentId_at_idx" ON "SecurityIncidentAck"("incidentId", "at");
+CREATE INDEX IF NOT EXISTS "SecurityIncidentAck_incidentId_at_idx" ON "SecurityIncidentAck"("incidentId", "at");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncidentNotice_userId_createdAt_idx" ON "SecurityIncidentNotice"("userId", "createdAt");
+CREATE INDEX IF NOT EXISTS "SecurityIncidentNotice_userId_createdAt_idx" ON "SecurityIncidentNotice"("userId", "createdAt");
 
 -- CreateIndex
-CREATE INDEX "SecurityIncidentNotice_outcome_createdAt_idx" ON "SecurityIncidentNotice"("outcome", "createdAt");
+CREATE INDEX IF NOT EXISTS "SecurityIncidentNotice_outcome_createdAt_idx" ON "SecurityIncidentNotice"("outcome", "createdAt");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "SecurityIncidentNotice_incidentId_userId_key" ON "SecurityIncidentNotice"("incidentId", "userId");
+CREATE UNIQUE INDEX IF NOT EXISTS "SecurityIncidentNotice_incidentId_userId_key" ON "SecurityIncidentNotice"("incidentId", "userId");
 
 -- AddForeignKey
-ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_zoneId_fkey" FOREIGN KEY ("zoneId") REFERENCES "SecurityZone"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'SecurityIncident_zoneId_fkey' AND conrelid = '"SecurityIncident"'::regclass) THEN
+    ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_zoneId_fkey" FOREIGN KEY ("zoneId") REFERENCES "SecurityZone"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 -- AddForeignKey
-ALTER TABLE "SecurityIncidentReason" ADD CONSTRAINT "SecurityIncidentReason_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'SecurityIncidentReason_incidentId_fkey' AND conrelid = '"SecurityIncidentReason"'::regclass) THEN
+    ALTER TABLE "SecurityIncidentReason" ADD CONSTRAINT "SecurityIncidentReason_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 -- AddForeignKey
-ALTER TABLE "SecurityEventTriage" ADD CONSTRAINT "SecurityEventTriage_eventId_fkey" FOREIGN KEY ("eventId") REFERENCES "SecurityEvent"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'SecurityEventTriage_eventId_fkey' AND conrelid = '"SecurityEventTriage"'::regclass) THEN
+    ALTER TABLE "SecurityEventTriage" ADD CONSTRAINT "SecurityEventTriage_eventId_fkey" FOREIGN KEY ("eventId") REFERENCES "SecurityEvent"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 -- AddForeignKey
-ALTER TABLE "SecurityEventTriage" ADD CONSTRAINT "SecurityEventTriage_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'SecurityEventTriage_incidentId_fkey' AND conrelid = '"SecurityEventTriage"'::regclass) THEN
+    ALTER TABLE "SecurityEventTriage" ADD CONSTRAINT "SecurityEventTriage_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 -- AddForeignKey
-ALTER TABLE "SecurityIncidentAck" ADD CONSTRAINT "SecurityIncidentAck_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'SecurityIncidentAck_incidentId_fkey' AND conrelid = '"SecurityIncidentAck"'::regclass) THEN
+    ALTER TABLE "SecurityIncidentAck" ADD CONSTRAINT "SecurityIncidentAck_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 -- AddForeignKey
-ALTER TABLE "SecurityIncidentNotice" ADD CONSTRAINT "SecurityIncidentNotice_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'SecurityIncidentNotice_incidentId_fkey' AND conrelid = '"SecurityIncidentNotice"'::regclass) THEN
+    ALTER TABLE "SecurityIncidentNotice" ADD CONSTRAINT "SecurityIncidentNotice_incidentId_fkey" FOREIGN KEY ("incidentId") REFERENCES "SecurityIncident"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 -- AddForeignKey
-ALTER TABLE "SecurityAlertRecipient" ADD CONSTRAINT "SecurityAlertRecipient_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'SecurityAlertRecipient_userId_fkey' AND conrelid = '"SecurityAlertRecipient"'::regclass) THEN
+    ALTER TABLE "SecurityAlertRecipient" ADD CONSTRAINT "SecurityAlertRecipient_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
 
 
 -- The retention leg's second count (§6.10): "last removed N events and M incidents".
-ALTER TABLE "SecurityIngestState" ADD COLUMN "retentionIncidentsDeleted" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "SecurityIngestState" ADD COLUMN IF NOT EXISTS "retentionIncidentsDeleted" INTEGER NOT NULL DEFAULT 0;
 
 -- ── Hand-written CHECKs ─────────────────────────────────────────────────────
 
 -- The scope's own columns, and only those: an area snapshot iff scope = area,
 -- a camera iff scope = camera (a Frigate name).
+ALTER TABLE "SecurityIncident" DROP CONSTRAINT IF EXISTS "SecurityIncident_scope_shape";
 ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_scope_shape" CHECK (
   "zoneLinkIds" IS NOT NULL AND "cameras" IS NOT NULL AND "reasonCodes" IS NOT NULL
   AND ("scope" = 'area') = ("zoneId" IS NOT NULL AND "zoneName" IS NOT NULL AND "zoneKind" IS NOT NULL)
@@ -268,6 +393,7 @@ ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_scope_shape" CHE
 -- State follows the codes: info iff no_action iff no code; resolved only once
 -- sealed; closedAt iff closed; resolvedAt/By iff resolved; alert iff
 -- notifyState left not_needed iff alertedAt.
+ALTER TABLE "SecurityIncident" DROP CONSTRAINT IF EXISTS "SecurityIncident_state_shape";
 ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_state_shape" CHECK (
   ("severity" = 'info') = ("state" = 'no_action')
   AND ("severity" = 'info') = (cardinality("reasonCodes") = 0)
@@ -280,6 +406,7 @@ ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_state_shape" CHE
 
 -- The span map is a JSON object (camera -> {first, last}): route 16 orders a
 -- camera-limited viewer's list with jsonb_each over it (review R1).
+ALTER TABLE "SecurityIncident" DROP CONSTRAINT IF EXISTS "SecurityIncident_span";
 ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_span" CHECK (
   "lastActivityAt" >= "firstActivityAt"
   AND jsonb_typeof("spanByCamera") = 'object'
@@ -290,16 +417,19 @@ ALTER TABLE "SecurityIncident" ADD CONSTRAINT "SecurityIncident_span" CHECK (
 
 -- D18: severity comes from the code, and only after_hours_presence alerts in
 -- P3. P4/P5 migrations widen this as their codes land.
+ALTER TABLE "SecurityIncidentReason" DROP CONSTRAINT IF EXISTS "SecurityIncidentReason_code_severity";
 ALTER TABLE "SecurityIncidentReason" ADD CONSTRAINT "SecurityIncidentReason_code_severity" CHECK (
   ("code" = 'after_hours_presence' AND "severity" = 'alert')
   OR ("code" IN ('camera_offline', 'threat_signal') AND "severity" = 'notice')
 );
 
+ALTER TABLE "SecurityIncidentReason" DROP CONSTRAINT IF EXISTS "SecurityIncidentReason_camera";
 ALTER TABLE "SecurityIncidentReason" ADD CONSTRAINT "SecurityIncidentReason_camera" CHECK (
   "evidenceCamera" IS NULL OR "evidenceCamera" ~ '^[a-zA-Z0-9_-]{1,64}$'
 );
 
 -- A member iff grouped; an error iff failed; link and area lists only on a member.
+ALTER TABLE "SecurityEventTriage" DROP CONSTRAINT IF EXISTS "SecurityEventTriage_shape";
 ALTER TABLE "SecurityEventTriage" ADD CONSTRAINT "SecurityEventTriage_shape" CHECK (
   "matchedLinkIds" IS NOT NULL AND "alsoZoneIds" IS NOT NULL
   AND ("outcome" = 'grouped') = ("incidentId" IS NOT NULL)
@@ -308,26 +438,32 @@ ALTER TABLE "SecurityEventTriage" ADD CONSTRAINT "SecurityEventTriage_shape" CHE
 );
 
 -- A note belongs to a resolve.
+ALTER TABLE "SecurityIncidentAck" DROP CONSTRAINT IF EXISTS "SecurityIncidentAck_note";
 ALTER TABLE "SecurityIncidentAck" ADD CONSTRAINT "SecurityIncidentAck_note" CHECK (
   "action" = 'resolve' OR "note" = ''
 );
 
 -- The live-session check can only have run for a token that carried a sign-in id.
+ALTER TABLE "SecurityIncidentAck" DROP CONSTRAINT IF EXISTS "SecurityIncidentAck_session";
 ALTER TABLE "SecurityIncidentAck" ADD CONSTRAINT "SecurityIncidentAck_session" CHECK (
   NOT "sessionChecked" OR "sessionId" IS NOT NULL
 );
 
 -- A NotificationLog row iff one was written (queued/sent/not_sent/outcome_unknown);
 -- settled iff not queued; transport snapshots only on a transported notice
--- (an outcome_unknown notice has none: its stamp is what was lost).
+-- (an outcome_unknown notice has none: its stamp is what was lost). The
+-- first list compares as text: on a box that just gained 'outcome_unknown'
+-- (ADD VALUE above) the enum value cannot be used in this transaction.
+ALTER TABLE "SecurityIncidentNotice" DROP CONSTRAINT IF EXISTS "SecurityIncidentNotice_shape";
 ALTER TABLE "SecurityIncidentNotice" ADD CONSTRAINT "SecurityIncidentNotice_shape" CHECK (
-  ("outcome" IN ('queued', 'sent', 'not_sent', 'outcome_unknown')) = ("notificationLogId" IS NOT NULL)
+  ("outcome"::text IN ('queued', 'sent', 'not_sent', 'outcome_unknown')) = ("notificationLogId" IS NOT NULL)
   AND ("outcome" = 'queued') = ("settledAt" IS NULL)
   AND ("outcome" IN ('sent', 'not_sent') OR ("channels" = '' AND "pushOutcome" IS NULL))
 );
 
 -- One row; the floor never passes its candidate, and never drops below where
 -- the engine started.
+ALTER TABLE "SecurityIncidentEngineState" DROP CONSTRAINT IF EXISTS "SecurityIncidentEngineState_shape";
 ALTER TABLE "SecurityIncidentEngineState" ADD CONSTRAINT "SecurityIncidentEngineState_shape" CHECK (
   "id" = 'singleton'
   AND "startedAtId" <= "triageFloor"
@@ -336,11 +472,12 @@ ALTER TABLE "SecurityIncidentEngineState" ADD CONSTRAINT "SecurityIncidentEngine
 
 -- ── SecurityEvent is append-only (ADR-059 §3.3; closes p2b-spec §2) ────────
 
-CREATE FUNCTION "security_event_append_only"() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION "security_event_append_only"() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   RAISE EXCEPTION 'SecurityEvent is append-only (ADR-059 §3.3): % refused', TG_OP
     USING ERRCODE = 'restrict_violation';
 END $$;
 
+DROP TRIGGER IF EXISTS "SecurityEvent_append_only" ON "SecurityEvent";
 CREATE TRIGGER "SecurityEvent_append_only" BEFORE UPDATE ON "SecurityEvent"
   FOR EACH ROW EXECUTE FUNCTION "security_event_append_only"();
