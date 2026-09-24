@@ -93,15 +93,18 @@ let _modelsCache: { at: number; models: ModelInfo[] } | null = null;
 const MODELS_CACHE_TTL_MS = 30_000;
 
 /**
- * Resolve one model's info from the TTL-cached model list, refreshing the
- * cache when stale. Returns `undefined` when the model is unknown OR the
- * gateway is unreachable and the cache was never populated — callers must
- * treat that as "unknown" and degrade, never block the turn.
+ * WARP-3047 — the model list behind every cached lookup in this module,
+ * refreshed when stale. `degradedProviders` is non-empty only for a one-off
+ * PARTIAL list served because no complete snapshot exists yet; a cached or
+ * stale-but-complete snapshot always reports `[]`. Null when the gateway is
+ * unreachable and the cache was never populated.
  */
-async function findModelInfo(
-  model: string,
-  now: number,
-): Promise<ModelInfo | undefined> {
+export interface CachedModelListing {
+  models: ModelInfo[];
+  degradedProviders: string[];
+}
+
+async function modelListing(now: number): Promise<CachedModelListing | null> {
   if (!_modelsCache || now - _modelsCache.at > MODELS_CACHE_TTL_MS) {
     try {
       const res = await listModels();
@@ -114,17 +117,43 @@ async function findModelInfo(
         // already hold a (stale but complete) snapshot — then serve stale,
         // same posture as the catch path below.
         if (!_modelsCache) {
-          return res.models.find((m) => m.id === model);
+          return { models: res.models, degradedProviders: res.degraded_providers };
         }
       } else {
         _modelsCache = { at: now, models: res.models };
       }
     } catch {
-      if (!_modelsCache) return undefined; // never populated → unknown
+      if (!_modelsCache) return null; // never populated → unknown
       // else: serve stale rather than failing the turn
     }
   }
-  return _modelsCache?.models.find((m) => m.id === model);
+  return _modelsCache ? { models: _modelsCache.models, degradedProviders: [] } : null;
+}
+
+/**
+ * Resolve one model's info from the TTL-cached model list, refreshing the
+ * cache when stale. Returns `undefined` when the model is unknown OR the
+ * gateway is unreachable and the cache was never populated — callers must
+ * treat that as "unknown" and degrade, never block the turn.
+ */
+async function findModelInfo(
+  model: string,
+  now: number,
+): Promise<ModelInfo | undefined> {
+  return (await modelListing(now))?.models.find((m) => m.id === model);
+}
+
+/**
+ * WARP-3047 — the installed-model list for `resolveActiveModel`, from the
+ * SAME 30 s snapshot vision routing uses (no second cache): the resolver
+ * runs inside chat turns, tool back-ends and pre-auth warm triggers, so it
+ * must not cost a gateway round-trip each time. The caller decides whether
+ * `degradedProviders` makes the list untrustworthy for its purpose.
+ */
+export async function getCachedModelListing(
+  now: number = Date.now(),
+): Promise<CachedModelListing | null> {
+  return modelListing(now);
 }
 
 export async function getModelCapabilities(

@@ -9,14 +9,26 @@
  * LLM_MODEL / the single installed model". This file locks the fallback
  * that promise never actually implemented, plus the pre-existing
  * (unchanged) `readActiveChatModel` contract.
+ *
+ * WARP-3047 — the blank/stale fallback now prefers LLM_MODEL (when it is
+ * installed) over "first listed", and `resolveActiveModel` is the ONE async
+ * answer every server-side consumer asks.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+
+const getCachedModelListing = vi.hoisted(() => vi.fn());
+vi.mock("./ai-gateway.client.js", () => ({ getCachedModelListing }));
+const warmDefaultModel = vi.hoisted(() => vi.fn(async (_model?: string | null) => undefined));
+vi.mock("./model-readiness.service.js", () => ({ warmDefaultModel }));
+
 import {
   ACTIVE_CHAT_MODEL_KEY,
   resolveStoredChatModel,
   readActiveChatModel,
   resolveActiveChatModel,
+  resolveActiveModel,
+  warmActiveModel,
 } from "./active-model.service.js";
 import type { ModelInfo } from "../types/index.js";
 
@@ -28,6 +40,17 @@ function prismaStub(row: { valueJson: unknown } | null): PrismaClient {
     },
   } as unknown as PrismaClient;
 }
+
+// The WARP-1511 "first installed" cases below predate the LLM_MODEL
+// preference; pin the env blank so the host's own value can't leak in.
+beforeEach(() => {
+  vi.stubEnv("LLM_MODEL", "");
+  getCachedModelListing.mockReset();
+  warmDefaultModel.mockClear();
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("readActiveChatModel (WARP-1112, unchanged by WARP-1511)", () => {
   it("returns null for the seeded blank string (the explicit unset state)", async () => {
@@ -134,5 +157,160 @@ describe("resolveActiveChatModel (WARP-1511 — blank/stale fallback)", () => {
 
   it("passes a blank stored value through as null when the installed set is unknown — never fabricates a fallback from an unconfirmed list", () => {
     expect(resolveActiveChatModel(null, null)).toBeNull();
+  });
+});
+
+// ── WARP-3047 ────────────────────────────────────────────────────────────
+// Two installed models, listed B-first (DMR /api/tags order is not a
+// preference). A is what the box was provisioned with (LLM_MODEL): it is
+// what the boot pull fetched and what every consumer used before this
+// ticket, so a blank row must mean A — not whichever id DMR lists first.
+const A = "docker.io/ai/gpt-oss:20B-F16";
+const B = "docker.io/ai/qwen3:8B-Q4_K_M";
+const listed: ModelInfo[] = [
+  { id: B, provider: "local", name: "Qwen3 8B Q4 K M", context_window: null, capabilities: { tools: true } },
+  { id: A, provider: "local", name: "Gpt-oss 20B F16", context_window: null, capabilities: { tools: true } },
+];
+
+describe("blank/stale fallback prefers LLM_MODEL (WARP-3047)", () => {
+  it("installed=[B, A], blank row, LLM_MODEL=A → A (not the first-listed B)", () => {
+    vi.stubEnv("LLM_MODEL", A);
+    expect(resolveStoredChatModel(null, listed)).toBe(A);
+    expect(resolveActiveChatModel(null, new Set([B, A]))).toBe(A);
+  });
+
+  it("a stale stored tag also falls back to LLM_MODEL first", () => {
+    vi.stubEnv("LLM_MODEL", A);
+    expect(resolveStoredChatModel("gemma4:26b", listed)).toBe(A);
+  });
+
+  it("an installed stored choice still wins over LLM_MODEL", () => {
+    vi.stubEnv("LLM_MODEL", A);
+    expect(resolveStoredChatModel(B, listed)).toBe(B);
+  });
+
+  it("LLM_MODEL that is NOT installed falls through to the first installed model", () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    expect(resolveStoredChatModel(null, listed)).toBe(B);
+  });
+
+  it("never falls back to a cloud model even when LLM_MODEL names one", () => {
+    vi.stubEnv("LLM_MODEL", "claude-sonnet");
+    const withCloud: ModelInfo[] = [
+      ...listed,
+      { id: "claude-sonnet", provider: "anthropic", name: "Claude Sonnet", context_window: 200000 },
+    ];
+    expect(resolveStoredChatModel(null, withCloud)).toBe(B);
+  });
+});
+
+function listing(models: ModelInfo[], degradedProviders: string[] = []) {
+  return { models, degradedProviders };
+}
+
+describe("resolveActiveModel — the one async answer (WARP-3047)", () => {
+  it("returns the stored choice when it is installed", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    expect(await resolveActiveModel(prismaStub({ valueJson: B }))).toBe(B);
+  });
+
+  it("blank row + installed=[B, A] + LLM_MODEL=A → A", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    expect(await resolveActiveModel(prismaStub({ valueJson: "" }))).toBe(A);
+  });
+
+  it("maps a legacy display-name row to the runtime id", async () => {
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    expect(await resolveActiveModel(prismaStub({ valueJson: "Qwen3 8B Q4 K M" }))).toBe(B);
+  });
+
+  it("unreachable listing: non-strict passes the stored choice through", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(null);
+    expect(await resolveActiveModel(prismaStub({ valueJson: B }))).toBe(B);
+  });
+
+  it("unreachable listing + blank row: non-strict falls back to LLM_MODEL", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(null);
+    expect(await resolveActiveModel(prismaStub({ valueJson: "" }))).toBe(A);
+  });
+
+  it("unreachable listing: strict answers null (filing semantics — never an unconfirmed model)", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(null);
+    expect(await resolveActiveModel(prismaStub({ valueJson: B }), { strict: true })).toBeNull();
+  });
+
+  it("a DEGRADED local listing counts as unconfirmed", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    // The local provider raised during the fan-out: its list is partial.
+    getCachedModelListing.mockResolvedValue(listing([listed[0]], ["local"]));
+    expect(await resolveActiveModel(prismaStub({ valueJson: "" }))).toBe(A);
+    expect(await resolveActiveModel(prismaStub({ valueJson: "" }), { strict: true })).toBeNull();
+  });
+
+  it("a degraded CLOUD provider does not unconfirm the local list", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(listing(listed, ["anthropic"]));
+    expect(await resolveActiveModel(prismaStub({ valueJson: B }), { strict: true })).toBe(B);
+  });
+
+  it("a confirmed-empty listing: non-strict → LLM_MODEL, strict → null", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(listing([]));
+    expect(await resolveActiveModel(prismaStub({ valueJson: "" }))).toBe(A);
+    expect(await resolveActiveModel(prismaStub({ valueJson: "" }), { strict: true })).toBeNull();
+  });
+
+  it("nothing stored, nothing listed, nothing configured → null (never a hardcoded tag)", async () => {
+    getCachedModelListing.mockResolvedValue(null);
+    expect(await resolveActiveModel(prismaStub(null))).toBeNull();
+  });
+
+  it("a settings-read failure degrades to the blank-row answer, never throws", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    const prisma = {
+      workspaceSetting: { findUnique: vi.fn().mockRejectedValue(new Error("db down")) },
+    } as unknown as PrismaClient;
+    expect(await resolveActiveModel(prisma)).toBe(A);
+  });
+
+  it("requireTools: an active model that explicitly cannot call tools falls back to LLM_MODEL", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    const visionOnly: ModelInfo[] = [
+      { ...listed[0], capabilities: { vision: true, tools: false } },
+      listed[1],
+    ];
+    getCachedModelListing.mockResolvedValue(listing(visionOnly));
+    expect(await resolveActiveModel(prismaStub({ valueJson: B }), { requireTools: true })).toBe(A);
+    // Without the requirement the owner's choice stands.
+    expect(await resolveActiveModel(prismaStub({ valueJson: B }))).toBe(B);
+  });
+
+  it("requireTools: unknown tool capability keeps the active model (only an explicit false falls back)", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    const unknownCaps: ModelInfo[] = [{ ...listed[0], capabilities: undefined }, listed[1]];
+    getCachedModelListing.mockResolvedValue(listing(unknownCaps));
+    expect(await resolveActiveModel(prismaStub({ valueJson: B }), { requireTools: true })).toBe(B);
+  });
+});
+
+describe("warmActiveModel (WARP-3047)", () => {
+  it("warms the ACTIVE model, not LLM_MODEL", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    await warmActiveModel(prismaStub({ valueJson: B }));
+    expect(warmDefaultModel).toHaveBeenCalledTimes(1);
+    expect(warmDefaultModel).toHaveBeenCalledWith(B);
+  });
+
+  it("hands null through when nothing resolves (the warm itself skips)", async () => {
+    getCachedModelListing.mockResolvedValue(null);
+    await warmActiveModel(prismaStub(null));
+    expect(warmDefaultModel).toHaveBeenCalledWith(null);
   });
 });
