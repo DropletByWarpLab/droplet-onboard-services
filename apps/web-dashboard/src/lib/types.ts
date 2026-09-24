@@ -698,6 +698,24 @@ export interface PutDepartmentProfilePayload {
   homeWidgets: DepartmentHomeWidget[];
 }
 
+// ── WARP-2981 (ADR-059 P6, DS-003): the active department, on the server ──
+
+/** The department a person's shell is arranged around, as the box answers it:
+ *  enough to label the switcher, nothing more. */
+export interface ActiveDepartmentView {
+  id: string;
+  slug: string;
+  name: string;
+  /** `null` is a real state: the department is not set up yet. */
+  profile: DepartmentProfileSummary | null;
+}
+
+/** GET/PUT /api/me/active-department. `department: null` is Whole business,
+ *  the default for everyone — the box keeps no row for it. */
+export interface ActiveDepartmentResponse {
+  department: ActiveDepartmentView | null;
+}
+
 export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
 
 /** One row of GET /api/departments/:id's `members` array — no email (the

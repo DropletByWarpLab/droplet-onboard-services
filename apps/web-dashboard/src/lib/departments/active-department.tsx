@@ -3,14 +3,40 @@
 /**
  * WARP-2976 (ADR-059 §2.3) — which department the shell is showing.
  *
- * Modelled on `lib/nav-layout.tsx`: a per-person DISPLAY preference, kept in
- * this browser's localStorage (`droplet-active-department:<user.id>`, the
- * slug; absent means Whole business). The key is PER USER: a shared browser
- * must not hand one person's narrowed shell to the next person who signs in
- * (review of #2285), and it is removed when that user signs out. Server-side preference arrives with the clients in
- * P6. It changes how the same routes are ARRANGED and nothing about what the
- * person may reach — the nav still runs every existing gate after the
- * department filter (`department-nav.ts`).
+ * Modelled on `lib/nav-layout.tsx`: a per-person DISPLAY preference. It
+ * changes how the same routes are ARRANGED and nothing about what the person
+ * may reach — the nav still runs every existing gate after the department
+ * filter (`department-nav.ts`).
+ *
+ * WHERE THE CHOICE LIVES (WARP-2981, ADR-059 P6 §6.1, DS-003). On the box —
+ * `GET/PUT /api/me/active-department` — so it follows the person to every
+ * device. This browser's localStorage (`droplet-active-department:<user.id>`,
+ * the slug; absent means Whole business) is the first-paint cache. The key is
+ * PER USER: a shared browser must not hand one person's narrowed shell to the
+ * next person who signs in (review of #2285), and it is removed when that
+ * user signs out. Who wins, and when:
+ *
+ *   1. First paint: the stored slug, exactly as P1.
+ *   2. Once there is a user, the box is read, and read again on focus — so a
+ *      switch made on the phone shows up here the next time this tab is
+ *      looked at.
+ *   3. The box's answer is ADOPTED (state and localStorage) unless the person
+ *      picked here after that read started, or a pick's PUT was still on its
+ *      way when it started. A newer local pick is never clobbered by an older
+ *      answer (D5).
+ *   4. A pick — the switcher, or arriving at /d/<slug> — applies at once and
+ *      is PUT with the department's id (null for Whole business). A failed
+ *      PUT is a console.warn and nothing else: the local pick stands until
+ *      the box next answers.
+ *   5. An orchestrator older than the route (a 404 whose code is not
+ *      DEPARTMENT_NOT_AVAILABLE) turns the sync off for the page's life,
+ *      which is P1's behaviour.
+ *   6. P1's local choices are not migrated (§5). Until this browser has
+ *      synced once for this person, the box's "Whole business" — which is
+ *      also what it says when it has never been told anything — does not
+ *      overwrite a local department; the first pick here writes the row.
+ *   7. Signing out forgets this browser's copy. The row on the box stays: it
+ *      is the person's choice on every device.
  *
  * Who gets which choices (§2.3, amended in review):
  *   · everyone — Whole business (their own gated nav, exactly today's) plus the
@@ -28,7 +54,9 @@
  * nav stands. A dead control is worse than none.
  *
  * Only DEPARTMENT rows are choices. HOUSEHOLD is the one-unit home case with
- * nothing to switch between, and a TEAM inherits its parent's profile.
+ * nothing to switch between, and a TEAM inherits its parent's profile. The box
+ * checks the same set on every read and write (`isChoosableDepartment`, one
+ * fixture file shared by both test suites).
  *
  * Like `useNavLayout`, the hook does NOT throw outside its provider: it
  * answers "Whole business, no switcher". The Sidebar and Workspace shell tests
@@ -47,9 +75,15 @@ import {
 import { usePathname } from "next/navigation";
 import useSWR from "swr";
 
-import { getDepartmentProfile, listDepartments } from "@/lib/api";
+import {
+  getActiveDepartment,
+  getDepartmentProfile,
+  listDepartments,
+  putActiveDepartment,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import type {
+  ActiveDepartmentView,
   Department,
   DepartmentProfile,
   DepartmentProfileResponse,
@@ -64,9 +98,20 @@ export function activeDepartmentStorageKey(userId: string): string {
   return `${ACTIVE_DEPARTMENT_STORAGE_KEY}:${userId}`;
 }
 
+/** The localStorage key saying this browser has synced `userId`'s choice with
+ *  the box at least once (rule 6 above). */
+export function activeDepartmentSyncedKey(userId: string): string {
+  return `${ACTIVE_DEPARTMENT_STORAGE_KEY}-synced:${userId}`;
+}
+
 /** Shared with `components/projects/usePm.ts#useDepartments` — same endpoint,
  *  same `{ departments }` shape, so the two reads dedupe into one request. */
 export const DEPARTMENTS_KEY = "/api/departments";
+
+/** The server choice's SWR key. Used as `[ACTIVE_DEPARTMENT_KEY, userId]`:
+ *  keyed by the person too, so an account switch without a reload never reads
+ *  the previous person's answer out of the cache. */
+export const ACTIVE_DEPARTMENT_KEY = "/api/me/active-department";
 
 /** The profile read's SWR key. The department home mutates it on save, which
  *  is what makes the sidebar follow a Customize without a reload. */
@@ -85,7 +130,8 @@ export interface ActiveDepartmentValue {
   canSeeOverview: boolean;
   /** At least one department to switch to (Whole business is always one). */
   showSwitcher: boolean;
-  /** Pick a department by slug, or null for Whole business. Persisted. */
+  /** Pick a department by slug, or null for Whole business. Persisted, on the
+   *  box and in this browser. */
   setActive: (slug: string | null) => void;
   /** The department list has answered (data or error) — so an empty
    *  `choices` means "none", not "not loaded yet". */
@@ -134,6 +180,37 @@ export function switcherChoiceCount(choices: readonly Department[]): number {
   return choices.length + 1;
 }
 
+/**
+ * The box has no `/api/me/active-department` at all (an orchestrator older
+ * than WARP-2981): a 404 that is not the route's own refusal. PURE.
+ */
+export function isMissingRoute(err: unknown): boolean {
+  const e = err as { status?: unknown; code?: unknown } | null;
+  return !!e && e.status === 404 && e.code !== "DEPARTMENT_NOT_AVAILABLE";
+}
+
+/**
+ * Whether a server answer may replace what this browser shows. PURE —
+ * exported for the unit tests; the provider is its only caller.
+ *
+ *   · `pickedSince` — the person picked here after the read started, or a
+ *     pick's PUT had not landed when it started: the answer is older than the
+ *     local pick, so it must not clobber it (D5).
+ *   · `synced` false + the box says Whole business + this browser holds a
+ *     department: a P1 choice the box was never told about (§5) — kept until
+ *     the first pick here writes the row.
+ */
+export function shouldAdoptServerChoice(input: {
+  pickedSince: boolean;
+  synced: boolean;
+  serverSlug: string | null;
+  localSlug: string | null;
+}): boolean {
+  if (input.pickedSince) return false;
+  if (!input.synced && input.serverSlug === null && input.localSlug !== null) return false;
+  return true;
+}
+
 function readStored(userId: string): string | null {
   try {
     return localStorage.getItem(activeDepartmentStorageKey(userId));
@@ -152,6 +229,32 @@ function writeStored(userId: string, slug: string | null): void {
   }
 }
 
+function readSynced(userId: string): boolean {
+  try {
+    return localStorage.getItem(activeDepartmentSyncedKey(userId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeSynced(userId: string, synced: boolean): void {
+  try {
+    if (synced) localStorage.setItem(activeDepartmentSyncedKey(userId), "1");
+    else localStorage.removeItem(activeDepartmentSyncedKey(userId));
+  } catch {
+    // Storage unavailable — rule 6 then simply re-applies next load.
+  }
+}
+
+/** One read of the box, tagged with what this browser had done when it began. */
+interface ServerChoiceRead {
+  /** `picks.current` when the read started. */
+  pickSeqAtStart: number;
+  /** PUTs still on their way when the read started. */
+  pendingAtStart: number;
+  department: ActiveDepartmentView | null;
+}
+
 export function ActiveDepartmentProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const pathname = usePathname();
@@ -168,8 +271,12 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
   const [stored, setStored] = useState<{ userId: string; slug: string | null } | null>(null);
   const previousUserId = useRef<string | null>(null);
   useEffect(() => {
-    // Signing out (a known user → none) forgets that user's choice.
-    if (!userId && previousUserId.current) writeStored(previousUserId.current, null);
+    // Signing out (a known user → none) forgets that user's choice — in this
+    // browser only; the box keeps it for their other devices.
+    if (!userId && previousUserId.current) {
+      writeStored(previousUserId.current, null);
+      writeSynced(previousUserId.current, false);
+    }
     previousUserId.current = userId;
     setStored(userId ? { userId, slug: readStored(userId) } : null);
   }, [userId]);
@@ -188,6 +295,84 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
   const choices = useMemo(() => departmentChoices(data?.departments), [data]);
   const isLoaded = data !== undefined || error !== undefined;
 
+  // ── the box (WARP-2981) ────────────────────────────────────────────────────
+  // Every local pick bumps `picks`; `pendingPuts` counts PUTs in flight. A read
+  // records both when it starts, which is how rule 3 tells an answer older
+  // than a local pick from a current one.
+  const picks = useRef(0);
+  const pendingPuts = useRef(0);
+  // Off for the page's life once the box proves it has no such route (rule 5).
+  const [serverSync, setServerSync] = useState(true);
+
+  // Keyed by the person: SWR only ever hands this hook the answer read for
+  // the user signed in NOW, so an account switch without a reload cannot
+  // apply the previous person's choice (their read lands in their own slot).
+  const { data: serverChoice, error: serverError } = useSWR<ServerChoiceRead>(
+    userId && serverSync ? [ACTIVE_DEPARTMENT_KEY, userId] : null,
+    async () => {
+      const pickSeqAtStart = picks.current;
+      const pendingAtStart = pendingPuts.current;
+      const res = await getActiveDepartment();
+      return { pickSeqAtStart, pendingAtStart, department: res.department };
+    },
+    { revalidateOnFocus: true, shouldRetryOnError: false },
+  );
+
+  useEffect(() => {
+    if (serverError && isMissingRoute(serverError)) setServerSync(false);
+  }, [serverError]);
+
+  useEffect(() => {
+    if (!serverChoice || !userId) return;
+    const serverSlug = serverChoice.department?.slug ?? null;
+    const adopt = shouldAdoptServerChoice({
+      pickedSince:
+        serverChoice.pickSeqAtStart !== picks.current || serverChoice.pendingAtStart !== 0,
+      synced: readSynced(userId),
+      serverSlug,
+      localSlug: readStored(userId),
+    });
+    if (!adopt) return;
+    writeSynced(userId, true);
+    writeStored(userId, serverSlug);
+    setStored((prev) =>
+      prev && prev.userId === userId && prev.slug === serverSlug ? prev : { userId, slug: serverSlug },
+    );
+  }, [serverChoice, userId]);
+
+  /** A local pick: applied at once, then told to the box (rule 4). */
+  const pick = useCallback(
+    (slug: string | null) => {
+      if (!userId) return;
+      picks.current += 1;
+      setStored({ userId, slug });
+      writeStored(userId, slug);
+      if (!serverSync) return;
+      // The box takes an id. A slug that is not one of this person's choices
+      // has no id to send — the local state resolves it to Whole business.
+      const departmentId =
+        slug === null ? null : (choices.find((d) => d.slug === slug)?.id ?? undefined);
+      if (departmentId === undefined) return;
+      pendingPuts.current += 1;
+      putActiveDepartment(departmentId)
+        .then(
+          () => writeSynced(userId, true),
+          (err: unknown) => {
+            if (isMissingRoute(err)) {
+              setServerSync(false);
+              return;
+            }
+            // A display preference: the local pick stands, nothing else.
+            console.warn("Couldn't save the department choice to Droplet; this browser keeps it.", err);
+          },
+        )
+        .finally(() => {
+          pendingPuts.current -= 1;
+        });
+    },
+    [userId, serverSync, choices],
+  );
+
   // Visiting /d/<slug> makes that department active — but only a slug the
   // viewer may choose; a typed URL for someone else's department must not be
   // persisted as their shell.
@@ -197,6 +382,9 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
   // /d/security is undone on the very next render: the stored slug becomes
   // null while the pathname still reads /d/security (the router has not moved
   // yet), and the effect would put Security straight back.
+  //
+  // An arrival is a pick like any other (rule 4): it is PUT, and an answer
+  // from the box that was already on its way does not undo it.
   const urlSlug = slugFromPath(pathname);
   const appliedUrlSlug = useRef<string | null>(null);
   useEffect(() => {
@@ -210,18 +398,8 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
     if (appliedUrlSlug.current === arrival) return;
     if (!choices.some((d) => d.slug === urlSlug)) return;
     appliedUrlSlug.current = arrival;
-    setStored({ userId, slug: urlSlug });
-    writeStored(userId, urlSlug);
-  }, [urlSlug, choices, userId]);
-
-  const setActive = useCallback(
-    (slug: string | null) => {
-      if (!userId) return;
-      setStored({ userId, slug });
-      writeStored(userId, slug);
-    },
-    [userId],
-  );
+    pick(urlSlug);
+  }, [urlSlug, choices, userId, pick]);
 
   const active = useMemo(
     () => resolveActive(choices, storedSlug),
@@ -249,10 +427,10 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
       activeProfile,
       canSeeOverview,
       showSwitcher: switcherChoiceCount(choices) >= 2,
-      setActive,
+      setActive: pick,
       isLoaded,
     }),
-    [choices, active, activeProfile, canSeeOverview, setActive, isLoaded],
+    [choices, active, activeProfile, canSeeOverview, pick, isLoaded],
   );
 
   return (
