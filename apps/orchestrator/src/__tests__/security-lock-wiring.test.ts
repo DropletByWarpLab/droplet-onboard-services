@@ -46,6 +46,9 @@ describe("the Matter lock adapter is wired into boot (WARP-2977 P2b-2)", () => {
     expect(call).toMatch(/getCommissionedDevices:\s*async \(\) => enrichGrouped\(prisma, await getCommissionedDevices\(\)\)/);
     expect(call).toContain("isMatterInitialized");
     expect(call).toContain("subscribeStateChanges");
+    // Review F8: the connection stream, so a change heard as a lock reconnects is recorded as found (polled).
+    expect(call).toMatch(/^\s*subscribeConnectionChanges,\s*$/m);
+    expect(index).toMatch(/import \{[^}]*\bsubscribeConnectionChanges,[^}]*\} from "\.\/services\/matter\.service\.js";/);
     const adapter = readFileSync(resolve(PACKAGE_ROOT, "src", "services", "security-lock-adapter.ts"), "utf8");
     expect(adapter).not.toMatch(/from\s+["']\.\/matter\.service\.js["']/);
   });

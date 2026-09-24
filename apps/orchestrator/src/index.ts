@@ -21,6 +21,7 @@ import {
   isMatterInitialized,
   shutdownMatterService,
   setPrismaForMatter,
+  subscribeConnectionChanges,
   subscribeStateChanges,
 } from "./services/matter.service.js";
 import { enrichGrouped } from "./services/rooms.service.js";
@@ -417,6 +418,9 @@ async function main() {
       isMatterInitialized,
     }),
     subscribeStateChanges,
+    // A change heard while its lock is not Connected is recorded as found
+    // (polled), not live: a reconnecting lock replays what changed while away.
+    subscribeConnectionChanges,
   });
 
   // Connect OpenWrt router (non-fatal if unavailable)

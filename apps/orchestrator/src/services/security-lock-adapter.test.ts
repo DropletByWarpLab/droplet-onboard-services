@@ -26,6 +26,7 @@ import {
   createLockTracker,
   createPrismaLockStore,
   createSecurityLockAdapter,
+  lockConnectionSubscriber,
   lockDedupeKey,
   lockDisplayName,
   lockFrameSubscriber,
@@ -43,6 +44,7 @@ import {
   type LockDeviceSource,
   type LockHealthInput,
   type LockLogger,
+  type LockObservedVia,
   type LockReading,
   type LockRowDraft,
   type LockSourceDevice,
@@ -181,14 +183,29 @@ function adapterWith(opts: {
     emitter.on("state_changed", cb);
     return () => emitter.off("state_changed", cb);
   });
+  const subscribeConnectionChanges = vi.fn((cb: (e: unknown) => void) => {
+    emitter.on("connection_changed", cb);
+    return () => emitter.off("connection_changed", cb);
+  });
   const adapter = createSecurityLockAdapter({
     store,
     source: opts.source ?? staticSource([lockDevice()]),
     subscribeStateChanges,
+    subscribeConnectionChanges,
     now: c.now,
     logger,
   });
-  return { adapter, store, c, logger, emitter, subscribeStateChanges };
+  return { adapter, store, c, logger, emitter, subscribeStateChanges, subscribeConnectionChanges };
+}
+
+/**
+ * The sidecar's `connection_changed` event, as matter.service re-emits it (no
+ * `type`): `{nodeId: String(nodeId), connectionState: NodeStates}` — matter.js
+ * 0.17.9 NodeStates: 0 Connected, 1 Disconnected, 2 Reconnecting,
+ * 3 WaitingForDeviceDiscovery (controller.ts setupNodeListeners).
+ */
+function connection(connectionState: unknown, nodeId: unknown = NODE) {
+  return { nodeId, connectionState };
 }
 
 afterEach(() => {
@@ -563,7 +580,22 @@ describe("lockFrameSubscriber — can never throw into the bridge", () => {
     sub(frame(1, { path: { endpointId: 1, clusterId: 6, attributeId: 0 } }));
     sub("garbage");
     expect(observe).toHaveBeenCalledTimes(1);
-    expect(observe).toHaveBeenCalledWith({ nodeId: NODE, endpointId: 1, ref: REF, reading: "unlocked" }, "live");
+    expect(observe).toHaveBeenCalledWith({ nodeId: NODE, endpointId: 1, ref: REF, reading: "unlocked" }, "live", {
+      fromStream: true,
+    });
+  });
+
+  it("labels each frame with viaOf(nodeId), read when the frame is heard (review F8)", () => {
+    const observe = vi.fn(async (_obs: unknown, _via: LockObservedVia, _opts?: unknown) => "recorded" as const);
+    const viaOf = vi.fn((nodeId: string): LockObservedVia => (nodeId === NODE ? "polled" : "live"));
+    const sub = lockFrameSubscriber({ observe }, vi.fn(), viaOf);
+    sub(frame(2));
+    sub(frame(1, { nodeId: "77" }));
+    expect(viaOf.mock.calls).toEqual([[NODE], ["77"]]);
+    expect(observe.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+      ["polled", { fromStream: true }],
+      ["live", { fromStream: true }],
+    ]);
   });
 
   it("a tracker that throws synchronously does not escape — through a real EventEmitter", () => {
@@ -1113,12 +1145,15 @@ describe("the adapter's health, end to end", () => {
 describe("startSecurityLockAdapter / registerSecurityLockJobs", () => {
   function deps(subscribe?: (cb: (e: unknown) => void) => () => void) {
     const unsubscribe = vi.fn();
+    const unsubscribeConnection = vi.fn();
     return {
       unsubscribe,
+      unsubscribeConnection,
       d: {
         store: fakeStore(),
         source: staticSource([lockDevice()]),
         subscribeStateChanges: vi.fn(subscribe ?? (() => unsubscribe)),
+        subscribeConnectionChanges: vi.fn((_cb: (e: unknown) => void) => unsubscribeConnection),
         logger: quietLogger(),
       },
     };
@@ -1137,9 +1172,14 @@ describe("startSecurityLockAdapter / registerSecurityLockJobs", () => {
     expect(() => cb({ nodeId: NODE, get path(): unknown { throw new Error("x"); } })).not.toThrow();
     expect(securityLockAdapter()).toBe(a);
 
+    expect(one.d.subscribeConnectionChanges).toHaveBeenCalledTimes(1);
+    const onConnection = one.d.subscribeConnectionChanges.mock.calls[0][0] as (e: unknown) => void;
+    expect(() => onConnection({ get nodeId(): unknown { throw new Error("x"); } })).not.toThrow();
+
     const two = deps();
     const b = startSecurityLockAdapter(two.d);
     expect(one.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(one.unsubscribeConnection).toHaveBeenCalledTimes(1);
     expect(securityLockAdapter()).toBe(b);
   });
 
@@ -1194,12 +1234,13 @@ describe("startSecurityLockAdapter / registerSecurityLockJobs", () => {
     }
   });
 
-  it("stop() unsubscribes and reads as not running", () => {
-    const { d, unsubscribe } = deps();
+  it("stop() unsubscribes both streams and reads as not running", () => {
+    const { d, unsubscribe, unsubscribeConnection } = deps();
     const adapter = startSecurityLockAdapter(d);
     adapter.noteSweepScheduled();
     adapter.stop();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(unsubscribeConnection).toHaveBeenCalledTimes(1);
     expect(adapter.health()).toMatchObject({ detail: "Not running" });
   });
 });
@@ -1694,5 +1735,305 @@ describe("a reading Droplet heard but could not save, on a lock the list cannot 
     await sweeping;
     expect(store.rows.map((r) => [r.draft.labels[0], r.draft.observed])).toEqual([["locked", "live"]]);
     expect(adapter.tracker.writeHealth().unsaved).toBe(0);
+  });
+});
+
+// ── review F8: a change heard as the lock reconnects is found, not live ──
+
+/**
+ * matter.js 0.17.9 with the sidecar still running: when a lock drops off the
+ * network (or reboots, or a reconnect is triggered) PairedNode keeps its
+ * change events switched on, and the resubscribe's priming report — filtered
+ * by data version, so exactly the attributes that changed while it was away —
+ * emits `state_changed` while the node is still Reconnecting (2) or
+ * WaitingForDeviceDiscovery (3), BEFORE `connection_changed` says Connected
+ * (0). The sidecar sends both over one SSE stream, in order. Such a frame says
+ * when Droplet found the change, not when it happened: `polled`.
+ */
+describe("a change heard while its lock is not connected is recorded as polled (review F8)", () => {
+  function started(opts: Parameters<typeof adapterWith>[0] = {}) {
+    const a = adapterWith(opts);
+    seed(a.store, "unlocked", "7");
+    a.adapter.start();
+    return a;
+  }
+  const observedRows = (store: ReturnType<typeof fakeStore>) =>
+    store.rows.slice(1).map((r) => [r.draft.labels[0], r.draft.observed]);
+
+  it.each([
+    [2, "Reconnecting"],
+    [3, "WaitingForDeviceDiscovery"],
+    [1, "Disconnected"],
+  ])("a frame while the node is %i (%s) records polled, stamped when it was heard", async (state) => {
+    const { store, emitter, c } = started();
+    emitter.emit("connection_changed", connection(state));
+    c.advance(1000);
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "polled"]]);
+    expect(store.rows[1].draft.startedAt.getTime()).toBe(T0 + 1000);
+    expect(store.rows[1].draft.summary).toMatch(/: locked \(found when Droplet checked\)$/);
+  });
+
+  it("Connected (0) switches the node back to live", async () => {
+    const { store, emitter } = started();
+    emitter.emit("connection_changed", connection(2));
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    emitter.emit("connection_changed", connection(0));
+    emitter.emit("state_changed", frame(2));
+    await flush();
+    expect(observedRows(store)).toEqual([
+      ["locked", "polled"],
+      ["unlocked", "live"],
+    ]);
+  });
+
+  it("a node whose connection was never heard is connected: its frames are live", async () => {
+    const { store, emitter } = started();
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "live"]]);
+  });
+
+  it("the state is per NODE: another node reconnecting leaves this one live", async () => {
+    const { store, emitter } = started();
+    emitter.emit("connection_changed", connection(2, "999"));
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "live"]]);
+  });
+
+  it("the node id is canonical: a connection event spelled with leading zeros is the same node", async () => {
+    const { store, emitter } = started();
+    emitter.emit("connection_changed", connection(2, `000${NODE}`));
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "polled"]]);
+  });
+
+  it.each([
+    ["a string state", connection("reconnecting")],
+    ["a fractional state", connection(2.5)],
+    ["a negative state", connection(-1)],
+    ["no state", { nodeId: NODE }],
+    ["a node id that is not one", connection(2, "lock-1")],
+    ["a numeric node id", connection(2, 4660)],
+    ["not an object", "garbage"],
+  ])("%s says nothing: the node stays as it was", async (_what, event) => {
+    const { store, emitter } = started();
+    emitter.emit("connection_changed", event);
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "live"]]);
+  });
+
+  it("a successful sweep that lists the node connected resets it", async () => {
+    const { adapter, store, emitter, c } = started({ source: staticSource([lockDevice({ attributes: { lockState: 2 } })]) });
+    emitter.emit("connection_changed", connection(2));
+    c.advance(1000);
+    await expect(adapter.sweep()).resolves.toMatchObject({ status: "ok", recorded: 0 });
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "live"]]);
+  });
+
+  it.each(["reconnecting", "waiting", "disconnected"] as const)(
+    "a sweep that lists the node %s does not reset it",
+    async (connectionState) => {
+      const { adapter, store, emitter, c } = started({ source: staticSource([lockDevice({ connectionState })]) });
+      emitter.emit("connection_changed", connection(2));
+      c.advance(1000);
+      await expect(adapter.sweep()).resolves.toMatchObject({ status: "ok" });
+      emitter.emit("state_changed", frame(1));
+      await flush();
+      expect(observedRows(store)).toEqual([["locked", "polled"]]);
+    },
+  );
+
+  it("a failed sweep does not reset it", async () => {
+    const source = staticSource(async () => {
+      throw new Error("sidecar 503");
+    });
+    const { adapter, store, emitter, c } = started({ source });
+    emitter.emit("connection_changed", connection(2));
+    c.advance(1000);
+    await expect(adapter.sweep()).resolves.toMatchObject({ status: "failed" });
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "polled"]]);
+  });
+
+  it("a connection event heard while the sweep's list was in flight is newer than the list: not reset", async () => {
+    const listed = deferred<readonly LockSourceDevice[]>();
+    const { adapter, store, emitter, c } = started({ source: staticSource(() => listed.promise) });
+    const sweeping = adapter.sweep();
+    c.advance(200);
+    emitter.emit("connection_changed", connection(2)); // the lock drops off after t0
+    listed.resolve([lockDevice({ attributes: { lockState: 2 } })]); // the list, from before, says connected
+    await expect(sweeping).resolves.toMatchObject({ status: "ok" });
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "polled"]]);
+  });
+
+  it("'newer than the list' is at or after t0: an event in the very millisecond the sweep started is kept", async () => {
+    const listed = deferred<readonly LockSourceDevice[]>();
+    const { adapter, store, emitter } = started({ source: staticSource(() => listed.promise) });
+    const sweeping = adapter.sweep();
+    emitter.emit("connection_changed", connection(2)); // same instant as t0 (the clock has not moved)
+    listed.resolve([lockDevice({ attributes: { lockState: 2 } })]);
+    await expect(sweeping).resolves.toMatchObject({ status: "ok" });
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([["locked", "polled"]]);
+  });
+
+  it("a LOST Connected event errs to polled for at most one sweep", async () => {
+    const { adapter, store, emitter, c } = started({ source: staticSource([lockDevice({ attributes: { lockState: 2 } })]) });
+    emitter.emit("connection_changed", connection(2));
+    c.advance(1000);
+    emitter.emit("state_changed", frame(1)); // the resubscribe's report: found, not live
+    await flush();
+    // Connected (0) is lost (an SSE gap). The lock is back and changes again.
+    c.advance(1000);
+    emitter.emit("state_changed", frame(2));
+    await flush();
+    // The next sweep (the list says connected) ends it.
+    c.advance(SECURITY_LOCK_SWEEP_INTERVAL_MS);
+    await adapter.sweep();
+    c.advance(1000);
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(observedRows(store)).toEqual([
+      ["locked", "polled"],
+      ["unlocked", "polled"],
+      ["locked", "live"],
+    ]);
+  });
+
+  it("a frame heard while not connected still wins the t0 guard over the sweep's older list reading", async () => {
+    const listed = deferred<readonly LockSourceDevice[]>();
+    const { adapter, store, emitter, c } = started({ source: staticSource(() => listed.promise) });
+    emitter.emit("connection_changed", connection(2));
+    c.advance(1000);
+    const sweeping = adapter.sweep();
+    c.advance(200);
+    emitter.emit("state_changed", frame(1)); // locked, heard after t0 (recorded polled)
+    await flush();
+    listed.resolve([lockDevice({ attributes: { lockState: 2 } })]); // the list still says unlocked
+    await expect(sweeping).resolves.toMatchObject({ status: "ok", superseded: 1, recorded: 0 });
+    expect(observedRows(store)).toEqual([["locked", "polled"]]);
+    expect(adapter.knownLocks()[0].reading).toBe("locked");
+  });
+
+  it("a frame heard while not connected still counts as the stream being heard (the header's last-seen time)", async () => {
+    const { adapter, emitter, c } = started();
+    emitter.emit("connection_changed", connection(2));
+    c.advance(5000);
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(adapter.tracker.writeHealth().lastLiveFrameAt?.getTime()).toBe(T0 + 5000);
+  });
+});
+
+describe("lockConnectionSubscriber — can never throw into the bridge (review F8)", () => {
+  it("hands a well-formed event to onState with the canonical node id; ignores everything else", () => {
+    const onState = vi.fn();
+    const sub = lockConnectionSubscriber(onState, vi.fn());
+    sub(connection(2, "0042"));
+    sub(connection("x"));
+    sub(null);
+    expect(onState).toHaveBeenCalledTimes(1);
+    expect(onState).toHaveBeenCalledWith("42", 2);
+  });
+
+  it("an onState that throws does not escape — through a real EventEmitter; the other consumers still hear it", () => {
+    const warn = vi.fn();
+    const sub = lockConnectionSubscriber(() => {
+      throw new Error("sync boom");
+    }, warn);
+    const emitter = new EventEmitter();
+    emitter.on("connection_changed", sub);
+    const after = vi.fn();
+    emitter.on("connection_changed", after);
+    expect(() => emitter.emit("connection_changed", connection(2))).not.toThrow();
+    expect(after).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ message: "sync boom" }));
+  });
+
+  it("an event whose getter throws, with a logger that throws too, still does not escape", () => {
+    const hostile = {
+      get nodeId(): unknown {
+        throw new Error("getter");
+      },
+      connectionState: 2,
+    };
+    const sub = lockConnectionSubscriber(vi.fn(), () => {
+      throw new Error("logger down");
+    });
+    expect(() => sub(hostile)).not.toThrow();
+  });
+});
+
+describe("the adapter subscribes to connection changes (review F8)", () => {
+  it("start() subscribes once; stop() unsubscribes", () => {
+    const unsubscribeConnection = vi.fn();
+    const subscribeConnectionChanges = vi.fn(() => unsubscribeConnection);
+    const adapter = createSecurityLockAdapter({
+      store: fakeStore(),
+      source: staticSource([lockDevice()]),
+      subscribeStateChanges: () => () => undefined,
+      subscribeConnectionChanges,
+      logger: quietLogger(),
+    });
+    adapter.start();
+    adapter.start();
+    expect(subscribeConnectionChanges).toHaveBeenCalledTimes(1);
+    adapter.stop();
+    expect(unsubscribeConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("a connection subscribe that throws is logged; the lock feed still runs and records live", async () => {
+    const logger = quietLogger();
+    const emitter = new EventEmitter();
+    const store = fakeStore();
+    seed(store, "unlocked", "7");
+    const adapter = createSecurityLockAdapter({
+      store,
+      source: staticSource([lockDevice()]),
+      subscribeStateChanges: (cb) => {
+        emitter.on("state_changed", cb);
+        return () => emitter.off("state_changed", cb);
+      },
+      subscribeConnectionChanges: () => {
+        throw new Error("emitter gone");
+      },
+      logger,
+    });
+    expect(() => adapter.start()).not.toThrow();
+    expect(logger.error).toHaveBeenCalledWith(expect.anything(), expect.stringMatching(/connection/));
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(store.rows.slice(1).map((r) => [r.draft.labels[0], r.draft.observed])).toEqual([["locked", "live"]]);
+    adapter.noteSweepScheduled();
+    await adapter.sweep();
+    expect(adapter.health()).toMatchObject({ state: "ok" });
+  });
+
+  it("an unsubscribe of the connection stream that throws does not throw out of stop()", () => {
+    const logger = quietLogger();
+    const adapter = createSecurityLockAdapter({
+      store: fakeStore(),
+      source: staticSource([lockDevice()]),
+      subscribeStateChanges: () => () => undefined,
+      subscribeConnectionChanges: () => () => {
+        throw new Error("already gone");
+      },
+      logger,
+    });
+    adapter.start();
+    expect(() => adapter.stop()).not.toThrow();
+    expect(logger.warn).toHaveBeenCalled();
   });
 });

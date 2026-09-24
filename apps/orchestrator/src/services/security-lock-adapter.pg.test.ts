@@ -228,6 +228,7 @@ describe.skipIf(!RUN)("Matter lock adapter store — real Postgres (WARP-2977 P2
       store: createPrismaLockStore(prisma),
       source,
       subscribeStateChanges: () => () => undefined,
+      subscribeConnectionChanges: () => () => undefined,
       logger: quiet,
     });
     expect(await adapter.sweep()).toMatchObject({ status: "ok", recorded: 1 });

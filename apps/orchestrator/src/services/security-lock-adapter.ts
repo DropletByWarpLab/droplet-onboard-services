@@ -39,12 +39,19 @@
  *     frame or sweep reads the history back and sees the row if it landed.
  *   · The sweep (60 s, cron runtime, advisory lockKey) finds changes the live
  *     stream missed, as `polled` rows. Its t0 guard skips a key that heard a
- *     live frame at or after the sweep started: the list may predate it.
+ *     stream frame at or after the sweep started: the list may predate it.
+ *   · A frame is `live` only while its node is Connected (review F8). A lock
+ *     that drops off the network and comes back replays what changed while it
+ *     was away, before the sidecar says Connected; such a frame is `polled`.
+ *     A node whose connection was never heard counts as connected. A
+ *     Connected event, or a successful list that says connected (and no
+ *     connection event heard at or after that sweep started), ends it.
  *   · A known lock is gone only after SECURITY_LOCK_GONE_AFTER_LISTS
  *     successful lists in a row lack it; until then it is kept as not
  *     reporting (the sidecar skips a node whose info build throws).
- *   · The subscriber can never throw synchronously — a throw inside the
- *     EventEmitter callback would tear down the SSE bridge for every consumer.
+ *   · Neither subscriber (frames, connection changes) can throw synchronously —
+ *     a throw inside an EventEmitter callback escapes `emit`, and the bridge
+ *     then drops and reopens the SSE stream for every consumer.
  *   · Health never reads `not_configured` on a smart-home service that has
  *     never answered: "no locks" is only ever what a SUCCESSFUL list said.
  *   · "Could not be saved" is per lock: down while some lock's latest store
@@ -67,6 +74,12 @@ import { createLogger } from "../lib/logger.js";
 export const MATTER_DOOR_LOCK_CLUSTER_ID = 257;
 /** DoorLock.LockState. */
 export const MATTER_LOCK_STATE_ATTRIBUTE_ID = 0;
+/**
+ * matter.js NodeStates.Connected — the `connectionState` of the sidecar's
+ * `connection_changed` event (1 Disconnected, 2 Reconnecting,
+ * 3 WaitingForDeviceDiscovery). A frame is `live` only from a Connected node.
+ */
+export const MATTER_NODE_CONNECTED = 0;
 
 export const SECURITY_LOCK_SWEEP_INTERVAL_MS = 60_000;
 export const SECURITY_LOCK_SWEEP_LOCK_KEY = "droplet:security-lock-sweep";
@@ -351,10 +364,16 @@ export interface LockWriteHealth {
 export interface LockTracker {
   /**
    * Apply one reading on its key's chain. Never rejects. `sweepStartedAt` is
-   * the sweep's t0: a polled reading for a key that heard a live frame at or
-   * after it is `superseded`.
+   * the sweep's t0: a polled reading for a key that heard a stream frame at or
+   * after it is `superseded`. `fromStream` marks a frame heard on the live
+   * stream even when it is recorded `polled` (heard while its lock was not
+   * connected, review F8): it is still newer than a list fetched before it.
    */
-  observe(obs: LockObservation, via: LockObservedVia, opts?: { sweepStartedAt?: Date }): Promise<LockObserveOutcome>;
+  observe(
+    obs: LockObservation,
+    via: LockObservedVia,
+    opts?: { sweepStartedAt?: Date; fromStream?: boolean },
+  ): Promise<LockObserveOutcome>;
   /** Drop every key whose node is not in `present` (a successful list). No row. Resolves with the number of keys dropped. */
   forgetNodesExcept(present: ReadonlySet<string>): Promise<number>;
   /** The reading the device last gave for `ref` (live, or a polled one no live frame superseded), or null. */
@@ -384,7 +403,7 @@ export function createLockTracker(deps: {
 
   /** What the STORE holds per key, as far as this process knows. Absent = read it back first. */
   const persisted = new Map<string, { id: string | null; reading: LockReading | null }>();
-  /** Receipt time (ms) of the latest live frame per key — the t0 guard's input. Set at receipt, not on apply. */
+  /** Receipt time (ms) of the latest stream frame per key (live or not) — the t0 guard's input. Set at receipt, not on apply. */
   const liveAt = new Map<string, number>();
   /** What the device last said per key — for display (knownLocks), never for transitions. */
   const heard = new Map<string, LockReading>();
@@ -484,7 +503,7 @@ export function createLockTracker(deps: {
   return {
     observe(obs, via, opts) {
       const receivedAt = now();
-      if (via === "live") {
+      if (via === "live" || opts?.fromStream === true) {
         liveAt.set(obs.ref, receivedAt.getTime());
         health.lastLiveFrameAt = receivedAt;
       }
@@ -518,26 +537,66 @@ export function createLockTracker(deps: {
 
 // ── the subscriber ───────────────────────────────────────────────────────
 
+/** `warn`, except that a logger failure never reaches the bridge either. */
+function safely(warn: (err: unknown) => void): (err: unknown) => void {
+  return (err) => {
+    try {
+      warn(err);
+    } catch {
+      // Nothing left to tell.
+    }
+  };
+}
+
 /**
  * The `subscribeStateChanges` callback. It can never throw synchronously and
  * never leaves a rejection unhandled: the bridge's EventEmitter would
  * otherwise take the SSE stream down for every consumer (matter.service.ts).
+ * `viaOf` labels each frame by its node's connection when it is heard
+ * (review F8); every frame is marked as heard on the stream.
  */
 export function lockFrameSubscriber(
   tracker: Pick<LockTracker, "observe">,
   warn: (err: unknown) => void,
+  viaOf: (nodeId: string) => LockObservedVia = () => "live",
 ): (event: unknown) => void {
-  const safeWarn = (err: unknown): void => {
-    try {
-      warn(err);
-    } catch {
-      // A logger failure must not reach the bridge either.
-    }
-  };
+  const safeWarn = safely(warn);
   return (event) => {
     try {
       const obs = parseLockFrame(event);
-      if (obs) void Promise.resolve(tracker.observe(obs, "live")).catch(safeWarn);
+      if (obs) void Promise.resolve(tracker.observe(obs, viaOf(obs.nodeId), { fromStream: true })).catch(safeWarn);
+    } catch (err) {
+      safeWarn(err);
+    }
+  };
+}
+
+/**
+ * A `connection_changed` bridge event (`{nodeId, connectionState}`, as the
+ * sidecar emits it: controller.ts setupNodeListeners) → the canonical node id
+ * and matter.js NodeStates number, or null for anything else.
+ */
+function parseConnectionEvent(e: unknown): { nodeId: string; state: number } | null {
+  if (!isRecord(e)) return null;
+  const nodeId = canonicalNodeId(e.nodeId);
+  const state = e.connectionState;
+  if (nodeId === null || typeof state !== "number" || !Number.isInteger(state) || state < 0) return null;
+  return { nodeId, state };
+}
+
+/**
+ * The `subscribeConnectionChanges` callback (review F8). The same discipline
+ * as `lockFrameSubscriber`: it can never throw into the bridge.
+ */
+export function lockConnectionSubscriber(
+  onState: (nodeId: string, state: number) => void,
+  warn: (err: unknown) => void,
+): (event: unknown) => void {
+  const safeWarn = safely(warn);
+  return (event) => {
+    try {
+      const change = parseConnectionEvent(event);
+      if (change) onState(change.nodeId, change.state);
     } catch (err) {
       safeWarn(err);
     }
@@ -605,6 +664,8 @@ export interface KnownLock {
 interface DeviceListReading {
   /** Every well-formed node id in the list (a lock or not): a node absent from it is decommissioned. */
   present: Set<string>;
+  /** The nodes the list says are connected (review F8: this ends a "not connected" heard before the sweep). */
+  connectedNodes: Set<string>;
   /** Every DoorLock endpoint, in list order; `reading` is null here (the caller fills in what was heard). */
   known: KnownLock[];
   /** The reading the list gives for each single-endpoint, connected lock — the sweep's polled observations. */
@@ -614,12 +675,13 @@ interface DeviceListReading {
 }
 
 function readDeviceList(devices: readonly unknown[]): DeviceListReading {
-  const out: DeviceListReading = { present: new Set(), known: [], polledReadings: [], multi: [] };
+  const out: DeviceListReading = { present: new Set(), connectedNodes: new Set(), known: [], polledReadings: [], multi: [] };
   for (const d of devices) {
     if (!isRecord(d)) continue;
     const nodeId = canonicalNodeId(d.nodeId);
     if (nodeId === null) continue;
     out.present.add(nodeId);
+    if (d.connectionState === "connected") out.connectedNodes.add(nodeId);
     // A lock is an endpoint that serves the DoorLock CLUSTER — never a device type or category.
     const lockEndpoints = (Array.isArray(d.endpoints) ? d.endpoints : [])
       .filter(
@@ -769,6 +831,8 @@ export interface SecurityLockAdapterDeps {
   source: LockDeviceSource;
   /** matter.service `subscribeStateChanges`. */
   subscribeStateChanges: (callback: (event: unknown) => void) => () => void;
+  /** matter.service `subscribeConnectionChanges` (review F8: a frame is live only from a Connected node). */
+  subscribeConnectionChanges: (callback: (event: unknown) => void) => () => void;
   now?: () => Date;
   logger?: LockLogger;
 }
@@ -814,6 +878,25 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
   let sweepScheduled = false;
   let sweeping = false;
   let unsubscribe: (() => void) | null = null;
+  let unsubscribeConnection: (() => void) | null = null;
+
+  /**
+   * Review F8: the nodes last heard NOT Connected, with when (ms) that was
+   * heard. A frame from one of them is `polled`: matter.js replays what
+   * changed while a lock was away before the sidecar says Connected, so the
+   * frame says when Droplet found the change, not when it happened. Absent =
+   * connected, including a node never heard (after boot, or a gap in the
+   * stream): the other default would label a steady lock's every change as
+   * found until a sweep lists it connected, and for as long as the list
+   * fails. Entries are small and only for nodes not connected; a
+   * decommissioned node's last one stays until the orchestrator restarts.
+   */
+  const notConnectedSince = new Map<string, number>();
+  const onConnection = (nodeId: string, state: number): void => {
+    if (state === MATTER_NODE_CONNECTED) notConnectedSince.delete(nodeId);
+    else notConnectedSince.set(nodeId, now().getTime());
+  };
+  const viaOf = (nodeId: string): LockObservedVia => (notConnectedSince.has(nodeId) ? "polled" : "live");
 
   const tracker = createLockTracker({
     store: deps.store,
@@ -842,7 +925,16 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
       return { status: "failed", message };
     }
 
-    const { present, known, polledReadings, multi } = readDeviceList(devices);
+    const { present, connectedNodes, known, polledReadings, multi } = readDeviceList(devices);
+
+    // Review F8: a list that says a node is connected ends its "not
+    // connected" — so a lost Connected event errs to `polled` for at most one
+    // sweep. Not one heard at or after t0, though: the list may predate it.
+    for (const nodeId of connectedNodes) {
+      const since = notConnectedSince.get(nodeId);
+      if (since !== undefined && since < t0.getTime()) notConnectedSince.delete(nodeId);
+    }
+
     for (const m of multi) {
       if (multiLogged.has(m.nodeId)) continue;
       multiLogged.add(m.nodeId);
@@ -919,19 +1011,34 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
     start() {
       if (started) return;
       try {
-        unsubscribe = deps.subscribeStateChanges(lockFrameSubscriber(tracker, (err) => log.warn({ err }, "security lock frame dropped")));
+        unsubscribe = deps.subscribeStateChanges(
+          lockFrameSubscriber(tracker, (err) => log.warn({ err }, "security lock frame dropped"), viaOf),
+        );
         started = true;
       } catch (err) {
         log.error({ err }, "security lock adapter could not subscribe to smart-home changes — /security shows locks as not running");
+        return;
+      }
+      try {
+        unsubscribeConnection = deps.subscribeConnectionChanges(
+          lockConnectionSubscriber(onConnection, (err) => log.warn({ err }, "security lock connection change dropped")),
+        );
+      } catch (err) {
+        // The lock feed still runs; only the live/found label of a change heard
+        // as a lock reconnects is lost (it reads live, as before review F8).
+        log.error({ err }, "security lock adapter could not subscribe to smart-home connection changes — a change heard as a lock reconnects is recorded as live");
       }
     },
     stop() {
-      try {
-        unsubscribe?.();
-      } catch (err) {
-        log.warn({ err }, "security lock adapter unsubscribe failed");
+      for (const off of [unsubscribe, unsubscribeConnection]) {
+        try {
+          off?.();
+        } catch (err) {
+          log.warn({ err }, "security lock adapter unsubscribe failed");
+        }
       }
       unsubscribe = null;
+      unsubscribeConnection = null;
       started = false;
     },
     async sweep() {
@@ -1055,6 +1162,7 @@ let active: SecurityLockAdapter | null = null;
  *       isMatterInitialized,
  *     }),
  *     subscribeStateChanges,
+ *     subscribeConnectionChanges,
  *   });
  */
 export function startSecurityLockAdapter(deps: SecurityLockAdapterDeps): SecurityLockAdapter {
