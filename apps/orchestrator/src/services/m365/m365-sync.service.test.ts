@@ -33,7 +33,12 @@ vi.mock("./m365-auth.service.js", async (importOriginal) => {
   };
 });
 
-import { syncCursor, type M365SyncDeps } from "./m365-sync.service.js";
+import {
+  MAX_PAGES_PER_TICK,
+  discoverResources,
+  syncCursor,
+  type M365SyncDeps,
+} from "./m365-sync.service.js";
 import { GraphRequestError, type GraphPage } from "./graph-client.js";
 import { M365NotConnectedError } from "./m365-auth.service.js";
 import type { DueCursor } from "./delta-cursor.service.js";
@@ -48,6 +53,7 @@ interface Row {
   workload: string;
   resourceId: string;
   deltaLink: string | null;
+  resumeLink: string | null;
   state: string;
   consecutiveFailures: number;
   nextAttemptAt: Date | null;
@@ -62,6 +68,7 @@ function row(over: Partial<Row> = {}): Row {
     workload: "mail",
     resourceId: "inbox",
     deltaLink: DELTA,
+    resumeLink: null,
     state: "SYNCING",
     consecutiveFailures: 0,
     nextAttemptAt: null,
@@ -99,6 +106,7 @@ function due(over: Partial<DueCursor> = {}): DueCursor {
     workload: "mail",
     resourceId: "inbox",
     deltaLink: DELTA,
+    resumeLink: null,
     state: "SYNCING",
     ...over,
   };
@@ -233,5 +241,150 @@ describe("syncCursor — the box could not produce a token", () => {
     expect(prisma.__first().state).toBe("BACKOFF");
     expect(prisma.__first().lastError ?? "").not.toMatch(/InvalidAuthenticationToken/);
     expect(markNeedsReconnectMock).not.toHaveBeenCalled();
+  });
+});
+
+// --- WARP-3059: an enumeration bigger than one tick -------------------------
+
+describe("syncCursor — an enumeration bigger than one tick's page budget (WARP-3059)", () => {
+  const TOTAL = MAX_PAGES_PER_TICK + 50;
+
+  /** Graph, paginated: page n links to n+1, and the last page carries the deltaLink. */
+  function pagedClient(fail?: (n: number) => Error | null) {
+    const fetched: string[] = [];
+    const getPage = vi.fn(async (url: string) => {
+      fetched.push(url);
+      const n = Number(/p=(\d+)/.exec(url)![1]);
+      const err = fail?.(n);
+      if (err) throw err;
+      return {
+        items: [{ id: `m${n}` }],
+        links:
+          n < TOTAL
+            ? { nextLink: `https://graph.microsoft.com/v1.0/me/messages/delta?p=${n + 1}`, deltaLink: null }
+            : { nextLink: null, deltaLink: `${DELTA}-after-${n}` },
+        raw: {},
+      } as unknown as GraphPage;
+    });
+    return { fetched, client: { getPage } as unknown as M365SyncDeps["client"] };
+  }
+  const first = () => "https://graph.microsoft.com/v1.0/me/messages/delta?p=1";
+
+  it("checkpoints at the budget and finishes on the next tick, fetching no page twice", async () => {
+    // Before WARP-3059 the first tick persisted nothing and the second started
+    // again at page 1 — a folder over the budget re-read the same pages every
+    // five minutes and never produced a deltaLink.
+    const prisma = fakePrisma([row({ deltaLink: null })]);
+    const { fetched, client } = pagedClient();
+
+    const tick1 = await syncCursor(deps(prisma, { client, initialUrlFor: first }), due({ deltaLink: null }));
+    expect(tick1).toMatchObject({ completed: false, checkpointed: true, pages: MAX_PAGES_PER_TICK });
+    expect(prisma.__first()).toMatchObject({
+      deltaLink: null, // the cursor has NOT advanced
+      resumeLink: `https://graph.microsoft.com/v1.0/me/messages/delta?p=${MAX_PAGES_PER_TICK + 1}`,
+      state: "IDLE",
+    });
+
+    const saved = prisma.__first()!;
+    const tick2 = await syncCursor(
+      deps(prisma, { client, initialUrlFor: first }),
+      due({ deltaLink: saved.deltaLink, resumeLink: saved.resumeLink }),
+    );
+    expect(tick2).toMatchObject({ completed: true, pages: TOTAL - MAX_PAGES_PER_TICK });
+    expect(prisma.__first()).toMatchObject({ deltaLink: `${DELTA}-after-${TOTAL}`, resumeLink: null });
+
+    expect(fetched).toHaveLength(TOTAL);
+    expect(new Set(fetched).size).toBe(TOTAL);
+  });
+
+  it("resumes from the checkpoint, not from the start, after a failure past it", async () => {
+    const prisma = fakePrisma([row({ deltaLink: null })]);
+    const flaky = pagedClient((n) =>
+      n === MAX_PAGES_PER_TICK + 5
+        ? new GraphRequestError({ statusCode: 503, code: "serviceNotAvailable", message: "throttled" })
+        : null,
+    );
+
+    await syncCursor(deps(prisma, { client: flaky.client, initialUrlFor: first }), due({ deltaLink: null }));
+    const checkpoint = prisma.__first()!.resumeLink;
+    await syncCursor(
+      deps(prisma, { client: flaky.client, initialUrlFor: first }),
+      due({ deltaLink: null, resumeLink: checkpoint }),
+    );
+
+    // The failure kept the last checkpoint — pages before it were handled —
+    // and did not throw the run back to page 1.
+    expect(prisma.__first()).toMatchObject({ resumeLink: checkpoint, state: "BACKOFF", deltaLink: null });
+  });
+
+  it("does not checkpoint a run that was handed neither link", async () => {
+    // A page with no nextLink and no deltaLink is Graph misbehaving, not a
+    // position to resume from.
+    const prisma = fakePrisma([row({ deltaLink: null })]);
+    const client = {
+      getPage: vi.fn(async () => ({ items: [], links: { nextLink: null, deltaLink: null }, raw: {} })),
+    } as unknown as M365SyncDeps["client"];
+    const res = await syncCursor(deps(prisma, { client, initialUrlFor: first }), due({ deltaLink: null }));
+    expect(res).toMatchObject({ completed: false, checkpointed: false });
+    expect(prisma.__first()!.resumeLink).toBeNull();
+  });
+});
+
+// --- WARP-3059: discovery follows the grant --------------------------------
+
+describe("discoverResources — only what the grant covers (WARP-3059)", () => {
+  function discoveryPrisma(grantedScopes: string | null) {
+    const upserts: Array<{ workload: string; resourceId: string }> = [];
+    return {
+      upserts,
+      m365Connection: { findUnique: vi.fn(async () => ({ grantedScopes })) },
+      m365DeltaCursor: {
+        upsert: vi.fn(async ({ where }: any) => {
+          upserts.push({
+            workload: where.userId_workload_resourceId.workload,
+            resourceId: where.userId_workload_resourceId.resourceId,
+          });
+          return {};
+        }),
+      },
+    };
+  }
+  /** Every folder listing is empty; the calls themselves are what we watch. */
+  const emptyListing = () =>
+    ({
+      getPage: vi.fn(async () => ({ items: [], links: { nextLink: null, deltaLink: null }, raw: {} })),
+    }) as unknown as M365SyncDeps["client"];
+
+  it("does not attempt To Do without a Tasks grant, and does not report it as a fault", async () => {
+    // What the connector actually requests (M365_SCOPES), as Microsoft returns it.
+    const prisma = discoveryPrisma(
+      "offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite Files.ReadWrite.All",
+    );
+    const client = emptyListing();
+
+    const found = await discoverResources(
+      { prisma: prisma as never, client, entra: {} as never, initialUrlFor: () => null, now: () => NOW },
+      USER,
+    );
+
+    expect(found.notGranted).toEqual(["todo"]);
+    expect(found.skipped).toEqual([]); // nothing index.ts would log as a fault
+    const urls = vi.mocked(client.getPage).mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("/todo/"))).toBe(false);
+    // The singletons still register.
+    expect(prisma.upserts.map((u) => u.workload).sort()).toEqual(["calendar", "files"]);
+  });
+
+  it("attempts nothing for a grant it cannot read", async () => {
+    // No recorded grant is not a grant: guessing "probably everything" would
+    // walk workloads nobody consented to.
+    const prisma = discoveryPrisma(null);
+    const client = emptyListing();
+    const found = await discoverResources(
+      { prisma: prisma as never, client, entra: {} as never, initialUrlFor: () => null, now: () => NOW },
+      USER,
+    );
+    expect(found.notGranted).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
+    expect(client.getPage).not.toHaveBeenCalled();
   });
 });

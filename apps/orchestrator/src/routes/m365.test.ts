@@ -78,6 +78,9 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       }),
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
+    m365DeltaCursor: {
+      deleteMany: vi.fn(async () => ({ count: 0 })),
+    },
   };
 }
 

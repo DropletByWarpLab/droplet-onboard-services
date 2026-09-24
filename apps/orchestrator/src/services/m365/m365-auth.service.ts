@@ -32,6 +32,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 
 import { recordActivity } from "../activity.singleton.js";
+import { purgeCursorsForUser } from "./delta-cursor.service.js";
 import {
   sealPendingFlow,
   sealTokenCache,
@@ -759,6 +760,12 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
     },
   });
 
+  // WARP-3059 — and the sync positions. A delta link is the OLD account's
+  // position: replayed after reconnecting as a different account it is wrong,
+  // and left in place it is claimed and failed on every tick. After the
+  // credential purge, so a failure here can only leave residue, never a token.
+  await purgeCursorsForUser(prisma, userId);
+
   // After the purge, not before: the row is the thing being attested to.
   await auditM365({
     what: "Microsoft 365 disconnected",
@@ -789,6 +796,9 @@ export async function purgeM365ForUser(
   userId: string,
 ): Promise<number> {
   const { count } = await prisma.m365Connection.deleteMany({ where: { userId } });
+  // WARP-3059 — the deleted person's sync positions go with them. Second, so a
+  // failure here leaves residue rather than a live refresh token.
+  await purgeCursorsForUser(prisma, userId);
   return count;
 }
 

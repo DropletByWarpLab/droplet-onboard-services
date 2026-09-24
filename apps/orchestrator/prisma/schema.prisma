@@ -7218,6 +7218,15 @@ model M365DeltaCursor {
   /// resync is pending (see `state`, which is what actually distinguishes them).
   deltaLink String?
 
+  /// WARP-3059 — where an enumeration too big for one tick resumes: the
+  /// `@odata.nextLink` of the last page the run HANDLED before its page budget
+  /// ran out. Separate from `deltaLink` on purpose — the cursor still advances
+  /// only when a run reaches its deltaLink; this is a checkpoint inside one run,
+  /// written only after every page before it was handled. Without it a folder
+  /// over the budget re-read the same pages every tick and never finished.
+  /// Cleared on completion and on a resync. Stored verbatim, never logged.
+  resumeLink String?
+
   state M365SyncState @default(IDLE)
 
   /// Drives the exponential backoff. Reset to 0 on every success.

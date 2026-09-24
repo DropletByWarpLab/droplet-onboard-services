@@ -14,6 +14,8 @@ import { describe, it, expect, vi } from "vitest";
 
 import {
   claimDueCursors,
+  purgeCursorsForUser,
+  recordCheckpoint,
   recordSuccess,
   recordFailure,
   upsertCursor,
@@ -29,6 +31,7 @@ function cursor(over: Record<string, unknown> = {}) {
     workload: "mail",
     resourceId: "inbox",
     deltaLink: "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=abc",
+    resumeLink: null,
     state: "IDLE",
     consecutiveFailures: 0,
     nextAttemptAt: null,
@@ -38,14 +41,29 @@ function cursor(over: Record<string, unknown> = {}) {
   };
 }
 
-function fakePrisma(seed: Array<Record<string, unknown>> = []) {
+/**
+ * `connected` is the set of users whose M365Connection is CONNECTED — the
+ * owners `claimDueCursors` may claim for (WARP-3059). Defaults to USER.
+ */
+function fakePrisma(seed: Array<Record<string, unknown>> = [], connected: string[] = [USER]) {
   let rows = seed.map((r) => ({ ...r }));
   return {
     __rows: () => rows,
     __first: () => rows[0],
+    m365Connection: {
+      findMany: vi.fn(async ({ where }: any = {}) =>
+        where?.state === "CONNECTED" ? connected.map((userId) => ({ userId })) : [],
+      ),
+    },
     m365DeltaCursor: {
+      deleteMany: vi.fn(async ({ where }: any) => {
+        const before = rows.length;
+        rows = rows.filter((r) => r.userId !== where.userId);
+        return { count: before - rows.length };
+      }),
       findMany: vi.fn(async ({ where, take }: any = {}) => {
         let out = rows;
+        if (where?.userId?.in) out = out.filter((r) => where.userId.in.includes(r.userId));
         if (where?.state?.in) out = out.filter((r) => where.state.in.includes(r.state));
         if (where?.OR) {
           out = out.filter((r) =>
@@ -98,6 +116,33 @@ describe("recordSuccess", () => {
     expect(row.lastError).toBeNull();
     expect(row.lastSyncedAt).toEqual(NOW);
   });
+
+  it("clears the resume checkpoint — the run it belonged to is finished (WARP-3059)", async () => {
+    const prisma = fakePrisma([cursor({ resumeLink: "https://graph.microsoft.com/v1.0/x?$skiptoken=p201" })]);
+    await recordSuccess(prisma as never, "c1", "https://graph.microsoft.com/v1.0/x?$deltatoken=D", NOW);
+    expect((prisma.__first() as any).resumeLink).toBeNull();
+  });
+});
+
+describe("recordCheckpoint (WARP-3059)", () => {
+  const RESUME = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$skiptoken=p201";
+
+  it("stores where the run resumes WITHOUT advancing the delta link", async () => {
+    // The cursor advances only at a deltaLink; a checkpoint is a position
+    // inside the run, kept apart so that rule still holds.
+    const prior = cursor({ deltaLink: null, state: "SYNCING", consecutiveFailures: 2 });
+    const prisma = fakePrisma([prior]);
+
+    await recordCheckpoint(prisma as never, "c1", RESUME);
+
+    const row = prisma.__first() as any;
+    expect(row.resumeLink).toBe(RESUME);
+    expect(row.deltaLink).toBeNull();
+    expect(row.state).toBe("IDLE"); // claimable next tick
+    expect(row.consecutiveFailures).toBe(0);
+    // Not a completed sync: the hub's "last synced" must not move.
+    expect(row.lastSyncedAt).toBeNull();
+  });
 });
 
 describe("recordFailure", () => {
@@ -128,13 +173,17 @@ describe("recordFailure", () => {
     // The important one. A dead delta token is NORMAL — Outlook evicts them
     // from a cache with no fixed lifetime. Keeping the link would replay a
     // token Graph has already rejected, forever.
-    const prisma = fakePrisma([cursor()]);
+    const prisma = fakePrisma([
+      cursor({ resumeLink: "https://graph.microsoft.com/v1.0/me/messages/delta?$skiptoken=p201" }),
+    ]);
 
     await recordFailure(prisma as never, "c1", { statusCode: 410 }, undefined, NOW);
 
     const row = prisma.__first() as any;
     expect(row.state).toBe("RESYNC_REQUIRED");
     expect(row.deltaLink).toBeNull();
+    // WARP-3059 — a checkpoint inside the dead enumeration is dead with it.
+    expect(row.resumeLink).toBeNull();
     // Re-enumeration is not a failure: it must not be delayed by backoff, and
     // it must not count toward the failure streak.
     expect(row.consecutiveFailures).toBe(0);
@@ -257,6 +306,44 @@ describe("claimDueCursors", () => {
   it("never returns a cursor already SYNCING, so two ticks cannot overlap", async () => {
     const prisma = fakePrisma([cursor({ id: "c1", state: "SYNCING", nextAttemptAt: null })]);
     expect(await claimDueCursors(prisma as never, 10, NOW)).toEqual([]);
+  });
+
+  it("never returns a cursor whose owner is not CONNECTED (WARP-3059)", async () => {
+    // A disconnected or needs-reconnect person's cursors would otherwise be
+    // claimed every tick only to fail at the token — work for nothing, and a
+    // stream of failures attributed to cursors that did nothing wrong.
+    const prisma = fakePrisma(
+      [cursor({ id: "c1", userId: USER }), cursor({ id: "c2", userId: "user-2" })],
+      [USER],
+    );
+    expect((await claimDueCursors(prisma as never, 10, NOW)).map((c) => c.id)).toEqual(["c1"]);
+  });
+
+  it("claims nothing, and reads no cursors, when nobody is connected", async () => {
+    const prisma = fakePrisma([cursor()], []);
+    expect(await claimDueCursors(prisma as never, 10, NOW)).toEqual([]);
+    expect(prisma.m365DeltaCursor.findMany).not.toHaveBeenCalled();
+  });
+
+  it("hands the resume checkpoint to the run", async () => {
+    const prisma = fakePrisma([cursor({ resumeLink: "https://graph.microsoft.com/v1.0/x?$skiptoken=p" })]);
+    const [due] = await claimDueCursors(prisma as never, 10, NOW);
+    expect(due!.resumeLink).toBe("https://graph.microsoft.com/v1.0/x?$skiptoken=p");
+  });
+});
+
+describe("purgeCursorsForUser (WARP-3059)", () => {
+  it("deletes one person's cursors and nobody else's", async () => {
+    // ADR-041: disconnect purges. A delta link is the old account's position;
+    // replayed after reconnecting as someone else it would be wrong, and kept
+    // after a user is deleted it is residue with no owner.
+    const prisma = fakePrisma([
+      cursor({ id: "c1", userId: USER }),
+      cursor({ id: "c2", userId: USER, resourceId: "sent" }),
+      cursor({ id: "c3", userId: "user-2" }),
+    ]);
+    expect(await purgeCursorsForUser(prisma as never, USER)).toBe(2);
+    expect(prisma.__rows().map((r: any) => r.id)).toEqual(["c3"]);
   });
 });
 

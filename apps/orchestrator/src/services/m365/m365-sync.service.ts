@@ -28,6 +28,16 @@
  * page handling must tolerate seeing the same item twice (it is an upsert
  * keyed on the vendor id, never an append).
  *
+ * ## Runs longer than one tick (WARP-3059)
+ *
+ * A run that exhausts its page budget is different from one that FAILED: every
+ * page it read was handled. So it stores the `nextLink` of its last handled
+ * page as `resumeLink` — a checkpoint in its own column, never in `deltaLink`,
+ * so the rule above still holds — and the next tick continues from there. A
+ * failure keeps the last checkpoint (the pages before it were handled); a
+ * resync clears it with the delta link. Without this, a folder over the budget
+ * re-read the same pages every tick and never produced a deltaLink.
+ *
  * ## What it does with what it reads — nothing, on purpose
  *
  * `handlePage` is injected and the shipped caller counts. This is not an
@@ -72,6 +82,7 @@ import {
 } from "./graph-client.js";
 import {
   claimDueCursors,
+  recordCheckpoint,
   recordFailure,
   recordSuccess,
   upsertCursor,
@@ -82,6 +93,7 @@ import {
   M365_WORKLOADS,
   SINGLETON_RESOURCE,
   discoveryUrlFor,
+  grantCovers,
 } from "./graph-resources.js";
 
 /**
@@ -89,15 +101,10 @@ import {
  *
  * A first enumeration of a large mailbox is thousands of pages; walking them
  * all in one tick would hold the tick open for minutes and starve every other
- * cursor behind it. Stopping early is safe **only** because of the rule above:
- * an unfinished run persists nothing, so the next tick repeats it from the last
- * `deltaLink`. That makes this a fairness bound, not a correctness one — but it
- * does mean a very large first sync makes progress only when it can finish
- * within the bound, which is why the number is generous rather than small.
- *
- * 🔴 If this is ever lowered to a value a first enumeration cannot complete
- * within, that mailbox never syncs at all and nothing reports a fault. Any
- * change here needs the resumable-run design that does not exist yet.
+ * cursor behind it. A run that reaches the bound checkpoints its position
+ * (`resumeLink`, WARP-3059) and the next tick continues it, so this is a
+ * fairness bound only: an enumeration of any size completes, over as many
+ * ticks as it needs.
  */
 export const MAX_PAGES_PER_TICK = 200;
 
@@ -110,6 +117,9 @@ export interface CursorSyncResult {
   pages: number;
   /** True when the run reached its `deltaLink` and the cursor advanced. */
   completed: boolean;
+  /** WARP-3059 — true when the run hit the page budget and stored where the
+   *  next tick resumes. */
+  checkpointed?: boolean;
   /** Set when the run failed; already redacted by `recordFailure`. */
   error?: string;
 }
@@ -165,7 +175,9 @@ export async function syncCursor(
     completed: false,
   };
 
-  let url: string | null = cursor.deltaLink;
+  // A checkpoint from a run the page budget cut short takes precedence: the
+  // pages before it were handled, and starting over would re-read them.
+  let url: string | null = cursor.resumeLink ?? cursor.deltaLink;
   if (!url) {
     url = deps.initialUrlFor(cursor.workload, cursor.resourceId);
     if (!url) {
@@ -294,11 +306,18 @@ export async function syncCursor(
     url = page.links.nextLink;
   }
 
-  // Ran out of page budget mid-enumeration, or Graph returned neither link.
-  // Nothing is persisted: the next tick repeats this run from the same starting
-  // point. See the module header for why persisting `nextLink` here would be a
-  // silent data-loss bug rather than an optimisation.
-  return { ...base, items, pages, completed: false };
+  // Out of page budget with more to read: every page so far was handled, so
+  // the next page's link is a correct place to resume (WARP-3059). This is NOT
+  // the failure path — a failed run returned above and kept its last
+  // checkpoint — and `deltaLink` is untouched.
+  if (url) {
+    await recordCheckpoint(deps.prisma, cursor.id, url);
+    return { ...base, items, pages, completed: false, checkpointed: true };
+  }
+
+  // Graph returned neither link. Nothing to resume from; the next tick repeats
+  // the run from its last good position.
+  return { ...base, items, pages, completed: false, checkpointed: false };
 }
 
 /** Summary of one scheduler tick. */
@@ -315,9 +334,9 @@ export interface SyncTickResult {
  * Sequential rather than concurrent, deliberately. Graph's throttling is
  * per-mailbox AND per-tenant, and a box syncing several connected people in one
  * organisation shares that tenant budget — firing every cursor at once is the
- * fastest way to earn a 429 that then applies to all of them. The budget is
- * generous for a paced reader (Outlook allows thousands of requests per
- * mailbox per ten minutes) and hostile to a burst.
+ * fastest way to earn a 429 that then applies to all of them. A paced reader
+ * that obeys `Retry-After` stays inside whatever the budget is; a burst finds
+ * its edge (WARP-2706 — Microsoft publishes no per-mailbox figure to plan by).
  */
 export async function runSyncTick(
   deps: M365SyncDeps,
@@ -417,25 +436,44 @@ async function listFolders(
  * Failure is per-workload and non-fatal. A tenant with no Exchange Online
  * licence has no mailbox to enumerate, and that must not stop OneDrive from
  * syncing — so a workload that refuses is skipped, not propagated.
+ *
+ * A workload the person's grant does not cover is not attempted at all
+ * (WARP-3059) and is reported as `notGranted`, not `skipped`: it is the
+ * expected consequence of what was consented to, not a fault. Before this, To
+ * Do — whose only delegated permission the connector does not request — was
+ * attempted, refused and logged as skipped on every tick for every person.
  */
 export async function discoverResources(
   deps: M365SyncDeps,
   userId: string,
-): Promise<{ registered: number; skipped: string[] }> {
+): Promise<{ registered: number; skipped: string[]; notGranted: string[] }> {
   const now = deps.now ?? (() => new Date());
 
   let accessToken: string;
   try {
     accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now());
   } catch {
-    return { registered: 0, skipped: [...M365_WORKLOADS] };
+    return { registered: 0, skipped: [...M365_WORKLOADS], notGranted: [] };
   }
+
+  // Read AFTER the token: a refresh rewrites `grantedScopes` with what
+  // Microsoft granted this time, which may be narrower than last time.
+  const connection = (await deps.prisma.m365Connection.findUnique({
+    where: { userId },
+    select: { grantedScopes: true },
+  })) as { grantedScopes: string | null } | null;
+  const granted = (connection?.grantedScopes ?? "").split(" ").filter(Boolean);
 
   let registered = 0;
   const skipped: string[] = [];
+  const notGranted: string[] = [];
 
   for (const workload of M365_WORKLOADS) {
     const spec = GRAPH_RESOURCES[workload];
+    if (!grantCovers(granted, spec.leastPrivilegeScope)) {
+      notGranted.push(workload);
+      continue;
+    }
     const discovery = discoveryUrlFor(workload);
 
     // A workload with one implicit resource — the drive root, the calendar
@@ -487,5 +525,5 @@ export async function discoverResources(
     }
   }
 
-  return { registered, skipped };
+  return { registered, skipped, notGranted };
 }

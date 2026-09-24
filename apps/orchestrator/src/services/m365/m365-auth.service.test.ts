@@ -89,6 +89,10 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
         return { count: 1 };
       }),
     },
+    // WARP-3059 — disconnect and user deletion purge the person's cursors.
+    m365DeltaCursor: {
+      deleteMany: vi.fn(async () => ({ count: 0 })),
+    },
   };
 }
 
@@ -293,6 +297,8 @@ describe("disconnect", () => {
     expect(row.tokenCacheEnc).toBeNull();
     expect(row.homeAccountId).toBeNull();
     expect(row.accountUpn).toBeNull();
+    // WARP-3059 — and the person's sync positions, scoped to them alone.
+    expect(prisma.m365DeltaCursor.deleteMany).toHaveBeenCalledWith({ where: { userId: USER } });
   });
 
   it("is safe to call when nothing is connected", async () => {
@@ -348,6 +354,8 @@ describe("purgeM365ForUser", () => {
 
     expect(await purgeM365ForUser(prisma as never, USER)).toBe(1);
     expect(prisma.__row()).toBeNull();
+    // WARP-3059 — the deleted person's cursors go too.
+    expect(prisma.m365DeltaCursor.deleteMany).toHaveBeenCalledWith({ where: { userId: USER } });
   });
 
   it("is a no-op for a user who never connected", async () => {

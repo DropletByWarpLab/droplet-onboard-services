@@ -232,6 +232,36 @@ export const GRAPH_RESOURCES: Readonly<Record<M365Workload, GraphResourceSpec>> 
   },
 };
 
+/** Delegated access levels, narrowest first. Lower-cased: Entra compares
+ *  scope names case-insensitively, and so must this. */
+const ACCESS_RANK: Readonly<Record<string, number>> = { readbasic: 0, read: 1, readwrite: 2 };
+
+/**
+ * WARP-3059 — does what Microsoft granted cover a workload's
+ * `leastPrivilegeScope`?
+ *
+ * The schema promises the sync engine "reads grantedScopes to decide which
+ * workloads it is allowed to attempt"; until this it did not, so To Do — whose
+ * only delegated permission is `Tasks.ReadWrite`, which the connector does not
+ * request — was attempted, refused and reported on every tick.
+ *
+ * A broader grant covers a narrower need (`Mail.ReadWrite` covers
+ * `Mail.ReadBasic`; `Files.ReadWrite.All` covers `Files.Read`); a write need is
+ * covered only by a write grant. Scopes arrive short (`Mail.Read`) or
+ * resource-qualified (`<resource>/Mail.Read`), so only the segment after the
+ * last `/` is compared. An unknown access level covers nothing.
+ */
+export function grantCovers(granted: readonly string[], needed: string): boolean {
+  const [resource, access] = needed.split(".");
+  const need = access === undefined ? undefined : ACCESS_RANK[access.toLowerCase()];
+  if (!resource || need === undefined) return false;
+  return granted.some((raw) => {
+    const [r, a] = raw.slice(raw.lastIndexOf("/") + 1).split(".");
+    const have = a === undefined ? undefined : ACCESS_RANK[a.toLowerCase()];
+    return r?.toLowerCase() === resource.toLowerCase() && have !== undefined && have >= need;
+  });
+}
+
 /** Narrow a stored workload string, or `null` if this build does not know it. */
 export function asWorkload(raw: string): M365Workload | null {
   return (M365_WORKLOADS as readonly string[]).includes(raw)
