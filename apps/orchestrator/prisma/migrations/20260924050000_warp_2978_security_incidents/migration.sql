@@ -249,6 +249,9 @@ ALTER TABLE "SecurityIncidentNotice" ADD CONSTRAINT "SecurityIncidentNotice_inci
 ALTER TABLE "SecurityAlertRecipient" ADD CONSTRAINT "SecurityAlertRecipient_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 
+-- The retention leg's second count (§6.10): "last removed N events and M incidents".
+ALTER TABLE "SecurityIngestState" ADD COLUMN "retentionIncidentsDeleted" INTEGER NOT NULL DEFAULT 0;
+
 -- ── Hand-written CHECKs ─────────────────────────────────────────────────────
 
 -- The scope's own columns, and only those: an area snapshot iff scope = area,

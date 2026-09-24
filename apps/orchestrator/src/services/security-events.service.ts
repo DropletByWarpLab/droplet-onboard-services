@@ -300,6 +300,7 @@ export function registerSecurityJobs(
       if (r.deleted > 0) logger.info(r, "security event retention trim");
       const i = await trimSecurityIncidents(prisma, r.before, now);
       if (i.marked > 0 || i.deleted > 0) logger.info(i, "security incident retention trim");
+      await prisma.securityIngestState.update({ where: { id: SINGLETON }, data: { retentionIncidentsDeleted: i.deleted } });
     },
     { lockKey: SECURITY_RETENTION_LOCK_KEY },
   );
@@ -399,6 +400,9 @@ export interface SecurityHealthRow {
   lastSeenAt: string | null;
 }
 
+/** `3 events`, `1 incident`. */
+const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
+
 /** Hours of silence after which a subscribed camera feed reads as quiet rather than ok. */
 const QUIET_AFTER_MS = 6 * 3_600_000;
 
@@ -410,7 +414,13 @@ export function buildSecurityHealth(input: {
   frigateConfigured: boolean;
   ingest: Readonly<IngestHealthState>;
   frigate: { health: SourceHealth; at: Date } | undefined;
-  state: { threatMirrorRanAt: Date | null; retentionRanAt: Date | null; retentionDeleted: number } | null;
+  state: {
+    threatMirrorRanAt: Date | null;
+    retentionRanAt: Date | null;
+    retentionDeleted: number;
+    /** WARP-2978 — incidents the last run removed (§6.10). */
+    retentionIncidentsDeleted?: number;
+  } | null;
   /**
    * WARP-2977 P2b — the site-mode ticker's row (`siteModeHealthRow` in
    * security-mode.service.ts), placed before `retention`. Optional: omitted,
@@ -494,7 +504,7 @@ export function buildSecurityHealth(input: {
       : retentionRan && now.getTime() - retentionRan.getTime() <= 36 * 3_600_000
         ? "ok"
         : "quiet",
-    detail: `Keeps ${SECURITY_EVENT_RETENTION_DAYS} days${retentionRan ? `; last removed ${input.state?.retentionDeleted ?? 0}` : "; not run yet"}`,
+    detail: `Keeps events ${SECURITY_EVENT_RETENTION_DAYS} days and incidents a year${retentionRan ? `; last removed ${count(input.state?.retentionDeleted ?? 0, "event")} and ${count(input.state?.retentionIncidentsDeleted ?? 0, "incident")}` : "; not run yet"}`,
     lastSeenAt: iso(retentionRan),
   });
 

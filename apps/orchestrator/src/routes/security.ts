@@ -195,7 +195,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
       const [state, siteMode, incidents, alerts] = await Promise.all([
         prisma.securityIngestState.findUnique({
           where: { id: "singleton" },
-          select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true },
+          select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true, retentionIncidentsDeleted: true },
         }),
         // Never throws: an unreadable mode is a `down` row, not a 503 of the header.
         securitySiteModeHealth(prisma, now),

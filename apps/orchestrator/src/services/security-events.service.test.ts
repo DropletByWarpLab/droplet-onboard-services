@@ -7,6 +7,11 @@
  * proven against Postgres in security-events.pg.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// WARP-2978 — the retention leg hands the SAME `before` to the incident trim.
+const incidentTrim = vi.hoisted(() => vi.fn(async () => ({ marked: 0, deleted: 0 })));
+vi.mock("./security-incidents.service.js", () => ({ trimSecurityIncidents: incidentTrim }));
+
 import {
   buildSecurityHealth,
   createStatusTracker,
@@ -258,6 +263,26 @@ describe("trimSecurityEvents — 30 days by default", () => {
   });
 });
 
+describe("WARP-2978 — the retention leg trims incidents with the events' own horizon (§6.10)", () => {
+  it("calls trimSecurityIncidents with trimSecurityEvents' `before`, and records how many incidents went", async () => {
+    const scheduleCron = vi.fn();
+    const p = {
+      securityEvent: { deleteMany: vi.fn().mockResolvedValue({ count: 4 }) },
+      securityIngestState: { upsert: vi.fn().mockResolvedValue({}), update: vi.fn().mockResolvedValue({}) },
+    };
+    incidentTrim.mockResolvedValueOnce({ marked: 2, deleted: 3 });
+    registerSecurityJobs({ scheduleInterval: vi.fn(), scheduleCron }, p as never);
+    const leg = scheduleCron.mock.calls[0][1] as () => Promise<void>;
+    await leg();
+    const before = (p.securityEvent.deleteMany.mock.calls[0][0] as { where: { startedAt: { lt: Date } } }).where.startedAt.lt;
+    expect(incidentTrim).toHaveBeenCalledWith(p, before, expect.any(Date));
+    expect(p.securityIngestState.update).toHaveBeenCalledWith({
+      where: { id: "singleton" },
+      data: { retentionIncidentsDeleted: 3 },
+    });
+  });
+});
+
 describe("registerSecurityJobs — on the cron runtime, single-flighted", () => {
   it("schedules the mirror every minute and retention nightly, each under its own advisory lock", () => {
     // A bare setInterval / while(true) in place of the runtime fails this.
@@ -376,6 +401,23 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     });
     expect(row(rows, "threat_mirror").state).toBe("quiet");
     expect(row(rows, "retention").state).toBe("quiet");
+  });
+
+  it("WARP-2978: the retention row names events AND incidents (§6.10)", () => {
+    const ran = buildSecurityHealth({
+      ...base,
+      ingest: ingest(),
+      state: { threatMirrorRanAt: NOW, retentionRanAt: NOW, retentionDeleted: 3, retentionIncidentsDeleted: 1 },
+    });
+    expect(row(ran, "retention").detail).toBe("Keeps events 30 days and incidents a year; last removed 3 events and 1 incident");
+    const one = buildSecurityHealth({
+      ...base,
+      ingest: ingest(),
+      state: { threatMirrorRanAt: NOW, retentionRanAt: NOW, retentionDeleted: 1, retentionIncidentsDeleted: 0 },
+    });
+    expect(row(one, "retention").detail).toBe("Keeps events 30 days and incidents a year; last removed 1 event and 0 incidents");
+    const never = buildSecurityHealth({ ...base, ingest: ingest(), state: null });
+    expect(row(never, "retention").detail).toBe("Keeps events 30 days and incidents a year; not run yet");
   });
 
   it("WARP-2977 P2b: a site_mode row is placed after threat_mirror and before retention, verbatim", () => {

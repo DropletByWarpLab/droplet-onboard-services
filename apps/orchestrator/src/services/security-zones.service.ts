@@ -344,6 +344,53 @@ export function zonesForEvent(row: ZoneMatchableEvent, index: ZoneIndex): string
   return [...out].sort(byString);
 }
 
+/**
+ * WARP-2978 (ADR-059 P3 spec §6.2) — every active area one row matches, from
+ * ALL active links (never viewer-filtered: the incident engine groups for
+ * everyone, and DS-005 is applied when incidents are read). Exactly
+ * `zonesForEvent`'s rules — a whole camera matches every row with that
+ * camera; a part of a view matches that camera's detections whose
+ * cameraZones include it, and all of that camera's offline/online rows —
+ * plus, per area, the link ids that matched and whether a part-of-view link
+ * did (`specificity`, for the engine's rank). Sorted by zone id; link ids
+ * sorted. A property test pins that the zone ids agree with `zonesForEvent`.
+ */
+export function matchAreasForEvent(
+  row: ZoneMatchableEvent,
+  links: readonly ActiveZoneLink[],
+): Array<{
+  zoneId: string;
+  zoneName: string;
+  zoneKind: SecurityZoneKind;
+  linkIds: string[];
+  specificity: "part" | "whole";
+}> {
+  if (row.camera === null) return [];
+  const isStatus = (CAMERA_STATUS_KINDS as readonly string[]).includes(row.kind);
+  const isDetection = (DETECTION_KINDS as readonly string[]).includes(row.kind);
+  const byZone = new Map<
+    string,
+    { zoneId: string; zoneName: string; zoneKind: SecurityZoneKind; linkIds: string[]; specificity: "part" | "whole" }
+  >();
+  for (const l of links) {
+    const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+    if (!parsed || parsed.camera !== row.camera) continue;
+    const matched =
+      parsed.frigateZone === null || isStatus || (isDetection && row.cameraZones.includes(parsed.frigateZone));
+    if (!matched) continue;
+    let m = byZone.get(l.zoneId);
+    if (!m) {
+      m = { zoneId: l.zoneId, zoneName: l.zoneName, zoneKind: l.zoneKind, linkIds: [], specificity: "whole" };
+      byZone.set(l.zoneId, m);
+    }
+    m.linkIds.push(l.linkId);
+    if (parsed.frigateZone !== null) m.specificity = "part";
+  }
+  return [...byZone.values()]
+    .map((m) => ({ ...m, linkIds: [...new Set(m.linkIds)].sort(byString) }))
+    .sort((a, b) => byString(a.zoneId, b.zoneId));
+}
+
 const linkKey = (l: DesiredZoneLink): string => `${l.sourceKind}\u0000${l.sourceRef}`;
 
 /** Route 12: requested links vs stored ones (deduped by `sourceKind` + `sourceRef`). */

@@ -8628,6 +8628,8 @@ model SecurityIngestState {
   threatMirrorRanAt DateTime?
   retentionRanAt    DateTime?
   retentionDeleted  Int       @default(0)
+  /// WARP-2978 — incidents the last retention run removed (§6.10).
+  retentionIncidentsDeleted Int @default(0)
   updatedAt         DateTime  @updatedAt
 }
 

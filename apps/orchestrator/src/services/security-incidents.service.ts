@@ -4,15 +4,81 @@
  * after quiet, hands `alert` incidents to the notifier, and trims incidents
  * with the events (§6.10). The `incidents` health row is its own (§6.11).
  *
- * S0: the final signatures with safe bodies. `registerSecurityIncidentJobs`
- * registers NOTHING yet and leaves `registeredAt` null, so the health row
- * honestly reads "Not running" until slice B lands the engine.
+ * The meaning lives in lib/security-rules.ts and lib/security-mode-history.ts
+ * (pure); this file does the I/O, in this order, every 10 s on the cron
+ * runtime under the `droplet:security-incidents` advisory lock (D15 — never
+ * on insert, so the MQTT hot path is unchanged; no while(true), no bare
+ * setInterval, no container). The lock transaction only HOLDS the lock: every
+ * step below runs its own short transactions on the outer client.
+ *
+ *   1. State. The engine's singleton row. On first sight it starts at the
+ *      current max SecurityEvent id: history is never grouped (D16).
+ *   2. Triage. The events in (triageFloor, head] with no triage row (an
+ *      anti-join), in id order, at most TRIAGE_BATCH, until TICK_BUDGET_MS is
+ *      spent. Each in ONE READ COMMITTED transaction that writes its triage row
+ *      (the exactly-once marker — the PK is the claim), the incident change and
+ *      the reason rows together. A throwing triage is recorded `failed` in a
+ *      separate transaction and never blocks the queue (D17).
+ *   3. Floor. Advanced only when the batch drained AND the floor candidate was
+ *      seen at least FLOOR_SETTLE_MS ago: every id at or below a head read two
+ *      minutes ago is committed or rolled back by now (every SecurityEvent
+ *      writer's transaction ends within 60 s — security-event-writers.test.ts
+ *      pins the writer list), and everything visible in (floor, head] has just
+ *      been triaged. A late-committing row below the head is therefore still
+ *      found by the anti-join, never skipped.
+ *   4. Timers. camera_offline for every collecting incident with an offline
+ *      member not yet judged.
+ *   5. Seal. `collecting` → `closed` once event-time quiet + settle AND the
+ *      settle after the last arrival have passed — and only when the backlog
+ *      drained this tick, so queued events are never shut out of their own
+ *      incident. camera_offline is judged once more first. A sealed incident
+ *      never reopens (D22).
+ *   6. Notify (security-alerts.service.ts), then redeliver stuck notices.
+ *   7. Health: lastOkAt when 1–6 completed; alerts health every 6th tick.
+ *
+ * Every incident write is a compare-and-set on `version`, with one re-read
+ * and re-plan on a lost race: two overlapping handlers (the lock makes that
+ * rare) make the loser roll back, never double-count.
+ *
+ * Canary (WARP-2203): no `next…` / `…Cursor` keys in this file.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient, SecurityIncident, SecurityZoneKind } from "@prisma/client";
 import type { CronRuntime } from "./cron-runtime.service.js";
 import type { SecurityHealthRow } from "./security-events.service.js";
 import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
-import { RULESET } from "../lib/security-rules.js";
+import { loadActiveLinks, matchAreasForEvent, type ActiveZoneLink, type ZoneMatchableEvent } from "./security-zones.service.js";
+import { loadSiteHours } from "./security-mode.service.js";
+import { notifyPendingIncidents, recomputeAlertsHealth, redeliverStuckNotices } from "./security-alerts.service.js";
+import { READ_COMMITTED_TX, REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import {
+  RULESET,
+  SECURITY_RULESET_VERSION,
+  QUIET_MS,
+  SETTLE_MS,
+  afterHoursPresence,
+  cameraOfflineVerdict,
+  capEvidence,
+  eventSpan,
+  joinPatch,
+  onlineKindFor,
+  openingFields,
+  parseActivityRef,
+  planTriage,
+  reasonPatch,
+  scopeFor,
+  threatSignal,
+  type ReasonDraft,
+  type ReasonState,
+  type ScopeDecision,
+  type TriageEvent,
+} from "../lib/security-rules.js";
+import { modeAt, parseModeRow, type ModeHistoryRow, type ModeTimeline } from "../lib/security-mode-history.js";
+import type { ModeFields } from "../lib/security-mode.js";
+import { siteDayClockCopy, type SiteHours } from "../lib/security-hours.js";
+import { isValidIanaZone } from "../lib/zoned-time.js";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("security-incidents");
 
 export const SECURITY_INCIDENT_INTERVAL_MS = 10_000;
 export const SECURITY_INCIDENT_LOCK_KEY = "droplet:security-incidents";
@@ -26,8 +92,15 @@ export const FLOOR_SETTLE_MS = 120_000;
 export { QUIET_MS, SETTLE_MS, MAX_SPAN_MS, EVIDENCE_PER_CAMERA } from "../lib/security-rules.js";
 /** camera_offline: a camera must stay down this long (§6.5) — the ruleset's number. */
 export const OFFLINE_MIN_MS = RULESET.camera_offline.minOfflineMs;
-/** Every sealed/plain incident follows its events (30 d); a coded one is kept a year (D30). */
+/** A coded incident is kept a year; plain activity follows its events (D30). */
 export const SECURITY_INCIDENT_RETENTION_DAYS = 365;
+/** `incidents` health: registered longer than this with no completed tick reads down (§6.11). */
+export const INCIDENT_HEALTH_STALE_MS = 120_000;
+/** The alerts health row is recomputed on the first tick and every this-many ticks after (§6.11). */
+export const ALERTS_HEALTH_EVERY_TICKS = 6;
+
+const SINGLETON = "singleton";
+const DAY_MS = 86_400_000;
 
 /** What index.ts hands the engine (spec §6.1). */
 export interface SecurityIncidentDeps {
@@ -51,6 +124,7 @@ export interface IncidentHealthState {
 }
 
 const incidentHealth: IncidentHealthState = { registeredAt: null, lastOkAt: null, lastError: null, failedLastDay: 0 };
+let ticks = 0;
 
 export function incidentHealthState(): Readonly<IncidentHealthState> {
   return incidentHealth;
@@ -64,19 +138,46 @@ export function _resetIncidentHealthForTests(): void {
     lastError: null,
     failedLastDay: 0,
   } satisfies IncidentHealthState);
+  ticks = 0;
 }
 
-/** The `incidents` row. S0: "Not running" until the engine registers. */
-export function incidentHealthRow(
-  health: Readonly<IncidentHealthState>,
-  tz: string | null,
-  now: Date,
-): SecurityHealthRow {
-  void tz;
-  void now;
+/**
+ * The `incidents` row, every viewer (spec §6.11):
+ *   · down "Not running" — not registered (§7's boot-time assertion);
+ *   · down "Hasn't sorted new events since 2:14 AM" — registered more than
+ *     2 min ago and no completed tick in the last 2 min (site-local clock;
+ *     without a site zone "for N minutes" — never UTC);
+ *   · down "Couldn't sort N events in the last day" — `failed` triage rows;
+ *   · ok "Sorting events into incidents". `lastSeenAt` = the last completed tick.
+ */
+export function incidentHealthRow(health: Readonly<IncidentHealthState>, tz: string | null, now: Date): SecurityHealthRow {
   const lastSeenAt = health.lastOkAt ? health.lastOkAt.toISOString() : null;
-  if (!health.registeredAt) return { id: "incidents", state: "down", detail: "Not running", lastSeenAt };
+  const down = (detail: string): SecurityHealthRow => ({ id: "incidents", state: "down", detail, lastSeenAt });
+  if (!health.registeredAt) return down("Not running");
+  const nowMs = now.getTime();
+  const lastOk = health.lastOkAt;
+  if (
+    nowMs - health.registeredAt.getTime() > INCIDENT_HEALTH_STALE_MS &&
+    (!lastOk || nowMs - lastOk.getTime() > INCIDENT_HEALTH_STALE_MS)
+  ) {
+    const since = lastOk ?? health.registeredAt;
+    return down(
+      tz
+        ? `Hasn't sorted new events since ${siteDayClockCopy(since, tz, now)}`
+        : `Hasn't sorted new events for ${Math.floor((nowMs - since.getTime()) / 60_000)} minutes`,
+    );
+  }
+  if (health.failedLastDay > 0) {
+    const n = health.failedLastDay;
+    return down(`Couldn't sort ${n} ${n === 1 ? "event" : "events"} in the last day`);
+  }
   return { id: "incidents", state: "ok", detail: "Sorting events into incidents", lastSeenAt };
+}
+
+/** The site's own zone for health copy, or null (never the process zone, never UTC). */
+async function siteZone(prisma: Pick<PrismaClient, "securitySiteHours">): Promise<string | null> {
+  const h = await prisma.securitySiteHours.findUnique({ where: { id: SINGLETON }, select: { state: true, timezone: true } });
+  return h && h.state === "set" && h.timezone && isValidIanaZone(h.timezone) ? h.timezone : null;
 }
 
 /** The row the /security/health handler shows. Never throws. */
@@ -84,21 +185,489 @@ export async function securityIncidentsHealth(
   prisma: Pick<PrismaClient, "securitySiteHours">,
   now: Date,
 ): Promise<SecurityHealthRow> {
-  void prisma;
-  return incidentHealthRow(incidentHealth, null, now);
+  let tz: string | null = null;
+  try {
+    tz = await siteZone(prisma);
+  } catch (err) {
+    logger.warn({ err }, "incidents health: the site zone could not be read; minutes instead of a clock time");
+  }
+  return incidentHealthRow(incidentHealth, tz, now);
+}
+
+// ── step 1: the engine's own row ──────────────────────────────────────────
+
+type EngineState = Prisma.SecurityIncidentEngineStateGetPayload<Record<string, never>>;
+
+/**
+ * The singleton, created on first sight at the current max id (D16) with
+ * INSERT … ON CONFLICT DO NOTHING and a read — never upsert({update:{}}).
+ */
+export async function ensureEngineState(prisma: PrismaClient, now: Date): Promise<EngineState> {
+  const row = await prisma.securityIncidentEngineState.findUnique({ where: { id: SINGLETON } });
+  if (row) return row;
+  const { _max } = await prisma.securityEvent.aggregate({ _max: { id: true } });
+  const start = _max.id ?? 0n;
+  await prisma.securityIncidentEngineState.createMany({
+    data: [{ id: SINGLETON, startedAtId: start, startedAt: now, triageFloor: start, floorCandidate: start, floorCandidateAt: now }],
+    skipDuplicates: true,
+  });
+  return prisma.securityIncidentEngineState.findUniqueOrThrow({ where: { id: SINGLETON } });
+}
+
+// ── the mode timeline (§6.4) ──────────────────────────────────────────────
+
+/** The stored mode row's defaults (what the first write creates). */
+const DEFAULT_MODE: ModeFields = { mode: "open", modeSource: "schedule", manualEnd: "none", manualUntil: null };
+
+/**
+ * ONE REPEATABLE READ snapshot, in P2b's order (the mode row, then the hours):
+ * the stored SecurityModeState, the evaluable hours (null when
+ * `loadSiteHours` says ok:false), and every mode_changed row from one second
+ * before `from` — plus the one row in force at that edge, so a history answer
+ * can say how its mode was set. Creates nothing.
+ */
+export async function loadModeTimeline(prisma: PrismaClient, from: Date, now: Date): Promise<ModeTimeline> {
+  return prisma.$transaction(async (tx) => {
+    const stored = await tx.securityModeState.findUnique({ where: { id: SINGLETON } });
+    const header = await tx.securitySiteHours.findUnique({ where: { id: SINGLETON } });
+    let hours: SiteHours | null = { state: "not_set" };
+    if (header) {
+      const load = await loadSiteHours(tx, header, now);
+      hours = load.ok ? load.hours : null;
+    }
+    const edge = new Date(from.getTime() - 1000);
+    const prior = await tx.securityEvent.findFirst({
+      where: { kind: "mode_changed", startedAt: { lt: edge } },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      select: { startedAt: true, labels: true },
+    });
+    const since = await tx.securityEvent.findMany({
+      where: { kind: "mode_changed", startedAt: { gte: edge } },
+      orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+      select: { startedAt: true, labels: true },
+    });
+    const rows: ModeHistoryRow[] = [];
+    for (const r of prior ? [prior, ...since] : since) {
+      const parsed = parseModeRow(r);
+      if (parsed) rows.push(parsed);
+    }
+    const fields: ModeFields = stored
+      ? { mode: stored.mode, modeSource: stored.modeSource, manualEnd: stored.manualEnd, manualUntil: stored.manualUntil }
+      : DEFAULT_MODE;
+    return { stored: fields, hours, rows };
+  }, REPEATABLE_READ_TX);
+}
+
+// ── step 2: triage ─────────────────────────────────────────────────────────
+
+type Tx = Prisma.TransactionClient;
+
+/** The incident columns the join window, the join patch and the reasons read. */
+const CANDIDATE_SELECT = {
+  id: true,
+  grouping: true,
+  scope: true,
+  zoneKind: true,
+  openedInMode: true,
+  firstActivityAt: true,
+  lastActivityAt: true,
+  lastArrivalAt: true,
+  eventCount: true,
+  countsByCamera: true,
+  cameras: true,
+  severity: true,
+  reasonCodes: true,
+  state: true,
+  notifyState: true,
+  alertedAt: true,
+  version: true,
+} as const satisfies Prisma.SecurityIncidentSelect;
+
+type Candidate = Prisma.SecurityIncidentGetPayload<{ select: typeof CANDIDATE_SELECT }>;
+
+/** Lost the incident's CAS twice: the event is recorded `failed` (D17), never looped on. */
+export class IncidentConflictError extends Error {
+  constructor(incidentId: string) {
+    super(`the incident ${incidentId} changed twice while this event was being added`);
+    this.name = "IncidentConflictError";
+  }
+}
+
+interface TriageContext {
+  links: readonly ActiveZoneLink[];
+  timeline: ModeTimeline;
+  now: Date;
+}
+
+export type TriageResult = "low" | "context" | "opened" | "joined" | "already";
+
+/** The reasons an event earns at triage (after_hours_presence, threat_signal). camera_offline is the timers' (§6.5). */
+async function triageReasons(
+  tx: Tx,
+  event: TriageEvent,
+  scope: { scope: SecurityIncident["scope"]; zoneKind: SecurityZoneKind | null },
+  timeline: ModeTimeline,
+): Promise<ReasonDraft[]> {
+  const out: ReasonDraft[] = [];
+  const ahp = afterHoursPresence({ scope: scope.scope, zoneKind: scope.zoneKind, event, timeline });
+  if (ahp) out.push(ahp);
+  if (event.kind === "threat") {
+    const id = parseActivityRef(event.sourceRef);
+    const row = id === null ? null : await tx.activityRow.findUnique({ where: { id }, select: { sub: true } });
+    const t = threatSignal(event, row);
+    if (t) out.push(t);
+  }
+  return out;
+}
+
+function reasonRows(incidentId: string, drafts: readonly ReasonDraft[]): Prisma.SecurityIncidentReasonCreateManyInput[] {
+  return drafts.map((d) => ({
+    incidentId,
+    code: d.code,
+    severity: d.severity,
+    rulesetVersion: SECURITY_RULESET_VERSION,
+    evidenceEventId: d.evidenceEventId,
+    evidenceCamera: d.evidenceCamera,
+    evidenceSource: d.evidenceSource as Prisma.SecurityIncidentReasonCreateManyInput["evidenceSource"],
+    evidenceKind: d.evidenceKind as Prisma.SecurityIncidentReasonCreateManyInput["evidenceKind"],
+    evidenceLabel: d.evidenceLabel,
+    evidenceAt: d.evidenceAt,
+    evidenceSummary: d.evidenceSummary,
+    detail: d.detail,
+  }));
+}
+
+const PLAIN: ReasonState = { severity: "info", reasonCodes: [], state: "no_action", notifyState: "not_needed", alertedAt: null };
+
+/**
+ * Triage ONE event in ONE READ COMMITTED transaction (§6.2–6.5): its scope,
+ * the incident it joins (CAS on version, one re-read on a lost race) or opens,
+ * the reasons it earns, and its triage row — together or not at all. The
+ * triage row is written last: if another engine triaged the event first, its
+ * PK makes this transaction roll back.
+ */
+export async function triageOne(
+  prisma: PrismaClient,
+  event: TriageEvent & ZoneMatchableEvent,
+  ctx: TriageContext,
+): Promise<TriageResult> {
+  const decision: ScopeDecision = scopeFor(event, event.camera ? matchAreasForEvent(event, ctx.links) : []);
+  const span = eventSpan(event);
+  const mode = modeAt(ctx.timeline, span.s).mode;
+  return prisma.$transaction(async (tx) => {
+    if (await tx.securityEventTriage.findUnique({ where: { eventId: event.id }, select: { eventId: true } })) return "already";
+    const ledger = async (outcome: "low" | "context" | "grouped", incidentId: string | null) =>
+      tx.securityEventTriage.create({
+        data: {
+          eventId: event.id,
+          outcome,
+          incidentId,
+          matchedLinkIds: outcome === "grouped" && decision.outcome === "group" ? decision.matchedLinkIds : [],
+          alsoZoneIds: outcome === "grouped" && decision.outcome === "group" ? decision.alsoZoneIds : [],
+          rulesetVersion: SECURITY_RULESET_VERSION,
+        },
+        select: { eventId: true },
+      });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const candidates: Candidate[] =
+        decision.outcome === "group"
+          ? await tx.securityIncident.findMany({
+              where: {
+                grouping: "collecting",
+                scope: decision.key.scope,
+                zoneId: decision.key.zoneId,
+                scopeCamera: decision.key.scopeCamera,
+              },
+              select: CANDIDATE_SELECT,
+            })
+          : [];
+      const plan = planTriage(decision, candidates, span, mode);
+      if (plan.action === "low" || plan.action === "context") {
+        await ledger(plan.action, null);
+        return plan.action;
+      }
+      if (decision.outcome !== "group") throw new Error("unreachable: a join or open without a scope");
+
+      if (plan.action === "open") {
+        const area = decision.area;
+        const drafts = await triageReasons(tx, event, { scope: decision.key.scope, zoneKind: area?.zoneKind ?? null }, ctx.timeline);
+        const kept = capEvidence([], drafts);
+        const created = await tx.securityIncident.create({
+          data: {
+            scope: decision.key.scope,
+            zoneId: decision.key.zoneId,
+            zoneName: area?.zoneName ?? null,
+            zoneKind: area?.zoneKind ?? null,
+            zoneLinkIds: area
+              ? ctx.links
+                  .filter((l) => l.zoneId === area.zoneId)
+                  .map((l) => l.linkId)
+                  .sort()
+              : [],
+            scopeCamera: decision.key.scopeCamera,
+            openedInMode: mode,
+            rulesetVersion: SECURITY_RULESET_VERSION,
+            openedAt: ctx.now,
+            stateChangedAt: ctx.now,
+            ...openingFields(event, span),
+            // Every list column is written explicitly: Prisma stores an omitted
+            // scalar list as NULL, which SecurityIncident_scope_shape refuses.
+            reasonCodes: [],
+            ...reasonPatch(PLAIN, kept, ctx.now),
+          },
+          select: { id: true },
+        });
+        if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(created.id, kept), skipDuplicates: true });
+        await ledger("grouped", created.id);
+        return "opened";
+      }
+
+      const i = plan.incident;
+      const existing = await tx.securityIncidentReason.findMany({
+        where: { incidentId: i.id },
+        select: { code: true, evidenceCamera: true, evidenceEventId: true },
+      });
+      const drafts = await triageReasons(tx, event, { scope: i.scope, zoneKind: i.zoneKind }, ctx.timeline);
+      const kept = capEvidence(existing, drafts);
+      const { count } = await tx.securityIncident.updateMany({
+        where: { id: i.id, version: i.version, grouping: "collecting" },
+        data: { ...joinPatch(i, event, span), ...reasonPatch(i, kept, ctx.now), version: { increment: 1 } },
+      });
+      if (count !== 1) continue;
+      if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(i.id, kept), skipDuplicates: true });
+      await ledger("grouped", i.id);
+      return "joined";
+    }
+    throw new IncidentConflictError(
+      decision.outcome === "group" ? `${decision.key.scope}:${decision.key.zoneId ?? decision.key.scopeCamera ?? "site"}` : "?",
+    );
+  }, READ_COMMITTED_TX);
+}
+
+/** A triage that threw: its `failed` row, in its own transaction. False when the event already had a row (another engine won). */
+async function recordFailed(prisma: PrismaClient, eventId: bigint, err: unknown): Promise<boolean> {
+  const message = (err instanceof Error ? err.message : String(err)).replace(/\u0000/g, "").slice(0, 500) || "unknown error";
+  const { count } = await prisma.securityEventTriage.createMany({
+    data: [{ eventId, outcome: "failed", incidentId: null, matchedLinkIds: [], alsoZoneIds: [], rulesetVersion: SECURITY_RULESET_VERSION, error: message }],
+    skipDuplicates: true,
+  });
+  return count > 0;
+}
+
+// ── steps 4–5: reasons after triage, and sealing ──────────────────────────
+
+const OFFLINE_KINDS = ["camera_offline", "source_offline"] as const;
+
+/** camera_offline drafts for one incident's offline members that no reason covers yet (§6.5). */
+async function offlineReasons(prisma: PrismaClient | Tx, incidentId: string, now: Date): Promise<ReasonDraft[]> {
+  const members = await prisma.securityEventTriage.findMany({
+    where: { incidentId, outcome: "grouped", event: { is: { kind: { in: [...OFFLINE_KINDS] } } } },
+    select: { event: true },
+  });
+  if (members.length === 0) return [];
+  const judged = new Set(
+    (
+      await prisma.securityIncidentReason.findMany({
+        where: { incidentId, code: "camera_offline" },
+        select: { evidenceEventId: true },
+      })
+    ).map((r) => r.evidenceEventId.toString()),
+  );
+  const out: ReasonDraft[] = [];
+  for (const { event } of members) {
+    if (judged.has(event.id.toString())) continue;
+    const onlines = await prisma.securityEvent.findMany({
+      where: { camera: event.camera, kind: onlineKindFor(event.kind), startedAt: { gte: event.startedAt } },
+      orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+      take: 3,
+      select: { startedAt: true },
+    });
+    const v = cameraOfflineVerdict(event, onlines, now);
+    if (v.verdict === "fire") out.push(v.reason);
+  }
+  return out;
+}
+
+/**
+ * Add camera_offline reasons to one collecting incident and, when `seal`,
+ * close it — ONE READ COMMITTED transaction, CAS on version with one re-read.
+ * Returns whether anything was written.
+ */
+async function updateCollecting(prisma: PrismaClient, incidentId: string, now: Date, seal: boolean): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const i = await tx.securityIncident.findUnique({ where: { id: incidentId }, select: CANDIDATE_SELECT });
+      if (!i || i.grouping !== "collecting") return false;
+      if (seal && !sealDue(i, now)) return false;
+      const existing = await tx.securityIncidentReason.findMany({
+        where: { incidentId },
+        select: { code: true, evidenceCamera: true, evidenceEventId: true },
+      });
+      const kept = capEvidence(existing, await offlineReasons(tx, incidentId, now));
+      const patch = reasonPatch(i, kept, now);
+      if (!seal && Object.keys(patch).length === 0 && kept.length === 0) return false;
+      const { count } = await tx.securityIncident.updateMany({
+        where: { id: incidentId, version: i.version, grouping: "collecting" },
+        data: { ...patch, ...(seal ? { grouping: "closed" as const, closedAt: now } : {}), version: { increment: 1 } },
+      });
+      if (count !== 1) continue;
+      if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(incidentId, kept), skipDuplicates: true });
+      return true;
+    }
+    return false;
+  }, READ_COMMITTED_TX);
+}
+
+/** §6.1 step 5's two clocks: event-time quiet + settle, and the settle after the last arrival. */
+function sealDue(i: Pick<Candidate, "lastActivityAt" | "lastArrivalAt">, now: Date): boolean {
+  const t = now.getTime();
+  return t >= i.lastActivityAt.getTime() + QUIET_MS + SETTLE_MS && t >= i.lastArrivalAt.getTime() + SETTLE_MS;
+}
+
+// ── the tick ──────────────────────────────────────────────────────────────
+
+export interface TickResult {
+  triaged: number;
+  failed: number;
+  drained: boolean;
+  floorAdvanced: boolean;
+  sealed: number;
+}
+
+export interface TickOptions {
+  /** Wall-clock budget for triage; TICK_BUDGET_MS by default. */
+  budgetMs?: number;
+}
+
+/** One tick (steps 1–7 above). Throws into safeRun's canary; `lastError` says why. */
+export async function tickSecurityIncidents(
+  prisma: PrismaClient,
+  deps: SecurityIncidentDeps,
+  opts: TickOptions = {},
+): Promise<TickResult> {
+  const now = deps.now?.() ?? new Date();
+  const deadline = Date.now() + (opts.budgetMs ?? TICK_BUDGET_MS);
+  ticks++;
+  try {
+    const result = await runTick(prisma, deps, now, deadline);
+    incidentHealth.lastOkAt = now;
+    return result;
+  } catch (err) {
+    incidentHealth.lastError = { at: now, message: err instanceof Error ? err.message : String(err) };
+    throw err;
+  }
+}
+
+async function runTick(prisma: PrismaClient, deps: SecurityIncidentDeps, now: Date, deadline: number): Promise<TickResult> {
+  // 1. State.
+  const state = await ensureEngineState(prisma, now);
+
+  // 2. Triage.
+  const { _max } = await prisma.securityEvent.aggregate({ _max: { id: true } });
+  const head = _max.id ?? state.triageFloor;
+  const rows = await prisma.securityEvent.findMany({
+    where: { id: { gt: state.triageFloor, lte: head }, triage: { is: null } },
+    orderBy: { id: "asc" },
+    take: TRIAGE_BATCH,
+  });
+  let triaged = 0;
+  let failed = 0;
+  let processed = 0;
+  if (rows.length > 0) {
+    const links = await loadActiveLinks(prisma);
+    const from = rows.reduce((m, r) => (r.startedAt < m ? r.startedAt : m), rows[0]!.startedAt);
+    const timeline = await loadModeTimeline(prisma, from, now);
+    for (const row of rows) {
+      if (Date.now() > deadline) break;
+      try {
+        const r = await triageOne(prisma, row, { links, timeline, now });
+        if (r !== "already") triaged++;
+      } catch (err) {
+        if (await recordFailed(prisma, row.id, err)) {
+          failed++;
+          logger.error({ err, eventId: row.id.toString() }, "security incident triage failed — recorded as failed; the queue continues");
+        } else {
+          logger.debug?.({ eventId: row.id.toString() }, "security incident triage lost to another engine");
+        }
+      }
+      processed++;
+    }
+  }
+  const drained = processed === rows.length && rows.length < TRIAGE_BATCH;
+
+  // 3. Floor.
+  let floorAdvanced = false;
+  if (drained && now.getTime() - state.floorCandidateAt.getTime() >= FLOOR_SETTLE_MS) {
+    const candidate = head > state.floorCandidate ? head : state.floorCandidate;
+    const { count } = await prisma.securityIncidentEngineState.updateMany({
+      where: { id: SINGLETON, triageFloor: state.triageFloor, floorCandidate: state.floorCandidate },
+      data: { triageFloor: state.floorCandidate, floorCandidate: candidate, floorCandidateAt: now },
+    });
+    floorAdvanced = count === 1;
+  }
+
+  // 4. Timers: collecting incidents with an offline member.
+  const offline = await prisma.securityEventTriage.findMany({
+    where: {
+      outcome: "grouped",
+      incident: { is: { grouping: "collecting" } },
+      event: { is: { kind: { in: [...OFFLINE_KINDS] } } },
+    },
+    select: { incidentId: true },
+  });
+  for (const id of new Set(offline.map((o) => o.incidentId).filter((x): x is string => x !== null))) {
+    await updateCollecting(prisma, id, now, false);
+  }
+
+  // 5. Seal — only with the backlog drained.
+  let sealed = 0;
+  if (drained) {
+    const due = await prisma.securityIncident.findMany({
+      where: {
+        grouping: "collecting",
+        lastActivityAt: { lte: new Date(now.getTime() - QUIET_MS - SETTLE_MS) },
+        lastArrivalAt: { lte: new Date(now.getTime() - SETTLE_MS) },
+      },
+      select: { id: true },
+    });
+    for (const { id } of due) if (await updateCollecting(prisma, id, now, true)) sealed++;
+  }
+
+  // 6. Notify, then redeliver.
+  await notifyPendingIncidents(prisma, deps, now);
+  await redeliverStuckNotices(prisma, now);
+
+  // 7. Health.
+  incidentHealth.failedLastDay = await prisma.securityEventTriage.count({
+    where: { outcome: "failed", triagedAt: { gte: new Date(now.getTime() - DAY_MS) } },
+  });
+  if (ticks % ALERTS_HEALTH_EVERY_TICKS === 1) await recomputeAlertsHealth(prisma, deps.resolveAccess, now);
+
+  return { triaged, failed, drained, floorAdvanced, sealed };
 }
 
 // ── registration ──────────────────────────────────────────────────────────
 
-/** S0: registers nothing and sets nothing — the health row honestly reads "Not running". */
+/**
+ * Register the engine on the cron runtime — every 10 s, single-flighted on
+ * SECURITY_INCIDENT_LOCK_KEY — and set `registeredAt`, the `incidents` health
+ * row's boot assertion. Not a cron spec (specs fire in process UTC).
+ */
 export function registerSecurityIncidentJobs(
   cronRuntime: Pick<CronRuntime, "scheduleInterval">,
   prisma: PrismaClient,
   deps: SecurityIncidentDeps,
 ): void {
-  void cronRuntime;
-  void prisma;
-  void deps;
+  cronRuntime.scheduleInterval(
+    SECURITY_INCIDENT_INTERVAL_MS,
+    async () => {
+      const r = await tickSecurityIncidents(prisma, deps);
+      if (r.triaged > 0 || r.failed > 0 || r.sealed > 0) logger.debug?.(r, "security incident tick");
+    },
+    { lockKey: SECURITY_INCIDENT_LOCK_KEY },
+  );
+  incidentHealth.registeredAt = new Date();
 }
 
 // ── retention (§6.10) ─────────────────────────────────────────────────────
@@ -110,14 +679,33 @@ export interface IncidentTrimResult {
   deleted: number;
 }
 
-/** S0 stub: trims nothing. Slice B implements §6.10 with the events' own `before`. */
-export async function trimSecurityIncidents(
-  prisma: PrismaClient,
-  before: Date,
-  now: Date,
-): Promise<IncidentTrimResult> {
-  void prisma;
-  void before;
-  void now;
-  return { marked: 0, deleted: 0 };
+/**
+ * Runs in the 03:50 retention leg right after `trimSecurityEvents`, with the
+ * SAME `before` (its events are gone, and their triage rows with them):
+ *   1. plain activity (severity info) whose events are all gone and whose
+ *      activity ended before `before` is deleted — it follows its events;
+ *   2. any incident whose activity ended more than a year ago and whose events
+ *      are all gone is deleted (Cascade: its reasons, acks and notices);
+ *   3. `eventsKept` follows what is left: `removed` when no member remains,
+ *      `partly_removed` when the earliest member was trimmed but some remain —
+ *      exact, from the members themselves.
+ * Every delete carries `members: {none: {}}`, so the Restrict FK from
+ * SecurityEventTriage can never fail the nightly job.
+ */
+export async function trimSecurityIncidents(prisma: PrismaClient, before: Date, now: Date): Promise<IncidentTrimResult> {
+  const plain = await prisma.securityIncident.deleteMany({
+    where: { severity: "info", lastActivityAt: { lt: before }, members: { none: {} } },
+  });
+  const old = await prisma.securityIncident.deleteMany({
+    where: { lastActivityAt: { lt: new Date(now.getTime() - SECURITY_INCIDENT_RETENTION_DAYS * DAY_MS) }, members: { none: {} } },
+  });
+  const removed = await prisma.securityIncident.updateMany({
+    where: { eventsKept: { not: "removed" }, firstActivityAt: { lt: before }, members: { none: {} } },
+    data: { eventsKept: "removed", version: { increment: 1 } },
+  });
+  const partly = await prisma.securityIncident.updateMany({
+    where: { eventsKept: "kept", firstActivityAt: { lt: before }, members: { some: {} } },
+    data: { eventsKept: "partly_removed", version: { increment: 1 } },
+  });
+  return { marked: removed.count + partly.count, deleted: plain.count + old.count };
 }
