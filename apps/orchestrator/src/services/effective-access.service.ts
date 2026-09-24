@@ -79,7 +79,6 @@
  * already hold the rows can compose without a second read.
  */
 import type { DepartmentKind, ModuleId, PrismaClient } from "@prisma/client";
-import { TOOL_DOMAINS } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import {
   resolveEffectiveUsage,
@@ -102,6 +101,13 @@ import {
 } from "../modules/module-registry.js";
 import { getEffectiveModuleIds } from "./modules.service.js";
 import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import {
+  loadToolLayers,
+  runtimeOnlyDomains,
+  toolDomainUniverse,
+  toolLayers,
+  type ToolLayers,
+} from "./tool-layers.service.js";
 
 // ── shapes ─────────────────────────────────────────────────────────
 
@@ -139,6 +145,13 @@ export interface EffectiveAccessInputs {
   /** WARP-1809: `kind` rides along (additive) so the People-page drawer can
    *  render the HOUSEHOLD unit kind-keyed ("Workspace"), never name-keyed. */
   deptRights: Array<{ id: string; name: string; kind: DepartmentKind; right: string }>;
+  /**
+   * WARP-2897 — both tool layers (tool-layers.service.ts). Absent = the
+   * compiled catalog alone, which is what every box with no remote server
+   * attached resolves to anyway. The fetch wrapper loads them inside the same
+   * REPEATABLE READ snapshot as every other input.
+   */
+  toolLayers?: ToolLayers;
 }
 
 /** The §5 wire shape (matches the dashboard's EffectiveAccess type —
@@ -219,6 +232,10 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
   const { user } = inputs;
   const tier = user.role;
   const connLevels = connectionLevels(inputs.connections);
+  // WARP-2897 — the tool-domain universe is TOOL_DOMAINS ∪ the runtime
+  // layer's own domains; every term below filters that one list.
+  const layers = inputs.toolLayers ?? toolLayers();
+  const universe = toolDomainUniverse(layers);
 
   // T7 usage line — import, never duplicate. Owner included: rail 1 keeps
   // admins from WRITING an owner policy row, but an owner's own row (self
@@ -247,7 +264,7 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
           level: "manage" as FeatureLevel,
         })),
       ],
-      toolDomains: [...TOOL_DOMAINS],
+      toolDomains: [...universe],
       locks: true,
       // The workspace escape channel is not a role narrowing — ai-gateway's
       // fail-closed 451 applies to owners too, so the resolver stays honest.
@@ -340,13 +357,19 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
   const featureIds = new Set(levelByModule.keys());
 
   // ── toolDomains = writeFilter ∩ moduleToolDomains ∩ roleToolGrants ──
-  const reachable = tierReachableDomains(tier);
-  const featureDomains = domainsForFeatures(featureIds);
+  //
+  // WARP-2897: over BOTH layers. `reachable` is populated (owner/admin) or
+  // readable (family/guest) domains of the catalog AND the runtime layer, so
+  // a domain no tool lives in — crm/pm, or an extension's once disabled —
+  // resolves for nobody. A role-less person keeps "every domain" on the grant
+  // term, as before; the universe merely includes the runtime-only ones.
+  const reachable = tierReachableDomains(tier, layers);
+  const featureDomains = domainsForFeatures(featureIds, runtimeOnlyDomains(layers));
   const granted =
     user.accessRole === null
-      ? new Set<string>(TOOL_DOMAINS)
+      ? new Set<string>(universe)
       : new Set(user.accessRole.toolGrants.map((g) => g.domain));
-  const toolDomains = [...TOOL_DOMAINS].filter(
+  const toolDomains = universe.filter(
     (d) => reachable.has(d) && featureDomains.has(d) && granted.has(d),
   );
 
@@ -471,7 +494,7 @@ export async function resolveEffectiveAccess(
     // nothing, and the caller still gets the documented null.
     if (!user) return null;
 
-    const [exceptions, workspaceModuleIds, cloudRow, connections, usagePolicy, memberships] =
+    const [exceptions, workspaceModuleIds, cloudRow, connections, usagePolicy, memberships, layers] =
       await Promise.all([
         tx.userAccessException.findMany({
           where: { userId },
@@ -498,6 +521,9 @@ export async function resolveEffectiveAccess(
           where: { userId },
           select: { right: true, department: { select: { id: true, name: true, kind: true } } },
         }),
+        // WARP-2897 — the runtime layer's classification rows, from the SAME
+        // snapshot. Reads nothing when no runtime tool is registered.
+        loadToolLayers(tx),
       ]);
 
     return computeEffectiveAccess({
@@ -509,6 +535,7 @@ export async function resolveEffectiveAccess(
       cloudEscapeEnabled: cloudRow?.enabled === true,
       connections,
       usagePolicy,
+      toolLayers: layers,
       deptRights: memberships.map((m) => ({
         id: m.department.id,
         name: m.department.name,
