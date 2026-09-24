@@ -155,7 +155,13 @@ export function AlertRoutingPanel() {
                 <span className="rt">
                   <span className="nm" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, whiteSpace: "normal", overflowWrap: "anywhere" }}>
                     <span>{p.name}</span>
-                    {p.managesSecurityDepartment && <span className="badge info">{ROUTING_COPY.managesChip}</span>}
+                    {p.managesSecurityDepartment && (
+                      // The shell's badge never shrinks; beside a switch on a phone this one is wider than
+                      // its column and was cut off mid-word, so it may shrink and wrap.
+                      <span className="badge info" data-manages style={{ flexShrink: 1, minWidth: 0, whiteSpace: "normal" }}>
+                        {ROUTING_COPY.managesChip}
+                      </span>
+                    )}
                   </span>
                   <span className="sub" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
                     {[roleLabel(p.role), p.eligible ? (p.delivery === "push" ? ROUTING_COPY.deliveryPush : ROUTING_COPY.deliveryInApp) : cantBeTold(p)].join(" · ")}

@@ -100,6 +100,8 @@ describe("at manage", () => {
     expect(maria).toHaveTextContent("Only in Droplet while it's open");
     // A suggestion, not a grant (D26).
     expect(within(maria).getByText("Manages the Security department")).toBeInTheDocument();
+    // On a phone the chip is wider than its column beside the switch: it wraps instead of being cut off.
+    expect(within(maria).getByText("Manages the Security department")).toHaveStyle({ flexShrink: "1", whiteSpace: "normal" });
   });
 
   it("an ineligible person: can't be told, and the switch is off and inert", async () => {
