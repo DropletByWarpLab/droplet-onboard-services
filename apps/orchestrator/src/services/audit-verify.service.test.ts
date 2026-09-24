@@ -15,6 +15,11 @@ import {
 } from "./activity.service.js";
 import { _setActivityRecorderForTests } from "./activity.singleton.js";
 import { createHmacSigner } from "./audit-signing.service.js";
+import {
+  activityRowCreateTrap,
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "../__tests__/helpers/activity-row-insert.js";
 
 vi.mock("./notifications.service.js", () => ({
   sendNotification: vi.fn().mockResolvedValue({
@@ -24,6 +29,14 @@ vi.mock("./notifications.service.js", () => ({
   }),
 }));
 import { sendNotification } from "./notifications.service.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
+
+/** What `transaction_timestamp()::text` reports inside the fake transaction (WARP-2977 P2b). */
+const FAKE_TXTS = "2026-09-24 09:00:00.000001+00";
+/** Where Prisma puts its transaction's id on an interactive-transaction client; the chain append requires it and keys its queue on it (WARP-2977 P2b). */
+const PRISMA_TX_ID = Symbol.for("prisma.client.transaction.id");
+/** Like Prisma, every `$transaction` hands its callback a FRESH handle with a unique transaction id. */
+let fakeTxSeq = 0;
 
 const KEY = Buffer.from("warp-237-verify-test-key-32bytes!", "utf8");
 
@@ -33,20 +46,8 @@ function makeChainFake() {
   let nextId = 1n;
   const prisma = {
     activityRow: {
-      async create({ data }: { data: Record<string, unknown> }) {
-        const refs = data.refs as { _tag?: string } | null | undefined;
-        const row = {
-          id: nextId++,
-          ...data,
-          sub: (data.sub as string | null) ?? null,
-          refs:
-            refs && typeof refs === "object" && refs._tag === "Prisma.DbNull"
-              ? null
-              : (refs ?? null),
-        } as Record<string, unknown> & { id: bigint };
-        rows.push(row);
-        return row;
-      },
+      // The append's handle check wants it; the row goes in through the raw INSERT below (WARP-3011).
+      create: activityRowCreateTrap.create,
       async findMany(args: {
         where?: { id?: { gt?: bigint } };
         orderBy: { id: "asc" };
@@ -59,17 +60,24 @@ function makeChainFake() {
           .slice(0, args.take);
       },
     },
-    async $queryRawUnsafe<T>(query: string) {
-      if (query.includes("pg_advisory_xact_lock")) {
-        return [{ locked: true }] as unknown as T;
+    async $queryRawUnsafe<T>(query: string, ...params: unknown[]) {
+      if (isActivityRowInsert(query)) {
+        const row = { ...activityRowFromInsert(nextId++, params) };
+        rows.push(row);
+        return [{ id: row.id }] as unknown as T;
       }
-      if (rows.length === 0) return [] as unknown as T;
+      if (query.includes("pg_advisory_xact_lock")) {
+        // WARP-2977 P2b: the append reads the isolation level in the same round-trip.
+        // …and the transaction start time: the append checks the tail read ran in the same transaction.
+        return [{ locked: true, iso: "read committed", txts: FAKE_TXTS }] as unknown as T;
+      }
+      // The tail read: one row even when empty (a scalar subquery), same transaction.
       return [
-        { signature: rows[rows.length - 1]!.signature },
+        { txts: FAKE_TXTS, signature: rows[rows.length - 1]?.signature ?? null },
       ] as unknown as T;
     },
-    async $transaction<T>(fn: (tx: unknown) => Promise<T>) {
-      return fn(prisma);
+    async $transaction<T>(fn: (tx: unknown) => Promise<T>, options?: unknown): Promise<T> {
+      return seam.$transaction(fn, options) as Promise<T>;
     },
     user: {
       // Ids and usernames are DELIBERATELY different here, the way they are in
@@ -84,6 +92,18 @@ function makeChainFake() {
       },
     },
   };
+  // WARP-1570: the shared transaction seam,
+  // never a hand-rolled stub — it records the options argument, and record()
+  // opens its transaction with READ_COMMITTED_TX. Like Prisma, every
+  // transaction hands its callback a FRESH handle with a unique transaction id
+  // and no `$transaction` (the chain append requires both, WARP-2977 P2b).
+  const seam = createTransactionSeam({
+    client: () => {
+      const tx: Record<string | symbol, unknown> = { ...prisma, [PRISMA_TX_ID]: `fake-tx-${++fakeTxSeq}` };
+      delete tx.$transaction;
+      return tx;
+    },
+  });
   return { prisma: prisma as never, rows };
 }
 
@@ -122,6 +142,20 @@ describe("verifyActivityChain / runNightlyChainVerification", () => {
     const res = await verifyActivityChain(fake.prisma, signer);
     expect(res.ok).toBe(false);
     expect(res.brokenAtId).toBe(fake.rows[2]!.id.toString());
+  });
+
+  // WARP-2977 P2b: the pg lane verifies only the rows a file appended, on a shared DB.
+  it("from a row: walks only the rows after it, the first anchored on that row's signature", async () => {
+    const from = { id: fake.rows[1]!.id, signature: fake.rows[1]!.signature as string };
+    // A row BEFORE the segment that would break a whole-table walk does not matter…
+    fake.rows[0]!.what = "someone else's row";
+    expect(await verifyActivityChain(fake.prisma, signer, from)).toEqual({ ok: true, rowsChecked: 3, brokenAtId: null });
+    // …but the first row of the segment must link to the anchor.
+    const wrongAnchor = { id: fake.rows[1]!.id, signature: fake.rows[0]!.signature as string };
+    expect(await verifyActivityChain(fake.prisma, signer, wrongAnchor)).toMatchObject({ ok: false, brokenAtId: fake.rows[2]!.id.toString() });
+    // …and a tampered row inside it still breaks it.
+    fake.rows[3]!.what = "tampered";
+    expect(await verifyActivityChain(fake.prisma, signer, from)).toMatchObject({ ok: false, brokenAtId: fake.rows[3]!.id.toString() });
   });
 
   it("nightly job on a broken chain appends an err row and notifies every owner/admin", async () => {

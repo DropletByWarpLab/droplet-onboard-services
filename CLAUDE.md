@@ -185,7 +185,7 @@ before you touch any of this:
   `ALLOWED_CHANNELS` (`scripts/release/gen-release-manifest.py`),
   `RELEASE_CHANNELS` (`update-agent/settings.ts`), the discovery rule in
   both pollers, and the cosign identity alternation in
-  `scripts/lib/apply-update.sh` — which is an enumerated `(main|stage)`
+  `docker/ota/apply-update.sh` — which is an enumerated `(main|stage)`
   on purpose. Never widen it to a wildcard.
 
 Full rationale: WARP-1670; device-side trust model: `docs/SECURITY.md`.

@@ -2,10 +2,15 @@
  * WARP-539 — production ApplyRunner: the compose-over-socket implementation
  * of the port apply.ts owns. This is the ONLY module in the orchestrator
  * that drives the host Docker daemon, and it does so through exactly one
- * host helper — scripts/lib/apply-update.sh — invoked with an ARGV ARRAY
+ * host helper — docker/ota/apply-update.sh — invoked with an ARGV ARRAY
  * (never a shell string). A manifest field (service name, image ref) can
- * therefore never be reinterpreted as a shell command: `execFile` hands the
- * tokens straight to the script with no `/bin/sh -c` in between.
+ * therefore never be reinterpreted as a shell command.
+ *
+ * WARP-3007: in production the exec boundary is host-exec.ts — the helper
+ * runs ON THE HOST in a one-shot `chroot /host` container (the orchestrator
+ * image has no docker CLI and cannot read the host .env). Paths handed to the
+ * helper are therefore HOST paths (`helperUpdatesDir`); files this module
+ * writes itself go through its own mount (`updatesDir`). Same volume.
  *
  * ── SECURITY POSTURE (why this exists + how it's fenced) ──
  * The apply step recreates every appliance container — INCLUDING the
@@ -20,8 +25,10 @@
  *   - the script checks the SHAPE of its inputs only: `validate_services`
  *     is a charset check on the service list and `require_pin_file` checks
  *     that an override file exists. It does NOT validate against the
- *     tracked compose file or the manifest's service set, and runs no
- *     `compose config` step (corrected by WARP-2898). What gets recreated,
+ *     tracked compose file or the manifest's service set, and no
+ *     `compose config` step gates a recreate (`enabled-services` only
+ *     reports what the staged file enables, for the WARP-2970 grow pass)
+ *     (corrected by WARP-2898). What gets recreated,
  *     and from which image, is fenced HERE: the override YAML is generated
  *     from the verified manifest by `composeOverrideYaml` (refuse, never
  *     quote), and an extension document never parses as a release
@@ -61,13 +68,15 @@
  * recreating them would grow the deployment, not update it (apply.ts).
  */
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
 import {
+  ReconcileUnsupportedError,
   SELF_SERVICE_NAME,
   type ApplyRunner,
+  type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
@@ -81,16 +90,21 @@ const defaultLog = createLogger("update-agent");
 export type ExecFn = (
   file: string,
   args: string[],
-  opts?: { timeoutMs?: number },
+  /** `env` is added for this call only (the host exec passes it through). */
+  opts?: { timeoutMs?: number; env?: Record<string, string> },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 export interface HostComposeRunnerOptions {
-  /** Absolute path to the host helper (scripts/lib/apply-update.sh). */
+  /** Absolute HOST path of the helper (docker/ota/apply-update.sh). */
   scriptPath: string;
   /** Absolute path to the on-host compose file the script drives. */
   composeFile: string;
-  /** Root under which <updateId>/{backup,configs.tar.gz} are staged. */
+  /** Root under which <updateId>/{backup,configs.tar.gz} are staged (this process's view). */
   updatesDir: string;
+  /** The same directory as the HELPER sees it (host path). Default: updatesDir. */
+  helperUpdatesDir?: string;
+  /** Private-GHCR token, handed to pull-images only (never another call). */
+  githubToken?: string;
   exec?: ExecFn;
   logger?: pino.Logger;
   /**
@@ -137,6 +151,36 @@ const DEFAULT_TIMEOUTS = { quickMs: 60_000, pullMs: 600_000, recreateMs: 300_000
  */
 export const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
+/** COMPOSE_PROFILES shape apply-update.sh's `validate_profiles` accepts. */
+const PROFILES_RE = /^[a-z0-9,_-]*$/;
+
+/**
+ * Parse env-reconcile.sh's one-line JSON report, strictly: anything off-shape
+ * means the host step did not do what we think, so the caller refuses the
+ * update rather than guessing.
+ */
+export function parseEnvReconcileReport(text: string): EnvReconcileReport {
+  const line = text.trim().split("\n").at(-1) ?? "";
+  const r = JSON.parse(line) as Record<string, unknown>;
+  const names = (v: unknown) =>
+    Array.isArray(v) && v.every((x) => typeof x === "string" && /^[A-Za-z0-9_-]+$/.test(x));
+  if (
+    !names(r.addedKeys) ||
+    !names(r.addedProfiles) ||
+    typeof r.profiles !== "string" ||
+    !PROFILES_RE.test(r.profiles) ||
+    typeof r.unitUpdated !== "boolean"
+  ) {
+    throw new Error(`env-reconcile report has an unexpected shape: ${line.slice(0, 200)}`);
+  }
+  return {
+    addedKeys: r.addedKeys as string[],
+    addedProfiles: r.addedProfiles as string[],
+    profiles: r.profiles,
+    unitUpdated: r.unitUpdated,
+  };
+}
+
 /**
  * Image ref / image ID shape safe to embed UNQUOTED in the generated
  * override YAML: one registry/digest token — no whitespace, quotes, or YAML
@@ -153,14 +197,14 @@ const IMAGE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
  * that pins what runs on the box.
  */
 function composeOverrideYaml(
-  target: RecreateTarget,
+  target: RecreateTarget | "grow",
   updateId: string,
   pins: Array<{ name: string; image: string }>,
 ): string {
   const lines = [
     `# WARP-539 — GENERATED compose override for update ${updateId}: pins every`,
     `# service deployed on this box to its ${target} image ref. Consumed by`,
-    `# scripts/lib/apply-update.sh as the second -f (base + override) so`,
+    `# docker/ota/apply-update.sh as the second -f (base + override) so`,
     `# build:-only services are recreated FROM the pinned ref, never from the`,
     `# local build. DO NOT EDIT — rewritten by the orchestrator's snapshot step.`,
     "services:",
@@ -209,19 +253,37 @@ export class RecreateServicesError extends Error {
  * Returns null when there is no parseable payload.
  */
 function parseFailedServices(text: string | undefined): string[] | null {
+  return parseStringList(text, "failed");
+}
+
+function parseStringList(text: string | undefined, key: "failed" | "skipped"): string[] | null {
   if (!text) return null;
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1 || end < start) return null;
   try {
-    const parsed = JSON.parse(text.slice(start, end + 1)) as { failed?: unknown };
-    if (Array.isArray(parsed.failed)) {
-      return parsed.failed.filter((s): s is string => typeof s === "string");
+    const list = (JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>)[key];
+    if (Array.isArray(list)) {
+      return list.filter((s): s is string => typeof s === "string");
     }
   } catch {
     // Not JSON — fall through to null (an unexpected failure shape).
   }
   return null;
+}
+
+/**
+ * The installed helper predates `reconcile-env` (every helper on stage/main
+ * before WARP-2995). Its arg parser dies on `--image` ("unknown flag") before
+ * dispatch, or on the subcommand itself. Matched on those exact die lines
+ * only: any other non-zero exit is a real reconcile failure.
+ */
+const RECONCILE_UNSUPPORTED_RE =
+  /\[apply-update\] ERROR: (unknown subcommand: reconcile-env|unknown flag: --image)\b/;
+
+function isReconcileUnsupported(err: unknown): boolean {
+  const stderr = (err as { stderr?: unknown }).stderr;
+  return typeof stderr === "string" && RECONCILE_UNSUPPORTED_RE.test(stderr);
 }
 
 export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRunner {
@@ -236,10 +298,11 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
     subcommand: string,
     args: string[],
     timeoutMs: number,
+    env?: Record<string, string>,
   ): Promise<string> {
     const argv = [subcommand, ...composeArgs, ...args];
     try {
-      const { stdout } = await exec(opts.scriptPath, argv, { timeoutMs });
+      const { stdout } = await exec(opts.scriptPath, argv, env ? { timeoutMs, env } : { timeoutMs });
       return stdout;
     } catch (err) {
       log.error(
@@ -257,6 +320,11 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
 
   function updateDir(updateId: string): string {
     return path.join(opts.updatesDir, updateId);
+  }
+
+  /** The same update dir, as the helper sees it. */
+  function helperUpdateDir(updateId: string): string {
+    return path.join(opts.helperUpdatesDir ?? opts.updatesDir, updateId);
   }
 
   return {
@@ -328,7 +396,7 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       // pg_dump into the same backup dir.
       await run(
         "snapshot",
-        ["--update-id", args.updateId, "--backup-dir", backupDir],
+        ["--update-id", args.updateId, "--backup-dir", path.join(helperUpdateDir(args.updateId), "backup")],
         timeouts.quickMs,
       );
     },
@@ -338,6 +406,7 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
         "pull-images",
         ["--images", ...services.map((s) => s.image)],
         timeouts.pullMs,
+        opts.githubToken ? { DROPLET_OTA_GITHUB_TOKEN: opts.githubToken } : undefined,
       );
     },
 
@@ -352,7 +421,12 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       await writeFile(tarPath, args.configsTar);
       await run(
         "stage-configs",
-        ["--update-id", args.updateId, "--configs-tar", tarPath],
+        [
+          "--update-id",
+          args.updateId,
+          "--configs-tar",
+          path.join(helperUpdateDir(args.updateId), "configs.tar.gz"),
+        ],
         timeouts.quickMs,
       );
     },
@@ -412,6 +486,78 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
         ["--update-id", args.updateId, "--target", args.target],
         timeouts.quickMs,
       );
+    },
+
+    async reconcileEnv(args: { updateId: string; image: string }): Promise<EnvReconcileReport> {
+      let stdout: string;
+      try {
+        stdout = await run(
+          "reconcile-env",
+          ["--update-id", args.updateId, "--image", args.image],
+          timeouts.quickMs,
+        );
+      } catch (err) {
+        if (isReconcileUnsupported(err)) throw new ReconcileUnsupportedError(err);
+        throw err;
+      }
+      return parseEnvReconcileReport(stdout);
+    },
+
+    async enabledServices(args: { updateId: string }): Promise<string[]> {
+      // WARP-2995 — the box's REAL profiles come from this update's host-side
+      // reconcile report. This container's own COMPOSE_PROFILES is not a
+      // source: it is frozen at the orchestrator's creation, so it misses a
+      // token the reconcile just added (and is empty when compose could not
+      // read .env). No report → "" → only profile-less services count.
+      let profiles = "";
+      try {
+        profiles = parseEnvReconcileReport(
+          await readFile(path.join(updateDir(args.updateId), "env-reconcile.json"), "utf8"),
+        ).profiles;
+      } catch {
+        log.warn(
+          { deviceUpdateId: args.updateId },
+          "no env-reconcile report for this update — only profile-less services count as enabled",
+        );
+      }
+      const stdout = await run("enabled-services", ["--profiles", profiles], timeouts.quickMs);
+      // One name per line; anything not service-shaped is not a service.
+      return stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => SERVICE_NAME_RE.test(l));
+    },
+
+    async startServices(args: {
+      updateId: string;
+      services: ReleaseService[];
+    }): Promise<{ started: string[] }> {
+      // WARP-2970 — its own override: override-release.yml pins only what was
+      // DEPLOYED at snapshot time, and a service must never start unpinned.
+      await writeFile(
+        path.join(updateDir(args.updateId), "override-grow.yml"),
+        composeOverrideYaml(
+          "grow",
+          args.updateId,
+          args.services.map((s) => ({ name: s.name, image: s.image })),
+        ),
+      );
+      const stdout = await run(
+        "recreate-services",
+        [
+          "--update-id",
+          args.updateId,
+          "--services",
+          args.services.map((s) => s.name).join(","),
+          "--target",
+          "grow",
+        ],
+        timeouts.recreateMs,
+      );
+      // The helper skips a service that already has a (stopped) container and
+      // names it in "skipped"; everything else it started.
+      const skipped = new Set(parseStringList(stdout, "skipped") ?? []);
+      return { started: args.services.map((s) => s.name).filter((n) => !skipped.has(n)) };
     },
   };
 }

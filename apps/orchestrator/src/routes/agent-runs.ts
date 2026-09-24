@@ -327,6 +327,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
         return;
       }
+      if (!(await cloudAllowedOr451(res, actor, model))) return;
       // WARP-2896 — a workshop run needs a workspace that exists, is still
       // active (a proposed one is read-only until reviewed) and has no other
       // run working in it: two runs on one checkout would commit over each
@@ -356,7 +357,6 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           return;
         }
       }
-      if (!(await cloudAllowedOr451(res, actor, model))) return;
       let id: string;
       try {
         ({ id } = await enqueueAgentRun(prisma, {

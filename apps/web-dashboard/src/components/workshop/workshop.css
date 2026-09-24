@@ -1,0 +1,486 @@
+/*
+ * WARP-2974 (ADR-056) — the Workshop as a space.
+ *
+ * The chat surface's layout, reused: `chat-app` / `conv-rail` / `chat-main` /
+ * `chat-head` / `chat-scroll` / `chat-wrap` / `chat-composer` / `msg-bubble`
+ * all come from chat-indigo.css. This file adds what a run transcript and a
+ * workspace context pane need on top: the step rows, the decision card, the
+ * context pane, the pill composer. Every colour is a token from
+ * indigo-tokens.css; every sustained motion stops under prefers-reduced-motion.
+ *
+ * The CHROME follows the Mac app, DropletAgent (design spec §5, Romain
+ * 2026-09-23): borderless and fluid. No borders, divider lines or card strokes —
+ * surfaces are separated by tone only (rail and pane vs main); a centred
+ * greeting over a floating pill composer that docks at the bottom once a run
+ * is open; the result is unboxed text in the reading column and the goal sits
+ * in the user bubble, no avatars. The palette is the same indigo ramp the Mac
+ * app ports. Where a rule below overrides a chat-indigo.css class it is scoped
+ * to `.workshop-app`, so /chat itself is untouched.
+ */
+
+/* ── Mac-app chrome over the reused chat classes ──────────── */
+.droplet-shell.workshop-app .conv-rail { border-right: 0; }
+.droplet-shell.workshop-app .conv-head { border-bottom: 0; }
+.droplet-shell.workshop-app .conv-new-btn { border: 0; background: transparent; }
+.droplet-shell.workshop-app .conv-new-btn:hover { background: var(--surface-2); }
+.droplet-shell.workshop-app .chat-head {
+  border-bottom: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* Selection is a tone, not a stripe. */
+.droplet-shell.workshop-app .conv-item { border-left: 0; }
+/* The Mac app's QuietButtonStyle: a secondary button is text only, with a
+   tonal fill on hover — the focus ring stays the one stroke allowed. A muted
+   label lifts to `--text` on the fill (muted drops under AA on a fill).
+   The primary (brand fill) and danger buttons are unchanged. */
+.droplet-shell.workshop-app .btn:not(.primary):not(.danger),
+.droplet-shell.workshop-app .icon-btn {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+.droplet-shell.workshop-app .btn:not(.primary):not(.danger):hover:not(:disabled),
+.droplet-shell.workshop-app .icon-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* ── Rail: the actions first, as plain rows ───────────────── */
+.droplet-shell .ws-rail-top { display: flex; flex-direction: column; gap: 1px; padding: 2px 10px 4px; }
+.droplet-shell .ws-rail-top button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  transition: background 140ms var(--ease, ease);
+}
+.droplet-shell .ws-rail-top button svg { color: var(--text-muted); flex-shrink: 0; }
+.droplet-shell .ws-rail-top button:hover { background: var(--surface-2); }
+
+/* ── Context pane (right) ─────────────────────────────────── */
+/* The pane owns its own `display`; the `<aside>` around it owns WHEN it shows
+   (`hidden xl:flex`, the conv-rail pattern — see chat-indigo.css). */
+.droplet-shell .ws-ctx {
+  width: 320px;
+  flex-shrink: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--glass-2);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+}
+/* Inside a drawer the pane owns the whole sheet: no rail chrome. */
+.droplet-shell .ws-ctx.is-drawer {
+  width: 100%;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.droplet-shell .ws-ctx-head {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px 0 16px;
+  min-width: 0;
+}
+.droplet-shell .ws-ctx-head .t {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.droplet-shell .ws-ctx-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 14px 24px;
+}
+.droplet-shell .ws-ctx-body::-webkit-scrollbar { width: 8px; }
+.droplet-shell .ws-ctx-body::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }
+
+.droplet-shell .ws-sect { margin-top: 14px; }
+.droplet-shell .ws-sect:first-child { margin-top: 4px; }
+.droplet-shell .ws-sect-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+  padding: 6px 2px 5px;
+}
+.droplet-shell .ws-sect-h .sx { margin-left: auto; font-weight: 500; font-family: var(--font-mono); font-size: 11px; }
+
+.droplet-shell .ws-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 12.5px;
+}
+.droplet-shell .ws-facts dt { color: var(--text-muted); }
+.droplet-shell .ws-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.droplet-shell .ws-facts code,
+.droplet-shell .ws-mono { font-family: var(--font-mono); font-size: 12px; }
+
+.droplet-shell .ws-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--inset);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.droplet-shell .ws-note { margin: 0; font-size: 12.5px; color: var(--text-muted); }
+
+.droplet-shell .ws-commits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.droplet-shell .ws-commit { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 12.5px; }
+.droplet-shell .ws-commit .s { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.droplet-shell .ws-commit .m { color: var(--text-muted); font-size: 11.5px; display: flex; gap: 6px; align-items: center; min-width: 0; }
+
+.droplet-shell .ws-clone {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.droplet-shell .ws-clone code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+/* ── Transcript (center) ──────────────────────────────────── */
+.droplet-shell .ws-thread { display: flex; flex-direction: column; gap: 18px; }
+
+/* The steps a run took: one row per tool call, in order — a tone, no stroke. */
+.droplet-shell .ws-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.droplet-shell .ws-step {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  min-width: 0;
+}
+.droplet-shell .ws-step-ic {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: var(--inset);
+  margin-top: 1px;
+}
+.droplet-shell .ws-step.is-ok .ws-step-ic { color: var(--success); background: rgba(34,197,94,0.14); }
+.droplet-shell .ws-step.is-error .ws-step-ic { color: #b91c1c; background: rgba(239,68,68,0.15); }
+.droplet-shell .ws-step.is-parked .ws-step-ic { color: #b45309; background: rgba(217,163,92,0.16); }
+.droplet-shell .ws-step.is-working .ws-step-ic { color: var(--brand); background: var(--brand-subtle); }
+.droplet-shell .ws-step-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; font-size: 13px; }
+.droplet-shell .ws-step-tool { font-family: var(--font-mono); font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.droplet-shell .ws-step-meta { color: var(--text-muted); font-size: 12px; }
+.droplet-shell .ws-step-meta.r { margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; }
+.droplet-shell .ws-step-args {
+  grid-column: 2;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.droplet-shell .ws-step details { grid-column: 2; font-size: 12px; }
+.droplet-shell .ws-step summary { cursor: pointer; color: var(--text-muted); user-select: none; }
+.droplet-shell .ws-step summary:hover { color: var(--text); }
+.droplet-shell .ws-step .ws-pre { margin-top: 6px; max-height: 320px; }
+
+/* Where a parked run stops and asks: an amber tone, the shield icon and the
+   heading's words — never colour alone. */
+.droplet-shell .ws-decision {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, #d9a35c 12%, var(--surface));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.droplet-shell .ws-decision-h { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--text); }
+.droplet-shell .ws-decision-h svg { color: #b45309; }
+.droplet-shell .ws-decision p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--text); }
+.droplet-shell .ws-decision .ws-facts { font-size: 12px; }
+.droplet-shell .ws-decision-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+
+/* The run's closing message: unboxed text in the reading column. */
+.droplet-shell .ws-answer {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.droplet-shell .ws-stop {
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(239,68,68,0.08);
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.droplet-shell .ws-stop b { color: #b91c1c; }
+.droplet-shell .ws-empty-steps { font-size: 13px; color: var(--text-muted); }
+
+/* The run's identity line under the goal: mono facts. */
+.droplet-shell .ws-runline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ── Rail rows ────────────────────────────────────────────── */
+.droplet-shell .ws-rail-row { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.droplet-shell .ws-rail-row .l { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.droplet-shell .ws-rail-row .l .conv-it-t { flex: 1; }
+.droplet-shell .ws-rail-filter { display: flex; flex-wrap: wrap; gap: 2px; padding: 2px 6px 6px; }
+.droplet-shell .ws-rail-filter button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.droplet-shell .ws-rail-filter button:hover { color: var(--text); background: var(--surface-2); }
+.droplet-shell .ws-rail-filter button.active { background: var(--brand-subtle); color: var(--brand); }
+.droplet-shell .ws-rail-act {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.droplet-shell .ws-rail-act:hover { background: var(--surface-2); color: var(--text); }
+
+/* Small chips (the shell's `.badge`, one size smaller for rails). */
+.droplet-shell .ws-chip { font-size: 10.5px; padding: 1px 7px; }
+.droplet-shell .badge .dot.is-live { animation: ws-breathe 2s ease-in-out infinite; }
+@keyframes ws-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .droplet-shell .badge .dot.is-live { animation: none; }
+}
+
+/* ── The pill composer ────────────────────────────────────── */
+/* One row: `+`, the goal field (grows to 8 lines), the Work-in chip, send.
+   A tone and a soft lift — no stroke. Radius 26 = a full pill at one line. */
+.droplet-shell.workshop-app .chat-composer-inner.ws-pill {
+  flex-direction: row;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 8px 8px 8px;
+  border: 0;
+  border-radius: 26px;
+  background: var(--surface);
+  box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.45);
+}
+.droplet-shell.workshop-app .ws-pill textarea {
+  flex: 1 1 240px;
+  width: auto;
+  min-width: 0;
+  min-height: 36px;
+  max-height: 192px;
+  padding: 7px 4px;
+  overflow-y: auto;
+}
+.droplet-shell .ws-pill-btn {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 140ms var(--ease, ease), color 140ms var(--ease, ease);
+}
+.droplet-shell .ws-pill-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+/* `margin-left: auto` (chat-indigo's) keeps send at the right edge when a
+   narrow pill wraps the chip under the field. */
+.droplet-shell.workshop-app .ws-pill .chat-send { width: 36px; height: 36px; border-radius: 999px; }
+/* The Work-in chip is a menu button (WorkInPicker), not a native <select>:
+   the browser paints a select's open list itself, outside every token. */
+.droplet-shell .ws-workin-wrap { position: relative; min-width: 0; max-width: 100%; display: flex; }
+.droplet-shell .ws-workin {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12.5px;
+  max-width: 100%;
+  min-width: 0;
+  cursor: pointer;
+  transition: background 140ms var(--ease, ease), color 140ms var(--ease, ease);
+}
+.droplet-shell .ws-workin:hover:not(:disabled),
+.droplet-shell .ws-workin[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--text) 9%, var(--surface-2));
+  color: var(--text);
+}
+.droplet-shell .ws-workin:disabled { cursor: default; opacity: 0.6; }
+.droplet-shell .ws-workin-label {
+  color: var(--text);
+  max-width: 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-shell .ws-workin-chevron { flex: none; transition: transform 140ms var(--ease, ease); }
+.droplet-shell .ws-workin[aria-expanded="true"] .ws-workin-chevron { transform: rotate(180deg); }
+/* The menu: the pill's own tone and a soft lift, no stroke. It opens upward —
+   the pill docks at the bottom of the page once a run is open. */
+.droplet-shell .ws-workin-menu {
+  position: absolute;
+  z-index: 60;
+  bottom: calc(100% + 8px);
+  right: 0;
+  min-width: 240px;
+  max-width: min(320px, calc(100vw - 32px));
+  max-height: min(50vh, 360px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--surface);
+  /* Shadow only — `--lift` carries a 1px brand ring, a stroke. */
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.08);
+  text-align: left;
+}
+.droplet-shell .ws-workin-menu[data-align="start"] { right: auto; left: 0; }
+.droplet-shell .ws-workin-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* The composer turns every focus ring off inside the pill (chat-indigo.css),
+   so the focused row shows as a tonal fill — a native menu's highlight. */
+.droplet-shell .ws-workin-item:hover,
+.droplet-shell .ws-workin-item:focus { background: var(--surface-2); outline: none; }
+.droplet-shell .ws-workin-item-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.droplet-shell .ws-workin-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-shell .ws-workin-item-caption { font-size: 11.5px; color: var(--text-muted); }
+.droplet-shell .ws-workin-check { flex: none; color: var(--brand); }
+/* A gap in tone, not a rule: the separator is space. */
+.droplet-shell .ws-workin-sep { height: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .droplet-shell .ws-workin,
+  .droplet-shell .ws-workin-chevron { transition: none; }
+}
+/* The quiet line under the pill: the safety chips, then any notice. */
+.droplet-shell .ws-hint {
+  max-width: 768px;
+  margin: 8px auto 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 12px;
+  text-align: center;
+}
+.droplet-shell .ws-safety { display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.droplet-shell .ws-status { font-size: 12.5px; color: var(--text-muted); min-width: 0; overflow-wrap: anywhere; }
+
+/* ── Empty: the greeting and the pill, centred together ───── */
+/* Auto margins centre the pair in the space under the header; opening a run
+   drops `is-empty` and the composer docks at the bottom again. Same DOM in
+   both states, so a half-typed goal survives the switch. */
+.droplet-shell.workshop-app .chat-main.is-empty .chat-scroll { flex: 0 0 auto; margin-top: auto; padding: 0 0 20px; }
+.droplet-shell.workshop-app .chat-main.is-empty .chat-composer { margin-bottom: auto; padding-bottom: 14vh; }
+.droplet-shell.workshop-app .chat-empty { height: auto; gap: 10px; }
+.droplet-shell.workshop-app .chat-empty .h { font-size: 26px; font-weight: 600; letter-spacing: -0.3px; }
+.droplet-shell.workshop-app .chat-empty .s { max-width: 560px; font-size: 14px; line-height: 1.55; }
+
+/* ── Head chips + drawer toggles ──────────────────────────── */
+.droplet-shell .ws-head-chips { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+/* `.droplet-shell .chat-iconbtn` is (0,2,0) and sets `display`, so Tailwind's
+   `lg:hidden` (0,1,0) can never hide these — the WARP-1792 rule: one owner
+   for `display`. The toggles hide here, at the same breakpoints the rail
+   (`lg`) and the context pane (`xl`) appear. */
+@media (min-width: 1024px) { .droplet-shell .ws-rail-toggle { display: none; } }
+/* On a phone the head has room for the title or the tool chip, not both; the
+   context toggle beside it opens the same pane. */
+@media (max-width: 720px) { .droplet-shell .ws-head-ws { display: none; } }
+@media (min-width: 1280px) { .droplet-shell .ws-ctx-toggle { display: none; } }
+
+@media (max-width: 720px) {
+  .droplet-shell .ws-workin-label { max-width: 150px; }
+  .droplet-shell.workshop-app .chat-main.is-empty .chat-composer { padding-bottom: 8vh; }
+  .droplet-shell.workshop-app .chat-empty .h { font-size: 22px; }
+}

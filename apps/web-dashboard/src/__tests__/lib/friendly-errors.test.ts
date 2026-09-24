@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
-import { translateError, type ErrorDomain } from "@/lib/friendly-errors";
+import { archivedZoneIdOf, translateError, type ErrorDomain } from "@/lib/friendly-errors";
+import type { SecurityErrorCode } from "@/lib/types";
 
 /**
  * WARP-294 — Tests for the typed-error → friendly-copy translator.
@@ -47,6 +48,8 @@ const DOMAINS: ErrorDomain[] = [
   "search-name",
   "search-keyword",
   "search-semantic",
+  // WARP-2977 P2b — the Security pages' writes (mode, opening hours, areas).
+  "security",
   "generic",
 ];
 
@@ -759,5 +762,106 @@ describe("translateError — search domains (WARP-1914)", () => {
     const copy = translateError({ status: 500 }, "search-name");
     expect(copy.toLowerCase()).toContain("search");
     expect(copy.toLowerCase()).not.toContain("load those files");
+  });
+});
+
+describe("translateError — security domain (WARP-2977 P2b)", () => {
+  const CODES = [
+    "MODE_CONFLICT",
+    "VERSION_CONFLICT",
+    "AUDIT_UNAVAILABLE",
+    "ZONE_NAME_TAKEN",
+    "ZONE_LIMIT",
+    "ZONE_NOT_FOUND",
+    "ZONE_ARCHIVED",
+    "SOURCE_NOT_FOUND",
+    "SOURCE_CHECK_UNAVAILABLE",
+    "INVALID_TIMEZONE",
+    "SAME_OPEN_CLOSE",
+    "HOURS_NOT_SET",
+    "EXCEPTION_LIMIT",
+    "EXCEPTION_OUT_OF_RANGE",
+    "EXCEPTION_NOT_FOUND",
+    "MODE_UNAVAILABLE",
+    "HOURS_UNAVAILABLE",
+    "ZONES_UNAVAILABLE",
+    "VALIDATION_ERROR",
+    "INTERNAL_ERROR",
+  ] as const satisfies readonly SecurityErrorCode[];
+  // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
+  // code added to SecurityErrorCode without copy here fails the build.
+  type Uncovered = Exclude<SecurityErrorCode, (typeof CODES)[number]>;
+  const everyCodeListed: [Uncovered] extends [never] ? true : Uncovered = true;
+  void everyCodeListed;
+  const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "security");
+
+  it("every typed code the Security routes answer with has its own copy", () => {
+    for (const code of CODES) {
+      const copy = translateError({ code, status: 409, message: SECRET }, "security");
+      expect(copy, code).not.toBe(fallback);
+      expect(copy, code).not.toContain(SECRET);
+    }
+  });
+
+  it("the copy never says zone, and never promises the site is watched over", () => {
+    // "zone" as a NOUN — "timezone" is the ordinary word for what the owner picks.
+    const banned = /monitor|armed|\barm\b|alarm|\bsecure\b|protected|guard|\bspaces?\b|\bzones?\b/i;
+    for (const code of [...CODES, "401", "404", "403", "409", "429", "NETWORK", "TIMEOUT", "TOTALLY_UNKNOWN_CODE"]) {
+      expect(translateError({ code }, "security"), code).not.toMatch(banned);
+    }
+    expect(fallback).not.toMatch(banned);
+  });
+
+  it("a 401 that survives authFetch's refresh (a flat 401, code UNKNOWN) says the session ended, not the fallback", () => {
+    // securityFetch turns a flat `{error: "..."}` 401 into code "UNKNOWN" + status 401 — after authFetch already tried to refresh.
+    const copy = translateError({ code: "UNKNOWN", status: 401, message: SECRET }, "security");
+    expect(copy).toBe("Your session has ended. Sign in again to make that change.");
+    expect(copy).not.toBe(fallback);
+    expect(translateError({ status: 401 }, "security")).toBe(copy);
+  });
+
+  it("an audit failure says nothing was changed; a conflict says someone else moved it", () => {
+    expect(translateError({ code: "AUDIT_UNAVAILABLE", status: 503 }, "security")).toMatch(/nothing was changed/);
+    expect(translateError({ code: "MODE_CONFLICT", status: 409 }, "security")).toMatch(/someone else/i);
+  });
+
+  it("a flat 404 module_disabled (the level changed under the page) gets status copy, not the fallback", () => {
+    expect(translateError({ status: 404, message: "HTTP 404" }, "security")).toMatch(/can't make that change/);
+  });
+
+  it("INTERNAL_ERROR (a 500) has its own copy, which never claims nothing changed", () => {
+    const copy = translateError({ code: "INTERNAL_ERROR", status: 500, message: SECRET }, "security");
+    expect(copy).not.toBe(fallback);
+    expect(copy).not.toContain(SECRET);
+    expect(copy).not.toMatch(/nothing was changed|wasn't made/i);
+    expect(copy).toMatch(/refresh/i);
+  });
+
+  // apiFetch's thrown error: code + status + the whole body.
+  const taken = (archivedZoneId?: unknown) =>
+    Object.assign(new Error(SECRET), {
+      code: "ZONE_NAME_TAKEN",
+      status: 409,
+      body: { error: { code: "ZONE_NAME_TAKEN", message: SECRET, ...(archivedZoneId === undefined ? {} : { archivedZoneId }) } },
+    });
+
+  it("ZONE_NAME_TAKEN held by a REMOVED area says restore it instead; held by an active one, pick another name", () => {
+    const removed = translateError(taken("z-old"), "security");
+    expect(removed).toBe("A removed area already has that name. Restore it instead, or pick another name.");
+    expect(translateError(taken(), "security")).toBe("There's already an area with that name. Pick another name.");
+    expect(removed).not.toContain(SECRET);
+    // Only the security domain reads the envelope.
+    expect(translateError(taken("z-old"), "generic")).not.toBe(removed);
+  });
+
+  it("archivedZoneIdOf reads the id only off a ZONE_NAME_TAKEN envelope with a non-empty string id", () => {
+    expect(archivedZoneIdOf(taken("z-old"))).toBe("z-old");
+    expect(archivedZoneIdOf(taken())).toBeNull();
+    expect(archivedZoneIdOf(taken(""))).toBeNull();
+    expect(archivedZoneIdOf(taken(42))).toBeNull();
+    expect(archivedZoneIdOf({ ...taken("z-old"), code: "VERSION_CONFLICT" })).toBeNull();
+    expect(archivedZoneIdOf({ code: "ZONE_NAME_TAKEN", body: null })).toBeNull();
+    expect(archivedZoneIdOf(null)).toBeNull();
+    expect(archivedZoneIdOf("ZONE_NAME_TAKEN")).toBeNull();
   });
 });
