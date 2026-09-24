@@ -42,6 +42,11 @@
  * credential to a vendor — rule 19, and ADR-043 §7's "never written to a log
  * or an export" in its most literal form. The remote branch drops it.
  *
+ * WARP-2900: the remote call runs inside `withRemoteCallAttribution` holding
+ * the caller's username and durable-run id ONLY, so an in-process port
+ * wrapper can write who a dispatch ran for on its own audit row. The port is
+ * still called with two arguments, and no token enters that scope.
+ *
  * ## ADR-043 §5 boundary
  *
  * This file holds no socket and imports no transport. It composes ports. The
@@ -56,6 +61,7 @@ import type {
   McpToolDescriptor,
 } from "./mcp-client.port.js";
 import type { McpCallContext } from "./mcp-client.service.js";
+import { withRemoteCallAttribution } from "./remote-call-attribution.js";
 
 const logger = createLogger("mcp-multiplexer");
 
@@ -404,8 +410,12 @@ export class McpToolMultiplexer implements McpClientPort {
     }
 
     // `context` is deliberately dropped: see the module header. The remote
-    // server gets the arguments and nothing else.
-    return remote.client.callTool(parsed.wireName, args);
+    // server gets the arguments and nothing else; the attribution scope is
+    // in-process only, for the orchestrator's own audit row.
+    return withRemoteCallAttribution(
+      { userId: context?.userId, agentRunId: context?.agentRunId },
+      () => remote.client.callTool(parsed.wireName, args),
+    );
   }
 
   #vetRemoteTool(

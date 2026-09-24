@@ -66,6 +66,14 @@ export interface RuntimeToolDescriptor {
   description: string;
   /** JSON Schema for the tool's arguments, serialised into `tools[]`. */
   inputSchema: Record<string, unknown>;
+  /**
+   * WARP-2900 — where this tool's code came from, when the box knows more
+   * than the server id: `extension:<slug>@<version>` for a promoted
+   * workshop extension. Absent for a vendor server (its code is not ours to
+   * name). Read by the inspector and /tools surfaces (H4); never by
+   * selection or dispatch.
+   */
+  provenance?: string;
 }
 
 /**

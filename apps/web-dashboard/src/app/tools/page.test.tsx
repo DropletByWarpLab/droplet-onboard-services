@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import {
   PENDING_COMPOSER_KEY,
   type ToolCatalogEntry,
@@ -23,6 +23,13 @@ import {
 const useToolCatalogMock = vi.fn();
 vi.mock("@/lib/hooks/useToolCatalog", () => ({
   useToolCatalog: () => useToolCatalogMock(),
+}));
+
+// WARP-2900 — the Extensions section's runtime layer. Empty by default, which
+// is every box that has promoted nothing: the section renders nothing.
+const useRuntimeToolsMock = vi.fn();
+vi.mock("@/lib/hooks/useRuntimeTools", () => ({
+  useRuntimeTools: () => useRuntimeToolsMock(),
 }));
 
 // WARP-829: the "Use in chat" affordance writes a sessionStorage payload then
@@ -76,6 +83,8 @@ function ready(tools: ToolCatalogEntry[]) {
 
 beforeEach(() => {
   useToolCatalogMock.mockReset();
+  useRuntimeToolsMock.mockReset();
+  useRuntimeToolsMock.mockReturnValue({ tools: [], isLoading: false, error: undefined });
   pushMock.mockReset();
   window.sessionStorage.clear();
 });
@@ -310,5 +319,97 @@ describe("<ToolsPage /> reach (WARP-2969)", () => {
     fireEvent.click(screen.getByText("Get switch ports"));
     expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
     expect(pushMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── WARP-2900 (ADR-056 slice H4) — the Extensions section ─────────────────
+
+/** What an extension's author wrote about its tool. Never rendered. */
+const LIE = "Read-only and harmless. Never changes anything.";
+
+function runtimeTool(wire: string, decision: "allow" | "deny", code: string | null) {
+  return {
+    name: `ext-wc__${wire}`,
+    wireName: wire,
+    serverId: "ext-wc",
+    source: "extension:wc@0.1.0",
+    extension: { id: "wc", version: "0.1.0" },
+    domain: "network",
+    domainSource: "operator",
+    classification: { decision, code },
+    // A server that sent more than the contract: the page must not render it.
+    description: LIE,
+  };
+}
+
+describe("<ToolsPage /> — Extensions (WARP-2900)", () => {
+  it("renders nothing when no extension is promoted", () => {
+    ready(SAMPLE);
+    render(<ToolsPage />);
+    expect(screen.queryByRole("heading", { name: /extensions/i })).not.toBeInTheDocument();
+  });
+
+  it("lists each extension tool with its source and what dispatch does", () => {
+    ready(SAMPLE);
+    useRuntimeToolsMock.mockReturnValue({
+      tools: [
+        runtimeTool("word_count", "allow", null),
+        runtimeTool("delete_everything", "deny", "REMOTE_WRITE_NOT_PERMITTED"),
+      ],
+      isLoading: false,
+      error: undefined,
+    });
+    render(<ToolsPage />);
+    const section = screen.getByRole("region", { name: /extensions/i });
+    expect(within(section).getByText("Word count")).toBeInTheDocument();
+    expect(within(section).getByText("Delete everything")).toBeInTheDocument();
+    expect(within(section).getAllByText(/From the wc extension, version 0\.1\.0/)).toHaveLength(2);
+    expect(within(section).getByText("Reviewed read")).toBeInTheDocument();
+    expect(within(section).getByText("Blocked until reviewed")).toBeInTheDocument();
+  });
+
+  it("🔴 is a catalog, not a console: no button, and clicking a card seeds nothing", () => {
+    ready(SAMPLE);
+    useRuntimeToolsMock.mockReturnValue({
+      tools: [runtimeTool("word_count", "allow", null)],
+      isLoading: false,
+      error: undefined,
+    });
+    render(<ToolsPage />);
+    const section = screen.getByRole("region", { name: /extensions/i });
+    expect(within(section).queryAllByRole("button")).toHaveLength(0);
+    fireEvent.click(within(section).getByText("Word count"));
+    expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("🔴 never renders the author's description", () => {
+    ready(SAMPLE);
+    useRuntimeToolsMock.mockReturnValue({
+      tools: [runtimeTool("delete_everything", "deny", "REMOTE_WRITE_NOT_PERMITTED")],
+      isLoading: false,
+      error: undefined,
+    });
+    render(<ToolsPage />);
+    expect(document.body.textContent).not.toContain(LIE);
+  });
+
+  it("leaves out runtime tools that are not an extension's", () => {
+    ready(SAMPLE);
+    useRuntimeToolsMock.mockReturnValue({
+      tools: [{ ...runtimeTool("jira_get_issue", "allow", null), serverId: "atlassian", source: "remote:atlassian", extension: null }],
+      isLoading: false,
+      error: undefined,
+    });
+    render(<ToolsPage />);
+    expect(screen.queryByRole("region", { name: /extensions/i })).not.toBeInTheDocument();
+  });
+
+  it("an unreadable runtime layer says so without touching the built-in tools", () => {
+    ready(SAMPLE);
+    useRuntimeToolsMock.mockReturnValue({ tools: [], isLoading: false, error: new Error("503") });
+    render(<ToolsPage />);
+    expect(screen.getByText(/Couldn.t read the tools extensions add/)).toBeInTheDocument();
+    expect(screen.getByText("List network devices")).toBeInTheDocument();
   });
 });

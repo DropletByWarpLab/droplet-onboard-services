@@ -500,13 +500,70 @@ def test_propose_writes_the_manifest_tags_and_pushes(store):
             workspace.propose("ws-m", "x", bad, "s", ALICE)
 
 
-def test_propose_never_lets_egress_through(store):
+def test_propose_never_lets_egress_or_kind_through(store):
     # MUTATION: drop the `manifest["egress"] = "none"` line and a manifest a
-    # run edited to `egress: "*"` is proposed as-is.
+    # run edited to `egress: "*"` is proposed as-is; drop the kind line and a
+    # run can propose `kind: "release"` (the verifier's key-usage rule is the
+    # second line of defence, not the first).
     store.create_workspace("ws-n", "python-tool", ALICE)
-    workspace.write("ws-n", "extension-manifest.json", json.dumps({"schemaVersion": 1, "egress": "*", "extra": True}))
+    workspace.write(
+        "ws-n",
+        "extension-manifest.json",
+        json.dumps({"schemaVersion": 1, "egress": "*", "kind": "release", "extra": True}),
+    )
     p = workspace.propose("ws-n", "Leaky", "0.2.0", "tries to phone home", ALICE)
-    assert p["manifest"]["egress"] == "none" and p["manifest"]["extra"] is True
+    assert p["manifest"]["egress"] == "none" and p["manifest"]["kind"] == "extension"
+    # Unknown keys are KEPT: the orchestrator's strict parser refuses them at
+    # promote with a legible reason instead of this end silently repairing.
+    assert p["manifest"]["extra"] is True
+
+
+@pytest.mark.parametrize(
+    "template,runtime,entrypoint,memory",
+    [("python-tool", "python312", "tool.py", 64), ("typescript-tool", "node20", "dist/index.js", 128)],
+)
+def test_propose_emits_the_extension_manifest_schema(store, template, runtime, entrypoint, memory):
+    ws = f"ws-t-{runtime}"
+    store.create_workspace(ws, template, ALICE)
+    p = workspace.propose(ws, "Word counter", "0.1.0", "Counts words.", ALICE)
+    assert p["kind"] == "extension"
+    m = p["manifest"]
+    assert m["schemaVersion"] == 1 and m["id"] == ws and m["version"] == "0.1.0" and m["kind"] == "extension"
+    assert m["runtime"] == runtime and m["entrypoint"] == entrypoint
+    assert m["resources"] == {"memoryMb": memory, "processes": 1}
+    assert [t["name"] for t in m["provides"]["tools"]] == ["word_count"]
+    assert m["provides"]["tools"][0]["export"] == "run"
+    assert m["provides"]["routineDrafts"] == [] and m["provides"]["proposedGrants"] == []
+    assert m["egress"] == "none" and m["summary"] == "Counts words."
+    assert "footprint" not in m and "routines" not in m["provides"]
+
+
+def test_propose_migrates_an_old_shape_template_manifest(store):
+    # An existing box's templates.git still holds the #2247-era manifest
+    # (templates are never re-seeded over an operator's commits), so propose
+    # must carry that shape into the current one on its own.
+    # MUTATION: return `existing` unchanged from normalize_manifest and red.
+    store.create_workspace("ws-old", "python-tool", ALICE)
+    old = {
+        "schemaVersion": 1,
+        "id": "",
+        "name": "",
+        "version": "0.1.0",
+        "egress": "none",
+        "provides": {"tools": [], "routines": []},
+        "footprint": {"memoryMb": 96, "cpus": 0.5, "processes": 1},
+    }
+    workspace.write("ws-old", "extension-manifest.json", json.dumps(old))
+    m = workspace.propose("ws-old", "Old", "0.3.0", "old shape", ALICE)["manifest"]
+    assert "footprint" not in m and "routines" not in m["provides"]
+    assert m["resources"] == {"memoryMb": 96, "processes": 1}
+    assert m["provides"] == {"tools": [], "routineDrafts": [], "proposedGrants": []}
+    assert (m["kind"], m["runtime"], m["entrypoint"]) == ("extension", "python312", "tool.py")
+    assert (m["id"], m["name"], m["version"]) == ("ws-old", "Old", "0.3.0")
+    # A checkout with no manifest at all gets the defaults.
+    store.create_workspace("ws-none", None, ALICE)
+    bare = workspace.propose("ws-none", "Bare", "0.1.0", "nothing yet", ALICE)["manifest"]
+    assert "runtime" not in bare and bare["provides"]["tools"] == []
 
 
 # ── smart HTTP ──────────────────────────────────────────────────────────────
