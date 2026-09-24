@@ -65,10 +65,14 @@ function at(ymd: string, time: string, tz = TZ): Date {
 }
 const NOW = at("2026-09-23", "12:00"); // a Wednesday, inside 09–17
 
-function access(level: Level | null, tier: EffectiveAccessResult["tier"] = "family"): EffectiveAccessResult {
+function access(level: Level | null, tier: EffectiveAccessResult["tier"] = "family", devices = false): EffectiveAccessResult {
   return {
     tier,
-    features: (level ? [{ moduleId: "security", level }] : []) as EffectiveAccessResult["features"],
+    features: [
+      ...(level ? [{ moduleId: "security", level }] : []),
+      // WARP-2977 P2b-2 (DS-019): Devices (smart_home) view — who may read door locks.
+      ...(devices ? [{ moduleId: "smart_home", level: "view" }] : []),
+    ] as EffectiveAccessResult["features"],
     toolDomains: [],
     locks: false,
     cloud: false,
@@ -98,9 +102,30 @@ function seeded(over: Partial<FakeWorld> = {}): FakeWorld {
   });
 }
 
-function app(w: FakeWorld, role: Role | null | "", level: Level | null, now: Date = NOW) {
-  const resolve = vi.fn(async (_userId: string) => access(level, role === "owner" ? "owner" : "family"));
+/** WARP-2977 P2b-2 — a lock adapter as route 7 reads it: the last sweep's locks and their readings. */
+type KnownLockFixture = { ref: string; nodeId: string; endpointId: number; name: string; room: string | null; connected: boolean; reading: string | null; polled: boolean };
+const lock = (nodeId: string, name: string, reading: string | null, connected = true): KnownLockFixture => ({
+  ref: `matter:${nodeId}/1`,
+  nodeId,
+  endpointId: 1,
+  name,
+  room: null,
+  connected,
+  reading,
+  polled: true,
+});
+
+function app(
+  w: FakeWorld,
+  role: Role | null | "",
+  level: Level | null,
+  now: Date = NOW,
+  opts: { devices?: boolean; locks?: KnownLockFixture[] | null } = {},
+) {
+  const resolve = vi.fn(async (_userId: string) => access(level, role === "owner" ? "owner" : "family", opts.devices === true));
   const prisma = fakePrisma(w);
+  const knownLocks = vi.fn(() => opts.locks ?? []);
+  const reader = opts.locks === null ? null : { knownLocks, listLocks: vi.fn(), health: vi.fn() };
   const server = express();
   server.use(express.json());
   server.use((req: Request, _res: Response, next: NextFunction) => {
@@ -110,8 +135,11 @@ function app(w: FakeWorld, role: Role | null | "", level: Level | null, now: Dat
     }
     next();
   });
-  server.use("/api", createSecuritySiteRouter(prisma as unknown as PrismaClient, { resolve, now: () => now }));
-  return { server, resolve, prisma };
+  server.use(
+    "/api",
+    createSecuritySiteRouter(prisma as unknown as PrismaClient, { resolve, now: () => now, locks: () => reader as never }),
+  );
+  return { server, resolve, prisma, knownLocks };
 }
 
 const HOURS_BODY = {
@@ -403,6 +431,78 @@ describe("POST /api/security/mode", () => {
     const res = await request(server).post("/api/security/mode").send({ action: "away" });
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe("MODE_UNAVAILABLE");
+  });
+});
+
+// WARP-2977 P2b-2 (spec §7 route 7, DS-019): a Close up or Away answer names
+// the door locks still reported open — for someone who may read locks — and
+// never claims the rest are locked.
+describe("POST /api/security/mode — unlockedLocks", () => {
+  const LOCKS = [
+    lock("1", "Side gate", "unlatched"),
+    lock("2", "Front door lock", "locked"),
+    lock("3", "Back door lock", "unlocked"),
+    lock("4", "Cellar", "unknown"),
+    lock("5", "Garage", "unlocked", false),
+    lock("6", "Annex", null),
+  ];
+
+  it.each(["close", "away"] as const)("%s, with Devices view: the connected locks last heard open, by name, sorted", async (action) => {
+    const { server, resolve } = app(seeded(), "family", "act", NOW, { devices: true, locks: LOCKS });
+    const res = await request(server).post("/api/security/mode").send({ action });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(true);
+    expect(res.body.unlockedLocks).toEqual(["Back door lock", "Side gate"]);
+    expect(resolve).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it("…also on a changed:false answer (already closed) — the doors are still worth naming", async () => {
+    const { server } = app(seeded(), "family", "act", NOW, { devices: true, locks: LOCKS });
+    await request(server).post("/api/security/mode").send({ action: "close" });
+    const again = await request(server).post("/api/security/mode").send({ action: "close" });
+    expect(again.body).toMatchObject({ changed: false, unlockedLocks: ["Back door lock", "Side gate"] });
+  });
+
+  it("without Devices view the field is ABSENT — not even an empty list says a lock exists", async () => {
+    const { server, knownLocks } = app(seeded(), "family", "act", NOW, { devices: false, locks: LOCKS });
+    const res = await request(server).post("/api/security/mode").send({ action: "close" });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty("unlockedLocks");
+    expect(knownLocks).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ action: "resume" }],
+    [{ action: "open", for: "2h" }],
+  ])("%j carries no unlockedLocks, even with Devices view", async (body) => {
+    const w = seeded({ mode: defaultMode({ mode: "away", modeSource: "manual", manualEnd: "until_changed", setAt: at("2026-09-23", "09:00") }) });
+    const res = await request(app(w, "family", "act", NOW, { devices: true, locks: LOCKS }).server)
+      .post("/api/security/mode")
+      .send(body);
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty("unlockedLocks");
+  });
+
+  it("no lock adapter running → an empty list (nothing known to be open), never an error after the change committed", async () => {
+    const w = seeded();
+    const res = await request(app(w, "family", "act", NOW, { devices: true, locks: null }).server)
+      .post("/api/security/mode")
+      .send({ action: "close" });
+    expect(res.status).toBe(200);
+    expect(res.body.unlockedLocks).toEqual([]);
+    expect(w.mode).toMatchObject({ mode: "closed", modeSource: "manual" });
+  });
+
+  it("a lock reader that throws AFTER the commit still answers 200 with the committed mode — every 5xx means nothing changed", async () => {
+    const w = seeded();
+    const { server, knownLocks } = app(w, "family", "act", NOW, { devices: true, locks: LOCKS });
+    knownLocks.mockImplementation(() => {
+      throw new Error("adapter state unreadable");
+    });
+    const res = await request(server).post("/api/security/mode").send({ action: "close" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ changed: true, unlockedLocks: [] });
+    expect(w.mode).toMatchObject({ mode: "closed" });
   });
 });
 

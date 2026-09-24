@@ -27,6 +27,13 @@
  * changed — every 5xx here means nothing changed; an hours write that
  * committed but cannot be read back answers 200 `{hours: null, mode: null}`.
  * User text is checked with `chainSafeText` BEFORE the transaction.
+ *
+ * WARP-2977 P2b-2 — a Close up or Away answer carries `unlockedLocks`: the
+ * names of the door locks last heard open (DS-019: only for someone who may
+ * read locks; for anyone else the field is absent). It never says "all
+ * locked" — a lock that is locked, unknown, never heard or not reporting is
+ * simply not named. Read from the adapter's memory AFTER the commit, so it
+ * can never turn a committed change into an error.
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -34,7 +41,8 @@ import { z } from "zod";
 import { requireRole } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
-import type { SecurityRouteDeps } from "../services/security-access.js";
+import { mayReadLocksFor, type SecurityRouteDeps } from "../services/security-access.js";
+import { securityLockAdapter, stillUnlockedLocks } from "../services/security-lock-adapter.js";
 import { chainSafeText, hasUnsafeDisplayChars, isSecurityAuditUnavailable } from "../services/security-audit.js";
 import { businessViewForRole } from "../services/business-profile.service.js";
 import { ActivityChainPreconditionError } from "../services/activity.service.js";
@@ -263,6 +271,20 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
     }
   });
 
+  /**
+   * WARP-2977 P2b-2 — the locks a Close up / Away answer names. In-memory
+   * (the last sweep's locks and the readings last heard), and it runs after
+   * the commit: a failure here is an empty list and a log line, never a 5xx.
+   */
+  const unlockedLocksNow = (): string[] => {
+    try {
+      return stillUnlockedLocks((deps.locks ?? securityLockAdapter)()?.knownLocks() ?? []);
+    } catch (err) {
+      logger.warn({ err }, "site mode changed; the door-lock list could not be read for the answer");
+      return [];
+    }
+  };
+
   // 7 (act) — Close up / Open up / Away / Back to opening hours.
   router.post("/security/mode", ...actGate, async (req: Request, res: Response) => {
     const parsed = modeActionSchema.safeParse(req.body);
@@ -270,13 +292,21 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
       fail(res, 400, "VALIDATION_ERROR", "That isn't a mode change Droplet understands.", parsed.error.issues);
       return;
     }
+    const namesLocks = parsed.data.action === "close" || parsed.data.action === "away";
     try {
+      // BEFORE the change (DS-019): a resolver failure is a 503 with nothing
+      // changed. The act gate already resolved this request, so it is the memo.
+      const mayReadLocks = namesLocks && (await mayReadLocksFor(req, deps.resolve));
       const result = await actOnMode(prisma, requester(req), parsed.data, clock());
       if (result.status === "conflict") {
         fail(res, 409, "MODE_CONFLICT", "The mode was changed by someone else at the same moment. Try again.");
         return;
       }
-      res.json({ mode: result.mode, changed: result.changed });
+      res.json({
+        mode: result.mode,
+        changed: result.changed,
+        ...(mayReadLocks ? { unlockedLocks: unlockedLocksNow() } : {}),
+      });
     } catch (err) {
       writeFailed(res, err, "MODE_UNAVAILABLE", "site mode change");
     }
