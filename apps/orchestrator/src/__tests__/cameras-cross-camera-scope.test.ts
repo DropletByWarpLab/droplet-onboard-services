@@ -136,8 +136,10 @@ const prisma = {
     findMany: grantFindMany,
   },
   user: {
+    // WARP-2911 — DISTINCT id and username, as production rows are: the pref
+    // names its person by `User.id`, web push is keyed by `User.username`.
     findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
-      where.id.in.map((id) => ({ id, role: id.slice(2) })),
+      where.id.in.map((id) => ({ id, role: id.slice(2), username: `nc-${id.slice(2)}` })),
     ),
   },
   cameraNotificationPref: {
@@ -528,7 +530,21 @@ describe("push notifications follow grants, not just prefs", () => {
     const endpoints = vi
       .mocked(webpush.sendNotification)
       .mock.calls.map((c) => (c[0] as { endpoint: string }).endpoint);
-    expect(endpoints).toEqual(["https://fcm.googleapis.com/fcm/send/u-owner"]);
+    expect(endpoints).toEqual(["https://fcm.googleapis.com/fcm/send/nc-owner"]);
+  });
+
+  it("🔴 WARP-2911 looks the recipient's subscriptions up by USERNAME, never by the pref's User.id", async () => {
+    // `PushSubscription.username` is what the subscribe route stores. Looking
+    // it up by `CameraNotificationPref.userId` (a `User.id`) matched no row on
+    // any box where the two differ — which is every production box — so a
+    // camera detection reached nobody's phone.
+    const findMany = (prisma as unknown as { pushSubscription: { findMany: ReturnType<typeof vi.fn> } })
+      .pushSubscription.findMany;
+    findMany.mockClear();
+    await dispatchDetectionEvent(prisma, { eventId: "ev-bed-2", cameraName: "bedroom", label: "person", score: 0.9 });
+    await vi.waitFor(() => expect(findMany).toHaveBeenCalled());
+    const keys = findMany.mock.calls.map((c) => (c[0] as { where: Record<string, unknown> }).where);
+    expect(keys).toEqual([{ username: "nc-owner" }]);
   });
 });
 

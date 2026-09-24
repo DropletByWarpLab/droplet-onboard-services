@@ -21,7 +21,8 @@
  * ## What it scans
  *
  *   calls         sendNotification( / recordNotification( /
- *                 publishNotificationToast(
+ *                 publishNotificationToast( / dispatchToUser( (web push's
+ *                 own entry point; its recipient is the 2nd argument)
  *   direct writes notificationLog.create( / notificationLog.createMany( /
  *                 pushSubscription.upsert( / pushSubscription.create(
  *
@@ -174,14 +175,14 @@ interface Site {
   label: string;
 }
 
-const CALL = /(?<![\w$.])(sendNotification|recordNotification|publishNotificationToast)\s*\(/g;
+const CALL = /(?<![\w$.])(sendNotification|recordNotification|publishNotificationToast|dispatchToUser)\s*\(/g;
 const WRITE = /(?<![\w$])(notificationLog\.(?:createMany|create)|pushSubscription\.(?:upsert|create))\s*\(/g;
 
 function sitesIn(file: SourceFile): Site[] {
   const out: Site[] = [];
   for (const re of [CALL, WRITE]) {
     for (const m of file.code.matchAll(re)) {
-      // The three definitions are not call sites.
+      // The definitions themselves are not call sites.
       if (/function\s*$/.test(file.code.slice(Math.max(0, m.index! - 20), m.index!))) continue;
       const argsAt = m.index! + m[0].length;
       const end = scanTo(file.code, argsAt, ")");
@@ -203,6 +204,13 @@ const SITES = PRODUCTION.flatMap(sitesIn);
 /** Every `username` the site passes: `username: <expr>` and shorthand `username`. */
 function recipientsOf(site: Site): Array<{ expr: string; at: number }> {
   const out: Array<{ expr: string; at: number }> = [];
+  if (site.callee === "dispatchToUser") {
+    // `dispatchToUser(prisma, username, payload)` — positional.
+    const from = site.argsAt + scanTo(site.args, 0, ",") + 1;
+    const end = scanTo(site.file.code, from, ",)");
+    out.push({ expr: site.file.code.slice(from, end).trim(), at: from });
+    return out;
+  }
   for (const m of site.args.matchAll(/(?<![\w$.'"`])username\s*(:|(?=[,}\s]))/g)) {
     const keyAt = site.argsAt + m.index!;
     if (m[1] === ":") {

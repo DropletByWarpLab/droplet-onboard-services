@@ -398,13 +398,18 @@ export async function dispatchDetectionEvent(
   // per-camera grants at send time, so a person whose access was revoked
   // (or whose role dropped below owner/admin) stops being told what this
   // camera sees. Fail closed per user: an unknown user gets nothing.
+  //
+  // WARP-2911: the pref names its person by `User.id`; web push is keyed by
+  // `PushSubscription.username`. The username is selected here and is what
+  // `dispatchToUser` gets — handing it the pref's id matched no subscription
+  // on any box where the two differ, so detections reached nobody's phone.
   const users = await prisma.user.findMany({
     where: { id: { in: interestedPrefs.map((p) => p.userId) } },
-    select: { id: true, role: true },
+    select: { id: true, role: true, username: true },
   });
-  const allowed: string[] = [];
+  const allowed: typeof users = [];
   for (const u of users) {
-    if (await canAccessCamera(prisma, u, ev.cameraName)) allowed.push(u.id);
+    if (await canAccessCamera(prisma, u, ev.cameraName)) allowed.push(u);
   }
   if (allowed.length === 0) return;
 
@@ -421,9 +426,9 @@ export async function dispatchDetectionEvent(
   // Fan out per-user. We don't bother awaiting individual results —
   // dispatchToUser handles its own pruning, and the SSE handler that
   // called us is already fire-and-forget.
-  for (const userId of allowed) {
-    void dispatchToUser(prisma, userId, payload).catch((err) =>
-      logger.warn({ err, userId }, "push dispatch user-failed"),
+  for (const recipient of allowed) {
+    void dispatchToUser(prisma, recipient.username, payload).catch((err) =>
+      logger.warn({ err, username: recipient.username }, "push dispatch user-failed"),
     );
   }
 }
