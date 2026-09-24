@@ -34,6 +34,7 @@ import {
   assertNotificationData,
   NotificationRecipientError,
 } from "../services/notifications.service.js";
+import { isReservedUserId, isUserIdShaped } from "@droplet/auth-policy";
 
 function makePrismaStub() {
   const created: Array<Record<string, unknown>> = [];
@@ -441,6 +442,24 @@ describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIE
     expect(e.caller).toMatch(/notifications\.test\.ts/);
     expect(e.message).toContain(e.caller!);
     expect(e.toJSON()).toMatchObject({ code: "NOTIFICATION_RECIPIENT_IS_ID", caller: e.caller });
+  });
+
+  it("refuses EXACTLY what @droplet/auth-policy refuses to mint — creation and refusal cannot drift", () => {
+    // Every place a username is created refuses `isReservedUserId`, which
+    // includes `isUserIdShaped`. If the refusal here drifted from that shape,
+    // either a creatable username would be refused every notification, or an
+    // id would slip through. One predicate, asserted from both sides.
+    const samples = [USER_ID, USER_ID.toUpperCase(), `${USER_ID}-2`, `sso-${USER_ID}`, "dev", "alice", USER_ID.slice(1)];
+    for (const username of samples) {
+      let refused = false;
+      try {
+        publishNotificationToast(to(username));
+      } catch (e) {
+        refused = e instanceof NotificationRecipientError;
+      }
+      expect(refused, username).toBe(isUserIdShaped(username));
+      expect(isReservedUserId(username) || !refused, username).toBe(true);
+    }
   });
 
   it.each(["dev", "_service:mcp", "alice", "romain.jouffret@example.com"])(
