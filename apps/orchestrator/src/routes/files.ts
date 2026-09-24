@@ -66,6 +66,7 @@ import {
   invalidatePrefix,
 } from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   ncMintEditorSession,
   docServerHealthy,
@@ -653,21 +654,20 @@ interface DeptSearchCorpora {
  * user's LOCAL identity (same pattern as `middleware/space.ts`'s
  * `_service:mcp` handling) — the service principal's own `role: "service"`
  * must never be used for a department-membership decision. Returns null
- * when no caller identity can be resolved (fail-closed → personal corpus
- * only).
+ * when no caller identity can be resolved, or when the header names more
+ * than one person (fail-closed → personal corpus only). The header is
+ * `User.username` or `User.id`, not a Nextcloud username (WARP-3061,
+ * asserted-user.service.ts).
  */
 async function resolveSearchCaller(
   req: Request,
   prisma: PrismaClient,
 ): Promise<{ id: string; role: string } | null> {
   if (isMcpService(req)) {
-    const assertedNcUser = (req.header("x-nextcloud-user") ?? "").trim();
-    if (!assertedNcUser) return null;
-    const localUser = await prisma.user.findUnique({
-      where: { nextcloudUsername: assertedNcUser },
-      select: { id: true, role: true },
-    });
-    return localUser ? { id: localUser.id, role: localUser.role } : null;
+    const assertedUser = (req.header("x-nextcloud-user") ?? "").trim();
+    if (!assertedUser) return null;
+    const resolved = await resolveAssertedUser(prisma, assertedUser);
+    return resolved.ok ? resolved.user : null;
   }
   const id = req.user?.id;
   const role = req.user?.role;

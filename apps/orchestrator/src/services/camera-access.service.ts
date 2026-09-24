@@ -31,6 +31,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { createLogger } from "../lib/logger.js";
+import { resolveAssertedUser } from "./asserted-user.service.js";
 
 const logger = createLogger("camera-access");
 
@@ -57,8 +58,9 @@ const UNRESTRICTED_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
  * WARP-1975 closes that. The principal now resolves the **acting user**
  * from the `X-Nextcloud-User` header the MCP server already asserts, the
  * same mechanism `middleware/space.ts` uses for department access, and
- * scopes to that human's grants. It fails CLOSED when the header is absent
- * or names nobody — a tool that cannot say who is asking gets nothing.
+ * scopes to that human's grants. It fails CLOSED when the header is absent,
+ * names nobody, or names more than one person (WARP-3061) — a tool that
+ * cannot say who is asking gets nothing.
  */
 const MCP_SERVICE_ID = "_service:mcp";
 
@@ -66,19 +68,21 @@ export interface AccessPrincipal {
   id?: string;
   role?: string;
   /**
-   * The Nextcloud username the MCP server asserts on behalf of the human
-   * who asked. Only consulted for `_service:mcp`; ignored for everyone
+   * The acting human the MCP server asserts in `X-Nextcloud-User`. Despite
+   * the header's name this is `User.username` (stdio) or `User.id` (HTTP
+   * transport), not a Nextcloud username — see asserted-user.service.ts
+   * (WARP-3061). Only consulted for `_service:mcp`; ignored for everyone
    * else, so a header cannot be used to impersonate.
    */
-  assertedNextcloudUser?: string | null;
+  assertedUser?: string | null;
 }
 
 /**
  * Lift the principal to scope by out of a request.
  *
  * For a human this is just `req.user`. For `_service:mcp` it carries the
- * asserted Nextcloud username through so `visibleCameraNames` can resolve
- * the human behind the tool call.
+ * asserted user through so `visibleCameraNames` can resolve the human
+ * behind the tool call.
  */
 export function principalFromRequest(req: {
   user?: { id?: string; role?: string };
@@ -87,7 +91,7 @@ export function principalFromRequest(req: {
   return {
     id: req.user?.id,
     role: req.user?.role,
-    assertedNextcloudUser: req.header?.("x-nextcloud-user")?.trim() || null,
+    assertedUser: req.header?.("x-nextcloud-user")?.trim() || null,
   };
 }
 
@@ -106,23 +110,22 @@ export async function visibleCameraNames(
 
   // Resolve the human behind a tool call. Same assertion mechanism as
   // middleware/space.ts, and the same posture: no asserted user, or one
-  // that resolves to nobody, means NOTHING — never everything. A tool that
-  // cannot say who is asking has not earned an answer.
+  // that resolves to nobody or to more than one person, means NOTHING —
+  // never everything. A tool that cannot say who is asking has not earned
+  // an answer.
   let scopeUserId = user.id;
   if (user.id === MCP_SERVICE_ID) {
-    const asserted = user.assertedNextcloudUser;
+    const asserted = user.assertedUser;
     if (!asserted) {
       logger.warn("MCP camera access with no asserted user; denying");
       return new Set();
     }
-    const acting = await prisma.user.findUnique({
-      where: { nextcloudUsername: asserted },
-      select: { id: true, role: true },
-    });
-    if (!acting) {
-      logger.warn({ asserted }, "MCP asserted a user that is not provisioned; denying");
+    const resolved = await resolveAssertedUser(prisma, asserted);
+    if (!resolved.ok) {
+      logger.warn({ asserted, reason: resolved.reason }, "MCP asserted user did not resolve to one person; denying");
       return new Set();
     }
+    const acting = resolved.user;
     // The acting human's OWN role decides — an owner asking through the
     // assistant still sees everything, a family member does not.
     if (UNRESTRICTED_ROLES.has(acting.role)) return "all";
@@ -277,7 +280,7 @@ export function requireCameraAccess(
     // sends it hunting for a camera-name problem it does not have. Say the
     // real thing; it discloses nothing a service principal cannot already
     // learn from any other route.
-    if (principal.id === MCP_SERVICE_ID && !principal.assertedNextcloudUser) {
+    if (principal.id === MCP_SERVICE_ID && !principal.assertedUser) {
       logger.warn({ path: req.path }, "MCP camera request with no asserted user");
       res.status(401).json({
         error: "no_asserted_user",

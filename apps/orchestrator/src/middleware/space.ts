@@ -16,8 +16,9 @@
  *   family       | pass     | pass iff membership.right >= minRight   | 403                                 | 403
  *   guest        | pass     | pass iff member AND minRight === reader | 403                                 | 403
  *   `_service:mcp`| pass    | asserted user's (X-Nextcloud-User →     | 403                                 | 403
- *                |          | local User) membership checked, same    |                                     |
- *                |          | rule as family/guest above              |                                     |
+ *                |          | exactly one local User, see             |                                     |
+ *                |          | asserted-user.service.ts) membership    |                                     |
+ *                |          | checked, same rule as family/guest above|                                     |
  *   other service| pass     | 403 (no asserted user to check)         | 403                                 | 403
  *
  * Membership lookup is ONE indexed `findUnique` — no Redis ACL cache, so
@@ -43,6 +44,7 @@ import { z } from "zod";
 import { recordAccessDenied } from "./auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("space-access");
@@ -397,26 +399,31 @@ export function requireSpaceAccess(
       if (role === "service") {
         if (userId === "_service:mcp") {
           if (token.kind !== "personal") {
-            const assertedNcUser = (req.header("x-nextcloud-user") ?? "").trim();
-            if (!assertedNcUser) {
+            const assertedUser = (req.header("x-nextcloud-user") ?? "").trim();
+            if (!assertedUser) {
               recordAccessDenied(req, "space-mcp-no-asserted-user");
               res
                 .status(403)
                 .json({ error: "Forbidden: no asserted user for space access" });
               return;
             }
-            const localUser = await prisma.user.findUnique({
-              where: { nextcloudUsername: assertedNcUser },
-              select: { id: true, role: true },
-            });
-            if (!localUser) {
-              recordAccessDenied(req, "space-mcp-unresolved-asserted-user");
+            // WARP-3061: the header is `User.username` or `User.id`, never
+            // only `nextcloudUsername` (NULL for SSO / SCIM rows). Nobody, or
+            // more than one person, is refused.
+            const resolved = await resolveAssertedUser(prisma, assertedUser);
+            if (!resolved.ok) {
+              recordAccessDenied(
+                req,
+                resolved.reason === "ambiguous"
+                  ? "space-mcp-ambiguous-asserted-user"
+                  : "space-mcp-unresolved-asserted-user",
+              );
               res
                 .status(403)
                 .json({ error: "Forbidden: asserted user not provisioned" });
               return;
             }
-            caller = { id: localUser.id, role: localUser.role };
+            caller = { id: resolved.user.id, role: resolved.user.role };
           }
         } else if (token.kind !== "personal") {
           recordAccessDenied(req, "space-service-denied");

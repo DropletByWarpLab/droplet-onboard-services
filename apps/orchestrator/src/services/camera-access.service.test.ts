@@ -17,10 +17,17 @@ import {
   setGrantsForUser,
   visibleCameraNames,
 } from "./camera-access.service.js";
+import { userDirectory, type DirectoryUser } from "../__tests__/helpers/user-directory.js";
 
 type Grant = { camera: { name: string } };
 
-function prismaWith(grantsByUser: Record<string, string[]>) {
+/** Nextcloud-mirror rows: `username` and `nextcloudUsername` agree. */
+const NC_MIRROR_USERS: DirectoryUser[] = [
+  { id: "u-sam", username: "sam", nextcloudUsername: "sam", role: "family" },
+  { id: "u-owner", username: "stefan", nextcloudUsername: "stefan", role: "owner" },
+];
+
+function prismaWith(grantsByUser: Record<string, string[]>, users = NC_MIRROR_USERS) {
   return {
     cameraAccessGrant: {
       findMany: vi.fn(async ({ where }: { where: { userId: string } }): Promise<Grant[]> =>
@@ -36,19 +43,7 @@ function prismaWith(grantsByUser: Record<string, string[]>) {
           .map((n) => ({ id: `id-${n}`, name: n })),
       ),
     },
-    user: {
-      findUnique: vi.fn(async ({ where }: { where: { nextcloudUsername?: string; id?: string } }) => {
-        if (where.id) {
-          const roles: Record<string, string> = { "u-sam": "family", "u-owner": "owner" };
-          return roles[where.id] ? { id: where.id, role: roles[where.id] } : null;
-        }
-        const dir: Record<string, { id: string; role: string }> = {
-          sam: { id: "u-sam", role: "family" },
-          stefan: { id: "u-owner", role: "owner" },
-        };
-        return dir[where.nextcloudUsername ?? ""] ?? null;
-      }),
-    },
+    user: userDirectory(users),
     cameraNotificationPref: {
       deleteMany: vi.fn(async (args: unknown) => args),
     },
@@ -189,10 +184,10 @@ describe("granting", () => {
 });
 
 describe("WARP-1975: the assistant is scoped to whoever is asking", () => {
-  const mcp = (assertedNextcloudUser: string | null) => ({
+  const mcp = (assertedUser: string | null) => ({
     id: "_service:mcp",
     role: "service",
-    assertedNextcloudUser,
+    assertedUser,
   });
 
   it("scopes to the acting human's grants, not to everything", async () => {
@@ -229,9 +224,95 @@ describe("WARP-1975: the assistant is scoped to whoever is asking", () => {
     // Otherwise anyone could set X-Nextcloud-User and impersonate.
     const visible = await visibleCameraNames(PRISMA(), {
       ...SAM,
-      assertedNextcloudUser: "stefan",
+      assertedUser: "stefan",
     });
     expect(visible).not.toBe("all");
+  });
+});
+
+describe("WARP-3061: the assistant resolves SSO / SCIM users too", () => {
+  // SSO- and SCIM-created rows authenticate through the IdP only, so their
+  // `nextcloudUsername` is NULL. The header names them by `User.username`
+  // (stdio: chat, agent runs) or `User.id` (the HTTP transport).
+  const MARIA: DirectoryUser = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "family" };
+  const OLIVIA: DirectoryUser = { id: "u-olivia", username: "olivia", nextcloudUsername: null, role: "owner" };
+  const GRANTS = { "u-maria": ["front_door"] };
+
+  /** The principal exactly as a camera route lifts it off an MCP request. */
+  const askedAs = (asserted: string) =>
+    principalFromRequest({
+      user: { id: "_service:mcp", role: "service" },
+      header: (n: string) => (n === "x-nextcloud-user" ? asserted : undefined),
+    });
+
+  const names = (scope: "all" | Set<string>) => (scope === "all" ? "all" : [...scope].sort());
+
+  it("scopes an SSO family member, named by username, to their grant", async () => {
+    const prisma = prismaWith(GRANTS, [MARIA]);
+    expect(names(await visibleCameraNames(prisma, askedAs("maria")))).toEqual(["front_door"]);
+  });
+
+  it("scopes them the same when the HTTP transport names them by User.id", async () => {
+    const prisma = prismaWith(GRANTS, [MARIA]);
+    expect(names(await visibleCameraNames(prisma, askedAs("u-maria")))).toEqual(["front_door"]);
+  });
+
+  it("gives an SSO owner asking through the assistant everything", async () => {
+    expect(await visibleCameraNames(prismaWith({}, [OLIVIA]), askedAs("olivia"))).toBe("all");
+  });
+
+  it("still resolves a Nextcloud-mirror row by nextcloudUsername after its username was edited", async () => {
+    const renamed: DirectoryUser = { id: "u-sam", username: "samuel", nextcloudUsername: "sam", role: "family" };
+    const prisma = prismaWith({ "u-sam": ["driveway"] }, [renamed]);
+    expect(names(await visibleCameraNames(prisma, askedAs("sam")))).toEqual(["driveway"]);
+  });
+
+  it("resolves one row matched by two columns as that one person", async () => {
+    // A Nextcloud-mirror row: `username` and `nextcloudUsername` both say "sam".
+    expect(names(await visibleCameraNames(PRISMA(), askedAs("sam")))).toEqual(["driveway", "front_door"]);
+  });
+
+  it("denies when the value is one person's username and ANOTHER person's nextcloudUsername", async () => {
+    // Nothing says which of them is asking. Picking one acts for the wrong
+    // person with the wrong person's reach: before WARP-3061 this resolved
+    // to the OWNER below and handed a family member every camera.
+    const marianne: DirectoryUser = { id: "u-marianne", username: "marianne", nextcloudUsername: "maria", role: "owner" };
+    const prisma = prismaWith(GRANTS, [MARIA, marianne]);
+    expect(names(await visibleCameraNames(prisma, askedAs("maria")))).toEqual([]);
+  });
+
+  it("denies when the value is one person's User.id and ANOTHER person's username", async () => {
+    const lookalike: DirectoryUser = { id: "u-other", username: "u-maria", nextcloudUsername: null, role: "family" };
+    const prisma = prismaWith({ ...GRANTS, "u-other": ["driveway"] }, [MARIA, lookalike]);
+    expect(names(await visibleCameraNames(prisma, askedAs("u-maria")))).toEqual([]);
+  });
+
+  it("denies a value that names nobody", async () => {
+    expect(names(await visibleCameraNames(prismaWith(GRANTS, [MARIA]), askedAs("nobody")))).toEqual([]);
+  });
+
+  it("lets the route guard through to a granted camera and 404s the rest", async () => {
+    const prisma = prismaWith(GRANTS, [MARIA]);
+    const guard = (camera: string) => {
+      const req = {
+        params: { name: camera },
+        user: { id: "_service:mcp", role: "service" },
+        header: (n: string) => (n === "x-nextcloud-user" ? "maria" : undefined),
+        route: { path: "/cameras/:name/snapshot" },
+      } as never;
+      const json = vi.fn();
+      const status = vi.fn(() => ({ json }));
+      const next = vi.fn();
+      requireCameraAccess(prisma)(req, { status, json, locals: {} } as never, next);
+      return { status, next };
+    };
+
+    const granted = guard("front_door");
+    await vi.waitFor(() => expect(granted.next).toHaveBeenCalled());
+
+    const other = guard("bedroom");
+    await vi.waitFor(() => expect(other.status).toHaveBeenCalledWith(404));
+    expect(other.next).not.toHaveBeenCalled();
   });
 });
 
@@ -241,7 +322,7 @@ describe("principalFromRequest", () => {
       user: { id: "_service:mcp", role: "service" },
       header: (n: string) => (n === "x-nextcloud-user" ? "  sam  " : undefined),
     });
-    expect(p.assertedNextcloudUser).toBe("sam");
+    expect(p.assertedUser).toBe("sam");
   });
 
   it("treats a blank header as absent", () => {
@@ -249,7 +330,7 @@ describe("principalFromRequest", () => {
       user: { id: "_service:mcp", role: "service" },
       header: () => "   ",
     });
-    expect(p.assertedNextcloudUser).toBeNull();
+    expect(p.assertedUser).toBeNull();
   });
 });
 

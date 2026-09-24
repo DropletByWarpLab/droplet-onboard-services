@@ -114,6 +114,7 @@ import {
   resolveDepartmentIdForSpaceReadOnly,
   type SpaceAccessCaller,
 } from "../middleware/space.js";
+import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
 // ── Mock Prisma ──────────────────────────────────────────────────────
 
@@ -127,16 +128,10 @@ interface MembershipRow {
   userId: string;
   right: string;
 }
-interface UserRow {
-  id: string;
-  nextcloudUsername: string;
-  role: string;
-}
-
 function createMockPrisma() {
   const departments = new Map<string, DeptRow>();
   const memberships = new Map<string, MembershipRow>();
-  const users = new Map<string, UserRow>();
+  const users = new Map<string, DirectoryUser>();
 
   const self = {
     department: {
@@ -164,16 +159,7 @@ function createMockPrisma() {
         },
       ),
     },
-    user: {
-      findUnique: vi.fn(
-        async ({ where }: { where: { nextcloudUsername: string } }) => {
-          for (const u of users.values()) {
-            if (u.nextcloudUsername === where.nextcloudUsername) return { ...u };
-          }
-          return null;
-        },
-      ),
-    },
+    user: userDirectory(() => [...users.values()]),
   };
 
   return {
@@ -200,8 +186,12 @@ function seedMembership(
   memberships.set(`${row.departmentId}:${row.userId}`, row);
 }
 
-function seedUser(users: Map<string, UserRow>, row: UserRow): void {
-  users.set(row.id, row);
+/** `username` defaults to `nextcloudUsername`: a Nextcloud-mirror row. */
+function seedUser(
+  users: Map<string, DirectoryUser>,
+  row: Omit<DirectoryUser, "username"> & { username?: string },
+): void {
+  users.set(row.id, { ...row, username: row.username ?? row.nextcloudUsername ?? row.id });
 }
 
 function buildReq(
@@ -620,6 +610,97 @@ describe("requireSpaceAccess middleware", () => {
       const next = vi.fn() as unknown as NextFunction;
       await mw(req, res, next);
       expect((res as unknown as { statusCode: number }).statusCode).toBe(403);
+    });
+
+    // WARP-3061 — the header names the person by `User.username` (stdio) or
+    // `User.id` (HTTP transport), never by `nextcloudUsername`, which is NULL
+    // for every SSO- and SCIM-created row.
+    describe("WARP-3061: SSO / SCIM users asking through the assistant", () => {
+      function askAs(asserted: string) {
+        return buildReq({
+          user: { id: "_service:mcp", role: "service" },
+          query: { space: `dept:${DEPT_UUID}` },
+          headers: { "x-nextcloud-user": asserted },
+        });
+      }
+
+      async function run(prisma: PrismaClient, asserted: string) {
+        const req = askAs(asserted);
+        const res = buildRes();
+        const next = vi.fn() as unknown as NextFunction;
+        await requireSpaceAccess(prisma, "reader")(req, res as unknown as Response, next);
+        return { req, res, next };
+      }
+
+      function deniedFor(reason: string) {
+        return expect.objectContaining({
+          severity: "warn",
+          refs: expect.objectContaining({ reason }),
+        });
+      }
+
+      it("admits an SSO member (nextcloudUsername NULL) named by username", async () => {
+        const { prisma, departments, memberships, users } = createMockPrisma();
+        seedDept(departments, { id: DEPT_UUID });
+        seedUser(users, { id: "u-maria", username: "maria", nextcloudUsername: null, role: "family" });
+        seedMembership(memberships, { departmentId: DEPT_UUID, userId: "u-maria", right: "reader" });
+
+        const { req, next } = await run(prisma, "maria");
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(req.spaceDepartmentId).toBe(DEPT_UUID);
+      });
+
+      it("admits the same member named by User.id (HTTP transport)", async () => {
+        const { prisma, departments, memberships, users } = createMockPrisma();
+        seedDept(departments, { id: DEPT_UUID });
+        seedUser(users, { id: "u-maria", username: "maria", nextcloudUsername: null, role: "family" });
+        seedMembership(memberships, { departmentId: DEPT_UUID, userId: "u-maria", right: "reader" });
+
+        const { next } = await run(prisma, "u-maria");
+        expect(next).toHaveBeenCalledTimes(1);
+      });
+
+      it("still checks the resolved person's membership — an SSO non-member is refused", async () => {
+        const { prisma, departments, users } = createMockPrisma();
+        seedDept(departments, { id: DEPT_UUID });
+        seedUser(users, { id: "u-maria", username: "maria", nextcloudUsername: null, role: "family" });
+
+        const { res, next } = await run(prisma, "maria");
+        expect(res.statusCode).toBe(403);
+        expect(next).not.toHaveBeenCalled();
+        expect(recordActivityMock).toHaveBeenCalledWith(deniedFor("space-not-member"));
+      });
+
+      it("refuses a value that is one person's username and ANOTHER person's nextcloudUsername", async () => {
+        // Before WARP-3061 this resolved to marianne by nextcloudUsername and
+        // checked HER membership, so maria's question was answered with
+        // marianne's department.
+        const { prisma, departments, memberships, users } = createMockPrisma();
+        seedDept(departments, { id: DEPT_UUID });
+        seedUser(users, { id: "u-maria", username: "maria", nextcloudUsername: null, role: "family" });
+        seedUser(users, { id: "u-marianne", username: "marianne", nextcloudUsername: "maria", role: "family" });
+        seedMembership(memberships, { departmentId: DEPT_UUID, userId: "u-marianne", right: "manager" });
+
+        const { res, next } = await run(prisma, "maria");
+        expect(res.statusCode).toBe(403);
+        expect(next).not.toHaveBeenCalled();
+        expect(recordActivityMock).toHaveBeenCalledWith(
+          deniedFor("space-mcp-ambiguous-asserted-user"),
+        );
+        // Refused before any membership is read: no person was established.
+        expect(prisma.departmentMembership.findUnique).not.toHaveBeenCalled();
+      });
+
+      it("audits a value that names nobody as unresolved", async () => {
+        const { prisma, departments } = createMockPrisma();
+        seedDept(departments, { id: DEPT_UUID });
+
+        const { res } = await run(prisma, "nobody");
+        expect(res.statusCode).toBe(403);
+        expect(recordActivityMock).toHaveBeenCalledWith(
+          deniedFor("space-mcp-unresolved-asserted-user"),
+        );
+      });
     });
 
     it("a non-mcp service principal 403s on any dept space", async () => {
