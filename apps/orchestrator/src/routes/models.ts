@@ -7,7 +7,9 @@
  * PATCH /api/models/active  (WRITE, owner/admin) — change the active local
  *                    chat model. Validates the tag is actually installed,
  *                    persists it to the `ai.model.chat` WorkspaceSetting, and
- *                    audits the change (ActivityRow). WARP-1112.
+ *                    audits the change (ActivityRow). WARP-1112. WARP-3047:
+ *                    and REALLY swaps — unloads the other resident models via
+ *                    the inference-manager, then warms the new one.
  *
  * The one-model rule (WARP-836) is retired for *selection among installed
  * models*: this endpoint only ever points chat at a model already on the
@@ -50,6 +52,12 @@ import {
   benchCacheKey,
   BENCH_CACHE_TTL,
 } from "../services/model-benchmark.service.js";
+import { isLocalProvider } from "../services/cloud-access.service.js";
+import { warmDefaultModel } from "../services/model-readiness.service.js";
+import {
+  unloadAllExcept,
+  type ResidencyReport,
+} from "../services/model-residency.service.js";
 import {
   fetchEligibleCatalog,
   openPullStream,
@@ -176,15 +184,29 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         // WARP-2882: the caller may send the runtime id or the display name;
         // what gets PERSISTED is always the runtime id.
         let tag: string | null;
+        let localListingDegraded = false;
         try {
           const listed = await aiGateway.listModels();
           tag = resolveLocalModelId(listed.models, ref);
+          localListingDegraded =
+            listed.degraded_providers?.some(isLocalProvider) ?? false;
         } catch (err) {
           logger.warn({ err }, "PATCH /models/active: gateway unreachable");
           return res.status(503).json({
             error: "ai_service_unreachable",
             detail:
               "Couldn't reach the AI service to confirm the model is installed. Try again in a moment.",
+          });
+        }
+
+        // WARP-3047 — the gateway answered but its LOCAL provider raised
+        // while listing: a model missing from that partial list is
+        // "couldn't confirm", not "isn't installed" (same rule as filing).
+        if (!tag && localListingDegraded) {
+          return res.status(503).json({
+            error: "ai_service_unreachable",
+            detail:
+              "Couldn't read this Droplet's installed models to confirm the choice. Try again in a moment.",
           });
         }
 
@@ -230,7 +252,37 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           },
         });
 
-        res.json({ activeModel: tag, changed: true });
+        // WARP-3047 — a REAL swap, not just a settings row. Docker Model
+        // Runner has no memory-aware eviction: the old model would stay
+        // resident and the new one load NEXT TO it until the GPU ran out.
+        // So the inference-manager (lifecycle owner — no chat goes through
+        // it) unloads every other resident model first. `previous` is not
+        // trusted for this — a blank row still has LLM_MODEL resident — so
+        // the sidecar reads what is actually resident. It reports anything it
+        // could not evict (a model mid-request) instead of pretending. Never
+        // fatal: the choice stands, and an idle model times out on its own.
+        let swap: ResidencyReport | null = null;
+        try {
+          swap = await unloadAllExcept(tag);
+          if (swap.stillResident.length > 0) {
+            logger.warn(
+              { model: tag, stillResident: swap.stillResident },
+              "PATCH /models/active: other models still resident (busy) — they unload when idle",
+            );
+          }
+        } catch (err) {
+          logger.warn({ err, model: tag }, "PATCH /models/active: couldn't unload the other models");
+        }
+
+        res.json({ activeModel: tag, changed: true, swap });
+
+        // Then load the new model so the first ask after the switch doesn't
+        // pay the cold load. After the response (never stalls the PATCH);
+        // `force` because an earlier warm of this model may have been undone
+        // by a swap away and back inside the debounce window.
+        setImmediate(() => {
+          void warmDefaultModel(tag, { force: true }).catch(() => undefined);
+        });
       } catch (err) {
         logger.warn({ err }, "PATCH /models/active failed");
         next(err);
@@ -240,8 +292,10 @@ export function createModelsRouter(prisma: PrismaClient): Router {
 
   // ── POST /api/models/:name/benchmark ─────────────────────────────
   // Measure a local model's tokens/sec (WARP-836). owner/admin, explicit:
-  // benchmarking loads the model, which (max_loaded_models=1) can evict the
-  // resident chat model — so this is never automatic. Runs a short fixed
+  // benchmarking LOADS the model — on Ollama (max_loaded_models=1) that
+  // evicts the resident chat model, and on DMR (no memory-aware eviction,
+  // WARP-3047) it loads next to it and fails if both don't fit — so this is
+  // never automatic. Runs a short fixed
   // generation, reads Ollama's own decode timing, caches the result, and
   // busts the page cache so the next GET shows the number.
   router.post(

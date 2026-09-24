@@ -123,14 +123,21 @@ export function resetWarmStateForTests(): void {
  * is where "not enough GPU memory to load the model" shows up — a model that
  * doesn't fit must be visible, not a debug line nobody reads.
  */
-export async function warmDefaultModel(model?: string | null): Promise<void> {
+export async function warmDefaultModel(
+  model?: string | null,
+  opts: { force?: boolean } = {},
+): Promise<void> {
   const target = (model ?? "").trim();
   if (!target) {
     logger.debug("no active model resolved — skipping model warm");
     return;
   }
   const now = Date.now();
-  if (now - (lastWarmAttemptAt.get(target) ?? 0) < WARM_DEBOUNCE_MS) {
+  // `force` is for the owner's explicit, audited model switch only
+  // (PATCH /models/active): an earlier warm of this model may since have been
+  // unloaded by a swap away and back, so the debounce would skip a warm that
+  // is needed. Every automatic trigger (login, setup, boot) stays debounced.
+  if (!opts.force && now - (lastWarmAttemptAt.get(target) ?? 0) < WARM_DEBOUNCE_MS) {
     return;
   }
   // Stamp at attempt start so concurrent triggers debounce against the

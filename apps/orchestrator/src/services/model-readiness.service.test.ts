@@ -333,6 +333,21 @@ describe("model-readiness warmDefaultModel (WARP-1041)", () => {
     expect(warmRequests(fetchMock)).toEqual(["gpt-oss:20b", "qwen3:8b"]);
   });
 
+  it("force: an explicit model switch warms even inside the debounce window (WARP-3047)", async () => {
+    // A→B→A→B within ten minutes: B's earlier warm is stale — the swap back
+    // to A unloaded it — so the owner's switch must not be debounced away.
+    vi.useFakeTimers();
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(okJsonResponse());
+
+    await warmDefaultModel("qwen3:8b");
+    await vi.advanceTimersByTimeAsync(60_000);
+    await warmDefaultModel("qwen3:8b"); // login/setup trigger: debounced
+    await warmDefaultModel("qwen3:8b", { force: true }); // the switch: not
+
+    expect(warmRequests(fetchMock)).toEqual(["qwen3:8b", "qwen3:8b"]);
+  });
+
   it("logs a non-2xx at WARN with the status and the runtime's reason, and lets the NEXT trigger retry", async () => {
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValue({
