@@ -33,6 +33,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { createLogger } from "../lib/logger.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
+import { modelListGeneration } from "../services/model-list-generation.js";
 import {
   getModelsPagePayload,
   overlayCloudState,
@@ -82,12 +83,16 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         // takes effect immediately without a cache-invalidation dance.
         let payload = await cacheGet<ModelsPagePayload>(MODELS_PAGE_CACHE_KEY);
         if (!payload) {
+          const generation = modelListGeneration();
           payload = await getModelsPagePayload();
           // WARP-1289: never cache a degraded payload (same rule as
           // GET /api/llm/models under WARP-1284) — the next request retries
           // the gateway so the page self-heals the moment the AI service is
           // reachable again, instead of pinning "unreachable" for a TTL.
-          if (!payload.degraded) {
+          // WARP-3046: nor one a finished download overtook — its list
+          // predates the new model, and the pull's bust has already run
+          // (model-list-generation.ts). This caller still gets it.
+          if (!payload.degraded && generation === modelListGeneration()) {
             await cacheSet(MODELS_PAGE_CACHE_KEY, payload, MODELS_PAGE_CACHE_TTL);
           }
         }
@@ -543,7 +548,11 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           // the chat picker's `llm:models` was never busted — the model had
           // just left "Available to install", so it looked like it vanished
           // for ~90 s. The gateway goes FIRST: dropping our caches before it
-          // lets a racing read re-fill them from the pre-pull listing.
+          // lets a new read re-fill them from its pre-pull listing. And
+          // `refreshModels()` bumps the model-list generation between the
+          // two, so a read ALREADY in flight when the download finished
+          // cannot write its pre-pull list back after the busts below
+          // (model-list-generation.ts).
           try {
             await aiGateway.refreshModels();
           } catch (err) {

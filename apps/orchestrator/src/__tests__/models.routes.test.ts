@@ -136,6 +136,7 @@ import {
   type ModelsPagePayload,
 } from "../services/models-summary.service.js";
 import { benchCacheKey } from "../services/model-benchmark.service.js";
+import { markModelListChanged } from "../services/model-list-generation.js";
 
 /**
  * Minimal prisma stub backing the `ai.model.chat` WorkspaceSetting. Starts at
@@ -528,6 +529,22 @@ describe("WARP-471 — /api/models route", () => {
     expect(res.status).toBe(200);
     expect(res.body.degraded).toBe(false);
     expect(vi.mocked(cacheSet)).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache a payload whose gateway read a model refresh overtook (WARP-3046)", async () => {
+    // A download finished (and busted `models:page`) while this read was in
+    // flight: its list predates the new model. Serve it to this caller, but
+    // writing it back would hide the model again for the full 30 s TTL.
+    const { cacheSet } = await import("../services/cache.service.js");
+    listModelsMock.mockImplementationOnce(async () => {
+      markModelListChanged();
+      return { models: [] };
+    });
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.degraded).toBe(false);
+    expect(vi.mocked(cacheSet)).not.toHaveBeenCalled();
   });
 
   it("PATCH /api/models 404s — read-only enforcement", async () => {

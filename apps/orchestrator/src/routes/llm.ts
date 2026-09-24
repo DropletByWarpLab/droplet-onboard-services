@@ -18,6 +18,7 @@ import {
   decideVisionRoute,
 } from "../services/vision-attachments.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { modelListGeneration } from "../services/model-list-generation.js";
 import { completeOnce } from "../services/llm-complete.service.js";
 import {
   runAgent,
@@ -918,6 +919,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
 
       let models: ModelsResponse;
+      const generation = modelListGeneration();
       try {
         models = await aiGateway.listModels();
       } catch (err) {
@@ -960,7 +962,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.json(await forCaller(await stampDefault({ ...models, degraded: true }, true)));
         return;
       }
-      await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
+      // WARP-3046: a download that finished while this read was in flight
+      // has already busted this key; its list predates the new model, so
+      // serve it without caching it (model-list-generation.ts).
+      if (generation === modelListGeneration()) {
+        await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
+      }
       res.json(await forCaller(await stampDefault(models)));
     } catch (err) {
       next(err);

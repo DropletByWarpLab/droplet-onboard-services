@@ -5,6 +5,7 @@ import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { markModelListChanged } from "../services/model-list-generation.js";
 
 import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
 import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
@@ -313,6 +314,24 @@ describe("LLM routes", () => {
         expect.objectContaining({ models: expect.any(Array) }),
         expect.any(Number)
       );
+    });
+
+    it("does not cache a list whose gateway read a model refresh overtook (WARP-3046)", async () => {
+      // A download finished (and busted `llm:models`) while this read was in
+      // flight: the list predates the new model. The caller still gets it,
+      // but caching it would drop the model from the chat picker for 30 s.
+      mockListModels.mockImplementationOnce(async () => {
+        markModelListChanged();
+        return {
+          models: [
+            { id: "llama3:8b", provider: "ollama", name: "llama3:8b", context_window: null },
+          ],
+        };
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.models).toHaveLength(1);
+      expect(mockCacheSet).not.toHaveBeenCalled();
     });
   });
 
