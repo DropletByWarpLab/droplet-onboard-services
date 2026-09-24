@@ -684,9 +684,12 @@ const ALLOWED: ReadonlyArray<{ file: string; expr: string; reason: string }> = [
 /** Sites whose argument is not an object literal — they forward an already-guarded input. */
 const FORWARDERS: ReadonlyArray<{ file: string; callee: string; reason: string }> = [
   {
+    // WARP-2804 — record, then deliver: sendNotification hands its input to
+    // the durable half, and deliverNotification reads the recipient back from
+    // that row (`row.username`, checked below like any other site).
     file: "orchestrator:services/notifications.service.ts",
-    callee: "publishNotificationToast",
-    reason: "sendNotification hands its own DispatchInput to the toast half after guarding it",
+    callee: "recordNotification",
+    reason: "sendNotification hands its own DispatchInput to the durable half after guarding it",
   },
 ];
 

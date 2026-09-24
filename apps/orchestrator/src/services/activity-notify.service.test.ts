@@ -344,6 +344,40 @@ describe("exactly-once and the settle window", () => {
   });
 });
 
+describe("WARP-2804 — each toast carries the id of the row recorded for it", () => {
+  it("so the toaster can acknowledge exactly the notification it shows", async () => {
+    let n = 0;
+    recordMock.mockImplementation(async () => ({ id: `log-${++n}` }));
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "assigned" }),
+        pmRow({ id: "a2", workItemId: "w2", verb: "assigned" }),
+      ],
+      assignees: [
+        { workItemId: "w1", userId: "u-bob" },
+        { workItemId: "w2", userId: "u-carol" },
+      ],
+      users: [
+        { id: "u-bob", username: "bob" },
+        { id: "u-carol", username: "carol" },
+      ],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledTimes(2);
+    // Pair each toast with the row recorded for the same recipient.
+    const recorded = await Promise.all(
+      recordMock.mock.calls.map(async (c: any, i: number) => ({
+        username: c[1].username,
+        id: (await recordMock.mock.results[i]!.value).id,
+      })),
+    );
+    const toasts = publishMock.mock.calls.map((c: any) => ({ username: c[0].username, id: c[0].id }));
+    expect(toasts.sort((a, b) => a.username.localeCompare(b.username))).toEqual(
+      recorded.sort((a, b) => a.username.localeCompare(b.username)),
+    );
+  });
+});
+
 describe("containment", () => {
   it("a failed toast does not roll back the claim or the durable log row", async () => {
     publishMock.mockReturnValue({ channels: [], errors: ["toast: mqtt_unavailable"] });

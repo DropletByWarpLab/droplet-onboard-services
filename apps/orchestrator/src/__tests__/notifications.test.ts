@@ -27,7 +27,8 @@ vi.mock("web-push", () => ({
 
 import {
   sendNotification,
-  listRecentNotifications,
+  deliverNotification,
+  listNotifications,
   publishNotificationToast,
   recordNotification,
   assertNotificationLink,
@@ -36,21 +37,18 @@ import {
   notifyOwnersAndAdmins,
 } from "../services/notifications.service.js";
 import { isReservedUserId, isUserIdShaped } from "@droplet/auth-policy";
+import { makeFakeNotificationLog } from "./helpers/fake-notification-log.js";
 
+/** WARP-2804 — the log is an evaluating fake: `sendNotification` now records
+ *  the row first (create), reads it back and stamps the outcome on it
+ *  (update), so `_created[0]` is the row as it stands after delivery. */
 function makePrismaStub() {
-  const created: Array<Record<string, unknown>> = [];
+  const log = makeFakeNotificationLog();
   const stub = {
-    notificationLog: {
-      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
-        const row = { id: `log-${created.length + 1}`, ...data };
-        created.push(row);
-        return row;
-      }),
-      findMany: vi.fn(async () => created.slice().reverse()),
-    },
-    _created: created,
+    notificationLog: log.delegate,
+    _created: log.rows as unknown as Array<Record<string, unknown>>,
   };
-  return stub as unknown as PrismaClient & { _created: typeof created };
+  return stub as unknown as PrismaClient & { _created: Array<Record<string, unknown>> };
 }
 
 /** The same stub plus the two delegates web push needs: a persisted VAPID
@@ -178,20 +176,20 @@ describe("sendNotification", () => {
   });
 });
 
-describe("listRecentNotifications", () => {
-  it("clamps limit between 1 and 200", async () => {
+describe("listNotifications — the limit", () => {
+  it("clamps limit between 1 and 200 (one extra row is read to know whether there is a next page)", async () => {
     const prisma = makePrismaStub();
-    await listRecentNotifications(prisma, "alice", 9999);
+    await listNotifications(prisma, "alice", { limit: 9999 });
     expect(prisma.notificationLog.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 200 }),
+      expect.objectContaining({ take: 201 }),
     );
     // WARP-2911 — read back by the recipient's username.
     expect(prisma.notificationLog.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { username: "alice" } }),
+      expect.objectContaining({ where: expect.objectContaining({ username: "alice" }) }),
     );
-    await listRecentNotifications(prisma, "alice", 0);
+    await listNotifications(prisma, "alice", { limit: 0 });
     expect(prisma.notificationLog.findMany).toHaveBeenLastCalledWith(
-      expect.objectContaining({ take: 1 }),
+      expect.objectContaining({ take: 2 }),
     );
   });
 });
@@ -315,7 +313,14 @@ describe("sendNotification deep link (WARP-2909)", () => {
     expect(toast).toMatchObject({ url: PARKED.url, data: PARKED.data });
 
     const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
-    expect(push).toEqual({ title: PARKED.title, body: PARKED.body, url: PARKED.url, data: PARKED.data, tag: PARKED.tag });
+    expect(push).toEqual({
+      title: PARKED.title,
+      body: PARKED.body,
+      url: PARKED.url,
+      data: PARKED.data,
+      tag: PARKED.tag,
+      notificationId: result.id,
+    });
 
     expect(prisma._created[0]).toMatchObject({ url: PARKED.url, data: PARKED.data });
     // WARP-2911 — the push leg looks subscriptions up by the same username.
@@ -361,7 +366,7 @@ describe("deep link behind a closed web_push gate", () => {
 
 describe("publishNotificationToast deep link (WARP-2909)", () => {
   it("never throws: a bad url is DROPPED from the toast and recorded", () => {
-    const out = publishNotificationToast({ ...PARKED, url: "javascript:alert(1)" });
+    const out = publishNotificationToast({ ...PARKED, id: "log-1", url: "javascript:alert(1)" });
     expect(out.channels).toEqual(["toast"]);
     expect(out.errors).toContain("toast: invalid_link");
     const toast = mqttPublish.mock.calls[0]![1] as Record<string, unknown>;
@@ -383,11 +388,11 @@ describe("recordNotification deep link (WARP-2909)", () => {
   });
 });
 
-describe("listRecentNotifications deep link (WARP-2909)", () => {
+describe("listNotifications deep link (WARP-2909)", () => {
   it("returns url and data for a row written with them", async () => {
     const prisma = makePrismaStub();
     await sendNotification(prisma, PARKED);
-    const [row] = await listRecentNotifications(prisma, "romain");
+    const { rows: [row] } = await listNotifications(prisma, "romain");
     expect(row).toMatchObject({ url: PARKED.url, data: PARKED.data });
   });
 });
@@ -415,7 +420,7 @@ describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIE
   });
 
   it("publishNotificationToast throws instead of publishing to a topic nobody subscribes", () => {
-    expect(() => publishNotificationToast(to(USER_ID))).toThrow(NotificationRecipientError);
+    expect(() => publishNotificationToast({ ...to(USER_ID), id: "log-1" })).toThrow(NotificationRecipientError);
     expect(mqttPublish).not.toHaveBeenCalled();
   });
 
@@ -428,13 +433,15 @@ describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIE
   });
 
   it("upper-case hex is still an id", () => {
-    expect(() => publishNotificationToast(to(USER_ID.toUpperCase()))).toThrow(/NOTIFICATION_RECIPIENT_IS_ID/);
+    expect(() => publishNotificationToast({ ...to(USER_ID.toUpperCase()), id: "log-1" })).toThrow(
+      /NOTIFICATION_RECIPIENT_IS_ID/,
+    );
   });
 
   it("the error names the caller's file, so the log line says where the id came from", () => {
     let err: unknown;
     try {
-      publishNotificationToast(to(USER_ID));
+      publishNotificationToast({ ...to(USER_ID), id: "log-1" });
     } catch (e) {
       err = e;
     }
@@ -468,7 +475,7 @@ describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIE
     async (username) => {
       const prisma = makePrismaStub();
       await expect(sendNotification(prisma, to(username))).resolves.toMatchObject({ channels: ["toast"] });
-      expect(() => publishNotificationToast(to(username))).not.toThrow();
+      expect(() => publishNotificationToast({ ...to(username), id: "log-1" })).not.toThrow();
       await expect(recordNotification(prisma, to(username))).resolves.toHaveProperty("id");
       expect(mqttPublish).toHaveBeenCalledWith(`droplet/notifications/${username}`, expect.anything());
     },
@@ -509,5 +516,123 @@ describe("notifyOwnersAndAdmins (WARP-2911)", () => {
     ).resolves.toEqual({ notified: ["romain"], failed: [LEGACY] });
     expect(mqttPublish.mock.calls.map((c) => c[0])).toEqual(["droplet/notifications/romain"]);
     expect(prisma._created.map((r) => r.username)).toEqual(["romain"]);
+  });
+});
+
+// ── WARP-2804: record, then deliver ─────────────────────────────────────────
+//
+// The row exists before any transport, so the toast and the push can carry its
+// id — which is what lets a client acknowledge the notification it shows. A
+// crash mid-send leaves a queued row the user can find, never a toast with no
+// row behind it.
+describe("WARP-2804 — sendNotification records the row, then delivers it", () => {
+  it("the row is created BEFORE anything is published", async () => {
+    const prisma = makePushingPrismaStub();
+    await sendNotification(prisma, PARKED);
+    const created = (prisma.notificationLog.create as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    expect(mqttPublish.mock.invocationCallOrder[0]!).toBeGreaterThan(created);
+    expect(webpushSend.mock.invocationCallOrder[0]!).toBeGreaterThan(created);
+  });
+
+  it("the toast carries the row's id, and the push carries it as notificationId", async () => {
+    const prisma = makePushingPrismaStub();
+    const result = await sendNotification(prisma, PARKED);
+    expect(result.id).toBe(prisma._created[0]!.id);
+    const toast = mqttPublish.mock.calls[0]![1] as Record<string, unknown>;
+    expect(toast.id).toBe(result.id);
+    const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
+    expect(push.notificationId).toBe(result.id);
+  });
+
+  it("one row per send: the outcome is stamped on the recorded row, not written as a second one", async () => {
+    const prisma = makePushingPrismaStub();
+    await sendNotification(prisma, PARKED);
+    expect(prisma._created).toHaveLength(1);
+    expect(prisma._created[0]).toMatchObject({ channels: "toast,push", pushOutcome: "sent", error: null });
+    expect(prisma._created[0]!.deliveredAt).toBeInstanceOf(Date);
+    // A fresh row is unread.
+    expect(prisma._created[0]!.ackState).toBe("unacked");
+  });
+
+  it("a dispatchToUser throw leaves the row stamped `failed`, rather than no row", async () => {
+    const prisma = makePushingPrismaStub();
+    (prisma as any).pushSubscription.findMany.mockRejectedValueOnce(new Error("db down"));
+    const result = await sendNotification(prisma, PARKED);
+    expect(prisma._created).toHaveLength(1);
+    expect(prisma._created[0]).toMatchObject({ id: result.id, pushOutcome: "failed", channels: "toast" });
+  });
+
+  it("a failed row create publishes nothing and pushes nothing", async () => {
+    const prisma = makePushingPrismaStub();
+    (prisma.notificationLog.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("db down"));
+    await expect(sendNotification(prisma, PARKED)).rejects.toThrow(/db down/);
+    expect(mqttPublish).not.toHaveBeenCalled();
+    expect(webpushSend).not.toHaveBeenCalled();
+  });
+
+  it("a stamp that cannot be written is logged, not thrown: the notification already went out", async () => {
+    const prisma = makePrismaStub();
+    (prisma.notificationLog.update as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("db blip"));
+    const result = await sendNotification(prisma, { username: "alice", kind: "reminder", title: "Standup" });
+    expect(result).toMatchObject({ delivered: true, channels: ["toast"] });
+    // The row stays as recorded: queued, unread, findable.
+    expect(prisma._created[0]).toMatchObject({ channels: "", deliveredAt: null, ackState: "unacked" });
+  });
+});
+
+describe("WARP-2804 — deliverNotification(prisma, id)", () => {
+  it("delivers what the ROW says, by id, to the row's recipient", async () => {
+    const prisma = makePushingPrismaStub();
+    const { id } = await recordNotification(prisma, PARKED);
+    const result = await deliverNotification(prisma, id, { tag: PARKED.tag });
+    expect(result).toMatchObject({ id, channels: ["toast", "push"], delivered: true });
+    expect(mqttPublish).toHaveBeenCalledWith(
+      "droplet/notifications/romain",
+      expect.objectContaining({ id, kind: "ai", title: PARKED.title, body: PARKED.body, url: PARKED.url, data: PARKED.data }),
+    );
+    const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
+    expect(push).toEqual({
+      title: PARKED.title,
+      body: PARKED.body,
+      url: PARKED.url,
+      data: PARKED.data,
+      tag: PARKED.tag,
+      notificationId: id,
+    });
+    expect(prisma._created[0]).toMatchObject({ id, channels: "toast,push", pushOutcome: "sent" });
+  });
+
+  it("throws when the row cannot be read — and publishes nothing", async () => {
+    const prisma = makePushingPrismaStub();
+    await expect(deliverNotification(prisma, "log-missing")).rejects.toThrow(/notification_not_found/);
+    expect(mqttPublish).not.toHaveBeenCalled();
+    expect(webpushSend).not.toHaveBeenCalled();
+  });
+
+  it("never throws on transport: MQTT down and push throwing still stamp the row", async () => {
+    const prisma = makePrismaStub(); // no pushSubscription delegate: the push leg throws
+    const { id } = await recordNotification(prisma, { username: "alice", kind: "system", title: "x" });
+    mqttPublish.mockImplementationOnce(() => {
+      throw new Error("mqtt down");
+    });
+    const result = await deliverNotification(prisma, id);
+    expect(result.delivered).toBe(false);
+    expect(prisma._created[0]).toMatchObject({ channels: "", deliveredAt: null, pushOutcome: "failed" });
+    expect(String(prisma._created[0]!.error)).toMatch(/toast: mqtt_unavailable/);
+  });
+
+  it("a bad tag degrades (the push goes out without it) instead of throwing", async () => {
+    const prisma = makePushingPrismaStub();
+    const { id } = await recordNotification(prisma, { username: "alice", kind: "system", title: "x" });
+    const result = await deliverNotification(prisma, id, { tag: "has space" });
+    expect(result.channels).toEqual(["toast", "push"]);
+    const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
+    expect(push.tag).toBeUndefined();
+  });
+
+  it("accepts a priority (WARP-2978 fills it) and ignores it here", async () => {
+    const prisma = makePrismaStub();
+    const { id } = await recordNotification(prisma, { username: "alice", kind: "event", title: "x" });
+    await expect(deliverNotification(prisma, id, { priority: "alert" })).resolves.toMatchObject({ id });
   });
 });

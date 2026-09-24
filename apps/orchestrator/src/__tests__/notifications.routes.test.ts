@@ -18,19 +18,12 @@ vi.mock("../services/mqtt.service.js", () => ({
 }));
 
 import { createNotificationsRouter } from "../routes/notifications.js";
+import { makeFakeNotificationLog } from "./helpers/fake-notification-log.js";
 
 function makeApp() {
-  const created: Array<Record<string, unknown>> = [];
-  const prisma = {
-    notificationLog: {
-      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
-        const row = { id: `log-${created.length + 1}`, url: null, data: null, ...data };
-        created.push(row);
-        return row;
-      }),
-      findMany: vi.fn(async () => created.slice().reverse()),
-    },
-  } as unknown as PrismaClient;
+  const log = makeFakeNotificationLog();
+  const created = log.rows as unknown as Array<Record<string, unknown>>;
+  const prisma = { notificationLog: log.delegate } as unknown as PrismaClient;
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -57,7 +50,13 @@ describe("/api/notifications deep link (WARP-2909)", () => {
       channels: "toast",
       deliveredAt: null,
       error: null,
+      pushOutcome: null,
       createdAt: new Date(),
+      ackState: "unacked",
+      ackedAt: null,
+      ackMethod: null,
+      ackSessionId: null,
+      ackClient: null,
     });
     const res = await request(app).get("/api/notifications");
     expect(res.status).toBe(200);

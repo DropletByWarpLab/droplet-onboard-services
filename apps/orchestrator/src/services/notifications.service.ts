@@ -19,6 +19,15 @@
  * button. So a camera seeing a person reached your phone and nothing else ever
  * did. Both channels are attempted here, both are best-effort, and the
  * NotificationLog row records which ones actually carried it.
+ *
+ * WARP-2804 — RECORD, THEN DELIVER, and the recipient can acknowledge it.
+ * `sendNotification` = `recordNotification` (the row, queued) followed by
+ * `deliverNotification(id)` (toast + push, then the outcome stamped on that
+ * row). The row exists before any transport, so the toast carries its `id`
+ * and the push its `notificationId`: a client can acknowledge exactly what it
+ * shows. A crash mid-send leaves a queued row the user can find, never a toast
+ * with no row behind it. `ackNotification` / `ackAllNotifications` /
+ * `countUnread` / `listNotifications` are the recipient's side (routes N1-N4).
  */
 
 import type { $Enums, Prisma, PrismaClient } from "@prisma/client";
@@ -40,6 +49,10 @@ export type NotificationKind = $Enums.NotificationKind;
  *  takes this so a caller can commit the log row in the SAME transaction as
  *  whatever claim made it necessary (WARP-2587). */
 type NotificationDb = PrismaClient | Prisma.TransactionClient;
+
+/** WARP-2804 — derived from the Prisma enums, like `NotificationKind`. */
+export type NotificationAckState = $Enums.NotificationAckState;
+export type NotificationAckMethod = $Enums.NotificationAckMethod;
 
 export interface DispatchInput {
   /** WARP-2911 — the recipient's Nextcloud username (`User.username`), NEVER
@@ -156,8 +169,12 @@ function safePublish(topic: string, payload: Record<string, unknown>): boolean {
  * is best-effort by design and the log row is the durable record. It does
  * throw on a caller bug — a `User.id` recipient (WARP-2911), which would
  * publish to a topic nobody subscribes to.
+ *
+ * WARP-2804 — `id` is the NotificationLog row this toast is for, and the
+ * payload carries it so the toaster can acknowledge it. A toast is only ever
+ * published for a recorded row.
  */
-export function publishNotificationToast(input: DispatchInput): {
+export function publishNotificationToast(input: DispatchInput & { id: string }): {
   channels: string[];
   errors: string[];
 } {
@@ -176,6 +193,7 @@ export function publishNotificationToast(input: DispatchInput): {
   // Channel 1: toast. Always attempted because the ws-bridge is the cheapest
   // delivery path and the user always has a dashboard tab nearby.
   const toastOk = safePublish(`droplet/notifications/${input.username}`, {
+    id: input.id,
     kind: input.kind,
     title: input.title,
     body: input.body ?? null,
@@ -223,15 +241,75 @@ export async function recordNotification(
   return row;
 }
 
-export async function sendNotification(
+/** What `deliverNotification` reads back: everything a transport carries. */
+const DELIVERY_SELECT = {
+  id: true,
+  username: true,
+  kind: true,
+  title: true,
+  body: true,
+  url: true,
+  data: true,
+} as const satisfies Prisma.NotificationLogSelect;
+
+/** A stored `data` column as the flat object the transports carry. The row was
+ *  validated on the way in (`recordNotification`); anything that is not an
+ *  object is dropped here, and `assertLinkFields` below checks the rest. */
+function storedData(data: Prisma.JsonValue | null): DispatchInput["data"] {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+  return data as Record<string, string | number | boolean>;
+}
+
+export interface DeliverOptions {
+  /** Web-push collapse key, `^[A-Za-z0-9._:-]{1,128}$`. A bad one is dropped, never thrown on. */
+  tag?: string;
+  /** WARP-2978 (ADR-059 P3 §B.6.7) fills this. Accepted and ignored here. */
+  priority?: string;
+}
+
+/**
+ * WARP-2804 — the DELIVERY half: transport one recorded row, by id.
+ *
+ *   1. Read the row (`id, username, kind, title, body, url, data`).
+ *   2. Publish the toast with its `id`.
+ *   3. Web push to the row's recipient with `notificationId: id`.
+ *   4. Stamp `channels`, `deliveredAt`, `error` and `pushOutcome` on the row.
+ *
+ * Never throws on TRANSPORT — both channels are best-effort — and a stamp that
+ * cannot be written is logged, not thrown: the notification already went out,
+ * and the row stays queued and findable. Throws only when the row cannot be
+ * read; then there is nothing to deliver, and nothing is published.
+ */
+export async function deliverNotification(
   prisma: PrismaClient,
-  input: DispatchInput,
+  id: string,
+  opts: DeliverOptions = {},
 ): Promise<DispatchResult> {
-  // WARP-2911 / WARP-2909 — a `User.id` recipient or a bad link is the
-  // caller's bug: refuse before any transport or row.
-  assertRecipientIsUsername("sendNotification", input.username);
-  assertLinkFields(input);
-  const { channels, errors } = publishNotificationToast(input);
+  const row = await prisma.notificationLog.findUnique({ where: { id }, select: DELIVERY_SELECT });
+  if (!row) throw new Error(`notification_not_found: ${id}`);
+
+  // WARP-2909 — delivery must not throw, so a link that fails the check
+  // DEGRADES: both transports go without it, and the toast half records why.
+  let link: Pick<DispatchInput, "url" | "data" | "tag"> = {
+    url: row.url ?? undefined,
+    data: storedData(row.data),
+    tag: opts.tag,
+  };
+  try {
+    assertLinkFields({ username: row.username, kind: row.kind, title: row.title, ...link });
+  } catch {
+    link = {};
+  }
+
+  const { channels, errors } = publishNotificationToast({
+    id: row.id,
+    username: row.username,
+    kind: row.kind,
+    title: row.title,
+    body: row.body,
+    url: link.url,
+    data: link.data,
+  });
 
   // Channel 2: web push. The toast only exists while a tab is open, so without
   // this a notification raised at 3am is gone by morning — the log row survives
@@ -258,12 +336,13 @@ export async function sendNotification(
   let pushOutcome: $Enums.PushOutcome;
   try {
     await ensurePushDispatch(prisma);
-    const { sent, attempted, refused } = await dispatchToUser(prisma, input.username, {
-      title: input.title,
-      body: input.body ?? "",
-      url: input.url,
-      data: input.data,
-      tag: input.tag,
+    const { sent, attempted, refused } = await dispatchToUser(prisma, row.username, {
+      title: row.title,
+      body: row.body ?? "",
+      url: link.url,
+      data: link.data,
+      tag: link.tag,
+      notificationId: row.id,
     });
     if (sent > 0) channels.push("push");
     pushOutcome = refused
@@ -277,32 +356,45 @@ export async function sendNotification(
     pushOutcome = "failed";
     pushError = `push: ${err instanceof Error ? err.message : String(err)}`;
     // Always visible to an operator, whether or not it reaches the row.
-    logger.warn({ err, username: input.username }, "push notification failed");
+    logger.warn({ err, username: row.username }, "push notification failed");
   }
   if (pushError && channels.length === 0) errors.push(pushError);
 
   const delivered = channels.length > 0;
-  const log = await prisma.notificationLog.create({
-    data: {
-      username: input.username,
-      kind: input.kind,
-      title: input.title,
-      body: input.body ?? null,
-      url: input.url ?? null,
-      data: input.data ?? undefined,
-      channels: channels.join(","),
-      deliveredAt: delivered ? new Date() : null,
-      error: errors.length > 0 ? errors.join(" | ") : null,
-      pushOutcome,
-    },
-  });
+  const error = errors.length > 0 ? errors.join(" | ") : null;
+  try {
+    await prisma.notificationLog.update({
+      where: { id: row.id },
+      data: {
+        channels: channels.join(","),
+        deliveredAt: delivered ? new Date() : null,
+        error,
+        pushOutcome,
+      },
+      select: { id: true },
+    });
+  } catch (err) {
+    logger.warn({ err, id: row.id }, "notification delivery stamp failed — the row is recorded and the notification was sent");
+  }
 
-  return {
-    id: log.id,
-    channels,
-    delivered,
-    error: errors.length > 0 ? errors.join(" | ") : undefined,
-  };
+  return { id: row.id, channels, delivered, error: error ?? undefined };
+}
+
+/**
+ * WARP-2804 — record, then deliver. Every caller keeps this signature.
+ *
+ * A `User.id` recipient or a bad link is the caller's bug (WARP-2911 /
+ * WARP-2909): refused before the row and before any transport. A row that
+ * cannot be written throws, and nothing is published.
+ */
+export async function sendNotification(
+  prisma: PrismaClient,
+  input: DispatchInput,
+): Promise<DispatchResult> {
+  assertRecipientIsUsername("sendNotification", input.username);
+  assertLinkFields(input);
+  const { id } = await recordNotification(prisma, input);
+  return deliverNotification(prisma, id, { tag: input.tag });
 }
 
 /**
@@ -361,4 +453,91 @@ export async function listRecentNotifications(
     orderBy: { createdAt: "desc" },
     take: Math.max(1, Math.min(200, limit)),
   });
+}
+
+// ── WARP-2804: the recipient's side ─────────────────────────────────────────
+
+/**
+ * What a client may see of its own notification rows (N1's `NotificationRow`).
+ * An EXPLICIT select, so a column added later is not exposed by default. The
+ * two device facts of an ack (`ackSessionId`, `ackClient`) are never returned:
+ * they are the box's record of the ack, not something to hand back to any
+ * client that asks.
+ */
+export const NOTIFICATION_ROW_SELECT = {
+  id: true,
+  kind: true,
+  title: true,
+  body: true,
+  url: true,
+  data: true,
+  channels: true,
+  deliveredAt: true,
+  error: true,
+  pushOutcome: true,
+  createdAt: true,
+  ackState: true,
+  ackedAt: true,
+  ackMethod: true,
+} as const satisfies Prisma.NotificationLogSelect;
+
+export type NotificationRow = Prisma.NotificationLogGetPayload<{ select: typeof NOTIFICATION_ROW_SELECT }>;
+
+export const NOTIFICATION_LIST_MAX = 200;
+
+/** `<createdAt ms>.<id>` — the keyset position of the last row of a page. */
+const CURSOR_RE = /^(\d{1,15})\.([A-Za-z0-9_-]{1,64})$/;
+
+export function encodeNotificationCursor(row: { createdAt: Date; id: string }): string {
+  return `${row.createdAt.getTime()}.${row.id}`;
+}
+
+/** The cursor's position, or null when it is not one this module minted. */
+export function parseNotificationCursor(cursor: string): { at: Date; id: string } | null {
+  const m = CURSOR_RE.exec(cursor);
+  if (!m) return null;
+  const at = new Date(Number(m[1]));
+  return Number.isNaN(at.getTime()) ? null : { at, id: m[2]! };
+}
+
+export interface ListNotificationsOptions {
+  /** 1–200, default 50. */
+  limit?: number;
+  /** From `nextCursor` of the previous page. An unparseable one throws `invalid_cursor`. */
+  cursor?: string | null;
+  /** `unacked`: unread only. Default `all`. */
+  state?: "unacked" | "all";
+}
+
+/**
+ * The recipient's notifications, newest first, keyset-paged on
+ * `(createdAt desc, id desc)` so a row arriving between pages never shifts or
+ * repeats one. `nextCursor` is null on the last page.
+ */
+export async function listNotifications(
+  prisma: PrismaClient,
+  username: string,
+  opts: ListNotificationsOptions = {},
+): Promise<{ rows: NotificationRow[]; nextCursor: string | null }> {
+  const limit = Math.max(1, Math.min(NOTIFICATION_LIST_MAX, Math.trunc(opts.limit ?? 50) || 1));
+  let after: { at: Date; id: string } | null = null;
+  if (opts.cursor) {
+    after = parseNotificationCursor(opts.cursor);
+    if (!after) throw new Error("invalid_cursor");
+  }
+  const rows = await prisma.notificationLog.findMany({
+    where: {
+      username,
+      ...(opts.state === "unacked" ? { ackState: "unacked" as const } : {}),
+      ...(after
+        ? { OR: [{ createdAt: { lt: after.at } }, { createdAt: after.at, id: { lt: after.id } }] }
+        : {}),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1,
+    select: NOTIFICATION_ROW_SELECT,
+  });
+  const page = rows.slice(0, limit);
+  const nextCursor = rows.length > limit ? encodeNotificationCursor(page[page.length - 1]!) : null;
+  return { rows: page, nextCursor };
 }
