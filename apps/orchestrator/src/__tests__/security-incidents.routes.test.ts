@@ -709,6 +709,79 @@ describe("review b7e1 (DS-005) — the SAME code on a camera she cannot see (fro
   });
 });
 
+/** Maria's own acknowledgement of MIXED, made while its only code was the front notice. */
+const MARIAS_MIXED_ACK = {
+  id: "a-maria-mixed", incidentId: MIXED, action: "acknowledge", byUserId: MARIA, byName: "Maria", at: T,
+  sessionId: "s-m", sessionChecked: true, client: "droplet-ios/1.4.0 (iOS 18.2)", viaNotificationId: null, note: "",
+};
+
+// Review b7e1 (non-blocking): a hidden escalation must not show as her own ack vanishing.
+describe("review b7e1 — a hidden alert escalates an incident she had acknowledged", () => {
+  it("her OWN ack and `viewer.acknowledged` stay; nobody else's ack, no notices, no lastAck, nothing of back; not actionable (the accepted residual)", async () => {
+    const f = world();
+    // Before: camera_offline on front (she sees it) — a notice-level incident she acknowledged.
+    f.world.securityIncident.push(
+      incident(MIXED, { state: "acknowledged", severity: "notice", reasonCodes: ["camera_offline"], notifyState: "not_needed", alertedAt: null, spanByCamera: {} }),
+    );
+    f.world.securityIncidentReason.push({ id: "r-mixed-2", createdAt: T, ...reason(MIXED, "camera_offline", "front", "notice", 12n) });
+    f.world.securityIncidentAck.push({ ...MARIAS_MIXED_ACK });
+    const { server } = app(f, "family", "act");
+    const before = await request(server).get(`/api/security/incidents/${MIXED}`);
+    expect(before.body).toMatchObject({ state: "acknowledged", actionable: true, viewer: { level: "act", acknowledged: true } });
+    expect(before.body.acks).toHaveLength(1);
+
+    // A person on hidden back: an alert reason; D22 reopens the incident; the owner then acknowledges it.
+    Object.assign(f.world.securityIncident.find((i) => i.id === MIXED)!, {
+      severity: "alert",
+      state: "acknowledged",
+      reasonCodes: ["after_hours_presence", "camera_offline"],
+      notifyState: "done",
+      alertedAt: T,
+    });
+    f.world.securityIncidentReason.push({ id: "r-mixed-1", createdAt: T, ...reason(MIXED, "after_hours_presence", "back", "alert", 11n) });
+    f.world.securityIncidentAck.push({ ...MARIAS_MIXED_ACK, id: "a-stefan-mixed", byUserId: STEFAN, byName: "Stefan", at: new Date(T.getTime() + 60_000), client: null });
+    f.world.securityIncidentNotice.push(
+      { id: "n-mixed-m", incidentId: MIXED, userId: MARIA, username: "maria", reason: "routed", outcome: "skipped_not_visible", notificationLogId: null, channels: "", pushOutcome: null, createdAt: T, settledAt: T },
+    );
+
+    const after = await request(server).get(`/api/security/incidents/${MIXED}`);
+    expect(after.status).toBe(200);
+    expect(after.body).toMatchObject({
+      state: "open",
+      severity: "notice",
+      reasonCodes: ["camera_offline"],
+      actionable: false,
+      lastAck: null,
+      notices: [],
+      viewer: { level: "act", acknowledged: true },
+    });
+    // Her own ack, exactly as she saw it before — and only hers.
+    expect(after.body.acks).toEqual(before.body.acks);
+    expect(JSON.stringify(after.body)).not.toMatch(/Stefan|after_hours_presence|"back"|skipped_not_visible/);
+    // The residual is the refusal itself: both actions 409, nothing written.
+    for (const action of ["acknowledge", "resolve"]) {
+      expect((await request(server).post(`/api/security/incidents/${MIXED}/${action}`).send({})).status, action).toBe(409);
+    }
+    expect(f.world.securityIncidentAck.filter((a) => a.incidentId === MIXED)).toHaveLength(2);
+    expect(h.inTx).not.toHaveBeenCalled();
+  });
+
+  it("the list's summary shows no lastAck for her partial view, not even her own (it would be the latest by anyone)", async () => {
+    const f = world();
+    withMixed(f, "open");
+    f.world.securityIncidentAck.push({ ...MARIAS_MIXED_ACK });
+    const list = await request(app(f, "family", "act").server).get("/api/security/incidents");
+    expect(list.body.incidents.find((i: { id: string }) => i.id === MIXED)).toMatchObject({ state: "open", lastAck: null });
+  });
+
+  it("plain activity keeps showing no ack at all, hers included", async () => {
+    const f = world();
+    f.world.securityIncidentAck.push({ ...MARIAS_MIXED_ACK, id: "a-maria-hidden", incidentId: HIDDEN_CODE });
+    const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${HIDDEN_CODE}`);
+    expect(res.body).toMatchObject({ state: "no_action", acks: [], viewer: { level: "act", acknowledged: false } });
+  });
+});
+
 describe("review A — incident events carry `zones`, like feed rows (the viewer's visible areas only)", () => {
   const TILL = "7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c82";
   const YARD = "8b3c4d5e-6f70-4b2c-9d3e-4f5a6b7c8d93";
@@ -905,6 +978,19 @@ describe("route 18 `actionable` agrees with what routes 19 and 20 do for this vi
       role: "family",
       level: "act",
       setup: (f) => withSameCode(f, "acknowledged", "notice"),
+      actionable: false,
+      acknowledge: { status: 409, code: "NOT_ACTIONABLE" },
+      resolve: { status: 409, code: "NOT_ACTIONABLE" },
+    },
+    {
+      name: "a partial viewer who acknowledged it earlier (her own ack shows; still nothing to act on)",
+      id: MIXED,
+      role: "family",
+      level: "act",
+      setup: (f) => {
+        withMixed(f, "open");
+        f.world.securityIncidentAck.push({ ...MARIAS_MIXED_ACK });
+      },
       actionable: false,
       acknowledge: { status: 409, code: "NOT_ACTIONABLE" },
       resolve: { status: 409, code: "NOT_ACTIONABLE" },

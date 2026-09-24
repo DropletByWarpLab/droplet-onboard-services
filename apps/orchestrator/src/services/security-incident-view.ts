@@ -18,11 +18,21 @@
  *     SEVERITY is on a camera the viewer cannot see (the rule and why:
  *     `projectIncident`) — is not actionable either (409 NOT_ACTIONABLE, the
  *     same body): acting would acknowledge or resolve an alert she cannot
- *     see. She gets no acks, no notices and no lastAck (each would reveal the
- *     hidden reason), and the state her visible codes justify: `resolved`
- *     once a person resolved the incident, else `open` — never the stored
- *     `acknowledged`, which a hidden escalation flips back to `open` (D22)
- *     with no cause she could see.
+ *     see. She gets nobody else's acks, no notices and no lastAck (each would
+ *     reveal the hidden reason), and the state her visible codes justify:
+ *     `resolved` once a person resolved the incident, else `open` — never
+ *     the stored `acknowledged`, which a hidden escalation flips back to
+ *     `open` (D22) with no cause she could see.
+ *   · …but a partial view keeps her OWN acknowledgements, and with them
+ *     `viewer.acknowledged` (review b7e1): they show only what she did
+ *     herself. Hiding them was one more thing that changed when a hidden
+ *     alert escalated an incident she had acknowledged (her ack vanished).
+ *     ACCEPTED RESIDUAL: that escalation still turns her view from
+ *     acknowledged and actionable to `open` and not actionable. That is the
+ *     refusal itself — a view that may not act has to say so, and pressing
+ *     the button would get the same 409 — and the only way to hide it would
+ *     be to let her seal an alert she cannot see. `actionable` stays pinned
+ *     to what routes 19–20 actually do.
  *   · a non-owner/admin never sees a `skipped_not_visible` notice, not even
  *     their own: it says an alert was raised on a camera they cannot see.
  *   · counts and labels sum `countsByCamera` over the visible cameras (plus
@@ -400,7 +410,7 @@ export interface IncidentSummary {
   eventCount: number;
   /** Visible counts per label; `_status` / `_threat` count status and threat rows. */
   labels: Record<string, number>;
-  /** The latest acknowledgement, when the viewer has a visible code. */
+  /** The latest acknowledgement, by anyone — only in an actionable view (never partial, never plain activity). */
   lastAck: IncidentAckSummary | null;
 }
 
@@ -471,7 +481,9 @@ export interface IncidentDetail extends IncidentSummary {
    * has a visible code (else 409 NOT_ACTIONABLE), and the incident is open or
    * acknowledged (a resolved one answers both actions with 200 changed:false).
    * Acknowledge follows it except once this viewer has acknowledged
-   * (`viewer.acknowledged`): then acknowledge is a 200 changed:false no-op.
+   * (`viewer.acknowledged`) an actionable incident: then acknowledge is a 200
+   * changed:false no-op. A partial view may carry `viewer.acknowledged`
+   * (her own earlier ack) and is still not actionable: both actions are 409.
    */
   actionable: boolean;
   reasons: IncidentReasonView[];
@@ -479,6 +491,7 @@ export interface IncidentDetail extends IncidentSummary {
   events: IncidentMemberView[];
   /** More visible members than `events` carries. */
   moreEvents: boolean;
+  /** Every ack when the view is actionable; a partial view, only this viewer's own; plain activity, none. */
   acks: IncidentAckView[];
   notices: IncidentNoticeView[];
   eventsKept: SecurityIncidentEvents;
@@ -622,9 +635,15 @@ export async function loadIncidentDetail(
   const p = projectIncident(row, reasons, v, now);
   if (!p) return null;
 
-  const acks = p.actionable
-    ? await prisma.securityIncidentAck.findMany({ where: { incidentId: id }, orderBy: [{ at: "asc" }, { id: "asc" }] })
-    : [];
+  // Every ack when actionable; in a PARTIAL view only the viewer's own (what
+  // she did herself — review b7e1); plain activity, none.
+  const acks =
+    p.actionable || p.partial
+      ? await prisma.securityIncidentAck.findMany({
+          where: { incidentId: id, ...(p.actionable ? {} : { byUserId: v.userId }) },
+          orderBy: [{ at: "asc" }, { id: "asc" }],
+        })
+      : [];
   // Owner/admin: every notice. Anyone else: their own — and never a
   // skipped_not_visible one, which says an alert was raised on a camera they
   // cannot see (DS-005, review #1).
