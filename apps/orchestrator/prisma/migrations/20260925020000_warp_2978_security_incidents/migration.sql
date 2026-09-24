@@ -182,6 +182,16 @@ CREATE TABLE IF NOT EXISTS "SecurityIncident" (
 
 -- Added in review (#4): an incident created before it has no per-camera span
 -- (`{}` — every viewer then sees the stored times). No default afterwards.
+--
+-- CONVERGED OLD-STAMP ROWS (review b7e1). Only a box that applied an earlier
+-- stamp of this folder (the pre-review shape) holds incidents from before
+-- this column, and this folder was never on stage or a shipped box: dev boxes
+-- only. Those rows get `{}` and are not backfilled. With no entry to project,
+-- `shownSpans` (security-incident-view.ts) and `projectedIncidentPage` fall
+-- back to the STORED first/last activity and grouping for every viewer, a
+-- camera-limited one included: on those rows a hidden camera's activity can
+-- still move her times and her list order (the pre-review #4 behaviour).
+-- Every incident the engine opens from here on carries its spans.
 ALTER TABLE "SecurityIncident" ADD COLUMN IF NOT EXISTS "spanByCamera" JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE "SecurityIncident" ALTER COLUMN "spanByCamera" DROP DEFAULT;
 
