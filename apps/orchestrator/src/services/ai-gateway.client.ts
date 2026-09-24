@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { getRequestId } from "../lib/request-context.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { markModelListChanged, modelListGeneration } from "./model-list-generation.js";
 import type {
   ChatRequest,
   ChatStreamChunk,
@@ -104,6 +105,7 @@ async function findModelInfo(
 ): Promise<ModelInfo | undefined> {
   if (!_modelsCache || now - _modelsCache.at > MODELS_CACHE_TTL_MS) {
     try {
+      const generation = modelListGeneration();
       const res = await listModels();
       if (res.degraded_providers?.length) {
         // WARP-1289: a degraded fan-out (some provider raised while the
@@ -116,7 +118,11 @@ async function findModelInfo(
         if (!_modelsCache) {
           return res.models.find((m) => m.id === model);
         }
-      } else {
+      } else if (generation === modelListGeneration()) {
+        // WARP-3046: a download finished while this read was in flight, so
+        // its list may predate the new model — never cache it (see
+        // model-list-generation.ts). The lookup below then reads "unknown"
+        // once, the same degrade as an unreachable gateway.
         _modelsCache = { at: now, models: res.models };
       }
     } catch {
@@ -125,6 +131,43 @@ async function findModelInfo(
     }
   }
   return _modelsCache?.models.find((m) => m.id === model);
+}
+
+/**
+ * WARP-3046 — the installed model set just changed (a download finished):
+ * make every model listing re-read it now instead of after its TTL.
+ *
+ * Two caches, both invalidated here: the gateway's ModelRegistry (60 s, via
+ * its service-token-gated POST /ai/models/refresh) and this module's own
+ * `_modelsCache` (30 s), which per-turn vision routing reads — without the
+ * local clear a just-installed vision model reads as "unknown capabilities"
+ * for its first turns. The local cache is dropped AFTER the gateway call, and
+ * dropped even when that call fails: the local list is stale either way.
+ *
+ * Dropping a cache does not stop a read that was already in flight from
+ * writing the pre-pull list back into it — the gateway hands a fan-out begun
+ * before its invalidation to the callers already awaiting it. So this also
+ * bumps the model-list generation, in the one slot that closes that window:
+ * after the gateway dropped its listing, before the caller busts its own
+ * caches (model-list-generation.ts has the full argument). Every writer of a
+ * model-list cache skips the write when the generation moved under its read.
+ * Throws on a gateway failure so the caller can log it; it never has to
+ * fail the pull that triggered it.
+ */
+export async function refreshModels(): Promise<void> {
+  try {
+    const res = await internalFetch(`${BASE_URL}/ai/models/refresh`, {
+      method: "POST",
+      headers: authHeaders(),
+      signal: timeout(),
+    });
+    if (!res.ok) throw new Error(`AI Gateway error: ${res.status}`);
+  } catch (err) {
+    throw wrapTimeout(err, "refreshModels", DEFAULT_GATEWAY_TIMEOUT_MS);
+  } finally {
+    _modelsCache = null;
+    markModelListChanged();
+  }
 }
 
 export async function getModelCapabilities(
