@@ -347,11 +347,14 @@ describe("tickSecurityBaselines — area rebuilds when links change (D2)", () =>
     const f = fakePrisma(
       world({
         ready: { id: "b-1", timezone: TZ, windowFrom: "2026-08-23", windowTo: "2026-09-19", finishedAt: ny("00:11", "2026-09-20") },
-        newest: { state: "failed", startedAt: ny("14:50"), error: "x" },
+        // A catch-up build failed ten minutes ago IN THIS ZONE, so it is still backing off:
+        // only the freshness rule can stop the area rebuild here.
+        newest: { state: "failed", startedAt: ny("14:50"), error: "x", timezone: TZ },
         liveAreas: [{ id: "z-1", version: 1 }],
       }),
     );
     await tickSecurityBaselines(f.prisma, ny("15:00"), deps(TZ));
+    expect(h.runFullBuild).not.toHaveBeenCalled();
     expect(h.rebuildAreas).not.toHaveBeenCalled();
   });
 
@@ -620,6 +623,10 @@ describe("securityPatternsHealth — reads, scopes, never throws", () => {
       workspace: { findUnique: vi.fn() },
       securityBaselineSource: { findMany: vi.fn() },
       securityBaselineBuild: { findFirst: vi.fn() },
+      // Every delegate the loader reads: a missing one throws while the reads are
+      // being started, and the started ones then reject with nobody listening.
+      camera: { findMany: vi.fn() },
+      securityCoverageSpan: { findMany: vi.fn() },
     } as never;
     registerSecurityBaselineJobs({ scheduleInterval: vi.fn() }, {} as never);
     const row = await securityPatternsHealth(prisma, { visibleCameras: "all", mayReadThreats: true }, new Date());
