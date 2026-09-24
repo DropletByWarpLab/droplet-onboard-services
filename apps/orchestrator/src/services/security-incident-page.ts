@@ -25,9 +25,13 @@
  * (security-incident-list.pg.test.ts); the mocked lanes substitute that
  * reference for it.
  *
- * Timestamps: the columns are `timestamp(3)` holding UTC. The span strings
- * and the cursor are ISO instants, converted `AT TIME ZONE 'UTC'` — never
- * through the session TimeZone.
+ * Timestamps: no time is converted in SQL (WARP-2980's static pin for every
+ * Security service). The columns are `timestamp(3)` holding the UTC wall
+ * clock, and the span strings and the cursor are `toISOString()` values —
+ * always UTC, always ending `Z`. Cast `::timestamp`, Postgres reads such a
+ * string's wall clock and ignores the zone mark, so the result is the UTC
+ * wall clock whatever the session TimeZone (a `::timestamptz` cast would go
+ * through it). The pg lane pins this under a +05:30 session.
  */
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { IncidentListFilters, IncidentViewer } from "./security-incident-view.js";
@@ -89,7 +93,7 @@ export async function projectedIncidentPage(
 
   const seen = Prisma.sql`((e.key = '' AND i."scope" IN ('site_threat', 'site_camera_system')) OR (e.key <> '' AND e.key = ANY(${vis}::text[])))`;
   const after = f.cursor
-    ? Prisma.sql`WHERE (p."projectedLast", p."id") < ((${f.cursor.at.toISOString()}::timestamptz AT TIME ZONE 'UTC'), ${f.cursor.id})`
+    ? Prisma.sql`WHERE (p."projectedLast", p."id") < (${f.cursor.at.toISOString()}::timestamp, ${f.cursor.id})`
     : Prisma.empty;
 
   return prisma.$queryRaw<ProjectedIncidentKey[]>`
@@ -100,7 +104,7 @@ export async function projectedIncidentPage(
       CROSS JOIN LATERAL (
         SELECT count(*)::int AS "total",
                (count(*) FILTER (WHERE ${seen}))::int AS "shown",
-               max((e.value ->> 'last')::timestamptz AT TIME ZONE 'UTC') FILTER (WHERE ${seen}) AS "shownLast"
+               max((e.value ->> 'last')::timestamp) FILTER (WHERE ${seen}) AS "shownLast"
         FROM jsonb_each(i."spanByCamera") AS e
       ) s
       WHERE ${Prisma.join(where, " AND ")}

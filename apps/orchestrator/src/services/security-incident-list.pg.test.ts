@@ -384,6 +384,28 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       expect(compared).toBeGreaterThan(300); // not vacuous
     });
 
+    it("the order, the keys and the cursor do not depend on the session TimeZone (no time is converted in SQL)", async () => {
+      const mine = new Set(await seed(30, 2980));
+      const v = VIEWERS[0] as CameraLimitedViewer;
+      const run = (db: PrismaClient, cursor?: { at: Date; id: string }) =>
+        projectedIncidentPage(db, v, { state: "all", ...(cursor ? { cursor } : {}) }, 1000).then((ks) =>
+          ks.filter((k) => mine.has(k.id)).map((k) => [k.id, k.projectedLast.toISOString()]),
+        );
+      const utc = await run(prisma);
+      expect(utc.length).toBeGreaterThan(5);
+      const middle = { at: new Date(utc[3]![1]!), id: utc[3]![0]! };
+      const utcAfter = await run(prisma, middle);
+      // A numeric zone: this lane's Postgres build may carry no tz database.
+      const shifted = await prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe("SET LOCAL TIME ZONE INTERVAL '+05:30' HOUR TO MINUTE");
+        const zone = await tx.$queryRawUnsafe<Array<{ z: string }>>("SELECT current_setting('TimeZone') AS z");
+        expect(zone[0]!.z).not.toMatch(/^(UTC|GMT|Etc\/UTC)$/);
+        return { all: await run(tx as unknown as PrismaClient), after: await run(tx as unknown as PrismaClient, middle) };
+      });
+      expect(shifted.all).toEqual(utc);
+      expect(shifted.after).toEqual(utcAfter);
+    });
+
     it("paging by the cursor (limit 3) visits exactly the reference order, for every viewer", async () => {
       const mine = new Set(await seed(40, 1570));
       for (const v of VIEWERS) {
