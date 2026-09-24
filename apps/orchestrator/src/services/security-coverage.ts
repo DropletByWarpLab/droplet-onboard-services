@@ -408,7 +408,9 @@ export async function refreshBaselineSources(
     select: { camera: true, startedAt: true, coveredUntil: true },
   });
   const states = sourceStates(spans, windowFor(now, tz), tz, now);
-  const existing = new Map((await prisma.securityBaselineSource.findMany()).map((r) => [r.sourceKey, r]));
+  const existing = new Map(
+    (await prisma.securityBaselineSource.findMany({ where: { sourceKey: { startsWith: "camera:" } } })).map((r) => [r.sourceKey, r]),
+  );
   const result: SourceRefreshResult = { cameras: states.size, created: 0, updated: 0, deleted: 0 };
   const keys: string[] = [];
   for (const s of states.values()) {
@@ -447,7 +449,8 @@ export async function refreshBaselineSources(
     });
     result.updated += 1;
   }
-  const { count } = await prisma.securityBaselineSource.deleteMany({ where: { sourceKey: { notIn: keys } } });
+  // Camera sources only: coverage knows nothing about P5c's `activity:*` sources, and must never sweep them.
+  const { count } = await prisma.securityBaselineSource.deleteMany({ where: { sourceKey: { startsWith: "camera:", notIn: keys } } });
   result.deleted = count;
   return result;
 }

@@ -448,7 +448,10 @@ describe("refreshBaselineSources — writes the learning state, keeps firstSeenA
     expect(src.create).toHaveBeenCalledWith({
       data: { sourceKey: "camera:back", camera: "back", state: "learning", daysObserved: 0, firstSeenAt: ago(30 * MIN), lastSeenAt: ago(MIN), stateChangedAt: NOW },
     });
-    expect(src.deleteMany).toHaveBeenCalledWith({ where: { sourceKey: { notIn: ["camera:front", "camera:back"] } } });
+    // Only camera sources: P5c's future `activity:*` sources are never swept by coverage (review #2352, finding 9).
+    expect(src.deleteMany).toHaveBeenCalledWith({
+      where: { sourceKey: { startsWith: "camera:", notIn: ["camera:front", "camera:back"] } },
+    });
   });
 
   it("a source row another tick created first (P2002 — a tick that outlived its lock) is not an error (review #2352, finding 5)", async () => {
