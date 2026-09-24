@@ -32,6 +32,13 @@ export const TEMPLATE_LABELS: Record<string, { label: string; blurb: string }> =
     label: "Python MCP server (3.12)",
     blurb: "Composes tools this box already has and shapes their data.",
   },
+  // WARP-2899 (ADR-056 slice L) — a connector draft is not an extension: it
+  // renders an ADR-046 REST profile, its guide, its egress entry and its
+  // ADR-042 rows into the store, and an owner exports it for a Warp Lab PR.
+  "rest-profile": {
+    label: "Connector draft (REST profile)",
+    blurb: "Drafts a vendor profile, its guide and its egress entry for Warp Lab to review. Nothing on this box dials the vendor.",
+  },
 };
 
 export function templateLabel(id: string | null | undefined): string {
@@ -66,6 +73,27 @@ export interface WorkspaceGit {
   tags: string[];
 }
 
+/**
+ * WARP-2899 — what GET /api/workspace/:id says about a connector draft (the
+ * orchestrator's `ConnectorDraftSummary`). `readback` is the server's one
+ * sentence — "drafts a connector for <vendor>; nothing on this box will dial
+ * <host> until Warp Lab ships it" — carried verbatim, never rebuilt here.
+ * `problems` is what keeps the draft from being proposed.
+ */
+export interface WorkspaceConnectorDraft {
+  provider: string;
+  displayName: string;
+  readback: string;
+  problems: string[];
+}
+
+/** The draft, when the answer is one — not `null`, not the sandbox's refusal. */
+export function connectorDraftOf(detail: Pick<WorkspaceDetail, "connectorDraft">): WorkspaceConnectorDraft | null {
+  const d = detail.connectorDraft;
+  if (!d || "error" in d || typeof d.readback !== "string" || d.readback.trim() === "") return null;
+  return { ...d, problems: Array.isArray(d.problems) ? d.problems : [] };
+}
+
 export interface WorkspaceDetail {
   id: string;
   name: string;
@@ -78,6 +106,12 @@ export interface WorkspaceDetail {
   userId: string;
   /** The sandbox's answer, or its refusal when the store is unreachable. */
   git: WorkspaceGit | { error: string; code: string };
+  /**
+   * WARP-2899 — the connector draft read at the proposal (or `work`): `null`
+   * for a workspace that is not one, the sandbox's refusal when it did not
+   * answer, and absent from an orchestrator that predates WARP-2899.
+   */
+  connectorDraft?: WorkspaceConnectorDraft | { error: string; code: string } | null;
   runs: Array<{
     id: string;
     status: string;
@@ -177,6 +211,67 @@ export async function getWorkspaceOutput(id: string): Promise<WorkspaceLastRun |
 export async function deleteWorkspace(id: string): Promise<void> {
   const res = await authFetch(`/api/workspace/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res?.ok) throw await readError(res, "Couldn't delete this workspace");
+}
+
+/**
+ * The workspace-id grammar. A copy, because the dashboard cannot import
+ * orchestrator code: the source of truth is `WORKSPACE_ID` in
+ * apps/orchestrator/src/services/workspace.service.ts (the sandbox's
+ * services/sandbox/gitstore.py carries the same pattern).
+ * `workshop.connector-draft.test.tsx` pins this copy to the orchestrator's,
+ * character for character.
+ */
+export const WORKSPACE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * How long an exported bundle's object URL stays alive after the click.
+ * `a.click()` returns before the browser has necessarily read the blob URL;
+ * Safari (iOS asks before it saves) and Firefox have been known to drop a
+ * download whose URL was revoked in that same tick. 40 s is the delay
+ * FileSaver.js uses.
+ */
+export const EXPORT_URL_LIFETIME_MS = 40_000;
+
+/**
+ * WARP-2899 — the name a bundle is saved under. The server names it
+ * `<id>-<head7>.bundle`; anything else in the header (a path, another
+ * workspace's id, a second extension) is ignored for `<id>.bundle`.
+ */
+export function bundleFilename(disposition: string | null | undefined, id: string): string {
+  const safeId = WORKSPACE_ID.test(id) ? id : "workspace";
+  const named = /filename="([^"]*)"/.exec(disposition ?? "")?.[1];
+  if (named && named.startsWith(`${safeId}-`) && /^-[0-9a-f]{7,40}\.bundle$/.test(named.slice(safeId.length))) return named;
+  return `${safeId}.bundle`;
+}
+
+/**
+ * WARP-2899 — download the workspace as a `git bundle` (the `work` branch and
+ * its proposal tags). Owner/admin people only; the route refuses anyone else
+ * and writes one audit row per download. It is an authFetch blob download
+ * rather than a plain link (the session cookie would ride either way) so that
+ * an expired access token is refreshed and the call retried, a refusal is
+ * reported in place instead of navigating to a JSON error page, and the saved
+ * name is checked (`bundleFilename`). Returns the name the file was saved under.
+ */
+export async function exportWorkspace(id: string): Promise<string> {
+  const res = await authFetch(`/api/workspace/${encodeURIComponent(id)}/export`);
+  if (!res?.ok) throw await readError(res, "Couldn't export this workspace");
+  const blob = await res.blob();
+  const filename = bundleFilename(res.headers.get("Content-Disposition"), id);
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    // Later, not now (see EXPORT_URL_LIFETIME_MS); on the throw path too, so the blob never leaks.
+    setTimeout(() => URL.revokeObjectURL(url), EXPORT_URL_LIFETIME_MS);
+  }
+  return filename;
 }
 
 /** The clone URL a person uses from their own machine, through the gateway. */
