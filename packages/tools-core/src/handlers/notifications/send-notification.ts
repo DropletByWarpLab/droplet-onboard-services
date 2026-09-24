@@ -20,7 +20,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (!title || title.length > 500) return err("INVALID_ARGS", "title must be 1-500 chars");
   const created = (await ctx.prisma.notificationLog.create({
     data: {
-      userId: ctx.userId,
+      // WARP-2911 — the column is `username`: `ctx.userId` IS the caller's
+      // username (routes/llm.ts, MCP `_meta.userId`), never a `User.id`.
+      username: ctx.userId,
       kind: "ai",
       title,
       body: typeof args.body === "string" ? args.body : null,

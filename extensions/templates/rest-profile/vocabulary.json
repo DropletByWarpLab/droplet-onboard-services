@@ -1,0 +1,377 @@
+{
+  "DATASET_NAMES": [
+    "appointment",
+    "patient",
+    "account",
+    "invoice",
+    "bill",
+    "ap_summary",
+    "charge",
+    "refund",
+    "payout",
+    "balance_transaction",
+    "subscription",
+    "contact",
+    "company",
+    "deal",
+    "ticket",
+    "engagement",
+    "order",
+    "product",
+    "customer",
+    "campaign",
+    "audience",
+    "audience_member",
+    "ecommerce_order",
+    "booking",
+    "employee",
+    "task"
+  ],
+  "CANONICAL_COLUMNS": {
+    "appointment": [
+      "appt_id",
+      "appt_time",
+      "provider_id",
+      "operatory_id",
+      "status",
+      "patient_id"
+    ],
+    "patient": [
+      "patient_id",
+      "first_name",
+      "last_name"
+    ],
+    "account": [
+      "account_id",
+      "balance"
+    ],
+    "invoice": [
+      "invoice_id",
+      "issued_at",
+      "due_at",
+      "customer_id",
+      "amount",
+      "balance",
+      "status",
+      "updated_at"
+    ],
+    "bill": [
+      "bill_id",
+      "issued_at",
+      "due_at",
+      "vendor_id",
+      "amount",
+      "balance",
+      "status",
+      "updated_at"
+    ],
+    "ap_summary": [
+      "vendor_id",
+      "balance"
+    ],
+    "charge": [
+      "charge_id",
+      "created_at",
+      "customer_id",
+      "amount",
+      "amount_refunded",
+      "currency",
+      "status",
+      "updated_at"
+    ],
+    "refund": [
+      "refund_id",
+      "created_at",
+      "charge_id",
+      "amount",
+      "currency",
+      "status",
+      "reason",
+      "updated_at"
+    ],
+    "payout": [
+      "payout_id",
+      "created_at",
+      "arrival_at",
+      "amount",
+      "currency",
+      "status",
+      "updated_at"
+    ],
+    "balance_transaction": [
+      "balance_transaction_id",
+      "created_at",
+      "type",
+      "gross_amount",
+      "fee_amount",
+      "net_amount",
+      "currency"
+    ],
+    "subscription": [
+      "subscription_id",
+      "customer_id",
+      "status",
+      "current_period_start",
+      "current_period_end",
+      "amount",
+      "currency",
+      "interval",
+      "updated_at"
+    ],
+    "contact": [
+      "contact_id",
+      "created_at",
+      "first_name",
+      "last_name",
+      "email",
+      "company_id",
+      "lifecycle_stage",
+      "updated_at"
+    ],
+    "company": [
+      "company_id",
+      "created_at",
+      "name",
+      "domain",
+      "updated_at"
+    ],
+    "deal": [
+      "deal_id",
+      "created_at",
+      "closed_at",
+      "company_id",
+      "name",
+      "stage",
+      "amount",
+      "currency",
+      "updated_at"
+    ],
+    "ticket": [
+      "ticket_id",
+      "created_at",
+      "closed_at",
+      "contact_id",
+      "subject",
+      "status",
+      "priority",
+      "updated_at"
+    ],
+    "engagement": [
+      "engagement_id",
+      "occurred_at",
+      "type",
+      "contact_id",
+      "deal_id",
+      "updated_at"
+    ],
+    "order": [
+      "order_id",
+      "created_at",
+      "customer_id",
+      "total_amount",
+      "subtotal_amount",
+      "tax_amount",
+      "refunded_amount",
+      "currency",
+      "financial_status",
+      "fulfillment_status",
+      "updated_at"
+    ],
+    "product": [
+      "product_id",
+      "created_at",
+      "title",
+      "sku",
+      "price_amount",
+      "currency",
+      "inventory_quantity",
+      "status",
+      "updated_at"
+    ],
+    "customer": [
+      "customer_id",
+      "created_at",
+      "first_name",
+      "last_name",
+      "email",
+      "orders_count",
+      "total_spent_amount",
+      "currency",
+      "updated_at"
+    ],
+    "campaign": [
+      "campaign_id",
+      "sent_at",
+      "audience_id",
+      "subject",
+      "status",
+      "emails_sent",
+      "opens_unique",
+      "clicks_unique"
+    ],
+    "audience": [
+      "audience_id",
+      "created_at",
+      "name",
+      "member_count",
+      "unsubscribe_count"
+    ],
+    "audience_member": [
+      "audience_member_id",
+      "audience_id",
+      "email",
+      "subscription_status",
+      "opted_in_at",
+      "updated_at"
+    ],
+    "ecommerce_order": [
+      "ecommerce_order_id",
+      "store_id",
+      "customer_id",
+      "total_amount",
+      "currency",
+      "processed_at"
+    ],
+    "booking": [
+      "booking_id",
+      "starts_at",
+      "ends_at",
+      "status",
+      "staff_id",
+      "customer_id",
+      "customer_name",
+      "service_name",
+      "created_at",
+      "updated_at"
+    ],
+    "employee": [
+      "employee_id",
+      "first_name",
+      "last_name",
+      "email",
+      "job_title",
+      "department",
+      "status",
+      "hired_at",
+      "manager_id",
+      "updated_at"
+    ],
+    "task": [
+      "task_id",
+      "project_id",
+      "created_at",
+      "closed_at",
+      "title",
+      "status",
+      "priority",
+      "assignee_id",
+      "updated_at"
+    ]
+  },
+  "REQUIRED_CANONICAL": {
+    "appointment": [
+      "appt_id",
+      "appt_time"
+    ],
+    "patient": [
+      "patient_id",
+      "last_name"
+    ],
+    "account": [
+      "balance"
+    ],
+    "invoice": [
+      "invoice_id",
+      "balance"
+    ],
+    "bill": [
+      "bill_id",
+      "balance"
+    ],
+    "ap_summary": [
+      "balance"
+    ],
+    "charge": [
+      "charge_id",
+      "amount",
+      "currency"
+    ],
+    "refund": [
+      "refund_id",
+      "amount",
+      "currency"
+    ],
+    "payout": [
+      "payout_id",
+      "amount",
+      "currency"
+    ],
+    "balance_transaction": [
+      "balance_transaction_id",
+      "net_amount",
+      "currency"
+    ],
+    "subscription": [
+      "subscription_id",
+      "status"
+    ],
+    "contact": [
+      "contact_id"
+    ],
+    "company": [
+      "company_id"
+    ],
+    "deal": [
+      "deal_id",
+      "stage"
+    ],
+    "ticket": [
+      "ticket_id",
+      "status"
+    ],
+    "engagement": [
+      "engagement_id",
+      "occurred_at"
+    ],
+    "order": [
+      "order_id",
+      "total_amount",
+      "currency"
+    ],
+    "product": [
+      "product_id"
+    ],
+    "customer": [
+      "customer_id"
+    ],
+    "campaign": [
+      "campaign_id",
+      "emails_sent"
+    ],
+    "audience": [
+      "audience_id",
+      "member_count"
+    ],
+    "audience_member": [
+      "audience_member_id",
+      "subscription_status"
+    ],
+    "ecommerce_order": [
+      "ecommerce_order_id",
+      "total_amount",
+      "currency"
+    ],
+    "booking": [
+      "booking_id",
+      "starts_at"
+    ],
+    "employee": [
+      "employee_id",
+      "last_name"
+    ],
+    "task": [
+      "task_id",
+      "status"
+    ]
+  }
+}

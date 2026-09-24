@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import connector_draft
 import gitstore
 from gitstore import Author, StoreError, git, must
 
@@ -516,6 +517,11 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
     if git(["rev-parse", "-q", "--verify", f"refs/tags/{tag}"], work).returncode == 0:
         raise StoreError(409, f"{tag} already exists; bump the version")
 
+    # WARP-2899: a connector draft is not an extension — it has its own path.
+    draft = describe_checkout(work)
+    if draft is not None:
+        return _propose_connector_draft(work, name, version, summary, tag, draft, author)
+
     manifest_path = work / MANIFEST_FILE
     defaults = manifest_defaults(workspace_id, name, version, infer_runtime(work))
     manifest = defaults
@@ -537,7 +543,53 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
     head = must(git(["rev-parse", "HEAD"], work), "rev-parse").stdout.strip()
     must(git(["tag", "-a", tag, "-m", summary, head], work, author=author), "tag")
     must(git(["push", "-q", "origin", gitstore.WORK_BRANCH, f"refs/tags/{tag}"], work), "push")
-    # `kind` says what was proposed. Only "extension" exists today; a
-    # connector draft (WARP-2899) answers with its own kind and no manifest,
-    # and the orchestrator lists that as not promotable.
+    # `kind` says what was proposed. A connector draft (WARP-2899) answers
+    # "connector-draft" from _propose_connector_draft below, with no
+    # manifest, and the orchestrator lists that as not promotable.
     return {"kind": "extension", "commit": head, "tag": tag, "manifest": manifest}
+
+
+# ── connector drafts (WARP-2899) ────────────────────────────────────────────
+
+
+def describe_checkout(work: Path) -> dict[str, Any] | None:
+    """connector_draft.describe_tree over the checkout, every read confined."""
+
+    def read(rel: str) -> str | None:
+        try:
+            target = _inside(work, rel)
+        except StoreError:
+            return None
+        if not target.is_file():
+            return None
+        return target.read_bytes()[:MAX_READ_BYTES].decode("utf-8", "replace")
+
+    return connector_draft.describe_tree(read)
+
+
+def _propose_connector_draft(
+    work: Path, name: str, version: str, summary: str, tag: str, draft: dict[str, Any], author: Author
+) -> dict[str, Any]:
+    """Tag a connector draft. NO extension manifest: nothing installs or loads
+    a draft — an owner exports it for a Warp Lab PR. Refused (409, nothing
+    tagged) while the rendered files are missing or disagree with the draft,
+    and when the workspace also holds an extension manifest."""
+    if (work / MANIFEST_FILE).exists():
+        raise StoreError(
+            409,
+            f"this workspace holds a connector draft AND an {MANIFEST_FILE}; a connector draft is not an "
+            "extension — draft it in a workspace made from the rest-profile template",
+        )
+    if draft["problems"]:
+        raise StoreError(
+            409,
+            "the connector draft is not ready: " + "; ".join(draft["problems"]) + " — run `npm run build` and `npm test`",
+        )
+    must(git(["add", "-A"], work), "stage")
+    if git(["status", "--porcelain"], work).stdout.strip():
+        subject = f"propose connector draft {draft['provider']} {version}"
+        must(git(["commit", "-q", "-m", f"{subject}\n\n{summary}"], work, author=author), "commit")
+    head = must(git(["rev-parse", "HEAD"], work), "rev-parse").stdout.strip()
+    must(git(["tag", "-a", tag, "-m", summary, head], work, author=author), "tag")
+    must(git(["push", "-q", "origin", gitstore.WORK_BRANCH, f"refs/tags/{tag}"], work), "push")
+    return {"commit": head, "tag": tag, "manifest": None, "kind": "connector-draft", "connectorDraft": draft}

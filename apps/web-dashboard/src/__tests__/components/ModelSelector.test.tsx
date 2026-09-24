@@ -100,3 +100,71 @@ describe("ModelSelector — cloud key-gating (reuses /api/llm/models)", () => {
     ).toBeInTheDocument();
   });
 });
+
+// ── WARP-3048: one model → a read-only chip that leads to /models ──
+//
+// Hiding the pill when there was nothing to choose left a single-model box's
+// composer naming no model at all, with no hint where models are managed.
+// The models brief (WARP-1116) asks for a read-only chip linking to /models.
+describe("ModelSelector — single-model chip (WARP-3048)", () => {
+  it("renders a read-only chip linking to /models when exactly one model exists", () => {
+    state.models = [LOCAL];
+    state.isLoading = false;
+    render(<ModelSelector value="mistral:7b-instruct" onChange={() => {}} />);
+
+    const chip = screen.getByRole("link", {
+      name: "Model: Mistral 7B — manage on Models",
+    });
+    expect(chip).toHaveAttribute("href", "/models");
+    expect(chip).toHaveTextContent("Mistral 7B");
+    // Read-only: nothing to pick from.
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("keeps the <select> for two or more models", () => {
+    state.models = [LOCAL, VISION];
+    state.isLoading = false;
+    render(<ModelSelector value="mistral:7b-instruct" onChange={() => {}} />);
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeInTheDocument();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("renders nothing when no model is available (the page's empty state explains)", () => {
+    state.models = [];
+    state.isLoading = false;
+    const { container } = render(
+      <ModelSelector value="" onChange={() => {}} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// ── WARP-3048 review: a thread's model that is not in the list right now ──
+//
+// /chat holds a thread's model while the list is degraded (a model swap can
+// stop the box's runtime answering the listing) and never falls a thread
+// back to the cloud. A <select> whose value matches no option DISPLAYS its
+// first option, so the composer would name a model the thread is not on.
+describe("ModelSelector — a held model missing from the list (WARP-3048)", () => {
+  it("names the held model instead of displaying the first option", () => {
+    state.models = [VISION, LOCAL];
+    state.isLoading = false;
+    render(<ModelSelector value="qwen3:14b" onChange={() => {}} />);
+
+    const select = screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement;
+    expect(select.value).toBe("qwen3:14b");
+    expect(
+      screen.getByRole("option", { name: "qwen3:14b · unavailable" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show the single-model chip for a model the thread is not on", () => {
+    state.models = [VISION];
+    state.isLoading = false;
+    render(<ModelSelector value="qwen3:14b" onChange={() => {}} />);
+
+    expect(screen.queryByRole("link")).toBeNull();
+    const select = screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement;
+    expect(select.value).toBe("qwen3:14b");
+  });
+});

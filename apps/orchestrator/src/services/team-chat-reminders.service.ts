@@ -115,7 +115,7 @@ export async function runTeamChatMeetingReminderSweep(
     remindersSent++;
 
     // Best-effort toasts — participants except the organizer, keyed by
-    // USERNAME (NotificationLog.userId / the MQTT topic are
+    // USERNAME (NotificationLog.username / the MQTT topic are
     // username-scoped, exactly like routes/notifications.ts getUser()).
     try {
       const participants = await prisma.teamChatParticipant.findMany({
@@ -133,7 +133,7 @@ export async function runTeamChatMeetingReminderSweep(
       for (const invitee of invitees) {
         try {
           await sendNotification(prisma, {
-            userId: invitee.username,
+            username: invitee.username,
             kind: "event",
             title: "Meeting reminder",
             body: `"${meeting.title}" starts in ${minutesToStart} min`,

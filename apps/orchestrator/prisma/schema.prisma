@@ -1453,7 +1453,8 @@ model CameraPin {
 // revoked permission).
 model PushSubscription {
   id             String    @id @default(uuid())
-  userId         String // Nextcloud username
+  /// Nextcloud username (`User.username`), never `User.id` (WARP-2911).
+  username       String
   endpoint       String    @unique
   // Push payload encryption keys, base64url. Required by Web Push protocol.
   p256dhKey      String
@@ -1467,7 +1468,7 @@ model PushSubscription {
   // Updated on every successful push so we can age out stale entries.
   lastFiredAt    DateTime?
 
-  @@index([userId])
+  @@index([username])
   @@index([deviceClientId])
 }
 
@@ -2343,7 +2344,8 @@ enum NotificationKind {
 // "recent notifications" panel and helps debug missing pushes.
 model NotificationLog {
   id          String           @id @default(cuid())
-  userId      String
+  /// Nextcloud username (`User.username`), never `User.id` (WARP-2911).
+  username    String
   kind        NotificationKind
   title       String
   body        String?
@@ -2361,7 +2363,7 @@ model NotificationLog {
   pushOutcome PushOutcome?
   createdAt   DateTime         @default(now())
 
-  @@index([userId, createdAt])
+  @@index([username, createdAt])
 }
 
 /// WARP-2904 — the web-push leg of one sendNotification call.

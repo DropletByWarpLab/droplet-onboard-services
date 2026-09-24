@@ -23,7 +23,8 @@ vi.mock("web-push", () => ({
 const lookupMock = vi.fn(async () => [{ address: "142.250.0.1", family: 4 }]);
 vi.mock("node:dns/promises", () => ({ lookup: (...a: unknown[]) => lookupMock(...(a as [])) }));
 
-import { dispatchToUser } from "../services/push-dispatch.service.js";
+import { dispatchDetectionEvent, dispatchToUser } from "../services/push-dispatch.service.js";
+import { NotificationRecipientError } from "../services/notification-recipient.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import type { RecordParams } from "../services/activity.service.js";
 
@@ -215,5 +216,119 @@ describe("dispatchToUser — dials exactly the vetted host", () => {
     expect((sendNotification.mock.calls[0][0] as { endpoint: string }).endpoint).toBe(
       "https://fcm.googleapis.com/fcm/send/x",
     );
+  });
+});
+
+// ── WARP-2911 ───────────────────────────────────────────────────────────────
+
+const USER_ID = "3b7d0195-6c1e-4f2a-9d8b-2a4c6e8f0a1b";
+
+describe("WARP-2911 — dispatchToUser refuses a User.id-shaped recipient", () => {
+  // `dispatchToUser` has direct callers (the camera fan-out, the push test
+  // button) that never pass through sendNotification's check — commit 5's
+  // camera bug lived in exactly one of them.
+  for (const gate of ["on", "off"] as const) {
+    it(`gate ${gate}: throws before the gate, a subscription, a dial or an audit row`, async () => {
+      const prisma = makePrisma({ gate, subs: [sub(GOOD)] });
+      const err = await dispatchToUser(prisma, USER_ID, { title: "t", body: "b" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NotificationRecipientError);
+      expect(err).toMatchObject({ code: "NOTIFICATION_RECIPIENT_IS_ID" });
+      expect(prisma.offLanAllowlistChannel.findUnique).not.toHaveBeenCalled();
+      expect(prisma.pushSubscription.count).not.toHaveBeenCalled();
+      expect(prisma.pushSubscription.findMany).not.toHaveBeenCalled();
+      expect(sendNotification).not.toHaveBeenCalled();
+      await flush();
+      expect(audited).toHaveLength(0);
+    });
+  }
+
+  it.each(["dev", "_service:mcp", "alice"])("%s is a username and is dialled", async (username) => {
+    sendNotification.mockResolvedValue({ statusCode: 201 });
+    const prisma = makePrisma({ gate: "on", subs: [sub(GOOD)] });
+    await expect(dispatchToUser(prisma, username, { title: "t", body: "b" })).resolves.toMatchObject({ sent: 1 });
+    expect(prisma.pushSubscription.findMany).toHaveBeenCalledWith({ where: { username } });
+  });
+});
+
+/** A box with one camera, and the given people interested in its `person`
+ *  events — each an owner/admin (so the grant check passes) with DISTINCT,
+ *  UUID-shaped `User.id` and a username. */
+function detectionPrisma(opts: {
+  gate: "on" | "off";
+  people: Array<{ id: string; username: string; subscribed: boolean }>;
+}) {
+  const base = makePrisma({ gate: opts.gate });
+  const subscribed = new Set(opts.people.filter((p) => p.subscribed).map((p) => p.username));
+  base.camera = {
+    findUnique: vi.fn(async () => ({ id: "cam-1", name: "front_door", displayName: "Front door" })),
+  };
+  base.cameraNotificationPref = {
+    findMany: vi.fn(async () => opts.people.map((p) => ({ userId: p.id, cameraId: "cam-1", onPerson: true }))),
+  };
+  base.user = {
+    findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
+      opts.people
+        .filter((p) => where.id.in.includes(p.id))
+        .map((p) => ({ id: p.id, role: "admin", username: p.username })),
+    ),
+  };
+  base.pushSubscription.count = vi.fn(async ({ where }: { where: { username: { in: string[] } } }) =>
+    where.username.in.filter((u) => subscribed.has(u)).length,
+  );
+  base.pushSubscription.findMany = vi.fn(async ({ where }: { where: { username: string } }) =>
+    subscribed.has(where.username) ? [sub(`https://fcm.googleapis.com/fcm/send/${where.username}`)] : [],
+  );
+  return base;
+}
+
+const EVENT = { eventId: "ev-1", cameraName: "front_door", label: "person", score: 0.9 };
+const PEOPLE = [
+  { id: "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f", username: "stefan", subscribed: true },
+  { id: "7a1b3c5d-9e0f-4a2b-8c4d-6e8f0a2b4c6d", username: "romain", subscribed: true },
+  { id: "1f2e3d4c-5b6a-4978-8a9b-0c1d2e3f4a5b", username: "sam", subscribed: false },
+];
+
+describe("WARP-2911 — a camera detection reads the web_push gate ONCE", () => {
+  it("🔴 gate off: ONE refused_gate audit row per event, however many recipients are subscribed; nothing dialled", async () => {
+    // `web_push` ships off, and detections are the most frequent sender. One
+    // signed warning per subscribed recipient per detection would bury
+    // /admin/audit; one per event says the same thing.
+    const prisma = detectionPrisma({ gate: "off", people: PEOPLE });
+    await dispatchDetectionEvent(prisma, EVENT);
+    await flush();
+
+    expect(prisma.offLanAllowlistChannel.findUnique).toHaveBeenCalledTimes(1);
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(prisma.pushSubscription.findMany).not.toHaveBeenCalled();
+    expect(audited).toHaveLength(1);
+    expect(audited[0]).toMatchObject({
+      kind: "network",
+      sub: "web_push",
+      refs: { channel: "web_push", outcome: "refused_gate", source: "camera_detection", camera: "front_door", subscriptions: 2 },
+    });
+    // No person is named on the event row, and no endpoint is carried.
+    expect(JSON.stringify(audited[0])).not.toMatch(/stefan|romain|fcm\.googleapis/);
+  });
+
+  it("gate off and nobody subscribed: no audit row at all (push ships off)", async () => {
+    const prisma = detectionPrisma({
+      gate: "off",
+      people: PEOPLE.map((p) => ({ ...p, subscribed: false })),
+    });
+    await dispatchDetectionEvent(prisma, EVENT);
+    await flush();
+    expect(audited).toHaveLength(0);
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("gate on: every allowed recipient is dialled on their USERNAME", async () => {
+    sendNotification.mockResolvedValue({ statusCode: 201 });
+    const prisma = detectionPrisma({ gate: "on", people: PEOPLE });
+    await dispatchDetectionEvent(prisma, EVENT);
+    await vi.waitFor(() => expect(sendNotification).toHaveBeenCalledTimes(2));
+    const keys = prisma.pushSubscription.findMany.mock.calls.map(
+      (c: [{ where: { username: string } }]) => c[0].where.username,
+    );
+    expect(keys.sort()).toEqual(["romain", "sam", "stefan"]);
   });
 });

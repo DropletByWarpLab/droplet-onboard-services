@@ -153,7 +153,40 @@ describe("workspace_propose", () => {
     const post = vi.fn(async () => makeResponse(200, { commit: "0123456789abcdef", tag: "proposal/0.2.0", manifest: { egress: "none" } }));
     const res = await workspacePropose.handler({ name: "Word counter", version: "0.2.0", summary: "Counts." }, ctxWith({ post }));
     expect(res).toMatchObject({ ok: true, data: { tag: "proposal/0.2.0", workspace: "ws-a", manifest: { egress: "none" } } });
-    expect((res as { data: { message: string } }).data.message).toMatch(/finished/);
+    expect((res as { data: { message: string } }).data.message).toBe(
+      "Proposed Word counter 0.2.0 as proposal/0.2.0. This run is finished; the person reviews it in the Workshop.",
+    );
+  });
+
+  it("a connector draft (WARP-2899) reads back as the vendor and the host nothing will dial, and names the export", async () => {
+    const readback = "drafts a connector for Acme; nothing on this box will dial api.acme.example until Warp Lab ships it";
+    const post = vi.fn(async () =>
+      makeResponse(200, { commit: "0123456789abcdef", tag: "proposal/0.1.0", manifest: null, kind: "connector-draft", readback }),
+    );
+    const res = await workspacePropose.handler({ name: "Acme", version: "0.1.0", summary: "Drafts Acme." }, ctxWith({ post }));
+    expect(res).toEqual({
+      ok: true,
+      data: {
+        workspace: "ws-a",
+        commit: "0123456789ab",
+        tag: "proposal/0.1.0",
+        kind: "connector-draft",
+        readback,
+        message:
+          `Proposed a connector draft (proposal/0.1.0): ${readback}. This run is finished; ` +
+          "an owner exports it from the Workshop for a Warp Lab PR.",
+      },
+    });
+  });
+
+  it("keeps its name, schema, tier and description (WARP-2899 changes the result only)", () => {
+    expect(workspacePropose.name).toBe("workspace_propose");
+    expect(workspacePropose.requiresWrite).toBe(true);
+    expect(workspacePropose.requiresConfirmation).toBe(true);
+    const schema = workspacePropose.inputSchema as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(schema.properties)).toEqual(["name", "version", "summary"]);
+    expect(schema.required).toEqual(["name", "version", "summary"]);
+    expect(workspacePropose.description).toMatch(/^Finish this run by proposing the workspace as an extension/);
   });
 });
 
