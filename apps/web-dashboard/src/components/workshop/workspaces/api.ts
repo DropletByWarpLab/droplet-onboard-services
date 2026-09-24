@@ -213,7 +213,24 @@ export async function deleteWorkspace(id: string): Promise<void> {
   if (!res?.ok) throw await readError(res, "Couldn't delete this workspace");
 }
 
-const WORKSPACE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/**
+ * The workspace-id grammar. A copy, because the dashboard cannot import
+ * orchestrator code: the source of truth is `WORKSPACE_ID` in
+ * apps/orchestrator/src/services/workspace.service.ts (the sandbox's
+ * services/sandbox/gitstore.py carries the same pattern).
+ * `workshop.connector-draft.test.tsx` pins this copy to the orchestrator's,
+ * character for character.
+ */
+export const WORKSPACE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * How long an exported bundle's object URL stays alive after the click.
+ * `a.click()` returns before the browser has necessarily read the blob URL;
+ * Safari (iOS asks before it saves) and Firefox have been known to drop a
+ * download whose URL was revoked in that same tick. 40 s is the delay
+ * FileSaver.js uses.
+ */
+export const EXPORT_URL_LIFETIME_MS = 40_000;
 
 /**
  * WARP-2899 — the name a bundle is saved under. The server names it
@@ -251,7 +268,8 @@ export async function exportWorkspace(id: string): Promise<string> {
     a.click();
     a.remove();
   } finally {
-    URL.revokeObjectURL(url);
+    // Later, not now (see EXPORT_URL_LIFETIME_MS); on the throw path too, so the blob never leaks.
+    setTimeout(() => URL.revokeObjectURL(url), EXPORT_URL_LIFETIME_MS);
   }
   return filename;
 }

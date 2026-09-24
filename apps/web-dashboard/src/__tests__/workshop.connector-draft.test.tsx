@@ -23,6 +23,8 @@
  *      expired session and retries, and a refusal is reported in place
  *      instead of navigating to a JSON error page), saved under the
  *      server's filename only when that name is a plain `<id>-<hex>.bundle`.
+ *      Its object URL outlives the click and is revoked on a timer, on the
+ *      throw path too.
  *   5. A refused export says so calmly and downloads nothing.
  *   6. The result line is one live region, mounted before the export, and an
  *      export still running when the person switches workspace never writes
@@ -42,11 +44,14 @@ vi.mock("@/lib/auth", () => ({
 import { WorkspaceContext } from "@/components/workshop/WorkspaceContext";
 import {
   bundleFilename,
+  EXPORT_URL_LIFETIME_MS,
   exportWorkspace,
   TEMPLATE_LABELS,
   templateLabel,
+  WORKSPACE_ID,
   WorkspaceApiError,
 } from "@/components/workshop/workspaces/api";
+import { readRepoFile } from "./helpers/test-paths";
 
 function okJson(body: unknown, status = 200) {
   return { ok: status < 400, status, json: async () => body };
@@ -104,6 +109,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -190,7 +196,9 @@ describe("Export bundle (WARP-2899)", () => {
     expect(within(p).queryByRole("button", { name: /export bundle/i })).toBeNull();
   });
 
-  it("downloads the bundle under the server's filename, and says so", async () => {
+  it("downloads the bundle under the server's filename, says so, and frees the object URL only later", async () => {
+    // Fake timers that still follow the wall clock, so waitFor's polling runs.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     wire(DETAIL, () => okBundle("# v2 git bundle\n", 'attachment; filename="ws-d-0123456.bundle"'));
     const p = await pane();
     fireEvent.click(within(p).getByRole("button", { name: /export bundle/i }));
@@ -198,8 +206,13 @@ describe("Export bundle (WARP-2899)", () => {
     expect(authFetchMock).toHaveBeenCalledWith("/api/workspace/ws-d/export", undefined);
     expect(clicked[0]).toEqual({ href: "blob:bundle-1", download: "ws-d-0123456.bundle" });
     expect(createObjectURL).toHaveBeenCalledTimes(1);
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:bundle-1");
     await waitFor(() => expect(within(p).getByTestId("export-status").textContent).toContain("ws-d-0123456.bundle"));
+    // Safari and Firefox can drop a download whose blob URL is gone by the time
+    // they read it: the URL outlives the click, and is still freed (M5).
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(EXPORT_URL_LIFETIME_MS);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:bundle-1");
   });
 
   it("keeps one live region mounted, so the result is announced when its text arrives", async () => {
@@ -308,5 +321,45 @@ describe("exportWorkspace / bundleFilename (WARP-2899)", () => {
     expect(authFetchMock).toHaveBeenCalledTimes(1);
     expect(authFetchMock.mock.calls[0]![0]).toBe("/api/workspace/ws-x/export");
     expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("keeps the object URL alive past the click for EXPORT_URL_LIFETIME_MS, then revokes it once", async () => {
+    vi.useFakeTimers();
+    authFetchMock.mockImplementation(async () => okBundle("# v2 git bundle\n", 'attachment; filename="ws-d-0123456.bundle"'));
+    await expect(exportWorkspace("ws-d")).resolves.toBe("ws-d-0123456.bundle");
+    expect(clicked).toEqual([{ href: "blob:bundle-1", download: "ws-d-0123456.bundle" }]);
+    // Not in the click's own tick: the browser has not necessarily read the URL yet.
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(EXPORT_URL_LIFETIME_MS - 1);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:bundle-1");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still revokes the object URL when handing the download to the browser throws", async () => {
+    vi.useFakeTimers();
+    authFetchMock.mockImplementation(async () => okBundle("# v2 git bundle\n", 'attachment; filename="ws-d-0123456.bundle"'));
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(() => {
+      throw new Error("download blocked");
+    });
+    await expect(exportWorkspace("ws-d")).rejects.toThrow("download blocked");
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(EXPORT_URL_LIFETIME_MS);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:bundle-1");
+  });
+});
+
+describe("the dashboard's workspace-id grammar (WARP-2899)", () => {
+  it("is the orchestrator's WORKSPACE_ID, character for character", () => {
+    // bundleFilename falls back to `workspace.bundle` for an id this copy rejects,
+    // so a server grammar that widens without this one would rename every export.
+    const src = readRepoFile("apps/orchestrator/src/services/workspace.service.ts");
+    const m = /export const WORKSPACE_ID = \/(.+)\/([a-z]*);/.exec(src);
+    expect(m, "WORKSPACE_ID literal not found in workspace.service.ts").not.toBeNull();
+    expect(WORKSPACE_ID.source).toBe(m![1]);
+    expect(WORKSPACE_ID.flags).toBe(m![2]);
   });
 });
