@@ -21,10 +21,13 @@
  * itself) over generated data and requires identical rows — the SQL matcher
  * is pinned to P2b's.
  *
- * Two additions to the spec's statement, each keeping a CHECK from failing a
- * whole build: a detection whose label the cell CHECK would refuse (Frigate's
- * COCO map has "traffic light") is not counted, and a negative duration never
- * reaches the dwell quantile. Sorting (`cameras`, the label ranking) is
+ * Additions to the spec's statement, each keeping a CHECK from failing a whole
+ * build: a detection whose label the cell CHECK would refuse (Frigate's COCO
+ * map has "traffic light") is not counted; a negative duration never reaches
+ * the dwell quantile; and a camera's observed time in a slot is the UNION of
+ * its spans (`range_agg`, Postgres 14+), so overlapping spans — a replica, a
+ * tick that outlived its lock — can neither count a minute twice nor push a
+ * 120-minute fall-back slot past the `observedMinutes` CHECK (review #2352). Sorting (`cameras`, the label ranking) is
  * `COLLATE "C"`, so the database's collation cannot reorder names.
  */
 import type { PrismaClient, SecurityBaselineBuildTrigger } from "@prisma/client";
@@ -121,16 +124,23 @@ link AS (
   WHERE l.state = 'active' AND z.state = 'active' AND l."sourceKind" IN ('camera', 'camera_zone')
     AND (p.only_zone_ids IS NULL OR l."zoneId" = ANY(p.only_zone_ids))
 ),
-cam_obs AS (
-  -- observed minutes per camera per slot, from coverage spans; keep slots observed for >= 5/6 of their length.
+cam_slot AS (
+  -- each camera's coverage inside each slot, as the UNION of its spans' pieces (range_agg): spans a second
+  -- process left overlapping never count a moment twice, so a slot never holds more than its own length.
   -- An area rebuild reads only its linked cameras (review #2352): never a full-build scan for one link edit.
-  SELECT sp.camera, s.ymd, s.hour, s.day_type,
-         SUM(EXTRACT(EPOCH FROM LEAST(sp."coveredUntil", s.s_end) - GREATEST(sp."startedAt", s.s_start))) / 60.0 AS mins
+  SELECT sp.camera, s.ymd, s.hour, s.day_type, s.s_start, s.s_end,
+         range_agg(tsrange(GREATEST(sp."startedAt", s.s_start), LEAST(sp."coveredUntil", s.s_end))) AS covered
   FROM p CROSS JOIN slot s JOIN "SecurityCoverageSpan" sp ON sp."startedAt" < s.s_end AND sp."coveredUntil" > s.s_start
   WHERE p.only_zone_ids IS NULL OR sp.camera IN (SELECT camera FROM link)
   GROUP BY sp.camera, s.ymd, s.hour, s.day_type, s.s_start, s.s_end
-  HAVING SUM(EXTRACT(EPOCH FROM LEAST(sp."coveredUntil", s.s_end) - GREATEST(sp."startedAt", s.s_start)))
-         >= EXTRACT(EPOCH FROM s.s_end - s.s_start) * 5.0 / 6.0
+),
+cam_obs AS (
+  -- observed SECONDS per camera per slot (divided once, at the end, so ms-precision spans round exactly);
+  -- keep slots observed for >= 5/6 of their length
+  SELECT c.camera, c.ymd, c.hour, c.day_type, u.secs
+  FROM cam_slot c
+  CROSS JOIN LATERAL (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM upper(r) - lower(r))), 0) AS secs FROM unnest(c.covered) AS r) u
+  WHERE u.secs >= EXTRACT(EPOCH FROM c.s_end - c.s_start) * 5.0 / 6.0
 ),
 area AS (
   SELECT zone_id, max(zone_version) AS zone_version,
@@ -139,10 +149,10 @@ area AS (
 ),
 key_obs AS (
   -- D3: an area slot is observed only when EVERY linked camera was
-  SELECT 'camera:' || o.camera AS zone_key, o.ymd, o.hour, o.day_type, o.mins
+  SELECT 'camera:' || o.camera AS zone_key, o.ymd, o.hour, o.day_type, o.secs
   FROM cam_obs o CROSS JOIN p WHERE p.camera_keys
   UNION ALL
-  SELECT 'area:' || a.zone_id, o.ymd, o.hour, o.day_type, MIN(o.mins)
+  SELECT 'area:' || a.zone_id, o.ymd, o.hour, o.day_type, MIN(o.secs)
   FROM area a JOIN cam_obs o ON o.camera = ANY(a.cams)
   GROUP BY a.zone_id, a.cams, o.ymd, o.hour, o.day_type
   HAVING COUNT(DISTINCT o.camera) = cardinality(a.cams)
@@ -191,7 +201,7 @@ grid AS (
   SELECT kl.zone_key, kl.label, g.day_type, g.hour
   FROM key_label kl CROSS JOIN (SELECT DISTINCT day_type, hour FROM slot) g
 ),
-obs AS (SELECT zone_key, day_type, hour, COUNT(*) AS n, SUM(mins) AS m FROM key_obs GROUP BY 1, 2, 3),
+obs AS (SELECT zone_key, day_type, hour, COUNT(*) AS n, SUM(secs) AS secs FROM key_obs GROUP BY 1, 2, 3),
 cnt AS (SELECT zone_key, label, day_type, hour, COUNT(DISTINCT ymd) AS d, COUNT(*) AS c FROM ev_obs GROUP BY 1, 2, 3, 4),
 dwell AS (
   -- hour +/- 1 pooled (same day type, circular), person only
@@ -208,7 +218,7 @@ SELECT p.build_id, g.zone_key,
        a.zone_version,
        COALESCE(a.cams, ARRAY[substr(g.zone_key, 8)]),
        g.label, g.day_type, g.hour,
-       COALESCE(o.n, 0), COALESCE(c.d, 0), COALESCE(c.c, 0), COALESCE(round(o.m), 0)::int,
+       COALESCE(o.n, 0), COALESCE(c.d, 0), COALESCE(c.c, 0), COALESCE(round(o.secs / 60.0), 0)::int,
        COALESCE(w.samples, 0), w.p99
 FROM grid g CROSS JOIN p
 LEFT JOIN area a ON g.zone_key = 'area:' || a.zone_id

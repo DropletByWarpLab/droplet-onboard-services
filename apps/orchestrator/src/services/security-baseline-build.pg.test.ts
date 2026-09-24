@@ -21,11 +21,18 @@
  *   single flight — a live claim → skip; a stale claim → failed 'interrupted'.
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL, like every *.pg.test.ts.
+ * Review #2352 hardening: spans are ms-precision (never whole minutes), a
+ * second process's OVERLAPPING spans are in the fixture (incl. the 120-minute
+ * fall-back slot covered twice — a sum would count it as 240 minutes and break
+ * the observedMinutes CHECK), a second window straddles the 2033 spring-forward
+ * (a date with no 02:00), and one case runs under `SET LOCAL TIME ZONE
+ * 'Pacific/Kiritimati'` to prove the slot bounds are bound as UTC text.
+ *
  * FIXTURE SCOPING — cameras `warp2980b_*`, areas named `warp2980b …`, events
- * `warp2980b:*`, and every date in November 2031 (the coverage pg file uses
- * 2032, so this file's prune of old spans can never touch its fixtures).
- * Builds have no tag; only this file writes them, and it clears the ones it
- * made (window 2031-…).
+ * `warp2980b:*`, and dates in November 2031 and February–March 2033 (the
+ * coverage pg file uses 2032, so this file's prune of old spans can never
+ * touch its fixtures). Builds have no tag; only this file writes them, and it
+ * clears the ones it made (windows 2031-… and 2033-…).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -50,6 +57,12 @@ const NOW = new Date("2031-11-10T17:00:00Z");
 const WINDOW = windowFor(NOW, TZ);
 const BOUNDS = windowBounds(WINDOW, TZ);
 const SLOTS = windowSlots(WINDOW.from, WINDOW.to, TZ);
+/** Today 2033-03-20 in New York; the window 2033-02-20 … 2033-03-19 holds the 2033-03-13 spring-forward. */
+const NOW_SPRING = new Date("2033-03-20T17:00:00Z");
+const WINDOW_SPRING = windowFor(NOW_SPRING, TZ);
+const BOUNDS_SPRING = windowBounds(WINDOW_SPRING, TZ);
+const SLOTS_SPRING = windowSlots(WINDOW_SPRING.from, WINDOW_SPRING.to, TZ);
+const DAY = 86_400_000;
 const CAMS = [`${TAG}_c1`, `${TAG}_c2`, `${TAG}_c3`, `${TAG}_c4`];
 /** Has events and links, never coverage: it must never make a slot observed. */
 const BLIND = `${TAG}_c5`;
@@ -79,7 +92,9 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
   const zoneIds: string[] = [];
 
   async function sweepBuilds(): Promise<void> {
-    await prisma.securityBaselineBuild.deleteMany({ where: { windowFrom: { startsWith: "2031-" } } });
+    await prisma.securityBaselineBuild.deleteMany({
+      where: { OR: [{ windowFrom: { startsWith: "2031-" } }, { windowFrom: { startsWith: "2033-" } }] },
+    });
   }
   async function sweep(): Promise<void> {
     await sweepBuilds();
@@ -148,14 +163,14 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
       .sort(cellOrder);
   }
 
-  async function claim(state: "building" | "ready" = "building", startedAt = NOW) {
+  async function claim(state: "building" | "ready" = "building", startedAt = NOW, window = WINDOW) {
     return prisma.securityBaselineBuild.create({
       data: {
         state,
         trigger: "first",
         timezone: TZ,
-        windowFrom: WINDOW.from,
-        windowTo: WINDOW.to,
+        windowFrom: window.from,
+        windowTo: window.to,
         rulesetVersion: 1,
         startedAt,
         finishedAt: state === "building" ? null : NOW,
@@ -181,41 +196,62 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
     await area(7, [["camera_zone", `${CAMS[3]}/drive`]]);
 
     const r = rng(2980);
-    // Coverage: whole-minute spans per camera, with gaps, from before the window to after it.
+    const closedSpan = (camera: string, start: number, end: number): Prisma.SecurityCoverageSpanCreateManyInput => ({
+      camera,
+      state: "closed",
+      startedAt: new Date(start),
+      coveredUntil: new Date(end),
+      processId: randomUUID(),
+      closedAt: new Date(end),
+    });
+    // Coverage: ms-precision spans per camera, with gaps, from before each window to after it.
     const spanRows: Prisma.SecurityCoverageSpanCreateManyInput[] = [];
-    for (const camera of CAMS) {
-      let t = BOUNDS.start.getTime() - 2 * 86_400_000;
-      while (t < BOUNDS.end.getTime() + 86_400_000) {
-        const len = (60 + Math.floor(r() * 3 * 1440)) * MIN;
-        const start = t;
-        const end = t + len;
-        spanRows.push({ camera, state: "closed", startedAt: new Date(start), coveredUntil: new Date(end), processId: randomUUID(), closedAt: new Date(end) });
-        t = end + Math.floor(r() * 180) * MIN;
+    for (const bounds of [BOUNDS, BOUNDS_SPRING]) {
+      for (const camera of CAMS) {
+        let t = bounds.start.getTime() - 2 * DAY + Math.floor(r() * MIN);
+        while (t < bounds.end.getTime() + DAY) {
+          const len = (60 + Math.floor(r() * 3 * 1440)) * MIN + Math.floor(r() * MIN);
+          spanRows.push(closedSpan(camera, t, t + len));
+          t = t + len + Math.floor(r() * 180 * MIN);
+        }
       }
     }
+    // What a second process could leave behind: spans that OVERLAP this camera's
+    // own — exact duplicates and shifted copies. Overlap must never count twice.
+    const own = spanRows.filter((s) => s.camera === CAMS[0]);
+    for (let i = 0; i < 12; i += 1) {
+      const s = own[Math.floor(r() * own.length)]!;
+      const shift = i % 3 === 0 ? 0 : Math.floor(r() * 90 * MIN);
+      spanRows.push(closedSpan(CAMS[0]!, (s.startedAt as Date).getTime() + shift, (s.coveredUntil as Date).getTime() + shift));
+    }
+    // The 120-minute fall-back slot (2031-11-02 01:00–03:00 EDT/EST = 05:00–07:00Z), covered twice over.
+    spanRows.push(closedSpan(CAMS[1]!, Date.parse("2031-11-02T04:30:00.250Z"), Date.parse("2031-11-02T07:30:00.750Z")));
+    spanRows.push(closedSpan(CAMS[1]!, Date.parse("2031-11-02T04:45:00.000Z"), Date.parse("2031-11-02T07:15:00.000Z")));
     await prisma.securityCoverageSpan.createMany({ data: spanRows });
 
-    // 300 detections, some outside the window; plus rows that must never count.
+    // 300 detections per window, some outside it; plus rows that must never count.
     const evRows: Prisma.SecurityEventCreateManyInput[] = [];
-    const span = BOUNDS.end.getTime() - BOUNDS.start.getTime() + 2 * 86_400_000;
-    for (let i = 0; i < 300; i += 1) {
-      const startedAt = new Date(BOUNDS.start.getTime() - 86_400_000 + Math.floor(r() * span));
-      const camera = pick(r, [...CAMS, ...CAMS, BLIND]);
-      const zones = PARTS.filter(() => r() < 0.4);
-      evRows.push({
-        source: "frigate",
-        kind: "detection",
-        severity: "info",
-        camera,
-        sourceRef: `${camera}/${TAG}-${i}`,
-        dedupeKey: `${TAG}:${i}`,
-        labels: [i % 97 === 0 ? "traffic light" : pick(r, LABELS)],
-        cameraZones: zones,
-        score: 0.9,
-        startedAt,
-        endedAt: new Date(startedAt.getTime() + 2_000 + Math.floor(r() * 400_000)),
-        summary: "detection",
-      });
+    for (const [w, bounds] of [["f", BOUNDS], ["s", BOUNDS_SPRING]] as const) {
+      const span = bounds.end.getTime() - bounds.start.getTime() + 2 * DAY;
+      for (let i = 0; i < 300; i += 1) {
+        const startedAt = new Date(bounds.start.getTime() - DAY + Math.floor(r() * span));
+        const camera = pick(r, [...CAMS, ...CAMS, BLIND]);
+        const zones = PARTS.filter(() => r() < 0.4);
+        evRows.push({
+          source: "frigate",
+          kind: "detection",
+          severity: "info",
+          camera,
+          sourceRef: `${camera}/${TAG}-${w}${i}`,
+          dedupeKey: `${TAG}:${w}${i}`,
+          labels: [i % 97 === 0 ? "traffic light" : pick(r, LABELS)],
+          cameraZones: zones,
+          score: 0.9,
+          startedAt,
+          endedAt: new Date(startedAt.getTime() + 2_000 + Math.floor(r() * 400_000)),
+          summary: "detection",
+        });
+      }
     }
     // Noise in observed slots — none of it may count.
     for (let i = 0; i < 40; i += 1) {
@@ -299,6 +335,8 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
     expect(got.some((c) => c.observedMinutes > c.daysObserved * 60)).toBe(true); // the 120-minute fall-back hour
     expect(got.some((c) => c.eventCount > 0)).toBe(true);
     expect(got.some((c) => c.dwellSamples >= 2)).toBe(true);
+    // The twice-covered fall-back slot counts its 120 minutes once (a sum would say 240).
+    expect(got.every((c) => c.observedMinutes <= c.daysObserved * 120)).toBe(true);
     // Every key keeps the four tracked labels: the readers take one row per key
     // from (person, weekday, hour 0) instead of an in-memory `distinct` (review #2352).
     for (const k of keys) {
@@ -311,6 +349,63 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
         expect(got.filter((c) => c.zoneKey === k && c.label === label)).toHaveLength(48);
       }
     }
+  }, 120_000);
+
+  it("the slot bounds are bound as UTC text: identical rows under SET LOCAL TIME ZONE 'Pacific/Kiritimati' (review #2352)", async () => {
+    await sweepBuilds();
+    const b = await claim();
+    // The named zone when the server has tzdata (CI's pg16 image does); else the
+    // same +14:00 as a SQL-standard offset (a Postgres build without tzdata).
+    const named = await prisma
+      .$queryRawUnsafe<Array<{ n: bigint }>>("SELECT count(*) AS n FROM pg_timezone_names WHERE name = 'Pacific/Kiritimati'")
+      .then((rows) => Number(rows[0]!.n) === 1, () => false);
+    const setZone = named ? "SET LOCAL TIME ZONE 'Pacific/Kiritimati'" : "SET LOCAL TIME ZONE INTERVAL '+14:00' HOUR TO MINUTE";
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(setZone);
+      const shown = await tx.$queryRawUnsafe<Array<{ TimeZone: string }>>('SHOW TimeZone');
+      expect(shown[0]!.TimeZone).toMatch(/Kiritimati|\+14|-14/);
+      return buildCells(tx, { buildId: b.id, slots: SLOTS, windowStart: BOUNDS.start, windowEnd: BOUNDS.end, onlyZoneIds: null, includeCameraKeys: true });
+    });
+    const want = referenceCells({
+      slots: SLOTS,
+      windowStart: BOUNDS.start,
+      windowEnd: BOUNDS.end,
+      events,
+      links: await liveLinks(),
+      spans: await spans(),
+      onlyZoneIds: null,
+      includeCameraKeys: true,
+    }).sort(cellOrder);
+    expect(await cellsOf(b.id)).toEqual(want);
+  }, 120_000);
+
+  it("a window with a spring-forward date (no 02:00 on 2033-03-13) equals the reference too", async () => {
+    await sweepBuilds();
+    expect(SLOTS_SPRING.some((s) => s.ymd === "2033-03-13" && s.hour === 2)).toBe(false);
+    const b = await claim("building", NOW_SPRING, WINDOW_SPRING);
+    await prisma.$transaction((tx) =>
+      buildCells(tx, {
+        buildId: b.id,
+        slots: SLOTS_SPRING,
+        windowStart: BOUNDS_SPRING.start,
+        windowEnd: BOUNDS_SPRING.end,
+        onlyZoneIds: null,
+        includeCameraKeys: true,
+      }),
+    );
+    const got = await cellsOf(b.id);
+    const want = referenceCells({
+      slots: SLOTS_SPRING,
+      windowStart: BOUNDS_SPRING.start,
+      windowEnd: BOUNDS_SPRING.end,
+      events,
+      links: await liveLinks(),
+      spans: await spans(),
+      onlyZoneIds: null,
+      includeCameraKeys: true,
+    }).sort(cellOrder);
+    expect(got.length).toBeGreaterThan(0);
+    expect(got).toEqual(want);
   }, 120_000);
 
   it("an area rebuild's rows equal the reference for just those areas, with no camera keys", async () => {

@@ -72,20 +72,40 @@ export function referenceCells(input: ReferenceInput): RefCell[] {
   const { slots } = input;
   const slotMs = slots.map((s) => s.end.getTime() - s.start.getTime());
 
-  // 1. Observed milliseconds per camera per slot, kept at ≥ 5/6 of the slot (integer arithmetic).
-  const camObs = new Map<string, Map<number, number>>();
+  // 1. Observed milliseconds per camera per slot: the UNION of its spans' pieces
+  //    in the slot (overlapping spans never count a moment twice), kept at
+  //    ≥ 5/6 of the slot (integer arithmetic).
+  const pieces = new Map<string, Map<number, Array<[number, number]>>>();
   for (const sp of input.spans) {
-    let perSlot = camObs.get(sp.camera);
     for (let i = 0; i < slots.length; i += 1) {
       const from = Math.max(sp.startedAt.getTime(), slots[i]!.start.getTime());
       const to = Math.min(sp.coveredUntil.getTime(), slots[i]!.end.getTime());
       if (to <= from) continue;
-      if (!perSlot) camObs.set(sp.camera, (perSlot = new Map()));
-      perSlot.set(i, (perSlot.get(i) ?? 0) + (to - from));
+      let perSlot = pieces.get(sp.camera);
+      if (!perSlot) pieces.set(sp.camera, (perSlot = new Map()));
+      const list = perSlot.get(i) ?? [];
+      list.push([from, to]);
+      perSlot.set(i, list);
     }
   }
-  for (const perSlot of camObs.values()) {
-    for (const [i, ms] of perSlot) if (ms * 6 < slotMs[i]! * 5) perSlot.delete(i);
+  const camObs = new Map<string, Map<number, number>>();
+  for (const [camera, perSlot] of pieces) {
+    const kept = new Map<number, number>();
+    for (const [i, list] of perSlot) {
+      list.sort((a, b) => a[0] - b[0]);
+      let ms = 0;
+      let [curFrom, curTo] = list[0]!;
+      for (const [f, t] of list.slice(1)) {
+        if (f <= curTo) curTo = Math.max(curTo, t);
+        else {
+          ms += curTo - curFrom;
+          [curFrom, curTo] = [f, t];
+        }
+      }
+      ms += curTo - curFrom;
+      if (ms * 6 >= slotMs[i]! * 5) kept.set(i, ms);
+    }
+    camObs.set(camera, kept);
   }
 
   // 2. Areas: the active links of the areas in scope.
