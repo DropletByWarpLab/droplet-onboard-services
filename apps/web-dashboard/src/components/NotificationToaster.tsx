@@ -15,6 +15,15 @@
  * (fire-and-forget: a failed ack never blocks the navigation). A toast that
  * times out or is dismissed is NOT an acknowledgement — nobody can prove it
  * was read. A payload without an `id` (an older box) is never acked.
+ *
+ * Review F1 — also the page end of the service worker (public/sw.js). A push
+ * is usually tapped long after it arrived, when the 15-minute session cookie
+ * has expired, so the worker's own ack gets a 401 — and the worker must not
+ * refresh the session (that would race this page's refresh-token rotation).
+ * It hands the ack here instead; this page makes it through authFetch, which
+ * refreshes. Once signed in, the page tells the worker it is listening
+ * ("dashboard-ready") so an ack handed over before the listener existed is
+ * delivered then. The worker's `navigate` fallback lands here too.
  */
 
 import { useEffect, useRef } from "react";
@@ -40,6 +49,23 @@ interface IncomingNotification {
  *  value it navigates to: only an in-app path, never `//host` or a scheme. */
 export function isInAppPath(url: unknown): url is string {
   return typeof url === "string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\");
+}
+
+/** A NotificationLog id (cuid): the shape the ack route accepts. */
+const NOTIFICATION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** What the service worker may ask of this page. */
+export type WorkerMessage = { type: "ack-notification"; id: string } | { type: "navigate"; url: string };
+
+/** The worker's message, validated — or null for anything malformed or foreign. */
+export function parseWorkerMessage(data: unknown): WorkerMessage | null {
+  if (data === null || typeof data !== "object") return null;
+  const msg = data as { type?: unknown; id?: unknown; url?: unknown };
+  if (msg.type === "ack-notification" && typeof msg.id === "string" && NOTIFICATION_ID_RE.test(msg.id)) {
+    return { type: "ack-notification", id: msg.id };
+  }
+  if (msg.type === "navigate" && isInAppPath(msg.url)) return { type: "navigate", url: msg.url };
+  return null;
 }
 
 // When the server didn't ship a title, prefer a kind-derived Title Case
@@ -144,6 +170,33 @@ export function NotificationToaster() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       try { ws?.close(); } catch { /* ignore */ }
     };
+  }, [user]);
+
+  // Review F1 — the service worker's hand-offs (see the header).
+  useEffect(() => {
+    if (typeof window === "undefined" || !user) return;
+    const container = typeof navigator !== "undefined" ? navigator.serviceWorker : undefined;
+    if (!container) return;
+    const acked = new Set<string>();
+    const onMessage = (event: MessageEvent) => {
+      const msg = parseWorkerMessage(event.data);
+      if (!msg) return;
+      if (msg.type === "navigate") {
+        routerRef.current.push(msg.url);
+        return;
+      }
+      // The worker may post the same id twice (straight to the window it
+      // opened, then again on "dashboard-ready"); the ack is made once.
+      if (acked.has(msg.id)) return;
+      acked.add(msg.id);
+      void ackNotification(msg.id, { via: "opened" }).catch(() => {});
+    };
+    container.addEventListener("message", onMessage);
+    // Signed in and listening: the worker hands over anything pending.
+    void container.ready
+      .then((registration) => registration.active?.postMessage({ type: "dashboard-ready" }))
+      .catch(() => {});
+    return () => container.removeEventListener("message", onMessage);
   }, [user]);
 
   return null;

@@ -252,3 +252,114 @@ describe("NotificationToaster acknowledgement (WARP-2804)", () => {
     expect(ackSpy).not.toHaveBeenCalled();
   });
 });
+
+// Review F1 — the service worker hands the page an ack it could not make (the
+// 15-min session cookie had expired when the push was tapped). The page acks
+// through `ackNotification` → authFetch, which refreshes the session; it also
+// routes the worker's `navigate` fallback, which had no receiver before.
+class FakeServiceWorkerContainer {
+  listeners = new Set<(ev: { data: unknown }) => void>();
+  activePost = vi.fn();
+  ready = Promise.resolve({ active: { postMessage: this.activePost } });
+  addEventListener(type: string, fn: (ev: { data: unknown }) => void) {
+    if (type === "message") this.listeners.add(fn);
+  }
+  removeEventListener(type: string, fn: (ev: { data: unknown }) => void) {
+    if (type === "message") this.listeners.delete(fn);
+  }
+  emit(data: unknown) {
+    for (const fn of this.listeners) fn({ data });
+  }
+}
+
+describe("NotificationToaster ← the service worker (WARP-2804, review F1)", () => {
+  let container: FakeServiceWorkerContainer;
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    toastSpy.mockReset();
+    routerPush.mockReset();
+    ackSpy.mockClear();
+    (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { protocol: "http:", host: "localhost" } as Location,
+    });
+    container = new FakeServiceWorkerContainer();
+    Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: container });
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, "serviceWorker");
+  });
+
+  async function mount() {
+    const view = render(<NotificationToaster />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return view;
+  }
+
+  it("tells the worker a signed-in dashboard is listening, so it hands over any pending ack", async () => {
+    await mount();
+    expect(container.activePost).toHaveBeenCalledWith({ type: "dashboard-ready" });
+  });
+
+  it("MUTATION: an ack the worker hands over is made as `opened`, through the page's authFetch", async () => {
+    await mount();
+    await act(async () => container.emit({ type: "ack-notification", id: "clx1" }));
+    expect(ackSpy).toHaveBeenCalledTimes(1);
+    expect(ackSpy).toHaveBeenCalledWith("clx1", { via: "opened" });
+  });
+
+  it("the same id handed over twice (posted directly, then on ready) is acked once", async () => {
+    await mount();
+    await act(async () => {
+      container.emit({ type: "ack-notification", id: "clx1" });
+      container.emit({ type: "ack-notification", id: "clx1" });
+    });
+    expect(ackSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["no data", null],
+    ["a string", "ack-notification"],
+    ["another type", { type: "hello", id: "clx1" }],
+    ["an id that is not a row id", { type: "ack-notification", id: "../admin" }],
+    ["an over-long id", { type: "ack-notification", id: "x".repeat(65) }],
+    ["a non-string id", { type: "ack-notification", id: 42 }],
+  ])("ignores a malformed or foreign message (%s)", async (_label, data) => {
+    await mount();
+    await act(async () => container.emit(data));
+    expect(ackSpy).not.toHaveBeenCalled();
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it("routes the worker's navigate fallback — in-app paths only", async () => {
+    await mount();
+    await act(async () => container.emit({ type: "navigate", url: "/calendar" }));
+    expect(routerPush).toHaveBeenCalledWith("/calendar");
+    routerPush.mockReset();
+    for (const url of ["//evil.example/x", "https://evil.example", "javascript:alert(1)", 42]) {
+      await act(async () => container.emit({ type: "navigate", url }));
+    }
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it("a failed hand-off ack is swallowed", async () => {
+    ackSpy.mockImplementationOnce(() => Promise.reject(new Error("offline")));
+    await mount();
+    await act(async () => {
+      container.emit({ type: "ack-notification", id: "clx1" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(ackSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops listening when unmounted", async () => {
+    const view = await mount();
+    expect(container.listeners.size).toBe(1);
+    view.unmount();
+    expect(container.listeners.size).toBe(0);
+  });
+});
