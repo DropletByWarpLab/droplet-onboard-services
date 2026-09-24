@@ -255,6 +255,13 @@ describe("the notifier (§6.7)", () => {
     expect(f.world.securityIncident[0]).toMatchObject({ notifyState: "done", notifyAttempts: 0, version: 3 });
   });
 
+  it("review #12: a notice's createdAt and settledAt are on ONE clock — the tick's — whatever the database's says", async () => {
+    const f = world(); // the fake database's clock is NOW
+    const tick = plus(NOW, 7_000);
+    await notifyPendingIncidents(client(f), deps(), tick);
+    expect(noticeOf(f, STEFAN)).toMatchObject({ createdAt: tick, settledAt: tick });
+  });
+
   it("records inside the transaction, delivers after it commits — with the incident's tag and alert priority", async () => {
     const f = world();
     await notifyPendingIncidents(client(f), deps(), NOW);

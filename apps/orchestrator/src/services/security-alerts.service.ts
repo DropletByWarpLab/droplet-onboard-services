@@ -383,6 +383,9 @@ async function notifyIncident(
           reason: recipient.reason,
           outcome: recipient.outcome,
           notificationLogId,
+          // One clock (review #12): created and settled on the tick's clock,
+          // the one the hourly cap and redelivery read — never the database's.
+          createdAt: now,
           settledAt: recipient.outcome === "queued" ? null : now,
         });
       }
