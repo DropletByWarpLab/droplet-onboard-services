@@ -12,9 +12,8 @@ import type { ModelsCatalogPayload } from "../types";
  * does), but the per-model `pulled` flags flip when a download finishes —
  * the pull flow calls `refresh` explicitly on success, and the 30s poll
  * keeps a second browser tab honest. A failed fetch surfaces on `error`;
- * the page treats the section as an enhancement and renders nothing rather
- * than an error wall (the Models page's own degraded state already tells
- * the AI-service-down story).
+ * the page renders one quiet line in the section for it rather than an
+ * error wall (WARP-3048 — it used to render nothing at all).
  */
 export function useModelsCatalog() {
   const { data, error, isLoading, mutate } = useSWR<ModelsCatalogPayload>(

@@ -1,0 +1,61 @@
+# CODEOWNERS (WARP-2900 / WARP-2923, ADR-056 slice H)
+#
+# The box's signing keys and the code that decides what they vouch for. A
+# change here changes what the appliance will sign or trust, so it carries a
+# required security review.
+#
+# This file only REQUESTS the review. It is enforced once a repo admin turns
+# on "Require review from Code Owners" in the `stage` (and `main`) branch
+# protection. Until then, the WARP-2923 manual gate applies: no PR touching
+# these paths merges without @rjouffret's GitHub approval.
+#
+# Last matching pattern wins, so keep the most specific lines last.
+
+# Device-identity sidecar: the device-id key and the extension-signing key.
+/services/device-identity-svc/                                  @rjouffret
+/proto/device_identity.proto                                    @rjouffret
+/apps/orchestrator/src/grpc-generated/device_identity.ts        @rjouffret
+/apps/orchestrator/src/services/device-identity.client.ts       @rjouffret
+
+# The OTA release verifier and the extension verifier (both trust anchors).
+/apps/orchestrator/src/services/update-agent/                   @rjouffret
+
+# Extensions: the one signer caller, the statement format, and the promote route.
+/apps/orchestrator/src/services/extension-promotion.service.ts  @rjouffret
+/apps/orchestrator/src/services/extension-manifest.ts           @rjouffret
+/apps/orchestrator/src/routes/extensions.ts                     @rjouffret
+/docs/schemas/extension-manifest.schema.json                    @rjouffret
+# Every extension-* source and test beside them (manifest, promotion,
+# cross-protocol, schema drift).
+/apps/orchestrator/src/services/extension-*                     @rjouffret
+/apps/orchestrator/src/services/device-identity.client.test.ts  @rjouffret
+
+# The tests that pin the above. Editing one (e.g. adding a second signer to
+# the guard's allowlist, or an RPC to the pinned proto set) is a change to
+# what the box will sign, so it carries the same review.
+/apps/orchestrator/src/__tests__/extension-signer.guard.test.ts       @rjouffret
+/apps/orchestrator/src/__tests__/device-identity-proto.snapshot.test.ts @rjouffret
+/apps/orchestrator/src/__tests__/env-preflight.ts                     @rjouffret
+
+# The custody contract for both keys.
+/docs/security/device-identity.md                               @rjouffret
+
+# Where a promoted extension RUNS (WARP-2900 H2): the sandbox's install /
+# relay path, the supervisor's limits and env allowlist, the first-party MCP
+# host shims, and the trust notes that describe them.
+/services/sandbox/extensions.py                                 @rjouffret
+/services/sandbox/supervisor.py                                 @rjouffret
+/services/sandbox/ext_host/                                     @rjouffret
+/docs/security/extension-trust.md                               @rjouffret
+
+# What an extension's call-back bearer may reach (WARP-2900 H3): the global
+# guard that confines the _service:ext:<slug> principal, and the test that
+# pins it. (The attach and token modules match extension-* above.)
+/apps/orchestrator/src/middleware/extension-principal-guard.ts   @rjouffret
+/apps/orchestrator/src/__tests__/extension-principal.test.ts     @rjouffret
+/apps/orchestrator/src/__tests__/extension-principal-wiring.test.ts @rjouffret
+# In-process attribution of a remote dispatch: it must never carry a token.
+/apps/orchestrator/src/services/remote-call-attribution.ts       @rjouffret
+
+# This file.
+/.github/CODEOWNERS                                             @rjouffret

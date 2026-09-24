@@ -93,7 +93,8 @@
   text-overflow: ellipsis;
 }
 
-/* Model pill (multi-model only — ModelSelector returns null otherwise). */
+/* Model pill — a <select> with 2+ models, a read-only link with one
+   (ModelSelector returns null only when there is no model at all). */
 .droplet-shell .chat-model {
   display: inline-flex;
   align-items: center;
@@ -121,6 +122,22 @@
   border-radius: 50%;
   background: var(--success);
   flex-shrink: 0;
+}
+/* WARP-3048 — single-model box: the same pill, read-only, as a link to
+   /models (models brief, WARP-1116). The name clamps like the select. */
+.droplet-shell .chat-model-link {
+  color: var(--text);
+  text-decoration: none;
+  min-width: 0;
+}
+.droplet-shell .chat-model-link:hover {
+  border-color: var(--brand);
+}
+.droplet-shell .chat-model-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .droplet-shell .chat-tag {

@@ -17,7 +17,13 @@ and a lost checkout is a `git clone` away.
 
 `templates.git` is seeded at service start from the templates baked into the
 image (`extensions/templates/` in the repo), only when absent — an operator's
-later commits to it are never overwritten.
+later commits to it are never overwritten. On every later start a template
+DIRECTORY the image has and the store does not is added in its own commit
+(WARP-2899: an existing box gains `rest-profile`); one the store has is never
+touched.
+
+A workspace leaves the box only as a `git bundle` an owner downloads
+(WARP-2899), built here from the local bare repo: nothing is dialled.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +48,13 @@ WORKSPACE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 TEMPLATES_REPO = "templates"
 WORK_BRANCH = "work"
 GIT_TIMEOUT_S = 60
+# The export ceiling — the same 64 MB the /git transport accepts for a push.
+MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+BUNDLE_TIMEOUT_S = 120
+MAX_SHOW_BYTES = 1024 * 1024
+# The refs a reader may name: the working branch, or a proposal tag. Closed on
+# purpose — the ref is interpolated into a `<ref>:<path>` object name.
+REF_RE = re.compile(r"^(work|proposal/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$")
 
 # Nothing from the service's environment reaches git: no token, no HOME
 # surprises, no proxy variables. A Windows dev checkout needs its own PATH and
@@ -176,6 +190,45 @@ def seed_templates() -> bool:
     return True
 
 
+def sync_templates() -> list[str]:
+    """Add every template directory the image carries and `templates.git`
+    lacks, one commit each. Never modifies a directory the store already has
+    — its operator's commits are theirs. Returns the names added."""
+    bare = REPOS_DIR / f"{TEMPLATES_REPO}.git"
+    if not bare.exists() or not TEMPLATES_SRC.is_dir():
+        return []
+    present = set(list_templates())
+    missing = sorted(
+        p.name for p in TEMPLATES_SRC.iterdir() if p.is_dir() and not p.name.startswith(".") and p.name not in present
+    )
+    if not missing:
+        return []
+    staging = WORK_DIR / ".sync-templates"
+    # Best-effort by design: a full or failing volume (copytree, rmtree)
+    # surfaces as a StoreError the lifespan logs, never as an OSError that
+    # would keep the sandbox from starting.
+    try:
+        ensure_dirs()
+        if staging.exists():
+            _rmtree(staging)
+        try:
+            must(git(["clone", "-q", "-b", "main", str(bare), str(staging)], WORK_DIR), "clone templates.git")
+            for name in missing:
+                shutil.copytree(TEMPLATES_SRC / name, staging / name)
+                must(git(["add", "-A", "--", name], staging), "stage template")
+                must(
+                    git(["commit", "-q", "-m", f"templates: add {name} from the image"], staging, author=SYSTEM_AUTHOR),
+                    "commit template",
+                )
+            must(git(["push", "-q", "origin", "main:main"], staging), "push templates")
+        finally:
+            if staging.exists():
+                _rmtree(staging)
+    except (OSError, shutil.Error, subprocess.SubprocessError) as exc:
+        raise StoreError(500, f"sync templates: {exc}") from exc
+    return missing
+
+
 def list_templates() -> list[str]:
     bare = REPOS_DIR / f"{TEMPLATES_REPO}.git"
     if not bare.exists():
@@ -247,6 +300,156 @@ def status(workspace_id: str) -> dict[str, Any]:
     dirty = bool(git(["status", "--porcelain"], work).stdout.strip())
     tags = git(["tag", "--list", "--sort=-creatordate"], work).stdout.split()
     return {"id": workspace_id, "branch": branch, "head": head, "dirty": dirty, "tags": tags[:20]}
+
+
+# ── proposals → extensions (WARP-2900 H2) ───────────────────────────────────
+#
+# The promote route reads a proposal FROM THE BARE REPOSITORY (the truth),
+# never from the checkout a run is still editing: the commit a tag points at,
+# its tree, and the manifest exactly as committed. Install exports that same
+# commit, and refuses unless its tree is the tree the signed statement names.
+
+PROPOSAL_TAG = re.compile(r"^proposal/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
+MANIFEST_PATH = "extension-manifest.json"
+MAX_MANIFEST_BYTES = 256 * 1024
+
+
+def read_at_tag(workspace_id: str, tag: str) -> dict[str, Any]:
+    """{commit, tree, manifest: bytes | None} for `tag` in the bare repo.
+    `manifest` is None when the commit carries no extension-manifest.json
+    (a connector draft is not promotable)."""
+    bare = bare_path(workspace_id)
+    if not bare.is_dir():
+        raise StoreError(404, f"no workspace {workspace_id}")
+    if not PROPOSAL_TAG.match(tag or ""):
+        raise StoreError(400, "tag must be proposal/<semver>")
+    cp = git(["rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"], bare)
+    if cp.returncode != 0:
+        raise StoreError(404, f"no tag {tag} in workspace {workspace_id}")
+    commit = cp.stdout.strip()
+    tree = must(git(["rev-parse", f"{commit}^{{tree}}"], bare), "rev-parse tree").stdout.strip()
+    shown = git(["cat-file", "blob", f"{commit}:{MANIFEST_PATH}"], bare, binary=True)
+    manifest: bytes | None = shown.stdout if shown.returncode == 0 else None
+    if manifest is not None and len(manifest) > MAX_MANIFEST_BYTES:
+        raise StoreError(413, f"{MANIFEST_PATH} exceeds {MAX_MANIFEST_BYTES} bytes")
+    return {"commit": commit, "tree": tree, "manifest": manifest}
+
+
+def export_commit(workspace_id: str, commit: str, tree: str, dest: Path) -> None:
+    """Extract exactly `commit` into `dest` (which must not exist), after
+    checking that its tree is `tree`. Argv-only git, the store's GIT_ENV."""
+    bare = bare_path(workspace_id)
+    if not bare.is_dir():
+        raise StoreError(404, f"no workspace {workspace_id}")
+    if not _SHA.match(commit or "") or not _SHA.match(tree or ""):
+        raise StoreError(400, "commit and tree must be 40-hex object ids")
+    cp = git(["rev-parse", "-q", "--verify", f"{commit}^{{tree}}"], bare)
+    if cp.returncode != 0:
+        raise StoreError(404, f"no commit {commit} in workspace {workspace_id}")
+    actual = cp.stdout.strip()
+    if actual != tree:
+        raise StoreError(409, f"commit {commit[:12]} has tree {actual[:12]}, the signed statement names {tree[:12]}")
+    archive = git(["archive", "--format=tar", commit], bare, binary=True, timeout=120)
+    if archive.returncode != 0:
+        raise StoreError(500, "could not export the commit")
+    dest.mkdir(parents=True, exist_ok=False)
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
+        tar.extractall(dest, filter="data")
+
+
+# ── connector drafts: export + readback (WARP-2899) ────────────────────────
+
+
+def _bare_or_404(workspace_id: str) -> Path:
+    bare = bare_path(workspace_id)
+    if not bare.is_dir():
+        raise StoreError(404, f"no workspace {workspace_id}")
+    return bare
+
+
+def _qualified(ref: str) -> str:
+    if not REF_RE.match(ref or ""):
+        raise StoreError(400, "ref must be work or proposal/<semver>")
+    return f"refs/heads/{ref}" if ref == WORK_BRANCH else f"refs/tags/{ref}"
+
+
+def _git_stdout_capped(args: list[str], cwd: Path, cap: int, timeout: int) -> bytes:
+    """git's stdout, read as it streams: the child is killed the moment it
+    passes `cap` bytes (413) or `timeout` seconds (504), so an oversized
+    export is never held whole in the sandbox's memory."""
+    proc = subprocess.Popen(
+        ["git", *args], cwd=str(cwd), env=dict(GIT_ENV), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    stderr: list[bytes] = []
+    drain = threading.Thread(target=lambda: stderr.append(proc.stderr.read() if proc.stderr else b""), daemon=True)
+    drain.start()
+    expired = threading.Event()
+
+    def _expire() -> None:
+        expired.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, _expire)
+    timer.start()
+    chunks: list[bytes] = []
+    total = 0
+    over = False
+    try:
+        assert proc.stdout is not None
+        while chunk := proc.stdout.read(65_536):
+            total += len(chunk)
+            if total > cap:
+                over = True
+                proc.kill()
+                break
+            chunks.append(chunk)
+    finally:
+        timer.cancel()
+        returncode = proc.wait()
+        drain.join(timeout=5)
+    if over:
+        raise StoreError(413, f"the workspace exceeds the {cap // (1024 * 1024)} MB export ceiling")
+    if expired.is_set():
+        raise StoreError(504, "the export took too long")
+    if returncode != 0:
+        lines = b"".join(stderr).decode("utf-8", "replace").strip().splitlines()
+        raise StoreError(500, f"bundle: {(lines[-1] if lines else f'exit {returncode}')[:200]}")
+    return b"".join(chunks)
+
+
+def bundle(workspace_id: str) -> tuple[bytes, str]:
+    """The workspace as a `git bundle`: the `work` branch, every proposal/*
+    tag, and HEAD when it names `work` — nothing else a /git push may have
+    left in the bare repo. Built from the local bare repo and returned on
+    stdout — no temp file for a run child (same UID, HOME=/tmp) to swap.
+    Returns the bytes and the head of `work`."""
+    bare = _bare_or_404(workspace_id)
+    head = must(git(["rev-parse", f"refs/heads/{WORK_BRANCH}"], bare), "rev-parse").stdout.strip()
+    tags = must(git(["for-each-ref", "--format=%(refname)", "refs/tags/proposal/"], bare), "list proposals").stdout.split()
+    refs = [f"refs/heads/{WORK_BRANCH}", *tags]
+    if git(["symbolic-ref", "-q", "HEAD"], bare).stdout.strip() == f"refs/heads/{WORK_BRANCH}":
+        refs.insert(0, "HEAD")
+    body = _git_stdout_capped(["bundle", "create", "-", *refs], bare, MAX_BUNDLE_BYTES, BUNDLE_TIMEOUT_S)
+    return body, head
+
+
+def ref_exists(workspace_id: str, ref: str) -> bool:
+    bare = _bare_or_404(workspace_id)
+    return git(["rev-parse", "-q", "--verify", f"{_qualified(ref)}^{{commit}}"], bare).returncode == 0
+
+
+def show_at(workspace_id: str, ref: str, path: str) -> str | None:
+    """One file of the bare repo at `ref` (work, or a proposal tag), or None
+    when the path is not there. 404 for an unknown workspace or ref."""
+    bare = _bare_or_404(workspace_id)
+    qualified = _qualified(ref)
+    if not ref_exists(workspace_id, ref):
+        raise StoreError(404, f"no {ref} in workspace {workspace_id}")
+    cp = git(["cat-file", "blob", f"{qualified}:{path}"], bare, binary=True)
+    if cp.returncode != 0:
+        return None
+    return cp.stdout[:MAX_SHOW_BYTES].decode("utf-8", "replace")
 
 
 def delete_workspace(workspace_id: str) -> bool:

@@ -9,7 +9,7 @@ import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
-import { sendNotification } from "./services/notifications.service.js";
+import { notifyOwnersAndAdmins } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
@@ -36,6 +36,11 @@ import {
   stopMcp,
 } from "./services/mcp-client.singleton.js";
 import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
+import {
+  createExtensionLifecycle,
+  EXTENSION_RECONCILE_LOCK_KEY,
+} from "./services/extension-lifecycle.service.js";
+import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
@@ -137,6 +142,7 @@ import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-
 import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
+import { createExtensionAttacher } from "./services/extension-attach.service.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
@@ -510,6 +516,40 @@ async function main() {
   // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
   // without dialling anything at all.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
+
+  // WARP-2900 (ADR-056 slice H2) — the extension reconciler, both ways. A
+  // sandbox restart forgets every extension process and a dead one is never
+  // restarted in place; each tick reinstalls any `installed`/`live`
+  // extension the sandbox no longer runs — re-verifying its signed statement
+  // and rotating its bearer first (install()), a bounded number of times for
+  // a process that keeps dying — and stops any process the sandbox runs for
+  // a row that must not run (review #2323). Same clock, its own lock key
+  // (the sandbox is one shared resource), never a `while True`. No Extension
+  // rows → the tick dials nothing, so a box with
+  // SANDBOX_PROCESS_SUPERVISION=0 (the shipped default) never calls out.
+  // H3: the same tick re-attaches every running extension this process has
+  // not attached (after an orchestrator restart the sandbox's processes
+  // outlive the in-memory attachment), and each restarted child gets the
+  // call-back URL.
+  const extensionSandbox = createExtensionSandboxClient();
+  const extensionIdentity = createDeviceIdentityClient();
+  const extensionLifecycle = createExtensionLifecycle({
+    prisma,
+    sandbox: extensionSandbox,
+    identity: extensionIdentity,
+    attach: createExtensionAttacher({ prisma, mux: mcpClient, sandbox: extensionSandbox, identity: extensionIdentity }),
+    orchestratorUrl: config.EXTENSION_CALLBACK_URL,
+  });
+  void extensionLifecycle.refreshInstalledIds().catch((err) => {
+    logger.warn({ err }, "extension installed-id refresh failed at boot");
+  });
+  cronRuntime.scheduleInterval(
+    config.EXTENSION_RECONCILE_INTERVAL_MS,
+    async () => {
+      await extensionLifecycle.reconcile();
+    },
+    { lockKey: EXTENSION_RECONCILE_LOCK_KEY },
+  );
 
   // Router-dependent schedulers only run when routing supervision is active.
   // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
@@ -1351,14 +1391,9 @@ async function main() {
         runner: otaApplyRunner,
         releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        // WARP-2911 — contained per recipient (notifications.service.ts).
         notifyOwners: async (title: string, body: string) => {
-          const owners = await prisma.user.findMany({
-            where: { role: { in: ["owner", "admin"] } },
-            select: { username: true },
-          });
-          for (const { username } of owners) {
-            await sendNotification(prisma, { userId: username, kind: "system", title, body });
-          }
+          await notifyOwnersAndAdmins(prisma, title, body);
         },
       }
     : null;

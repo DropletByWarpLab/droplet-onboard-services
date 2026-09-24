@@ -66,7 +66,7 @@ describe.skipIf(!RUN)("activity notify sweep — real Postgres (WARP-2587)", () 
     if (ws.length > 0) {
       await prisma.pmWorkspace.deleteMany({ where: { id: { in: ws.map((w) => w.id) } } });
     }
-    await prisma.notificationLog.deleteMany({ where: { userId: OURS } });
+    await prisma.notificationLog.deleteMany({ where: { username: OURS } });
     await prisma.user.deleteMany({ where: { username: OURS } });
   }
 
@@ -127,7 +127,7 @@ describe.skipIf(!RUN)("activity notify sweep — real Postgres (WARP-2587)", () 
     expect(second.notificationsSent).toBe(0);
 
     const logs = await prisma.notificationLog.findMany({
-      where: { userId: `${PREFIX}assignee` },
+      where: { username: `${PREFIX}assignee` },
     });
     expect(logs).toHaveLength(1);
     expect(logs[0].kind).toBe("event");

@@ -364,8 +364,21 @@ export interface CatalogModelEntry {
 /** Wire shape of `GET /api/models/catalog` — the ELIGIBLE set (VRAM-gated,
  *  decided appliance-side by the inference-manager) with `pulled` flags. */
 export interface ModelsCatalogPayload {
+  /** null = the box couldn't measure it. */
   detected_vram_gb: number | null;
+  /** WARP-3048 — where `detected_vram_gb` came from (`override`,
+   *  `device_bridge`, `dgpu_sysfs`, `unified_memory`; null when unknown).
+   *  Its presence is what makes a 0 a measurement. Optional: an older
+   *  orchestrator drops it. */
+  vram_source?: string | null;
   models: CatalogModelEntry[];
+  /** WARP-3048 — the sidecar couldn't list what's installed, so `pulled`
+   *  can't be trusted (and downloads are refused). Optional: an older
+   *  orchestrator drops the flag. */
+  tags_unreachable?: boolean;
+  /** WARP-3048 — the box's model list file couldn't be read; the catalog
+   *  is last-known-good or empty. Optional, as above. */
+  degraded_manifest?: boolean;
 }
 
 /** One opt-in cloud provider on the Models page. WARP-2871 — the page is the
@@ -3050,6 +3063,21 @@ export interface ToolInspectRow {
   alsoWithheldBy: InspectGate[];
   /** Present on a lock-capable tool the person may not use for locks. */
   lockCaveat?: string;
+  /**
+   * WARP-2900 — `built-in`, `extension:<slug>@<version>` or
+   * `remote:<serverId>`. Optional only so an older orchestrator still types.
+   */
+  source?: string;
+  /** The runtime server that advertised it; null for a compiled tool. */
+  serverId?: string | null;
+  /** WARP-2900 — runtime rows only: what dispatch does with a call. */
+  classification?: RuntimeToolClassification;
+  /**
+   * WARP-2900 — runtime rows only, present ⇔ dispatch refuses every call.
+   * Not a withholding gate: an advertised row with one is a tool the model
+   * is shown and cannot use.
+   */
+  callRefusal?: string;
 }
 
 export interface ToolInspectResponse {
@@ -3063,6 +3091,11 @@ export interface ToolInspectResponse {
     advertised: number;
     withheld: number;
     byGate: Record<InspectGate, number>;
+    /**
+     * WARP-2900 — of `advertised`, how many dispatch refuses every call to.
+     * Optional only so an older orchestrator still types.
+     */
+    refusedAtDispatch?: number;
   };
   rows: ToolInspectRow[];
 }
@@ -3325,6 +3358,114 @@ export interface RoutineSchedule {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ─── WARP-2900 (ADR-056 slice H4) — runtime tools + extensions ──────────────
+
+/** What dispatch does with a call to a runtime tool, as the orchestrator's policy answers. */
+export interface RuntimeToolClassification {
+  decision: "allow" | "deny";
+  /** REMOTE_WRITE_NOT_PERMITTED, REMOTE_TOOL_DENIED, … Null on allow. */
+  code: string | null;
+}
+
+/**
+ * One row of `GET /api/llm/tools/runtime`. There is deliberately no
+ * description: a runtime tool's description is its author's claim.
+ */
+export interface RuntimeToolView {
+  name: string;
+  wireName: string;
+  serverId: string;
+  source: string;
+  extension: { id: string; version: string } | null;
+  domain: string;
+  domainSource: "operator" | "server" | "default";
+  classification: RuntimeToolClassification;
+}
+
+export interface RuntimeToolsResponse {
+  tools: RuntimeToolView[];
+}
+
+/** The promote readback, derived server-side from provides/resources/egress only. */
+export interface ExtensionReadback {
+  tools: { total: number; startsAsWriteWithConfirmation: number; proposedReadOnly: number };
+  routineDrafts: number;
+  proposedGrants: number;
+  memoryMb: number;
+  egress: string;
+  /** The sentences the confirm step shows, in order. */
+  lines: string[];
+}
+
+export interface ExtensionPreflightFinding {
+  code: string;
+  detail: string;
+}
+
+export interface ExtensionPreflight {
+  ok: boolean;
+  blocking: ExtensionPreflightFinding[];
+  advisory: ExtensionPreflightFinding[];
+  budget: { availableMb: number; requestedMb: number; ceilingMb: number };
+}
+
+export type ExtensionStatus = "signed" | "installed" | "live" | "disabled" | "failed" | "uninstalled";
+
+export interface ExtensionListItem {
+  id: string;
+  workspaceId: string;
+  name: string;
+  status: ExtensionStatus;
+  failureReason: string | null;
+  operatorDomain: string | null;
+  installedByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  version: {
+    version: string;
+    tag: string;
+    commit: string;
+    signer: string;
+    keyFingerprint: string;
+    promotedAt: string;
+  } | null;
+  readback: ExtensionReadback | null;
+}
+
+export interface ExtensionProposal {
+  workspaceId: string;
+  name: string;
+  userId: string;
+  tag: string;
+  version: string;
+  slug: string;
+  proposedAt: string | null;
+  promotable: boolean;
+  reason: string | null;
+  readback: ExtensionReadback | null;
+}
+
+/** Phase 1 of `POST /api/extensions/:workspaceId/promote` (202). */
+export interface ExtensionPromotePhase1 {
+  confirmationToken: string;
+  expiresAt: string;
+  workspaceId: string;
+  slug: string;
+  tag: string;
+  version: string;
+  commit: string;
+  manifestSha256: string;
+  readback: ExtensionReadback;
+  preflight: ExtensionPreflight;
+}
+
+/** Phase 2 (201). */
+export interface ExtensionPromoteResult {
+  version: string;
+  installed: boolean;
+  installError: { code: string; message: string } | null;
 }
 
 // ── WARP-2977 (ADR-059 P2): the Security command center feed ──

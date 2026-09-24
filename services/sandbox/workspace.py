@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import connector_draft
 import gitstore
 from gitstore import Author, StoreError, git, must
 
@@ -421,18 +422,82 @@ def last_run(workspace_id: str) -> dict[str, Any] | None:
 # ── propose ─────────────────────────────────────────────────────────────────
 
 
-def manifest_defaults(workspace_id: str, name: str, version: str) -> dict[str, Any]:
-    """The ADR-030 extension-manifest.json a proposal leaves behind. `egress`
-    is the literal none — the verifier (slice H) refuses anything else."""
-    return {
+# The manifest schema (WARP-2900 H1): apps/orchestrator/src/services/
+# extension-manifest.ts and docs/schemas/extension-manifest.schema.json.
+# Propose writes that shape; the orchestrator's strict parser is the judge at
+# promote, so a manifest a run left wrong is refused THERE with its reason,
+# not silently repaired here. What propose does force: the identity fields,
+# `kind` and `egress` — a run cannot propose anything but an extension that
+# reaches nothing outside the box.
+DEFAULT_MEMORY_MB = 256
+# The #2247-era shape (`provides.routines`, `footprint`) — still what an
+# existing box's templates.git holds, because templates are never re-seeded
+# over an operator's commits.
+_LEGACY_KEYS = ("footprint",)
+
+
+def infer_runtime(work: Path) -> tuple[str, str] | None:
+    """(runtime, entrypoint) from what the checkout holds, for a manifest
+    that names neither. None when nothing says which."""
+    if (work / "package.json").is_file() or (work / "tsconfig.json").is_file():
+        return "node20", "dist/index.js"
+    if (work / "tool.py").is_file():
+        return "python312", "tool.py"
+    return None
+
+
+def manifest_defaults(
+    workspace_id: str,
+    name: str,
+    version: str,
+    runtime: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    """The extension-manifest.json a proposal leaves behind when the checkout
+    has none. `egress` is the literal none and `kind` the literal extension —
+    the verifier refuses anything else."""
+    manifest: dict[str, Any] = {
         "schemaVersion": 1,
         "id": workspace_id,
         "name": name,
         "version": version,
+        "kind": "extension",
+        "provides": {"tools": [], "routineDrafts": [], "proposedGrants": []},
+        "resources": {"memoryMb": DEFAULT_MEMORY_MB, "processes": 1},
         "egress": "none",
-        "provides": {"tools": [], "routines": []},
-        "footprint": {"memoryMb": 256, "cpus": 0.5, "processes": 1},
     }
+    if runtime is not None:
+        manifest["runtime"], manifest["entrypoint"] = runtime
+    return manifest
+
+
+def normalize_manifest(existing: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    """Carry a checkout's manifest into the current shape. Unknown keys are
+    KEPT (the orchestrator refuses them at promote, legibly); the legacy
+    `footprint` / empty `provides.routines` are migrated; the identity fields
+    are forced from `defaults`. `kind` and `egress` are forced by propose()."""
+    manifest = {k: v for k, v in existing.items() if k not in _LEGACY_KEYS}
+    footprint = existing.get("footprint")
+    provides = existing.get("provides")
+    provides = dict(provides) if isinstance(provides, dict) else {}
+    if provides.get("routines") == []:
+        del provides["routines"]
+    for key in ("tools", "routineDrafts", "proposedGrants"):
+        if not isinstance(provides.get(key), list):
+            provides[key] = []
+    manifest["provides"] = provides
+    resources = manifest.get("resources")
+    resources = dict(resources) if isinstance(resources, dict) else {}
+    if "memoryMb" not in resources:
+        legacy_mb = footprint.get("memoryMb") if isinstance(footprint, dict) else None
+        resources["memoryMb"] = legacy_mb if isinstance(legacy_mb, int) else DEFAULT_MEMORY_MB
+    resources["processes"] = 1
+    manifest["resources"] = resources
+    for key in ("runtime", "entrypoint"):
+        if key not in manifest and key in defaults:
+            manifest[key] = defaults[key]
+    for key in ("schemaVersion", "id", "name", "version"):
+        manifest[key] = defaults[key]
+    return manifest
 
 
 def propose(workspace_id: str, name: str, version: str, summary: str, author: Author) -> dict[str, Any]:
@@ -452,15 +517,22 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
     if git(["rev-parse", "-q", "--verify", f"refs/tags/{tag}"], work).returncode == 0:
         raise StoreError(409, f"{tag} already exists; bump the version")
 
+    # WARP-2899: a connector draft is not an extension — it has its own path.
+    draft = describe_checkout(work)
+    if draft is not None:
+        return _propose_connector_draft(work, name, version, summary, tag, draft, author)
+
     manifest_path = work / MANIFEST_FILE
-    manifest = manifest_defaults(workspace_id, name, version)
+    defaults = manifest_defaults(workspace_id, name, version, infer_runtime(work))
+    manifest = defaults
     if manifest_path.is_file():
         try:
             existing = json.loads(manifest_path.read_text(encoding="utf-8"))
             if isinstance(existing, dict):
-                manifest = {**existing, "id": workspace_id, "name": name, "version": version}
+                manifest = normalize_manifest(existing, defaults)
         except (json.JSONDecodeError, OSError):
             pass
+    manifest["kind"] = "extension"
     manifest["egress"] = "none"
     manifest["summary"] = summary
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -471,4 +543,53 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
     head = must(git(["rev-parse", "HEAD"], work), "rev-parse").stdout.strip()
     must(git(["tag", "-a", tag, "-m", summary, head], work, author=author), "tag")
     must(git(["push", "-q", "origin", gitstore.WORK_BRANCH, f"refs/tags/{tag}"], work), "push")
-    return {"commit": head, "tag": tag, "manifest": manifest}
+    # `kind` says what was proposed. A connector draft (WARP-2899) answers
+    # "connector-draft" from _propose_connector_draft below, with no
+    # manifest, and the orchestrator lists that as not promotable.
+    return {"kind": "extension", "commit": head, "tag": tag, "manifest": manifest}
+
+
+# ── connector drafts (WARP-2899) ────────────────────────────────────────────
+
+
+def describe_checkout(work: Path) -> dict[str, Any] | None:
+    """connector_draft.describe_tree over the checkout, every read confined."""
+
+    def read(rel: str) -> str | None:
+        try:
+            target = _inside(work, rel)
+        except StoreError:
+            return None
+        if not target.is_file():
+            return None
+        return target.read_bytes()[:MAX_READ_BYTES].decode("utf-8", "replace")
+
+    return connector_draft.describe_tree(read)
+
+
+def _propose_connector_draft(
+    work: Path, name: str, version: str, summary: str, tag: str, draft: dict[str, Any], author: Author
+) -> dict[str, Any]:
+    """Tag a connector draft. NO extension manifest: nothing installs or loads
+    a draft — an owner exports it for a Warp Lab PR. Refused (409, nothing
+    tagged) while the rendered files are missing or disagree with the draft,
+    and when the workspace also holds an extension manifest."""
+    if (work / MANIFEST_FILE).exists():
+        raise StoreError(
+            409,
+            f"this workspace holds a connector draft AND an {MANIFEST_FILE}; a connector draft is not an "
+            "extension — draft it in a workspace made from the rest-profile template",
+        )
+    if draft["problems"]:
+        raise StoreError(
+            409,
+            "the connector draft is not ready: " + "; ".join(draft["problems"]) + " — run `npm run build` and `npm test`",
+        )
+    must(git(["add", "-A"], work), "stage")
+    if git(["status", "--porcelain"], work).stdout.strip():
+        subject = f"propose connector draft {draft['provider']} {version}"
+        must(git(["commit", "-q", "-m", f"{subject}\n\n{summary}"], work, author=author), "commit")
+    head = must(git(["rev-parse", "HEAD"], work), "rev-parse").stdout.strip()
+    must(git(["tag", "-a", tag, "-m", summary, head], work, author=author), "tag")
+    must(git(["push", "-q", "origin", gitstore.WORK_BRANCH, f"refs/tags/{tag}"], work), "push")
+    return {"commit": head, "tag": tag, "manifest": None, "kind": "connector-draft", "connectorDraft": draft}

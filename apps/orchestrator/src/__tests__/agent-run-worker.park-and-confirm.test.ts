@@ -241,17 +241,17 @@ describe("agent runs — Tier-2 parks (WARP-2179)", () => {
     expect(mcp.executed).toHaveLength(0);
     expect(chat).toHaveBeenCalledTimes(1);
     expect(sendNotificationMock).toHaveBeenCalledTimes(1);
-    const note = sendNotificationMock.mock.calls[0]![1] as { userId: string; kind: string; title: string; body: string };
-    expect(note.userId).toBe("romain");
+    const note = sendNotificationMock.mock.calls[0]![1] as { username: string; kind: string; title: string; body: string };
+    expect(note.username).toBe("romain");
     expect(note.kind).toBe("ai");
     expect(note.title).toContain("delete_file");
     expect(note.body).toContain("tidy up old files");
     expect(note.body).toContain("Nothing has been done yet");
     // WARP-2909 — the park links to the run and says a decision is pending.
-    // `userId` is the USERNAME (the fake's id and username differ on purpose).
-    const link = note as unknown as { userId: string; url: string; tag: string; data: Record<string, unknown> };
-    expect(link.userId).toBe(OWNER.username);
-    expect(link.userId).not.toBe(OWNER.id);
+    // `username` is the USERNAME (the fake's id and username differ on purpose).
+    const link = note as unknown as { username: string; url: string; tag: string; data: Record<string, unknown> };
+    expect(link.username).toBe(OWNER.username);
+    expect(link.username).not.toBe(OWNER.id);
     expect(link.url).toBe(`/workshop?run=${id}`);
     expect(link.tag).toBe(`agent-run:${id}`);
     expect(link.data).toEqual({ agentRunId: id, pendingTool: "delete_file", needsDecision: true });
@@ -331,9 +331,9 @@ describe("agent runs — Tier-2 parks (WARP-2179)", () => {
     expect(titles.filter((t) => t.startsWith("Background run finished"))).toHaveLength(1);
     // WARP-2909 — the finish carries the same link and tag, and NO needsDecision.
     const finished = sendNotificationMock.mock.calls
-      .map((c) => c[1] as { title: string; userId: string; url: string; tag: string; data: Record<string, unknown> })
+      .map((c) => c[1] as { title: string; username: string; url: string; tag: string; data: Record<string, unknown> })
       .find((n) => n.title.startsWith("Background run finished"))!;
-    expect(finished.userId).toBe(OWNER.username);
+    expect(finished.username).toBe(OWNER.username);
     expect(finished.url).toBe(`/workshop?run=${id}`);
     expect(finished.tag).toBe(`agent-run:${id}`);
     expect(finished.data).toEqual({ agentRunId: id, status: "succeeded" });

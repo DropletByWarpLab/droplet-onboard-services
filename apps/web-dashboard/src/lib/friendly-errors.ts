@@ -756,13 +756,24 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     module_disabled: "You can't make that change any more. Refresh the page.",
     "404": "You can't make that change any more. Refresh the page.",
     // The P2b helpers go through authFetch, which refreshes an expired access
-    // token and retries: a 401 that still reaches the page means the session
-    // really ended (authFetch is already on its way to /login).
-    "401": "Your session has ended. Sign in again to make that change.",
+    // token and retries. A 401 that still reaches the page is NOT proof the
+    // session ended: authFetch also hands back the original 401 when the
+    // refresh was transient (a rotation race, a network blip) or when
+    // /api/auth/me could not confirm the session is dead — and the session is
+    // fine in both. A real end is already on its way to /login. So: say the
+    // change didn't land (the auth gate answers before any write), and name
+    // signing in again only as the remedy for a 401 that keeps coming back.
+    "401": "Droplet couldn't confirm you're signed in, so nothing was changed. Try again, and sign in again if this keeps happening.",
     "403": "You don't have permission to make that change.",
     "409": "Someone else changed this just now. Refresh the page and try again.",
     "429": "That's a lot of changes at once. Wait a moment and try again.",
     NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    // securityFetch's own code for a request that never answered. Keyed here
+    // so the copy doesn't hang on inferCodeFromMessage matching the browser's
+    // wording ("Failed to fetch" in Chrome, "NetworkError …" in Firefox,
+    // "Load failed" in Safari — which matches nothing).
+    NETWORK_ERROR:
       "We can't reach this Droplet right now. Check the connection and try again.",
     TIMEOUT: "That took too long. Refresh the page to see whether it went through.",
   },

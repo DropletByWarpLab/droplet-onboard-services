@@ -1,0 +1,10 @@
+{
+  "name": "droplet-connector-draft",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/render.mjs",
+    "test": "node --test test/draft.test.mjs test/render.test.mjs"
+  }
+}
