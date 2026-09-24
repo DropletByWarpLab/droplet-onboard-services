@@ -72,6 +72,12 @@ def cloud_capabilities(model: str) -> ModelCapabilities:
 # dispatch (router.py:188 forwards `tools[]` untouched; ADR-011 / WARP-104),
 # and nothing gates on this flag. Making it load-bearing is a behavior change
 # with its own ticket — do not wire it into dispatch here.
+#
+# WARP-3047: the flag now steers MODEL CHOICE, not dispatch — the
+# orchestrator's `resolveActiveModel({ requireTools })` (agent runs) and
+# voice-io keep their configured model when the active one reports
+# `tools=False`. On DMR a model with no row here reads exactly that, so every
+# model the catalog can pull must have a row.
 _STATIC_CAPABILITY_ROWS: tuple[tuple[tuple[str, ...], ModelCapabilities], ...] = (
     # --- Mirrored from droplet-local-LLM/models/model-manifest.json ---------
     #
@@ -102,6 +108,16 @@ _STATIC_CAPABILITY_ROWS: tuple[tuple[tuple[str, ...], ModelCapabilities], ...] =
     (
         ("qwen3-vl", "qwen3-vl:8b", "qwen3-vl:32b"),
         ModelCapabilities(vision=True, tools=True),
+    ),
+    # glm-4.7-flash — this repo's catalog copy,
+    # `services/inference-manager/models/model-manifest.json:89-105`,
+    # `"capabilities": ["tools", "thinking"]` (:102). WARP-3047: the one
+    # catalog model the mirror had missed. On DMR it read `tools=False` (no
+    # `capabilities` in `/api/show`), so an agent run or voice turn with it
+    # active was sent to LLM_MODEL instead — a second model on the GPU.
+    (
+        ("glm-4.7-flash", "glm-4.7-flash:31b"),
+        ModelCapabilities(vision=False, tools=True),
     ),
     # --- Configured by THIS repo, absent from the manifest ------------------
     #
