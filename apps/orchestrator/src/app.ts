@@ -124,6 +124,7 @@ import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
@@ -723,7 +724,7 @@ export function createApp(
   // Single fn override at module level so createEmailRouter keeps its
   // existing (prisma, gate) signature. Tests can call wireEmailAnalysis
   // directly with a stub.
-  wireEmailAnalysis(createEmailAnalysisFn(mcpClient));
+  wireEmailAnalysis(createEmailAnalysisFn(mcpClient, () => resolveActiveModel(prisma)));
 
   // WARP-465 (D1): email backbone — accounts list, threads list +
   // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468
