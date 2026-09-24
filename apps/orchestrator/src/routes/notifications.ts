@@ -7,7 +7,9 @@
  *   N3  POST /notifications/:id/ack       ack one ({via?: 'inbox'|'opened'})
  *   N4  POST /notifications/ack-all       ack the listed ids ({ids}: the ones the client showed)
  *       POST /notifications/send          the LLM `send_notification` tool and
- *                                         system code; calls sendNotification()
+ *                                         a person's one-off; calls sendNotification()
+ *                                         (WARP-3060: the tool's recipient is the
+ *                                         person it acts for — see recipientFor)
  *
  * WARP-2804 — everything here is keyed on `req.user.username`: a person only
  * ever reads or acks their OWN rows. Someone else's id answers exactly like a
@@ -42,6 +44,7 @@ import {
   type NotificationKind,
 } from "../services/notifications.service.js";
 import { describeClient } from "../lib/client-descriptor.js";
+import { resolveAttributedToolAccess, toolAllowedForPrincipal } from "../services/tool-access.service.js";
 
 function getUser(req: Request): string {
   const username = req.user?.username;
@@ -49,6 +52,49 @@ function getUser(req: Request): string {
   // an invariant break, not a legitimate "admin" default (ORCH-007 fail-open).
   if (!username) throw new Error("authenticated user required");
   return username;
+}
+
+const MCP_PRINCIPAL_ID = "_service:mcp";
+const SEND_TOOL = "send_notification";
+
+type Recipient = { username: string; viaTool: boolean } | { denied: "acting_user_required" | "forbidden_tool_for_role" };
+
+/**
+ * WARP-3060 — who a POST /notifications/send is FOR.
+ *
+ * A person in the browser notifies themselves: `req.user.username`.
+ *
+ * The `send_notification` tool arrives as the `_service:mcp` principal, whose
+ * own username is nobody's — sending on it publishes to a topic no one
+ * subscribes to. The person the assistant acts for is asserted in
+ * `X-Nextcloud-User` (mcp-server context.ts `withActingUser`), trusted only
+ * from that principal: a username on the stdio transport, a `User.id` on the
+ * HTTP one, so it is looked up by username, then by id — the lookup
+ * middleware/mcp-acting-user-gate.ts makes. That person is the only recipient
+ * the tool can reach.
+ *
+ * Then the question chat asks before it dispatches the tool, asked of the
+ * same person off their User row (`resolveAttributedToolAccess`): may their
+ * tier and access role use `send_notification`? Nobody named, nobody found, a
+ * deactivated account or a refusal → 403. Never the service principal, never
+ * a wider identity.
+ */
+async function recipientFor(prisma: PrismaClient, req: Request): Promise<Recipient> {
+  if (!(req.user?.id === MCP_PRINCIPAL_ID && req.user.role === "service")) {
+    return { username: getUser(req), viaTool: false };
+  }
+  const asserted = (req.header("x-nextcloud-user") ?? "").trim();
+  if (!asserted) return { denied: "acting_user_required" };
+  const person =
+    (await prisma.user.findUnique({ where: { username: asserted }, select: { id: true, username: true } })) ??
+    (await prisma.user.findUnique({ where: { id: asserted }, select: { id: true, username: true } }));
+  if (!person) return { denied: "acting_user_required" };
+  const access = await resolveAttributedToolAccess(prisma, person.id);
+  if (access.unresolved) return { denied: "acting_user_required" };
+  if (!toolAllowedForPrincipal(SEND_TOOL, access.tier ?? undefined, access.scope)) {
+    return { denied: "forbidden_tool_for_role" };
+  }
+  return { username: person.username, viaTool: true };
 }
 
 // WARP-2587 — one vocabulary, checked in BOTH directions at compile time. The
@@ -65,7 +111,7 @@ type _KindsCover = NotificationKind extends (typeof NOTIFICATION_KINDS)[number] 
 const _kindsAreExhaustive: _KindsCover = true;
 
 const sendSchema = z.object({
-  kind: z.enum(NOTIFICATION_KINDS).default("system"),
+  kind: z.enum(NOTIFICATION_KINDS).optional(),
   title: z.string().min(1).max(500),
   body: z.string().max(2000).optional(),
 });
@@ -205,9 +251,24 @@ export function createNotificationsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
+      const recipient = await recipientFor(prisma, req);
+      if ("denied" in recipient) {
+        res.status(403).json(
+          recipient.denied === "forbidden_tool_for_role"
+            ? { error: recipient.denied, tool: SEND_TOOL }
+            : { error: recipient.denied },
+        );
+        return;
+      }
+      // WARP-3060 — what the model sends is labelled as the assistant's: a
+      // model-steered message must not present itself as a `system` alert.
+      if (recipient.viaTool && parsed.data.kind !== undefined && parsed.data.kind !== "ai") {
+        res.status(400).json({ error: "kind_not_allowed" });
+        return;
+      }
       const result = await sendNotification(prisma, {
-        username: getUser(req),
-        kind: parsed.data.kind,
+        username: recipient.username,
+        kind: recipient.viaTool ? "ai" : (parsed.data.kind ?? "system"),
         title: parsed.data.title,
         body: parsed.data.body,
       });
