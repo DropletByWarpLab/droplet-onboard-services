@@ -547,7 +547,10 @@ class _LimitsCache:
     # v2 (WARP-1825/1826): appliance added the `placement` GPU-residency
     # block. This cache still only consumes `limits`; the placement block
     # is read by the orchestrator's model metrics path, not here.
-    _KNOWN_SCHEMA_VERSION = 2
+    # v3 (WARP-3047): `limits.max_loaded_models` is omitted on a runtime that
+    # enforces no loaded-model cap (DMR). `refresh` already keeps the current
+    # value for a missing key, so the only consumer change is this number.
+    _KNOWN_SCHEMA_VERSION = 3
 
     # Sentinel for "we haven't observed a schema_version yet" — distinct
     # from None ("appliance returned no schema_version key"). Without this,
