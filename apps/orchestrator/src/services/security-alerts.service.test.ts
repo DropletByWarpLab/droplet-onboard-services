@@ -311,6 +311,47 @@ describe("the notifier (§6.7)", () => {
     expect(resolve).toHaveBeenCalledWith(MARIA);
   });
 
+  it("review #2: the only routed person is eligible but cannot see the camera → the owner is told (fallback_owner)", async () => {
+    const f = world({
+      securityAlertRecipient: [
+        { userId: STEFAN, state: "not_receiving", origin: "chosen", version: 1, setById: STEFAN },
+        { userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN },
+      ],
+    });
+    LEVELS[MARIA] = "act";
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_not_visible", reason: "routed" });
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "sent", reason: "fallback_owner" });
+    expect(f.world.notificationLog.map((r) => r.username)).toEqual(["stefan"]);
+  });
+
+  it("review #2: a routed person who was capped still counts as told — no fallback", async () => {
+    const prior = Array.from({ length: SECURITY_ALERT_HOURLY_CAP }, (_, k) => ({
+      id: `p${k}`,
+      incidentId: `00000000-0000-4000-8000-00000000010${k}`,
+      userId: MARIA,
+      username: "maria",
+      reason: "routed",
+      outcome: "sent",
+      notificationLogId: `lp${k}`,
+      channels: "toast",
+      createdAt: plus(NOW, -(k + 1) * 60_000),
+      settledAt: plus(NOW, -(k + 1) * 60_000),
+    }));
+    const f = world({
+      securityAlertRecipient: [
+        { userId: STEFAN, state: "not_receiving", origin: "chosen", version: 1, setById: STEFAN },
+        { userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN },
+      ],
+      cameraAccessGrant: [{ id: "g1", userId: MARIA, cameraId: "cam-back" }],
+      securityIncidentNotice: prior,
+    });
+    LEVELS[MARIA] = "act";
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_capped" });
+    expect(noticeOf(f, STEFAN)).toBeUndefined();
+  });
+
   it("eligibility is ≥ act on Security, checked at send time: `view` is not enough", async () => {
     const f = world({ securityAlertRecipient: [{ userId: JORDAN, state: "receiving", origin: "chosen", version: 1, setById: STEFAN }] });
     LEVELS[JORDAN] = "view";
@@ -473,6 +514,21 @@ describe("the alerts health row (§6.11)", () => {
       state: "down",
       detail: "Nobody set to be told can open Security, so the owner is told instead",
     });
+  });
+
+  it("review #2 — down: an Inside / Staff only camera nobody set to be told can see (the owner is told about it instead)", async () => {
+    const f = world({
+      securityAlertRecipient: [{ ...receiving(STEFAN), state: "not_receiving" }, receiving(MARIA)],
+      pushSubscription: [{ id: "p2", username: "maria", endpoint: "https://fcm.googleapis.com/y" }],
+    });
+    LEVELS[MARIA] = "act";
+    expect(await computeAlertsHealthRow(client(f), resolve, NOW)).toMatchObject({
+      state: "down",
+      detail: "Nobody set to be told can see Back camera, so the owner is told about it instead",
+    });
+    // Give her the camera: covered, and the row reads ok.
+    f.world.cameraAccessGrant.push({ id: "g2", userId: MARIA, cameraId: "cam-back" });
+    expect(await computeAlertsHealthRow(client(f), resolve, NOW)).toMatchObject({ state: "ok", detail: "Alerts go to Maria" });
   });
 
   it("quiet: a receiver with no phone set up hears only while Droplet is open — named, to owner/admin", async () => {

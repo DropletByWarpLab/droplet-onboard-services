@@ -50,6 +50,7 @@ import { deliverNotification, recordNotification } from "./notifications.service
 import { webPushGate } from "./off-lan-gate.service.js";
 import { auditSecurityInTx, auditSecuritySystem, chainSafeText, stripUnsafeDisplayChars } from "./security-audit.js";
 import { summaryName } from "./security-mode.service.js";
+import { parseLinkRef } from "./security-zones.service.js";
 import { alertCopy, type AlertEvidence } from "../lib/security-alert-copy.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { isValidIanaZone } from "../lib/zoned-time.js";
@@ -181,25 +182,32 @@ async function alreadyNoticed(prisma: PrismaClient, incidentId: string): Promise
   return new Set(rows.map((n) => n.userId));
 }
 
-/** Steps 2–3: who is told, and each one's outcome and words. Reads only (plus the owners' lazy rows). */
+/**
+ * Notices that mean the incident reached someone: a NotificationLog row was
+ * written (whatever its transport did), or the person was capped — they were
+ * told about other alerts this hour and see this one in Security.
+ */
+const REACHED: readonly SecurityNoticeOutcome[] = ["queued", "sent", "not_sent", "skipped_capped"];
+
+/**
+ * Steps 2–3: who is told, and each one's outcome and words. Reads only (plus
+ * the owners' lazy rows).
+ *
+ * The routed people are planned first. If NONE of them is reached (queued or
+ * capped) — nobody eligible, or everyone eligible cannot see the evidence's
+ * camera (review #2: eligibility is about Security, not about cameras) — the
+ * eligible owners not already planned are added with `fallback_owner`, so an
+ * alert never goes to nobody.
+ */
 async function planNotices(prisma: PrismaClient, deps: NotifierDeps, incident: NotifyIncident, now: Date): Promise<PlannedNotice[]> {
   await ensureOwnerRecipients(prisma);
   const already = await alreadyNoticed(prisma, incident.id);
+  const reachedBefore = await prisma.securityIncidentNotice.count({ where: { incidentId: incident.id, outcome: { in: [...REACHED] } } });
   const routed = await prisma.securityAlertRecipient.findMany({
     where: { state: "receiving" },
     select: { user: { select: USER_SELECT } },
     orderBy: { userId: "asc" },
   });
-  const candidates: Array<{ user: RecipientUser; reason: SecurityNoticeReason; eligibility: Eligibility }> = [];
-  for (const { user } of routed) candidates.push({ user, reason: "routed", eligibility: await eligibilityOf(user, deps.resolveAccess) });
-  if (!candidates.some((c) => c.eligibility.eligible)) {
-    const owners = await prisma.user.findMany({ where: { role: "owner" }, select: USER_SELECT, orderBy: { id: "asc" } });
-    for (const owner of owners) {
-      if (candidates.some((c) => c.user.id === owner.id)) continue;
-      const eligibility = await eligibilityOf(owner, deps.resolveAccess);
-      if (eligibility.eligible) candidates.push({ user: owner, reason: "fallback_owner", eligibility });
-    }
-  }
 
   const cameras = [...new Set(incident.reasons.map((r) => r.evidenceCamera).filter((c): c is string => c !== null))];
   const labels = new Map(
@@ -211,17 +219,13 @@ async function planNotices(prisma: PrismaClient, deps: NotifierDeps, incident: N
   const tz = await copyZone(prisma);
   const hourAgo = new Date(now.getTime() - HOUR_MS);
 
-  const out: PlannedNotice[] = [];
-  for (const c of candidates) {
-    if (already.has(c.user.id)) continue;
-    if (!c.eligibility.eligible) {
-      const outcome = c.eligibility.reason === "no_address" ? "skipped_no_address" : "skipped_no_access";
-      out.push({ user: c.user, reason: c.reason, outcome, copy: null });
-      continue;
+  const plan = async (user: RecipientUser, reason: SecurityNoticeReason, eligibility: Eligibility): Promise<PlannedNotice> => {
+    if (!eligibility.eligible) {
+      return { user, reason, outcome: eligibility.reason === "no_address" ? "skipped_no_address" : "skipped_no_access", copy: null };
     }
     // DS-005, per recipient: only the alert evidence on cameras they can see.
-    const visible = await visibleCameraNames(prisma, { id: c.user.id, role: c.user.role });
-    const ownerOrAdmin = c.user.role === "owner" || c.user.role === "admin";
+    const visible = await visibleCameraNames(prisma, { id: user.id, role: user.role });
+    const ownerOrAdmin = user.role === "owner" || user.role === "admin";
     const evidence: AlertEvidence[] = incident.reasons
       .filter((r) => (r.evidenceCamera === null ? ownerOrAdmin : visible === "all" || visible.has(r.evidenceCamera)))
       .map((r) => ({
@@ -229,18 +233,26 @@ async function planNotices(prisma: PrismaClient, deps: NotifierDeps, incident: N
         at: r.evidenceAt,
         mode: String((r.detail as Record<string, unknown> | null)?.mode ?? "closed"),
       }));
-    if (evidence.length === 0) {
-      out.push({ user: c.user, reason: c.reason, outcome: "skipped_not_visible", copy: null });
-      continue;
-    }
+    if (evidence.length === 0) return { user, reason, outcome: "skipped_not_visible", copy: null };
     const recent = await prisma.securityIncidentNotice.count({
-      where: { userId: c.user.id, outcome: { in: [...COUNTED] }, createdAt: { gte: hourAgo } },
+      where: { userId: user.id, outcome: { in: [...COUNTED] }, createdAt: { gte: hourAgo } },
     });
-    if (recent >= SECURITY_ALERT_HOURLY_CAP) {
-      out.push({ user: c.user, reason: c.reason, outcome: "skipped_capped", copy: null });
-      continue;
+    if (recent >= SECURITY_ALERT_HOURLY_CAP) return { user, reason, outcome: "skipped_capped", copy: null };
+    return { user, reason, outcome: "queued", copy: alertCopy({ zoneName: incident.zoneName ?? "", evidence, tz }) };
+  };
+
+  const out: PlannedNotice[] = [];
+  for (const { user } of routed) {
+    if (already.has(user.id)) continue;
+    out.push(await plan(user, "routed", await eligibilityOf(user, deps.resolveAccess)));
+  }
+  if (reachedBefore === 0 && !out.some((o) => REACHED.includes(o.outcome))) {
+    const owners = await prisma.user.findMany({ where: { role: "owner" }, select: USER_SELECT, orderBy: { id: "asc" } });
+    for (const owner of owners) {
+      if (already.has(owner.id) || out.some((o) => o.user.id === owner.id)) continue;
+      const eligibility = await eligibilityOf(owner, deps.resolveAccess);
+      if (eligibility.eligible) out.push(await plan(owner, "fallback_owner", eligibility));
     }
-    out.push({ user: c.user, reason: c.reason, outcome: "queued", copy: alertCopy({ zoneName: incident.zoneName ?? "", evidence, tz }) });
   }
   return out;
 }
@@ -446,9 +458,36 @@ async function eligibleReceivers(prisma: PrismaClient, resolve: EffectiveAccessR
 }
 
 /**
+ * The cameras an after-hours alert can come from (an ACTIVE link of an active
+ * Inside / Staff only area) that no eligible receiver can see — alerts about
+ * them reach the owners only through the fallback (review #2).
+ */
+async function uncoveredAlertCameras(prisma: PrismaClient, receivers: readonly RecipientUser[]): Promise<string[]> {
+  const links = await prisma.securityZoneLink.findMany({
+    where: { state: "active", zone: { state: "active", kind: { in: ["interior", "restricted"] } } },
+    select: { sourceKind: true, sourceRef: true },
+  });
+  const cameras = new Set<string>();
+  for (const l of links) {
+    const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+    if (parsed) cameras.add(parsed.camera);
+  }
+  if (cameras.size === 0) return [];
+  const covered = new Set<string>();
+  for (const r of receivers) {
+    const visible = await visibleCameraNames(prisma, { id: r.id, role: r.role });
+    if (visible === "all") return [];
+    for (const c of visible) covered.add(c);
+  }
+  return [...cameras].filter((c) => !covered.has(c)).sort();
+}
+
+/**
  * The `alerts` row — owner/admin only (it names who is told):
  *   · not_configured — no opening hours, or no Inside / Staff only area with a link;
- *   · down — an alert failed in the last day; or nobody set to be told is eligible;
+ *   · down — an alert failed in the last day; or nobody set to be told is
+ *     eligible; or an Inside / Staff only camera none of them can see (the
+ *     owner fallback is what reaches anyone about it);
  *   · quiet — an eligible receiver has no phone set up (or phone notifications
  *     are off on this box): they hear only while Droplet is open;
  *   · ok — who alerts go to.
@@ -466,6 +505,19 @@ export async function computeAlertsHealthRow(
   if (failed > 0) return row("down", "An alert couldn't be sent");
   const receivers = await eligibleReceivers(prisma, resolve);
   if (receivers.length === 0) return row("down", "Nobody set to be told can open Security, so the owner is told instead");
+  const uncovered = await uncoveredAlertCameras(prisma, receivers);
+  if (uncovered.length > 0) {
+    const labels = new Map(
+      (await prisma.camera.findMany({ where: { name: { in: uncovered } }, select: { name: true, displayName: true } })).map((c) => [
+        c.name,
+        stripUnsafeDisplayChars(c.displayName).trim() || c.name,
+      ]),
+    );
+    return row(
+      "down",
+      `Nobody set to be told can see ${listNames(uncovered.map((c) => labels.get(c) ?? c))}, so the owner is told about ${uncovered.length === 1 ? "it" : "them"} instead`,
+    );
+  }
   const names = (us: readonly RecipientUser[]) => us.map(displayName).sort((a, b) => a.localeCompare(b));
   if (!(await webPushGate(prisma))) {
     return row("quiet", `Alerts reach ${listNames(names(receivers))} only while Droplet is open (phone notifications are turned off on this box)`);
