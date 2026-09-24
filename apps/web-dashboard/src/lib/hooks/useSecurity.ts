@@ -304,6 +304,16 @@ export function useSecurityPatterns() {
   return { overview: data ?? null, error: error as Error | undefined, isLoading, mutate };
 }
 
+/**
+ * The cameras this viewer may see (/api/cameras is filtered to their grants,
+ * like every Security read) — the patterns page lists the ones Droplet has
+ * never heard from. Shares the `/api/cameras` cache with useCameraDisplayNames.
+ */
+export function useSecurityCameras() {
+  const { data, error } = useSWR<CameraInfo[]>("/api/cameras", fetchCameras);
+  return { cameras: data ?? null, error: error as Error | undefined };
+}
+
 /** GET /api/security/patterns/cells — one key and label; a `null` key fetches nothing. */
 export function useSecurityPatternCells(key: string | null, label: string | null) {
   const { data, error, isLoading } = useSWR<SecurityPatternCells>(
