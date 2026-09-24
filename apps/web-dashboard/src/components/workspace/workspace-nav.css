@@ -102,7 +102,10 @@ body:has(.droplet-workspace) {
   flex: 1;
   min-width: 8px;
 }
-.ws-status {
+/* Scoped to the header: the Workshop composer's notice line is also
+   `.ws-status` (WARP-2974), and a bare selector here turned it into this pill,
+   clipped to 32px on a phone (WARP-3063). */
+.ws-head .ws-status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -116,7 +119,7 @@ body:has(.droplet-workspace) {
   flex: none;
   white-space: nowrap;
 }
-.ws-status .dot,
+.ws-head .ws-status .dot,
 .ws-strip-health .dot {
   width: 7px;
   height: 7px;
@@ -125,15 +128,15 @@ body:has(.droplet-workspace) {
   flex: none;
 }
 /* Same three tones the shell chip uses (droplet-shell.css `.pt-chip.is-*`). */
-.ws-status.is-degraded .dot,
+.ws-head .ws-status.is-degraded .dot,
 .ws-strip-health.is-degraded .dot {
   background: #d9a35c;
 }
-.ws-status.is-down .dot,
+.ws-head .ws-status.is-down .dot,
 .ws-strip-health.is-down .dot {
   background: #ef4444;
 }
-.ws-status.is-unknown .dot,
+.ws-head .ws-status.is-unknown .dot,
 .ws-strip-health.is-unknown .dot {
   background: var(--text-muted);
 }
@@ -369,10 +372,10 @@ body:has(.droplet-workspace) {
   .ws-user-name {
     display: none;
   }
-  .ws-status .lbl {
+  .ws-head .ws-status .lbl {
     display: none;
   }
-  .ws-status {
+  .ws-head .ws-status {
     width: 32px;
     padding: 0;
     justify-content: center;
