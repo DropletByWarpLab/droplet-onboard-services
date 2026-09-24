@@ -1525,15 +1525,24 @@ describe(`a lock is gone only after ${SECURITY_LOCK_GONE_AFTER_LISTS} successful
   });
 
   it("the count is CONSECUTIVE: a list that has it again resets it", async () => {
-    const { adapter, devices } = sweeping([lockDevice()]);
+    const { adapter, devices, store } = sweeping([lockDevice()]);
     await adapter.sweep();
     for (let round = 0; round < 3; round++) {
       devices.length = 0;
-      for (let i = 1; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) await adapter.sweep();
+      for (let i = 1; i < SECURITY_LOCK_GONE_AFTER_LISTS; i++) {
+        await adapter.sweep();
+        // Still known after EVERY missing list of the round — a count carried
+        // over from the round before would drop it here.
+        expect(adapter.knownLocks(), `round ${round}, miss ${i}`).toEqual([
+          expect.objectContaining({ ref: REF, connected: false }),
+        ]);
+      }
       devices.push(lockDevice());
       await adapter.sweep();
       expect(adapter.knownLocks()).toEqual([expect.objectContaining({ ref: REF, connected: true })]);
     }
+    // Never forgotten, so the history was read once.
+    expect(store.lastReading).toHaveBeenCalledTimes(1);
   });
 
   it("a FAILED list is not an absence", async () => {
