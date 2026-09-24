@@ -48,7 +48,7 @@ Refresh token is stored separately and only sent to `/api/auth/refresh`.
 | POST | `/auth/login?return=body` | none | `{ email, password, totp?, recoveryCode? }` | `{ user, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 | POST | `/auth/refresh` | refresh | `{ refreshToken }` | `{ accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 | POST | `/auth/logout` | Bearer | — | `{ status: "ok" }` |
-| GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role }` |
+| GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role, mustChangePassword, session: { endsAt } \| null }` |
 | POST | `/auth/totp/enroll` | Bearer | — | `{ otpauthUri, qrDataUrl, issuer }` |
 | POST | `/auth/totp/verify` | Bearer | `{ code }` (6-digit) | `{ enabled: true, recoveryCodes? }` |
 | POST | `/auth/recovery` | Bearer | `{ code }` | `{ ok: true, remaining }` |
@@ -63,6 +63,18 @@ is forced through before reaching anything else. Failure shapes (flat envelope, 
 (new fails policy), `400 SAME_PASSWORD` (new === current), `400 INVALID_REQUEST`
 (missing fields), `429 TOO_MANY_ATTEMPTS` (+ `retryAfterSeconds`, `Retry-After`
 header — progressive lock on repeated wrong current password).
+
+**When the sign-in ends (`session.endsAt`, WARP-2981).** `/auth/me` carries
+`session: { endsAt: "ISO-8601" }`: when this sign-in stops working, which is the
+sign-in time plus the absolute session limit (12 h for every role as shipped).
+Token refresh does not move it and nothing extends it, so an app can say when the
+person will be signed out and ask them to sign in again before then. The idle
+limit is **not** offered, because every request the app makes resets it.
+`session` is `null` when the box cannot tell (a service token, a token minted
+before session records, the session store unreachable). Treat `null`, and a box
+too old to send the key, as "show nothing". Only `/auth/me` carries it; the login
+and refresh bodies do not. Signing out, or an admin ending the session, can still
+end it sooner.
 
 **Auth model (ADR-013 directory).** Login authenticates an **email +
 password (argon2id)** against the local directory — *not* Nextcloud
@@ -561,6 +573,44 @@ WARP-1341: this is a **business-only** build. `workspaceType` is always
 `"business"` — GET never returns `"home"`, and a POST with `"home"` is a
 `400 invalid_body`. Missing-row default is `"business"`, so mobile can treat
 a 404 the same way.
+
+### Active department (`/api/me/active-department` — WARP-2981)
+
+The department a person's app is arranged around (ADR-059, DS-003). It is kept
+on the box, so a switch made on one device reaches the others. It **arranges,
+never grants**: what the person can reach is the same whatever is chosen.
+
+| Method | Path | Auth | Body | 200 response |
+|---|---|---|---|---|
+| GET | `/me/active-department` | Bearer (a person) | — | `{ department: ActiveDepartment \| null }` |
+| PUT | `/me/active-department` | Bearer (a person) | `{ departmentId: "<uuid>" \| null }` | `{ department: ActiveDepartment \| null }` |
+
+`ActiveDepartment` is `{ id, slug, name, profile: { template, icon } | null }`.
+`profile: null` means the department is not set up yet.
+
+- **`department: null` is Whole business**, the default for everyone (DS-014).
+  PUT `null` to choose it. The box keeps nothing for Whole business, so a person
+  who never chose anything also reads `null`.
+- **What to offer.** `GET /api/departments` returns the rows the person may see.
+  Offer the `kind: "DEPARTMENT"` rows whose `state` is neither `archived` nor
+  `archiving`, sorted by name, plus Whole business. PUT accepts exactly that
+  set. With no such row, show no switcher.
+- **Each person reads and writes only their own choice.** Nothing in the request
+  names a person. A service token gets `403 HUMAN_ONLY`.
+- **The box checks the choice again on every read.** If the person has been
+  removed from the department, or it has been archived, GET answers `null`.
+- **Every PUT refusal looks the same.** A department the person may not choose
+  (missing, not theirs, archived or being archived, a team, the household) gets
+  one `404 DEPARTMENT_NOT_AVAILABLE` body, so the answer never shows whether a
+  department exists. The body is strict: an unknown key, a non-uuid id or a
+  missing `departmentId` is `400 VALIDATION_ERROR`.
+- **The last write wins** across devices. Read it again on launch and when the
+  app comes to the foreground, to pick up a switch made elsewhere. Nothing is
+  audited: it is a display preference.
+- **Errors are nested**, as on the Notifications routes:
+  `{ "error": { "code": "…", "message": "…" } }`. Key on `code`. A `404` with any
+  other code, or none, means the box is older than this route: keep the choice
+  on the device.
 
 ## Error shape
 
