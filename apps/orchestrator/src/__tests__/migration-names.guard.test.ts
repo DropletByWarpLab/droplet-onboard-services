@@ -55,4 +55,15 @@ describe("migration folder names (WARP-2896)", () => {
     expect(folders).toContain("20260924010000_warp_2896_workspace");
     expect(folders).not.toContain("20260920120000_warp_2896_workspace");
   });
+
+  it("the WARP-2704 M365 migration exists once, re-stamped to sort after the stage migrations it merged behind", () => {
+    // Written as 20260924010000, the stamp #2247 had already given the 2896
+    // workspace migration, so `warp_2704` sorted BEFORE a migration stage boxes
+    // had applied. Re-stamped before merge to follow stage's newest at the
+    // time, 20260924020000_warp_2911_notification_recipient_username (#2349).
+    const folders = migrationFolders();
+    expect(folders).toContain("20260924030000_warp_2704_m365_auth_code_per_connection_app");
+    expect(folders).not.toContain("20260924010000_warp_2704_m365_auth_code_per_connection_app");
+    expect(folders).toContain("20260924020000_warp_2911_notification_recipient_username");
+  });
 });

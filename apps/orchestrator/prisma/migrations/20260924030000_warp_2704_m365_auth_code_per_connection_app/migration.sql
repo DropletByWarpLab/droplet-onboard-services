@@ -3,6 +3,10 @@
 --
 -- Additive only; every new column is nullable and no existing row changes.
 --
+-- Re-stamped before merge from 20260924010000, a stamp stage already held for
+-- 20260924010000_warp_2896_workspace (#2247), so this sorts after every
+-- migration on stage at the time (#2344 review). No box applied the old name.
+--
 -- appClientId / appTenantId (WARP-2705): the customer-registered, single-tenant
 -- app a link signs in through. Replaces the box-wide M365_CLIENT_ID and the
 -- hardcoded `/organizations` authority. Non-secret, and they survive a
