@@ -51,8 +51,17 @@ const sha256 = (v: string) => createHash("sha256").update(v).digest("hex");
 /** Minimal in-memory stand-in for prisma.m365Connection. */
 function fakePrisma(seed: Record<string, unknown> | null = null) {
   let row: Record<string, unknown> | null = seed ? { ...seed } : null;
+  // WARP-3059 — the person's delta cursors, so a purge shows as rows gone
+  // rather than only as a call made.
+  let cursors: Array<{ id: string; userId: string; resourceId: string }> = [];
   return {
     __row: () => row,
+    __cursors: () => cursors,
+    __addCursors: (...resourceIds: string[]) => {
+      for (const resourceId of resourceIds) {
+        cursors.push({ id: `c${cursors.length + 1}`, userId: USER, resourceId });
+      }
+    },
     m365Connection: {
       // Honours `where` — the callback finds its row by `pendingStateHash`,
       // so a fake that ignored the key would pass a lookup that should miss.
@@ -91,7 +100,11 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
     },
     // WARP-3059 — disconnect and user deletion purge the person's cursors.
     m365DeltaCursor: {
-      deleteMany: vi.fn(async () => ({ count: 0 })),
+      deleteMany: vi.fn(async ({ where }: any) => {
+        const before = cursors.length;
+        cursors = cursors.filter((c) => c.userId !== where.userId);
+        return { count: before - cursors.length };
+      }),
     },
   };
 }
@@ -1016,5 +1029,189 @@ describe("a reconnect leaves no credential of the old link behind (#2344 review)
     const row = prisma.__row() as any;
     expect(row).toMatchObject({ state: "CONNECTED", accountUpn: "sam@practice.com" });
     expect(row.tokenCacheEnc).toBeTruthy();
+  });
+});
+
+// --- #2347 review, blocking 2 ------------------------------------------------
+// Reconnecting is the ordinary recovery path (NEEDS_RECONNECT → Reconnect) and
+// it never passes through disconnect(). A person who signs in as ANOTHER
+// mailbox, or through another app, must not inherit the old link's cursors:
+// their delta links would be replayed against the new mailbox, and folder ids
+// that do not exist there 404, classify FATAL and park FAILED for good.
+
+const A = { homeAccountId: "a-oid.home-tid", tenantId: "tenant-a", accountUpn: "a@practice.com" };
+const B = { homeAccountId: "b-oid.home-tid", tenantId: "tenant-a", accountUpn: "b@practice.com" };
+const OTHER_APP = { clientId: "7c6b5a49-3827-4165-9403-f2e1d0c9b8a7", tenantId: APP.tenantId };
+
+/** Sign in through the browser flow, end to end, and land as `who`. */
+async function connectAs(
+  prisma: ReturnType<typeof fakePrisma>,
+  who: Partial<EntraAuthResult>,
+  app = APP,
+): Promise<string> {
+  const entra = fakeEntra({ acquireByAuthorizationCode: vi.fn(async () => authResult(who)) });
+  const { state } = await beginAuthCodeConnect(prisma as never, entra, USER, { app, redirectUri: REDIRECT });
+  return await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, code: "c" });
+}
+
+/** Connected as A through APP, with two cursors synced under that link. */
+async function connectedAsAWithCursors() {
+  const prisma = fakePrisma(null);
+  expect(await connectAs(prisma, A)).toBe("connected");
+  prisma.__addCursors("inbox-of-a", "archive-of-a");
+  return prisma;
+}
+
+/** The grant died; the person is asked to reconnect. */
+function grantDied(prisma: ReturnType<typeof fakePrisma>) {
+  (prisma.__row() as any).state = "NEEDS_RECONNECT";
+}
+
+describe("a reconnect as someone else starts their sync from nothing (#2347 review)", () => {
+  it("purges the cursors when the sign-in that completes is a different mailbox", async () => {
+    const prisma = await connectedAsAWithCursors();
+    grantDied(prisma);
+
+    expect(await connectAs(prisma, B)).toBe("connected");
+
+    expect(prisma.__cursors()).toEqual([]);
+    expect(prisma.__row()).toMatchObject({ state: "CONNECTED", accountUpn: B.accountUpn });
+  });
+
+  it("purges them BEFORE the row turns CONNECTED, so no tick can claim them in between", async () => {
+    // CONNECTED is what makes a cursor claimable. Purging after the write
+    // would leave a window for a tick to replay A's positions with B's token.
+    const prisma = await connectedAsAWithCursors();
+    grantDied(prisma);
+    const stateAtPurge: unknown[] = [];
+    const purge = vi.mocked(prisma.m365DeltaCursor.deleteMany);
+    const realPurge = purge.getMockImplementation()!;
+    purge.mockImplementation(async (args: any) => {
+      stateAtPurge.push((prisma.__row() as any).state);
+      return realPurge(args);
+    });
+
+    expect(await connectAs(prisma, B)).toBe("connected");
+    expect(stateAtPurge).toEqual(["PENDING_CONSENT"]);
+  });
+
+  it("keeps the cursors when the same account reconnects, so its sync carries on where it was", async () => {
+    const prisma = await connectedAsAWithCursors();
+    grantDied(prisma);
+
+    expect(await connectAs(prisma, A)).toBe("connected");
+
+    expect(prisma.__cursors().map((c) => c.resourceId)).toEqual(["inbox-of-a", "archive-of-a"]);
+  });
+
+  it("purges them when the same account signs in through a different app registration", async () => {
+    // A delta token is issued to one app's reads; nothing documents it as
+    // portable to another registration, so a new app starts from scratch.
+    const prisma = await connectedAsAWithCursors();
+    expect(await connectAs(prisma, A, OTHER_APP)).toBe("connected");
+    expect(prisma.__cursors()).toEqual([]);
+  });
+
+  it("purges them when the same account signs in to a different tenant", async () => {
+    const prisma = await connectedAsAWithCursors();
+    expect(await connectAs(prisma, { ...A, tenantId: "tenant-elsewhere" })).toBe("connected");
+    expect(prisma.__cursors()).toEqual([]);
+  });
+
+  it("purges them on the device-code path too", async () => {
+    const prisma = await connectedAsAWithCursors();
+    grantDied(prisma);
+    const entra = fakeEntra({
+      acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
+        onCode({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://microsoft.com/devicelogin",
+          expiresAt: new Date(Date.now() + 900_000),
+          message: "enter the code",
+        });
+        return authResult(B);
+      }),
+    });
+
+    await beginDeviceCodeConnect(prisma as never, entra, USER);
+    await vi.waitFor(() => expect(prisma.__row()).toMatchObject({ state: "CONNECTED" }));
+
+    expect(prisma.__cursors()).toEqual([]);
+  });
+
+  it("keeps a cancelled reconnect's cursors for the same account to pick up later", async () => {
+    // Cancelling is not disconnecting: the cursors stay unclaimed (the row is
+    // not CONNECTED) and hold no credential. Whoever connects next decides.
+    const prisma = await connectedAsAWithCursors();
+    const entra = fakeEntra();
+    const { state } = await beginAuthCodeConnect(prisma as never, entra, USER, { app: APP, redirectUri: REDIRECT });
+    expect(
+      await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, error: "access_denied" }),
+    ).toBe("cancelled");
+    expect(prisma.__cursors()).toHaveLength(2);
+
+    expect(await connectAs(prisma, A)).toBe("connected");
+    expect(prisma.__cursors()).toHaveLength(2);
+  });
+
+  it("purges cursors a discovery already running re-created after a disconnect, even for the same account", async () => {
+    // #2347 review, non-blocking: discovery that got its token before the
+    // disconnect can upsert after the purge. Nothing on file says whose they
+    // are any more, so the next sign-in does not adopt them.
+    const prisma = await connectedAsAWithCursors();
+    await disconnect(prisma as never, USER);
+    expect(prisma.__cursors()).toEqual([]);
+    prisma.__addCursors("inbox-of-a"); // the late upsert
+
+    expect(await connectAs(prisma, A)).toBe("connected");
+    expect(prisma.__cursors()).toEqual([]);
+  });
+
+  it("treats cursors from a link made before WARP-3059 as someone else's", async () => {
+    const prisma = fakePrisma({
+      id: "row-1",
+      userId: USER,
+      state: "NEEDS_RECONNECT",
+      homeAccountId: A.homeAccountId,
+      tenantId: A.tenantId,
+      tokenCacheEnc: sealTokenCache(USER, CACHE),
+      ...APP_COLUMNS,
+    });
+    prisma.__addCursors("inbox-of-a");
+
+    expect(await connectAs(prisma, A)).toBe("connected");
+    expect(prisma.__cursors()).toEqual([]);
+  });
+
+  it("purges nothing for a sign-in that lost its race to another", async () => {
+    // A device-code poll left running while the person finished in the
+    // browser as A: when it resolves (as B) the row is no longer waiting on
+    // it, so it writes nothing, and must not purge A's cursors either.
+    const prisma = await connectedAsAWithCursors();
+    let finish!: (r: EntraAuthResult) => void;
+    const deviceEntra = fakeEntra({
+      acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
+        onCode({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://microsoft.com/devicelogin",
+          expiresAt: new Date(Date.now() + 900_000),
+          message: "enter the code",
+        });
+        return await new Promise<EntraAuthResult>((resolve) => {
+          finish = resolve;
+        });
+      }),
+    });
+    await beginDeviceCodeConnect(prisma as never, deviceEntra, USER);
+    expect(await connectAs(prisma, A)).toBe("connected");
+    const writes = vi.mocked(prisma.m365Connection.updateMany).mock.calls.length;
+
+    finish(authResult(B));
+    await vi.waitFor(() =>
+      expect(vi.mocked(prisma.m365Connection.updateMany).mock.calls.length).toBeGreaterThan(writes),
+    );
+
+    expect(prisma.__row()).toMatchObject({ state: "CONNECTED", accountUpn: A.accountUpn });
+    expect(prisma.__cursors()).toHaveLength(2);
   });
 });

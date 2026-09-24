@@ -7292,6 +7292,17 @@ model M365Connection {
   /// workloads it is allowed to attempt.
   grantedScopes String?
 
+  /// WARP-3059 (#2347 review) — which link this person's M365DeltaCursor rows
+  /// were built under: a SHA-256 (hex) of the app client id, homeAccountId and
+  /// tenantId of the sign-in that last connected. A delta link and a folder id
+  /// are positions in one mailbox read through one app, so a sign-in that
+  /// completes as anything else purges the cursors before the row turns
+  /// CONNECTED; the same link keeps them. Unlike the account columns it
+  /// survives a sign-in STARTING, because the cursors do. A hash, so a
+  /// DISCONNECTED row still names no account through it. Cleared with the
+  /// cursors on disconnect; NULL means "not known" and counts as a change.
+  cursorLinkHash String?
+
   /// When the in-flight sign-in stops being valid. Microsoft expires a device
   /// code in ~15 minutes, and an authorization-code sign-in gets the same
   /// window. A PENDING_CONSENT row past this is swept back to DISCONNECTED —

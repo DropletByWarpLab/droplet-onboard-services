@@ -185,6 +185,7 @@ interface ConnectionRow {
   appTenantId?: string | null;
   pendingStateHash?: string | null;
   pendingFlowEnc?: string | null;
+  cursorLinkHash?: string | null;
 }
 
 /**
@@ -216,6 +217,26 @@ const UNLINKED = {
   pendingFlowEnc: null,
   pendingFlowExpiresAt: null,
 } as const;
+
+/**
+ * WARP-3059 (#2347 review) — which link a person's delta cursors belong to.
+ *
+ * A delta link, a resume link and a folder id are positions in ONE mailbox,
+ * read through ONE app registration. Signing in as another account, into
+ * another tenant, or through another app makes every one of them wrong: the
+ * old delta links would be replayed against the new mailbox, and folder ids
+ * that do not exist there 404, classify FATAL and park FAILED for good. A
+ * delta token is issued to one app's reads, and nothing documents it as
+ * portable to another registration, so a new app starts from scratch too.
+ *
+ * Hashed, so a row names no account through it. It is NOT in NO_ACCOUNT: the
+ * cursors survive a sign-in starting, so what says whose they are must too.
+ */
+function cursorLinkHash(app: EntraAppRegistration, result: EntraAuthResult): string {
+  return createHash("sha256")
+    .update(JSON.stringify([app.clientId, result.homeAccountId, result.tenantId ?? null]))
+    .digest("hex");
+}
 
 /** The stored app registration, or null when the row predates WARP-2705. */
 function storedApp(row: ConnectionRow | null): EntraAppRegistration | null {
@@ -510,7 +531,7 @@ export async function completeAuthCodeConnect(
     return await settleConnectFailure(prisma, userId, err);
   }
 
-  return (await persistConnected(prisma, userId, result)) ? "connected" : "cancelled";
+  return (await persistConnected(prisma, userId, app, result)) ? "connected" : "cancelled";
 }
 
 /**
@@ -607,7 +628,7 @@ export async function beginDeviceCodeConnect(
 
     completion
       .then(async (result) => {
-        await persistConnected(prisma, userId, result);
+        await persistConnected(prisma, userId, app, result);
       })
       .catch(async (err: unknown) => {
         await persistFailure(prisma, userId, err);
@@ -630,17 +651,39 @@ export async function beginDeviceCodeConnect(
  *
  * `updateMany` is what makes the check-and-write atomic; a read-then-update
  * would leave the same race open, just narrower.
+ *
+ * `app` is the registration THIS sign-in went through, not whatever the row
+ * says now: a newer sign-in may have replaced it.
  */
 async function persistConnected(
   prisma: PrismaClient,
   userId: string,
+  app: EntraAppRegistration,
   result: EntraAuthResult,
   now: Date = new Date(),
 ): Promise<boolean> {
+  const linkHash = cursorLinkHash(app, result);
+
+  // WARP-3059 (#2347 review) — a sign-in as someone else does not inherit the
+  // cursors on file. Reconnecting is the ordinary recovery path and never
+  // passes through disconnect(), so this is where they go. BEFORE the row
+  // turns CONNECTED, because that is what makes them claimable: purging after
+  // would leave a window for a tick to replay the old account's positions
+  // with the new account's token. Only for the sign-in the row is still
+  // waiting on: one that lost its race writes nothing below, and must not
+  // purge the winner's cursors either.
+  const prior = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+  if (prior?.state === "PENDING_CONSENT" && prior.cursorLinkHash !== linkHash) {
+    await purgeCursorsForUser(prisma, userId);
+  }
+
   const { count } = await prisma.m365Connection.updateMany({
     where: { userId, state: "PENDING_CONSENT" },
     data: {
       state: "CONNECTED",
+      cursorLinkHash: linkHash,
       homeAccountId: result.homeAccountId,
       tenantId: result.tenantId,
       accountUpn: result.accountUpn,
@@ -776,6 +819,10 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
     data: {
       ...UNLINKED,
       lastError: null,
+      // The cursors go below, so nothing is left for this to name. A cursor a
+      // discovery already running re-creates after the purge is then unowned,
+      // and the next sign-in purges it rather than adopting it.
+      cursorLinkHash: null,
       // appClientId / appTenantId are kept on purpose (WARP-2705): they are
       // configuration, not a credential, and they make reconnecting one click.
     },
