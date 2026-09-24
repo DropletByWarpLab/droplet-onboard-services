@@ -24,6 +24,11 @@
  * refreshes. Once signed in, the page tells the worker it is listening
  * ("dashboard-ready") so an ack handed over before the listener existed is
  * delivered then. The worker's `navigate` fallback lands here too.
+ *
+ * WARP-2978 (ADR-059 P3 §6.7) — a Security alert (`priority: "alert"`) is the
+ * persistent error toast (role=alert, never times out) with "Open", and "Open"
+ * on an incident link adds `?n=<notification id>` so the incident page's
+ * Acknowledge records which alert it came from.
  */
 
 import { useEffect, useRef } from "react";
@@ -41,8 +46,22 @@ interface IncomingNotification {
   url?: string;
   /** WARP-2804 — the NotificationLog row this toast is for; "Open" acknowledges it. */
   id?: string;
-  /** WARP-2978 fills this (an alert vs a notice). Carried, not yet rendered. */
+  /** WARP-2978 — `data.incidentId` on a Security alert. */
+  data?: Record<string, unknown>;
+  /** WARP-2978 — `alert` on a Security alert: the persistent toast. */
   priority?: string;
+}
+
+/** An incident page, the only link that takes `?n=`. */
+const INCIDENT_PATH_RE = /^\/security\/incidents\/[A-Za-z0-9-]+$/;
+
+/**
+ * WARP-2978 — the incident page's link with the notification it was opened
+ * from, so Acknowledge can send it. Any other link, or an id that is not a
+ * row id, is returned as the box sent it.
+ */
+export function withNotificationParam(url: string, id: string | null): string {
+  return id && NOTIFICATION_ID_RE.test(id) && INCIDENT_PATH_RE.test(url) ? `${url}?n=${encodeURIComponent(id)}` : url;
 }
 
 /** WARP-2909 — the box validates `url`, but the toaster never trusts a wire
@@ -160,11 +179,13 @@ export function NotificationToaster() {
                 // WARP-2804 — opening it is the acknowledgement. Sent first,
                 // never awaited: the navigation must not wait on the network.
                 if (id) void ackNotification(id, { via: "opened" }).catch(() => {});
-                routerRef.current.push(link);
+                routerRef.current.push(withNotificationParam(link, id));
               },
             }
           : undefined;
-        toastRef.current(message, payload.kind === "ai" ? "info" : "success", action);
+        // WARP-2978 — an alert is the persistent error toast (role=alert), never a 5 s one.
+        const type = payload.priority === "alert" ? "error" : payload.kind === "ai" ? "info" : "success";
+        toastRef.current(message, type, action);
       };
       ws.onclose = () => scheduleReconnect();
       ws.onerror = () => {
