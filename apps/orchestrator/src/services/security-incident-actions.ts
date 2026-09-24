@@ -101,7 +101,7 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
     });
     if (!row) return { status: "not_found" };
     const reasons = await prisma.securityIncidentReason.findMany({ where: { incidentId: row.id }, select: REASON_VIEW_SELECT });
-    const view = projectIncident(row, reasons, input.viewer);
+    const view = projectIncident(row, reasons, input.viewer, now);
     if (!view) return { status: "not_found" };
     if (!view.actionable) return { status: "not_actionable" };
 

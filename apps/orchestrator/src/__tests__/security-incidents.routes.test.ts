@@ -575,6 +575,23 @@ describe("review #1 (DS-005) — a viewer who sees only a LOWER code (front noti
     expect(res.body.notices.map((n: { outcome: string }) => n.outcome).sort()).toEqual(["sent", "skipped_not_visible"]);
   });
 
+  it("review #4: her times come from her camera — a person on hidden `back` later moves neither her last activity nor `still happening`", async () => {
+    const f = world();
+    withMixed(f);
+    const mixed = f.world.securityIncident.find((i) => i.id === MIXED)!;
+    const late = new Date(NOW.getTime() - 60_000); // back active a minute ago
+    Object.assign(mixed, {
+      firstActivityAt: T,
+      lastActivityAt: late,
+      spanByCamera: { front: { first: T.toISOString(), last: T.toISOString() }, back: { first: T.toISOString(), last: late.toISOString() } },
+    });
+    const maria = await request(app(f, "family", "act").server).get(`/api/security/incidents/${MIXED}`);
+    // front was last active at T (16 min before NOW): quiet + settle has passed for her.
+    expect(maria.body).toMatchObject({ lastActivityAt: T.toISOString(), grouping: "closed" });
+    const owner = await request(app(f, "owner", "manage").server).get(`/api/security/incidents/${MIXED}`);
+    expect(owner.body).toMatchObject({ lastActivityAt: late.toISOString(), grouping: "collecting" });
+  });
+
   it("a non-admin's own skipped_not_visible notice is never returned, even once they can see an alert code", async () => {
     const f = world();
     f.world.securityIncidentNotice.find((n) => n.id === "n-maria")!.outcome = "skipped_not_visible";

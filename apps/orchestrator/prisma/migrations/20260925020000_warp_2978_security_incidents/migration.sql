@@ -81,6 +81,7 @@ CREATE TABLE "SecurityIncident" (
     "eventCount" INTEGER NOT NULL,
     "countsByCamera" JSONB NOT NULL,
     "cameras" TEXT[],
+    "spanByCamera" JSONB NOT NULL,
     "eventsKept" "SecurityIncidentEvents" NOT NULL DEFAULT 'kept',
     "openedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "closedAt" TIMESTAMP(3),

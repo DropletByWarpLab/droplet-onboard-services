@@ -287,6 +287,7 @@ const CANDIDATE_SELECT = {
   eventCount: true,
   countsByCamera: true,
   cameras: true,
+  spanByCamera: true,
   severity: true,
   reasonCodes: true,
   state: true,

@@ -153,6 +153,7 @@ describe("triage: one person in the Stock room after closing", () => {
       firstActivityAt: T0,
       lastActivityAt: plus(T0, 20_000),
       lastArrivalAt: plus(T0, 21_000),
+      spanByCamera: { back: { first: T0.toISOString(), last: plus(T0, 20_000).toISOString() } },
     });
     expect(f.world.securityIncidentReason).toEqual([
       expect.objectContaining({

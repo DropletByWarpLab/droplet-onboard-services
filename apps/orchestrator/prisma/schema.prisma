@@ -8935,6 +8935,9 @@ model SecurityIncident {
   countsByCamera   Json
   /// distinct member cameras — DS-005 visibility after the trim
   cameras          String[]
+  /// {"<camera>": {"first": ISO, "last": ISO}, "": {…}} — each camera's own event-time span, so a
+  /// viewer who cannot see every camera gets the times from hers (review #4). Shape validated in code.
+  spanByCamera     Json
   eventsKept       SecurityIncidentEvents   @default(kept)
   openedAt         DateTime                 @default(now())
   closedAt         DateTime?

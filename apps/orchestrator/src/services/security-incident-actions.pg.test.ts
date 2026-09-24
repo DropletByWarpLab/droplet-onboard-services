@@ -110,6 +110,7 @@ describe.skipIf(!RUN)("Incident acknowledgement against real Postgres (WARP-2978
         lastArrivalAt: T,
         eventCount: 1,
         countsByCamera: { [camera]: { _status: 1 } },
+        spanByCamera: { [camera]: { first: T.toISOString(), last: T.toISOString() } },
         cameras: [camera],
         reasons: {
           create: {

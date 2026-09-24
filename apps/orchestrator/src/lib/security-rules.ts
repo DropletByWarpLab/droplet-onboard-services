@@ -288,6 +288,39 @@ function addCount(counts: CountsByCamera, event: TriageEvent): CountsByCamera {
   return next;
 }
 
+/**
+ * Review #4 (DS-005) — each camera's own event-time span (`""` = site rows),
+ * as ISO strings: `{"<camera>": {first, last}}`. A viewer who cannot see every
+ * camera gets the incident's times (and whether it is still happening) from
+ * her cameras alone, so a person on a hidden camera never moves them. Its own
+ * column, not inside `countsByCamera`, whose every number is an event count.
+ */
+export type SpanByCamera = Record<string, { first: string; last: string }>;
+
+/** The stored Json as spans (Dates): well-formed `{first, last}` ISO pairs only; anything else is dropped. */
+export function parseSpans(json: unknown): Record<string, { first: Date; last: Date }> {
+  const out: Record<string, { first: Date; last: Date }> = {};
+  if (!json || typeof json !== "object" || Array.isArray(json)) return out;
+  for (const [camera, v] of Object.entries(json as Record<string, unknown>)) {
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+    const { first, last } = v as { first?: unknown; last?: unknown };
+    if (typeof first !== "string" || typeof last !== "string") continue;
+    const f = new Date(first);
+    const l = new Date(last);
+    if (Number.isNaN(f.getTime()) || Number.isNaN(l.getTime())) continue;
+    out[camera] = { first: f, last: l };
+  }
+  return out;
+}
+
+function addSpan(spans: SpanByCamera, event: TriageEvent, span: EventSpan): SpanByCamera {
+  const key = event.camera ?? "";
+  const prior = parseSpans(spans)[key];
+  const first = prior && prior.first.getTime() < span.s.getTime() ? prior.first : span.s;
+  const last = prior && prior.last.getTime() > span.e.getTime() ? prior.last : span.e;
+  return { ...spans, [key]: { first: first.toISOString(), last: last.toISOString() } };
+}
+
 /** The columns an incident's first event sets. */
 export interface OpeningFields {
   firstActivityAt: Date;
@@ -296,6 +329,7 @@ export interface OpeningFields {
   eventCount: number;
   countsByCamera: CountsByCamera;
   cameras: string[];
+  spanByCamera: SpanByCamera;
 }
 
 export function openingFields(event: TriageEvent, span: EventSpan): OpeningFields {
@@ -306,6 +340,7 @@ export function openingFields(event: TriageEvent, span: EventSpan): OpeningField
     eventCount: 1,
     countsByCamera: addCount({}, event),
     cameras: event.camera ? [event.camera] : [],
+    spanByCamera: addSpan({}, event, span),
   };
 }
 
@@ -314,6 +349,7 @@ export interface JoinableIncident extends GroupableIncident {
   eventCount: number;
   countsByCamera: unknown;
   cameras: readonly string[];
+  spanByCamera: unknown;
 }
 
 /** What joining changes (§6.3): the span (min/max), the arrival clock, the count, the counts per camera, the cameras. */
@@ -327,7 +363,17 @@ export function joinPatch(i: JoinableIncident, event: TriageEvent, span: EventSp
     eventCount: i.eventCount + 1,
     countsByCamera: addCount(parseCounts(i.countsByCamera), event),
     cameras: [...cameras].sort(byString),
+    spanByCamera: addSpan(toSpanJson(i.spanByCamera), event, span),
   };
+}
+
+/** A stored spans column, re-serialised from its validated entries. */
+function toSpanJson(json: unknown): SpanByCamera {
+  const out: SpanByCamera = {};
+  for (const [camera, { first, last }] of Object.entries(parseSpans(json))) {
+    out[camera] = { first: first.toISOString(), last: last.toISOString() };
+  }
+  return out;
 }
 
 // ── the rules (§6.5) ──────────────────────────────────────────────────────

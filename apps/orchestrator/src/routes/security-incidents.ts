@@ -181,7 +181,13 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
         }
       }
       res.json(
-        await listIncidents(prisma, viewer, { state: q.data.state, severity: q.data.severity, zoneId: q.data.zone, cursor: cursor ?? undefined }, q.data.limit),
+        await listIncidents(
+          prisma,
+          viewer,
+          { state: q.data.state, severity: q.data.severity, zoneId: q.data.zone, cursor: cursor ?? undefined },
+          q.data.limit,
+          clock(),
+        ),
       );
     } catch (err) {
       logger.error({ err }, "incident list read failed");
@@ -193,7 +199,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
   router.get("/security/incidents/summary", requireRole(...VIEW_ROLES), async (req: Request, res: Response) => {
     try {
       const viewer = await viewerOf(prisma, req, deps);
-      const [summary, ready] = await Promise.all([incidentsSummary(prisma, viewer), alertsReady(prisma)]);
+      const [summary, ready] = await Promise.all([incidentsSummary(prisma, viewer, clock()), alertsReady(prisma)]);
       res.json({ ...summary, alertsReady: ready });
     } catch (err) {
       logger.error({ err }, "incident summary read failed");
@@ -209,7 +215,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
     }
     try {
       const viewer = await viewerOf(prisma, req, deps);
-      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps));
+      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps), clock());
       if (!detail) {
         // Missing and hidden are the same answer, byte for byte.
         fail(res, 404, "INCIDENT_NOT_FOUND", "There is no such incident.");
@@ -262,7 +268,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
           fail(res, 409, "INCIDENT_CONFLICT", "Someone else changed this incident at the same moment. Try again.");
           return;
       }
-      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps));
+      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps), now);
       res.json({ incident: detail, changed: result.changed });
     } catch (err) {
       writeFailed(res, err, `incident ${action}`, "INCIDENTS_UNAVAILABLE");

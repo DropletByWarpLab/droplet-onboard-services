@@ -52,7 +52,7 @@ import type {
 import { feedVisibilityWhere, listSecurityEvents } from "./security-events.service.js";
 import { loadActiveLinks, viewerAreas } from "./security-zones.service.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
-import { parseCounts } from "../lib/security-rules.js";
+import { QUIET_MS, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
@@ -83,6 +83,7 @@ export const INCIDENT_VIEW_SELECT = {
   eventCount: true,
   countsByCamera: true,
   cameras: true,
+  spanByCamera: true,
   eventsKept: true,
 } as const satisfies Prisma.SecurityIncidentSelect;
 
@@ -140,10 +141,43 @@ export interface IncidentProjection {
   eventCount: number;
   /** Visible counts per label (`_status` / `_threat` for status and threat rows). */
   labels: Record<string, number>;
+  /**
+   * Review #4 — the event-time span and whether it is still happening, from
+   * the cameras THIS viewer can see (`spanByCamera`), so activity on a hidden
+   * camera never moves them. A viewer who sees every camera of the incident
+   * gets the stored values. `openedInMode` needs no projection: an event
+   * joins only in the incident's own mode, so every member's start — hers
+   * included — was in that mode.
+   */
+  firstActivityAt: Date;
+  lastActivityAt: Date;
+  grouping: SecurityIncidentGrouping;
 }
 
-/** §6.8 — null when the viewer may not know the incident exists. */
-export function projectIncident(i: IncidentRowForView, reasons: readonly ReasonRowForView[], v: IncidentViewer): IncidentProjection | null {
+/** The viewer's own span and grouping (review #4). */
+function viewerSpan(
+  i: IncidentRowForView,
+  v: IncidentViewer,
+  now: Date,
+): { firstActivityAt: Date; lastActivityAt: Date; grouping: SecurityIncidentGrouping } {
+  const stored = { firstActivityAt: i.firstActivityAt, lastActivityAt: i.lastActivityAt, grouping: i.grouping };
+  const spans = Object.entries(parseSpans(i.spanByCamera));
+  const shown = spans.filter(([camera]) => (camera === "" ? SITE_SCOPES.includes(i.scope) : seesCamera(v, camera)));
+  if (shown.length === 0 || shown.length === spans.length) return stored;
+  const first = new Date(Math.min(...shown.map(([, s]) => s.first.getTime())));
+  const last = new Date(Math.max(...shown.map(([, s]) => s.last.getTime())));
+  // Her cameras quiet for quiet + settle: it has stopped happening, as far as she can know.
+  const quiet = now.getTime() >= last.getTime() + QUIET_MS + SETTLE_MS;
+  return { firstActivityAt: first, lastActivityAt: last, grouping: i.grouping === "closed" || quiet ? "closed" : "collecting" };
+}
+
+/** §6.8 — null when the viewer may not know the incident exists. `now` decides "still happening" for a partial camera view. */
+export function projectIncident(
+  i: IncidentRowForView,
+  reasons: readonly ReasonRowForView[],
+  v: IncidentViewer,
+  now: Date,
+): IncidentProjection | null {
   if (!incidentVisible(i, v)) return null;
   const visible = reasons.filter((r) => reasonVisible(r, i, v));
   let severity: SecuritySeverity = "info";
@@ -174,6 +208,7 @@ export function projectIncident(i: IncidentRowForView, reasons: readonly ReasonR
     actionable,
     eventCount,
     labels,
+    ...viewerSpan(i, v, now),
   };
 }
 
@@ -369,10 +404,10 @@ export function summaryOf(p: IncidentProjection, lastAck: { action: SecurityInci
     state: p.state,
     severity: p.severity,
     reasonCodes: p.codes,
-    grouping: i.grouping,
+    grouping: p.grouping,
     openedInMode: i.openedInMode,
-    firstActivityAt: i.firstActivityAt.toISOString(),
-    lastActivityAt: i.lastActivityAt.toISOString(),
+    firstActivityAt: p.firstActivityAt.toISOString(),
+    lastActivityAt: p.lastActivityAt.toISOString(),
     eventCount: p.eventCount,
     labels: p.labels,
     lastAck: p.actionable && lastAck ? { action: lastAck.action, byName: lastAck.byName, at: lastAck.at.toISOString() } : null,
@@ -399,7 +434,7 @@ async function latestAcks(prisma: Db, ids: readonly string[]): Promise<Map<strin
 }
 
 /** Project a page of incidents with one reasons query and one acks query. Hidden rows (never expected after the SQL) are dropped. */
-async function summariesOf(prisma: Db, rows: readonly IncidentRowForView[], v: IncidentViewer): Promise<IncidentSummary[]> {
+async function summariesOf(prisma: Db, rows: readonly IncidentRowForView[], v: IncidentViewer, now: Date): Promise<IncidentSummary[]> {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
   const reasons = await prisma.securityIncidentReason.findMany({
@@ -409,18 +444,24 @@ async function summariesOf(prisma: Db, rows: readonly IncidentRowForView[], v: I
   const acks = await latestAcks(prisma, ids);
   const out: IncidentSummary[] = [];
   for (const row of rows) {
-    const p = projectIncident(row, reasons.filter((r) => r.incidentId === row.id), v);
+    const p = projectIncident(row, reasons.filter((r) => r.incidentId === row.id), v, now);
     if (p) out.push(summaryOf(p, acks.get(row.id) ?? null));
   }
   return out;
 }
 
-/** Route 16: one page, `(lastActivityAt desc, id desc)`. */
+/**
+ * Route 16: one page, `(lastActivityAt desc, id desc)` on the STORED last
+ * activity. Known residual (review #4): for a viewer who cannot see every
+ * camera, the ORDER (and so the cursor) can still move when a hidden camera
+ * is active; the times shown are hers.
+ */
 export async function listIncidents(
   prisma: Db,
   v: IncidentViewer,
   f: IncidentListFilters,
   limit: number,
+  now: Date,
 ): Promise<{ incidents: IncidentSummary[]; nextCursor: string | null }> {
   const rows = await prisma.securityIncident.findMany({
     where: incidentListWhere(v, f),
@@ -431,7 +472,7 @@ export async function listIncidents(
   const page = rows.slice(0, limit);
   const tail = page[page.length - 1];
   return {
-    incidents: await summariesOf(prisma, page, v),
+    incidents: await summariesOf(prisma, page, v, now),
     nextCursor: rows.length > limit && tail ? `${tail.lastActivityAt.getTime()}.${tail.id}` : null,
   };
 }
@@ -440,11 +481,12 @@ export async function listIncidents(
 export async function incidentsSummary(
   prisma: Db,
   v: IncidentViewer,
+  now: Date,
 ): Promise<{ openAlerts: number; openNotices: number; latest: IncidentSummary[] }> {
   const [openAlerts, openNotices, latest] = await Promise.all([
     prisma.securityIncident.count({ where: incidentListWhere(v, { state: "attention", severity: "alert" }) }),
     prisma.securityIncident.count({ where: incidentListWhere(v, { state: "attention", severity: "notice" }) }),
-    listIncidents(prisma, v, { state: "attention" }, 3),
+    listIncidents(prisma, v, { state: "attention" }, 3, now),
   ]);
   return { openAlerts, openNotices, latest: latest.incidents };
 }
@@ -459,6 +501,7 @@ export async function loadIncidentDetail(
   id: string,
   v: IncidentViewer,
   level: "view" | "act" | "manage",
+  now: Date,
 ): Promise<IncidentDetail | null> {
   const row = await prisma.securityIncident.findUnique({ where: { id }, select: INCIDENT_VIEW_SELECT });
   if (!row) return null;
@@ -467,7 +510,7 @@ export async function loadIncidentDetail(
     orderBy: [{ evidenceAt: "asc" }, { id: "asc" }],
     select: REASON_VIEW_SELECT,
   });
-  const p = projectIncident(row, reasons, v);
+  const p = projectIncident(row, reasons, v, now);
   if (!p) return null;
 
   const acks = p.actionable

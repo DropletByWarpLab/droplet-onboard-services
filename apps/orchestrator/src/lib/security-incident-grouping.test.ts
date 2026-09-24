@@ -17,6 +17,7 @@ import {
   joinPatch,
   openingFields,
   parseCounts,
+  parseSpans,
   pickIncident,
   planTriage,
   rankPick,
@@ -198,6 +199,7 @@ describe("the counts that survive the event trim (DS-005)", () => {
       eventCount: 1,
       countsByCamera: { back: { person: 1 } },
       cameras: ["back"],
+      spanByCamera: { back: { first: e.startedAt.toISOString(), last: e.endedAt!.toISOString() } },
     });
   });
 
@@ -208,6 +210,7 @@ describe("the counts that survive the event trim (DS-005)", () => {
       eventCount: 1,
       countsByCamera: { back: { person: 1 } },
       cameras: ["back"],
+      spanByCamera: { back: { first: T0.toISOString(), last: plus(T0, 10_000).toISOString() } },
     };
     const offline = ev({ kind: "camera_offline", camera: "front", labels: [], startedAt: plus(T0, -30_000), endedAt: null, createdAt: plus(T0, 60_000) });
     const p = joinPatch(i, offline, eventSpan(offline));
@@ -218,11 +221,28 @@ describe("the counts that survive the event trim (DS-005)", () => {
       eventCount: 2,
       countsByCamera: { back: { person: 1 }, front: { _status: 1 } },
       cameras: ["back", "front"],
+      // Review #4: each camera keeps its OWN span, so a viewer of one camera never sees another's times.
+      spanByCamera: {
+        back: { first: T0.toISOString(), last: plus(T0, 10_000).toISOString() },
+        front: { first: plus(T0, -30_000).toISOString(), last: plus(T0, -30_000).toISOString() },
+      },
+    });
+    const later = ev({ camera: "back", startedAt: plus(T0, 60_000), endedAt: plus(T0, 70_000) });
+    expect(joinPatch({ ...i, ...p }, later, eventSpan(later)).spanByCamera.back).toEqual({
+      first: T0.toISOString(),
+      last: plus(T0, 70_000).toISOString(),
     });
     const threat = ev({ kind: "threat", camera: null, labels: ["auth"], source: "activity_mirror" });
     expect(openingFields(threat, eventSpan(threat)).countsByCamera).toEqual({ "": { _threat: 1 } });
     const frigate = ev({ kind: "source_offline", camera: null, labels: [], source: "frigate_status" });
     expect(openingFields(frigate, eventSpan(frigate))).toMatchObject({ countsByCamera: { "": { _status: 1 } }, cameras: [] });
+  });
+
+  it("parseSpans keeps only well-formed {first, last} ISO pairs", () => {
+    const good = { first: T0.toISOString(), last: plus(T0, 1).toISOString() };
+    expect(parseSpans({ back: good, "": good })).toEqual({ back: { first: T0, last: plus(T0, 1) }, "": { first: T0, last: plus(T0, 1) } });
+    expect(parseSpans(null)).toEqual({});
+    expect(parseSpans({ back: { first: "yesterday", last: good.last }, front: { first: good.first }, yard: 3 })).toEqual({});
   });
 
   it("parseCounts keeps only the validated shape", () => {

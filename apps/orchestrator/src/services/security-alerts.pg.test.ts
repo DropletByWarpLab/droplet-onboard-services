@@ -137,6 +137,7 @@ describe.skipIf(!RUN)("Security alerts against real Postgres (WARP-2978)", () =>
         lastArrivalAt: NOW,
         eventCount: 1,
         countsByCamera: { [`${TAG}_back`]: { person: 1 } },
+        spanByCamera: { [`${TAG}_back`]: { first: NOW.toISOString(), last: NOW.toISOString() } },
         cameras: [`${TAG}_back`],
         reasons: {
           create: {
