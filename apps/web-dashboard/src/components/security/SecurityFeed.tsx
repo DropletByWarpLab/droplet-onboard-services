@@ -27,11 +27,25 @@
  *   - an area nothing covers (no camera linked yet — every new area) is its
  *     own empty state, checked first: no health row can vouch for a place no
  *     camera watches, so it must never read as quiet.
+ *
+ * WARP-2977 P2b-2 adds door locks, for people with Devices view (the server
+ * sends their rows and the `locks` header row to no one else):
+ *   - a Doors view, offered while the header carries a `locks` row that isn't
+ *     "No door locks paired";
+ *   - lock rows with a padlock glyph (closed only for locked), "Door lock" in
+ *     their second line, and "Found when Droplet checked" when the 60 s check
+ *     found the change rather than the live stream (its time is then the
+ *     check's, not the change's);
+ *   - the empty state reads the `locks` row for the views lock rows feed, and
+ *     an area is "not covered" per view: a camera view of an area only a lock
+ *     covers, or the Doors view of one no lock covers, never reads as quiet.
  */
 import Link from "next/link";
 import {
   Car,
   Loader2,
+  Lock,
+  LockOpen,
   Moon,
   PawPrint,
   Plane,
@@ -47,7 +61,7 @@ import {
 import { formatRelativeTime } from "@/lib/relative-time";
 import type { SecurityEvent, SecurityEventKind, SecurityHealthRow, SecurityZoneRef } from "@/lib/types";
 
-export type SecurityView = "all" | "detections" | "health" | "network";
+export type SecurityView = "all" | "detections" | "health" | "doors" | "network";
 
 export const COPY = {
   notAlarm: "Droplet shows what happened here. Alerts come later.",
@@ -84,11 +98,28 @@ export const COPY = {
   emptyNotCoveredBody: "So nothing can show up here. Someone who manages Security can choose which cameras cover it.",
   openAreas: "Open Areas",
   modeRowSub: "Site mode",
+  // WARP-2977 P2b-2 — door locks.
+  lockRowSub: "Door lock",
+  polledSub: "Found when Droplet checked",
+  emptyNotHearingLocks: "Droplet isn't hearing from the door locks",
+  emptyNoLocksLinked: "No door locks are linked to {area} yet",
+  emptyNoLocksLinkedManageBody: "So nothing can show up here. Choose its door locks on the Areas page.",
+  emptyNoLocksLinkedBody: "So nothing can show up here. Someone who manages Security can link its door locks.",
 } as const;
+
+/**
+ * What the server appends to a polled lock row's summary. The row's second
+ * line already says it (`COPY.polledSub`), so the title drops it rather than
+ * saying it twice. Unmatched (the server's words changed), the title is the
+ * summary as sent.
+ */
+const POLLED_SUMMARY_SUFFIX = " (found when Droplet checked)";
 
 export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
   camera_ingest: "Camera events",
   camera_system: "Camera system",
+  // WARP-2977 P2b-2 — the Matter lock adapter (only people with Devices view get this row).
+  locks: "Door locks",
   threat_mirror: "Network and sign-in warnings",
   // WARP-2977 P2b — the ticker that follows the opening hours (the site mode).
   site_mode: "Opening hours",
@@ -106,6 +137,7 @@ const VIEW_LABEL: Record<SecurityView, string> = {
   all: "Everything",
   detections: "People and vehicles",
   health: "Camera health",
+  doors: "Doors",
   network: "Network and sign-in",
 };
 
@@ -113,27 +145,53 @@ const VIEW_LABEL: Record<SecurityView, string> = {
 const CAMERA_SOURCES: readonly SecurityHealthRow["id"][] = ["camera_ingest", "camera_system"];
 
 /**
+ * WARP-2977 P2b-2 — whether to offer the Doors view: the header carries a
+ * `locks` row (the viewer may read locks) and it isn't "No door locks paired".
+ * A `down` row still offers it: the view then says the locks aren't heard.
+ */
+export function canShowDoors(sources: SecurityHealthRow[] | null): boolean {
+  const row = sources?.find((s) => s.id === "locks");
+  return row !== undefined && row.state !== "not_configured";
+}
+
+/**
+ * The view the page asks for: a picked Doors view falls back to Everything
+ * once the header has loaded and offers no Doors (the last lock was unpaired,
+ * or this person's Devices view was taken away) — never a chip-less view
+ * stuck on an empty list. While the header loads, the pick stands.
+ */
+export function viewFor(view: SecurityView, sources: SecurityHealthRow[] | null): SecurityView {
+  return view === "doors" && sources !== null && !canShowDoors(sources) ? "all" : view;
+}
+
+/**
  * WARP-2977 P2b — the health rows whose sources feed each view's rows. An
  * empty view reads ONLY these (a stopped threat check says nothing about an
  * empty camera view, and the reverse). A camera view reads both camera rows:
  * detections reach Droplet as camera events, and only while the camera system
  * itself runs. `retention` feeds no rows. The threat row exists only for
- * owners and admins (the server drops it for everyone else), and an area
- * narrows a view to camera rows: threats and mode changes are site-wide and
- * never sit in an area.
+ * owners and admins (the server drops it for everyone else). Threats and mode
+ * changes are site-wide and never sit in an area.
+ *
+ * WARP-2977 P2b-2 — the `locks` row feeds Everything and Doors, for someone
+ * who gets that row (`canSeeLocks`); an area holds lock rows as well as camera
+ * rows.
  */
 export function sourcesForView(
   view: SecurityView,
-  opts: { canSeeThreats: boolean; areaSelected: boolean },
+  opts: { canSeeThreats: boolean; areaSelected: boolean; canSeeLocks?: boolean },
 ): SecurityHealthRow["id"][] {
   const cameras = [...CAMERA_SOURCES];
-  if (opts.areaSelected && view !== "network") return cameras;
+  const locks: SecurityHealthRow["id"][] = opts.canSeeLocks ? ["locks"] : [];
   switch (view) {
     case "all":
-      return opts.canSeeThreats ? [...cameras, "threat_mirror", "site_mode"] : [...cameras, "site_mode"];
+      if (opts.areaSelected) return [...cameras, ...locks];
+      return opts.canSeeThreats ? [...cameras, ...locks, "threat_mirror", "site_mode"] : [...cameras, ...locks, "site_mode"];
     case "detections":
     case "health":
       return cameras;
+    case "doors":
+      return locks;
     case "network":
       return opts.canSeeThreats ? ["threat_mirror"] : [];
   }
@@ -148,6 +206,8 @@ export function kindsForView(view: SecurityView, includeLow: boolean): SecurityE
       return includeLow ? ["detection", "detection_low"] : ["detection"];
     case "health":
       return ["camera_offline", "camera_online", "source_offline", "source_online"];
+    case "doors":
+      return ["lock_state"];
     case "network":
       return ["threat"];
   }
@@ -182,6 +242,14 @@ export function iconFor(e: SecurityEvent): LucideIcon {
       if (mode === "away") return Plane;
       return Shield;
     }
+    case "lock_state": {
+      // WARP-2977 P2b-2 — labels = [reading]. A closed padlock only when it IS
+      // locked; an unknown reading gets the neutral glyph, never a padlock.
+      const reading = e.labels[0];
+      if (reading === "locked") return Lock;
+      if (reading === "unlocked" || reading === "not_fully_locked" || reading === "unlatched") return LockOpen;
+      return Shield;
+    }
     default: {
       const unhandled: never = e.kind;
       void unhandled;
@@ -194,6 +262,9 @@ export function iconFor(e: SecurityEvent): LucideIcon {
 function titleFor(e: SecurityEvent, cameraLabel: (name: string) => string): string {
   if (e.camera && e.kind === "camera_offline") return `${cameraLabel(e.camera)} stopped reporting`;
   if (e.camera && e.kind === "camera_online") return `${cameraLabel(e.camera)} is reporting again`;
+  if (e.observed === "polled" && e.summary.endsWith(POLLED_SUMMARY_SUFFIX)) {
+    return e.summary.slice(0, -POLLED_SUMMARY_SUFFIX.length);
+  }
   return e.summary;
 }
 
@@ -201,6 +272,8 @@ function subFor(e: SecurityEvent, cameraLabel: (name: string) => string): string
   const parts: string[] = [];
   if (e.kind === "threat") parts.push(e.labels[0] === "auth" ? "Sign-in" : "Network");
   if (e.kind === "mode_changed") parts.push(COPY.modeRowSub);
+  if (e.kind === "lock_state") parts.push(COPY.lockRowSub);
+  if (e.observed === "polled") parts.push(COPY.polledSub);
   if (e.camera) parts.push(cameraLabel(e.camera));
   if (e.score !== null && (e.kind === "detection" || e.kind === "detection_low")) {
     parts.push(`${Math.round(e.score * 100)}% sure`);
@@ -233,8 +306,12 @@ export interface SecurityFeedProps {
    * whose rows never sit in an area. `linkCount` = the viewer's visible active
    * links (SecurityZoneView.links): 0 means nothing covers the area, and the
    * server answers its filter with an empty page without looking.
+   * WARP-2977 P2b-2 — `cameraLinkCount` / `lockLinkCount` split it, so a
+   * camera view of an area only a lock covers (and the Doors view of one no
+   * lock covers) says so instead of reading as quiet. Absent: every link is
+   * a camera link.
    */
-  areas?: Array<SecurityZoneRef & { linkCount: number }> | null;
+  areas?: Array<SecurityZoneRef & { linkCount: number; cameraLinkCount?: number; lockLinkCount?: number }> | null;
   /** Whether the viewer manages Security — the not-covered empty state then links to the Areas page. */
   canManageAreas?: boolean;
   /** The selected area id, or null for all areas. */
@@ -245,9 +322,13 @@ export interface SecurityFeedProps {
 
 export function SecurityFeed(props: SecurityFeedProps) {
   const now = props.now ?? new Date();
-  const views: SecurityView[] = props.canSeeThreats
-    ? ["all", "detections", "health", "network"]
-    : ["all", "detections", "health"];
+  const views: SecurityView[] = [
+    "all",
+    "detections",
+    "health",
+    ...(canShowDoors(props.sources) ? (["doors"] as const) : []),
+    ...(props.canSeeThreats ? (["network"] as const) : []),
+  ];
   const showAreaSelect =
     Boolean(props.areas && props.areas.length > 0 && props.onZoneChange) && props.view !== "network";
 
@@ -446,7 +527,13 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
           const Icon = iconFor(e);
           const low = e.kind === "detection_low";
           return (
-            <li className="lrow" key={e.id} data-kind={e.kind} style={low ? { opacity: 0.7 } : undefined}>
+            <li
+              className="lrow"
+              key={e.id}
+              data-kind={e.kind}
+              data-observed={e.observed}
+              style={low ? { opacity: 0.7 } : undefined}
+            >
               <span className={`ri${e.severity === "info" ? "" : " brand"}`} aria-hidden>
                 <Icon size={16} />
               </span>
@@ -512,18 +599,32 @@ const isReporting = (row: SecurityHealthRow | undefined): boolean =>
  */
 function emptyStateFor(props: SecurityFeedProps): [string, string, EmptyKind] {
   const areaSelected = Boolean(props.zone) && props.view !== "network";
-  // First: the camera health rows say nothing about a place no camera watches.
+  // First: the health rows say nothing about a place nothing of THIS view's
+  // kind covers — no camera for a camera view, no lock for Doors (P2b-2),
+  // nothing at all for Everything.
   const area = areaSelected ? props.areas?.find((a) => a.id === props.zone) : undefined;
-  if (area && area.linkCount === 0) {
-    return [
-      COPY.emptyNotCovered.replace("{area}", area.name),
-      props.canManageAreas ? COPY.emptyNotCoveredManageBody : COPY.emptyNotCoveredBody,
-      "not-covered",
-    ];
+  if (area) {
+    if (props.view === "doors") {
+      if ((area.lockLinkCount ?? 0) === 0) {
+        return [
+          COPY.emptyNoLocksLinked.replace("{area}", area.name),
+          props.canManageAreas ? COPY.emptyNoLocksLinkedManageBody : COPY.emptyNoLocksLinkedBody,
+          "not-covered",
+        ];
+      }
+    } else if ((props.view === "all" ? area.linkCount : (area.cameraLinkCount ?? area.linkCount)) === 0) {
+      return [
+        COPY.emptyNotCovered.replace("{area}", area.name),
+        props.canManageAreas ? COPY.emptyNotCoveredManageBody : COPY.emptyNotCoveredBody,
+        "not-covered",
+      ];
+    }
   }
   if (props.healthError) return [COPY.emptyUnchecked, COPY.emptyNotListeningBody, "not-reporting"];
   const sources = props.sources ?? [];
-  const ids = sourcesForView(props.view, { canSeeThreats: props.canSeeThreats, areaSelected });
+  // The server sends the `locks` row only to someone who may read locks.
+  const canSeeLocks = sources.some((s) => s.id === "locks");
+  const ids = sourcesForView(props.view, { canSeeThreats: props.canSeeThreats, areaSelected, canSeeLocks });
 
   // With no camera system neither camera row can report (camera_system is
   // not even sent); the view's OTHER sources still count.
@@ -540,7 +641,9 @@ function emptyStateFor(props: SecurityFeedProps): [string, string, EmptyKind] {
         ? COPY.emptyNotCheckingNetwork
         : down.id === "site_mode"
           ? COPY.emptyNotCheckingHours
-          : COPY.emptyNotListening;
+          : down.id === "locks"
+            ? COPY.emptyNotHearingLocks
+            : COPY.emptyNotListening;
     return [head, COPY.emptyNotListeningBody, "not-reporting"];
   }
   if (noCameras && ids.includes("camera_ingest")) {
