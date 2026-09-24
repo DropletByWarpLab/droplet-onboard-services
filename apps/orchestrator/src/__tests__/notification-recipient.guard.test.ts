@@ -32,22 +32,31 @@
  *   - fed from a `select` projection without `username` (the WARP-2783 shape);
  *   - an `enabledById`, a `createdById`, an `ownerId`, a `.id`, or any
  *     identifier ending in `Id`.
- * A bare identifier is followed back to its binding (`const x = …`,
- * `for (const x of …)`, `for (const { username } of …)`), and a same-file
- * helper it is assigned from is read (`const to = await ownerUsername(prisma)`,
- * the WARP-2813 shape), so `const owner = settings.enabledById; … { username:
- * owner }` is still red. A site that still passes `userId:` is red too.
+ * Wrappers that do not change which value flows are peeled first (`as T`, `!`,
+ * `?? …` / `|| …` / a ternary — each side —, `String(…)`, `${…}`), so
+ * `String(pref.userId)` is judged as `pref.userId`. A bare identifier is then
+ * followed back to its binding: `const x = …`; `for (const x of …)`, through
+ * an array built up with `.push(…)` from `[]` or a `.map((r) => r.id)`;
+ * `for (const { username } of …)`; a same-file helper it is assigned from
+ * (`const to = await ownerUsername(prisma)`, the WARP-2813 shape); and a
+ * parameter, through every caller of its function — a wrapper
+ * `tell(prisma, username)` fed `admin.id` is the same bug one call away. A site
+ * that still passes `userId:` is red too.
  *
  * Two recipients ending in `Id` ARE usernames and are allow-listed below with
  * the reason. Neither reason is taken on trust: the reminders one is checked by
  * following every Reminder writer, the tools-core one is pinned to exactly
  * `ctx.userId`, and an entry that stops matching a site fails.
  *
- * The run output enumerates every site it found (one case per site).
+ * The run output enumerates every site it found (one case per site). The
+ * scanner is itself tested (bottom of the file) on the shapes it must flag
+ * and the idioms it must not.
  *
- * The runtime twin is `assertRecipientIsUsername` in notifications.service.ts:
- * a UUID-shaped recipient throws `NOTIFICATION_RECIPIENT_IS_ID`. This file
- * catches the mistake before it runs; that one catches whatever this misses.
+ * The runtime twin is `assertRecipientIsUsername` (services/notification-
+ * recipient.ts), run by sendNotification, publishNotificationToast,
+ * recordNotification and dispatchToUser: a UUID-shaped recipient throws
+ * `NOTIFICATION_RECIPIENT_IS_ID`. This file catches the mistake before it
+ * runs; that one catches whatever this misses.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -229,45 +238,241 @@ function recipientsOf(site: Site): Array<{ expr: string; at: number }> {
 // ── Following a value back to where it came from ───────────────────────────
 
 type Binding =
-  | { kind: "value"; expr: string } // const x = <expr>
-  | { kind: "element"; iterable: string } // for (const x of <iterable>)
-  | { kind: "field"; source: string }; // const { x } = <source> / for (const { x } of <source>)
+  | { kind: "value"; at: number; expr: string } // const x = <expr>
+  | { kind: "element"; at: number; iterable: string } // for (const x of <iterable>)
+  | { kind: "field"; at: number; source: string } // const { x } = <source> / for (const { x } of <source>)
+  | { kind: "param"; at: number; fn: string; index: number; destructured: boolean }; // function f(…, x, …)
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** The nearest declaration of `name` before `before` — a lexical-scope approximation. */
+/**
+ * Split `s` at every top-level occurrence of one of `seps` — outside brackets
+ * and strings. `angles` also treats `<…>` as brackets, for parameter lists
+ * (`a: Map<string, string>, username: string`); never for expressions, where
+ * `<` is a comparison.
+ */
+function splitTop(s: string, seps: readonly string[], angles = false): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let last = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") quote = c;
+    else if ("([{".includes(c) || (angles && c === "<")) depth++;
+    else if (")]}".includes(c) || (angles && c === ">" && s[i - 1] !== "=")) depth--;
+    else if (depth === 0) {
+      const sep = seps.find((x) => s.startsWith(x, i));
+      if (sep) {
+        parts.push(s.slice(last, i));
+        i += sep.length - 1;
+        last = i + 1;
+      }
+    }
+  }
+  parts.push(s.slice(last));
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/** A top-level `cond ? a : b` (not `?.`, not `??`), as its two branches. */
+function ternaryBranches(e: string): [string, string] | null {
+  let depth = 0;
+  let quote: string | null = null;
+  let q = -1;
+  for (let i = 0; i < e.length; i++) {
+    const c = e[i]!;
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") quote = c;
+    else if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (depth === 0 && c === "?" && e[i + 1] !== "." && e[i + 1] !== "?" && e[i - 1] !== "?") {
+      if (q < 0) q = i;
+    } else if (depth === 0 && c === ":" && q >= 0) {
+      return [e.slice(q + 1, i).trim(), e.slice(i + 1).trim()];
+    }
+  }
+  return null;
+}
+
+const STRING_LITERAL = /^(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')$/;
+
+/**
+ * The parts of an expression that can BE the value, with every wrapper that
+ * does not change which value flows peeled off: `await`, parentheses,
+ * `as T` / `satisfies T`, `!` (trailing or mid-chain), `String(…)`,
+ * `.toString()` and friends, a template's `${…}`. `a ?? b`, `a || b` and a
+ * ternary yield each side. A string literal yields nothing: `"dev"` is a
+ * username, never an id.
+ *
+ * Without this, `p.userId as string`, `p.userId ?? "dev"`, `pref!.userId`,
+ * `` `${pref.userId}` `` and `String(pref.userId)` all fell through to a
+ * fallback that only looked for a literal `.id` — and passed.
+ */
+function valueParts(expr: string, depth = 0): string[] {
+  let e = expr.trim();
+  for (let guard = 0; guard < 20; guard++) {
+    const before = e;
+    e = e.replace(/^await\s+/, "").trim();
+    if (e.startsWith("(") && scanTo(e, 1, ")") === e.length - 1) e = e.slice(1, -1).trim();
+    e = e.replace(/\s+(?:as|satisfies)\s+[\w$.<>[\]|&'", ]+$/, "").trim();
+    e = e.replace(/!+$/, "");
+    e = e.replace(/\??\.(?:toString|trim|toLowerCase|toUpperCase|normalize)\(\s*\)$/, "");
+    if (/^String\s*\(/.test(e)) {
+      const open = e.indexOf("(") + 1;
+      if (scanTo(e, open, ")") === e.length - 1) e = e.slice(open, -1).trim();
+    }
+    if (e === before) break;
+  }
+  // A non-null assertion inside a chain: `pref!.userId` is `pref.userId`.
+  e = e.replace(/!(?=\??\.|\[)/g, "");
+  if (depth > 8) return [e];
+
+  const alternatives = splitTop(e, ["??", "||"]);
+  if (alternatives.length > 1) return alternatives.flatMap((a) => valueParts(a, depth + 1));
+  const branches = ternaryBranches(e);
+  if (branches) return branches.flatMap((b) => valueParts(b, depth + 1));
+  if (STRING_LITERAL.test(e)) return [];
+  if (e.startsWith("`") && e.endsWith("`")) {
+    const inner: string[] = [];
+    for (let i = 1; i < e.length - 1; i++) {
+      if (e[i] === "\\") i++;
+      else if (e[i] === "$" && e[i + 1] === "{") {
+        const end = scanTo(e, i + 2, "}");
+        inner.push(e.slice(i + 2, end));
+        i = end;
+      }
+    }
+    return inner.flatMap((x) => valueParts(x, depth + 1));
+  }
+  return [e];
+}
+
+const NOT_A_FUNCTION = new Set([
+  "if", "for", "while", "switch", "catch", "return", "function", "typeof", "await", "new", "async",
+]);
+const HEADER =
+  /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]+)?=\s*(?:async\s+)?(?:function\s*\*?\s*[\w$]*\s*)?\(|(?:^|[\s,;{}])(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/g;
+
+/** A named function (declaration, `const f = (…) =>`, or method) whose body
+ *  contains `at` and one of whose parameters is `name` — the innermost. */
+function enclosingParam(code: string, name: string, at: number): Extract<Binding, { kind: "param" }> | null {
+  let best: Extract<Binding, { kind: "param" }> | null = null;
+  for (const m of code.matchAll(HEADER)) {
+    if (m.index! >= at) break;
+    const fn = m[1] ?? m[2] ?? m[3];
+    if (!fn || NOT_A_FUNCTION.has(fn)) continue;
+    const open = m.index! + m[0].length;
+    const close = scanTo(code, open, ")");
+    const after = code.slice(close + 1);
+    let bodyStart: number;
+    let bodyEnd: number;
+    // `const f = (…) => …` has an arrow body; `const f = function (…) {…}`
+    // and declarations/methods have a block.
+    if (m[2] !== undefined && !/=\s*(?:async\s+)?function\b/.test(m[0])) {
+      const arrow = /^\s*(?::[^={;]+)?=>\s*/.exec(after);
+      if (!arrow) continue;
+      bodyStart = close + 1 + arrow[0].length;
+      bodyEnd = code[bodyStart] === "{" ? scanTo(code, bodyStart + 1, "}") : scanTo(code, bodyStart, ";");
+    } else {
+      const block = /^\s*(?::[^{=;]+)?\{/.exec(after);
+      if (!block) continue;
+      bodyStart = close + block[0].length;
+      bodyEnd = scanTo(code, bodyStart + 1, "}");
+    }
+    if (!(bodyStart < at && at < bodyEnd)) continue;
+    const params = splitTop(code.slice(open, close), [","], true);
+    const index = params.findIndex((p) => {
+      const q = p.replace(/^\.\.\./, "");
+      if (q.startsWith("{")) return new RegExp(`\\b${esc(name)}\\b`).test(q.slice(0, scanTo(q, 1, "}")));
+      return q.match(/^([A-Za-z_$][\w$]*)/)?.[1] === name;
+    });
+    if (index < 0) continue;
+    if (!best || m.index! > best.at) {
+      best = { kind: "param", at: m.index!, fn, index, destructured: params[index]!.replace(/^\.\.\./, "").startsWith("{") };
+    }
+  }
+  return best;
+}
+
+/** The nearest binding of `name` before `before`: a declaration, a loop
+ *  variable, or a parameter of the function it is used in. A lexical-scope
+ *  approximation — the closest one wins. */
 function bindingOf(code: string, name: string, before: number): Binding | null {
   const n = esc(name);
   const patterns: Array<[RegExp, (m: RegExpExecArray) => Binding]> = [
     [
       new RegExp(`(?:const|let|var)\\s+${n}\\s*(?::[^=;]+)?=(?![=>])`, "g"),
-      (m) => ({ kind: "value", expr: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ";")).trim() }),
+      (m) => ({ kind: "value", at: m.index, expr: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ";")).trim() }),
     ],
     [
       new RegExp(`(?:const|let|var)\\s*\\{[^}]*\\b${n}\\b[^}]*\\}\\s*=(?![=>])`, "g"),
-      (m) => ({ kind: "field", source: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ";")).trim() }),
+      (m) => ({ kind: "field", at: m.index, source: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ";")).trim() }),
     ],
     [
       new RegExp(`for\\s*\\(\\s*(?:const|let|var)\\s+${n}\\s+of\\s+`, "g"),
-      (m) => ({ kind: "element", iterable: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ")")).trim() }),
+      (m) => ({ kind: "element", at: m.index, iterable: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ")")).trim() }),
     ],
     [
       new RegExp(`for\\s*\\(\\s*(?:const|let|var)\\s*\\{[^}]*\\b${n}\\b[^}]*\\}\\s+of\\s+`, "g"),
-      (m) => ({ kind: "field", source: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ")")).trim() }),
+      (m) => ({ kind: "field", at: m.index, source: code.slice(m.index + m[0].length, scanTo(code, m.index + m[0].length, ")")).trim() }),
     ],
   ];
-  let best: { at: number; binding: Binding } | null = null;
+  let best: Binding | null = null;
   for (const [re, make] of patterns) {
     let m: RegExpExecArray | null;
     while ((m = re.exec(code)) && m.index < before) {
-      if (!best || m.index > best.at) best = { at: m.index, binding: make(m) };
+      if (!best || m.index > best.at) best = make(m);
     }
   }
-  return best?.binding ?? null;
+  const param = enclosingParam(code, name, before);
+  if (param && (!best || param.at > best.at)) return param;
+  return best;
+}
+
+/** Every call of `fn` in the universe, with its top-level arguments. */
+function callsOf(
+  fn: string,
+  universe: readonly SourceFile[],
+): Array<{ file: SourceFile; at: number; args: string[] }> {
+  const out: Array<{ file: SourceFile; at: number; args: string[] }> = [];
+  const re = new RegExp(`(?<![\\w$])${esc(fn)}\\s*\\(`, "g");
+  for (const file of universe) {
+    for (const m of file.code.matchAll(re)) {
+      if (/function\s*\*?\s*$/.test(file.code.slice(Math.max(0, m.index! - 20), m.index!))) continue;
+      const open = m.index! + m[0].length;
+      const close = scanTo(file.code, open, ")");
+      // A method header `fn(…) {` is a definition, not a call.
+      if (/^\s*(?::[^{=;]+)?\{/.test(file.code.slice(close + 1))) continue;
+      out.push({ file, at: m.index!, args: splitTop(file.code.slice(open, close), [","]) });
+    }
+  }
+  return out;
+}
+
+/** `name` of an object literal: `{ name: <expr> }` → `<expr>`, `{ name }` → `name`. */
+function propertyOf(literal: string, name: string): string | null {
+  const e = literal.trim();
+  if (!e.startsWith("{")) return null;
+  for (const entry of splitTop(e.slice(1, scanTo(e, 1, "}")), [","])) {
+    if (entry === name) return name;
+    const m = new RegExp(`^${esc(name)}\\s*:\\s*`).exec(entry);
+    if (m) return entry.slice(m[0].length);
+  }
+  return null;
 }
 
 const IDENT = /^[A-Za-z_$][\w$]*$/;
 const MEMBER = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)+$/;
+const ID_NAMES = /\b(enabledById|createdById|ownerId)\b/;
 
 /** A `select: { … }` that projects the id and not the username. */
 function idOnlyProjection(expr: string): boolean {
@@ -276,70 +481,180 @@ function idOnlyProjection(expr: string): boolean {
   );
 }
 
+/** `.id` / `…Id` as the LAST segment of a name. */
+function idSegment(segment: string): string | null {
+  if (segment === "id") return "a `.id` — a User.id";
+  if (/Id$/.test(segment)) return "an identifier ending in `Id`";
+  return null;
+}
+
+/** A same-file helper the value is the result of (`await ownerUsername(prisma)`,
+ *  the WARP-2813 shape): read its body. */
+function helperProblems(code: string, e: string): string[] {
+  const callee = e.match(/^([A-Za-z_$][\w$]*)\s*\(/)?.[1];
+  const decl = callee ? new RegExp(`function\\s+${esc(callee)}\\s*\\(`).exec(code) : null;
+  if (!decl) return [];
+  const open = code.indexOf("{", scanTo(code, decl.index + decl[0].length, ")"));
+  const body = code.slice(open + 1, scanTo(code, open + 1, "}"));
+  const out: string[] = [];
+  if (idOnlyProjection(body)) out.push(`\`${callee}()\` reads a select projection without \`username\``);
+  if (/\breturn\b[^;]*\.id\b(?!\s*[:(])/.test(body)) out.push(`\`${callee}()\` returns a \`.id\``);
+  if (/\.map\(\s*\(?\s*\w+\s*\)?\s*=>\s*\w+\.(?:id|\w+Id)\b/.test(body)) out.push(`\`${callee}()\` maps rows to an id`);
+  return out;
+}
+
 /** The problems with one value flowing into a recipient slot, followed back. */
-function problemsWith(code: string, expr: string, at: number, depth = 0): string[] {
+function problemsWith(
+  file: SourceFile,
+  expr: string,
+  at: number,
+  universe: readonly SourceFile[],
+  depth = 0,
+): string[] {
+  return valueParts(expr).flatMap((part) => partProblems(file, part, at, universe, depth));
+}
+
+function partProblems(
+  file: SourceFile,
+  e: string,
+  at: number,
+  universe: readonly SourceFile[],
+  depth: number,
+): string[] {
+  const code = file.code;
   const problems: string[] = [];
-  const e = expr.replace(/^await\s+/, "").replace(/^\((.*)\)$/s, "$1").trim();
-  if (/\b(enabledById|createdById|ownerId)\b/.test(e)) {
-    problems.push(`\`${e}\` names an ${e.match(/\b(enabledById|createdById|ownerId)\b/)![1]} — a User.id`);
-  }
+  const named = e.match(ID_NAMES);
+  if (named) problems.push(`\`${e}\` names an ${named[1]} — a User.id`);
   if (idOnlyProjection(e)) problems.push(`\`${e.slice(0, 80)}\` is a select projection without \`username\``);
-  if (depth > 4) return problems;
+  if (depth > 6) return problems;
 
   if (MEMBER.test(e)) {
-    const last = e.split(/\??\./).pop()!;
-    if (last === "id") problems.push(`\`${e}\` is a \`.id\` — a User.id`);
-    else if (/Id$/.test(last)) problems.push(`\`${e}\` is an identifier ending in \`Id\``);
+    const segments = e.split(/\??\./);
+    const why = idSegment(segments[segments.length - 1]!);
+    if (why) problems.push(`\`${e}\` is ${why}`);
     // `row.username`: where did `row` come from?
-    const head = e.split(/\??\./)[0]!;
+    const head = segments[0]!;
+    const prop = segments.slice(1).join(".");
     const b = bindingOf(code, head, at);
     if (b?.kind === "value" && idOnlyProjection(b.expr)) {
       problems.push(`\`${head}\` is fed from a \`select\` projection without \`username\``);
     }
-    if (b?.kind === "element") problems.push(...problemsWithIterable(code, b.iterable, at, depth + 1));
+    if (b?.kind === "element") problems.push(...iterableProblems(file, b.iterable, b.at, universe, depth + 1, prop));
     return problems;
   }
 
   if (IDENT.test(e)) {
-    if (e === "id") problems.push("`id` — a User.id");
-    else if (/Id$/.test(e)) problems.push(`\`${e}\` is an identifier ending in \`Id\``);
+    const why = idSegment(e);
+    if (why) problems.push(`\`${e}\` is ${why}`);
     const b = bindingOf(code, e, at);
     if (!b) {
       if (!/username/i.test(e)) problems.push(`cannot see where \`${e}\` comes from — name it \`username\` or bind it in this file`);
       return problems;
     }
-    if (b.kind === "value") problems.push(...problemsWith(code, b.expr, at, depth + 1));
-    else if (b.kind === "element") problems.push(...problemsWithIterable(code, b.iterable, at, depth + 1));
-    else problems.push(...problemsWithIterable(code, b.source, at, depth + 1));
+    if (b.kind === "value") problems.push(...problemsWith(file, b.expr, b.at, universe, depth + 1));
+    else if (b.kind === "element") problems.push(...iterableProblems(file, b.iterable, b.at, universe, depth + 1));
+    else if (b.kind === "field") problems.push(...iterableProblems(file, b.source, b.at, universe, depth + 1, e));
+    else {
+      // A parameter: the value is whatever each caller passes. A wrapper
+      // `function tell(username) { sendNotification(…{ username }) }` fed
+      // `admin.id` is the same bug one call away.
+      for (const call of callsOf(b.fn, universe)) {
+        const arg = b.destructured
+          ? propertyOf(call.args[b.index] ?? "", e)
+          : (call.args[b.index] ?? null);
+        if (!arg) continue;
+        problems.push(
+          ...problemsWith(call.file, arg, call.at, universe, depth + 1).map(
+            (p) => `via ${b.fn}(…) at ${call.file.id}:${lineOf(call.file.code, call.at)}: ${p}`,
+          ),
+        );
+      }
+    }
     return problems;
   }
 
-  // A call or anything else: the text itself must not carry an id.
-  if (/(?:^|[^\w$])\w*\.id\b(?!\s*[:(])/.test(e) && !/\bwhere\b/.test(e)) {
+  // A call or anything else. `(… ).userId` ends in an id; a literal `.id`
+  // anywhere outside a `where` is one; a same-file helper is read.
+  const tail = e.match(/\)\s*\??\.\s*([A-Za-z_$][\w$]*)$/);
+  const tailWhy = tail ? idSegment(tail[1]!) : null;
+  if (tailWhy) problems.push(`\`${e.slice(0, 80)}\` ends in ${tailWhy}`);
+  else if (/(?:^|[^\w$])\w*\.id\b(?!\s*[:(])/.test(e) && !/\bwhere\b/.test(e)) {
     problems.push(`\`${e.slice(0, 80)}\` passes a \`.id\``);
   }
-  // A helper in the same file (`const to = await ownerUsername(prisma)`): read
-  // its body. The WARP-2813 shape was exactly this — the lookup selected `id`.
-  const callee = e.match(/^([A-Za-z_$][\w$]*)\s*\(/)?.[1];
-  const decl = callee ? new RegExp(`function\\s+${esc(callee)}\\s*\\(`).exec(code) : null;
-  if (decl) {
-    const open = code.indexOf("{", scanTo(code, decl.index + decl[0].length, ")"));
-    const body = code.slice(open + 1, scanTo(code, open + 1, "}"));
-    if (idOnlyProjection(body)) problems.push(`\`${callee}()\` reads a select projection without \`username\``);
-    if (/\breturn\b[^;]*\.id\b(?!\s*[:(])/.test(body)) problems.push(`\`${callee}()\` returns a \`.id\``);
-  }
+  problems.push(...helperProblems(code, e));
   return problems;
 }
 
-/** Rows or values iterated into a recipient: the source must not be an id projection. */
-function problemsWithIterable(code: string, expr: string, at: number, depth: number): string[] {
+/**
+ * What an iterated recipient comes from. `prop` is the property the recipient
+ * reads off each element (`o.username` → "username"), or undefined when the
+ * element IS the recipient.
+ *
+ * Follows: a `select` projection; `.map((x) => x.id)`; a same-file helper; an
+ * array built up with `.push(…)` from `[]` (the shape that hid commit 5's
+ * camera bug from the first version of this sweep); and a parameter, through
+ * its callers.
+ */
+function iterableProblems(
+  file: SourceFile,
+  expr: string,
+  at: number,
+  universe: readonly SourceFile[],
+  depth: number,
+  prop?: string,
+): string[] {
+  const code = file.code;
   const e = expr.replace(/^await\s+/, "").trim();
   if (idOnlyProjection(e)) return [`iterates \`${e.slice(0, 80)}\`, a select projection without \`username\``];
-  if (IDENT.test(e) && depth <= 4) {
-    const b = bindingOf(code, e, at);
-    if (b?.kind === "value") return problemsWithIterable(code, b.expr, at, depth + 1);
+  if (depth > 6) return [];
+  const problems: string[] = [];
+
+  // `rows.map((r) => r.id)` — only when the map IS the iterated value (its
+  // `)` closes the expression), not a `.map` inside a query's `where`.
+  const map = [...e.matchAll(/\.map\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*(?::[^)=]*)?\)?\s*=>\s*/g)].find(
+    (m) => scanTo(e, m.index! + ".map(".length, ")") === e.length - 1,
+  );
+  if (map) {
+    const body = e.slice(map.index! + map[0].length, scanTo(e, map.index! + map[0].length, ")")).trim();
+    if (!body.startsWith("{")) {
+      for (const part of valueParts(body)) {
+        const segments = part.split(/\??\./);
+        const why = MEMBER.test(part) || IDENT.test(part) ? idSegment(segments[segments.length - 1]!) : null;
+        if (why) problems.push(`iterates \`${e.slice(0, 80)}\`, whose element is ${why}`);
+      }
+    }
   }
-  return [];
+  problems.push(...helperProblems(code, e));
+
+  if (!IDENT.test(e)) return problems;
+  const b = bindingOf(code, e, at);
+  if (b?.kind === "value") {
+    if (/^(?:\[\s*\]|new\s+(?:Set|Array)\b[^;]*)$/.test(b.expr)) {
+      // Built up element by element: check what was put in.
+      const add = new RegExp(`(?<![\\w$.])${esc(e)}\\s*\\.\\s*(?:push|unshift|add)\\s*\\(`, "g");
+      for (const m of code.matchAll(add)) {
+        if (m.index! < b.at || m.index! > at) continue;
+        const open = m.index! + m[0].length;
+        for (const arg of splitTop(code.slice(open, scanTo(code, open, ")")), [","])) {
+          const value = prop ? (propertyOf(arg, prop) ?? (IDENT.test(arg) || MEMBER.test(arg) ? `${arg}.${prop}` : null)) : arg;
+          if (value) problems.push(...problemsWith(file, value, m.index!, universe, depth + 1));
+        }
+      }
+    } else {
+      problems.push(...iterableProblems(file, b.expr, b.at, universe, depth + 1, prop));
+    }
+  } else if (b?.kind === "param" && !b.destructured) {
+    for (const call of callsOf(b.fn, universe)) {
+      const arg = call.args[b.index];
+      if (!arg) continue;
+      problems.push(
+        ...iterableProblems(call.file, arg, call.at, universe, depth + 1, prop).map(
+          (p) => `via ${b.fn}(…) at ${call.file.id}:${lineOf(call.file.code, call.at)}: ${p}`,
+        ),
+      );
+    }
+  }
+  return problems;
 }
 
 // ── The allow-list ─────────────────────────────────────────────────────────
@@ -380,6 +695,27 @@ const allowed = (site: Site, expr: string) =>
 const forwarded = (site: Site) =>
   FORWARDERS.some((f) => f.file === site.file.id && f.callee === site.callee);
 
+/**
+ * Everything wrong with one site, `[]` when nothing is. The sweep below and the
+ * scanner's self-test run THIS function, so a fixture the self-test proves red
+ * is red for the same reason a production site would be.
+ */
+function siteProblems(site: Site, universe: readonly SourceFile[]): string[] {
+  const recipients = recipientsOf(site);
+  if (recipients.length === 0) {
+    const legacy = site.args.match(/(?<![\w$.'"`])userId\s*:\s*([^,}\n]+)/);
+    if (legacy) {
+      return [`passes \`${legacy[0]}\` — the recipient field is \`username\` and takes a User.username, never a User.id (WARP-2911)`];
+    }
+    return forwarded(site)
+      ? []
+      : ["no `username` in the arguments — pass an object literal so the recipient is visible here, or add the site to FORWARDERS with a reason"];
+  }
+  return recipients.flatMap(({ expr, at }) =>
+    allowed(site, expr) ? [] : problemsWith(site.file, expr, at, universe).map((p) => `username: ${expr} — ${p}`),
+  );
+}
+
 // ── The sweep ──────────────────────────────────────────────────────────────
 
 describe("🔴 WARP-2911 every notification recipient is a username", () => {
@@ -404,26 +740,8 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
 
   // One case per site, named for it: the run output IS the enumeration.
   it.each(SITES.map((s) => [s.label, s] as const))("%s", (_label, site) => {
-    const recipients = recipientsOf(site);
-    if (recipients.length === 0) {
-      const legacy = site.args.match(/(?<![\w$.'"`])userId\s*:\s*([^,}\n]+)/);
-      expect(
-        legacy?.[0] ?? null,
-        `${site.label}: passes \`${legacy?.[0]}\` — the recipient field is \`username\` and takes a ` +
-          "User.username, never a User.id (WARP-2911).",
-      ).toBeNull();
-      expect(
-        forwarded(site),
-        `${site.label}: no \`username\` in the arguments. Pass an object literal so the ` +
-          "recipient is visible here, or add the site to FORWARDERS with a reason.",
-      ).toBe(true);
-      return;
-    }
-    const problems = recipients.flatMap(({ expr, at }) =>
-      allowed(site, expr) ? [] : problemsWith(site.file.code, expr, at).map((p) => `username: ${expr} — ${p}`),
-    );
     expect(
-      problems,
+      siteProblems(site, PRODUCTION),
       `${site.label}: the recipient must be a User.username. A User.id here reaches nobody: the ` +
         "toast topic, the PushSubscription lookup and both NotificationLog readers are keyed on " +
         "the username (WARP-2783, WARP-2813, WARP-2910).",
@@ -531,5 +849,223 @@ describe("🔴 WARP-2911 user fakes on notification paths return distinct id and
         expect(id, `${rel}: ${row} — id and username must differ, as they do in production`).not.toBe(username);
       }
     }
+  });
+});
+
+// ── The scanner's self-test ────────────────────────────────────────────────
+
+/**
+ * A sweep is only as good as the shapes it can see. Each fixture below is a
+ * tiny source file with ONE recipient site. It runs through `siteProblems`, the
+ * function the sweep above uses, so "the scanner flags it" means production
+ * code written that way goes red.
+ *
+ * KNOWN_BAD holds the shapes a reviewer showed passing the first version of this
+ * sweep (review of #2349), plus the three historical defects. KNOWN_GOOD holds
+ * the idioms production actually uses, so the hardening cannot turn into a
+ * sweep that flags everything.
+ */
+const KNOWN_BAD: ReadonlyArray<readonly [string, string]> = [
+  [
+    "`as string` on an id",
+    `async function run(prisma) {
+      const prefs = await prisma.cameraNotificationPref.findMany({});
+      for (const p of prefs) await sendNotification(prisma, { username: p.userId as string, kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "`?? \"dev\"` after an id",
+    `async function run(prisma) {
+      const prefs = await prisma.cameraNotificationPref.findMany({});
+      for (const p of prefs) await sendNotification(prisma, { username: p.userId ?? "dev", kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "a non-null assertion mid-chain: `pref!.userId`",
+    `async function run(prisma, pref) {
+      await sendNotification(prisma, { username: pref!.userId, kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "a template literal around an id",
+    `async function run(prisma, pref) {
+      await sendNotification(prisma, { username: \`\${pref.userId}\`, kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "`String(…)` around an id",
+    `async function run(prisma, pref) {
+      await sendNotification(prisma, { username: String(pref.userId), kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "dispatchToUser: `pref!.userId`",
+    `async function run(prisma, pref, payload) {
+      await dispatchToUser(prisma, pref!.userId, payload);
+    }`,
+  ],
+  [
+    "dispatchToUser: `String(pref.userId)`",
+    `async function run(prisma, pref, payload) {
+      await dispatchToUser(prisma, String(pref.userId), payload);
+    }`,
+  ],
+  [
+    "dispatchToUser: `pref.userId as string`",
+    `async function run(prisma, pref, payload) {
+      await dispatchToUser(prisma, pref.userId as string, payload);
+    }`,
+  ],
+  [
+    "ids pushed into an empty array, then looped (the commit-5 camera shape)",
+    `async function run(prisma, payload) {
+      const users = await prisma.user.findMany({ select: { id: true, role: true, username: true } });
+      const allowed: string[] = [];
+      for (const u of users) allowed.push(u.id);
+      for (const recipient of allowed) void dispatchToUser(prisma, recipient, payload);
+    }`,
+  ],
+  [
+    "ids pushed into an empty array, then looped — sendNotification",
+    `async function run(prisma) {
+      const admins = await prisma.user.findMany({ where: { role: "admin" } });
+      const to = [];
+      for (const a of admins) to.push(a.id);
+      for (const recipient of to) await sendNotification(prisma, { username: recipient, kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "rows mapped to their ids, then looped",
+    `async function run(prisma) {
+      const rows = await prisma.user.findMany({ where: { role: "admin" } });
+      const ids = rows.map((r) => r.id);
+      for (const recipient of ids) await sendNotification(prisma, { username: recipient, kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "a wrapper whose parameter is named `username`, fed an id",
+    `async function tell(prisma, username: string) {
+      await sendNotification(prisma, { username, kind: "system", title: "t" });
+    }
+    export async function run(prisma) {
+      const admins = await prisma.user.findMany({ where: { role: "admin" } });
+      for (const admin of admins) await tell(prisma, admin.id);
+    }`,
+  ],
+  [
+    "a wrapper whose destructured parameter is `username`, fed an id",
+    `const tell = async (prisma, { username, title }: { username: string; title: string }) => {
+      await sendNotification(prisma, { username, kind: "system", title });
+    };
+    export async function run(prisma, settings) {
+      await tell(prisma, { username: settings.enabledById, title: "t" });
+    }`,
+  ],
+  [
+    "WARP-2783: a `select: { id: true }` recipient",
+    `async function run(prisma) {
+      const admins = await prisma.user.findMany({ where: { role: "admin" }, select: { id: true } });
+      for (const admin of admins) await sendNotification(prisma, { username: admin.id, kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "WARP-2813: a same-file lookup that returns the id",
+    `async function ownerUsername(prisma) {
+      const owner = await prisma.user.findFirst({ where: { role: "owner" }, select: { id: true } });
+      return owner?.id ?? null;
+    }
+    async function run(prisma) {
+      const to = await ownerUsername(prisma);
+      await sendNotification(prisma, { username: to, kind: "ai", title: "t" });
+    }`,
+  ],
+  [
+    "WARP-2910: the digest's `settings.enabledById`",
+    `async function run(prisma, settings) {
+      await sendNotification(prisma, { username: settings.enabledById, kind: "ai", title: "t" });
+    }`,
+  ],
+  [
+    "a site still spelling the field `userId`",
+    `async function run(prisma, admin) {
+      await sendNotification(prisma, { userId: admin.id, kind: "system", title: "t" });
+    }`,
+  ],
+];
+
+const KNOWN_GOOD: ReadonlyArray<readonly [string, string]> = [
+  [
+    "a username selected and destructured in the loop",
+    `async function run(prisma) {
+      const users = await prisma.user.findMany({ where: { role: "admin" }, select: { username: true } });
+      for (const { username } of users) await sendNotification(prisma, { username, kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "`row.username`, with a literal fallback",
+    `async function run(prisma, row) {
+      await sendNotification(prisma, { username: row.username ?? "dev", kind: "system", title: "t" });
+    }`,
+  ],
+  [
+    "the session's username through a same-file getter",
+    `function getUser(req) { return req.user?.username || "dev"; }
+    async function run(prisma, req) {
+      const username = getUser(req);
+      await dispatchToUser(prisma, username, { title: "t", body: "b" });
+    }`,
+  ],
+  [
+    "rows pushed into an array, their `.username` dialled (the fixed camera shape)",
+    `async function run(prisma, payload) {
+      const users = await prisma.user.findMany({ select: { id: true, role: true, username: true } });
+      const allowed: typeof users = [];
+      for (const u of users) allowed.push(u);
+      for (const recipient of allowed) void dispatchToUser(prisma, recipient.username, payload);
+    }`,
+  ],
+  [
+    "a wrapper whose parameter is named `username`, fed a username",
+    `async function tell(prisma, username: string) {
+      await sendNotification(prisma, { username, kind: "system", title: "t" });
+    }
+    export async function run(prisma) {
+      const admins = await prisma.user.findMany({ where: { role: "admin" }, select: { username: true } });
+      for (const admin of admins) await tell(prisma, admin.username);
+    }`,
+  ],
+  [
+    "object literals pushed, their `username` recorded (the activity-notify shape)",
+    `async function claim(tx, outgoing) {
+      for (const o of outgoing) await recordNotification(tx, { username: o.username, kind: "event", title: o.title });
+    }
+    async function sweep(prisma, users) {
+      const outgoing = [];
+      for (const u of users) {
+        const username = u.username;
+        outgoing.push({ username, title: "t" });
+      }
+      await claim(prisma, outgoing);
+    }`,
+  ],
+];
+
+function fixture(name: string, source: string): SourceFile {
+  return { id: `fixture:${name}`, code: stripComments(source) };
+}
+
+describe("🔴 WARP-2911 the sweep's scanner, tested on the shapes it must see", () => {
+  it.each(KNOWN_BAD)("flags: %s", (name, source) => {
+    const file = fixture(name, source);
+    const sites = sitesIn(file);
+    expect(sites, `${name}: the scanner found no site at all`).toHaveLength(1);
+    expect(siteProblems(sites[0]!, [file]), `${name}: the scanner let it through`).not.toEqual([]);
+  });
+
+  it.each(KNOWN_GOOD)("passes: %s", (name, source) => {
+    const file = fixture(name, source);
+    const sites = sitesIn(file);
+    expect(sites, `${name}: the scanner found no site at all`).toHaveLength(1);
+    expect(siteProblems(sites[0]!, [file])).toEqual([]);
   });
 });
