@@ -334,7 +334,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       if (!actor) return;
       const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
-        res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
+        res.status(400).json({ error: "model is required (no active model is installed and LLM_MODEL is not set)" });
         return;
       }
       if (!(await cloudAllowedOr451(res, actor, model))) return;
@@ -521,7 +521,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       const followsActiveModel = parsed.data.model === undefined;
       const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
-        res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
+        res.status(400).json({ error: "model is required (no active model is installed and LLM_MODEL is not set)" });
         return;
       }
       if (!(await cloudAllowedOr451(res, actor, model))) return;
