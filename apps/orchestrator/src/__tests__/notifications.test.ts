@@ -461,7 +461,7 @@ describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIE
     for (const username of samples) {
       let refused = false;
       try {
-        publishNotificationToast(to(username));
+        publishNotificationToast({ ...to(username), id: "log-1" });
       } catch (e) {
         refused = e instanceof NotificationRecipientError;
       }
