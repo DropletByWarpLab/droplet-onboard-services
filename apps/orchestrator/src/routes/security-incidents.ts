@@ -46,6 +46,7 @@ import {
   type IncidentViewer,
 } from "../services/security-incident-view.js";
 import { actOnIncident } from "../services/security-incident-actions.js";
+import { securityOngoingSource } from "../services/camera.service.js";
 import { alertsReady, readAlertRouting, setAlertRouting } from "../services/security-alerts.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import { loadActiveLinks, viewerAreas } from "../services/security-zones.service.js";
@@ -158,6 +159,8 @@ function writeFailed(res: Response, err: unknown, what: string, unavailable: "IN
 export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: SecurityRouteDeps = {}): Router {
   const router = Router();
   const clock = (): Date => (deps.now ? deps.now() : new Date());
+  // WARP-2978 PR-D — who is still in view, for a camera-limited viewer's "still happening".
+  const presence = deps.ongoing ?? securityOngoingSource();
   const resolver = deps.resolve ?? resolveEffectiveAccess;
   const actGate = [sensitiveRateLimit, requireRole(...ACT_ROLES), requireFeatureAccess("security", "act", deps.resolve)];
   const manageGate = [sensitiveRateLimit, requireRole(...MANAGE_ROLES), requireFeatureAccess("security", "manage", deps.resolve)];
@@ -187,6 +190,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
           { state: q.data.state, severity: q.data.severity, zoneId: q.data.zone, cursor: cursor ?? undefined },
           q.data.limit,
           clock(),
+          presence,
         ),
       );
     } catch (err) {
@@ -199,7 +203,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
   router.get("/security/incidents/summary", requireRole(...VIEW_ROLES), async (req: Request, res: Response) => {
     try {
       const viewer = await viewerOf(prisma, req, deps);
-      const [summary, ready] = await Promise.all([incidentsSummary(prisma, viewer, clock()), alertsReady(prisma)]);
+      const [summary, ready] = await Promise.all([incidentsSummary(prisma, viewer, clock(), presence), alertsReady(prisma)]);
       res.json({ ...summary, alertsReady: ready });
     } catch (err) {
       logger.error({ err }, "incident summary read failed");
@@ -215,7 +219,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
     }
     try {
       const viewer = await viewerOf(prisma, req, deps);
-      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps), clock());
+      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps), clock(), presence);
       if (!detail) {
         // Missing and hidden are the same answer, byte for byte.
         fail(res, 404, "INCIDENT_NOT_FOUND", "There is no such incident.");
@@ -268,7 +272,7 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
           fail(res, 409, "INCIDENT_CONFLICT", "Someone else changed this incident at the same moment. Try again.");
           return;
       }
-      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps), now);
+      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps), now, presence);
       res.json({ incident: detail, changed: result.changed });
     } catch (err) {
       writeFailed(res, err, `incident ${action}`, "INCIDENTS_UNAVAILABLE");

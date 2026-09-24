@@ -46,7 +46,9 @@
  *      never reopens (D22). PR-D: an incident holding the ongoing row of a
  *      person still in view is not sealed while their `end` row could still
  *      join it (within MAX_SPAN_MS of its first activity) — one visit, one
- *      incident, one alert.
+ *      incident, one alert. Who holds what is `presenceHolds`
+ *      (security-inflight.ts), the same answer a camera-limited viewer's
+ *      "still happening" reads (security-incident-view.ts).
  *   6. Notify (security-alerts.service.ts), then redeliver stuck notices.
  *   7. Health: lastOkAt when 1–6 completed; alerts health every 6th tick.
  *      A failed `incident.alerted` audit from step 6 is rethrown only after
@@ -65,14 +67,13 @@ import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import { loadActiveLinks, matchAreasForEvent, type ActiveZoneLink, type ZoneMatchableEvent } from "./security-zones.service.js";
 import { loadSiteHours } from "./security-mode.service.js";
 import { recordSecurityEvent } from "./security-events.service.js";
-import { frigateOngoingToDraft, ongoingFrigateId } from "./security-event-ingest.js";
-import type { OngoingSource } from "./security-inflight.js";
+import { frigateOngoingToDraft } from "./security-event-ingest.js";
+import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { notifyPendingIncidents, recomputeAlertsHealth, redeliverStuckNotices } from "./security-alerts.service.js";
 import { READ_COMMITTED_TX, REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 import {
   RULESET,
   SECURITY_RULESET_VERSION,
-  MAX_SPAN_MS,
   QUIET_MS,
   SETTLE_MS,
   afterHoursPresence,
@@ -325,34 +326,6 @@ export async function writeOngoingRows(
     }
   }
   return written;
-}
-
-/**
- * The due incidents a person still in view holds open (step 5): each has an
- * ongoing member whose person the in-flight map still tracks (or ended less
- * than the grace ago, so their `end` row is about to be triaged), and is young
- * enough that the `end` could still join it — past MAX_SPAN_MS from its first
- * activity nothing could, so it seals as before.
- */
-async function heldOpenByPresence(
-  prisma: PrismaClient,
-  due: ReadonlyArray<{ id: string; firstActivityAt: Date }>,
-  source: OngoingSource | undefined,
-  now: Date,
-): Promise<Set<string>> {
-  const held = new Set<string>();
-  if (!source) return held;
-  const young = due.filter((d) => now.getTime() - d.firstActivityAt.getTime() <= MAX_SPAN_MS).map((d) => d.id);
-  if (young.length === 0) return held;
-  const members = await prisma.securityEventTriage.findMany({
-    where: { incidentId: { in: young }, outcome: "grouped", event: { is: { kind: "detection_ongoing" } } },
-    select: { incidentId: true, event: { select: { dedupeKey: true } } },
-  });
-  for (const m of members) {
-    const id = ongoingFrigateId(m.event.dedupeKey);
-    if (m.incidentId !== null && id !== null && source.inView(id, now)) held.add(m.incidentId);
-  }
-  return held;
 }
 
 // ── step 2: triage ─────────────────────────────────────────────────────────
@@ -820,7 +793,8 @@ async function runTick(
       },
       select: { id: true, firstActivityAt: true },
     });
-    const held = await heldOpenByPresence(prisma, due, deps.ongoing, now);
+    // PR-D: a person still in view holds their incident open (presenceHolds).
+    const held = await presenceHolds(prisma, due, deps.ongoing, now);
     for (const { id } of due) {
       if (held.has(id)) continue;
       if (await updateCollecting(prisma, id, now, true)) sealed++;

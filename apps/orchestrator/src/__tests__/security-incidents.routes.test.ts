@@ -233,7 +233,7 @@ function world(over: Partial<FakeWorld> = {}): FakeSecurityPrisma {
   );
 }
 
-function app(f: FakeSecurityPrisma, role: Role | null | "", level: Level | null) {
+function app(f: FakeSecurityPrisma, role: Role | null | "", level: Level | null, ongoing?: { inView: (id: string, now: Date) => boolean }) {
   const resolve = vi.fn(async (_userId: string) => access(level, role === "owner" ? "owner" : "family"));
   const server = express();
   server.use(express.json());
@@ -245,7 +245,7 @@ function app(f: FakeSecurityPrisma, role: Role | null | "", level: Level | null)
     }
     next();
   });
-  server.use("/api", createSecurityIncidentsRouter(f.client as unknown as PrismaClient, { resolve, now: () => NOW }));
+  server.use("/api", createSecurityIncidentsRouter(f.client as unknown as PrismaClient, { resolve, now: () => NOW, ...(ongoing ? { ongoing } : {}) }));
   return { server, resolve };
 }
 
@@ -788,6 +788,68 @@ describe("review b7e1 — a hidden alert escalates an incident she had acknowled
     f.world.securityIncidentAck.push({ ...MARIAS_MIXED_ACK, id: "a-maria-hidden", incidentId: HIDDEN_CODE });
     const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${HIDDEN_CODE}`);
     expect(res.body).toMatchObject({ state: "no_action", acks: [], viewer: { level: "act", acknowledged: false } });
+  });
+});
+
+// WARP-2978 PR-D: a person still in view holds an incident open. For a viewer
+// who cannot see every camera, "still happening" is her cameras' — so the
+// routes hand the in-flight map (deps.ongoing) to every read that projects.
+describe("PR-D — a person still in view on her camera keeps her incident happening (routes 16–19)", () => {
+  /** Stock room on front + back: back quiet since T-40 s; a person on front still in view, their ongoing row at T+30 s. */
+  const STAYING = "5a2b4c6d-7e8f-4a91-8b2c-d3e4f5a6b7c8";
+  const FID = "1790000000.1-abc";
+  const span = (first: Date, last: Date) => ({ first: first.toISOString(), last: last.toISOString() });
+  function withStay(f: FakeSecurityPrisma): void {
+    f.world.securityIncident.push(
+      incident(STAYING, {
+        reasonCodes: ["after_hours_presence"],
+        firstActivityAt: new Date(T.getTime() - 60_000),
+        // Past quiet + settle before NOW: only the hold keeps it collecting.
+        lastActivityAt: new Date(T.getTime() + 30_000),
+        countsByCamera: { front: { _ongoing: 1 }, back: { person: 1 } },
+        spanByCamera: {
+          front: span(T, new Date(T.getTime() + 30_000)),
+          back: span(new Date(T.getTime() - 60_000), new Date(T.getTime() - 40_000)),
+        },
+      }),
+    );
+    f.world.securityIncidentReason.push({
+      id: "r-stay", createdAt: T, ...reason(STAYING, "after_hours_presence", "front", "alert", 81n), evidenceKind: "detection_ongoing",
+    });
+    f.world.securityEvent.push({
+      id: 81n, source: "frigate", kind: "detection_ongoing", severity: "info", camera: "front", sourceRef: `front/${FID}`,
+      dedupeKey: `frigate-ongoing:${FID}`, labels: ["person"], cameraZones: [], score: 0.9, startedAt: T, endedAt: null,
+      summary: "Person still in view after 30 s", createdAt: new Date(T.getTime() + 30_000),
+    });
+    f.world.securityEventTriage.push(
+      { eventId: 81n, outcome: "grouped", incidentId: STAYING, matchedLinkIds: [], alsoZoneIds: [], rulesetVersion: 2, error: null, triagedAt: T },
+    );
+  }
+  const inView = (who: string) => ({ inView: (id: string) => id === who });
+  const groupingOf = (list: Array<{ id: string; grouping: string }>) => list.find((i) => i.id === STAYING)?.grouping;
+
+  it("Maria (front only), the front person still in view: collecting on 16, 17, 18 and in 19's answer", async () => {
+    const f = world();
+    withStay(f);
+    const { server } = app(f, "family", "act", inView(FID));
+    expect(groupingOf((await request(server).get("/api/security/incidents")).body.incidents)).toBe("collecting");
+    expect(groupingOf((await request(server).get("/api/security/incidents/summary")).body.latest)).toBe("collecting");
+    expect((await request(server).get(`/api/security/incidents/${STAYING}`)).body.grouping).toBe("collecting");
+    const acked = await request(server).post(`/api/security/incidents/${STAYING}/acknowledge`).send({});
+    expect(acked.status).toBe(200);
+    expect(acked.body.incident.grouping).toBe("collecting");
+  });
+
+  it("…and nobody in view: her own quiet says it stopped; the owner's stored grouping is the engine's either way", async () => {
+    const f = world();
+    withStay(f);
+    const { server } = app(f, "family", "act", inView("someone-else"));
+    expect(groupingOf((await request(server).get("/api/security/incidents")).body.incidents)).toBe("closed");
+    expect(groupingOf((await request(server).get("/api/security/incidents/summary")).body.latest)).toBe("closed");
+    expect((await request(server).get(`/api/security/incidents/${STAYING}`)).body.grouping).toBe("closed");
+    for (const ongoing of [inView(FID), inView("someone-else")]) {
+      expect((await request(app(f, "owner", "manage", ongoing).server).get(`/api/security/incidents/${STAYING}`)).body.grouping).toBe("collecting");
+    }
   });
 });
 

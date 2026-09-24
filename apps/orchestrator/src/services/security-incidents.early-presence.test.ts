@@ -47,7 +47,8 @@ import {
   writeOngoingRows,
   type SecurityIncidentDeps,
 } from "./security-incidents.service.js";
-import { createInflightTracker, INFLIGHT_END_GRACE_MS, type InflightTracker } from "./security-inflight.js";
+import { createInflightTracker, INFLIGHT_END_GRACE_MS, presenceHolds, type InflightTracker } from "./security-inflight.js";
+import { loadIncidentDetail, type IncidentViewer } from "./security-incident-view.js";
 import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import { areaRows, createFakeSecurityPrisma, eventRow, officeHours, type FakeSecurityPrisma } from "../__tests__/security-incidents.fake.js";
 
@@ -335,5 +336,119 @@ describe("the later end row joins the SAME incident", () => {
     expect(f.world.securityIncident[0]).toMatchObject({ grouping: "collecting" });
     await tick(f, t, plus(T0, MAX_SPAN_MS + 1_000));
     expect(f.world.securityIncident[0]).toMatchObject({ grouping: "closed" });
+  });
+});
+
+// Review #4 × the hold: a viewer who cannot see every camera gets "still
+// happening" from her own cameras. A person still in view holds the incident
+// open, so for her it stays happening exactly when that person is on a
+// camera she can see — never because of one she cannot (DS-005).
+describe("a camera-limited viewer's \"still happening\" while a person holds the incident open", () => {
+  const MARIA = "22222222-2222-4222-8222-222222222222";
+  const sees = (camera: string): IncidentViewer => ({
+    userId: MARIA,
+    visibleCameras: new Set([camera]),
+    mayReadThreats: false,
+    ownerOrAdmin: false,
+  });
+  const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
+
+  /**
+   * The Stock room, watched by `back` and `front`: someone passed `front` a
+   * minute before (ended 40 s before T0), and the person on `back` is still
+   * in view 30 s in — one incident, both cameras.
+   */
+  async function staying() {
+    const hours = officeHours();
+    const stock = areaRows(STOCK, "Stock room", "interior", ["back", "front"]);
+    const f = createFakeSecurityPrisma(
+      {
+        securityZone: [stock.zone],
+        securityZoneLink: stock.links,
+        securitySiteHours: [hours.header],
+        securitySchedule: hours.days,
+        securityModeState: [
+          { id: "singleton", mode: "closed", modeSource: "schedule", manualEnd: "none", manualUntil: null, setAt: T0, version: 3 },
+        ],
+        securityIncidentEngineState: [
+          { id: "singleton", startedAtId: 0n, startedAt: T0, triageFloor: 0n, floorCandidate: 0n, floorCandidateAt: T0, updatedAt: T0 },
+        ],
+        securityEvent: [
+          eventRow({
+            id: 5n,
+            camera: "front",
+            sourceRef: "front/1789999940.5-abc",
+            dedupeKey: "frigate:1789999940.5-abc",
+            startedAt: plus(T0, -60_000),
+            endedAt: plus(T0, -40_000),
+            createdAt: plus(T0, -39_000),
+          }),
+        ],
+      },
+      T0,
+    );
+    const t = createInflightTracker();
+    t.observe(frigate("new"), T0);
+    await tick(f, t, plus(T0, 30_000));
+    expect(f.world.securityIncident).toHaveLength(1);
+    const incident = f.world.securityIncident[0]!;
+    expect(incident).toMatchObject({ cameras: ["back", "front"], grouping: "collecting" });
+    const detail = (v: IncidentViewer, at: Date, presence: InflightTracker | undefined = t) =>
+      loadIncidentDetail(f.client as unknown as PrismaClient, incident.id as string, v, "act", at, presence);
+    return { f, t, incident, detail };
+  }
+
+  it("her camera's person: still happening past her quiet, through their end, until the seal — never stopped, then back", async () => {
+    const { f, t, detail } = await staying();
+    // Her `back` activity is the ongoing row (to 30 s): quiet + settle after it has passed.
+    const past = plus(T0, 30_000 + QUIET_MS + SETTLE_MS + 60_000);
+    await tick(f, t, past);
+    expect(f.world.securityIncident[0]).toMatchObject({ grouping: "collecting" });
+    expect((await detail(sees("back"), past))!.grouping).toBe("collecting");
+    // Her own quiet alone said "stopped" here — and "happening" again once the end joined.
+    expect((await detail(sees("back"), past, createInflightTracker()))!.grouping).toBe("closed");
+    expect((await detail(sees("back"), plus(T0, 9 * 60_000)))!.grouping).toBe("collecting");
+
+    // They leave at 10 min: the end joins, and her times move with it.
+    const endAt = plus(T0, 10 * 60_000);
+    t.observe(frigate("end"), endAt);
+    endRow(f, endAt);
+    await tick(f, t, plus(endAt, 5_000));
+    const after = await detail(sees("back"), plus(endAt, 5_000));
+    expect(after).toMatchObject({ grouping: "collecting", lastActivityAt: endAt.toISOString() });
+
+    // Sealed after quiet + settle: closed for her too, and for good.
+    const sealAt = plus(endAt, QUIET_MS + SETTLE_MS + 1_000);
+    await tick(f, t, sealAt);
+    expect(f.world.securityIncident[0]).toMatchObject({ grouping: "closed" });
+    expect((await detail(sees("back"), sealAt))!.grouping).toBe("closed");
+  });
+
+  it("a person on a camera she cannot see holds it open for everyone else, never for her (DS-005)", async () => {
+    const { f, t, detail } = await staying();
+    // Her `front` went quiet 40 s before T0; well past quiet + settle, the back person still holds it.
+    const past = plus(T0, 30_000 + QUIET_MS + SETTLE_MS + 60_000);
+    await tick(f, t, past);
+    expect(f.world.securityIncident[0]).toMatchObject({ grouping: "collecting" });
+    expect((await detail(owner, past))!.grouping).toBe("collecting");
+    const hers = (await detail(sees("front"), past))!;
+    expect(hers.grouping).toBe("closed");
+    // Exactly what she would see had nobody been on back at all.
+    expect(hers).toEqual((await detail(sees("front"), past, createInflightTracker()))!);
+  });
+
+  it("presenceHolds: the cameras whose person is still in view, per incident, only while their end could join", async () => {
+    const { f, t, incident } = await staying();
+    const client = f.client as unknown as PrismaClient;
+    const at = plus(T0, 5 * 60_000);
+    expect(await presenceHolds(client, [incident as { id: string; firstActivityAt: Date }], t, at)).toEqual(
+      new Map([[incident.id, new Set(["back"])]]),
+    );
+    // Nobody in view, no map, or past the span cap: nothing holds it.
+    const gone = createInflightTracker();
+    expect(await presenceHolds(client, [incident as { id: string; firstActivityAt: Date }], gone, at)).toEqual(new Map());
+    expect(await presenceHolds(client, [incident as { id: string; firstActivityAt: Date }], undefined, at)).toEqual(new Map());
+    const capped = plus(incident.firstActivityAt as Date, MAX_SPAN_MS + 1);
+    expect(await presenceHolds(client, [incident as { id: string; firstActivityAt: Date }], t, capped)).toEqual(new Map());
   });
 });

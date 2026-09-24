@@ -32,9 +32,14 @@
  * incident sealed after 6½ quiet minutes would shut out the `end` row of the
  * very person it is about — a second alert for one visit. An ended object
  * still counts for INFLIGHT_END_GRACE_MS, so the `end` row (written from the
- * same message) is triaged before the incident can seal.
+ * same message) is triaged before the incident can seal. Which incidents are
+ * held, and by which cameras, is `presenceHolds` below: the engine's seal and
+ * a camera-limited viewer's "still happening" read the same answer.
  */
+import type { PrismaClient } from "@prisma/client";
+import { MAX_SPAN_MS } from "../lib/security-rules.js";
 import {
+  ongoingFrigateId,
   parseFrigateInflight,
   SECURITY_MIN_SCORE,
   SECURITY_ONGOING_AFTER_MS,
@@ -184,4 +189,38 @@ export function createInflightTracker(
 
     size: () => inflight.size,
   };
+}
+
+/**
+ * Who holds each incident open (spec §6.12): per incident, the cameras of its
+ * `detection_ongoing` members whose person is still in view (`inView`) — and
+ * only while that person's `end` could still join it, within MAX_SPAN_MS of
+ * the incident's first activity (past that nothing could, so it seals as
+ * before). Incidents nobody holds are absent. ONE rule, two readers: the
+ * engine does not seal an incident that has an entry (step 5), and a viewer
+ * who cannot see every camera is told it is still happening only for the
+ * cameras she can see (security-incident-view.ts, DS-005). Without a source
+ * nothing is held.
+ */
+export async function presenceHolds(
+  prisma: Pick<PrismaClient, "securityEventTriage">,
+  incidents: ReadonlyArray<{ id: string; firstActivityAt: Date }>,
+  source: Pick<OngoingSource, "inView"> | undefined,
+  now: Date,
+): Promise<Map<string, Set<string>>> {
+  const held = new Map<string, Set<string>>();
+  if (!source) return held;
+  const young = incidents.filter((i) => now.getTime() - i.firstActivityAt.getTime() <= MAX_SPAN_MS).map((i) => i.id);
+  if (young.length === 0) return held;
+  const members = await prisma.securityEventTriage.findMany({
+    where: { incidentId: { in: young }, outcome: "grouped", event: { is: { kind: "detection_ongoing" } } },
+    select: { incidentId: true, event: { select: { dedupeKey: true, camera: true } } },
+  });
+  for (const m of members) {
+    const id = ongoingFrigateId(m.event.dedupeKey);
+    // An ongoing row always has a camera (CHECK SecurityEvent_ongoing_shape).
+    if (m.incidentId === null || id === null || m.event.camera === null || !source.inView(id, now)) continue;
+    held.set(m.incidentId, (held.get(m.incidentId) ?? new Set<string>()).add(m.event.camera));
+  }
+  return held;
 }

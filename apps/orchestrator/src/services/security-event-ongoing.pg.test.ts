@@ -34,7 +34,7 @@ import { join } from "node:path";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { MIGRATIONS_DIR } from "../__tests__/helpers/test-paths.js";
 import { tickSecurityIncidents, _resetIncidentHealthForTests, type SecurityIncidentDeps } from "./security-incidents.service.js";
-import { createInflightTracker } from "./security-inflight.js";
+import { createInflightTracker, presenceHolds } from "./security-inflight.js";
 
 // The global unit setup mocks @prisma/client; this file needs the real one.
 vi.unmock("@prisma/client");
@@ -329,8 +329,13 @@ describe.skipIf(!RUN)("the detection_ongoing row in Postgres (WARP-2978 PR-D)", 
       expect(await prisma.securityEvent.count({ where: { camera: CAM, kind: "detection_ongoing" } })).toBe(1);
 
       // Eight minutes on, still in view: past quiet + settle, but held open.
-      await tickSecurityIncidents(prisma, deps(new Date(Date.now() + 8 * 60_000), map));
+      const eight = new Date(Date.now() + 8 * 60_000);
+      await tickSecurityIncidents(prisma, deps(eight, map));
       expect(await prisma.securityIncident.findUniqueOrThrow({ where: { id: incidentId } })).toMatchObject({ grouping: "collecting" });
+      // …by this camera's person: the answer a camera-limited viewer's "still happening" reads too.
+      expect(await presenceHolds(prisma, [{ id: incidentId, firstActivityAt: startedAt }], map, eight)).toEqual(
+        new Map([[incidentId, new Set([CAM])]]),
+      );
 
       // Nine minutes on, Frigate ends the object: the ingest's own `end` row joins the SAME incident.
       const endAt = new Date(Date.now() + 9 * 60_000);

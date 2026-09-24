@@ -205,6 +205,18 @@ describe("projectIncident — the span and the grouping a viewer may know", () =
     expect(projectIncident({ ...i, grouping: "closed" }, codes, frontOnly, NOW)!.grouping).toBe("closed");
   });
 
+  it("WARP-2978 PR-D: a person still in view on HER camera keeps it happening past her quiet; one on a hidden camera never does", () => {
+    const quietAt = plus(T, 60_000 + QUIET_MS + SETTLE_MS);
+    const onFront = new Set(["front"]);
+    expect(projectIncident(i, codes, frontOnly, quietAt, onFront)!.grouping).toBe("collecting");
+    // DS-005: the back person holds it open for everyone else, not for her.
+    expect(projectIncident(i, codes, frontOnly, quietAt, new Set(["back"]))!.grouping).toBe("closed");
+    expect(projectIncident(i, codes, frontOnly, quietAt, new Set(["back"]))).toEqual(projectIncident(i, codes, frontOnly, quietAt));
+    // The hold moves none of her times, and reopens nothing sealed.
+    expect(projectIncident(i, codes, frontOnly, quietAt, onFront)).toMatchObject({ firstActivityAt: T, lastActivityAt: plus(T, 60_000) });
+    expect(projectIncident({ ...i, grouping: "closed" }, codes, frontOnly, quietAt, onFront)!.grouping).toBe("closed");
+  });
+
   it("the owner (every camera) gets the stored values", () => {
     const p = projectIncident(i, codes, owner, plus(T, 3_600_000))!;
     expect(p).toMatchObject({ firstActivityAt: i.firstActivityAt, lastActivityAt: i.lastActivityAt, grouping: "collecting" });
