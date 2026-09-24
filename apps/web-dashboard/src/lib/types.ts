@@ -710,11 +710,15 @@ export interface ActiveDepartmentView {
   profile: DepartmentProfileSummary | null;
 }
 
-/** GET/PUT /api/me/active-department. `department: null` is Whole business,
- *  the default for everyone — the box keeps no row for it. */
-export interface ActiveDepartmentResponse {
-  department: ActiveDepartmentView | null;
-}
+/** GET/PUT /api/me/active-department. `scope` is explicit, never read off a
+ *  null: `unset` — the person has never chosen, on any device (the shell shows
+ *  Whole business, the default for everyone, and a choice this browser kept
+ *  from before P6 stands); `whole_business` — chosen; `department` — chosen,
+ *  and `department` is set then and only then. */
+export type ActiveDepartmentResponse =
+  | { scope: "unset"; department: null }
+  | { scope: "whole_business"; department: null }
+  | { scope: "department"; department: ActiveDepartmentView };
 
 export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
 

@@ -2,11 +2,15 @@
  * WARP-2981 (ADR-059 §6.1, §7.1, DS-003) — `/api/me/active-department`, the
  * department a person's shell is arranged around, on every device.
  *
- *   P6-1  GET /me/active-department   → {department: View | null}
+ *   P6-1  GET /me/active-department   → {scope, department: View | null}
  *   P6-2  PUT /me/active-department   {departmentId: uuid | null} → same
  *
- * View = {id, slug, name, profile: {template, icon} | null}. `null` is Whole
- * business, the default for everyone (DS-014).
+ * `scope` is explicit: `unset` (never chosen, on any device), `whole_business`
+ * or `department`, and `department` is the View exactly when it is
+ * `department`. View = {id, slug, name, profile: {template, icon} | null}.
+ * Whole business is what the shell shows for both `unset` and
+ * `whole_business` (DS-014); only a chosen scope replaces a choice a browser
+ * kept from before P6. PUT null chooses Whole business.
  *
  * The choice is the CALLER's own and nobody else's: both routes key on
  * `req.user.id` and the strict body names no person. Service principals have
@@ -14,8 +18,8 @@
  * HUMAN_ONLY). A department the caller may not choose — missing, not theirs,
  * archived, archiving, a TEAM, the HOUSEHOLD — is one 404
  * DEPARTMENT_NOT_AVAILABLE body in every case, so the route never confirms a
- * department exists. GET re-checks the stored choice and answers null when it
- * no longer holds, without writing.
+ * department exists. GET re-checks a stored department and answers
+ * `whole_business` when it no longer holds, without writing.
  *
  * Behind authMiddleware (core, not module-gated: every person has a shell).
  * Errors are `{error: {code, message}}`. Nothing is audited — a display
@@ -61,7 +65,7 @@ export function createMeDepartmentRouter(prisma: PrismaClient): Router {
     try {
       const viewer = personOf(req, res);
       if (!viewer) return;
-      res.json({ department: await readActiveDepartment(prisma, viewer) });
+      res.json(await readActiveDepartment(prisma, viewer));
     } catch (err) {
       next(err);
     }
@@ -83,7 +87,7 @@ export function createMeDepartmentRouter(prisma: PrismaClient): Router {
         fail(res, 404, "DEPARTMENT_NOT_AVAILABLE", "That department isn't available to choose.");
         return;
       }
-      res.json({ department: out.department });
+      res.json(out.answer);
     } catch (err) {
       next(err);
     }

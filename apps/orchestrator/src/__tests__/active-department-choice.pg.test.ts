@@ -6,9 +6,14 @@
  *
  *   migration  The folder applies after every earlier one (the lane's own
  *              `migrate deploy`), and running it AGAIN is a no-op: the
- *              IF NOT EXISTS / duplicate_object guards are SQL, and only
- *              Postgres can say they hold. Run twice here inside a
- *              transaction that is rolled back.
+ *              IF NOT EXISTS / duplicate_object / pg_constraint guards are
+ *              SQL, and only Postgres can say they hold. Run twice here
+ *              inside a transaction that is rolled back. The same file run
+ *              on the FIRST version's shape (no `scope`, departmentId NOT
+ *              NULL — what a dev box applied before review) converges it,
+ *              its rows becoming department choices; also rolled back.
+ *   shape      `scope` ⇔ departmentId is a CHECK Prisma cannot declare, so
+ *              only Postgres can refuse a row that breaks it.
  *   cascade    "The row never outlives the person or the department" is the
  *              two FKs' ON DELETE CASCADE. A fake cannot show it.
  *   one row    Two devices choosing at once must leave ONE row, the later
@@ -76,6 +81,22 @@ function statements(sql: string): string[] {
 
 class Rollback extends Error {}
 
+/** The first version of this migration (d2ed6c57, applied on dev boxes before
+ *  review): no `scope`, and Whole business was the absence of a row. */
+const FIRST_VERSION = [
+  `CREATE TABLE "ActiveDepartmentChoice" (
+    "userId" TEXT NOT NULL,
+    "departmentId" TEXT NOT NULL,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "ActiveDepartmentChoice_pkey" PRIMARY KEY ("userId")
+  )`,
+  `CREATE INDEX "ActiveDepartmentChoice_departmentId_idx" ON "ActiveDepartmentChoice"("departmentId")`,
+  `ALTER TABLE "ActiveDepartmentChoice" ADD CONSTRAINT "ActiveDepartmentChoice_userId_fkey"
+    FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE`,
+  `ALTER TABLE "ActiveDepartmentChoice" ADD CONSTRAINT "ActiveDepartmentChoice_departmentId_fkey"
+    FOREIGN KEY ("departmentId") REFERENCES "Department"("id") ON DELETE CASCADE ON UPDATE CASCADE`,
+];
+
 type Viewer = { id: string; username: string; role: string };
 
 describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", () => {
@@ -137,19 +158,28 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
 
   const choiceOf = (userId: string) => prisma.activeDepartmentChoice.findUnique({ where: { userId } });
 
+  const CONSTRAINTS = [
+    { conname: "ActiveDepartmentChoice_departmentId_fkey", contype: "f", confdeltype: "c" },
+    { conname: "ActiveDepartmentChoice_pkey", contype: "p", confdeltype: " " },
+    { conname: "ActiveDepartmentChoice_scope_shape", contype: "c", confdeltype: " " },
+    { conname: "ActiveDepartmentChoice_userId_fkey", contype: "f", confdeltype: "c" },
+  ];
+  const constraintsSql = `SELECT conname, contype, confdeltype FROM pg_constraint
+    WHERE conrelid = '"ActiveDepartmentChoice"'::regclass ORDER BY conname`;
+  /** scope's default and departmentId's nullability, as the catalog has them. */
+  const columnsSql = `SELECT column_name, column_default, is_nullable FROM information_schema.columns
+    WHERE table_name = 'ActiveDepartmentChoice' AND column_name IN ('scope', 'departmentId') ORDER BY column_name`;
+  const CONVERGED_COLUMNS = [
+    { column_name: "departmentId", column_default: null, is_nullable: "YES" },
+    { column_name: "scope", column_default: null, is_nullable: "NO" },
+  ];
+
   // ── the migration ──────────────────────────────────────────────────────────
 
   describe("the migration", () => {
-    it("is applied: one pkey on userId, both FKs ON DELETE CASCADE, the departmentId index", async () => {
-      const cons = await prisma.$queryRawUnsafe<{ conname: string; contype: string; confdeltype: string }[]>(
-        `SELECT conname, contype, confdeltype FROM pg_constraint
-          WHERE conrelid = '"ActiveDepartmentChoice"'::regclass ORDER BY conname`,
-      );
-      expect(cons).toEqual([
-        { conname: "ActiveDepartmentChoice_departmentId_fkey", contype: "f", confdeltype: "c" },
-        { conname: "ActiveDepartmentChoice_pkey", contype: "p", confdeltype: " " },
-        { conname: "ActiveDepartmentChoice_userId_fkey", contype: "f", confdeltype: "c" },
-      ]);
+    it("is applied: one pkey on userId, both FKs ON DELETE CASCADE, the shape CHECK, the departmentId index", async () => {
+      expect(await prisma.$queryRawUnsafe(constraintsSql)).toEqual(CONSTRAINTS);
+      expect(await prisma.$queryRawUnsafe(columnsSql)).toEqual(CONVERGED_COLUMNS);
       const idx = await prisma.$queryRawUnsafe<{ indexname: string }[]>(
         `SELECT indexname FROM pg_indexes WHERE tablename = 'ActiveDepartmentChoice' ORDER BY indexname`,
       );
@@ -161,34 +191,130 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
 
     it("running it again, twice, is a no-op — nothing duplicated, nothing fails", async () => {
       const stmts = statements(MIGRATION_SQL);
-      expect(stmts.length).toBe(4);
+      expect(stmts.length).toBe(9);
       await expect(
         prisma.$transaction(async (tx) => {
           for (let pass = 0; pass < 2; pass += 1) {
             for (const s of stmts) await tx.$executeRawUnsafe(s);
           }
-          const [{ n }] = await tx.$queryRawUnsafe<{ n: bigint }[]>(
-            `SELECT count(*)::bigint AS n FROM pg_constraint WHERE conrelid = '"ActiveDepartmentChoice"'::regclass`,
-          );
-          expect(Number(n)).toBe(3);
+          expect(await tx.$queryRawUnsafe(constraintsSql)).toEqual(CONSTRAINTS);
+          expect(await tx.$queryRawUnsafe(columnsSql)).toEqual(CONVERGED_COLUMNS);
           throw new Rollback();
         }),
       ).rejects.toBeInstanceOf(Rollback);
+    });
+
+    it("run on the FIRST version's shape, it converges it: the rows become department choices, and the CHECK holds", async () => {
+      const maria = await person("maria");
+      const ana = await person("ana");
+      const sec = await department("security");
+      await expect(
+        prisma.$transaction(
+          async (tx) => {
+            // The table exactly as the first version created it (d2ed6c57).
+            await tx.$executeRawUnsafe(`DROP TABLE "ActiveDepartmentChoice"`);
+            await tx.$executeRawUnsafe(`DROP TYPE "ActiveDepartmentScope"`);
+            for (const s of FIRST_VERSION) await tx.$executeRawUnsafe(s);
+            await tx.$executeRawUnsafe(
+              `INSERT INTO "ActiveDepartmentChoice" ("userId", "departmentId", "updatedAt") VALUES ($1, $2, now())`,
+              maria.id,
+              sec.id,
+            );
+
+            for (let pass = 0; pass < 2; pass += 1) {
+              for (const s of statements(MIGRATION_SQL)) await tx.$executeRawUnsafe(s);
+            }
+
+            expect(await tx.$queryRawUnsafe(constraintsSql)).toEqual(CONSTRAINTS);
+            expect(await tx.$queryRawUnsafe(columnsSql)).toEqual(CONVERGED_COLUMNS);
+            expect(
+              await tx.$queryRawUnsafe(
+                `SELECT "userId", "scope"::text AS scope, "departmentId" FROM "ActiveDepartmentChoice"`,
+              ),
+            ).toEqual([{ userId: maria.id, scope: "department", departmentId: sec.id }]);
+            // The file's own CHECK (not the lane's) refuses both ill-formed
+            // rows; each attempt is rolled back to a savepoint so the
+            // transaction stays usable.
+            const insert = (scope: string, departmentId: string | null) =>
+              tx.$executeRawUnsafe(
+                `INSERT INTO "ActiveDepartmentChoice" ("userId", "scope", "departmentId", "updatedAt")
+                   VALUES ($1, $2::"ActiveDepartmentScope", $3, now())`,
+                ana.id,
+                scope,
+                departmentId,
+              );
+            for (const [scope, departmentId] of [["department", null], ["whole_business", sec.id]] as const) {
+              await tx.$executeRawUnsafe(`SAVEPOINT ill_formed`);
+              await expect(insert(scope, departmentId)).rejects.toThrow(/ActiveDepartmentChoice_scope_shape/);
+              await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ill_formed`);
+            }
+            // …and takes a Whole business row, which the first version's
+            // NOT NULL could not.
+            await insert("whole_business", null);
+            throw new Rollback();
+          },
+          { timeout: 30_000 },
+        ),
+      ).rejects.toBeInstanceOf(Rollback);
+      // Rolled back: the lane's migrated table is exactly as it was.
+      expect(await prisma.$queryRawUnsafe(constraintsSql)).toEqual(CONSTRAINTS);
+    });
+  });
+
+  // ── the shape CHECK ────────────────────────────────────────────────────────
+
+  describe("scope ⇔ departmentId (ActiveDepartmentChoice_scope_shape)", () => {
+    const insert = (userId: string, scope: string, departmentId: string | null) =>
+      prisma.$executeRawUnsafe(
+        `INSERT INTO "ActiveDepartmentChoice" ("userId", "scope", "departmentId", "updatedAt")
+           VALUES ($1, $2::"ActiveDepartmentScope", $3, now())`,
+        userId,
+        scope,
+        departmentId,
+      );
+
+    it("a department choice without a department is refused", async () => {
+      const maria = await person("maria");
+      await expect(insert(maria.id, "department", null)).rejects.toThrow(/ActiveDepartmentChoice_scope_shape/);
+      expect(await choiceOf(maria.id)).toBeNull();
+    });
+
+    it("a Whole business choice that names a department is refused", async () => {
+      const maria = await person("maria");
+      const sec = await department("security");
+      await expect(insert(maria.id, "whole_business", sec.id)).rejects.toThrow(/ActiveDepartmentChoice_scope_shape/);
+      expect(await choiceOf(maria.id)).toBeNull();
+    });
+
+    it("the two well-formed rows are accepted", async () => {
+      const maria = await person("maria");
+      const ana = await person("ana");
+      const sec = await department("security");
+      await insert(maria.id, "department", sec.id);
+      await insert(ana.id, "whole_business", null);
+      expect(await choiceOf(maria.id)).toMatchObject({ scope: "department", departmentId: sec.id });
+      expect(await choiceOf(ana.id)).toMatchObject({ scope: "whole_business", departmentId: null });
     });
   });
 
   // ── cascades ───────────────────────────────────────────────────────────────
 
   describe("the row never outlives the person or the department", () => {
-    it("deleting the person deletes their choice", async () => {
+    it("deleting the person deletes their choice, Whole business or a department", async () => {
       const maria = await person("maria");
       const sec = await department("security");
       await join_(sec.id, maria.id);
       expect((await chooseActiveDepartment(prisma, maria, sec.id)).ok).toBe(true);
       expect(await choiceOf(maria.id)).not.toBeNull();
 
+      const ana = await person("ana");
+      await chooseActiveDepartment(prisma, ana, null);
+      expect(await choiceOf(ana.id)).not.toBeNull();
+
       await prisma.user.delete({ where: { id: maria.id } });
+      await prisma.user.delete({ where: { id: ana.id } });
       expect(await choiceOf(maria.id)).toBeNull();
+      expect(await choiceOf(ana.id)).toBeNull();
     });
 
     it("deleting the department deletes every choice of it, and no one else's", async () => {
@@ -210,23 +336,28 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
   // ── one row per person ─────────────────────────────────────────────────────
 
   describe("one row per person, last write wins", () => {
-    it("twenty concurrent choices across two departments leave exactly ONE row", async () => {
+    it("twenty-one concurrent choices across two departments and Whole business leave exactly ONE well-formed row", async () => {
       const maria = await person("maria");
       const sec = await department("security");
       const sales = await department("sales");
       await join_(sec.id, maria.id);
       await join_(sales.id, maria.id);
 
+      const ids = [sec.id, sales.id, null];
       const results = await Promise.all(
-        Array.from({ length: 20 }, (_, i) => chooseActiveDepartment(prisma, maria, i % 2 ? sec.id : sales.id)),
+        Array.from({ length: 21 }, (_, i) => chooseActiveDepartment(prisma, maria, ids[i % 3]!)),
       );
       expect(results.every((r) => r.ok)).toBe(true);
       const rows = await prisma.activeDepartmentChoice.findMany({ where: { userId: maria.id } });
       expect(rows).toHaveLength(1);
-      expect([sec.id, sales.id]).toContain(rows[0]!.departmentId);
+      expect([
+        { scope: "department", departmentId: sec.id },
+        { scope: "department", departmentId: sales.id },
+        { scope: "whole_business", departmentId: null },
+      ]).toContainEqual({ scope: rows[0]!.scope, departmentId: rows[0]!.departmentId });
     });
 
-    it("a later choice replaces the earlier one, and Whole business deletes it", async () => {
+    it("a later choice replaces the earlier one, and Whole business replaces it with a whole_business row", async () => {
       const maria = await person("maria");
       const sec = await department("security");
       const sales = await department("sales");
@@ -238,8 +369,12 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
       expect((await choiceOf(maria.id))?.departmentId).toBe(sales.id);
       expect(await prisma.activeDepartmentChoice.count({ where: { userId: maria.id } })).toBe(1);
 
-      expect(await chooseActiveDepartment(prisma, maria, null)).toEqual({ ok: true, department: null });
-      expect(await choiceOf(maria.id)).toBeNull();
+      expect(await chooseActiveDepartment(prisma, maria, null)).toEqual({
+        ok: true,
+        answer: { scope: "whole_business", department: null },
+      });
+      expect(await choiceOf(maria.id)).toMatchObject({ scope: "whole_business", departmentId: null });
+      expect(await readActiveDepartment(prisma, maria)).toEqual({ scope: "whole_business", department: null });
     });
   });
 
@@ -287,7 +422,7 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
     }
     const PATH = "/api/me/active-department";
 
-    it("a member chooses, reads it back, is archived out of it (GET → null, row kept), then picks Whole business", async () => {
+    it("never chosen reads `unset`; a member chooses, reads it back, is archived out of it (GET → whole_business, row kept), then picks Whole business", async () => {
       const maria = await person("maria");
       const sec = await department("security");
       await join_(sec.id, maria.id);
@@ -295,10 +430,12 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
         data: { departmentId: sec.id, template: "security", icon: "shield", navHrefs: ["/security"], homeWidgets: [], updatedBy: "warp2981-test" },
       });
       const a = app(() => maria);
+      expect((await request(a).get(PATH)).body).toEqual({ scope: "unset", department: null });
 
       const put = await request(a).put(PATH).send({ departmentId: sec.id });
       expect(put.status).toBe(200);
       expect(put.body).toEqual({
+        scope: "department",
         department: { id: sec.id, slug: sec.slug, name: sec.name, profile: { template: "security", icon: "shield" } },
       });
       expect((await request(a).get(PATH)).body).toEqual(put.body);
@@ -307,13 +444,14 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
       await prisma.department.update({ where: { id: sec.id }, data: { state: "archived" } });
       const got = await request(a).get(PATH);
       expect(got.status).toBe(200);
-      expect(got.body).toEqual({ department: null });
+      expect(got.body).toEqual({ scope: "whole_business", department: null });
       // GET never writes: the row and its updatedAt are exactly as they were.
       expect(await choiceOf(maria.id)).toEqual(before);
 
       const whole = await request(a).put(PATH).send({ departmentId: null });
-      expect(whole.body).toEqual({ department: null });
-      expect(await choiceOf(maria.id)).toBeNull();
+      expect(whole.body).toEqual({ scope: "whole_business", department: null });
+      expect(await choiceOf(maria.id)).toMatchObject({ scope: "whole_business", departmentId: null });
+      expect((await request(a).get(PATH)).body).toEqual({ scope: "whole_business", department: null });
     });
 
     it("a person removed from the department since reads Whole business", async () => {
@@ -323,7 +461,7 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
       await chooseActiveDepartment(prisma, maria, sec.id);
 
       await prisma.departmentMembership.deleteMany({ where: { departmentId: sec.id, userId: maria.id } });
-      expect(await readActiveDepartment(prisma, maria)).toBeNull();
+      expect(await readActiveDepartment(prisma, maria)).toEqual({ scope: "whole_business", department: null });
       expect((await choiceOf(maria.id))?.departmentId).toBe(sec.id);
     });
 
@@ -357,7 +495,7 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
       const res = await request(app(() => owner)).put(PATH).send({ departmentId: sales.id });
       expect(res.status).toBe(200);
       expect((await choiceOf(owner.id))?.departmentId).toBe(sales.id);
-      expect((await request(app(() => maria)).get(PATH)).body).toEqual({ department: null });
+      expect((await request(app(() => maria)).get(PATH)).body).toEqual({ scope: "unset", department: null });
     });
   });
 });

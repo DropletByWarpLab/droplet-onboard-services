@@ -9,10 +9,11 @@
  *     archiving, a TEAM, the HOUSEHOLD — is ONE 404 body, so the route never
  *     confirms that a department exists;
  *   · choosability is checked on write AND on read: a department archived (or
- *     a membership removed) since reads as Whole business (null), and GET
- *     never writes, so the row is left for the next PUT to replace;
- *   · no row is Whole business (DS-014), and choosing Whole business deletes
- *     the row.
+ *     a membership removed) since reads as Whole business, and GET never
+ *     writes, so the row is left for the next PUT to replace;
+ *   · the answer's `scope` is explicit: no row is `unset` (never chosen), and
+ *     choosing Whole business WRITES a `whole_business` row, so the two are
+ *     never the same answer (CLAUDE.md "No guessing, ever").
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express from "express";
@@ -56,7 +57,14 @@ const UNKNOWN = "99999999-9999-4999-8999-999999999999";
 
 // ── an in-memory Prisma: the three delegates the route touches ──────────────
 
-type Choice = { userId: string; departmentId: string; updatedAt: Date };
+type Choice = { userId: string; scope: "whole_business" | "department"; departmentId: string | null; updatedAt: Date };
+
+/** ActiveDepartmentChoice_scope_shape, which Postgres enforces on the box. */
+function assertShape(row: Choice): void {
+  if ((row.scope === "department") !== (row.departmentId !== null)) {
+    throw new Error('new row violates check constraint "ActiveDepartmentChoice_scope_shape"');
+  }
+}
 
 function pick<T extends Record<string, unknown>>(row: T, select?: Record<string, unknown>): Partial<T> {
   if (!select) return { ...row };
@@ -102,8 +110,9 @@ function makeDb() {
           throw err;
         }
         const prev = choices.get(where.userId);
-        const row = prev ? { ...prev, ...update, updatedAt: new Date() } : { ...create, updatedAt: new Date() };
-        choices.set(where.userId, row as Choice);
+        const row = (prev ? { ...prev, ...update, updatedAt: new Date() } : { ...create, updatedAt: new Date() }) as Choice;
+        assertShape(row);
+        choices.set(where.userId, row);
         return row;
       }),
       deleteMany: vi.fn(async ({ where = {} }: { where?: Partial<Choice> } = {}) => {
@@ -147,8 +156,13 @@ function makeDb() {
     nextUpsertError,
     join: (dept: Dept, person: Person) => memberships.add(`${dept.id}:${person.id}`),
     leave: (dept: Dept, person: Person) => memberships.delete(`${dept.id}:${person.id}`),
-    choose: (person: Person, dept: Dept) =>
-      choices.set(person.id, { userId: person.id, departmentId: dept.id, updatedAt: new Date() }),
+    choose: (person: Person, dept: Dept | null) =>
+      choices.set(
+        person.id,
+        dept
+          ? { userId: person.id, scope: "department", departmentId: dept.id, updatedAt: new Date() }
+          : { userId: person.id, scope: "whole_business", departmentId: null, updatedAt: new Date() },
+      ),
   };
 }
 
@@ -186,17 +200,27 @@ const put = (as: string, body: unknown) => request(app).put(PATH).set("x-test-as
 // ── P6-1 GET ─────────────────────────────────────────────────────────────────
 
 describe("GET /api/me/active-department", () => {
-  it("no row is Whole business: {department: null} — the default for everyone (DS-014)", async () => {
+  it("no row is `unset` — never chosen, on any device — not Whole business", async () => {
     const res = await get("maria");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ department: null });
+    expect(res.body).toEqual({ scope: "unset", department: null });
   });
 
-  it("a chosen department reads back as exactly {id, slug, name, profile}", async () => {
+  it("a Whole business row reads back as `whole_business`, without looking up any department", async () => {
+    db.choose(PEOPLE.maria!, null);
+    const res = await get("maria");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ scope: "whole_business", department: null });
+    expect(db.raw.department.findUnique).not.toHaveBeenCalled();
+    expect(db.raw.departmentMembership.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("a chosen department reads back as `department` with exactly {id, slug, name, profile}", async () => {
     db.choose(PEOPLE.maria!, D.security);
     const res = await get("maria");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
+      scope: "department",
       department: { id: D.security.id, slug: "security", name: "Security", profile: { template: "security", icon: "shield" } },
     });
   });
@@ -208,38 +232,38 @@ describe("GET /api/me/active-department", () => {
     expect(Object.keys(res.body.department)).toEqual(["id", "slug", "name", "profile"]);
   });
 
-  it("archived since it was chosen → null, and the row is left untouched (GET never writes)", async () => {
+  it("archived since it was chosen → whole_business, and the row is left untouched (GET never writes)", async () => {
     db.choose(PEOPLE.maria!, D.security);
     db.departments.get(D.security.id)!.state = "archived";
     const res = await get("maria");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ department: null });
+    expect(res.body).toEqual({ scope: "whole_business", department: null });
     expect(db.choices.get(PEOPLE.maria!.id)?.departmentId).toBe(D.security.id);
     expect(db.writes).not.toHaveBeenCalled();
   });
 
-  it("archiving since it was chosen → null", async () => {
+  it("archiving since it was chosen → whole_business", async () => {
     db.choose(PEOPLE.stefan!, D.sales);
     db.departments.get(D.sales.id)!.state = "archiving";
-    expect((await get("stefan")).body).toEqual({ department: null });
+    expect((await get("stefan")).body).toEqual({ scope: "whole_business", department: null });
   });
 
-  it("removed from the department since → null, row untouched", async () => {
+  it("removed from the department since → whole_business, row untouched", async () => {
     db.choose(PEOPLE.maria!, D.security);
     db.leave(D.security, PEOPLE.maria!);
-    expect((await get("maria")).body).toEqual({ department: null });
+    expect((await get("maria")).body).toEqual({ scope: "whole_business", department: null });
     expect(db.choices.has(PEOPLE.maria!.id)).toBe(true);
     expect(db.writes).not.toHaveBeenCalled();
   });
 
-  it("a row pointing at a department that no longer exists → null", async () => {
-    db.choices.set(PEOPLE.maria!.id, { userId: PEOPLE.maria!.id, departmentId: UNKNOWN, updatedAt: new Date() });
-    expect((await get("maria")).body).toEqual({ department: null });
+  it("a row pointing at a department that no longer exists → whole_business", async () => {
+    db.choices.set(PEOPLE.maria!.id, { userId: PEOPLE.maria!.id, scope: "department", departmentId: UNKNOWN, updatedAt: new Date() });
+    expect((await get("maria")).body).toEqual({ scope: "whole_business", department: null });
   });
 
   it("reads only the caller's own row — someone else's choice is not theirs", async () => {
     db.choose(PEOPLE.stefan!, D.security);
-    expect((await get("maria")).body).toEqual({ department: null });
+    expect((await get("maria")).body).toEqual({ scope: "unset", department: null });
     expect((await get("stefan")).body.department.id).toBe(D.security.id);
   });
 });
@@ -251,9 +275,10 @@ describe("PUT /api/me/active-department", () => {
     const res = await put("maria", { departmentId: D.security.id });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
+      scope: "department",
       department: { id: D.security.id, slug: "security", name: "Security", profile: { template: "security", icon: "shield" } },
     });
-    expect(db.choices.get(PEOPLE.maria!.id)?.departmentId).toBe(D.security.id);
+    expect(db.choices.get(PEOPLE.maria!.id)).toMatchObject({ scope: "department", departmentId: D.security.id });
     // …and it is what the next GET says.
     expect((await get("maria")).body).toEqual(res.body);
   });
@@ -276,18 +301,29 @@ describe("PUT /api/me/active-department", () => {
     expect(db.choices.get(PEOPLE.maria!.id)?.departmentId).toBe(D.sales.id);
   });
 
-  it("null is Whole business: the row is deleted → {department: null}", async () => {
+  it("null chooses Whole business: the row records it, and GET says so — not `unset`", async () => {
     db.choose(PEOPLE.maria!, D.security);
     const res = await put("maria", { departmentId: null });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ department: null });
-    expect(db.choices.has(PEOPLE.maria!.id)).toBe(false);
+    expect(res.body).toEqual({ scope: "whole_business", department: null });
+    expect(db.choices.get(PEOPLE.maria!.id)).toMatchObject({ scope: "whole_business", departmentId: null });
+    expect((await get("maria")).body).toEqual({ scope: "whole_business", department: null });
   });
 
-  it("null with no row is still 200 (Whole business is already the answer)", async () => {
+  it("null with no row writes one: a first choice of Whole business is a choice", async () => {
     const res = await put("maria", { departmentId: null });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ department: null });
+    expect(res.body).toEqual({ scope: "whole_business", department: null });
+    expect(db.choices.get(PEOPLE.maria!.id)).toMatchObject({ scope: "whole_business", departmentId: null });
+    expect((await get("maria")).body.scope).toBe("whole_business");
+  });
+
+  it("a department after Whole business replaces it with a department row", async () => {
+    db.choose(PEOPLE.maria!, null);
+    const res = await put("maria", { departmentId: D.security.id });
+    expect(res.status).toBe(200);
+    expect(db.choices.get(PEOPLE.maria!.id)).toMatchObject({ scope: "department", departmentId: D.security.id });
+    expect((await get("maria")).body.scope).toBe("department");
   });
 
   it("writes only the caller's own row — someone else's choice survives both a pick and Whole business", async () => {
@@ -296,8 +332,8 @@ describe("PUT /api/me/active-department", () => {
     await put("maria", { departmentId: D.sales.id });
     expect(db.choices.get(PEOPLE.stefan!.id)?.departmentId).toBe(D.security.id);
     await put("maria", { departmentId: null });
-    expect(db.choices.get(PEOPLE.stefan!.id)?.departmentId).toBe(D.security.id);
-    expect(db.choices.has(PEOPLE.maria!.id)).toBe(false);
+    expect(db.choices.get(PEOPLE.stefan!.id)).toMatchObject({ scope: "department", departmentId: D.security.id });
+    expect(db.choices.get(PEOPLE.maria!.id)).toMatchObject({ scope: "whole_business", departmentId: null });
   });
 
   describe("a department the person may not choose is ONE 404 body, whatever the reason", () => {

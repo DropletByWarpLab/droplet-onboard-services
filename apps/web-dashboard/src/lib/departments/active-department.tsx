@@ -20,7 +20,9 @@
  *   2. Once there is a user, the box is read, and read again on focus — so a
  *      switch made on the phone shows up here the next time this tab is
  *      looked at.
- *   3. The box's answer is ADOPTED (state and localStorage) unless the person
+ *   3. The box's answer says explicitly whether the person has chosen:
+ *      `unset` (never, on any device), `whole_business` or `department`. A
+ *      CHOSEN scope is ADOPTED (state and localStorage) unless the person
  *      picked here after that read started, or a pick's PUT was still on its
  *      way when it started. A newer local pick is never clobbered by an older
  *      answer (D5).
@@ -31,10 +33,11 @@
  *   5. An orchestrator older than the route (a 404 whose code is not
  *      DEPARTMENT_NOT_AVAILABLE) turns the sync off for the page's life,
  *      which is P1's behaviour.
- *   6. P1's local choices are not migrated (§5). Until this browser has
- *      synced once for this person, the box's "Whole business" — which is
- *      also what it says when it has never been told anything — does not
- *      overwrite a local department; the first pick here writes the row.
+ *   6. P1's local choices are not migrated (§5), and `unset` is never
+ *      adopted: a department this browser kept from before P6 stands until a
+ *      choice exists on the box — the first pick on any device. A Whole
+ *      business chosen on the phone is `whole_business`, not `unset`, so it
+ *      does reach a laptop still holding a P1 department.
  *   7. Signing out forgets this browser's copy. The row on the box stays: it
  *      is the person's choice on every device.
  *
@@ -83,7 +86,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import type {
-  ActiveDepartmentView,
+  ActiveDepartmentResponse,
   Department,
   DepartmentProfile,
   DepartmentProfileResponse,
@@ -96,12 +99,6 @@ export const ACTIVE_DEPARTMENT_STORAGE_KEY = "droplet-active-department";
 /** The localStorage key holding `userId`'s choice. */
 export function activeDepartmentStorageKey(userId: string): string {
   return `${ACTIVE_DEPARTMENT_STORAGE_KEY}:${userId}`;
-}
-
-/** The localStorage key saying this browser has synced `userId`'s choice with
- *  the box at least once (rule 6 above). */
-export function activeDepartmentSyncedKey(userId: string): string {
-  return `${ACTIVE_DEPARTMENT_STORAGE_KEY}-synced:${userId}`;
 }
 
 /** Shared with `components/projects/usePm.ts#useDepartments` — same endpoint,
@@ -196,19 +193,14 @@ export function isMissingRoute(err: unknown): boolean {
  *   · `pickedSince` — the person picked here after the read started, or a
  *     pick's PUT had not landed when it started: the answer is older than the
  *     local pick, so it must not clobber it (D5).
- *   · `synced` false + the box says Whole business + this browser holds a
- *     department: a P1 choice the box was never told about (§5) — kept until
- *     the first pick here writes the row.
+ *   · `scope: "unset"` — nobody has chosen, on any device: there is nothing
+ *     to adopt, and a P1 choice this browser holds stands (§5).
  */
 export function shouldAdoptServerChoice(input: {
   pickedSince: boolean;
-  synced: boolean;
-  serverSlug: string | null;
-  localSlug: string | null;
+  scope: ActiveDepartmentResponse["scope"];
 }): boolean {
-  if (input.pickedSince) return false;
-  if (!input.synced && input.serverSlug === null && input.localSlug !== null) return false;
-  return true;
+  return !input.pickedSince && input.scope !== "unset";
 }
 
 function readStored(userId: string): string | null {
@@ -229,30 +221,13 @@ function writeStored(userId: string, slug: string | null): void {
   }
 }
 
-function readSynced(userId: string): boolean {
-  try {
-    return localStorage.getItem(activeDepartmentSyncedKey(userId)) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeSynced(userId: string, synced: boolean): void {
-  try {
-    if (synced) localStorage.setItem(activeDepartmentSyncedKey(userId), "1");
-    else localStorage.removeItem(activeDepartmentSyncedKey(userId));
-  } catch {
-    // Storage unavailable — rule 6 then simply re-applies next load.
-  }
-}
-
 /** One read of the box, tagged with what this browser had done when it began. */
 interface ServerChoiceRead {
   /** `picks.current` when the read started. */
   pickSeqAtStart: number;
   /** PUTs still on their way when the read started. */
   pendingAtStart: number;
-  department: ActiveDepartmentView | null;
+  answer: ActiveDepartmentResponse;
 }
 
 export function ActiveDepartmentProvider({ children }: { children: React.ReactNode }) {
@@ -275,7 +250,6 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
     // browser only; the box keeps it for their other devices.
     if (!userId && previousUserId.current) {
       writeStored(previousUserId.current, null);
-      writeSynced(previousUserId.current, false);
     }
     previousUserId.current = userId;
     setStored(userId ? { userId, slug: readStored(userId) } : null);
@@ -312,8 +286,8 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
     async () => {
       const pickSeqAtStart = picks.current;
       const pendingAtStart = pendingPuts.current;
-      const res = await getActiveDepartment();
-      return { pickSeqAtStart, pendingAtStart, department: res.department };
+      const answer = await getActiveDepartment();
+      return { pickSeqAtStart, pendingAtStart, answer };
     },
     { revalidateOnFocus: true, shouldRetryOnError: false },
   );
@@ -324,16 +298,14 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
 
   useEffect(() => {
     if (!serverChoice || !userId) return;
-    const serverSlug = serverChoice.department?.slug ?? null;
+    const { answer } = serverChoice;
     const adopt = shouldAdoptServerChoice({
       pickedSince:
         serverChoice.pickSeqAtStart !== picks.current || serverChoice.pendingAtStart !== 0,
-      synced: readSynced(userId),
-      serverSlug,
-      localSlug: readStored(userId),
+      scope: answer.scope,
     });
     if (!adopt) return;
-    writeSynced(userId, true);
+    const serverSlug = answer.scope === "department" ? answer.department.slug : null;
     writeStored(userId, serverSlug);
     setStored((prev) =>
       prev && prev.userId === userId && prev.slug === serverSlug ? prev : { userId, slug: serverSlug },
@@ -355,17 +327,14 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
       if (departmentId === undefined) return;
       pendingPuts.current += 1;
       putActiveDepartment(departmentId)
-        .then(
-          () => writeSynced(userId, true),
-          (err: unknown) => {
-            if (isMissingRoute(err)) {
-              setServerSync(false);
-              return;
-            }
-            // A display preference: the local pick stands, nothing else.
-            console.warn("Couldn't save the department choice to Droplet; this browser keeps it.", err);
-          },
-        )
+        .catch((err: unknown) => {
+          if (isMissingRoute(err)) {
+            setServerSync(false);
+            return;
+          }
+          // A display preference: the local pick stands, nothing else.
+          console.warn("Couldn't save the department choice to Droplet; this browser keeps it.", err);
+        })
         .finally(() => {
           pendingPuts.current -= 1;
         });

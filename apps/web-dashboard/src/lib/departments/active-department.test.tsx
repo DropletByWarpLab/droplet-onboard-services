@@ -10,9 +10,11 @@
  *     exactly the set the box checks (one fixture file, read by both suites).
  *   · visiting /d/<slug> makes that department active and remembers it.
  *   · the remembered choice is per user and forgotten on sign-out.
- *   · the box's answer wins once it arrives, but never over a local pick made
- *     after the read began or still on its way; a pick is PUT; a box without
- *     the route means P1's local-only behaviour.
+ *   · the box's answer wins once it arrives, if it is a CHOSEN scope — never
+ *     `unset`, so a P1 local choice survives a box nobody has told anything —
+ *     and never over a local pick made after the read began or still on its
+ *     way; a pick is PUT; a box without the route means P1's local-only
+ *     behaviour.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -39,7 +41,6 @@ vi.mock("@/lib/auth", () => ({
 }));
 // The signed-in user in these tests is "u1" unless a test overrides `id`.
 const U1_KEY = "droplet-active-department:u1";
-const U1_SYNCED = "droplet-active-department-synced:u1";
 
 const pathRef = { current: "/" };
 vi.mock("next/navigation", () => ({
@@ -51,7 +52,6 @@ import {
   ACTIVE_DEPARTMENT_KEY,
   ActiveDepartmentProvider,
   activeDepartmentStorageKey,
-  activeDepartmentSyncedKey,
   departmentChoices,
   isMissingRoute,
   resolveActive,
@@ -87,11 +87,15 @@ function dept(over: Partial<Department>): Department {
 const security = dept({ id: "sec", name: "Security", slug: "security" });
 const sales = dept({ id: "sal", name: "Sales", slug: "sales" });
 
-/** What the box answers for a department. */
+/** What the box answers for a chosen department. */
 const onBox = (d: Department): ActiveDepartmentResponse => ({
+  scope: "department",
   department: { id: d.id, slug: d.slug, name: d.name, profile: null },
 });
-const WHOLE: ActiveDepartmentResponse = { department: null };
+/** Whole business, CHOSEN (on this device or another). */
+const WHOLE: ActiveDepartmentResponse = { scope: "whole_business", department: null };
+/** Nobody has chosen anything, on any device. */
+const UNSET: ActiveDepartmentResponse = { scope: "unset", department: null };
 
 /** A typed error as `securityFetch` throws it. */
 function httpError(status: number, code?: string): Error {
@@ -190,22 +194,18 @@ describe("isMissingRoute", () => {
 });
 
 describe("shouldAdoptServerChoice", () => {
-  const base = { pickedSince: false, synced: true, serverSlug: "security", localSlug: "sales" };
+  it("a chosen scope wins once it answers — a department, and Whole business alike", () => {
+    expect(shouldAdoptServerChoice({ pickedSince: false, scope: "department" })).toBe(true);
+    expect(shouldAdoptServerChoice({ pickedSince: false, scope: "whole_business" })).toBe(true);
+  });
 
-  it("the box wins once it answers", () => {
-    expect(shouldAdoptServerChoice(base)).toBe(true);
-    expect(shouldAdoptServerChoice({ ...base, serverSlug: null })).toBe(true);
+  it("`unset` is never adopted: nobody chose, so a P1 choice here stands", () => {
+    expect(shouldAdoptServerChoice({ pickedSince: false, scope: "unset" })).toBe(false);
   });
 
   it("never over a local pick made after the read began (or still on its way)", () => {
-    expect(shouldAdoptServerChoice({ ...base, pickedSince: true })).toBe(false);
-    expect(shouldAdoptServerChoice({ ...base, pickedSince: true, synced: false, serverSlug: null, localSlug: null })).toBe(false);
-  });
-
-  it("an unsynced browser keeps a P1 department against the box's Whole business — and only that", () => {
-    expect(shouldAdoptServerChoice({ ...base, synced: false, serverSlug: null })).toBe(false);
-    expect(shouldAdoptServerChoice({ ...base, synced: false, serverSlug: null, localSlug: null })).toBe(true);
-    expect(shouldAdoptServerChoice({ ...base, synced: false })).toBe(true);
+    expect(shouldAdoptServerChoice({ pickedSince: true, scope: "department" })).toBe(false);
+    expect(shouldAdoptServerChoice({ pickedSince: true, scope: "whole_business" })).toBe(false);
   });
 });
 
@@ -254,8 +254,8 @@ describe("<ActiveDepartmentProvider>", () => {
     getActiveDepartmentMock.mockReset();
     putActiveDepartmentMock.mockReset();
     getDepartmentProfileMock.mockResolvedValue({ profile: null, inheritedFrom: null, canEdit: false });
-    // The box has never been told anything: Whole business.
-    getActiveDepartmentMock.mockResolvedValue(WHOLE);
+    // The box has never been told anything.
+    getActiveDepartmentMock.mockResolvedValue(UNSET);
     putActiveDepartmentMock.mockImplementation(async (id: string | null) =>
       id === null ? WHOLE : onBox([security, sales].find((d) => d.id === id)!),
     );
@@ -339,7 +339,6 @@ describe("<ActiveDepartmentProvider>", () => {
 
   it("keys the choice per user", () => {
     expect(activeDepartmentStorageKey("u1")).toBe(U1_KEY);
-    expect(activeDepartmentSyncedKey("u1")).toBe(U1_SYNCED);
   });
 
   it("another user with the same slug stored lands on Whole business (shared browser)", async () => {
@@ -373,9 +372,8 @@ describe("<ActiveDepartmentProvider>", () => {
     expect(localStorage.getItem(U1_KEY)).toBe("security");
   });
 
-  it("signing out clears the signed-out user's choice (and this browser's sync mark), not the box's", async () => {
+  it("signing out clears the signed-out user's choice in this browser, not the box's", async () => {
     localStorage.setItem(U1_KEY, "security");
-    localStorage.setItem(U1_SYNCED, "1");
     getActiveDepartmentMock.mockResolvedValue(onBox(security));
     listDepartmentsMock.mockResolvedValue({ departments: [security] });
     const { rerender } = wrap(<Probe />);
@@ -384,7 +382,6 @@ describe("<ActiveDepartmentProvider>", () => {
     authRef.current = null;
     rerender(tree(<Probe />));
     await waitFor(() => expect(localStorage.getItem(U1_KEY)).toBeNull());
-    expect(localStorage.getItem(U1_SYNCED)).toBeNull();
     expect(screen.getByTestId("active")).toHaveTextContent("whole");
     // Nothing is written to the box on sign-out.
     expect(putActiveDepartmentMock).not.toHaveBeenCalled();
@@ -409,42 +406,47 @@ describe("<ActiveDepartmentProvider>", () => {
   describe("the box's answer", () => {
     it("replaces this browser's copy — state AND localStorage (a switch made on another device)", async () => {
       localStorage.setItem(U1_KEY, "sales");
-      localStorage.setItem(U1_SYNCED, "1");
       getActiveDepartmentMock.mockResolvedValue(onBox(security));
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
       wrap(<Probe />);
       await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("security"));
       expect(localStorage.getItem(U1_KEY)).toBe("security");
-      expect(localStorage.getItem(U1_SYNCED)).toBe("1");
       // Adopting is not a pick: nothing is echoed back.
       expect(putActiveDepartmentMock).not.toHaveBeenCalled();
     });
 
-    it("Whole business on the box replaces a department here once this browser has synced", async () => {
+    it("Whole business CHOSEN on another device reaches a browser still holding a P1 department", async () => {
+      // The laptop has never talked to the box; the phone picked Whole business.
       localStorage.setItem(U1_KEY, "security");
-      localStorage.setItem(U1_SYNCED, "1");
+      getActiveDepartmentMock.mockResolvedValue(WHOLE);
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
       wrap(<Probe />);
       await waitFor(() => expect(localStorage.getItem(U1_KEY)).toBeNull());
       expect(screen.getByTestId("active")).toHaveTextContent("whole");
+      expect(putActiveDepartmentMock).not.toHaveBeenCalled();
     });
 
-    it("a P1 choice the box was never told about survives its Whole business, until the first pick here writes the row (§5)", async () => {
+    it("a P1 choice survives a box that says `unset` — nobody chose — until a pick writes the row (§5)", async () => {
       localStorage.setItem(U1_KEY, "security");
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
       wrap(<Probe />);
       await waitFor(() => expect(getActiveDepartmentMock).toHaveBeenCalled());
       await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("security"));
       expect(localStorage.getItem(U1_KEY)).toBe("security");
-      expect(localStorage.getItem(U1_SYNCED)).toBeNull();
+      // …on every read: focus re-reads `unset` and still changes nothing.
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      await waitFor(() => expect(getActiveDepartmentMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+      expect(screen.getByTestId("active")).toHaveTextContent("security");
+      expect(localStorage.getItem(U1_KEY)).toBe("security");
+      expect(putActiveDepartmentMock).not.toHaveBeenCalled();
 
       await click("pick sales");
       await waitFor(() => expect(putActiveDepartmentMock).toHaveBeenCalledWith("sal"));
-      await waitFor(() => expect(localStorage.getItem(U1_SYNCED)).toBe("1"));
     });
 
     it("is re-read on focus, so a switch on the phone reaches an open tab", async () => {
-      localStorage.setItem(U1_SYNCED, "1");
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
       wrap(<Probe />);
       await waitFor(() => expect(getActiveDepartmentMock).toHaveBeenCalledTimes(1));
@@ -459,7 +461,6 @@ describe("<ActiveDepartmentProvider>", () => {
     });
 
     it("an answer to a read that began BEFORE a local pick does not overwrite it", async () => {
-      localStorage.setItem(U1_SYNCED, "1");
       const read = deferred<ActiveDepartmentResponse>();
       getActiveDepartmentMock.mockReturnValue(read.promise);
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
@@ -476,7 +477,6 @@ describe("<ActiveDepartmentProvider>", () => {
     });
 
     it("an answer to a read that began while a pick's PUT was still on its way does not overwrite it", async () => {
-      localStorage.setItem(U1_SYNCED, "1");
       getActiveDepartmentMock.mockResolvedValue(WHOLE);
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
       wrap(<Probe />);
@@ -543,7 +543,6 @@ describe("<ActiveDepartmentProvider>", () => {
     });
 
     it("a failed PUT keeps the local pick, and says so only in the console", async () => {
-      localStorage.setItem(U1_SYNCED, "1");
       putActiveDepartmentMock.mockRejectedValue(httpError(500, "INTERNAL_ERROR"));
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
       wrap(<Probe />);
@@ -605,7 +604,6 @@ describe("<ActiveDepartmentProvider>", () => {
 
     it("a read that fails otherwise (5xx, network) leaves this browser's choice as it is", async () => {
       localStorage.setItem(U1_KEY, "security");
-      localStorage.setItem(U1_SYNCED, "1");
       getActiveDepartmentMock.mockRejectedValue(httpError(503, "UNKNOWN"));
       listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
       wrap(<Probe />);

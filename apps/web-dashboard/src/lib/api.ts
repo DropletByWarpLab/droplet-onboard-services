@@ -9359,7 +9359,8 @@ export function ackAllNotifications(ids: readonly string[]): Promise<Notificatio
 
 export const ACTIVE_DEPARTMENT_PATH = "/api/me/active-department";
 
-/** P6-1 — the caller's department, re-checked by the box now; null is Whole business. */
+/** P6-1 — the caller's choice, re-checked by the box now. `scope: "unset"` is
+ *  "never chosen", which is not the same answer as a chosen Whole business. */
 export function getActiveDepartment(): Promise<ActiveDepartmentResponse> {
   return securityFetch<ActiveDepartmentResponse>(`${BASE}${ACTIVE_DEPARTMENT_PATH}`);
 }

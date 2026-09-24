@@ -582,15 +582,28 @@ never grants**: what the person can reach is the same whatever is chosen.
 
 | Method | Path | Auth | Body | 200 response |
 |---|---|---|---|---|
-| GET | `/me/active-department` | Bearer (a person) | — | `{ department: ActiveDepartment \| null }` |
-| PUT | `/me/active-department` | Bearer (a person) | `{ departmentId: "<uuid>" \| null }` | `{ department: ActiveDepartment \| null }` |
+| GET | `/me/active-department` | Bearer (a person) | — | `{ scope, department: ActiveDepartment \| null }` |
+| PUT | `/me/active-department` | Bearer (a person) | `{ departmentId: "<uuid>" \| null }` | `{ scope, department: ActiveDepartment \| null }` |
+
+`scope` is always present and says what the person chose:
+
+| `scope` | Meaning | `department` |
+|---|---|---|
+| `"unset"` | The person has never chosen, on any device. | `null` |
+| `"whole_business"` | The person chose Whole business. | `null` |
+| `"department"` | The person chose a department. | `ActiveDepartment` |
 
 `ActiveDepartment` is `{ id, slug, name, profile: { template, icon } | null }`.
 `profile: null` means the department is not set up yet.
 
-- **`department: null` is Whole business**, the default for everyone (DS-014).
-  PUT `null` to choose it. The box keeps nothing for Whole business, so a person
-  who never chose anything also reads `null`.
+- **Key on `scope`, not on `department` being `null`.** Show Whole business, the
+  default for everyone (DS-014), for both `"unset"` and `"whole_business"`. They
+  differ in one way: `"unset"` means nobody chose anything, so a choice the app
+  already kept on the device may stand. `"whole_business"` was chosen, on this
+  device or another, and replaces whatever the device holds.
+- **PUT `null` chooses Whole business**, and the box records that choice: the
+  next GET answers `"whole_business"`, never `"unset"`. PUT a department's id to
+  choose it. PUT answers with the same shape as GET.
 - **What to offer.** `GET /api/departments` returns the rows the person may see.
   Offer the `kind: "DEPARTMENT"` rows whose `state` is neither `archived` nor
   `archiving`, sorted by name, plus Whole business. PUT accepts exactly that
@@ -598,7 +611,9 @@ never grants**: what the person can reach is the same whatever is chosen.
 - **Each person reads and writes only their own choice.** Nothing in the request
   names a person. A service token gets `403 HUMAN_ONLY`.
 - **The box checks the choice again on every read.** If the person has been
-  removed from the department, or it has been archived, GET answers `null`.
+  removed from the department, or it has been archived, GET answers
+  `"whole_business"`. The box keeps the choice, so it comes back if the
+  department is restored or the person is added back.
 - **Every PUT refusal looks the same.** A department the person may not choose
   (missing, not theirs, archived or being archived, a team, the household) gets
   one `404 DEPARTMENT_NOT_AVAILABLE` body, so the answer never shows whether a

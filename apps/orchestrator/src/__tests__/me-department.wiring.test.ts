@@ -48,7 +48,7 @@ describe("/api/me/active-department is mounted behind authMiddleware", () => {
     });
     const res = await request(app).get(PATH).set("Authorization", `Bearer ${token}`);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ department: null });
+    expect(res.body).toEqual({ scope: "unset", department: null });
     expect(findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { userId: "7f6e5d4c-3b2a-4190-8f7e-6d5c4b3a2918" } }),
     );

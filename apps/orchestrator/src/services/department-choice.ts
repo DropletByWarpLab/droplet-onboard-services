@@ -2,10 +2,13 @@
  * WARP-2981 (ADR-059 §6.1, DS-003) — the department a person's shell is
  * arranged around, kept on the server so it follows them to every device.
  *
- * One row per person (`ActiveDepartmentChoice`, keyed by userId), and only
- * while a department is chosen: no row is Whole business, the default for
- * everyone (DS-014). It SHOWS, never grants — the nav still runs every gate
- * after the department filter.
+ * One row per person (`ActiveDepartmentChoice`, keyed by userId), and the row
+ * IS their choice: `scope` is Whole business or a department. No row means
+ * they have never chosen — its own answer, `unset`, not a second meaning of
+ * Whole business: the box shows Whole business (DS-014) either way, but only
+ * a chosen scope may replace a choice a browser kept from before P6. It
+ * SHOWS, never grants — the nav still runs every gate after the department
+ * filter.
  *
  * Choosability is checked on WRITE and again on READ. A person removed from
  * the department, or a department archived since, reads as Whole business.
@@ -33,7 +36,7 @@ export interface ChoiceViewer {
   role: string;
 }
 
-/** What GET and PUT answer with — the switcher's label and nothing more. */
+/** A chosen department in an answer — the switcher's label and nothing more. */
 export interface ActiveDepartmentView {
   id: string;
   slug: string;
@@ -41,6 +44,21 @@ export interface ActiveDepartmentView {
   /** `null` is a real state: the department is not set up yet. */
   profile: { template: string; icon: string } | null;
 }
+
+/**
+ * What GET and PUT answer. `scope` is always explicit:
+ *   · `unset` — no choice on the box yet (no row);
+ *   · `whole_business` — chosen, or a department chosen that the person may no
+ *     longer choose (the row is kept; see readActiveDepartment);
+ *   · `department` — `department` is the view, and only then non-null.
+ */
+export type ActiveDepartmentAnswer =
+  | { scope: "unset"; department: null }
+  | { scope: "whole_business"; department: null }
+  | { scope: "department"; department: ActiveDepartmentView };
+
+const UNSET: ActiveDepartmentAnswer = { scope: "unset", department: null };
+const WHOLE_BUSINESS: ActiveDepartmentAnswer = { scope: "whole_business", department: null };
 
 /** States in which a department is on its way out, or gone. */
 const NOT_CHOOSABLE_STATES: ReadonlySet<string> = new Set(["archived", "archiving"]);
@@ -102,23 +120,28 @@ async function loadChoosable(
 }
 
 /**
- * The caller's department, re-checked now; null is Whole business. Reads the
- * row, then the department and the viewer's membership. Never writes.
+ * The caller's choice, re-checked now. Reads the row, then (for a department)
+ * the department and the viewer's membership. Never writes: a department the
+ * viewer may no longer choose reads as Whole business and the row waits for
+ * their next choice, so a department restored from the archive comes back.
  */
 export async function readActiveDepartment(
   prisma: PrismaClient,
   viewer: ChoiceViewer,
-): Promise<ActiveDepartmentView | null> {
+): Promise<ActiveDepartmentAnswer> {
   const row = await prisma.activeDepartmentChoice.findUnique({
     where: { userId: viewer.id },
-    select: { departmentId: true },
+    select: { scope: true, departmentId: true },
   });
-  if (!row) return null;
-  return loadChoosable(prisma, viewer, row.departmentId);
+  if (!row) return UNSET;
+  if (row.scope === "whole_business") return WHOLE_BUSINESS;
+  // A department choice always names one: ActiveDepartmentChoice_scope_shape.
+  const view = await loadChoosable(prisma, viewer, row.departmentId!);
+  return view ? { scope: "department", department: view } : WHOLE_BUSINESS;
 }
 
 export type ChooseResult =
-  | { ok: true; department: ActiveDepartmentView | null }
+  | { ok: true; answer: ActiveDepartmentAnswer }
   | { ok: false; reason: "not_available" };
 
 /** Postgres FK violation, as Prisma reports it. */
@@ -127,14 +150,14 @@ function isForeignKeyViolation(err: unknown): boolean {
 }
 
 /**
- * Set the caller's department, or Whole business with `null`.
+ * Set the caller's department, or Whole business with `null`. Either way the
+ * row records the choice (upsert keyed by userId — the primary key, so two
+ * devices racing can never leave two rows; the later write wins).
  *
- *   · null → the row is deleted (deleteMany, so "already Whole business" is
- *     not an error);
+ *   · null → a `whole_business` row, with no department;
  *   · a department the caller may not choose, or one that does not exist →
  *     `not_available`, with nothing written;
- *   · otherwise an upsert keyed by userId — the primary key, so two devices
- *     racing can never leave two rows; the later write wins.
+ *   · otherwise a `department` row naming it.
  *
  * A department removed between the check and the write fails its FK and is
  * the same `not_available`.
@@ -145,20 +168,26 @@ export async function chooseActiveDepartment(
   departmentId: string | null,
 ): Promise<ChooseResult> {
   if (departmentId === null) {
-    await prisma.activeDepartmentChoice.deleteMany({ where: { userId: viewer.id } });
-    return { ok: true, department: null };
+    const whole = { scope: "whole_business", departmentId: null } as const;
+    await prisma.activeDepartmentChoice.upsert({
+      where: { userId: viewer.id },
+      create: { userId: viewer.id, ...whole },
+      update: whole,
+    });
+    return { ok: true, answer: WHOLE_BUSINESS };
   }
   const view = await loadChoosable(prisma, viewer, departmentId);
   if (!view) return { ok: false, reason: "not_available" };
+  const chosen = { scope: "department", departmentId } as const;
   try {
     await prisma.activeDepartmentChoice.upsert({
       where: { userId: viewer.id },
-      create: { userId: viewer.id, departmentId },
-      update: { departmentId },
+      create: { userId: viewer.id, ...chosen },
+      update: chosen,
     });
   } catch (err) {
     if (isForeignKeyViolation(err)) return { ok: false, reason: "not_available" };
     throw err;
   }
-  return { ok: true, department: view };
+  return { ok: true, answer: { scope: "department", department: view } };
 }
