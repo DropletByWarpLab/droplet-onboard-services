@@ -129,6 +129,7 @@ describe("🔴 the path parameter is the target, and the query models the turn",
     expect(mocks.inspectTools).toHaveBeenCalledWith(
       prisma,
       expect.objectContaining({ targetUserId: "someone-else" }),
+      {},
     );
   });
 
@@ -142,7 +143,7 @@ describe("🔴 the path parameter is the target, and the query models the turn",
       offLan: true,
       interview: true,
       voice: true,
-    });
+    }, {});
   });
 
   it("treats an absent or non-truthy flag as false, and a missing message as empty", async () => {
@@ -155,7 +156,7 @@ describe("🔴 the path parameter is the target, and the query models the turn",
       offLan: false,
       interview: false,
       voice: false,
-    });
+    }, {});
   });
 
   it("🔴 hands the prompt composer the ADVERTISED tools, from the tool inspector", async () => {
@@ -185,6 +186,28 @@ describe("🔴 the path parameter is the target, and the query models the turn",
       expect.objectContaining({ allowedToolNames: undefined }),
     );
   });
+
+  it("🔴 hands the multiplexer's remote call policy to the inspector (WARP-2900)", async () => {
+    // The runtime rows' dispatch verdict must come from the policy a real
+    // call runs through. app.ts passes the process-wide one; a router that
+    // dropped it would have the inspector fall back to its own default and
+    // the page could disagree with dispatch without a test noticing.
+    mocks.inspectTools.mockResolvedValue(TOOLS_RESULT);
+    mocks.inspectPrompt.mockResolvedValue(PROMPT_RESULT);
+    const policy = () => ({ kind: "allow" as const });
+    const app = express();
+    app.use((req, _res, next) => {
+      (req as unknown as { user: { role: string; id: string } }).user = { role: "owner", id: "admin-1" };
+      next();
+    });
+    app.use("/api", createAdminPromptInspectorRouter(prisma, { remoteCallPolicy: policy }));
+    await request(app).get("/api/admin/tool-inspect/u1");
+    await request(app).get("/api/admin/prompt-inspect/u1");
+    expect(mocks.inspectTools).toHaveBeenCalledTimes(2);
+    for (const call of mocks.inspectTools.mock.calls) {
+      expect(call[2]).toEqual({ remoteCallPolicy: policy });
+    }
+  });
 });
 
 // ── the audit row ───────────────────────────────────────────────────────────
@@ -198,6 +221,21 @@ describe("🔴 looking leaves a trace, and the trace carries no content", () => 
     expect(row.severity).toBe("info");
     expect(row.refs.target).toBe("u1");
     expect(row.refs.by).toBe("admin-1");
+  });
+
+  it("🔴 the tool-inspect row counts runtime tools the model is shown but dispatch refuses (WARP-2900)", async () => {
+    // They are advertised — the real turn sends their schemas — so they are
+    // in `advertised`, and the row says separately how many of those every
+    // call to would be refused. Folding them into `withheld` undercounts what
+    // the model receives.
+    mocks.inspectTools.mockResolvedValue({
+      ...TOOLS_RESULT,
+      counts: { ...TOOLS_RESULT.counts, refusedAtDispatch: 3 },
+    });
+    await request(appAs("owner")).get("/api/admin/tool-inspect/u1");
+    const row = mocks.recordActivity.mock.calls[0]![0] as ActivityRow;
+    expect(row.refs.advertised).toBe(7);
+    expect(row.refs.refusedAtDispatch).toBe(3);
   });
 
   it("🔴 never copies the prompt text into the row", async () => {

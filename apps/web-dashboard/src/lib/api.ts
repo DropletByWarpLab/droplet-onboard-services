@@ -9,6 +9,11 @@ import type { SaasConnectionState } from "@droplet/shared-types";
 import type {
   ToolInspectResponse,
   PromptInspectResponse,
+  RuntimeToolsResponse,
+  ExtensionListItem,
+  ExtensionProposal,
+  ExtensionPromotePhase1,
+  ExtensionPromoteResult,
   CameraInfo,
   CameraGroupInfo,
   CameraPinInfo,
@@ -8953,6 +8958,95 @@ export async function deleteRoutineSchedule(
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to delete schedule: ${res.status}`);
   }
+}
+
+// ─── WARP-2900 (ADR-056 slice H4) — runtime tools + extensions ──────────────
+
+/**
+ * `GET /api/llm/tools/runtime` — tools that exist only at runtime (promoted
+ * extensions, connected servers): name, source and what dispatch does with a
+ * call. No descriptions, by design.
+ */
+export async function fetchRuntimeTools(): Promise<RuntimeToolsResponse> {
+  const res = await authFetch(`${BASE}/api/llm/tools/runtime`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load runtime tools: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * A refused extension request. `code` is the orchestrator's machine code
+ * (`TOKEN_OPERATION_MISMATCH`, `extensions_disabled`, …) so the page can say
+ * something specific; `message` is the server's sentence when it sent one.
+ */
+export class ExtensionRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+    /** The whole refusal body — a blocked phase 1 carries `readback` + `preflight`. */
+    readonly body: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = "ExtensionRequestError";
+  }
+}
+
+async function extensionRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await authFetch(`${BASE}${path}`, init);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    const code = typeof body.error === "string" ? body.error : null;
+    const message =
+      typeof body.message === "string" ? body.message : code ?? `Request failed: ${res.status}`;
+    throw new ExtensionRequestError(message, res.status, code, body);
+  }
+  return res.json() as Promise<T>;
+}
+
+const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json" } } as const;
+
+export function fetchExtensions(): Promise<{ extensions: ExtensionListItem[] }> {
+  return extensionRequest("/api/extensions");
+}
+
+export function fetchExtensionProposals(): Promise<{ proposals: ExtensionProposal[] }> {
+  return extensionRequest("/api/extensions/proposals");
+}
+
+/** Phase 1: the readback + preflight the owner confirms. Signs nothing. */
+export function prepareExtensionPromotion(workspaceId: string): Promise<ExtensionPromotePhase1> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
+    ...JSON_POST,
+    body: JSON.stringify({}),
+  });
+}
+
+/** Phase 2: echoes the token and the digest that was read back; 409 if the bytes moved. */
+export function confirmExtensionPromotion(
+  workspaceId: string,
+  input: { confirmationToken: string; manifestSha256: string; operatorDomain?: string | null },
+): Promise<ExtensionPromoteResult> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
+    ...JSON_POST,
+    body: JSON.stringify(input),
+  });
+}
+
+export function setExtensionEnabled(
+  slug: string,
+  enabled: boolean,
+): Promise<{ id: string; status: string }> {
+  return extensionRequest(
+    `/api/extensions/${encodeURIComponent(slug)}/${enabled ? "enable" : "disable"}`,
+    { ...JSON_POST, body: JSON.stringify({}) },
+  );
+}
+
+export function uninstallExtension(slug: string): Promise<{ id: string; status: string }> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, { method: "DELETE" });
 }
 
 /** WARP-2991 — what a cloud turn on this conversation would carry. Mirrors
