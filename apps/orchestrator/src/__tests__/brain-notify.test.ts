@@ -224,7 +224,7 @@ describe("notifyFindings — no owner (WARP-2752)", () => {
 describe("notifyFindings — who it is addressed to (WARP-2813)", () => {
   it("addresses the owner by USERNAME, not by id", async () => {
     // The notifications subsystem is keyed on `User.username` end to end:
-    // `sendNotification` publishes `droplet/notifications/${userId}`, ws-bridge
+    // `sendNotification` publishes `droplet/notifications/${username}`, ws-bridge
     // subscribes `droplet/notifications/${user.username}`, and both readers of
     // the persisted NotificationLog filter by username. A UUID here is dropped
     // by the broker AND invisible to every reader — the notification exists and
@@ -233,15 +233,15 @@ describe("notifyFindings — who it is addressed to (WARP-2813)", () => {
     await notifyFindings(db([finding()]), { now: NOW });
     expect(sendNotification).toHaveBeenCalledOnce();
     const [, input] = sendNotification.mock.calls[0]!;
-    expect((input as unknown as { userId: string }).userId).toBe("owner");
-    expect((input as unknown as { userId: string }).userId).not.toBe("u-owner");
+    expect((input as unknown as { username: string }).username).toBe("owner");
+    expect((input as unknown as { username: string }).username).not.toBe("u-owner");
   });
 
   it("addresses the digest to the username too", async () => {
     await notifyFindings(db([finding({ impactMinor: 1n })]), { now: NOW });
     expect(sendNotification).toHaveBeenCalledOnce();
     const [, input] = sendNotification.mock.calls[0]!;
-    expect((input as unknown as { userId: string }).userId).toBe("owner");
+    expect((input as unknown as { username: string }).username).toBe("owner");
   });
 });
 

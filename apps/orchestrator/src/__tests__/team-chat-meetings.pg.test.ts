@@ -119,7 +119,7 @@ describe.skipIf(!RUN)("team chat meetings — real Postgres (WARP-1685)", () => 
       });
     }
     await prisma.calendarEvent.deleteMany({ where: { userId: OURS } });
-    await prisma.notificationLog.deleteMany({ where: { userId: OURS } });
+    await prisma.notificationLog.deleteMany({ where: { username: OURS } });
     await prisma.user.deleteMany({ where: { username: OURS } });
   }
 
@@ -339,12 +339,12 @@ describe.skipIf(!RUN)("team chat meetings — real Postgres (WARP-1685)", () => 
 
     // REAL NotificationLog rows: invitee yes, organizer no.
     const bobLogs = await prisma.notificationLog.findMany({
-      where: { userId: bob.username },
+      where: { username: bob.username },
     });
     expect(bobLogs).toHaveLength(1);
     expect(bobLogs[0].title).toBe("Meeting reminder");
     const aliceLogs = await prisma.notificationLog.count({
-      where: { userId: alice.username },
+      where: { username: alice.username },
     });
     expect(aliceLogs).toBe(0);
   });

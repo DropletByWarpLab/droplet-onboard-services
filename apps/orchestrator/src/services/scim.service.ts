@@ -54,6 +54,7 @@ import {
   type GuardActor,
 } from "./role-mutation-guard.service.js";
 import { createLogger } from "../lib/logger.js";
+import { isUserIdShaped } from "@droplet/auth-policy";
 
 const logger = createLogger("scim-service");
 
@@ -93,11 +94,13 @@ const SCIM_AUDIT_ACTOR = `scim:${OKTA_PROVIDER}`;
 const SCIM_RANK_MESSAGE =
   "SCIM cannot assign a role above the directory-sync ceiling";
 
-/** Local-part of an email, sanitized into a username seed (mirrors sso.ts). */
+/** Local-part of an email, sanitized into a username seed (mirrors sso.ts).
+ *  WARP-2911: never the shape of a `User.id` — notifications refuse a
+ *  UUID-shaped recipient, so such a username would be refused every one. */
 function usernameSeedFromEmail(email: string): string {
   const local = email.split("@")[0] ?? email;
   const cleaned = local.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 48);
-  return cleaned.length >= 2 ? cleaned : `scim-${cleaned}`;
+  return cleaned.length >= 2 && !isUserIdShaped(cleaned) ? cleaned : `scim-${cleaned}`;
 }
 
 export interface ProvisionUserResult {
