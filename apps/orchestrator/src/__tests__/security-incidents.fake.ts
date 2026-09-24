@@ -413,6 +413,8 @@ export interface FakeSecurityPrisma {
   failOn(table: TableName, method: string, predicate?: (args: unknown) => boolean, opts?: { always?: boolean; error?: Error }): void;
   /** Run `effect` (once) just BEFORE the next matching call — a concurrent writer landing between a read and a CAS. */
   onCall(table: TableName, method: string, effect: (world: FakeWorld) => void): void;
+  /** How many `$transaction` callbacks are running right now (0 = autocommit). */
+  txDepth(): number;
   client: Record<string, unknown>;
 }
 
@@ -433,6 +435,7 @@ export function createFakeSecurityPrisma(init: Partial<FakeWorld> = {}, start: D
   const raw: string[] = [];
   const faults: Array<{ table: TableName; method: string; predicate?: (a: unknown) => boolean; always: boolean; error?: Error }> = [];
   const effects: Array<{ table: TableName; method: string; effect: (w: FakeWorld) => void }> = [];
+  let depth = 0;
 
   function maybeFail(table: TableName, method: string, args: unknown): void {
     const e = effects.findIndex((x) => x.table === table && x.method === method);
@@ -710,11 +713,14 @@ export function createFakeSecurityPrisma(init: Partial<FakeWorld> = {}, start: D
     if (Array.isArray(fn)) return Promise.all(fn);
     txLevels.push(opts?.isolationLevel ?? "default");
     const snapshot = clone(world);
+    depth++;
     try {
       return await (fn as (tx: unknown) => Promise<unknown>)(client);
     } catch (err) {
       for (const t of TABLES) world[t] = snapshot[t];
       throw err;
+    } finally {
+      depth--;
     }
   };
   client.$executeRawUnsafe = async (sql: string) => {
@@ -749,6 +755,7 @@ export function createFakeSecurityPrisma(init: Partial<FakeWorld> = {}, start: D
     onCall(table, method, effect) {
       effects.push({ table, method, effect });
     },
+    txDepth: () => depth,
     client,
   };
 }

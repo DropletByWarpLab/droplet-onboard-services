@@ -792,6 +792,8 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
       "orchestrator:routes/device-clients.ts",
       "orchestrator:routes/notifications.ts",
       "tools-core:handlers/notifications/send-notification.ts",
+      // WARP-2978 — the Security alert notifier (record-then-deliver).
+      "orchestrator:services/security-alerts.service.ts",
     ]) {
       expect(files, `the sweep found no site in ${f}`).toContain(f);
     }
@@ -823,6 +825,13 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
       expect(recipientsOf(s).length > 0 || keyedByRowId(s), s.label).toBe(true);
       expect(s.args, `${s.label} writes the recipient column`).not.toMatch(/\bdata\s*:\s*\{[^}]*\busername\b/);
     }
+  });
+
+  it("WARP-2978: the Security notifier records by `recipient.user.username`, from a user projection that carries the username", () => {
+    const sites = SITES.filter((s) => s.file.id === "orchestrator:services/security-alerts.service.ts");
+    expect(sites.map((s) => s.callee)).toEqual(["recordNotification"]);
+    expect(sites.flatMap((s) => recipientsOf(s).map((r) => r.expr))).toEqual(["recipient.user.username"]);
+    expect(sites[0]!.file.code).toMatch(/const USER_SELECT = \{[^}]*\busername: true/);
   });
 
   it("the tools-core send_notification site is fed from `ctx.userId` only", () => {
