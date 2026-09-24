@@ -10,7 +10,10 @@
  *   · a camera key exists for a viewer only when they may see that camera;
  *   · an area key exists only when the area is active and visible
  *     (`zoneVisibleTo` over its active links) AND the viewer may see EVERY
- *     camera in the cells' `cameras`;
+ *     camera behind it: the cells' `cameras`, or — for an area with no cells
+ *     yet (every area on day 1) — every camera of its current active links.
+ *     An empty camera list never passes on its own (review #2352: `every()`
+ *     over [] is true, and the explanation then named the hidden camera);
  *   · anything else is absent, and absent answers exactly like missing — the
  *     same `not_found`, the same 404 body — so a hidden area cannot be
  *     probed for.
@@ -170,22 +173,32 @@ type ReadyBuild = NonNullable<Awaited<ReturnType<typeof readyBuild>>>;
 
 const windowOf = (b: ReadyBuild) => ({ from: b.windowFrom, to: b.windowTo, builtAt: (b.finishedAt ?? new Date(0)).toISOString() });
 
+/** The cameras of an area's current active camera / camera_zone links, sorted, deduped. */
+function linkCameras(own: readonly ActiveZoneLink[]): string[] {
+  const cams = own.map((l) => parseLinkRef(l.sourceKind, l.sourceRef)?.camera).filter((c): c is string => !!c);
+  return [...new Set(cams)].sort(byString);
+}
+
 /**
- * DS-005 for one key. `cellCameras` — the `cameras` of the key's cells in the
- * ready build (null when it has none). False when the key is hidden or gone:
- * the caller answers exactly as for a key that does not exist.
+ * DS-005 for one key: the cameras behind it when the viewer may see ALL of
+ * them, else null — and the caller answers exactly as for a key that does not
+ * exist. `cellCameras` — the `cameras` of the key's cells in the ready build
+ * (null or empty when it has none). An area with no cells is judged on every
+ * camera of its current active links: an empty list is never "all visible".
  */
-function keyVisible(
+function visibleKeyCameras(
   key: { kind: "area"; zoneId: string } | { kind: "camera"; camera: string },
   links: readonly ActiveZoneLink[],
   cellCameras: readonly string[] | null,
   scope: Scope,
-): boolean {
-  if (key.kind === "camera") return canSee(scope, key.camera);
+): string[] | null {
+  if (key.kind === "camera") return canSee(scope, key.camera) ? [key.camera] : null;
   const own = links.filter((l) => l.zoneId === key.zoneId);
-  if (own.length === 0) return false; // archived, or no active link: nothing to explain
-  if (!zoneVisibleTo({ id: key.zoneId }, own, visibleLinks(own, scope))) return false;
-  return (cellCameras ?? []).every((c) => canSee(scope, c));
+  if (own.length === 0) return null; // archived, or no active link: nothing to explain
+  if (!zoneVisibleTo({ id: key.zoneId }, own, visibleLinks(own, scope))) return null;
+  const cameras = cellCameras && cellCameras.length > 0 ? [...cellCameras] : linkCameras(own);
+  if (cameras.length === 0) return null;
+  return cameras.every((c) => canSee(scope, c)) ? cameras : null;
 }
 
 // ── route 29 ─────────────────────────────────────────────────────────────
@@ -234,7 +247,7 @@ export async function readPatternsOverview(prisma: ReadDb, scope: SecurityViewer
     }
     for (const { row, labels: kept } of byKey.values()) {
       const key = row.keyKind === "area" ? { kind: "area" as const, zoneId: row.zoneId! } : { kind: "camera" as const, camera: row.camera! };
-      if (!keyVisible(key, links, row.cameras, scope)) continue;
+      if (!visibleKeyCameras(key, links, row.cameras, scope)) continue;
       keys.push({
         zoneKey: row.zoneKey,
         kind: row.keyKind,
@@ -293,7 +306,7 @@ export async function readPatternCells(
     parsed.kind === "area" ? loadActiveLinks(prisma) : Promise.resolve([] as ActiveZoneLink[]),
   ]);
   if (rows.length === 0) return NOT_FOUND;
-  if (!keyVisible(parsed, links, rows[0]!.cameras, scope)) return NOT_FOUND;
+  if (!visibleKeyCameras(parsed, links, rows[0]!.cameras, scope)) return NOT_FOUND;
 
   const at = new Map(rows.map((r) => [`${r.dayType}:${r.hour}`, r]));
   const cells: CellView[] = [];
@@ -340,24 +353,19 @@ export async function explainSecurityPattern(
     prisma.securityBaselineCell.findFirst({ where: { buildId: ready.id, zoneKey }, select: { cameras: true } }),
   ]);
 
+  const visibleCameras = visibleKeyCameras(parsed, links, anyCell?.cameras ?? null, scope);
+  if (!visibleCameras) return NOT_FOUND;
   let name: string;
-  let cameras: string[];
+  const cameras = visibleCameras;
   if (parsed.kind === "area") {
-    if (!keyVisible(parsed, links, anyCell?.cameras ?? null, scope)) return NOT_FOUND;
-    const own = links.filter((l) => l.zoneId === parsed.zoneId);
-    name = own[0]!.zoneName;
-    cameras =
-      anyCell?.cameras ??
-      [...new Set(own.map((l) => parseLinkRef(l.sourceKind, l.sourceRef)?.camera).filter((c): c is string => !!c))].sort(byString);
+    name = links.find((l) => l.zoneId === parsed.zoneId)!.zoneName;
   } else {
-    if (!canSee(scope, parsed.camera)) return NOT_FOUND;
     const known =
       cameraLabels.has(parsed.camera) ||
       anyCell !== null ||
       (await prisma.securityBaselineSource.findMany({ where: { camera: parsed.camera } })).length > 0;
     if (!known) return NOT_FOUND;
     name = cameraLabels.get(parsed.camera) ?? parsed.camera;
-    cameras = [parsed.camera];
   }
 
   const tz = ready.timezone;
@@ -413,7 +421,10 @@ export async function explainSecurityPattern(
         timezone: tz,
       },
       window: windowOf(ready),
+      // Every camera here is visible by construction; filtered again so a
+      // source row can never outlive a later change to the rule above.
       sources: cameras
+        .filter((c) => canSee(scope, c))
         .map((c) => sourceOf.get(c))
         .filter((s): s is NonNullable<typeof s> => s !== undefined)
         .map((s) => ({

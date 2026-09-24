@@ -26,6 +26,9 @@ const C = "back"; // not granted
 const AREA_X = "3f1c2a9e-0b7d-4c55-9a51-1c2d3e4f5a61"; // links A and C
 const AREA_Y = "7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c82"; // links A only
 const GONE = "0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6";
+/** Areas with NO cells yet (day 1: nothing observed; D3 needs every linked camera). */
+const AREA_Z = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"; // links A and C
+const AREA_W = "6d7e8f9a-0b1c-4d2e-9f3a-4b5c6d7e8f9a"; // links A only
 
 const ALL: SecurityViewerScope = { visibleCameras: "all", mayReadThreats: true };
 const FAMILY: SecurityViewerScope = { visibleCameras: new Set([A]), mayReadThreats: false };
@@ -58,11 +61,16 @@ function world(over: Partial<PatternsWorld> = {}): PatternsWorld {
     zones: [
       { id: AREA_X, name: "Shop floor", kind: "interior", state: "active", version: 2 },
       { id: AREA_Y, name: "Car park", kind: "parking", state: "active", version: 1 },
+      { id: AREA_Z, name: "Stock room", kind: "restricted", state: "active", version: 1 },
+      { id: AREA_W, name: "Porch", kind: "entry", state: "active", version: 1 },
     ],
     links: [
       { id: "l1", zoneId: AREA_X, sourceKind: "camera", sourceRef: A, state: "active" },
       { id: "l2", zoneId: AREA_X, sourceKind: "camera", sourceRef: C, state: "active" },
       { id: "l3", zoneId: AREA_Y, sourceKind: "camera_zone", sourceRef: `${A}/drive`, state: "active" },
+      { id: "l4", zoneId: AREA_Z, sourceKind: "camera", sourceRef: A, state: "active" },
+      { id: "l5", zoneId: AREA_Z, sourceKind: "camera_zone", sourceRef: `${C}/shelf`, state: "active" },
+      { id: "l6", zoneId: AREA_W, sourceKind: "camera", sourceRef: A, state: "active" },
     ],
     sources: [
       { sourceKey: `camera:${A}`, camera: A, state: "active", daysObserved: 20, firstSeenAt: new Date("2026-08-01T00:00:00Z"), lastSeenAt: NOW, stateChangedAt: NOW },
@@ -194,6 +202,42 @@ describe("readPatternCells (route 30)", () => {
   it("a label the key does not keep, or no ready build → not found", async () => {
     expect(await readPatternCells(db(world()), ALL, `camera:${A}`, "dog")).toEqual({ status: "not_found" });
     expect(await readPatternCells(db(world({ builds: [] })), ALL, `camera:${A}`, "person")).toEqual({ status: "not_found" });
+  });
+});
+
+describe("DS-005 for an area with NO cells yet (review #2352, finding 1)", () => {
+  it("family granted A only, area linking A and C: not_found, byte-identical to a random id — never C's source row", async () => {
+    const hidden = await explainSecurityPattern(db(world()), FAMILY, { zoneId: AREA_Z }, NOW);
+    const missing = await explainSecurityPattern(db(world()), FAMILY, { zoneId: GONE }, NOW);
+    expect(hidden).toEqual({ status: "not_found" });
+    expect(JSON.stringify(hidden)).toBe(JSON.stringify(missing));
+  });
+
+  it("the owner gets it: the area's link cameras, and their sources", async () => {
+    const r = await explainSecurityPattern(db(world()), ALL, { zoneId: AREA_Z }, NOW);
+    if (r.status !== "ok") throw new Error(r.status);
+    expect(r.view.key).toMatchObject({ kind: "area", zoneId: AREA_Z, cameras: [C, A].sort() });
+    expect(r.view.cell).toBeNull();
+    expect(r.view.sources.map((s) => s.camera).sort()).toEqual([C, A].sort());
+  });
+
+  it("an area the viewer fully sees, with no cells: ok, and only visible cameras' sources", async () => {
+    const r = await explainSecurityPattern(db(world()), FAMILY, { zoneId: AREA_W }, NOW);
+    if (r.status !== "ok") throw new Error(r.status);
+    expect(r.view.key.cameras).toEqual([A]);
+    expect(r.view.sources.map((s) => s.camera)).toEqual([A]);
+    expect(JSON.stringify(r)).not.toContain(C);
+  });
+
+  it("route 30 for the no-cells area answers like a missing key for everyone", async () => {
+    expect(await readPatternCells(db(world()), FAMILY, `area:${AREA_Z}`, "person")).toEqual({ status: "not_found" });
+    expect(await readPatternCells(db(world()), ALL, `area:${AREA_Z}`, "person")).toEqual({ status: "not_found" });
+  });
+
+  it("route 29 never lists an area without cells", async () => {
+    const o = await readPatternsOverview(db(world()), ALL);
+    expect(o.keys.map((k) => k.zoneKey)).not.toContain(`area:${AREA_Z}`);
+    expect(o.keys.map((k) => k.zoneKey)).not.toContain(`area:${AREA_W}`);
   });
 });
 

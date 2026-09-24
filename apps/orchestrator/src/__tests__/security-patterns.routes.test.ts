@@ -32,6 +32,7 @@ const C = "back";
 const X = "3f1c2a9e-0b7d-4c55-9a51-1c2d3e4f5a61"; // A + C
 const Y = "7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c82"; // A only
 const GONE = "0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6";
+const Z = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"; // A + C, and NO cells yet (day 1)
 
 type Role = "owner" | "admin" | "family" | "guest";
 
@@ -48,11 +49,14 @@ function world(): PatternsWorld {
     zones: [
       { id: X, name: "Shop floor", kind: "interior", state: "active", version: 2 },
       { id: Y, name: "Car park", kind: "parking", state: "active", version: 1 },
+      { id: Z, name: "Stock room", kind: "restricted", state: "active", version: 1 },
     ],
     links: [
       { id: "l1", zoneId: X, sourceKind: "camera", sourceRef: A, state: "active" },
       { id: "l2", zoneId: X, sourceKind: "camera", sourceRef: C, state: "active" },
       { id: "l3", zoneId: Y, sourceKind: "camera", sourceRef: A, state: "active" },
+      { id: "l4", zoneId: Z, sourceKind: "camera", sourceRef: A, state: "active" },
+      { id: "l5", zoneId: Z, sourceKind: "camera", sourceRef: C, state: "active" },
     ],
     sources: [
       { sourceKey: `camera:${A}`, camera: A, state: "active", daysObserved: 20, firstSeenAt: new Date("2026-08-01T00:00:00Z"), lastSeenAt: NOW, stateChangedAt: NOW },
@@ -179,6 +183,21 @@ describe("31 GET /api/security/patterns/explain", () => {
     expect(hidden.body.error.code).toBe("PATTERN_NOT_FOUND");
     expect(JSON.stringify(hidden.body)).toBe(JSON.stringify(missing.body));
     expect(JSON.stringify(hiddenCamera.body)).toBe(JSON.stringify(missing.body));
+  });
+
+  it("DS-005 on day 1: an area with NO cells whose cameras the viewer cannot all see answers like a random id (review #2352)", async () => {
+    const hidden = await request(app("family")).get(`/api/security/patterns/explain?zone=${Z}`);
+    const missing = await request(app("family")).get(`/api/security/patterns/explain?zone=${GONE}`);
+    expect(hidden.status).toBe(404);
+    expect(JSON.stringify(hidden.body)).toBe(JSON.stringify(missing.body));
+    expect(JSON.stringify(hidden.body)).not.toContain(C);
+    const cells = await request(app("family")).get(`/api/security/patterns/cells?key=area:${Z}`);
+    expect(cells.status).toBe(404);
+    expect(JSON.stringify(cells.body)).toBe(JSON.stringify(missing.body));
+    // The owner sees every camera: the area answers, with no cell yet.
+    const owner = await request(app("owner")).get(`/api/security/patterns/explain?zone=${Z}`);
+    expect(owner.status).toBe(200);
+    expect(owner.body.cell).toBeNull();
   });
 
   it("no ready build → 409 PATTERNS_NOT_BUILT; no zone → 409 NO_TIMEZONE", async () => {
