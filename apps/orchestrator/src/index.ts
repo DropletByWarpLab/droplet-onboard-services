@@ -165,6 +165,7 @@ import {
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
+  grantCoversNoWorkload,
   runSyncTick,
   type M365SyncDeps,
 } from "./services/m365/m365-sync.service.js";
@@ -1957,6 +1958,15 @@ async function main() {
             logger.info(
               { skipped: found.skipped, registered: found.registered },
               "m365 discovery skipped workloads",
+            );
+          }
+          // `notGranted` alone is not logged (To Do's is expected), but a grant
+          // that covers NOTHING means this person syncs nothing, and silence
+          // would read as an empty mailbox (#2347 review).
+          if (grantCoversNoWorkload(found)) {
+            logger.warn(
+              { userId, notGranted: found.notGranted },
+              "m365 grant covers no workload; nothing syncs for this connection",
             );
           }
         }

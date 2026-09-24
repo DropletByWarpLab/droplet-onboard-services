@@ -217,6 +217,12 @@ function createPrismaMock(seed: any[] = []) {
       return { count: before - m365Rows.length };
     }),
   };
+  // WARP-3059 — and their sync cursors, which carry the old account's delta
+  // positions. Same reason for a real delegate: a missing one would be a
+  // swallowed TypeError that reads as "purged".
+  self.m365DeltaCursor = {
+    deleteMany: vi.fn(async () => ({ count: 0 })),
+  };
   self._m365Rows = m365Rows;
   self._users = users;
   return self;
@@ -274,6 +280,9 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
     // routes scope to the requester's OWN connection, so a row left behind
     // holds a live mailbox credential nobody can ever disconnect.
     expect(prisma.m365Connection.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice" },
+    });
+    expect(prisma.m365DeltaCursor.deleteMany).toHaveBeenCalledWith({
       where: { userId: "u-alice" },
     });
     expect(prisma._m365Rows.some((r: any) => r.userId === "u-alice")).toBe(false);

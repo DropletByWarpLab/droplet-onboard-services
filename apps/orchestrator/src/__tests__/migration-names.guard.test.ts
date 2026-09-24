@@ -69,4 +69,17 @@ describe("migration folder names (WARP-2896)", () => {
     expect(folders).not.toContain("20260924010000_warp_2704_m365_auth_code_per_connection_app");
     expect(folders).toContain("20260924020000_warp_2911_notification_recipient_username");
   });
+
+  it("the WARP-3059 M365 sync-cursor migration exists once, re-stamped after stage's newest", () => {
+    // Written as 20260924020000_warp_3059_m365_cursor_resume_link, which sorts
+    // before 20260924030000_warp_2900_extensions (#2326), now on stage.
+    // Re-stamped past it before merge, leaving 20260924040000 free for the
+    // WARP-2704 migration this branch carries, and renamed because it now also
+    // adds M365Connection.cursorLinkHash (#2347 review). A rename escapes the
+    // same-name check above, so the old folder is refused by name here.
+    const folders = migrationFolders();
+    expect(folders).toContain("20260924050000_warp_3059_m365_sync_cursors");
+    expect(folders).not.toContain("20260924020000_warp_3059_m365_cursor_resume_link");
+    expect(folders).toContain("20260924030000_warp_2900_extensions");
+  });
 });

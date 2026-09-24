@@ -75,6 +75,9 @@ function stubPrisma(row: Record<string, unknown> | null) {
         return current;
       }),
     },
+    m365DeltaCursor: {
+      deleteMany: vi.fn(async () => ({ count: 0 })),
+    },
   };
 }
 
