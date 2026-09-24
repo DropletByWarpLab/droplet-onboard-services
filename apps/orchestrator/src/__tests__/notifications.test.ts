@@ -39,9 +39,10 @@ import {
 import { isReservedUserId, isUserIdShaped } from "@droplet/auth-policy";
 import { makeFakeNotificationLog } from "./helpers/fake-notification-log.js";
 
-/** WARP-2804 — the log is an evaluating fake: `sendNotification` now records
- *  the row first (create), reads it back and stamps the outcome on it
- *  (update), so `_created[0]` is the row as it stands after delivery. */
+/** WARP-2804 — the log is an evaluating fake: `sendNotification` records the
+ *  row first (create), claims it (updateMany) and stamps the outcome on it
+ *  (update) — never re-reading it — so `_created[0]` is the row as it stands
+ *  after delivery. */
 function makePrismaStub() {
   const log = makeFakeNotificationLog();
   const stub = {
@@ -647,7 +648,7 @@ describe("WARP-2804 — delivery is claimed: a retry by id is a no-op", () => {
     expect(mqttPublish).toHaveBeenCalledTimes(1);
   });
 
-  it("an activity-notify row whose toast already went out (channels set, pushOutcome NULL) is not re-sent", async () => {
+  it("an activity-notify row whose toast already went out (deliveredAt set, pushOutcome NULL) is not re-sent", async () => {
     const prisma = makePrismaStub();
     const { id } = await recordNotification(prisma, { username: "alice", kind: "event", title: "Assigned" });
     Object.assign(prisma._created[0]!, { channels: "toast", deliveredAt: new Date() });

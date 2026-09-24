@@ -301,12 +301,13 @@ const OUTCOME_UNKNOWN = "delivery: outcome_unknown";
 /**
  * WARP-2804 (review F8) — claim a recorded row for delivery, exactly once.
  *
- * "Queued" is the state `recordNotification` writes: no channels, no
- * deliveredAt, no error, no pushOutcome. The claim is the ONE update that moves
- * a row out of it, before any transport, so of two callers (a retry, a race)
+ * "Queued" is the state `recordNotification` writes: no `deliveredAt` and no
+ * `error`. Every stamp sets one or the other — a delivery that carried
+ * nothing records why — and so does this claim (`outcome_unknown`), so those
+ * two columns are the whole test. The claim is the ONE update that moves a row
+ * out of "queued", before any transport, so of two callers (a retry, a race)
  * exactly one wins and the other is a no-op. A row activity-notify already
- * toasted (`channels` set, `pushOutcome` NULL) or failed (`error` set) is not
- * queued either.
+ * toasted (`deliveredAt` set) or failed (`error` set) is not queued either.
  *
  * `true` = claimed or unclaimable-because-the-DB-failed (delivery goes ahead:
  * losing a notification is worse than a rare duplicate); `false` = someone
@@ -315,7 +316,7 @@ const OUTCOME_UNKNOWN = "delivery: outcome_unknown";
 async function claimForDelivery(prisma: PrismaClient, id: string): Promise<boolean> {
   try {
     const { count } = await prisma.notificationLog.updateMany({
-      where: { id, channels: "", deliveredAt: null, error: null, pushOutcome: null },
+      where: { id, deliveredAt: null, error: null },
       data: { error: OUTCOME_UNKNOWN },
     });
     return count === 1;
