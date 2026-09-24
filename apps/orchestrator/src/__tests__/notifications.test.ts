@@ -706,15 +706,38 @@ describe("WARP-2804 — deliverNotification(prisma, id)", () => {
     expect(String(prisma._created[0]!.error)).toMatch(/toast: mqtt_unavailable/);
   });
 
-  it("a bad tag degrades (the push goes out without it) instead of throwing, and the row says why", async () => {
+  // Review F5 — the tag is checked ON ITS OWN. A bad tag used to strip the
+  // row's valid url/data too: the toast lost its Open action and the push
+  // opened /cameras.
+  it("MUTATION: a bad tag drops ONLY the tag — url and data still reach the toast and the push — and the row says invalid_tag", async () => {
     const prisma = makePushingPrismaStub();
-    const { id } = await recordNotification(prisma, { username: "alice", kind: "system", title: "x" });
+    const { id } = await recordNotification(prisma, PARKED);
     const result = await deliverNotification(prisma, id, { tag: "has space" });
     expect(result.channels).toEqual(["toast", "push"]);
+    const toast = mqttPublish.mock.calls[0]![1] as Record<string, unknown>;
+    expect(toast).toMatchObject({ url: PARKED.url, data: PARKED.data });
     const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
+    expect(push).toMatchObject({ url: PARKED.url, data: PARKED.data });
     expect(push.tag).toBeUndefined();
-    expect(String(prisma._created[0]!.error)).toContain("delivery: invalid_link");
+    expect(prisma._created[0]!.error).toBe("delivery: invalid_tag");
   });
+
+  it("a per-incident tag (`incident/42`) is a valid collapse key and reaches the push", async () => {
+    const prisma = makePushingPrismaStub();
+    await sendNotification(prisma, { ...PARKED, tag: "incident/42" });
+    const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
+    expect(push.tag).toBe("incident/42");
+    expect(prisma._created[0]!.error).toBeNull();
+  });
+
+  it.each(["has space", "a\\b", "x".repeat(129), "", "tag\n2", "tag?x=1"])(
+    "the tag %j is still refused by sendNotification (a caller bug)",
+    async (tag) => {
+      const prisma = makePrismaStub();
+      await expect(sendNotification(prisma, { ...PARKED, tag })).rejects.toThrow(/tag/);
+      expect(prisma._created).toHaveLength(0);
+    },
+  );
 
   it("accepts a priority (WARP-2978 fills it) and ignores it here", async () => {
     const prisma = makePrismaStub();

@@ -77,7 +77,8 @@ export interface DispatchInput {
    *  hash — `assertNotificationData` refuses those keys, nesting, and > 1 KB. */
   data?: Record<string, string | number | boolean>;
   /** WARP-2909 — collapse key (web push `tag`): repeated notifications with
-   *  one tag replace each other in the tray. `^[A-Za-z0-9._:-]{1,128}$`. */
+   *  one tag replace each other in the tray. `^[A-Za-z0-9._:/-]{1,128}$`
+   *  (`/` since WARP-2804, for per-incident tags like `incident/42`). */
   tag?: string;
 }
 
@@ -85,7 +86,14 @@ export interface DispatchInput {
 
 const MAX_LINK_LENGTH = 512;
 const MAX_DATA_BYTES = 1024;
-const TAG_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+/**
+ * The collapse key. Its only consumer is the service worker's
+ * `showNotification({ tag })` — an opaque string compared for equality, never
+ * a path, URL, topic or file name — so `/` is as safe as `:` and lets P3 tag
+ * alerts per incident (`incident/42`). Whitespace, backslash, `?`, `#` and
+ * anything non-ASCII stay out.
+ */
+const TAG_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
 /** `url` is refused because the service worker merges `data` into the
  *  notification data it opens on click — a `data.url` must never be able to
  *  stand in for the validated `url` (sw.js also spreads it first, belt and
@@ -264,7 +272,8 @@ function storedData(data: Prisma.JsonValue | null): DispatchInput["data"] {
 }
 
 export interface DeliverOptions {
-  /** Web-push collapse key, `^[A-Za-z0-9._:-]{1,128}$`. A bad one is dropped, never thrown on. */
+  /** Web-push collapse key, `^[A-Za-z0-9._:/-]{1,128}$`. A bad one is dropped
+   *  (only the tag — review F5), recorded as `delivery: invalid_tag`, never thrown on. */
   tag?: string;
   /** WARP-2978 (ADR-059 P3 §B.6.7) fills this. Accepted and ignored here. */
   priority?: string;
@@ -338,17 +347,24 @@ async function deliverRow(
     return { id: row.id, channels: [], delivered: false, skipped: "already_delivered" };
   }
 
-  // WARP-2909 — delivery must not throw, so a link that fails the check
-  // DEGRADES: both transports go without it, and the row records why. The
-  // row's url/data were checked when it was recorded; in practice this is a
-  // bad `tag` handed to deliverNotification directly.
-  let link: Pick<DispatchInput, "url" | "data" | "tag"> = { url: row.url, data: row.data, tag: opts.tag };
-  let linkError: string | null = null;
+  // WARP-2909 — delivery must not throw, so a field that fails its check
+  // DEGRADES and the row records why. Each is checked ON ITS OWN (review F5):
+  // a bad tag handed to deliverNotification drops only the tag — the row's
+  // url/data (checked when it was recorded) still give the toast its Open
+  // action and the push its link.
+  const link: Pick<DispatchInput, "url" | "data" | "tag"> = { url: row.url, data: row.data, tag: opts.tag };
+  const deliveryErrors: string[] = [];
+  if (link.tag !== undefined && !TAG_RE.test(link.tag)) {
+    link.tag = undefined;
+    deliveryErrors.push("delivery: invalid_tag");
+  }
   try {
-    assertLinkFields({ username: row.username, kind: row.kind, title: row.title, ...link });
+    if (link.url !== undefined) assertNotificationLink(link.url);
+    if (link.data !== undefined) assertNotificationData(link.data);
   } catch {
-    link = {};
-    linkError = "delivery: invalid_link";
+    link.url = undefined;
+    link.data = undefined;
+    deliveryErrors.push("delivery: invalid_link");
   }
 
   const { channels, errors } = publishNotificationToast({
@@ -409,7 +425,7 @@ async function deliverRow(
     logger.warn({ err, username: row.username }, "push notification failed");
   }
   if (pushError && channels.length === 0) errors.push(pushError);
-  if (linkError) errors.push(linkError);
+  errors.push(...deliveryErrors);
 
   const delivered = channels.length > 0;
   const error = errors.length > 0 ? errors.join(" | ") : null;
