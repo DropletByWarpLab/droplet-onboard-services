@@ -410,7 +410,7 @@ function ChatWidget({ w, h }: WidgetProps) {
     "Summarize the files I uploaded today",
     "What's using the most storage?",
     "Draft a changelog from recent notes",
-    "Dim the living-room lights to 30%",
+    "Dim the conference-room lights to 30%",
   ].slice(0, nSug);
   const [val, setVal] = useState("");
   // WARP-1803 — the prompt + model snapshot that flips the tile from hero to
@@ -730,7 +730,7 @@ function StatusWidget({ w, h }: WidgetProps) {
   const stats: StatRow[] = [
     { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recently indexed", dot: "var(--success)", href: "/files" },
     { icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" },
-    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "smart devices online", dot: "var(--success)", href: "/devices" },
+    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" },
     { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
     voiceRow,
   ];
@@ -776,11 +776,11 @@ function StatusWidget({ w, h }: WidgetProps) {
 
 /* ─────────────────────────── Activity timeline ─────────────────────────── */
 const ACTIVITY: [string, "ok" | "warn" | "err", LucideIcon, string][] = [
-  ["07:14", "warn", Video, "Garage camera idle 1h 47m · no motion events"],
+  ["07:14", "warn", Video, "Loading-dock camera idle 1h 47m · no motion events"],
   ["08:30", "ok", Settings, "NAS snapshot completed · 64 GB written"],
   ["09:42", "ok", MessageSquare, "You asked for a storage breakdown · saved"],
-  ["10:15", "err", AlertTriangle, "Garage cam offline 4m · PoE flap port-7 · recovered"],
-  ["11:14", "ok", Lightbulb, "Living-room lights dimmed to 30% by you"],
+  ["10:15", "err", AlertTriangle, "Loading-dock cam offline 4m · PoE flap port-7 · recovered"],
+  ["11:14", "ok", Lightbulb, "Conference-room lights dimmed to 30% by you"],
   ["12:30", "ok", Network, "New device joined LAN · 192.168.4.51"],
 ];
 // Exported for the WARP-1992 deep-link test, the same reason CalendarWidget is.
@@ -853,17 +853,17 @@ export function FilesWidget() {
   );
 }
 
-/* ─────────────────────────── Smart-home scenes ─────────────────────────── */
+/* ─────────────────────────── Device-control scenes ─────────────────────── */
 function ScenesWidget() {
   const [scene, setScene] = useState("Day");
-  const [devs, setDevs] = useState<Record<string, boolean>>({ living: true, office: false, door: false });
+  const [devs, setDevs] = useState<Record<string, boolean>>({ conference: true, office: false, door: false });
   const scenes: [string, LucideIcon][] = [
-    ["Morning", Sparkles], ["Day", Lightbulb], ["Night", Blinds], ["Away", Lock],
+    ["Opening", Sparkles], ["Day", Lightbulb], ["After hours", Blinds], ["Closed", Lock],
   ];
   const list: [string, LucideIcon, string, string][] = [
-    ["living", Lightbulb, "Living room", "3 lights · 30%"],
+    ["conference", Lightbulb, "Conference room", "3 lights · 30%"],
     ["office", Thermometer, "Office", "72°F · cooling"],
-    ["door", Lock, "Front door", "Locked"],
+    ["door", Lock, "Main entrance", "Locked"],
   ];
   return (
     <div className="w-scenes">
@@ -2008,7 +2008,7 @@ export const WIDGETS: Record<string, WidgetMeta> = {
 // Feature-flagged widgets (no backend yet — default OFF).
 const GATED_WIDGETS: Array<[boolean, string, WidgetMeta]> = [
   [FEATURES.homeActivity,    "activity", { title: "Activity",      icon: ActivityIcon, Comp: ActivityWidget, minW: 3, minH: 3, maxW: 6, maxH: 7, scroll: true }],
-  [FEATURES.homeScenes,      "scenes",   { title: "Smart devices", icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6, maxH: 5 }],
+  [FEATURES.homeScenes,      "scenes",   { title: "Device control", icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6, maxH: 5 }],
   [FEATURES.homeAutomations, "tools",    { title: "Automations",   icon: Wrench,       Comp: ToolsWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
   [FEATURES.homeTasks,       "tasks",    { title: "Tasks",         icon: Check,        Comp: TasksWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
 ];

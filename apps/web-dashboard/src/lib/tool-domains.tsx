@@ -52,7 +52,7 @@ interface DomainMeta {
 export const DOMAIN_META: Record<string, DomainMeta> = {
   network: { label: "Network", icon: Network },
   files: { label: "Files", icon: FolderOpen },
-  "smart-home": { label: "Smart devices", icon: Heater },
+  "smart-home": { label: "Device control", icon: Heater },
   cameras: { label: "Cameras", icon: Camera },
   switch: { label: "Switch", icon: SwitchIcon },
   calendar: { label: "Calendar", icon: Calendar },

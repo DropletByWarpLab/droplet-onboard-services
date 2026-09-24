@@ -69,7 +69,7 @@ const GATE_LABEL: Record<InspectGate, string> = {
   write_tier: "Not owner or admin",
   role_grant: "Their role doesn't reach it",
   interview_strip: "Setup conversation",
-  off_lan_withhold: "Off the home network",
+  off_lan_withhold: "Off the local network",
   chat_policy: "Not available by asking",
   turn_relevance: "Not relevant to this message",
 };
@@ -199,12 +199,12 @@ export default function AssistantInspectorPage() {
           />
           <Row
             icon={<Lock size={15} />}
-            title="Away from home"
+            title="Away from the office"
             sub="On a cloud model, stored files, memory, the business profile and pins are withheld."
             right={
               <input
                 type="checkbox"
-                aria-label="Away from home"
+                aria-label="Away from the office"
                 checked={offLan}
                 onChange={(e) => setOffLan(e.target.checked)}
               />

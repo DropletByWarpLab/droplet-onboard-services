@@ -22,7 +22,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "get_command_history",
   description:
-    "View the recent command audit log for smart-home devices. Shows what commands were sent, whether they were auto-executed or required confirmation, and if any were blocked by safety rules.",
+    "View the recent command audit log for controlled devices. Shows what commands were sent, whether they were auto-executed or required confirmation, and if any were blocked by safety rules.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

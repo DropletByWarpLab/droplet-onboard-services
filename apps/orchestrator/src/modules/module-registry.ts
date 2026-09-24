@@ -302,7 +302,7 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "smart_home", label: "Devices",
-    description: "Smart-home devices over Matter.",
+    description: "Device control over Matter.",
     // Gate ONLY the Matter/smart-home surface. "/api/devices" is deliberately
     // NOT gated here: it hosts the appliance/fleet device registry, device
     // pairing (/api/devices/pair*), push-notification subscribe
@@ -542,7 +542,7 @@ export const BUSINESS_TYPES: readonly BusinessTypeDef[] = [
   },
   {
     id: "retail", label: "Retail",
-    description: "A store — cameras, smart devices, network, managed switch.",
+    description: "A store — cameras, device control, network, managed switch.",
     modules: ["knowledge", "files", "calendar", "cameras", "security", "smart_home", "network", "managed_switch"],
   },
   {

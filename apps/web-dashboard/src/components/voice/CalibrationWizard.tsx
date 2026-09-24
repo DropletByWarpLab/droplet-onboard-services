@@ -533,8 +533,8 @@ export function CalibrationWizard({
                 }
               />
               <p className="microcap">
-                Stand where you usually are — the couch, the desk, the
-                kitchen. Not next to the box.
+                Stand where you usually are — your desk, the front desk,
+                the break room. Not next to the box.
               </p>
             </div>
           ) : (

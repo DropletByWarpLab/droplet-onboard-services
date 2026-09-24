@@ -140,7 +140,7 @@ export function ConnectDriveDialog({ open, onClose }: ConnectDriveDialogProps) {
             )}
             <p className="text-xs opacity-60 mt-2">
               This sign-in is shared for the whole Droplet and opens the shared
-              Droplet folder only — keep it to household admins.
+              Droplet folder only — keep it to workspace admins.
             </p>
           </section>
         </div>

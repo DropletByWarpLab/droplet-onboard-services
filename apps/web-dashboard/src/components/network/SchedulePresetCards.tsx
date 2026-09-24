@@ -6,8 +6,8 @@ import { SCHEDULE_PRESETS, type SchedulePreset } from "./schedule-presets";
 /**
  * Top-row preset picker on the Schedules tab (WARP-99 / T8).
  *
- * Three cards — Bedtime, School hours, Homework mode. The first two open the
- * full schedule editor pre-filled with the preset's windows + name; Homework
+ * Three cards — After hours, Business hours, Focus mode. The first two open the
+ * full schedule editor pre-filled with the preset's windows + name; Focus mode
  * opens the override picker with a 90-minute duration chip pre-selected and
  * a blank subject (user picks inside the modal).
  */

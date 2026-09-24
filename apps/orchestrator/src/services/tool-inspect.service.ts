@@ -270,7 +270,7 @@ const REASONS: Record<InspectGate, (e: GateSubject, tier: string | null) => stri
   interview_strip: () =>
     `This is a setup conversation. Nothing that changes anything runs during setup.`,
   off_lan_withhold: () =>
-    `They are off the home network, and this tool reads stored content. ` +
+    `They are off the local network, and this tool reads stored content. ` +
     `It comes back when they are on the LAN.`,
   chat_policy: () =>
     `Withheld from chat by policy — it is reachable from its own screen, or ` +

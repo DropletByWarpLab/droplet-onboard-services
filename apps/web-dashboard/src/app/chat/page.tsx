@@ -1047,7 +1047,7 @@ export default function ChatPage() {
               interview session: that surface is the walkthrough, and an empty
               frame of it (the beat before the transcript loads, or a
               self-healed session) reading "Ask Droplet anything · Dim the
-              living-room lights" is precisely the "it dropped me back into a
+              conference-room lights" is precisely the "it dropped me back into a
               chat" report. Keyed off `interviewSessionOpen` — the whole
               lifecycle AND the navigation into it — so a finished interview
               reopened after its history is gone stays quiet too, and so does
@@ -1096,7 +1096,7 @@ export default function ChatPage() {
                   {[
                     "What's using the most storage?",
                     "Summarize the files I uploaded today",
-                    "Dim the living-room lights to 30%",
+                    "Dim the conference-room lights to 30%",
                     "What joined the network this week?",
                   ].map((prompt) => (
                     <button
