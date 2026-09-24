@@ -6,7 +6,7 @@
  * is, and it says nothing at all until it knows.
  */
 import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { Lock, LockOpen, Moon, Plane, Shield, Store } from "lucide-react";
 import {
   COPY,
@@ -750,6 +750,40 @@ describe("door locks (WARP-2977 P2b-2)", () => {
 
     it("the Doors view of a lock-covered area is quiet when the locks row reports", () => {
       expect(emptyKind(at("doors", "z-door").container)).toBe("quiet");
+    });
+
+    // Review F6: an area's empty state reads only the sources that area uses.
+    const withRowState = (id: SecurityHealthRow["id"], state: SecurityHealthRow["state"]) =>
+      withLocks().map((s) => (s.id === id ? { ...s, state } : s));
+    const areaFeed = (view: SecurityView, zone: string, sources: SecurityHealthRow[]) =>
+      render(<SecurityFeed {...props({ view, zone, areas: AREAS, onZoneChange: vi.fn(), sources, canManageAreas: true })} />);
+
+    it("Everything over a CAMERA-only area: the door locks being down says nothing about it", () => {
+      const r = areaFeed("all", "z-shop", withRowState("locks", "down"));
+      expect(emptyKind(r.container)).toBe("quiet");
+      expect(r.container.querySelector("[data-empty]")).not.toHaveTextContent(COPY.emptyNotHearingLocks);
+    });
+
+    it("Everything over a LOCK-only area: the cameras being down says nothing about it; the locks being down does", () => {
+      expect(emptyKind(areaFeed("all", "z-door", withRowState("camera_ingest", "down")).container)).toBe("quiet");
+      cleanup();
+      const down = areaFeed("all", "z-door", withRowState("locks", "down"));
+      expect(emptyKind(down.container)).toBe("not-reporting");
+      expect(down.container.querySelector("[data-empty] .eh")).toHaveTextContent(COPY.emptyNotHearingLocks);
+    });
+
+    it("sourcesForView keys an area's rows on what covers it", () => {
+      const owner = { canSeeThreats: true, areaSelected: true, canSeeLocks: true };
+      expect(sourcesForView("all", { ...owner, areaLinks: { cameras: 1, locks: 0 } })).toEqual(["camera_ingest", "camera_system"]);
+      expect(sourcesForView("all", { ...owner, areaLinks: { cameras: 0, locks: 2 } })).toEqual(["locks"]);
+      expect(sourcesForView("all", { ...owner, areaLinks: { cameras: 1, locks: 1 } })).toEqual(["camera_ingest", "camera_system", "locks"]);
+      // Without Devices view a lock link never counts (the server sends none anyway).
+      expect(sourcesForView("all", { ...owner, canSeeLocks: false, areaLinks: { cameras: 1, locks: 1 } })).toEqual([
+        "camera_ingest",
+        "camera_system",
+      ]);
+      // Unknown counts keep PR-2's behaviour.
+      expect(sourcesForView("all", owner)).toEqual(["camera_ingest", "camera_system", "locks"]);
     });
   });
 });

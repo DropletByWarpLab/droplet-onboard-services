@@ -174,18 +174,28 @@ export function viewFor(view: SecurityView, sources: SecurityHealthRow[] | null)
  * changes are site-wide and never sit in an area.
  *
  * WARP-2977 P2b-2 — the `locks` row feeds Everything and Doors, for someone
- * who gets that row (`canSeeLocks`); an area holds lock rows as well as camera
- * rows.
+ * who gets that row (`canSeeLocks`). An area holds lock rows as well as camera
+ * rows, but only the kinds that cover it (review F6): Everything over a
+ * camera-only area never reads the locks row, and over a lock-only area never
+ * the camera rows. `areaLinks` absent = both kinds.
  */
 export function sourcesForView(
   view: SecurityView,
-  opts: { canSeeThreats: boolean; areaSelected: boolean; canSeeLocks?: boolean },
+  opts: {
+    canSeeThreats: boolean;
+    areaSelected: boolean;
+    canSeeLocks?: boolean;
+    areaLinks?: { cameras: number; locks: number };
+  },
 ): SecurityHealthRow["id"][] {
   const cameras = [...CAMERA_SOURCES];
   const locks: SecurityHealthRow["id"][] = opts.canSeeLocks ? ["locks"] : [];
   switch (view) {
     case "all":
-      if (opts.areaSelected) return [...cameras, ...locks];
+      if (opts.areaSelected) {
+        const links = opts.areaLinks;
+        return [...(!links || links.cameras > 0 ? cameras : []), ...(!links || links.locks > 0 ? locks : [])];
+      }
       return opts.canSeeThreats ? [...cameras, ...locks, "threat_mirror", "site_mode"] : [...cameras, ...locks, "site_mode"];
     case "detections":
     case "health":
@@ -624,7 +634,16 @@ function emptyStateFor(props: SecurityFeedProps): [string, string, EmptyKind] {
   const sources = props.sources ?? [];
   // The server sends the `locks` row only to someone who may read locks.
   const canSeeLocks = sources.some((s) => s.id === "locks");
-  const ids = sourcesForView(props.view, { canSeeThreats: props.canSeeThreats, areaSelected, canSeeLocks });
+  const ids = sourcesForView(props.view, {
+    canSeeThreats: props.canSeeThreats,
+    areaSelected,
+    canSeeLocks,
+    // Counted per kind by the page; absent counts (a caller that doesn't split them) read as both kinds.
+    areaLinks:
+      area && area.cameraLinkCount !== undefined && area.lockLinkCount !== undefined
+        ? { cameras: area.cameraLinkCount, locks: area.lockLinkCount }
+        : undefined,
+  });
 
   // With no camera system neither camera row can report (camera_system is
   // not even sent); the view's OTHER sources still count.
