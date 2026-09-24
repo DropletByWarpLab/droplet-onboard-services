@@ -3815,7 +3815,7 @@ export interface NotificationAckResult {
   changed: boolean;
 }
 
-/** N4. `unread` is what the badge should say now. */
+/** N4 (`{ids}` in: the notifications shown). `unread` is what the badge should say now. */
 export interface NotificationAckAllResult {
   acked: number;
   unread: number;

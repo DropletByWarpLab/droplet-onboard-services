@@ -5,9 +5,9 @@
  * Run against the evaluating fake (helpers/fake-notification-log.ts), so each
  * predicate in the where-clauses is load-bearing here: drop `username` and
  * Maria's row is acked by Stefan; drop the `ackState` filter and a second ack
- * overwrites the first `ackedAt`; drop `before` and a notification that
- * arrived after the user looked is swept unseen; count `untracked` and every
- * badge fills with 90 days of history. The real-Postgres twin
+ * overwrites the first `ackedAt`; drop the `ids` bound and a notification the
+ * person never saw is swept; count `untracked` and every badge fills with 90
+ * days of history. The real-Postgres twin
  * (`notifications-ack.pg.test.ts`) proves the same against the CHECK and under
  * concurrency.
  */
@@ -139,40 +139,62 @@ describe("ackNotification", () => {
   });
 });
 
-describe("ackAllNotifications", () => {
-  it("MUTATION: acks the recipient's unread rows up to `before`, and never one that arrived after", async () => {
-    const a = log.seed({ username: "stefan", createdAt: at(0) });
-    const b = log.seed({ username: "stefan", createdAt: at(10) });
-    const late = log.seed({ username: "stefan", createdAt: at(20) });
-    const out = await ackAllNotifications(prisma, { username: "stefan", before: at(10), ...SAID });
+describe("ackAllNotifications — the ids the client showed (review F4)", () => {
+  // A time bound (`createdAt <= before`) cannot say "what the person saw": a
+  // row inserted inside a longer transaction commits AFTER a newer row, with
+  // an OLDER createdAt, so it was never listed and still falls under any
+  // bound the client can send. P3's security notices are written in-tx. So
+  // N4 takes the ids the client actually showed and acks exactly those.
+  it("MUTATION: acks exactly the listed ids — an older unlisted row (a late commit) stays unread", async () => {
+    const lateCommit = log.seed({ username: "stefan", createdAt: at(0) }); // older, never listed
+    const a = log.seed({ username: "stefan", createdAt: at(10) });
+    const b = log.seed({ username: "stefan", createdAt: at(20) });
+    const out = await ackAllNotifications(prisma, { username: "stefan", ids: [a.id, b.id], ...SAID });
     expect(out).toEqual({ acked: 2, unread: 1 });
     const state = (id: string) => log.rows.find((r) => r.id === id)!;
-    expect(state(a.id)).toMatchObject({ ackState: "acked", ackMethod: "all", ackSessionId: SAID.sessionId });
+    expect(state(a.id)).toMatchObject({ ackState: "acked", ackMethod: "all", ackSessionId: SAID.sessionId, ackSessionChecked: true });
     expect(state(b.id)).toMatchObject({ ackState: "acked", ackMethod: "all" });
-    expect(state(late.id)).toMatchObject({ ackState: "unacked", ackedAt: null });
+    expect(state(lateCommit.id)).toMatchObject({ ackState: "unacked", ackedAt: null });
   });
 
-  it("`untracked` rows are not swept (they are not unread), another person's rows are never touched", async () => {
-    const old = log.seed({ username: "stefan", createdAt: at(0), ackState: "untracked" });
-    const maria = log.seed({ username: "maria", createdAt: at(1) });
-    const out = await ackAllNotifications(prisma, { username: "stefan", before: at(30), ...SAID });
+  it("MUTATION: another person's id is simply not counted, and their row is untouched", async () => {
+    const mine = log.seed({ username: "stefan" });
+    const maria = log.seed({ username: "maria" });
+    const out = await ackAllNotifications(prisma, { username: "stefan", ids: [mine.id, maria.id], ...SAID });
+    expect(out).toEqual({ acked: 1, unread: 0 });
+    expect(log.rows.find((r) => r.id === maria.id)).toMatchObject({ ackState: "unacked", ackSessionId: null });
+  });
+
+  it("`untracked` rows are not acked by it (they were never unread), and are not counted", async () => {
+    const old = log.seed({ username: "stefan", ackState: "untracked" });
+    const out = await ackAllNotifications(prisma, { username: "stefan", ids: [old.id], ...SAID });
     expect(out).toEqual({ acked: 0, unread: 0 });
-    expect(log.rows.find((r) => r.id === old.id)!.ackState).toBe("untracked");
-    expect(log.rows.find((r) => r.id === maria.id)!.ackState).toBe("unacked");
+    expect(log.rows[0]!.ackState).toBe("untracked");
   });
 
   it("an already-acked row keeps its first ack", async () => {
-    const row = log.seed({ username: "stefan", createdAt: at(0) });
+    const row = log.seed({ username: "stefan" });
     await ackNotification(prisma, { id: row.id, username: "stefan", method: "opened", ...SAID });
     const out = await ackAllNotifications(prisma, {
       username: "stefan",
-      before: at(30),
+      ids: [row.id],
       sessionId: "sid-2",
       client: null,
       sessionChecked: false,
     });
     expect(out.acked).toBe(0);
     expect(log.rows[0]).toMatchObject({ ackMethod: "opened", ackSessionId: SAID.sessionId });
+  });
+
+  it("a repeated id is acked once; an empty list acks nothing", async () => {
+    const row = log.seed({ username: "stefan" });
+    expect(await ackAllNotifications(prisma, { username: "stefan", ids: [row.id, row.id], ...SAID })).toEqual({
+      acked: 1,
+      unread: 0,
+    });
+    const other = log.seed({ username: "stefan" });
+    expect(await ackAllNotifications(prisma, { username: "stefan", ids: [], ...SAID })).toEqual({ acked: 0, unread: 1 });
+    expect(log.rows.find((r) => r.id === other.id)!.ackState).toBe("unacked");
   });
 });
 

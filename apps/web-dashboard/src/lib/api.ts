@@ -9320,7 +9320,12 @@ export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } =
   );
 }
 
-/** N4 — "mark all read", up to `before`: the ISO time of the newest notification the person was shown. */
-export function ackAllNotifications(before: string): Promise<NotificationAckAllResult> {
-  return securityFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { before }));
+/**
+ * N4 — "mark all read": the ids of the notifications the person was SHOWN
+ * (1–200). Never a time bound: a notification committed late by a longer
+ * transaction can be older than everything shown, and must stay unread. Ids
+ * that are not the person's are simply not counted.
+ */
+export function ackAllNotifications(ids: readonly string[]): Promise<NotificationAckAllResult> {
+  return securityFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { ids }));
 }

@@ -5,7 +5,7 @@
  *   N1  GET  /notifications               the list (keyset-paged) + the unread count
  *   N2  GET  /notifications/unread-count  the badge alone
  *   N3  POST /notifications/:id/ack       ack one ({via?: 'inbox'|'opened'})
- *   N4  POST /notifications/ack-all       ack every unread row up to `before`
+ *   N4  POST /notifications/ack-all       ack the listed ids ({ids}: the ones the client showed)
  *       POST /notifications/send          the LLM `send_notification` tool and
  *                                         system code; calls sendNotification()
  *
@@ -37,6 +37,7 @@ import {
   ackAllNotifications,
   parseNotificationCursor,
   NOTIFICATION_LIST_MAX,
+  ACK_ALL_MAX_IDS,
   type AckAttribution,
   type NotificationKind,
 } from "../services/notifications.service.js";
@@ -80,9 +81,6 @@ function fail(res: Response, status: number, code: ErrorCode, message: string): 
 /** A NotificationLog id (cuid) — and nothing that could be anything else. */
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-/** A client's clock may run a little ahead of the box's; further than this is not "what I was shown". */
-const BEFORE_SKEW_MS = 60_000;
-
 const listQuerySchema = z
   .object({
     limit: z
@@ -102,7 +100,10 @@ const listQuerySchema = z
 /** `inbox` (the default) or `opened` — the client REPORTS the person opened its link. */
 const ackBodySchema = z.object({ via: z.enum(["inbox", "opened"]).optional() }).strict();
 
-const ackAllBodySchema = z.object({ before: z.string().datetime({ offset: true }) }).strict();
+/** Review F4 — the ids the client SHOWED, never a time bound (see ackAllNotifications). */
+const ackAllBodySchema = z
+  .object({ ids: z.array(z.string().regex(ID_RE)).min(1).max(ACK_ALL_MAX_IDS) })
+  .strict();
 
 /** Service principals never own rows; N3/N4 refuse them before anything is looked up. */
 function refuseServicePrincipal(req: Request, res: Response): boolean {
@@ -158,15 +159,12 @@ export function createNotificationsRouter(prisma: PrismaClient): Router {
       if (refuseServicePrincipal(req, res)) return;
       const parsed = ackAllBodySchema.safeParse(req.body ?? {});
       if (!parsed.success) {
-        fail(res, 400, "VALIDATION_ERROR", "`before` must be the ISO-8601 time of the newest notification shown.");
+        fail(res, 400, "VALIDATION_ERROR", "`ids` must list the 1–200 notifications that were shown.");
         return;
       }
-      const before = new Date(parsed.data.before);
-      if (before.getTime() > Date.now() + BEFORE_SKEW_MS) {
-        fail(res, 400, "VALIDATION_ERROR", "`before` is in the future.");
-        return;
-      }
-      const out = await ackAllNotifications(prisma, { username: getUser(req), before, ...attribution(req) });
+      // Ids that are not the caller's (or do not exist) are simply not
+      // counted: no error that would confirm another person's id exists.
+      const out = await ackAllNotifications(prisma, { username: getUser(req), ids: parsed.data.ids, ...attribution(req) });
       res.json(out);
     } catch (err) {
       next(err);

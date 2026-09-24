@@ -15,8 +15,9 @@
  *   first ack  "First ack wins" rests on the row lock: two concurrent acks of
  *              one row must answer exactly one `changed: true`, and the stored
  *              sign-in must be the winner's.
- *   ack-all    A row created after `before` is never swept, even while the
- *              sweep runs.
+ *   ack-all    (review F4) A row a longer transaction commits late — older
+ *              than everything the person was shown — is never acked by
+ *              "mark all read": reproduced with a real open transaction.
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL, like every *.pg.test.ts.
  * Local: scripts/test-orchestrator-pg.sh. CI: the `pg-integration` job in
@@ -41,7 +42,7 @@ vi.mock("../services/mqtt.service.js", () => ({ publish: vi.fn() }));
 import {
   ackNotification,
   ackAllNotifications,
-  countUnread,
+  listNotifications,
   recordNotification,
 } from "../services/notifications.service.js";
 
@@ -240,41 +241,69 @@ describe.skipIf(!RUN)("notification acknowledgement — real Postgres (WARP-2804
     expect(await prisma.notificationLog.findUnique({ where: { id } })).toMatchObject({ ackState: "unacked", ackSessionId: null });
   });
 
-  it("MUTATION: ack-all never sweeps a row newer than `before` — one that arrived while the person looked, or one racing the sweep", async () => {
-    const t0 = new Date(Date.now() - 60_000);
-    const before = new Date(t0.getTime() + 10_000);
-    await prisma.notificationLog.createMany({
-      data: [
-        ...[0, 1, 2].map((i) => ({
-          id: `${PREFIX}old-${i}`,
-          username: u("stefan"),
-          kind: "system" as const,
-          title: `old ${i}`,
-          channels: "",
-          createdAt: new Date(t0.getTime() + i * 1000),
-        })),
-        // Arrived after the list was drawn and before "mark all read" was
-        // clicked: already committed when the sweep runs (D5).
-        {
-          id: `${PREFIX}arrived`,
-          username: u("stefan"),
-          kind: "system" as const,
-          title: "arrived while looking",
-          channels: "",
-          createdAt: new Date(before.getTime() + 5_000),
-        },
-      ],
+  // Review F4 — the race a time bound loses, reproduced for real. A longer
+  // transaction (P3's notifier records its notice in-tx) inserts its row
+  // FIRST, so its createdAt is OLDER; a newer row commits meanwhile and is all
+  // the person's list can show; then the long transaction commits. Its row is
+  // now visible and older than everything listed — under `createdAt <= newest
+  // shown` it was swept unseen. N4 acks the listed ids, so it stays unread.
+  it("MUTATION: ack-all never acks a row the person never saw — a late commit older than everything shown", async () => {
+    const t0 = Date.now() - 60_000;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let markInserted!: () => void;
+    const inserted = new Promise<void>((r) => (markInserted = r));
+    const longTx = prisma.$transaction(
+      async (tx) => {
+        await tx.notificationLog.create({
+          data: {
+            id: `${PREFIX}late-commit`,
+            username: u("stefan"),
+            kind: "event",
+            title: "written inside a longer transaction",
+            channels: "",
+            createdAt: new Date(t0),
+          },
+        });
+        markInserted();
+        await gate;
+      },
+      { timeout: 30_000 },
+    );
+    await inserted;
+
+    await prisma.notificationLog.create({
+      data: {
+        id: `${PREFIX}shown`,
+        username: u("stefan"),
+        kind: "event",
+        title: "committed first, listed",
+        channels: "",
+        createdAt: new Date(t0 + 5_000),
+      },
     });
-    const [out] = await Promise.all([
-      ackAllNotifications(prisma, { username: u("stefan"), before, sessionId: "sid-1", client: null, sessionChecked: false }),
-      prisma.notificationLog.create({
-        data: { id: `${PREFIX}new`, username: u("stefan"), kind: "system", title: "new", channels: "", createdAt: new Date(before.getTime() + 1) },
-      }),
-    ]);
-    expect(out.acked).toBe(3);
-    for (const id of [`${PREFIX}arrived`, `${PREFIX}new`]) {
-      expect((await prisma.notificationLog.findUnique({ where: { id } }))?.ackState, id).toBe("unacked");
-    }
-    expect(await countUnread(prisma, u("stefan"))).toBe(2);
+    const listed = await listNotifications(prisma, u("stefan"), { state: "unacked" });
+    expect(listed.rows.map((r) => r.id)).toEqual([`${PREFIX}shown`]);
+
+    release();
+    await longTx;
+    const late = await prisma.notificationLog.findUnique({ where: { id: `${PREFIX}late-commit` } });
+    // The shape of the bug: the late row is OLDER than the newest row shown.
+    expect(late!.createdAt.getTime()).toBeLessThan(listed.rows[0]!.createdAt.getTime());
+
+    const out = await ackAllNotifications(prisma, {
+      username: u("stefan"),
+      ids: listed.rows.map((r) => r.id),
+      sessionId: "sid-1",
+      client: null,
+      sessionChecked: true,
+    });
+    expect(out).toEqual({ acked: 1, unread: 1 });
+    expect((await prisma.notificationLog.findUnique({ where: { id: `${PREFIX}late-commit` } }))?.ackState).toBe("unacked");
+    expect((await prisma.notificationLog.findUnique({ where: { id: `${PREFIX}shown` } }))).toMatchObject({
+      ackState: "acked",
+      ackMethod: "all",
+      ackSessionChecked: true,
+    });
   });
 });

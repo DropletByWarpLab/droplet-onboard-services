@@ -699,34 +699,45 @@ export async function ackNotification(
   return { changed: count === 1, row };
 }
 
+/** N4's bound: at most this many ids per "mark all read". */
+export const ACK_ALL_MAX_IDS = 200;
+
 export interface AckAllInput extends AckAttribution {
   username: string;
-  /** The newest `createdAt` the client showed. A row created after it is never swept. */
-  before: Date;
+  /** The ids of the notifications the client actually SHOWED (1–200). */
+  ids: readonly string[];
 }
 
 /**
- * WARP-2804 — "mark all read": the recipient's `unacked` rows created at or
- * before `before`, with `ackMethod: 'all'`.
+ * WARP-2804 — "mark all read": exactly the notifications the client showed,
+ * with `ackMethod: 'all'`.
  *
- * `before` is required so a notification that arrived after the person looked
- * is never swept unseen. `untracked` rows are left alone — they were never
- * unread — and an acked row keeps its first ack. Returns how many it acked and
- * the unread count left over (what the badge should now say).
+ * Review F4 — an id list, never a time bound. A row inserted inside a longer
+ * transaction commits after a newer row, with an OLDER `createdAt`: the client
+ * never listed it, yet any `createdAt <= before` would sweep it unseen (P3's
+ * security notices are written in-tx). The where-clause holds the ids, the
+ * caller's username and `unacked`: another person's id is simply not counted
+ * (no error that would confirm it exists), an `untracked` row is left alone
+ * (it was never unread), and an acked row keeps its first ack. Returns how many
+ * it acked and the unread count left over (what the badge should now say).
  */
 export async function ackAllNotifications(
   db: NotificationDb,
   input: AckAllInput,
 ): Promise<{ acked: number; unread: number }> {
-  const { count } = await db.notificationLog.updateMany({
-    where: { username: input.username, ackState: "unacked", createdAt: { lte: input.before } },
-    data: {
-      ackState: "acked",
-      ackedAt: new Date(),
-      ackMethod: "all",
-      ...ackFacts(input),
-    },
-  });
+  const ids = [...new Set(input.ids)];
+  const { count } =
+    ids.length === 0
+      ? { count: 0 }
+      : await db.notificationLog.updateMany({
+          where: { id: { in: ids }, username: input.username, ackState: "unacked" },
+          data: {
+            ackState: "acked",
+            ackedAt: new Date(),
+            ackMethod: "all",
+            ...ackFacts(input),
+          },
+        });
   return { acked: count, unread: await countUnread(db, input.username) };
 }
 

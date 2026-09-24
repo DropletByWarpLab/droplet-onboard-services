@@ -109,13 +109,36 @@ describe("ackNotification (N3)", () => {
 });
 
 describe("ackAllNotifications (N4)", () => {
-  it("POSTs the `before` it was given", async () => {
+  it("POSTs the ids of the notifications that were shown — never a time bound", async () => {
     mockFetch.mockResolvedValueOnce(ok({ acked: 2, unread: 0 }));
-    const out = await ackAllNotifications("2026-09-24T08:05:00.000Z");
+    const out = await ackAllNotifications(["clx1", "clx2"]);
     const [url, init] = lastCall();
     expect(url).toBe("/api/notifications/ack-all");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(String(init.body))).toEqual({ before: "2026-09-24T08:05:00.000Z" });
+    expect(JSON.parse(String(init.body))).toEqual({ ids: ["clx1", "clx2"] });
     expect(out).toEqual({ acked: 2, unread: 0 });
+  });
+});
+
+// Review F1 — the service worker hands an ack it could not make (the 15-min
+// session cookie had expired) to the page, which acks through authFetch: a 401
+// refreshes the session (the refresh cookie is scoped to /api/auth, which the
+// page can reach and the service worker must not race) and the ack is retried.
+describe("ackNotification through authFetch", () => {
+  it("a 401 refreshes the session and the ack is retried", async () => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { pathname: "/calendar", assign: vi.fn(), href: "http://localhost/calendar" } as unknown as Location,
+    });
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 401, json: () => Promise.resolve({}), headers: new Headers(), clone() { return this; } })
+      .mockResolvedValueOnce(ok({}))
+      .mockResolvedValueOnce(ok({ notification: { ...ROW, ackState: "acked" }, changed: true }));
+    const out = await ackNotification("clx1", { via: "opened" });
+    const urls = mockFetch.mock.calls.map((c) => c[0]);
+    expect(urls[0]).toBe("/api/notifications/clx1/ack");
+    expect(urls).toContain("/api/auth/refresh");
+    expect(urls[urls.length - 1]).toBe("/api/notifications/clx1/ack");
+    expect(out.changed).toBe(true);
   });
 });

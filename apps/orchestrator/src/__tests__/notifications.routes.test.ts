@@ -96,9 +96,8 @@ const PEOPLE: Record<string, { id: string; username: string; role: string; sid?:
   mcp: { id: "_service:mcp", username: "_service:mcp", role: "service" },
 };
 
-/** Fixture times DERIVE from the clock: N4 refuses a `before` more than 60 s
- *  ahead of the box's clock, so a hard-coded date turns red the day the
- *  calendar passes it — or, run early, is "the future". */
+/** Fixture times derive from the clock, an hour back, so no fixture is ever
+ *  "the future" whatever day the suite runs. */
 const HOUR_AGO = Date.now() - 60 * 60_000;
 const ago = (min: number) => new Date(HOUR_AGO + min * 60_000);
 
@@ -237,48 +236,56 @@ describe("N3 POST /api/notifications/:id/ack (WARP-2804)", () => {
   });
 });
 
-describe("N4 POST /api/notifications/ack-all (WARP-2804)", () => {
-  it("acks up to `before` and never a later row; `untracked` rows are neither swept nor counted", async () => {
+describe("N4 POST /api/notifications/ack-all {ids} (WARP-2804, review F4)", () => {
+  it("acks exactly the ids shown — an older unlisted row stays unread; `untracked` is neither acked nor counted", async () => {
     const { app, log } = makeAckApp();
-    const early = log.seed({ username: "stefan", createdAt: ago(1) });
-    const shown = log.seed({ username: "stefan", createdAt: ago(5) });
-    const late = log.seed({ username: "stefan", createdAt: ago(10) });
+    const lateCommit = log.seed({ username: "stefan", createdAt: ago(0) }); // never listed
+    const a = log.seed({ username: "stefan", createdAt: ago(1) });
+    const b = log.seed({ username: "stefan", createdAt: ago(5) });
     const history = log.seed({ username: "stefan", createdAt: ago(-60), ackState: "untracked" });
     const res = await request(app)
       .post("/api/notifications/ack-all")
       .set("X-Droplet-Client", IOS)
-      .send({ before: shown.createdAt.toISOString() });
+      .send({ ids: [a.id, b.id, history.id] });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ acked: 2, unread: 1 });
     const byId = (id: string) => log.rows.find((r) => r.id === id)!;
-    expect(byId(early.id)).toMatchObject({ ackState: "acked", ackMethod: "all", ackSessionId: "sid-stefan-1", ackClient: IOS });
-    expect(byId(shown.id).ackState).toBe("acked");
-    expect(byId(late.id).ackState).toBe("unacked");
+    expect(byId(a.id)).toMatchObject({ ackState: "acked", ackMethod: "all", ackSessionId: "sid-stefan-1", ackClient: IOS });
+    expect(byId(b.id).ackState).toBe("acked");
+    expect(byId(lateCommit.id).ackState).toBe("unacked");
     expect(byId(history.id).ackState).toBe("untracked");
   });
 
-  it("never touches another person's rows", async () => {
+  it("another person's ids are simply not counted — the answer is the same as for ids that do not exist", async () => {
     const { app, log } = makeAckApp();
-    log.seed({ username: "maria", createdAt: ago(1) });
-    const res = await request(app).post("/api/notifications/ack-all").send({ before: ago(30).toISOString() });
-    expect(res.body).toEqual({ acked: 0, unread: 0 });
+    const maria = log.seed({ username: "maria" });
+    const theirs = await request(app).post("/api/notifications/ack-all").send({ ids: [maria.id] });
+    const missing = await request(app).post("/api/notifications/ack-all").send({ ids: ["log-999"] });
+    expect(theirs.status).toBe(200);
+    expect(theirs.body).toEqual({ acked: 0, unread: 0 });
+    expect(theirs.body).toEqual(missing.body);
     expect(log.rows[0]!.ackState).toBe("unacked");
   });
 
   it("a service principal → 403 HUMAN_ONLY", async () => {
     const { app, log } = makeAckApp();
-    const res = await request(app).post("/api/notifications/ack-all").set("x-test-as", "mcp").send({ before: new Date().toISOString() });
+    const row = log.seed({ username: "stefan" });
+    const res = await request(app).post("/api/notifications/ack-all").set("x-test-as", "mcp").send({ ids: [row.id] });
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe("HUMAN_ONLY");
     expect(log.delegate.updateMany).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["no before", {}],
-    ["a before that is not ISO-8601", { before: "yesterday" }],
-    ["a date-only before", { before: "2026-09-24" }],
-    ["a before more than 60 s in the future", { before: new Date(Date.now() + 5 * 60_000).toISOString() }],
-    ["an unknown key", { before: new Date().toISOString(), all: true }],
+    ["no body", {}],
+    ["an empty list", { ids: [] }],
+    ["more than 200 ids", { ids: Array.from({ length: 201 }, (_, i) => `log-${i}`) }],
+    ["an id with a dot", { ids: ["log.1"] }],
+    ["an id over 64 chars", { ids: ["a".repeat(65)] }],
+    ["a non-string id", { ids: [42] }],
+    ["ids not a list", { ids: "log-1" }],
+    ["the retired `before` (the body is strict)", { before: new Date().toISOString() }],
+    ["an unknown key beside ids", { ids: ["log-1"], all: true }],
   ])("400 VALIDATION_ERROR for %s", async (_label, body) => {
     const { app, log } = makeAckApp();
     const res = await request(app).post("/api/notifications/ack-all").send(body);
@@ -287,9 +294,11 @@ describe("N4 POST /api/notifications/ack-all (WARP-2804)", () => {
     expect(log.delegate.updateMany).not.toHaveBeenCalled();
   });
 
-  it("a before a few seconds ahead (client clock skew) is accepted", async () => {
+  it("200 ids is the limit and is accepted", async () => {
     const { app } = makeAckApp();
-    const res = await request(app).post("/api/notifications/ack-all").send({ before: new Date(Date.now() + 30_000).toISOString() });
+    const res = await request(app)
+      .post("/api/notifications/ack-all")
+      .send({ ids: Array.from({ length: 200 }, (_, i) => `log-${i}`) });
     expect(res.status).toBe(200);
   });
 });
