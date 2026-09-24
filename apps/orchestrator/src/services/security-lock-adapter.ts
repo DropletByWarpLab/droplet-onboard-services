@@ -69,6 +69,13 @@ export const SECURITY_LOCK_SWEEP_INTERVAL_MS = 60_000;
 export const SECURITY_LOCK_SWEEP_LOCK_KEY = "droplet:security-lock-sweep";
 /** Consecutive failed sweeps after which the last good list is no longer trusted. */
 export const SECURITY_LOCK_SWEEP_FAILURES_DOWN = 3;
+/**
+ * The cap on the FRESH list a person waits on (/security/sources, a new lock
+ * link). The sidecar's own timeout is 30 s; a page load must not hang that
+ * long — the answer is then "couldn't check the door locks" (review F3). The
+ * sweep keeps the service's own timeout: nobody waits on it.
+ */
+export const SECURITY_LOCK_LIST_TIMEOUT_MS = 5_000;
 
 const NODE_ID = /^\d{1,20}$/;
 const UINT64_MAX = 18_446_744_073_709_551_615n;
@@ -763,7 +770,8 @@ export interface SecurityLockAdapter {
    * A FRESH list of every paired DoorLock endpoint (with the reading last
    * heard for each), for the Areas page and route 12's link check. Writes no
    * row and leaves the sweep's state alone. THROWS when the smart-home
-   * service cannot answer — never an empty list.
+   * service cannot answer, or does not within SECURITY_LOCK_LIST_TIMEOUT_MS —
+   * never an empty list.
    */
   listLocks(): Promise<KnownLock[]>;
   /** Called by `registerSecurityLockJobs` once the sweep is on the cron runtime. */
@@ -896,7 +904,21 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
       sweepScheduled = true;
     },
     async listLocks() {
-      const listed: unknown = await deps.source.list();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const giveUp = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`the smart-home service did not answer within ${SECURITY_LOCK_LIST_TIMEOUT_MS / 1000} s`)),
+          SECURITY_LOCK_LIST_TIMEOUT_MS,
+        );
+        timer.unref?.();
+      });
+      let listed: unknown;
+      try {
+        // A late answer or failure of the losing list is still handled by the race.
+        listed = await Promise.race([deps.source.list(), giveUp]);
+      } finally {
+        clearTimeout(timer);
+      }
       if (!Array.isArray(listed)) throw new Error("the smart-home service returned no device list");
       return readDeviceList(listed).known.map((l) => ({ ...l, reading: tracker.lastHeard(l.ref) }));
     },

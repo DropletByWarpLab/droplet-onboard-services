@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   LOCK_READINGS,
   MATTER_DOOR_LOCK_CLUSTER_ID,
+  SECURITY_LOCK_LIST_TIMEOUT_MS,
   SECURITY_LOCK_SWEEP_INTERVAL_MS,
   SECURITY_LOCK_SWEEP_LOCK_KEY,
   _resetSecurityLockAdapterForTests,
@@ -1296,6 +1297,51 @@ describe("adapter.listLocks — a FRESH list of the paired door-lock endpoints, 
     expect(store.write.mock.calls.length).toBe(writesBefore);
     // The sweep's own state is untouched: listing is not a sweep.
     expect(adapter.sweepState().lastSweepOkAt).toBeNull();
+  });
+
+  // Review F3: the sidecar's own timeout is 30 s — a page load and a link save must not hang that long.
+  describe(`a smart-home service that hangs: the fresh list gives up after ${SECURITY_LOCK_LIST_TIMEOUT_MS / 1000} s`, () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("rejects at the cap (so /sources reads the locks as unavailable and a new lock link is a 503), not before", async () => {
+      expect(SECURITY_LOCK_LIST_TIMEOUT_MS).toBe(5_000);
+      const { adapter } = adapterWith({ source: staticSource(() => new Promise(() => undefined)) });
+      let settled: unknown = "pending";
+      const p = adapter.listLocks().then(
+        () => (settled = "resolved"),
+        (err: Error) => (settled = err),
+      );
+      await vi.advanceTimersByTimeAsync(SECURITY_LOCK_LIST_TIMEOUT_MS - 1);
+      expect(settled).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      await p;
+      expect(settled).toBeInstanceOf(Error);
+      expect((settled as Error).message).toMatch(/did not answer within 5 s/);
+    });
+
+    it("an answer inside the cap is used, and leaves no timer behind", async () => {
+      const { adapter } = adapterWith({
+        source: staticSource(() => new Promise((r) => setTimeout(() => r([lockDevice()]), 4_000))),
+      });
+      const p = adapter.listLocks();
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect((await p).map((l) => l.ref)).toEqual([REF]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("the sweep is not capped by it (it keeps the service's own timeout)", async () => {
+      const { adapter } = adapterWith({
+        source: staticSource(() => new Promise((r) => setTimeout(() => r([lockDevice()]), 8_000))),
+      });
+      const p = adapter.sweep();
+      await vi.advanceTimersByTimeAsync(8_000);
+      await expect(p).resolves.toMatchObject({ status: "ok", locks: 1 });
+    });
   });
 
   it("throws when the smart-home service cannot answer — never an empty list", async () => {
