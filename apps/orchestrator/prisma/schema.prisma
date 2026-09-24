@@ -8418,6 +8418,9 @@ enum SecurityEventSource {
   activity_mirror
   /// WARP-2977 P2b — a change of the site mode (SecurityModeState). One row per change.
   site_mode
+  /// WARP-2977 P2b-2 — a Matter DoorLock endpoint's LockState, read from the
+  /// smart-home service (security-lock-adapter.ts). Transitions only.
+  matter_lock
 }
 
 enum SecurityEventKind {
@@ -8438,6 +8441,18 @@ enum SecurityEventKind {
   threat
   /// The site mode changed. labels = [mode, modeSource, fromMode]; startedAt = the boundary instant.
   mode_changed
+  /// A door lock's reading changed (or was first seen). labels = [reading], reading ∈
+  /// {locked, unlocked, not_fully_locked, unlatched, unknown}; sourceRef = `matter:<nodeId>/<endpointId>`;
+  /// camera NULL. Never claims a cause (no "someone unlocked it").
+  lock_state
+}
+
+/// WARP-2977 P2b-2 — how a row's startedAt was observed.
+/// live = startedAt is when it happened; polled = when Droplet's 60 s check found it.
+/// polled rows are never timing evidence (P4 co-occurrence, P5 dwell). P5 adds `synced`.
+enum SecurityObservation {
+  live
+  polled
 }
 
 /// info < notice < alert. On an event this is the source's own weight; the
@@ -8469,11 +8484,15 @@ model SecurityEvent {
   startedAt   DateTime
   endedAt     DateTime?
   summary     String
+  /// WARP-2977 P2b-2. Every P2a/P2b writer is live; the lock sweep writes polled.
+  observed    SecurityObservation @default(live)
   createdAt   DateTime            @default(now())
 
   @@index([startedAt])
   @@index([camera, startedAt])
   @@index([kind, startedAt])
+  // Brief §5's (sourceRef): a lock's history read-back and the area filter's lock links join here.
+  @@index([sourceRef, startedAt])
 }
 
 /// Ingest bookkeeping — one row. The threat mirror's cursor is the last
@@ -8493,8 +8512,8 @@ model SecurityIngestState {
 //
 // Areas resolve against SecurityEvent at READ time — SecurityEvent gets no zoneId.
 // Values land with their first writer: link states proposed/rejected, origin,
-// evidence and confidence arrive with P4; the `lock` source kind with the Matter
-// adapter (P2b-2); departmentId when something reads it.
+// evidence and confidence arrive with P4; departmentId when something reads it.
+// The `lock` source kind landed with the Matter lock adapter (P2b-2).
 //
 // Every shape rule below that Prisma cannot express is a hand-written CHECK in
 // 20260924000100_warp_2977_security_zones_hours_mode — explicit enums, never
@@ -8517,6 +8536,9 @@ enum SecurityZoneState {
 enum SecurityZoneSourceKind {
   camera
   camera_zone
+  /// WARP-2977 P2b-2 — one Matter DoorLock endpoint, `matter:<nodeId>/<endpointId>`
+  /// (equal to its lock_state rows' sourceRef). Visible only with smart_home ≥ view (DS-019).
+  lock
 }
 
 /// `removed` = a person unlinked it. Kept (never deleted) so P4 never re-proposes it.
