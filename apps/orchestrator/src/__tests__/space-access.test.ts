@@ -691,6 +691,50 @@ describe("requireSpaceAccess middleware", () => {
         expect(prisma.departmentMembership.findUnique).not.toHaveBeenCalled();
       });
 
+      it("refuses a DEACTIVATED member named by username, audited as its own reason", async () => {
+        // An assistant run in flight when SCIM deactivates maria: her
+        // membership is still on file, and must not be used.
+        const { prisma, departments, memberships, users } = createMockPrisma();
+        seedDept(departments, { id: DEPT_UUID });
+        seedUser(users, {
+          id: "u-maria",
+          username: "maria",
+          nextcloudUsername: null,
+          role: "family",
+          directoryStatus: "DEACTIVATED",
+        });
+        seedMembership(memberships, { departmentId: DEPT_UUID, userId: "u-maria", right: "manager" });
+
+        const { res, next } = await run(prisma, "maria");
+        expect(res.statusCode).toBe(403);
+        expect(next).not.toHaveBeenCalled();
+        expect(recordActivityMock).toHaveBeenCalledWith(
+          deniedFor("space-mcp-deactivated-asserted-user"),
+        );
+        expect(prisma.departmentMembership.findUnique).not.toHaveBeenCalled();
+      });
+
+      it("refuses as ambiguous when a DEACTIVATED row collides with an active one", async () => {
+        const { prisma, departments, memberships, users } = createMockPrisma();
+        seedDept(departments, { id: DEPT_UUID });
+        seedUser(users, {
+          id: "u-maria",
+          username: "maria",
+          nextcloudUsername: null,
+          role: "family",
+          directoryStatus: "DEACTIVATED",
+        });
+        seedUser(users, { id: "u-marianne", username: "marianne", nextcloudUsername: "maria", role: "family" });
+        seedMembership(memberships, { departmentId: DEPT_UUID, userId: "u-marianne", right: "manager" });
+
+        const { res, next } = await run(prisma, "maria");
+        expect(res.statusCode).toBe(403);
+        expect(next).not.toHaveBeenCalled();
+        expect(recordActivityMock).toHaveBeenCalledWith(
+          deniedFor("space-mcp-ambiguous-asserted-user"),
+        );
+      });
+
       it("audits a value that names nobody as unresolved", async () => {
         const { prisma, departments } = createMockPrisma();
         seedDept(departments, { id: DEPT_UUID });

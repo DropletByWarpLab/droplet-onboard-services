@@ -16,7 +16,7 @@
  *   family       | pass     | pass iff membership.right >= minRight   | 403                                 | 403
  *   guest        | pass     | pass iff member AND minRight === reader | 403                                 | 403
  *   `_service:mcp`| pass    | asserted user's (X-Nextcloud-User →     | 403                                 | 403
- *                |          | exactly one local User, see             |                                     |
+ *                |          | exactly one ACTIVE local User, see      |                                     |
  *                |          | asserted-user.service.ts) membership    |                                     |
  *                |          | checked, same rule as family/guest above|                                     |
  *   other service| pass     | 403 (no asserted user to check)         | 403                                 | 403
@@ -44,10 +44,20 @@ import { z } from "zod";
 import { recordAccessDenied } from "./auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
-import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import {
+  resolveAssertedUser,
+  type AssertedUserFailure,
+} from "../services/asserted-user.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("space-access");
+
+/** Each way the `_service:mcp` asserted user fails to resolve, audited as its own reason. */
+const MCP_ASSERTED_USER_DENIAL: Record<AssertedUserFailure, string> = {
+  not_found: "space-mcp-unresolved-asserted-user",
+  ambiguous: "space-mcp-ambiguous-asserted-user",
+  deactivated: "space-mcp-deactivated-asserted-user",
+};
 
 declare global {
   namespace Express {
@@ -408,16 +418,11 @@ export function requireSpaceAccess(
               return;
             }
             // WARP-3061: the header is `User.username` or `User.id`, never
-            // only `nextcloudUsername` (NULL for SSO / SCIM rows). Nobody, or
-            // more than one person, is refused.
+            // only `nextcloudUsername` (NULL for SSO / SCIM rows). Nobody,
+            // more than one person, or a deactivated person is refused.
             const resolved = await resolveAssertedUser(prisma, assertedUser);
             if (!resolved.ok) {
-              recordAccessDenied(
-                req,
-                resolved.reason === "ambiguous"
-                  ? "space-mcp-ambiguous-asserted-user"
-                  : "space-mcp-unresolved-asserted-user",
-              );
+              recordAccessDenied(req, MCP_ASSERTED_USER_DENIAL[resolved.reason]);
               res
                 .status(403)
                 .json({ error: "Forbidden: asserted user not provisioned" });

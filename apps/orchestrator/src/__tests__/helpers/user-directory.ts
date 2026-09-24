@@ -9,7 +9,8 @@
  *   - a `where` value matches a column only on strict equality, so a NULL
  *     `nextcloudUsername` (every SSO / SCIM row) never matches a string;
  *   - `findMany` returns each matching row ONCE, however many `OR` arms it
- *     satisfies, and honours `take`.
+ *     satisfies, ANDs any other `where` key onto the `OR`, and honours `take`;
+ *   - `directoryStatus` defaults to ACTIVE, as the column does.
  */
 import { vi } from "vitest";
 
@@ -19,9 +20,11 @@ export interface DirectoryUser {
   /** NULL for SSO- and SCIM-created rows, which never touch Nextcloud. */
   nextcloudUsername: string | null;
   role: string;
+  /** Defaults to ACTIVE (the column default); SCIM deactivation sets DEACTIVATED. */
+  directoryStatus?: "ACTIVE" | "DEACTIVATED";
 }
 
-type Column = "id" | "username" | "nextcloudUsername";
+type Column = "id" | "username" | "nextcloudUsername" | "directoryStatus";
 type Where = Partial<Record<Column, string>>;
 
 function matches(row: DirectoryUser, where: Where): boolean {
@@ -40,7 +43,11 @@ function project(row: DirectoryUser, select?: Record<string, boolean>) {
 
 /** `source` is read on every call, so a fixture seeded after construction counts. */
 export function userDirectory(source: DirectoryUser[] | (() => DirectoryUser[])) {
-  const rowsNow = () => (typeof source === "function" ? source() : source);
+  const rowsNow = () =>
+    (typeof source === "function" ? source() : source).map((r) => ({
+      directoryStatus: "ACTIVE" as const,
+      ...r,
+    }));
   return {
     findUnique: vi.fn(
       async ({ where, select }: { where: Where; select?: Record<string, boolean> }) => {
@@ -58,8 +65,12 @@ export function userDirectory(source: DirectoryUser[] | (() => DirectoryUser[]))
         select?: Record<string, boolean>;
         take?: number;
       }) => {
+        const { OR, ...rest } = where;
         const hit = rowsNow().filter((r) =>
-          where.OR ? where.OR.some((arm) => matches(r, arm)) : matches(r, where),
+          OR
+            ? OR.some((arm) => matches(r, arm)) &&
+              (Object.keys(rest) as Column[]).every((k) => r[k] === rest[k])
+            : matches(r, rest),
         );
         return (take === undefined ? hit : hit.slice(0, take)).map((r) => project(r, select));
       },

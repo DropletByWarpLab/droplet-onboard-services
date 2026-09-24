@@ -14,7 +14,27 @@ import request from "supertest";
 import express from "express";
 import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
-const { searchByLexicalSpy } = vi.hoisted(() => ({ searchByLexicalSpy: vi.fn() }));
+const { searchByLexicalSpy, filesRouteWarn } = vi.hoisted(() => ({
+  searchByLexicalSpy: vi.fn(),
+  filesRouteWarn: vi.fn(),
+}));
+// Only routes/files.ts's own logger is observed; every other one is inert.
+vi.mock("pino", () => {
+  const inert = () => undefined;
+  const make = (opts?: { name?: string }): Record<string, unknown> => {
+    const logger: Record<string, unknown> = {
+      info: inert,
+      error: inert,
+      debug: inert,
+      trace: inert,
+      fatal: inert,
+      warn: opts?.name === "files-route" ? filesRouteWarn : inert,
+    };
+    logger.child = () => logger;
+    return logger;
+  };
+  return { default: make };
+});
 vi.mock("../services/file-search.service.js", () => ({
   searchByLexical: (...args: unknown[]) => searchByLexicalSpy(...args),
   searchHybrid: vi.fn(),
@@ -74,7 +94,15 @@ async function searchAs(app: express.Express, asserted: string) {
 
 beforeEach(() => {
   searchByLexicalSpy.mockReset().mockResolvedValue([]);
+  filesRouteWarn.mockReset();
 });
+
+/** The fallback to the personal corpus is logged with why the person did not resolve. */
+const warnedPersonalOnly = (reason: string) =>
+  expect(filesRouteWarn).toHaveBeenCalledWith(
+    expect.objectContaining({ reason }),
+    expect.stringContaining("personal corpus only"),
+  );
 
 describe("WARP-3061 — the assistant searches an SSO person's departments", () => {
   it("adds the department corpus of an SSO member named by username", async () => {
@@ -98,5 +126,26 @@ describe("WARP-3061 — the assistant searches an SSO person's departments", () 
     };
     const params = await searchAs(appWith([MARIA, marianne], { "u-marianne": [FINANCE] }), "maria");
     expect(params.additionalUserIds).toEqual([]);
+    warnedPersonalOnly("ambiguous");
+  });
+
+  it("searches personal files only, and says why, when the person is DEACTIVATED", async () => {
+    // A run in flight when SCIM deactivates maria must not keep reading her
+    // department.
+    const gone: DirectoryUser = { ...MARIA, directoryStatus: "DEACTIVATED" };
+    const params = await searchAs(appWith([gone], { "u-maria": [FINANCE] }), "maria");
+    expect(params.additionalUserIds).toEqual([]);
+    warnedPersonalOnly("deactivated");
+  });
+
+  it("logs a value that names nobody before falling back to personal files", async () => {
+    const params = await searchAs(appWith([MARIA], { "u-maria": [FINANCE] }), "nobody");
+    expect(params.additionalUserIds).toEqual([]);
+    warnedPersonalOnly("not_found");
+  });
+
+  it("does not warn when the person resolves", async () => {
+    await searchAs(appWith([MARIA], { "u-maria": [FINANCE] }), "maria");
+    expect(filesRouteWarn).not.toHaveBeenCalled();
   });
 });

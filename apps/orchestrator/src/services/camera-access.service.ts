@@ -59,8 +59,8 @@ const UNRESTRICTED_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
  * from the `X-Nextcloud-User` header the MCP server already asserts, the
  * same mechanism `middleware/space.ts` uses for department access, and
  * scopes to that human's grants. It fails CLOSED when the header is absent,
- * names nobody, or names more than one person (WARP-3061) — a tool that
- * cannot say who is asking gets nothing.
+ * names nobody, names more than one person, or names a deactivated person
+ * (WARP-3061) — a tool that cannot say who is asking gets nothing.
  */
 const MCP_SERVICE_ID = "_service:mcp";
 
@@ -110,9 +110,9 @@ export async function visibleCameraNames(
 
   // Resolve the human behind a tool call. Same assertion mechanism as
   // middleware/space.ts, and the same posture: no asserted user, or one
-  // that resolves to nobody or to more than one person, means NOTHING —
-  // never everything. A tool that cannot say who is asking has not earned
-  // an answer.
+  // that resolves to nobody, to more than one person or to a deactivated
+  // one, means NOTHING — never everything. A tool that cannot say who is
+  // asking has not earned an answer.
   let scopeUserId = user.id;
   if (user.id === MCP_SERVICE_ID) {
     const asserted = user.assertedUser;
@@ -122,7 +122,7 @@ export async function visibleCameraNames(
     }
     const resolved = await resolveAssertedUser(prisma, asserted);
     if (!resolved.ok) {
-      logger.warn({ asserted, reason: resolved.reason }, "MCP asserted user did not resolve to one person; denying");
+      logger.warn({ asserted, reason: resolved.reason }, "MCP asserted user did not resolve to one active person; denying");
       return new Set();
     }
     const acting = resolved.user;

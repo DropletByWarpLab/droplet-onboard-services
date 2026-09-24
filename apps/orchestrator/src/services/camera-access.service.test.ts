@@ -287,6 +287,16 @@ describe("WARP-3061: the assistant resolves SSO / SCIM users too", () => {
     expect(names(await visibleCameraNames(prisma, askedAs("u-maria")))).toEqual([]);
   });
 
+  it("denies a DEACTIVATED person named by username, grants and all", async () => {
+    const gone: DirectoryUser = { ...MARIA, directoryStatus: "DEACTIVATED" };
+    expect(names(await visibleCameraNames(prismaWith(GRANTS, [gone]), askedAs("maria")))).toEqual([]);
+  });
+
+  it("denies a DEACTIVATED owner named by User.id rather than handing over every camera", async () => {
+    const gone: DirectoryUser = { ...OLIVIA, directoryStatus: "DEACTIVATED" };
+    expect(names(await visibleCameraNames(prismaWith({}, [gone]), askedAs("u-olivia")))).toEqual([]);
+  });
+
   it("denies a value that names nobody", async () => {
     expect(names(await visibleCameraNames(prismaWith(GRANTS, [MARIA]), askedAs("nobody")))).toEqual([]);
   });

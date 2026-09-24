@@ -654,8 +654,9 @@ interface DeptSearchCorpora {
  * user's LOCAL identity (same pattern as `middleware/space.ts`'s
  * `_service:mcp` handling) — the service principal's own `role: "service"`
  * must never be used for a department-membership decision. Returns null
- * when no caller identity can be resolved, or when the header names more
- * than one person (fail-closed → personal corpus only). The header is
+ * when no caller identity can be resolved, when the header names more than
+ * one person, or when it names a deactivated one (fail-closed → personal
+ * corpus only, logged with the reason). The header is
  * `User.username` or `User.id`, not a Nextcloud username (WARP-3061,
  * asserted-user.service.ts).
  */
@@ -667,7 +668,14 @@ async function resolveSearchCaller(
     const assertedUser = (req.header("x-nextcloud-user") ?? "").trim();
     if (!assertedUser) return null;
     const resolved = await resolveAssertedUser(prisma, assertedUser);
-    return resolved.ok ? resolved.user : null;
+    if (!resolved.ok) {
+      logger.warn(
+        { asserted: assertedUser, reason: resolved.reason },
+        "search: MCP asserted user did not resolve to one active person; personal corpus only",
+      );
+      return null;
+    }
+    return resolved.user;
   }
   const id = req.user?.id;
   const role = req.user?.role;
