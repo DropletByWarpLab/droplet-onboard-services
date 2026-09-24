@@ -202,7 +202,7 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 - **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox is `services/sandbox` on the first `internal: true` network ([ADR-056 §C](ADR-056-agentic-extensibility.md), WARP-2895); extensions run there as processes first (WARP-2900) and as containers through the apply-path fragment schema second (WARP-2898).
 - **Files involved:** `apps/orchestrator/src/routes/` (new `extensions.ts`), `apps/web-dashboard/src/app/` (new `/extensions` route), `apps/orchestrator/prisma/schema.prisma` (new `Extension` model)
 - **Status:** `[ ]` Not started. ADR-020's signed-manifest substrate + ADR-004's RBAC guard are design-committed to reuse (WARP-908 / [ADR-030](ADR-030-signed-rbac-gated-app-catalog-installer.md) — a curated, signed, RBAC-gated catalog installer, explicitly NOT the free-form Docker-socket one-click install pattern some competitors ship). ADR-030 is a design ADR only; build is explicitly deferred to post-GA.
-- **Blockers:** the sandbox contract — owned by ADR-056 §C (WARP-2895 the service, WARP-2898 the fragment schema); signing/trust model (resolved by ADR-030, reusing ADR-020; the box-local extension key is ADR-056 §C).
+- **Blockers:** the sandbox contract — owned by ADR-056 §C: the service is built (WARP-2895, #2218, on `stage`); the fragment schema (WARP-2898) is not; signing/trust model (resolved by ADR-030, reusing ADR-020; the box-local extension key is ADR-056 §C).
 - **Next action:** Post-GA, build against ADR-030 as revised by ADR-056 §C, in the WARP-2891 slice order (WARP-2895 → WARP-2900 → WARP-2898).
 
 ---
@@ -260,7 +260,7 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 |---|---|---|---|---|
 | LLM inference too slow on a low-power host (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation — M1.6 token streaming — is shipped (WARP-1442); hardware path is droplet-local-LLM / the inference host. |
 | Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence is the confirmation interceptor and the classification record (ADR-043 §2, ADR-056 §D); OpenClaw is gone. |
-| Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here; sandbox + guardrails live in droplet-local-LLM. |
+| Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here, and so does the depth-defence: the confirmation interceptor, the classification record and `services/sandbox` (ADR-043 §2, ADR-056 §C / §D). OpenClaw, the droplet-local-LLM guardrail this row used to name, is gone. |
 | Privileged container escape from router/NAS | Critical | Low | `openwrt/` (replaces privileged Docker approach) | Architecture already mitigates: router is OpenWrt, not a `--privileged` container. |
 | SD card corruption / data loss | High | Medium | `scripts/setup.sh`, `openwrt/` | Storage health monitoring + A/B partition scheme (overlaps M3.4). |
 | Docker Compose complexity for non-technical users | Medium | High | `scripts/setup.sh`, `scripts/factory-reset.sh`, `openwrt/build.sh` | M2.8 SD-card image is the long-term mitigation. |
@@ -280,6 +280,6 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 
 - **M1.3 JWT auth** — entirely in this repo; the API contract lives in `packages/shared-types` + `docs/mobile-api-contract.md`.
 - **M1.6 Streaming** — done, entirely in-repo (orchestrator `routes/llm.ts` SSE path + WARP-1442 agent-loop token streaming); not a `droplet-local-LLM` dependency.
-- **M2.7 Prompt-injection hardening** — input layer here; sandbox layer in droplet-local-LLM.
+- **M2.7 Prompt-injection hardening** — input layer and sandbox both here (`services/sandbox`, ADR-056 §C); not a `droplet-local-LLM` dependency since OpenClaw was deleted on 2026-04-30.
 - **M3.2 Native mobile apps** — not this repo; `droplet-ios` + `droplet-android` consume the orchestrator per `packages/shared-types` + `docs/mobile-api-contract.md`.
 - **M3.4 OTA** — this repo owns the update agent; `releases/` holds the manifests.
