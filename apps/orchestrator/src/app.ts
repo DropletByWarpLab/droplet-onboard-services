@@ -100,6 +100,7 @@ import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
 import { createRemoteToolClassificationsRouter } from "./routes/remote-tool-classifications.js";
 import { createCapabilitiesRouter } from "./routes/capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
+import { createMeDepartmentRouter } from "./routes/me-department.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
 import { createModuleGate } from "./middleware/module-gate.js";
@@ -657,6 +658,10 @@ export function createApp(
   app.use("/api", createCapabilitiesRouter(prisma, config));
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
+  // WARP-2981 (ADR-059 §6.1, DS-003): the caller's own active department,
+  // GET/PUT /api/me/active-department. Core, not module-gated: every person
+  // has a shell to arrange. Service principals are refused in the router.
+  app.use("/api", createMeDepartmentRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
   app.use("/api", createActivityRouter(prisma));
   // WARP-237: device-key-signed daily-root read surface.
