@@ -19,18 +19,35 @@
  *     "do we have a working token" check but mean opposite things to a person.
  *   - **Nothing here logs a token, a cache blob, or a device code.** The public
  *     view is built by an explicit allow-list, not by spreading the row.
+ *   - **The customer's own app (WARP-2705).** Every sign-in and refresh goes
+ *     through the app registration stored on the connection; there is no
+ *     box-wide client id to fall back to.
+ *   - **Authorization code + PKCE is the primary sign-in (WARP-2704).** Every
+ *     Entra tenant created since 2026-07-01 blocks device code through
+ *     security defaults; device code stays as a fallback for tenants that
+ *     still allow it.
  */
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+
 import type { PrismaClient } from "@prisma/client";
 
 import { recordActivity } from "../activity.singleton.js";
-import { sealTokenCache, unsealTokenCache } from "./token-cache.js";
+import {
+  sealPendingFlow,
+  sealTokenCache,
+  unsealPendingFlow,
+  unsealTokenCache,
+} from "./token-cache.js";
 import {
   classifyAuthFailure,
   isPendingFlowExpired,
   redactAuthError,
   PENDING_FLOW_TTL_MS,
+  type EntraAppRegistration,
   type EntraFailureLike,
 } from "./state.js";
+
+export type { EntraAppRegistration } from "./state.js";
 
 // --- The Entra port -------------------------------------------------------
 //
@@ -59,18 +76,43 @@ export interface EntraAuthResult {
   accessToken?: string;
 }
 
+/**
+ * Every operation takes the app registration it signs in through (WARP-2705):
+ * the port has no notion of a box-wide app, so no caller can fall back to one.
+ */
 export interface EntraClient {
   /**
-   * Begin a device-code sign-in. `onCode` fires as soon as Microsoft issues
-   * the code (so the caller can show it immediately); the promise resolves
-   * only once the person has approved it.
+   * The URL of Microsoft's sign-in page for an authorization-code sign-in
+   * (WARP-2704). PKCE is S256 over `codeChallenge`; `state` and `nonce` are
+   * echoed back so the callback can be tied to the flow that started it.
    */
-  acquireByDeviceCode(opts: {
-    onCode: (info: DeviceCodeInfo) => void;
-  }): Promise<EntraAuthResult>;
+  getAuthCodeUrl(
+    app: EntraAppRegistration,
+    opts: { redirectUri: string; state: string; nonce: string; codeChallenge: string },
+  ): Promise<string>;
+
+  /** Redeem the code the callback received, with the verifier kept server-side. */
+  acquireByAuthorizationCode(
+    app: EntraAppRegistration,
+    opts: { code: string; redirectUri: string; codeVerifier: string; nonce: string },
+  ): Promise<EntraAuthResult>;
+
+  /**
+   * Begin a device-code sign-in — the fallback. `onCode` fires as soon as
+   * Microsoft issues the code (so the caller can show it immediately); the
+   * promise resolves only once the person has approved it.
+   */
+  acquireByDeviceCode(
+    app: EntraAppRegistration,
+    opts: { onCode: (info: DeviceCodeInfo) => void },
+  ): Promise<EntraAuthResult>;
 
   /** Refresh silently from a stored cache. */
-  acquireSilent(serializedCache: string, homeAccountId: string): Promise<EntraAuthResult>;
+  acquireSilent(
+    app: EntraAppRegistration,
+    serializedCache: string,
+    homeAccountId: string,
+  ): Promise<EntraAuthResult>;
 }
 
 // --- Errors ---------------------------------------------------------------
@@ -81,6 +123,21 @@ export class M365NotConnectedError extends Error {
   constructor(public readonly state: string) {
     super(`Microsoft 365 is not connected (state: ${state}).`);
     this.name = "M365NotConnectedError";
+  }
+}
+
+/**
+ * WARP-2705 — a sign-in was asked for with no app registration named and none
+ * stored on the connection. There is deliberately no box-wide app to fall back
+ * to; the owner has to say which of their organisation's apps to use.
+ */
+export class M365AppRequiredError extends Error {
+  constructor() {
+    super(
+      "Connecting Microsoft 365 needs your organisation's app registration: its " +
+        "Application (client) ID and Directory (tenant) ID.",
+    );
+    this.name = "M365AppRequiredError";
   }
 }
 
@@ -102,6 +159,9 @@ export interface M365ConnectionView {
   /** Which Microsoft account is linked, for the person to recognise. Not secret. */
   accountUpn: string | null;
   tenantId: string | null;
+  /** WARP-2705 — the app registration this connection signs in through. Not
+   *  secret; kept across a disconnect so reconnecting is one click. */
+  app: EntraAppRegistration | null;
   grantedScopes: string[];
   connectedAt: Date | null;
   lastRefreshOkAt: Date | null;
@@ -120,6 +180,16 @@ interface ConnectionRow {
   pendingFlowExpiresAt: Date | null;
   homeAccountId: string | null;
   tokenCacheEnc: string | null;
+  appClientId?: string | null;
+  appTenantId?: string | null;
+  pendingStateHash?: string | null;
+  pendingFlowEnc?: string | null;
+}
+
+/** The stored app registration, or null when the row predates WARP-2705. */
+function storedApp(row: ConnectionRow | null): EntraAppRegistration | null {
+  if (!row?.appClientId || !row.appTenantId) return null;
+  return { clientId: row.appClientId, tenantId: row.appTenantId };
 }
 
 /**
@@ -172,6 +242,7 @@ const DISCONNECTED_VIEW: M365ConnectionView = {
   state: "DISCONNECTED",
   accountUpn: null,
   tenantId: null,
+  app: null,
   grantedScopes: [],
   connectedAt: null,
   lastRefreshOkAt: null,
@@ -191,6 +262,7 @@ function toView(row: ConnectionRow, now: Date): M365ConnectionView {
     state,
     accountUpn: row.accountUpn ?? null,
     tenantId: row.tenantId ?? null,
+    app: storedApp(row),
     grantedScopes: row.grantedScopes ? row.grantedScopes.split(" ").filter(Boolean) : [],
     connectedAt: row.connectedAt ?? null,
     lastRefreshOkAt: row.lastRefreshOkAt ?? null,
@@ -214,8 +286,241 @@ export async function getConnectionView(
 
 // --- Connect --------------------------------------------------------------
 
+/** Options every sign-in accepts. */
+export interface ConnectOptions {
+  /** The app to sign in through. Omit to reuse the one stored on the
+   *  connection; with neither, the sign-in is refused (M365AppRequiredError). */
+  app?: EntraAppRegistration;
+}
+
+/** The app a new sign-in uses: the one asked for, else the stored one. */
+async function resolveApp(
+  prisma: PrismaClient,
+  userId: string,
+  requested: EntraAppRegistration | undefined,
+): Promise<EntraAppRegistration> {
+  if (requested) return requested;
+  const row = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+  const stored = storedApp(row);
+  if (!stored) throw new M365AppRequiredError();
+  return stored;
+}
+
+/** 32 random bytes, base64url — the RFC 7636 verifier shape (43 chars). */
+function randomToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+/** What the row stores in place of the raw OAuth `state`. */
+function hashState(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
+
+/** Constant-time string equality that tolerates unequal lengths. */
+function sameSecret(a: string, b: string): boolean {
+  return timingSafeEqual(
+    createHash("sha256").update(a).digest(),
+    createHash("sha256").update(b).digest(),
+  );
+}
+
 /**
- * Start a device-code sign-in.
+ * WARP-2704 — start an authorization-code sign-in.
+ *
+ * Builds Microsoft's sign-in URL FIRST and only then parks the row in
+ * PENDING_CONSENT, so a box that cannot reach Microsoft answers with an error
+ * without dirtying the connection. The row keeps a SHA-256 of `state` (the
+ * callback's lookup key) and the sealed verifier, nonce and redirect URI; the
+ * raw `state` goes back to the caller once, for the redirect and the browser
+ * cookie that ties the callback to this browser.
+ *
+ * Connecting IS the consent event (ADR-041).
+ */
+export async function beginAuthCodeConnect(
+  prisma: PrismaClient,
+  entra: EntraClient,
+  userId: string,
+  opts: ConnectOptions & {
+    /** The box's own callback URL, byte-identical in both legs. */
+    redirectUri: string;
+  },
+  now: Date = new Date(),
+): Promise<{ authorizeUrl: string; state: string; expiresAt: Date }> {
+  const app = await resolveApp(prisma, userId, opts.app);
+
+  const state = randomToken();
+  const nonce = randomToken();
+  const codeVerifier = randomToken();
+  const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+
+  const authorizeUrl = await entra.getAuthCodeUrl(app, {
+    redirectUri: opts.redirectUri,
+    state,
+    nonce,
+    codeChallenge,
+  });
+
+  const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
+  const pending = {
+    state: "PENDING_CONSENT" as const,
+    appClientId: app.clientId,
+    appTenantId: app.tenantId,
+    pendingStateHash: hashState(state),
+    pendingFlowEnc: sealPendingFlow(userId, {
+      codeVerifier,
+      nonce,
+      redirectUri: opts.redirectUri,
+    }),
+    pendingFlowExpiresAt: expiresAt,
+    lastError: null,
+  };
+  await prisma.m365Connection.upsert({
+    where: { userId },
+    create: { userId, ...pending },
+    update: pending,
+  });
+
+  return { authorizeUrl, state, expiresAt };
+}
+
+/** How a callback ended, for the dashboard to say so. */
+export type AuthCodeOutcome = "connected" | "cancelled" | "expired" | "failed" | "invalid";
+
+/**
+ * WARP-2704 — finish an authorization-code sign-in from Microsoft's redirect.
+ *
+ * The callback is reached WITHOUT a Droplet session (a Microsoft sign-in with
+ * MFA or an admin's consent can outlast the 15-minute access token), so the
+ * person is identified by the flow, never by anything the browser asserts:
+ *
+ *   1. `state` must equal the httpOnly cookie set when THIS browser pressed
+ *      Connect. That is what stops a lured browser from linking an attacker's
+ *      mailbox to the owner's account (login CSRF).
+ *   2. The row is found by the state's hash and CLAIMED by one conditional
+ *      write that clears it, so a replayed or racing callback redeems nothing.
+ *   3. The verifier, nonce and redirect URI come from the sealed row, and the
+ *      code is redeemed through the app stored on it.
+ *
+ * An unknown or mismatched state touches no row at all.
+ */
+export async function completeAuthCodeConnect(
+  prisma: PrismaClient,
+  entra: EntraClient,
+  callback: {
+    state: string | null | undefined;
+    /** The state cookie this browser carries. */
+    browserState: string | null | undefined;
+    code?: string | null;
+    /** Microsoft's `error` / `error_description`, when it sent those instead. */
+    error?: string | null;
+    errorDescription?: string | null;
+  },
+  now: Date = new Date(),
+): Promise<AuthCodeOutcome> {
+  const { state, browserState } = callback;
+  if (!state || !browserState || !sameSecret(state, browserState)) return "invalid";
+
+  const stateHash = hashState(state);
+  const row = (await prisma.m365Connection.findUnique({
+    where: { pendingStateHash: stateHash },
+  })) as (ConnectionRow & { userId: string }) | null;
+  if (!row || row.state !== "PENDING_CONSENT") return "invalid";
+  const userId = row.userId;
+
+  const { count } = await prisma.m365Connection.updateMany({
+    where: { userId, state: "PENDING_CONSENT", pendingStateHash: stateHash },
+    data: { pendingStateHash: null, pendingFlowEnc: null },
+  });
+  if (count !== 1) return "invalid";
+
+  if (isPendingFlowExpired(row.pendingFlowExpiresAt, now)) {
+    await returnToDisconnected(prisma, userId, null);
+    return "expired";
+  }
+
+  if (callback.error) {
+    return await settleConnectFailure(prisma, userId, {
+      errorCode: callback.error,
+      errorMessage: callback.errorDescription ?? undefined,
+    });
+  }
+
+  const app = storedApp(row);
+  if (!callback.code || !app || !row.pendingFlowEnc) {
+    await returnToDisconnected(prisma, userId, "Microsoft did not return a usable sign-in. Please try again.");
+    return "failed";
+  }
+
+  let flow: ReturnType<typeof unsealPendingFlow>;
+  try {
+    flow = unsealPendingFlow(userId, row.pendingFlowEnc);
+  } catch {
+    await returnToDisconnected(prisma, userId, "This sign-in could no longer be completed. Please try again.");
+    return "failed";
+  }
+
+  let result: EntraAuthResult;
+  try {
+    result = await entra.acquireByAuthorizationCode(app, {
+      code: callback.code,
+      redirectUri: flow.redirectUri,
+      codeVerifier: flow.codeVerifier,
+      nonce: flow.nonce,
+    });
+  } catch (err) {
+    return await settleConnectFailure(prisma, userId, err);
+  }
+
+  return (await persistConnected(prisma, userId, result)) ? "connected" : "cancelled";
+}
+
+/** Put an in-flight sign-in back to DISCONNECTED — and only an in-flight one. */
+async function returnToDisconnected(
+  prisma: PrismaClient,
+  userId: string,
+  lastError: string | null,
+): Promise<void> {
+  await prisma.m365Connection.updateMany({
+    where: { userId, state: "PENDING_CONSENT" },
+    data: {
+      state: "DISCONNECTED",
+      pendingStateHash: null,
+      pendingFlowEnc: null,
+      pendingFlowExpiresAt: null,
+      lastError,
+    },
+  });
+}
+
+/**
+ * A failed authorization-code sign-in, in the state the person can act on.
+ *
+ * Differs from `persistFailure` in one place: a TRANSIENT failure returns the
+ * row to DISCONNECTED rather than leaving it alone. The flow was already
+ * claimed, so nothing can complete it — left in PENDING_CONSENT the row would
+ * read "signing in" until the window lapsed.
+ */
+async function settleConnectFailure(
+  prisma: PrismaClient,
+  userId: string,
+  err: unknown,
+): Promise<AuthCodeOutcome> {
+  const failure = (err ?? {}) as EntraFailureLike;
+  const kind = classifyAuthFailure(failure);
+  if (kind === "TRANSIENT") {
+    await returnToDisconnected(prisma, userId, redactAuthError(failure));
+    return "failed";
+  }
+  await persistFailure(prisma, userId, failure);
+  return kind === "ABANDONED" ? "cancelled" : "failed";
+}
+
+/**
+ * Start a device-code sign-in — the FALLBACK since WARP-2704. Every tenant
+ * created since 2026-07-01 blocks this flow (AADSTS50199 → ERROR), so the
+ * authorization code above is what the dashboard offers first.
  *
  * Resolves as soon as Microsoft issues the code, so the caller can show it
  * immediately; the sign-in itself completes in the background and flips the
@@ -229,29 +534,33 @@ export async function beginDeviceCodeConnect(
   prisma: PrismaClient,
   entra: EntraClient,
   userId: string,
+  opts: ConnectOptions = {},
   now: Date = new Date(),
 ): Promise<DeviceCodeInfo> {
+  const app = await resolveApp(prisma, userId, opts.app);
   const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
 
+  // An authorization-code attempt left open in another tab is superseded:
+  // its hash and sealed flow go, so its callback can no longer claim the row.
+  const pending = {
+    state: "PENDING_CONSENT" as const,
+    appClientId: app.clientId,
+    appTenantId: app.tenantId,
+    pendingStateHash: null,
+    pendingFlowEnc: null,
+    pendingFlowExpiresAt: expiresAt,
+    lastError: null,
+  };
   await prisma.m365Connection.upsert({
     where: { userId },
-    create: {
-      userId,
-      state: "PENDING_CONSENT",
-      pendingFlowExpiresAt: expiresAt,
-      lastError: null,
-    },
-    update: {
-      state: "PENDING_CONSENT",
-      pendingFlowExpiresAt: expiresAt,
-      lastError: null,
-    },
+    create: { userId, ...pending },
+    update: pending,
   });
 
   return await new Promise<DeviceCodeInfo>((resolve, reject) => {
     let handedBack = false;
 
-    const completion = entra.acquireByDeviceCode({
+    const completion = entra.acquireByDeviceCode(app, {
       onCode: (info) => {
         handedBack = true;
         resolve(info);
@@ -289,7 +598,7 @@ async function persistConnected(
   userId: string,
   result: EntraAuthResult,
   now: Date = new Date(),
-): Promise<void> {
+): Promise<boolean> {
   const { count } = await prisma.m365Connection.updateMany({
     where: { userId, state: "PENDING_CONSENT" },
     data: {
@@ -299,6 +608,8 @@ async function persistConnected(
       accountUpn: result.accountUpn,
       grantedScopes: result.grantedScopes,
       tokenCacheEnc: sealTokenCache(userId, result.serializedCache),
+      pendingStateHash: null,
+      pendingFlowEnc: null,
       pendingFlowExpiresAt: null,
       connectedAt: now,
       lastRefreshOkAt: now,
@@ -319,6 +630,7 @@ async function persistConnected(
       userInitiated: true,
     });
   }
+  return count > 0;
 }
 
 /**
@@ -353,7 +665,13 @@ async function persistFailure(
   if (kind === "ABANDONED") {
     await prisma.m365Connection.updateMany({
       where: { userId },
-      data: { state: "DISCONNECTED", pendingFlowExpiresAt: null, lastError: null },
+      data: {
+        state: "DISCONNECTED",
+        pendingStateHash: null,
+        pendingFlowEnc: null,
+        pendingFlowExpiresAt: null,
+        lastError: null,
+      },
     });
     return;
   }
@@ -362,6 +680,8 @@ async function persistFailure(
     where: { userId },
     data: {
       state: kind,
+      pendingStateHash: null,
+      pendingFlowEnc: null,
       pendingFlowExpiresAt: null,
       lastError: redactAuthError(failure),
     },
@@ -429,9 +749,13 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
       accountUpn: null,
       tenantId: null,
       grantedScopes: null,
+      pendingStateHash: null,
+      pendingFlowEnc: null,
       pendingFlowExpiresAt: null,
       connectedAt: null,
       lastError: null,
+      // appClientId / appTenantId are kept on purpose (WARP-2705): they are
+      // configuration, not a credential, and they make reconnecting one click.
     },
   });
 
@@ -520,9 +844,31 @@ export async function getAccessToken(
     throw new M365NotConnectedError("NEEDS_RECONNECT");
   }
 
+  // WARP-2705 — only a link made before per-connection apps can lack one. Its
+  // tokens belong to an app the box no longer names, so it cannot refresh:
+  // that is a reconnect, said plainly, not an ERROR and not a crash.
+  const app = storedApp(row);
+  if (!app) {
+    const reason =
+      "This Microsoft 365 link was made before Droplet used your organisation's own app. Please connect again.";
+    await prisma.m365Connection.update({
+      where: { userId },
+      data: { state: "NEEDS_RECONNECT", lastError: reason },
+    });
+    await auditM365({
+      what: "Microsoft 365 needs reconnect",
+      state: "NEEDS_RECONNECT",
+      userId,
+      severity: "warn",
+      reason,
+      userInitiated: false,
+    });
+    throw new M365NotConnectedError("NEEDS_RECONNECT");
+  }
+
   let result: EntraAuthResult;
   try {
-    result = await entra.acquireSilent(cache, row.homeAccountId);
+    result = await entra.acquireSilent(app, cache, row.homeAccountId);
   } catch (err) {
     await persistFailure(prisma, userId, err);
     throw err;
