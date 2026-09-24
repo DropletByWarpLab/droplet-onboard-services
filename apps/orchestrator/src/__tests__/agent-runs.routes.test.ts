@@ -449,15 +449,41 @@ describe("agent-runs routes — runs follow the box's ACTIVE model (WARP-3047)",
     expect(resolveActiveModelMock).not.toHaveBeenCalled();
   });
 
-  it("a schedule with no model stores the model active at CREATION (non-null column)", async () => {
+  it("a schedule with no model FOLLOWS the active model — the ticker resolves it at every fire", async () => {
     resolveActiveModelMock.mockResolvedValue(ACTIVE);
     const { app, db } = buildApp(owner);
     const res = await request(app)
       .post("/api/agent-runs/schedules")
       .send({ goal: "sweep clips", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
     expect(res.status).toBe(201);
-    expect(db.schedules[0]).toMatchObject({ model: ACTIVE });
+    // `model` still holds a real id (what was active at creation): the
+    // fallback when nothing resolves at fire, and what an older build fires.
+    expect(db.schedules[0]).toMatchObject({ model: ACTIVE, followsActiveModel: true });
     expect(resolveActiveModelMock).toHaveBeenCalledWith(db.prisma, { requireTools: true });
+
+    const listed = await request(app).get("/api/agent-runs/schedules");
+    expect(listed.body.schedules[0]).toMatchObject({ model: ACTIVE, followsActiveModel: true });
+  });
+
+  it("a schedule with an explicit model is pinned to it", async () => {
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "sweep clips", model: "gpt-oss:20b", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(res.status).toBe(201);
+    expect(db.schedules[0]).toMatchObject({ model: "gpt-oss:20b", followsActiveModel: false });
+    expect(resolveActiveModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a schedule with no model on a box with no model at all → 400", async () => {
+    resolveActiveModelMock.mockResolvedValue(null);
+    const { app, db } = buildApp(owner);
+    const res = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "sweep clips", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(res.status).toBe(400);
+    expect(db.schedules).toHaveLength(0);
   });
 
   it("nothing resolvable → 400, never a queued run on a guessed model", async () => {
