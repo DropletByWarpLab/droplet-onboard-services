@@ -17,8 +17,12 @@
  *   · at most INFLIGHT_MAX_ENTRIES, the oldest evicted; an entry whose
  *     tracking started more than INFLIGHT_MAX_AGE_MS ago is dropped;
  *   · `end` deletes the entry. A camera that stops reporting (or is disabled)
- *     is tracking nobody, so its entries go; Frigate itself going offline
- *     (source_offline) clears the map — its objects never end;
+ *     is tracking nobody, so its entries go, grace included; Frigate itself
+ *     going offline (its LWT, source_offline) clears the map — its objects
+ *     never end. A broker drop forgets nobody (mqtt.js emits `close` on every
+ *     reconnect, and a person standing still may get no `update` after it):
+ *     an `end` lost meanwhile is bounded by the span cap for the hold
+ *     (`presenceHolds`) and by INFLIGHT_MAX_AGE_MS for the entry;
  *   · due = tracked ≥ SECURITY_ONGOING_AFTER_MS, best score ≥
  *     SECURITY_MIN_SCORE, not Frigate's false positive, no ongoing row yet;
  *   · in memory only: a restart forgets it, and then only the `end` row
@@ -71,7 +75,7 @@ interface Entry {
 export interface InflightTracker {
   /** Feed one raw `frigate/events` message (parsed JSON), before the gate. */
   observe(message: unknown, now: Date): void;
-  /** A camera stopped reporting or was disabled: forget its people. `null` = Frigate itself (source_offline): forget everyone. */
+  /** A camera stopped reporting or was disabled: forget its people, their grace too. `null` = Frigate itself (source_offline): forget everyone. */
   forgetCamera(camera: string | null): void;
   /** The people due an ongoing row now, oldest first. Drops entries past INFLIGHT_MAX_AGE_MS. */
   due(now: Date): OngoingObject[];
@@ -94,14 +98,14 @@ export function createInflightTracker(
   const endGraceMs = opts.endGraceMs ?? INFLIGHT_END_GRACE_MS;
   /** Insertion order = the order Droplet first heard of each person: the first key is the oldest. */
   const inflight = new Map<string, Entry>();
-  /** Ended people whose ongoing row exists → when they ended. */
-  const ended = new Map<string, number>();
+  /** Ended people whose ongoing row exists → when they ended, and on which camera. */
+  const ended = new Map<string, { at: number; camera: string }>();
 
   const tooOld = (e: Pick<Entry, "startedAt">, now: Date) => now.getTime() - e.startedAt.getTime() > maxAgeMs;
 
   function prune(now: Date): void {
     for (const [id, e] of inflight) if (tooOld(e, now)) inflight.delete(id);
-    for (const [id, at] of ended) if (now.getTime() - at >= endGraceMs) ended.delete(id);
+    for (const [id, g] of ended) if (now.getTime() - g.at >= endGraceMs) ended.delete(id);
   }
 
   return {
@@ -111,9 +115,10 @@ export function createInflightTracker(
       if (r.type === "end") {
         const e = inflight.get(r.id);
         inflight.delete(r.id);
+        // An `end` between due() and markWritten() gets no grace; harmless: that ongoing row arrives now, so its incident cannot seal before this end row triages (this tick or the next).
         if (e?.written) {
           ended.delete(r.id);
-          ended.set(r.id, now.getTime());
+          ended.set(r.id, { at: now.getTime(), camera: e.camera });
           while (ended.size > maxEntries) ended.delete(ended.keys().next().value!);
         }
         return;
@@ -151,9 +156,11 @@ export function createInflightTracker(
     forgetCamera(camera) {
       if (camera === null) {
         inflight.clear();
+        ended.clear();
         return;
       }
       for (const [id, e] of inflight) if (e.camera === camera) inflight.delete(id);
+      for (const [id, g] of ended) if (g.camera === camera) ended.delete(id);
     },
 
     due(now) {
@@ -183,8 +190,8 @@ export function createInflightTracker(
     inView(id, now) {
       const e = inflight.get(id);
       if (e) return !tooOld(e, now);
-      const at = ended.get(id);
-      return at !== undefined && now.getTime() - at < endGraceMs;
+      const g = ended.get(id);
+      return g !== undefined && now.getTime() - g.at < endGraceMs;
     },
 
     size: () => inflight.size,

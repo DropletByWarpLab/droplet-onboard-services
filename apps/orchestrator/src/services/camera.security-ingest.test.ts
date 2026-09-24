@@ -16,7 +16,7 @@
  *      /security shows, rather than a quiet feed.
  *   4. WARP-2978 PR-D — the in-flight map (who is still in view) is fed from
  *      the same RAW messages, before the gate, and forgets people when their
- *      camera, Frigate or the broker goes away.
+ *      camera or Frigate goes away — not when the broker blips.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -75,6 +75,7 @@ import { initCameraService, securityOngoingSource, shutdownCameraService, subscr
 import type { CameraSSEEvent } from "../types/camera.js";
 import { resetCameraEventGateForTests } from "./camera-event-gate.js";
 import { _resetSecurityIngestHealthForTests, securityIngestHealthState } from "./security-events.service.js";
+import { INFLIGHT_MAX_AGE_MS } from "./security-inflight.js";
 
 const createMany = vi.fn();
 const findFirst = vi.fn();
@@ -353,14 +354,29 @@ describe("WARP-2978 PR-D — the in-flight map is fed from the raw messages, bef
     expect(dueIds()).toEqual([]);
   });
 
-  it("a dropped broker forgets everyone (an `end` sent meanwhile is never redelivered)", () => {
+  it("a dropped broker forgets nobody: a person standing still (no `update` after the reconnect) still holds, and their `end` still gets the grace", () => {
     const start_time = startedSec();
+    const inView = () => securityOngoingSource().inView("a", new Date());
     message("frigate/events", frigate("new", "a", { start_time }));
+    securityOngoingSource().markWritten("a"); // the engine wrote their ongoing row
+    // mqtt.js emits `close` (and `offline`) on every reconnect cycle.
     (handlers.close as () => void)();
-    expect(dueIds()).toEqual([]);
-    message("frigate/events", frigate("update", "a", { start_time }));
-    expect(dueIds()).toEqual(["a"]);
+    expect(inView()).toBe(true);
     (handlers.offline as () => void)();
-    expect(dueIds()).toEqual([]);
+    expect(inView()).toBe(true);
+    (handlers.connect as () => void)();
+    message("frigate/events", frigate("end", "a", { start_time }));
+    expect(inView()).toBe(true);
+  });
+
+  it("an `end` lost while the broker was away is bounded: the entry goes at the 6 h age limit (its hold already stopped at the span cap)", () => {
+    const start_time = startedSec();
+    message("frigate/events", frigate("new", "b", { start_time }));
+    (handlers.close as () => void)();
+    (handlers.connect as () => void)(); // clean session: Frigate's `end` for b is never redelivered
+    expect(dueIds()).toEqual(["b"]);
+    const past = new Date(start_time * 1000 + INFLIGHT_MAX_AGE_MS + 1);
+    expect(securityOngoingSource().inView("b", past)).toBe(false);
+    expect(securityOngoingSource().due(past)).toEqual([]);
   });
 });

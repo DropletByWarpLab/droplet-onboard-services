@@ -179,6 +179,21 @@ describe("the bounds: 256 entries, 6 hours, a camera or Frigate going offline", 
     expect(t.due(plus(T0, 60_000))).toEqual([]);
   });
 
+  it("forgetting a camera forgets its ended people's grace too; forgetting Frigate forgets every grace", () => {
+    const t = createInflightTracker();
+    for (const [id, camera] of [["a.1-x", "back"], ["b.1-x", "front"]]) {
+      t.observe(msg("new", { id, camera }), T0);
+      t.markWritten(id);
+      t.observe(msg("end", { id, camera }), plus(T0, 60_000));
+    }
+    const at = plus(T0, 61_000);
+    expect([t.inView("a.1-x", at), t.inView("b.1-x", at)]).toEqual([true, true]);
+    t.forgetCamera("back");
+    expect([t.inView("a.1-x", at), t.inView("b.1-x", at)]).toEqual([false, true]);
+    t.forgetCamera(null);
+    expect(t.inView("b.1-x", at)).toBe(false);
+  });
+
   it("ignores what is not a well-formed Frigate object message", () => {
     const t = createInflightTracker();
     t.observe({ type: "new", after: { id: "a b" } }, T0);

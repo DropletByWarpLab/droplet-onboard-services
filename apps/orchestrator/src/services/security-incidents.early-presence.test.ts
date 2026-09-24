@@ -47,7 +47,13 @@ import {
   writeOngoingRows,
   type SecurityIncidentDeps,
 } from "./security-incidents.service.js";
-import { createInflightTracker, INFLIGHT_END_GRACE_MS, presenceHolds, type InflightTracker } from "./security-inflight.js";
+import {
+  createInflightTracker,
+  INFLIGHT_END_GRACE_MS,
+  INFLIGHT_MAX_AGE_MS,
+  presenceHolds,
+  type InflightTracker,
+} from "./security-inflight.js";
 import { loadIncidentDetail, type IncidentViewer } from "./security-incident-view.js";
 import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import { areaRows, createFakeSecurityPrisma, eventRow, officeHours, type FakeSecurityPrisma } from "../__tests__/security-incidents.fake.js";
@@ -330,12 +336,18 @@ describe("the later end row joins the SAME incident", () => {
     expect(f.world.securityIncident[0]).toMatchObject({ grouping: "closed" });
   });
 
-  it("the hold stops at the span cap: past 60 min from the first activity no end could join, so it seals", async () => {
+  it("the hold stops at the span cap: past 60 min from the first activity no end could join, so it seals — also when the end was lost in a broker drop, whose entry goes at 6 h", async () => {
     const { f, t } = await alertAt30s();
     await tick(f, t, plus(T0, MAX_SPAN_MS));
     expect(f.world.securityIncident[0]).toMatchObject({ grouping: "collecting" });
     await tick(f, t, plus(T0, MAX_SPAN_MS + 1_000));
     expect(f.world.securityIncident[0]).toMatchObject({ grouping: "closed" });
+    // Never an `end` (lost while the broker was away): still in the map, holding nothing, until the age limit.
+    expect(t.inView(FID, plus(T0, MAX_SPAN_MS + 1_000))).toBe(true);
+    await tick(f, t, plus(T0, INFLIGHT_MAX_AGE_MS + 1));
+    expect(t.size()).toBe(0);
+    expect(f.world.securityIncident).toHaveLength(1);
+    expect(ongoingRows(f)).toHaveLength(1);
   });
 });
 

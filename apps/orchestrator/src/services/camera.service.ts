@@ -152,17 +152,16 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
     // WARP-2977 — a dropped broker is an ingest that is down, not a quiet
     // site. mqtt.js reconnects on its own; the next `connect` resubscribes and
     // its SUBACK marks the feed live again.
-    // WARP-2978 PR-D: an `end` sent while the broker was away is never
-    // redelivered (clean session), so the in-flight map starts over; a person
-    // still tracked is re-learned from Frigate's next `update`.
-    _mqttClient.on("close", () => {
-      noteFrigateConnectionLost();
-      _inflight.forgetCamera(null);
-    });
-    _mqttClient.on("offline", () => {
-      noteFrigateConnectionLost();
-      _inflight.forgetCamera(null);
-    });
+    // WARP-2978 PR-D: a dropped broker forgets nobody in the in-flight map.
+    // mqtt.js emits `close` on every reconnect cycle, and a person standing
+    // still may get no `update` after it: forgetting them would let their
+    // `end` open a second incident, and a second alert. An `end` sent while
+    // the broker was away is never redelivered (clean session); that person's
+    // hold still stops at the span cap and their entry at the 6 h age limit
+    // (security-inflight.ts). Frigate itself going away is its LWT
+    // (`frigate/available` offline), which handleMqttMessage still forgets on.
+    _mqttClient.on("close", () => noteFrigateConnectionLost());
+    _mqttClient.on("offline", () => noteFrigateConnectionLost());
   } catch (err) {
     logger.warn("Camera MQTT connection failed: %s", err);
   }
