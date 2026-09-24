@@ -32,7 +32,7 @@ const RUN =
 const TAG = "warp2980c";
 const CAM = `${TAG}_front`;
 const CAM2 = `${TAG}_back`;
-const T0 = new Date("2031-03-10T12:00:00Z");
+const T0 = new Date("2032-03-10T12:00:00Z");
 const MIN = 60_000;
 const at = (min: number) => new Date(T0.getTime() + min * MIN);
 
@@ -127,8 +127,8 @@ describe.skipIf(!RUN)("Coverage against real Postgres (WARP-2980)", () => {
   it("the learning state lands as rows the source CHECK accepts, and a camera gone 35 days is dropped", async () => {
     const pid = randomUUID();
     // Two full site (UTC) dates inside T0's window, and a camera last seen just past the keep horizon.
-    const d7 = new Date("2031-03-07T00:00:00Z");
-    const d9 = new Date("2031-03-09T00:00:00Z");
+    const d7 = new Date("2032-03-07T00:00:00Z");
+    const d9 = new Date("2032-03-09T00:00:00Z");
     await prisma.securityCoverageSpan.createMany({
       data: [
         { camera: CAM, state: "closed", startedAt: d7, coveredUntil: d9, processId: pid, closedAt: d9 },
