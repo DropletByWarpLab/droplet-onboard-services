@@ -1,15 +1,21 @@
 /**
- * WARP-2978 (ADR-059 P3 spec §6.1 step 3, R7) — the SecurityEvent writer
- * list, pinned.
+ * WARP-2978 (ADR-059 P3 spec §6.1 step 3, R7) — the SecurityEvent writers,
+ * pinned CALL SITE by call site.
  *
  * The incident engine's triage floor is gap-safe only because every
  * transaction that writes a SecurityEvent ends within 60 s: the floor moves to
  * a head read two minutes earlier, and a writer still open by then would have
  * its row skipped — silently and forever. So every writer is reviewed against
- * that bound, and this file is how a NEW writer gets noticed: it greps every
- * production `.ts` under `src/` for `securityEvent.create(` /
- * `securityEvent.createMany(` and pins the exact list. A new site fails here
- * until someone adds it below, with the reason its transaction is short.
+ * that bound, and this file is how a NEW one gets noticed. It scans every
+ * production `.ts` under `src/` for
+ *   · a Prisma write — `securityEvent.create(` / `.createMany(` /
+ *     `.createManyAndReturn(` — and pins each one as `<file>#<function>`: a
+ *     second writer added to a file that already has one fails too (review
+ *     #10), while an edit elsewhere in the file does not churn the list;
+ *   · raw SQL — `INSERT INTO "SecurityEvent"` / `COPY "SecurityEvent"` —
+ *     which must not exist at all.
+ * A new site fails here until it is added below with the reason its
+ * transaction is short.
  *
  * It also pins the other half of D11: nothing UPDATEs a SecurityEvent (the
  * database refuses it anyway — the `SecurityEvent_append_only` trigger).
@@ -31,53 +37,88 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 /** The source with comments blanked (same length), so a writer named in a comment does not count. */
-function code(file: string): string {
-  return readFileSync(file, "utf8")
+function blankComments(src: string): string {
+  return src
     .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
     .replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
 }
 
 const PRODUCTION = walk(SRC)
   .map((full) => ({ full, rel: path.relative(SRC, full).split(path.sep).join("/") }))
-  .filter(({ rel }) => !rel.endsWith(".test.ts") && !rel.split("/").includes("__tests__"));
+  .filter(({ rel }) => !rel.endsWith(".test.ts") && !rel.split("/").includes("__tests__"))
+  .map(({ full, rel }) => ({ rel, code: blankComments(readFileSync(full, "utf8")) }));
 
-function sites(re: RegExp): string[] {
+const PRISMA_WRITE = /\bsecurityEvent\s*\.\s*(?:create|createMany|createManyAndReturn)\s*\(/g;
+const PRISMA_UPDATE = /\bsecurityEvent\s*\.\s*(?:update|updateMany|upsert)\s*\(/g;
+const RAW_WRITE = /\b(?:INSERT\s+INTO|COPY)\s+(?:"?public"?\s*\.\s*)?"SecurityEvent"(?=[\s(])/gi;
+const RAW_UPDATE = /\bUPDATE\s+(?:"?public"?\s*\.\s*)?"SecurityEvent"(?=\s)/gi;
+
+/** The name of the function a position sits in: the nearest preceding declaration. */
+function enclosingFunction(code: string, at: number): string {
+  const decl = /(?:\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>)/g;
+  let name = "<module>";
+  for (const m of code.matchAll(decl)) {
+    if (m.index! >= at) break;
+    name = m[1] ?? m[2] ?? name;
+  }
+  return name;
+}
+
+/** Every match of `re` in `files`, as `<file>#<function>`, sorted. */
+function sites(files: ReadonlyArray<{ rel: string; code: string }>, re: RegExp): string[] {
   const out: string[] = [];
-  for (const { full, rel } of PRODUCTION) {
-    const src = code(full);
-    for (const m of src.matchAll(re)) out.push(`${rel}:${src.slice(0, m.index).split("\n").length}`.replace(/:\d+$/, ""));
+  for (const { rel, code } of files) {
+    for (const m of code.matchAll(re)) out.push(`${rel}#${enclosingFunction(code, m.index!)}`);
   }
   return out.sort();
 }
 
-/**
- * Every writer, and why its transaction is short. Paths, not line numbers,
- * so an edit elsewhere in the file does not churn this list.
- */
-const WRITERS: ReadonlyArray<readonly [file: string, why: string]> = [
+/** Every writer, and why its transaction is short. */
+const WRITERS: ReadonlyArray<readonly [site: string, why: string]> = [
+  ["services/security-events.service.ts#recordSecurityEvent", "an autocommit createMany of one row (one statement)"],
+  ["services/security-events.service.ts#mirrorThreatRows", "an autocommit createMany of ≤ 500 rows (one statement)"],
   [
-    "services/security-events.service.ts",
-    "recordSecurityEvent: an autocommit createMany (one statement); the threat mirror: an autocommit createMany of ≤ 500 rows",
-  ],
-  [
-    "services/security-mode.service.ts",
-    "insertModeChangedRow: inside a mode/hours READ COMMITTED interactive transaction (Prisma's default 5 s timeout)",
+    "services/security-mode.service.ts#insertModeChangedRow",
+    "inside a mode/hours READ COMMITTED interactive transaction (Prisma's default 5 s timeout)",
   ],
 ];
 
-describe("SecurityEvent writers — the floor's 60 s bound is reviewed per writer (R7)", () => {
-  it("the writer list is exactly the pinned one", () => {
-    const found = [...new Set(sites(/\bsecurityEvent\s*\.\s*(?:create|createMany)\s*\(/g))];
-    expect(found).toEqual(WRITERS.map(([file]) => file).sort());
+describe("SecurityEvent writers — the floor's 60 s bound is reviewed per call site (R7)", () => {
+  it("the Prisma writers are exactly the pinned call sites", () => {
+    expect(sites(PRODUCTION, PRISMA_WRITE)).toEqual(WRITERS.map(([site]) => site).sort());
+  });
+
+  it("no raw SQL writes a SecurityEvent (review #10)", () => {
+    expect(sites(PRODUCTION, RAW_WRITE)).toEqual([]);
   });
 
   it("nothing updates or upserts a SecurityEvent (D11 — the table is append-only)", () => {
-    expect(sites(/\bsecurityEvent\s*\.\s*(?:update|updateMany|upsert)\s*\(/g)).toEqual([]);
-    expect(sites(/UPDATE\s+"SecurityEvent"/g)).toEqual([]);
+    expect(sites(PRODUCTION, PRISMA_UPDATE)).toEqual([]);
+    expect(sites(PRODUCTION, RAW_UPDATE)).toEqual([]);
   });
 
   it("the scan can see a writer (a check that cannot fail proves nothing)", () => {
     expect(PRODUCTION.length).toBeGreaterThan(100);
-    expect(sites(/\bsecurityEvent\s*\.\s*createMany\s*\(/g).length).toBeGreaterThanOrEqual(2);
+    const fixture = {
+      rel: "services/fixture.ts",
+      code: blankComments(`
+        // prisma.securityEvent.create({}) in a comment does not count
+        export async function recordSecurityEvent(p) { await p.securityEvent.createMany({ data: [] }); }
+        async function second(p) { await p.securityEvent.create({ data: {} }); }
+        const third = async (tx) => { await tx.securityEvent.createManyAndReturn({ data: [] }); };
+        export async function raw(p) {
+          await p.$executeRawUnsafe('INSERT INTO "SecurityEvent" ("source") VALUES ($1)', "x");
+          await p.$executeRaw\`insert into public."SecurityEvent"(kind) values ('x')\`;
+          await p.$executeRawUnsafe('INSERT INTO "SecurityEventTriage" ("eventId") VALUES (1)');
+        }
+      `),
+    };
+    expect(sites([fixture], PRISMA_WRITE)).toEqual([
+      "services/fixture.ts#recordSecurityEvent",
+      "services/fixture.ts#second",
+      "services/fixture.ts#third",
+    ]);
+    // Two raw writes to SecurityEvent (either spelling); the triage table is not one.
+    expect(sites([fixture], RAW_WRITE)).toEqual(["services/fixture.ts#raw", "services/fixture.ts#raw"]);
   });
 });
