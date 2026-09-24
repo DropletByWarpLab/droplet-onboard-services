@@ -189,6 +189,9 @@ export function createApp(
   app.use(
     cors({
       credentials: true,
+      // WARP-3052 — browser clients on an allowed cross-origin must be able to
+      // read the Files degrade marker (it is not a CORS-safelisted header).
+      exposedHeaders: ["X-Droplet-Degraded"],
       origin: (origin, cb) => {
         if (!origin || config.corsAllowedOrigins.includes(origin)) {
           return cb(null, true);
