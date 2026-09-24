@@ -29,7 +29,7 @@
  *      A docker hiccup must never crash the daily purge cron.
  *
  * The docker surface rides the SAME single audited host script as the apply
- * path (scripts/lib/apply-update.sh — fixed subcommands, argv arrays, never
+ * path (docker/ota/apply-update.sh — fixed subcommands, argv arrays, never
  * a shell string): list-self-swap-helpers / capture-self-swap-logs /
  * rm-self-swap-helper. Nothing here talks to the socket directly.
  */
@@ -50,7 +50,7 @@ export const SELF_SWAP_HELPER_PREFIX = "droplet-ota-self-swap-";
 const EXEC_TIMEOUT_MS = 60_000;
 
 export interface PurgeSelfSwapHelpersOptions {
-  /** Absolute path to the host helper (scripts/lib/apply-update.sh). */
+  /** Absolute path to the host helper (docker/ota/apply-update.sh). */
   scriptPath: string;
   /** Container path holding <updateId>/ state dirs (log capture target). */
   updatesDir: string;

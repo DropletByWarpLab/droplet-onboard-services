@@ -49,7 +49,7 @@ MIN_ORCHESTRATOR_SCHEMA = 1
 # change, not a workflow flag — every value here needs a matching release
 # branch (publish-release.yml derives the channel from the dispatch ref),
 # a device-side discovery rule (poller.ts / update_poll.py), and an entry
-# in the cosign identity policy (scripts/lib/apply-update.sh).
+# in the cosign identity policy (docker/ota/apply-update.sh).
 #
 #   stable — refs/heads/main,  the release every box eventually gets
 #   stage  — refs/heads/stage, the pre-flight channel (WARP-1670)

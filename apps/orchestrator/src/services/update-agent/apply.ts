@@ -19,10 +19,14 @@
  *   2. pull the release images BY DIGEST;
  *   3. stage the release configs (sha256-gated against the VERIFIED
  *      manifest before a byte is unpacked);
+ *   3b. WARP-2995: reconcile the HOST .env (additive keys, COMPOSE_PROFILES
+ *      tokens, boot-unit profile flags) with the staged
+ *      docker/ota/env-reconcile.sh; a failure refuses the release
+ *      (`env_reconcile_failed`) before anything is swapped;
  *   4. `prisma migrate deploy` — gated on minOrchestratorSchema (the
  *      parse gate refuses `orchestrator_schema_unsupported` outright);
  *   5. recreate every manifest service EXCEPT the orchestrator via the
- *      scripts/lib/apply-update.sh helper over the host compose socket;
+ *      docker/ota/apply-update.sh helper over the host compose socket;
  *   6. health-gate them (the /health(z) probes from WARP-535, carried in
  *      each manifest service's `healthcheck` entry);
  *   7. swap the orchestrator itself LAST through a DETACHED helper
@@ -74,6 +78,14 @@
  *     failed and the rollback restored a healthy previous state;
  *   - `degraded_health`     — rides `failed`: the rollback ALSO failed
  *     its health gate (WARP-538 convention: NOT a new enum value).
+ *   - `env_reconcile_failed` — rides `rejected`: the host .env reconcile
+ *     (step 3b) failed; configs were restored and nothing was swapped.
+ *
+ * OUTCOME (WARP-3007) — `DeviceUpdate.outcome` is the explicit verdict an
+ * operator acts on, written in the same guarded write as the status:
+ * rolled_back / rollback_failed on the rollback paths, starting_services at
+ * commit, then committed / services_start_failed from the post-commit start
+ * (startNewServices). Everything else stays not_applied.
  *
  * OBSERVABILITY (WARP-541) — every stage emits a structured
  * `event: "update.<stage>"` pino event (canonical list + payload rules:
@@ -93,7 +105,11 @@ import {
   type UpdateFailureReason,
 } from "./manifest.js";
 import { getUpdateAgentSettings } from "./settings.js";
-import { transitionDeviceUpdate } from "./transitions.js";
+import {
+  recordCommittedOutcome,
+  transitionDeviceUpdate,
+  type DeviceUpdateOutcomeName,
+} from "./transitions.js";
 
 const defaultLog = createLogger("update-agent");
 
@@ -110,12 +126,25 @@ export type ApplyFailureReason =
   | "configs_mismatch"
   | "image_signature_failed"
   | "health_gate_failed"
-  | "degraded_health";
+  | "degraded_health"
+  | "env_reconcile_failed";
+
+/**
+ * WARP-2995 — what docker/ota/env-reconcile.sh did to the host .env (key
+ * NAMES and profile tokens only, never a value). `profiles` is the box's
+ * COMPOSE_PROFILES after the reconcile.
+ */
+export interface EnvReconcileReport {
+  addedKeys: string[];
+  addedProfiles: string[];
+  profiles: string;
+  unitUpdated: boolean;
+}
 
 /**
  * Port to the compose-over-socket mechanics (production:
  * host-compose-runner.ts → detached helper containers running
- * scripts/lib/apply-update.sh; tests: an in-memory fake honoring the
+ * docker/ota/apply-update.sh; tests: an in-memory fake honoring the
  * same contract). apply.ts owns the state machine, the runner owns the
  * Docker surface — nothing in this module touches the socket directly.
  */
@@ -172,6 +201,45 @@ export interface ApplyRunner {
    * the helper is launched.
    */
   recreateSelfDetached(opts: { updateId: string; target: RecreateTarget }): Promise<void>;
+  /**
+   * WARP-2995 — step 3b: additive, idempotent reconcile of the HOST .env
+   * (new keys, COMPOSE_PROFILES tokens, boot-unit profile flags) by the
+   * staged docker/ota/env-reconcile.sh, run host-side off `image` (the
+   * release orchestrator image, already pulled + verified). Throws on
+   * failure; the report is also kept in the update dir.
+   */
+  reconcileEnv(opts: { updateId: string; image: string }): Promise<EnvReconcileReport>;
+  /**
+   * WARP-2970 — the compose services the (now staged) compose file enables on
+   * this box: `docker compose config --services` under the box's REAL
+   * COMPOSE_PROFILES (WARP-2995: taken from this update's reconcile report;
+   * with no report, only profile-less services count as enabled).
+   */
+  enabledServices(opts: { updateId: string }): Promise<string[]>;
+  /**
+   * WARP-2970 — start services that have NO container yet, pinned to their
+   * release refs (a third override, override-grow.yml). Post-commit only.
+   * A service that already has a container (an operator stopped it) is left
+   * alone; `started` names only what was actually started.
+   */
+  startServices(opts: {
+    updateId: string;
+    services: ReleaseService[];
+  }): Promise<{ started: string[] }>;
+}
+
+/**
+ * WARP-2995 / #2320 review — the box's helper cannot reconcile at all (it is
+ * older than the subcommand). step 3b logs a skip instead of refusing the
+ * release: the reconcile is additive, and refusing would strand an OTA-only
+ * box forever, since the fix would itself have to arrive as a release.
+ */
+export class ReconcileUnsupportedError extends Error {
+  constructor(cause: unknown) {
+    super("the installed OTA helper has no reconcile-env subcommand");
+    this.name = "ReconcileUnsupportedError";
+    (this as Error & { cause?: unknown }).cause = cause;
+  }
 }
 
 /** One health-probe attempt; true = healthy. */
@@ -227,6 +295,19 @@ export interface ApplyUpdateOptions {
   logger?: pino.Logger;
   probe?: HealthProbe;
   healthGate?: { attempts: number; intervalMs: number };
+  /**
+   * WARP-2970 — tell the box's owners and admins something they must act on
+   * (index.ts wires the notification fan-out). Absent → log only.
+   */
+  notifyOwners?: (title: string, body: string) => Promise<void>;
+  /**
+   * WARP-3017 — resolves once THIS process's HTTP server is listening
+   * (index.ts resolves it in the `server.listen` callback). The resume gates
+   * include the orchestrator itself, so they wait for it — bounded by the
+   * gate's own attempts × interval — and never probe this process before it
+   * can answer. Absent → treated as already listening (tests, apply-now).
+   */
+  whenListening?: Promise<void>;
 }
 
 export type ApplyUpdateResult =
@@ -245,7 +326,18 @@ export type ApplyUpdateResult =
 
 export type ResumeResult =
   | { outcome: "nothing_to_resume" }
-  | { outcome: "committed"; deviceUpdateId: string }
+  | {
+      outcome: "committed";
+      deviceUpdateId: string;
+      /**
+       * WARP-2970 — the post-commit start of services new to this box's
+       * enabled set. NOT run by the resume hook: index.ts calls it after the
+       * server listens and does not await it, so a slow `compose up` can never
+       * hold the orchestrator off its own healthcheck (which the detached
+       * self-swap helper is waiting on). Never throws.
+       */
+      startNewServices: () => Promise<void>;
+    }
   | { outcome: "rolled_back"; deviceUpdateId: string }
   | { outcome: "failed"; deviceUpdateId: string }
   | { outcome: "self_rollback_started"; deviceUpdateId: string }
@@ -271,12 +363,13 @@ async function setStatus(
   id: string,
   status: "verifying" | "applying" | "committed" | "rolled_back" | "failed" | "rejected",
   failureReason: string | null = null,
+  outcome?: DeviceUpdateOutcomeName,
 ): Promise<void> {
   // Committed BEFORE the action the new status guards — this write IS the
   // resumability contract. Routed through the WARP-541 advance-only choke
   // point: a backwards transition (or a concurrently-moved row) throws
   // instead of corrupting the audit table.
-  await transitionDeviceUpdate(prisma, { id, to: status, failureReason, logger: log });
+  await transitionDeviceUpdate(prisma, { id, to: status, failureReason, outcome, logger: log });
 }
 
 /**
@@ -314,7 +407,10 @@ async function runHealthGate(
   probe: HealthProbe,
   gate: { attempts: number; intervalMs: number },
   log: pino.Logger,
-  ctx: { deviceUpdateId: string; phase: "sidecars" | "post_swap" | "rollback" },
+  ctx: {
+    deviceUpdateId: string;
+    phase: "sidecars" | "post_swap" | "rollback" | "post_commit_start";
+  },
 ): Promise<string | null> {
   const startedAt = Date.now();
   const unhealthy = await healthGate(services, probe, gate);
@@ -342,6 +438,154 @@ async function runHealthGate(
     );
   }
   return unhealthy;
+}
+
+/**
+ * WARP-2970 — the OTA path only ever SWAPS what is already running
+ * (`deployed`), so a service that joins the default compose set in a release
+ * (email-indexer) would never start on a box that gets its code by OTA: the
+ * box never re-runs setup.sh, and the orchestrator cannot rewrite .env.
+ *
+ * After COMMIT, start every manifest service the new compose enables on this
+ * box that has no container, pinned to its release digest. Profile-gated
+ * services stay off unless the box's own COMPOSE_PROFILES turns them on, so
+ * this never GROWS a deployment beyond what the box's config already says.
+ *
+ * Post-commit by design: the update is healthy and final, so a failure here
+ * is logged loudly and does not roll back. Keeping it out of the rollback
+ * machinery means there is no "previous" ref to invent for a service that
+ * never ran.
+ */
+async function startNewlyEnabledServices(
+  runner: ApplyRunner,
+  log: pino.Logger,
+  opts: {
+    prisma: PrismaClient;
+    updateId: string;
+    manifest: ReleaseManifest;
+    refs: Record<string, string | null>;
+    probe: HealthProbe;
+    gate: { attempts: number; intervalMs: number };
+    notifyOwners?: (title: string, body: string) => Promise<void>;
+  },
+): Promise<void> {
+  const outcome = await startNewlyEnabledServicesInner(runner, log, opts);
+  // WARP-3007 — the post-commit verdict, on the row. Never throws.
+  try {
+    await recordCommittedOutcome(opts.prisma, { id: opts.updateId, outcome, logger: log });
+  } catch (err) {
+    log.warn({ err, deviceUpdateId: opts.updateId, outcome }, "OTA could not record the post-commit outcome");
+  }
+}
+
+async function startNewlyEnabledServicesInner(
+  runner: ApplyRunner,
+  log: pino.Logger,
+  opts: {
+    updateId: string;
+    manifest: ReleaseManifest;
+    refs: Record<string, string | null>;
+    probe: HealthProbe;
+    gate: { attempts: number; intervalMs: number };
+    notifyOwners?: (title: string, body: string) => Promise<void>;
+  },
+): Promise<"committed" | "services_start_failed"> {
+  let names: string[] = [];
+  try {
+    const enabled = new Set(await runner.enabledServices({ updateId: opts.updateId }));
+    const missing = opts.manifest.services.filter(
+      (s) => opts.refs[s.name] === null && enabled.has(s.name),
+    );
+    if (missing.length === 0) return "committed";
+    names = missing.map((s) => s.name);
+    const { started } = await runner.startServices({ updateId: opts.updateId, services: missing });
+    if (started.length === 0) return "committed";
+    // "started" is not "working": probe each one with the healthcheck the
+    // manifest carries, so a crash-looping container is reported, not logged
+    // as a success.
+    const unhealthy = await runHealthGate(
+      missing.filter((s) => started.includes(s.name)),
+      opts.probe,
+      opts.gate,
+      log,
+      { deviceUpdateId: opts.updateId, phase: "post_commit_start" },
+    );
+    if (unhealthy !== null) {
+      names = started;
+      throw new Error(`${unhealthy} did not become healthy after it was started`);
+    }
+    log.info(
+      { event: "update.services_started", deviceUpdateId: opts.updateId, services: started },
+      "OTA post-commit — started release services this box enables but was not running",
+    );
+    return "committed";
+  } catch (err) {
+    log.error(
+      {
+        event: "update.services_start_failed",
+        deviceUpdateId: opts.updateId,
+        services: names,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "OTA post-commit service start FAILED — the update stays committed; the service is not running",
+    );
+    try {
+      await opts.notifyOwners?.(
+        SERVICES_START_FAILED_TITLE,
+        servicesStartFailedBody(names),
+      );
+    } catch (notifyErr) {
+      log.warn({ err: notifyErr, deviceUpdateId: opts.updateId }, "OTA owner notification failed");
+    }
+    return "services_start_failed";
+  }
+}
+
+export const SERVICES_START_FAILED_TITLE = "Part of your Droplet update didn't start";
+
+export function servicesStartFailedBody(services: string[]): string {
+  const what = services.length > 0 ? ` (${services.join(", ")})` : "";
+  return (
+    `The update installed and your Droplet is running normally, but a new part of it${what} ` +
+    "did not start, so the features that use it are unavailable for now. " +
+    "Contact support if this doesn't clear up."
+  );
+}
+
+/**
+ * WARP-3017 — bounded wait for this process to listen before a resume gate
+ * that includes it. False = it never listened within attempts × interval,
+ * which the caller treats as the orchestrator being unhealthy.
+ */
+async function waitUntilListening(
+  whenListening: Promise<void> | undefined,
+  gate: { attempts: number; intervalMs: number },
+  log: pino.Logger,
+  deviceUpdateId: string,
+): Promise<boolean> {
+  if (!whenListening) return true;
+  const boundMs = gate.attempts * gate.intervalMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const listened = await Promise.race([
+    whenListening.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), boundMs);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (!listened) {
+    log.warn(
+      {
+        event: "update.health_gate_failed",
+        deviceUpdateId,
+        phase: "listen",
+        unhealthyService: SELF_SERVICE_NAME,
+        durationMs: boundMs,
+      },
+      "OTA resume — this orchestrator never started listening within the gate bound",
+    );
+  }
+  return listened;
 }
 
 /** recreateServices + the WARP-541 per-batch progress event. */
@@ -642,6 +886,56 @@ export async function applyPendingUpdate(
     },
     "OTA step 3 — sha256-gated release configs staged",
   );
+  // ── step 3b (WARP-2995): reconcile the HOST .env before anything swaps ──
+  // The orchestrator cannot see .env, and scripts/ never ships over OTA, so
+  // this is the only way a key or COMPOSE_PROFILES token a release needs
+  // reaches an OTA-only box. A failure refuses the release HERE — configs
+  // restored, nothing recreated — instead of half-applying it.
+  const selfService = manifest.services.find((s) => s.name === SELF_SERVICE_NAME);
+  try {
+    if (!selfService) throw new Error("manifest has no orchestrator image to run the reconcile from");
+    const report = await runner.reconcileEnv({ updateId: row.id, image: selfService.image }).catch(
+      (err: unknown) => {
+        // The box's helper predates reconcile-env (only a helper OTA never
+        // updated). Skip — the reconcile is additive — rather than refuse
+        // every release from now on with no remote way out. Any other
+        // failure still refuses below.
+        if (!(err instanceof ReconcileUnsupportedError)) throw err;
+        log.warn(
+          { event: "update.env_reconcile_skipped", deviceUpdateId: row.id, reason: "helper_unsupported" },
+          "OTA step 3b skipped — the installed helper has no reconcile-env; .env left as it is",
+        );
+        return null;
+      },
+    );
+    if (report) {
+    log.info(
+      {
+        event: "update.env_reconciled",
+        deviceUpdateId: row.id,
+        addedKeys: report.addedKeys,
+        addedProfiles: report.addedProfiles,
+        unitUpdated: report.unitUpdated,
+      },
+      "OTA step 3b — host .env reconciled (additive; key names only)",
+    );
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    await runner.restoreConfigs({ updateId: row.id });
+    await setStatus(prisma, log, row.id, "rejected", "env_reconcile_failed");
+    log.error(
+      { event: "update.env_reconcile_failed", deviceUpdateId: row.id, err: detail },
+      "OTA apply refused — the host .env reconcile failed; configs restored, nothing swapped",
+    );
+    return {
+      outcome: "rejected",
+      deviceUpdateId: row.id,
+      failureReason: "env_reconcile_failed",
+      detail,
+    };
+  }
+
   // minOrchestratorSchema gate: enforced by parseReleaseManifest above
   // (orchestrator_schema_unsupported → rejected before any side effect).
   const migrateStartedAt = Date.now();
@@ -695,7 +989,7 @@ export async function applyPendingUpdate(
     });
     if (stillUnhealthy !== null) {
       // ── step 9: rollback also failed ──
-      await setStatus(prisma, log, row.id, "failed", "degraded_health");
+      await setStatus(prisma, log, row.id, "failed", "degraded_health", "rollback_failed");
       log.error(
         {
           event: "update.failed",
@@ -707,7 +1001,7 @@ export async function applyPendingUpdate(
       );
       return { outcome: "failed", deviceUpdateId: row.id };
     }
-    await setStatus(prisma, log, row.id, "rolled_back", "health_gate_failed");
+    await setStatus(prisma, log, row.id, "rolled_back", "health_gate_failed", "rolled_back");
     log.warn(
       { event: "update.rolled_back", deviceUpdateId: row.id, unhealthyService: unhealthy },
       "OTA update rolled back — previous digests restored and healthy",
@@ -729,6 +1023,8 @@ export async function applyPendingUpdate(
 /**
  * onStart hook (index.ts, right after the update-agent settings load):
  * resume whatever the previous orchestrator process left in flight.
+ * WARP-3017: index.ts does NOT await this before `server.listen` — the gates
+ * here probe this process, so they wait on `opts.whenListening` instead.
  */
 export async function resumeInterruptedApply(
   opts: ApplyUpdateOptions,
@@ -772,20 +1068,39 @@ export async function resumeInterruptedApply(
       "OTA resume found an in-flight applying row — health-gating the running state",
     );
 
+    // WARP-3017 — every gate below includes this very process, so wait
+    // (bounded) until it listens; never probe it before `listen`.
+    const listening = await waitUntilListening(opts.whenListening, gate, log, applying.id);
+
     if (runningTarget) {
       // We ARE the new orchestrator — final gate over ALL services
       // (sidecars were gated pre-swap; this re-checks them plus self).
-      const unhealthy = await runHealthGate(deployed, probe, gate, log, {
-        deviceUpdateId: applying.id,
-        phase: "post_swap",
-      });
+      const unhealthy = listening
+        ? await runHealthGate(deployed, probe, gate, log, {
+            deviceUpdateId: applying.id,
+            phase: "post_swap",
+          })
+        : SELF_SERVICE_NAME;
       if (unhealthy === null) {
-        await setStatus(prisma, log, applying.id, "committed", null);
+        await setStatus(prisma, log, applying.id, "committed", null, "starting_services");
         log.info(
           { event: "update.committed", deviceUpdateId: applying.id, gitSha: applying.gitSha },
           "OTA update committed — all services healthy on the release digests",
         );
-        return { outcome: "committed", deviceUpdateId: applying.id };
+        return {
+          outcome: "committed",
+          deviceUpdateId: applying.id,
+          startNewServices: () =>
+            startNewlyEnabledServices(runner, log, {
+              prisma,
+              updateId: applying.id,
+              manifest,
+              refs,
+              probe,
+              gate,
+              notifyOwners: opts.notifyOwners,
+            }),
+        };
       }
       // Full detached rollback — the OLD orchestrator's resume writes the
       // rolled_back / failed verdict once it is back.
@@ -810,12 +1125,14 @@ export async function resumeInterruptedApply(
     // Running the OLD image with an `applying` row → the detached helper
     // rolled the swap back (or it never landed). Gate the previous state
     // and write the verdict.
-    const unhealthy = await runHealthGate(deployed, probe, gate, log, {
-      deviceUpdateId: applying.id,
-      phase: "rollback",
-    });
+    const unhealthy = listening
+      ? await runHealthGate(deployed, probe, gate, log, {
+          deviceUpdateId: applying.id,
+          phase: "rollback",
+        })
+      : SELF_SERVICE_NAME;
     if (unhealthy !== null) {
-      await setStatus(prisma, log, applying.id, "failed", "degraded_health");
+      await setStatus(prisma, log, applying.id, "failed", "degraded_health", "rollback_failed");
       log.error(
         {
           event: "update.failed",
@@ -827,7 +1144,7 @@ export async function resumeInterruptedApply(
       );
       return { outcome: "failed", deviceUpdateId: applying.id };
     }
-    await setStatus(prisma, log, applying.id, "rolled_back", "health_gate_failed");
+    await setStatus(prisma, log, applying.id, "rolled_back", "health_gate_failed", "rolled_back");
     log.warn(
       { event: "update.rolled_back", deviceUpdateId: applying.id, gitSha: applying.gitSha },
       "OTA update rolled back — previous digests restored and healthy",

@@ -546,6 +546,36 @@ describe("business_find — the graph edges", () => {
     ]);
   });
 
+  it("WARP-2988: a refused project lookup drops the enrichment, never the customer", async () => {
+    // A CRM-only person (or a box with Projects off) asking about a customer
+    // with a won deal: `/api/pm/projects` answers 404 module_disabled. The
+    // customer is still the answer. MUTATION: remove the catch -> the whole
+    // call fails as BUSINESS_MODULE_OFF "Projects is switched off".
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record"))
+        return recordOf({ closedDeals: [{ ...wonDeal, id: "d-won", projectId: "p-won" }] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
+      if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
+      return res(false, 404, { error: "module_disabled", module: "projects" });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    const data = expectOk(out).data as { customer: { id: string }; projects: unknown[] };
+    expect(data.customer.id).toBe("c1");
+    expect(data.projects).toEqual([]);
+  });
+
+  it("WARP-2988: any OTHER project-lookup failure still fails the call", async () => {
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record"))
+        return recordOf({ closedDeals: [{ ...wonDeal, id: "d-won", projectId: "p-won" }] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
+      if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
+      return res(false, 500, { error: "boom" });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    expect(out.ok).toBe(false);
+  });
+
   it("returns a project the customer owns directly, with no deal at all (ADR-044)", async () => {
     // `PmProject.companyId` (WARP-2562) is the edge for work that never came
     // through a deal — a warranty callout, anything begun before the CRM was
