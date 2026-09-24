@@ -110,11 +110,12 @@ export default function ChatPage() {
   // WARP-3048 — who chose the model the composer is on. 'auto' follows the
   // box's active model (defaultModel) for as long as the chat is fresh, so
   // a switch on /models reaches a /chat that is already open or was served a
-  // stale cache; 'user' (a composer pick) and 'restored' (a reopened thread)
-  // are never overridden by it. New chat goes back to 'auto'.
-  const [selectionSource, setSelectionSource] = useState<
-    "auto" | "user" | "restored"
-  >("auto");
+  // stale cache; a composer pick ('user') is never overridden by it. A
+  // reopened thread needs no source of its own: it has a conversation id,
+  // which already ends "fresh". New chat goes back to 'auto'.
+  const [selectionSource, setSelectionSource] = useState<"auto" | "user">(
+    "auto",
+  );
   // WARP-845 — the project the NEXT new chat is filed under (set by the
   // sidebar's per-project "+"). Ref-mirrored so the URL-clear reset
   // effect can seed the project persona without dep churn.
@@ -420,9 +421,6 @@ export default function ChatPage() {
     if (models.some((m) => m.id === pendingRestoredModel)) {
       setSelectedModel(pendingRestoredModel);
     }
-    // WARP-3048 — a reopened thread keeps its model; defaultModel no
-    // longer steers it.
-    setSelectionSource("restored");
     setPendingRestoredModel(null);
   }, [pendingRestoredModel, models]);
 

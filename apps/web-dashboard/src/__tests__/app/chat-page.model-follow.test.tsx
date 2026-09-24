@@ -6,8 +6,13 @@
  * FIRST answer stuck: a switch on /models (or a stale cached defaultModel on
  * a client-side visit) never reached the composer, and "New chat" kept the
  * old pick. These tests drive the selection source: 'auto' follows
- * defaultModel while the chat is fresh; 'user' and 'restored' do not; New
- * chat goes back to 'auto'; a model that leaves the list falls back.
+ * defaultModel while the chat is fresh; a user pick and a reopened thread
+ * do not follow it; New chat goes back to 'auto'; a model that leaves the
+ * list falls back.
+ *
+ * NB: a <select> whose value matches no option DISPLAYS its first option,
+ * so every expectation below names a model that is not first in the list
+ * — or checks the model a send actually carries.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -26,6 +31,7 @@ type Model = { id: string; provider: string; name: string };
 // ── useChat mock — ref-overridable; captures the page's options so a test
 // can fire onConversationLoaded like a real thread load does. ──────────────
 const clearMessagesMock = vi.fn();
+const sendMessageMock = vi.fn();
 const chatRef: {
   current: { conversationId: string | null; messages: ChatMsg[] };
 } = { current: { conversationId: null, messages: [] } };
@@ -39,7 +45,7 @@ vi.mock("@/lib/hooks/useChat", () => ({
     return {
       messages: chatRef.current.messages,
       isStreaming: false,
-      sendMessage: vi.fn(),
+      sendMessage: sendMessageMock,
       stop: vi.fn(),
       retryMessage: vi.fn(),
       regenerate: vi.fn(),
@@ -114,6 +120,7 @@ function picker(): HTMLSelectElement {
 
 beforeEach(() => {
   cleanup();
+  sendMessageMock.mockReset();
   clearMessagesMock.mockReset().mockImplementation(() => {
     chatRef.current = { conversationId: null, messages: [] };
   });
@@ -203,16 +210,25 @@ describe("/chat model selection source (WARP-3048)", () => {
   });
 
   it("falls back to the active model when the selected one leaves the list", async () => {
+    modelsRef.current = { models: [A, B, C], defaultModel: "model-b" };
     const { rerender } = render(<ChatPage />);
-    await waitFor(() => expect(picker().value).toBe("model-a"));
+    await waitFor(() => expect(picker().value).toBe("model-b"));
     fireEvent.change(picker(), { target: { value: "model-c" } });
     await waitFor(() => expect(picker().value).toBe("model-c"));
 
     // Model C was removed (or its cloud key revoked).
-    modelsRef.current = { models: [A, B], defaultModel: "model-a" };
+    modelsRef.current = { models: [A, B], defaultModel: "model-b" };
     rerender(<ChatPage />);
 
-    await waitFor(() => expect(picker().value).toBe("model-a"));
+    await waitFor(() => expect(picker().value).toBe("model-b"));
+    // And a send really carries the fallback, not the vanished model.
+    fireEvent.click(screen.getByRole("button", { name: "What's using the most storage?" }));
+    expect(sendMessageMock).toHaveBeenCalledWith(
+      "What's using the most storage?",
+      "model-b",
+      undefined,
+      "local",
+    );
   });
 });
 

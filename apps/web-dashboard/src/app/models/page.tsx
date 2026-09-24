@@ -199,14 +199,11 @@ export default function ModelsPage() {
   const degraded = data.degraded === true;
 
   // WARP-1827 — the eligible catalog minus what's already installed.
-  // WARP-3048 — when that leaves nothing, the section says why (catalogNote)
-  // instead of vanishing. With `tags_unreachable` the `pulled` flags are
-  // unknown, so no card is offered: it could re-download a model the box
-  // already has.
-  const installable =
-    catalog.data?.tags_unreachable === true
-      ? []
-      : (catalog.data?.models ?? []).filter((m) => !m.pulled);
+  // WARP-3048 — whenever there is a note, it REPLACES the cards: that is how
+  // nothing says why it can't be installed, and how `tags_unreachable` (where
+  // `pulled` is a guess, so a card could re-download the serving model)
+  // offers no card at all.
+  const installable = (catalog.data?.models ?? []).filter((m) => !m.pulled);
   const installNote = catalogNote(catalog.data, catalog.error);
 
   // WARP-1827 — placement banner: ONE line for the whole page, and only on an
@@ -362,7 +359,7 @@ export default function ModelsPage() {
           <section id="models-catalog" aria-labelledby="models-catalog-heading">
             <div className="sect">
               <h2 id="models-catalog-heading">Available to install</h2>
-              {installable.length > 0 && (
+              {!installNote && (
                 <span className="sx">Ready for this Droplet’s hardware</span>
               )}
             </div>
