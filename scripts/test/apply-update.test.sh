@@ -1107,6 +1107,63 @@ else
 fi
 
 # =============================================================================
+# Phase 8 — WARP-2898 (ADR-056 slice K1): the helper's subcommand surface is
+# CLOSED. The orchestrator's socket reach is exactly this dispatcher, so an
+# unknown subcommand must die before any docker (or cosign) call, and the
+# case list itself is pinned: a new subcommand (K3 adds the extension ones)
+# is a reviewed change to EXPECTED_SUBCOMMANDS below, never a silent one.
+# MUTATION: add an arm to the dispatcher, or turn `*) die` into a no-op, and
+# this phase goes red.
+# =============================================================================
+echo ""
+echo "--- Phase 8: the subcommand surface is closed (WARP-2898) ---"
+
+for bad in install-extension recreate-extension "recreate-services;id" "docker" ""; do
+  stub_reset
+  ERR="$(run_apply "$bad" --compose-file "$COMPOSE_FILE" --services orchestrator 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+     && printf '%s' "$ERR" | grep -q "unknown subcommand" \
+     && [ ! -s "$STUB_DIR/calls.log" ]; then
+    pass "unknown subcommand '$bad' dies non-zero before any docker/cosign call"
+  else
+    fail "unknown subcommand '$bad' was not refused cleanly (rc=$rc, calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null | tr '\n' ';'))"
+  fi
+done
+
+EXPECTED_SUBCOMMANDS=" current-image-refs snapshot pull-images stage-configs migrate-deploy recreate-services enabled-services reconcile-env restore-configs recreate-self-detached self-swap-supervise list-self-swap-helpers capture-self-swap-logs rm-self-swap-helper *"
+DISPATCH_LABELS=""
+DISPATCH_SHAPE_OK=1
+in_case=0
+while IFS= read -r line; do
+  if [ "$in_case" -eq 0 ]; then
+    [ "$line" = 'case "$SUBCOMMAND" in' ] && in_case=1
+    continue
+  fi
+  [ "$line" = "esac" ] && break
+  [ -z "${line// /}" ] && continue
+  case "$line" in
+    "  "*") "*" ;;")
+      label="${line#  }"
+      DISPATCH_LABELS="$DISPATCH_LABELS ${label%%)*}"
+      ;;
+    *) DISPATCH_SHAPE_OK=0 ;;
+  esac
+done < "$APPLY_SH"
+if [ "$(grep -c '^case "$SUBCOMMAND" in$' "$APPLY_SH")" = "1" ] \
+   && [ "$DISPATCH_SHAPE_OK" = "1" ] \
+   && [ "$DISPATCH_LABELS" = "$EXPECTED_SUBCOMMANDS" ]; then
+  pass "the dispatcher's case list is exactly the pinned subcommand set"
+else
+  fail "the dispatcher changed (one-line arms: $DISPATCH_SHAPE_OK; labels:$DISPATCH_LABELS; expected:$EXPECTED_SUBCOMMANDS)"
+fi
+if grep -q '^  \*) die "unknown subcommand: \$SUBCOMMAND" ;;$' "$APPLY_SH"; then
+  pass "the dispatcher's fallback arm dies on an unknown subcommand"
+else
+  fail "the dispatcher's fallback arm no longer dies"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""

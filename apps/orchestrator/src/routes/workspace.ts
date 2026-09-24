@@ -23,6 +23,13 @@
  * (`refuseRunArgv`), and again by the sandbox. A refused argv never leaves
  * this process.
  *
+ * WARP-2899 — `GET /api/workspace/:id/export` hands an owner/admin PERSON the
+ * workspace as a `git bundle` (never a run, never the mcp principal), with one
+ * audit row carrying the bundle's sha256. A workspace holding a connector
+ * draft (the `rest-profile` template) reads back, on the detail and in the
+ * propose activity, as the vendor it drafts and the host nothing on this box
+ * will dial — the draft is never loaded here.
+ *
  * `/api/git/<repo>.git/*` is `git http-backend` behind the gateway: nginx
  * rewrites `/git/` to it, the auth middleware accepts the git CLI's Basic
  * form on this prefix (its second slot carries the session JWT), and the
@@ -32,7 +39,7 @@
 import express, { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   recordAccessDenied,
   requireRole,
@@ -52,6 +59,11 @@ import {
   type WorkspaceSandboxClient,
 } from "../services/workspace.service.js";
 import { ACTIVE_AGENT_RUN_STATUSES } from "../services/agent-run-worker.service.js";
+import {
+  connectorDraftReadback,
+  parseConnectorDraftFacts,
+  summarizeConnectorDraft,
+} from "../services/connector-draft.js";
 
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const WORKSHOP_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
@@ -336,6 +348,15 @@ export function createWorkspaceRouter(
         if (err instanceof WorkspaceSandboxError) return { error: err.message, code: err.code };
         throw err;
       });
+      // WARP-2899 — read at the proposal when there is one: that is what an
+      // owner exports and a reviewer reads.
+      const connectorDraft = await sandbox.connectorDraft(id.data, row.proposedTag ?? "work").then(
+        (facts) => (facts ? summarizeConnectorDraft(facts) : null),
+        (err: unknown) => {
+          if (err instanceof WorkspaceSandboxError) return { error: err.message, code: err.code };
+          throw err;
+        },
+      );
       res.json({
         id: row.id,
         name: row.name,
@@ -347,6 +368,7 @@ export function createWorkspaceRouter(
         updatedAt: row.updatedAt.toISOString(),
         userId: row.userId,
         git,
+        connectorDraft,
         runs: row.runs.map((r) => ({
           id: r.id,
           status: r.status,
@@ -392,6 +414,67 @@ export function createWorkspaceRouter(
         refs: { workspaceId: id.data },
       });
       res.json({ id: id.data, deleted: true });
+    } catch (err) {
+      relaySandboxError(err, res, next);
+    }
+  });
+
+  // ── the export (WARP-2899) ──────────────────────────────────────────────
+  //
+  // Owner/admin, and a PERSON: `requireRole` already refuses the mcp
+  // principal's `service` role, and the explicit check below keeps it refused
+  // if the guard is ever widened — plus a request carrying a run header, so a
+  // workshop run can never walk its own workspace off the box. The bundle is
+  // built by the sandbox from its local bare repo; nothing else is dialled.
+
+  router.get("/workspace/:id/export", requireRole("owner", "admin"), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = (req as Request & { user?: AuthUser }).user;
+      if (!user || user.id === MCP_PRINCIPAL_ID || user.role === "service" || req.header(AGENT_RUN_HEADER) !== undefined) {
+        recordAccessDenied(req, "workspace-export-not-human");
+        res.status(403).json({ error: "Forbidden: a person exports a workspace, not a run" });
+        return;
+      }
+      const id = idParam.safeParse(req.params.id);
+      if (!id.success) {
+        res.status(400).json({ error: "Invalid workspace id" });
+        return;
+      }
+      const row = await prisma.workshopWorkspace.findUnique({
+        where: { id: id.data },
+        select: { id: true, name: true, proposedTag: true },
+      });
+      if (!row) {
+        res.status(404).json({ error: "No such workspace" });
+        return;
+      }
+      const { body, head } = await sandbox.bundle(id.data);
+      const sha256 = createHash("sha256").update(body).digest("hex");
+      // Which vendor, for the audit row. Best effort: a draft that cannot be
+      // read never blocks the owner's download of their own workspace.
+      let provider: string | null = null;
+      try {
+        provider = (await sandbox.connectorDraft(id.data, row.proposedTag ?? "work"))?.provider || null;
+      } catch {
+        provider = null;
+      }
+      await recordActivity({
+        kind: "tool_run",
+        severity: "info",
+        sourceIcon: "download",
+        what: "Workspace exported",
+        sub: row.name,
+        actor: actorFromRequest(req),
+        refs: { workspaceId: id.data, head, sha256, bytes: body.length, proposedTag: row.proposedTag ?? null, provider },
+      });
+      res.status(200);
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("Content-Disposition", `attachment; filename="${id.data}-${head.slice(0, 7)}.bundle"`);
+      // Bundle bytes for git, as an attachment — never rendered, never cached.
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "no-store");
+      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
+      res.send(body);
     } catch (err) {
       relaySandboxError(err, res, next);
     }
@@ -503,8 +586,14 @@ export function createWorkspaceRouter(
           op === "run" && typeof body.timeoutMs === "number" ? (body.timeoutMs as number) : undefined;
         const result = await sandbox.op(id.data, op, withAuthor, timeoutMs);
 
+        let payload: unknown = result;
         if (op === "propose") {
-          const tag = (result as { tag?: string })?.tag ?? null;
+          const proposed = (result ?? {}) as { tag?: string; kind?: string; connectorDraft?: unknown };
+          const tag = proposed.tag ?? null;
+          // WARP-2899 — a connector draft reads back as the vendor and the
+          // host nothing on this box will dial, on the row and to the model.
+          const draft = proposed.kind === "connector-draft" ? parseConnectorDraftFacts(proposed.connectorDraft) : null;
+          const readback = draft ? connectorDraftReadback(draft) : null;
           await prisma.workshopWorkspace.update({
             where: { id: id.data },
             data: { status: "proposed", proposedTag: tag, proposedAt: new Date() },
@@ -513,11 +602,18 @@ export function createWorkspaceRouter(
             kind: "tool_run",
             severity: "info",
             sourceIcon: "hammer",
-            what: "Extension proposed",
-            sub: `${body.name as string} ${body.version as string}`,
+            what: draft ? "Connector draft proposed" : "Extension proposed",
+            sub: readback ?? `${body.name as string} ${body.version as string}`,
             actor: actorFromRequest(req),
-            refs: { workspaceId: id.data, userId: actor.username, agentRunId: bound.runId, tag },
+            refs: {
+              workspaceId: id.data,
+              userId: actor.username,
+              agentRunId: bound.runId,
+              tag,
+              ...(draft ? { provider: draft.provider } : {}),
+            },
           });
+          if (readback) payload = { ...(result as Record<string, unknown>), readback };
         } else if (op === "run" || op === "commit") {
           await recordActivity({
             kind: "tool_run",
@@ -529,7 +625,7 @@ export function createWorkspaceRouter(
             refs: { workspaceId: id.data, userId: actor.username, agentRunId: bound.runId },
           });
         }
-        res.json(result);
+        res.json(payload);
       } catch (err) {
         relaySandboxError(err, res, next);
       }

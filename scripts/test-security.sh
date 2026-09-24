@@ -484,6 +484,78 @@ else
 fi
 
 # =============================================================================
+# Test 14c: WARP-2898 (ADR-056 slice K1) — no base service is named ext-*
+# =============================================================================
+# `ext-<id>` is the namespace an extension container runs in: its compose
+# override (update-agent/extension-fragment.ts) ADDS one service with that
+# name. If the base file ever defined an ext-* service, an extension override
+# would MERGE its keys into a first-party service instead of adding its own,
+# so the name space is reserved here, not by convention. The same holds for
+# the top-level `ext-<id>-data` volume the override declares: a base volume
+# of that name would be merged, and extension <id> would mount first-party
+# data at /data. The check first runs against two throwaway fixtures (an
+# ext-foo service; an ext-foo-data volume), so a vacuous check (wrong key,
+# empty parse) cannot pass.
+# MUTATION: drop either startswith("ext-") test and its fixture self-check
+# goes red.
+
+_no_ext_services() {
+  python3 - "$1" <<'PYEOF'
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+services = (data or {}).get("services") or {}
+if not services:
+    print("no services parsed - refusing a vacuous pass", file=sys.stderr)
+    sys.exit(2)
+volumes = (data or {}).get("volumes") or {}
+reserved = sorted(name for name in services if str(name).startswith("ext-"))
+reserved += sorted("volume " + str(name) for name in volumes if str(name).startswith("ext-"))
+if reserved:
+    print("base services/volumes in the reserved ext-* namespace: " + ", ".join(reserved), file=sys.stderr)
+    sys.exit(1)
+print(f"{len(services)} base services and {len(volumes)} base volumes, none named ext-*")
+PYEOF
+}
+
+_ext_fixture_dir=$(mktemp -d)
+cat > "$_ext_fixture_dir/services.yml" <<'YAMLEOF'
+services:
+  orchestrator:
+    image: orchestrator
+  ext-foo:
+    image: foo
+YAMLEOF
+cat > "$_ext_fixture_dir/volumes.yml" <<'YAMLEOF'
+services:
+  orchestrator:
+    image: orchestrator
+volumes:
+  orchestrator-data:
+  ext-foo-data:
+YAMLEOF
+_ext_fixture_rc=0
+_no_ext_services "$_ext_fixture_dir/services.yml" >/dev/null 2>&1 || _ext_fixture_rc=$?
+_ext_vol_fixture_rc=0
+_no_ext_services "$_ext_fixture_dir/volumes.yml" >/dev/null 2>&1 || _ext_vol_fixture_rc=$?
+rm -rf "$_ext_fixture_dir"
+
+_ext_rc=0
+_ext_output=$(_no_ext_services "$COMPOSE_FILE" 2>&1) || _ext_rc=$?
+
+if [ "$_ext_fixture_rc" -ne 1 ]; then
+  fail "Test 14c self-check: a fixture with an ext-foo service was not refused (rc=$_ext_fixture_rc)"
+elif [ "$_ext_vol_fixture_rc" -ne 1 ]; then
+  fail "Test 14c self-check: a fixture with an ext-foo-data volume was not refused (rc=$_ext_vol_fixture_rc)"
+elif [ "$_ext_rc" -eq 0 ]; then
+  pass "docker-compose.yml: no base service or volume is named ext-* (the extension namespace, WARP-2898)"
+else
+  fail "docker-compose.yml: a base service or volume sits in the reserved ext-* namespace (WARP-2898)"
+  printf "${_RED}%s${_RESET}\n" "$_ext_output" >&2
+fi
+
+# =============================================================================
 # Test 14: WARP-573 — orchestrator migration-on-boot is guarded
 # =============================================================================
 # The orchestrator container must NOT boot via the old unguarded

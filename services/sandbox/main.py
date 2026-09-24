@@ -37,6 +37,8 @@ The API
     GET|DELETE /workspaces/{id}
     POST /workspaces/{id}/{read,search,diff,log,write,commit,run,propose}
     GET  /workspaces/{id}/output
+    GET  /workspaces/{id}/bundle            WARP-2899: the export, a git bundle
+    GET  /workspaces/{id}/connector-draft   WARP-2899: a draft's facts at ?ref=
     ANY  /git/{repo}.git/...           `git http-backend`, proxied by the orchestrator
 
 Every `/transform` is ONE child process (runner.py), killed on completion or
@@ -69,6 +71,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+import connector_draft
 import extensions
 import gitstore
 import supervisor
@@ -176,6 +179,15 @@ async def _lifespan(_app: FastAPI):
         print(f"[sandbox] git store at {gitstore.REPOS_DIR} (templates {'seeded' if seeded else 'present'})", flush=True)
     except gitstore.StoreError as exc:
         print(f"[sandbox] git store: templates not seeded: {exc}", flush=True)
+    # WARP-2899: a template the image gained since this box seeded is added;
+    # an existing one is never touched. Best-effort: nothing it raises may
+    # cost a box that already worked its sandbox.
+    try:
+        added = gitstore.sync_templates()
+        if added:
+            print(f"[sandbox] git store: templates added from the image: {', '.join(added)}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — logged; the service must still start
+        print(f"[sandbox] git store: templates not synced: {exc}", flush=True)
     yield
 
 
@@ -619,6 +631,23 @@ async def workspace_output(workspace_id: str):
 @app.post("/workspaces/{workspace_id}/propose")
 async def workspace_propose(workspace_id: str, req: ProposeRequest):
     return await _in_thread(workspace.propose, workspace_id, req.name, req.version, req.summary, req.author.pair())
+
+
+@app.get("/workspaces/{workspace_id}/bundle")
+async def workspace_bundle(workspace_id: str):
+    content, head = await _in_thread(gitstore.bundle, workspace_id)
+    return Response(content=content, media_type="application/octet-stream", headers={"X-Bundle-Head": head})
+
+
+def _connector_draft_at(workspace_id: str, ref: str) -> dict[str, Any] | None:
+    if not gitstore.ref_exists(workspace_id, ref):
+        raise gitstore.StoreError(404, f"no {ref} in workspace {workspace_id}")
+    return connector_draft.describe_tree(lambda path: gitstore.show_at(workspace_id, ref, path))
+
+
+@app.get("/workspaces/{workspace_id}/connector-draft")
+async def workspace_connector_draft(workspace_id: str, ref: str = gitstore.WORK_BRANCH):
+    return {"draft": await _in_thread(_connector_draft_at, workspace_id, ref)}
 
 
 # The smart-HTTP transport. The orchestrator forwards /git/<repo>.git/* here
