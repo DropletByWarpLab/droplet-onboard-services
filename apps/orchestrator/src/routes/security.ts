@@ -107,9 +107,12 @@ async function incidentOfEvents(
   prisma: Pick<PrismaClient, "securityEventTriage">,
   eventIds: readonly string[],
 ): Promise<Map<string, string>> {
-  void prisma;
-  void eventIds;
-  return new Map();
+  if (eventIds.length === 0) return new Map();
+  const rows = await prisma.securityEventTriage.findMany({
+    where: { eventId: { in: eventIds.map((id) => BigInt(id)) }, outcome: "grouped" },
+    select: { eventId: true, incidentId: true },
+  });
+  return new Map(rows.filter((r) => r.incidentId !== null).map((r) => [r.eventId.toString(), r.incidentId!]));
 }
 
 /**

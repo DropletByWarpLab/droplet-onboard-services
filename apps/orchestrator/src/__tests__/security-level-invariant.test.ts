@@ -23,8 +23,14 @@
  *     source too);
  *   · no parameterised path precedes a literal sibling it would swallow,
  *     across the three routers in app.ts's mount order;
- *   · the write-route count is 9 and the GET count 6, so the table cannot
+ *   · the write-route count is 12 and the GET count 10, so the table cannot
  *     pass over empty stubs or a dropped route.
+ *
+ * WARP-2978 (P3 §7): a fourth router, createSecurityIncidentsRouter (routes
+ * 16–22), mounted after the site router. Acknowledge and resolve are act;
+ * choosing who is told is manage (and family can never pass its role floor,
+ * even with a manage resolver); every GET stays at view, and the literal
+ * `/incidents/summary` is declared before `/incidents/:id`.
  */
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -72,11 +78,19 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["PUT /security/hours", "manage", MANAGE_ROLES],
   ["PUT /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
   ["DELETE /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
+  // createSecurityIncidentsRouter (WARP-2978, routes 16–22)
+  ["GET /security/incidents", "view", VIEW_ROLES],
+  ["GET /security/incidents/summary", "view", VIEW_ROLES],
+  ["GET /security/incidents/:id", "view", VIEW_ROLES],
+  ["POST /security/incidents/:id/acknowledge", "act", ACT_ROLES],
+  ["POST /security/incidents/:id/resolve", "act", ACT_ROLES],
+  ["GET /security/alert-routing", "view", VIEW_ROLES],
+  ["PUT /security/alert-routing/:userId", "manage", MANAGE_ROLES],
 ];
 
-/** The real number of Security write routes in PR-1 (spec §9 says 9 — and it is). */
-const WRITE_ROUTES = 9;
-const GET_ROUTES = 6;
+/** P2b PR-1 has 9 write routes and 6 GETs; WARP-2978 adds 3 writes (19, 20, 22) and 4 GETs (16, 17, 18, 21). */
+const WRITE_ROUTES = 12;
+const GET_ROUTES = 10;
 
 type Handle = (req: unknown, res: unknown, next: () => void) => unknown;
 interface Layer {
@@ -95,7 +109,7 @@ const ROUTERS = [
   ["createSecurityRouter", createSecurityRouter(PRISMA, {})],
   ["createSecurityZonesRouter", createSecurityZonesRouter(PRISMA, {})],
   ["createSecuritySiteRouter", createSecuritySiteRouter(PRISMA, {})],
-  // WARP-2978 (P3) — mounted after the site router; its routes (16–22) join the TABLE with slice D.
+  // WARP-2978 (P3) — mounted after the site router.
   ["createSecurityIncidentsRouter", createSecurityIncidentsRouter(PRISMA, {})],
 ] as const;
 
@@ -155,7 +169,7 @@ function pathRegex(path: string): RegExp {
   return new RegExp(`^${body}$`);
 }
 
-describe("Security level invariant — the three routers' real stacks (spec §7, §9)", () => {
+describe("Security level invariant — the four routers' real stacks (spec §7, §9)", () => {
   it("the routes are exactly the §7 table, in mount order", () => {
     expect(ROUTES.map((r) => r.key)).toEqual(TABLE.map(([key]) => key));
   });
@@ -199,7 +213,7 @@ describe("Security level invariant — the three routers' real stacks (spec §7,
   });
 
   it("no route source uses requireRoleOrMcpService / requireRoleOrService (comments aside)", () => {
-    for (const file of ["security.ts", "security-zones.ts", "security-site.ts"]) {
+    for (const file of ["security.ts", "security-zones.ts", "security-site.ts", "security-incidents.ts"]) {
       const code = readFileSync(resolve(__dirname, "../routes", file), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "");
@@ -219,7 +233,13 @@ describe("Security level invariant — the three routers' real stacks (spec §7,
     expect(shadowed).toEqual([]);
   });
 
-  it("app.ts mounts the three routers at /api in the order this table assumes", () => {
+  it("WARP-2978: `/incidents/summary` is declared before `/incidents/:id`, which would swallow it", () => {
+    const keys = ROUTES.map((r) => r.key);
+    expect(keys.indexOf("GET /security/incidents/summary")).toBeGreaterThanOrEqual(0);
+    expect(keys.indexOf("GET /security/incidents/summary")).toBeLessThan(keys.indexOf("GET /security/incidents/:id"));
+  });
+
+  it("app.ts mounts the four routers at /api in the order this table assumes", () => {
     const app = readFileSync(resolve(__dirname, "../app.ts"), "utf8");
     const mounts = [...app.matchAll(/app\.use\(\s*"\/api"\s*,\s*(createSecurity\w*Router)\(/g)].map((m) => m[1]);
     expect(mounts).toEqual(ROUTERS.map(([name]) => name));

@@ -190,6 +190,15 @@ describe("GET /api/security/events — query and paging", () => {
     expect(res.body.events.map((e: { incident: unknown }) => e.incident)).toEqual([null, null]);
   });
 
+  it("WARP-2978: a grouped event carries its incident's id — one IN query on the triage ledger for the page", async () => {
+    findMany.mockResolvedValue([dbRow(1), dbRow(2)]);
+    triage.mockResolvedValue([{ eventId: 1n, incidentId: "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4" }]);
+    const res = await request(app("family")).get("/api/security/events");
+    expect(res.body.events.map((e: { incident: unknown }) => e.incident)).toEqual([{ id: "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4" }, null]);
+    expect(triage).toHaveBeenCalledTimes(1);
+    expect(triage.mock.calls[0][0].where).toEqual({ eventId: { in: [1n, 2n] }, outcome: "grouped" });
+  });
+
   it("a cursor narrows to rows strictly after it in feed order", async () => {
     await request(app()).get("/api/security/events?cursor=1790000000000.42");
     expect(findMany.mock.calls[0][0].where.AND).toContainEqual({
