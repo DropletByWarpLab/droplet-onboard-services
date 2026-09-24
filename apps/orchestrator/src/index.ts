@@ -170,7 +170,7 @@ import {
 } from "./services/m365/m365-sync.service.js";
 import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
-import { createEntraClient, isM365Configured } from "./services/m365/entra-client.js";
+import { createEntraClient } from "./services/m365/entra-client.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -1913,9 +1913,10 @@ async function main() {
   // resolves the grant — and none of them had anything calling them in
   // sequence, so no mailbox was ever read.
   //
-  // Gated on `isM365Configured()`: with no client id there is no app to
-  // authenticate against, and a tick that runs anyway would mark every cursor
-  // failed on a box that simply does not offer the feature.
+  // Not gated on configuration: since WARP-2705 each connection carries its
+  // own app registration, so there is no box-wide switch to read. A box where
+  // nobody has connected pays one indexed `findMany` per tick and dials
+  // nothing — the tick below walks CONNECTED rows only.
   //
   // Discovery runs BEFORE the tick, every time, and that ordering is
   // load-bearing rather than tidy: mail delta is per-folder, so a folder
@@ -1925,7 +1926,7 @@ async function main() {
   //
   // `lockKey` for the same reason as the ERP legs: without it a multi-instance
   // box double-polls Microsoft and spends the tenant's throttling budget twice.
-  if (isM365Configured()) {
+  {
     const m365Deps: M365SyncDeps = {
       prisma: prisma as never,
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),

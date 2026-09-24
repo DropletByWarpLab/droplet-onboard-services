@@ -20,9 +20,75 @@ import { describe, it, expect } from "vitest";
 import {
   classifyAuthFailure,
   isPendingFlowExpired,
+  parseAppRegistration,
   redactAuthError,
   PENDING_FLOW_TTL_MS,
 } from "./state.js";
+
+const CLIENT = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+const TENANT = "9a8b7c6d-5e4f-4321-8fed-cba987654321";
+
+describe("parseAppRegistration (WARP-2705)", () => {
+  it("accepts a client id and a tenant id copied from the app's Overview page", () => {
+    expect(parseAppRegistration({ clientId: CLIENT, tenantId: TENANT })).toEqual({
+      ok: true,
+      app: { clientId: CLIENT, tenantId: TENANT },
+    });
+  });
+
+  it("accepts a verified domain in place of the tenant GUID", () => {
+    // Entra takes either as the authority's tenant segment.
+    expect(parseAppRegistration({ clientId: CLIENT, tenantId: "practice.onmicrosoft.com" })).toEqual({
+      ok: true,
+      app: { clientId: CLIENT, tenantId: "practice.onmicrosoft.com" },
+    });
+  });
+
+  it("normalises case and surrounding whitespace, the usual damage from a paste", () => {
+    expect(
+      parseAppRegistration({ clientId: ` ${CLIENT.toUpperCase()} `, tenantId: " Practice.COM\n" }),
+    ).toEqual({ ok: true, app: { clientId: CLIENT, tenantId: "practice.com" } });
+  });
+
+  it("refuses the multitenant authorities — the whole point is the customer's own tenant", () => {
+    // `/organizations` is exactly what WARP-2705 removes. Accepting it here
+    // would put the fleet-pooled, publisher-gated shape back one paste away.
+    // The DOMAIN shape alone would refuse these too (no dot); the explicit
+    // check is what tells the owner WHY, instead of "that isn't a domain".
+    for (const tenantId of ["common", "organizations", "consumers", "ORGANIZATIONS"]) {
+      expect(parseAppRegistration({ clientId: CLIENT, tenantId })).toMatchObject({
+        ok: false,
+        field: "tenantId",
+        reason: expect.stringMatching(/your organisation's own/i),
+      });
+    }
+  });
+
+  it("refuses anything that could reshape the authority URL", () => {
+    // The tenant is interpolated into the sign-in URL's path. A value that is
+    // not a GUID or a hostname must never reach it.
+    for (const tenantId of ["../common", "a/b", "tenant?x=1", "x#y", "", "-bad-.com", "no-dot"]) {
+      expect(parseAppRegistration({ clientId: CLIENT, tenantId })).toMatchObject({
+        ok: false,
+        field: "tenantId",
+      });
+    }
+  });
+
+  it("refuses a client id that is not a GUID", () => {
+    for (const clientId of ["", "droplet", `${CLIENT}x`, "0f1e2d3c4b5a49688776a5b4c3d2e1f0"]) {
+      expect(parseAppRegistration({ clientId, tenantId: TENANT })).toMatchObject({
+        ok: false,
+        field: "clientId",
+      });
+    }
+  });
+
+  it("refuses non-string input rather than coercing it", () => {
+    expect(parseAppRegistration({ clientId: 42, tenantId: TENANT })).toMatchObject({ ok: false });
+    expect(parseAppRegistration({ clientId: CLIENT, tenantId: null })).toMatchObject({ ok: false });
+  });
+});
 
 describe("classifyAuthFailure", () => {
   it("treats a revoked or expired grant as NEEDS_RECONNECT, not an error", () => {
@@ -74,6 +140,23 @@ describe("classifyAuthFailure", () => {
         errorMessage: "AADSTS50199: device code flow is blocked by Conditional Access policy",
       }),
     ).toBe("ERROR");
+  });
+
+  it("treats a mis-registered redirect or platform as ERROR, even when Entra calls it invalid_grant", () => {
+    // WARP-2704. These are the ways a customer's app registration can be wrong
+    // for the authorization-code path. Every one arrives at the token endpoint
+    // looking like a grant problem, and every one fails identically however
+    // many times the person signs in — so none of them may read as "reconnect".
+    const cases = [
+      "AADSTS50011: The redirect URI specified in the request does not match",
+      "AADSTS7000218: The request body must contain client_assertion or client_secret",
+      "AADSTS9002327: Tokens issued for the 'Single-Page Application' client-type may only be redeemed via cross-origin requests",
+      "AADSTS50194: Application is not configured as a multi-tenant application",
+      "AADSTS90094: The grant requires admin permission",
+    ];
+    for (const errorMessage of cases) {
+      expect(classifyAuthFailure({ errorCode: "invalid_grant", errorMessage })).toBe("ERROR");
+    }
   });
 
   it("defaults an unrecognised failure to ERROR rather than nagging the customer", () => {

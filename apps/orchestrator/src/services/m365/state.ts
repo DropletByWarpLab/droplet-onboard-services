@@ -16,10 +16,76 @@
  *     in again just loops them through a flow that cannot succeed.
  */
 
-/** How long a device-code sign-in stays valid. Microsoft expires the code in
- *  ~15 minutes; we sweep at 15 so a stale PENDING_CONSENT row can never
- *  outlive the code it is waiting on. */
+/** How long a sign-in stays valid. Microsoft expires a device code in ~15
+ *  minutes; we sweep at 15 so a stale PENDING_CONSENT row can never outlive
+ *  the code it is waiting on. An authorization-code sign-in (WARP-2704) gets
+ *  the same window — long enough for MFA or an admin's consent, short enough
+ *  that an abandoned tab cannot be resumed hours later. */
 export const PENDING_FLOW_TTL_MS = 15 * 60 * 1000;
+
+// --- The app registration (WARP-2705) --------------------------------------
+
+/** The customer's own Entra app a connection signs in through. Non-secret. */
+export interface EntraAppRegistration {
+  /** Application (client) id — a GUID, lower-cased. */
+  clientId: string;
+  /** Directory (tenant) id — a GUID or a verified domain, lower-cased. */
+  tenantId: string;
+}
+
+export type AppRegistrationParse =
+  | { ok: true; app: EntraAppRegistration }
+  | { ok: false; field: "clientId" | "tenantId"; reason: string };
+
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A DNS name with at least one dot: labels of 1–63 [a-z0-9-], no leading or
+ *  trailing hyphen. Nothing that could add a path, query or fragment. */
+const DOMAIN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** Entra's multitenant authority segments. A single-tenant registration only
+ *  issues tokens on its own tenant, and these are the fleet-pooled shape
+ *  WARP-2705 removes — so they are refused, not normalised. */
+const MULTITENANT_SEGMENTS: ReadonlySet<string> = new Set(["common", "organizations", "consumers"]);
+
+/**
+ * Validate the two ids an owner copies off their app registration's Overview
+ * page. Pure, and strict on purpose: `tenantId` is interpolated into the
+ * sign-in authority URL, so anything that is not a GUID or a hostname must
+ * never get that far.
+ */
+export function parseAppRegistration(input: {
+  clientId?: unknown;
+  tenantId?: unknown;
+}): AppRegistrationParse {
+  const clientId = typeof input.clientId === "string" ? input.clientId.trim().toLowerCase() : "";
+  if (!GUID.test(clientId)) {
+    return {
+      ok: false,
+      field: "clientId",
+      reason: "The Application (client) ID is a GUID, like 0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0.",
+    };
+  }
+
+  const tenantId = typeof input.tenantId === "string" ? input.tenantId.trim().toLowerCase() : "";
+  if (MULTITENANT_SEGMENTS.has(tenantId)) {
+    return {
+      ok: false,
+      field: "tenantId",
+      reason: "Use your organisation's own Directory (tenant) ID, not a shared sign-in endpoint.",
+    };
+  }
+  if (!GUID.test(tenantId) && !DOMAIN.test(tenantId)) {
+    return {
+      ok: false,
+      field: "tenantId",
+      reason: "The Directory (tenant) ID is a GUID, or your organisation's verified domain.",
+    };
+  }
+
+  return { ok: true, app: { clientId, tenantId } };
+}
 
 /**
  * The four ways an authentication attempt can end badly. They are separated
@@ -129,6 +195,13 @@ const CONFIG_AADSTS: readonly string[] = [
   "AADSTS7000215", // invalid client secret
   "AADSTS900023", // invalid tenant identifier
   "AADSTS90002", // tenant not found
+  // WARP-2704 — the customer's app registration is wrong for the
+  // authorization-code path. Signing in again fails identically every time.
+  "AADSTS50011", // redirect URI not registered on the app
+  "AADSTS7000218", // redirect registered under "Web": Entra demands a secret
+  "AADSTS9002327", // redirect registered as a single-page app: browser-only redemption
+  "AADSTS50194", // single-tenant app asked through a multitenant authority
+  "AADSTS90094", // tenant policy: only an admin can grant these permissions
 ];
 
 function haystack(err: EntraFailureLike): string {
@@ -177,7 +250,8 @@ function isRetryableStatus(status: number | undefined): boolean {
  * Has an in-flight sign-in stopped being valid?
  *
  * A missing deadline counts as expired. That is deliberate: the in-memory
- * device-code flow does not survive an orchestrator restart, and a
+ * device-code flow does not survive an orchestrator restart, a person can
+ * close the Microsoft tab mid-sign-in, and a
  * PENDING_CONSENT row with no deadline would otherwise never be swept — the
  * person could never start a new sign-in because one would always appear to be
  * in progress.

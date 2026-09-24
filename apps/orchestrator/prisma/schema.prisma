@@ -7207,8 +7207,9 @@ model WorkspaceLocation {
 enum M365ConnectionState {
   /// No Microsoft account linked. The default, and where a disconnect returns.
   DISCONNECTED
-  /// A sign-in is in flight and Microsoft is waiting for the person to approve
-  /// it on another device. Expires — see `pendingFlowExpiresAt`.
+  /// A sign-in is in flight: the person is at Microsoft's sign-in page
+  /// (authorization code, WARP-2704) or approving a code on another device
+  /// (device code, the fallback). Expires — see `pendingFlowExpiresAt`.
   PENDING_CONSENT
   /// Usable. A refresh token is held and the last refresh succeeded.
   CONNECTED
@@ -7247,6 +7248,36 @@ model M365Connection {
   /// case where someone reconnects a DIFFERENT tenant than before.
   tenantId String?
 
+  /// WARP-2705 — the Application (client) id of the CUSTOMER'S OWN Entra app
+  /// registration this link signs in through. Not a secret: a public-client id
+  /// is designed to ship inside the client, and the flows use no client
+  /// secret. Per connection rather than one box-wide id, because a single
+  /// Warp-Lab multitenant app is the PARTNER_GATED shape ADR-042 §3 rules out
+  /// and pools Graph's per-app throttling ceiling across every customer.
+  ///
+  /// Survives a disconnect on purpose: it is configuration, not a credential,
+  /// and keeping it is what makes "connect again" one click.
+  appClientId String?
+
+  /// WARP-2705 — the tenant that app is registered in (a GUID or a verified
+  /// domain). The sign-in authority is `${M365_AUTHORITY_HOST}/${appTenantId}`:
+  /// a single-tenant registration only issues tokens on its own tenant
+  /// authority, never on `/organizations`. Survives a disconnect, like
+  /// `appClientId`. `tenantId` above is what Microsoft REPORTS for the
+  /// signed-in account; this is what the owner CONFIGURED.
+  appTenantId String?
+
+  /// WARP-2704 — SHA-256 (hex) of the OAuth `state` of an in-flight
+  /// authorization-code sign-in. The callback finds the row by it; the raw
+  /// value only ever travels in the redirect and an httpOnly cookie. Cleared
+  /// the moment a callback claims it, so a replayed callback finds nothing.
+  pendingStateHash String? @unique
+
+  /// WARP-2704 — `dcv1:` blob of the in-flight sign-in's PKCE code verifier,
+  /// nonce and redirect URI, sealed under the token-cache key with its own
+  /// AAD. Cleared together with `pendingStateHash`.
+  pendingFlowEnc String?
+
   /// User principal name (e.g. `sam@practice.com`), shown in the dashboard so
   /// the owner can see which account is connected. Not a secret.
   accountUpn String?
@@ -7268,9 +7299,11 @@ model M365Connection {
   grantedScopes String?
 
   /// When the in-flight sign-in stops being valid. Microsoft expires a device
-  /// code in ~15 minutes. A PENDING_CONSENT row past this is swept back to
-  /// DISCONNECTED — an orchestrator restart drops the in-memory flow, and
-  /// without this the row would sit "pending" forever.
+  /// code in ~15 minutes, and an authorization-code sign-in gets the same
+  /// window. A PENDING_CONSENT row past this is swept back to DISCONNECTED —
+  /// an orchestrator restart drops the in-memory device-code flow, a person can
+  /// close the Microsoft tab, and without this the row would sit "pending"
+  /// forever.
   pendingFlowExpiresAt DateTime?
 
   /// First successful connect. Kept across a NEEDS_RECONNECT round-trip so the
