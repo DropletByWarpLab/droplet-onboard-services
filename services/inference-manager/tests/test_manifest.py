@@ -451,6 +451,31 @@ def test_shipped_min_vram_covers_the_pinned_build():
     assert at_16 == {"gpt-oss:20b", "qwen3-vl:8b", "llama3.2:3b", "glm-4.7-flash:31b"}
 
 
+def test_shipped_manifest_names_every_pinned_build_by_digest():
+    """`pulled` also accepts the pinned build installed under another tag
+    (the old catalog pulled `latest`), matched on the manifest digest DMR's
+    /api/tags reports. Every pinned entry must carry that digest, well formed:
+    a missing one silently re-offers an installed model on every such box."""
+    import re
+
+    digest = re.compile(r"sha256:[0-9a-f]{64}")
+    for m in _shipped_manifest().models:
+        assert m.oci_digest is not None, f"{m.name} pins {m.oci!r} but declares no oci_digest"
+        assert digest.fullmatch(m.oci_digest), f"{m.name}: malformed oci_digest {m.oci_digest!r}"
+    digests = [m.oci_digest for m in _shipped_manifest().models]
+    assert len(set(digests)) == len(digests), "two entries claim the same build"
+
+
+def test_oci_digest_is_optional(tmp_path: Path):
+    """Same never-brick rule as `oci`: a manifest without it still loads, and
+    such an entry falls back to tag-exact matching."""
+    from manifest import load_manifest
+
+    p = tmp_path / "m.json"
+    p.write_text(_entry_with_oci("ai/gemma4:26b-a4b-q4_K_M"))
+    assert load_manifest(p).models[0].oci_digest is None
+
+
 def _entry_with_oci(oci: str) -> str:
     return json.dumps({
         "models": [

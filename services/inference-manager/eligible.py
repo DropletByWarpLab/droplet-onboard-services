@@ -43,9 +43,20 @@ async def build_eligible(
         available_pinned = {
             pinned for pinned in map(runtime.pinned_id, reported) if pinned
         }
+        # WARP-3046 review: the manifest digest of every installed tag, so a
+        # pinned build installed under another tag still counts (`_is_pulled`).
+        # A runtime that reports none leaves this empty: tag-exact only. Real
+        # strings only — an entry with no `oci_digest` (None) must never match
+        # a tag the runtime reported without one.
+        installed_digests = {
+            digest
+            for digest in (m.get("digest") for m in installed.get("models", []))
+            if isinstance(digest, str) and digest
+        }
     except Exception:
         available = set()
         available_pinned = set()
+        installed_digests = set()
         tags_unreachable = True
 
     def _is_pulled(m: ManifestEntry) -> bool:
@@ -57,7 +68,12 @@ async def build_eligible(
         # uninstallable.
         pinned = runtime.pinned_id(runtime.preferred_id(m.pull_tag, m.oci))
         if pinned is not None:
-            return pinned in available_pinned
+            # ...or when that build is installed under ANOTHER tag: the old
+            # catalog pulled `ai/qwen3-vl:latest`, the same digest as the
+            # pinned `8B-UD-Q4_K_XL`. Read tag-exactly, such a box was offered
+            # a second copy and the `already_pulled` guard never fired. A
+            # different build has a different digest, so siblings stay apart.
+            return pinned in available_pinned or m.oci_digest in installed_digests
         # PR #53 review: an entry that pins nothing matches BOTH identifiers,
         # not just `name`. The pull ships the registry identifier (main.py
         # calls `runtime.pull(entry.pull_tag)`), so a quantization-pinned

@@ -418,3 +418,156 @@ async def test_eligible_shipped_manifest_on_the_16gb_dmr_box(
         "llama3.2:3b": False,
         "glm-4.7-flash:31b": False,
     }
+
+
+# ── WARP-3046 review: detection never runs on the event loop ─────────────
+
+
+async def test_eligible_runs_vram_detection_off_the_event_loop(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    """Detection can block on the device-bridge for up to its timeout. Run on
+    the loop, that stalls every route this process serves — /health, whose
+    failure restarts the container, included. It must run on a worker thread."""
+    import threading
+
+    import vram
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def fake_detect():
+        seen["thread"] = threading.get_ident()
+        return 16, vram.SOURCE_BRIDGE
+
+    monkeypatch.setattr(vram, "detect", fake_detect)
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": []})
+    )
+
+    data = (await client.get("/models/eligible")).json()
+    assert data["detected_vram_gb"] == 16
+    assert seen["thread"] != loop_thread
+
+
+# ── WARP-3046 review: the pinned build installed under another tag ───────
+#
+# Tag-exact `pulled` was right about siblings, but a box that installed a
+# model through the old catalog holds it as `ai/<repo>:latest` — and for
+# qwen3-vl and llama3.2 that IS the pinned build (the Hub's `latest` and the
+# pinned tag share one manifest digest). Read tag-exactly, those boxes were
+# offered a second copy and the `already_pulled` guard never fired. DMR's
+# /api/tags reports each tag's manifest digest (verified on .195: it equals the
+# Hub's), so the manifest carries the pinned build's digest and a digest match
+# counts as installed. Different builds have different digests, so the
+# sibling fix above is untouched.
+
+QWEN3_VL_8B_DIGEST = "sha256:a18971a77b8fda79c555f603c4f94ca0183cb40499f336dc2825659504e29fc5"
+LLAMA32_3B_DIGEST = "sha256:436bb282b41968a83638482999980267ca8d7e8b5574604460efa9efff11cf59"
+GPT_OSS_20B_F16_DIGEST = "sha256:c8b0e86df701b13bc71e79bc04ae25eb34b73e6d852e2c7e958af8cb6674c2c4"
+# The Hub's `latest` for these two repos is a DIFFERENT build from the pin.
+GEMMA4_LATEST_DIGEST = "sha256:2d64f3d511ba202dd064d1cec2813b079350c44a2aa812f8ee4e3c6f8bafc49d"
+GPT_OSS_LATEST_DIGEST = "sha256:008cd4c511a1a06903eb0f12dad45acd574ef21aef5476de2bf3aff2c90912aa"
+
+
+async def test_eligible_pinned_build_installed_as_latest_reads_pulled(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    import main
+    import vram
+    vram._cached_gb = 16
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    manifest_path.write_text(json.dumps({
+        "models": [
+            {"name": "qwen3-vl:8b", "pull_tag": "qwen3-vl:8b",
+             "oci": "ai/qwen3-vl:8B-UD-Q4_K_XL", "oci_digest": QWEN3_VL_8B_DIGEST,
+             "format": "gguf", "quantization": "UD-Q4_K_XL", "min_vram_gb": 4},
+        ]
+    }))
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": [
+            {"name": "docker.io/ai/qwen3-vl:latest", "digest": QWEN3_VL_8B_DIGEST},
+        ]})
+    )
+
+    pulled = {m["name"]: m["pulled"] for m in (await client.get("/models/eligible")).json()["models"]}
+    assert pulled == {"qwen3-vl:8b": True}
+
+
+async def test_eligible_a_different_build_under_latest_is_still_not_pulled(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    """The digest is what makes it safe: gemma4's `latest` is the 12B, a
+    different digest from either pinned build, so neither reads installed."""
+    import main
+    import vram
+    vram._cached_gb = 16
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    builds = json.loads(_two_gemma_builds())
+    builds["models"][0]["oci_digest"] = (
+        "sha256:5290d23664774b4379a483bc45e3cebabad09f3aaf5998e4037883909f51700a"
+    )
+    builds["models"][1]["oci_digest"] = (
+        "sha256:bf9c1591634c7df2a3f8eb59c29552d206a5f7057ac17601ab5f4a2739cecbbc"
+    )
+    manifest_path.write_text(json.dumps(builds))
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": [
+            {"name": "docker.io/ai/gemma4:latest", "digest": GEMMA4_LATEST_DIGEST},
+        ]})
+    )
+
+    pulled = {m["name"]: m["pulled"] for m in (await client.get("/models/eligible")).json()["models"]}
+    assert pulled == {"gemma4:26b": False, "gemma4:31b": False}
+
+
+async def test_eligible_shipped_manifest_recognises_what_the_old_catalog_installed(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    """The REAL manifest against a box the old catalog populated: the seeded
+    gpt-oss build, plus qwen3-vl and llama3.2 pulled as `latest` (the bare-id
+    derivation dropped the tag). Both are the pinned builds, so both read
+    installed — and gpt-oss's `latest` (the MXFP4 build) would not have."""
+    from pathlib import Path
+
+    import main
+    import vram
+    vram._cached_gb = 16
+    shipped = Path(__file__).resolve().parents[1] / "models" / "model-manifest.json"
+    monkeypatch.setattr(main, "MANIFEST_PATH", str(shipped))
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": [
+            {"name": "docker.io/ai/gpt-oss:20B-F16", "digest": GPT_OSS_20B_F16_DIGEST},
+            {"name": "docker.io/ai/qwen3-vl:latest", "digest": QWEN3_VL_8B_DIGEST},
+            {"name": "docker.io/ai/llama3.2:latest", "digest": LLAMA32_3B_DIGEST},
+        ]})
+    )
+
+    pulled = {m["name"]: m["pulled"] for m in (await client.get("/models/eligible")).json()["models"]}
+    assert pulled == {
+        "gpt-oss:20b": True,
+        "qwen3-vl:8b": True,
+        "llama3.2:3b": True,
+        "glm-4.7-flash:31b": False,
+    }
+
+
+async def test_eligible_shipped_gpt_oss_is_not_satisfied_by_its_latest_build(
+    client, respx_mock, manifest_path, monkeypatch
+):
+    from pathlib import Path
+
+    import main
+    import vram
+    vram._cached_gb = 16
+    shipped = Path(__file__).resolve().parents[1] / "models" / "model-manifest.json"
+    monkeypatch.setattr(main, "MANIFEST_PATH", str(shipped))
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": [
+            {"name": "docker.io/ai/gpt-oss:latest", "digest": GPT_OSS_LATEST_DIGEST},
+        ]})
+    )
+
+    pulled = {m["name"]: m["pulled"] for m in (await client.get("/models/eligible")).json()["models"]}
+    assert pulled["gpt-oss:20b"] is False

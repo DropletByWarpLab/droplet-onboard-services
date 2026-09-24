@@ -67,6 +67,13 @@ class ManifestEntry(BaseModel):
     # Those are a BUILD-time fact — where weights come from when we package an
     # artifact. This is the RUNTIME identifier the daemon is asked to serve.
     oci: str | None = None
+    # WARP-3046: the manifest digest of the build `oci` pins (the Hub's, which
+    # DMR's /api/tags reports verbatim per tag). `/models/eligible` matches it
+    # so the same build installed under ANOTHER tag — the old catalog pulled
+    # `ai/qwen3-vl:latest`, which is `8B-UD-Q4_K_XL` — reads installed, while a
+    # different build of the same repository never can. Optional, same
+    # never-brick rationale: without it an entry matches tag-exactly.
+    oci_digest: str | None = None
 
     model_config = {"populate_by_name": True}
 
