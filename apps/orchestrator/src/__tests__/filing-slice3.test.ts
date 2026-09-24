@@ -16,6 +16,8 @@
  *   - add any key to the audit refs allow-list
  *   - interpolate anything into an audit phrase
  *   - send the digest at zero, or twice in a day
+ *   - send (or dedupe) the digest on the owner's `User.id` instead of their
+ *     username (WARP-2910)
  *   - drop `evidence: { not: DbNull }` from the retention sweep
  *   - key the orphan purge on the status row OR the chunks instead of both
  *   - let a PHI skip be re-openable from the Skipped tab
@@ -143,13 +145,54 @@ const DIGEST_SETTING = {
   digestHour: 8,
 };
 
-function digestPrisma(over: { setting?: unknown; pending?: number; already?: unknown }) {
+/** A NotificationLog row the digest already wrote today, keyed the way the
+ *  real table is: by the recipient's USERNAME. */
+type SentRow = { id: string; userId: string; kind: string; title: string };
+
+function digestPrisma(over: {
+  setting?: unknown;
+  pending?: number;
+  sentToday?: SentRow[];
+  /** false = the enabling owner's User row is gone. */
+  ownerExists?: boolean;
+}) {
+  const sentToday = over.sentToday ?? [];
   return {
     autoFilingSetting: { findUnique: vi.fn(async () => over.setting ?? DIGEST_SETTING) },
     ingestProposal: { count: vi.fn(async () => over.pending ?? 0) },
-    notificationLog: { findFirst: vi.fn(async () => over.already ?? null) },
-  } as never;
+    // WARP-2910 — DISTINCT id and username, as production rows are.
+    // `enabledById` is a `User.id`; the notification subsystem is keyed on
+    // `User.username`. The fake this replaces had no user at all, so the
+    // digest could hand the id straight to sendNotification and every
+    // assertion here still passed.
+    user: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
+        over.ownerExists !== false && where.id === "u-owner"
+          ? { id: "u-owner", username: "owner" }
+          : null,
+      ),
+    },
+    // HONOURS `where`: a row keyed by anyone else is not this owner's digest.
+    notificationLog: {
+      findFirst: vi.fn(
+        async ({ where }: { where: { userId: string; kind: string; title: { startsWith: string } } }) =>
+          sentToday.find(
+            (r) =>
+              r.userId === where.userId &&
+              r.kind === where.kind &&
+              r.title.startsWith(where.title.startsWith),
+          ) ?? null,
+      ),
+    },
+  };
 }
+
+const SENT_THIS_MORNING = (userId: string): SentRow => ({
+  id: "n0",
+  userId,
+  kind: "ai",
+  title: `${DIGEST_TITLE_PREFIX} 3 things need a look`,
+});
 
 /** 08:15 local on an arbitrary day. `getHours()` is local by design — the
  *  owner reads this at breakfast, not at UTC midnight. */
@@ -160,40 +203,70 @@ const atEight = () => {
 
 describe("🔴 the digest speaks only when there is something to say", () => {
   it("MUTATION: send at zero — the notification becomes furniture", async () => {
-    const r = await runFilingDigest(digestPrisma({ pending: 0 }), atEight());
+    const r = await runFilingDigest(digestPrisma({ pending: 0 }) as never, atEight());
     expect(r).toMatchObject({ sent: false, reason: "nothing_waiting" });
     expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 
   it("sends once when something is waiting", async () => {
-    const r = await runFilingDigest(digestPrisma({ pending: 3 }), atEight());
+    const r = await runFilingDigest(digestPrisma({ pending: 3 }) as never, atEight());
     expect(r.sent).toBe(true);
     expect(sendNotificationMock).toHaveBeenCalledTimes(1);
     const input = sendNotificationMock.mock.calls[0][1];
-    expect(input).toMatchObject({ userId: "u-owner", kind: "ai" });
+    expect(input.kind).toBe("ai");
     expect(input.title).toContain("3 things need a look");
     // 🔴 No body. The count IS the message, and a body is the first place a
     // customer name or a filename would appear.
     expect(input.body).toBeNull();
   });
 
+  it("🔴 WARP-2910 MUTATION: send to `settings.enabledById` — the digest reaches nobody", async () => {
+    // `enabledById` is a `User.id`. The toast topic, the web-push lookup and
+    // both NotificationLog readers are keyed by `User.username`, so an id here
+    // is a toast the broker drops and a row no reader can see.
+    await runFilingDigest(digestPrisma({ pending: 3 }) as never, atEight());
+    expect(sendNotificationMock).toHaveBeenCalledTimes(1);
+    const input = sendNotificationMock.mock.calls[0][1];
+    expect(input.userId).toBe("owner");
+    expect(input.userId).not.toBe(DIGEST_SETTING.enabledById);
+  });
+
   it("MUTATION: drop the already-sent read — a restart re-sends every hour", async () => {
     const r = await runFilingDigest(
-      digestPrisma({ pending: 3, already: { id: "n0" } }),
+      digestPrisma({ pending: 3, sentToday: [SENT_THIS_MORNING("owner")] }) as never,
       atEight(),
     );
     expect(r).toMatchObject({ sent: false, reason: "already_sent" });
     expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 
+  it("🔴 WARP-2910 the already-sent read looks the digest up by the owner's USERNAME", async () => {
+    // Self-consistent on the id, the old read never saw a row the real
+    // recipient owns — the same UUID fed the read and the send.
+    const db = digestPrisma({ pending: 3, sentToday: [SENT_THIS_MORNING("owner")] });
+    const r = await runFilingDigest(db as never, atEight());
+    expect(r).toMatchObject({ sent: false, reason: "already_sent" });
+    expect(db.notificationLog.findFirst).toHaveBeenCalledTimes(1);
+    expect(db.notificationLog.findFirst.mock.calls[0]![0].where.userId).toBe("owner");
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
+  it("🔴 WARP-2910 an owner whose User row is gone is `no_owner`, never a send to undefined", async () => {
+    const db = digestPrisma({ pending: 3, ownerExists: false });
+    const r = await runFilingDigest(db as never, atEight());
+    expect(r).toMatchObject({ sent: false, reason: "no_owner" });
+    expect(db.notificationLog.findFirst).not.toHaveBeenCalled();
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
   it("stays quiet outside the owner's hour", async () => {
-    const r = await runFilingDigest(digestPrisma({ pending: 3 }), new Date(2026, 8, 5, 14, 0, 0));
+    const r = await runFilingDigest(digestPrisma({ pending: 3 }) as never, new Date(2026, 8, 5, 14, 0, 0));
     expect(r).toMatchObject({ sent: false, reason: "wrong_hour" });
   });
 
   it("stays quiet when filing is off, whatever is pending", async () => {
     const r = await runFilingDigest(
-      digestPrisma({ setting: { ...DIGEST_SETTING, mode: "off" }, pending: 9 }),
+      digestPrisma({ setting: { ...DIGEST_SETTING, mode: "off" }, pending: 9 }) as never,
       atEight(),
     );
     expect(r).toMatchObject({ sent: false, reason: "off" });
