@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest";
 import { MIGRATIONS_DIR, readSchema } from "./helpers/test-paths.js";
 
 const schema = readSchema().replace(/\r\n/g, "\n");
-const MIGRATION = "20260924030000_warp_2804_notification_ack";
+const MIGRATION = "20260924040000_warp_2804_notification_ack";
 const sql = readFileSync(join(MIGRATIONS_DIR, MIGRATION, "migration.sql"), "utf8").replace(/\r\n/g, "\n");
 /** The statements alone: the header may SAY things the code must not do. */
 const code = sql

@@ -52,7 +52,7 @@ const RUN =
 
 const PREFIX = "warp2804-";
 const MIGRATION_SQL = readFileSync(
-  join(MIGRATIONS_DIR, "20260924030000_warp_2804_notification_ack", "migration.sql"),
+  join(MIGRATIONS_DIR, "20260924040000_warp_2804_notification_ack", "migration.sql"),
   "utf8",
 );
 
