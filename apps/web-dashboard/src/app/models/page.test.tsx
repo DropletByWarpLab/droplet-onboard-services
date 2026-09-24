@@ -849,6 +849,48 @@ describe("<ModelsPage /> catalog section (WARP-1827)", () => {
     },
   );
 
+  // Lane A's catalog (WARP-3046) sends `vram_source` alongside the number,
+  // and there `0` is a real measurement ("nothing fits") while only `null`
+  // means "couldn't size this box". Without the field — today's
+  // orchestrator — a 0 is the known mis-read (an iGPU carve-out rounding to
+  // 0), so it stays "couldn't measure".
+  it("says the memory couldn't be measured when a sourced catalog sends null (WARP-3048)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      data: { detected_vram_gb: null, vram_source: null, models: [] },
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expectOnlyNote(/couldn.t measure this droplet.s gpu memory/i);
+  });
+
+  it("treats a sourced 0 as a measurement — nothing fits (WARP-3048)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      data: { detected_vram_gb: 0, vram_source: "dgpu_sysfs", models: [] },
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expectOnlyNote(/none of the models droplet offers fit this droplet.s 0 gb of gpu memory/i);
+  });
+
+  it("names unified memory as memory, not GPU memory (WARP-3048)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      data: { detected_vram_gb: 6, vram_source: "unified_memory", models: [] },
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expectOnlyNote(/fit this droplet.s 6 gb of memory\./i);
+    expect(screen.getByRole("status")).not.toHaveTextContent(/gpu/i);
+  });
+
   it("says nothing fits when the box measured real memory and none qualifies (WARP-3048)", () => {
     ready();
     useModelsCatalogMock.mockReturnValue({

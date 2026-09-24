@@ -366,6 +366,11 @@ export interface CatalogModelEntry {
 export interface ModelsCatalogPayload {
   /** null = the box couldn't measure it. */
   detected_vram_gb: number | null;
+  /** WARP-3048 — where `detected_vram_gb` came from (`override`,
+   *  `device_bridge`, `dgpu_sysfs`, `unified_memory`; null when unknown).
+   *  Its presence is what makes a 0 a measurement. Optional: an older
+   *  orchestrator drops it. */
+  vram_source?: string | null;
   models: CatalogModelEntry[];
   /** WARP-3048 — the sidecar couldn't list what's installed, so `pulled`
    *  can't be trusted (and downloads are refused). Optional: an older

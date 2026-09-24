@@ -100,10 +100,16 @@ function catalogNote(
   if (data.degraded_manifest === true) {
     return "Couldn’t read this Droplet’s list of supported models, so no downloads are offered right now.";
   }
-  if (data.detected_vram_gb == null || data.detected_vram_gb === 0) {
+  // `null` is "couldn't size this box". A `0` is a real measurement only on
+  // an orchestrator that also says where it came from (`vram_source`, C1);
+  // without it, 0 is the iGPU carve-out mis-read and means unknown too.
+  const vram = data.detected_vram_gb;
+  if (vram == null || (vram === 0 && data.vram_source === undefined)) {
     return "Couldn’t measure this Droplet’s GPU memory, so no downloads are offered.";
   }
-  return `None of the models Droplet offers fit this Droplet’s ${data.detected_vram_gb} GB of GPU memory.`;
+  // A GPU-less / APU / Jetson box is sized from memory it shares with the OS.
+  const memory = data.vram_source === "unified_memory" ? "memory" : "GPU memory";
+  return `None of the models Droplet offers fit this Droplet’s ${vram} GB of ${memory}.`;
 }
 
 /** Owner/admin can change the active model; everyone else sees it read-only.
