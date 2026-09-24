@@ -40,6 +40,7 @@ from .base import (
     RuntimePullError,
     deleted_result,
     pulled_result,
+    unload_result,
 )
 
 # DMR's ollama-compatible pull. Preferred over the native `POST /models/create`
@@ -50,6 +51,12 @@ from .base import (
 # implemented, because two code paths that both "work" but are exercised
 # differently is how the untested one rots.
 PULL_PATH = "/api/pull"
+
+# WARP-3047 — DMR's NATIVE residency endpoints (scheduling/http_handler.go,
+# registered under the `/engines` inference prefix on v1.2.6). There is no
+# Ollama-compat equivalent that reports the runner mode or frees by ref.
+ENGINES_PS_PATH = "/engines/ps"
+ENGINES_UNLOAD_PATH = "/engines/unload"
 
 # NOTE: DMR's native `DELETE /models/{ns}/{name}` and `POST /models/create` are
 # deliberately NOT used. Its ollama-compat `/api/delete` and `/api/pull` accept
@@ -293,3 +300,82 @@ class DmrRuntime(OllamaWireRuntime):
         )
         resp.raise_for_status()
         return deleted_result(model)
+
+    async def _resident_chat_runners(self) -> list[str]:
+        """Chat (``completion``-mode) runners DMR has resident, by the ref
+        their loading request used — native ``GET /engines/ps``
+        (``scheduling.BackendStatus``: ``backend_name``, ``model_name``,
+        ``mode``, ``in_use``, ``loading``). The native listing rather than the
+        Ollama-compat ``/api/ps`` because only it carries ``mode``: an
+        embedding runner is not a chat model and is left alone."""
+        resp = await self._client.get(ENGINES_PS_PATH)
+        resp.raise_for_status()
+        body = resp.json()
+        names: list[str] = []
+        for runner in body if isinstance(body, list) else []:
+            if not isinstance(runner, dict) or runner.get("mode", "completion") != "completion":
+                continue
+            name = runner.get("model_name")
+            if isinstance(name, str) and name.strip() and name not in names:
+                names.append(name)
+        return names
+
+    async def unload_others(self, keep: str) -> dict[str, list[str]]:
+        """Unload every resident chat runner except ``keep`` (WARP-3047).
+
+        Why this is needed at all: DMR v1.2.6's loader has no memory
+        accounting. It keeps up to ``min(NumCPU, 8)`` runners and evicts only
+        when every slot is taken or after a 5-minute idle timeout
+        (``pkg/inference/scheduling/loader.go``), so switching from A to B
+        starts B's llama-server next to A with ``-ngl 999``, and a B that
+        does not fit in what A left free fails with "not enough GPU memory".
+
+        ``POST /engines/unload`` with ``backend: ""`` evicts across every
+        backend and, unlike naming ``llama.cpp``, leaves the model's
+        per-model runner config in place for its next load (``Unload`` only
+        deletes configs whose backend matches). DMR frees a runner only when
+        nothing references it — one serving a request is silently skipped —
+        so the result is READ BACK from ``/engines/ps``, never assumed.
+        ``terminate()`` waits for the runner process to exit, so by the time
+        the call returns the freed VRAM is really free.
+        """
+        others = [
+            name
+            for name in await self._resident_chat_runners()
+            if not _same_resident_model(name, keep)
+        ]
+        if others:
+            resp = await self._client.post(
+                ENGINES_UNLOAD_PATH, json={"backend": "", "models": others}
+            )
+            resp.raise_for_status()
+        after = [
+            name
+            for name in await self._resident_chat_runners()
+            if not _same_resident_model(name, keep)
+        ]
+        return unload_result([n for n in others if n not in after], after)
+
+
+def _same_resident_model(resident: str, keep: str) -> bool:
+    """Does the runner DMR reports as ``resident`` hold the model ``keep``?
+
+    WARP-3047, for :meth:`DmrRuntime.unload_others`. A runner is keyed by the
+    ref its loading request used (``ai/x:T`` or ``docker.io/ai/x:T``), and
+    the caller may spell the same model differently, so both sides are
+    normalised — registry host and ``:latest`` dropped, a real tag KEPT: two
+    builds of one repository are different weights in VRAM.
+
+    A bare Ollama-style ``keep`` (``gpt-oss:20b``) carries no OCI tag that can
+    be matched (see :func:`to_runtime_id`), so it keeps every build of its
+    repository. Unloading the model the caller asked to keep is the worse
+    mistake of the two.
+    """
+    candidate = (keep or "").strip()
+    if not candidate:
+        return False
+    if "/" in candidate:
+        return _normalize_oci_reference(resident) == _normalize_oci_reference(candidate)
+    return _normalize_oci_reference(resident, drop_tag=True) == _normalize_oci_reference(
+        to_runtime_id(candidate), drop_tag=True
+    )

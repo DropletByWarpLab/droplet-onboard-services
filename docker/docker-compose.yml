@@ -2582,10 +2582,10 @@ services:
       # Set LLM_URL=__mock__ for a dev box with no orchestrator (transcript
       # echoes as the spoken reply).
       - LLM_URL=${LLM_URL:-http://orchestrator:3000}
-      # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct fits
-      # the inference host's 7 GB RAM budget with the rest of the stack up).
-      # Override via env if the appliance has a larger/different model
-      # loaded (see droplet-local-LLM /models/sync).
+      # FALLBACK ONLY (WARP-3047): voice follows the box's ACTIVE model — it
+      # asks the orchestrator's GET /api/llm/models for defaultModel (cached
+      # 30 s) — and sends LLM_MODEL only when the orchestrator can't name one.
+      # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
       # WARP-1432 — voice turn shaping (client-side request shape only).
       # Empty passthrough: the effective defaults live in

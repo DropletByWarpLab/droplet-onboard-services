@@ -102,9 +102,10 @@ export type ResolvedModel =
  * slip through. The catalogue is asked first and its answer wins.
  *
  * A gateway that cannot be listed is `model_unreachable`, not a fallback to a
- * hardcoded tag: `email-analysis.service.ts` carries a `mistral:7b-instruct`
- * fallback that is not pulled in production and 404s upstream, which turns
- * every analysis into a silent default. A worker that writes must fail loudly.
+ * hardcoded tag: `email-analysis.service.ts` used to carry a
+ * `mistral:7b-instruct` fallback (removed in WARP-3047) that was not pulled in
+ * production and 404'd upstream, which turned every analysis into a silent
+ * default. A worker that writes must fail loudly.
  */
 export async function resolveFilingModel(prisma: PrismaClient): Promise<ResolvedModel> {
   let installed: ModelInfo[];

@@ -82,7 +82,8 @@ true, not a stub.
 ### Surviving routes
 
 `GET /health` · `GET /models/available` · `GET /models/loaded` ·
-`GET /models/manifest` · `GET /models/eligible` · `POST /models/pull`
+`GET /models/manifest` · `GET /models/eligible` · `POST /models/pull` ·
+`POST /models/unload` (added here — divergence 9)
 
 ## Deliberate divergences from upstream
 
@@ -102,7 +103,7 @@ These are edits, not omissions. Re-apply them on every re-sync.
 2. **`setup_auth` warns louder** when the token is empty, naming the file to
    check. Upstream calls it "dev mode"; on an appliance it is a silent gap.
 3. **`/health` reports `placement: {"state": "not_applicable", "models": []}`**
-   statically, and keeps `schema_version: 2`. Dropping to v1 would be worse
+   statically, and keeps the v2 shape (now `schema_version: 3`, see 9). Dropping to v1 would be worse
    than useless: ai-gateway's `_LimitsCache` logs a one-time warning on *any*
    non-equal version, so a correct deployment would look like a stale appliance
    forever. `not_applicable` is one of v2's own documented states, and every
@@ -127,6 +128,13 @@ These are edits, not omissions. Re-apply them on every re-sync.
 8. **`test_shipped_manifest_agrees_with_oci_sources` is not vendored.**
    `models/oci-sources.json` is a build-time packaging input that belongs
    upstream; that cross-check stays there.
+9. **WARP-3047 — `POST /models/unload` and `InferenceRuntime.unload_others`
+   are LOCAL ADDITIONS** (`runtime/base.py`, `runtime/ollama.py`,
+   `runtime/dmr.py`, `tests/test_unload.py`), and `/health` is
+   `schema_version: 3`: `limits.max_loaded_models` is omitted on DMR, which
+   enforces no loaded-model cap. A model switch needs the lifecycle sidecar to
+   unload the old model because DMR v1.2.6 has no memory-aware eviction.
+   Upstream them to `droplet-local-LLM` rather than dropping them on re-sync.
 
 ## Re-syncing
 

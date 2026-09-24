@@ -109,21 +109,23 @@ export function createEmailAnalysisFn(
   // WARP-2391 — the port, so this caller sees the same MCP surface the
   // agent loop does (the multiplexer in production).
   mcp: McpClientPort,
+  // WARP-3047 — the box's ACTIVE model, asked PER CALL (app.ts passes
+  // `resolveActiveModel`). This used to capture `DEFAULT_MODEL ?? LLM_MODEL`
+  // once at boot, so a switch never reached it, and the analysis — which
+  // also backs the email_summarize_thread chat tool — loaded the env model
+  // next to the active one on DMR.
+  resolveModel: () => Promise<string | null>,
 ): EmailAnalysisFn {
-  // LLM_MODEL is the model the box actually hosts (single-box.sh writes
-  // it to .env); the historic mistral fallback is not pulled in
-  // production and would 404 upstream — every analysis would silently
-  // degrade to DEFAULT_ANALYSIS.
-  const defaultModel =
-    process.env.DEFAULT_MODEL ??
-    process.env.LLM_MODEL ??
-    "mistral:7b-instruct";
   return async (input: EmailAnalysisInput): Promise<EmailAnalysis> => {
     try {
+      const model = await resolveModel();
+      // Nothing to ask — the placeholder card, never a hardcoded tag the
+      // box does not host (the historic mistral fallback 404'd upstream).
+      if (!model) return DEFAULT_ANALYSIS;
       const result = await runAgent(
         { mcp, aiGateway: { chat: aiGateway.chat } },
         {
-          model: defaultModel,
+          model,
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: buildUserPrompt(input) },

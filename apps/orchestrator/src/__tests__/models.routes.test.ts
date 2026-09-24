@@ -54,6 +54,24 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
+// WARP-3047 — a switch is a REAL swap: the route unloads every other resident
+// model through the inference-manager, then warms the new one. Both are
+// network, so both are observed here.
+const { unloadAllExceptMock, warmDefaultModelMock } = vi.hoisted(() => ({
+  unloadAllExceptMock: vi.fn(async (_keep: string) => ({
+    unloaded: [] as string[],
+    stillResident: [] as string[],
+  })),
+  warmDefaultModelMock: vi.fn(async (..._a: unknown[]) => undefined),
+}));
+vi.mock("../services/model-residency.service.js", () => ({
+  unloadAllExcept: (keep: string) => unloadAllExceptMock(keep),
+}));
+vi.mock("../services/model-readiness.service.js", async (importActual) => ({
+  ...(await importActual<typeof import("../services/model-readiness.service.js")>()),
+  warmDefaultModel: (...a: unknown[]) => warmDefaultModelMock(...a),
+}));
+
 // WARP-836 — stub only the Ollama metrics *probe* (network); keep the real
 // `metricsFor` so the enrichment name-matching is exercised for real.
 const { fetchLocalModelMetricsMock } = vi.hoisted(() => ({
@@ -585,7 +603,11 @@ describe("WARP-1112 — PATCH /api/models/active", () => {
       .patch("/api/models/active")
       .send({ model: "llama3.2:3b" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ activeModel: "llama3.2:3b", changed: true });
+    expect(res.body).toEqual({
+      activeModel: "llama3.2:3b",
+      changed: true,
+      swap: { unloaded: [], stillResident: [] },
+    });
     expect(prisma._active()).toBe("llama3.2:3b");
     expect(prisma.workspaceSetting.upsert).toHaveBeenCalledTimes(1);
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
@@ -689,6 +711,119 @@ describe("WARP-1112 — PATCH /api/models/active", () => {
     const res = await request(app).get("/api/models");
     expect(res.status).toBe(200);
     expect(res.body.activeModel).toBe("llama3.2:3b");
+  });
+});
+
+describe("WARP-3047 — PATCH /api/models/active really swaps the loaded model", () => {
+  const A = "docker.io/ai/gpt-oss:20B-F16";
+  const B = "docker.io/ai/qwen3:8B-Q4_K_M";
+  const installed = {
+    models: [
+      { id: A, provider: "local", name: "Gpt-oss 20B F16", context_window: null },
+      { id: B, provider: "local", name: "Qwen3 8B Q4 K M", context_window: null },
+    ],
+  };
+  const owner = { username: "stefan", role: "owner" };
+  /** The warm fires on setImmediate AFTER the response — flush one tick. */
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  it("unloads every other resident model, reports it, THEN warms the new one", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const order: string[] = [];
+    unloadAllExceptMock.mockImplementationOnce(async (keep: string) => {
+      order.push(`unload:${keep}`);
+      return { unloaded: [A], stillResident: [] };
+    });
+    warmDefaultModelMock.mockImplementationOnce(async (model: unknown) => {
+      order.push(`warm:${String(model)}`);
+    });
+    const prisma = createPrismaMock(A);
+
+    const res = await request(buildApp(owner, prisma))
+      .patch("/api/models/active")
+      .send({ model: B });
+    await flush();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      activeModel: B,
+      changed: true,
+      swap: { unloaded: [A], stillResident: [] },
+    });
+    expect(order).toEqual([`unload:${B}`, `warm:${B}`]);
+    // An explicit, audited owner switch is never swallowed by the warm
+    // debounce (a warm of B minutes ago may since have been unloaded).
+    expect(warmDefaultModelMock).toHaveBeenCalledWith(B, { force: true });
+  });
+
+  it("keeps the runtime id when the caller sent the display name", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    await request(buildApp(owner, createPrismaMock(A)))
+      .patch("/api/models/active")
+      .send({ model: "Qwen3 8B Q4 K M" });
+    await flush();
+    expect(unloadAllExceptMock).toHaveBeenCalledWith(B);
+    expect(warmDefaultModelMock).toHaveBeenCalledWith(B, { force: true });
+  });
+
+  it("reports a model DMR could not evict (still serving) instead of pretending", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    unloadAllExceptMock.mockResolvedValueOnce({ unloaded: [], stillResident: [A] });
+    const res = await request(buildApp(owner, createPrismaMock(A)))
+      .patch("/api/models/active")
+      .send({ model: B });
+    expect(res.status).toBe(200);
+    expect(res.body.swap).toEqual({ unloaded: [], stillResident: [A] });
+  });
+
+  it("an unreachable inference-manager never fails the switch: swap is null, the choice stands, B is warmed", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    unloadAllExceptMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    const prisma = createPrismaMock(A);
+    const res = await request(buildApp(owner, prisma))
+      .patch("/api/models/active")
+      .send({ model: B });
+    await flush();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ activeModel: B, changed: true, swap: null });
+    expect(prisma._active()).toBe(B);
+    expect(warmDefaultModelMock).toHaveBeenCalledWith(B, { force: true });
+  });
+
+  it("a no-op PATCH neither unloads nor warms", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const res = await request(buildApp(owner, createPrismaMock(B)))
+      .patch("/api/models/active")
+      .send({ model: B });
+    await flush();
+    expect(res.body).toEqual({ activeModel: B, changed: false });
+    expect(unloadAllExceptMock).not.toHaveBeenCalled();
+    expect(warmDefaultModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a rejected model (not installed) neither unloads nor warms", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const res = await request(buildApp(owner, createPrismaMock(A)))
+      .patch("/api/models/active")
+      .send({ model: "gemma4:26b" });
+    await flush();
+    expect(res.status).toBe(400);
+    expect(unloadAllExceptMock).not.toHaveBeenCalled();
+    expect(warmDefaultModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a DEGRADED local listing is 503 ai_service_unreachable, not a false 400 not_installed", async () => {
+    // The gateway answered, but its local provider raised during the listing:
+    // "not in the list" means "couldn't confirm", not "isn't installed".
+    listModelsMock.mockResolvedValue({ models: [], degraded_providers: ["local"] });
+    const prisma = createPrismaMock(A);
+    const res = await request(buildApp(owner, prisma))
+      .patch("/api/models/active")
+      .send({ model: B });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("ai_service_unreachable");
+    expect(prisma.workspaceSetting.upsert).not.toHaveBeenCalled();
+    expect(unloadAllExceptMock).not.toHaveBeenCalled();
   });
 });
 
@@ -1658,7 +1793,7 @@ describe("WARP-2882 — rows carry the runtime id; probes and writes key on it",
       .patch("/api/models/active")
       .send({ model: "Gpt-oss 20B F16" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ activeModel: "docker.io/ai/gpt-oss:20B-F16", changed: true });
+    expect(res.body).toMatchObject({ activeModel: "docker.io/ai/gpt-oss:20B-F16", changed: true });
     expect(prisma._active()).toBe("docker.io/ai/gpt-oss:20B-F16");
   });
 });
