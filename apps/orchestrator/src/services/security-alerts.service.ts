@@ -31,8 +31,10 @@
  *      and the already-noticed filter mean nobody is ever told twice;
  *   5. after commit: `deliverNotification(id, {tag, priority: 'alert'})` per
  *      queued notice, then the notice is settled from the row's own stamp;
- *   6. `incident.alerted`, audited by the system after the commit — its throw
- *      reaches safeRun's canary (after every other incident is handled).
+ *   6. `incident.alerted`, audited by the system after the commit. A failed
+ *      audit is RETURNED (`auditError`), never thrown here: the engine
+ *      finishes its tick — every other incident, redelivery, health — and
+ *      only then rethrows it into safeRun's canary (review #8).
  * A throw in 1–4 counts an attempt; the third is terminal (`failed`, and the
  * alerts health row goes down).
  *
@@ -426,15 +428,16 @@ async function notifyIncident(
 
 /**
  * Engine step 6: every pending alert, oldest first. An incident whose write
- * fails is counted as an attempt and does not stop the others; a failed
- * after-commit audit is rethrown once all of them are handled (safeRun's canary).
+ * fails is counted as an attempt and does not stop the others. The first
+ * failed after-commit audit comes back as `auditError` for the engine to
+ * rethrow at the END of its tick (review #8).
  */
 export async function notifyPendingIncidents(
   prisma: PrismaClient,
   deps: NotifierDeps,
   now: Date,
   opts: NotifyOptions = {},
-): Promise<{ incidents: number }> {
+): Promise<{ incidents: number; auditError?: unknown }> {
   const pending = await prisma.securityIncident.findMany({
     where: { notifyState: "pending" },
     orderBy: [{ alertedAt: "asc" }, { id: "asc" }],
@@ -448,12 +451,13 @@ export async function notifyPendingIncidents(
     try {
       if (await notifyIncident(prisma, deps, id, now, opts)) incidents++;
     } catch (err) {
+      // notifyIncident throws only from the after-commit audit: its notices were written.
+      incidents++;
       logger.error({ err, incidentId: id }, "security alert sent, but its audit row was not written");
       firstError ??= err;
     }
   }
-  if (firstError) throw firstError;
-  return { incidents };
+  return firstError ? { incidents, auditError: firstError } : { incidents };
 }
 
 /** Engine step 6, second half: notices still queued two minutes on get one more delivery, then settle. */

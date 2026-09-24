@@ -510,6 +510,15 @@ describe("after triage: the notifier, and health", () => {
     expect(TICK_DEADLINE_MS).toBeLessThanOrEqual(45_000);
   });
 
+  it("review #8: an alert's failed audit does not cut the tick short — redelivery, the failed count, alerts health and lastOkAt all run, THEN it rethrows", async () => {
+    const f = world();
+    alerts.notify.mockResolvedValueOnce({ incidents: 1, auditError: new Error("chain down") } as never);
+    await expect(tick(f)).rejects.toThrow("chain down");
+    expect(alerts.redeliver).toHaveBeenCalledTimes(1);
+    expect(alerts.recompute).toHaveBeenCalledTimes(1);
+    expect(incidentHealthState()).toMatchObject({ lastOkAt: T0, lastError: { at: T0, message: "chain down" } });
+  });
+
   it("a completed tick sets lastOkAt; a throwing one records lastError and rethrows", async () => {
     const f = world();
     await tick(f);

@@ -42,6 +42,8 @@
  *      never reopens (D22).
  *   6. Notify (security-alerts.service.ts), then redeliver stuck notices.
  *   7. Health: lastOkAt when 1–6 completed; alerts health every 6th tick.
+ *      A failed `incident.alerted` audit from step 6 is rethrown only after
+ *      all of this (review #8) — it is an audit problem, not a sorting one.
  *
  * Every incident write is a compare-and-set on `version`, with one re-read
  * and re-plan on a lost race: two overlapping handlers (the lock makes that
@@ -621,9 +623,7 @@ export async function tickSecurityIncidents(
   const hardDeadline = startedAt + TICK_DEADLINE_MS;
   ticks++;
   try {
-    const result = await runTick(prisma, deps, now, deadline, () => Date.now() > hardDeadline);
-    incidentHealth.lastOkAt = now;
-    return result;
+    return await runTick(prisma, deps, now, deadline, () => Date.now() > hardDeadline);
   } catch (err) {
     incidentHealth.lastError = { at: now, message: err instanceof Error ? err.message : String(err) };
     throw err;
@@ -721,7 +721,7 @@ async function runTick(
   }
 
   // 6. Notify, then redeliver — each stops at the tick's hard deadline (review #6).
-  await notifyPendingIncidents(prisma, deps, now, { deadline: pastHardDeadline });
+  const notified = await notifyPendingIncidents(prisma, deps, now, { deadline: pastHardDeadline });
   await redeliverStuckNotices(prisma, now, { deadline: pastHardDeadline });
 
   // 7. Health.
@@ -729,7 +729,10 @@ async function runTick(
     where: { outcome: "failed", triagedAt: { gte: new Date(now.getTime() - DAY_MS) } },
   });
   if (ticks % ALERTS_HEALTH_EVERY_TICKS === 1) await recomputeAlertsHealth(prisma, deps.resolveAccess, now);
+  incidentHealth.lastOkAt = now;
 
+  // Review #8: the tick's work is done; an alert's failed audit reaches safeRun now.
+  if (notified.auditError !== undefined) throw notified.auditError;
   return { triaged, failed, drained, floorAdvanced, sealed };
 }
 

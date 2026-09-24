@@ -284,6 +284,18 @@ describe("the notifier (§6.7)", () => {
     });
   });
 
+  it("review #8: a failed audit is RETURNED, never thrown — the next incident is still notified", async () => {
+    const f = world();
+    const second = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    f.world.securityIncident.push({ ...incident({ id: second, alertedAt: plus(NOW, -1_000) }), zoneLinkIds: ["l0"] });
+    f.world.securityIncidentReason.push({ id: "r2", createdAt: NOW, ...reason("back", plus(NOW, -50_000), { incidentId: second }) });
+    h.audit.mockRejectedValueOnce(new Error("chain down"));
+    const r = await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(r).toMatchObject({ incidents: 2, auditError: expect.objectContaining({ message: "chain down" }) });
+    expect(f.world.securityIncident.map((i) => i.notifyState)).toEqual(["done", "done"]);
+    expect(h.audit).toHaveBeenCalledTimes(2);
+  });
+
   it("DS-005: a family recipient who cannot see the camera is skipped_not_visible — no NotificationLog row for her", async () => {
     const f = world({ securityAlertRecipient: [{ userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN }] });
     LEVELS[MARIA] = "act";
