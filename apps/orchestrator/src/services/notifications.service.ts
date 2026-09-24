@@ -45,7 +45,8 @@ export interface DispatchInput {
    *  `User.id`. It is the key at every hop: the toast topic
    *  `droplet/notifications/<username>` (ws-bridge subscribes on the username
    *  only), the `PushSubscription.username` lookup, and both
-   *  `NotificationLog.username` readers. A `User.id` here reaches nobody. */
+   *  `NotificationLog.username` readers. A `User.id` here reaches nobody, so
+   *  every entry point refuses one (`NOTIFICATION_RECIPIENT_IS_ID`, below). */
   username: string;
   kind: NotificationKind;
   title: string;
@@ -107,6 +108,70 @@ export function assertNotificationData(data: Record<string, unknown>): void {
   }
 }
 
+// ── WARP-2911: the recipient is a username ──────────────────────────────────
+
+/** The shape of a `User.id` (`@default(uuid())`). No username has it — a
+ *  Nextcloud login, `dev`, a `_service:*` identity — so a recipient that
+ *  matches is an id handed to the username slot. */
+const USER_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type NotificationRecipientErrorCode = "NOTIFICATION_RECIPIENT_IS_ID";
+
+/**
+ * WARP-2911 — a caller handed a `User.id` where the recipient's USERNAME goes.
+ *
+ * A PROGRAMMING error, and deliberately a throw rather than a `logger.warn`:
+ * the failure it replaces was silent and total (the broker drops the toast,
+ * no PushSubscription matches, no reader can see the row), and it shipped
+ * three times (WARP-2783, WARP-2813, WARP-2910) because a warning nobody reads
+ * is what silence already looked like. `caller` is the first stack frame
+ * outside this module — the file that passed the id — so the log line says
+ * where to look. Not in the error handler's trusted set: a route that throws
+ * it answers a generic 500.
+ */
+export class NotificationRecipientError extends Error {
+  readonly code: NotificationRecipientErrorCode;
+  /** `fn (path/to/caller.ts:line:col)`, or null when no frame is available. */
+  readonly caller: string | null;
+
+  constructor(code: NotificationRecipientErrorCode, message: string, caller: string | null) {
+    super(message);
+    this.name = "NotificationRecipientError";
+    this.code = code;
+    this.caller = caller;
+  }
+
+  static isId(entryPoint: string, caller: string | null): NotificationRecipientError {
+    return new NotificationRecipientError(
+      "NOTIFICATION_RECIPIENT_IS_ID",
+      `NOTIFICATION_RECIPIENT_IS_ID: ${entryPoint} was handed a User.id as the recipient; ` +
+        `it takes the recipient's User.username` +
+        (caller ? ` (passed from ${caller})` : ""),
+      caller,
+    );
+  }
+
+  toJSON(): { name: string; code: NotificationRecipientErrorCode; message: string; caller: string | null } {
+    return { name: this.name, code: this.code, message: this.message, caller: this.caller };
+  }
+}
+
+/** The first stack frame that is not this module: whoever called in. */
+function callerOutsideThisModule(): string | null {
+  const frame = (new Error().stack ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("at ") && !line.includes("notifications.service"));
+  return frame ? frame.slice("at ".length) : null;
+}
+
+/** The one check every entry point runs on the recipient. */
+function assertRecipientIsUsername(entryPoint: string, input: DispatchInput): void {
+  if (USER_ID_SHAPE.test(input.username)) {
+    throw NotificationRecipientError.isId(entryPoint, callerOutsideThisModule());
+  }
+}
+
 /** The one check every entry point runs on the optional link fields. */
 function assertLinkFields(input: DispatchInput): void {
   if (input.url !== undefined) assertNotificationLink(input.url);
@@ -138,13 +203,16 @@ function safePublish(topic: string, payload: Record<string, unknown>): boolean {
  * WARP-2587 — the TRANSPORT half of a dispatch, on its own.
  *
  * Extracted so a caller that must write the log row transactionally can still
- * publish the toast afterwards. Never throws: the toast is best-effort by
- * design and the log row is the durable record.
+ * publish the toast afterwards. Never throws on a TRANSPORT problem: the toast
+ * is best-effort by design and the log row is the durable record. It does
+ * throw on a caller bug — a `User.id` recipient (WARP-2911), which would
+ * publish to a topic nobody subscribes to.
  */
 export function publishNotificationToast(input: DispatchInput): {
   channels: string[];
   errors: string[];
 } {
+  assertRecipientIsUsername("publishNotificationToast", input);
   const channels: string[] = [];
   const errors: string[] = [];
   // WARP-2909 — this function must not throw, so a bad link DEGRADES: the
@@ -185,8 +253,9 @@ export async function recordNotification(
   db: NotificationDb,
   input: DispatchInput,
 ): Promise<{ id: string }> {
-  // WARP-2909 — before the write: inside a caller's transaction a throw here
-  // aborts it before anything commits.
+  // WARP-2909 / WARP-2911 — before the write: inside a caller's transaction a
+  // throw here aborts it before anything commits.
+  assertRecipientIsUsername("recordNotification", input);
   assertLinkFields(input);
   const row = await db.notificationLog.create({
     data: {
@@ -209,7 +278,9 @@ export async function sendNotification(
   prisma: PrismaClient,
   input: DispatchInput,
 ): Promise<DispatchResult> {
-  // WARP-2909 — a bad link is the caller's bug: refuse before any transport.
+  // WARP-2911 / WARP-2909 — a `User.id` recipient or a bad link is the
+  // caller's bug: refuse before any transport or row.
+  assertRecipientIsUsername("sendNotification", input);
   assertLinkFields(input);
   const { channels, errors } = publishNotificationToast(input);
 

@@ -32,6 +32,7 @@ import {
   recordNotification,
   assertNotificationLink,
   assertNotificationData,
+  NotificationRecipientError,
 } from "../services/notifications.service.js";
 
 function makePrismaStub() {
@@ -387,4 +388,69 @@ describe("listRecentNotifications deep link (WARP-2909)", () => {
     const [row] = await listRecentNotifications(prisma, "romain");
     expect(row).toMatchObject({ url: PARKED.url, data: PARKED.data });
   });
+});
+
+// ── WARP-2911: the recipient is a username, never a User.id ─────────────────
+//
+// A `User.id` (`@default(uuid())`) handed to the recipient slot fails SILENTLY
+// and completely — the broker drops the toast, no PushSubscription matches, and
+// no reader can see the row. It shipped three times (WARP-2783, WARP-2813,
+// WARP-2910), each time behind a green test whose fake had `id === username`.
+// So all three entry points refuse a UUID-shaped recipient by THROWING, with
+// the caller's file in the error, before anything is published or written.
+describe("WARP-2911 — a UUID-shaped recipient is refused (NOTIFICATION_RECIPIENT_IS_ID)", () => {
+  const USER_ID = "3b7d0195-6c1e-4f2a-9d8b-2a4c6e8f0a1b";
+  const to = (username: string) => ({ username, kind: "system" as const, title: "Audit log integrity check failed" });
+
+  it("sendNotification throws before the toast, the push and the row", async () => {
+    const prisma = makePushingPrismaStub();
+    const err = await sendNotification(prisma, to(USER_ID)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NotificationRecipientError);
+    expect(err).toMatchObject({ code: "NOTIFICATION_RECIPIENT_IS_ID" });
+    expect(mqttPublish).not.toHaveBeenCalled();
+    expect(webpushSend).not.toHaveBeenCalled();
+    expect(prisma._created).toHaveLength(0);
+  });
+
+  it("publishNotificationToast throws instead of publishing to a topic nobody subscribes", () => {
+    expect(() => publishNotificationToast(to(USER_ID))).toThrow(NotificationRecipientError);
+    expect(mqttPublish).not.toHaveBeenCalled();
+  });
+
+  it("recordNotification throws before the row write (inside a caller's transaction, that aborts it)", async () => {
+    const prisma = makePrismaStub();
+    await expect(recordNotification(prisma, to(USER_ID))).rejects.toMatchObject({
+      code: "NOTIFICATION_RECIPIENT_IS_ID",
+    });
+    expect(prisma._created).toHaveLength(0);
+  });
+
+  it("upper-case hex is still an id", () => {
+    expect(() => publishNotificationToast(to(USER_ID.toUpperCase()))).toThrow(/NOTIFICATION_RECIPIENT_IS_ID/);
+  });
+
+  it("the error names the caller's file, so the log line says where the id came from", () => {
+    let err: unknown;
+    try {
+      publishNotificationToast(to(USER_ID));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NotificationRecipientError);
+    const e = err as NotificationRecipientError;
+    expect(e.caller).toMatch(/notifications\.test\.ts/);
+    expect(e.message).toContain(e.caller!);
+    expect(e.toJSON()).toMatchObject({ code: "NOTIFICATION_RECIPIENT_IS_ID", caller: e.caller });
+  });
+
+  it.each(["dev", "_service:mcp", "alice", "romain.jouffret@example.com"])(
+    "%s is a username: all three accept it",
+    async (username) => {
+      const prisma = makePrismaStub();
+      await expect(sendNotification(prisma, to(username))).resolves.toMatchObject({ channels: ["toast"] });
+      expect(() => publishNotificationToast(to(username))).not.toThrow();
+      await expect(recordNotification(prisma, to(username))).resolves.toHaveProperty("id");
+      expect(mqttPublish).toHaveBeenCalledWith(`droplet/notifications/${username}`, expect.anything());
+    },
+  );
 });
