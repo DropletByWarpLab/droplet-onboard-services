@@ -33,9 +33,10 @@
  *   · `dedupeKey = matter_lock:<node>/<ep>:after:<prevId|none>:<reading>` is
  *     deterministic, so two bridges (or a retry of a write that did land)
  *     collapse to one row.
- *   · Memory moves ONLY on `recorded` | `duplicate`. A failed write keeps the
- *     old reading, so the next frame or sweep retries — the P2a status
- *     tracker's flaw (memory ahead of the store) is not repeated here.
+ *   · Memory moves ONLY on `recorded` | `duplicate` — never ahead of the
+ *     store (the P2a status tracker's flaw). A failed write FORGETS the key's
+ *     memory: `failed` can be a connection drop after COMMIT, so the next
+ *     frame or sweep reads the history back and sees the row if it landed.
  *   · The sweep (60 s, cron runtime, advisory lockKey) finds changes the live
  *     stream missed, as `polled` rows. Its t0 guard skips a key that heard a
  *     live frame at or after the sweep started: the list may predate it.
@@ -309,7 +310,7 @@ export function lockRowDraft(input: {
  *   · `unchanged`  — the store already says this.
  *   · `recorded`   — a row was written.
  *   · `duplicate`  — the row already existed (another bridge, or a retry of a write that landed).
- *   · `failed`     — nothing written; memory kept, so the next frame or sweep retries.
+ *   · `failed`     — not known to be written; memory forgotten, so the next frame or sweep reads the history and retries.
  *   · `superseded` — a polled reading older than a live frame for the same key; dropped.
  */
 export type LockObserveOutcome = "unchanged" | "recorded" | "duplicate" | "failed" | "superseded";
@@ -387,7 +388,7 @@ export function createLockTracker(deps: {
   function noteFailure(err: unknown, obs: LockObservation, what: string): void {
     unsaved.add(obs.ref);
     health.lastWriteError = { at: now(), message: errMessage(err) };
-    log.warn({ err, ref: obs.ref, reading: obs.reading }, `security lock ${what} failed — kept the previous reading, will retry`);
+    log.warn({ err, ref: obs.ref, reading: obs.reading }, `security lock ${what} failed — will read the history back and retry`);
   }
 
   async function apply(
@@ -429,10 +430,15 @@ export function createLockTracker(deps: {
     try {
       outcome = await store.write(draft);
     } catch (err) {
+      // `failed` may be a lie: the connection can drop AFTER the commit. Forget
+      // what the store holds, so the next observation reads the history back
+      // and sees the row if it did land (review F2).
+      persisted.delete(obs.ref);
       noteFailure(err, obs, "write");
       return "failed";
     }
     if (outcome !== "recorded" && outcome !== "duplicate") {
+      persisted.delete(obs.ref);
       noteFailure(new Error("the store did not save the row"), obs, "write");
       return "failed";
     }

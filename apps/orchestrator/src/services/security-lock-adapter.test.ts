@@ -394,6 +394,46 @@ describe("createLockTracker — transitions only, memory moves only with the sto
     expect(store.write).toHaveBeenCalledTimes(1);
   });
 
+  // Review F2: `failed` can be a lie — a connection dropped after COMMIT. Memory
+  // must not survive a failed write, or the store's real latest row is never seen.
+  describe("a write that LANDED but was reported failed (a drop after COMMIT)", () => {
+    const landedThen = (outcome: "failed" | "throw") => {
+      const real = store.write.getMockImplementation()!;
+      store.write.mockImplementationOnce(async (draft: LockRowDraft) => {
+        await real(draft);
+        if (outcome === "throw") throw new Error("connection terminated after commit");
+        return "failed";
+      });
+    };
+
+    it.each(["failed", "throw"] as const)(
+      "(%s) the door locked again before any retry: the history is read back, so the store's 'unlocked' is corrected",
+      async (outcome) => {
+        seed(store, "locked", "7");
+        landedThen(outcome);
+        await expect(tracker.observe(obs("unlocked"), "live")).resolves.toBe("failed");
+        expect(store.rows.map((r) => r.draft.labels[0])).toEqual(["locked", "unlocked"]); // it did land
+        const landedId = store.rows[1]!.id;
+
+        await expect(tracker.observe(obs("locked"), "live")).resolves.toBe("recorded");
+        expect(store.rows.map((r) => r.draft.labels[0])).toEqual(["locked", "unlocked", "locked"]);
+        expect(store.rows.at(-1)?.draft.dedupeKey).toBe(`matter_lock:${NODE}/1:after:${landedId}:locked`);
+        expect(tracker.writeHealth().unsaved).toBe(0);
+      },
+    );
+
+    it("the same reading again: the landed row is found in the history — nothing re-sent, nothing owed", async () => {
+      seed(store, "locked", "7");
+      landedThen("failed");
+      await tracker.observe(obs("unlocked"), "live");
+      expect(tracker.writeHealth().unsaved).toBe(1);
+      await expect(tracker.observe(obs("unlocked"), "live")).resolves.toBe("unchanged");
+      expect(store.write).toHaveBeenCalledTimes(1);
+      expect(store.rows).toHaveLength(2);
+      expect(tracker.writeHealth().unsaved).toBe(0);
+    });
+  });
+
   it("a write that THROWS is a failure like any other", async () => {
     seed(store, "locked", "7");
     store.write.mockRejectedValueOnce(new Error("pool closed"));
