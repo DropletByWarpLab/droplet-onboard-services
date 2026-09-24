@@ -345,7 +345,7 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
     // estimate and dispatch sides drift apart. `narrowToolsToScope` is now the
     // single expression of it, and `tool-access.service.test.ts` pins its
     // behaviour — including that an absent scope narrows nothing.
-    expect(ROUTE_SRC).toMatch(/narrowToolsToScope\(pooledTools, toolAccessScope\)/);
+    expect(ROUTE_SRC).toMatch(/narrowToolsToScope\(\s*pooledTools,\s*toolAccessScope,?\s*\)/);
     expect(ROUTE_SRC).toContain("pool: effectiveTools.map((t) => t.name)");
   });
 
@@ -361,5 +361,25 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
     for (const src of [ROUTE_SRC, LOOP_SRC]) {
       expect(src).not.toMatch(/\.filter\(\([a-z]+\) => toolAllowedInScope\(/);
     }
+  });
+
+  it("the runtime lookup is wired where runtime names appear (WARP-2897) — WIRING ONLY", () => {
+    // This pins call SHAPE, not behaviour. The behaviour is pinned by
+    // tool-domain-narrowing.catalog.test.ts (narrowAllowedToolsForRole under a
+    // scope, real registry + classification cache) and
+    // tool-domain-narrowing.dispatch.test.ts (the loop's advertisement and its
+    // dispatch gate, same real state) — each with its own mutation.
+    //
+    // What this adds is the shape those suites cannot see: the loop snapshots
+    // ONE lookup per turn and hands that same snapshot to both the
+    // advertisement and the dispatch gate, and the catalog build resolves the
+    // same helper by default.
+    //
+    // The estimate's `pooledTools` is compiled-only (TOOLS), so it takes no
+    // lookup; a lookup there would be a no-op dressed as parity.
+    expect(ROUTE_SRC).toContain("runtime: RuntimeToolLookup = currentRuntimeToolLookup(),");
+    expect(LOOP_SRC).toContain("const runtimeLookup = currentRuntimeToolLookup();");
+    expect(LOOP_SRC).toMatch(/narrowToolsToScope\([\s\S]{0,400}?scoped,\s*runtimeLookup,?\s*\)/);
+    expect(LOOP_SRC).toMatch(/toolDispatchDenial\(call\.function\.name, args, scoped, runtimeLookup\)/);
   });
 });

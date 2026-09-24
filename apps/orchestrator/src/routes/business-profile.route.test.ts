@@ -23,6 +23,11 @@ import { createBusinessProfileRouter } from "./business-profile.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import { createActivityRecorder } from "../services/activity.service.js";
 import { createHmacSigner } from "../services/audit-signing.service.js";
+import {
+  activityRowCreateTrap,
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "../__tests__/helpers/activity-row-insert.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 /** What `transaction_timestamp()::text` reports inside the fake transaction (WARP-2977 P2b). */
@@ -143,7 +148,12 @@ function makePrisma(
         return { count: 0 };
       },
     },
-    async $queryRawUnsafe<T>(query: string): Promise<T> {
+    async $queryRawUnsafe<T>(query: string, ...params: unknown[]): Promise<T> {
+      if (isActivityRowInsert(query)) {
+        const stored: StoredActivityRow = activityRowFromInsert(nextId++, params);
+        activityRows.push(stored);
+        return [{ id: stored.id }] as unknown as T;
+      }
       if (query.includes("pg_advisory_xact_lock")) {
         // WARP-2977 P2b: the append reads the isolation level in the same round-trip.
         // …and the transaction start time: the append checks the tail read ran in the same transaction.
@@ -158,30 +168,8 @@ function makePrisma(
     async $transaction(fn: (tx: any) => Promise<unknown>, options?: unknown): Promise<unknown> {
       return seam.$transaction(fn, options);
     },
-    activityRow: {
-      create: async ({ data }: { data: Record<string, unknown> }) => {
-        const stored: StoredActivityRow = {
-          id: nextId++,
-          kind: data.kind as string,
-          what: data.what as string,
-          severity: data.severity as string,
-          sourceIcon: data.sourceIcon as string,
-          sub: (data.sub as string | null) ?? null,
-          refs:
-            data.refs && (data.refs as { _tag?: string })._tag === "Prisma.DbNull"
-              ? null
-              : (data.refs as Record<string, unknown> | null) ?? null,
-          signature: data.signature as string,
-          prevSignatureHash: data.prevSignatureHash as string,
-          actorType: (data.actorType as string | null) ?? null,
-          actorId: (data.actorId as string | null) ?? null,
-          schemaVersion: data.schemaVersion as number,
-          at: data.at as Date,
-        };
-        activityRows.push(stored);
-        return stored;
-      },
-    },
+    // The append's handle check wants it; the row goes in through the raw INSERT above (WARP-3011).
+    activityRow: activityRowCreateTrap,
   };
   // WARP-1570: the shared transaction seam,
   // never a hand-rolled stub — it records the options argument, and record()

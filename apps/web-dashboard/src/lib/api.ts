@@ -125,6 +125,7 @@ import type {
   PutDepartmentProfilePayload,
   AccessRole,
   AccessRolePayload,
+  AccessToolDomainsResponse,
   AccessSyncState,
   AccessStartingPoint,
   AccessExceptionInput,
@@ -8028,6 +8029,20 @@ export async function listRoleTemplates(): Promise<RoleTemplatesResponse> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to load role templates: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-2897 — the grantable tool-domain vocabulary, both layers (owner/admin).
+ * The role builder appends one Extensions row per `runtime[]` entry
+ * (toolDomainGroupsWith); a box with nothing attached answers `runtime: []`.
+ */
+export async function listAccessToolDomains(): Promise<AccessToolDomainsResponse> {
+  const res = await authFetch(`${BASE}/api/access/tool-domains`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load tool domains: ${res.status}`);
   }
   return res.json();
 }
