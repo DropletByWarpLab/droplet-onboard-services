@@ -3,7 +3,7 @@
  *
  * WHY THESE CASES RUN HERE AND NOT IN THE MOCKED LANE
  *
- *   the CHECKs    — every hand-written CHECK in 20260924070000_warp_2978_…
+ *   the CHECKs    — every hand-written CHECK in 20260925020000_warp_2978_…
  *                   refuses its bad row, with SQLSTATE 23514 AND the
  *                   constraint's own name (a row refused by the WRONG rule does
  *                   not count). They are invisible to `prisma migrate diff`.
