@@ -10,7 +10,22 @@
  * turns its positional parameters back into the row Postgres would hold —
  * `refs` parsed from the bound text, exactly as the jsonb column returns it.
  * The fake answers the INSERT with `[{ id }]` (it is `RETURNING "id"`).
+ *
+ * The append still requires its transaction handle to carry
+ * `activityRow.create` (WARP-2977 P2b: part of the check that the handle is
+ * Prisma's transaction client itself), so a fake hands it
+ * `activityRowCreateTrap`: present, and failing the test if the recorder
+ * ever writes through it again.
  */
+
+/** The `activityRow` delegate of a fake the real recorder appends through. Never called by a correct append. */
+export const activityRowCreateTrap = {
+  async create(): Promise<never> {
+    throw new Error(
+      "WARP-3011: the activity recorder called activityRow.create — ActivityRow is written with the raw INSERT (INSERT_ACTIVITY_ROW_SQL), never Prisma's Json write",
+    );
+  },
+};
 
 export interface InsertedActivityRow {
   id: bigint;

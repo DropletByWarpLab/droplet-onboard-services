@@ -25,9 +25,18 @@ import {
   type ActivityRowSigner,
 } from "../services/audit-signing.service.js";
 import {
+  activityRowCreateTrap,
   activityRowFromInsert,
   isActivityRowInsert,
 } from "./helpers/activity-row-insert.js";
+import { createTransactionSeam, type TransactionSeam } from "./helpers/prisma-tx-harness.js";
+
+/** What `transaction_timestamp()::text` reports inside the fake transaction (WARP-2977 P2b). */
+const FAKE_TXTS = "2026-09-24 09:00:00.000001+00";
+/** Where Prisma puts its transaction's id on an interactive-transaction client; the chain append requires it and keys its queue on it (WARP-2977 P2b). */
+const PRISMA_TX_ID = Symbol.for("prisma.client.transaction.id");
+/** Like Prisma, every `$transaction` hands its callback a FRESH handle with a unique transaction id. */
+let fakeTxSeq = 0;
 
 interface StoredRow {
   id: bigint;
@@ -58,22 +67,43 @@ interface StoredRow {
 function makePrismaFake() {
   const rows: StoredRow[] = [];
   let nextId = 1n;
+  let seam: TransactionSeam | undefined;
   return {
     rows,
     prisma: {
+      // The append's handle check wants it; the row goes in through the raw INSERT below (WARP-3011).
+      activityRow: activityRowCreateTrap,
       async $queryRawUnsafe<T>(query: string, ...params: unknown[]): Promise<T> {
         if (isActivityRowInsert(query)) {
           const row = activityRowFromInsert(nextId++, params) as StoredRow;
           rows.push(row);
           return [{ id: row.id }] as unknown as T;
         }
-        if (rows.length === 0) return [] as unknown as T;
+        // WARP-2977 P2b: the chain lock reports the isolation level in the
+        // same round-trip; the append refuses anything but READ COMMITTED.
+        if (query.includes("pg_advisory_xact_lock")) {
+          // …and the transaction start time: the append checks the tail read ran in the same transaction.
+          return [{ locked: true, iso: "read committed", txts: FAKE_TXTS }] as unknown as T;
+        }
+        // The tail read: one row even when empty (a scalar subquery), same transaction.
         return [
-          { signature: rows[rows.length - 1]!.signature },
+          { txts: FAKE_TXTS, signature: rows[rows.length - 1]?.signature ?? null },
         ] as unknown as T;
       },
-      async $transaction<T>(fn: (tx: never) => Promise<T>): Promise<T> {
-        return fn(this as never);
+      // WARP-1570: the shared transaction seam,
+      // never a hand-rolled stub — it records the options argument, and record()
+      // opens its transaction with READ_COMMITTED_TX. Like Prisma, every
+      // transaction hands its callback a FRESH handle with a unique transaction
+      // id and no `$transaction` (the chain append requires both, WARP-2977 P2b).
+      async $transaction<T>(fn: (tx: never) => Promise<T>, options?: unknown): Promise<T> {
+        seam ??= createTransactionSeam({
+          client: () => {
+            const tx: Record<string | symbol, unknown> = { ...this, [PRISMA_TX_ID]: `fake-tx-${++fakeTxSeq}` };
+            delete tx.$transaction;
+            return tx;
+          },
+        });
+        return seam.$transaction(fn as (tx: unknown) => Promise<T>, options) as Promise<T>;
       },
     },
   };
