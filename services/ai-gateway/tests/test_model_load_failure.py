@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -287,16 +288,22 @@ async def test_limits_keep_their_default_when_dmr_omits_max_loaded_models(caplog
 # ── /ai/chat and the session route map it to a typed 503 ────────────────
 
 
-@pytest.fixture
-async def chat_globals():
+@asynccontextmanager
+async def _chat_globals():
     """The module globals the chat routes need, owned by THIS test.
 
     The ASGI test transport runs no lifespan, so the globals are None unless a
-    test sets them. A scheduler started here runs its worker on this test's
-    event loop, which closes when the test ends — left installed, the next
-    test to use `main.inference_scheduler` would enqueue into a dead worker and
-    hang until the pytest timeout. So: a fresh scheduler, stopped and the
+    test sets them. The scheduler's worker is a task on the loop that starts
+    it, and that loop closes when the test ends — left installed, the next
+    test to use `main.inference_scheduler` enqueues into a dead worker and
+    hangs until the pytest timeout. So: a fresh scheduler, stopped and the
     previous globals restored on the way out.
+
+    A context manager entered IN the test body, not an async fixture: this
+    module's tests run under anyio, and whether an async fixture runs on the
+    test's loop depends on which of pytest-asyncio / anyio registered first
+    (CI and a local venv differ). A worker on the fixture's loop never runs
+    while the test awaits it.
     """
     import main
     from router import ProviderRouter
@@ -329,65 +336,65 @@ async def _never_loads():
     yield  # pragma: no cover — makes this an async generator
 
 
-async def test_ai_chat_answers_a_typed_503_with_honest_copy(client, chat_globals):
-    main = chat_globals
-    with patch.object(main.provider_router, "chat", AsyncMock(side_effect=_ERR)):
-        resp = await client.post("/ai/chat", json=_chat_body(stream=False))
-    assert resp.status_code == 503
-    body = resp.json()
-    assert body["error"] == "model_load_failed"
-    assert _HONEST in body["detail"]
-    # The scheduler slot is released — the next request is admitted.
-    assert main.inference_scheduler.active_requests == 0
+async def test_ai_chat_answers_a_typed_503_with_honest_copy(client):
+    async with _chat_globals() as main:
+        with patch.object(main.provider_router, "chat", AsyncMock(side_effect=_ERR)):
+            resp = await client.post("/ai/chat", json=_chat_body(stream=False))
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["error"] == "model_load_failed"
+        assert _HONEST in body["detail"]
+        # The scheduler slot is released — the next request is admitted.
+        assert main.inference_scheduler.active_requests == 0
 
 
-async def test_ai_chat_stream_answers_the_typed_503_before_any_frame(client, chat_globals):
+async def test_ai_chat_stream_answers_the_typed_503_before_any_frame(client):
     """The dashboard chat STREAMS. The load failure is raised inside the
     provider's generator, so it must be pulled before the response starts —
     a 200 that is then cut off can't carry the honest copy."""
-    main = chat_globals
-    with patch.object(main.provider_router, "chat", AsyncMock(return_value=_never_loads())):
-        resp = await client.post("/ai/chat", json=_chat_body(stream=True))
-    assert resp.status_code == 503
-    body = resp.json()
-    assert body == {"error": "model_load_failed", "detail": body["detail"]}
-    assert _HONEST in body["detail"]
-    assert main.inference_scheduler.active_requests == 0
+    async with _chat_globals() as main:
+        with patch.object(main.provider_router, "chat", AsyncMock(return_value=_never_loads())):
+            resp = await client.post("/ai/chat", json=_chat_body(stream=True))
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body == {"error": "model_load_failed", "detail": body["detail"]}
+        assert _HONEST in body["detail"]
+        assert main.inference_scheduler.active_requests == 0
 
 
-async def test_ai_chat_stream_still_streams_every_frame_and_frees_the_slot(client, chat_globals):
-    main = chat_globals
+async def test_ai_chat_stream_still_streams_every_frame_and_frees_the_slot(client):
+    async with _chat_globals() as main:
 
-    async def frames():
-        yield 'data: {"choices":[{"delta":{"content":"he"}}]}\n\n'
-        yield 'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n'
-        yield "data: [DONE]\n\n"
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"content":"he"}}]}\n\n'
+            yield 'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n'
+            yield "data: [DONE]\n\n"
 
-    with patch.object(main.provider_router, "chat", AsyncMock(return_value=frames())):
-        resp = await client.post("/ai/chat", json=_chat_body(stream=True))
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/event-stream")
-    assert resp.text.index('"he"') < resp.text.index('"llo"') < resp.text.index("[DONE]")
-    assert main.inference_scheduler.active_requests == 0
+        with patch.object(main.provider_router, "chat", AsyncMock(return_value=frames())):
+            resp = await client.post("/ai/chat", json=_chat_body(stream=True))
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.text.index('"he"') < resp.text.index('"llo"') < resp.text.index("[DONE]")
+        assert main.inference_scheduler.active_requests == 0
 
 
-async def test_ai_chat_stream_other_pre_frame_errors_are_the_generic_502(client, chat_globals):
+async def test_ai_chat_stream_other_pre_frame_errors_are_the_generic_502(client):
     """Anything else that fails before the first frame gets the blocking
     path's GW-08 answer — a generic 502 with a correlation id, never the
     upstream text — instead of a 200 cut off mid-body."""
-    main = chat_globals
-    secret = "http://test-dmr:12434 sk-LEAKED upstream body"
+    async with _chat_globals() as main:
+        secret = "http://test-dmr:12434 sk-LEAKED upstream body"
 
-    async def boom():
-        raise RuntimeError(secret)
-        yield  # pragma: no cover
+        async def boom():
+            raise RuntimeError(secret)
+            yield  # pragma: no cover
 
-    with patch.object(main.provider_router, "chat", AsyncMock(return_value=boom())):
-        resp = await client.post("/ai/chat", json=_chat_body(stream=True))
-    assert resp.status_code == 502
-    assert "sk-LEAKED" not in resp.text
-    assert "Upstream provider error" in resp.json()["detail"]
-    assert main.inference_scheduler.active_requests == 0
+        with patch.object(main.provider_router, "chat", AsyncMock(return_value=boom())):
+            resp = await client.post("/ai/chat", json=_chat_body(stream=True))
+        assert resp.status_code == 502
+        assert "sk-LEAKED" not in resp.text
+        assert "Upstream provider error" in resp.json()["detail"]
+        assert main.inference_scheduler.active_requests == 0
 
 
 async def test_session_chat_stream_answers_the_typed_503(client_with_sessions):
