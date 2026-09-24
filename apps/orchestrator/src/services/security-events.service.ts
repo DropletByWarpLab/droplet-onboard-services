@@ -138,13 +138,32 @@ export interface StatusTracker {
  *
  * Readings for one camera are applied in arrival order (a per-key promise
  * chain): `offline` then `online` a millisecond apart must not race.
+ *
+ * WARP-2977 P2b-2 (review F1): `pending` IS the status half of camera_ingest's
+ * write health — the header reads down exactly while a row is queued here
+ * (`statusUnsaved`), and ok again once it lands or is dropped because the
+ * camera went back to what the store holds. A duplicate (the row already
+ * landed) counts as saved.
  */
+let statusTrackerSeq = 0;
+
 export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">): StatusTracker {
   const last = new Map<string | null, { health: SourceHealth; at: Date }>();
   const told = new Map<string | null, SourceHealth>();
   const persisted = new Map<string | null, SourceHealth | null>();
   const pending = new Map<string | null, SecurityEventDraft>();
   const chains = new Map<string | null, Promise<unknown>>();
+  // This tracker's keys in the shared health set (a second tracker — tests — never clears ours).
+  const trackerId = ++statusTrackerSeq;
+  const unsavedKey = (camera: string | null) => `${trackerId}\u0000${camera ?? ""}`;
+  const queue = (camera: string | null, draft: SecurityEventDraft) => {
+    pending.set(camera, draft);
+    ingestHealth.statusUnsaved.add(unsavedKey(camera));
+  };
+  const settle = (camera: string | null) => {
+    pending.delete(camera);
+    ingestHealth.statusUnsaved.delete(unsavedKey(camera));
+  };
 
   async function previousFromStore(camera: string | null): Promise<SourceHealth | null> {
     const row = await prisma.securityEvent.findFirst({
@@ -180,18 +199,20 @@ export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">)
     // `online` produce no row but still move the store's view forward.
     const fresh = statusTransitionToDraft(reading, inStore, now);
     if (!fresh) {
-      pending.delete(key);
+      settle(key);
       persisted.set(key, reading.health);
       return { broadcast, stored: null };
     }
     const retry = pending.get(key);
     const draft = retry && retry.kind === fresh.kind ? retry : fresh;
-    const stored = await recordSecurityEvent(prisma, draft);
+    // A duplicate means the row is already in the store (a retry of a write
+    // that did land): saved, never queued again.
+    const stored = (await writeSecurityEvent(prisma, draft)) !== "failed";
     if (stored) {
-      pending.delete(key);
+      settle(key);
       persisted.set(key, reading.health);
     } else {
-      pending.set(key, draft);
+      queue(key, draft);
     }
     return { broadcast, stored };
   }
@@ -344,6 +365,15 @@ interface IngestHealthState {
    */
   lastRecordedAt: Map<SecurityEventSource, Date>;
   lastWriteError: Map<SecurityEventSource, { at: Date; message: string }>;
+  /**
+   * WARP-2977 P2b-2 (review F1) — camera status rows the status tracker
+   * could not save and still holds for a retry (one entry per tracker and
+   * camera). camera_ingest's status half reads THIS, not "last error newer
+   * than last save": status rows are rare, and a failed one that no longer
+   * needs writing (the camera went back to its stored state) must not keep
+   * the header down until the next status row lands, weeks later.
+   */
+  statusUnsaved: Set<string>;
   jobsRegistered: boolean;
 }
 
@@ -354,11 +384,9 @@ const ingestHealth: IngestHealthState = {
   lastFrigateMessageAt: null,
   lastRecordedAt: new Map(),
   lastWriteError: new Map(),
+  statusUnsaved: new Set(),
   jobsRegistered: false,
 };
-
-/** The sources whose rows the `camera_ingest` header row speaks for: detections and camera status. */
-const CAMERA_WRITE_SOURCES: readonly SecurityEventSource[] = ["frigate", "frigate_status"];
 
 /** The latest write of `source` failed and nothing of it has been saved since. */
 function writeFailing(ingest: Readonly<IngestHealthState>, source: SecurityEventSource): boolean {
@@ -480,9 +508,11 @@ export function buildSecurityHealth(input: {
   } else {
     const heard = ingest.lastFrigateMessageAt ?? ingest.frigateSubscribedAt;
     const quiet = !heard || now.getTime() - heard.getTime() > QUIET_AFTER_MS;
-    // A camera source's most recent write failed and nothing of it has been
-    // saved since. Per source: a status save does not vouch for detections.
-    const failing = CAMERA_WRITE_SOURCES.some((source) => writeFailing(ingest, source));
+    // Detections: the most recent detection write failed and none has been
+    // saved since (they are frequent, so the next one settles it). Camera
+    // status: the status tracker still holds a row it could not save. Each
+    // half on its own: a status save does not vouch for detections.
+    const failing = writeFailing(ingest, "frigate") || ingest.statusUnsaved.size > 0;
     rows.push({
       id: "camera_ingest",
       state: failing ? "down" : quiet ? "quiet" : "ok",
@@ -552,6 +582,7 @@ export function _resetSecurityIngestHealthForTests(): void {
     lastFrigateMessageAt: null,
     lastRecordedAt: new Map(),
     lastWriteError: new Map(),
+    statusUnsaved: new Set(),
     jobsRegistered: false,
   } satisfies IngestHealthState);
 }

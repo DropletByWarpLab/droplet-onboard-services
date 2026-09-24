@@ -149,6 +149,56 @@ describe("write health is per SOURCE (WARP-2977 P2b-2) — one source's save nev
     expect(securityIngestHealthState().lastWriteError.get("matter_lock")?.message).toBe("disk full");
     expect(cameraIngest().state).toBe("ok");
   });
+
+  // Review F1: camera STATUS write health is "the status tracker still holds a
+  // row it could not save", not "the last status error is newer than the last
+  // status save" — status rows are rare, so the latter could stick for weeks.
+  describe("camera status rows: down exactly while the tracker holds an unsaved row", () => {
+    function statusStore(previousKind: string) {
+      const createMany = vi.fn().mockResolvedValue({ count: 1 });
+      const findFirst = vi.fn().mockResolvedValue({ kind: previousKind });
+      return { t: createStatusTracker({ securityEvent: { createMany, findFirst } } as never), createMany };
+    }
+
+    it("a failed status write, then the camera back in its stored state: nothing is left to save → ok", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockRejectedValueOnce(new Error("disk full"));
+      await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      expect(cameraIngest()).toMatchObject({ state: "down", detail: "Camera events are arriving but could not be saved" });
+      // Back to the state the store already holds: the queued offline row is dropped, nothing is owed.
+      await t.observe("frigate/cam1/status/detect", "online", new Date(NOW.getTime() + 60_000));
+      expect(cameraIngest().state).toBe("ok");
+    });
+
+    it("a failed status write, then its retry lands → ok", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockRejectedValueOnce(new Error("disk full"));
+      await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      expect(cameraIngest().state).toBe("down");
+      await t.observe("frigate/cam1/status/detect", "offline", new Date(NOW.getTime() + 60_000));
+      expect(cameraIngest().state).toBe("ok");
+    });
+
+    it("a retry that already landed (a duplicate) counts as saved — stored, nothing queued, ok", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockResolvedValueOnce({ count: 0 });
+      const r = await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      expect(r?.stored).toBe(true);
+      expect(cameraIngest().state).toBe("ok");
+      // …and the next reading does not re-send it.
+      await t.observe("frigate/cam1/status/detect", "offline", new Date(NOW.getTime() + 60_000));
+      expect(createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("one camera's unsaved row is not cleared by another camera's save", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockRejectedValueOnce(new Error("disk full"));
+      await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      await t.observe("frigate/cam2/status/detect", "offline", NOW);
+      expect(createMany).toHaveBeenCalledTimes(2);
+      expect(cameraIngest().state).toBe("down");
+    });
+  });
 });
 
 describe("createStatusTracker — transitions only, previous read back from the store", () => {
@@ -436,12 +486,17 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     expect(row(rows, "camera_ingest").state).toBe("ok");
   });
 
-  it("WARP-2977 P2b-2: a failed camera STATUS write is a camera write too → down", () => {
+  it("WARP-2977 P2b-2 (review F1): a camera STATUS row the tracker could not save is a camera write too → down", () => {
+    const rows = buildSecurityHealth({ ...base, ingest: ingest({ statusUnsaved: new Set(["1\u0000cam1"]) }) });
+    expect(row(rows, "camera_ingest").state).toBe("down");
+  });
+
+  it("WARP-2977 P2b-2 (review F1): an old status write error with nothing left unsaved is NOT down", () => {
     const rows = buildSecurityHealth({
       ...base,
       ingest: ingest({ lastWriteError: new Map([["frigate_status", { at: NOW, message: "x" }]]) }),
     });
-    expect(row(rows, "camera_ingest").state).toBe("down");
+    expect(row(rows, "camera_ingest").state).toBe("ok");
   });
 
   it("WARP-2977 P2b-2: a failed write of a source that is not a camera's (a lock, a mode change) leaves camera_ingest alone", () => {
