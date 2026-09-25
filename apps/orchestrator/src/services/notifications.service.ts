@@ -32,7 +32,7 @@
 
 import type { $Enums, Prisma, PrismaClient } from "@prisma/client";
 import { publish } from "./mqtt.service.js";
-import { dispatchToUser, ensurePushDispatch } from "./push-dispatch.service.js";
+import { dispatchToUser, ensurePushDispatch, type NotificationPriority } from "./push-dispatch.service.js";
 import { assertRecipientIsUsername } from "./notification-recipient.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -80,7 +80,14 @@ export interface DispatchInput {
    *  one tag replace each other in the tray. `^[A-Za-z0-9._:/-]{1,128}$`
    *  (`/` since WARP-2804, for per-incident tags like `incident/42`). */
   tag?: string;
+  /** WARP-2978 (ADR-059 P3 §6.7) — `alert`: web push kept for an hour with
+   *  urgency high, and the toast / push payloads carry `priority` so the
+   *  clients keep it on screen until it is handled. Transport only: it is
+   *  not stored on the row. */
+  priority?: NotificationPriority;
 }
+
+export type { NotificationPriority };
 
 // ── WARP-2909: the deep-link validators ─────────────────────────────────────
 
@@ -211,6 +218,7 @@ export function publishNotificationToast(input: DispatchInput & { id: string }):
     at: new Date().toISOString(),
     ...(link.url !== undefined ? { url: link.url } : {}),
     ...(link.data !== undefined ? { data: link.data } : {}),
+    ...(input.priority === "alert" ? { priority: input.priority } : {}),
   });
   if (toastOk) channels.push("toast");
   else errors.push("toast: mqtt_unavailable");
@@ -275,8 +283,9 @@ export interface DeliverOptions {
   /** Web-push collapse key, `^[A-Za-z0-9._:/-]{1,128}$`. A bad one is dropped
    *  (only the tag — review F5), recorded as `delivery: invalid_tag`, never thrown on. */
   tag?: string;
-  /** WARP-2978 (ADR-059 P3 §B.6.7) fills this. Accepted and ignored here. */
-  priority?: string;
+  /** WARP-2978 (ADR-059 P3 §6.7, D37) — `alert`: the push is dialled with TTL
+   *  3600 s and urgency high, and both payloads carry `priority`. */
+  priority?: NotificationPriority;
 }
 
 /** Everything a transport carries, for one recorded row. */
@@ -376,6 +385,7 @@ async function deliverRow(
     body: row.body,
     url: link.url,
     data: link.data,
+    priority: opts.priority,
   });
 
   // Channel 2: web push. The toast only exists while a tab is open, so without
@@ -410,6 +420,7 @@ async function deliverRow(
       data: link.data,
       tag: link.tag,
       notificationId: row.id,
+      ...(opts.priority === "alert" ? { priority: opts.priority } : {}),
     });
     if (sent > 0) channels.push("push");
     pushOutcome = refused
@@ -504,7 +515,7 @@ export async function sendNotification(
         url: input.url,
         data: input.data,
       },
-      { tag: input.tag },
+      { tag: input.tag, priority: input.priority },
     );
   } catch (err) {
     // deliverRow is total; this is the belt to its braces.

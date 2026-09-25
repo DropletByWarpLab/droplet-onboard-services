@@ -7,9 +7,24 @@
    nothing below names a colour, radius or easing — it reads the ramp, and
    the dark theme arrives through `.dark .droplet-workspace` for free.
 
-   Every class carries the `ws-` prefix; the three overrides at the bottom
-   that reach into pages are scoped under `.droplet-workspace` and exist
-   only because those pages size themselves to the viewport.
+   Every class carries the `ws-` prefix, and so do the Workshop's own
+   classes (components/workshop: `ws-status`, `ws-chip`, …). This file loads
+   on every authenticated route in BOTH nav layouts (AuthGate imports
+   WorkspaceShell), so a bare `.ws-status` here restyled the Workshop
+   composer's notice into a clipped 32px pill (WARP-3063), and a bare
+   `.ws-chip` reached its status chips (WARP-3064). Every `.ws-*` rule is
+   therefore anchored to the shell region that owns it:
+     .droplet-workspace > .ws-chrome             header · spaces · chips
+     .droplet-workspace > .ws-main > .ws-views   view pills
+     .droplet-workspace > .ws-strip              status strip
+     .droplet-workspace > .ws-bottom             phone tab bar
+   and never to `.droplet-workspace` alone: in this layout the page itself
+   renders inside `.ws-main`, so a descendant rule would still reach it.
+   __tests__/components/WorkspaceShell.test.tsx holds that line.
+
+   The three overrides at the bottom that reach into pages are scoped under
+   `.droplet-workspace` and exist only because those pages size themselves
+   to the viewport.
 
    Chrome geometry (kept in the two custom properties so the viewport-locked
    pages can subtract it):
@@ -40,13 +55,13 @@ body:has(.droplet-workspace) {
 }
 
 /* ── Sticky chrome: header + spaces + chips ─────────────────────────── */
-.ws-chrome {
+.droplet-workspace > .ws-chrome {
   position: sticky;
   top: 0;
   z-index: 40;
 }
 
-.ws-head {
+.droplet-workspace > .ws-chrome .ws-head {
   height: 56px;
   display: flex;
   align-items: center;
@@ -57,7 +72,7 @@ body:has(.droplet-workspace) {
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
 }
-.ws-mark {
+.droplet-workspace > .ws-chrome .ws-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -67,16 +82,16 @@ body:has(.droplet-workspace) {
   color: var(--brand);
   flex: none;
 }
-.ws-mark:focus-visible,
-.ws-icon-btn:focus-visible,
-.ws-space:focus-visible,
-.ws-chip:focus-visible,
-.ws-view:focus-visible,
-.ws-bottom-item:focus-visible {
+.droplet-workspace > .ws-chrome .ws-mark:focus-visible,
+.droplet-workspace > .ws-chrome .ws-icon-btn:focus-visible,
+.droplet-workspace > .ws-chrome .ws-space:focus-visible,
+.droplet-workspace > .ws-chrome .ws-chip:focus-visible,
+.droplet-workspace > .ws-main > .ws-views .ws-view:focus-visible,
+.droplet-workspace > .ws-bottom .ws-bottom-item:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
-.ws-greet {
+.droplet-workspace > .ws-chrome .ws-greet {
   display: flex;
   flex-direction: column;
   line-height: 1.2;
@@ -84,25 +99,29 @@ body:has(.droplet-workspace) {
   white-space: nowrap;
   min-width: 0;
 }
-.ws-greet .g {
+.droplet-workspace > .ws-chrome .ws-greet .g {
   font-size: 13px;
   color: var(--text-muted);
 }
-.ws-greet .g b {
+.droplet-workspace > .ws-chrome .ws-greet .g b {
   color: var(--text);
   font-weight: 600;
 }
-.ws-greet .d {
+.droplet-workspace > .ws-chrome .ws-greet .d {
   font-size: 11px;
   color: var(--text-muted);
   font-family: var(--font-mono);
   margin-top: 1px;
 }
-.ws-spring {
+.droplet-workspace > .ws-chrome .ws-spring,
+.droplet-workspace > .ws-strip .ws-spring {
   flex: 1;
   min-width: 8px;
 }
-.ws-status {
+/* Scoped to the header: the Workshop composer's notice line is also
+   `.ws-status` (WARP-2974), and a bare selector here turned it into this pill,
+   clipped to 32px on a phone (WARP-3063). */
+.droplet-workspace > .ws-chrome .ws-head .ws-status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -116,8 +135,8 @@ body:has(.droplet-workspace) {
   flex: none;
   white-space: nowrap;
 }
-.ws-status .dot,
-.ws-strip-health .dot {
+.droplet-workspace > .ws-chrome .ws-head .ws-status .dot,
+.droplet-workspace > .ws-strip .ws-strip-health .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -125,26 +144,26 @@ body:has(.droplet-workspace) {
   flex: none;
 }
 /* Same three tones the shell chip uses (droplet-shell.css `.pt-chip.is-*`). */
-.ws-status.is-degraded .dot,
-.ws-strip-health.is-degraded .dot {
+.droplet-workspace > .ws-chrome .ws-head .ws-status.is-degraded .dot,
+.droplet-workspace > .ws-strip .ws-strip-health.is-degraded .dot {
   background: #d9a35c;
 }
-.ws-status.is-down .dot,
-.ws-strip-health.is-down .dot {
+.droplet-workspace > .ws-chrome .ws-head .ws-status.is-down .dot,
+.droplet-workspace > .ws-strip .ws-strip-health.is-down .dot {
   background: #ef4444;
 }
-.ws-status.is-unknown .dot,
-.ws-strip-health.is-unknown .dot {
+.droplet-workspace > .ws-chrome .ws-head .ws-status.is-unknown .dot,
+.droplet-workspace > .ws-strip .ws-strip-health.is-unknown .dot {
   background: var(--text-muted);
 }
-.ws-user {
+.droplet-workspace > .ws-chrome .ws-user {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
   flex: none;
 }
-.ws-avatar {
+.droplet-workspace > .ws-chrome .ws-avatar {
   width: 30px;
   height: 30px;
   border-radius: 50%;
@@ -157,7 +176,7 @@ body:has(.droplet-workspace) {
   justify-content: center;
   flex: none;
 }
-.ws-user-name {
+.droplet-workspace > .ws-chrome .ws-user-name {
   font-size: 13px;
   font-weight: 500;
   color: var(--text);
@@ -166,7 +185,7 @@ body:has(.droplet-workspace) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ws-icon-btn {
+.droplet-workspace > .ws-chrome .ws-icon-btn {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-input);
@@ -179,16 +198,16 @@ body:has(.droplet-workspace) {
   flex: none;
   transition: background 180ms var(--ease), color 180ms var(--ease);
 }
-.ws-icon-btn:hover {
+.droplet-workspace > .ws-chrome .ws-icon-btn:hover {
   background: var(--surface-2);
   color: var(--text);
 }
-.ws-icon-btn:active {
+.droplet-workspace > .ws-chrome .ws-icon-btn:active {
   transform: scale(0.96);
 }
 
 /* ── Level 1: space tabs ─────────────────────────────────────────────── */
-.ws-spaces {
+.droplet-workspace > .ws-chrome .ws-spaces {
   height: 46px;
   display: flex;
   align-items: flex-end;
@@ -199,10 +218,10 @@ body:has(.droplet-workspace) {
   overflow-x: auto;
   scrollbar-width: none;
 }
-.ws-spaces::-webkit-scrollbar {
+.droplet-workspace > .ws-chrome .ws-spaces::-webkit-scrollbar {
   display: none;
 }
-.ws-space {
+.droplet-workspace > .ws-chrome .ws-space {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -218,17 +237,18 @@ body:has(.droplet-workspace) {
   cursor: pointer;
   transition: color 180ms var(--ease);
 }
-.ws-space:hover {
+.droplet-workspace > .ws-chrome .ws-space:hover {
   color: var(--text);
 }
-.ws-space.is-active {
+.droplet-workspace > .ws-chrome .ws-space.is-active {
   font-weight: 600;
   color: var(--text);
   border-bottom-color: var(--brand);
 }
 /* Attention dot — derived from the chips' badges (teamChatUnread today);
    omitted entirely when nothing needs attention. */
-.ws-attn {
+.droplet-workspace > .ws-chrome .ws-attn,
+.droplet-workspace > .ws-bottom .ws-attn {
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -237,7 +257,7 @@ body:has(.droplet-workspace) {
 }
 
 /* ── Level 2: destination chips ──────────────────────────────────────── */
-.ws-chips {
+.droplet-workspace > .ws-chrome .ws-chips {
   height: 52px;
   display: flex;
   align-items: center;
@@ -248,10 +268,10 @@ body:has(.droplet-workspace) {
   overflow-x: auto;
   scrollbar-width: none;
 }
-.ws-chips::-webkit-scrollbar {
+.droplet-workspace > .ws-chrome .ws-chips::-webkit-scrollbar {
   display: none;
 }
-.ws-chip {
+.droplet-workspace > .ws-chrome .ws-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -264,25 +284,25 @@ body:has(.droplet-workspace) {
   text-decoration: none;
   transition: background 180ms var(--ease), color 180ms var(--ease);
 }
-.ws-chip:hover {
+.droplet-workspace > .ws-chrome .ws-chip:hover {
   background: var(--hover);
 }
-.ws-chip.is-active {
+.droplet-workspace > .ws-chrome .ws-chip.is-active {
   background: var(--brand);
   color: var(--on-brand);
 }
 /* The Sidebar's NavBadge rides along; on the brand fill its accent tint would
    vanish, so the active chip re-inks it. `ml-auto` is a no-op in a chip. */
-.ws-chip.is-active [aria-hidden="true"] {
+.droplet-workspace > .ws-chrome .ws-chip.is-active [aria-hidden="true"] {
   background: rgba(255, 255, 255, 0.22);
   color: inherit;
 }
 
 /* ── Level 3: view pills — top of the page column ───────────────────── */
-.ws-views {
+.droplet-workspace > .ws-main > .ws-views {
   padding: 16px 36px 0;
 }
-.ws-views-inner {
+.droplet-workspace > .ws-main > .ws-views .ws-views-inner {
   max-width: 1160px;
   margin: 0 auto;
   display: flex;
@@ -290,10 +310,10 @@ body:has(.droplet-workspace) {
   overflow-x: auto;
   scrollbar-width: none;
 }
-.ws-views-inner::-webkit-scrollbar {
+.droplet-workspace > .ws-main > .ws-views .ws-views-inner::-webkit-scrollbar {
   display: none;
 }
-.ws-view {
+.droplet-workspace > .ws-main > .ws-views .ws-view {
   font-size: 12.5px;
   font-weight: 500;
   padding: 7px 13px;
@@ -306,28 +326,28 @@ body:has(.droplet-workspace) {
   transition: background 180ms var(--ease), color 180ms var(--ease),
     border-color 180ms var(--ease);
 }
-.ws-view:hover {
+.droplet-workspace > .ws-main > .ws-views .ws-view:hover {
   background: var(--surface-2);
 }
-.ws-view.is-active {
+.droplet-workspace > .ws-main > .ws-views .ws-view.is-active {
   background: var(--brand-subtle);
   border-color: color-mix(in srgb, var(--brand) 35%, transparent);
   color: var(--brand-deep);
 }
 
 /* ── Page column ─────────────────────────────────────────────────────── */
-.ws-main {
+.droplet-workspace > .ws-main {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
 }
-.ws-main:focus {
+.droplet-workspace > .ws-main:focus {
   outline: none;
 }
 
 /* ── Status strip (desktop) ──────────────────────────────────────────── */
-.ws-strip {
+.droplet-workspace > .ws-strip {
   height: 32px;
   display: flex;
   align-items: center;
@@ -340,22 +360,22 @@ body:has(.droplet-workspace) {
   white-space: nowrap;
   overflow: hidden;
 }
-.ws-strip-health {
+.droplet-workspace > .ws-strip .ws-strip-health {
   display: inline-flex;
   align-items: center;
   gap: 7px;
 }
-.ws-strip-meta,
-.ws-strip-keys {
+.droplet-workspace > .ws-strip .ws-strip-meta,
+.droplet-workspace > .ws-strip .ws-strip-keys {
   font-size: 11px;
   font-family: var(--font-mono);
 }
-.ws-strip-keys {
+.droplet-workspace > .ws-strip .ws-strip-keys {
   color: var(--text-faint);
 }
 
 /* ── Phone tab bar ───────────────────────────────────────────────────── */
-.ws-bottom {
+.droplet-workspace > .ws-bottom {
   display: none;
 }
 
@@ -364,15 +384,15 @@ body:has(.droplet-workspace) {
     --ws-top: 108px;
     --ws-bottom: calc(56px + env(safe-area-inset-bottom));
   }
-  .ws-spaces,
-  .ws-strip,
-  .ws-user-name {
+  .droplet-workspace > .ws-chrome .ws-spaces,
+  .droplet-workspace > .ws-strip,
+  .droplet-workspace > .ws-chrome .ws-user-name {
     display: none;
   }
-  .ws-status .lbl {
+  .droplet-workspace > .ws-chrome .ws-head .ws-status .lbl {
     display: none;
   }
-  .ws-status {
+  .droplet-workspace > .ws-chrome .ws-head .ws-status {
     width: 32px;
     padding: 0;
     justify-content: center;
@@ -381,31 +401,31 @@ body:has(.droplet-workspace) {
      greeting is the one flexible thing: it takes the width the fixed-size
      controls leave and ellipsizes, so the row can never push the document
      wider than the phone (measured 472px on a 375px viewport before this). */
-  .ws-head {
+  .droplet-workspace > .ws-chrome .ws-head {
     gap: 10px;
     padding: 0 16px;
   }
-  .ws-greet {
+  .droplet-workspace > .ws-chrome .ws-greet {
     flex: 1 1 auto;
   }
-  .ws-greet .g,
-  .ws-greet .d {
+  .droplet-workspace > .ws-chrome .ws-greet .g,
+  .droplet-workspace > .ws-chrome .ws-greet .d {
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .ws-head .ws-spring {
+  .droplet-workspace > .ws-chrome .ws-head .ws-spring {
     display: none;
   }
-  .ws-chips {
+  .droplet-workspace > .ws-chrome .ws-chips {
     padding: 0 16px;
   }
-  .ws-views {
+  .droplet-workspace > .ws-main > .ws-views {
     padding: 12px 16px 0;
   }
-  .ws-main {
+  .droplet-workspace > .ws-main {
     padding-bottom: var(--ws-bottom);
   }
-  .ws-bottom {
+  .droplet-workspace > .ws-bottom {
     position: fixed;
     bottom: 0;
     left: 0;
@@ -421,7 +441,7 @@ body:has(.droplet-workspace) {
     backdrop-filter: blur(20px) saturate(150%);
     -webkit-backdrop-filter: blur(20px) saturate(150%);
   }
-  .ws-bottom-item {
+  .droplet-workspace > .ws-bottom .ws-bottom-item {
     position: relative;
     flex: 1;
     min-width: 0;
@@ -438,16 +458,16 @@ body:has(.droplet-workspace) {
     cursor: pointer;
     transition: color 180ms var(--ease);
   }
-  .ws-bottom-item span:not(.ws-attn) {
+  .droplet-workspace > .ws-bottom .ws-bottom-item span:not(.ws-attn) {
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .ws-bottom-item.is-active {
+  .droplet-workspace > .ws-bottom .ws-bottom-item.is-active {
     color: var(--brand);
   }
-  .ws-bottom-item .ws-attn {
+  .droplet-workspace > .ws-bottom .ws-bottom-item .ws-attn {
     position: absolute;
     top: 8px;
     right: calc(50% - 16px);
@@ -455,11 +475,11 @@ body:has(.droplet-workspace) {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ws-space,
-  .ws-chip,
-  .ws-view,
-  .ws-icon-btn,
-  .ws-bottom-item {
+  .droplet-workspace > .ws-chrome .ws-space,
+  .droplet-workspace > .ws-chrome .ws-chip,
+  .droplet-workspace > .ws-main > .ws-views .ws-view,
+  .droplet-workspace > .ws-chrome .ws-icon-btn,
+  .droplet-workspace > .ws-bottom .ws-bottom-item {
     transition: none;
   }
 }

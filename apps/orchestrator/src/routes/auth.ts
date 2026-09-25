@@ -87,6 +87,7 @@ import {
   listUserSessions,
   idleLimitSecondsForRole,
   absoluteLimitSecondsForRole,
+  readSessionDeadline,
 } from "../services/session.service.js";
 import {
   storeNcToken,
@@ -2358,12 +2359,23 @@ export function createProtectedAuthRouter(
         }
       }
 
+      // WARP-2981 (ADR-059 §6.2) — the latest this sign-in can last (the
+      // absolute cap; idle expiry, the concurrent-session cap and revocation
+      // can end it sooner, and the idle deadline moves with every request, so
+      // it is not offered).
+      // null = cannot tell: a sid-less grace-path token, a service principal
+      // (no sign-in to end), or a record that is missing or unreadable. A
+      // plain read — it never slides the idle clock and never fails /auth/me.
+      const deadline =
+        req.user.role !== "service" && req.user.sid ? await readSessionDeadline(req.user.sid) : null;
+
       res.json({
         id: req.user.id,
         username: req.user.username,
         displayName: req.user.displayName,
         role: req.user.role,
         mustChangePassword,
+        session: deadline ? { endsAt: deadline.endsAt.toISOString() } : null,
       });
     } catch (err) {
       next(err);

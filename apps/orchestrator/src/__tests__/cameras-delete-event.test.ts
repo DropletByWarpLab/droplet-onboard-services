@@ -73,6 +73,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
 }));
 
 import { createCamerasRouter } from "../routes/cameras.js";
+import { userDirectory } from "./helpers/user-directory.js";
 import { deleteEvent } from "../services/frigate.client.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -150,7 +151,7 @@ describe("DELETE /api/cameras/events/:eventId", () => {
       // mcp-server stamps X-Nextcloud-User on every orchestrator call); an
       // owner acting through the assistant keeps owner scope.
       const prisma = {
-        user: { findUnique: vi.fn().mockResolvedValue({ id: "u-owner", role: "owner" }) },
+        user: userDirectory([{ id: "u-owner", username: "romain", nextcloudUsername: "romain", role: "owner" }]),
       };
       const res = await request(buildApp(mcpPrincipal, prisma))
         .delete("/api/cameras/events/ev-2")

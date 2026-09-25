@@ -23,6 +23,7 @@ import { WizardReplay } from "@/components/help/WizardReplay";
 import { searchHelp } from "@/lib/help-index";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { LifeBuoy } from "lucide-react";
+import { PENDING_PROMPT_KEY } from "@/lib/types";
 
 /**
  * /help — single-page customer-facing manual for Droplet.
@@ -56,7 +57,7 @@ export default function HelpPage() {
   // search.
   const askDropletAI = () => {
     try {
-      window.sessionStorage.setItem("droplet.pendingPrompt", trimmed);
+      window.sessionStorage.setItem(PENDING_PROMPT_KEY, trimmed);
     } catch {
       /* private mode — /chat still opens, just without the prefilled prompt */
     }

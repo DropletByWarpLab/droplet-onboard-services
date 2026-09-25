@@ -87,13 +87,28 @@ function kindFallbackTitle(kind?: IncomingNotification["kind"]): string {
 }
 
 export function NotificationToaster() {
-  const { toast } = useToast();
+  const { toast, dismissAll } = useToast();
   const { user } = useAuth();
   const router = useRouter();
   const toastRef = useRef(toast);
   toastRef.current = toast;
   const routerRef = useRef(router);
   routerRef.current = router;
+
+  // WARP-2992 — a toast belongs to the person it was shown to: a notification's
+  // body, a file name in an upload error. Error toasts stay until dismissed
+  // (WCAG 2.2.1) and the stack lives in the layout, above the session, so one
+  // raised just before sign-out was still on screen for the next person to
+  // sign in on this tab. This is the one layout-level component that sees both
+  // the session and the stack, so it clears the stack when a signed-in
+  // identity ENDS — not when one begins, so a toast raised on /login survives
+  // the sign-in it was about.
+  const userId = user?.id ?? null;
+  const shownTo = useRef(userId);
+  useEffect(() => {
+    if (shownTo.current !== null && shownTo.current !== userId) dismissAll();
+    shownTo.current = userId;
+  }, [userId, dismissAll]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

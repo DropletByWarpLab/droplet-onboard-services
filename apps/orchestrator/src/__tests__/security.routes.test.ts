@@ -55,6 +55,7 @@ import { createSecurityRouter } from "../routes/security.js";
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 import { MODULE_BY_ID } from "../modules/module-registry.js";
 import { _resetSecurityIngestHealthForTests, registerSecurityJobs } from "../services/security-events.service.js";
+import { _resetIncidentHealthForTests } from "../services/security-incidents.service.js";
 
 type Role = "owner" | "admin" | "family" | "guest";
 
@@ -62,6 +63,7 @@ const findMany = vi.fn();
 const grants = vi.fn();
 const stateRow = vi.fn();
 const zoneLinks = vi.fn();
+const triage = vi.fn();
 
 function app(role: Role | null = "owner") {
   const prisma = {
@@ -69,6 +71,7 @@ function app(role: Role | null = "owner") {
     cameraAccessGrant: { findMany: grants },
     securityIngestState: { findUnique: stateRow },
     securityZoneLink: { findMany: zoneLinks },
+    securityEventTriage: { findMany: triage },
   };
   const server = express();
   server.use((req: Request, _res: Response, next: NextFunction) => {
@@ -111,6 +114,8 @@ beforeEach(() => {
   grants.mockReset().mockResolvedValue([{ camera: { name: "front" } }]);
   stateRow.mockReset().mockResolvedValue(null);
   zoneLinks.mockReset().mockResolvedValue([]);
+  triage.mockReset().mockResolvedValue([]);
+  _resetIncidentHealthForTests();
   h.siteModeHealth.mockReset().mockImplementation(async () => h.siteMode);
   h.patternsHealth.mockReset().mockImplementation(async () => h.patterns);
   h.snapshot.clear();
@@ -188,6 +193,21 @@ describe("GET /api/security/events — query and paging", () => {
     expect(res.body.events[0]).toMatchObject({ frigateEventId: "1711.5-abc", camera: "front", kind: "detection" });
   });
 
+  it("WARP-2978: every row carries `incident` — null for an event no incident holds", async () => {
+    findMany.mockResolvedValue([dbRow(1), dbRow(2)]);
+    const res = await request(app()).get("/api/security/events");
+    expect(res.body.events.map((e: { incident: unknown }) => e.incident)).toEqual([null, null]);
+  });
+
+  it("WARP-2978: a grouped event carries its incident's id — one IN query on the triage ledger for the page", async () => {
+    findMany.mockResolvedValue([dbRow(1), dbRow(2)]);
+    triage.mockResolvedValue([{ eventId: 1n, incidentId: "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4" }]);
+    const res = await request(app("family")).get("/api/security/events");
+    expect(res.body.events.map((e: { incident: unknown }) => e.incident)).toEqual([{ id: "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4" }, null]);
+    expect(triage).toHaveBeenCalledTimes(1);
+    expect(triage.mock.calls[0][0].where).toEqual({ eventId: { in: [1n, 2n] }, outcome: "grouped" });
+  });
+
   it("a cursor narrows to rows strictly after it in feed order", async () => {
     await request(app()).get("/api/security/events?cursor=1790000000000.42");
     expect(findMany.mock.calls[0][0].where.AND).toContainEqual({
@@ -224,15 +244,26 @@ describe("GET /api/security/health", () => {
     const res = await request(app("owner")).get("/api/security/health");
     expect(res.status).toBe(200);
     // WARP-2977 P2b: `site_mode` joins the pinned order — deliberately red against P2a's list.
-    // WARP-2980: `patterns` joins it after site_mode (P3/P4 rows go between them when they land).
+    // WARP-2978: `incidents` and `alerts` join it after site_mode; WARP-2980's `patterns` follows
+    // them, before retention (whichever merged second moved this pin).
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "threat_mirror",
       "site_mode",
+      "incidents",
+      "alerts",
       "patterns",
       "retention",
     ]);
+  });
+
+  it("WARP-2978: the incidents row says DOWN 'Not running' while the engine is not registered (§7's boot assertion)", async () => {
+    const res = await request(app("family")).get("/api/security/health");
+    expect(res.body.sources.find((s: { id: string }) => s.id === "incidents")).toMatchObject({
+      state: "down",
+      detail: "Not running",
+    });
   });
 
   it("WARP-2980: the patterns row is the baseline job's row, verbatim, asked for with the viewer's scope", async () => {
@@ -264,10 +295,12 @@ describe("GET /api/security/health", () => {
 
   it("family does not get a threat row for a feed they cannot see, but does get the site mode and patterns", async () => {
     const res = await request(app("family")).get("/api/security/health");
+    // WARP-2978: nor the alerts row (it names who is told); the incidents row is everyone's.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "site_mode",
+      "incidents",
       "patterns",
       "retention",
     ]);
@@ -354,7 +387,7 @@ describe("GET /api/security/events?zone= — DS-005 applied to places", () => {
         {
           camera: "back",
           OR: [
-            { kind: { in: ["detection", "detection_low"] }, cameraZones: { hasSome: ["porch"] } },
+            { kind: { in: ["detection", "detection_ongoing", "detection_low"] }, cameraZones: { hasSome: ["porch"] } },
             { kind: { in: ["camera_offline", "camera_online"] } },
           ],
         },

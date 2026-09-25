@@ -740,9 +740,52 @@ describe("WARP-2804 — deliverNotification(prisma, id)", () => {
     },
   );
 
-  it("accepts a priority (WARP-2978 fills it) and ignores it here", async () => {
+  it("accepts a priority (WARP-2978 honours it — see the priority block below)", async () => {
     const prisma = makePrismaStub();
     const { id } = await recordNotification(prisma, { username: "alice", kind: "event", title: "x" });
     await expect(deliverNotification(prisma, id, { priority: "alert" })).resolves.toMatchObject({ id });
+  });
+});
+
+// ── WARP-2978 (ADR-059 P3 §6.7, D37): an alert is long-lived and urgent ─────
+
+describe("WARP-2978 priority: 'alert'", () => {
+  const ALERT = {
+    username: "maria",
+    kind: "event" as const,
+    title: "Person in Stock room after hours",
+    body: "Back camera saw someone at 2:14 AM. The site was closed.",
+    url: "/security/incidents/0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+    data: { incidentId: "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4" },
+  };
+
+  it("dials web push with TTL 3600 s and urgency high, and the push and toast payloads carry the priority", async () => {
+    const prisma = makePushingPrismaStub();
+    const { id } = await recordNotification(prisma, ALERT);
+    await deliverNotification(prisma, id, { tag: "security-incident-0b7c9d1e", priority: "alert" });
+    expect(webpushSend).toHaveBeenCalledTimes(1);
+    const [, body, opts] = webpushSend.mock.calls[0] as unknown as [unknown, string, Record<string, unknown>];
+    expect(opts).toMatchObject({ TTL: 3600, urgency: "high" });
+    expect(JSON.parse(body)).toMatchObject({ priority: "alert", notificationId: id });
+    const toast = mqttPublish.mock.calls[0]![1] as Record<string, unknown>;
+    expect(toast).toMatchObject({ id, priority: "alert" });
+  });
+
+  it("sendNotification forwards `priority` from its input", async () => {
+    const prisma = makePushingPrismaStub();
+    await sendNotification(prisma, { ...ALERT, priority: "alert" });
+    const [, , opts] = webpushSend.mock.calls[0] as unknown as [unknown, string, Record<string, unknown>];
+    expect(opts).toMatchObject({ TTL: 3600, urgency: "high" });
+  });
+
+  it("without a priority the dial is unchanged: TTL 60, no urgency, no priority key anywhere", async () => {
+    const prisma = makePushingPrismaStub();
+    const { id } = await recordNotification(prisma, ALERT);
+    await deliverNotification(prisma, id, { tag: "security-incident-0b7c9d1e" });
+    const [, body, opts] = webpushSend.mock.calls[0] as unknown as [unknown, string, Record<string, unknown>];
+    expect(opts).toMatchObject({ TTL: 60 });
+    expect(opts).not.toHaveProperty("urgency");
+    expect(JSON.parse(body)).not.toHaveProperty("priority");
+    expect(mqttPublish.mock.calls[0]![1]).not.toHaveProperty("priority");
   });
 });

@@ -116,6 +116,7 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
 } from "@/lib/types";
+import { PENDING_PROMPT_KEY } from "@/lib/types";
 // WARP-1803 — the hero's inline conversation reuses the chat surface's
 // message rendering (ChatMessage + the indigo chat skin). Both sheets are
 // fully `.droplet-shell`-scoped, so importing them here styles only the
@@ -428,7 +429,7 @@ function ChatWidget({ w, h }: WidgetProps) {
       // "select a model" empty state and its pendingPrompt effect sends the
       // prompt once a model is ready.
       try {
-        window.sessionStorage.setItem("droplet.pendingPrompt", body);
+        window.sessionStorage.setItem(PENDING_PROMPT_KEY, body);
       } catch {
         /* private mode — /chat still opens */
       }

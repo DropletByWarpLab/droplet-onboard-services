@@ -13,7 +13,7 @@ vi.mock("./camera-access.service.js", () => ({
   principalFromRequest: (req: { user?: { id?: string; role?: string } }) => ({
     id: req.user?.id,
     role: req.user?.role,
-    assertedNextcloudUser: null,
+    assertedUser: null,
   }),
   visibleCameraNames: h.visible,
 }));

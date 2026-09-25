@@ -27,6 +27,10 @@
  *   - an area nothing covers (no camera linked yet — every new area) is its
  *     own empty state, checked first: no health row can vouch for a place no
  *     camera watches, so it must never read as quiet.
+ *
+ * WARP-2978 PR-D — a person Frigate is still tracking 30 s in gets one
+ * `detection_ongoing` row before their `end`: it reads "Still in view", sits
+ * with the detections, and their later `end` is its own row.
  */
 import Link from "next/link";
 import {
@@ -84,6 +88,8 @@ export const COPY = {
   emptyNotCoveredBody: "So nothing can show up here. Someone who manages Security can choose which cameras cover it.",
   openAreas: "Open Areas",
   modeRowSub: "Site mode",
+  // WARP-2978 PR-D — a person still in view 30 s in, before Frigate's `end`.
+  stillInView: "Still in view",
 } as const;
 
 export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
@@ -147,7 +153,7 @@ export function kindsForView(view: SecurityView, includeLow: boolean): SecurityE
     case "all":
       return undefined;
     case "detections":
-      return includeLow ? ["detection", "detection_low"] : ["detection"];
+      return includeLow ? ["detection", "detection_ongoing", "detection_low"] : ["detection", "detection_ongoing"];
     case "health":
       return ["camera_offline", "camera_online", "source_offline", "source_online"];
     case "network":
@@ -162,6 +168,7 @@ export function kindsForView(view: SecurityView, includeLow: boolean): SecurityE
 export function iconFor(e: SecurityEvent): LucideIcon {
   switch (e.kind) {
     case "detection":
+    case "detection_ongoing":
     case "detection_low": {
       const label = e.labels[0];
       if (label === "car") return Car;
@@ -204,7 +211,7 @@ function subFor(e: SecurityEvent, cameraLabel: (name: string) => string): string
   if (e.kind === "threat") parts.push(e.labels[0] === "auth" ? "Sign-in" : "Network");
   if (e.kind === "mode_changed") parts.push(COPY.modeRowSub);
   if (e.camera) parts.push(cameraLabel(e.camera));
-  if (e.score !== null && (e.kind === "detection" || e.kind === "detection_low")) {
+  if (e.score !== null && (e.kind === "detection" || e.kind === "detection_ongoing" || e.kind === "detection_low")) {
     parts.push(`${Math.round(e.score * 100)}% sure`);
   }
   if (e.kind === "detection_low") parts.push("low confidence");
@@ -477,6 +484,11 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
                   {e.severity === "alert" && (
                     <span className="badge danger" style={{ marginRight: 6 }}>
                       Serious
+                    </span>
+                  )}
+                  {e.kind === "detection_ongoing" && (
+                    <span className="badge info" data-ongoing style={{ marginRight: 6 }}>
+                      {COPY.stillInView}
                     </span>
                   )}
                   <span>{subFor(e, cameraLabel)}</span>

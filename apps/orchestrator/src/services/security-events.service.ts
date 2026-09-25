@@ -20,6 +20,7 @@ import {
   type SourceHealth,
   type StatusReading,
 } from "./security-event-ingest.js";
+import { trimSecurityIncidents } from "./security-incidents.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("security-events");
@@ -289,10 +290,14 @@ export async function trimSecurityEvents(
 /**
  * Both jobs on the orchestrator's cron runtime, each single-flighted on its
  * own advisory lock. No new container, no bare setInterval, no while(true).
+ *
+ * WARP-2978 (§6.10): the retention leg trims incidents right after the
+ * events, with the events' own `before`, so an incident's `eventsKept` says
+ * exactly what the trim removed.
  */
 export function registerSecurityJobs(
   cronRuntime: Pick<CronRuntime, "scheduleInterval" | "scheduleCron">,
-  prisma: SecurityPrisma,
+  prisma: PrismaClient,
 ): void {
   cronRuntime.scheduleInterval(
     SECURITY_THREAT_MIRROR_INTERVAL_MS,
@@ -305,8 +310,12 @@ export function registerSecurityJobs(
   cronRuntime.scheduleCron(
     SECURITY_RETENTION_CRON,
     async () => {
-      const r = await trimSecurityEvents(prisma);
+      const now = new Date();
+      const r = await trimSecurityEvents(prisma, SECURITY_EVENT_RETENTION_DAYS, now);
       if (r.deleted > 0) logger.info(r, "security event retention trim");
+      const i = await trimSecurityIncidents(prisma, r.before, now);
+      if (i.marked > 0 || i.deleted > 0) logger.info(i, "security incident retention trim");
+      await prisma.securityIngestState.update({ where: { id: SINGLETON }, data: { retentionIncidentsDeleted: i.deleted } });
     },
     { lockKey: SECURITY_RETENTION_LOCK_KEY },
   );
@@ -386,17 +395,20 @@ export type SourceState = "ok" | "quiet" | "down" | "not_configured";
 
 /**
  * The header's rows, in the pinned display order
- * `camera_ingest, camera_system, (locks — P2b PR-2), threat_mirror, site_mode, patterns, retention`.
- * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `patterns`
- * (WARP-2980 P5) is the baseline job's. P3's `incidents, alerts` and P4's
- * `links, summaries` go between site_mode and patterns when they land —
- * whichever merges second moves this pin.
+ * `camera_ingest, camera_system, (locks — P2b PR-2), threat_mirror, site_mode, incidents, alerts, patterns, retention`.
+ * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `incidents`
+ * and `alerts` (WARP-2978 P3) are the incident engine's and the notifier's;
+ * `patterns` (WARP-2980 P5) is the baseline job's. P4's `links, summaries` go
+ * between alerts and patterns when they land — whichever merges second moves
+ * this pin.
  */
 export type SecurityHealthId =
   | "camera_ingest"
   | "camera_system"
   | "threat_mirror"
   | "site_mode"
+  | "incidents"
+  | "alerts"
   | "patterns"
   | "retention";
 
@@ -406,6 +418,9 @@ export interface SecurityHealthRow {
   detail: string;
   lastSeenAt: string | null;
 }
+
+/** `3 events`, `1 incident`. */
+const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
 
 /** Hours of silence after which a subscribed camera feed reads as quiet rather than ok. */
 const QUIET_AFTER_MS = 6 * 3_600_000;
@@ -418,13 +433,26 @@ export function buildSecurityHealth(input: {
   frigateConfigured: boolean;
   ingest: Readonly<IngestHealthState>;
   frigate: { health: SourceHealth; at: Date } | undefined;
-  state: { threatMirrorRanAt: Date | null; retentionRanAt: Date | null; retentionDeleted: number } | null;
+  state: {
+    threatMirrorRanAt: Date | null;
+    retentionRanAt: Date | null;
+    retentionDeleted: number;
+    /** WARP-2978 — incidents the last run removed (§6.10). */
+    retentionIncidentsDeleted?: number;
+  } | null;
   /**
    * WARP-2977 P2b — the site-mode ticker's row (`siteModeHealthRow` in
    * security-mode.service.ts), placed before `retention`. Optional: omitted,
    * the header is exactly P2a's.
    */
   siteMode?: SecurityHealthRow;
+  /**
+   * WARP-2978 — the incident engine's row (every viewer) and the alerts row
+   * (owner/admin only: it names who is told), placed after `site_mode`. Each
+   * optional and placed on its own.
+   */
+  incidents?: SecurityHealthRow;
+  alerts?: SecurityHealthRow;
   /**
    * WARP-2980 P5 — the baseline job's row (`patternsHealthRow` in
    * security-baselines.service.ts), placed right before `retention`.
@@ -490,6 +518,8 @@ export function buildSecurityHealth(input: {
   });
 
   if (input.siteMode) rows.push(input.siteMode);
+  if (input.incidents) rows.push(input.incidents);
+  if (input.alerts) rows.push(input.alerts);
   if (input.patterns) rows.push(input.patterns);
 
   const retentionRan = input.state?.retentionRanAt ?? null;
@@ -500,7 +530,7 @@ export function buildSecurityHealth(input: {
       : retentionRan && now.getTime() - retentionRan.getTime() <= 36 * 3_600_000
         ? "ok"
         : "quiet",
-    detail: `Keeps ${SECURITY_EVENT_RETENTION_DAYS} days${retentionRan ? `; last removed ${input.state?.retentionDeleted ?? 0}` : "; not run yet"}`,
+    detail: `Keeps events ${SECURITY_EVENT_RETENTION_DAYS} days and incidents a year${retentionRan ? `; last removed ${count(input.state?.retentionDeleted ?? 0, "event")} and ${count(input.state?.retentionIncidentsDeleted ?? 0, "incident")}` : "; not run yet"}`,
     lastSeenAt: iso(retentionRan),
   });
 

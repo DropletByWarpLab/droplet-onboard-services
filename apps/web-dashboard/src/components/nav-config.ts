@@ -207,12 +207,13 @@ export type NavGroup = {
 /* ─────────── Nav definition ───────────────────────────────────────────────
    WARP-2967 — four groups and a Settings front door:
 
-     WORK      Overview · Ask AI · Files · Messages · Email · Calendar
+     WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
      BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
-     SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
+     SYSTEMS   Security · Cameras [Events] · Network [Voice, Remote access] · Devices
      ADMIN     Settings
 
-   ~14 rows all-on, ~11 on a typical box. Everything else keeps its route and
+   16 rows all-on for an owner: the ticket's ~14, plus Security (WARP-2977)
+   and Workshop (WARP-3063, owner/admin only). Everything else keeps its route and
    moves behind Settings as the WARP-1807 tuck — `hidden: true` plus a
    `settingsSection`, which is what `settingsGroups()` below renders from.
 
@@ -223,7 +224,8 @@ export type NavGroup = {
 export const NAV_GROUPS: NavGroup[] = [
   // WARP-2967 — WORK. The things a person opens to do their job. Six rows,
   // ordered by how often a working day touches them, and every one of them is
-  // somewhere you *go*, never something you *configure*.
+  // somewhere you *go*, never something you *configure*. WARP-3063 adds a
+  // seventh for owner/admin, Workshop, last.
   {
     label: "Work",
     items: [
@@ -275,6 +277,25 @@ export const NAV_GROUPS: NavGroup[] = [
       // NavItem type has no count field; out of scope).
       { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
       { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
+      // WARP-2925 → WARP-2974 → WARP-3063 — Workshop, where the owner gives the
+      // box a goal and has it build custom tools. WARP-2967 tucked it behind
+      // Settings → Automation with Routines, and that removed it from the
+      // product: nobody looks in Settings for the place they build things,
+      // and a tucked route also swaps the sidebar to the Settings panel on
+      // arrival (`isSettingsContext`). It is somewhere you *go*, so it is a
+      // Work row again. Last, because a working day touches it less than mail.
+      //
+      // owner/admin only: this mirrors RUN_STARTER_ROLES on the agent-runs
+      // routes, which is the guard that actually decides. The nav gate only
+      // keeps the sidebar from offering a page that would 403. It is
+      // role-gated rather than module-gated because a run can compose tools
+      // from every surface, so no single module's absence should hide it.
+      {
+        href: "/workshop",
+        label: "Workshop",
+        icon: Hammer,
+        roles: ["owner", "admin"],
+      },
 
       /* ── tucked out of Work (WARP-1807 / WARP-2966 / WARP-2967) ────────
          Rendered by no nav surface; Settings owns the way in. Each keeps its
@@ -320,16 +341,17 @@ export const NAV_GROUPS: NavGroup[] = [
         settingsSection: "Workspace",
         settingsBlurb: "Computers mirroring a folder with this Droplet",
       },
-      // WARP-2671 / WARP-2925 — Routines and Workshop. Both are a person's own
-      // work, not admin artefacts, which is why WARP-2671 fought to keep
-      // Routines out of Admin and away from /tools. WARP-2967 does not undo
-      // that argument: they are tucked because they are not DAILY, and they
-      // land under Settings → **Automation**, their own section — not folded
-      // under Ask AI, which would make a composed sequence look like a mode of
-      // the chat box.
+      // WARP-2671 — Routines. A person's own work, not an admin artefact,
+      // which is why WARP-2671 fought to keep it out of Admin and away from
+      // /tools. WARP-2967 does not undo that argument: it is tucked because it
+      // is not DAILY, and it lands under Settings → **Automation**, its own
+      // section, not folded under Ask AI, which would make a composed
+      // sequence look like a mode of the chat box. (Workshop sat here too
+      // until WARP-3063 made it a Work row again, above.)
       //
-      // Role-gated rather than module-gated: both compose tools from every
-      // surface, so there is no single module whose absence should hide them.
+      // Role-gated rather than module-gated: a routine composes tools from
+      // every surface, so there is no single module whose absence should hide
+      // it.
       {
         href: "/routines",
         label: "Routines",
@@ -338,18 +360,6 @@ export const NAV_GROUPS: NavGroup[] = [
         hidden: true,
         settingsSection: "Automation",
         settingsBlurb: "Sequences the box runs on a schedule or a trigger",
-      },
-      // owner/admin only — mirrors RUN_STARTER_ROLES on the agent-runs routes,
-      // the guard that actually decides; this only keeps the nav from offering
-      // a page that would 403.
-      {
-        href: "/workshop",
-        label: "Workshop",
-        icon: Hammer,
-        roles: ["owner", "admin"],
-        hidden: true,
-        settingsSection: "Automation",
-        settingsBlurb: "Give the box a goal and watch the run that pursues it",
       },
     ],
   },
