@@ -232,8 +232,8 @@ describe("display ownership is derived from the chat sheets (WARP-3043)", () => 
 
   it("no element pairs a sheet-owned display class with a Tailwind display utility", () => {
     expect(displayOffenders()).toEqual([
-      "app/chat/page.tsx:881 chat-iconbtn+lg:hidden",
-      "app/chat/page.tsx:925 chat-iconbtn+lg:hidden",
+      "app/chat/page.tsx:882 chat-iconbtn+lg:hidden",
+      "app/chat/page.tsx:926 chat-iconbtn+lg:hidden",
     ]);
   });
 });
