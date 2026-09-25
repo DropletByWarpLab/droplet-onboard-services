@@ -10,6 +10,13 @@
  *
  *   1. coverage — every tick, zone or not (spans are instants). The first
  *      tick of this process closes every span another process left open;
+ *   1b. WARP-2980 PR-B (spec D18) — expected activity whose `expiresAt` has
+ *      passed is marked `expired`, zone or not, each with its system audit
+ *      after its own commit (security-suppressions.service.ts). A failed
+ *      audit is rethrown only after the tick's work (and `lastOkAt`) — never
+ *      through `lastError`, whose words ("Couldn't check which cameras…")
+ *      would be false. Every reader also requires `expiresAt > now`, so a
+ *      tick that runs late never extends one;
  *   2. the zone — `resolveSecurityTimezone` (site zone, else a valid
  *      Workspace.tz). None → stop: nothing can be cut into site hours;
  *   3. the job-state row, created lazily at the current site hour;
@@ -55,6 +62,7 @@ import {
 import { fetchStats } from "./frigate.client.js";
 import { config } from "../config.js";
 import { rebuildAreas, runFullBuild, type FullBuildOutcome } from "./security-baseline-build.js";
+import { expireSuppressions } from "./security-suppressions.service.js";
 import { BASELINE } from "../lib/security-baseline-math.js";
 import { PATTERN_RELEASE } from "../lib/security-rules.js";
 import { patternRuleHealth, plainTickError, type PatternRuleHealth } from "./security-pattern-rules.js";
@@ -360,6 +368,19 @@ export async function tickSecurityBaselines(
   now: Date = new Date(),
   deps: BaselineJobDeps = {},
 ): Promise<BaselineTickResult> {
+  const expiry: { auditError?: unknown } = {};
+  const result = await runBaselineTick(prisma, now, deps, expiry);
+  // D18: the tick's work (and lastOkAt) is done; a failed expiry audit reaches safeRun's canary now.
+  if (expiry.auditError !== undefined) throw expiry.auditError;
+  return result;
+}
+
+async function runBaselineTick(
+  prisma: JobDb,
+  now: Date,
+  deps: BaselineJobDeps,
+  expiry: { auditError?: unknown },
+): Promise<BaselineTickResult> {
   const processId = deps.processId ?? BOOT_PROCESS_ID;
   const clock = deps.clock ?? Date.now;
   const tickStart = clock();
@@ -374,6 +395,9 @@ export async function tickSecurityBaselines(
     await recordCoverage(prisma, { ingest: tracker.ingest, readings: seeded.readings, stats }, processId, now, { bootClose });
     bootClosed.add(processId);
 
+    // 1b. Expected activity past its expiresAt — zone or not (D18).
+    expiry.auditError = (await expireSuppressions(prisma, now)).auditError;
+
     const zone = await (deps.zone ?? (() => resolveSecurityTimezone(prisma)))();
     result.zone = zone;
     if (!zone) {
@@ -385,7 +409,6 @@ export async function tickSecurityBaselines(
     const hourEnd = slotOf(now, zone).start;
     if (hourEnd.getTime() > state.hourlyThrough.getTime()) {
       await refreshBaselineSources(prisma, zone, now);
-      // PR-B adds the suppression expiry here.
       await prisma.securityBaselineJobState.updateMany({
         where: { id: SINGLETON, hourlyThrough: state.hourlyThrough },
         data: { hourlyThrough: hourEnd },

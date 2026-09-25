@@ -19,7 +19,12 @@
  *     probed for.
  *
  * Every number is computed by lib/security-baseline-math.ts — the functions
- * the rules (PR-B) use — so an explanation never disagrees with a flag.
+ * the rules (PR-B) use — so an explanation never disagrees with a flag. And
+ * (WARP-2980 PR-B, review item 11) route 31 asks the engine's own pauses
+ * (`buildPause`, `keyPause`): while one holds, `paused` says which and every
+ * "would flag" is false/null — the engine flags nothing then either. Its
+ * `expected` is the active expected activity covering the slot, matched by
+ * the engine's own rule (`suppressionCovers`).
  * Bounded: one key, one label, three cells (explain); one key and label
  * (cells); the kept keys and labels of one build (overview). No list is
  * paged, so no WARP-2203 cursor key.
@@ -46,7 +51,7 @@ import {
   type PatternRelease,
 } from "../lib/security-baseline-math.js";
 import { slotMinutes, slotOf } from "../lib/security-baseline-slots.js";
-import { PATTERN_RELEASE } from "../lib/security-rules.js";
+import { PATTERN_RELEASE, buildPause, keyPause, suppressionCovers, type PatternPause, type SuppressionSlot } from "../lib/security-rules.js";
 import { localPartsOf } from "../lib/zoned-time.js";
 import { siteClockCopy } from "../lib/security-hours.js";
 
@@ -133,8 +138,16 @@ export interface ExplainPatternView {
     dwell: { longestUsualVisitSec: number | null; samples: number; wouldFlagAboveSec: number | null };
     neighbours: Array<{ hour: number; daysObserved: number; daysWithEvent: number }>;
   } | null;
-  /** Active suppressions that would match (PR-B); always [] before it. */
-  expected: Array<{ id: string; text: string; until: string }>;
+  /**
+   * WARP-2980 PR-B (review item 11): why the pattern rules are paused for this
+   * key right now — the engine's own gates (a build cut in another zone or out
+   * of date, the area's links changed since its cells, a camera behind it
+   * learning or stale). While set, every "would flag" in `cell` is false/null.
+   * Null when nothing pauses them, or there is no cell.
+   */
+  paused: PatternPause | null;
+  /** The active expected activity covering this slot, for any code (PR-B). `text` is the person's reason. */
+  expected: Array<{ id: string; text: string; until: string; codes: PatternCode[] }>;
   release: Record<PatternCode, PatternRelease>;
 }
 
@@ -186,8 +199,11 @@ function linkCameras(own: readonly ActiveZoneLink[]): string[] {
  * exist. `cellCameras` — the `cameras` of the key's cells in the ready build
  * (null or empty when it has none). An area with no cells is judged on every
  * camera of its current active links: an empty list is never "all visible".
+ * WARP-2980 PR-B: the expected-activity list (route 32) asks here too, so a
+ * place and a person's reason are shown under the same rule as its numbers
+ * (review item 9 — one rule, not a second copy).
  */
-function visibleKeyCameras(
+export function visibleKeyCameras(
   key: { kind: "area"; zoneId: string } | { kind: "camera"; camera: string },
   links: readonly ActiveZoneLink[],
   cellCameras: readonly string[] | null,
@@ -375,19 +391,34 @@ export async function explainSecurityPattern(
   const atInstant = q.at ?? now;
   const slot = slotOf(atInstant, tz);
   const hours = neighbourHours(slot.hour);
-  const [rows, sourceRows] = await Promise.all([
+  const [rows, sourceRows, liveZone, expected] = await Promise.all([
     prisma.securityBaselineCell.findMany({
       where: { buildId: ready.id, zoneKey, label, dayType: slot.dayType, hour: { in: [...hours] } },
     }),
     prisma.securityBaselineSource.findMany({ where: { camera: { in: cameras } } }),
+    parsed.kind === "area"
+      ? prisma.securityZone.findUnique({ where: { id: parsed.zoneId }, select: { state: true, version: true } })
+      : Promise.resolve(null),
+    expectedActivityFor(prisma, { zoneKey, label, ymd: slot.ymd, hour: slot.hour }, now),
   ]);
 
   let cell: ExplainPatternView["cell"] = null;
+  let paused: PatternPause | null = null;
   if (rows.length > 0) {
     const byHour = new Map(rows.map((r) => [r.hour, r]));
     const [prev, cur, next] = hours.map((h) => byHour.get(h));
+    // The engine's gates (c), (d), (f), (g) — never a second copy of them.
+    paused =
+      buildPause(zone, ready, now) ??
+      keyPause(
+        parsed.kind === "area" ? { kind: "area", liveVersion: liveZone?.state === "active" ? liveZone.version : null } : { kind: "camera" },
+        { zoneVersion: (cur ?? rows[0]!).zoneVersion, cameras: (cur ?? rows[0]!).cameras },
+        new Map(sourceRows.map((r) => [r.camera, r.state])),
+      );
     const s = smoothCounts(countsOf(prev), countsOf(cur), countsOf(next));
     const ready_ = isReady(s.n);
+    // What the engine would do right now: ready AND not paused.
+    const judged = ready_ && paused === null;
     const p = rarityP(s);
     const lambdaHour = hourlyRate(s);
     const dwell = { dwellSamples: cur?.dwellSamples ?? 0, durationP99Sec: cur?.durationP99Sec ?? null };
@@ -396,15 +427,15 @@ export async function explainSecurityPattern(
       daysObserved: cur?.daysObserved ?? 0,
       daysWithEvent: cur?.daysWithEvent ?? 0,
       smoothed: { daysObserved: s.n, daysWithEvent: s.d },
-      rarity: { p, flagsBelow: RARITY_MAX_P, wouldFlag: ready_ && isRare(p) },
+      rarity: { p, flagsBelow: RARITY_MAX_P, wouldFlag: judged && isRare(p) },
       volume: {
         typicalPerHour: lambdaHour,
-        flagsFrom: ready_ && lambdaHour !== null ? volumeThreshold(slotRate(lambdaHour, slotMinutes(slot))) : null,
+        flagsFrom: judged && lambdaHour !== null ? volumeThreshold(slotRate(lambdaHour, slotMinutes(slot))) : null,
       },
       dwell: {
         longestUsualVisitSec: dwell.dwellSamples >= DWELL_MIN_SAMPLES ? dwell.durationP99Sec : null,
         samples: dwell.dwellSamples,
-        wouldFlagAboveSec: ready_ ? dwellThresholdSec(label, dwell) : null,
+        wouldFlagAboveSec: judged ? dwellThresholdSec(label, dwell) : null,
       },
       neighbours: hours.map((h) => ({ hour: h, daysObserved: byHour.get(h)?.daysObserved ?? 0, daysWithEvent: byHour.get(h)?.daysWithEvent ?? 0 })),
     };
@@ -438,8 +469,44 @@ export async function explainSecurityPattern(
           lastSeenAt: s.lastSeenAt.toISOString(),
         })),
       cell,
-      expected: [],
+      paused,
+      expected,
       release: { ...PATTERN_RELEASE },
     },
   };
+}
+
+/**
+ * The active expected activity covering one slot, for any code — route 31's
+ * `expected`, through the same `suppressionCovers` the engine's
+ * `suppressionFor` uses (review item 10). The key is already visible to the
+ * viewer (route 31 answers 404 otherwise).
+ */
+export async function expectedActivityFor(
+  prisma: Pick<PrismaClient, "securitySuppression">,
+  at: SuppressionSlot,
+  now: Date,
+): Promise<Array<{ id: string; text: string; until: string; codes: PatternCode[] }>> {
+  const rows = await prisma.securitySuppression.findMany({
+    where: { state: "active", expiresAt: { gt: now } },
+    select: {
+      id: true,
+      targetKind: true,
+      zoneId: true,
+      camera: true,
+      label: true,
+      days: true,
+      hourFrom: true,
+      hourCount: true,
+      codes: true,
+      state: true,
+      createdAt: true,
+      expiresAt: true,
+      reason: true,
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  return rows
+    .filter((r) => suppressionCovers(r, at, now))
+    .map((r) => ({ id: r.id, text: r.reason, until: r.expiresAt.toISOString(), codes: r.codes as PatternCode[] }));
 }

@@ -96,7 +96,18 @@ export type SecurityAuditAction =
   /** System actor, after the notices commit. refs `{incidentId, notices: [{userId, outcome, reason}]}`. */
   | "incident.alerted"
   /** A person chose who is told about alerts (in-tx, last). refs `{userId, state, eligibleReceivers}`. */
-  | "alert_routing.set";
+  | "alert_routing.set"
+  /**
+   * WARP-2980 (ADR-059 P5 PR-B). A person added expected activity (in-tx,
+   * last). refs `{suppressionId, target: {kind, zoneId | camera}, label, days,
+   * hourFrom, hourCount, codes, expiresAt}` — never the reason (user text
+   * stays off the chain).
+   */
+  | "suppression.create"
+  /** A person removed expected activity (in-tx, last). refs `{suppressionId}`. */
+  | "suppression.remove"
+  /** System actor, after its commit: expected activity passed its expiresAt (the baseline tick). refs `{suppressionId}`. */
+  | "suppression.expire";
 
 /** A JSON value exactly as the chain signs and stores it. */
 export type SecurityRefValue =

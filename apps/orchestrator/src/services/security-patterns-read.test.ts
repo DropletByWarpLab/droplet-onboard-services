@@ -278,6 +278,7 @@ describe("explainSecurityPattern (route 31, the PR-E tool's function)", () => {
       ],
     });
     expect(v.cell!.rarity.p).toBeCloseTo(0.5 / 31, 12);
+    expect(v.paused).toBeNull();
     expect(v.expected).toEqual([]);
     expect(v.release).toEqual({ out_of_place: "trial", unusual_volume: "trial", long_dwell: "trial" });
   });
@@ -311,5 +312,80 @@ describe("explainSecurityPattern (route 31, the PR-E tool's function)", () => {
     expect(await explainSecurityPattern(db(world({ hours: null })), ALL, { camera: A }, NOW)).toEqual({ status: "no_timezone" });
     expect(await explainSecurityPattern(db(world()), ALL, {}, NOW)).toEqual({ status: "not_found" });
     expect(await explainSecurityPattern(db(world()), ALL, { camera: A, zoneId: AREA_Y }, NOW)).toEqual({ status: "not_found" });
+  });
+});
+
+// ── WARP-2980 PR-B: route 31's `expected` and `paused` ───────────────────
+
+describe("route 31 `expected` — the active expected activity covering the slot, by the engine's own match (review item 10)", () => {
+  // NOW is Wed 2:14 AM in New York: slot weekday 02.
+  const row = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    targetKind: "camera",
+    zoneId: null,
+    camera: A,
+    label: "person",
+    days: "weekdays",
+    hourFrom: 22,
+    hourCount: 6,
+    codes: ["out_of_place", "unusual_volume"],
+    state: "active",
+    reason: "Night deliveries",
+    createdAt: new Date("2026-09-20T12:00:00Z"),
+    expiresAt: new Date("2026-10-20T12:00:00Z"),
+    ...over,
+  });
+
+  it("lists the one that covers the slot, with its codes; not another label, hour, day type or key; not one past its expiresAt", async () => {
+    const w = world({
+      suppressions: [
+        row("s-match"),
+        row("s-label", { label: "car" }),
+        row("s-hour", { hourFrom: 9, hourCount: 8 }),
+        // Opens on Tuesday night 22:00 → Wednesday 02:00 is its tail; a WEEKENDS one does not cover it.
+        row("s-days", { days: "weekends" }),
+        row("s-key", { camera: C }),
+        row("s-expired", { expiresAt: NOW }),
+        row("s-removed", { state: "removed" }),
+      ],
+    });
+    const r = await explainSecurityPattern(db(w), FAMILY, { camera: A }, NOW);
+    if (r.status !== "ok") throw new Error(r.status);
+    expect(r.view.expected).toEqual([{ id: "s-match", text: "Night deliveries", until: "2026-10-20T12:00:00.000Z", codes: ["out_of_place", "unusual_volume"] }]);
+  });
+});
+
+describe("route 31 `paused` — the engine's own gates, so an explanation never says a flag the engine would not raise (review item 11)", () => {
+  it("a camera still learning: paused camera_not_active, and every 'would flag' is off; the numbers stay", async () => {
+    const r = await explainSecurityPattern(db(world()), ALL, { camera: C }, NOW);
+    if (r.status !== "ok") throw new Error(r.status);
+    expect(r.view.paused).toBe("camera_not_active");
+    expect(r.view.cell).toMatchObject({ ready: true, rarity: { wouldFlag: false }, volume: { flagsFrom: null }, dwell: { wouldFlagAboveSec: null } });
+    expect(r.view.cell!.rarity.p).toBeCloseTo(0.5 / 31, 12);
+  });
+
+  it("an out-of-date build: stale_build; one cut in another zone: zone_changed", async () => {
+    const stale = world();
+    stale.builds[0]!.windowTo = "2026-09-20";
+    const r1 = await explainSecurityPattern(db(stale), ALL, { camera: A }, NOW);
+    expect(r1.status === "ok" && r1.view.paused).toBe("stale_build");
+    expect(r1.status === "ok" && r1.view.cell!.rarity.wouldFlag).toBe(false);
+    const moved = world({ hours: { state: "set", timezone: "America/Chicago" } });
+    const r2 = await explainSecurityPattern(db(moved), ALL, { camera: A }, NOW);
+    expect(r2.status === "ok" && r2.view.paused).toBe("zone_changed");
+  });
+
+  it("an area whose links changed since its cells: area_changed", async () => {
+    const w = world();
+    w.zones.find((z) => z.id === AREA_Y)!.version = 2;
+    const r = await explainSecurityPattern(db(w), FAMILY, { zoneId: AREA_Y }, NOW);
+    expect(r.status === "ok" && r.view.paused).toBe("area_changed");
+  });
+
+  it("nothing pauses a fresh build of an active camera; no cell → null", async () => {
+    const r = await explainSecurityPattern(db(world()), ALL, { camera: A }, NOW);
+    expect(r.status === "ok" && r.view.paused).toBeNull();
+    const none = await explainSecurityPattern(db(world()), ALL, { camera: A, label: "dog" }, NOW);
+    expect(none.status === "ok" && none.view.paused).toBeNull();
   });
 });
