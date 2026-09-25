@@ -2,11 +2,18 @@
  * WARP-1452 — `search_calendar_events` LLM tool.
  *
  * Text search over the user's calendar (title / description / location),
- * optionally bounded to a date range. Pure-prisma read tier; mirrors
- * `list_events`' field selection so both tools return the same event shape.
+ * optionally bounded to a date range. Returns `list_events`' event shape
+ * (`toolEvent`), so the two tools stay interchangeable.
+ *
+ * WARP-3101 — READ THROUGH THE ORCHESTRATOR (`GET /api/calendar/events?q=`),
+ * never `ctx.prisma`: it used to key the query on `ctx.userId`, a User.id over
+ * the mcp-server's HTTP transport, which matches no CalendarEvent (the column
+ * holds a username). The range, when given, keeps events that OVERLAP it, the
+ * rule list_events and the dashboard use.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { parseModelDate } from "./_dates.js";
+import { err, forbidden, invalid, refusalOf, toolEvent, type EventJson } from "./_route.js";
 
 const inputSchema = {
   type: "object",
@@ -17,7 +24,7 @@ const inputSchema = {
       maxLength: 200,
       description: "Text to match against event title, description, and location (case-insensitive).",
     },
-    from: { type: "string", description: "Optional ISO-8601 lower bound on start time." },
+    from: { type: "string", description: "Optional ISO-8601 lower bound: events ending after it." },
     to: { type: "string", description: "Optional ISO-8601 upper bound on start time." },
     limit: {
       type: "integer",
@@ -30,29 +37,8 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
-function err(code: string, message: string): ToolResult {
-  return { ok: false, status: "error", error: { code, message } };
-}
-
-interface CalendarEventRow {
-  id: string;
-  title: string;
-  startsAt: Date;
-  endsAt: Date;
-  allDay: boolean;
-  location: string | null;
-  meetingUrl: string | null;
-  source: string | null;
-}
-
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  if (!ctx.userId) {
-    return {
-      ok: false,
-      status: "error",
-      error: { code: "AUTH_REQUIRED", message: "auth_required" },
-    };
-  }
+  if (!ctx.userId) return err("AUTH_REQUIRED", "auth_required");
   const query = typeof args.query === "string" ? args.query.trim() : "";
   if (!query || query.length > 200) return err("INVALID_ARGS", "query must be 1-200 chars");
   const from = args.from !== undefined ? parseModelDate(args.from) : null;
@@ -68,42 +54,27 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     limit = args.limit;
   }
 
-  const range: Array<Record<string, unknown>> = [];
-  if (from) range.push({ startsAt: { gte: from } });
-  if (to) range.push({ startsAt: { lte: to } });
-
-  const rows = (await ctx.prisma.calendarEvent.findMany({
-    where: {
-      userId: ctx.userId,
-      ...(range.length > 0 ? { AND: range } : {}),
-      OR: [
-        { title: { contains: query, mode: "insensitive" } },
-        { description: { contains: query, mode: "insensitive" } },
-        { location: { contains: query, mode: "insensitive" } },
-      ],
-    },
-    orderBy: { startsAt: "asc" },
-    take: limit,
-  })) as unknown as CalendarEventRow[];
+  const qs = new URLSearchParams({ q: query, limit: String(limit) });
+  if (from) qs.set("from", from.toISOString());
+  if (to) qs.set("to", to.toISOString());
+  const res = await ctx.http.orchestrator.get(`/api/calendar/events?${qs}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const refusal = await refusalOf(res);
+    if (res.status === 403) return forbidden(refusal);
+    if (res.status === 400) return invalid(refusal);
+    return err("SEARCH_FAILED", `orchestrator returned ${res.status}`);
+  }
+  const { events } = (await res.json()) as { events: EventJson[] };
 
   return {
     ok: true,
     data: {
       type: "search_calendar_events",
-      count: rows.length,
+      count: events.length,
       query,
-      events: rows.map((e) => ({
-        id: e.id,
-        title: e.title,
-        starts_at: e.startsAt.toISOString(),
-        ends_at: e.endsAt.toISOString(),
-        all_day: e.allDay,
-        location: e.location,
-        // WARP-1874 — kept in step with list_events, per the shape contract
-        // this file's header states.
-        meeting_url: e.meetingUrl,
-        source: e.source,
-      })),
+      events: events.map(toolEvent),
     },
   };
 }

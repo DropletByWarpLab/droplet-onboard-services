@@ -1,48 +1,35 @@
-import { describe, it, expect, vi } from "vitest";
-import type { Mock } from "vitest";
+import { describe, it, expect } from "vitest";
 import deleteEvent from "../../../src/handlers/calendar/delete-event.js";
-import type { ToolContext } from "../../../src/types.js";
-
-function ctxWith(
-  findUnique: Mock,
-  delFn: Mock,
-  userId = "alice",
-): ToolContext {
-  return {
-    prisma: {
-      calendarEvent: { findUnique, delete: delFn },
-    } as unknown as ToolContext["prisma"],
-    http: {} as ToolContext["http"],
-    matter: {} as ToolContext["matter"],
-    userId,
-    signal: new AbortController().signal,
-  };
-}
+import { json, orchestratorCtx } from "../../helpers/orchestrator-ctx.js";
 
 describe("delete_event", () => {
-  it("rejects missing id", async () => {
-    const r = await deleteEvent.handler({}, ctxWith(vi.fn(), vi.fn()));
+  it("rejects missing id without a hop", async () => {
+    const o = orchestratorCtx();
+    const r = await deleteEvent.handler({}, o.ctx);
     expect(r.ok).toBe(false);
+    expect(o.delete).not.toHaveBeenCalled();
   });
 
-  it("forbids cross-user delete", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "bob", source: "local" });
-    const r = await deleteEvent.handler({ id: "x" }, ctxWith(findUnique, vi.fn()));
-    expect(r.ok).toBe(false);
+  it("🔴 WARP-3101 deletes through the orchestrator, which knows whose event it is", async () => {
+    const o = orchestratorCtx();
+    o.delete.mockResolvedValueOnce(json(200, { deleted: "a/b" }));
+    const r = await deleteEvent.handler({ id: "a/b" }, o.ctx);
+    expect(r).toEqual({ ok: true, data: { id: "a/b", deleted: true } });
+    expect(o.delete).toHaveBeenCalledTimes(1);
+    // The id is a path segment, so it is encoded.
+    expect(o.delete.mock.calls[0]![0]).toBe("/api/calendar/events/a%2Fb");
   });
 
-  it("rejects deleting externally-synced events", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "alice", source: "google" });
-    const r = await deleteEvent.handler({ id: "x" }, ctxWith(findUnique, vi.fn()));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("EXTERNAL_SOURCE");
-  });
-
-  it("deletes a local event", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "alice", source: "local" });
-    const delFn = vi.fn().mockResolvedValue({});
-    const r = await deleteEvent.handler({ id: "x" }, ctxWith(findUnique, delFn));
-    expect(r.ok).toBe(true);
-    expect(delFn).toHaveBeenCalledWith({ where: { id: "x" } });
+  it.each([
+    [404, { error: "event_not_found" }, "NOT_FOUND"],
+    [403, { error: "forbidden" }, "FORBIDDEN"],
+    [403, { error: "acting_user_required" }, "FORBIDDEN"],
+    [409, { error: "cannot delete externally-synced event (remove the source instead)" }, "EXTERNAL_SOURCE"],
+    [500, {}, "DELETE_FAILED"],
+  ])("%i %j → %s", async (status, body, code) => {
+    const o = orchestratorCtx();
+    o.delete.mockResolvedValueOnce(json(status, body));
+    const r = await deleteEvent.handler({ id: "x" }, o.ctx);
+    expect(r).toMatchObject({ ok: false, error: { code } });
   });
 });

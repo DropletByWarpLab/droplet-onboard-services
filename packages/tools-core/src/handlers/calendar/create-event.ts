@@ -1,6 +1,18 @@
+/**
+ * `create_event` — add an event to the calendar of the person the assistant
+ * acts for.
+ *
+ * WARP-3101 — WRITTEN BY THE ORCHESTRATOR (`POST /api/calendar/events`), never
+ * here. This handler used to insert the row through `ctx.prisma` with
+ * `userId: ctx.userId`. `CalendarEvent.userId` holds a username, and over the
+ * mcp-server's HTTP transport `ctx.userId` is a User.id, so the event landed
+ * on a calendar nobody reads. The route resolves the person from the
+ * acting-user header and files the event under their username.
+ */
 import { parseMeetingLink } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { parseModelDate } from "./_dates.js";
+import { err, forbidden, invalid, refusalOf } from "./_route.js";
 
 const inputSchema = {
   type: "object",
@@ -20,10 +32,6 @@ const inputSchema = {
   required: ["title", "starts_at", "ends_at"],
   additionalProperties: false,
 } as const;
-
-function err(code: string, message: string): ToolResult {
-  return { ok: false, status: "error", error: { code, message } };
-}
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   if (!ctx.userId) return err("AUTH_REQUIRED", "auth_required");
@@ -50,27 +58,32 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     meetingUrl = link.url;
   }
 
-  try {
-    const ev = (await ctx.prisma.calendarEvent.create({
-      data: {
-        userId: ctx.userId,
-        title,
-        description: typeof args.description === "string" ? args.description : null,
-        location: typeof args.location === "string" ? args.location : null,
-        meetingUrl,
-        startsAt,
-        endsAt,
-        allDay: args.all_day === true,
-        source: "local",
-      },
-    })) as unknown as { id: string; title: string; startsAt: Date };
-    return {
-      ok: true,
-      data: { id: ev.id, title: ev.title, starts_at: ev.startsAt.toISOString() },
-    };
-  } catch (e) {
-    return err("CREATE_FAILED", e instanceof Error ? e.message : String(e));
+  // The route takes strict ISO-8601; the model's looser shapes were parsed
+  // above, so send the instant they name.
+  const res = await ctx.http.orchestrator.post(
+    "/api/calendar/events",
+    {
+      title,
+      ...(typeof args.description === "string" ? { description: args.description } : {}),
+      ...(typeof args.location === "string" ? { location: args.location } : {}),
+      ...(meetingUrl !== null ? { meetingUrl } : {}),
+      startsAt: startsAt.toISOString(),
+      endsAt: endsAt.toISOString(),
+      allDay: args.all_day === true,
+    },
+    { headers: { Accept: "application/json" } },
+  );
+  if (!res.ok) {
+    const refusal = await refusalOf(res);
+    if (res.status === 403) return forbidden(refusal);
+    if (res.status === 400) return invalid(refusal);
+    return err("CREATE_FAILED", `orchestrator returned ${res.status}`);
   }
+  const { event } = (await res.json()) as { event: { id: string; title: string; startsAt: string } };
+  return {
+    ok: true,
+    data: { id: event.id, title: event.title, starts_at: new Date(event.startsAt).toISOString() },
+  };
 }
 
 const tool: Tool = {
