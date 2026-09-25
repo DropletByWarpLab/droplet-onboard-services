@@ -809,8 +809,9 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
       new Set(["sendNotification", "listNotifications", "countUnread", "ackNotification", "ackAllNotifications"]),
     );
     for (const s of routes) {
-      // WARP-3060 — /send's recipient is `recipientFor(prisma, req)`'s: the
-      // caller, or for the send_notification tool the person it acts for.
+      // WARP-3060 / WARP-3099 — /send's and N1's recipient is
+      // `recipientFor(prisma, req, tool)`'s: the caller, or for the
+      // send_notification / list_notifications tool the person it acts for.
       for (const r of recipientsOf(s)) expect(r.expr, s.label).toMatch(/^(getUser\(req\)|username|recipient\.username)$/);
     }
     // Every direct NotificationLog update is either keyed by the recipient or by the row's own id.
