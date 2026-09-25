@@ -166,11 +166,12 @@ Two gates, and it matters which one is load-bearing:
 
 - **Cosign signature over `catalog.json` (opt-in, off by default).**
   Enabled with `DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE=1`. It is off on
-  purpose: the OTA trust anchor is still the WARP-535 placeholder, so
-  turning it on before the key ceremony makes **every download a 503**.
-  The flag exists so the ceremony can upgrade the posture without a code
-  change — and so the UI never claims "signed" for something nobody
-  verified.
+  purpose: `update-agent/cosign.pub` has been a real P-256 key since the
+  2026-07-30 key ceremony, but nothing signs an on-box-generated
+  `catalog.json` today, so turning it on makes **every download a 503**.
+  The flag exists so signing `catalog.json` can upgrade the posture
+  without a code change — and so the UI never claims "signed" for
+  something nobody verified.
 
 The Windows `.sig` is the **Tauri updater's minisign envelope** (key
 `F5E6E366DCF9B85E`). It is declared, digest-checked and served verbatim,

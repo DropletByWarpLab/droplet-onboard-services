@@ -976,18 +976,20 @@ const envSchema = z.object({
   //                        legitimate state (dev boxes stage nothing) and the
   //                        surface degrades to "no apps available", never a 500.
   //   REQUIRE_SIGNATURE  — enforce the cosign signature over catalog.json.
-  //                        OFF by default and that is deliberate: the OTA trust
-  //                        anchor is still the WARP-535 placeholder, so turning
-  //                        this on before the key ceremony makes every download
-  //                        a 503. The always-on gate is the per-asset sha256
-  //                        re-check in services/app-downloads/store.ts, which
-  //                        works today; this flag exists so the ceremony can
+  //                        OFF by default and that is deliberate: update-agent/
+  //                        cosign.pub has been a real P-256 key since the
+  //                        2026-07-30 key ceremony, but nothing signs an
+  //                        on-box-generated catalog.json today, so turning
+  //                        this on makes every download a 503. The always-on
+  //                        gate is the per-asset sha256 re-check in
+  //                        services/app-downloads/store.ts, which works today;
+  //                        this flag exists so signing catalog.json can
   //                        upgrade the posture without a code change.
   //
   // EXPLICIT string→bool, NOT z.coerce.boolean(): coerce runs Boolean(...), so
   // the non-empty strings "0"/"false" would BOTH coerce to true — here that
-  // would silently ENABLE the signature requirement against a placeholder
-  // anchor and take every download offline. Only "1"/"true" enable it.
+  // would silently ENABLE the signature requirement against a catalog nothing
+  // signs and take every download offline. Only "1"/"true" enable it.
   DROPLET_APP_DOWNLOADS_DIR: z.string().default("/opt/droplet/app-downloads"),
   DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE: z
     .string()
