@@ -37,11 +37,36 @@
  * the alert: `notifyState` pending → done, with no notices (review #9) — a
  * person has already handled it, so nobody is woken for it. An acknowledge
  * leaves it pending: someone is on it, and the others are still told.
+ *
+ * WARP-2980 (ADR-059 P5 PR-B, brief §4.4, spec D15) — a VERDICT: Expected /
+ * Not expected, by owner/admin at act level (route 35; review item 2). It
+ * feeds precision and nothing else: it never touches state, severity, codes
+ * or notifications, so an alert that joins later still notifies.
+ *
+ *   judged on the viewer's projection plus their visible flags:
+ *     partial, or nothing to judge           → 409 NOT_JUDGEABLE (one body)
+ *     the same verdict AND the same codes    → changed:false, no audit
+ *     otherwise (any state, collecting too)  → stamped: who, when, the
+ *                                              first mark (never moves), and
+ *                                              `verdictCodes` = what they
+ *                                              could judge — codes that
+ *                                              joined since are picked up
+ *   It can change (expected ↔ not_expected), never go back to unreviewed.
+ *   One READ COMMITTED transaction: CAS on version (one re-read and re-plan
+ *   on a lost race, then 409 INCIDENT_CONFLICT), `auditSecurityInTx` LAST.
  */
 import type { PrismaClient, SecurityIncidentAckAction, SecurityIncidentState } from "@prisma/client";
 import { auditSecurityInTx, stripUnsafeDisplayChars } from "./security-audit.js";
 import { summaryName } from "./security-mode.service.js";
-import { projectIncident, INCIDENT_VIEW_SELECT, REASON_VIEW_SELECT, type IncidentViewer } from "./security-incident-view.js";
+import {
+  FLAG_VIEW_SELECT,
+  INCIDENT_VIEW_SELECT,
+  REASON_VIEW_SELECT,
+  VERDICT_SELECT,
+  judgeableCodes,
+  projectIncident,
+  type IncidentViewer,
+} from "./security-incident-view.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -203,6 +228,74 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
           // owner/admin activity routes, who see every camera: no DS-005 leak.
           visibleCodes: [...view.codes],
           state: write.state,
+        },
+      });
+      return true;
+    }, READ_COMMITTED_TX);
+    if (done) return { status: "ok", changed: true };
+  }
+  return { status: "conflict" };
+}
+
+// ── WARP-2980 P5 PR-B: the verdict (route 35) ─────────────────────────────
+
+export type IncidentVerdict = "expected" | "not_expected";
+
+export type IncidentVerdictResult =
+  | { status: "ok"; changed: boolean }
+  | { status: "not_found" }
+  | { status: "not_judgeable" }
+  | { status: "conflict" };
+
+const VERDICT_WORDS: Readonly<Record<IncidentVerdict, string>> = { expected: "as expected", not_expected: "as not expected" };
+
+/** Expected / Not expected (spec D15, review item 2). See the table in this file's header. */
+export async function setIncidentVerdict(
+  prisma: PrismaClient,
+  input: { incidentId: string; verdict: IncidentVerdict; actor: IncidentActor; viewer: IncidentViewer; now: Date },
+): Promise<IncidentVerdictResult> {
+  const { actor, now, viewer } = input;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const row = await prisma.securityIncident.findUnique({
+      where: { id: input.incidentId },
+      select: { ...INCIDENT_VIEW_SELECT, ...VERDICT_SELECT, version: true },
+    });
+    if (!row) return { status: "not_found" };
+    const reasons = await prisma.securityIncidentReason.findMany({ where: { incidentId: row.id }, select: REASON_VIEW_SELECT });
+    const view = projectIncident(row, reasons, viewer, now);
+    if (!view) return { status: "not_found" };
+    // Only a viewer the flags' role clause admits reads them; judgeableCodes applies the camera clauses.
+    const flags = viewer.ownerOrAdmin ? await prisma.securityPatternFlag.findMany({ where: { incidentId: row.id }, select: FLAG_VIEW_SELECT }) : [];
+    const codes = judgeableCodes(view, flags, viewer);
+    if (view.partial || codes.length === 0) return { status: "not_judgeable" };
+    const sameCodes = codes.length === row.verdictCodes.length && codes.every((c, n) => c === row.verdictCodes[n]);
+    if (row.verdict === input.verdict && sameCodes) return { status: "ok", changed: false };
+
+    const done = await prisma.$transaction(async (tx) => {
+      const { count } = await tx.securityIncident.updateMany({
+        where: { id: row.id, version: row.version },
+        data: {
+          verdict: input.verdict,
+          verdictById: actor.id,
+          verdictByName: summaryName(actor.displayName || actor.username),
+          verdictAt: now,
+          // The first mark never moves (the CHECK ties it to a verdict being set).
+          verdictFirstAt: row.verdict === "unreviewed" ? now : row.verdictFirstAt!,
+          verdictCodes: codes,
+          version: { increment: 1 },
+        },
+      });
+      if (count !== 1) return false;
+      // LAST: it takes the box-wide chain lock until commit; nothing may follow it here.
+      await auditSecurityInTx(tx, { user: { id: actor.id, role: actor.role } }, {
+        action: "incident.verdict",
+        what: `Security: marked ${HOUSE_WORDS[row.severity] ?? "an incident"} ${placeOf(row)} ${VERDICT_WORDS[input.verdict]}`,
+        refs: {
+          incidentId: row.id,
+          verdict: input.verdict,
+          from: row.verdict,
+          codes: [...codes],
+          incidentCodes: [...row.reasonCodes],
         },
       });
       return true;

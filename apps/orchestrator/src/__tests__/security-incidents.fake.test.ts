@@ -172,3 +172,96 @@ describe("the incident fake's SecurityIncidentReason_site_evidence mirror", () =
     expect(f.world.securityIncidentReason).toHaveLength(0);
   });
 });
+
+/**
+ * WARP-2980 P5 PR-B — the fake mirrors 20260925060100's CHECKs, so an engine
+ * or route bug that would write a flag, an expected activity or a verdict
+ * Postgres refuses fails in the mocked lane too (the pg lane pins the real
+ * text: security-pattern-flags.pg.test.ts). One legal row and one refusal per
+ * rule the mocked suites lean on.
+ */
+describe("the incident fake's WARP-2980 PR-B mirrors", () => {
+  type Tables = Record<string, { createMany(a: unknown): Promise<{ count: number }>; updateMany(a: unknown): Promise<{ count: number }> }>;
+  const INC = "00000000-0000-4000-8000-0000000029a1";
+  const at = new Date("2026-09-23T21:14:00Z");
+  const flag = (over: Record<string, unknown> = {}) => ({
+    incidentId: INC,
+    code: "out_of_place",
+    effect: "trial",
+    severity: "alert",
+    rulesetVersion: 3,
+    zoneKey: "camera:back",
+    keyCameras: ["back"],
+    evidenceEventId: 1n,
+    evidenceCamera: "back",
+    evidenceLabel: "person",
+    evidenceAt: at,
+    evidenceSummary: "x",
+    detail: {},
+    ...over,
+  });
+  const suppression = (over: Record<string, unknown> = {}) => ({
+    targetKind: "camera",
+    camera: "back",
+    label: "person",
+    days: "weekdays",
+    hourFrom: 22,
+    hourCount: 3,
+    codes: ["out_of_place"],
+    reason: "The cleaner",
+    createdById: "u-owner",
+    createdByName: "Maria",
+    createdAt: at,
+    expiresAt: new Date(at.getTime() + 30 * 86_400_000),
+    ...over,
+  });
+
+  it("accepts a legal flag and a legal expected activity; a fresh incident is unreviewed", async () => {
+    const f = createFakeSecurityPrisma({ securityIncident: [{ id: INC, scope: "camera", scopeCamera: "back" }] });
+    const t = f.client as unknown as Tables;
+    await expect(t.securityPatternFlag!.createMany({ data: [flag()] })).resolves.toEqual({ count: 1 });
+    await expect(t.securitySuppression!.createMany({ data: [suppression()] })).resolves.toEqual({ count: 1 });
+    await expect(t.securitySuppression!.createMany({ data: [suppression({ hourFrom: 0, hourCount: 24 })] })).resolves.toEqual({ count: 1 });
+    expect(f.world.securityIncident[0]).toMatchObject({ verdict: "unreviewed", verdictCodes: [], verdictAt: null });
+  });
+
+  it.each([
+    ["an alert for a cat", { evidenceLabel: "cat" }],
+    ["unusual_volume at alert", { code: "unusual_volume" }],
+    ["suppressed without a suppression", { effect: "suppressed" }],
+    ["an evidence camera outside keyCameras", { zoneKey: "area:00000000-0000-4000-8000-0000000029a2", keyCameras: ["front"] }],
+    ["a camera key with another camera behind it", { keyCameras: ["back", "front"] }],
+    ["ruleset v2", { rulesetVersion: 2 }],
+  ])("refuses a flag with %s", async (_name, over) => {
+    const f = createFakeSecurityPrisma({ securityIncident: [{ id: INC, scope: "camera", scopeCamera: "back" }] });
+    await expect((f.client as unknown as Tables).securityPatternFlag!.createMany({ data: [flag(over)] })).rejects.toThrow(
+      /SecurityPatternFlag_shape/,
+    );
+  });
+
+  it.each([
+    ["after_hours_presence", { codes: ["after_hours_presence"] }],
+    ["long_dwell for a car", { label: "car", codes: ["long_dwell"] }],
+    ["366 days", { expiresAt: new Date(at.getTime() + 366 * 86_400_000) }],
+    ["removed without who", { state: "removed", endedAt: at }],
+    ["a whole day from 3 PM", { hourFrom: 15, hourCount: 24 }],
+  ])("refuses expected activity with %s", async (_name, over) => {
+    const f = createFakeSecurityPrisma();
+    await expect((f.client as unknown as Tables).securitySuppression!.createMany({ data: [suppression(over)] })).rejects.toThrow(
+      /SecuritySuppression_shape/,
+    );
+  });
+
+  it("refuses a verdict without its codes, or a mark without who", async () => {
+    const f = createFakeSecurityPrisma({ securityIncident: [{ id: INC, scope: "camera", scopeCamera: "back" }] });
+    const t = f.client as unknown as Tables;
+    const mark = { verdict: "expected", verdictAt: at, verdictFirstAt: at, verdictById: "u", verdictByName: "Maria", verdictCodes: ["camera_offline"] };
+    await expect(t.securityIncident!.updateMany({ where: { id: INC }, data: { ...mark, verdictCodes: [] } })).rejects.toThrow(
+      /SecurityIncident_verdict_shape/,
+    );
+    await expect(t.securityIncident!.updateMany({ where: { id: INC }, data: { ...mark, verdictByName: null } })).rejects.toThrow(
+      /SecurityIncident_verdict_shape/,
+    );
+    await expect(t.securityIncident!.updateMany({ where: { id: INC }, data: mark })).resolves.toEqual({ count: 1 });
+  });
+});

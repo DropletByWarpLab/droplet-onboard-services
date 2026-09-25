@@ -8,6 +8,13 @@
  * "zone" as a UI noun ("Area" is the noun; "timezone" is the ordinary word
  * for what the owner picks, and stays).
  *
+ * WARP-2980 (P5 PR-B): nor the code's words for what the Patterns page calls
+ * "Expected activity" and "what's usual" — suppress…, baseline(s) — matched
+ * WORD-INITIALLY, so an identifier such as SecuritySuppressionView never trips
+ * it; and never "all clear" or "all locked" (brief §3.2: a quiet source is
+ * shown as quiet, never as all clear — the same lines P3 PR-C and the wall
+ * add, one copy each).
+ *
  * WHAT IS SCANNED
  *   · Every export of every module in components/security and app/security,
  *     walked at RUNTIME (COPY objects, MODE_DISCLAIMER, KIND_LABEL,
@@ -46,9 +53,12 @@ import * as AreaDialog from "./AreaDialog";
 import * as AreaLinksDialog from "./AreaLinksDialog";
 import * as AreasPanel from "./AreasPanel";
 import * as ExceptionsEditor from "./ExceptionsEditor";
+import * as ExpectedActivityCard from "./ExpectedActivityCard";
+import * as ExpectedActivityDialog from "./ExpectedActivityDialog";
 import * as HoursEditor from "./HoursEditor";
 import * as LearningList from "./LearningList";
 import * as ModeCard from "./ModeCard";
+import * as PrecisionCard from "./PrecisionCard";
 import * as SecurityFeed from "./SecurityFeed";
 import * as SecurityWall from "./SecurityWall";
 import * as TimezoneSelect from "./TimezoneSelect";
@@ -68,6 +78,10 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/AreaLinksDialog.tsx": AreaLinksDialog,
   "src/components/security/AreasPanel.tsx": AreasPanel,
   "src/components/security/ExceptionsEditor.tsx": ExceptionsEditor,
+  // WARP-2980 (P5 PR-B) — expected activity and how often Droplet was right.
+  "src/components/security/ExpectedActivityCard.tsx": ExpectedActivityCard,
+  "src/components/security/ExpectedActivityDialog.tsx": ExpectedActivityDialog,
+  "src/components/security/PrecisionCard.tsx": PrecisionCard,
   "src/components/security/HoursEditor.tsx": HoursEditor,
   // WARP-2980 (P5 PR-A) — the patterns page.
   "src/components/security/LearningList.tsx": LearningList,
@@ -98,7 +112,10 @@ const BANNED: ReadonlyArray<readonly [name: string, re: RegExp]> = [
   ["guard", /guard/i],
   ["space", /\bspaces?\b/i],
   ["zone (as a UI noun)", /\bzones?\b/i],
-  // WARP-2981 — a verdict on the site, which Droplet never gives.
+  // WARP-2980 (P5 PR-B) — word-initial: "Suppressed" trips, `SecuritySuppressionView` does not.
+  ["suppress", /\bsuppress/i],
+  ["baseline", /\bbaselines?\b/i],
+  // A verdict on the site, which Droplet never gives (P5 PR-B; WARP-2981 widens the gap to any whitespace).
   ["all clear", /\ball\s+clear\b/i],
   ["all locked", /\ball\s+locked\b/i],
 ];
@@ -254,7 +271,14 @@ describe("Security copy lint (spec §8)", () => {
     ["This space is empty"],
     ["Add a zone"],
     ["Zones"],
+    // WARP-2980 (P5 PR-B)
+    ["Suppressed"],
+    ["Remove the suppression"],
+    ["What the baseline says"],
+    ["Baselines"],
     ["All clear"],
+    ["The doors are all locked"],
+    // WARP-2981
     ["Everything is all clear tonight"],
     ["All locked"],
     ["Doors: all  locked up"],
@@ -262,7 +286,20 @@ describe("Security copy lint (spec §8)", () => {
     expect(violations([{ where: "probe", text }])).not.toEqual([]);
   });
 
-  it.each([["Times are in Europe/London (your timezone)"], ["Opening hours"], ["Warm up"], ["Farm shop"], ["All reporting"], ["Clear all filters"]])(
+  it.each([
+    ["Times are in Europe/London (your timezone)"],
+    ["Opening hours"],
+    ["Warm up"],
+    ["Farm shop"],
+    // WARP-2980 (P5 PR-B) — the UI's own words, and an identifier-shaped probe.
+    ["Expected activity"],
+    ["Kept 3 flags quiet"],
+    ["SecuritySuppressionView"],
+    ["Clear the form"],
+    // WARP-2981
+    ["All reporting"],
+    ["Clear all filters"],
+  ])(
     "the matcher lets %j through",
     (text) => {
       expect(violations([{ where: "probe", text }])).toEqual([]);

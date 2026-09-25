@@ -23,17 +23,23 @@
  *     source too);
  *   · no parameterised path precedes a literal sibling it would swallow,
  *     across the routers in app.ts's mount order;
- *   · the write-route count is 12 and the GET count 13 (P2b's 9 writes and 6
- *     GETs, WARP-2978's 3 writes and 4 GETs, WARP-2980's 3 GETs), so the table
- *     cannot pass over empty stubs or a dropped route. P4 and P5 PR-B each add
- *     their own rows.
+ *   · the write-route count is 15 and the GET count 14 (P2b's 9 writes and 6
+ *     GETs, WARP-2978's 3 writes and 4 GETs, WARP-2980 PR-A's 3 GETs, PR-B's 3
+ *     writes and 1 GET), so the table cannot pass over empty stubs or a
+ *     dropped route. P4 adds its own rows.
  *
  * WARP-2978 (P3 §7): createSecurityIncidentsRouter (routes 16–22), mounted
  * after the site router. Acknowledge and resolve are act; choosing who is told
  * is manage (and family can never pass its role floor, even with a manage
  * resolver); every GET stays at view, and the literal `/incidents/summary` is
  * declared before `/incidents/:id`. WARP-2980 (P5 PR-A):
- * createSecurityPatternsRouter (routes 29–31, all view), mounted last.
+ * createSecurityPatternsRouter (routes 29–31, all view), mounted last. P5
+ * PR-B: expected activity in the same router — the list (32) is view; adding
+ * (33) and removing (34) are manage, so family never passes their role floor
+ * and neither does Droplet's AI (§4.9: it never creates, extends or widens a
+ * suppression). The verdict (35, in the incidents router after resolve) is
+ * act with an owner/admin floor (review item 2): nobody overwrites a
+ * judgement about cameras they cannot see, and the AI gives none.
  *
  * WARP-2981 (P6): P6-3, the rack panel's count (routes/panel-security.ts), is
  * NOT a Security router and is not in the table: it lives under /api/panel,
@@ -96,20 +102,27 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["GET /security/incidents/:id", "view", VIEW_ROLES],
   ["POST /security/incidents/:id/acknowledge", "act", ACT_ROLES],
   ["POST /security/incidents/:id/resolve", "act", ACT_ROLES],
+  // WARP-2980 P5 PR-B — route 35: act, floored at owner/admin.
+  ["POST /security/incidents/:id/verdict", "act", MANAGE_ROLES],
   ["GET /security/alert-routing", "view", VIEW_ROLES],
   ["PUT /security/alert-routing/:userId", "manage", MANAGE_ROLES],
   // createSecurityPatternsRouter (WARP-2980, routes 29–31): read-only; all literal paths
   ["GET /security/patterns", "view", VIEW_ROLES],
   ["GET /security/patterns/cells", "view", VIEW_ROLES],
   ["GET /security/patterns/explain", "view", VIEW_ROLES],
+  // WARP-2980 P5 PR-B — expected activity (routes 32–34); the literal path before `/:id/remove`.
+  ["GET /security/suppressions", "view", VIEW_ROLES],
+  ["POST /security/suppressions", "manage", MANAGE_ROLES],
+  ["POST /security/suppressions/:id/remove", "manage", MANAGE_ROLES],
 ];
 
 /**
  * P2b spec §9's 9 write routes and 6 GETs; WARP-2978 adds 3 writes (19, 20, 22)
- * and 4 GETs (16, 17, 18, 21); WARP-2980 adds 3 GETs (29–31) and no write.
+ * and 4 GETs (16, 17, 18, 21); WARP-2980 PR-A adds 3 GETs (29–31) and no
+ * write; PR-B adds 3 writes (33, 34, 35) and 1 GET (32).
  */
-const WRITE_ROUTES = 12;
-const GET_ROUTES = 13;
+const WRITE_ROUTES = 15;
+const GET_ROUTES = 14;
 
 type Handle = (req: unknown, res: unknown, next: () => void) => unknown;
 interface Layer {

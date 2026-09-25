@@ -2,23 +2,42 @@
  * WARP-2978 (ADR-059 P3 spec §6.5, D18–D22) — the reason-code rules, one
  * block per code, plus how a reason moves the incident (severity, state,
  * notify) and the per-camera evidence cap. Pure.
+ *
+ * WARP-2980 (P5 PR-B, p5b spec §11.1 A) — the pattern rules: the three hits
+ * (P5-A's arithmetic, D7), the severity table (D9), the expected-activity
+ * match (D11–D13, one rule for the engine and route 31) and the pauses the
+ * engine and route 31 share; every pattern code still `trial`; the code order
+ * pinned to the Prisma enum.
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import {
   EVIDENCE_PER_CAMERA,
+  PATTERN_RELEASE,
+  PATTERN_RULES,
+  REASON_CODE_ORDER,
   RULESET,
   afterHoursPresence,
+  buildPause,
   cameraOfflineVerdict,
   capEvidence,
+  hourInWindow,
+  keyPause,
   parseActivityRef,
+  patternHits,
+  patternSeverity,
   reasonPatch,
+  suppressionCovers,
+  suppressionFor,
   threatSignal,
+  type PatternCells,
   type ReasonDraft,
   type ReasonState,
+  type SuppressionMatchRow,
   type TriageEvent,
 } from "./security-rules.js";
+import { PATTERN_CODES, slotRate, volumeThreshold, type CellCounts } from "./security-baseline-math.js";
 import type { ModeHistoryRow, ModeTimeline } from "./security-mode-history.js";
 import { hhmmToMinutes, weekFrom, type DayHours, type SiteHours } from "./security-hours.js";
 import { zonedWallClockToUtc } from "./zoned-time.js";
@@ -264,7 +283,7 @@ describe("threat_signal (notice) — a mirrored network or sign-in warning", () 
 });
 
 describe("the database pins D18: the CHECK's code/severity pairs are exactly the RULESET's", () => {
-  it("SecurityIncidentReason_code_severity matches RULESET", () => {
+  it("SecurityIncidentReason_code_severity matches RULESET — the three P3 codes only (WARP-2980: no pattern code is a key of RULESET)", () => {
     const sql = readFileSync(
       path.join(PACKAGE_ROOT, "prisma", "migrations", "20260925030000_warp_2978_security_incidents", "migration.sql"),
       "utf8",
@@ -278,6 +297,17 @@ describe("the database pins D18: the CHECK's code/severity pairs are exactly the
     expect(Object.fromEntries(pairs)).toEqual(
       Object.fromEntries(Object.entries(RULESET).map(([code, rule]) => [code, rule.severity])),
     );
+    expect(Object.keys(RULESET).sort()).toEqual(["after_hours_presence", "camera_offline", "threat_signal"]);
+  });
+
+  it("WARP-2980 D3 — trial is a database fact: no P5 code appears in that CHECK (PR-D widens it with its first writer)", () => {
+    const sql = readFileSync(
+      path.join(PACKAGE_ROOT, "prisma", "migrations", "20260925030000_warp_2978_security_incidents", "migration.sql"),
+      "utf8",
+    );
+    const check = /"SecurityIncidentReason_code_severity" CHECK \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? "";
+    expect(check).toContain("after_hours_presence");
+    for (const code of PATTERN_CODES) expect(check, code).not.toContain(code);
   });
 });
 
@@ -378,5 +408,292 @@ describe("capEvidence — at most EVIDENCE_PER_CAMERA rows per (code, camera)", 
       [d("front", 7n), ...Array.from({ length: 6 }, (_, i) => d("front", BigInt(60 + i)))],
     );
     expect(kept.map((k) => k.evidenceEventId)).toEqual([60n, 61n, 62n, 63n]);
+  });
+});
+
+// ── WARP-2980 P5 PR-B: the pattern rules (p5b spec §11.1 A) ────────────────
+
+const cell = (daysObserved: number, daysWithEvent: number, eventCount = 0, observedMinutes = daysObserved * 60): CellCounts => ({
+  daysObserved,
+  daysWithEvent,
+  eventCount,
+  observedMinutes,
+});
+const cells = (cur: CellCounts | null, around: { prev?: CellCounts; next?: CellCounts; dwellSamples?: number; p99?: number | null } = {}): PatternCells => ({
+  prev: around.prev ?? null,
+  cur,
+  next: around.next ?? null,
+  dwell: { dwellSamples: around.dwellSamples ?? 0, durationP99Sec: around.p99 ?? null },
+});
+const hits = (c: PatternCells, over: { label?: string; durationSec?: number | null; slotMinutes?: number; k?: number | null } = {}) =>
+  patternHits({ label: over.label ?? "person", durationSec: over.durationSec ?? null, slotMinutes: over.slotMinutes ?? 60, k: over.k ?? null, cells: c });
+const codesOf = (h: ReturnType<typeof patternHits>) => h.map((x) => x.code);
+
+describe("patternHits — out_of_place (D7: isRare over the smoothed cell)", () => {
+  it("fires below 0.05 and never at it (n = 20, d = 0: 0.5/21)", () => {
+    expect(codesOf(hits(cells(cell(20, 0))))).toEqual(["out_of_place"]);
+    // d′ = 0.25·(1 + 1) = 0.5, n′ = 10 + 0.25·40 = 20 → 1/21 ≈ 0.0476 fires …
+    expect(codesOf(hits(cells(cell(10, 0), { prev: cell(20, 1), next: cell(20, 1) })))).toEqual(["out_of_place"]);
+    // … n′ = 9 + 10 = 19 → exactly 1/20 = 0.05 does not.
+    expect(codesOf(hits(cells(cell(9, 0), { prev: cell(20, 1), next: cell(20, 1) })))).toEqual([]);
+  });
+
+  it("nothing fires below 10 smoothed observed days — no code at all; exactly 10 is ready", () => {
+    expect(hits(cells(cell(9, 0)))).toEqual([]);
+    // Rarity alone can never fire below 10 (p ≥ 0.5/10); volume and dwell could, and must not.
+    expect(hits(cells(cell(5, 0, 0, 300), { dwellSamples: 40, p99: 60 }), { k: 50, durationSec: 1_000 })).toEqual([]);
+    expect(codesOf(hits(cells(cell(10, 5, 5, 600), { dwellSamples: 40, p99: 60 }), { k: 50, durationSec: 1_000 }))).toEqual([
+      "unusual_volume",
+      "long_dwell",
+    ]);
+    expect(codesOf(hits(cells(cell(10, 0))))).toEqual(["out_of_place"]);
+    expect(hits(cells(null))).toEqual([]);
+  });
+
+  it("its detail reproduces p exactly from the stored strings", () => {
+    const [h] = hits(cells(cell(10, 0), { prev: cell(20, 1), next: cell(20, 1) }));
+    expect(h!.detail).toEqual({
+      daysObserved: 10,
+      daysWithEvent: 0,
+      smoothedDaysObserved: "20",
+      smoothedDaysWithEvent: "0.5",
+      p: "0.0476",
+      flagsBelow: "0.05",
+    });
+    const d = h!.detail;
+    expect(((Number(d.smoothedDaysWithEvent) + 0.5) / (Number(d.smoothedDaysObserved) + 1)).toPrecision(3)).toBe(d.p);
+  });
+});
+
+describe("patternHits — unusual_volume (D7/D8: k past k* for the event's own slot)", () => {
+  // λ_hour = (40 + 0.5) / (1200 / 60) = 2.025; a fall-back slot is 120 minutes → λ = 4.05.
+  const busy = cells(cell(20, 10, 40, 1200));
+  const lambda = slotRate(40.5 / 20, 120);
+  const kStar = volumeThreshold(lambda);
+
+  it("k* − 1 does not fire and k* does, with λ from slotRate on a 120-minute slot", () => {
+    expect(codesOf(hits(busy, { slotMinutes: 120, k: kStar - 1 }))).toEqual([]);
+    const [h] = hits(busy, { slotMinutes: 120, k: kStar });
+    expect(h).toMatchObject({ code: "unusual_volume", detail: { k: kStar, flagsFrom: kStar, slotMinutes: 120, lambda: lambda.toPrecision(3) } });
+    expect(h!.detail.typicalPerHour).toBe((2.025).toPrecision(3));
+    expect(h!.detail.tailP).toMatch(/^\d\.\d{2}e-\d+$/);
+  });
+
+  it("fewer than 3 never fires, even where 2 is past the tail", () => {
+    // A never-seen hour: λ = 0.5 / 20 = 0.025, P(X ≥ 2) ≈ 3e-4 < 0.001 — but k < 3.
+    const quiet = cells(cell(20, 0, 0, 1200));
+    expect(codesOf(hits(quiet, { k: 2 }))).toEqual(["out_of_place"]);
+    expect(codesOf(hits(quiet, { k: 3 }))).toEqual(["out_of_place", "unusual_volume"]);
+  });
+
+  it("k = null skips the code; so does a cell with no observed time (no rate)", () => {
+    expect(codesOf(hits(busy, { k: null }))).toEqual([]);
+    expect(codesOf(hits(cells(cell(20, 10, 40, 0)), { k: 500 }))).toEqual([]);
+  });
+});
+
+describe("patternHits — long_dwell (D7: person, ≥ 30 samples, longer than max(p99, 120 s))", () => {
+  const usual = (dwellSamples: number, p99: number | null) => cells(cell(20, 10), { dwellSamples, p99 });
+
+  it("p99 90 s → the 120 s floor: 120 does not fire, 121 does; its detail shows duration ≥ threshold", () => {
+    expect(hits(usual(30, 90), { durationSec: 120 })).toEqual([]);
+    const [h] = hits(usual(30, 90), { durationSec: 121 });
+    expect(h).toEqual({ code: "long_dwell", detail: { durationSec: 121, p99Sec: 90, thresholdSec: 120, samples: 30 } });
+    expect(h!.detail.durationSec as number).toBeGreaterThanOrEqual(h!.detail.thresholdSec as number);
+  });
+
+  it("p99 300 s needs more than 300 s", () => {
+    expect(hits(usual(30, 300), { durationSec: 300 })).toEqual([]);
+    expect(codesOf(hits(usual(30, 300), { durationSec: 300.4 }))).toEqual(["long_dwell"]);
+  });
+
+  it("29 samples, a car, or no duration → never", () => {
+    expect(hits(usual(29, 90), { durationSec: 1000 })).toEqual([]);
+    expect(hits(usual(30, 90), { durationSec: 1000, label: "car" })).toEqual([]);
+    expect(hits(usual(30, 90), { durationSec: null })).toEqual([]);
+  });
+});
+
+describe("patternSeverity — every row of spec §4.6 (D9, D10)", () => {
+  it.each([
+    ["out_of_place", "person", "open", "interior", "notice"],
+    ["out_of_place", "person", "closed", "entry", "alert"],
+    ["out_of_place", "person", "open", "restricted", "alert"],
+    ["out_of_place", "person", "away", null, "alert"],
+    ["out_of_place", "cat", "closed", "restricted", "notice"],
+    ["out_of_place", "car", "away", null, "notice"],
+    ["unusual_volume", "person", "open", "entry", "info"],
+    ["unusual_volume", "person", "closed", "restricted", "notice"],
+    ["unusual_volume", "car", "open", "parking", "notice"],
+    ["long_dwell", "person", "away", "perimeter", "alert"],
+    ["long_dwell", "person", "open", "parking", "notice"],
+  ] as const)("%s · %s · %s · %s → %s", (code, label, mode, kind, expected) => {
+    expect(patternSeverity(code, label, mode, kind)).toBe(expected);
+  });
+
+  it("only an open ENTRY AREA lowers unusual_volume to info — not a camera key, not a closed entry", () => {
+    expect(patternSeverity("unusual_volume", "person", "open", null)).toBe("notice");
+    expect(patternSeverity("unusual_volume", "person", "closed", "entry")).toBe("notice");
+  });
+});
+
+describe("expected activity — one match rule for the engine and route 31 (D11–D13, review item 10)", () => {
+  const Z = "3f1c2a9e-0b7d-4c55-9a51-1c2d3e4f5a61";
+  const NOW = new Date("2026-09-23T12:00:00Z");
+  const row = (over: Partial<SuppressionMatchRow> = {}): SuppressionMatchRow => ({
+    id: "s1",
+    targetKind: "area",
+    zoneId: Z,
+    camera: null,
+    label: "person",
+    days: "weekdays",
+    hourFrom: 22,
+    hourCount: 3,
+    codes: ["out_of_place"],
+    state: "active",
+    createdAt: new Date("2026-09-20T12:00:00Z"),
+    expiresAt: new Date("2026-10-20T12:00:00Z"),
+    ...over,
+  });
+  // 2026-09-23 is a Wednesday; 25 Friday, 26 Saturday, 27 Sunday, 28 Monday.
+  const slot = (over: Partial<{ zoneKey: string; label: string; ymd: string; hour: number }> = {}) => ({
+    zoneKey: `area:${Z}`,
+    label: "person",
+    ymd: "2026-09-23",
+    hour: 22,
+    ...over,
+  });
+
+  it("hourInWindow wraps past midnight: (22, 3) is 22, 23 and 0 — not 21 or 1; (22, 2) stops at 23; 24 hours is every hour", () => {
+    expect([21, 22, 23, 0, 1].map((h) => hourInWindow(h, 22, 3))).toEqual([false, true, true, true, false]);
+    expect([22, 23, 0].map((h) => hourInWindow(h, 22, 2))).toEqual([true, true, false]);
+    expect(Array.from({ length: 24 }, (_, h) => hourInWindow(h, 7, 24)).every(Boolean)).toBe(true);
+  });
+
+  it("matches the slot it names", () => {
+    expect(suppressionCovers(row(), slot(), NOW)).toBe(true);
+    expect(suppressionCovers(row(), slot({ hour: 0, ymd: "2026-09-24" }), NOW)).toBe(true);
+    expect(suppressionCovers(row({ targetKind: "camera", zoneId: null, camera: "front" }), slot({ zoneKey: "camera:front" }), NOW)).toBe(true);
+    expect(suppressionCovers(row({ days: "every_day" }), slot({ ymd: "2026-09-26" }), NOW)).toBe(true);
+  });
+
+  it.each([
+    ["another key", row(), slot({ zoneKey: "area:7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c82" })],
+    ["a camera key for an area row", row(), slot({ zoneKey: `camera:${Z}` })],
+    ["another label", row(), slot({ label: "car" })],
+    ["weekdays on a Saturday evening", row(), slot({ ymd: "2026-09-26" })],
+    ["weekends on a Wednesday evening", row({ days: "weekends" }), slot()],
+    ["an hour before the window", row(), slot({ hour: 21 })],
+    ["an hour after it", row(), slot({ hour: 1, ymd: "2026-09-24" })],
+    ["removed", row({ state: "removed" }), slot()],
+    ["expired", row({ state: "expired" }), slot()],
+    ["still active but past expiresAt (a lagging expiry never extends one)", row({ expiresAt: NOW }), slot()],
+  ])("never matches %s", (_what, r, s) => {
+    expect(suppressionCovers(r, s, NOW)).toBe(false);
+  });
+
+  it("review item 5 — a window past midnight belongs to the day it OPENS: Friday night's tail is a weekday's, Sunday night's is not", () => {
+    const late = row({ hourFrom: 22, hourCount: 4 });
+    expect(suppressionCovers(late, slot({ ymd: "2026-09-26", hour: 1 }), NOW)).toBe(true); // Sat 01:00 ← Friday night
+    expect(suppressionCovers(late, slot({ ymd: "2026-09-28", hour: 1 }), NOW)).toBe(false); // Mon 01:00 ← Sunday night
+    expect(suppressionCovers(row({ hourFrom: 22, hourCount: 4, days: "weekends" }), slot({ ymd: "2026-09-28", hour: 1 }), NOW)).toBe(true);
+    // A 24-hour window opened at 06:00 runs to 05:59 the next day, and those hours are the previous day's —
+    // which is why route 33 and SecuritySuppression_shape store a whole day only from midnight.
+    const fromSix = row({ hourFrom: 6, hourCount: 24, days: "weekends" });
+    expect(suppressionCovers(fromSix, slot({ ymd: "2026-09-28", hour: 5 }), NOW)).toBe(true); // Mon 05:00 ← Sunday
+    expect(suppressionCovers(fromSix, slot({ ymd: "2026-09-28", hour: 6 }), NOW)).toBe(false); // Mon 06:00 opens Monday
+    // From midnight, "Weekends, All day" is exactly Saturday and Sunday.
+    const allDay = row({ hourFrom: 0, hourCount: 24, days: "weekends" });
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-25", hour: 23 }), NOW)).toBe(false); // Fri 23:00
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-26", hour: 0 }), NOW)).toBe(true); // Sat 00:00
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-27", hour: 23 }), NOW)).toBe(true); // Sun 23:00
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-28", hour: 0 }), NOW)).toBe(false); // Mon 00:00
+  });
+
+  it("suppressionFor adds the code filter and the oldest-wins choice", () => {
+    const flag = { ...slot(), code: "out_of_place" as const };
+    expect(suppressionFor({ ...flag, code: "unusual_volume" }, [row()], NOW)).toBeNull();
+    const older = row({ id: "s-old", createdAt: new Date("2026-09-01T00:00:00Z") });
+    const newer = row({ id: "s-new", createdAt: new Date("2026-09-10T00:00:00Z") });
+    expect(suppressionFor(flag, [newer, older], NOW)?.id).toBe("s-old");
+    const tieA = row({ id: "s-a" });
+    const tieB = row({ id: "s-b" });
+    expect(suppressionFor(flag, [tieB, tieA], NOW)?.id).toBe("s-a");
+    expect(suppressionFor(flag, [row({ state: "removed" })], NOW)).toBeNull();
+  });
+
+  it("takes a pattern code only — after_hours_presence cannot even be asked", () => {
+    // @ts-expect-error — a P3 code is not a PatternCode (D12: expected activity never hides after_hours_presence).
+    const r = suppressionFor({ ...slot(), code: "after_hours_presence" }, [row({ codes: ["out_of_place"] })], NOW);
+    expect(r).toBeNull();
+  });
+});
+
+describe("the pauses the engine and route 31 share (review item 11)", () => {
+  const NOW = new Date("2026-09-23T12:00:00Z"); // 08:00 in New York
+  const TZ = "America/New_York";
+
+  it("buildPause: another zone; a window ending before today − 2 site dates; today − 2 passes", () => {
+    expect(buildPause(TZ, { timezone: "Europe/London", windowTo: "2026-09-22" }, NOW)).toBe("zone_changed");
+    expect(buildPause(TZ, { timezone: TZ, windowTo: "2026-09-20" }, NOW)).toBe("stale_build");
+    expect(buildPause(TZ, { timezone: TZ, windowTo: "2026-09-21" }, NOW)).toBeNull();
+    expect(buildPause(TZ, { timezone: TZ, windowTo: "2026-09-22" }, NOW)).toBeNull();
+  });
+
+  it("keyPause: an area whose version moved or is gone; the evidence camera outside the cells; any camera not active", () => {
+    const state = new Map([
+      ["front", "active"],
+      ["back", "learning"],
+    ]);
+    const area = (liveVersion: number | null) => ({ kind: "area" as const, liveVersion });
+    expect(keyPause(area(2), { zoneVersion: 2, cameras: ["front"] }, state, "front")).toBeNull();
+    expect(keyPause(area(3), { zoneVersion: 2, cameras: ["front"] }, state, "front")).toBe("area_changed");
+    expect(keyPause(area(null), { zoneVersion: 2, cameras: ["front"] }, state, "front")).toBe("area_changed");
+    expect(keyPause(area(2), { zoneVersion: 2, cameras: ["front"] }, state, "side")).toBe("area_changed");
+    expect(keyPause(area(2), { zoneVersion: 2, cameras: ["back", "front"] }, state, "front")).toBe("camera_not_active");
+    expect(keyPause({ kind: "camera" }, { zoneVersion: null, cameras: ["back"] }, state, "back")).toBe("camera_not_active");
+    expect(keyPause({ kind: "camera" }, { zoneVersion: null, cameras: ["gone"] }, state)).toBe("camera_not_active");
+    expect(keyPause({ kind: "camera" }, { zoneVersion: null, cameras: [] }, state)).toBe("camera_not_active");
+  });
+});
+
+describe("tripwires (D2, D21)", () => {
+  it("every pattern code is still `trial` — flipping one is P5 PR-D, with the counted path, the reasons CHECK arm and the alert copy (F2)", () => {
+    expect(Object.keys(PATTERN_RULES.codes)).toEqual([...PATTERN_CODES]);
+    expect(PATTERN_RELEASE).toEqual({ out_of_place: "trial", unusual_volume: "trial", long_dwell: "trial" });
+  });
+
+  it("REASON_CODE_ORDER is the `enum SecurityReasonCode` block of schema.prisma, in declaration order", () => {
+    const schema = readFileSync(path.join(PACKAGE_ROOT, "prisma", "schema.prisma"), "utf8");
+    const block = /enum SecurityReasonCode \{([\s\S]*?)\}/.exec(schema)?.[1] ?? "";
+    const values = block
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("//"));
+    expect([...REASON_CODE_ORDER]).toEqual(values);
+  });
+
+  it("reasonPatch still sorts the P3 codes in declaration order", () => {
+    const d: ReasonDraft = {
+      code: "after_hours_presence",
+      severity: "alert",
+      evidenceEventId: 9n,
+      evidenceCamera: "back",
+      evidenceSource: "frigate",
+      evidenceKind: "detection",
+      evidenceLabel: "person",
+      evidenceAt: WED_2214,
+      evidenceSummary: "x",
+      detail: {},
+    };
+    const i: ReasonState = { severity: "notice", reasonCodes: ["threat_signal"], state: "open", notifyState: "not_needed", alertedAt: null };
+    expect(reasonPatch(i, [d], WED_2214).reasonCodes).toEqual(["after_hours_presence", "threat_signal"]);
+  });
+
+  it("capEvidence caps pattern-flag drafts the same way: 5 per (code, camera), never a stored one twice", () => {
+    const flag = (id: bigint, camera = "back") => ({ code: "out_of_place" as const, evidenceCamera: camera, evidenceEventId: id, severity: "alert" });
+    const drafts = [1n, 2n, 3n, 4n, 5n, 6n, 7n].map((id) => flag(id));
+    expect(capEvidence([], drafts).map((d) => d.evidenceEventId)).toEqual([1n, 2n, 3n, 4n, 5n]);
+    expect(capEvidence([{ code: "out_of_place", evidenceCamera: "back", evidenceEventId: 1n }], [flag(1n), flag(8n, "front")]).map((d) => d.evidenceEventId)).toEqual([8n]);
   });
 });

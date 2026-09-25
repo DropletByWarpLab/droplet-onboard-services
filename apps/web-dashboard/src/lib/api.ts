@@ -153,6 +153,9 @@ import type {
   SecurityHoursWriteResult,
   SecurityPatternCells,
   SecurityPatternsOverview,
+  SecuritySuppressionCreateBody,
+  SecuritySuppressionList,
+  SecuritySuppressionView,
   SecurityModeAction,
   SecurityModeActionResult,
   SecurityModeView,
@@ -9283,6 +9286,28 @@ export function getSecurityPatterns(): Promise<SecurityPatternsOverview> {
 export function getSecurityPatternCells(key: string, label: string): Promise<SecurityPatternCells> {
   const qs = new URLSearchParams({ key, label }).toString();
   return securityFetch<SecurityPatternCells>(`${BASE}${SECURITY_PATTERNS_PATH}/cells?${qs}`);
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-B): expected activity (routes 32–34) ──
+// Through `securityFetch` (typed `.code`); a failure is rendered with
+// `translateError(err, "security")`. The list is view-level; add and remove
+// are manage (the page offers them only when the list's `canManage` says so).
+
+export const SECURITY_SUPPRESSIONS_PATH = "/api/security/suppressions";
+
+/** Route 32. */
+export function getSecuritySuppressions(): Promise<SecuritySuppressionList> {
+  return securityFetch<SecuritySuppressionList>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}`);
+}
+
+/** Route 33. */
+export function createSecuritySuppression(body: SecuritySuppressionCreateBody): Promise<{ suppression: SecuritySuppressionView }> {
+  return securityFetch<{ suppression: SecuritySuppressionView }>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}`, jsonBody("POST", body));
+}
+
+/** Route 34. The route takes no body; `{}` is sent so the JSON parser has one. */
+export function removeSecuritySuppression(id: string): Promise<{ changed: boolean }> {
+  return securityFetch<{ changed: boolean }>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}/${encodeURIComponent(id)}/remove`, jsonBody("POST", {}));
 }
 
 /** 15 (manage) — 204. `version` is the hours version the page read. */

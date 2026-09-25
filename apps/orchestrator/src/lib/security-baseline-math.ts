@@ -4,12 +4,14 @@
  *
  * The cells store RAW counts (services/security-baseline-build.ts); every
  * score is computed here, on read, from the three stored hours h−1, h, h+1 of
- * the same day type. The rules (PR-B), the patterns page and the
- * explanation (routes 30–31, the PR-E chat tool) all call these functions, so
- * an explanation can never disagree with a flag.
+ * the same day type. The rules (`patternHits`, lib/security-rules.ts — PR-B),
+ * the patterns page and the explanation (routes 30–31, P4's chat tool) all
+ * call these functions, so an explanation can never disagree with a flag.
  *
  * What is never in the arithmetic (brief §4.4): verdicts, suppressions,
- * modes, area kinds. Those change severity (PR-B), never detection.
+ * modes, area kinds. Modes and area kinds change a flag's severity
+ * (`patternSeverity`), expected activity quiets it, verdicts only feed
+ * precision — never detection.
  */
 import { poissonUpperTail } from "./security-stats.js";
 
@@ -26,32 +28,21 @@ export const BASELINE = {
   /** docker/frigate/config.yml `objects.track`. */
   labels: ["person", "car", "dog", "cat"] as const,
   maxLabelsPerKey: 8,
+  /** A ready build whose window ends more than this many site dates before today pauses the rules and area rebuilds (PR-B). */
+  freshWindowDays: 2,
 } as const;
 
 /** The window the cells are built over, in complete site-local dates before today. */
 export const BASELINE_WINDOW_DAYS = BASELINE.windowDays;
 
 /**
- * The version of the rules a build was made under (`SecurityBaselineBuild.rulesetVersion`).
- * P3's `SECURITY_RULESET_VERSION` does not exist yet; PR-B replaces this with it.
+ * The three P5 codes. Their rules, releases and severities are
+ * lib/security-rules.ts's PATTERN_RULES (PR-B), fingerprinted with P3's
+ * RULESET; a build is stamped with SECURITY_RULESET_VERSION.
  */
-export const SECURITY_BASELINE_RULESET_VERSION = 1;
-
-/** The three P5 codes. PR-B adds them to P3's engine; PR-A only reports their release. */
 export const PATTERN_CODES = ["out_of_place", "unusual_volume", "long_dwell"] as const;
 export type PatternCode = (typeof PATTERN_CODES)[number];
 export type PatternRelease = "trial" | "live";
-
-/**
- * Every P5 code ships `trial` (spec §11, D18): evaluated and shown to
- * owner/admin, never counted or notified, until PR-D flips it after the
- * house-unit measurement. PR-B moves this into P3's RULESET.
- */
-export const PATTERN_RELEASE: Readonly<Record<PatternCode, PatternRelease>> = {
-  out_of_place: "trial",
-  unusual_volume: "trial",
-  long_dwell: "trial",
-};
 
 /** out_of_place: p strictly below this. */
 export const RARITY_MAX_P = 0.05;

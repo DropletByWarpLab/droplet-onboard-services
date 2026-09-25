@@ -4,15 +4,19 @@
  * WARP-2980 (ADR-059 P5 §8) — /security/patterns, titled "Patterns".
  *
  * What normal looks like for each area and camera, learned from the last four
- * weeks, and how far along Droplet is with each camera. Read-only in PR-A:
- * PR-C adds the expected-activity list and "how often Droplet was right"
- * below these sections.
+ * weeks, and how far along Droplet is with each camera — and (WARP-2980
+ * PR-B) the expected activity people have taught it, and how often each
+ * kind of flag was right.
  *
  *   1. the status line — the `patterns` row of the /security health header,
  *      verbatim; plus the trial sentence while any flag is in trial (the ok
  *      row already carries it);
  *   2. Learning (`LearningList`) — every camera the viewer may see;
- *   3. What's usual (`UsualGrid`) — once the first nightly build exists.
+ *   3. What's usual (`UsualGrid`) — once the first nightly build exists;
+ *   4. Expected activity (`ExpectedActivityCard`) — every state with a site
+ *      zone; Add and Remove only when route 32's `canManage` says so;
+ *   5. How often Droplet was right (`PrecisionCard`) — only when route 29
+ *      sends `precision` (owner/admin).
  *
  * Every reader sees it (routes 29/30 are view-level for every household
  * role); the server has already applied DS-005 to every key and number, so
@@ -23,7 +27,9 @@ import { useMemo } from "react";
 import Link from "next/link";
 import { Activity, CalendarClock, Clock, Loader2, RefreshCw, Video } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { ExpectedActivityCard } from "@/components/security/ExpectedActivityCard";
 import { LearningList } from "@/components/security/LearningList";
+import { PrecisionCard } from "@/components/security/PrecisionCard";
 import { UsualGrid } from "@/components/security/UsualGrid";
 import { COPY } from "@/components/security/patterns-copy";
 import { translateError } from "@/lib/friendly-errors";
@@ -139,6 +145,11 @@ export default function SecurityPatternsPage() {
               <p className="usual-empty">{COPY.notBuilt}</p>
             )}
           </section>
+        )}
+
+        <ExpectedActivityCard overview={overview} now={now} />
+        {overview.precision !== null && overview.timezone !== null && (
+          <PrecisionCard precision={overview.precision} timezone={overview.timezone} now={now} />
         )}
       </div>
     );

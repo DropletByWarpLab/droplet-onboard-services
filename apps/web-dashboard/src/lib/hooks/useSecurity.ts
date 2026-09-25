@@ -24,6 +24,7 @@ import {
   SECURITY_MODE_PATH,
   SECURITY_PATTERNS_PATH,
   SECURITY_SOURCES_PATH,
+  SECURITY_SUPPRESSIONS_PATH,
   SECURITY_ZONES_PATH,
   archiveSecurityZone,
   createSecurityZone,
@@ -42,6 +43,7 @@ import {
   getSecurityPatternCells,
   getSecurityPatterns,
   getSecuritySources,
+  getSecuritySuppressions,
   getSecurityZones,
   patchSecurityZone,
   postSecurityMode,
@@ -67,6 +69,7 @@ import type {
   SecurityPatternCells,
   SecurityPatternsOverview,
   SecuritySourcesView,
+  SecuritySuppressionList,
   SecurityZoneCreateBody,
   SecurityZoneCreated,
   SecurityZoneLinksBody,
@@ -528,4 +531,17 @@ export function useSecurityPatternCells(key: string | null, label: string | null
     () => getSecurityPatternCells(key!, label!),
   );
   return { cells: data ?? null, error: error as Error | undefined, isLoading };
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-B): expected activity ──
+
+/**
+ * GET /api/security/suppressions — the expected activity this viewer may see
+ * and whether they may change it (`canManage`, the server's answer). A failed
+ * read is an `error`, never an empty list: "nothing is marked as expected"
+ * and "Droplet couldn't say" must not look the same.
+ */
+export function useSecuritySuppressions() {
+  const { data, error, isLoading, mutate } = useSWR<SecuritySuppressionList>(SECURITY_SUPPRESSIONS_PATH, () => getSecuritySuppressions());
+  return { list: data ?? null, error: error as Error | undefined, isLoading, mutate };
 }
