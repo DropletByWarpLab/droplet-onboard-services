@@ -8,7 +8,7 @@
  * HTTP transport) and so refused the person's own event as FORBIDDEN.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-import { err, forbidden, refusalOf } from "./_route.js";
+import { err, forbidden, refusalOf, switchedOff } from "./_route.js";
 
 const inputSchema = {
   type: "object",
@@ -27,6 +27,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   });
   if (!res.ok) {
     const refusal = await refusalOf(res);
+    const off = switchedOff(refusal);
+    if (off) return off;
     if (res.status === 404) return err("NOT_FOUND", "event_not_found");
     if (res.status === 403) return forbidden(refusal);
     if (res.status === 409) {

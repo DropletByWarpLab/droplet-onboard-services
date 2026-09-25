@@ -133,6 +133,10 @@ describe("search_calendar_events", () => {
     const down = orchestratorCtx();
     down.get.mockResolvedValueOnce(json(503, {}));
     expect(await searchEvents.handler({ query: "x" }, down.ctx)).toMatchObject({ ok: false, error: { code: "SEARCH_FAILED" } });
+
+    const off = orchestratorCtx();
+    off.get.mockResolvedValueOnce(json(404, { error: "module_disabled", module: "calendar" }));
+    expect(await searchEvents.handler({ query: "x" }, off.ctx)).toMatchObject({ ok: false, error: { code: "MODULE_DISABLED" } });
   });
 
   it("metadata: Tier-1 read-only, query required, no extra args", () => {

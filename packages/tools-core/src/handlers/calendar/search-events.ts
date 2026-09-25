@@ -13,7 +13,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { parseModelDate } from "./_dates.js";
-import { err, forbidden, invalid, refusalOf, toolEvent, type EventJson } from "./_route.js";
+import { err, forbidden, invalid, refusalOf, switchedOff, toolEvent, type EventJson } from "./_route.js";
 
 const inputSchema = {
   type: "object",
@@ -64,7 +64,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     const refusal = await refusalOf(res);
     if (res.status === 403) return forbidden(refusal);
     if (res.status === 400) return invalid(refusal);
-    return err("SEARCH_FAILED", `orchestrator returned ${res.status}`);
+    return switchedOff(refusal) ?? err("SEARCH_FAILED", `orchestrator returned ${res.status}`);
   }
   const { events } = (await res.json()) as { events: EventJson[] };
 

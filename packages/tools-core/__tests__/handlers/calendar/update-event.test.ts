@@ -32,6 +32,8 @@ describe("update_event", () => {
   // event it is, whether it is local, and the range after the patch.
   it.each([
     [404, { error: "event_not_found" }, "NOT_FOUND"],
+    // The Calendar module gate: switched off is not "no such event".
+    [404, { error: "module_disabled", module: "calendar" }, "MODULE_DISABLED"],
     [403, { error: "forbidden" }, "FORBIDDEN"],
     [403, { error: "forbidden_tool_for_role", tool: "update_event" }, "FORBIDDEN"],
     [409, { error: "cannot modify externally-synced event" }, "EXTERNAL_SOURCE"],

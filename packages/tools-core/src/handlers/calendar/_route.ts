@@ -39,6 +39,18 @@ export async function refusalOf(res: Response): Promise<RouteRefusal> {
 }
 
 /**
+ * `/api/calendar` sits behind the Calendar module gate (the orchestrator's
+ * module-mounts.ts): switched off, it answers 404 `module_disabled`. That is
+ * "this part of Droplet is off", not "no such event" — say so. `null` for any
+ * other refusal.
+ */
+export function switchedOff(refusal: RouteRefusal): ToolResult | null {
+  return refusal.error === "module_disabled"
+    ? err("MODULE_DISABLED", "The calendar is switched off on this Droplet.")
+    : null;
+}
+
+/**
  * A 403. `forbidden` is the route's "not your event"; the other two are the
  * acting-user check (services/tool-acting-user.service.ts in the orchestrator).
  */

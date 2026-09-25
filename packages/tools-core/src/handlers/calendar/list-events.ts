@@ -11,7 +11,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { parseModelDate } from "./_dates.js";
-import { err, forbidden, refusalOf, toolEvent, type EventJson } from "./_route.js";
+import { err, forbidden, refusalOf, switchedOff, toolEvent, type EventJson } from "./_route.js";
 
 const inputSchema = {
   type: "object",
@@ -34,8 +34,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const res = await ctx.http.orchestrator.get(`/api/calendar/events?${qs}`, {
     headers: { Accept: "application/json" },
   });
-  if (res.status === 403) return forbidden(await refusalOf(res));
-  if (!res.ok) return err("LIST_FAILED", `orchestrator returned ${res.status}`);
+  if (!res.ok) {
+    const refusal = await refusalOf(res);
+    if (res.status === 403) return forbidden(refusal);
+    return switchedOff(refusal) ?? err("LIST_FAILED", `orchestrator returned ${res.status}`);
+  }
   const { events } = (await res.json()) as { events: EventJson[] };
   return {
     ok: true,

@@ -79,5 +79,10 @@ describe("list_events", () => {
     const down = orchestratorCtx();
     down.get.mockResolvedValueOnce(json(500, {}));
     expect(await listEvents.handler({}, down.ctx)).toMatchObject({ ok: false, error: { code: "LIST_FAILED" } });
+
+    // The Calendar module gate answers 404 module_disabled: say it is off.
+    const off = orchestratorCtx();
+    off.get.mockResolvedValueOnce(json(404, { error: "module_disabled", module: "calendar" }));
+    expect(await listEvents.handler({}, off.ctx)).toMatchObject({ ok: false, error: { code: "MODULE_DISABLED" } });
   });
 });

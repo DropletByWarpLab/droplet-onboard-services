@@ -86,6 +86,16 @@ describe("create_event", () => {
     expect(r).toMatchObject({ ok: false, error: { code: "INVALID_ARGS", message: "invalid description" } });
   });
 
+  it("the Calendar module switched off (404 module_disabled) says so", async () => {
+    const o = orchestratorCtx();
+    o.post.mockResolvedValueOnce(json(404, { error: "module_disabled", module: "calendar" }));
+    const r = await createEvent.handler(
+      { title: "x", starts_at: "2026-04-01T12:00:00Z", ends_at: "2026-04-01T13:00:00Z" },
+      o.ctx,
+    );
+    expect(r).toMatchObject({ ok: false, error: { code: "MODULE_DISABLED" } });
+  });
+
   it("any other failure is CREATE_FAILED, whatever the body", async () => {
     const o = orchestratorCtx();
     o.post.mockResolvedValueOnce(new Response("<html>bad gateway</html>", { status: 502 }));
