@@ -5,8 +5,9 @@
  * real. Pinned: each read is a GET of its one path with a timeout signal (a
  * TV cannot afford a request that never answers — it would stall its SWR key
  * for good); route 17's counts are validated so the wall never draws a number
- * it was not given; `session.endsAt` is taken only when it is a real time; and
- * the camera check is a GET that is aborted as soon as its status is read.
+ * it was not given; `session.endsAt` is taken only when it is a real time;
+ * the camera list is this viewer's, and a disconnected camera system is never
+ * read as "no cameras"; and a camera's picture bypasses the HTTP cache.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -14,10 +15,11 @@ const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
 import {
-  getBirdseyeStatus,
   getSecurityIncidentCounts,
   getSecurityWallHealth,
   getSignInEndsAt,
+  getWallCameraSnapshot,
+  getWallCameras,
   getWallModules,
   signInEndsAtOf,
 } from "@/lib/api";
@@ -136,21 +138,63 @@ describe("getWallModules", () => {
   });
 });
 
-describe("getBirdseyeStatus", () => {
-  it("a GET whose status is read off the headers, then aborted — never HEAD", async () => {
-    mockFetch.mockResolvedValue({ ok: false, status: 404, headers: new Headers() });
-    await expect(getBirdseyeStatus()).resolves.toBe(404);
-    const [url, init] = lastCall();
-    expect(url).toBe("/api/cameras/birdseye/live");
-    expect(init.method ?? "GET").toBe("GET");
-    expect(init.signal!.aborted).toBe(true);
+describe("getWallCameras (GET /api/cameras, narrowed to this viewer's grants by the server)", () => {
+  it("GETs the list with a timeout and returns it as given", async () => {
+    const cameras = [{ name: "till", displayName: "Till", status: "recording", enabled: true }];
+    mockFetch.mockResolvedValue(reply(200, { cameras }));
+    await expect(getWallCameras()).resolves.toEqual(cameras);
+    expect(lastCall()[0]).toBe("/api/cameras");
+    expect(lastCall()[1].method ?? "GET").toBe("GET");
+    expect(lastCall()[1].signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("the caller's signal aborting abandons the check", async () => {
-    mockFetch.mockImplementation(hangsUntilAborted);
-    const ctrl = new AbortController();
-    const pending = getBirdseyeStatus(ctrl.signal);
-    ctrl.abort();
-    await expect(pending).rejects.toBeTruthy();
+  it("the camera system disconnected: its empty list throws — it does not mean 'no cameras'", async () => {
+    mockFetch.mockResolvedValue(reply(200, { cameras: [], _status: "disconnected" }));
+    await expect(getWallCameras()).rejects.toMatchObject({ code: "CAMERAS_DISCONNECTED" });
+  });
+
+  it.each([
+    ["no list", {}],
+    ["a list of the wrong shape", { cameras: [{ displayName: "Till" }] }],
+    ["not an array", { cameras: "till" }],
+  ])("%s throws", async (_why, body) => {
+    mockFetch.mockResolvedValue(reply(200, body));
+    await expect(getWallCameras()).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+  });
+
+  it("a 404 (Cameras not open to this viewer) throws with its status", async () => {
+    mockFetch.mockResolvedValue(reply(404, { error: { code: "NOT_FOUND", message: "x" } }));
+    await expect(getWallCameras()).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("getWallCameraSnapshot", () => {
+  it("GETs one camera's latest picture at 720 px, past the HTTP cache, with a timeout — and hands back the image", async () => {
+    const jpeg = new Blob(["jpeg"], { type: "image/jpeg" });
+    mockFetch.mockResolvedValue({ ok: true, status: 200, blob: () => Promise.resolve(jpeg), headers: new Headers() });
+    await expect(getWallCameraSnapshot("back door")).resolves.toBe(jpeg);
+    const [url, init] = lastCall();
+    expect(url).toBe("/api/cameras/back%20door/snapshot?h=720");
+    expect(init.method ?? "GET").toBe("GET");
+    expect(init.cache).toBe("no-store");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("anything but 2xx rejects with its status — never an empty picture", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 502, blob: () => Promise.resolve(new Blob()), headers: new Headers() });
+    await expect(getWallCameraSnapshot("till")).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("a hung picture is given up after 20 s (a TIMEOUT error)", async () => {
+    vi.useFakeTimers();
+    try {
+      mockFetch.mockImplementation(hangsUntilAborted);
+      const pending = getWallCameraSnapshot("till");
+      const assertion = expect(pending).rejects.toMatchObject({ code: "TIMEOUT", status: 0 });
+      await vi.advanceTimersByTimeAsync(20_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -30,12 +30,19 @@ export const WALL_COPY = {
   exitFullScreen: "Leave full screen",
   stripLabel: "Security status",
 
-  camerasAlt: "Live view of the cameras",
   camerasConnecting: "Connecting to the cameras…",
-  // One line for "not enabled" and "not yours": the server makes the two the same answer (WARP-2982).
-  camerasUnavailable: "The combined camera view isn't available here.",
-  camerasLost: "The camera view isn't coming through.",
+  // No camera granted to this account (or Cameras not open to it): the account is the fix, not the box.
+  camerasNone: "This account can't see any cameras yet",
+  camerasNoneBody: "Someone who manages Droplet can choose which cameras it shows, on the Users page.",
+  camerasLost: "The camera list isn't coming through.",
   camerasLostBody: "Droplet keeps trying. The status below still updates.",
+  // One tile per camera; {camera} is the name the household gave it.
+  tileAlt: "{camera}, latest picture",
+  tileConnecting: "Connecting…",
+  tileLost: "No picture yet. Droplet keeps trying.",
+  tileStale: "Picture from {time}",
+  tileNotSending: "Not sending pictures",
+  tileOff: "Turned off",
 
   modeLabel: "Site mode",
   modeUnknown: "Can't tell right now",
@@ -95,12 +102,20 @@ export function wallRunsFor(role: string | null | undefined): boolean {
 export const WALL_STALE_AFTER_MS = 45_000;
 /** The sign-out warning shows in the sign-in's last half hour. */
 export const WALL_SESSION_WARN_MS = 30 * 60_000;
-/** A live composite reconnects this often: a clean upstream end freezes the last frame with no error, so only a reconnect bounds it. */
-export const CAMERA_RECONNECT_MS = 5 * 60_000;
-/** After a 404 (not enabled, or not this viewer's) the composite is asked about again this often. */
-export const CAMERA_UNAVAILABLE_RECHECK_MS = 10 * 60_000;
+/** A camera tile's picture older than this (five missed 3 s asks) is dimmed under its own time: never drawn as current. */
+export const WALL_TILE_STALE_AFTER_MS = 15_000;
 /** The render clock: "Updated", staleness and the sign-out warning are re-judged this often. */
 export const WALL_TICK_MS = 5_000;
+
+/**
+ * The camera tiles' grid on a TV: the nearest square that holds them, wider
+ * than tall (1 → 1×1, 2 → 2×1, 3–4 → 2×2, 5–6 → 3×2, 7–9 → 3×3, 10–12 → 4×3),
+ * so every tile fits the space the strip leaves and none is off screen.
+ */
+export function tileGrid(n: number): { cols: number; rows: number } {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+  return { cols, rows: Math.max(1, Math.ceil(n / cols)) };
+}
 
 /**
  * What each /security health row is to the wall. Only event SOURCES count in

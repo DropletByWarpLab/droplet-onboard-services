@@ -1,140 +1,168 @@
 "use client";
 
 /**
- * WARP-2981 (ADR-059 P6, §3.8) — the wall's camera composite: Frigate's
- * birdseye (WARP-1918), through the same route /cameras/birdseye plays, left
- * running for hours.
+ * WARP-2981 (ADR-059 P6, §3.8) — the wall's cameras: one tile for each camera
+ * the signed-in person may see, and for nothing else.
  *
- *   waiting ─(allowed)─▶ checking ─ 2xx ─▶ live ─(5 min)─▶ live, reconnected
- *      │                    │ ▲            │
- *      │                    │ └── retry ── lost ◀─ <img> error
- *      │                    ├── any other status, a timeout, no answer ─▶ lost
- *      │                    └── 404 ─▶ unavailable ─(10 min)─▶ checking
- *      └─(not allowed / no camera system)─▶ off
+ * D6 (Stefan: "Member wall, own cameras"). The wall runs on a Staff account,
+ * never an owner's or admin's, so it cannot use Frigate's birdseye composite:
+ * that is all-or-nothing (WARP-2982), only a viewer who sees every camera gets
+ * it. Instead the tiles are exactly the list GET /api/cameras returns for this
+ * person — the server narrows it to their grants (DS-005) — in the list's
+ * order, each named as the household named it (`cameraLabelOf`, the feed's
+ * rule). Each tile asks its own camera's latest picture every 3 s
+ * (`useWallSnapshot`; the per-camera snapshot route checks the grant again).
  *
- * The check is a GET whose status is read off the headers before the request
- * is aborted (`getBirdseyeStatus`) — never HEAD, which a continuous stream
- * never answers. A 404 is one neutral line for "not enabled" and "not yours":
- * the composite is all-or-nothing, only a viewer who may see every camera gets
- * it (WARP-2982), and the server makes the two answers identical. `lost` is
- * retried on the wall's backoff (15 s, 30 s, 60 s, then every 2 min), and a
- * live stream reconnects every 5 min: a clean upstream end freezes the last
- * frame with no error, so only a reconnect bounds a frozen picture. The new
- * stream loads hidden under the old one and replaces it on its first frame
- * (`load`), so a reconnect never blanks the screen; one that has not loaded
- * by the next reconnect is replaced in turn (never more than two streams).
+ * A tile never presents a frozen picture as a current one:
+ *   · a camera turned off, or not sending pictures (`offline`/`idle` on the
+ *     list: no frames reach the camera system) is not asked at all and shows
+ *     no picture, only that;
+ *   · a picture older than 15 s (the snapshots are failing) stays, dimmed and
+ *     grey, under "Picture from {time}" — its own age;
+ *   · before the first picture: "Connecting…"; if that fails, "No picture
+ *     yet" while it keeps trying.
  *
- * Nothing is asked while `allowed` is not true: the page's modules read says
- * whether Cameras is open to this viewer, and every request to a gate that
- * refuses them would be a denial row. Every timer is a setTimeout cleared on
- * each transition and on unmount.
+ * Nothing is asked while the modules read has not said Security and Cameras
+ * are open to this person (every request to a gate that refuses them would be
+ * a denial row). The tiles fill the space the strip leaves on a TV (a
+ * near-square grid, `--cols` × `--rows`) and stack one per row on a phone.
  */
-import { useEffect, useState } from "react";
-import { VideoOff } from "lucide-react";
-import { getBirdseyeLiveUrl, getBirdseyeStatus } from "@/lib/api";
-import { wallRetryDelayMs } from "@/lib/hooks/useSecurity";
+import { useEffect, useState, type CSSProperties } from "react";
+import { TriangleAlert, VideoOff } from "lucide-react";
+import { cameraLabelOf, useWallSnapshot } from "@/lib/hooks/useSecurity";
+import type { CameraInfo } from "@/lib/types";
+import { fill } from "./ModeCard";
 import { COPY as FEED_COPY } from "./SecurityFeed";
-import { CAMERA_RECONNECT_MS, CAMERA_UNAVAILABLE_RECHECK_MS, WALL_COPY } from "./wall-status";
-
-export type WallCamerasState = "waiting" | "off" | "checking" | "live" | "unavailable" | "lost";
+import { WALL_COPY, WALL_TILE_STALE_AFTER_MS, tileGrid } from "./wall-status";
 
 export interface WallCamerasProps {
-  /** Whether Cameras is open to this viewer; null until the wall's modules read has answered. */
+  /** Whether Security and Cameras are both open to this viewer; null until the wall's modules read has answered. */
   allowed: boolean | null;
   /** /security/health says no camera system is set up (`camera_ingest: not_configured`). */
   noCameraSystem: boolean;
+  /** This viewer's cameras (GET /api/cameras); null until the list answers. */
+  cameras: CameraInfo[] | null;
+  /** The list's latest attempt failed. */
+  listFailed: boolean;
+  /** The wall's render clock (epoch ms): a tile's age is judged against it. */
+  now: number;
+  /** Formats a time for the wall (with the day when it is not today). */
+  time: (ms: number) => string;
 }
 
-export function WallCameras({ allowed, noCameraSystem }: WallCamerasProps) {
-  const ask = allowed === true && !noCameraSystem;
-  const [state, setState] = useState<WallCamerasState>("waiting");
-  // Bumped to ask again; `lost` counts its retries for the backoff.
-  const [check, setCheck] = useState(0);
-  const [retries, setRetries] = useState(0);
-  // The stream on screen, and the one replacing it while a reconnect loads (a new `src` is a new stream).
-  const [shown, setShown] = useState(0);
-  const [next, setNext] = useState<number | null>(null);
-  const asked = next ?? shown;
+/** A camera that is turned off or not sending pictures: never asked, never drawn with a picture. */
+function notSending(c: CameraInfo): "off" | "not_sending" | null {
+  if (c.enabled === false) return "off";
+  if (c.status === "offline" || c.status === "idle") return "not_sending";
+  return null;
+}
 
-  // Ask the route — whenever it may be asked and a (re)check is due.
+/** An object URL for the picture, revoked when it is replaced or the tile goes. */
+function useObjectUrl(blob: Blob | null): string | null {
+  const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
-    if (!ask) {
-      setState(allowed === null ? "waiting" : "off");
+    if (blob === null) {
+      setUrl(null);
       return;
     }
-    const ctrl = new AbortController();
-    setState("checking");
-    getBirdseyeStatus(ctrl.signal).then(
-      (status) => {
-        if (ctrl.signal.aborted) return;
-        if (status >= 200 && status < 300) {
-          setRetries(0);
-          setNext(null);
-          setState("live");
-        } else {
-          setState(status === 404 ? "unavailable" : "lost");
-        }
-      },
-      () => {
-        if (!ctrl.signal.aborted) setState("lost");
-      },
-    );
-    return () => ctrl.abort();
-  }, [ask, allowed, check]);
+    const u = URL.createObjectURL(blob);
+    setUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [blob]);
+  return url;
+}
 
-  // The timers each state owns.
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    if (state === "live") timer = setTimeout(() => setNext(asked + 1), CAMERA_RECONNECT_MS);
-    if (state === "unavailable") timer = setTimeout(() => setCheck((c) => c + 1), CAMERA_UNAVAILABLE_RECHECK_MS);
-    if (state === "lost") {
-      timer = setTimeout(() => {
-        setRetries((r) => r + 1);
-        setCheck((c) => c + 1);
-      }, wallRetryDelayMs(retries + 1));
-    }
-    return () => {
-      if (timer !== null) clearTimeout(timer);
-    };
-  }, [state, asked, retries]);
+export type WallTileState = "connecting" | "live" | "stale" | "lost" | "off" | "not_sending";
 
-  if (state === "live") {
-    const stream = (g: number) => `${getBirdseyeLiveUrl()}?w=${g}`;
+function WallTile({ camera, now, time }: { camera: CameraInfo; now: number; time: (ms: number) => string }) {
+  const quiet = notSending(camera);
+  // Not asked when quiet, so no picture at all: SWR has no data for a null key.
+  const { picture, failed } = useWallSnapshot(quiet === null ? camera.name : null);
+  const src = useObjectUrl(picture?.value ?? null);
+  const label = cameraLabelOf(camera);
+
+  const state: WallTileState =
+    quiet ?? (picture === null ? (failed ? "lost" : "connecting") : now - picture.at > WALL_TILE_STALE_AFTER_MS ? "stale" : "live");
+  const line =
+    state === "off"
+      ? WALL_COPY.tileOff
+      : state === "not_sending"
+        ? WALL_COPY.tileNotSending
+        : state === "lost"
+          ? WALL_COPY.tileLost
+          : state === "connecting"
+            ? WALL_COPY.tileConnecting
+            : state === "stale"
+              ? fill(WALL_COPY.tileStale, { time: time(picture!.at) })
+              : null;
+
+  return (
+    <figure className={state === "stale" ? "sec-wall-tile is-stale" : "sec-wall-tile"} data-state={state} data-camera={camera.name}>
+      <div className="sec-wall-tile-frame" aria-busy={state === "connecting"}>
+        {src !== null ? (
+          <img src={src} alt={fill(WALL_COPY.tileAlt, { camera: label })} />
+        ) : (
+          state !== "connecting" && <VideoOff size={32} aria-hidden="true" />
+        )}
+      </div>
+      <figcaption>
+        <span className="sec-wall-tile-name">{label}</span>
+        {line !== null && (
+          <span className="sec-wall-tile-state">
+            {state === "stale" && (
+              <span className="badge warn sec-wall-badge" aria-hidden="true">
+                <TriangleAlert size={12} />
+              </span>
+            )}
+            {line}
+          </span>
+        )}
+      </figcaption>
+    </figure>
+  );
+}
+
+export function WallCameras({ allowed, noCameraSystem, cameras, listFailed, now, time }: WallCamerasProps) {
+  if (allowed === true && !noCameraSystem && cameras !== null && cameras.length > 0) {
+    const { cols, rows } = tileGrid(cameras.length);
     return (
       <div className="sec-wall-cameras">
-        <img key={shown} src={stream(shown)} alt={WALL_COPY.camerasAlt} onError={() => setState("lost")} />
-        {next !== null && (
-          <img
-            key={next}
-            src={stream(next)}
-            alt=""
-            aria-hidden="true"
-            className="is-pending"
-            onLoad={() => {
-              setShown(next);
-              setNext(null);
-            }}
-            onError={() => setState("lost")}
-          />
-        )}
+        <div className="sec-wall-tiles" style={{ "--cols": cols, "--rows": rows } as CSSProperties}>
+          {cameras.map((c) => (
+            <WallTile key={c.name} camera={c} now={now} time={time} />
+          ))}
+        </div>
       </div>
     );
   }
-  const busy = state === "waiting" || state === "checking";
-  const line =
-    state === "off" && noCameraSystem
-      ? FEED_COPY.emptyNoCameras
-      : state === "off" || state === "unavailable"
-        ? WALL_COPY.camerasUnavailable
-        : state === "lost"
-          ? WALL_COPY.camerasLost
-          : WALL_COPY.camerasConnecting;
+
+  // One note instead of the tiles.
+  const kind =
+    allowed === null
+      ? "connecting"
+      : noCameraSystem
+        ? "no-system"
+        : allowed === false || cameras?.length === 0
+          ? "none"
+          : listFailed
+            ? "lost"
+            : "connecting";
+  const busy = kind === "connecting";
   return (
-    <div className="sec-wall-cameras" aria-busy={busy} data-state={state}>
+    <div className="sec-wall-cameras" aria-busy={busy} data-state={kind}>
       <div className="sec-wall-cameras-note">
         {!busy && <VideoOff size={40} aria-hidden="true" />}
-        <p>{line}</p>
-        {state === "lost" && <p className="sec-wall-sub">{WALL_COPY.camerasLostBody}</p>}
+        <p>
+          {kind === "no-system"
+            ? FEED_COPY.emptyNoCameras
+            : kind === "none"
+              ? WALL_COPY.camerasNone
+              : kind === "lost"
+                ? WALL_COPY.camerasLost
+                : WALL_COPY.camerasConnecting}
+        </p>
+        {kind === "none" && <p className="sec-wall-sub">{WALL_COPY.camerasNoneBody}</p>}
+        {kind === "lost" && <p className="sec-wall-sub">{WALL_COPY.camerasLostBody}</p>}
       </div>
     </div>
   );

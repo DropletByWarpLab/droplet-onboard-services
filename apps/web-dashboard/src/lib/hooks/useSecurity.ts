@@ -34,6 +34,8 @@ import {
   getSecurityIncidentCounts,
   getSecurityWallHealth,
   getSignInEndsAt,
+  getWallCameraSnapshot,
+  getWallCameras,
   getWallModules,
   getSecurityHours,
   getSecurityMode,
@@ -131,9 +133,14 @@ export function useSecurityHealth() {
  * `/api/cameras` cache with the cameras pages. That list is already filtered
  * to the viewer's grants, as the feed is, so it names nothing the feed hides.
  */
+/** The name the household gave a camera, else its Frigate name. The feed's and the wall's (WARP-2981) one rule. */
+export function cameraLabelOf(c: Pick<CameraInfo, "name" | "displayName">): string {
+  return c.displayName || c.name;
+}
+
 export function useCameraDisplayNames(): (name: string) => string {
   const { data } = useSWR<CameraInfo[]>("/api/cameras", fetchCameras);
-  const byName = useMemo(() => new Map((data ?? []).map((c) => [c.name, c.displayName || c.name])), [data]);
+  const byName = useMemo(() => new Map((data ?? []).map((c) => [c.name, cameraLabelOf(c)])), [data]);
   return useCallback((name: string) => byName.get(name) ?? name, [byName]);
 }
 
@@ -316,10 +323,22 @@ export const WALL_KEY = "security-wall";
 export const WALL_REFRESH_MS = 15_000;
 export const WALL_MODULES_REFRESH_MS = 120_000;
 export const WALL_SESSION_REFRESH_MS = 300_000;
+/** Each camera tile asks for its camera's latest picture this often (the /cameras grid's 2 s, eased for a TV left on for hours). */
+export const WALL_TILE_REFRESH_MS = 3_000;
 
-/** 15 s, 30 s, 60 s, then 120 s for good (SWR's retryCount starts at 1). */
+/** Doubling from `firstMs`, never past 2 min (SWR's retryCount starts at 1). */
+function backoffMs(firstMs: number, retryCount: number): number {
+  return Math.min(120_000, firstMs * 2 ** Math.max(0, retryCount - 1));
+}
+
+/** 15 s, 30 s, 60 s, then 120 s for good. */
 export function wallRetryDelayMs(retryCount: number): number {
-  return Math.min(120_000, 15_000 * 2 ** Math.max(0, retryCount - 1));
+  return backoffMs(15_000, retryCount);
+}
+
+/** A camera tile starts from its own cadence: 3 s, 6 s, 12 s … then 120 s for good. */
+export function tileRetryDelayMs(retryCount: number): number {
+  return backoffMs(WALL_TILE_REFRESH_MS, retryCount);
 }
 
 /** SWR `onErrorRetry`: every error, on `wallRetryDelayMs`. */
@@ -386,6 +405,12 @@ export function WallModulesKeeper(): null {
 export interface SecurityWallState {
   /** Null until the wall's modules read has answered: nothing else is asked before. */
   access: { security: boolean; cameras: boolean } | null;
+  /**
+   * The cameras this viewer may see (GET /api/cameras, narrowed to their
+   * grants by the server), asked only when Security and Cameras are both open
+   * to them; null until it answers. `failed`: its latest attempt failed.
+   */
+  cameras: { list: CameraInfo[] | null; failed: boolean };
   counts: SecurityIncidentCounts | null;
   sources: SecurityHealthRow[] | null;
   mode: SecurityModeView | null;
@@ -416,6 +441,7 @@ export function useSecurityWall(): SecurityWallState {
   const counts = useSWR<Heard<SecurityIncidentCounts>>(on ? [WALL_KEY, "counts"] : null, heard(() => getSecurityIncidentCounts()), WALL_SWR);
   const health = useSWR<Heard<{ sources: SecurityHealthRow[] }>>(on ? [WALL_KEY, "health"] : null, heard(() => getSecurityWallHealth()), WALL_SWR);
   const mode = useSWR<Heard<SecurityModeView>>(on ? [WALL_KEY, "mode"] : null, heard(() => getSecurityMode()), WALL_SWR);
+  const cameras = useSWR<CameraInfo[]>(on && access?.cameras === true ? [WALL_KEY, "cameras"] : null, () => getWallCameras(), WALL_SWR);
   const session = useSWR<string | null>([WALL_KEY, "session"], () => getSignInEndsAt(), {
     ...WALL_SWR,
     refreshInterval: WALL_SESSION_REFRESH_MS,
@@ -423,6 +449,7 @@ export function useSecurityWall(): SecurityWallState {
 
   return {
     access,
+    cameras: { list: cameras.data ?? null, failed: Boolean(cameras.error) },
     counts: counts.data?.value ?? null,
     sources: health.data?.value.sources ?? null,
     mode: mode.data?.value ?? null,
@@ -440,6 +467,33 @@ export function useSecurityWall(): SecurityWallState {
       mode: Boolean(mode.error),
     },
   };
+}
+
+/** SWR `onErrorRetry` for a camera tile: every error, on the backoff from its own cadence. */
+function tileOnErrorRetry(
+  _err: unknown,
+  _key: unknown,
+  _config: unknown,
+  revalidate: Revalidator,
+  opts: Required<RevalidatorOptions>,
+): void {
+  setTimeout(() => void revalidate(opts), tileRetryDelayMs(opts.retryCount));
+}
+
+/**
+ * One wall tile's picture: its camera's latest snapshot every 3 s, with the
+ * time it arrived (`at`, cached with it — a tile judges its own staleness by
+ * it), retried on the tile backoff whatever the error. `name: null` asks
+ * nothing: a camera that is turned off or not sending pictures is not asked
+ * (its last frame would be a frozen one).
+ */
+export function useWallSnapshot(name: string | null) {
+  const { data, error } = useSWR<Heard<Blob>>(name === null ? null : [WALL_KEY, "snapshot", name], heard(() => getWallCameraSnapshot(name!)), {
+    ...WALL_SWR,
+    refreshInterval: WALL_TILE_REFRESH_MS,
+    onErrorRetry: tileOnErrorRetry,
+  });
+  return { picture: data ?? null, failed: Boolean(error) };
 }
 
 // ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like ──

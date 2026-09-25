@@ -8,6 +8,8 @@
  *     answered, nor when Security is not open to this person (each such read
  *     would be a feature-gate denial, which the threat mirror shows as a
  *     "threat");
+ *   · this person's camera list is asked only when Security AND Cameras are
+ *     open to them (D6: the wall's tiles are exactly that list);
  *   · every key is the wall's own (`["security-wall", …]`), never /security's;
  *   · every modules answer is mirrored into the nav gate's shared key;
  *   · a failed read is retried — a 404 included — and its success clears it;
@@ -26,6 +28,7 @@ const api = vi.hoisted(() => ({
   getSecurityWallHealth: vi.fn(),
   getSecurityMode: vi.fn(),
   getSignInEndsAt: vi.fn(),
+  getWallCameras: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (orig) => ({
@@ -43,6 +46,7 @@ const NARROWED = { modules: ON.modules, effectiveForUser: [{ moduleId: "cameras"
 const COUNTS = { openAlerts: 1, openNotices: 2 };
 const SOURCES = { sources: [{ id: "camera_ingest", state: "ok", detail: "Listening", lastSeenAt: null }] };
 const MODE = { mode: "closed", source: "schedule" };
+const CAMERAS = [{ name: "till", displayName: "Till", status: "recording", enabled: true }];
 
 let cache: Map<string, unknown>;
 function wrapper({ children }: { children: ReactNode }) {
@@ -54,7 +58,10 @@ function status(n: number): Error {
 }
 
 const securityCalls = () =>
-  api.getSecurityIncidentCounts.mock.calls.length + api.getSecurityWallHealth.mock.calls.length + api.getSecurityMode.mock.calls.length;
+  api.getSecurityIncidentCounts.mock.calls.length +
+  api.getSecurityWallHealth.mock.calls.length +
+  api.getSecurityMode.mock.calls.length +
+  api.getWallCameras.mock.calls.length;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -64,6 +71,7 @@ beforeEach(() => {
   api.getSecurityWallHealth.mockResolvedValue(SOURCES);
   api.getSecurityMode.mockResolvedValue(MODE);
   api.getSignInEndsAt.mockResolvedValue(null);
+  api.getWallCameras.mockResolvedValue(CAMERAS);
 });
 
 afterEach(() => vi.useRealTimers());
@@ -83,6 +91,24 @@ describe("useSecurityWall — gated on its own modules read (T-D6)", () => {
     expect(result.current.sources).toEqual(SOURCES.sources);
     expect(result.current.mode).toEqual(MODE);
     expect(result.current.access).toEqual({ security: true, cameras: true });
+    await waitFor(() => expect(result.current.cameras).toEqual({ list: CAMERAS, failed: false }));
+  });
+
+  it("Cameras not open to this person: the Security reads, but never their camera list", async () => {
+    api.getWallModules.mockResolvedValue({ modules: [{ id: "security", effective: true }, { id: "cameras", effective: false }] });
+    const { result } = renderHook(() => useSecurityWall(), { wrapper });
+    await waitFor(() => expect(result.current.counts).toEqual(COUNTS));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(api.getWallCameras).not.toHaveBeenCalled();
+    expect(result.current.cameras).toEqual({ list: null, failed: false });
+  });
+
+  it("a camera list that fails before it ever answered says so", async () => {
+    api.getWallCameras.mockRejectedValue(status(503));
+    const { result } = renderHook(() => useSecurityWall(), { wrapper });
+    await waitFor(() => expect(result.current.cameras).toEqual({ list: null, failed: true }));
   });
 
   it.each([
@@ -109,6 +135,9 @@ describe("useSecurityWall — gated on its own modules read (T-D6)", () => {
     expect(own.every((k) => k.includes('"security-wall"'))).toBe(true);
     expect(keys).not.toContain("/api/security/health");
     expect(keys).not.toContain("/api/security/mode");
+    // Not the cameras pages' shared list either: an owner's cached list in this tab must never become the wall's tiles.
+    expect(keys).not.toContain("/api/cameras");
+    expect(own.some((k) => k.includes('"cameras"'))).toBe(true);
     expect((cache.get(MODULE_GATE_KEY) as { data?: unknown } | undefined)?.data).toEqual(ON);
   });
 

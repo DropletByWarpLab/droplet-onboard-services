@@ -3,19 +3,22 @@
 /**
  * WARP-2981 (ADR-059 P6, §3.8) — /security/wall: the Security wall for a TV.
  *
- * Frigate's birdseye composite above a status strip — the site mode, what
- * needs attention, and which sources are not reporting. Read-only, no
- * navigation (AuthGate renders no shell here), signed in as an ordinary
- * person: every number is that person's own DS-005 projection, read from the
- * routes /security already uses (useSecurityWall). Nothing here writes, and
- * nothing names a person.
+ * A tile for each camera the signed-in person may see, above a status strip
+ * — the site mode, what needs attention, and which sources are not reporting.
+ * Read-only, no navigation (AuthGate renders no shell here), signed in as a
+ * Staff account — never an owner or admin (D6, Stefan: "Member wall, own
+ * cameras"; AuthGate refuses those before this renders): every number and
+ * every camera is that person's own DS-005 projection, read from the routes
+ * /security and /cameras already use (useSecurityWall). Nothing here writes,
+ * and nothing names a person.
  *
  * Built for twelve unattended hours: every read polls and retries on a capped
  * backoff; the strip says when it last heard from Droplet and dims under a
  * banner once that is more than 45 s ago (or the screen is offline) instead of
  * freezing; no value is drawn before its first answer (an em dash, never a 0);
- * the composite reconnects itself; and in the sign-in's last half hour a
- * banner says the screen will be signed out.
+ * each camera tile keeps asking and shows its picture's age once it is old;
+ * and in the sign-in's last half hour a banner says the screen will be
+ * signed out.
  *
  * Always dark (a TV in a room, often at night): the `.droplet-shell` root sits
  * inside a `.dark` element, so the shell's dark ramp resolves whatever the
@@ -130,6 +133,10 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
         <WallCameras
           allowed={wall.access === null ? null : wall.access.security && wall.access.cameras}
           noCameraSystem={cameraIngest?.state === "not_configured"}
+          cameras={wall.cameras.list}
+          listFailed={wall.cameras.failed}
+          now={now}
+          time={time}
         />
 
         <div className="sec-wall-banners">

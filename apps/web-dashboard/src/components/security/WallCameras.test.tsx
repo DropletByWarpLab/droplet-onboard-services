@@ -1,50 +1,78 @@
 /**
- * WARP-2981 (ADR-059 P6) — the wall's camera composite (T-D8).
+ * WARP-2981 (ADR-059 P6, D6 — Stefan: "Member wall, own cameras") — the
+ * wall's camera tiles (T-D8).
  *
- * `authFetch` is mocked one layer under `getBirdseyeStatus`, so what is pinned
- * is the request the page really makes: a GET (never HEAD — a continuous MJPEG
- * stream never answers one) whose signal is aborted as soon as the status is
- * read, and only when the viewer may ask at all. Then the state machine:
- * live and reconnecting every 5 min (the old frame kept until the new stream's
- * first one), a 404's one neutral line re-asked every 10 min, anything else
- * lost and retried on the wall's backoff, and nothing left running after
- * unmount.
+ * `authFetch` is mocked one layer under `getWallCameraSnapshot`, so what is
+ * pinned is what the TV really asks for: one camera's latest picture, for the
+ * cameras the list gave and no other (DS-005), never for a camera that is
+ * turned off or not sending pictures (its last frame would be a frozen one).
+ * Then each tile's own clock: live, stale after 15 s under its own time
+ * (dimmed, never drawn as current), "No picture yet" while it keeps trying,
+ * a fresh picture every 3 s, and nothing left asking after unmount.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { SWRConfig } from "swr";
+import type { ReactNode } from "react";
 
 const h = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ authFetch: h.authFetch, useAuth: () => ({ user: null }) }));
 
-import { WallCameras } from "./WallCameras";
+import { WallCameras, type WallCamerasProps } from "./WallCameras";
 import { COPY as FEED_COPY } from "./SecurityFeed";
 import { WALL_COPY } from "./wall-status";
+import type { CameraInfo } from "@/lib/types";
 
-const URL = "/api/cameras/birdseye/live";
-const answer = (status: number) => Promise.resolve({ status, ok: status >= 200 && status < 300 });
+const cam = (name: string, over: Partial<CameraInfo> = {}): CameraInfo => ({
+  name,
+  displayName: "",
+  manufacturer: null,
+  model: null,
+  ipAddress: "10.0.0.2",
+  macAddress: null,
+  enabled: true,
+  autoDiscovered: false,
+  status: "recording",
+  lastSeen: "2026-09-25T20:00:00.000Z",
+  lastDetection: null,
+  ...over,
+});
 
-/** Let the check's promise chain settle inside act. */
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-  });
-}
+/** Paths answering 503; everything else a JPEG. */
+let failing: Set<string>;
+let objectUrls: number;
+
+const picturePaths = () =>
+  (h.authFetch.mock.calls as Array<[string, RequestInit]>).map(([url]) => url.split("?")[0]!);
+const asked = (name: string) => picturePaths().filter((p) => p === `/api/cameras/${name}/snapshot`).length;
+const tile = (name: string) => document.querySelector(`[data-camera="${name}"]`) as HTMLElement;
 
 async function advance(ms: number) {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
   });
-  await settle();
 }
 
-const img = () => screen.queryByAltText(WALL_COPY.camerasAlt) as HTMLImageElement | null;
-/** Every stream element in the composite, on screen or loading under it. */
-const streams = () => [...document.querySelectorAll(".sec-wall-cameras > img")].map((i) => i.getAttribute("src"));
-const pending = () => document.querySelector(".sec-wall-cameras > img.is-pending") as HTMLImageElement;
+function Wrap({ children }: { children: ReactNode }) {
+  return <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig>;
+}
+
+const time = (ms: number) => `T${new Date(ms).toISOString().slice(11, 19)}`;
+function props(over: Partial<WallCamerasProps>): WallCamerasProps {
+  return { allowed: true, noCameraSystem: false, cameras: null, listFailed: false, now: Date.now(), time, ...over };
+}
 
 beforeEach(() => {
-  vi.useFakeTimers();
-  h.authFetch.mockReset();
+  vi.useFakeTimers({ now: new Date("2026-09-25T21:00:00.000Z") });
+  failing = new Set();
+  objectUrls = 0;
+  URL.createObjectURL = vi.fn(() => `blob:picture-${++objectUrls}`);
+  URL.revokeObjectURL = vi.fn();
+  h.authFetch.mockReset().mockImplementation(async (url: string) => {
+    const path = url.split("?")[0]!;
+    const status = failing.has(path) ? 503 : 200;
+    return { ok: status === 200, status, blob: async () => new Blob(["jpeg"], { type: "image/jpeg" }), headers: new Headers() };
+  });
 });
 
 afterEach(() => {
@@ -52,157 +80,184 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("WallCameras — when it may ask", () => {
+describe("WallCameras — one note instead of tiles", () => {
   it("before the modules read answers: connecting, and no request", async () => {
-    const { container } = render(<WallCameras allowed={null} noCameraSystem={false} />);
+    const { container } = render(<WallCameras {...props({ allowed: null })} />, { wrapper: Wrap });
     await advance(60_000);
     expect(h.authFetch).not.toHaveBeenCalled();
     expect(screen.getByText(WALL_COPY.camerasConnecting)).toBeInTheDocument();
     expect(container.querySelector("[aria-busy='true']")).not.toBeNull();
   });
 
-  it("Cameras not open to this viewer: the neutral line, and no request (each would be a denial row)", async () => {
-    render(<WallCameras allowed={false} noCameraSystem={false} />);
-    await advance(20 * 60_000);
+  it("Cameras not open to this account: 'can't see any cameras yet', and no request", async () => {
+    render(<WallCameras {...props({ allowed: false })} />, { wrapper: Wrap });
+    await advance(60_000);
     expect(h.authFetch).not.toHaveBeenCalled();
-    expect(screen.getByText(WALL_COPY.camerasUnavailable)).toBeInTheDocument();
+    expect(screen.getByText(WALL_COPY.camerasNone)).toBeInTheDocument();
+    expect(screen.getByText(WALL_COPY.camerasNoneBody)).toBeInTheDocument();
+  });
+
+  it("an account with no cameras granted: the same empty state", async () => {
+    render(<WallCameras {...props({ cameras: [] })} />, { wrapper: Wrap });
+    await advance(60_000);
+    expect(h.authFetch).not.toHaveBeenCalled();
+    expect(screen.getByText(WALL_COPY.camerasNone)).toBeInTheDocument();
+    expect(document.querySelector("figure")).toBeNull();
   });
 
   it("no camera system: says so, and no request", async () => {
-    render(<WallCameras allowed={true} noCameraSystem={true} />);
+    render(<WallCameras {...props({ noCameraSystem: true, cameras: [cam("front")] })} />, { wrapper: Wrap });
     await advance(60_000);
     expect(h.authFetch).not.toHaveBeenCalled();
     expect(screen.getByText(FEED_COPY.emptyNoCameras)).toBeInTheDocument();
   });
-});
 
-describe("WallCameras — the check", () => {
-  it("is a GET whose signal is aborted once the status is read", async () => {
-    h.authFetch.mockReturnValue(answer(200));
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
-    expect(h.authFetch).toHaveBeenCalledTimes(1);
-    const [url, init] = h.authFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(URL);
-    expect(init.method ?? "GET").toBe("GET");
-    expect(init.signal).toBeInstanceOf(AbortSignal);
-    expect(init.signal!.aborted).toBe(true);
+  it("the list failing before it ever answered: 'isn't coming through', never 'can't see any cameras'", async () => {
+    render(<WallCameras {...props({ listFailed: true })} />, { wrapper: Wrap });
+    expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument();
+    expect(screen.queryByText(WALL_COPY.camerasNone)).toBeNull();
   });
 
-  it("a request that never answers is given up after 20 s — lost, not stuck on connecting", async () => {
-    h.authFetch.mockImplementation((_u: string, init: RequestInit) =>
-      new Promise((_resolve, reject) => init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))),
-    );
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await advance(19_999);
+  it("the list not answered yet: connecting", async () => {
+    render(<WallCameras {...props({})} />, { wrapper: Wrap });
     expect(screen.getByText(WALL_COPY.camerasConnecting)).toBeInTheDocument();
-    await advance(1);
-    expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument();
   });
 });
 
-describe("WallCameras — live", () => {
-  it("2xx → the composite, reconnected every 5 minutes — the old frame stays up until the new stream's first one", async () => {
-    h.authFetch.mockReturnValue(answer(200));
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
-    expect(streams()).toEqual([`${URL}?w=0`]);
-    await advance(5 * 60_000 - 1);
-    expect(streams()).toEqual([`${URL}?w=0`]);
-    await advance(1);
-    // The new stream loads hidden (and unnamed) under the one on screen: the picture never blanks.
-    expect(streams()).toEqual([`${URL}?w=0`, `${URL}?w=1`]);
-    expect(img()?.getAttribute("src")).toBe(`${URL}?w=0`);
-    expect(pending()).toHaveAttribute("aria-hidden", "true");
-    expect(pending()).toHaveAttribute("alt", "");
-    fireEvent.load(pending());
-    await settle();
-    expect(streams()).toEqual([`${URL}?w=1`]);
-    expect(img()?.getAttribute("src")).toBe(`${URL}?w=1`);
-    await advance(5 * 60_000);
-    fireEvent.load(pending());
-    await settle();
-    expect(streams()).toEqual([`${URL}?w=2`]);
-    // A reconnect is a new src, not another check.
-    expect(h.authFetch).toHaveBeenCalledTimes(1);
+describe("WallCameras — exactly this account's cameras (DS-005)", () => {
+  it("a tile for each camera on the list, in its order, named as the household named it — and pictures asked for those alone", async () => {
+    const cameras = [cam("back_door", { displayName: "Back door" }), cam("stock_room", { displayName: "Stock room" }), cam("yard_2")];
+    render(<WallCameras {...props({ cameras })} />, { wrapper: Wrap });
+    await advance(0);
+    const tiles = [...document.querySelectorAll("figure[data-camera]")];
+    expect(tiles.map((t) => t.getAttribute("data-camera"))).toEqual(["back_door", "stock_room", "yard_2"]);
+    expect(tiles.map((t) => t.querySelector(".sec-wall-tile-name")!.textContent)).toEqual(["Back door", "Stock room", "yard_2"]);
+    expect(new Set(picturePaths())).toEqual(new Set(["/api/cameras/back_door/snapshot", "/api/cameras/stock_room/snapshot", "/api/cameras/yard_2/snapshot"]));
+    expect(screen.getByAltText("Back door, latest picture")).toHaveAttribute("src", expect.stringMatching(/^blob:picture-\d+$/));
   });
 
-  it("a reconnect that never loads is replaced by the next one — never more than two streams, the old frame still up", async () => {
-    h.authFetch.mockReturnValue(answer(200));
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
-    await advance(5 * 60_000);
-    expect(streams()).toEqual([`${URL}?w=0`, `${URL}?w=1`]);
-    await advance(5 * 60_000);
-    expect(streams()).toEqual([`${URL}?w=0`, `${URL}?w=2`]);
-  });
-
-  it("a reconnect that fails → lost, like the stream on screen failing", async () => {
-    h.authFetch.mockReturnValue(answer(200));
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
-    await advance(5 * 60_000);
-    fireEvent.error(pending());
-    await settle();
-    expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument();
-    expect(streams()).toEqual([]);
-  });
-
-  it("the stream failing → lost, then checked again on the backoff", async () => {
-    h.authFetch.mockReturnValue(answer(200));
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
-    fireEvent.error(img()!);
-    await settle();
-    expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument();
-    expect(screen.getByText(WALL_COPY.camerasLostBody)).toBeInTheDocument();
-    await advance(15_000);
-    expect(h.authFetch).toHaveBeenCalledTimes(2);
-    expect(img()).not.toBeNull();
-  });
-});
-
-describe("WallCameras — not available, or lost", () => {
-  it("404 → the neutral line (never 'lost'), asked again only after 10 minutes", async () => {
-    h.authFetch.mockReturnValue(answer(404));
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
-    expect(screen.getByText(WALL_COPY.camerasUnavailable)).toBeInTheDocument();
-    expect(screen.queryByText(WALL_COPY.camerasLost)).toBeNull();
-    expect(img()).toBeNull();
-    await advance(10 * 60_000 - 1);
-    expect(h.authFetch).toHaveBeenCalledTimes(1);
-    await advance(1);
-    expect(h.authFetch).toHaveBeenCalledTimes(2);
+  it("each picture is a GET at 720 px that bypasses the HTTP cache, with a timeout", async () => {
+    render(<WallCameras {...props({ cameras: [cam("front")] })} />, { wrapper: Wrap });
+    await advance(0);
+    const [url, init] = h.authFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/cameras/front/snapshot?h=720");
+    expect(init.method ?? "GET").toBe("GET");
+    expect(init.cache).toBe("no-store");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it.each([
-    ["a 500", () => answer(500)],
-    ["a 502", () => answer(502)],
-    ["no answer at all", () => Promise.reject(new TypeError("Failed to fetch"))],
-  ])("%s → lost (not the 404 line), re-asked at 15 s then 30 s", async (_why, reply) => {
-    h.authFetch.mockImplementation(reply);
-    render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
-    expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument();
-    expect(screen.queryByText(WALL_COPY.camerasUnavailable)).toBeNull();
-    await advance(15_000 - 1);
-    expect(h.authFetch).toHaveBeenCalledTimes(1);
-    await advance(1);
-    expect(h.authFetch).toHaveBeenCalledTimes(2);
-    await advance(30_000 - 1);
-    expect(h.authFetch).toHaveBeenCalledTimes(2);
-    await advance(1);
-    expect(h.authFetch).toHaveBeenCalledTimes(3);
+    ["turned off", { enabled: false }, WALL_COPY.tileOff, "off"],
+    ["offline", { status: "offline" as const }, WALL_COPY.tileNotSending, "not_sending"],
+    ["idle (no frames)", { status: "idle" as const }, WALL_COPY.tileNotSending, "not_sending"],
+  ])("a camera %s: never asked, no picture — it says so", async (_why, over, line, state) => {
+    render(<WallCameras {...props({ cameras: [cam("front", { displayName: "Front", ...over }), cam("back", { displayName: "Back" })] })} />, {
+      wrapper: Wrap,
+    });
+    await advance(60_000);
+    expect(asked("front")).toBe(0);
+    expect(asked("back")).toBeGreaterThan(0);
+    expect(tile("front").querySelector("img")).toBeNull();
+    expect(tile("front")).toHaveTextContent(line);
+    expect(tile("front")).toHaveAttribute("data-state", state);
   });
 
-  it("unmounting stops everything: no more checks, no reconnects", async () => {
-    h.authFetch.mockReturnValue(answer(500));
-    const { unmount } = render(<WallCameras allowed={true} noCameraSystem={false} />);
-    await settle();
+  it("a camera that stops sending pictures drops its picture at once — no frozen frame", async () => {
+    const { rerender } = render(<WallCameras {...props({ cameras: [cam("front", { displayName: "Front" })] })} />, { wrapper: Wrap });
+    await advance(0);
+    expect(screen.getByAltText("Front, latest picture")).toBeInTheDocument();
+    const before = asked("front");
+    rerender(<WallCameras {...props({ cameras: [cam("front", { displayName: "Front", status: "offline" })] })} />);
+    await advance(30_000);
+    expect(screen.queryByAltText("Front, latest picture")).toBeNull();
+    expect(asked("front")).toBe(before);
+  });
+
+  it("lays the tiles out as the nearest square: 3 cameras → 2 × 2", async () => {
+    render(<WallCameras {...props({ cameras: [cam("a"), cam("b"), cam("c")] })} />, { wrapper: Wrap });
+    const grid = document.querySelector(".sec-wall-tiles") as HTMLElement;
+    expect(grid.style.getPropertyValue("--cols")).toBe("2");
+    expect(grid.style.getPropertyValue("--rows")).toBe("2");
+  });
+});
+
+describe("WallCameras — a tile's own clock", () => {
+  it("a new picture every 3 s; the one it replaces is let go", async () => {
+    render(<WallCameras {...props({ cameras: [cam("front")] })} />, { wrapper: Wrap });
+    await advance(0);
+    expect(asked("front")).toBe(1);
+    await advance(3_000);
+    expect(asked("front")).toBe(2);
+    await advance(3_000);
+    expect(asked("front")).toBe(3);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:picture-1");
+  });
+
+  it("pictures failing: live up to 15 s, then the last one stays — dimmed, grey, under its own time", async () => {
+    const t0 = Date.now();
+    const cameras = [cam("front", { displayName: "Front" })];
+    const { rerender } = render(<WallCameras {...props({ cameras, now: t0 })} />, { wrapper: Wrap });
+    await advance(0);
+    expect(tile("front")).toHaveAttribute("data-state", "live");
+    expect(tile("front").querySelector(".sec-wall-tile-state")).toBeNull();
+    failing.add("/api/cameras/front/snapshot");
+    await advance(15_000);
+    rerender(<WallCameras {...props({ cameras, now: t0 + 15_000 })} />);
+    expect(tile("front")).toHaveAttribute("data-state", "live");
+    rerender(<WallCameras {...props({ cameras, now: t0 + 15_001 })} />);
+    expect(tile("front")).toHaveAttribute("data-state", "stale");
+    expect(tile("front")).toHaveClass("is-stale");
+    expect(screen.getByAltText("Front, latest picture")).toBeInTheDocument();
+    expect(tile("front")).toHaveTextContent(`Picture from ${time(t0)}`);
+    expect(tile("front").querySelector(".badge.warn svg")).not.toBeNull();
+    // Answers again: live, no age.
+    failing.clear();
+    await advance(120_000);
+    rerender(<WallCameras {...props({ cameras, now: Date.now() })} />);
+    expect(tile("front")).toHaveAttribute("data-state", "live");
+    expect(tile("front")).not.toHaveClass("is-stale");
+  });
+
+  it("no picture yet and the first ask failed: 'No picture yet', then its retry — 3 s, 6 s, 12 s — brings it", async () => {
+    failing.add("/api/cameras/front/snapshot");
+    render(<WallCameras {...props({ cameras: [cam("front", { displayName: "Front" })] })} />, { wrapper: Wrap });
+    await advance(0);
+    expect(tile("front")).toHaveAttribute("data-state", "lost");
+    expect(tile("front")).toHaveTextContent(WALL_COPY.tileLost);
+    expect(tile("front").querySelector("img")).toBeNull();
+    await advance(3_000);
+    expect(asked("front")).toBe(2);
+    await advance(6_000);
+    expect(asked("front")).toBe(3);
+    failing.clear();
+    await advance(12_000);
+    expect(asked("front")).toBe(4);
+    expect(tile("front")).toHaveAttribute("data-state", "live");
+  });
+
+  it("the retries never back off past 2 minutes", async () => {
+    failing.add("/api/cameras/front/snapshot");
+    render(<WallCameras {...props({ cameras: [cam("front")] })} />, { wrapper: Wrap });
+    await advance(30 * 60_000);
+    const n = asked("front");
+    await advance(120_000);
+    expect(asked("front")).toBe(n + 1);
+  });
+
+  it("before the first picture: connecting, not a blank tile", async () => {
+    h.authFetch.mockImplementation(() => new Promise(() => {}));
+    render(<WallCameras {...props({ cameras: [cam("front")] })} />, { wrapper: Wrap });
+    await advance(1_000);
+    expect(tile("front")).toHaveAttribute("data-state", "connecting");
+    expect(tile("front")).toHaveTextContent(WALL_COPY.tileConnecting);
+  });
+
+  it("unmounting stops every tile asking", async () => {
+    const { unmount } = render(<WallCameras {...props({ cameras: [cam("front"), cam("back")] })} />, { wrapper: Wrap });
+    await advance(0);
     unmount();
-    await advance(60 * 60_000);
-    expect(h.authFetch).toHaveBeenCalledTimes(1);
-    expect(vi.getTimerCount()).toBe(0);
+    const n = h.authFetch.mock.calls.length;
+    await advance(10 * 60_000);
+    expect(h.authFetch.mock.calls.length).toBe(n);
   });
 });

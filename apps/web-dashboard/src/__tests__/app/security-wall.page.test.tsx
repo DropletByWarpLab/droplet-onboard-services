@@ -11,10 +11,13 @@
  *   · stale after 45 s, offline when the browser says so (a warning mark, the
  *     day when it is not today), the sign-out warning in the sign-in's last
  *     half hour — and a remount over a warm cache keeps the values' own time;
+ *   · the cameras are this account's own: a tile for each camera the list
+ *     gives (a Staff account with 2 of 4 cameras shows those 2), a picture
+ *     asked for those alone (D6, Stefan: "Member wall, own cameras");
  *   · the way out is always visible; Full screen only where the browser
  *     offers it;
- *   · every request is a GET to one of the six reads it is allowed (§4) —
- *     and no dashboard source can even name the rack panel's route (T-D13);
+ *   · every request is a GET to one of the reads it is allowed (§4) — and no
+ *     dashboard source can even name the rack panel's route (T-D13);
  *   · wall.css: tokens only, the strip on screen above 640 px, readable muted
  *     badges, and nothing 375 px wide scrolls sideways.
  */
@@ -27,16 +30,16 @@ import { join, relative, sep } from "node:path";
 import { PACKAGE_ROOT, packagePath } from "../helpers/test-paths";
 
 const h = vi.hoisted(() => ({ authFetch: vi.fn() }));
-vi.mock("@/lib/auth", () => ({ authFetch: h.authFetch, useAuth: () => ({ user: { id: "u1", role: "owner" } }) }));
+vi.mock("@/lib/auth", () => ({ authFetch: h.authFetch, useAuth: () => ({ user: { id: "u1", role: "family" } }) }));
 
 import SecurityWallPage from "@/app/security/wall/page";
 import { SecurityWall } from "@/components/security/SecurityWall";
 import { WALL_COPY } from "@/components/security/wall-status";
 import { COPY as MODE_COPY } from "@/components/security/ModeCard";
 import { COPY as FEED_COPY } from "@/components/security/SecurityFeed";
-import type { SecurityHealthRow, SecurityModeView } from "@/lib/types";
+import type { CameraInfo, SecurityHealthRow, SecurityModeView } from "@/lib/types";
 
-// ── the box, as the wall's six reads see it ────────────────────────────────
+// ── the box, as the wall's reads see it ────────────────────────────────────
 
 const MODULES_ON = { modules: [{ id: "security", effective: true }, { id: "cameras", effective: true }] };
 const MODE: SecurityModeView = {
@@ -59,7 +62,8 @@ interface Box {
   sources: SecurityHealthRow[];
   mode: SecurityModeView;
   me: unknown;
-  birdseye: number;
+  /** GET /api/cameras for this account — the server has already narrowed it to their grants. */
+  cameras: unknown;
   /** Paths that answer 503 instead. */
   down?: string[];
 }
@@ -71,8 +75,23 @@ const ALLOWED = [
   "/api/security/health",
   "/api/security/mode",
   "/api/auth/me",
-  "/api/cameras/birdseye/live",
+  "/api/cameras",
 ];
+const snapshot = (name: string) => `/api/cameras/${name}/snapshot`;
+const cam = (name: string, displayName: string, over: Partial<CameraInfo> = {}): CameraInfo => ({
+  name,
+  displayName,
+  manufacturer: null,
+  model: null,
+  ipAddress: "10.0.0.2",
+  macAddress: null,
+  enabled: true,
+  autoDiscovered: false,
+  status: "recording",
+  lastSeen: "2026-09-25T20:00:00.000Z",
+  lastDetection: null,
+  ...over,
+});
 
 function respond(url: string): unknown {
   const path = url.split("?")[0]!;
@@ -88,9 +107,10 @@ function respond(url: string): unknown {
       return { status: 200, body: box.mode };
     case "/api/auth/me":
       return { status: 200, body: box.me };
-    case "/api/cameras/birdseye/live":
-      return { status: box.birdseye, body: {} };
+    case "/api/cameras":
+      return { status: 200, body: box.cameras };
     default:
+      if (/^\/api\/cameras\/[^/]+\/snapshot$/.test(path)) return { status: 200, body: null };
       return { status: 404, body: {} };
   }
 }
@@ -102,12 +122,21 @@ beforeEach(() => {
     counts: { openAlerts: 1, openNotices: 1, latest: [{ id: "i1", zone: { name: "Stock room" } }], alertsReady: true },
     sources: [row("camera_ingest", "ok"), row("camera_system", "down"), row("threat_mirror", "ok"), row("site_mode", "ok"), row("incidents", "ok")],
     mode: MODE,
-    me: { id: "u1", username: "stefan", session: null },
-    birdseye: 200,
+    me: { id: "u1", username: "tv", session: null },
+    cameras: { cameras: [cam("back_door", "Back door"), cam("till", "Till")] },
   };
+  let objectUrls = 0;
+  URL.createObjectURL = vi.fn(() => `blob:picture-${++objectUrls}`);
+  URL.revokeObjectURL = vi.fn();
   h.authFetch.mockImplementation(async (url: string) => {
     const r = respond(url) as { status: number; body: unknown };
-    return { ok: r.status >= 200 && r.status < 300, status: r.status, json: async () => r.body, headers: new Headers() };
+    return {
+      ok: r.status >= 200 && r.status < 300,
+      status: r.status,
+      json: async () => r.body,
+      blob: async () => new Blob(["jpeg"], { type: "image/jpeg" }),
+      headers: new Headers(),
+    };
   });
 });
 
@@ -157,14 +186,14 @@ describe("/security/wall — what the strip says (T-D7)", () => {
     else expect(cell("mode").textContent).not.toMatch(/out of date/);
   });
 
-  it("no camera system: says so — not 'isn't available here' — and never asks for the composite", async () => {
+  it("no camera system: says so — not 'can't see any cameras' — and never asks for a camera", async () => {
     // No camera system means no FRIGATE_URL, so the Cameras module is not effective either.
     box.modules = { modules: [{ id: "security", effective: true }, { id: "cameras", effective: false }] };
     box.sources = [row("camera_ingest", "not_configured"), row("threat_mirror", "ok"), row("incidents", "ok")];
     render(<SecurityWallPage />, { wrapper: Wrap });
     await waitFor(() => expect(screen.getByText(FEED_COPY.emptyNoCameras)).toBeInTheDocument());
-    expect(screen.queryByText(WALL_COPY.camerasUnavailable)).toBeNull();
-    expect((h.authFetch.mock.calls as Array<[string]>).some(([url]) => url.startsWith("/api/cameras/"))).toBe(false);
+    expect(screen.queryByText(WALL_COPY.camerasNone)).toBeNull();
+    expect((h.authFetch.mock.calls as Array<[string]>).some(([url]) => url.startsWith("/api/cameras"))).toBe(false);
   });
 
   it("before any answer: no number at all — dashes, 'Waiting for Droplet…', and no 0", async () => {
@@ -189,10 +218,44 @@ describe("/security/wall — what the strip says (T-D7)", () => {
     expect(text).toMatch(/may be behind/);
   });
 
-  it("the camera composite plays for a viewer it is allowed to", async () => {
+});
+
+describe("/security/wall — this account's own cameras (D6: \"Member wall, own cameras\")", () => {
+  const asked = () => (h.authFetch.mock.calls as Array<[string]>).map(([url]) => url.split("?")[0]!);
+
+  it("a Staff account with 2 of the box's 4 cameras: exactly those 2 tiles, by their household names — and pictures for those 2 alone", async () => {
+    // The box has four cameras; the list route has narrowed them to this account's grants.
+    box.cameras = { cameras: [cam("back_door", "Back door"), cam("till", "Till")] };
     render(<SecurityWallPage />, { wrapper: Wrap });
-    await waitFor(() => expect(screen.getByAltText(WALL_COPY.camerasAlt)).toBeInTheDocument());
-    expect(screen.getByAltText(WALL_COPY.camerasAlt).getAttribute("src")).toBe("/api/cameras/birdseye/live?w=0");
+    await waitFor(() => expect(screen.getByAltText("Back door, latest picture")).toBeInTheDocument());
+    expect(screen.getByAltText("Till, latest picture")).toBeInTheDocument();
+    const tiles = [...document.querySelectorAll("figure[data-camera]")].map((f) => f.querySelector(".sec-wall-tile-name")!.textContent);
+    expect(tiles).toEqual(["Back door", "Till"]);
+    const pictures = new Set(asked().filter((p) => p.endsWith("/snapshot")));
+    expect(pictures).toEqual(new Set([snapshot("back_door"), snapshot("till")]));
+    expect(document.body.textContent).not.toMatch(/Stock room|Office/);
+  });
+
+  it("an account with no cameras granted: 'This account can't see any cameras yet' — and no picture asked", async () => {
+    box.cameras = { cameras: [] };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(WALL_COPY.camerasNone)).toBeInTheDocument());
+    expect(asked().some((p) => p.endsWith("/snapshot"))).toBe(false);
+  });
+
+  it("Cameras not open to this account: the same empty state, and not even the list is asked", async () => {
+    box.modules = { modules: [{ id: "security", effective: true }, { id: "cameras", effective: false }] };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(WALL_COPY.camerasNone)).toBeInTheDocument());
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    expect(asked().some((p) => p.startsWith("/api/cameras"))).toBe(false);
+  });
+
+  it("the camera system disconnected: the list's empty answer is not 'no cameras'", async () => {
+    box.cameras = { cameras: [], _status: "disconnected" };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument());
+    expect(screen.queryByText(WALL_COPY.camerasNone)).toBeNull();
   });
 });
 
@@ -347,13 +410,13 @@ describe("/security/wall — the way out, and Full screen", () => {
 });
 
 describe("/security/wall — what it asks (T-D7)", () => {
-  it("every request is a GET to one of the six reads it is allowed", async () => {
+  it("every request is a GET to one of the reads it is allowed — the six, and a picture of each camera on the list", async () => {
     box.me = { id: "u1", session: { endsAt: new Date(Date.now() + 60_000).toISOString() } };
     render(<SecurityWallPage />, { wrapper: Wrap });
-    await waitFor(() => expect(screen.getByAltText(WALL_COPY.camerasAlt)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByAltText("Till, latest picture")).toBeInTheDocument());
     const calls = h.authFetch.mock.calls as Array<[string, RequestInit | undefined]>;
     const paths = new Set(calls.map(([url]) => url.split("?")[0]));
-    expect([...paths].sort()).toEqual([...ALLOWED].sort());
+    expect([...paths].sort()).toEqual([...ALLOWED, snapshot("back_door"), snapshot("till")].sort());
     for (const [url, init] of calls) expect(init?.method ?? "GET", url).toBe("GET");
   });
 });
@@ -408,9 +471,18 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
     expect(code).not.toMatch(/\.sec-wall-leave[^{,]*\{[^}]*(clip|width: 1px|position: absolute)/);
   });
 
-  it("≤ 640 px: the composite goes 16:9 and the cells wrap at 150 px", () => {
-    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-cameras \{[^}]*aspect-ratio: 16 \/ 9;/);
+  it("≤ 640 px: one tile per row, each picture 16:9, and the cells wrap at 150 px", () => {
+    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-tiles \{ grid-template-columns: minmax\(0, 1fr\); grid-template-rows: none; \}/);
+    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-tile-frame \{ aspect-ratio: 16 \/ 9; \}/);
     expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-strip > dl \{[^}]*repeat\(auto-fit, minmax\(150px, 1fr\)\)/);
+  });
+
+  it("above 640 px the tiles are an equal --cols × --rows grid, so every camera fits the space the strip leaves", () => {
+    expect(code).toMatch(/\.sec-wall-tiles \{[^}]*grid-template-columns: repeat\(var\(--cols, 1\), minmax\(0, 1fr\)\);\s*grid-template-rows: repeat\(var\(--rows, 1\), minmax\(0, 1fr\)\);/);
+  });
+
+  it("an old picture is dimmed and grey — never drawn as a current one", () => {
+    expect(code).toMatch(/\.sec-wall-tile\.is-stale \.sec-wall-tile-frame > img \{ opacity: 0\.4; filter: grayscale\(1\); \}/);
   });
 
   it("nothing is fixed wider than a 375 px phone's content box", () => {

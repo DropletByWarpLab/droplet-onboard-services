@@ -3,11 +3,12 @@
  * and its retry policy (useSecurity.ts): when the strip is fresh, stale or
  * offline; which health rows count as sources and what the sources cell says;
  * when the needs-attention count may be behind; when the sign-out warning
- * shows; how long a failed read waits before it is retried.
+ * shows; how long a failed read waits before it is retried; the camera
+ * tiles' grid; and who the wall runs for (D6).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SecurityHealthRow } from "@/lib/types";
-import { wallOnErrorRetry, wallRetryDelayMs } from "@/lib/hooks/useSecurity";
+import { tileRetryDelayMs, wallOnErrorRetry, wallRetryDelayMs } from "@/lib/hooks/useSecurity";
 import {
   BEHIND_COPY,
   WALL_COPY,
@@ -16,7 +17,9 @@ import {
   sessionWarning,
   sourceRows,
   sourcesHeadline,
+  tileGrid,
   wallFreshness,
+  wallRunsFor,
   type WallRead,
 } from "./wall-status";
 
@@ -169,5 +172,45 @@ describe("the wall's retry policy (T-D5)", () => {
     expect(revalidate).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(revalidate).toHaveBeenCalledWith({ retryCount: 2, dedupe: true });
+  });
+});
+
+describe("tileRetryDelayMs — from a tile's own 3 s cadence", () => {
+  it("3 s, 6 s, 12 s … and never past 2 minutes", () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8].map(tileRetryDelayMs)).toEqual([3_000, 6_000, 12_000, 24_000, 48_000, 96_000, 120_000, 120_000]);
+  });
+});
+
+describe("tileGrid — every camera on screen, in the nearest square", () => {
+  it.each([
+    [1, 1, 1],
+    [2, 2, 1],
+    [3, 2, 2],
+    [4, 2, 2],
+    [5, 3, 2],
+    [6, 3, 2],
+    [7, 3, 3],
+    [9, 3, 3],
+    [10, 4, 3],
+    [12, 4, 3],
+    [13, 4, 4],
+  ])("%i cameras → %i × %i", (n, cols, rows) => {
+    const g = tileGrid(n);
+    expect(g).toEqual({ cols, rows });
+    expect(g.cols * g.rows).toBeGreaterThanOrEqual(n);
+  });
+});
+
+describe("wallRunsFor (D6: \"Member wall, own cameras\")", () => {
+  it.each([
+    ["family", true],
+    ["guest", true],
+    ["owner", false],
+    ["admin", false],
+    ["service", false],
+    [undefined, false],
+    [null, false],
+  ])("%s → %s", (role, runs) => {
+    expect(wallRunsFor(role)).toBe(runs);
   });
 });

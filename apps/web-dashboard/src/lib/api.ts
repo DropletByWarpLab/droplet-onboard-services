@@ -9376,9 +9376,10 @@ export function putActiveDepartment(departmentId: string | null): Promise<Active
 // ── WARP-2981 (ADR-059 P6, §3.8): the Security wall ──
 // /security/wall reads only what /security already shows this viewer — each
 // read their own DS-005 projection, view level, never a write — and every read
-// goes through `securityFetch` (20 s, typed `.status`), so a request that
-// never answers fails and is retried instead of stalling its SWR key for the
-// TV's lifetime. The rack panel's box-wide count is for the panel's service
+// has a 20 s timeout and a typed `.status` (`securityFetch`; the camera
+// pictures, which are not JSON, the same by hand), so a request that never
+// answers fails and is retried instead of stalling its SWR key for the TV's
+// lifetime. The rack panel's box-wide count is for the panel's service
 // principal alone and is never read from here (pinned by the wall's page test).
 import type { SecurityIncidentCounts } from "./types";
 import type { ModulesView } from "./hooks/useModuleGate";
@@ -9453,26 +9454,56 @@ export async function getWallModules(): Promise<ModulesView> {
 }
 
 /**
- * Whether the birdseye composite would play for this viewer: the HTTP status
- * of a GET, read off its headers, and the request aborted at once — the body
- * is an endless MJPEG stream and is never read. Never HEAD: Express runs the
- * GET handler for a HEAD and Node sends a HEAD's headers only when the
- * response ends, which a continuous stream never does. Through `authFetch`,
- * so an expired access cookie is refreshed before the `<img>` needs it.
- * Rejects on a timeout (20 s), a network failure, or `signal` aborting.
+ * The cameras this viewer may see — GET /api/cameras, which the server
+ * already narrows to their grants (`filterVisibleCameras`, WARP-1962; owner
+ * and admin see all). The wall draws a tile for each and for nothing else
+ * (DS-005). Through `securityFetch` (20 s): a hung list fails and is retried.
+ * `_status: "disconnected"` (the camera system isn't reachable) comes with an
+ * empty list that does NOT mean "no cameras", so it throws instead.
  */
-export async function getBirdseyeStatus(signal?: AbortSignal): Promise<number> {
-  const ctrl = new AbortController();
-  const stop = () => ctrl.abort();
-  if (signal?.aborted) stop();
-  signal?.addEventListener("abort", stop, { once: true });
-  const timer = setTimeout(stop, DEFAULT_API_FETCH_TIMEOUT_MS);
+export async function getWallCameras(): Promise<CameraInfo[]> {
+  const body = await securityFetch<unknown>(`${BASE}/api/cameras`);
+  const b = (body && typeof body === "object" ? body : {}) as { cameras?: unknown; _status?: unknown };
+  if (b._status === "disconnected") {
+    const e: TypedError = new Error("Droplet can't reach the camera system right now.");
+    e.code = "CAMERAS_DISCONNECTED";
+    e.status = 200;
+    throw e;
+  }
+  if (!Array.isArray(b.cameras) || !b.cameras.every((c) => c && typeof c === "object" && typeof (c as { name?: unknown }).name === "string")) {
+    throw unreadable("The camera list");
+  }
+  return b.cameras as CameraInfo[];
+}
+
+/** The height the wall asks each camera's latest picture at: large enough for a quarter of a 1080p TV. */
+export const WALL_SNAPSHOT_HEIGHT = 720;
+
+/**
+ * One camera's latest picture (GET /api/cameras/:name/snapshot, which checks
+ * this viewer's grant), as a Blob for an object URL. Through `authFetch`, so
+ * an expiring access cookie is refreshed (an `<img src>` cannot), with a 20 s
+ * timeout, and `no-store`: the route allows 5 s of HTTP caching, and a
+ * cached picture must never be drawn as a new one. Rejects with the status on
+ * anything but 2xx.
+ */
+export async function getWallCameraSnapshot(name: string): Promise<Blob> {
+  const path = `${getCameraSnapshotUrl(name)}?h=${WALL_SNAPSHOT_HEIGHT}`;
+  const timeout = AbortSignal.timeout(DEFAULT_API_FETCH_TIMEOUT_MS);
   try {
-    const res = await authFetch(getBirdseyeLiveUrl(), { signal: ctrl.signal });
-    return res.status;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", stop);
-    ctrl.abort();
+    const r = await authFetch(path, { signal: timeout, cache: "no-store" });
+    if (!r.ok) {
+      const e: TypedError = new Error(`HTTP ${r.status}`);
+      e.code = "SNAPSHOT_FAILED";
+      e.status = r.status;
+      throw e;
+    }
+    return await r.blob();
+  } catch (err) {
+    if ((err as TypedError).code === "SNAPSHOT_FAILED") throw err;
+    const e: TypedError = new Error(timeout.aborted ? `Request timed out: ${path}` : err instanceof Error ? err.message : "Network error");
+    e.code = timeout.aborted ? "TIMEOUT" : "NETWORK_ERROR";
+    e.status = 0;
+    throw e;
   }
 }
