@@ -103,6 +103,9 @@
   flex-basis: 100%; font-size: clamp(13px, 1.1vw, 22px); color: var(--text-muted); overflow-wrap: anywhere;
 }
 .droplet-shell .sec-wall-badge { font-size: clamp(12px, 1vw, 20px); }
+/* The strip's two buttons grow with the screen like its badges: the shell's .btn.sm (12.5 px, 30 px high) up to 20 px text on a
+   TV; at 720 px and below they keep the shell's 44 px touch target (below). */
+.droplet-shell .sec-wall-strip .btn { font-size: clamp(12.5px, 1vw, 20px); height: auto; min-height: 2.4em; padding: 0 0.9em; }
 /* The shell's muted badge (--text-muted on --inset) is 4.41:1 on the strip's --surface — under 4.5 for text this size. */
 .droplet-shell .sec-wall-strip .badge.muted { color: var(--text); }
 .droplet-shell .sec-wall-sources {
@@ -131,6 +134,9 @@
   /* Full width (a grid item with a ratio would otherwise start-align): capped at 75dvh, the picture is letterboxed on --bg as on a TV. */
   .droplet-shell .sec-wall-tile-frame { aspect-ratio: 16 / 9; max-height: 75dvh; justify-self: stretch; }
   .droplet-shell .sec-wall-strip > dl { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+@media (max-width: 720px) {
+  .droplet-shell .sec-wall-strip .btn { min-height: 44px; }
 }
 
 /* ── Instead of the wall: the D6 refusal (and the signed-out notice) ── */

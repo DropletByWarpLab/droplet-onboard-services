@@ -77,7 +77,7 @@ function ModeBadge({ mode }: { mode: SecurityMode }) {
   const { cls, text, icon: Icon } = MODE_BADGE[mode];
   return (
     <span className={`${cls} sec-wall-badge`}>
-      <Icon size={14} aria-hidden="true" />
+      <Icon size="1em" aria-hidden="true" />
       {text}
     </span>
   );

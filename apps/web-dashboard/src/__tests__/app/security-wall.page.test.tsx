@@ -160,6 +160,10 @@ describe("/security/wall — what the strip says (T-D7)", () => {
     await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
     expect(within(cell("attention")).getByText("1 alert")).toBeInTheDocument();
     expect(within(cell("mode")).getByText(MODE_COPY.badgeClosed)).toBeInTheDocument();
+    // The mode's icon scales with the badge's text on a TV (19.2 px at 1920), never a fixed 14 px.
+    const modeIcon = within(cell("mode")).getByText(MODE_COPY.badgeClosed).querySelector("svg");
+    expect(modeIcon).toHaveAttribute("width", "1em");
+    expect(modeIcon).toHaveAttribute("height", "1em");
     expect(within(cell("sources")).getByText("1 not reporting")).toBeInTheDocument();
     expect(within(cell("sources")).getByText("Camera system")).toBeInTheDocument();
     // At the wall's badge size, not the shell's 11 px: the state is the point of the list.
@@ -510,6 +514,11 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
     expect(phone).toMatch(/\.droplet-shell \.sec-wall-strip \{ order: -1; border-top: 0; border-bottom: 1px solid var\(--border\); \}/);
     // The tiles keep order 0, below both.
     expect(code).not.toMatch(/\.sec-wall-(cameras|tiles) \{[^}]*order:/);
+  });
+
+  it("the strip's buttons grow with the screen like its badges, and keep the shell's 44 px touch target at 720 px and below", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-strip \.btn \{ font-size: clamp\(12\.5px, 1vw, 20px\); height: auto; min-height: 2\.4em; padding: 0 0\.9em; \}/);
+    expect(code).toMatch(/@media \(max-width: 720px\) \{\s*\.droplet-shell \.sec-wall-strip \.btn \{ min-height: 44px; \}/);
   });
 
   it("above 640 px the tiles are an equal --cols × --rows grid, so every camera fits the space the strip leaves", () => {
