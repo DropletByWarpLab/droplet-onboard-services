@@ -1060,7 +1060,7 @@ export default function ChatPage() {
               isBusinessBox &&
               bizProfile?.onboardingState === "not_started"
             ) && (
-            <div className="chat-empty">
+            <div className="chat-empty" data-testid="chat-empty">
               <div className="ico" aria-hidden="true">
                 <Sparkles size={26} />
               </div>

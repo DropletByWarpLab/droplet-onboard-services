@@ -199,7 +199,7 @@ describe("chat /chat — a started interview opens with its first question", () 
     // The interview chrome proves the page settled into the interview…
     expect(await screen.findByTestId("interview-progress")).toBeTruthy();
     // …and the generic chat empty state is absent.
-    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+    expect(screen.queryByTestId("chat-empty")).toBeNull();
   });
 
   // ── the transition, not the settled frame ────────────────────────────────
@@ -247,7 +247,7 @@ describe("chat /chat — a started interview opens with its first question", () 
     expect(screen.queryByTestId("interview-intro-card")).toBeNull();
     // …and what replaced it is the interview, NOT "Ask Droplet anything"
     // plus four prompts about dimming the living-room lights.
-    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+    expect(screen.queryByTestId("chat-empty")).toBeNull();
   });
 
   it("never falls back to the generic empty state between Resume and the session loading", async () => {
@@ -268,7 +268,7 @@ describe("chat /chat — a started interview opens with its first question", () 
     // The banner does not sit inside the session it just opened…
     expect(screen.queryByTestId("interview-resume-banner")).toBeNull();
     // …and neither does the generic empty state.
-    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+    expect(screen.queryByTestId("chat-empty")).toBeNull();
   });
 
   // ── the navigation is owed unconditionally ───────────────────────────────
@@ -325,7 +325,7 @@ describe("chat /chat — a started interview opens with its first question", () 
     // knows the id from the start response — it does not need the profile to
     // tell it where it is.
     expect(screen.queryByTestId("interview-intro-card")).toBeNull();
-    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+    expect(screen.queryByTestId("chat-empty")).toBeNull();
   });
 
   it("navigates into the new session even when the profile refresh fails outright", async () => {
@@ -352,6 +352,6 @@ describe("chat /chat — a started interview opens with its first question", () 
     rerender(<ChatPage />);
 
     expect(screen.queryByTestId("interview-intro-card")).toBeNull();
-    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+    expect(screen.queryByTestId("chat-empty")).toBeNull();
   });
 });
