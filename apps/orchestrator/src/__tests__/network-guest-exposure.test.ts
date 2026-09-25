@@ -6,6 +6,8 @@
  *    (`status.wireless`) or `GET /network/wifi`; the latter is owner/admin.
  *  - The device roster (`/network/devices`, `/:mac`, `/events`, DHCP leases)
  *    is for employees: owner/admin/family, never an external guest.
+ *  - WARP-3118: groups, schedules, overrides and schedule events name staff
+ *    devices too, so they follow the same owner/admin/family floor.
  *  - `manualBlock` writes an activity row with actor, MAC, old and new state.
  *  - `GET /network/audit?userId=` for someone else is owner/admin only.
  */
@@ -97,6 +99,7 @@ function buildApp(): express.Express {
   const networkDeviceService = {
     listDevices: vi.fn().mockResolvedValue([DEVICE]),
     getDevice: vi.fn().mockResolvedValue(DEVICE),
+    listGroups: vi.fn().mockResolvedValue([{ id: "g1", name: "Staff", members: [DEVICE] }]),
   };
   const scheduleApi = {
     setManualBlock: vi.fn(async (mac: string, blocked: boolean) => ({
@@ -104,6 +107,10 @@ function buildApp(): express.Express {
       manualBlock: blocked,
       previousManualBlock: !blocked,
     })),
+    listSchedules: vi.fn().mockResolvedValue([{ id: "s1", deviceMac: DEVICE.mac }]),
+    getSchedule: vi.fn().mockResolvedValue({ id: "s1", deviceMac: DEVICE.mac }),
+    listOverrides: vi.fn().mockResolvedValue([{ id: "o1", deviceMac: DEVICE.mac }]),
+    listScheduleEvents: vi.fn().mockResolvedValue([{ id: "e1", deviceMac: DEVICE.mac }]),
   };
   registerWifiRoutes(router, { prisma });
   registerStatusRoutes(router, { prisma, networkDeviceService } as never);
@@ -201,6 +208,39 @@ describe("the device roster is for employees, not guests", () => {
 
   it("guest keeps the status read", async () => {
     const res = await request(buildApp()).get("/api/network/status").set("x-test-role", "guest");
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("groups and schedules are for employees, not guests (WARP-3118)", () => {
+  const paths = [
+    "/api/network/groups",
+    "/api/network/schedules",
+    "/api/network/schedules/s1",
+    "/api/network/overrides",
+    "/api/network/overrides?active=1",
+    "/api/network/schedule-events",
+  ];
+
+  it.each(paths)("guest gets 403 and no device MAC on %s", async (path) => {
+    const res = await request(buildApp()).get(path).set("x-test-role", "guest");
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toContain(DEVICE.mac);
+  });
+
+  for (const role of ["owner", "admin", "family"]) {
+    it.each(paths)(`${role} reads %s`, async (path) => {
+      const res = await request(buildApp()).get(path).set("x-test-role", role);
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(res.body)).toContain(DEVICE.mac);
+    });
+  }
+
+  it("the MCP principal still reads schedules", async () => {
+    const res = await request(buildApp())
+      .get("/api/network/schedules")
+      .set("x-test-role", "service")
+      .set("x-test-user", "_service:mcp");
     expect(res.status).toBe(200);
   });
 });
