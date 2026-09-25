@@ -130,6 +130,57 @@ describe("the incident fake's SecurityEvent_ongoing_shape mirror", () => {
 });
 
 /**
+ * WARP-2977 P2b-2 — the fake mirrors SecurityEvent_lock_shape (20260925050100),
+ * so a lock row the engine (or a fixture) writes in the mocked lane is held to
+ * the shape Postgres holds it to, and nothing but a lock row is a matter_lock row.
+ */
+describe("the incident fake's SecurityEvent_lock_shape mirror", () => {
+  type Events = { securityEvent: { createMany(a: unknown): Promise<{ count: number }> } };
+  const lockRow = (over: Record<string, unknown> = {}) => ({
+    source: "matter_lock",
+    kind: "lock_state",
+    severity: "info",
+    camera: null,
+    sourceRef: "matter:7/1",
+    dedupeKey: "matter-lock:7/1:1",
+    labels: ["unlocked"],
+    cameraZones: [],
+    score: null,
+    startedAt: new Date("2026-09-23T21:14:00Z"),
+    endedAt: null,
+    summary: "Back door lock unlocked",
+    observed: "polled",
+    ...over,
+  });
+
+  it("accepts a legal lock row, for every reading", async () => {
+    for (const reading of ["locked", "unlocked", "not_fully_locked", "unlatched", "unknown"]) {
+      const f = createFakeSecurityPrisma();
+      await expect((f.client as unknown as Events).securityEvent.createMany({ data: [lockRow({ labels: [reading] })] })).resolves.toEqual({
+        count: 1,
+      });
+    }
+  });
+
+  it.each([
+    ["another kind from the lock source", { kind: "detection" }],
+    ["another source for a lock reading", { source: "frigate" }],
+    ["a camera", { camera: "back" }],
+    ["two labels", { labels: ["unlocked", "locked"] }],
+    ["no label", { labels: [] }],
+    ["a reading that is not one", { labels: ["open"] }],
+    ["a camera-shaped sourceRef", { sourceRef: "back/1790000000.1-abc" }],
+    ["an endpoint past five digits", { sourceRef: "matter:7/123456" }],
+  ])("refuses a lock row with %s", async (_name, over) => {
+    const f = createFakeSecurityPrisma();
+    await expect((f.client as unknown as Events).securityEvent.createMany({ data: [lockRow(over)] })).rejects.toThrow(
+      /SecurityEvent_lock_shape/,
+    );
+    expect(f.world.securityEvent).toHaveLength(0);
+  });
+});
+
+/**
  * Review 383d647e item 4 — the fake mirrors SecurityIncidentReason_site_evidence
  * (20260925030000), so an engine bug that would write a camera-less reason on
  * an area or camera incident fails in the mocked lane as Postgres refuses it.

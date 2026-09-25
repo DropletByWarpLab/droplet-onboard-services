@@ -431,7 +431,11 @@ export function zonesForEvent(row: ZoneMatchableEvent, index: ZoneIndex): string
  * cameraZones include it, and all of that camera's offline/online rows —
  * plus, per area, the link ids that matched and whether a part-of-view link
  * did (`specificity`, for the engine's rank). Sorted by zone id; link ids
- * sorted. A property test pins that the zone ids agree with `zonesForEvent`.
+ * sorted. A property test pins that the zone ids agree with `zonesForEvent`
+ * for every camera row. The ONE difference is door locks (WARP-2977 P2b-2):
+ * the feed puts a lock row in the areas its lock is linked to, but lock rows
+ * feed no rule (D21), so here a lock link matches nothing and a lock row
+ * (camera NULL) matches no area.
  */
 export function matchAreasForEvent(
   row: ZoneMatchableEvent,

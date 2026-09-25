@@ -677,6 +677,49 @@ describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank in
     }
   });
 
+  it("WARP-2977 P2b-2: lock links never place a camera row; a lock row is in its lock's areas on the feed, in none for the engine (D21)", () => {
+    const r = rng(2977);
+    const LOCKS = ["matter:7/1", "matter:7/2", "matter:9/1"];
+    let placedOnFeed = 0;
+    for (let round = 0; round < 20; round++) {
+      const links: ActiveZoneLink[] = [];
+      for (const zoneId of ZONES) {
+        const n = Math.floor(r() * 4);
+        for (let k = 0; k < n; k++) {
+          const camera = pick(r, CAMS);
+          const shape = r();
+          links.push({
+            linkId: `${zoneId}-${round}-${k}`,
+            zoneId,
+            zoneName: zoneId,
+            zoneKind: "interior",
+            sourceKind: shape < 0.3 ? "lock" : shape < 0.6 ? "camera" : "camera_zone",
+            sourceRef: shape < 0.3 ? pick(r, LOCKS) : shape < 0.6 ? camera : `${camera}/${pick(r, PARTS)}`,
+          });
+        }
+      }
+      const index = buildZoneIndex(links);
+      for (let e = 0; e < 10; e++) {
+        if (r() < 0.3) {
+          const lock = { source: "matter_lock" as const, kind: "lock_state" as const, camera: null, cameraZones: [], sourceRef: pick(r, LOCKS) };
+          expect(matchAreasForEvent(lock, links)).toEqual([]);
+          placedOnFeed += zonesForEvent(lock, index).length;
+          continue;
+        }
+        const kind = pick(r, KINDS);
+        const siteWide = kind === "source_offline" || kind === "threat" || kind === "mode_changed";
+        const row = { source: "frigate" as const, kind, camera: siteWide ? null : pick(r, CAMS), cameraZones: PARTS.filter(() => r() < 0.3) };
+        const got = matchAreasForEvent(row, links);
+        expect(got.map((m) => m.zoneId), JSON.stringify({ row, links })).toEqual(zonesForEvent(row, index));
+        // No lock link is ever one of the links that matched.
+        const lockLinkIds = new Set(links.filter((l) => l.sourceKind === "lock").map((l) => l.linkId));
+        expect(got.flatMap((m) => m.linkIds).filter((id) => lockLinkIds.has(id))).toEqual([]);
+      }
+    }
+    // Not vacuous: the feed really did place lock rows in areas.
+    expect(placedOnFeed).toBeGreaterThan(5);
+  });
+
   it("carries the matched link ids and 'part' when a part-of-view link matched", () => {
     const links: ActiveZoneLink[] = [
       { linkId: "a1", zoneId: "za", zoneName: "Shop", zoneKind: "interior", sourceKind: "camera", sourceRef: "front" },
