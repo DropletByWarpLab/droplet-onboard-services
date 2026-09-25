@@ -8,7 +8,9 @@
  *
  *   T-O1  which incidents count: state `open` over the whole box (an owner's
  *         view, threats included) — never acknowledged, resolved or plain
- *         activity; and `alerts` is how many of those carry an alert;
+ *         activity; and `alerts` is how many of those carry an alert — both
+ *         read in one REPEATABLE READ snapshot (the pg lane interleaves a
+ *         write between them);
  *   T-O2  DS-005: the number equals the OWNER's route-17 total over the same
  *         rows, and is not a family viewer's — who may read higher (an
  *         incident someone else acknowledged whose top reason she cannot see
@@ -201,6 +203,17 @@ describe("P6-3 — which incidents count (T-O1)", () => {
     const res = await get(app(createFakeSecurityPrisma(mixedBox(), NOW), DISPLAY));
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ security: "on", open: 3, alerts: 1, upToDate: true });
+  });
+
+  it("both numbers are read in ONE REPEATABLE READ transaction — never a pair that never existed (alerts > open)", async () => {
+    const f = createFakeSecurityPrisma(mixedBox(), NOW);
+    const depths: number[] = [];
+    f.onCall("securityIncident", "count", () => depths.push(f.txDepth()));
+    f.onCall("securityIncident", "count", () => depths.push(f.txDepth()));
+    const res = await get(app(f, DISPLAY));
+    expect(res.body).toEqual({ security: "on", open: 3, alerts: 1, upToDate: true });
+    expect(f.txLevels).toEqual(["RepeatableRead"]);
+    expect(depths).toEqual([1, 1]);
   });
 
   it("an empty box is 0 — an answer, with upToDate saying it can be trusted", async () => {

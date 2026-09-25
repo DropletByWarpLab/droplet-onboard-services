@@ -74,6 +74,7 @@ import { projectedIncidentPage } from "./security-incident-page.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { QUIET_MS, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
@@ -698,13 +699,19 @@ const WHOLE_SITE: IncidentViewer = {
  * openAlerts): route 17's where, over a viewer who is never partial. §3.8's
  * exception to DS-005, kept narrow: two numbers, no ids, names, areas or
  * times, read only by the panel's own service principal.
+ *
+ * Both counts come from ONE snapshot (REPEATABLE READ): under READ COMMITTED
+ * an alert opening, acknowledged or escalating between the two statements
+ * gives a pair that never existed — `alerts > open`, which the panel refuses
+ * as unusable and shows as "—" for a whole cadence, at exactly the moment the
+ * number matters.
  */
-export async function panelOpenIncidents(prisma: Pick<Db, "securityIncident">): Promise<{ open: number; alerts: number }> {
-  const [open, alerts] = await Promise.all([
-    prisma.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention" }) }),
-    prisma.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention", severity: "alert" }) }),
-  ]);
-  return { open, alerts };
+export async function panelOpenIncidents(prisma: Pick<Db, "$transaction">): Promise<{ open: number; alerts: number }> {
+  return prisma.$transaction(async (tx) => {
+    const open = await tx.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention" }) });
+    const alerts = await tx.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention", severity: "alert" }) });
+    return { open, alerts };
+  }, REPEATABLE_READ_TX);
 }
 
 /**
