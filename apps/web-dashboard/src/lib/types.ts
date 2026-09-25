@@ -3184,6 +3184,14 @@ export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 export const PENDING_PROMPT_KEY = "droplet.pendingPrompt";
 
 /**
+ * WARP-3062 — `sessionStorage[CHAT_DRAFT_KEY]` holds the /chat composer's
+ * unsent text, so it survives the composer unmounting (the assistant
+ * layout's switch to Overview and back). Cleared by sending, and on sign-out
+ * with the hand-offs above: it is the signed-in person's words.
+ */
+export const CHAT_DRAFT_KEY = "droplet.chatDraft";
+
+/**
  * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
  * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
  * contract and change together.

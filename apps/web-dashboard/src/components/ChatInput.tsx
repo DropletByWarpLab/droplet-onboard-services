@@ -60,6 +60,14 @@ interface ChatInputProps {
    * the pill together can never strand them at the bottom edge.
    */
   suggestions?: React.ReactNode;
+  /**
+   * WARP-3062 — keeps the unsent text in this tab's sessionStorage under
+   * this key, so a half-typed message survives the composer unmounting
+   * (crossing to the business side and back, or any navigation away) and
+   * is put back when it mounts again. Sending clears it. Omitted, the
+   * composer forgets its text on unmount, as it always has.
+   */
+  draftKey?: string;
 }
 
 /**
@@ -80,6 +88,15 @@ export interface ChatInputHandle {
   seed: (text: string) => void;
 }
 
+function readDraft(draftKey: string | undefined): string {
+  if (!draftKey || typeof window === "undefined") return "";
+  try {
+    return sessionStorage.getItem(draftKey) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   onSend,
   disabled,
@@ -92,8 +109,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   onToolCommand,
   modelSelector,
   suggestions,
+  draftKey,
 }, ref) {
-  const [value, setValue] = useState("");
+  // The composer only ever renders on the client — AuthGate holds every
+  // protected page behind its loading state until the session probe
+  // resolves — so the stored draft can seed the first render directly.
+  const [value, setValue] = useState(() => readDraft(draftKey));
   const [isDragging, setIsDragging] = useState(false);
   // WARP-844 — voice input. "unavailable" hides the mic after the
   // orchestrator answers 503 (whisper sidecar not deployed); jsdom and
@@ -156,6 +177,27 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // WARP-3062 — mirror the text into the draft slot; an empty composer
+  // (including right after a send) clears it.
+  useEffect(() => {
+    if (!draftKey) return;
+    try {
+      if (value) sessionStorage.setItem(draftKey, value);
+      else sessionStorage.removeItem(draftKey);
+    } catch {
+      // Storage unavailable — the draft just won't outlive this mount.
+    }
+  }, [draftKey, value]);
+
+  // A restored draft sizes the field the way typing it would have.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || !el.value) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    // Mount only: typing resizes through onInput.
+  }, []);
 
   // Slash-command tool menu (gated on `slashTools`). Opens when the composer
   // text starts with "/"; the query is everything after it. A "/" anywhere
