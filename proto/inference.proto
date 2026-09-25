@@ -18,6 +18,11 @@ service InferenceService {
   // retrieval router (WARP-437). Returns one of {factual, analytical,
   // conversational, navigational, unknown}.
   rpc ClassifyQuery(ClassifyQueryRequest) returns (ClassifyQueryResponse);
+  // Calibrated decision model (Kev, WARP-3070). Forwards to the
+  // droplet-local-LLM `decision-model` sidecar. Fails soft: an unconfigured,
+  // slow or erroring sidecar is reported in DecideResponse.status, never as
+  // a gRPC error. See droplet-local-LLM/docs/ADR-006-decision-model-kev.md.
+  rpc Decide(DecideRequest) returns (DecideResponse);
 }
 
 message ChatRequest {
@@ -115,4 +120,82 @@ message ClassifyQueryResponse {
   // Top-1 confidence in [0, 1]. Server-side floor is applied via
   // CLASSIFIER_CONFIDENCE_FLOOR; below the floor the class is "unknown".
   float confidence = 2;
+}
+
+// ── Decision model (WARP-3070 — Kev, ADR-006 in droplet-local-LLM) ──
+
+message DecideRequest {
+  // The text to evaluate. User content: the gateway never logs it.
+  string state = 1;
+  // Question id (caller-chosen, never shown to the model) -> question.
+  map<string, DecideQuestion> questions = 2;
+  // Per-request deadline for the sidecar call. 0 = gateway default (2000 ms).
+  int32 timeout_ms = 3;
+  // Model override. Empty = "kev-latest".
+  string model = 4;
+}
+
+enum DecideQuestionType {
+  DECIDE_QUESTION_TYPE_UNSPECIFIED = 0;
+  // Yes/no. Answer: probability of yes.
+  DECIDE_QUESTION_TYPE_NOUL = 1;
+  // Pick one of 1-255 named options.
+  DECIDE_QUESTION_TYPE_CHOICE = 2;
+  // A level on an ordered scale, lowest first.
+  DECIDE_QUESTION_TYPE_SCORE = 3;
+}
+
+message DecideOption {
+  string name = 1;
+  // Empty = no description (sent as null).
+  string description = 2;
+}
+
+message DecideQuestion {
+  DecideQuestionType type = 1;
+  string instructions = 2;
+  // NOUL only, both optional: what "true" / "false" mean.
+  string true_description = 3;
+  string false_description = 4;
+  // CHOICE only. A repeated field, not a map, because order matters to the model.
+  repeated DecideOption options = 5;
+  // SCORE only. Ordered lowest to highest.
+  repeated string levels = 6;
+}
+
+enum DecideStatus {
+  DECIDE_STATUS_UNSPECIFIED = 0;
+  DECIDE_STATUS_OK = 1;
+  // Not configured, timed out, unreachable, 5xx or rejected key. Caller keeps
+  // its non-Kev behaviour.
+  DECIDE_STATUS_UNAVAILABLE = 2;
+  // The sidecar rejected the request (422). A caller bug, not an outage.
+  DECIDE_STATUS_INVALID = 3;
+}
+
+message DecideAnswer {
+  DecideQuestionType type = 1;
+  // NOUL: probability of yes.
+  float noul = 2;
+  // CHOICE: the most likely option name.
+  string choice = 3;
+  // SCORE: mean level index, starting at 0.
+  float score = 4;
+  // CHOICE and SCORE. Not a measured accuracy rate.
+  float confidence = 5;
+  // CHOICE: option name -> p. SCORE: level index as a string ("0", "1", ...) -> p.
+  map<string, float> probabilities = 6;
+  // SCORE: level index as a string -> level description.
+  map<string, string> legend = 7;
+}
+
+message DecideResponse {
+  DecideStatus status = 1;
+  // Question id -> answer. Populated only when status is OK.
+  map<string, DecideAnswer> answers = 2;
+  // Sidecar-reported latency; wall-clock on the gateway when absent.
+  float latency_ms = 3;
+  string model = 4;
+  // Short reason for UNAVAILABLE / INVALID. Never contains the state text.
+  string detail = 5;
 }

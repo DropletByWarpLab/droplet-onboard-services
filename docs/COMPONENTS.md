@@ -324,12 +324,18 @@ network. Host-published ports and host-network services are called out.
   section.
 - **gRPC consumers:** file-indexer (`EmbedText`), orchestrator/mcp-server
   (`Rerank`, `ClassifyQuery` for adaptive RAG routing).
-- **Planned — Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):**
-  a `Decide` RPC (WARP-3070) proxying to `droplet-local-LLM`'s `decision-model`
-  sidecar (`:8009`, profile `decision`, off by default): calibrated yes/no /
-  choice / score answers, no generated text. It is the **only** way in: nothing
-  else calls `:8009`. Consumers fail soft to today's behaviour and never sit on the
-  write-approval path. Not built until the bench-box go/no-go (WARP-3069) passes.
+- **Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):** the
+  `Decide` RPC (WARP-3070) exists and proxies to `droplet-local-LLM`'s
+  `decision-model` sidecar (`:8009`, profile `decision`, off by default):
+  calibrated yes/no / choice / score answers, no generated text. **Off until
+  `DECISION_MODEL_URL` is set** (plus `DECISION_MODEL_API_KEY`, the sidecar's
+  key); unset, it answers `DECIDE_STATUS_UNAVAILABLE` with no network call.
+  Every failure (timeout, 5xx, 401) is a status in the response, never a gRPC
+  error; a 422 is `DECIDE_STATUS_INVALID`. Orchestrator client:
+  `apps/orchestrator/src/services/decision-model.client.ts`. It is the **only**
+  way in: nothing else calls `:8009`. **No consumers yet** (triage, `ClassifyQuery`,
+  tool-domain selection, `classify_items`: WARP-3071–3074); they must fail soft
+  to today's behaviour and never sit on the write-approval path.
   Full picture: `docs/agentic-workflows.md` § "Decision model (Kev)".
 - **Gotchas:** does **not** dispatch tools (forwards `tools[]` as-is, returns raw
   `tool_calls` to the orchestrator). Embed/rerank models lazy-load from HF on first
@@ -588,7 +594,7 @@ network. Host-published ports and host-network services are called out.
 ## proto/ & schemas/
 
 - `proto/inference.proto` — ai-gateway gRPC: `Chat`/`StreamChat`/`ListModels`/
-  `EmbedText`/`Rerank`/`ClassifyQuery`. `proto/device_identity.proto` — TPM sidecar:
+  `EmbedText`/`Rerank`/`ClassifyQuery`/`Decide`. `proto/device_identity.proto` — TPM sidecar:
   `Sign`/`GetCert`/`GetStatus`/`Reseal`. Codegen via `scripts/generate-grpc.sh`.
 - `schemas/anchor.schema.json` — JSON Schema 2020-12 for the `Anchor` union; the
   source of truth for `packages/shared-types/src/anchor.ts` (regenerate, don't

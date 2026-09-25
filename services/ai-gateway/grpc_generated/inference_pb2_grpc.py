@@ -64,6 +64,11 @@ class InferenceServiceStub(object):
                 request_serializer=inference__pb2.ClassifyQueryRequest.SerializeToString,
                 response_deserializer=inference__pb2.ClassifyQueryResponse.FromString,
                 _registered_method=True)
+        self.Decide = channel.unary_unary(
+                '/droplet.inference.InferenceService/Decide',
+                request_serializer=inference__pb2.DecideRequest.SerializeToString,
+                response_deserializer=inference__pb2.DecideResponse.FromString,
+                _registered_method=True)
 
 
 class InferenceServiceServicer(object):
@@ -114,6 +119,16 @@ class InferenceServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Decide(self, request, context):
+        """Calibrated decision model (Kev, WARP-3070). Forwards to the
+        droplet-local-LLM `decision-model` sidecar. Fails soft: an unconfigured,
+        slow or erroring sidecar is reported in DecideResponse.status, never as
+        a gRPC error. See droplet-local-LLM/docs/ADR-006-decision-model-kev.md.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_InferenceServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -146,6 +161,11 @@ def add_InferenceServiceServicer_to_server(servicer, server):
                     servicer.ClassifyQuery,
                     request_deserializer=inference__pb2.ClassifyQueryRequest.FromString,
                     response_serializer=inference__pb2.ClassifyQueryResponse.SerializeToString,
+            ),
+            'Decide': grpc.unary_unary_rpc_method_handler(
+                    servicer.Decide,
+                    request_deserializer=inference__pb2.DecideRequest.FromString,
+                    response_serializer=inference__pb2.DecideResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -310,6 +330,33 @@ class InferenceService(object):
             '/droplet.inference.InferenceService/ClassifyQuery',
             inference__pb2.ClassifyQueryRequest.SerializeToString,
             inference__pb2.ClassifyQueryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Decide(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/droplet.inference.InferenceService/Decide',
+            inference__pb2.DecideRequest.SerializeToString,
+            inference__pb2.DecideResponse.FromString,
             options,
             channel_credentials,
             insecure,
