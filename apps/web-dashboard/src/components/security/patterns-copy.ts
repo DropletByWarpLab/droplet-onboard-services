@@ -3,16 +3,19 @@
  * pure formatters behind them.
  *
  * "Patterns" and "what normal looks like" / "what's usual" are the UI's
- * words; "baseline" and "suppression" never appear. Like every Security
- * page, nothing here says monitor, armed, arm, alarm, secure, protected,
- * guard, space or zone (components/security/security-copy.test.ts scans
- * every export of this module).
+ * words; "baseline" and "suppression" never appear (the copy lint bans them).
+ * PR-B adds "Expected activity" — what the routes and the code call a
+ * suppression — and "How often Droplet was right". Like every Security page,
+ * nothing here says monitor, armed, arm, alarm, secure, protected, guard,
+ * space or zone (components/security/security-copy.test.ts scans every export
+ * of this module).
  */
+import type { SecurityPatternCode, SecuritySuppressionDays } from "@/lib/types";
 
 export const COPY = {
   title: "Patterns",
   sub: "What normal looks like for each area and camera, learned from the last 4 weeks. Droplet uses it to notice what isn't usual. It never changes because someone marks a flag as expected.",
-  trial: "Trial: Droplet doesn't raise these flags yet.",
+  trial: "Trial: Droplet notes what it would flag, but doesn't raise these flags yet.",
 
   learningTitle: "Learning",
   learningHint: "Droplet needs about two weeks of watching a camera before it knows what's usual there.",
@@ -50,6 +53,97 @@ export const COPY = {
   notBuilt: "Droplet works out what's usual every night, from the days it has watched so far.",
   retry: "Retry",
 } as const;
+
+// ── WARP-2980 PR-B: expected activity and how often Droplet was right ──
+
+/** The card on /security/patterns. It never promises an alert: after-hours alerts need hours, an inside area and a person to tell. */
+export const EXPECTED_COPY = {
+  title: "Expected activity",
+  hint: "Activity someone who can change Security settings has said is normal for a place and time. Droplet won't flag it as unusual until the date it ends. It never hides someone inside after hours.",
+  empty: "Nothing is marked as expected.",
+  emptyManage: "Nothing is marked as expected. When something Droplet flags is normal for a place and time, add it here.",
+  add: "Add expected activity",
+  remove: "Remove",
+  removeAria: "Remove expected activity: {what}, {when}",
+  removed: "Removed. Droplet will flag this again when it isn't usual.",
+  added: "Added. Droplet won't flag this as unusual until {date}.",
+  inArea: "{label} in {place}",
+  onCamera: "{label} on {place}",
+  removedArea: "Removed area",
+  until: "Until {date} · added by {name}",
+  quietedOne: "Kept 1 flag quiet",
+  quietedMany: "Kept {n} flags quiet",
+  everyDay: "Every day",
+  weekdays: "Weekdays",
+  weekends: "Weekends",
+  allDay: "All day",
+  retry: "Retry",
+} as const;
+
+/** The add form. */
+export const EXPECTED_DIALOG_COPY = {
+  title: "Add expected activity",
+  intro: "Droplet stops flagging what you choose here as unusual, for this place and time, until the date you pick. It never hides someone inside after hours, and it keeps learning what's usual.",
+  where: "Area or camera",
+  what: "What was seen",
+  days: "Days",
+  from: "From",
+  for: "For",
+  flags: "Stop these flags",
+  reason: "Why is this expected?",
+  until: "For how long",
+  hoursOne: "1 hour",
+  hoursMany: "{n} hours",
+  reasonPlaceholder: "The cleaner comes on weekday evenings",
+  week: "A week",
+  month: "30 days",
+  quarter: "3 months",
+  year: "A year",
+  save: "Add",
+  cancel: "Cancel",
+  saving: "Adding…",
+  close: "Close",
+  needFlag: "Choose at least one flag.",
+  needReason: "Say why this is expected.",
+  badReason: "The reason has characters Droplet can't store. Remove them and try again.",
+  dwellPersonOnly: "Only people can stay longer than usual.",
+  noKeys: "Droplet needs to learn what's usual somewhere first.",
+} as const;
+
+/** For how long, in days — what route 33 accepts (1–365), offered as four choices. */
+export const EXPECTED_LENGTHS: ReadonlyArray<{ days: number; label: string }> = [
+  { days: 7, label: EXPECTED_DIALOG_COPY.week },
+  { days: 30, label: EXPECTED_DIALOG_COPY.month },
+  { days: 90, label: EXPECTED_DIALOG_COPY.quarter },
+  { days: 365, label: EXPECTED_DIALOG_COPY.year },
+];
+
+/** The card owner/admin see: counts from the first mark, a percentage from day 30. */
+export const PRECISION_COPY = {
+  title: "How often Droplet was right",
+  hint: "When someone marks a flagged incident Not expected, Droplet counts that flag as right. After 30 days of marks, this shows how often each kind of flag was right.",
+  none: "Nothing has been marked yet.",
+  soFarOne: "1 mark so far",
+  soFarMany: "{n} marks so far",
+  right: "Right {right} of {n} times ({percent}%)",
+  since: "since {date}",
+} as const;
+
+/** Each pattern flag's name, as the page and (later) the incident page say it. */
+export const PATTERN_NAME: Readonly<Record<SecurityPatternCode, string>> = {
+  out_of_place: "Not usual at this time",
+  unusual_volume: "Busier than usual",
+  long_dwell: "Stayed longer than usual",
+};
+
+/** The flags in the order the page lists them. */
+export const PATTERN_ORDER: readonly SecurityPatternCode[] = ["out_of_place", "unusual_volume", "long_dwell"];
+
+export const DAYS_NAME: Readonly<Record<SecuritySuppressionDays, string>> = {
+  every_day: EXPECTED_COPY.everyDay,
+  weekdays: EXPECTED_COPY.weekdays,
+  weekends: EXPECTED_COPY.weekends,
+};
 
 /** The tracked labels' names; any other Frigate label is shown capitalised. */
 export const LABEL_NAME: Readonly<Record<string, string>> = {
@@ -125,4 +219,21 @@ export function formatPerDay(perDay: number): string {
   if (perDay < 1) return "fewer than one detection a day";
   const n = Math.round(perDay);
   return `about ${n.toLocaleString("en-US")} ${n === 1 ? "detection" : "detections"} a day`;
+}
+
+/** A window of site hours: "10 PM–12 AM" (22, 2), "9 AM–5 PM" (9, 8); 24 hours is "All day". */
+export function hoursSpan(hourFrom: number, hourCount: number): string {
+  if (hourCount >= 24) return EXPECTED_COPY.allDay;
+  return `${hourTick(hourFrom)}–${hourTick((hourFrom + hourCount) % 24)}`;
+}
+
+/**
+ * An instant's date on the SITE's calendar (never the device's, never UTC):
+ * "Oct 25", with the year when it is not the current site year ("Sep 25, 2027").
+ */
+export function siteDate(instant: string | Date, timeZone: string, now: Date): string {
+  const at = instant instanceof Date ? instant : new Date(instant);
+  const year = (d: Date) => new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric" }).format(d);
+  const sameYear = year(at) === year(now);
+  return new Intl.DateTimeFormat("en-US", { timeZone, month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }) }).format(at);
 }

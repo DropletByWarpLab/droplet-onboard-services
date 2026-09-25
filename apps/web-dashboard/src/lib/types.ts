@@ -3805,7 +3805,13 @@ export type SecurityErrorCode =
   | "PATTERNS_UNAVAILABLE"
   | "PATTERN_NOT_FOUND"
   | "PATTERNS_NOT_BUILT"
-  | "NO_TIMEZONE";
+  | "NO_TIMEZONE"
+  // WARP-2980 (P5 PR-B) — expected activity, routes 32–34 (ZONE_ARCHIVED and
+  // AUDIT_UNAVAILABLE above answer route 33 too).
+  | "SUPPRESSIONS_UNAVAILABLE"
+  | "SUPPRESSION_NOT_FOUND"
+  | "SUPPRESSION_TARGET_NOT_FOUND"
+  | "SUPPRESSION_LIMIT";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
@@ -3850,6 +3856,14 @@ export interface SecurityPatternsOverview {
     learning: boolean;
   }>;
   waitingProposals: number;
+  /** WARP-2980 PR-B: how often each pattern code was right — owner/admin only, else null. */
+  precision: SecurityPatternPrecision | null;
+}
+
+/** WARP-2980 PR-B — route 29's precision: per pattern code, counts from the first mark, a percentage from day 30. */
+export interface SecurityPatternPrecision {
+  showAfterDays: 30;
+  codes: Array<{ code: SecurityPatternCode; marked: number; notExpected: number; firstMarkedAt: string; percentRight: number | null }>;
 }
 
 /** One (dayType, hour) of route 30. */
@@ -3890,8 +3904,54 @@ export interface SecurityPatternExplainView {
     dwell: { longestUsualVisitSec: number | null; samples: number; wouldFlagAboveSec: number | null };
     neighbours: Array<{ hour: number; daysObserved: number; daysWithEvent: number }>;
   } | null;
-  expected: Array<{ id: string; text: string; until: string }>;
+  /** WARP-2980 PR-B: why the pattern rules are paused for this key now; every "would flag" is off while set. */
+  paused: "zone_changed" | "stale_build" | "area_changed" | "camera_not_active" | null;
+  /** WARP-2980 PR-B: the active expected activity covering this slot. */
+  expected: Array<{ id: string; text: string; until: string; codes: SecurityPatternCode[] }>;
   release: Record<SecurityPatternCode, SecurityPatternRelease>;
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-B): expected activity (routes 32–34) ──
+// Mirrors apps/orchestrator/src/services/security-suppressions.service.ts.
+// "Suppression" is the route's and the code's word; the UI says "Expected activity".
+
+export type SecuritySuppressionDays = "every_day" | "weekdays" | "weekends";
+
+/** Route 32's row. */
+export interface SecuritySuppressionView {
+  id: string;
+  target: { kind: "area"; zoneId: string; name: string; archived: boolean } | { kind: "camera"; camera: string; name: string };
+  label: string;
+  days: SecuritySuppressionDays;
+  /** Site-local hour 0–23, and how many hours from it (1–24; wraps past midnight). */
+  hourFrom: number;
+  hourCount: number;
+  codes: SecurityPatternCode[];
+  reason: string;
+  createdByName: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Flags it quietened — owner/admin only; null for anyone else. */
+  quietedFlags: number | null;
+}
+
+/** Route 32. `canManage` is the server's answer: render Add / Remove from it, never from a level guess. */
+export interface SecuritySuppressionList {
+  suppressions: SecuritySuppressionView[];
+  canManage: boolean;
+  limit: number;
+}
+
+/** Route 33's body — exactly these keys. */
+export interface SecuritySuppressionCreateBody {
+  target: { kind: "area"; zoneId: string } | { kind: "camera"; camera: string };
+  label: string;
+  days: SecuritySuppressionDays;
+  hourFrom: number;
+  hourCount: number;
+  codes: SecurityPatternCode[];
+  reason: string;
+  expiresInDays: number;
 }
 
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──

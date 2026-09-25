@@ -12,6 +12,10 @@
  *     list and the grid.
  * The trial sentence shows while any flag is in trial, unless the health row
  * already says so.
+ *
+ * WARP-2980 PR-B: Expected activity and "How often Droplet was right" come
+ * after What's usual, in that order; the precision card only when route 29
+ * sends `precision` (owner/admin); the trial line's reworded words.
  */
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -24,6 +28,7 @@ const h = vi.hoisted(() => ({
   mutate: vi.fn(),
   health: null as unknown,
   cameras: [] as unknown[],
+  suppressions: { suppressions: [], canManage: false, limit: 100 } as unknown,
 }));
 
 vi.mock("@/lib/hooks/useSecurity", () => ({
@@ -31,6 +36,7 @@ vi.mock("@/lib/hooks/useSecurity", () => ({
   useSecurityHealth: () => ({ sources: h.health, error: undefined, isLoading: false, refresh: vi.fn() }),
   useSecurityCameras: () => ({ cameras: h.cameras, error: undefined }),
   useSecurityPatternCells: () => ({ cells: null, error: undefined, isLoading: true }),
+  useSecuritySuppressions: () => ({ list: h.suppressions, error: undefined, isLoading: false, mutate: vi.fn() }),
 }));
 
 vi.mock("@/components/shell/ShellPage", () => ({
@@ -44,7 +50,7 @@ vi.mock("@/components/shell/ShellPage", () => ({
 }));
 
 import SecurityPatternsPage from "@/app/security/patterns/page";
-import { COPY } from "@/components/security/patterns-copy";
+import { COPY, EXPECTED_COPY, PRECISION_COPY } from "@/components/security/patterns-copy";
 
 const RELEASE = { out_of_place: "trial", unusual_volume: "trial", long_dwell: "trial" } as const;
 function overview(over: Partial<SecurityPatternsOverview> = {}): SecurityPatternsOverview {
@@ -59,6 +65,7 @@ function overview(over: Partial<SecurityPatternsOverview> = {}): SecurityPattern
     ],
     keys: [{ zoneKey: "camera:front", kind: "camera", zoneId: null, name: "Front camera", cameras: ["front"], labels: ["person"], learning: true }],
     waitingProposals: 0,
+    precision: null,
     ...over,
   };
 }
@@ -140,5 +147,23 @@ describe("/security/patterns", () => {
     expect(alert.textContent).not.toContain("ECONNREFUSED");
     fireEvent.click(screen.getByRole("button", { name: COPY.retry }));
     expect(h.mutate).toHaveBeenCalled();
+  });
+
+  it("WARP-2980 PR-B: Expected activity, then How often Droplet was right, come after What's usual — in that order", () => {
+    h.overview = overview({ precision: { showAfterDays: 30, codes: [] } });
+    render(<SecurityPatternsPage />);
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((x) => x.textContent);
+    expect(headings).toEqual([COPY.learningTitle, COPY.usualTitle, EXPECTED_COPY.title, PRECISION_COPY.title]);
+  });
+
+  it("no precision from the server (family) → no precision card; Expected activity still shows", () => {
+    render(<SecurityPatternsPage />);
+    expect(screen.getByRole("heading", { name: EXPECTED_COPY.title })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: PRECISION_COPY.title })).toBeNull();
+  });
+
+  it("the trial line now says Droplet notes what it would flag", () => {
+    render(<SecurityPatternsPage />);
+    expect(screen.getByText("Trial: Droplet notes what it would flag, but doesn't raise these flags yet.")).toBeTruthy();
   });
 });

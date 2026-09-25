@@ -792,6 +792,11 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "PATTERN_NOT_FOUND",
     "PATTERNS_NOT_BUILT",
     "NO_TIMEZONE",
+    // WARP-2980 (P5 PR-B) — expected activity, routes 32–34.
+    "SUPPRESSIONS_UNAVAILABLE",
+    "SUPPRESSION_NOT_FOUND",
+    "SUPPRESSION_TARGET_NOT_FOUND",
+    "SUPPRESSION_LIMIT",
   ] as const satisfies readonly SecurityErrorCode[];
   // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
   // code added to SecurityErrorCode without copy here fails the build.
@@ -810,7 +815,8 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
 
   it("the copy never says zone, and never promises the site is watched over", () => {
     // "zone" as a NOUN — "timezone" is the ordinary word for what the owner picks.
-    const banned = /monitor|armed|\barm\b|alarm|\bsecure\b|protected|guard|\bspaces?\b|\bzones?\b/i;
+    // WARP-2980 PR-B: nor the code's words for what the page calls "expected activity" and "what's usual".
+    const banned = /monitor|armed|\barm\b|alarm|\bsecure\b|protected|guard|\bspaces?\b|\bzones?\b|\bsuppress|\bbaselines?\b/i;
     for (const code of [...CODES, "401", "404", "403", "409", "429", "NETWORK", "NETWORK_ERROR", "TIMEOUT", "TOTALLY_UNKNOWN_CODE"]) {
       expect(translateError({ code }, "security"), code).not.toMatch(banned);
     }
