@@ -122,6 +122,7 @@ import type {
   VpnStatusInfo,
 } from "@/lib/types";
 import { PENDING_PROMPT_KEY } from "@/lib/types";
+import { greetingNow } from "@/lib/greeting";
 // WARP-1803 — the hero's inline conversation reuses the chat surface's
 // message rendering (ChatMessage + the indigo chat skin). Both sheets are
 // fully `.droplet-shell`-scoped, so importing them here styles only the
@@ -149,15 +150,6 @@ export interface WidgetMeta {
 }
 
 /* ─────────────────────────── helpers ─────────────────────────── */
-
-function greetingNow(): string {
-  const hr = new Date().getHours();
-  if (hr < 5) return "Still up";
-  if (hr < 12) return "Good morning";
-  if (hr < 18) return "Good afternoon";
-  if (hr < 22) return "Good evening";
-  return "Working late";
-}
 
 function relTime(iso: string): string {
   const then = new Date(iso).getTime();
