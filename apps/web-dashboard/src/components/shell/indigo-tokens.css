@@ -26,10 +26,17 @@
    WARP-2976: `.dept-switcher` (the ADR-059 department switcher) is a third
    scope, for the same reason. It renders at the top of the desktop sidebar,
    which sits above every page scope, so without its own scope the ramp would
-   not resolve there. Tokens only, like `.droplet-workspace`. */
+   not resolve there. Tokens only, like `.droplet-workspace`.
+
+   WARP-3062: the Assistant navigation layout's bar is a fourth, for the
+   same reason: it sits above every page scope. The scope is the BAR, not
+   `.droplet-assistant`, because the layout's business side must render
+   today's pages unchanged — a shell-wide scope would restyle every page
+   that is not itself a `.droplet-shell`. Tokens only. */
 .droplet-shell,
 .droplet-workspace,
-.dept-switcher {
+.dept-switcher,
+.droplet-assistant > .da-bar {
   /* ── Indigo identity — LIGHT (default) ─────────────────── */
   --bg: #f5f6fb;
   --surface: #ffffff;
@@ -109,7 +116,8 @@
 
 .dark .droplet-shell,
 .dark .droplet-workspace,
-.dark .dept-switcher {
+.dark .dept-switcher,
+.dark .droplet-assistant > .da-bar {
   /* ── Indigo identity — DARK (the original handoff ramp) ── */
   --bg: #0f1117;
   --surface: #1a1d27;

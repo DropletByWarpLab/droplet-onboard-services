@@ -783,6 +783,28 @@ export const NAV_GROUPS: NavGroup[] = [
 // from NAV_GROUPS routes through the drawer.
 export const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
 
+/**
+ * WARP-3062 — where Overview lives in the assistant nav layout. That layout
+ * opens on Ask AI, so `/` belongs to the Ask side and the same Home board is
+ * served from here instead. Only the href moves: the entry keeps its label,
+ * glyph and (absent) gates, so the business side's nav is today's nav.
+ */
+export const ASSISTANT_OVERVIEW_HREF = "/overview";
+
+/** Re-point every `/` entry (Overview, in any department arrangement) at
+ *  `href`. Returns the input untouched when there is nothing to move, so a
+ *  caller can compare by identity. Pure — runs before gating, like
+ *  `departmentNavGroups`. */
+export function withOverviewAt(groups: NavGroup[], href: string): NavGroup[] {
+  if (href === "/") return groups;
+  return groups.map((g) => ({
+    ...g,
+    items: g.items.map((item) =>
+      item.href === "/" ? { ...item, href } : item,
+    ),
+  }));
+}
+
 /** Filter a group's items by role + capabilities. Returns the same
  *  shape with items shaped to render order; empty groups are caller's
  *  responsibility to skip.
@@ -970,7 +992,9 @@ export function isSettingsContext(pathname: string): boolean {
  * `requiresModule` today; the explicit list below makes that a guarantee
  * instead of an accident.
  */
-const ALWAYS_ON_PATHS = ["/", "/chat", "/settings"] as const;
+// WARP-3062: `/overview` is Home under the assistant layout, so it is always
+// on for the same reason `/` is.
+const ALWAYS_ON_PATHS = ["/", ASSISTANT_OVERVIEW_HREF, "/chat", "/settings"] as const;
 
 // Exported (WARP-2971) so the Workspace layout derives the active space with
 // the SAME segment-aware rule `moduleForPath` uses, not a second prefix test.
