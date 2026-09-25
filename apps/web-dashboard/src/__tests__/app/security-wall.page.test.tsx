@@ -18,8 +18,10 @@
  *     offers it;
  *   · every request is a GET to one of the reads it is allowed (§4) — and no
  *     dashboard source can even name the rack panel's route (T-D13);
- *   · wall.css: tokens only, the strip on screen above 640 px, readable muted
- *     badges, and nothing 375 px wide scrolls sideways.
+ *   · wall.css: tokens only, the strip at the bottom of a TV's screen, every
+ *     picture at least 72 px high (the page scrolls rather than squeeze one),
+ *     one-line captions, readable muted badges, and nothing 375 px wide
+ *     scrolls sideways.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -453,13 +455,25 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
   const css = readFileSync(packagePath("src/components/security/wall.css"), "utf8");
   const code = css.replace(/\/\*[\s\S]*?\*\//g, "");
 
-  it("above 640 px the page is exactly the viewport's height, so the strip is never pushed below the fold", () => {
-    expect(code).toMatch(/@media \(min-width: 641px\) \{\s*\.droplet-shell\.sec-wall \{ height: 100dvh; \}\s*\}/);
-    expect(code).toMatch(/\.droplet-shell\.sec-wall \{[^}]*grid-template-rows: minmax\(0, 1fr\) auto auto;/);
+  it("the page is at least the viewport's height, the tiles take what the strip leaves, and it grows (never squeezes) below that", () => {
+    expect(code).toMatch(/\.droplet-shell\.sec-wall \{[^}]*min-height: 100dvh;[^}]*grid-template-rows: minmax\(0, 1fr\) auto auto;/);
+    // Round 3 (UX): a fixed height squeezed 12 pictures to 0–23 px on a 960×540 TV browser. Now the page scrolls a little instead.
+    expect(code).not.toMatch(/\.droplet-shell\.sec-wall \{[^}]*(?<![-\w])height:/);
   });
 
-  it("≤ 640 px: the rows stack from the top — no empty bands between them", () => {
-    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.droplet-shell\.sec-wall \{[^}]*align-content: start;/);
+  it("a picture is never less than 72 px high, and nothing in it spills onto the caption", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-frame \{\s*position: relative; min-height: 72px; overflow: hidden;/);
+  });
+
+  it("a caption is one line: a long name ends in an ellipsis, the state keeps its words", () => {
+    expect(code).toMatch(/\.sec-wall-tile > figcaption \{[^}]*display: flex;/);
+    expect(code).not.toMatch(/\.sec-wall-tile > figcaption \{[^}]*flex-wrap: wrap/);
+    expect(code).toMatch(/\.sec-wall-tile-name \{\s*min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
+    expect(code).toMatch(/\.sec-wall-tile-state \{ flex-shrink: 0; white-space: nowrap;/);
+  });
+
+  it("≤ 640 px wide or ≤ 480 px tall (a phone either way up): the rows stack from the top — no empty bands between them", () => {
+    expect(code).toMatch(/@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*\.droplet-shell\.sec-wall \{[^}]*align-content: start;/);
   });
 
   it("a muted badge on the strip is readable (4.41:1 → --text), and a stale strip's badges lose their colour", () => {
@@ -471,10 +485,11 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
     expect(code).not.toMatch(/\.sec-wall-leave[^{,]*\{[^}]*(clip|width: 1px|position: absolute)/);
   });
 
-  it("≤ 640 px: one tile per row, each picture 16:9, and the cells wrap at 150 px", () => {
-    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-tiles \{ grid-template-columns: minmax\(0, 1fr\); grid-template-rows: none; \}/);
-    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-tile-frame \{ aspect-ratio: 16 \/ 9; \}/);
-    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-strip > dl \{[^}]*repeat\(auto-fit, minmax\(150px, 1fr\)\)/);
+  it("≤ 640 px wide or ≤ 480 px tall: one tile per row, each picture 16:9 but never taller than the screen, and the cells wrap at 150 px", () => {
+    const phone = /@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*/.exec(code)?.[0] ?? "";
+    expect(phone).toMatch(/\.sec-wall-tiles \{ grid-template-columns: minmax\(0, 1fr\); grid-template-rows: none; \}/);
+    expect(phone).toMatch(/\.sec-wall-tile-frame \{ aspect-ratio: 16 \/ 9; max-height: 75dvh; \}/);
+    expect(phone).toMatch(/\.sec-wall-strip > dl \{[^}]*repeat\(auto-fit, minmax\(150px, 1fr\)\)/);
   });
 
   it("above 640 px the tiles are an equal --cols × --rows grid, so every camera fits the space the strip leaves", () => {

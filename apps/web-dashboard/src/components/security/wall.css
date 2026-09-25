@@ -6,23 +6,24 @@
  * classes. The page wraps its .droplet-shell root in a .dark element, so
  * these resolve the shell's dark ramp whatever the dashboard's theme.
  *
- * Layout. Above 640 px the page is exactly the viewport's height, so the
- * camera tiles take what the banners and the strip leave (grid rows
- * `minmax(0, 1fr) auto auto`) and the strip is always on screen. The tiles
- * are a `--cols` × `--rows` grid of equal cells (tileGrid), each a picture
- * over its caption, so every camera fits and none is off screen. At 640 px
- * and below the page may scroll: the tiles stack one per row, each picture
- * 16:9, the rows stack from the top, and the strip's cells wrap two by two,
- * so 375 px never scrolls sideways. Type scales with the screen (clamp) so a
- * 55" TV reads from across the room. No animation.
+ * Layout. Above 640 px wide and 480 px tall the page is at least the
+ * viewport's height, and the camera tiles take what the banners and the strip
+ * leave (grid rows `minmax(0, 1fr) auto auto`), so the strip is at the
+ * bottom of the screen. The tiles are a `--cols` × `--rows` grid of equal
+ * cells (tileGrid), each a picture over a one-line caption. A picture is
+ * never less than 72 px high: when the screen is too short for that (a 1080p
+ * TV browser at 960×540 with 12 cameras and a banner), the page grows and
+ * scrolls a little instead of squeezing the pictures away. At 640 px wide or
+ * 480 px tall and below (a phone, either way up) the page scrolls: the tiles
+ * stack one per row, each picture 16:9, the rows stack from the top, and the
+ * strip's cells wrap two by two, so 375 px never scrolls sideways. Type
+ * scales with the screen (clamp) so a 55" TV reads from across the room. No
+ * animation.
  */
 .droplet-shell.sec-wall {
   position: relative; min-height: 100dvh; margin: 0;
   display: grid; grid-template-rows: minmax(0, 1fr) auto auto;
   background: var(--bg); color: var(--text);
-}
-@media (min-width: 641px) {
-  .droplet-shell.sec-wall { height: 100dvh; }
 }
 .droplet-shell.sec-wall:focus { outline: none; }
 
@@ -45,18 +46,21 @@
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden;
 }
 .droplet-shell .sec-wall-tile-frame {
-  position: relative; min-height: 0; display: flex; align-items: center; justify-content: center;
+  position: relative; min-height: 72px; overflow: hidden; display: flex; align-items: center; justify-content: center;
   background: var(--bg); color: var(--text-muted);
 }
 .droplet-shell .sec-wall-tile-frame > img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
 /* An old picture: dimmed and grey under its own time, never drawn as a current one. */
 .droplet-shell .sec-wall-tile.is-stale .sec-wall-tile-frame > img { opacity: 0.4; filter: grayscale(1); }
+/* One line, whatever the tile's width: a long name ends in "…", the state keeps its words. */
 .droplet-shell .sec-wall-tile > figcaption {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; padding: 8px 12px;
+  display: flex; align-items: center; gap: 12px; min-width: 0; padding: 8px 12px;
   font-size: clamp(14px, 1.2vw, 24px);
 }
-.droplet-shell .sec-wall-tile-name { font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
-.droplet-shell .sec-wall-tile-state { display: inline-flex; align-items: center; gap: 6px; color: var(--text); overflow-wrap: anywhere; }
+.droplet-shell .sec-wall-tile-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text);
+}
+.droplet-shell .sec-wall-tile-state { flex-shrink: 0; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
 .droplet-shell .sec-wall-cameras-note {
   display: grid; justify-items: center; gap: 10px; max-width: 36em; padding: 24px; text-align: center;
   color: var(--text-muted); font-size: clamp(14px, 1.4vw, 28px);
@@ -109,12 +113,12 @@
 .droplet-shell .sec-wall-strip.is-stale .sec-wall-sources { color: var(--text-muted); }
 .droplet-shell .sec-wall-strip.is-stale .badge { filter: grayscale(1); }
 
-/* ── Phone width ───────────────────────────────────────────── */
-@media (max-width: 640px) {
+/* ── A phone, either way up ─────────────────────────────────── */
+@media (max-width: 640px), (max-height: 480px) {
   .droplet-shell.sec-wall { grid-template-rows: auto auto auto; align-content: start; }
   .droplet-shell .sec-wall-cameras { min-height: 200px; }
   .droplet-shell .sec-wall-tiles { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
-  .droplet-shell .sec-wall-tile-frame { aspect-ratio: 16 / 9; }
+  .droplet-shell .sec-wall-tile-frame { aspect-ratio: 16 / 9; max-height: 75dvh; }
   .droplet-shell .sec-wall-strip > dl { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 }
 

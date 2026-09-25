@@ -40,7 +40,8 @@ export const WALL_COPY = {
   // One tile per camera; {camera} is the name the household gave it.
   tileAlt: "{camera}, latest picture",
   tileConnecting: "Connecting…",
-  tileLost: "No picture yet. Droplet keeps trying.",
+  // Short: a caption is one line, and the tile keeps asking without saying so.
+  tileLost: "No picture yet",
   tileStale: "Picture from {time}",
   tileNotSending: "Not sending pictures",
   tileOff: "Turned off",
@@ -124,7 +125,8 @@ export const WALL_TICK_MS = 5_000;
 /**
  * The camera tiles' grid on a TV: the nearest square that holds them, wider
  * than tall (1 → 1×1, 2 → 2×1, 3–4 → 2×2, 5–6 → 3×2, 7–9 → 3×3, 10–12 → 4×3),
- * so every tile fits the space the strip leaves and none is off screen.
+ * so the tiles share the space the strip leaves (wall.css keeps each picture
+ * at least 72 px high, and scrolls the page a little when that doesn't fit).
  */
 export function tileGrid(n: number): { cols: number; rows: number } {
   const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
