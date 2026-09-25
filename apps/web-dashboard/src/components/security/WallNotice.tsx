@@ -1,14 +1,19 @@
 "use client";
 
 /**
- * WARP-2981 (ADR-059 P6, §3.8) — what /security/wall shows instead of the
- * wall. AuthGate renders it; it asks Droplet for nothing.
+ * WARP-2981 (ADR-059 P6, §3.8) — the two things /security/wall shows instead
+ * of the wall. AuthGate renders them; neither asks Droplet for anything.
  *
  *   · `WallRefused` — D6 (Stefan: "Member wall, own cameras"): an owner or
  *     admin session never runs the wall. It says why, and what to do: sign in
  *     on the TV with a Staff account whose cameras are the ones to show. The
  *     refused person manages people, so it links to Users, where accounts
  *     are added and their cameras chosen, and offers to sign out of the TV.
+ *   · `WallSignedOut` — the TV's sign-in ended (the 12 h limit, 30 min with
+ *     no request, a fifth sign-in elsewhere, a revocation), or it never had
+ *     one. It says so, and only a press opens the sign-in form: the screen
+ *     never leads anyone into typing a password in front of the room by
+ *     itself (authFetch and AuthGate do not navigate to /login from here).
  *
  * Always dark and chromeless, like the wall (wall.css).
  */
@@ -61,6 +66,19 @@ export function WallRefused() {
         </button>
         <Link href="/security" className="btn ghost">
           {WALL_COPY.leave}
+        </Link>
+      </div>
+    </Notice>
+  );
+}
+
+export function WallSignedOut() {
+  return (
+    <Notice title={WALL_COPY.signedOutTitle}>
+      <p>{WALL_COPY.signedOutBody}</p>
+      <div className="sec-wall-notice-actions">
+        <Link href={SECURITY_WALL_SIGN_IN_HREF} className="btn primary">
+          {WALL_COPY.signedOutAction}
         </Link>
       </div>
     </Notice>

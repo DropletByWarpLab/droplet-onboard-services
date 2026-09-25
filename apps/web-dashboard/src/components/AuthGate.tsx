@@ -11,7 +11,7 @@ import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
 import { HELP_PATH, isSecurityWallPath } from "@/lib/routing";
 import { WallModulesKeeper } from "@/lib/hooks/useSecurity";
-import { WallRefused } from "@/components/security/WallNotice";
+import { WallRefused, WallSignedOut } from "@/components/security/WallNotice";
 import { wallRunsFor } from "@/components/security/wall-status";
 
 // `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
@@ -118,8 +118,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
-    // If not authenticated and not on a public page, redirect to login.
-    if (!user && !isPublicPage && !applianceUnclaimed) {
+    // If not authenticated and not on a public page, redirect to login —
+    // except on the Security wall (WARP-2981), which faces a room: it shows
+    // that the TV is signed out, and only a press opens the sign-in form.
+    if (!user && !isPublicPage && !applianceUnclaimed && !isSecurityWallPath(pathname)) {
       router.replace("/login");
       return;
     }
@@ -300,6 +302,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // visitor doesn't briefly see the manual before the /login redirect.
   if (pathname === HELP_PATH && applianceUnclaimed) {
     return <>{children}</>;
+  }
+
+  // WARP-2981 — no sign-in on the Security wall: say so, in front of the room,
+  // instead of a sign-in form (the redirect above skips this path).
+  if (!user && isSecurityWallPath(pathname)) {
+    return <WallSignedOut />;
   }
 
   // Not authenticated — show nothing while redirecting

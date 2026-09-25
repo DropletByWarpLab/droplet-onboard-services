@@ -82,6 +82,11 @@ export const WALL_COPY = {
   refusedManage: "You can add that account, and choose its cameras, on the Users page.",
   refusedManageLink: "Open Users",
   refusedSignOut: "Sign out of this TV",
+
+  // The TV's sign-in ended while the wall was up: never a sign-in form in front of the room by itself.
+  signedOutTitle: "This TV view is signed out",
+  signedOutBody: "Nothing is shown until someone signs in again on this TV.",
+  signedOutAction: "Sign in on this TV",
 } as const;
 
 /**
