@@ -421,8 +421,11 @@ export interface ReasonDraft {
   detail: Record<string, string | number | null>;
 }
 
+/** The P3 codes: each has ONE severity in RULESET. The pattern codes (P5) never reach `evidenceOf`. */
+export type P3Code = keyof typeof RULESET;
+
 function evidenceOf(
-  code: SecurityReasonCode,
+  code: P3Code,
   event: TriageEvent,
   label: string | null,
   detail: ReasonDraft["detail"],

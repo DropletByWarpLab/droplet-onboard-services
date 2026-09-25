@@ -8796,6 +8796,8 @@ model SecurityZone {
   links       SecurityZoneLink[]
   /// WARP-2978 — incidents scoped to this area (Restrict: areas are archived, never deleted).
   incidents   SecurityIncident[]
+  /// WARP-2980 P5 PR-B — expected activity for this area (Restrict, for the same reason).
+  suppressions SecuritySuppression[]
 
   @@index([state])
 }
@@ -9015,7 +9017,7 @@ model SecurityBaselineBuild {
   windowTo       String                       @db.VarChar(10)
   rulesetVersion Int                          @db.SmallInt
   /// Bumped by every change to this build's cells (the full insert, each area rebuild).
-  /// The engine's cell cache is keyed on (id, cellsVersion).
+  /// The engine keeps no cell cache: the rules read three cells per judged event (WARP-2980 PR-B).
   cellsVersion   Int                          @default(0)
   startedAt      DateTime                     @default(now())
   finishedAt     DateTime?
@@ -9084,10 +9086,12 @@ model SecurityBaselineJobState {
 // Membership is SecurityEventTriage (one row per SecurityEvent, the exactly-once marker);
 // SecurityEvent stays append-only (a BEFORE UPDATE trigger refuses any update).
 // Values land with their first writer: out_of_place / unusual_volume / long_dwell and the verdict
-// columns with P5, camera_offline_during_activity with P4, the door codes with ADR-055.
+// columns landed with P5 PR-B (WARP-2980); camera_offline_during_activity lands with P4, the door
+// codes with ADR-055.
 //
 // Every shape rule Prisma cannot express is a hand-written CHECK in
-// 20260925030000_warp_2978_security_incidents — explicit enums, never IS NULL as state.
+// 20260925030000_warp_2978_security_incidents (P5 PR-B's: 20260925060100_warp_2980_security_patterns_verdicts)
+// — explicit enums, never IS NULL as state.
 
 enum SecurityIncidentScope {
   /// One area. zoneId + zoneName + zoneKind are set (CHECK).
@@ -9137,6 +9141,19 @@ enum SecurityReasonCode {
   after_hours_presence
   camera_offline
   threat_signal
+  /// WARP-2980 P5 PR-B (brief §4.3) — the pattern codes. In PR-B they appear on SecurityPatternFlag,
+  /// SecuritySuppression.codes and SecurityIncident.verdictCodes only: each ships `trial`, and
+  /// SecurityIncidentReason_code_severity refuses them until P5 PR-D makes one count.
+  out_of_place
+  unusual_volume
+  long_dwell
+}
+
+/// WARP-2980 P5 PR-B — a person's judgement of an incident (brief §4.4). Explicit — never inferred from verdictAt.
+enum SecurityIncidentVerdict {
+  unreviewed
+  expected
+  not_expected
 }
 
 enum SecurityTriageOutcome {
@@ -9237,16 +9254,32 @@ model SecurityIncident {
   version          Int                      @default(0)
   updatedAt        DateTime                 @updatedAt
 
-  reasons SecurityIncidentReason[]
-  members SecurityEventTriage[]
-  acks    SecurityIncidentAck[]
-  notices SecurityIncidentNotice[]
+  /// WARP-2980 P5 PR-B (brief §4.4) — Expected / Not expected, by owner/admin at act level. Never
+  /// changes state, severity, codes or notifications. CHECK SecurityIncident_verdict_shape.
+  verdict          SecurityIncidentVerdict  @default(unreviewed)
+  /// User.id (no FK, like stateChangedById) and User.displayName at the time, display-safe.
+  verdictById      String?
+  verdictByName    String?                  @db.VarChar(120)
+  /// The latest mark.
+  verdictAt        DateTime?
+  /// The first mark. Never moves when the verdict changes, so precision's 30 days are stable.
+  verdictFirstAt   DateTime?
+  /// The codes the person could judge when they marked it; precision is attributed to these.
+  /// Empty iff unreviewed (CHECK).
+  verdictCodes     SecurityReasonCode[]     @default([])
+
+  reasons      SecurityIncidentReason[]
+  members      SecurityEventTriage[]
+  acks         SecurityIncidentAck[]
+  notices      SecurityIncidentNotice[]
+  patternFlags SecurityPatternFlag[]
 
   @@index([grouping, scope, zoneId, scopeCamera])
   @@index([state, lastActivityAt])
   @@index([lastActivityAt])
   @@index([zoneId, lastActivityAt])
   @@index([notifyState])
+  @@index([verdict])
 }
 
 model SecurityIncidentReason {
@@ -9367,4 +9400,132 @@ model SecurityIncidentEngineState {
   floorCandidate   BigInt
   floorCandidateAt DateTime
   updatedAt        DateTime @updatedAt
+}
+
+// ── WARP-2980 P5 PR-B (ADR-059 §4.3, §4.4): pattern flags, expected activity, verdicts ──
+//
+// Every P5 code ships `trial`: a hit is written to SecurityPatternFlag, never to
+// SecurityIncidentReason (whose code_severity CHECK refuses the P5 codes until PR-D). Shape rules
+// Prisma cannot express are hand-written CHECKs in 20260925060100_warp_2980_security_patterns_verdicts.
+
+/// Why a pattern flag did not count. Explicit — never inferred from suppressionId.
+enum SecurityPatternFlagEffect {
+  /// the code's release was `trial` when it was judged (every P5 code in ruleset v3)
+  trial
+  /// an active SecuritySuppression matched it — checked first, so it is recorded in trial too
+  suppressed
+}
+
+enum SecuritySuppressionTarget {
+  area
+  camera
+}
+
+/// Which days the window OPENS on (a window past midnight belongs to the day it opens).
+enum SecuritySuppressionDays {
+  every_day
+  weekdays
+  weekends
+}
+
+enum SecuritySuppressionState {
+  active
+  /// a person removed it (endedById set)
+  removed
+  /// its expiresAt passed (the baseline tick; endedById NULL)
+  expired
+}
+
+/// What the pattern rules did with one grouped Frigate detection (SecurityPatternDay).
+enum SecurityPatternOutcome {
+  /// every gate passed and the three rules ran, whether or not one hit
+  judged
+  no_build
+  /// the ready build was cut in another zone
+  zone_changed
+  stale_build
+  /// the key has no cells for this label
+  no_cell
+  /// the area's links changed since its cells were built
+  area_changed
+  /// a camera behind the key is learning or stale
+  camera_not_active
+  /// fewer than 10 smoothed observed days behind the cell
+  not_ready
+  /// the evaluation threw
+  failed
+}
+
+/// A pattern code judged on one detection that did NOT count (brief §4.3). Snapshots, so a rebuild
+/// or a removed suppression never moves it.
+model SecurityPatternFlag {
+  id              String                    @id @default(uuid())
+  incidentId      String
+  incident        SecurityIncident          @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  code            SecurityReasonCode
+  effect          SecurityPatternFlagEffect
+  /// What it would carry if it counted (spec D9).
+  severity        SecuritySeverity
+  suppressionId   String?
+  suppression     SecuritySuppression?      @relation(fields: [suppressionId], references: [id], onDelete: Restrict)
+  rulesetVersion  Int                       @db.SmallInt
+  /// `area:<id>` | `camera:<name>` — the key judged against — and the cameras behind it (DS-005 on
+  /// derived numbers: a flag is shown only to a viewer who sees every one of them).
+  zoneKey         String                    @db.VarChar(72)
+  keyCameras      String[]
+  /// The detection. No FK: events are trimmed at 30 d; flags live with the incident.
+  evidenceEventId BigInt
+  evidenceCamera  String                    @db.VarChar(64)
+  evidenceLabel   String                    @db.VarChar(64)
+  evidenceAt      DateTime
+  evidenceSummary String                    @db.VarChar(500)
+  /// The numbers behind the flag (spec §4.5): safe integers and strings only.
+  detail          Json
+  createdAt       DateTime                  @default(now())
+
+  @@unique([incidentId, code, evidenceEventId])
+  @@index([suppressionId])
+  @@index([createdAt])
+}
+
+/// "Expected activity" in the UI (brief §4.4). A person at Security manage said this is normal for
+/// one place, label and time window. It quiets the three pattern codes only (spec D12). Immutable:
+/// removed or expired, never edited or extended.
+model SecuritySuppression {
+  id            String                    @id @default(uuid())
+  targetKind    SecuritySuppressionTarget
+  zoneId        String?
+  zone          SecurityZone?             @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  camera        String?                   @db.VarChar(64)
+  label         String                    @db.VarChar(64)
+  days          SecuritySuppressionDays
+  /// Site-local wall-clock hour 0–23, and how many hours from it (1–24; wraps past midnight).
+  hourFrom      Int                       @db.SmallInt
+  hourCount     Int                       @db.SmallInt
+  codes         SecurityReasonCode[]
+  reason        String                    @db.VarChar(120)
+  state         SecuritySuppressionState  @default(active)
+  createdById   String
+  createdByName String                    @db.VarChar(120)
+  createdAt     DateTime                  @default(now())
+  expiresAt     DateTime
+  endedAt       DateTime?
+  endedById     String?
+  flags         SecurityPatternFlag[]
+
+  @@index([state, expiresAt])
+  @@index([zoneId])
+}
+
+/// Per site-local date: how many grouped Frigate detections the pattern rules judged, paused on each
+/// gate, or failed on — so a fortnight with no flag can be told from a fortnight in which nothing
+/// was judged (P5 PR-D's go/no-go measurement). Written once per engine tick.
+model SecurityPatternDay {
+  /// Site-local 'YYYY-MM-DD'.
+  date      String                 @db.VarChar(10)
+  outcome   SecurityPatternOutcome
+  count     Int
+  updatedAt DateTime               @updatedAt
+
+  @@id([date, outcome])
 }
