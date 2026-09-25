@@ -9,7 +9,7 @@ import {
   useImperativeHandle,
   forwardRef,
 } from "react";
-import { ArrowUpRight, Loader2, Mic, Paperclip, Square, Wrench } from "lucide-react";
+import { ArrowUpRight, Loader2, Mic, Plus, Square, Wrench } from "lucide-react";
 import { transcribeAudio, SttUnavailable } from "@/lib/api";
 import { canCaptureAudio, PcmRecorder } from "@/lib/audio-capture";
 import type { ChatAttachment, ToolCatalogEntry } from "@/lib/types";
@@ -48,14 +48,18 @@ interface ChatInputProps {
   onToolCommand?: (tool: ToolCatalogEntry) => void;
   /**
    * WARP-904 — per-turn provider/model quick-switch. A compact affordance
-   * (the `ModelSelector` pill, optionally paired with the "local ·
-   * on-device" tag) rendered at the START of the composer's icon row —
-   * next to the input the user is about to send from, rather than up in
-   * the page header where it's easy to miss on a long thread. Omitted
-   * entirely (e.g. the home hero composer) renders the row exactly as
-   * it did before this prop existed.
+   * (the `ModelSelector` pill) rendered inside the pill right after the
+   * field — next to the input the user is about to send from, rather than
+   * up in the page header where it's easy to miss on a long thread. Omitted
+   * entirely, the pill has no model control.
    */
   modelSelector?: React.ReactNode;
+  /**
+   * WARP-3043 — the empty chat's suggestion chips. Rendered INSIDE the
+   * composer, after the pill, so the layout that centres the greeting and
+   * the pill together can never strand them at the bottom edge.
+   */
+  suggestions?: React.ReactNode;
 }
 
 /**
@@ -87,6 +91,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   slashTools,
   onToolCommand,
   modelSelector,
+  suggestions,
 }, ref) {
   const [value, setValue] = useState("");
   const [isDragging, setIsDragging] = useState(false);
@@ -355,15 +360,22 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       onDrop={onDrop}
       className="chat-composer relative"
     >
-      {/* Design-handoff composer card. The card is the visual focus
-          boundary — chat-indigo.css suppresses every inner focus ring. */}
+      {/* WARP-3043 — the pill (the Mac composer): one row of attach, the
+          field, the model, the mic and send. The pill is the field's focus
+          boundary; its buttons keep a keyboard ring (chat-indigo.css). A
+          press on its empty space puts the caret in the field. */}
       <div
-        className={`chat-composer-inner ${isDragging ? "ring-2 ring-accent ring-inset" : ""}`}
+        className={`chat-composer-inner${isDragging ? " is-drop" : ""}`}
+        onMouseDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          e.preventDefault();
+          textareaRef.current?.focus();
+        }}
       >
       {showAttachmentRow ? (
         <div
           data-testid="attachment-row"
-          className="flex flex-wrap gap-1.5"
+          className="chat-attach-row flex flex-wrap gap-1.5"
         >
           {attachments!.map((a) => (
             <AttachmentChip
@@ -416,6 +428,28 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           ))}
         </ul>
       ) : null}
+      {dropEnabled ? (
+        <>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={handleFileInputChange}
+            data-testid="chat-file-input"
+            aria-label="Attach files"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled}
+            aria-label="Attach a file"
+            className="chat-iconbtn"
+          >
+            <Plus size={17} aria-hidden="true" />
+          </button>
+        </>
+      ) : null}
       <textarea
         ref={textareaRef}
         value={value}
@@ -430,77 +464,50 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         disabled={disabled}
         rows={1}
       />
-      <div className="chat-crow">
-        {modelSelector}
-        {dropEnabled ? (
-          <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              hidden
-              onChange={handleFileInputChange}
-              data-testid="chat-file-input"
-              aria-label="Attach files"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={disabled}
-              aria-label="Attach a file"
-              className="chat-iconbtn"
-            >
-              <Paperclip size={15} />
-            </button>
-          </>
-        ) : null}
-        {voiceState !== "unavailable" ? (
-          <button
-            type="button"
-            onClick={() => void toggleRecording()}
-            disabled={disabled || voiceState === "transcribing"}
-            aria-label={
-              voiceState === "recording"
-                ? "Stop recording"
-                : voiceState === "transcribing"
-                  ? "Transcribing…"
-                  : "Dictate a message"
-            }
-            aria-pressed={voiceState === "recording"}
-            className={`chat-iconbtn ${voiceState === "recording" ? "is-rec animate-pulse" : ""}`}
-          >
-            {voiceState === "transcribing" ? (
-              <Loader2 size={15} className="animate-spin" />
-            ) : (
-              <Mic size={15} />
-            )}
-          </button>
-        ) : null}
-        {showStop ? (
-          <button
-            type="button"
-            onClick={onStop}
-            aria-label="Stop generating"
-            className="chat-send chat-stop"
-          >
-            <Square size={13} fill="currentColor" aria-hidden="true" />
-          </button>
-        ) : (
-          <button
-            onClick={handleSubmit}
-            disabled={disabled || !hasText}
-            aria-label="Send message"
-            className="chat-send"
-          >
-            <ArrowUpRight size={15} strokeWidth={2.4} />
-          </button>
-        )}
+      {modelSelector}
+      {voiceState !== "unavailable" ? (
+        <button
+          type="button"
+          onClick={() => void toggleRecording()}
+          disabled={disabled || voiceState === "transcribing"}
+          aria-label={
+            voiceState === "recording"
+              ? "Stop recording"
+              : voiceState === "transcribing"
+                ? "Transcribing…"
+                : "Dictate a message"
+          }
+          aria-pressed={voiceState === "recording"}
+          className={`chat-iconbtn ${voiceState === "recording" ? "is-rec animate-pulse" : ""}`}
+        >
+          {voiceState === "transcribing" ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <Mic size={15} />
+          )}
+        </button>
+      ) : null}
+      {showStop ? (
+        <button
+          type="button"
+          onClick={onStop}
+          aria-label="Stop generating"
+          className="chat-send chat-stop"
+        >
+          <Square size={13} fill="currentColor" aria-hidden="true" />
+        </button>
+      ) : (
+        <button
+          onClick={handleSubmit}
+          disabled={disabled || !hasText}
+          aria-label="Send message"
+          className="chat-send"
+        >
+          <ArrowUpRight size={15} strokeWidth={2.4} />
+        </button>
+      )}
       </div>
-      </div>
-      <p className="chat-hint">
-        Responses are generated locally on your Droplet — nothing leaves the
-        device.
-      </p>
+      {suggestions}
     </div>
   );
 });

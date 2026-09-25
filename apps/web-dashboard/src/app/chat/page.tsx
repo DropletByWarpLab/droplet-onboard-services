@@ -9,7 +9,6 @@ import {
   RotateCcw,
   Settings2,
   ShieldCheck,
-  Sparkles,
   Wrench,
   X,
 } from "lucide-react";
@@ -53,6 +52,7 @@ import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
 import { reachableInChat } from "@/lib/tool-domains";
 import { useAuth } from "@/lib/auth";
+import { greetingLine } from "@/lib/greeting";
 import {
   PENDING_COMPOSER_KEY,
   PENDING_PROMPT_KEY,
@@ -823,9 +823,8 @@ export default function ChatPage() {
     return -1;
   }, [messages]);
 
-  // WARP-855 — design-handoff header: conversation title (first user
-  // message, clamped) or "New chat", plus the "local · on-device" privacy
-  // tag whenever the selected model runs on the box (local provider).
+  // WARP-855 — the header's conversation title: the first user message,
+  // clamped, or "New chat".
   const headerTitle = useMemo(() => {
     const first = messages.find((m) => m.role === "user")?.content.trim();
     if (!first) return "New chat";
@@ -858,6 +857,18 @@ export default function ChatPage() {
     [models, selectedModel],
   );
 
+  // WARP-3043 — ONE flag drives both the centred layout (`is-empty`) and the
+  // greeting, so they never disagree. A `?c=` in the URL is a conversation
+  // on its way (its load is in flight), never a fresh chat — that is what
+  // keeps a deep link from flashing the empty state. The interview session
+  // is its own surface (WARP-2667), and the intro card replaces the
+  // greeting and its suggestions on an untouched business box.
+  const introCardShown =
+    isPrivileged && isBusinessBox && bizProfile?.onboardingState === "not_started";
+  const isFresh =
+    messages.length === 0 && !urlConversationId && !interviewSessionOpen;
+  const showGreeting = isFresh && !introCardShown;
+
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
     // pins just above the tab bar with no gap. Matches AuthGate main's padding.
@@ -879,7 +890,7 @@ export default function ChatPage() {
       </aside>
 
       {/* Main chat area */}
-      <div className="chat-main">
+      <div className={`chat-main${isFresh ? " is-empty" : ""}`}>
         {/* Header */}
         <header className="chat-head">
           {/* WARP-331: mobile-only history-drawer trigger. */}
@@ -890,7 +901,7 @@ export default function ChatPage() {
             aria-label="Open chat history"
             aria-haspopup="dialog"
             aria-expanded={mobileHistoryOpen}
-            className="chat-iconbtn lg:hidden"
+            className="chat-iconbtn chat-drawer-toggle"
             title="Chat history"
           >
             <PanelLeftOpen size={18} aria-hidden="true" />
@@ -934,7 +945,7 @@ export default function ChatPage() {
               aria-label="Open files in this conversation"
               aria-haspopup="dialog"
               aria-expanded={mobileFilesOpen}
-              className="chat-iconbtn lg:hidden"
+              className="chat-iconbtn chat-drawer-toggle"
               title="Files"
             >
               <PanelRightOpen size={18} aria-hidden="true" />
@@ -943,7 +954,7 @@ export default function ChatPage() {
           <button
             onClick={handleNewChat}
             disabled={messages.length === 0}
-            className="chat-new"
+            className="chat-new chat-new-head"
             aria-label="Start a new chat"
           >
             <RotateCcw size={14} aria-hidden="true" />
@@ -1054,34 +1065,27 @@ export default function ChatPage() {
                 />
               </div>
             )}
-          {/* The generic chat empty state — "Ask Droplet anything" plus four
-              off-topic suggestion prompts. It must never paint inside the
-              interview session: that surface is the walkthrough, and an empty
-              frame of it (the beat before the transcript loads, or a
-              self-healed session) reading "Ask Droplet anything · Dim the
-              conference-room lights" is precisely the "it dropped me back into a
-              chat" report. Keyed off `interviewSessionOpen` — the whole
-              lifecycle AND the navigation into it — so a finished interview
-              reopened after its history is gone stays quiet too, and so does
-              the beat between `router.push` and the transcript arriving. */}
-          {messages.length === 0 &&
-            !interviewSessionOpen &&
-            !(
-              isPrivileged &&
-              isBusinessBox &&
-              bizProfile?.onboardingState === "not_started"
-            ) && (
+          {/* The generic chat empty state — the greeting and the question
+              (WARP-3043, the Mac app's empty chat), with the suggestions in
+              the composer. It must never paint inside the interview session:
+              that surface is the walkthrough, and an empty frame of it (the
+              beat before the transcript loads, or a self-healed session)
+              reading like a fresh chat is precisely the "it dropped me back
+              into a chat" report. `showGreeting` is keyed off
+              `interviewSessionOpen` — the whole lifecycle AND the navigation
+              into it — so a finished interview reopened after its history is
+              gone stays quiet too, and so does the beat between `router.push`
+              and the transcript arriving. */}
+          {showGreeting && (
             <div className="chat-empty" data-testid="chat-empty">
-              <div className="ico" aria-hidden="true">
-                <Sparkles size={26} />
-              </div>
-              <p className="h">Ask Droplet anything</p>
-              <p className="s">
+              <p className="l1">{greetingLine(user?.displayName || user?.username)}</p>
+              <h1 className="h">
                 {/* WARP-3048 — there is no picker "above": name the real
                     reason nothing is selected, and where models live. A
-                    degraded list is an outage (WARP-1284), never "no model". */}
+                    degraded list is an outage (WARP-1284), never "no model".
+                    A problem REPLACES the question. */}
                 {selectedModel && !modelsDegraded ? (
-                  "Your local AI is ready — nothing leaves the device."
+                  "What can I help you with today?"
                 ) : modelsLoading ? (
                   "Checking which AI model is ready…"
                 ) : modelsError ? (
@@ -1097,29 +1101,11 @@ export default function ChatPage() {
                     .
                   </>
                 )}
-              </p>
+              </h1>
               {!isPrivileged && isBusinessBox && (
                 <p className="type-caption-1 text-label-quaternary mt-1">
                   {INTERVIEW_COPY.nonOwnerHint}
                 </p>
-              )}
-              {selectedModel && (
-                <div className="chat-suggs">
-                  {[
-                    "What's using the most storage?",
-                    "Summarize the files I uploaded today",
-                    "Dim the conference-room lights to 30%",
-                    "What joined the network this week?",
-                  ].map((prompt) => (
-                    <button
-                      key={prompt}
-                      onClick={() => handleSend(prompt)}
-                      className="chat-sugg"
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
               )}
             </div>
           )}
@@ -1184,7 +1170,7 @@ export default function ChatPage() {
                     <div
                       key={msg.id}
                       data-testid="proposal-parse-failure"
-                      className="my-3 rounded-2xl border border-system-red/30 px-5 py-4 flex items-center gap-3"
+                      className="my-3 chat-tone is-danger px-5 py-4 flex items-center gap-3"
                     >
                       <span className="type-body text-label-primary">
                         {INTERVIEW_COPY.parseFailure}
@@ -1244,11 +1230,7 @@ export default function ChatPage() {
               data-testid="jump-to-latest"
               tabIndex={isDetached ? 0 : -1}
               className={`
-                absolute left-1/2 -translate-x-1/2 -top-12 z-10
-                inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full
-                bg-accent text-white shadow-md
-                type-caption-1 hover:bg-accent-hover
-                focus:outline-none focus:ring-2 focus:ring-accent/40
+                chat-jump absolute left-1/2 -translate-x-1/2 -top-12 z-10
                 transition-opacity duration-150
                 ${isDetached ? "opacity-100" : "opacity-0 pointer-events-none"}
               `}
@@ -1267,7 +1249,7 @@ export default function ChatPage() {
           <div className="px-4 pt-3">
             <div
               role="status"
-              className="flex items-center gap-2 flex-wrap rounded-lg border border-separator bg-surface-secondary px-3 py-2"
+              className="chat-tone flex items-center gap-2 flex-wrap px-3 py-2"
             >
               <Wrench size={14} className="flex-none text-accent" aria-hidden="true" />
               <span className="type-footnote text-label-secondary">
@@ -1314,7 +1296,7 @@ export default function ChatPage() {
                   key={chip}
                   type="button"
                   onClick={() => handleSend(chip)}
-                  className="px-3.5 py-1.5 rounded-full border border-separator type-footnote text-label-primary hover:bg-surface-secondary"
+                  className="chat-sugg"
                 >
                   {chip}
                 </button>
@@ -1340,6 +1322,28 @@ export default function ChatPage() {
               <ModelSelector value={selectedModel} onChange={handleModelChange} />
               {isLocalModel && <span className="chat-tag">local · on-device</span>}
             </>
+          }
+          // WARP-3043 — the empty chat's suggestions render inside the
+          // composer, under the pill (one scrolling row above it on phones).
+          suggestions={
+            showGreeting && selectedModel ? (
+              <div className="chat-suggs">
+                {[
+                  "What's using the most storage?",
+                  "Summarize the files I uploaded today",
+                  "What joined the network this week?",
+                ].map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => handleSend(prompt)}
+                    className="chat-sugg"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            ) : undefined
           }
         />
       </div>

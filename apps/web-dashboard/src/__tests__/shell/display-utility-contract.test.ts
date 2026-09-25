@@ -231,9 +231,9 @@ describe("display ownership is derived from the chat sheets (WARP-3043)", () => 
   });
 
   it("no element pairs a sheet-owned display class with a Tailwind display utility", () => {
-    expect(displayOffenders()).toEqual([
-      "app/chat/page.tsx:882 chat-iconbtn+lg:hidden",
-      "app/chat/page.tsx:926 chat-iconbtn+lg:hidden",
-    ]);
+    // Stage had exactly two: the /chat drawer triggers (`chat-iconbtn
+    // lg:hidden`). WARP-3043 gave them `.chat-drawer-toggle`, whose display
+    // chat-indigo.css owns, so the list is empty and must stay so.
+    expect(displayOffenders()).toEqual([]);
   });
 });

@@ -151,7 +151,6 @@ accent-alpha components/Toast.tsx
 
 # ── white-on-accent ──
 white-on-accent app/cameras/[name]/page.tsx
-white-on-accent app/chat/page.tsx
 white-on-accent app/devices/pair/page.tsx
 white-on-accent components/cameras/CameraCard.tsx
 white-on-accent components/chat/InterviewSurfaces.tsx

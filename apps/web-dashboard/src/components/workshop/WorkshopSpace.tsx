@@ -335,14 +335,14 @@ export function WorkshopSpace() {
     ) : null;
 
   return (
-    <div className="droplet-shell chat-app workshop-app h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden" data-screen-label="Droplet — Workshop">
+    <div className="droplet-shell chat-app h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden" data-screen-label="Droplet — Workshop">
       <aside className="conv-rail hidden lg:flex" aria-label="Workshop rail">
         {rail()}
       </aside>
 
       <div className={`chat-main${selectedRunId ? "" : " is-empty"}`}>
         <header className="chat-head">
-          <button ref={railTrigger} type="button" className="chat-iconbtn ws-rail-toggle" aria-label="Open the workshop rail" onClick={() => setRailOpen(true)}>
+          <button ref={railTrigger} type="button" className="chat-iconbtn chat-drawer-toggle" aria-label="Open the workshop rail" onClick={() => setRailOpen(true)}>
             <PanelLeft size={16} aria-hidden />
           </button>
           <div className="chat-head-title" title={detail?.goal ?? "Workshop"}>

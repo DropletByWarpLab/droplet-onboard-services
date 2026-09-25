@@ -290,7 +290,7 @@ export const ChatMessage = memo(function ChatMessage({
       {/* Bubble + meta. group/message lets the action toolbar surface on
           hover OR keyboard focus (focus-within) without prop-drilling
           state up. */}
-      <div className={`msg-col group/message ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`msg-col group/message ${isUser ? "items-end" : "is-assistant items-start"}`}>
       <div
         className={`msg-bubble ${isUser ? "is-user" : "is-assistant"}`}
         // role="status" + aria-live="polite" on the streaming assistant

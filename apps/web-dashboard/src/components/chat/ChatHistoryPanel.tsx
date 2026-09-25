@@ -294,17 +294,8 @@ export function ChatHistoryPanel({
         >
           <FolderPlus size={15} aria-hidden="true" />
         </button>
-        <button
-          type="button"
-          onClick={onNewChat}
-          aria-label="New chat"
-          title="New chat"
-          className="conv-new-btn"
-        >
-          <Plus size={16} aria-hidden="true" />
-        </button>
         {/* WARP-1787 — the mobile drawer only. `chat-iconbtn` rather than
-            the bordered `conv-new-btn`: leaving is not a third creation
+            `conv-new-btn`: leaving is not a third creation
             action, and the phone layer already takes that button to 44px. */}
         {onClose && (
           <button
@@ -318,6 +309,12 @@ export function ChatHistoryPanel({
           </button>
         )}
       </div>
+      {/* WARP-3043 — the Mac sidebar's first action: a labelled row above
+          search, not a bordered `+` square in the header. */}
+      <button type="button" onClick={onNewChat} className="conv-new-row">
+        <Plus size={16} aria-hidden="true" />
+        New chat
+      </button>
       <div className="conv-search">
         <Search size={14} aria-hidden="true" />
         <input

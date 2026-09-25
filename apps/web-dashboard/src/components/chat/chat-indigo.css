@@ -10,9 +10,19 @@
    Scope: every selector lives under `.droplet-shell` (same convention as
    droplet-shell.css) so nothing leaks into non-ported surfaces.
 
+   WARP-3043 — the CHROME follows the Mac app, DropletAgent (design spec §5,
+   Romain 2026-09-23), as the Workshop already did (WARP-2974): borderless
+   and fluid. Surfaces are separated by tone only — no borders, divider lines
+   or card strokes, and no `--lift` (it carries a 1px brand ring, a stroke);
+   a greeting over a pill composer that docks at the bottom once there are
+   messages; replies are unboxed text with no avatars. The Workshop's
+   `.workshop-app` overrides moved here and were deleted.
+
    Design-transcript constraints honored here:
-   - NO focus highlight on anything inside the composer card (the user
-     corrected this three times in the design sessions).
+   - The composer's textarea shows no focus highlight — the pill is its
+     boundary (the user corrected this three times in the design sessions).
+     WARP-3043 narrowed that to the textarea: pill BUTTONS keep a visible
+     keyboard focus (WCAG 2.4.7).
    - Date captions are title-case and 11.5px — not uppercase.
    - The model pill only exists when >1 model is configured (enforced in
      ModelSelector.tsx, not here).
@@ -74,10 +84,8 @@
   align-items: center;
   gap: 12px;
   padding: 0 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--glass);
-  backdrop-filter: blur(20px) saturate(150%);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  /* A transparent row in the page — no bar, no divider (the Mac chrome). */
+  background: transparent;
   z-index: 20;
 }
 
@@ -102,8 +110,7 @@
   height: 30px;
   padding: 0 11px;
   border-radius: 8px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: transparent;
   font-size: 12px;
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
   color: var(--text);
@@ -131,7 +138,7 @@
   min-width: 0;
 }
 .droplet-shell .chat-model-link:hover {
-  border-color: var(--brand);
+  background: var(--surface-2);
 }
 .droplet-shell .chat-model-name {
   max-width: 180px;
@@ -146,7 +153,9 @@
   white-space: nowrap;
 }
 
-/* Bordered surface button (header "New chat", rail trigger). */
+/* Quiet text button (header "New chat", the Workshop's workspace chip) —
+   the Mac app's QuietButtonStyle: no stroke, a tonal fill on hover, and the
+   muted label lifts to `--text` on the fill (muted drops under AA on it). */
 .droplet-shell .chat-new {
   display: inline-flex;
   align-items: center;
@@ -154,21 +163,27 @@
   height: 32px;
   padding: 0 13px;
   border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
   font-size: 13px;
   font-weight: 500;
-  transition: background 180ms var(--ease, cubic-bezier(0.25, 0.1, 0.25, 1));
+  transition: background 180ms var(--ease, cubic-bezier(0.25, 0.1, 0.25, 1)),
+    color 180ms var(--ease, cubic-bezier(0.25, 0.1, 0.25, 1));
 }
-.droplet-shell .chat-new:hover:not(:disabled) { background: var(--surface-2); }
+.droplet-shell .chat-new:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
 .droplet-shell .chat-new:disabled {
-  color: var(--text-muted);
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* Quiet 30px icon button (header tools, composer attach/mic). */
-.droplet-shell .chat-iconbtn {
+/* Quiet 30px icon button (header tools, composer attach/mic). The scope is
+   `:is(.droplet-shell, .fam-top)` — still (0,2,0) — so a top bar outside the
+   chat surface can use the same button. */
+:is(.droplet-shell, .fam-top) .chat-iconbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -180,20 +195,51 @@
   color: var(--text-muted);
   transition: background 160ms var(--ease, ease), color 160ms var(--ease, ease);
 }
-.droplet-shell .chat-iconbtn:hover:not(:disabled) {
+:is(.droplet-shell, .fam-top) .chat-iconbtn:hover:not(:disabled) {
   background: var(--surface);
   color: var(--text);
 }
-.droplet-shell .chat-iconbtn:disabled { opacity: 0.5; cursor: not-allowed; }
-.droplet-shell .chat-iconbtn[aria-pressed="true"],
-.droplet-shell .chat-iconbtn.is-on {
+:is(.droplet-shell, .fam-top) .chat-iconbtn:disabled { opacity: 0.5; cursor: not-allowed; }
+:is(.droplet-shell, .fam-top) .chat-iconbtn[aria-pressed="true"],
+:is(.droplet-shell, .fam-top) .chat-iconbtn.is-on {
   background: var(--brand-subtle);
   color: var(--brand);
 }
 /* Recording state for the mic. */
-.droplet-shell .chat-iconbtn.is-rec {
+:is(.droplet-shell, .fam-top) .chat-iconbtn.is-rec {
   background: color-mix(in srgb, #ef4444 15%, transparent);
   color: #ef4444;
+}
+
+/* WARP-3043 — ONE owner for `display` on the drawer triggers (the WARP-1792
+   rule). `.chat-iconbtn` above is (0,2,0) and sets `display`, so a Tailwind
+   `lg:hidden` (0,1,0) on the same button never hid it: both /chat drawer
+   triggers showed on desktop, and opening one put a second history panel
+   beside the rail. These hide here, after the rule they override, at the
+   breakpoint the rails appear. The head's New chat hides with them — the
+   rail has its own New chat row from `lg` up. */
+@media (min-width: 1024px) {
+  :is(.droplet-shell, .fam-top) .chat-drawer-toggle,
+  .droplet-shell .chat-new-head {
+    display: none;
+  }
+}
+
+/* The Mac app's QuietButtonStyle for the secondary buttons the chat and
+   Workshop panes render: text only, a tonal fill on hover — the focus ring
+   stays the one stroke allowed. A muted label lifts to `--text` on the fill.
+   The primary (brand fill) and danger buttons are unchanged. Moved from
+   workshop.css (WARP-2974), where it was scoped to the Workshop. */
+.droplet-shell.chat-app .btn:not(.primary):not(.danger),
+.droplet-shell.chat-app .icon-btn {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+.droplet-shell.chat-app .btn:not(.primary):not(.danger):hover:not(:disabled),
+.droplet-shell.chat-app .icon-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 /* ── Conversation rail ──────────────────────────────────────────────── */
@@ -209,16 +255,15 @@
    "Droplet is thinking" one word per line, and squashed the Ask input into a
    corner square. Both the rail and the drawer were live at once.
    `display` is therefore owned entirely by the utilities, which specify it at
-   both breakpoints (`hidden` below lg, `lg:flex` at and above). */
+   both breakpoints (`hidden` below lg, `lg:flex` at and above).
+   WARP-3043 — a solid `--surface` tone against the page's `--bg`: no edge
+   stroke and no glass (the Mac sidebar ships as surface). */
 .droplet-shell .conv-rail {
   width: 276px;
   flex-shrink: 0;
   height: 100%;
   flex-direction: column;
-  background: var(--glass-2);
-  border-right: 1px solid var(--border);
-  backdrop-filter: blur(20px) saturate(150%);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  background: var(--surface);
 }
 
 .droplet-shell .conv-head {
@@ -228,7 +273,6 @@
   align-items: center;
   gap: 10px;
   padding: 0 12px 0 18px;
-  border-bottom: 1px solid var(--border);
 }
 .droplet-shell .conv-head-t {
   flex: 1;
@@ -244,8 +288,8 @@
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  border: 0;
+  background: transparent;
   color: var(--text-muted);
   transition: background 160ms var(--ease, ease), color 160ms var(--ease, ease);
 }
@@ -254,20 +298,45 @@
   color: var(--text);
 }
 
+/* The rail's first action, as a plain row (the Mac sidebar's New chat; the
+   geometry of the Workshop rail's action rows). */
+.droplet-shell .conv-new-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% - 20px);
+  margin: 2px 10px 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  transition: background 140ms var(--ease, ease);
+}
+.droplet-shell .conv-new-row svg { color: var(--text-muted); flex-shrink: 0; }
+.droplet-shell .conv-new-row:hover { background: var(--hover); }
+
 .droplet-shell .conv-search {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 12px 14px 4px;
+  margin: 8px 14px 4px;
   height: 36px;
   padding: 0 11px;
   border-radius: 9px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
+  background: transparent;
   color: var(--text-muted);
+  transition: background 140ms var(--ease, ease);
 }
+.droplet-shell .conv-search:hover { background: var(--hover); }
 .droplet-shell .conv-search:focus-within {
-  border-color: color-mix(in srgb, var(--brand) 40%, var(--border));
+  background: var(--inset);
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }
 .droplet-shell .conv-search input {
   flex: 1;
@@ -309,15 +378,14 @@
   width: 100%;
   padding: 9px 10px;
   border-radius: 9px;
-  border-left: 2px solid transparent;
   background: transparent;
   text-align: left;
   transition: background 140ms var(--ease, ease);
 }
-.droplet-shell .conv-item:hover { background: var(--surface); }
+/* Selection is a tone, not a stripe. */
+.droplet-shell .conv-item:hover { background: var(--hover); }
 .droplet-shell .conv-item.is-active {
   background: var(--brand-subtle);
-  border-left-color: var(--brand);
 }
 .droplet-shell .conv-it-t {
   font-size: 13px;
@@ -328,7 +396,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.droplet-shell .conv-item.is-active .conv-it-t { color: var(--brand-soft); }
+.droplet-shell .conv-item.is-active .conv-it-t { color: var(--text); }
 .droplet-shell .conv-it-s {
   font-size: 12px;
   color: var(--text-muted);
@@ -363,42 +431,57 @@
 
 /* ── Empty state ────────────────────────────────────────────────────── */
 
+/* The Mac app's empty chat: a muted greeting line, then the question (or
+   the reason no model is ready) as the headline, over the pill. */
 .droplet-shell .chat-empty {
-  height: 60vh;
+  height: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 10px;
   color: var(--text-muted);
   text-align: center;
 }
-.droplet-shell .chat-empty .ico {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  background: var(--brand-subtle);
-  color: var(--brand);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 8px;
+.droplet-shell .chat-empty .l1 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text-muted);
 }
 .droplet-shell .chat-empty .h {
-  font-size: 19px;
+  margin: 0;
+  font-size: 26px;
   font-weight: 600;
+  letter-spacing: -0.3px;
   color: var(--text);
 }
-.droplet-shell .chat-empty .s { font-size: 14px; }
+.droplet-shell .chat-empty .s { max-width: 560px; font-size: 14px; line-height: 1.55; }
 
+/* Empty: the greeting and the pill centred together. Auto margins centre
+   the pair in the space under the header; the first message drops
+   `is-empty` and the composer docks at the bottom. Same DOM in both states,
+   so a half-typed message survives the switch. (Moved from workshop.css.) */
+.droplet-shell .chat-main.is-empty .chat-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin-top: auto;
+  padding: 0 0 20px;
+}
+.droplet-shell .chat-main.is-empty .chat-composer {
+  margin-bottom: auto;
+  padding-bottom: 14vh;
+}
+
+/* Suggestions render INSIDE the composer, after the pill, so the auto
+   margins can never strand them at the bottom edge. Centred under it. */
 .droplet-shell .chat-suggs {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
-  margin-top: 18px;
-  max-width: 560px;
-  padding: 0 20px;
+  max-width: 768px;
+  margin: 14px auto 0;
+  padding: 0;
 }
 /* These carry whole prompts ("Summarize the files I uploaded today"), which
    don't fit on one line on a phone. A fixed `height` made the text wrap out
@@ -412,16 +495,14 @@
   min-height: 34px;
   padding: 6px 14px;
   border-radius: 9999px;
-  border: 1px solid var(--border);
+  border: 0;
   background: var(--surface);
   color: var(--text);
   font-size: 13px;
-  transition: background 160ms var(--ease, ease),
-    border-color 160ms var(--ease, ease);
+  transition: background 160ms var(--ease, ease);
 }
 .droplet-shell .chat-sugg:hover {
   background: var(--surface-2);
-  border-color: color-mix(in srgb, var(--brand) 28%, var(--border));
 }
 
 /* ── Messages ───────────────────────────────────────────────────────── */
@@ -497,6 +578,21 @@
   white-space: pre-wrap;
 }
 
+/* WARP-3043 — on /chat (and the Workshop) a reply is unboxed text in the
+   reading column, with no avatars. Scoped to `.droplet-shell.chat-app`, NOT
+   the shared classes: the Home "Ask AI" tile renders the same ChatMessage
+   inside `.droplet-shell.w-chat-thread` and keeps its bubble. At (0,4,0)
+   these beat the base rules above and any Tailwind utility (0,1,0). */
+.droplet-shell.chat-app .msg-ava { display: none; }
+.droplet-shell.chat-app .msg-col.is-assistant { max-width: 100%; }
+.droplet-shell.chat-app .msg-bubble.is-assistant {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  line-height: 1.6;
+}
+
 /* Hover-revealed action row under assistant messages. Carries the real
    app's full action set (copy/quote/regenerate/edit/thumbs), not just the
    design's copy+retry. */
@@ -537,30 +633,52 @@
   flex-shrink: 0;
   padding: 12px 24px 22px;
 }
+/* The pill (the Mac composer; values moved verbatim from the Workshop's,
+   WARP-2974): one row — `+`, the field (grows to 8 lines), the model, the
+   mic, send. A tone and a soft lift, no stroke. Radius 26 = a full pill at
+   one line. A press on its empty space focuses the field (ChatInput). */
 .droplet-shell .chat-composer-inner {
   max-width: 768px;
   margin: 0 auto;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 10px 10px 10px 16px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px;
+  border: 0;
+  border-radius: 26px;
+  background: var(--surface);
+  box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.45);
+  cursor: text;
 }
-/* The card is the visual boundary — NOTHING inside it shows a focus ring
-   (design-session correction, three times). Keyboard users still have the
-   card-level affordance via the textarea caret. */
-.droplet-shell .chat-composer-inner :focus-visible { outline: none !important; }
-.droplet-shell .chat-composer-inner :focus {
+/* A file dragged over the composer: a tone, not a ring. */
+.droplet-shell .chat-composer-inner.is-drop {
+  background: color-mix(in srgb, var(--brand) 8%, var(--surface));
+}
+/* The pill is the field's boundary, so the TEXTAREA shows no focus ring
+   (design-session correction, three times) — the caret is its affordance.
+   Every pill BUTTON keeps a visible keyboard focus: an inset brand ring,
+   with the outline off so it is one ring, not two (WCAG 2.4.7). A menu's
+   items show focus as a tonal fill instead, so they are left out. */
+.droplet-shell .chat-composer-inner textarea:focus-visible { outline: none !important; }
+.droplet-shell .chat-composer-inner textarea:focus {
   outline: none !important;
   box-shadow: none !important;
 }
+.droplet-shell .chat-composer-inner button:not([role^="menuitem"]):focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--brand);
+}
 
 .droplet-shell .chat-composer-inner textarea {
-  width: 100%;
-  min-height: 24px;
-  max-height: 168px;
+  flex: 1 1 240px;
+  width: auto;
+  min-width: 0;
+  min-height: 36px;
+  max-height: 192px;
+  padding: 7px 4px;
+  overflow-y: auto;
   resize: none;
   background: transparent;
   border: 0;
@@ -576,10 +694,21 @@
   cursor: not-allowed;
 }
 
-.droplet-shell .chat-crow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* Attachment chips: a full-width first row inside the pill. */
+.droplet-shell .chat-composer-inner .chat-attach-row {
+  flex: 1 0 100%;
+  padding: 2px 4px 0;
+}
+
+/* Round 36px controls in the pill; hover is a tone on the pill's surface. */
+.droplet-shell .chat-composer-inner .chat-iconbtn {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+}
+.droplet-shell .chat-composer-inner .chat-iconbtn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .droplet-shell .chat-send {
@@ -598,6 +727,13 @@
   color: var(--on-brand);
   transition: background 180ms ease, transform 120ms ease;
 }
+/* `margin-left: auto` (above) keeps send at the right edge when a narrow
+   pill wraps the model under the field. */
+.droplet-shell .chat-composer-inner .chat-send {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+}
 .droplet-shell .chat-send:hover:not(:disabled) { background: var(--brand-hover); }
 .droplet-shell .chat-send:active:not(:disabled) { transform: scale(0.96); }
 .droplet-shell .chat-send:disabled {
@@ -608,31 +744,56 @@
 .droplet-shell .chat-send.chat-stop {
   background: var(--surface-2);
   color: var(--text);
-  border: 1px solid var(--border);
 }
-.droplet-shell .chat-send.chat-stop:hover { background: var(--surface); }
+.droplet-shell .chat-send.chat-stop:hover {
+  background: color-mix(in srgb, var(--text) 9%, var(--surface-2));
+}
 
-.droplet-shell .chat-hint {
-  max-width: 768px;
-  margin: 8px auto 0;
-  text-align: center;
-  font-size: 11px;
-  color: var(--text-muted);
+/* Jump-to-latest: a glass pill over the last message, in `--text` (the old
+   accent fill with white ink read 2.98:1 in dark). Shadow only — no ring. */
+.droplet-shell .chat-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(20, 22, 45, 0.1), 0 6px 18px -8px rgba(20, 22, 45, 0.3);
+}
+.droplet-shell .chat-jump:hover { background: var(--surface); }
+.droplet-shell .chat-jump:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* A quiet tonal card for the notes /chat renders inline (the "Ready to use"
+   tool banner, a proposal that failed to parse). Tone only — no stroke;
+   layout stays with the element's utilities, so no `display` here. */
+.droplet-shell .chat-tone {
+  background: var(--inset);
+  border-radius: 12px;
+}
+.droplet-shell .chat-tone.is-danger {
+  background: color-mix(in srgb, var(--danger-ink) 10%, var(--surface));
 }
 
 /* ── Surfaces that ride along (system prompt, tool banner) ──────────── */
 
 .droplet-shell .chat-subpanel {
-  border-bottom: 1px solid var(--border);
-  background: var(--glass-2);
-  backdrop-filter: blur(20px) saturate(150%);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  background: transparent;
   padding: 12px 20px;
 }
 .droplet-shell .chat-subpanel textarea {
   width: 100%;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 9px;
   padding: 8px 11px;
   font-size: 13px;
@@ -658,7 +819,6 @@
   .droplet-shell .chat-composer {
     padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
   }
-  .droplet-shell .chat-hint { display: none; }
   .droplet-shell .chat-new span { display: none; }
   /* 34 -> 44: this collapses to an icon-only square here, and 34px is under
      the touch minimum (04-coding-standards/mobile-web-layout.md). */
@@ -667,21 +827,73 @@
   /* Header tools and the composer's attach/mic were 30x30 — measured under
      the 44px Apple HIG / WCAG 2.5.5 target on /chat at 375px. The send button
      and the empty-state suggestion chips were both 34px. */
-  .droplet-shell .chat-iconbtn { width: 44px; height: 44px; }
+  :is(.droplet-shell, .fam-top) .chat-iconbtn { width: 44px; height: 44px; }
   .droplet-shell .chat-send { height: 44px; }
   /* min-height, not height — a chip whose prompt needs two lines has to grow
      rather than spill its text out of the pill. */
   .droplet-shell .chat-sugg { min-height: 44px; }
+  .droplet-shell .conv-new-row { min-height: 44px; }
+  .droplet-shell .chat-empty .h { font-size: 24px; }
+
+  /* The pill's round controls stay 36px to the eye and take a 44px target
+     through `::after` (a 4px overhang on each side). */
+  .droplet-shell .chat-composer-inner > button { position: relative; }
+  .droplet-shell .chat-composer-inner > button::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+  }
 
   /* The model picker's <select> rendered 21px tall — it is a real control, not
      a label, so it owes the same 44px. The wrapper grows with it. */
   .droplet-shell .chat-model { height: 44px; }
   .droplet-shell .chat-model select { min-height: 44px; }
+  /* The composer textarea needs no 44px floor of its own any more: a press
+     anywhere on the pill (52px tall) focuses it. */
+}
 
-  /* The composer textarea is one line tall until it grows, so the tappable
-     area of the product's main input was 24px. Give it the target height; it
-     still auto-grows from there. */
-  .droplet-shell .chat-composer-inner textarea { min-height: 44px; }
+/* Phones, landscape phones and 200% zoom: a centred pill jumps with the
+   keyboard and clips the chips, so the empty chat keeps the pill DOCKED at
+   the bottom and centres the greeting in the space above it; the chips
+   become one scrolling row above the pill. `:has(> .chat-suggs)` keeps the
+   Workshop's composer (which has no chips) out of the flex change. */
+@media (max-width: 760px), (max-height: 480px) {
+  .droplet-shell .chat-main.is-empty .chat-scroll {
+    flex: 1 1 auto;
+    margin-top: 0;
+    padding: 0;
+  }
+  .droplet-shell .chat-main.is-empty .chat-empty { min-height: 100%; }
+  .droplet-shell .chat-main.is-empty .chat-composer {
+    margin-bottom: 0;
+    padding-bottom: 22px;
+  }
+  .droplet-shell .chat-composer:has(> .chat-suggs) {
+    display: flex;
+    flex-direction: column;
+  }
+  .droplet-shell .chat-composer:has(> .chat-suggs) .chat-composer-inner { width: 100%; }
+  .droplet-shell .chat-composer > .chat-suggs {
+    order: -1;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    max-width: 100%;
+    margin: 0 0 10px;
+  }
+  .droplet-shell .chat-composer > .chat-suggs .chat-sugg {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+}
+/* …and the docked padding a phone composer has everywhere else. */
+@media (max-width: 760px) {
+  .droplet-shell .chat-main.is-empty .chat-composer {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+}
+@media (max-height: 480px) {
+  .droplet-shell .chat-empty .h { font-size: 22px; }
 }
 
 /* ── File rail (WARP-2205) ──────────────────────────────────────────── */
@@ -694,18 +906,14 @@
    a 375px viewport away from the conversation. `display` belongs entirely to
    the utilities, which specify it at both breakpoints.
 
-   Mirrors `.conv-rail` on the opposite edge: same width, same glass, same
-   blur — `border-left` rather than `border-right` because this rail closes the
-   layout instead of opening it. */
+   Mirrors `.conv-rail` on the opposite edge: same width, same `--surface`
+   tone, no edge stroke (WARP-3043). */
 .droplet-shell .file-rail {
   width: 276px;
   flex-shrink: 0;
   height: 100%;
   flex-direction: column;
-  background: var(--glass-2);
-  border-left: 1px solid var(--border);
-  backdrop-filter: blur(20px) saturate(150%);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  background: var(--surface);
 }
 
 /* Same 56px as `.conv-head`, so the two rails and the chat header agree on
@@ -717,7 +925,6 @@
   align-items: center;
   gap: 10px;
   padding: 0 12px 0 18px;
-  border-bottom: 1px solid var(--border);
 }
 .droplet-shell .file-rail-head-t {
   flex: 1;
@@ -809,7 +1016,9 @@
   .droplet-shell .msg-actions,
   .droplet-shell .chat-send,
   .droplet-shell .chat-new,
-  .droplet-shell .chat-iconbtn {
+  .droplet-shell .conv-new-row,
+  .droplet-shell .conv-search,
+  :is(.droplet-shell, .fam-top) .chat-iconbtn {
     transition: none;
   }
 }
