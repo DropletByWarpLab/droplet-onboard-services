@@ -128,16 +128,16 @@ export function useSecurityHealth() {
   return { sources: data?.sources ?? null, error: error as Error | undefined, isLoading, refresh: () => mutate() };
 }
 
-/**
- * Frigate name → the household's name for the camera (WARP-1893). Shares the
- * `/api/cameras` cache with the cameras pages. That list is already filtered
- * to the viewer's grants, as the feed is, so it names nothing the feed hides.
- */
 /** The name the household gave a camera, else its Frigate name. The feed's and the wall's (WARP-2981) one rule. */
 export function cameraLabelOf(c: Pick<CameraInfo, "name" | "displayName">): string {
   return c.displayName || c.name;
 }
 
+/**
+ * Frigate name → the household's name for the camera (WARP-1893). Shares the
+ * `/api/cameras` cache with the cameras pages. That list is already filtered
+ * to the viewer's grants, as the feed is, so it names nothing the feed hides.
+ */
 export function useCameraDisplayNames(): (name: string) => string {
   const { data } = useSWR<CameraInfo[]>("/api/cameras", fetchCameras);
   const byName = useMemo(() => new Map((data ?? []).map((c) => [c.name, cameraLabelOf(c)])), [data]);
