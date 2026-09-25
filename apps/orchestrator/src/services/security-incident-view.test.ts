@@ -6,9 +6,14 @@
  *
  * WARP-2980 PR-B (spec D16; review items 2, 3): who sees a pattern flag, and
  * what a viewer can judge.
+ *
+ * WARP-2977 × WARP-2981: the rack's viewer (`WHOLE_SITE`) reads door locks,
+ * and the list's SQL never reads `mayReadLocks`, so that choice cannot move
+ * the rack's number.
  */
 import { describe, expect, it } from "vitest";
 import { QUIET_MS, SETTLE_MS } from "../lib/security-rules.js";
+import { readPackageFile } from "../__tests__/helpers/test-paths.js";
 import {
   flagCamerasVisible,
   flagVisible,
@@ -16,7 +21,9 @@ import {
   seesEverything,
   type FlagForView,
   incidentListWhere,
+  type IncidentListFilters,
   incidentVisibilityWhere,
+  panelOpenIncidents,
   projectIncident,
   projectedLastActivity,
   visibleReasonWhere,
@@ -317,6 +324,47 @@ describe("the list's SQL mirrors the projection (DS-005 in the query, visibility
         { reasons: { none: { AND: [visibleReasonWhere(frontOnly), { severity: "alert" }] } } },
       ],
     });
+  });
+});
+
+describe("WARP-2977 × WARP-2981 — the rack's viewer and door locks (D20, D21)", () => {
+  const STATES: IncidentListFilters["state"][] = ["attention", "open", "acknowledged", "resolved", "activity", "all"];
+  /** `v` with a `mayReadLocks` that throws when read. */
+  const lockBlind = (v: IncidentViewer): IncidentViewer =>
+    Object.defineProperty({ ...v }, "mayReadLocks", {
+      enumerable: true,
+      get() {
+        throw new Error("incidentListWhere read mayReadLocks");
+      },
+    });
+
+  it("incidentListWhere never reads mayReadLocks — every state and severity, for the owner and for a family viewer", () => {
+    for (const v of [owner, frontOnly]) {
+      for (const state of STATES) {
+        for (const severity of [undefined, "alert", "notice"] as const) {
+          const f: IncidentListFilters = severity ? { state, severity } : { state };
+          expect(() => incidentListWhere(lockBlind(v), f), `${v.userId} ${state} ${severity ?? "-"}`).not.toThrow();
+        }
+      }
+    }
+  });
+
+  it("panelOpenIncidents counts over the owner's where — the same with or without door locks", async () => {
+    const wheres: unknown[] = [];
+    const tx = { securityIncident: { count: async ({ where }: { where: unknown }) => (wheres.push(where), 0) } };
+    const prisma = { $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx) };
+    expect(await panelOpenIncidents(prisma as never)).toEqual({ open: 0, alerts: 0 });
+    for (const mayReadLocks of [true, false]) {
+      const v = { ...owner, mayReadLocks };
+      expect(wheres).toEqual([incidentListWhere(v, { state: "attention" }), incidentListWhere(v, { state: "attention", severity: "alert" })]);
+    }
+  });
+
+  it("WHOLE_SITE sets mayReadLocks: true, deliberately — the owner's whole box, with the reason it is inert beside it", () => {
+    const src = readPackageFile("src", "services", "security-incident-view.ts");
+    const literal = /const WHOLE_SITE: Required<IncidentViewer> = \{([^}]*)\};/.exec(src)?.[1];
+    expect(literal, "the WHOLE_SITE literal").toBeDefined();
+    expect(literal).toMatch(/^\s*\/\/ .*\(D20\).*\(D21\).*incidentListWhere never reads it\.\n\s*mayReadLocks: true,$/m);
   });
 });
 
