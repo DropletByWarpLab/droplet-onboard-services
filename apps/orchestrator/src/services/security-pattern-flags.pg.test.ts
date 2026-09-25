@@ -360,6 +360,8 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B schema against real Postgres", () => {
       ["hourFrom 24", { hourFrom: "24" }],
       ["hourCount 0", { hourCount: "0" }],
       ["hourCount 25", { hourCount: "25" }],
+      // A whole day starts at midnight: from 15:00 it would quiet the wrong days while the page says "All day".
+      ["a whole day from 15:00", { hourFrom: "15", hourCount: "24" }],
     ] as Array<[string, Record<string, string | undefined>]>)("%s → refused", async (_what, over) => {
       expect(await run(zone(), suppression(over))).toEqual(rejectedBy("SecuritySuppression_shape"));
     });

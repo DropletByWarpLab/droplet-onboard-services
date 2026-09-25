@@ -597,10 +597,17 @@ describe("expected activity — one match rule for the engine and route 31 (D11�
     expect(suppressionCovers(late, slot({ ymd: "2026-09-26", hour: 1 }), NOW)).toBe(true); // Sat 01:00 ← Friday night
     expect(suppressionCovers(late, slot({ ymd: "2026-09-28", hour: 1 }), NOW)).toBe(false); // Mon 01:00 ← Sunday night
     expect(suppressionCovers(row({ hourFrom: 22, hourCount: 4, days: "weekends" }), slot({ ymd: "2026-09-28", hour: 1 }), NOW)).toBe(true);
-    // An all-day window opened at 06:00 runs to 05:59 the next day, and those hours are the previous day's.
-    const allDay = row({ hourFrom: 6, hourCount: 24, days: "weekends" });
-    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-28", hour: 5 }), NOW)).toBe(true); // Mon 05:00 ← Sunday
-    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-28", hour: 6 }), NOW)).toBe(false); // Mon 06:00 opens Monday
+    // A 24-hour window opened at 06:00 runs to 05:59 the next day, and those hours are the previous day's —
+    // which is why route 33 and SecuritySuppression_shape store a whole day only from midnight.
+    const fromSix = row({ hourFrom: 6, hourCount: 24, days: "weekends" });
+    expect(suppressionCovers(fromSix, slot({ ymd: "2026-09-28", hour: 5 }), NOW)).toBe(true); // Mon 05:00 ← Sunday
+    expect(suppressionCovers(fromSix, slot({ ymd: "2026-09-28", hour: 6 }), NOW)).toBe(false); // Mon 06:00 opens Monday
+    // From midnight, "Weekends, All day" is exactly Saturday and Sunday.
+    const allDay = row({ hourFrom: 0, hourCount: 24, days: "weekends" });
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-25", hour: 23 }), NOW)).toBe(false); // Fri 23:00
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-26", hour: 0 }), NOW)).toBe(true); // Sat 00:00
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-27", hour: 23 }), NOW)).toBe(true); // Sun 23:00
+    expect(suppressionCovers(allDay, slot({ ymd: "2026-09-28", hour: 0 }), NOW)).toBe(false); // Mon 00:00
   });
 
   it("suppressionFor adds the code filter and the oldest-wins choice", () => {

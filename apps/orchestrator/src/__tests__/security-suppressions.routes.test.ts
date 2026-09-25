@@ -334,6 +334,12 @@ describe("33 POST /api/security/suppressions (manage)", () => {
     expect(audits()[0]!.what).toBe("Security: added expected activity on camera back");
   });
 
+  it("a whole day from midnight is added (from any other hour it is a 400, below)", async () => {
+    const res = await request(app("owner", "manage").server).post("/api/security/suppressions").send(body({ hourFrom: 0, hourCount: 24 }));
+    expect(res.status).toBe(201);
+    expect(res.body.suppression).toMatchObject({ days: "weekdays", hourFrom: 0, hourCount: 24 });
+  });
+
   it.each([
     ["expiresInDays 0", { expiresInDays: 0 }],
     ["expiresInDays 366", { expiresInDays: 366 }],
@@ -346,10 +352,12 @@ describe("33 POST /api/security/suppressions (manage)", () => {
     ["an empty reason", { reason: "" }],
     ["a whitespace reason", { reason: "   " }],
     ["a 121-character reason", { reason: "x".repeat(121) }],
-    ["a bidi override", { reason: "Cleaner ‮yrros" }],
+    ["a bidi override", { reason: "Cleaner \u202eyrros" }],
     ["U+0000", { reason: "Cleaner\u0000" }],
     ["hourCount 0", { hourCount: 0 }],
     ["hourCount 25", { hourCount: 25 }],
+    // "Weekdays, all day" opened at 3 PM would quiet Saturday morning and not Monday's.
+    ["a whole day from 3 PM", { hourFrom: 15, hourCount: 24 }],
     ["hourFrom 24", { hourFrom: 24 }],
     ["a fractional hour", { hourFrom: 22.5 }],
     ["an unknown key", { fromIncidentId: MISSING }],

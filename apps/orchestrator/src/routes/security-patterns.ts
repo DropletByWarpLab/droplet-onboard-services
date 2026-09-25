@@ -110,6 +110,13 @@ const createBody = z
   .refine((b) => !b.codes.includes("long_dwell") || b.label === "person", {
     message: "only people can stay longer than usual",
     path: ["codes"],
+  })
+  // All day is midnight to midnight. A 24-hour window belongs to the day it
+  // OPENS (suppressionCovers), so "Weekdays, all day" from 3 PM would quiet
+  // Saturday morning and not Monday's: refused, never shown as "All day".
+  .refine((b) => b.hourCount < 24 || b.hourFrom === 0, {
+    message: "a whole day starts at midnight",
+    path: ["hourFrom"],
   });
 
 /** Route 34 takes no body. */

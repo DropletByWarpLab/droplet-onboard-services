@@ -9499,7 +9499,8 @@ model SecuritySuppression {
   camera        String?                   @db.VarChar(64)
   label         String                    @db.VarChar(64)
   days          SecuritySuppressionDays
-  /// Site-local wall-clock hour 0–23, and how many hours from it (1–24; wraps past midnight).
+  /// Site-local wall-clock hour 0–23, and how many hours from it (1–24; wraps past midnight;
+  /// 24 — All day — only from 0, since a window belongs to the day it opens).
   hourFrom      Int                       @db.SmallInt
   hourCount     Int                       @db.SmallInt
   codes         SecurityReasonCode[]

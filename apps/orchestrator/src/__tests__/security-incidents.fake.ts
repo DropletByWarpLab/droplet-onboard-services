@@ -518,6 +518,7 @@ function check(table: TableName, r: Row): void {
       (r.hourFrom as number) <= 23 &&
       (r.hourCount as number) >= 1 &&
       (r.hourCount as number) <= 24 &&
+      ((r.hourCount as number) < 24 || r.hourFrom === 0) &&
       Array.isArray(codes) &&
       !codes.some((c) => c == null) &&
       codes.length >= 1 &&

@@ -221,6 +221,7 @@ describe("the incident fake's WARP-2980 PR-B mirrors", () => {
     const t = f.client as unknown as Tables;
     await expect(t.securityPatternFlag!.createMany({ data: [flag()] })).resolves.toEqual({ count: 1 });
     await expect(t.securitySuppression!.createMany({ data: [suppression()] })).resolves.toEqual({ count: 1 });
+    await expect(t.securitySuppression!.createMany({ data: [suppression({ hourFrom: 0, hourCount: 24 })] })).resolves.toEqual({ count: 1 });
     expect(f.world.securityIncident[0]).toMatchObject({ verdict: "unreviewed", verdictCodes: [], verdictAt: null });
   });
 
@@ -243,6 +244,7 @@ describe("the incident fake's WARP-2980 PR-B mirrors", () => {
     ["long_dwell for a car", { label: "car", codes: ["long_dwell"] }],
     ["366 days", { expiresAt: new Date(at.getTime() + 366 * 86_400_000) }],
     ["removed without who", { state: "removed", endedAt: at }],
+    ["a whole day from 3 PM", { hourFrom: 15, hourCount: 24 }],
   ])("refuses expected activity with %s", async (_name, over) => {
     const f = createFakeSecurityPrisma();
     await expect((f.client as unknown as Tables).securitySuppression!.createMany({ data: [suppression(over)] })).rejects.toThrow(

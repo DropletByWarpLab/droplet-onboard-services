@@ -228,7 +228,9 @@ ALTER TABLE "SecurityPatternFlag" ADD CONSTRAINT "SecurityPatternFlag_shape" CHE
 -- D12/D13: expected activity names one target, a label, a window and 1–3
 -- DISTINCT-by-zod pattern codes (never after_hours_presence, camera_offline or
 -- threat_signal); lasts at most a year; `active` iff not ended, `removed` iff
--- a person ended it. A duplicate code passes here (harmless to matching; zod
+-- a person ended it. A whole day starts at midnight: a 24-hour window belongs
+-- to the day it opens, so one from 15:00 would quiet the wrong days while the
+-- page says "All day". A duplicate code passes here (harmless to matching; zod
 -- refuses it).
 ALTER TABLE "SecuritySuppression" DROP CONSTRAINT IF EXISTS "SecuritySuppression_shape";
 ALTER TABLE "SecuritySuppression" ADD CONSTRAINT "SecuritySuppression_shape" CHECK (
@@ -237,6 +239,7 @@ ALTER TABLE "SecuritySuppression" ADD CONSTRAINT "SecuritySuppression_shape" CHE
   AND ("camera" IS NULL OR "camera" ~ '^[a-zA-Z0-9_-]{1,64}$')
   AND "label" ~ '^[a-zA-Z0-9_-]{1,64}$'
   AND "hourFrom" BETWEEN 0 AND 23 AND "hourCount" BETWEEN 1 AND 24
+  AND ("hourCount" < 24 OR "hourFrom" = 0)
   AND "codes" IS NOT NULL AND array_position("codes", NULL) IS NULL
   AND cardinality("codes") BETWEEN 1 AND 3
   AND "codes" <@ ARRAY['out_of_place', 'unusual_volume', 'long_dwell']::"SecurityReasonCode"[]
