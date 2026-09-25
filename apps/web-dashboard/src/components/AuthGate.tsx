@@ -5,6 +5,7 @@ import { useEffect, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
+import { AssistantShell } from "@/components/assistant/AssistantShell";
 import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
@@ -336,12 +337,26 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // owns its own <main id="main"> (the skip link's target) and sits at the
   // same point in this ladder, so every takeover above and the module guard
   // inside apply to both layouts identically.
+  //
+  // WARP-3062: so does the Assistant shell, for the same reasons — its
+  // business side is the Sidebar below, and its Ask side is `/chat`, which
+  // the guard never blocks (always on).
   if (navLayout === "workspace") {
     return (
       <>
         <WorkspaceShell>
           <ModuleRouteGuard>{children}</ModuleRouteGuard>
         </WorkspaceShell>
+        <HelpLauncher />
+      </>
+    );
+  }
+  if (navLayout === "assistant") {
+    return (
+      <>
+        <AssistantShell>
+          <ModuleRouteGuard>{children}</ModuleRouteGuard>
+        </AssistantShell>
         <HelpLauncher />
       </>
     );

@@ -32,14 +32,17 @@ import { FilesLibrariesNav } from "./nav/FilesLibrariesNav";
 // in the chrome. This file owns rendering; nav-config owns what there is to
 // render and who may see it.
 import {
+  ASSISTANT_OVERVIEW_HREF,
   MOBILE_PRIMARY_HREFS,
   NAV_GROUPS,
   isSettingsContext,
   settingsGroups,
   visibleItems,
+  withOverviewAt,
   type AuthRole,
   type NavItem,
 } from "./nav-config";
+import { useNavLayout } from "@/lib/nav-layout";
 // WARP-2976 (ADR-059 §2.3) — the department switcher and the department
 // filter. The filter only NARROWS `NAV_GROUPS` to the active department's
 // profile; `visibleItems` below still runs every gate over the result, so a
@@ -153,8 +156,14 @@ export function Sidebar() {
   // WARP-2976 — the active department's arrangement of the nav, or
   // NAV_GROUPS itself for Whole business. Gating runs AFTER this, below.
   const { active: activeDepartment, activeProfile } = useActiveDepartment();
-  const navGroups = departmentNavGroups(NAV_GROUPS, activeDepartment, activeProfile);
-  const inDepartment = navGroups !== NAV_GROUPS;
+  const departmentGroups = departmentNavGroups(NAV_GROUPS, activeDepartment, activeProfile);
+  const inDepartment = departmentGroups !== NAV_GROUPS;
+  // WARP-3062 — under the assistant layout `/` is the Ask side's front door,
+  // so Overview is served at ASSISTANT_OVERVIEW_HREF. Only the href moves;
+  // every other layout gets the groups back untouched.
+  const { layout: navLayout } = useNavLayout();
+  const overviewHref = navLayout === "assistant" ? ASSISTANT_OVERVIEW_HREF : "/";
+  const navGroups = withOverviewAt(departmentGroups, overviewHref);
 
   // Compute the rendered groups once. Empty groups (e.g. Admin when the
   // user is family/guest without the Activity entry) are filtered out so
@@ -201,7 +210,7 @@ export function Sidebar() {
     ? (renderedGroups[0]?.items ?? [])
         .slice(0, MOBILE_PRIMARY_HREFS.length)
         .map((i) => i.href)
-    : MOBILE_PRIMARY_HREFS;
+    : MOBILE_PRIMARY_HREFS.map((href) => (href === "/" ? overviewHref : href));
   /** Does this href own a slot in the mobile bottom tab bar? */
   const isMobilePrimary = (href: string): boolean => primaryHrefs.includes(href);
 
@@ -263,11 +272,13 @@ export function Sidebar() {
 
   return (
     <>
-      {/* ── Desktop Sidebar ── */}
+      {/* ── Desktop Sidebar ──
+          The top edge is `--shell-bar-h`: 0 unless a layout mounts a bar
+          above the rail (WARP-3062's assistant layout sets it). */}
       <aside
         aria-label="Primary navigation"
         className="
-          hidden lg:flex lg:flex-col lg:fixed lg:inset-y-0 lg:left-0 lg:w-[var(--sidebar-w)]
+          hidden lg:flex lg:flex-col lg:fixed lg:top-[var(--shell-bar-h,0px)] lg:bottom-0 lg:left-0 lg:w-[var(--sidebar-w)]
           sidebar-w-transition
           bg-[var(--color-sidebar-bg)] dp-material
           border-r border-separator z-40

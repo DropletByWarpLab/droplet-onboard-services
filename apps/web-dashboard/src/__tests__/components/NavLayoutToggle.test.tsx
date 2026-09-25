@@ -27,7 +27,7 @@ describe("NavLayoutToggle", () => {
     const group = screen.getByRole("radiogroup", { name: "Navigation layout" });
     const radios = screen.getAllByRole("radio");
     expect(group).toContainElement(radios[0]);
-    expect(radios).toHaveLength(2);
+    expect(radios).toHaveLength(3);
     expect(screen.getByRole("radio", { name: "Sidebar navigation" })).toHaveAttribute(
       "aria-checked",
       "true",
@@ -35,6 +35,23 @@ describe("NavLayoutToggle", () => {
     expect(
       screen.getByRole("radio", { name: "Workspace tabs navigation" }),
     ).toHaveAttribute("aria-checked", "false");
+    // WARP-3062 — opt-in: offered, never the default.
+    expect(
+      screen.getByRole("radio", { name: "Assistant navigation" }),
+    ).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("clicking Assistant persists the choice (WARP-3062)", () => {
+    render(
+      <NavLayoutProvider>
+        <NavLayoutToggle />
+      </NavLayoutProvider>,
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "Assistant navigation" }));
+    expect(
+      screen.getByRole("radio", { name: "Assistant navigation" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(localStorage.getItem(NAV_LAYOUT_STORAGE_KEY)).toBe("assistant");
   });
 
   it("clicking Workspace tabs persists the choice", () => {
@@ -63,6 +80,11 @@ describe("NavLayoutToggle", () => {
       screen.getByRole("radio", { name: "Workspace tabs navigation" }),
       { key: "ArrowRight" },
     );
+    expect(localStorage.getItem(NAV_LAYOUT_STORAGE_KEY)).toBe("assistant");
+    fireEvent.keyDown(
+      screen.getByRole("radio", { name: "Assistant navigation" }),
+      { key: "ArrowRight" },
+    );
     expect(localStorage.getItem(NAV_LAYOUT_STORAGE_KEY)).toBe("sidebar");
   });
 });
@@ -74,6 +96,14 @@ describe("NavLayoutProvider / useNavLayout", () => {
       wrapper: NavLayoutProvider,
     });
     expect(result.current.layout).toBe("workspace");
+  });
+
+  it("adopts a stored assistant choice (WARP-3062)", () => {
+    localStorage.setItem(NAV_LAYOUT_STORAGE_KEY, "assistant");
+    const { result } = renderHook(() => useNavLayout(), {
+      wrapper: NavLayoutProvider,
+    });
+    expect(result.current.layout).toBe("assistant");
   });
 
   it("ignores a value that is not a layout", () => {

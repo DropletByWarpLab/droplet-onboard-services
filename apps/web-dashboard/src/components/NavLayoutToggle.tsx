@@ -1,11 +1,14 @@
 "use client";
 
-import { LayoutPanelTop, PanelLeft } from "lucide-react";
+import { LayoutPanelTop, MessageSquare, PanelLeft } from "lucide-react";
 import { useNavLayout, type NavLayout } from "@/lib/nav-layout";
 
+// WARP-3062 — the assistant layout takes the Ask AI nav item's own glyph,
+// because that is the side it opens on.
 const options: { value: NavLayout; icon: typeof PanelLeft; label: string }[] = [
   { value: "sidebar", icon: PanelLeft, label: "Sidebar" },
   { value: "workspace", icon: LayoutPanelTop, label: "Workspace tabs" },
+  { value: "assistant", icon: MessageSquare, label: "Assistant" },
 ];
 
 /**
