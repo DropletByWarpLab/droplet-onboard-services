@@ -13,7 +13,9 @@
  */
 import { describe, expect, it } from "vitest";
 import { QUIET_MS, SETTLE_MS } from "../lib/security-rules.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 import { readPackageFile } from "../__tests__/helpers/test-paths.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 import {
   flagCamerasVisible,
   flagVisible,
@@ -352,8 +354,11 @@ describe("WARP-2977 × WARP-2981 — the rack's viewer and door locks (D20, D21)
   it("panelOpenIncidents counts over the owner's where — the same with or without door locks", async () => {
     const wheres: unknown[] = [];
     const tx = { securityIncident: { count: async ({ where }: { where: unknown }) => (wheres.push(where), 0) } };
-    const prisma = { $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx) };
-    expect(await panelOpenIncidents(prisma as never)).toEqual({ open: 0, alerts: 0 });
+    // The shared transaction seam (WARP-1570): it records the isolation
+    // level the read asks for, which a hand-rolled `$transaction` discards.
+    const seam = createTransactionSeam({ client: () => tx });
+    expect(await panelOpenIncidents({ $transaction: seam.$transaction } as never)).toEqual({ open: 0, alerts: 0 });
+    expect(seam.calls()).toEqual([REPEATABLE_READ_TX]);
     for (const mayReadLocks of [true, false]) {
       const v = { ...owner, mayReadLocks };
       expect(wheres).toEqual([incidentListWhere(v, { state: "attention" }), incidentListWhere(v, { state: "attention", severity: "alert" })]);
