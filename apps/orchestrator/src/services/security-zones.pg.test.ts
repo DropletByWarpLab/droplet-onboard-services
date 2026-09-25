@@ -20,6 +20,11 @@
  *   rollback      — an in-tx audit that cannot be written leaves no area, no
  *                   link, no version bump and no ActivityRow (a real ROLLBACK,
  *                   not the unit lane's fake).
+ *   P4 (WARP-2979) — route 12 accepts a `proposed` row in the desired set
+ *                   (the pre-P4 diff ignored it); Add it / Keep / Not this /
+ *                   Undo write CHECK-valid rows and a chain that verifies;
+ *                   the evidence trim drops only old samples, keeps the
+ *                   aggregates, and a rerun is a no-op.
  *   the limit     — a restore and an add racing for the 64th place: the
  *                   area-limit advisory lock makes exactly one win. The
  *                   interleaving is forced with a held row lock, so the test
@@ -41,6 +46,8 @@ import {
   ZoneWriteError,
   buildZoneIndex,
   createZone,
+  decideDropletLink,
+  trimLinkEvidence,
   loadActiveLinks,
   normaliseZoneName,
   replaceZoneLinks,
@@ -458,6 +465,121 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
       expect(await prisma.securityZone.findUniqueOrThrow({ where: { id: zone.id } })).toMatchObject({ version: 0 });
       expect(await prisma.activityRow.count()).toBe(rowsBefore);
       expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
+    });
+  });
+
+  describe("WARP-2979 — Droplet's links on real rows", () => {
+    const deps = () => ({
+      scope: { visibleCameras: "all" as const },
+      cameraLabels: new Map([[CAMS[0]!, "Front camera"], [CAMS[1]!, "Back camera"], [CAMS[2]!, "Side camera"]]),
+      frigateConfig: async () => ({ cameras: {} }),
+    });
+    const evidence = (candidate: string, samples: Array<{ anchorAt: string; hitAt: string }> = []) => ({
+      v: 1,
+      kind: "camera_camera",
+      window: { from: "2026-09-06T09:45:00.000Z", to: "2026-09-20T09:45:00.000Z" },
+      anchor: { linkId: "l-anchor", sourceKind: "camera", sourceRef: CAMS[0]!, label: "Front camera" },
+      candidate: { sourceKind: "camera", sourceRef: candidate, label: "x" },
+      forward: { n: 40, k: 34, excluded: 0, lambdaMilli: 2000, liftTenths: 170, confidenceBp: 7090 },
+      reverse: { n: 45, k: 36, excluded: 1, lambdaMilli: 2700, liftTenths: 133, confidenceBp: 6620 },
+      chosen: "whole",
+      wholeK: null,
+      names: { match: false, shared: [] },
+      hypotheses: 12,
+      pAdj: "1.1e-27",
+      gate: "auto",
+      samples,
+      samplesTrimmedBefore: null,
+    });
+    async function dropletRow(zoneId: string, sourceRef: string, state: "proposed" | "active", samples: Array<{ anchorAt: string; hitAt: string }> = []) {
+      return prisma.securityZoneLink.create({
+        data: {
+          zoneId,
+          sourceKind: "camera",
+          sourceRef,
+          sourceLabel: sourceRef,
+          state,
+          origin: "droplet",
+          stateSetBy: "droplet",
+          evidence: evidence(sourceRef, samples),
+          confidence: 0.662,
+          rulesVersion: 1,
+          evidenceAt: T0,
+        },
+      });
+    }
+    const linksAudit = async (zoneId: string) =>
+      prisma.$queryRaw<Array<{ refs: Record<string, unknown> }>>`
+        SELECT "refs" FROM "ActivityRow" WHERE "refs"->>'zoneId' = ${zoneId} AND "refs"->>'action' IN ('zone.links', 'link.accepted', 'link.rejected') ORDER BY id`;
+
+    it("route 12: a `proposed` row in the desired set is ACCEPTED (active, set by the person), `accepted` in the refs", async () => {
+      const zone = await createZone(prisma, ctx, { name: `${TAG} P4 accept by save`, kind: "interior" });
+      await replaceZoneLinks(prisma, ctx, zone.id, { links: [{ sourceKind: "camera", sourceRef: CAMS[0]! }], expectedVersion: 0 }, deps());
+      const suggestion = await dropletRow(zone.id, CAMS[1]!, "proposed");
+      const out = await replaceZoneLinks(
+        prisma,
+        ctx,
+        zone.id,
+        { links: [{ sourceKind: "camera", sourceRef: CAMS[0]! }, { sourceKind: "camera", sourceRef: CAMS[1]! }], expectedVersion: 1 },
+        deps(),
+      );
+      expect(out.changed).toBe(true);
+      expect(await prisma.securityZoneLink.findUniqueOrThrow({ where: { id: suggestion.id } })).toMatchObject({
+        state: "active",
+        origin: "droplet",
+        stateSetBy: "person",
+        decidedById: `${TAG}-owner`,
+      });
+      expect(await prisma.securityZoneLink.count({ where: { zoneId: zone.id } })).toBe(2);
+      const audits = await linksAudit(zone.id);
+      expect(audits[audits.length - 1]!.refs).toMatchObject({ added: [], removed: [], reactivated: [], accepted: [CAMS[1]] });
+      expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
+    });
+
+    it("Add it, Keep, Not this and Undo: CHECK-valid rows, one audit each, and the chain verifies", async () => {
+      const zone = await createZone(prisma, ctx, { name: `${TAG} P4 decisions`, kind: "interior" });
+      const add = await dropletRow(zone.id, CAMS[0]!, "proposed");
+      const keep = await dropletRow(zone.id, CAMS[1]!, "active");
+      const notThis = await dropletRow(zone.id, CAMS[2]!, "proposed");
+      const undo = await dropletRow(zone.id, `${TAG}_c4`, "active");
+      expect((await decideDropletLink(prisma, ctx, add.id, "accept", deps())).changed).toBe(true);
+      expect((await decideDropletLink(prisma, ctx, keep.id, "accept", deps())).changed).toBe(true);
+      expect((await decideDropletLink(prisma, ctx, notThis.id, "reject", deps())).changed).toBe(true);
+      expect((await decideDropletLink(prisma, ctx, undo.id, "reject", deps())).changed).toBe(true);
+      const rows = await prisma.securityZoneLink.findMany({ where: { zoneId: zone.id }, orderBy: { sourceRef: "asc" } });
+      expect(rows.map((r) => [r.id, r.state, r.origin, r.stateSetBy])).toEqual(
+        expect.arrayContaining([
+          [add.id, "active", "droplet", "person"],
+          [keep.id, "active", "droplet", "person"],
+          [notThis.id, "rejected", "droplet", "person"],
+          [undo.id, "rejected", "droplet", "person"],
+        ]),
+      );
+      expect(await prisma.securityZone.findUniqueOrThrow({ where: { id: zone.id } })).toMatchObject({ version: 4 });
+      expect((await linksAudit(zone.id)).map((a) => [a.refs.action, a.refs.from, a.refs.undo ?? null])).toEqual([
+        ["link.accepted", "proposed", null],
+        ["link.accepted", "active", null],
+        ["link.rejected", "proposed", false],
+        ["link.rejected", "active", true],
+      ]);
+      // A repeat changes nothing and writes no audit.
+      expect((await decideDropletLink(prisma, ctx, undo.id, "reject", deps())).changed).toBe(false);
+      expect(await linksAudit(zone.id)).toHaveLength(4);
+      expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
+    });
+
+    it("trimLinkEvidence drops only the old samples, keeps the aggregates, and a rerun is a no-op", async () => {
+      const zone = await createZone(prisma, ctx, { name: `${TAG} P4 trim`, kind: "interior" });
+      const before = new Date("2026-08-25T03:50:00.000Z");
+      const OLD = { anchorAt: "2026-08-10T10:00:00.000Z", hitAt: "2026-08-10T10:00:03.000Z" };
+      const NEW = { anchorAt: "2026-08-30T10:00:00.000Z", hitAt: "2026-08-30T10:00:03.000Z" };
+      const row = await dropletRow(zone.id, CAMS[0]!, "active", [NEW, OLD]);
+      const first = await trimLinkEvidence(prisma, before);
+      expect(first.trimmed).toBeGreaterThanOrEqual(1);
+      const after = await prisma.securityZoneLink.findUniqueOrThrow({ where: { id: row.id } });
+      expect(after.evidence).toEqual({ ...evidence(CAMS[0]!, [NEW]), samplesTrimmedBefore: before.toISOString() });
+      expect(after.confidence).toBe(0.662);
+      expect(await trimLinkEvidence(prisma, before)).toEqual({ trimmed: 0 });
     });
   });
 

@@ -19,11 +19,10 @@
  * 23 and 26. The only writer is route 27 (`setSecurityAiSettings`, manage,
  * compare-and-set on `version`, audited `ai_settings.set` in its transaction).
  *
- * S0 FOUNDATION: `readSecurityAiSettings` is complete (the job and the health
- * row need it now); `setSecurityAiSettings` is slice R's and throws until then
- * — no route calls it yet.
  */
 import type { PrismaClient, SecurityAiLinking, SecurityAiSummaries } from "@prisma/client";
+import { auditSecurityInTx } from "./security-audit.js";
+import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 
 export const SECURITY_AI_SETTINGS_ID = "singleton";
 
@@ -75,20 +74,60 @@ export async function readSecurityAiSettings(
   return { linking: made.linking, summaries: made.summaries, version: made.version };
 }
 
+/** The audit line for a change, in the words the settings panel uses. */
+function changeCopy(from: SecurityAiSettingsView, to: SecurityAiSettingsInput): string {
+  const parts: string[] = [];
+  if (from.linking !== to.linking) {
+    parts.push(
+      to.linking === "link_and_suggest"
+        ? "Droplet's AI now links cameras on its own when it's sure, and suggests the rest"
+        : to.linking === "suggest_only"
+          ? "Droplet's AI now only suggests links"
+          : "Droplet's AI no longer looks for links",
+    );
+  }
+  if (from.summaries !== to.summaries) {
+    parts.push(to.summaries === "on" ? "Droplet now writes incident summaries" : "Droplet no longer writes incident summaries");
+  }
+  return `Security: ${parts.join("; ")}`;
+}
+
 /**
  * Route 27 (manage): compare-and-set on `version`, then `auditSecurityInTx`
- * `ai_settings.set` LAST, in one READ_COMMITTED transaction. Nothing to change
- * → `changed: false`, no write, no audit. A lost CAS → 409 VERSION_CONFLICT.
- *
- * S0 stub — slice R builds it; nothing calls it before then.
+ * `ai_settings.set` LAST, in one READ_COMMITTED transaction. The row is
+ * created first if it was never read (its defaults, ON CONFLICT DO NOTHING).
+ * A stale `expectedVersion` → 409 VERSION_CONFLICT, whatever it asks for
+ * (the panel re-reads and shows the other person's choice). Nothing to change
+ * → `changed: false`, no write, no audit.
  */
 export async function setSecurityAiSettings(
   prisma: PrismaClient,
   ctx: { req: { user?: { id: string; role?: string } | undefined }; now: Date },
   input: SecurityAiSettingsInput,
 ): Promise<SecurityAiSettingsView & { changed: boolean }> {
-  void prisma;
-  void ctx;
-  void input;
-  throw new Error("setSecurityAiSettings is not built yet (WARP-2979 slice R)");
+  await prisma.securityAiSettings.createMany({ data: [{ id: SECURITY_AI_SETTINGS_ID }], skipDuplicates: true });
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.securityAiSettings.findUniqueOrThrow({ where: { id: SECURITY_AI_SETTINGS_ID }, select: SELECT });
+    if (current.version !== input.expectedVersion) {
+      throw new SecurityAiSettingsError(409, "VERSION_CONFLICT", "Someone else changed these settings; reload and try again");
+    }
+    if (current.linking === input.linking && current.summaries === input.summaries) {
+      return { linking: current.linking, summaries: current.summaries, version: current.version, changed: false };
+    }
+    const { count } = await tx.securityAiSettings.updateMany({
+      where: { id: SECURITY_AI_SETTINGS_ID, version: input.expectedVersion },
+      data: { linking: input.linking, summaries: input.summaries, version: { increment: 1 }, updatedById: ctx.req.user?.id ?? null },
+    });
+    if (count !== 1) throw new SecurityAiSettingsError(409, "VERSION_CONFLICT", "Someone else changed these settings; reload and try again");
+    await auditSecurityInTx(tx, ctx.req, {
+      action: "ai_settings.set",
+      what: changeCopy(current, input),
+      refs: {
+        linking: input.linking,
+        summaries: input.summaries,
+        from: { linking: current.linking, summaries: current.summaries },
+      },
+    });
+    return { linking: input.linking, summaries: input.summaries, version: current.version + 1, changed: true };
+  }, READ_COMMITTED_TX);
 }

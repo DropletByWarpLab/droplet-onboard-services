@@ -10,6 +10,11 @@
  * `nameKey` is enforced, and `$transaction` ROLLS BACK on a throw — so "no
  * write" and "the row is unchanged" are provable, not assumed.
  *
+ * WARP-2979 (P4 §7 routes 3, 12, 23–25): Droplet's links — who made and set
+ * each link, its evidence only for a viewer who can see every source it names,
+ * the suggestions list (a manage filter, never a gate), Add it / Keep and Not
+ * this / Undo on the link's CURRENT state, and route 12's new diff cells.
+ *
  * What is pinned:
  *   · the 4-case level pin on every write route: (a) exactly manage → the
  *     exact 2xx and the exact audit row; (b) an admin narrowed to act → 404
@@ -73,6 +78,10 @@ interface LinkRow {
   /** WARP-2979 — who created the row and who set its state; every P2b row is a person's. */
   origin: "person" | "droplet";
   stateSetBy: "person" | "droplet";
+  evidence?: unknown;
+  confidence?: number | null;
+  rulesVersion?: number | null;
+  evidenceAt?: Date | null;
   createdById: string | null;
   decidedById: string | null;
   stateChangedAt: Date;
@@ -100,6 +109,8 @@ const db = {
   createError: null as unknown,
   /** In order: every raw statement (with its values) and every active-area count — pins lock-before-count. */
   log: [] as string[],
+  /** WARP-2979 — the AI settings row (null = never read). */
+  ai: null as null | { linking: string; summaries: string; version: number },
 };
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -142,6 +153,66 @@ function seed(): void {
   db.createError = null;
   db.open = [];
   db.log = [];
+  db.ai = null;
+}
+
+// ── WARP-2979: Droplet's links ────────────────────────────────────────────
+
+/** Every P2b row as route 3 now shows it: a person made and set it, no evidence. */
+const PERSON = { origin: "person", setBy: "person", evidence: null } as const;
+/** Droplet's suggestion on `side` for Shop floor (anchored on `front`). */
+const SUGGESTION = "5d0c1b2a-3e4f-4a5b-9c6d-7e8f9a0b1c2d";
+/** Droplet's own link on `front` for Yard (anchored on `back`): "Linked by Droplet". */
+const AUTO = "6e1d2c3b-4f5a-4b6c-8d7e-8f9a0b1c2d3e";
+/** A suggestion a person turned down: `back` for Shop floor. */
+const TURNED_DOWN = "7f2e3d4c-5a6b-4c7d-9e8f-9a0b1c2d3e4f";
+
+function evidence(anchor: { linkId: string; ref: string; label: string }, candidate: { ref: string; label: string }, match = false) {
+  return {
+    v: 1,
+    kind: "camera_camera",
+    window: { from: "2026-09-06T09:45:00.000Z", to: "2026-09-20T09:45:00.000Z" },
+    anchor: { linkId: anchor.linkId, sourceKind: "camera", sourceRef: anchor.ref, label: anchor.label },
+    candidate: { sourceKind: "camera", sourceRef: candidate.ref, label: candidate.label },
+    forward: { n: 40, k: 34, excluded: 0, lambdaMilli: 2000, liftTenths: 170, confidenceBp: 7090 },
+    reverse: { n: 45, k: 36, excluded: 1, lambdaMilli: 2700, liftTenths: 133, confidenceBp: 6620 },
+    chosen: "whole",
+    wholeK: null,
+    names: match ? { match: true, shared: ["shop"] } : { match: false, shared: [] },
+    hypotheses: 12,
+    pAdj: "1.1e-27",
+    gate: "auto",
+    samples: [{ anchorAt: "2026-09-19T14:14:02.000Z", hitAt: "2026-09-19T14:14:05.000Z" }],
+    samplesTrimmedBefore: null,
+  };
+}
+
+function droplet(id: string, zoneId: string, sourceRef: string, state: LinkRow["state"], ev: unknown, stateSetBy: "person" | "droplet" = "droplet", confidence = 0.662): LinkRow {
+  return {
+    id,
+    zoneId,
+    sourceKind: "camera",
+    sourceRef,
+    sourceLabel: `snap ${sourceRef}`,
+    state,
+    origin: "droplet",
+    stateSetBy,
+    evidence: ev,
+    confidence,
+    rulesVersion: 1,
+    evidenceAt: T0,
+    createdById: null,
+    decidedById: null,
+    stateChangedAt: T0,
+  };
+}
+
+function seedDroplet(): void {
+  db.links.push(
+    droplet(SUGGESTION, SHOP, "side", "proposed", evidence({ linkId: "l-shop-front", ref: "front", label: "Front camera" }, { ref: "side", label: "Side camera" })),
+    droplet(AUTO, YARD, "front", "active", evidence({ linkId: "l-yard-back", ref: "back", label: "Back camera" }, { ref: "front", label: "Front camera" })),
+    droplet(TURNED_DOWN, SHOP, "back", "rejected", evidence({ linkId: "l-shop-front", ref: "front", label: "Front camera" }, { ref: "back", label: "Back camera" }), "person"),
+  );
 }
 
 /** Another writer commits a version bump on `id` (visible now, and kept if our transaction rolls back). */
@@ -221,27 +292,45 @@ const prisma = {
     ),
   },
   securityZoneLink: {
-    findMany: vi.fn(async (args: { where: { zoneId?: string; state?: string; zone?: { state?: string } }; select?: Record<string, unknown> }) =>
-      db.links
-        .filter((l) => {
-          if (args.where.zoneId !== undefined && l.zoneId !== args.where.zoneId) return false;
-          if (!matchesState(l.state, args.where.state)) return false;
-          const zone = db.zones.find((z) => z.id === l.zoneId)!;
-          return matchesState(zone.state, args.where.zone?.state);
-        })
-        .map((l) => {
-          const zone = db.zones.find((z) => z.id === l.zoneId)!;
-          return { ...clone(l), zone: { name: zone.name, kind: zone.kind } };
-        }),
+    findMany: vi.fn(
+      async (args: { where: { zoneId?: string; state?: string; origin?: string; zone?: { state?: string } }; select?: Record<string, unknown> }) =>
+        db.links
+          .filter((l) => {
+            if (args.where.zoneId !== undefined && l.zoneId !== args.where.zoneId) return false;
+            if (!matchesState(l.state, args.where.state)) return false;
+            if (!matchesState(l.origin, args.where.origin)) return false;
+            const zone = db.zones.find((z) => z.id === l.zoneId)!;
+            return matchesState(zone.state, args.where.zone?.state);
+          })
+          .map((l) => {
+            const zone = db.zones.find((z) => z.id === l.zoneId)!;
+            return { evidence: null, confidence: null, evidenceAt: null, ...clone(l), zone: { id: zone.id, name: zone.name, kind: zone.kind } };
+          }),
+    ),
+    // WARP-2979 — routes 24/25 read the link with its area.
+    findUnique: vi.fn(async (args: { where: { id: string } }) => {
+      const l = db.links.find((x) => x.id === args.where.id);
+      if (!l) return null;
+      const z = db.zones.find((x) => x.id === l.zoneId)!;
+      return { ...clone(l), zone: { id: z.id, name: z.name, state: z.state, version: z.version } };
+    }),
+    count: vi.fn(async (args: { where: { zoneId: string; state: string } }) =>
+      db.links.filter((l) => l.zoneId === args.where.zoneId && l.state === args.where.state).length,
     ),
     createMany: vi.fn(async (args: { data: Array<Omit<LinkRow, "id" | "decidedById">> }) => {
       for (const d of args.data) db.links.push({ id: `l-new-${d.sourceRef}`, decidedById: null, ...d });
       return { count: args.data.length };
     }),
     updateMany: vi.fn(
-      async (args: { where: { id: string | { in: string[] }; state?: string }; data: Partial<LinkRow> }) => {
+      async (args: { where: { id: string | { in: string[] }; state?: string; origin?: string; stateSetBy?: string }; data: Partial<LinkRow> }) => {
         const ids = typeof args.where.id === "string" ? [args.where.id] : args.where.id.in;
-        const hits = db.links.filter((l) => ids.includes(l.id) && matchesState(l.state, args.where.state));
+        const hits = db.links.filter(
+          (l) =>
+            ids.includes(l.id) &&
+            matchesState(l.state, args.where.state) &&
+            matchesState(l.origin, args.where.origin) &&
+            matchesState(l.stateSetBy, args.where.stateSetBy),
+        );
         for (const l of hits) Object.assign(l, args.data);
         return { count: hits.length };
       },
@@ -249,6 +338,14 @@ const prisma = {
   },
   camera: {
     findMany: vi.fn(async () => db.cameras.map(clone)),
+  },
+  securityAiSettings: {
+    findUnique: vi.fn(async () => (db.ai ? clone(db.ai) : null)),
+    createMany: vi.fn(async () => {
+      db.ai ??= { linking: "link_and_suggest", summaries: "on", version: 0 };
+      return { count: 1 };
+    }),
+    findUniqueOrThrow: vi.fn(async () => clone(db.ai!)),
   },
   cameraAccessGrant: {
     findMany: vi.fn(async (args: { where: { userId: string } }) =>
@@ -372,6 +469,8 @@ interface WriteCase {
   send: (userId: keyof typeof USERS) => request.Test;
   status: number;
   action: string;
+  /** WARP-2979 — rows the route needs (Droplet's links), seeded before each case. */
+  setup?: () => void;
 }
 
 const WRITES: WriteCase[] = [
@@ -408,9 +507,26 @@ const WRITES: WriteCase[] = [
     status: 200,
     action: "zone.links",
   },
+  // WARP-2979 — routes 24 and 25: manage, on Droplet's links.
+  {
+    name: "POST /security/links/:linkId/accept",
+    setup: () => seedDroplet(),
+    send: (u) => request(app(u)).post(`/api/security/links/${SUGGESTION}/accept`).send({}),
+    status: 200,
+    action: "link.accepted",
+  },
+  {
+    name: "POST /security/links/:linkId/reject",
+    setup: () => seedDroplet(),
+    send: (u) => request(app(u)).post(`/api/security/links/${AUTO}/reject`).send({}),
+    status: 200,
+    action: "link.rejected",
+  },
 ];
 
-describe.each(WRITES)("$name — level pins (manage)", ({ send, status, action }) => {
+describe.each(WRITES)("$name — level pins (manage)", ({ send, status, action, setup }) => {
+  beforeEach(() => setup?.());
+
   it("(a) exactly manage → the exact 2xx and exactly one audit row", async () => {
     const res = await send("u-admin");
     expect(res.status).toBe(status);
@@ -486,12 +602,19 @@ describe("DS-005 — family granted `front` only", () => {
         state: "active",
         version: 3,
         links: [
-          { id: "l-shop-cam9", sourceKind: "camera", sourceRef: "cam9", label: "was cam9", state: "active", stateChangedAt: T0.toISOString() },
-          { id: "l-shop-front", sourceKind: "camera", sourceRef: "front", label: "Front camera", state: "active", stateChangedAt: T0.toISOString() },
-          { id: "l-shop-porch", sourceKind: "camera_zone", sourceRef: "back/porch", label: "Back camera", state: "active", stateChangedAt: T0.toISOString() },
+          { id: "l-shop-cam9", sourceKind: "camera", sourceRef: "cam9", label: "was cam9", state: "active", stateChangedAt: T0.toISOString(), ...PERSON },
+          { id: "l-shop-front", sourceKind: "camera", sourceRef: "front", label: "Front camera", state: "active", stateChangedAt: T0.toISOString(), ...PERSON },
+          { id: "l-shop-porch", sourceKind: "camera_zone", sourceRef: "back/porch", label: "Back camera", state: "active", stateChangedAt: T0.toISOString(), ...PERSON },
         ],
       },
-      { id: YARD, name: "Yard", kind: "perimeter", state: "active", version: 1, links: [{ id: "l-yard-back", sourceKind: "camera", sourceRef: "back", label: "Back camera", state: "active", stateChangedAt: T0.toISOString() }] },
+      {
+        id: YARD,
+        name: "Yard",
+        kind: "perimeter",
+        state: "active",
+        version: 1,
+        links: [{ id: "l-yard-back", sourceKind: "camera", sourceRef: "back", label: "Back camera", state: "active", stateChangedAt: T0.toISOString(), ...PERSON }],
+      },
     ]);
   });
 
@@ -986,5 +1109,268 @@ describe("PUT /api/security/zones/:id/links", () => {
     expect(res.status).toBe(200);
     expect(res.body.changed).toBe(true);
     expect(prisma.$transaction).toHaveBeenCalled();
+  });
+});
+
+// ── WARP-2979 (P4 §7): Droplet's links ───────────────────────────────────
+
+describe("GET /api/security/zones — who made each link, and Droplet's evidence only for who can see all of it (route 3)", () => {
+  beforeEach(() => seedDroplet());
+
+  it("the owner sees 'Linked by Droplet' with its evidence; suggestions and turned-down rows are not links", async () => {
+    const res = await request(app("u-owner")).get("/api/security/zones");
+    const yard = res.body.zones.find((z: { id: string }) => z.id === YARD);
+    const auto = yard.links.find((l: { id: string }) => l.id === AUTO);
+    expect(auto).toMatchObject({ origin: "droplet", setBy: "droplet", state: "active", label: "Front camera" });
+    expect(auto.evidence).toEqual(evidence({ linkId: "l-yard-back", ref: "back", label: "Back camera" }, { ref: "front", label: "Front camera" }));
+    const ids = res.body.zones.flatMap((z: { links: Array<{ id: string }> }) => z.links.map((l) => l.id));
+    expect(ids).not.toContain(SUGGESTION);
+    expect(ids).not.toContain(TURNED_DOWN);
+  });
+
+  it("DS-005: family sees Droplet's link on `front` — but NOT its evidence, which names `back` (hidden from them)", async () => {
+    const res = await request(app("u-fam")).get("/api/security/zones");
+    const yard = res.body.zones.find((z: { id: string }) => z.id === YARD);
+    expect(yard.links).toEqual([expect.objectContaining({ id: AUTO, origin: "droplet", setBy: "droplet", evidence: null })]);
+  });
+
+  it("evidence that does not parse is never sent (fail closed), even to the owner", async () => {
+    db.links.find((l) => l.id === AUTO)!.evidence = { v: 2, anything: "else" };
+    const res = await request(app("u-owner")).get("/api/security/zones");
+    const auto = res.body.zones.find((z: { id: string }) => z.id === YARD).links.find((l: { id: string }) => l.id === AUTO);
+    expect(auto.evidence).toBeNull();
+  });
+});
+
+describe("GET /api/security/link-proposals (route 23) — a manage filter, never a gate", () => {
+  beforeEach(() => seedDroplet());
+
+  it("the owner gets every open suggestion with its area, live label, confidence, evidence and date", async () => {
+    const res = await request(app("u-owner")).get("/api/security/link-proposals");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      level: "manage",
+      linking: "link_and_suggest",
+      proposals: [
+        {
+          linkId: SUGGESTION,
+          zone: { id: SHOP, name: "Shop floor", kind: "interior" },
+          sourceKind: "camera",
+          sourceRef: "side",
+          label: "Side camera",
+          confidence: 0.662,
+          evidence: evidence({ linkId: "l-shop-front", ref: "front", label: "Front camera" }, { ref: "side", label: "Side camera" }),
+          suggestedAt: T0.toISOString(),
+        },
+      ],
+    });
+    expect(resolve).toHaveBeenCalledWith("u-owner");
+  });
+
+  it("a name match first, then confidence", async () => {
+    db.links.push(
+      droplet("8a3f4e5d-6b7c-4d8e-9f0a-0b1c2d3e4f5a", YARD, "side", "proposed", evidence({ linkId: "l-yard-back", ref: "back", label: "Back camera" }, { ref: "side", label: "Side camera" }, true), "droplet", 0.41),
+      droplet("9b4a5f6e-7c8d-4e9f-8a0b-1c2d3e4f5a6b", YARD, "cam9", "proposed", evidence({ linkId: "l-yard-back", ref: "back", label: "Back camera" }, { ref: "cam9", label: "cam9" }), "droplet", 0.9),
+    );
+    const res = await request(app("u-owner")).get("/api/security/link-proposals");
+    expect(res.body.proposals.map((p: { sourceRef: string; zone: { id: string } }) => [p.zone.id, p.sourceRef])).toEqual([
+      [YARD, "side"],
+      [YARD, "cam9"],
+      [SHOP, "side"],
+    ]);
+  });
+
+  it.each([
+    ["family at view", "u-fam" as const, "view"],
+    ["an admin narrowed to act", "u-admin-act" as const, "act"],
+  ])("%s → 200 with an EMPTY list and their level — never a denial", async (_n, user, level) => {
+    const res = await request(app(user)).get("/api/security/link-proposals");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ level, linking: "link_and_suggest", proposals: [] });
+  });
+
+  it("a suggestion in a removed area is not listed", async () => {
+    db.zones.find((z) => z.id === SHOP)!.state = "archived";
+    const res = await request(app("u-owner")).get("/api/security/link-proposals");
+    expect(res.body.proposals).toEqual([]);
+  });
+
+  it("guests are below the role floor", async () => {
+    expect((await request(app("u-guest")).get("/api/security/link-proposals")).status).toBe(403);
+  });
+
+  it("a database failure is 503 LINKS_UNAVAILABLE, never an empty list", async () => {
+    prisma.securityZoneLink.findMany.mockRejectedValueOnce(new Error("db down"));
+    const res = await request(app("u-owner")).get("/api/security/link-proposals");
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("LINKS_UNAVAILABLE");
+  });
+});
+
+describe("POST /api/security/links/:linkId/{accept,reject} (routes 24, 25) — intents on the link's current state", () => {
+  beforeEach(() => seedDroplet());
+  const accept = (id: string, body: unknown = {}) => request(app("u-owner")).post(`/api/security/links/${id}/accept`).send(body as object);
+  const reject = (id: string, body: unknown = {}) => request(app("u-owner")).post(`/api/security/links/${id}/reject`).send(body as object);
+  const row = (id: string) => db.links.find((l) => l.id === id)!;
+
+  it("Add it: a suggestion → active, set by the person; audited link.accepted from proposed; the area version moves", async () => {
+    const res = await accept(SUGGESTION);
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(true);
+    expect(row(SUGGESTION)).toMatchObject({ state: "active", origin: "droplet", stateSetBy: "person", decidedById: "u-owner", stateChangedAt: NOW });
+    expect(res.body.zone).toMatchObject({ id: SHOP, version: 4 });
+    expect(res.body.zone.links.find((l: { id: string }) => l.id === SUGGESTION)).toMatchObject({ origin: "droplet", setBy: "person" });
+    expect(audits()).toHaveLength(1);
+    expect(audits()[0]).toMatchObject({
+      what: `Security: added Droplet's suggestion Side camera to the area "Shop floor"`,
+      actor: { type: "user", id: "u-owner" },
+      refs: { action: "link.accepted", zoneId: SHOP, linkId: SUGGESTION, sourceRef: "side", from: "proposed" },
+    });
+  });
+
+  it("Keep: Droplet's own link stays active, now set by the person (it counts for alerts from now on)", async () => {
+    const res = await accept(AUTO);
+    expect(res.status).toBe(200);
+    expect(row(AUTO)).toMatchObject({ state: "active", stateSetBy: "person", decidedById: "u-owner" });
+    expect(audits()[0]).toMatchObject({
+      what: `Security: kept Droplet's link Front camera in the area "Yard"`,
+      refs: { action: "link.accepted", from: "active" },
+    });
+  });
+
+  it("Not this: a suggestion → rejected, set by the person", async () => {
+    const res = await reject(SUGGESTION);
+    expect(res.status).toBe(200);
+    expect(row(SUGGESTION)).toMatchObject({ state: "rejected", stateSetBy: "person", decidedById: "u-owner" });
+    expect(audits()[0]).toMatchObject({
+      what: `Security: turned down Droplet's suggestion Side camera for the area "Shop floor"`,
+      refs: { action: "link.rejected", from: "proposed", undo: false },
+    });
+  });
+
+  it("Undo: Droplet's own link → rejected (it stops labelling anything at once), undo: true", async () => {
+    const res = await reject(AUTO);
+    expect(res.status).toBe(200);
+    expect(row(AUTO)).toMatchObject({ state: "rejected", stateSetBy: "person" });
+    expect(res.body.zone.links.map((l: { id: string }) => l.id)).not.toContain(AUTO);
+    expect(audits()[0]).toMatchObject({ what: `Security: undid Droplet's link Front camera in the area "Yard"`, refs: { from: "active", undo: true } });
+  });
+
+  it("a repeat is changed:false with one audit in total", async () => {
+    expect((await accept(SUGGESTION)).body.changed).toBe(true);
+    const again = await accept(SUGGESTION);
+    expect(again.status).toBe(200);
+    expect(again.body.changed).toBe(false);
+    expect((await reject(TURNED_DOWN)).body.changed).toBe(false);
+    expect(audits()).toHaveLength(1);
+  });
+
+  it("a row a person set is not Droplet's to ask about: undoing a person's link, or re-accepting a turned-down one → 409 LINK_NOT_DECIDABLE", async () => {
+    const personLink = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    db.links.push({ ...droplet(personLink, SHOP, "cam7", "active", null), origin: "person", stateSetBy: "person", evidence: null, confidence: null, rulesVersion: null, evidenceAt: null });
+    const kept = "1b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e";
+    db.links.push(droplet(kept, YARD, "cam8", "active", evidence({ linkId: "l-yard-back", ref: "back", label: "Back camera" }, { ref: "cam8", label: "cam8" }), "person"));
+    const before = state();
+    for (const res of [await reject(personLink), await reject(kept), await accept(TURNED_DOWN)]) {
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe("LINK_NOT_DECIDABLE");
+    }
+    expect(state()).toEqual(before);
+    expect(audits()).toEqual([]);
+  });
+
+  it("missing or malformed id → 404 LINK_NOT_FOUND", async () => {
+    for (const res of [await accept("2c3d4e5f-6a7b-4c8d-8e9f-0a1b2c3d4e5f"), await reject("not-a-uuid")]) {
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe("LINK_NOT_FOUND");
+    }
+  });
+
+  it("a removed area → 409 ZONE_ARCHIVED", async () => {
+    db.zones.find((z) => z.id === SHOP)!.state = "archived";
+    const res = await accept(SUGGESTION);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("ZONE_ARCHIVED");
+  });
+
+  it("adding a 33rd active link → 409 LINK_LIMIT, nothing written", async () => {
+    for (let i = 0; i < 29; i += 1) db.links.push({ ...db.links[0]!, id: `fill-${i}`, sourceRef: `fill${i}` });
+    expect(db.links.filter((l) => l.zoneId === SHOP && l.state === "active")).toHaveLength(32);
+    const before = state();
+    const res = await accept(SUGGESTION);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("LINK_LIMIT");
+    expect(state()).toEqual(before);
+    expect(audits()).toEqual([]);
+  });
+
+  it("a CAS lost once is re-read and re-planned; lost twice → 409 LINK_CONFLICT, nothing written", async () => {
+    let losses = 1;
+    db.beforeCas = () => {
+      if (losses-- > 0) concurrentBump(SHOP);
+    };
+    expect((await accept(SUGGESTION)).status).toBe(200);
+    seed();
+    seedDroplet();
+    vi.clearAllMocks();
+    h.recordActivityInTx.mockImplementation(async () => ({ id: 1n }));
+    db.beforeCas = () => concurrentBump(SHOP);
+    const res = await accept(SUGGESTION);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("LINK_CONFLICT");
+    expect(row(SUGGESTION).state).toBe("proposed");
+    expect(audits()).toEqual([]);
+  });
+
+  it("a failed audit append → 503 AUDIT_UNAVAILABLE and the link unchanged", async () => {
+    h.recordActivityInTx.mockRejectedValue(new Error("chain down"));
+    const res = await reject(AUTO);
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("AUDIT_UNAVAILABLE");
+    expect(row(AUTO)).toMatchObject({ state: "active", stateSetBy: "droplet" });
+  });
+
+  it("a body with anything in it → 400 (server-stamped fields are never read)", async () => {
+    const res = await accept(SUGGESTION, { stateSetBy: "person" });
+    expect(res.status).toBe(400);
+    expect(row(SUGGESTION).state).toBe("proposed");
+  });
+});
+
+describe("PUT /api/security/zones/:id/links — route 12's P4 cells (§6.5)", () => {
+  beforeEach(() => seedDroplet());
+  const put = (id: string, links: Array<[string, string]>, expectedVersion: number) =>
+    request(app("u-owner"))
+      .put(`/api/security/zones/${id}/links`)
+      .send({ links: links.map(([sourceKind, sourceRef]) => ({ sourceKind, sourceRef })), expectedVersion });
+  const row = (id: string) => db.links.find((l) => l.id === id)!;
+
+  it("a suggestion ticked and saved is ACCEPTED (active, set by the person), with `accepted` in the refs", async () => {
+    const res = await put(SHOP, [["camera", "front"], ["camera_zone", "back/porch"], ["camera", "cam9"], ["camera", "side"]], 3);
+    expect(res.status).toBe(200);
+    expect(row(SUGGESTION)).toMatchObject({ state: "active", origin: "droplet", stateSetBy: "person", decidedById: "u-owner" });
+    expect(db.links.filter((l) => l.zoneId === SHOP && l.sourceRef === "side")).toHaveLength(1);
+    expect(audits()[0]).toMatchObject({ refs: { added: [], removed: [], reactivated: [], accepted: ["side"] } });
+  });
+
+  it("a suggestion NOT in the set is left alone — suggestions are decided by routes 24/25, never by a save", async () => {
+    const res = await put(SHOP, [["camera", "front"], ["camera_zone", "back/porch"]], 3);
+    expect(res.status).toBe(200);
+    expect(row(SUGGESTION)).toMatchObject({ state: "proposed", stateSetBy: "droplet" });
+    expect(audits()[0]).toMatchObject({ refs: { removed: ["cam9"], accepted: [] } });
+  });
+
+  it("a turned-down source ticked by a person is REACTIVATED: active, set by the person (origin and evidence stay Droplet's)", async () => {
+    const res = await put(SHOP, [["camera", "front"], ["camera_zone", "back/porch"], ["camera", "cam9"], ["camera", "back"]], 3);
+    expect(res.status).toBe(200);
+    expect(row(TURNED_DOWN)).toMatchObject({ state: "active", origin: "droplet", stateSetBy: "person", decidedById: "u-owner" });
+    expect(audits()[0]).toMatchObject({ refs: { reactivated: ["back"], accepted: [] } });
+  });
+
+  it("Droplet's own link left out of the set is REMOVED by the person (never by Droplet)", async () => {
+    const res = await put(YARD, [["camera", "back"]], 1);
+    expect(res.status).toBe(200);
+    expect(row(AUTO)).toMatchObject({ state: "removed", stateSetBy: "person", decidedById: "u-owner" });
+    expect(audits()[0]).toMatchObject({ refs: { removed: ["front"] } });
   });
 });

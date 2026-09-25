@@ -59,8 +59,9 @@ import type {
 } from "@prisma/client";
 import type { SecurityViewerScope } from "./security-access.js";
 import { FRIGATE_NAME, type SecurityEventKind, type SecurityEventSource } from "./security-event-ingest.js";
-import { auditSecurityInTx, chainSafeText } from "./security-audit.js";
+import { auditSecurityInTx, chainSafeText, stripUnsafeDisplayChars } from "./security-audit.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
+import { linkEvidenceSources, parseLinkEvidence, type LinkEvidenceV1 } from "../lib/security-link-evidence.js";
 
 /** Route 8/11 refuse a 65th ACTIVE area (409 ZONE_LIMIT). */
 export const SECURITY_ZONE_ACTIVE_LIMIT = 64;
@@ -172,6 +173,21 @@ export interface SecurityZoneLinkView {
   label: string;
   state: SecurityZoneLinkState;
   stateChangedAt: string;
+  /** WARP-2979 — who created the link: a person, or Droplet (its suggestion, or its own link). */
+  origin: SecurityLinkActor;
+  /**
+   * WARP-2979 — who set its current state. `origin droplet` + `setBy droplet`
+   * is "Linked by Droplet" (Keep / Undo); `origin droplet` + `setBy person` is
+   * a suggestion a person added or kept. Only person-set links make alerts.
+   */
+  setBy: SecurityLinkActor;
+  /**
+   * WARP-2979 (§7 route 3) — Droplet's evidence, or null: null unless `origin
+   * = droplet`, the stored value parses (`parseLinkEvidence`, fail closed),
+   * AND this viewer can see every source it names (DS-005: it says when
+   * someone was at a camera).
+   */
+  evidence: LinkEvidenceV1 | null;
 }
 
 export interface SecurityZoneView {
@@ -458,11 +474,20 @@ const linkKey = (l: DesiredZoneLink): string => `${l.sourceKind}\u0000${l.source
 
 /**
  * Route 12: requested links vs stored ones (deduped by `sourceKind` + `sourceRef`).
+ * WARP-2979 (§6.5) — every cell of the table, each a PERSON's write:
  *
- * WARP-2979 S0: the signature carries `accepted`; slice R fills in §6.5's
- * table (a `proposed` row in the desired set → `accepted`, a `rejected` one →
- * `reactivated`). Until then both are left exactly as before P4 — no such
- * rows exist before the proposal job writes them.
+ * | stored row                 | in the desired set              | not in it                |
+ * | none                       | added (active, person/person)   | —                        |
+ * | active (any origin/setter) | unchanged                       | removed (setter person)  |
+ * | removed                    | reactivated (setter person)     | unchanged                |
+ * | proposed (Droplet's)       | ACCEPTED (active, setter person)| unchanged — suggestions  |
+ * |                            |                                 | are decided by routes    |
+ * |                            |                                 | 24/25, never by a save   |
+ * | rejected                   | reactivated (a person linked it | unchanged                |
+ * |                            | after all; setter person)       |                          |
+ *
+ * Before P4 a `proposed` row in the desired set matched neither branch and was
+ * silently ignored; the pg lane pins the fix.
  */
 export function diffZoneLinks(
   existing: readonly ExistingZoneLink[],
@@ -477,7 +502,8 @@ export function diffZoneLinks(
     wanted.add(key);
     const e = stored.get(key);
     if (!e) diff.added.push({ sourceKind: d.sourceKind, sourceRef: d.sourceRef });
-    else if (e.state === "removed") diff.reactivated.push(e);
+    else if (e.state === "removed" || e.state === "rejected") diff.reactivated.push(e);
+    else if (e.state === "proposed") diff.accepted.push(e);
   }
   for (const e of existing) {
     if (e.state === "active" && !wanted.has(linkKey(e))) diff.removed.push(e);
@@ -563,6 +589,10 @@ export interface StoredZoneLink {
   sourceLabel: string;
   state: SecurityZoneLinkState;
   stateChangedAt: Date;
+  /** WARP-2979. */
+  origin: SecurityLinkActor;
+  stateSetBy: SecurityLinkActor;
+  evidence: Prisma.JsonValue | null;
 }
 
 const LINK_SELECT = {
@@ -572,6 +602,9 @@ const LINK_SELECT = {
   sourceLabel: true,
   state: true,
   stateChangedAt: true,
+  origin: true,
+  stateSetBy: true,
+  evidence: true,
 } satisfies Prisma.SecurityZoneLinkSelect;
 
 /** An area with its ACTIVE links only — removed links are history, never shown. */
@@ -607,13 +640,40 @@ export async function loadCameraLabels(prisma: Pick<PrismaClient, "camera">): Pr
 }
 
 /**
+ * WARP-2979 (§7 route 3, D13) — Droplet's evidence for ONE viewer: the parsed
+ * `LinkEvidenceV1` when the link is Droplet's (`origin = droplet`), the
+ * stored value is exactly that shape, and the viewer can see EVERY source it
+ * names (the anchor and the candidate — `linkEvidenceSources`; a lock is
+ * never visible before PR-4's `mayReadLocks`). Anything else is null: the
+ * evidence says when someone stood at a camera (DS-005), so a viewer who can
+ * see the link but not the anchor gets the chip without the numbers.
+ */
+export function evidenceFor(
+  link: { origin: SecurityLinkActor; evidence: unknown },
+  scope: Pick<SecurityViewerScope, "visibleCameras"> | null,
+): LinkEvidenceV1 | null {
+  if (!scope || link.origin !== "droplet") return null;
+  const e = parseLinkEvidence(link.evidence);
+  if (!e) return null;
+  const named = linkEvidenceSources(e);
+  const shown = visibleLinks(
+    named.filter((s): s is { sourceKind: SecurityZoneSourceKind; sourceRef: string } => s.sourceKind === "camera" || s.sourceKind === "camera_zone"),
+    scope,
+  );
+  return shown.length === named.length ? e : null;
+}
+
+/**
  * One area's wire view over the links the CALLER already filtered for the
  * viewer. `label` is the live camera display name, else the snapshot.
+ * `scope` (WARP-2979) decides who sees Droplet's evidence; without it no
+ * evidence is sent.
  */
 export function toZoneView(
   zone: Omit<ZoneRecord, "links">,
   links: readonly StoredZoneLink[],
   cameraLabels: ReadonlyMap<string, string>,
+  scope: Pick<SecurityViewerScope, "visibleCameras"> | null = null,
 ): SecurityZoneView {
   return {
     id: zone.id,
@@ -630,6 +690,9 @@ export function toZoneView(
         label: (camera !== undefined ? cameraLabels.get(camera) : undefined) ?? l.sourceLabel,
         state: l.state,
         stateChangedAt: l.stateChangedAt.toISOString(),
+        origin: l.origin,
+        setBy: l.stateSetBy,
+        evidence: evidenceFor(l, scope),
       };
     }),
   };
@@ -645,7 +708,7 @@ export function visibleZoneViews(
   for (const z of zones) {
     const visible = visibleLinks(z.links, scope);
     if (!zoneVisibleTo(z, z.links, visible)) continue;
-    out.push(toZoneView(z, visible, cameraLabels));
+    out.push(toZoneView(z, visible, cameraLabels, scope));
   }
   return out;
 }
@@ -747,7 +810,12 @@ export type ZoneWriteErrorCode =
   | "ZONE_NAME_TAKEN"
   | "ZONE_LIMIT"
   | "SOURCE_NOT_FOUND"
-  | "SOURCE_CHECK_UNAVAILABLE";
+  | "SOURCE_CHECK_UNAVAILABLE"
+  // WARP-2979 — routes 24/25 (a person decides on Droplet's link).
+  | "LINK_NOT_FOUND"
+  | "LINK_NOT_DECIDABLE"
+  | "LINK_CONFLICT"
+  | "LINK_LIMIT";
 
 /** An expected refusal: the route answers `status` with `{error: {code, message, ...extra}}`. */
 export class ZoneWriteError extends Error {
@@ -1103,7 +1171,8 @@ export async function replaceZoneLinks(
       sources.scope,
     );
   const planned = diffZoneLinks(await readLinks(prisma), input.links);
-  const fresh: DesiredZoneLink[] = [...planned.added, ...planned.reactivated];
+  // Every ref that becomes active now is verified — Droplet's suggestions a person ticked included.
+  const fresh: DesiredZoneLink[] = [...planned.added, ...planned.reactivated, ...planned.accepted];
   if (fresh.length === 0 && planned.removed.length === 0) return { zone, changed: false };
 
   const cameraRows = sources.cameraLabels;
@@ -1141,8 +1210,8 @@ export async function replaceZoneLinks(
       });
       if (count !== 1) throw await casLost(tx, id, true);
       const diff = diffZoneLinks(await readLinks(tx), input.links);
-      if (diff.added.length + diff.reactivated.length + diff.removed.length === 0) throw new NoLinkChange();
-      if ([...diff.added, ...diff.reactivated].some((l) => !verified.has(linkKey(l)))) throw versionConflict();
+      if (diff.added.length + diff.reactivated.length + diff.accepted.length + diff.removed.length === 0) throw new NoLinkChange();
+      if ([...diff.added, ...diff.reactivated, ...diff.accepted].some((l) => !verified.has(linkKey(l)))) throw versionConflict();
 
       if (diff.added.length > 0) {
         await tx.securityZoneLink.createMany({
@@ -1161,9 +1230,17 @@ export async function replaceZoneLinks(
         });
       }
       for (const l of diff.reactivated) {
-        // One row at a time: each gets its own fresh label snapshot.
+        // One row at a time: each gets its own fresh label snapshot. `removed`, or (WARP-2979) a
+        // `rejected` suggestion a person now links themselves: its origin and evidence stay Droplet's.
         await tx.securityZoneLink.updateMany({
-          where: { id: l.id, state: "removed" },
+          where: { id: l.id, state: l.state },
+          data: { state: "active", stateSetBy: "person", sourceLabel: labelFor(l), decidedById: actorId, stateChangedAt: ctx.now },
+        });
+      }
+      for (const l of diff.accepted) {
+        // WARP-2979 — Droplet's suggestion, ticked and saved: a person's link from now on.
+        await tx.securityZoneLink.updateMany({
+          where: { id: l.id, state: "proposed", origin: "droplet", stateSetBy: "droplet" },
           data: { state: "active", stateSetBy: "person", sourceLabel: labelFor(l), decidedById: actorId, stateChangedAt: ctx.now },
         });
       }
@@ -1185,6 +1262,7 @@ export async function replaceZoneLinks(
           added: diff.added.map((l) => l.sourceRef),
           removed: diff.removed.map((l) => l.sourceRef),
           reactivated: diff.reactivated.map((l) => l.sourceRef),
+          accepted: diff.accepted.map((l) => l.sourceRef),
         },
       });
       return after;
@@ -1196,7 +1274,221 @@ export async function replaceZoneLinks(
   }
 }
 
+// ── WARP-2979: a person decides on Droplet's link (routes 24, 25; §6.5) ────
+
+export type LinkDecision = "accept" | "reject";
+
+/** Thrown inside a decision's transaction when the area CAS lost: re-read and re-plan once. */
+class DecisionCasLost extends Error {}
+
+const linkNotFound = (): ZoneWriteError => new ZoneWriteError(404, "LINK_NOT_FOUND", "No such link");
+const notDecidable = (): ZoneWriteError =>
+  new ZoneWriteError(409, "LINK_NOT_DECIDABLE", "That link was set by a person or already decided; there is nothing for Droplet to ask about");
+
+/** How the audit line names a link's view: `Back camera`, or `the "till" part of Back camera`. */
+function linkPhrase(l: { sourceKind: SecurityZoneSourceKind; sourceRef: string; sourceLabel: string }, labels: ReadonlyMap<string, string>): string {
+  const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+  const label = stripUnsafeDisplayChars((parsed ? labels.get(parsed.camera) : undefined) ?? l.sourceLabel);
+  return parsed?.frigateZone ? `the "${parsed.frigateZone}" part of ${label}` : label;
+}
+
+/**
+ * Routes 24 (accept) and 25 (reject): INTENTS on the link's current state, not
+ * client-versioned — a stale page must not 409 because the hourly job
+ * refreshed a suggestion (the P2b mode-action rule).
+ *
+ *   accept: `proposed` → active, setter person ("Add it");
+ *           active set by Droplet → still active, setter person ("Keep": from
+ *           now on it counts for alerts and anchors further suggestions);
+ *           already active and set by a person → `changed: false`, no audit.
+ *   reject: `proposed` → `rejected` ("Not this");
+ *           active set by Droplet → `rejected` ("Undo");
+ *           already `rejected` → `changed: false`, no audit.
+ *   Anything else (a person's own link, a `removed` row, accepting a
+ *   rejected one) → 409 LINK_NOT_DECIDABLE: a person decides those with
+ *   route 12.
+ *
+ * One READ_COMMITTED transaction: read the link and its area (missing, or
+ * its camera hidden from the actor → 404 LINK_NOT_FOUND, one body for both;
+ * archived area → 409 ZONE_ARCHIVED); CAS the area version (the area row
+ * first — P2b's lock order); the guarded update `{id, state: from, origin:
+ * droplet, stateSetBy: droplet}` (count 0 → LINK_NOT_DECIDABLE); accepting
+ * into an area already at 32 active links → 409 LINK_LIMIT; the audit LAST.
+ * A lost CAS is re-read and re-planned once, then 409 LINK_CONFLICT.
+ */
+export async function decideDropletLink(
+  prisma: PrismaClient,
+  ctx: ZoneWriteContext,
+  linkId: string,
+  decision: LinkDecision,
+  sources: { scope: Pick<SecurityViewerScope, "visibleCameras">; cameraLabels: ReadonlyMap<string, string> },
+): Promise<{ zone: ZoneRecord; changed: boolean }> {
+  const actorId = ctx.req.user?.id ?? null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const link = await tx.securityZoneLink.findUnique({
+          where: { id: linkId },
+          select: {
+            id: true,
+            zoneId: true,
+            sourceKind: true,
+            sourceRef: true,
+            sourceLabel: true,
+            state: true,
+            origin: true,
+            stateSetBy: true,
+            zone: { select: { id: true, name: true, state: true, version: true } },
+          },
+        });
+        if (!link || visibleLinks([link], sources.scope).length === 0) throw linkNotFound();
+        if (link.zone.state !== "active") throw archived();
+        const droplets = link.origin === "droplet" && link.stateSetBy === "droplet";
+        let from: "proposed" | "active";
+        if (decision === "accept") {
+          if (link.state === "active" && link.stateSetBy === "person") {
+            const zone = await tx.securityZone.findUnique({ where: { id: link.zoneId }, select: ZONE_SELECT });
+            if (!zone) throw linkNotFound();
+            return { zone, changed: false };
+          }
+          if (!droplets || (link.state !== "proposed" && link.state !== "active")) throw notDecidable();
+          from = link.state;
+        } else {
+          if (link.state === "rejected") {
+            const zone = await tx.securityZone.findUnique({ where: { id: link.zoneId }, select: ZONE_SELECT });
+            if (!zone) throw linkNotFound();
+            return { zone, changed: false };
+          }
+          if (!droplets || (link.state !== "proposed" && link.state !== "active")) throw notDecidable();
+          from = link.state;
+        }
+
+        const { count } = await tx.securityZone.updateMany({
+          where: { id: link.zoneId, version: link.zone.version, state: "active" },
+          data: { version: { increment: 1 } },
+        });
+        if (count !== 1) throw new DecisionCasLost();
+
+        if (decision === "accept" && from === "proposed") {
+          const active = await tx.securityZoneLink.count({ where: { zoneId: link.zoneId, state: "active" } });
+          if (active >= SECURITY_ZONE_LINK_LIMIT) {
+            throw new ZoneWriteError(409, "LINK_LIMIT", `An area can have at most ${SECURITY_ZONE_LINK_LIMIT} links`);
+          }
+        }
+        const to = decision === "accept" ? "active" : "rejected";
+        const updated = await tx.securityZoneLink.updateMany({
+          where: { id: link.id, state: from, origin: "droplet", stateSetBy: "droplet" },
+          data: { state: to, stateSetBy: "person", decidedById: actorId, stateChangedAt: ctx.now },
+        });
+        if (updated.count !== 1) throw notDecidable();
+
+        const zone = await tx.securityZone.findUnique({ where: { id: link.zoneId }, select: ZONE_SELECT });
+        if (!zone) throw linkNotFound();
+        const phrase = linkPhrase(link, sources.cameraLabels);
+        await auditSecurityInTx(
+          tx,
+          ctx.req,
+          decision === "accept"
+            ? {
+                action: "link.accepted",
+                what:
+                  from === "proposed"
+                    ? `Security: added Droplet's suggestion ${phrase} to the area "${zone.name}"`
+                    : `Security: kept Droplet's link ${phrase} in the area "${zone.name}"`,
+                refs: { zoneId: zone.id, linkId: link.id, sourceRef: link.sourceRef, from },
+              }
+            : {
+                action: "link.rejected",
+                what:
+                  from === "proposed"
+                    ? `Security: turned down Droplet's suggestion ${phrase} for the area "${zone.name}"`
+                    : `Security: undid Droplet's link ${phrase} in the area "${zone.name}"`,
+                refs: { zoneId: zone.id, linkId: link.id, sourceRef: link.sourceRef, from, undo: from === "active" },
+              },
+        );
+        return { zone, changed: true };
+      }, READ_COMMITTED_TX);
+    } catch (err) {
+      if (err instanceof DecisionCasLost) continue;
+      throw err;
+    }
+  }
+  throw new ZoneWriteError(409, "LINK_CONFLICT", "Someone else changed this area at the same moment; try again");
+}
+
+// ── WARP-2979: Droplet's open suggestions (route 23) ──────────────────────
+
+/** One suggestion as route 23 sends it. */
+export interface SecurityLinkProposalView {
+  linkId: string;
+  zone: { id: string; name: string; kind: SecurityZoneKind };
+  sourceKind: SecurityZoneSourceKind;
+  sourceRef: string;
+  /** The camera's display name (never the part). */
+  label: string;
+  /** Wilson lower bound, 0..1. */
+  confidence: number;
+  /** Null unless the viewer can see every source it names (the same rule as route 3). */
+  evidence: LinkEvidenceV1 | null;
+  /** When the evidence behind it was computed. */
+  suggestedAt: string;
+}
+
+/**
+ * Every open suggestion (`proposed`, Droplet's) in an active area whose
+ * camera the viewer can see, ordered: a name match first (the tiebreak
+ * §6.2.4 allows on the page), then confidence, then the area and the ref.
+ */
+export async function listLinkProposals(
+  prisma: Pick<PrismaClient, "securityZoneLink">,
+  scope: Pick<SecurityViewerScope, "visibleCameras">,
+  cameraLabels: ReadonlyMap<string, string>,
+): Promise<SecurityLinkProposalView[]> {
+  const rows = await prisma.securityZoneLink.findMany({
+    where: { state: "proposed", origin: "droplet", zone: { state: "active" } },
+    select: {
+      id: true,
+      sourceKind: true,
+      sourceRef: true,
+      sourceLabel: true,
+      origin: true,
+      evidence: true,
+      confidence: true,
+      evidenceAt: true,
+      stateChangedAt: true,
+      zone: { select: { id: true, name: true, kind: true } },
+    },
+  });
+  const out = visibleLinks(rows, scope).map((r) => {
+    const camera = parseLinkRef(r.sourceKind, r.sourceRef)?.camera;
+    const evidence = evidenceFor(r, scope);
+    return {
+      match: evidence?.names.match ?? false,
+      view: {
+        linkId: r.id,
+        zone: { id: r.zone.id, name: r.zone.name, kind: r.zone.kind },
+        sourceKind: r.sourceKind,
+        sourceRef: r.sourceRef,
+        label: (camera !== undefined ? cameraLabels.get(camera) : undefined) ?? r.sourceLabel,
+        confidence: r.confidence ?? 0,
+        evidence,
+        suggestedAt: (r.evidenceAt ?? r.stateChangedAt).toISOString(),
+      } satisfies SecurityLinkProposalView,
+    };
+  });
+  out.sort(
+    (a, b) =>
+      Number(b.match) - Number(a.match) ||
+      b.view.confidence - a.view.confidence ||
+      byString(a.view.zone.name, b.view.zone.name) ||
+      byString(a.view.sourceRef, b.view.sourceRef),
+  );
+  return out.map((o) => o.view);
+}
+
 // ── WARP-2979: retention of Droplet's link evidence (§6.16) ───────────────
+
+const TRIM_PAGE = 200;
 
 /**
  * Link evidence SAMPLES are presence data (when someone stood at a door).
@@ -1204,16 +1496,54 @@ export async function replaceZoneLinks(
  * `trimSecurityIncidents`, with THE SAME `before` (now − 30 d): for every
  * `origin = droplet` row whose `evidence.samples` has an `anchorAt` or
  * `hitAt` before `before`, rewrite `evidence` without those samples and set
- * `samplesTrimmedBefore`. The aggregates stay (they name no moment). Rows are
- * never deleted.
+ * `samplesTrimmedBefore` to `before`. The aggregates (counts, lift,
+ * confidence, the window's dates) stay: they name no moment, and they are
+ * what the link was decided on. Rows are never deleted — `removed` and
+ * `rejected` rows are the memory that stops re-proposals.
  *
- * S0 stub — slice R builds it; until then it trims nothing.
+ * In pages of 200 by id, in JS. Evidence this build cannot parse loses ALL
+ * its samples (fail closed on presence data), keeping everything else. Each
+ * rewrite is guarded on the `evidenceAt` it read, so a refresh by the hourly
+ * job in between is never clobbered (the refresh's samples are newer). A
+ * rerun is a no-op.
  */
 export async function trimLinkEvidence(
   prisma: Pick<PrismaClient, "securityZoneLink">,
   before: Date,
 ): Promise<{ trimmed: number }> {
-  void prisma;
-  void before;
-  return { trimmed: 0 };
+  const cut = before.getTime();
+  const at = before.toISOString();
+  let trimmed = 0;
+  let cursor: string | null = null;
+  for (;;) {
+    const page: Array<{ id: string; evidence: Prisma.JsonValue | null; evidenceAt: Date | null }> = await prisma.securityZoneLink.findMany({
+      where: { origin: "droplet", ...(cursor ? { id: { gt: cursor } } : {}) },
+      select: { id: true, evidence: true, evidenceAt: true },
+      orderBy: { id: "asc" },
+      take: TRIM_PAGE,
+    });
+    for (const row of page) {
+      const raw = row.evidence;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const samples = (raw as { samples?: unknown }).samples;
+      if (!Array.isArray(samples) || samples.length === 0) continue;
+      const parsed = parseLinkEvidence(raw);
+      let kept: unknown[];
+      if (parsed) {
+        kept = parsed.samples.filter((s) => Date.parse(s.anchorAt) >= cut && Date.parse(s.hitAt) >= cut);
+        if (kept.length === parsed.samples.length) continue;
+      } else {
+        kept = [];
+      }
+      const next = { ...(raw as Record<string, unknown>), samples: kept, samplesTrimmedBefore: at };
+      const r = await prisma.securityZoneLink.updateMany({
+        where: { id: row.id, origin: "droplet", evidenceAt: row.evidenceAt },
+        data: { evidence: next as Prisma.InputJsonValue },
+      });
+      trimmed += r.count;
+    }
+    if (page.length < TRIM_PAGE) break;
+    cursor = page[page.length - 1]!.id;
+  }
+  return { trimmed };
 }

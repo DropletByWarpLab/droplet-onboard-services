@@ -11,6 +11,8 @@
  *   13  PUT    /api/security/hours                         manage
  *   14  PUT    /api/security/hours/exceptions/:date        manage
  *   15  DELETE /api/security/hours/exceptions/:date        manage
+ *   26  GET    /api/security/ai-settings                   view    (WARP-2979)
+ *   27  PUT    /api/security/ai-settings                   manage  (WARP-2979)
  *
  * Gating: every GET is `requireRole('owner','admin','family')` ONLY — a page
  * load can never produce a feature-gate denial (which the P2a threat mirror
@@ -50,6 +52,13 @@ import {
   type HoursInput,
   type HoursWriteResult,
 } from "../services/security-mode.service.js";
+import {
+  SECURITY_AI_LINKING,
+  SECURITY_AI_SUMMARIES,
+  SecurityAiSettingsError,
+  readSecurityAiSettings,
+  setSecurityAiSettings,
+} from "../services/security-ai-settings.js";
 import { hhmmToMinutes, validateDay, validateWeek, type DayHours, type WeekdayHours } from "../lib/security-hours.js";
 import { canonicalZone, isCalendarYmd, isValidIanaZone } from "../lib/zoned-time.js";
 import { createLogger } from "../lib/logger.js";
@@ -63,6 +72,11 @@ const MANAGE_ROLES = ["owner", "admin"] as const;
 const DAY_KINDS = ["closed", "open_all_day", "hours"] as const;
 const HHMM = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "use HH:MM");
 const VERSION = z.number().int().min(0).max(2_147_483_647);
+
+/** WARP-2979 — route 27's body: the whole choice and the version it was made on. Server-stamped fields are never read. */
+const aiSettingsSchema = z
+  .object({ linking: z.enum(SECURITY_AI_LINKING), summaries: z.enum(SECURITY_AI_SUMMARIES), expectedVersion: VERSION })
+  .strict();
 
 const modeActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("close") }).strict(),
@@ -117,7 +131,8 @@ type ErrorCode =
   | "EXCEPTION_NOT_FOUND"
   | "EXCEPTION_LIMIT"
   | "EXCEPTION_OUT_OF_RANGE"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  | "AI_SETTINGS_UNAVAILABLE";
 
 function fail(res: Response, status: number, code: ErrorCode, message: string, issues?: unknown[]): void {
   res.status(status).json({ error: issues ? { code, message, issues } : { code, message } });
@@ -407,6 +422,45 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
       res.status(204).end();
     } catch (err) {
       writeFailed(res, err, "HOURS_UNAVAILABLE", "special day delete");
+    }
+  });
+
+  // 26 (WARP-2979) — what Droplet's AI may do in Security. Every viewer may read it.
+  router.get("/security/ai-settings", requireRole(...VIEW_ROLES), async (_req: Request, res: Response) => {
+    try {
+      res.json(await readSecurityAiSettings(prisma));
+    } catch (err) {
+      logger.error({ err }, "security AI settings read failed");
+      fail(res, 503, "AI_SETTINGS_UNAVAILABLE", "Droplet's AI settings can't be read right now.");
+    }
+  });
+
+  // 27 (WARP-2979, manage) — change it, on the version the page read.
+  router.put("/security/ai-settings", ...manageGate, async (req: Request, res: Response) => {
+    const parsed = aiSettingsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      fail(res, 400, "VALIDATION_ERROR", "Those settings aren't in a shape Droplet understands.", parsed.error.issues);
+      return;
+    }
+    try {
+      res.json(await setSecurityAiSettings(prisma, { req: requester(req).req, now: clock() }, parsed.data));
+    } catch (err) {
+      if (err instanceof SecurityAiSettingsError) {
+        fail(res, err.status, err.code, "Someone else changed these settings since this page loaded.");
+        return;
+      }
+      if (isSecurityAuditUnavailable(err)) {
+        logger.error({ err }, "security AI settings: audit unavailable, nothing changed");
+        fail(res, 503, "AUDIT_UNAVAILABLE", "Nothing was changed: the audit log couldn't be written.");
+        return;
+      }
+      if (err instanceof TypeError || err instanceof ActivityChainPreconditionError) {
+        logger.error({ err }, "security AI settings: programming error");
+        fail(res, 500, "INTERNAL_ERROR", "Something went wrong on Droplet.");
+        return;
+      }
+      logger.error({ err }, "security AI settings write failed");
+      fail(res, 503, "AI_SETTINGS_UNAVAILABLE", "Droplet's AI settings can't be changed right now.");
     }
   });
 
