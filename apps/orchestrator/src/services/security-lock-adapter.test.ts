@@ -879,16 +879,16 @@ describe("lockHealthRow", () => {
       lastSweepError: { at: new Date(T0), message: "ECONNREFUSED" },
       consecutiveSweepFailures: 12,
     });
-    expect(lockHealthRow(neverAnswered)).toMatchObject({ state: "down", detail: "Can't reach the smart-home service" });
+    expect(lockHealthRow(neverAnswered)).toMatchObject({ state: "down", detail: "Can't reach the device-control service" });
     // The empty-token 401 loop: the bridge reports up, every list fails.
     expect(lockHealthRow({ ...neverAnswered, bridgeUp: true })).toMatchObject({
       state: "down",
-      detail: "Can't reach the smart-home service",
+      detail: "Can't reach the device-control service",
     });
     // Bridge up and only ONE failure so far — still no success ever → down, not "Listening to 0 locks".
     expect(lockHealthRow({ ...neverAnswered, bridgeUp: true, consecutiveSweepFailures: 1 })).toMatchObject({
       state: "down",
-      detail: "Can't reach the smart-home service",
+      detail: "Can't reach the device-control service",
     });
   });
 
@@ -901,7 +901,7 @@ describe("lockHealthRow", () => {
   it("the live bridge down → down, even with a good last list", () => {
     expect(lockHealthRow(healthInput({ bridgeUp: false }))).toMatchObject({
       state: "down",
-      detail: "Can't reach the smart-home service",
+      detail: "Can't reach the device-control service",
     });
     expect(lockHealthRow(healthInput({ bridgeUp: false, lastSweepLockCount: 0, knownLocks: [] })).state).toBe("down");
   });
@@ -911,7 +911,7 @@ describe("lockHealthRow", () => {
     expect(lockHealthRow(healthInput({ consecutiveSweepFailures: 2, lastSweepError: err })).state).toBe("ok");
     expect(lockHealthRow(healthInput({ consecutiveSweepFailures: 3, lastSweepError: err }))).toMatchObject({
       state: "down",
-      detail: "Can't reach the smart-home service",
+      detail: "Can't reach the device-control service",
     });
   });
 
@@ -1044,7 +1044,7 @@ describe("lockReadingsState — whether a Close up may name any lock (rjouffret,
   it("each is exactly the header's down row of the same name", () => {
     expect(lockHealthRow(healthInput({ started: false })).detail).toBe("Not running");
     expect(lockHealthRow(healthInput({ lastSweepOkAt: null })).detail).toBe("Hasn't checked the locks yet");
-    expect(lockHealthRow(healthInput({ bridgeUp: false })).detail).toBe("Can't reach the smart-home service");
+    expect(lockHealthRow(healthInput({ bridgeUp: false })).detail).toBe("Can't reach the device-control service");
   });
 
   it("a lock that isn't reporting, or a change that couldn't be saved, puts the ROW down but leaves the readings current", () => {
@@ -1070,7 +1070,7 @@ describe("the adapter's health, end to end", () => {
     adapter.noteSweepScheduled();
     for (let i = 0; i < 4; i++) {
       await adapter.sweep();
-      expect(adapter.health()).toMatchObject({ state: "down", detail: "Can't reach the smart-home service" });
+      expect(adapter.health()).toMatchObject({ state: "down", detail: "Can't reach the device-control service" });
     }
   });
 
@@ -1184,7 +1184,7 @@ describe("the adapter's health, end to end", () => {
     adapter.start();
     adapter.noteSweepScheduled();
     await adapter.sweep();
-    expect(adapter.health()).toMatchObject({ state: "down", detail: "Can't reach the smart-home service" });
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Can't reach the device-control service" });
   });
 });
 

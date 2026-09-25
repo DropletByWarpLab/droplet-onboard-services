@@ -842,7 +842,8 @@ export function lockReadingsState(
 const READINGS_NOT_CURRENT: Record<Exclude<LockReadingsState, "current">, string> = {
   not_running: "Not running",
   not_checked_yet: "Hasn't checked the locks yet",
-  unreachable: "Can't reach the smart-home service",
+  // #2367 renamed "Smart-home" to "Device control" in everything a person reads.
+  unreachable: "Can't reach the device-control service",
 };
 
 /**

@@ -710,7 +710,7 @@ describe("door locks (WARP-2977 P2b-2)", () => {
 
   it("canShowDoors: only when the header carries a locks row that isn't 'No door locks paired'", () => {
     expect(canShowDoors(withLocks())).toBe(true);
-    expect(canShowDoors(withLocks({ ...LOCKS_OK, state: "down", detail: "Can't reach the smart-home service" }))).toBe(true);
+    expect(canShowDoors(withLocks({ ...LOCKS_OK, state: "down", detail: "Can't reach the device-control service" }))).toBe(true);
     expect(canShowDoors(withLocks({ ...LOCKS_OK, state: "not_configured", detail: "No door locks paired" }))).toBe(false);
     expect(canShowDoors(OK)).toBe(false);
     expect(canShowDoors(null)).toBe(false);
@@ -768,7 +768,7 @@ describe("door locks (WARP-2977 P2b-2)", () => {
 
   it("the Doors view: its own row decides the empty state — down is never quiet, ok is", () => {
     const down = render(
-      <SecurityFeed {...props({ view: "doors", sources: withLocks({ ...LOCKS_OK, state: "down", detail: "Can't reach the smart-home service" }) })} />,
+      <SecurityFeed {...props({ view: "doors", sources: withLocks({ ...LOCKS_OK, state: "down", detail: "Can't reach the device-control service" }) })} />,
     );
     expect(emptyKind(down.container)).toBe("not-reporting");
     expect(down.container.querySelector("[data-empty] .eh")).toHaveTextContent(COPY.emptyNotHearingLocks);
