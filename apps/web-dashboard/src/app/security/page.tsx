@@ -16,15 +16,21 @@
  * WARP-2977 P2b-2: door locks, for people with Devices view — a Doors view
  * while the header offers one (a picked Doors view falls back to Everything
  * when it stops), and areas counted per kind of link.
+ *
+ * WARP-2981 (ADR-059 P6) — the header's one action opens the Security wall
+ * (/security/wall), the read-only TV view. It is not in the nav.
  */
 import { useMemo, useState } from "react";
-import { Shield } from "lucide-react";
+import Link from "next/link";
+import { Shield, Tv } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ModeCard } from "@/components/security/ModeCard";
 import { SecurityFeed, kindsForView, viewFor, type SecurityView } from "@/components/security/SecurityFeed";
 import { useCameraDisplayNames, useSecurityFeed, useSecurityHealth, useSecurityZones } from "@/lib/hooks/useSecurity";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
 import { useAuth } from "@/lib/auth";
+import { SECURITY_WALL_PATH } from "@/lib/routing";
+import { WALL_COPY } from "@/components/security/wall-status";
 
 const PAGE_SUB = "What your cameras saw, whether they're reporting, and network warnings, in one place.";
 
@@ -78,7 +84,18 @@ export default function SecurityPage() {
   const cameraLabel = useCameraDisplayNames();
 
   return (
-    <ShellPage icon={<Shield size={15} />} label="Security" title="Security" sub={PAGE_SUB}>
+    <ShellPage
+      icon={<Shield size={15} />}
+      label="Security"
+      title="Security"
+      sub={PAGE_SUB}
+      actions={
+        <Link href={SECURITY_WALL_PATH} className="btn" title={WALL_COPY.linkTitle}>
+          <Tv size={15} aria-hidden="true" />
+          {WALL_COPY.link}
+        </Link>
+      }
+    >
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {/* After a mode write ModeCard has already put the server's answer in
             the mode cache. The feed's useSWRInfinite keys are out of reach of

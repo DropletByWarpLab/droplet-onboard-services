@@ -8,7 +8,11 @@
  *                        the last statement of its own transaction;
  *   a rolled-back ack  — an audit that cannot be written rolls the whole
  *                        acknowledgement back: no ack row, no state change, no
- *                        NotificationLog ack, and no ActivityRow.
+ *                        NotificationLog ack, and no ActivityRow;
+ *   the rack panel     — WARP-2981 (ADR-059 P6): acknowledging takes the
+ *                        incident off the panel's number (P6-3) at once, and
+ *                        its two counts share one snapshot (an alert
+ *                        committing between them is in neither).
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL. Fixtures are tagged
  * `warp2978d`; the audit chain is only walked and cleaned after this file's
@@ -20,7 +24,7 @@ import type { PrismaClient } from "@prisma/client";
 vi.unmock("@prisma/client");
 
 import { actOnIncident, type IncidentActor } from "./security-incident-actions.js";
-import type { IncidentViewer } from "./security-incident-view.js";
+import { panelOpenIncidents, type IncidentViewer } from "./security-incident-view.js";
 import { createActivityRecorder } from "./activity.service.js";
 import { _setActivityRecorderForTests } from "./activity.singleton.js";
 import { createHmacSigner } from "./audit-signing.service.js";
@@ -131,6 +135,47 @@ describe.skipIf(!RUN)("Incident acknowledgement against real Postgres (WARP-2978
     return i.id;
   }
 
+  /** An open after-hours alert on `camera` (legal under every CHECK: an alert has a notify state and an alertedAt). */
+  async function openAlert(camera: string): Promise<string> {
+    const i = await prisma.securityIncident.create({
+      data: {
+        scope: "camera",
+        scopeCamera: camera,
+        zoneLinkIds: [],
+        openedInMode: "closed",
+        state: "open",
+        severity: "alert",
+        reasonCodes: ["after_hours_presence"],
+        notifyState: "module_off",
+        alertedAt: T,
+        rulesetVersion: 1,
+        firstActivityAt: T,
+        lastActivityAt: T,
+        lastArrivalAt: T,
+        eventCount: 1,
+        countsByCamera: { [camera]: { person: 1 } },
+        spanByCamera: { [camera]: { first: T.toISOString(), last: T.toISOString() } },
+        cameras: [camera],
+        reasons: {
+          create: {
+            code: "after_hours_presence",
+            severity: "alert",
+            rulesetVersion: 1,
+            evidenceEventId: 10n,
+            evidenceCamera: camera,
+            evidenceSource: "frigate",
+            evidenceKind: "detection",
+            evidenceLabel: "person",
+            evidenceAt: T,
+            evidenceSummary: "Person",
+            detail: {},
+          },
+        },
+      },
+    });
+    return i.id;
+  }
+
   it("two people acknowledge at once: two rows, one state change, two audits — and the chain verifies", async () => {
     const id = await openIncident(`${TAG}_c1`);
     const results = await Promise.all([
@@ -181,5 +226,38 @@ describe.skipIf(!RUN)("Incident acknowledgement against real Postgres (WARP-2978
     await actOnIncident(prisma, { incidentId: id, action: "acknowledge", actor: actor("maria", "family"), viewer: viewer("maria"), now: NOW });
     expect(await prisma.notificationLog.findUniqueOrThrow({ where: { id: log.id } })).toMatchObject({ ackState: "acked", ackMethod: "incident" });
     expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
+  });
+
+  it("WARP-2981: acknowledging an open incident takes exactly that one off the rack panel's number (P6-3)", async () => {
+    const before = await panelOpenIncidents(prisma);
+    const id = await openIncident(`${TAG}_c3`);
+    // A notice: one more open, no more alerts.
+    expect(await panelOpenIncidents(prisma)).toEqual({ open: before.open + 1, alerts: before.alerts });
+    expect(await actOnIncident(prisma, { incidentId: id, action: "acknowledge", actor: actor("owner", "owner"), viewer: viewer("owner"), now: NOW })).toEqual({
+      status: "ok",
+      changed: true,
+    });
+    expect(await panelOpenIncidents(prisma)).toEqual(before);
+  });
+
+  it("WARP-2981: both of the rack's numbers come from one snapshot — an alert that opens between the two counts is in neither", async () => {
+    const before = await panelOpenIncidents(prisma);
+    // The alert commits on ANOTHER connection (the bare client) right after the first count, inside the panel's transaction.
+    let opened: string | null = null;
+    const racing = prisma.$extends({
+      query: {
+        securityIncident: {
+          async count({ args, query }) {
+            const n = await query(args);
+            opened ??= await openAlert(`${TAG}_c4`);
+            return n;
+          },
+        },
+      },
+    });
+    // Under READ COMMITTED the second count would see it: { open: before.open, alerts: before.alerts + 1 } — alerts > open on an empty box.
+    expect(await panelOpenIncidents(racing as unknown as PrismaClient)).toEqual(before);
+    expect(opened).not.toBeNull();
+    expect(await panelOpenIncidents(prisma)).toEqual({ open: before.open + 1, alerts: before.alerts + 1 });
   });
 });

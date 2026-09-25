@@ -47,6 +47,10 @@
  *     Door locks (WARP-2977 P2b-2, DS-019) exactly as on the feed: the engine
  *     never groups a lock row (D21), but a member that is one is shown only
  *     with Devices view, with the areas its lock is linked to.
+ *   · WARP-2981 (ADR-059 P6, §3.8) — the rack panel's numbers are the one
+ *     read that is no person's projection: `panelOpenIncidents` counts the
+ *     whole box as an owner sees it, and only the panel's own service route
+ *     (P6-3) reads it — never a route a person can call.
  *
  * The projection and the SQL builders are pure; the loaders below them read
  * and then project. The wire shapes are the ones P3 PR-C and P6 build on.
@@ -93,6 +97,7 @@ import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 import type { PatternCode } from "../lib/security-baseline-math.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
@@ -795,6 +800,51 @@ export async function incidentsSummary(
     listIncidents(prisma, v, { state: "attention" }, 3, now, presence),
   ]);
   return { openAlerts, openNotices, latest: latest.incidents };
+}
+
+/**
+ * WARP-2981 (ADR-059 P6 D20) — the box as the rack panel counts it: an
+ * owner's view, every camera and every threat. Not exported, and no person
+ * is ever this viewer: `panelOpenIncidents` is its one reader.
+ *
+ * `Required<IncidentViewer>`, so a field added to the viewer — required or
+ * optional — breaks compilation here until someone chooses its value for the
+ * rack. Merge order with #2350 (door locks): it adds `mayReadLocks`, and
+ * whichever of #2350 / #2368 lands second sets `WHOLE_SITE.mayReadLocks =
+ * true` deliberately. It cannot move the rack's number either way: lock rows
+ * never form an incident (D21, pinned on #2350), and `mayReadLocks` narrows
+ * only an incident's members and area names, never `incidentListWhere`.
+ */
+const WHOLE_SITE: Required<IncidentViewer> = {
+  userId: "_service:display",
+  visibleCameras: "all",
+  mayReadThreats: true,
+  // The owner's whole box (D20); inert for the count: lock rows never form an incident (D21), and incidentListWhere never reads it.
+  mayReadLocks: true,
+  ownerOrAdmin: true,
+};
+
+/**
+ * P6-3's numbers: the incidents that need attention — state `open`, nobody on
+ * them yet; acknowledged, resolved and plain activity never count — over the
+ * whole box, and how many of them carry an alert. They are the owner's route-17
+ * answer by construction (`open` = openAlerts + openNotices, `alerts` =
+ * openAlerts): route 17's where, over a viewer who is never partial. §3.8's
+ * exception to DS-005, kept narrow: two numbers, no ids, names, areas or
+ * times, read only by the panel's own service principal.
+ *
+ * Both counts come from ONE snapshot (REPEATABLE READ): under READ COMMITTED
+ * an alert opening, acknowledged or escalating between the two statements
+ * gives a pair that never existed — `alerts > open`, which the panel refuses
+ * as unusable and shows as "—" for a whole cadence, at exactly the moment the
+ * number matters.
+ */
+export async function panelOpenIncidents(prisma: Pick<Db, "$transaction">): Promise<{ open: number; alerts: number }> {
+  return prisma.$transaction(async (tx) => {
+    const open = await tx.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention" }) });
+    const alerts = await tx.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention", severity: "alert" }) });
+    return { open, alerts };
+  }, REPEATABLE_READ_TX);
 }
 
 /**

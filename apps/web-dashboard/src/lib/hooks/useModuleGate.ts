@@ -42,7 +42,8 @@ interface EffectiveFeature {
   moduleId: string;
   level: "view" | "act" | "manage";
 }
-interface ModulesView {
+/** Exported for the Security wall's own modules read (WARP-2981), which mirrors into this key. */
+export interface ModulesView {
   modules: ModuleState[];
   /**
    * WARP-1528 / ADR-032 §3(a) — the PER-USER view: workspace-effective ∩ this

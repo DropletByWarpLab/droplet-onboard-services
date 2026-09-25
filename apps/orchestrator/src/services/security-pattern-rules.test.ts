@@ -285,9 +285,15 @@ describe("k — what `unusual_volume` counts (D8)", () => {
       expect(await kArea(f)).toBe(5000);
     });
 
-    it("past the scan ceiling (20000 rows) k is not known: null, and volume is not judged", async () => {
-      const f = kWorld([...Array.from({ length: 20_000 }, (_, i) => row(i + 1, "door")), row(20_001, "aisle")], ["back/aisle"]);
-      expect(await kArea(f)).toBeNull();
+    // n rows, only the last in the area: whether the scan reads row n is the difference between k = 1 and null.
+    const ceilingWorld = (n: number) => kWorld([...Array.from({ length: n - 1 }, (_, i) => row(i + 1, "door")), row(n, "aisle")], ["back/aisle"]);
+
+    it("rows that run out exactly at the scan ceiling (20000 rows) are a known k", async () => {
+      expect(await kArea(ceilingWorld(20_000))).toBe(1);
+    });
+
+    it("past the scan ceiling (20001 rows) k is not known: null, and volume is not judged", async () => {
+      expect(await kArea(ceilingWorld(20_001))).toBeNull();
     });
   });
 

@@ -4017,6 +4017,19 @@ export interface SecuritySuppressionCreateBody {
   expiresInDays: number;
 }
 
+// ── WARP-2981 (ADR-059 P6): the Security wall ──
+
+/**
+ * The two numbers the wall reads off route 17 (GET
+ * /api/security/incidents/summary): open incidents with a visible alert, and
+ * open ones with only notices — already this viewer's DS-005 projection. The
+ * rest of that body is PR-C's.
+ */
+export interface SecurityIncidentCounts {
+  openAlerts: number;
+  openNotices: number;
+}
+
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──
 
 export type NotificationKind = "reminder" | "event" | "system" | "ai";

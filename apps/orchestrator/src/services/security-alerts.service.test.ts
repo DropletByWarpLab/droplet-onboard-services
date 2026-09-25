@@ -486,7 +486,9 @@ describe("the notifier (§6.7)", () => {
 
   it("WARP-2980 D15: a verdict landing between the read and the CAS loses this tick's write — nothing written, no attempt spent — and the next tick tells", async () => {
     const f = world();
-    // Route 35 bumps `version` (security-incident-actions.ts) after the notifier read the incident, before its CAS.
+    // Route 35 bumps `version` (security-incident-actions.ts). The verdict lands inside `isSecurityModuleOn`:
+    // after the notifier's read, before `planNotices` — not between the plan and the CAS. Still a valid race:
+    // the CAS compares the `version` the read saw, so the bump makes it lose either way.
     let marked = false;
     const racing = {
       ...deps(),
