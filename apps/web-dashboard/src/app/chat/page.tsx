@@ -273,8 +273,9 @@ export default function ChatPage() {
           const next = new URL(window.location.href);
           next.searchParams.delete("c");
           window.history.replaceState(null, "", next.toString());
-          // WARP-1668 — replaceState does NOT notify useSearchParams, so
-          // nothing else here re-renders off this failure. Re-read the
+          // WARP-1668 — Next (≥14.1) patches `history.replaceState`, so
+          // `useSearchParams` follows this strip, but nothing in the strip
+          // tells the resume banner the session is gone. Re-read the
           // profile: if the id we just failed to load was the interview
           // session, `interviewResumable` flips false and the resume banner
           // retires instead of offering the same dead trip again.
@@ -303,14 +304,24 @@ export default function ChatPage() {
   // state → URL: when the hook updates conversationId for any reason
   // (server response after a send, clearMessages, etc.), mirror it into
   // the URL via replaceState so the panel and a refresh both stay aligned.
+  //
+  // WARP-3043 — `c` is removed only when a conversation that WAS open closes
+  // (set → null). On a deep-link mount `conversationId` is still null while
+  // the load is in flight, and deleting `c` then (Next's patched
+  // replaceState updates `useSearchParams`) flashed the empty state and lost
+  // the open conversation if you left before the load landed. A failed load
+  // strips `c` on its own path above.
+  const prevConversationIdRef = useRef(conversationId);
   useEffect(() => {
+    const prev = prevConversationIdRef.current;
+    prevConversationIdRef.current = conversationId;
     if (typeof window === "undefined") return;
     const next = new URL(window.location.href);
     if (conversationId) {
       if (next.searchParams.get("c") === conversationId) return;
       next.searchParams.set("c", conversationId);
     } else {
-      if (!next.searchParams.has("c")) return;
+      if (prev === null || !next.searchParams.has("c")) return;
       next.searchParams.delete("c");
     }
     window.history.replaceState(null, "", next.toString());
