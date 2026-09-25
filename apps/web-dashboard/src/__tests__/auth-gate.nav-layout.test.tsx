@@ -38,9 +38,12 @@ vi.mock("@/lib/nav-layout", () => ({
   useNavLayout: () => ({ layout: layoutRef.current, setLayout: vi.fn() }),
 }));
 
+const userRef: { current: { id: string; username: string; displayName: string; role?: string } } = {
+  current: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+};
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({
-    user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+    user: userRef.current,
     isLoading: false,
     setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
     setupProbeError: null,
@@ -50,10 +53,12 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import { AuthGate } from "@/components/AuthGate";
+import { WALL_COPY } from "@/components/security/wall-status";
 
 beforeEach(() => {
   pathnameValue = "/";
   layoutRef.current = "sidebar";
+  userRef.current = { id: "u1", username: "ada", displayName: "Ada", role: "owner" };
 });
 
 describe("AuthGate — nav layout switch (WARP-2971)", () => {
@@ -95,6 +100,7 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
   ] as const)("with the %s layout on %s: no shell, no <main>, no help — the guard wraps the page", (layout, path) => {
     layoutRef.current = layout;
     pathnameValue = path;
+    userRef.current = { ...userRef.current, role: "family" };
     render(<AuthGate>wall page</AuthGate>);
     expect(screen.queryByTestId("sidebar-shell")).toBeNull();
     expect(screen.queryByTestId("workspace-shell")).toBeNull();
@@ -113,5 +119,41 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
     expect(screen.getByTestId("help-launcher")).toBeInTheDocument();
     expect(document.querySelector("main#main")).toHaveTextContent("security page");
     expect(screen.queryByTestId("wall-modules-keeper")).toBeNull();
+  });
+});
+
+describe("AuthGate — D6: the wall never runs on an owner or admin session (WARP-2981)", () => {
+  it.each([
+    ["owner", "/security/wall"],
+    ["admin", "/security/wall"],
+    ["admin", "/security/wall/"],
+    // A role this build doesn't know (or none at all): the wall can't vouch it is not an admin's.
+    ["service", "/security/wall"],
+    [undefined, "/security/wall"],
+  ])("a %s session on %s: the refusal alone — no keeper, no guard, no page", (role, path) => {
+    userRef.current = { ...userRef.current, role };
+    pathnameValue = path;
+    render(<AuthGate>wall page</AuthGate>);
+    expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedTitle })).toBeInTheDocument();
+    expect(screen.queryByText("wall page")).toBeNull();
+    expect(screen.queryByTestId("wall-modules-keeper")).toBeNull();
+    expect(screen.queryByTestId("module-guard")).toBeNull();
+    expect(screen.queryByTestId("sidebar-shell")).toBeNull();
+    expect(screen.queryByTestId("help-launcher")).toBeNull();
+  });
+
+  it.each(["family", "guest"])("a %s session runs the wall", (role) => {
+    userRef.current = { ...userRef.current, role };
+    pathnameValue = "/security/wall";
+    render(<AuthGate>wall page</AuthGate>);
+    expect(screen.getByTestId("module-guard")).toHaveTextContent("wall page");
+    expect(screen.queryByText(WALL_COPY.refusedTitle)).toBeNull();
+  });
+
+  it("an owner anywhere else is not refused", () => {
+    pathnameValue = "/security";
+    render(<AuthGate>security page</AuthGate>);
+    expect(document.querySelector("main#main")).toHaveTextContent("security page");
+    expect(screen.queryByText(WALL_COPY.refusedTitle)).toBeNull();
   });
 });

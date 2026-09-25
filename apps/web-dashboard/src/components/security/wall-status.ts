@@ -67,7 +67,29 @@ export const WALL_COPY = {
   offlineTitle: "This screen is offline.",
   offlineBody: "What you see is from {time}.",
   signOutSoon: "This screen will be signed out by {time} at the latest. Someone will need to sign in again to keep it on.",
+
+  // D6 (Stefan: "Member wall, own cameras") — an owner or admin session is refused. {tier} is tierLabel("family").
+  refusedTitle: "This TV view doesn't run on an owner or admin account",
+  refusedWhy: "An owner or admin can change anything in Droplet, and a TV stays signed in, in a room, for hours.",
+  refusedWhat: "Sign in on this TV with a {tier} account instead. The TV then shows only the cameras that account has been given.",
+  refusedManage: "You can add that account, and choose its cameras, on the Users page.",
+  refusedManageLink: "Open Users",
+  refusedSignOut: "Sign out of this TV",
 } as const;
+
+/**
+ * D6 — the roles a wall runs for. An owner or admin session is refused
+ * (Stefan: "Member wall, own cameras"): a TV stays signed in, unattended, in
+ * a room, one click from everything that account can do. A role this build
+ * does not know is refused too: the wall cannot vouch that it is not an
+ * admin's. The rule is the UI's: every read the wall makes is an ordinary
+ * route this person may already call from /security or /cameras.
+ */
+const WALL_ROLES: ReadonlySet<string> = new Set(["family", "guest"]);
+
+export function wallRunsFor(role: string | null | undefined): boolean {
+  return typeof role === "string" && WALL_ROLES.has(role);
+}
 
 /** Two missed 15 s polls: the strip is as fresh as its stalest cell. */
 export const WALL_STALE_AFTER_MS = 45_000;

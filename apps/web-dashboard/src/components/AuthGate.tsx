@@ -11,6 +11,8 @@ import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
 import { HELP_PATH, isSecurityWallPath } from "@/lib/routing";
 import { WallModulesKeeper } from "@/lib/hooks/useSecurity";
+import { WallRefused } from "@/components/security/WallNotice";
+import { wallRunsFor } from "@/components/security/wall-status";
 
 // `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
 // person so they can set their password at `/invite/<token>`. Omitting it made
@@ -330,7 +332,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // The keeper sits OUTSIDE the guard: it keeps the wall's modules read polling
   // (and mirroring into the guard's key) while the guard's card is up, so the
   // TV comes back by itself once Security is on again.
+  //
+  // D6 (Stefan: "Member wall, own cameras") — an owner or admin session never
+  // runs the wall: it would sit signed in, unattended, in a room, one click
+  // from everything that account can do. The refusal comes first and alone —
+  // no keeper, no guard, no page — so a refused session asks Droplet nothing.
   if (isSecurityWallPath(pathname)) {
+    if (!wallRunsFor(user.role)) return <WallRefused />;
     return (
       <>
         <WallModulesKeeper />

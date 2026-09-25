@@ -3,6 +3,9 @@ export const HELP_PATH = "/help";
 /** WARP-2981 (ADR-059 §3.8) — the Security wall: a chromeless, read-only page for a TV. */
 export const SECURITY_WALL_PATH = "/security/wall";
 
+/** Where the wall's "sign in" goes: the sign-in page, back to the wall afterwards. */
+export const SECURITY_WALL_SIGN_IN_HREF = `/login?next=${encodeURIComponent(SECURITY_WALL_PATH)}`;
+
 /**
  * Whether `path` is the Security wall: trailing slashes, a query and a hash
  * are ignored, so `/security/wall/` and `/security/wall?x=1` are the wall

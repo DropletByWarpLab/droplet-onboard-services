@@ -54,6 +54,7 @@ import * as SecurityWall from "./SecurityWall";
 import * as TimezoneSelect from "./TimezoneSelect";
 import * as UsualGrid from "./UsualGrid";
 import * as WallCameras from "./WallCameras";
+import * as WallNotice from "./WallNotice";
 import * as PatternsCopy from "./patterns-copy";
 import * as WallStatus from "./wall-status";
 import * as SecurityPage from "@/app/security/page";
@@ -75,6 +76,7 @@ const MODULES: Record<string, Record<string, unknown>> = {
   // WARP-2981 (P6) — the Security wall.
   "src/components/security/SecurityWall.tsx": SecurityWall,
   "src/components/security/WallCameras.tsx": WallCameras,
+  "src/components/security/WallNotice.tsx": WallNotice,
   "src/components/security/wall-status.ts": WallStatus,
   "src/components/security/TimezoneSelect.tsx": TimezoneSelect,
   "src/components/security/UsualGrid.tsx": UsualGrid,

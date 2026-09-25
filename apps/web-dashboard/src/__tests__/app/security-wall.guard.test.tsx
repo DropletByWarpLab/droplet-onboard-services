@@ -16,7 +16,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
 
-const h = vi.hoisted(() => ({ authFetch: vi.fn() }));
+const h = vi.hoisted(() => ({ authFetch: vi.fn(), role: "family" as string }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn(), back: vi.fn() }),
   usePathname: () => "/security/wall",
@@ -24,7 +24,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/auth", () => ({
   authFetch: h.authFetch,
   useAuth: () => ({
-    user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+    user: { id: "u1", username: "ada", displayName: "Ada", role: h.role },
     isLoading: false,
     setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
     setupProbeError: null,
@@ -73,6 +73,7 @@ const navGateReads = () => (h.authFetch.mock.calls as Array<[string, RequestInit
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
+  h.role = "family";
   modules = { status: 200, body: ON };
   h.authFetch.mockReset().mockImplementation(async (url: string) => {
     const r = reply(url.split("?")[0]!);
@@ -124,5 +125,22 @@ describe("the wall behind the module guard (D11)", () => {
     await advance(120_000);
     expect(blocked()).toBe(false);
     expect(wallShown()).toBe(true);
+  });
+});
+
+describe("D6: an owner or admin session is refused (Stefan: \"Member wall, own cameras\")", () => {
+  it.each(["owner", "admin"])("a %s on the TV: the refusal, and not one request in 10 minutes — no modules, no Security, no cameras", async (role) => {
+    h.role = role;
+    render(
+      <SWRConfig value={{ provider: () => new Map() }}>
+        <AuthGate>
+          <SecurityWallPage />
+        </AuthGate>
+      </SWRConfig>,
+    );
+    await advance(10 * 60_000);
+    expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedTitle })).toBeInTheDocument();
+    expect(wallShown()).toBe(false);
+    expect(h.authFetch).not.toHaveBeenCalled();
   });
 });
