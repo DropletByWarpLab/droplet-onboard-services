@@ -670,6 +670,12 @@
   outline: none;
   box-shadow: inset 0 0 0 2px var(--brand);
 }
+/* Send is FILLED --brand, so the inset brand ring above vanishes into it.
+   Its ring sits outside instead: a 2px gap in the pill's tone, then brand.
+   `button.` keeps this above the rule above (which carries a type). */
+.droplet-shell .chat-composer-inner button.chat-send:focus-visible {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--brand);
+}
 
 .droplet-shell .chat-composer-inner textarea {
   flex: 1 1 240px;

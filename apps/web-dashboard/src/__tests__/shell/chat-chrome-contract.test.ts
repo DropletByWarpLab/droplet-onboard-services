@@ -91,6 +91,32 @@ const declValue = (selector: string, prop: string, media = "") =>
     .map((d) => d.value.trim())
     .at(-1);
 
+/**
+ * Specificity [ids, classes/attributes/pseudo-classes, types] of the flat
+ * selectors in chat-indigo.css. `:not(x)` counts as its argument.
+ */
+function specificity(selector: string): [number, number, number] {
+  const s = selector.replace(/:not\(([^)]*)\)/g, " $1");
+  const ids = (s.match(/#[\w-]+/g) ?? []).length;
+  const classes = (s.match(/\.[\w-]+|\[[^\]]*\]|(?<!:):(?!:)[\w-]+/g) ?? []).length;
+  const types = (s.replace(/\[[^\]]*\]/g, "").match(/(?:^|[\s>+~])[a-z][\w-]*/gi) ?? []).length;
+  return [ids, classes, types];
+}
+
+function compareSpecificity(a: string, b: string): number {
+  const [x, y] = [specificity(a), specificity(b)];
+  return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+}
+
+/** A box-shadow value split into its comma-separated layers. */
+const shadowLayers = (value: string) => value.split(/,(?![^(]*\))/).map((l) => l.trim());
+
+/** The colour of one box-shadow layer (a token or a literal). */
+const layerColour = (layer: string) =>
+  /var\(--[\w-]+\)|#[0-9a-f]{3,8}\b|(?:rgb|hsl|color-mix)a?\([^)]*\)+|\b(?:transparent|currentColor)\b/i.exec(
+    layer,
+  )?.[0];
+
 describe("chat chrome is borderless (WARP-3043)", () => {
   it("no chat chrome rule draws a border", () => {
     const strokes = CHAT_RULES.filter((r) =>
@@ -145,6 +171,48 @@ describe("keyboard focus inside the pill (WCAG 2.4.7)", () => {
         r.decls.some((d) => d.prop === "box-shadow" && /inset/.test(d.value)),
     );
     expect(ring, "no `.chat-composer-inner button:focus-visible` ring").toBeTruthy();
+  });
+
+  it("send's focus ring is not painted in send's own fill", () => {
+    // The generic pill ring is inset --brand; send is FILLED --brand, so that
+    // ring is brand on brand — invisible. Resolve the ring a focused send
+    // actually gets (specificity, then source order) and check the colour
+    // that touches the fill is not the fill, and that an outset ring's outer
+    // colour is not the pill it sits on.
+    // Meta: a bare `.chat-send:focus-visible` LOSES to the generic ring, which
+    // carries a type selector — the resolution below must see that.
+    expect(
+      compareSpecificity(
+        '.droplet-shell .chat-composer-inner button:not([role^="menuitem"]):focus-visible',
+        ".droplet-shell .chat-composer-inner .chat-send:focus-visible",
+      ),
+    ).toBeGreaterThan(0);
+    const FOCUSED_SEND =
+      /^\.droplet-shell \.chat-composer-inner (button)?(\.chat-send)?(:not\(\[role\^="menuitem"\]\))?:focus-visible$/;
+    const winner = CHAT_RULES.map((r, order) => ({ r, order }))
+      .filter(
+        ({ r }) =>
+          r.media === "" &&
+          FOCUSED_SEND.test(r.selector) &&
+          r.decls.some((d) => d.prop === "box-shadow"),
+      )
+      .sort((a, b) => compareSpecificity(a.r.selector, b.r.selector) || a.order - b.order)
+      .at(-1);
+    expect(winner, "no box-shadow ring reaches a focused send").toBeTruthy();
+    const shadow = winner!.r.decls.filter((d) => d.prop === "box-shadow").at(-1)!.value;
+    const layers = shadowLayers(shadow);
+    const inner = layerColour(layers[0]);
+    const outer = layerColour(layers[layers.length - 1]);
+    const pill = declValue(".droplet-shell .chat-composer-inner", "background");
+
+    for (const fillSelector of [".droplet-shell .chat-send", ".droplet-shell .chat-send.chat-stop"]) {
+      const fill = declValue(fillSelector, "background");
+      expect(fill, `${fillSelector} has no fill`).toBeTruthy();
+      expect(inner, `${winner!.r.selector}: ring touching ${fillSelector} is its fill`).not.toBe(fill);
+    }
+    if (!/\binset\b/.test(layers[layers.length - 1])) {
+      expect(outer, `${winner!.r.selector}: outset ring is the pill's own tone`).not.toBe(pill);
+    }
   });
 
   it("the focus kill only ever targets the textarea", () => {
