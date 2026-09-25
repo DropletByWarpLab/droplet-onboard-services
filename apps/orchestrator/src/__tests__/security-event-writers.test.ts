@@ -75,7 +75,14 @@ function sites(files: ReadonlyArray<{ rel: string; code: string }>, re: RegExp):
 
 /** Every writer, and why its transaction is short. */
 const WRITERS: ReadonlyArray<readonly [site: string, why: string]> = [
-  ["services/security-events.service.ts#recordSecurityEvent", "an autocommit createMany of one row (one statement)"],
+  [
+    "services/security-events.service.ts#writeSecurityEvent",
+    // WARP-2977 P2b-2 renamed the one writer; recordSecurityEvent (Frigate, camera
+    // status, the engine's still-in-view rows) is a wrapper over it, and the lock
+    // adapter's LockStore.write (createPrismaLockStore) calls it for every
+    // lock_state row, live and swept alike — no transaction of its own.
+    "an autocommit createMany of one row (one statement)",
+  ],
   ["services/security-events.service.ts#mirrorThreatRows", "an autocommit createMany of ≤ 500 rows (one statement)"],
   [
     "services/security-mode.service.ts#insertModeChangedRow",
