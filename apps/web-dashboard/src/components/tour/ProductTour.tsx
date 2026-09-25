@@ -115,7 +115,7 @@ function MotifRecap({ health }: { health: SystemHealthStatus | null }) {
     [Wifi, "Wi-Fi"],
     [Globe, "Internet address"],
     [HardDrive, "Drives"],
-    [Lightbulb, "Smart devices"],
+    [Lightbulb, "Device control"],
     [Camera, "Cameras"],
     [ShieldCheck, "Remote access"],
     [Sparkles, "Private AI"],

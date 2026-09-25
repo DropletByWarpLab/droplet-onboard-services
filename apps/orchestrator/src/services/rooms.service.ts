@@ -12,8 +12,10 @@
 import type { PrismaClient } from "@prisma/client";
 import type { MatterGrouped, Room } from "../types/smart-home.js";
 
-/** The 12 room glyphs the UI offers (brief §5.4) — validated server-side so a
- *  bad value can never reach the client's icon map. */
+/** The room glyphs the UI can render (brief §5.4) — validated server-side so a
+ *  bad value can never reach the client's icon map. The first twelve are the
+ *  original household set, kept so existing rooms still validate on update;
+ *  the business-only build offers the workplace set after them on create. */
 export const ROOM_ICONS = [
   "home",
   "sofa",
@@ -27,6 +29,14 @@ export const ROOM_ICONS = [
   "dumbbell",
   "washing-machine",
   "door-open",
+  "building-2",
+  "presentation",
+  "coffee",
+  "server",
+  "warehouse",
+  "factory",
+  "package",
+  "printer",
 ] as const;
 
 export class RoomValidationError extends Error {
@@ -65,7 +75,7 @@ export function normalizeName(raw: unknown): string {
 }
 
 function normalizeIcon(raw: unknown): string {
-  if (raw == null) return "home";
+  if (raw == null) return "building-2";
   if (typeof raw !== "string" || !ROOM_ICONS.includes(raw as (typeof ROOM_ICONS)[number])) {
     throw new RoomValidationError("icon is not one of the allowed room glyphs");
   }

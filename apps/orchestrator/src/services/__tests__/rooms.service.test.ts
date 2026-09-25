@@ -126,7 +126,7 @@ describe("rooms CRUD", () => {
     const a = await createRoom(prisma, { name: "Kitchen", icon: "chef-hat" });
     const b = await createRoom(prisma, { name: "Living room" });
     expect(a.icon).toBe("chef-hat");
-    expect(b.icon).toBe("home"); // default
+    expect(b.icon).toBe("building-2"); // default
     expect(b.sortOrder).toBeGreaterThan(a.sortOrder);
     await expect(createRoom(prisma, { name: "X", icon: "skull" })).rejects.toThrow(
       RoomValidationError,

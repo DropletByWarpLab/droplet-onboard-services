@@ -62,6 +62,12 @@
       "healthcheck": { "type": "http", "port": 8081, "path": "/health" }
     },
     {
+      "name": "device-gateway",
+      "context": ".",
+      "dockerfile": "services/device-gateway/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8084, "path": "/health" }
+    },
+    {
       "name": "camera-discovery",
       "context": ".",
       "dockerfile": "services/camera-discovery/Dockerfile",

@@ -117,6 +117,7 @@ export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
   "DEVICE_SECRET_KEY",
   "DEVICE_SECRET",
   "SERVICE_TOKEN_SWITCH",
+  "SERVICE_TOKEN_DEVICE_GATEWAY",
   "SERVICE_TOKEN_AI_GATEWAY",
   "SERVICE_TOKEN_VOICE",
   "SERVICE_TOKEN_MCP",
@@ -1222,6 +1223,11 @@ const envSchema = z.object({
   // the host gateway.
   SWITCH_SERVICE_URL: z.string().default("http://host.docker.internal:8081"),
 
+  // --- Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) ---
+  // services/device-gateway runs `network_mode: host` on :8084 (BACnet Who-Is
+  // and KNX routing are broadcast/multicast), so same host-gateway rationale.
+  DEVICE_GATEWAY_URL: z.string().default("http://host.docker.internal:8084"),
+
   // --- OLED / TFT Display ---
   // Same rationale again: the display service runs with `network_mode: host`
   // on the appliance (uvicorn on :8082). `localhost` inside the orchestrator
@@ -1257,6 +1263,11 @@ const envSchema = z.object({
   // falls back to SERVICE_SECRET so installs that pinned the legacy shared
   // secret keep working until setup.sh re-mints.
   SERVICE_TOKEN_SWITCH: z.string().default(""),
+
+  // SERVICE_TOKEN_DEVICE_GATEWAY — outbound bearer for device-gateway.client.ts
+  // → device gateway. Compose wires the gateway container's SERVICE_SECRET to
+  // the same value; the gateway fails CLOSED (403) without it.
+  SERVICE_TOKEN_DEVICE_GATEWAY: z.string().default(""),
 
   // SERVICE_TOKEN_AI_GATEWAY — WARP-560. Dedicated outbound bearer for
   // ai-gateway.client.ts → ai-gateway, which previously had NO inbound auth

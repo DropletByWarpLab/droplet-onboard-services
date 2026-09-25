@@ -6,12 +6,12 @@ import { presetById } from "./schedule-presets";
 import { translateError } from "@/lib/friendly-errors";
 
 /**
- * Compact popover that one-click applies the "Bedtime" preset to a device or
- * group, with an escape-hatch to open the full editor pre-filled with the
- * preset's windows.
+ * Compact popover that one-click applies the "After hours" preset (id
+ * `bedtime`) to a device or group, with an escape-hatch to open the full
+ * editor pre-filled with the preset's windows.
  *
- * The Bedtime windows come from the shared `SCHEDULE_PRESETS` registry
- * (WARP-99 / T8) — keep them out of this file.
+ * The preset's name, copy and windows come from the shared
+ * `SCHEDULE_PRESETS` registry (WARP-99 / T8) — keep them out of this file.
  */
 
 export type QuickScheduleSubject =
@@ -116,9 +116,9 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
       className="card absolute z-50 w-[280px] shadow-xl"
       style={{ padding: "12px" }}
     >
-      <p className="type-headline text-[color:var(--text)]">Apply Bedtime?</p>
+      <p className="type-headline text-[color:var(--text)]">Apply {BEDTIME.name}?</p>
       <p className="type-footnote text-[color:var(--text-muted)] mt-1">
-        Sun–Thu 9pm–7am, Fri–Sat 11pm–8am
+        {BEDTIME.description}
       </p>
 
       <div className="mt-3 flex justify-end gap-2">

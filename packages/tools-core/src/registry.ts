@@ -81,6 +81,9 @@ import removeDevice from "./handlers/smart-home/remove-device.js";
 import createScene from "./handlers/smart-home/create-scene.js";
 // WARP-1447: room assignment ("move the lamp to the den"; auto-creates rooms)
 import assignDeviceRoom from "./handlers/smart-home/assign-device-room.js";
+// Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) via /api/building
+import getBuildingDevices from "./handlers/smart-home/get-building-devices.js";
+import setBuildingPoint from "./handlers/smart-home/set-building-point.js";
 
 // cameras
 import listCameras from "./handlers/cameras/list-cameras.js";
@@ -321,6 +324,8 @@ const allTools: Tool[] = [
   // WARP-1447: put a device in a room (write tier, no confirmation —
   // reversible household bookkeeping, same posture as create_reminder)
   assignDeviceRoom,
+  getBuildingDevices,
+  setBuildingPoint,
   // cameras
   listCameras,
   listDiscoveredCameras,

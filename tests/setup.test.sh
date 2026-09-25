@@ -645,8 +645,16 @@ else
   fail "DISPLAY_SERVICE_URL is '${DISPLAY_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8082)"
 fi
 
-# (AC #2) None of the three may be left as host.docker.internal or docker0.
-if { grep -E '^(ROUTING|SWITCH|DISPLAY)_SERVICE_URL=' "$TMP_ROOT/.env" || true; } \
+# (4) DEVICE_GATEWAY_URL — derived gateway, host port 8084.
+DEVICE_GATEWAY_URL_EFFECTIVE=$( { grep -E '^DEVICE_GATEWAY_URL=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$DEVICE_GATEWAY_URL_EFFECTIVE" = "http://${SB_FAKE_GW}:8084" ]; then
+  pass "DEVICE_GATEWAY_URL is the derived droplet_default gateway (http://${SB_FAKE_GW}:8084)"
+else
+  fail "DEVICE_GATEWAY_URL is '${DEVICE_GATEWAY_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8084)"
+fi
+
+# (AC #2) None of the four may be left as host.docker.internal or docker0.
+if { grep -E '^(ROUTING|SWITCH|DISPLAY)_SERVICE_URL=|^DEVICE_GATEWAY_URL=' "$TMP_ROOT/.env" || true; } \
      | grep -qE 'host\.docker\.internal|172\.17\.0\.1'; then
   fail "a host-net SERVICE_URL still points at host.docker.internal/172.17.0.1 (the unreachable docker0)"
 else

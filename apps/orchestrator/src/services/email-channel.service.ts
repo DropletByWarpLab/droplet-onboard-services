@@ -211,7 +211,7 @@ export function buildInviteEmail(input: InviteEmailInput): InviteEmailMessage {
   const safeUrl = escapeHtml(input.acceptUrl);
 
   const text = [
-    "You've been invited to join a Droplet household.",
+    "You've been invited to join your team's Droplet.",
     "",
     "Open this link to accept the invitation and set up your account:",
     input.acceptUrl,
@@ -220,7 +220,7 @@ export function buildInviteEmail(input: InviteEmailInput): InviteEmailMessage {
   ].join("\n");
 
   const html = [
-    "<p>You've been invited to join a Droplet household.</p>",
+    "<p>You've been invited to join your team's Droplet.</p>",
     `<p><a href="${safeUrl}">Accept your invitation</a> and set up your account.</p>`,
     `<p>Or paste this link into your browser:<br><span>${safeUrl}</span></p>`,
     "<p>If you weren't expecting this, you can ignore this email.</p>",
@@ -258,7 +258,7 @@ export function buildShareNotificationEmail(
   const subject = "A file was shared with you on Droplet";
 
   const text = [
-    `${sharer} shared "${input.fileName}" with you on your household Droplet.`,
+    `${sharer} shared "${input.fileName}" with you on your team's Droplet.`,
     "",
     "Sign in to your Droplet dashboard and open Files → Shared to view it.",
     "",
@@ -266,7 +266,7 @@ export function buildShareNotificationEmail(
   ].join("\n");
 
   const html = [
-    `<p>${escapeHtml(sharer)} shared <strong>&quot;${escapeHtml(input.fileName)}&quot;</strong> with you on your household Droplet.</p>`,
+    `<p>${escapeHtml(sharer)} shared <strong>&quot;${escapeHtml(input.fileName)}&quot;</strong> with you on your team's Droplet.</p>`,
     "<p>Sign in to your Droplet dashboard and open <strong>Files &rarr; Shared</strong> to view it.</p>",
     "<p>If you weren't expecting this, you can ignore this email.</p>",
   ].join("\n");

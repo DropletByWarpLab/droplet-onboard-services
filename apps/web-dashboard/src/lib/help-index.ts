@@ -102,10 +102,10 @@ export const HELP_INDEX: readonly HelpEntry[] = [
   },
   {
     id: "devices",
-    title: "Smart devices",
+    title: "Device control",
     summary:
-      "The Droplet speaks Matter, the smart-device protocol most new devices support. Pair a Matter light, switch, sensor, or thermostat and it appears on the Devices page. To pair, scan the QR code on the device — the pairing key is exchanged over your local Wi-Fi with no cloud account. Unpair from the device's detail panel.",
-    keywords: ["smart devices", "matter", "device", "devices", "light", "switch", "sensor", "thermostat", "pair", "unpair", "automation"],
+      "The Droplet speaks Matter, the device-control protocol most new devices support. Pair a Matter light, switch, sensor, or thermostat and it appears on the Devices page. To pair, scan the QR code on the device — the pairing key is exchanged over your local Wi-Fi with no cloud account. Unpair from the device's detail panel.",
+    keywords: ["device control", "smart devices", "matter", "device", "devices", "light", "switch", "sensor", "thermostat", "pair", "unpair", "automation"],
   },
   {
     id: "files",
