@@ -625,7 +625,14 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // provider's cache). They are the same cache only because the app mounts no
   // `<SWRConfig provider>`; adding one would leave this path emptying a cache
   // nobody reads.
-  if (hadSession) unload({ revalidate: false });
+  //
+  // WARP-2981 — on the Security wall the cache goes whatever storage says.
+  // The wall is never anonymous, and it does not navigate (below), so nothing
+  // else empties the cache before the next person signs in through its
+  // client-side "Sign in on this screen" — and its keys name no person. Another
+  // tab's sign-out may already have taken the cached profile.
+  const onWall = isSecurityWallPath(window.location.pathname);
+  if (hadSession || onWall) unload({ revalidate: false });
   // Public pages own their anonymous flow: a refresh failure on /setup (the
   // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
   // NOT hard-navigate to /login — AuthGate routes those contextually
@@ -642,8 +649,8 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // WARP-2981 — the Security wall faces a room: it never opens a sign-in form
   // by itself, so nobody is led into typing a password in front of it. The
   // provider signs the tree out instead, and AuthGate's wall branch says the
-  // TV is signed out, with a "Sign in on this TV" someone has to press.
-  if (isSecurityWallPath(window.location.pathname)) {
+  // screen is signed out, with a "Sign in on this screen" someone has to press.
+  if (onWall) {
     window.dispatchEvent(new Event(WALL_SIGNED_OUT_EVENT));
   } else if (!onPublicPage) {
     window.location.assign(

@@ -13,6 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
+import useSWR, { SWRConfig, mutate, unload } from "swr";
 
 vi.mock("@/lib/api", () => ({
   patchSetupReady: vi.fn(),
@@ -56,6 +57,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  unload({ revalidate: false });
   localStorage.clear();
   Object.defineProperty(window, "location", { configurable: true, writable: true, value: realLocation });
 });
@@ -75,6 +77,30 @@ describe("authFetch — a dead session on the Security wall never opens a sign-i
     } finally {
       window.removeEventListener(WALL_SIGNED_OUT_EVENT, heard);
     }
+  });
+
+  // A second tab signed out (or hit its own dead path) first: it took the cached profile every tab
+  // shares, and emptied only its own cache. This tab's wall does not navigate, so the next sign-in on
+  // it — client-side, through "Sign in on this screen" — would mount over the last account's cameras.
+  it("the cached profile already gone (another tab signed out): the wall's cache is still emptied", async () => {
+    stubLocation("/security/wall");
+    stubFetch(() => new Response("", { status: 401 }));
+    localStorage.removeItem(USER_KEY);
+    await mutate(["security-wall", "cameras"], [{ name: "a-back-office" }], { revalidate: false });
+    await mutate(["security-wall", "snapshot", "a-back-office"], { value: "A's picture", at: 1 }, { revalidate: false });
+
+    await authFetch("/api/security/mode");
+
+    const { cache } = SWRConfig.defaultValue;
+    expect(JSON.stringify(Array.from(cache.keys(), (k) => cache.get(k)?.data ?? null))).not.toMatch(/a-back-office|A's picture/);
+
+    // The next person's first render of the wall's camera list draws nothing of A's.
+    function Cameras() {
+      const { data } = useSWR<{ name: string }[]>(["security-wall", "cameras"], null, { revalidateOnMount: false });
+      return <span data-testid="cams">{data ? data.map((c) => c.name).join(",") : "none"}</span>;
+    }
+    render(<Cameras />);
+    expect(screen.getByTestId("cams")).toHaveTextContent("none");
   });
 
   it("anywhere else (even /security/wallpaper) it still goes to /login?next=…, and the wall is not told", async () => {
