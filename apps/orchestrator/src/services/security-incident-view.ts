@@ -683,8 +683,16 @@ export async function incidentsSummary(
  * WARP-2981 (ADR-059 P6 D20) — the box as the rack panel counts it: an
  * owner's view, every camera and every threat. Not exported, and no person
  * is ever this viewer: `panelOpenIncidents` is its one reader.
+ *
+ * `Required<IncidentViewer>`, so a field added to the viewer — required or
+ * optional — breaks compilation here until someone chooses its value for the
+ * rack. Merge order with #2350 (door locks): it adds `mayReadLocks`, and
+ * whichever of #2350 / #2368 lands second sets `WHOLE_SITE.mayReadLocks =
+ * true` deliberately. It cannot move the rack's number either way: lock rows
+ * never form an incident (D21, pinned on #2350), and `mayReadLocks` narrows
+ * only an incident's members and area names, never `incidentListWhere`.
  */
-const WHOLE_SITE: IncidentViewer = {
+const WHOLE_SITE: Required<IncidentViewer> = {
   userId: "_service:display",
   visibleCameras: "all",
   mayReadThreats: true,
