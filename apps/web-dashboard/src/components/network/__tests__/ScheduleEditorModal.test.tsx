@@ -227,8 +227,8 @@ describe("ScheduleEditorModal", () => {
     const nameInput = (await screen.findByLabelText(
       /^name$/i,
     )) as HTMLInputElement;
-    expect(nameInput.value).toBe("School hours");
-    // School preset has exactly one window (Mon–Fri 8am–3pm).
+    expect(nameInput.value).toBe("Business hours");
+    // School preset has exactly one window (Mon–Fri 9am–5pm).
     const windows = screen.getAllByRole("group", { name: /^window \d+$/i });
     expect(windows).toHaveLength(1);
   });

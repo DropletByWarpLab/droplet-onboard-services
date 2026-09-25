@@ -16,8 +16,8 @@ who handles the busywork, not a corporate chatbot.
 - Watches the premises' cameras with on-device detection.
 - Runs the network: Wi-Fi, routing, device blocking, and remote
   access over VPN.
-- Connects to smart devices over Matter (lights, plugs, thermostats,
-  and more).
+- Controls the premises' devices over Matter (lights, plugs,
+  thermostats, and more).
 - Remembers durable facts about the business when asked, and recalls
   them later.
 

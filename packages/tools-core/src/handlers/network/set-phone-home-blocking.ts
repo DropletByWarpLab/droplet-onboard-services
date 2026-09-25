@@ -78,7 +78,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "set_phone_home_blocking",
   description:
-    "Block or allow 'phone home' (internet/WAN egress) for IoT, camera, and smart-home devices while keeping them working on the local network and on time (NTP + local DNS stay allowed). scope 'master' toggles the whole feature, 'cameras' the camera VLAN, 'group' a single device group (pass groupId). Destructive: requires user confirmation in the Droplet dashboard.",
+    "Block or allow 'phone home' (internet/WAN egress) for IoT, camera, and connected building devices while keeping them working on the local network and on time (NTP + local DNS stay allowed). scope 'master' toggles the whole feature, 'cameras' the camera VLAN, 'group' a single device group (pass groupId). Destructive: requires user confirmation in the Droplet dashboard.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

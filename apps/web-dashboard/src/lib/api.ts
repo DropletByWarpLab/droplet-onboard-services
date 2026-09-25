@@ -9398,6 +9398,111 @@ export function putActiveDepartment(departmentId: string | null): Promise<Active
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Device control — building systems over the device gateway (BACnet/IP,
+// Modbus TCP, SNMP, KNX/IP). Orchestrator: routes/building.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type BuildingProtocol = "bacnet" | "modbus" | "snmp" | "knx";
+export type BuildingValue = boolean | number | string;
+
+export interface BuildingPoint {
+  id: string;
+  name: string;
+  kind: "number" | "boolean" | "text";
+  unit?: string | null;
+  writable: boolean;
+  min?: number | null;
+  max?: number | null;
+  [k: string]: unknown;
+}
+
+export interface BuildingDevice {
+  id: string;
+  name: string;
+  protocol: BuildingProtocol;
+  address: string;
+  room?: string | null;
+  template?: string | null;
+  points: BuildingPoint[];
+  [k: string]: unknown;
+}
+
+export interface BuildingReading {
+  value: BuildingValue | null;
+  error: string | null;
+}
+
+export interface BuildingWriteResult {
+  applied: boolean;
+  live_writes: boolean;
+  readback?: BuildingReading | null;
+}
+
+async function buildingJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await authFetch(`${BASE}/api/building${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+  });
+  if (res.status === 204) return undefined as T;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(
+      data.error || data.message || `Device gateway request failed (${res.status})`,
+    ) as Error & { code?: string; status?: number };
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
+  }
+  return data as T;
+}
+
+export async function listBuildingDevices(): Promise<BuildingDevice[]> {
+  return (await buildingJson<{ devices: BuildingDevice[] }>("/devices")).devices;
+}
+
+export async function readBuildingValues(
+  id: string,
+): Promise<{ read_at: string; values: Record<string, BuildingReading> }> {
+  return buildingJson(`/devices/${encodeURIComponent(id)}/values`);
+}
+
+export async function writeBuildingPoint(
+  id: string,
+  pointId: string,
+  value: BuildingValue,
+): Promise<BuildingWriteResult> {
+  return buildingJson(
+    `/devices/${encodeURIComponent(id)}/points/${encodeURIComponent(pointId)}/write`,
+    { method: "POST", body: JSON.stringify({ value }) },
+  );
+}
+
+export async function saveBuildingDevice(
+  id: string,
+  device: Record<string, unknown>,
+): Promise<BuildingDevice> {
+  return buildingJson(`/devices/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(device),
+  });
+}
+
+export async function deleteBuildingDevice(id: string): Promise<void> {
+  await buildingJson(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function discoverBuildingDevices(
+  protocol: "bacnet" | "knx",
+): Promise<Record<string, unknown>[]> {
+  return (
+    await buildingJson<{ found: Record<string, unknown>[] }>("/discover", {
+      method: "POST",
+      body: JSON.stringify({ protocol }),
+    })
+  ).found;
+}
+
 // ── WARP-2981 (ADR-059 P6, §3.8): the Security wall ──
 // /security/wall reads only what /security already shows this viewer — each
 // read their own DS-005 projection, view level, never a write — and every read

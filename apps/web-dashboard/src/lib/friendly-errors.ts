@@ -591,7 +591,7 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     department_not_found:
       "That department isn't available anymore. Refresh and try again.",
     department_not_assignable:
-      "Household can't own work — it's the group everyone is already in. Pick a department or a team.",
+      "Workspace can't own work — it's the group everyone is already in. Pick a department or a team.",
     department_archived:
       "That department has been archived, so new work can't be assigned to it. Pick another one, or restore it first.",
     invalid_request:

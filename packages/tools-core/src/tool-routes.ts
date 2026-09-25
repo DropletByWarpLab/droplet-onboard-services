@@ -222,6 +222,15 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
     admit("post", "/api/matter/rooms"),
     admit("patch", "/api/matter/devices/:nodeId/alias"),
   ] },
+  { tool: "get_building_devices", client: "orchestrator", hops: [
+    admit("get", "/api/building/devices"),
+    admit("get", "/api/building/devices/:id"),
+    admit("get", "/api/building/devices/:id/values"),
+  ] },
+  { tool: "set_building_point", client: "orchestrator", hops: [
+    admit("get", "/api/building/devices/:id"),
+    admit("post", "/api/building/devices/:id/points/:pointId/write"),
+  ] },
 
   // ── cameras ─────────────────────────────────────────────────────────────
   { tool: "list_cameras", client: "orchestrator", hops: [admit("get", "/api/cameras")] },

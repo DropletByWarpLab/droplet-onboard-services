@@ -11,7 +11,8 @@
  * WARP-2980 PR-B (spec D18): expected activity past its `expiresAt` is
  * expired on every tick, zone or not, each with one system audit after its
  * own commit; a failed audit is rethrown only once the tick has finished —
- * `lastOkAt` set, `lastError` untouched.
+ * `lastOkAt` set, `lastError` untouched — and so is the step's own throw,
+ * which the row shows in its own words (`expiryError`; review #2369).
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -203,9 +204,43 @@ describe("tickSecurityBaselines — expected activity past its expiresAt ends (W
     await expect(tickSecurityBaselines(f.prisma, NOW_T, deps(TZ))).rejects.toThrow("chain down");
     expect(h.record).toHaveBeenCalledTimes(2);
     expect(w.suppressions.map((r) => r.state)).toEqual(["expired", "expired"]);
-    expect(baselineHealthState()).toMatchObject({ lastOkAt: NOW_T, lastError: null });
+    // The step completed: a failed audit is the canary's, never the row's.
+    expect(baselineHealthState()).toMatchObject({ lastOkAt: NOW_T, lastError: null, expiryError: null });
     // The tick's other work still ran after the expiry step.
     expect(f.jobState.findUnique).toHaveBeenCalled();
+  });
+
+  // Review #2369: the step's OWN throw, not an audit's.
+  const registered = () => ({ ...baselineHealthState(), registeredAt: new Date(NOW_T.getTime() - 60 * 60_000) });
+  const dbDown = () => Object.assign(new Error("Can't reach database server"), { code: "P1001" });
+
+  it("the step itself throws (a database error): the tick runs on, lastError untouched, the row says so in expiry words, the throw is rethrown once the tick is done — and the next tick that completes the step clears it", async () => {
+    const w = world({ suppressions: [due("s1")] });
+    const f = fakePrisma(w);
+    const err = dbDown();
+    f.suppression.findMany.mockRejectedValueOnce(err);
+    await expect(tickSecurityBaselines(f.prisma, NOW_T, deps(TZ))).rejects.toBe(err);
+    expect(f.jobState.findUnique).toHaveBeenCalled();
+    expect(baselineHealthState()).toMatchObject({ lastOkAt: NOW_T, lastError: null, expiryError: { at: NOW_T, message: "the database couldn't be read" } });
+    expect(patternsHealthRow(registered(), db(), ALL, NOW_T)).toMatchObject({
+      state: "down",
+      detail: "Couldn't record that expected activity ended: the database couldn't be read",
+    });
+
+    const next = new Date(NOW_T.getTime() + 60_000);
+    await tickSecurityBaselines(f.prisma, next, deps(TZ));
+    expect(w.suppressions[0]!.state).toBe("expired");
+    expect(baselineHealthState()).toMatchObject({ lastOkAt: next, lastError: null, expiryError: null });
+  });
+
+  it("…and a later step's throw still wins: lastError is set, and that error is the one thrown", async () => {
+    const f = fakePrisma(world({ suppressions: [due("s1")] }));
+    const later = new Error("job state unreadable");
+    f.suppression.findMany.mockRejectedValueOnce(dbDown());
+    f.jobState.findUnique.mockRejectedValueOnce(later);
+    await expect(tickSecurityBaselines(f.prisma, NOW_T, deps(TZ))).rejects.toBe(later);
+    expect(baselineHealthState()).toMatchObject({ lastOkAt: null, lastError: { at: NOW_T, message: "something went wrong" } });
+    expect(patternsHealthRow(registered(), db(), ALL, NOW_T).detail).toBe("Couldn't check which cameras Droplet can hear: something went wrong");
   });
 
   it("a row removed between the read and the CAS is not expired and not audited", async () => {
@@ -586,6 +621,24 @@ describe("patternsHealthRow — every state (§6.14)", () => {
       db({ timezone: null }),
       ALL,
       { state: "down", detail: "Hasn't checked which cameras Droplet can hear for 5 minutes" },
+    ],
+    [
+      "WARP-2980 D18: the expiry step threw; the tick ran on",
+      running({ expiryError: { at: NOW, message: "the database couldn't be read" } }),
+      db(),
+      ALL,
+      { state: "down", detail: "Couldn't record that expected activity ended: the database couldn't be read" },
+    ],
+    [
+      "…a tick that failed after it is still the tick's words",
+      running({
+        lastOkAt: new Date(NOW.getTime() - 90_000),
+        lastError: { at: new Date(NOW.getTime() - 30_000), message: "something went wrong" },
+        expiryError: { at: new Date(NOW.getTime() - 30_000), message: "the database couldn't be read" },
+      }),
+      db(),
+      ALL,
+      { state: "down", detail: "Couldn't check which cameras Droplet can hear: something went wrong" },
     ],
     ["the rows couldn't be read", running(), null, ALL, { state: "down", detail: "Couldn't read what normal looks like" }],
     ["no zone", running(), db({ timezone: null }), ALL, { state: "not_configured", detail: "Needs the site's timezone. Set the opening hours to choose it." }],

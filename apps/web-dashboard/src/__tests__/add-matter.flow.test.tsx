@@ -55,7 +55,7 @@ describe("AddMatterDevicePage — three-state flow", () => {
 
   it("renders the scan phase initially with the manual-entry input", async () => {
     render(<AddMatterDevicePage />);
-    expect(screen.getByText(/add a smart device/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^add a device$/i })).toBeInTheDocument();
     // The scanner is lazy-loaded via next/dynamic (WARP-102), so the
     // manual-entry input lands a tick after first render — findBy, not getBy.
     expect(

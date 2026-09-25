@@ -32,7 +32,7 @@ export const KIND_LABELS: Record<ActivityKind, string> = {
   file: "Files",
   camera: "Cameras",
   network: "Network",
-  smart_home: "Smart devices",
+  smart_home: "Device control",
   email: "Email",
   auth: "Sign-in & accounts",
   tool_run: "Tool run",

@@ -318,7 +318,7 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
   {
     moduleId: "smart_home",
     label: "Devices",
-    description: "Smart-home devices and rooms",
+    description: "Device control: devices and rooms",
     locks: true,
     levels: [
       { value: "view", label: "View", grants: "Devices and history" },
@@ -596,7 +596,7 @@ export interface ToolDomainGroup {
 export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "network", label: "Network", domains: ["network"], feature: "network" },
   { id: "files", label: "Files", domains: ["files"], feature: "files" },
-  { id: "smart-home", label: "Smart-home", domains: ["smart-home"], feature: "smart_home", locks: true },
+  { id: "smart-home", label: "Device control", domains: ["smart-home"], feature: "smart_home", locks: true },
   { id: "cameras", label: "Cameras", domains: ["cameras"], feature: "cameras" },
   { id: "switch", label: "Switch", domains: ["switch"], feature: "managed_switch" },
   {

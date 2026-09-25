@@ -1765,6 +1765,10 @@ EOF
   # WARP-850: matter-controller is the 4th host-net service on the ladder
   # (:8083) — same WARP-806 reasoning as the three above.
   upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
+  # device-gateway is the 5th host-net service on the ladder (:8084,
+  # network_mode: host for BACnet Who-Is UDP broadcast + KNX multicast) —
+  # same WARP-806 reasoning as the four above.
+  upsert_env DEVICE_GATEWAY_URL "http://${bridge_gw}:8084"
   # WARP-895: hand the Droplet AP's SSID (and an operator-set PSK, if any)
   # to the Matter controller so BLE-first Matter devices can join the LAN.
   # SSID matches the AP written above (~line 201).
@@ -1800,5 +1804,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE/DEVICE_GATEWAY URLs → ${bridge_net} gateway ${bridge_gw})"
 }
