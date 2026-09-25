@@ -70,6 +70,11 @@ import {
   fetchShares,
   createShare,
 } from "@/lib/api";
+import {
+  isFilesUnavailableError,
+  FILES_UNAVAILABLE_TITLE,
+  FILES_UNAVAILABLE_HINT,
+} from "@/lib/files-unavailable";
 import { authFetch, useAuth } from "@/lib/auth";
 // WARP-1944 — display-only space naming for the breadcrumb root crumb, the
 // same mapping the SpaceSwitcher's tabs render with (WARP-1808).
@@ -420,7 +425,11 @@ export default function FilesPage() {
   // status in the thrown message) — not merely to being below root, so a
   // transient failure deep inside a healthy, registered drive never claims
   // the drive "isn't connected".
+  // WARP-3076 — the box marked the listing degraded: the file service is
+  // down, so neither "empty" nor "drive not connected" is true.
+  const filesUnavailable = isFilesUnavailableError(listingError);
   const driveNotConnected =
+    !filesUnavailable &&
     !!listingError &&
     currentPath !== "/" &&
     /\b404\b/.test(
@@ -1672,17 +1681,21 @@ export default function FilesPage() {
                   style={{ color: "var(--text-muted)" }}
                 >
                   <p className="type-subheadline mb-1">
-                    {driveNotConnected
-                      ? "This drive isn't connected to the file browser yet"
-                      : "We couldn't load your files"}
+                    {filesUnavailable
+                      ? FILES_UNAVAILABLE_TITLE
+                      : driveNotConnected
+                        ? "This drive isn't connected to the file browser yet"
+                        : "We couldn't load your files"}
                   </p>
                   <p
                     className="type-caption-1 mb-3"
                     style={{ color: "var(--text-faint)" }}
                   >
-                    {driveNotConnected
-                      ? "Its files will show up here once it finishes connecting. Try again in a moment."
-                      : "Something interrupted the connection. Try again in a moment."}
+                    {filesUnavailable
+                      ? FILES_UNAVAILABLE_HINT
+                      : driveNotConnected
+                        ? "Its files will show up here once it finishes connecting. Try again in a moment."
+                        : "Something interrupted the connection. Try again in a moment."}
                   </p>
                   <button
                     type="button"

@@ -2122,6 +2122,9 @@ export interface HealthResponse {
     // service is up — stays true in simulated mode too (no physical
     // device); /display/status surfaces the backend if needed.
     display: boolean;
+    // WARP-3052 — file service (Nextcloud) reachability. Informational: it
+    // never affects `status`. Optional: older boxes don't send it.
+    nextcloud?: boolean;
   };
 }
 
