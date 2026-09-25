@@ -281,8 +281,9 @@ export async function loadPatternContextSafe(prisma: Parameters<typeof loadPatte
  * The cap applies AFTER both filters (review #2369): pages in
  * id order until PATTERN_K_CAP rows match or the rows run out, so rows outside
  * the area never use it up. The filters stay in TypeScript — `matchAreasForEvent`
- * is the one matcher, and `labels[0]` has no Prisma filter. Reaching
- * PATTERN_K_SCAN_CEILING first returns null: volume is not judged for this event.
+ * is the one matcher, and `labels[0]` has no Prisma filter. Rows still unread
+ * after PATTERN_K_SCAN_CEILING return null: volume is not judged for this event.
+ * Rows that run out exactly at the ceiling are a known k.
  */
 export async function countSlotDetections(
   prisma: Pick<PrismaClient, "securityEvent">,
@@ -306,17 +307,20 @@ export async function countSlotDetections(
       },
       select: { id: true, source: true, kind: true, camera: true, cameraZones: true, labels: true },
       orderBy: { id: "asc" },
-      take: PATTERN_K_CAP,
+      // One row past the page says whether any remain, so a scan that runs out exactly at the ceiling still knows k.
+      take: PATTERN_K_CAP + 1,
     });
-    k += page.filter(inKey).length;
+    const more = page.length > PATTERN_K_CAP;
+    const rows = more ? page.slice(0, PATTERN_K_CAP) : page;
+    k += rows.filter(inKey).length;
     if (k >= PATTERN_K_CAP) return PATTERN_K_CAP;
-    if (page.length < PATTERN_K_CAP) return k;
-    read += page.length;
+    if (!more) return k;
+    read += rows.length;
     if (read >= PATTERN_K_SCAN_CEILING) {
       logger.warn({ eventId: q.eventId.toString(), read, k }, "security pattern rules: k not known within the scan ceiling — volume not judged");
       return null;
     }
-    after = page[page.length - 1]!.id;
+    after = rows[rows.length - 1]!.id;
   }
 }
 
