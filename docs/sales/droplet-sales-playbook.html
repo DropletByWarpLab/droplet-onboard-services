@@ -1,0 +1,240 @@
+<title>Droplet Dental Beachhead</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f5f6fb; --surface:#ffffff; --surface-2:#eef0f7; --line:#e1e4f0;
+  --text:#1b1e2b; --muted:#5b6172; --brand:#4f46e5; --brand-soft:rgba(99,102,241,.10);
+  --good:#15803d; --good-bg:rgba(22,163,74,.10);
+  --warn:#a16207; --warn-bg:rgba(234,179,8,.14);
+  --bad:#b91c1c; --bad-bg:rgba(220,38,38,.09);
+  --display:"Bricolage Grotesque",ui-sans-serif,system-ui,sans-serif;
+  --body:"Source Sans 3",-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  color-scheme:dark;
+  --bg:#12131c; --surface:#1a1c28; --surface-2:#222536; --line:#2e3246;
+  --text:#e7e8f2; --muted:#a3a8bd; --brand:#a5b4fc; --brand-soft:rgba(129,140,248,.14);
+  --good:#4ade80; --good-bg:rgba(74,222,128,.12);
+  --warn:#facc15; --warn-bg:rgba(250,204,21,.12);
+  --bad:#f87171; --bad-bg:rgba(248,113,113,.12);
+}}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#12131c; --surface:#1a1c28; --surface-2:#222536; --line:#2e3246;
+  --text:#e7e8f2; --muted:#a3a8bd; --brand:#a5b4fc; --brand-soft:rgba(129,140,248,.14);
+  --good:#4ade80; --good-bg:rgba(74,222,128,.12);
+  --warn:#facc15; --warn-bg:rgba(250,204,21,.12);
+  --bad:#f87171; --bad-bg:rgba(248,113,113,.12);
+}
+body{background:var(--bg);color:var(--text);font:17px/1.6 var(--body);padding-inline:16px;padding-block:40px 80px}
+.wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:56px}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.15}
+h1{font-size:clamp(2rem,5vw,2.9rem);font-weight:700;letter-spacing:-.02em}
+h2{font-size:1.6rem;font-weight:700;letter-spacing:-.01em}
+h3{font-size:1.12rem;font-weight:500}
+p{margin:0;max-width:68ch}
+section{display:flex;flex-direction:column;gap:18px}
+.eyebrow{font:500 .75rem/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--brand)}
+.lede{font-size:1.2rem;color:var(--muted)}
+.muted{color:var(--muted)}
+code,.src{font-family:var(--mono);font-size:.8em}
+.src{color:var(--muted)}
+a{color:var(--brand)}
+.answer{background:var(--surface);border-radius:14px;padding:28px;display:flex;flex-direction:column;gap:14px;box-shadow:0 0 0 1px var(--line)}
+.answer .big{font-family:var(--display);font-size:1.45rem;font-weight:500;line-height:1.3;text-wrap:balance}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+.cell{background:var(--surface-2);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px}
+.cell h3{font-size:1rem}
+ul,ol{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:6px;max-width:68ch}
+.table{overflow-x:auto;background:var(--surface);border-radius:12px;box-shadow:0 0 0 1px var(--line)}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:.93rem}
+th,td{text-align:left;padding:11px 14px;vertical-align:top;border-bottom:1px solid var(--line)}
+th{font:500 .72rem/1.2 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);background:var(--surface-2)}
+tr:last-child td{border-bottom:0}
+tr.pick td{background:var(--brand-soft)}
+.pill{display:inline-block;font:500 .72rem/1 var(--mono);padding:5px 8px;border-radius:999px;white-space:nowrap}
+.hi{color:var(--good);background:var(--good-bg)} .md{color:var(--warn);background:var(--warn-bg)} .lo{color:var(--bad);background:var(--bad-bg)}
+.gates{display:flex;flex-direction:column;gap:10px}
+.gate{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;background:var(--surface);border-radius:12px;padding:16px 18px;box-shadow:0 0 0 1px var(--line)}
+.gate .pill{align-self:start;margin-top:3px}
+.gate p{font-size:.96rem}
+.quote{border-left:3px solid var(--brand);padding:4px 0 4px 16px;font-style:italic;color:var(--muted);max-width:68ch}
+.steps{counter-reset:s;list-style:none;padding:0;gap:14px}
+.steps li{counter-increment:s;display:grid;grid-template-columns:2.2em 1fr;gap:10px}
+.steps li::before{content:counter(s);font:700 1rem/1.6 var(--display);color:var(--brand)}
+.obj{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+.obj div{background:var(--surface);border-radius:12px;padding:16px 18px;box-shadow:0 0 0 1px var(--line)}
+.obj b{display:block;margin-bottom:4px}
+.foot{font-size:.88rem;color:var(--muted);border-top:1px solid var(--line);padding-top:20px}
+</style>
+
+<div class="wrap">
+
+<header style="display:flex;flex-direction:column;gap:14px">
+  <span class="eyebrow">Droplet · Go-to-market · Sept 2026</span>
+  <h1>Sell the server closet to the independent dental practice</h1>
+  <p class="lede">Built from a read of the three repos: <code>droplet-onboard-services</code> (the box), <code>DropletAgent</code> (Mac client) and <code>droplet-windows</code> (Windows client and VPN service). Every claim below is backed by a file in those repos, cited in grey.</p>
+</header>
+
+<section>
+  <div class="answer">
+    <span class="eyebrow">The customer group</span>
+    <div class="big">Independent, owner-led dental practices with 2–6 dentists and 10–40 staff, running Open Dental, Dentrix or Eaglesoft on premises, with no in-house IT and an outsourced dental-IT provider.</div>
+    <p>The owner dentist signs. The office manager uses it every day. The practice's dental-IT provider decides whether it gets installed.</p>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Why dental, from the code</span>
+  <h2>The repos already bet on this customer</h2>
+  <p>No other vertical has this much built for it. The team has been building for dentists without saying so on the cover.</p>
+  <div class="grid2">
+    <div class="cell"><h3>Practice-system connectors</h3><p>Eaglesoft is "provider #1". Dentrix and Open Dental connectors exist, and the export-drop track reads the practice's own report files with no vendor approval needed.</p><span class="src">services/erp-connector/src/ · docs/integrations/export-drop.md</span></div>
+    <div class="cell"><h3>A dental front desk</h3><p>A <code>/practice</code> dashboard reads live from the practice system. The "company brain" produces a sourced morning brief, which is what the dental discovery call asked for as "morning-huddle patient briefings".</p><span class="src">apps/web-dashboard/src/app/practice · ADR-051 · ADR-010</span></div>
+    <div class="cell"><h3>Clinical files</h3><p>An in-browser DICOM X-ray viewer sits next to document editing. A PHI model runs through the integration setup, with PHI-free audit rows.</p><span class="src">ADR-034 · docs/integrations/SETUP.md §6</span></div>
+    <div class="cell"><h3>The rest of the closet</h3><p>Router, Wi-Fi, firewall, camera recorder, file server and Matter smart-building devices. A practice buys all of these today from separate vendors.</p><span class="src">openwrt/ · FRIGATE_PARITY.md · ADR-012</span></div>
+  </div>
+  <p class="quote">"Droplet's wedge is regulated SMBs (legal, dental, real-estate, lending, healthcare) who cannot use SaaS productivity tools because the data leaves their compliance boundary." <span class="src">docs/ADR-010-pm-stack-selection.md</span></p>
+</section>
+
+<section>
+  <span class="eyebrow">Segment scorecard</span>
+  <h2>Every segment the repos name, ranked</h2>
+  <p>Fit means features built for that segment today. Pain means how badly cloud AI hurts them. Blockers are what stops a signature this quarter.</p>
+  <div class="table"><table>
+    <thead><tr><th>Segment</th><th>Fit</th><th>Pain</th><th>Blockers</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr class="pick"><td><b>Independent dental, 2–6 dentists</b><br><span class="src">ADR-010, ADR-044, erp-connector</span></td><td><span class="pill hi">High</span></td><td><span class="pill hi">High</span></td><td>BAA template, Eaglesoft legal gate (export-drop works around it)</td><td><b>Beachhead</b></td></tr>
+      <tr><td>Small lenders and mortgage brokers<br><span class="src">ADR-007 pilots</span></td><td><span class="pill md">Medium</span></td><td><span class="pill hi">High</span></td><td>No loan-system connector. GLBA questions answered by posture only</td><td>Segment 2</td></tr>
+      <tr><td>Medical and specialty clinics<br><span class="src">"Clinic / practice" preset</span></td><td><span class="pill md">Medium</span></td><td><span class="pill hi">High</span></td><td>No EHR connector. Same HIPAA gaps as dental, with more scrutiny</td><td>After dental proof</td></tr>
+      <tr><td>Law and accounting firms<br><span class="src">ADR-010; QuickBooks and Xero connectors</span></td><td><span class="pill md">Medium</span></td><td><span class="pill md">Medium</span></td><td>No practice-management or tax connector. Cloud habits are strong</td><td>Opportunistic</td></tr>
+      <tr><td>Dealerships and remodelers<br><span class="src">ADR-007 pilots</span></td><td><span class="pill md">Medium</span></td><td><span class="pill lo">Low</span></td><td>No DMS connector. The cameras and network are the pitch, not the AI</td><td>Not now</td></tr>
+      <tr><td>Photo and creative studios<br><span class="src">the photo-studio pilot box</span></td><td><span class="pill md">Medium</span></td><td><span class="pill lo">Low</span></td><td>Weak compliance pain means a weak reason to pay for on-prem</td><td>Keep as reference site</td></tr>
+      <tr><td>Retail and hospitality<br><span class="src">Shopify, Square, Loyverse connectors</span></td><td><span class="pill md">Medium</span></td><td><span class="pill lo">Low</span></td><td>Already on cloud POS. Buys on price</td><td>Not now</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <span class="eyebrow">Ideal customer profile</span>
+  <h2>Who to call, and who to skip</h2>
+  <div class="grid2">
+    <div class="cell"><h3>Firmographics</h3><ul>
+      <li>1–3 locations, 10–40 staff. The setup wizard defaults to 11–50. <span class="src">OrgStep.tsx</span></li>
+      <li>Owner dentist is still chairside and still signs checks</li>
+      <li>Not owned by a DSO. DSOs buy centrally and want SOC 2 first</li>
+    </ul></div>
+    <div class="cell"><h3>Technology</h3><ul>
+      <li>Practice system on a server in the building, not cloud-only</li>
+      <li>Microsoft 365 or Google Workspace, so SSO works on day one <span class="src">ONBOARDING_SSO_OIDC.md</span></li>
+      <li>QuickBooks for the books <span class="src">quickbooks connector</span></li>
+      <li>Old cameras, a consumer router and a NAS that "the IT guy" set up</li>
+    </ul></div>
+    <div class="cell"><h3>Trigger events</h3><ul>
+      <li>The server, NAS or recorder is due for replacement</li>
+      <li>Staff caught pasting patient notes into ChatGPT</li>
+      <li>A ransomware scare at a practice nearby, or a cyber-insurance questionnaire</li>
+      <li>Opening a second location</li>
+    </ul></div>
+    <div class="cell"><h3>Skip them if</h3><ul>
+      <li>The practice system is cloud-only (Dentrix Ascend only, Curve). Most of the box's value goes away</li>
+      <li>The buyer asks for a SOC 2 report up front. None exists yet <span class="src">compliance-progress.md</span></li>
+      <li>There is no local IT provider willing to rack the box</li>
+    </ul></div>
+  </div>
+  <h3>The buying group</h3>
+  <div class="table"><table>
+    <thead><tr><th>Role</th><th>What they care about</th><th>What to show them</th></tr></thead>
+    <tbody>
+      <tr><td><b>Owner dentist</b> (signs)</td><td>Liability, cost, not being the next breach headline</td><td>Patient data never leaves the building. One lease replaces four vendors</td></tr>
+      <tr><td><b>Office manager</b> (daily user)</td><td>Chasing unscheduled treatment, huddle prep, insurance follow-ups</td><td>The morning brief and "who has unscheduled treatment over $1,000?" asked in chat</td></tr>
+      <tr><td><b>Dental-IT provider</b> (gatekeeper)</td><td>Fewer support calls. Not being replaced</td><td>Signed updates, default-deny egress, hash-chained audit log, and a place in the deal (see Channel)</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <span class="eyebrow">Positioning</span>
+  <h2>What we say</h2>
+  <div class="answer">
+    <div class="big">"An AI office manager that knows your practice, in a box that never lets patient data leave the building. It also replaces your server, your router and your camera recorder."</div>
+  </div>
+  <ul>
+    <li><b>Lead with the morning huddle, not with security.</b> Security is why they can say yes. The daily brief is why they want it.</li>
+    <li><b>Say "stays in the building", never "HIPAA compliant".</b> HIPAA readiness, the BAA template and SOC 2 are not started. The repo's own Trust page says nothing on it is a claim yet. <span class="src">apps/web-dashboard/src/app/trust/page.tsx</span></li>
+    <li><b>Show the approval card.</b> "Reads run automatically, writes ask for a thumbs-up, destructive actions are blocked." This answers "what if the AI does something wrong?" before anyone asks. <span class="src">DropletAgent/CLAUDE.md hard rule 2</span></li>
+    <li><b>Sell consolidation.</b> The practice already pays for a server, a firewall, a recorder and backups. Price the lease against that combined line, not against a ChatGPT seat.</li>
+  </ul>
+</section>
+
+<section>
+  <span class="eyebrow">Channel</span>
+  <h2>Sell through the dental-IT provider</h2>
+  <p>ADR-042 describes the customer as "a business defined by not having an IT department". Those businesses rent one. Almost every independent practice has a regional dental-IT shop that owns the closet, and that shop can block any hardware sale. The repos have no reseller or MSP channel today.</p>
+  <ol class="steps">
+    <li><div><b>Recruit 3–5 regional dental-IT providers as installation partners.</b> They rack the box, run the setup wizard and keep the support relationship. Pay them a share of the lease for the full two-year term. <span class="src">2-year lease cycle: CLAUDE.md Foundation</span></div></li>
+    <li><div><b>Use study clubs and county dental societies for demand.</b> Run one 30-minute live demo of the morning brief, on a real box, at a monthly meeting.</div></li>
+    <li><div><b>Stay independent of Patterson and Henry Schein.</b> They own Eaglesoft and Dentrix and sell competing products. Patterson has not sanctioned direct database access. <span class="src">docs/integrations/eaglesoft.md</span></div></li>
+  </ol>
+</section>
+
+<section>
+  <span class="eyebrow">The motion</span>
+  <h2>From first call to signed lease</h2>
+  <ol class="steps">
+    <li><div><b>Discovery call, 20 minutes.</b> Ask four questions. When does your server or recorder need replacing? Who is your IT provider? Has anyone on staff used ChatGPT with patient information? How do you prepare the morning huddle today?</div></li>
+    <li><div><b>Site visit.</b> Stand up export-drop on the first visit. It is the only practice-system integration that needs no vendor approval, because the practice exports its own reports to a folder it controls. <span class="src">export-drop.md §1</span></div></li>
+    <li><div><b>30-day paid pilot.</b> The office manager gets a morning brief from the practice's own data every day. Measure one number: unscheduled treatment put back on the books.</div></li>
+    <li><div><b>Convert to the two-year lease.</b> Credit the pilot fee toward the lease. The dental-IT partner does the full install: network, cameras and file migration.</div></li>
+    <li><div><b>Reference.</b> Ask for one study-club talk by the owner. One dentist presenting to other dentists is the sales tool that matters in this market.</div></li>
+  </ol>
+  <p class="muted">The first 3 practices are design partners, not just customers. Every export-drop profile is marked unverified until someone checks it against a real export (Dentrix ships no profile). Those practices provide the real exports. Discount them in return. <span class="src">export-drop.md "Built-in profiles"</span></p>
+</section>
+
+<section>
+  <span class="eyebrow">Objections</span>
+  <h2>What they will say</h2>
+  <div class="obj">
+    <div><b>"Will you sign a BAA?"</b>Not until the template exists; that work is not started. Until then, answer with the architecture: the box is leased hardware in their building, and there are no Warp-operated servers holding their data. Have counsel write the BAA before the first dental meeting. <span class="src">compliance-progress.md · ADR-028</span></div>
+    <div><b>"We already have Microsoft 365. Why not Copilot?"</b>Copilot cannot see the practice system on the server in the back room. Droplet reads it on the LAN and still connects to their M365. <span class="src">apps/orchestrator/src/services/m365/</span></div>
+    <div><b>"My IT guy will say no."</b>Put the IT guy in the deal. He installs it, earns a share of the lease and keeps the client.</div>
+    <div><b>"Is the local AI good enough?"</b>Demo on their own data. Today's box runs a 20B model on a 16 GB card with a 16k context. Keep demos to briefs, lookups and drafts, and avoid long multi-document reasoning. <span class="src">docs/dmr-single-box.md · config.ts</span></div>
+    <div><b>"What happens when the lease ends?"</b>A new box on the 2-year cycle, with signed updates in between. The data stays theirs, encrypted at rest with a TPM-sealed key. <span class="src">docs/security/at-rest-encryption.md</span></div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Gates</span>
+  <h2>Fix these before the first signature</h2>
+  <p>These are what the repos show is missing. Each one can lose a deal.</p>
+  <div class="gates">
+    <div class="gate"><span class="pill lo">Blocker</span><p><b>Set a price.</b> The docs disagree: CLAUDE.md says a 2-year lease, while ADR-026 says a "one-time-purchase appliance". ROADMAP still lists "No defined revenue model" as a risk. Pick the lease, set a monthly figure and write the IT partner's share. <span class="src">ROADMAP.md:267 · ADR-026:38</span></p></div>
+    <div class="gate"><span class="pill lo">Blocker</span><p><b>Write a BAA template and a one-page HIPAA posture sheet.</b> Every dental buyer asks for them. The integration setup already requires a signed BAA before a real practice system is connected. <span class="src">integrations/SETUP.md §6</span></p></div>
+    <div class="gate"><span class="pill md">High</span><p><b>Verify the export-drop profiles against real exports.</b> Start with Open Dental and Eaglesoft. Dentrix needs a profile written from a real file. <span class="src">export-drop.md</span></p></div>
+    <div class="gate"><span class="pill md">High</span><p><b>Finish Windows signing.</b> Front desks run Windows. Authenticode signing is "wired, not procured", and without it remote access does not work. The installer is NSIS only, with no MSI, which IT partners deploying with Intune or group policy will ask about. <span class="src">droplet-windows/README.md · WARP-2688</span></p></div>
+    <div class="gate"><span class="pill md">High</span><p><b>Close the Eaglesoft legal question</b> (WARP-1100) before promising a live Eaglesoft connection. Until then, sell export-drop only.</p></div>
+    <div class="gate"><span class="pill hi">Later</span><p><b>Start SOC 2 Type I</b> once 5 practices are live. It opens multi-location groups and small DSOs. The compliance tracker says audits wait for customer demand, and this would be that demand. <span class="src">compliance-progress.md</span></p></div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">First 90 days</span>
+  <h2>Plan</h2>
+  <div class="table"><table>
+    <thead><tr><th>Weeks</th><th>Goal</th><th>Done when</th></tr></thead>
+    <tbody>
+      <tr><td>1–3</td><td>Price, BAA template, HIPAA posture sheet, 10-minute demo on a seeded box</td><td>A dentist can get a written quote and a BAA in one meeting</td></tr>
+      <tr><td>2–6</td><td>Sign 2 dental-IT partners in one metro area</td><td>Each partner has racked a demo box in their own office</td></tr>
+      <tr><td>4–10</td><td>3 design-partner practices on paid pilots</td><td>Open Dental and Eaglesoft profiles marked verified; a Dentrix profile exists</td></tr>
+      <tr><td>8–13</td><td>Convert pilots to leases. One study-club talk</td><td>3 signed leases and 10 qualified meetings from the talk</td></tr>
+    </tbody>
+  </table></div>
+  <p>After dental works, go to <b>small lenders and mortgage brokers</b>. They have the same pain (regulated data, no IT department), they are already in the pilot list, and the playbook carries over once a loan-system connector exists.</p>
+</section>
+
+<p class="foot">Sources: repo reads of droplet-onboard-services (main at 8d7a224), DropletAgent and droplet-windows on 2026-09-25. No price, customer count or market size appears in the repos, so none is given here. The April 2026 GTM strategy document is not in the repos and was not used.</p>
+
+</div>
