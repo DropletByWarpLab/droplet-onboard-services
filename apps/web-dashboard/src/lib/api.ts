@@ -167,6 +167,11 @@ import type {
   SecurityZonePatchBody,
   SecurityZonesResponse,
   SecurityZoneWriteResult,
+  SecurityAiSettingsBody,
+  SecurityAiSettingsView,
+  SecurityAiSettingsWriteResult,
+  SecurityLinkDecisionResult,
+  SecurityLinkProposalsView,
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
@@ -9275,6 +9280,43 @@ export function putSecurityZoneLinks(id: string, body: SecurityZoneLinksBody): P
     `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/links`,
     jsonBody("PUT", body),
   );
+}
+
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+export const SECURITY_LINK_PROPOSALS_PATH = "/api/security/link-proposals";
+export const SECURITY_LINKS_PATH = "/api/security/links";
+export const SECURITY_AI_SETTINGS_PATH = "/api/security/ai-settings";
+
+/** 23 (view; the list is filled only at manage) — Droplet's open suggestions. */
+export function getSecurityLinkProposals(): Promise<SecurityLinkProposalsView> {
+  return securityFetch<SecurityLinkProposalsView>(`${BASE}${SECURITY_LINK_PROPOSALS_PATH}`);
+}
+
+/** 24 (manage) — add Droplet's suggestion, or Keep a link Droplet made. */
+export function acceptSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/accept`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 25 (manage) — Not this (a suggestion), or Undo (a link Droplet made). Final: Droplet never suggests it again. */
+export function rejectSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/reject`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 26 (view) — what Droplet's AI may do in Security. */
+export function getSecurityAiSettings(): Promise<SecurityAiSettingsView> {
+  return securityFetch<SecurityAiSettingsView>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`);
+}
+
+/** 27 (manage) — change it; `expectedVersion` from the last read (409 VERSION_CONFLICT otherwise). */
+export function putSecurityAiSettings(body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> {
+  return securityFetch<SecurityAiSettingsWriteResult>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`, jsonBody("PUT", body));
 }
 
 /** 13 (manage) — set or clear the weekly hours. */

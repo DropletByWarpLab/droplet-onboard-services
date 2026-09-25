@@ -83,7 +83,7 @@ const AT = "2026-09-23T10:00:00.000Z";
 const RAW_SERVER_MESSAGE = "prisma P2034 write conflict on SecurityZone row";
 
 function link(id: string, sourceKind: SecurityZoneLinkView["sourceKind"], sourceRef: string, label: string): SecurityZoneLinkView {
-  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT };
+  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT, origin: "person", setBy: "person", evidence: null };
 }
 
 const FRONT: SecurityZoneView = {

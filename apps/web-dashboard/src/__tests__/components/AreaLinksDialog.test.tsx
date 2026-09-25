@@ -23,7 +23,7 @@ import type { SecuritySourcesView, SecurityZoneLinkView, SecurityZoneView } from
 const AT = "2026-09-23T10:00:00.000Z";
 
 function link(id: string, sourceKind: SecurityZoneLinkView["sourceKind"], sourceRef: string, label: string): SecurityZoneLinkView {
-  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT };
+  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT, origin: "person", setBy: "person", evidence: null };
 }
 
 const SOURCES: SecuritySourcesView = {

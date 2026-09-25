@@ -33,10 +33,25 @@
  * `"nameKey" = lower(btrim("name"))`, and JS `toLowerCase` disagrees with
  * Postgres `lower()` on real names ('İstanbul', a final sigma), which would
  * turn those names into CHECK violations.
+ *
+ * WARP-2979 (ADR-059 P4 §6.5, §6.7.1) — Droplet's links. A link row now says
+ * who created it (`origin`, immutable) and who set its current state
+ * (`stateSetBy`), both explicit enums with NO database default: every writer
+ * names both (a person's route-12 write is `person`/`person`). What reads
+ * them:
+ *   · `ActiveZoneLink.setBy` — P3's area choice and alert codes take only
+ *     links a PERSON made or kept (`personLinked`, `buildZoneIndex`'s
+ *     `personOnly`): a link Droplet activated on its own groups events into
+ *     its area (context) but never makes an alert by itself;
+ *   · the states `proposed` (Droplet's suggestion) and `rejected` (a person
+ *     said no, or undid Droplet's link) are final-for-Droplet memory, like
+ *     `removed`; `loadActiveLinks` and every read-time match still read
+ *     `active` only.
  */
 import type {
   Prisma,
   PrismaClient,
+  SecurityLinkActor,
   SecurityZoneKind,
   SecurityZoneLinkState,
   SecurityZoneSourceKind,
@@ -61,6 +76,13 @@ export interface ActiveZoneLink {
   sourceKind: SecurityZoneSourceKind;
   /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
   sourceRef: string;
+  /**
+   * WARP-2979 — who set the link's current (active) state: `person` for a link
+   * a person made or kept, `droplet` for one Droplet activated on its own
+   * ("Linked by Droplet"). Only `person` links anchor Droplet's suggestions
+   * and make alerts (§6.7.1).
+   */
+  setBy: SecurityLinkActor;
 }
 
 /** What a link points at. PR-2 widens this with `{nodeId, endpointId}` for `lock`. */
@@ -102,19 +124,32 @@ export interface DesiredZoneLink {
   sourceRef: string;
 }
 
-/** A link row as stored, active or removed. */
+/** A link row as stored, in any state (WARP-2979: active, removed, proposed or rejected). */
 export interface ExistingZoneLink extends DesiredZoneLink {
   id: string;
   state: SecurityZoneLinkState;
+  /** WARP-2979 — who created the row. */
+  origin: SecurityLinkActor;
+  /** WARP-2979 — who set its current state. */
+  stateSetBy: SecurityLinkActor;
 }
 
-/** Route 12's diff. Its three lists are the `zone.links` audit refs (as ref strings). */
+/**
+ * Route 12's diff. Its lists are the `zone.links` audit refs (as ref strings).
+ * Every write it plans is a PERSON's: `stateSetBy = person` (§6.5's table).
+ */
 export interface ZoneLinkDiff {
-  /** Refs this area never had → create `active`. */
+  /** Refs this area never had → create `active`, origin person. */
   added: DesiredZoneLink[];
-  /** `removed` rows asked for again → back to `active`. */
+  /** `removed` (and, WARP-2979, `rejected`) rows asked for again → back to `active`. */
   reactivated: ExistingZoneLink[];
-  /** `active` rows no longer asked for → `removed` (decidedById, stateChangedAt). */
+  /**
+   * WARP-2979 — Droplet's `proposed` rows the person ticked and saved →
+   * `active`, stateSetBy person. A suggestion NOT in the desired set is left
+   * alone (routes 24/25 decide suggestions, never a save).
+   */
+  accepted: ExistingZoneLink[];
+  /** `active` rows (any origin or setter) no longer asked for → `removed`, stateSetBy person. */
   removed: ExistingZoneLink[];
 }
 
@@ -179,6 +214,7 @@ export async function loadActiveLinks(
       zoneId: true,
       sourceKind: true,
       sourceRef: true,
+      stateSetBy: true,
       zone: { select: { name: true, kind: true } },
     },
     orderBy: [{ zoneId: "asc" }, { sourceKind: "asc" }, { sourceRef: "asc" }],
@@ -190,6 +226,7 @@ export async function loadActiveLinks(
     zoneKind: r.zone.kind,
     sourceKind: r.sourceKind,
     sourceRef: r.sourceRef,
+    setBy: r.stateSetBy,
   }));
 }
 
@@ -309,9 +346,21 @@ export function zoneEventWhere(
   return arms.length === 0 ? "none" : { OR: arms };
 }
 
+/** WARP-2979 — `buildZoneIndex`'s options. */
+export interface ZoneIndexOptions {
+  /**
+   * Only links a PERSON made or kept (`setBy = 'person'`) — the index
+   * `camera_offline_during_activity` matches activity against (§6.7.2), so a
+   * link Droplet activated on its own can never put someone "in" an area for
+   * an alert. A link with no `setBy` is left out (fail closed).
+   */
+  personOnly?: boolean;
+}
+
 /** Build the matcher index from the viewer's visible links of visible areas. */
 export function buildZoneIndex(
-  links: readonly Pick<ActiveZoneLink, "zoneId" | "sourceKind" | "sourceRef">[],
+  links: readonly (Pick<ActiveZoneLink, "zoneId" | "sourceKind" | "sourceRef"> & { setBy?: SecurityLinkActor })[],
+  opts: ZoneIndexOptions = {},
 ): ZoneIndex {
   const byCamera = new Map<string, string[]>();
   const byCameraZone = new Map<string, Map<string, string[]>>();
@@ -321,6 +370,7 @@ export function buildZoneIndex(
     else if (!ids.includes(zoneId)) ids.push(zoneId);
   };
   for (const l of links) {
+    if (opts.personOnly && l.setBy !== "person") continue;
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
     if (!parsed) continue;
     if (parsed.frigateZone === null) {
@@ -349,6 +399,24 @@ export function zonesForEvent(row: ZoneMatchableEvent, index: ZoneIndex): string
   return [...out].sort(byString);
 }
 
+/** One active area an event matched (`matchAreasForEvent`). */
+export interface ZoneEventMatch {
+  zoneId: string;
+  zoneName: string;
+  zoneKind: SecurityZoneKind;
+  /** The area's active link ids that matched this event, sorted. */
+  linkIds: string[];
+  /** `part` when a part-of-view (camera_zone) link matched, else `whole`. */
+  specificity: "part" | "whole";
+  /**
+   * WARP-2979 (§6.7.1) — true when ANY matching link was made or kept by a
+   * person (`setBy = 'person'`). An area matched only through links Droplet
+   * activated on its own is context: it groups, it never alerts, and P3's
+   * area choice ranks it below every person-linked area.
+   */
+  personLinked: boolean;
+}
+
 /**
  * WARP-2978 (ADR-059 P3 spec §6.2) — every active area one row matches, from
  * ALL active links (never viewer-filtered: the incident engine groups for
@@ -359,24 +427,13 @@ export function zonesForEvent(row: ZoneMatchableEvent, index: ZoneIndex): string
  * plus, per area, the link ids that matched and whether a part-of-view link
  * did (`specificity`, for the engine's rank). Sorted by zone id; link ids
  * sorted. A property test pins that the zone ids agree with `zonesForEvent`.
+ * WARP-2979: plus whether a person-set link matched (`personLinked`).
  */
-export function matchAreasForEvent(
-  row: ZoneMatchableEvent,
-  links: readonly ActiveZoneLink[],
-): Array<{
-  zoneId: string;
-  zoneName: string;
-  zoneKind: SecurityZoneKind;
-  linkIds: string[];
-  specificity: "part" | "whole";
-}> {
+export function matchAreasForEvent(row: ZoneMatchableEvent, links: readonly ActiveZoneLink[]): ZoneEventMatch[] {
   if (row.camera === null) return [];
   const isStatus = (CAMERA_STATUS_KINDS as readonly string[]).includes(row.kind);
   const isDetection = (DETECTION_KINDS as readonly string[]).includes(row.kind);
-  const byZone = new Map<
-    string,
-    { zoneId: string; zoneName: string; zoneKind: SecurityZoneKind; linkIds: string[]; specificity: "part" | "whole" }
-  >();
+  const byZone = new Map<string, ZoneEventMatch>();
   for (const l of links) {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
     if (!parsed || parsed.camera !== row.camera) continue;
@@ -385,11 +442,12 @@ export function matchAreasForEvent(
     if (!matched) continue;
     let m = byZone.get(l.zoneId);
     if (!m) {
-      m = { zoneId: l.zoneId, zoneName: l.zoneName, zoneKind: l.zoneKind, linkIds: [], specificity: "whole" };
+      m = { zoneId: l.zoneId, zoneName: l.zoneName, zoneKind: l.zoneKind, linkIds: [], specificity: "whole", personLinked: false };
       byZone.set(l.zoneId, m);
     }
     m.linkIds.push(l.linkId);
     if (parsed.frigateZone !== null) m.specificity = "part";
+    if (l.setBy === "person") m.personLinked = true;
   }
   return [...byZone.values()]
     .map((m) => ({ ...m, linkIds: [...new Set(m.linkIds)].sort(byString) }))
@@ -398,14 +456,21 @@ export function matchAreasForEvent(
 
 const linkKey = (l: DesiredZoneLink): string => `${l.sourceKind}\u0000${l.sourceRef}`;
 
-/** Route 12: requested links vs stored ones (deduped by `sourceKind` + `sourceRef`). */
+/**
+ * Route 12: requested links vs stored ones (deduped by `sourceKind` + `sourceRef`).
+ *
+ * WARP-2979 S0: the signature carries `accepted`; slice R fills in §6.5's
+ * table (a `proposed` row in the desired set → `accepted`, a `rejected` one →
+ * `reactivated`). Until then both are left exactly as before P4 — no such
+ * rows exist before the proposal job writes them.
+ */
 export function diffZoneLinks(
   existing: readonly ExistingZoneLink[],
   desired: readonly DesiredZoneLink[],
 ): ZoneLinkDiff {
   const stored = new Map(existing.map((e) => [linkKey(e), e]));
   const wanted = new Set<string>();
-  const diff: ZoneLinkDiff = { added: [], reactivated: [], removed: [] };
+  const diff: ZoneLinkDiff = { added: [], reactivated: [], accepted: [], removed: [] };
   for (const d of desired) {
     const key = linkKey(d);
     if (wanted.has(key)) continue;
@@ -1032,7 +1097,7 @@ export async function replaceZoneLinks(
     visibleLinks(
       await client.securityZoneLink.findMany({
         where: { zoneId: id },
-        select: { id: true, sourceKind: true, sourceRef: true, state: true },
+        select: { id: true, sourceKind: true, sourceRef: true, state: true, origin: true, stateSetBy: true },
         orderBy: [{ sourceKind: "asc" }, { sourceRef: "asc" }],
       }),
       sources.scope,
@@ -1087,6 +1152,9 @@ export async function replaceZoneLinks(
             sourceRef: l.sourceRef,
             sourceLabel: labelFor(l),
             state: "active" as const,
+            // WARP-2979 — a person made it: both explicit, no database default.
+            origin: "person" as const,
+            stateSetBy: "person" as const,
             createdById: actorId,
             stateChangedAt: ctx.now,
           })),
@@ -1096,13 +1164,15 @@ export async function replaceZoneLinks(
         // One row at a time: each gets its own fresh label snapshot.
         await tx.securityZoneLink.updateMany({
           where: { id: l.id, state: "removed" },
-          data: { state: "active", sourceLabel: labelFor(l), decidedById: actorId, stateChangedAt: ctx.now },
+          data: { state: "active", stateSetBy: "person", sourceLabel: labelFor(l), decidedById: actorId, stateChangedAt: ctx.now },
         });
       }
       if (diff.removed.length > 0) {
         await tx.securityZoneLink.updateMany({
           where: { id: { in: diff.removed.map((l) => l.id) }, state: "active" },
-          data: { state: "removed", decidedById: actorId, stateChangedAt: ctx.now },
+          // WARP-2979 — `removed` is always a person's (CHECK SecurityZoneLink_origin_shape),
+          // including a person unticking a link Droplet activated on its own.
+          data: { state: "removed", stateSetBy: "person", decidedById: actorId, stateChangedAt: ctx.now },
         });
       }
       const after = await tx.securityZone.findUnique({ where: { id }, select: ZONE_SELECT });
@@ -1124,4 +1194,26 @@ export async function replaceZoneLinks(
     if (err instanceof NoLinkChange) return { zone, changed: false };
     throw err;
   }
+}
+
+// ── WARP-2979: retention of Droplet's link evidence (§6.16) ───────────────
+
+/**
+ * Link evidence SAMPLES are presence data (when someone stood at a door).
+ * Runs in the 03:50 retention leg right after `trimSecurityEvents` and P3's
+ * `trimSecurityIncidents`, with THE SAME `before` (now − 30 d): for every
+ * `origin = droplet` row whose `evidence.samples` has an `anchorAt` or
+ * `hitAt` before `before`, rewrite `evidence` without those samples and set
+ * `samplesTrimmedBefore`. The aggregates stay (they name no moment). Rows are
+ * never deleted.
+ *
+ * S0 stub — slice R builds it; until then it trims nothing.
+ */
+export async function trimLinkEvidence(
+  prisma: Pick<PrismaClient, "securityZoneLink">,
+  before: Date,
+): Promise<{ trimmed: number }> {
+  void prisma;
+  void before;
+  return { trimmed: 0 };
 }

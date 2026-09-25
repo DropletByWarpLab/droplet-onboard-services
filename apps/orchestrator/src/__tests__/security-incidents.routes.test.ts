@@ -869,8 +869,8 @@ describe("review A — incident events carry `zones`, like feed rows (the viewer
       { id: YARD, name: "Yard", nameKey: "yard", kind: "perimeter", state: "active", version: 0 },
     );
     f.world.securityZoneLink.push(
-      { id: "lt1", zoneId: TILL, sourceKind: "camera", sourceRef: "front", sourceLabel: "Front door", state: "active" },
-      { id: "ly1", zoneId: YARD, sourceKind: "camera", sourceRef: "back", sourceLabel: "Back camera", state: "active" },
+      { id: "lt1", zoneId: TILL, sourceKind: "camera", sourceRef: "front", sourceLabel: "Front door", state: "active", origin: "person", stateSetBy: "person" },
+      { id: "ly1", zoneId: YARD, sourceKind: "camera", sourceRef: "back", sourceLabel: "Back camera", state: "active", origin: "person", stateSetBy: "person" },
     );
     const ev = (id: bigint, camera: string) => ({
       id, source: "frigate", kind: "detection", severity: "info", camera, sourceRef: `${camera}/${id}.5-a`, dedupeKey: `z:${id}`,

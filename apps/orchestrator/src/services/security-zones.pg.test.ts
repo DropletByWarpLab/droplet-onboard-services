@@ -143,6 +143,8 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
           sourceRef: l.sourceRef,
           sourceLabel: l.sourceRef,
           state: l.state ?? "active",
+          origin: "person" as const,
+          stateSetBy: "person" as const,
         })),
       });
     }
@@ -265,6 +267,7 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
               zoneKind: "interior",
               sourceKind: whole ? "camera" : "camera_zone",
               sourceRef: whole ? camera : `${camera}/${pick(r, PARTS)}`,
+              setBy: "person",
             });
           }
         }

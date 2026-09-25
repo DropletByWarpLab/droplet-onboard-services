@@ -10,7 +10,9 @@
  * that is quiet apart from one that is not being fed.
  *
  * WARP-2977 P2b adds the areas, sources, site-mode and opening-hours hooks
- * (bottom of the file). Each returns its OWN `mutate`, and each write helper
+ * (bottom of the file). WARP-2979 (P4) adds Droplet's suggestions and the
+ * decisions on its links (`useLinkProposals`) and the AI settings
+ * (`useAiSettings`). Each returns its OWN `mutate`, and each write helper
  * throws the apiFetch TypedError for the caller to render with
  * `translateError(err, "security")`. None of them can reach the feed's
  * useSWRInfinite keys — after a write that changes feed rows (a mode change,
@@ -20,6 +22,13 @@ import { useCallback, useMemo } from "react";
 import useSWR, { useSWRConfig, type Revalidator, type RevalidatorOptions } from "swr";
 import useSWRInfinite from "swr/infinite";
 import {
+  SECURITY_AI_SETTINGS_PATH,
+  SECURITY_LINK_PROPOSALS_PATH,
+  acceptSecurityLink,
+  getSecurityAiSettings,
+  getSecurityLinkProposals,
+  putSecurityAiSettings,
+  rejectSecurityLink,
   SECURITY_ALERT_ROUTING_PATH,
   SECURITY_HOURS_PATH,
   SECURITY_INCIDENTS_PATH,
@@ -65,6 +74,11 @@ import {
   type SecurityEventsQuery,
 } from "@/lib/api";
 import type {
+  SecurityAiSettingsBody,
+  SecurityAiSettingsView,
+  SecurityAiSettingsWriteResult,
+  SecurityLinkDecisionResult,
+  SecurityLinkProposalsView,
   AlertRoutingPerson,
   AlertRoutingSetBody,
   AlertRoutingView,
@@ -705,4 +719,87 @@ export function useAlertRouting() {
   );
 
   return { routing: data ?? null, error: error as Error | undefined, isLoading, refresh: () => mutate(), set };
+}
+
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+/**
+ * GET /api/security/link-proposals — Droplet's open suggestions (filled only
+ * at manage; below it the list is empty, never refused) plus the linking
+ * setting. `accept` (route 24: Add it / Keep) and `reject` (route 25: Not
+ * this / Undo) are manage-level intents on the link's CURRENT state; each
+ * refreshes every area list (a decision moves an area's links and version),
+ * the sources' link statuses and this list. Both throw the typed error for
+ * `translateError(err, "security")`.
+ */
+export function useLinkProposals() {
+  const { mutate: globalMutate } = useSWRConfig();
+  const { data, error, isLoading, mutate } = useSWR<SecurityLinkProposalsView>(
+    SECURITY_LINK_PROPOSALS_PATH,
+    () => getSecurityLinkProposals(),
+    { shouldRetryOnError: false },
+  );
+
+  const settle = useCallback(async () => {
+    await Promise.all([mutate(), globalMutate(isZonesKey), globalMutate(SECURITY_SOURCES_PATH)]);
+  }, [mutate, globalMutate]);
+
+  const accept = useCallback(
+    async (linkId: string): Promise<SecurityLinkDecisionResult> => {
+      const r = await acceptSecurityLink(linkId);
+      await settle();
+      return r;
+    },
+    [settle],
+  );
+  const reject = useCallback(
+    async (linkId: string): Promise<SecurityLinkDecisionResult> => {
+      const r = await rejectSecurityLink(linkId);
+      await settle();
+      return r;
+    },
+    [settle],
+  );
+
+  return {
+    proposals: data?.proposals ?? null,
+    linking: data?.linking ?? null,
+    level: data?.level ?? null,
+    error: error as Error | undefined,
+    isLoading,
+    refresh: () => mutate(),
+    accept,
+    reject,
+  };
+}
+
+/**
+ * GET /api/security/ai-settings — what Droplet's AI may do in Security.
+ * `save` PUTs the whole choice with the version it read (manage) and puts the
+ * server's answer in the cache; it refreshes the suggestions (linking may
+ * have turned off or on) and the health header (its `links` row names the
+ * setting). On a 409 the caller re-reads with `refresh()`.
+ */
+export function useAiSettings() {
+  const { mutate: globalMutate } = useSWRConfig();
+  const { data, error, isLoading, mutate } = useSWR<SecurityAiSettingsView>(
+    SECURITY_AI_SETTINGS_PATH,
+    () => getSecurityAiSettings(),
+    { shouldRetryOnError: false },
+  );
+
+  const save = useCallback(
+    async (body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> => {
+      const r = await putSecurityAiSettings(body);
+      await Promise.all([
+        mutate({ linking: r.linking, summaries: r.summaries, version: r.version }, { revalidate: false }),
+        globalMutate(SECURITY_LINK_PROPOSALS_PATH),
+        globalMutate(SECURITY_HEALTH_PATH),
+      ]);
+      return r;
+    },
+    [mutate, globalMutate],
+  );
+
+  return { settings: data ?? null, error: error as Error | undefined, isLoading, refresh: () => mutate(), save };
 }

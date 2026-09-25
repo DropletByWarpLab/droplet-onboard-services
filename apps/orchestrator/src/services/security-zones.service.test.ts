@@ -39,8 +39,14 @@ import {
 const onlyFront = { visibleCameras: new Set(["front"]) as ReadonlySet<string> };
 const everyone = { visibleCameras: "all" as const };
 
-function link(zoneId: string, sourceKind: "camera" | "camera_zone", sourceRef: string, name = zoneId): ActiveZoneLink {
-  return { linkId: `${zoneId}:${sourceRef}`, zoneId, zoneName: name, zoneKind: "interior", sourceKind, sourceRef };
+function link(
+  zoneId: string,
+  sourceKind: "camera" | "camera_zone",
+  sourceRef: string,
+  name = zoneId,
+  setBy: "person" | "droplet" = "person",
+): ActiveZoneLink {
+  return { linkId: `${zoneId}:${sourceRef}`, zoneId, zoneName: name, zoneKind: "interior", sourceKind, sourceRef, setBy };
 }
 
 function row(over: Partial<ZoneMatchableEvent> = {}): ZoneMatchableEvent {
@@ -208,10 +214,10 @@ describe("viewerAreas / zoneFilterFor — what one viewer's feed resolves", () =
 
 describe("diffZoneLinks — route 12's plan", () => {
   const stored: ExistingZoneLink[] = [
-    { id: "1", sourceKind: "camera", sourceRef: "front", state: "active" },
-    { id: "2", sourceKind: "camera_zone", sourceRef: "back/till", state: "removed" },
-    { id: "3", sourceKind: "camera", sourceRef: "side", state: "active" },
-    { id: "4", sourceKind: "camera", sourceRef: "old", state: "removed" },
+    { id: "1", sourceKind: "camera", sourceRef: "front", state: "active", origin: "person", stateSetBy: "person" },
+    { id: "2", sourceKind: "camera_zone", sourceRef: "back/till", state: "removed", origin: "person", stateSetBy: "person" },
+    { id: "3", sourceKind: "camera", sourceRef: "side", state: "active", origin: "person", stateSetBy: "person" },
+    { id: "4", sourceKind: "camera", sourceRef: "old", state: "removed", origin: "person", stateSetBy: "person" },
   ];
 
   it("new → added, removed-and-asked-again → reactivated, active-and-dropped → removed", () => {
@@ -225,6 +231,7 @@ describe("diffZoneLinks — route 12's plan", () => {
     ).toEqual({
       added: [{ sourceKind: "camera_zone", sourceRef: "back/door" }],
       reactivated: [stored[1]],
+      accepted: [],
       removed: [stored[2]],
     });
   });
@@ -235,7 +242,7 @@ describe("diffZoneLinks — route 12's plan", () => {
         { sourceKind: "camera", sourceRef: "front" },
         { sourceKind: "camera", sourceRef: "side" },
       ]),
-    ).toEqual({ added: [], reactivated: [], removed: [] });
+    ).toEqual({ added: [], reactivated: [], accepted: [], removed: [] });
   });
 
   it("the same name as a different kind is a different link", () => {
@@ -248,12 +255,16 @@ describe("diffZoneLinks — route 12's plan", () => {
 describe("loadActiveLinks", () => {
   it("asks for active links of ACTIVE areas only, and flattens the area onto each link", async () => {
     const findMany = vi.fn().mockResolvedValue([
-      { id: "l1", zoneId: "z1", sourceKind: "camera", sourceRef: "front", zone: { name: "Shop", kind: "entry" } },
+      { id: "l1", zoneId: "z1", sourceKind: "camera", sourceRef: "front", stateSetBy: "person", zone: { name: "Shop", kind: "entry" } },
+      { id: "l2", zoneId: "z1", sourceKind: "camera", sourceRef: "back", stateSetBy: "droplet", zone: { name: "Shop", kind: "entry" } },
     ]);
     const out = await loadActiveLinks({ securityZoneLink: { findMany } } as never);
     expect(findMany.mock.calls[0][0].where).toEqual({ state: "active", zone: { state: "active" } });
+    // WARP-2979 — who set the link is read, never inferred (a NULL decidedById says nothing).
+    expect(findMany.mock.calls[0][0].select).toMatchObject({ stateSetBy: true });
     expect(out).toEqual([
-      { linkId: "l1", zoneId: "z1", zoneName: "Shop", zoneKind: "entry", sourceKind: "camera", sourceRef: "front" },
+      { linkId: "l1", zoneId: "z1", zoneName: "Shop", zoneKind: "entry", sourceKind: "camera", sourceRef: "front", setBy: "person" },
+      { linkId: "l2", zoneId: "z1", zoneName: "Shop", zoneKind: "entry", sourceKind: "camera", sourceRef: "back", setBy: "droplet" },
     ]);
   });
 });
@@ -519,6 +530,7 @@ describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank in
             zoneKind: "interior",
             sourceKind: whole ? "camera" : "camera_zone",
             sourceRef: whole ? camera : `${camera}/${pick(r, PARTS)}`,
+            setBy: "person",
           });
         }
       }
@@ -540,18 +552,64 @@ describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank in
 
   it("carries the matched link ids and 'part' when a part-of-view link matched", () => {
     const links: ActiveZoneLink[] = [
-      { linkId: "a1", zoneId: "za", zoneName: "Shop", zoneKind: "interior", sourceKind: "camera", sourceRef: "front" },
-      { linkId: "b1", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/till" },
-      { linkId: "b2", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/porch" },
+      { linkId: "a1", zoneId: "za", zoneName: "Shop", zoneKind: "interior", sourceKind: "camera", sourceRef: "front", setBy: "person" },
+      { linkId: "b1", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/till", setBy: "person" },
+      { linkId: "b2", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/porch", setBy: "person" },
     ];
     expect(matchAreasForEvent({ source: "frigate", kind: "detection", camera: "front", cameraZones: ["till"] }, links)).toEqual([
-      { zoneId: "za", zoneName: "Shop", zoneKind: "interior", linkIds: ["a1"], specificity: "whole" },
-      { zoneId: "zb", zoneName: "Till", zoneKind: "restricted", linkIds: ["b1"], specificity: "part" },
+      { zoneId: "za", zoneName: "Shop", zoneKind: "interior", linkIds: ["a1"], specificity: "whole", personLinked: true },
+      { zoneId: "zb", zoneName: "Till", zoneKind: "restricted", linkIds: ["b1"], specificity: "part", personLinked: true },
     ]);
     // A camera's own offline row reaches every part of its view.
     expect(
       matchAreasForEvent({ source: "frigate_status", kind: "camera_offline", camera: "front", cameraZones: [] }, links).find((m) => m.zoneId === "zb"),
     ).toMatchObject({ linkIds: ["b1", "b2"], specificity: "part" });
     expect(matchAreasForEvent({ source: "activity_mirror", kind: "threat", camera: null, cameraZones: [] }, links)).toEqual([]);
+  });
+
+  // WARP-2979 (§6.7.1) — an area matched only through links Droplet activated on its own is context:
+  // it still matches (so the event still groups there), but it is not person-linked.
+  it("personLinked: true when ANY matching link was set by a person; false when only Droplet's links matched", () => {
+    const links: ActiveZoneLink[] = [
+      link("za", "camera", "front", "Shop", "droplet"),
+      link("zb", "camera", "front", "Till", "droplet"),
+      link("zb", "camera_zone", "front/till", "Till", "person"),
+    ];
+    const at = (cameraZones: string[]) =>
+      matchAreasForEvent({ source: "frigate", kind: "detection", camera: "front", cameraZones }, links).map((m) => [m.zoneId, m.personLinked]);
+    // za matches through Droplet's link only; zb through Droplet's whole-camera link AND a person's part.
+    expect(at(["till"])).toEqual([
+      ["za", false],
+      ["zb", true],
+    ]);
+    // Away from the till only Droplet's links match zb: still grouped there, not person-linked.
+    expect(at([])).toEqual([
+      ["za", false],
+      ["zb", false],
+    ]);
+  });
+});
+
+describe("buildZoneIndex — personOnly (WARP-2979: the index camera_offline_during_activity matches against)", () => {
+  const links = [
+    link("za", "camera", "front", "Shop", "person"),
+    link("zb", "camera", "front", "Yard", "droplet"),
+    link("zc", "camera_zone", "back/door", "Door", "droplet"),
+    link("zd", "camera_zone", "back/door", "Stock", "person"),
+  ];
+
+  it("leaves out every link Droplet set; the default index keeps them all", () => {
+    const person = buildZoneIndex(links, { personOnly: true });
+    const all = buildZoneIndex(links);
+    expect(zonesForEvent(row({ camera: "front" }), person)).toEqual(["za"]);
+    expect(zonesForEvent(row({ camera: "front" }), all)).toEqual(["za", "zb"]);
+    expect(zonesForEvent(row({ camera: "back", cameraZones: ["door"] }), person)).toEqual(["zd"]);
+    expect(zonesForEvent(row({ camera: "back", cameraZones: ["door"] }), all)).toEqual(["zc", "zd"]);
+  });
+
+  it("fails closed: a link with no setBy is not a person's", () => {
+    const bare = [{ zoneId: "za", sourceKind: "camera" as const, sourceRef: "front" }];
+    expect(zonesForEvent(row({ camera: "front" }), buildZoneIndex(bare, { personOnly: true }))).toEqual([]);
+    expect(zonesForEvent(row({ camera: "front" }), buildZoneIndex(bare))).toEqual(["za"]);
   });
 });

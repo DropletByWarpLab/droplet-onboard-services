@@ -8748,12 +8748,13 @@ model SecurityIngestState {
 // ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
 //
 // Areas resolve against SecurityEvent at READ time — SecurityEvent gets no zoneId.
-// Values land with their first writer: link states proposed/rejected, origin,
-// evidence and confidence arrive with P4; the `lock` source kind with the Matter
-// adapter (P2b-2); departmentId when something reads it.
+// Values land with their first writer: the `lock` source kind with the Matter
+// adapter (P2b-2); departmentId when something reads it. WARP-2979 (P4) added
+// the link states proposed/rejected, origin/stateSetBy, evidence and confidence.
 //
 // Every shape rule below that Prisma cannot express is a hand-written CHECK in
-// 20260924000100_warp_2977_security_zones_hours_mode — explicit enums, never
+// 20260924000100_warp_2977_security_zones_hours_mode (and, for WARP-2979's
+// columns, 20260926000100_warp_2979_security_ai) — explicit enums, never
 // IS NULL as state.
 
 enum SecurityZoneKind {
@@ -8775,10 +8776,21 @@ enum SecurityZoneSourceKind {
   camera_zone
 }
 
-/// `removed` = a person unlinked it. Kept (never deleted) so P4 never re-proposes it.
+/// `removed` = a person unlinked it. `rejected` = a person turned down or undid Droplet's link.
+/// Both are final for Droplet: kept (never deleted), never re-proposed, never touched (WARP-2979).
 enum SecurityZoneLinkState {
   active
   removed
+  /// WARP-2979 — Droplet suggests it; nothing uses it until a person accepts it.
+  proposed
+  /// WARP-2979 — a person said no to Droplet's suggestion, or undid Droplet's link.
+  rejected
+}
+
+/// WARP-2979 — who created a link row (`origin`, immutable) and who set its current state (`stateSetBy`).
+enum SecurityLinkActor {
+  person
+  droplet
 }
 
 model SecurityZone {
@@ -8818,10 +8830,56 @@ model SecurityZoneLink {
   createdAt      DateTime               @default(now())
   decidedById    String?
   stateChangedAt DateTime               @default(now())
+  /// WARP-2979 — who created the row. Immutable. Every P2b row was made by a person (route 12): backfilled
+  /// `person`. No default: every writer names it.
+  origin         SecurityLinkActor
+  /// WARP-2979 — who set the CURRENT state. `droplet` only for proposed/active on a droplet-origin row (CHECK).
+  /// No default: every writer names it.
+  stateSetBy     SecurityLinkActor
+  /// WARP-2979 — LinkEvidenceV1 (lib/security-link-evidence.ts), validated in code. Set iff origin = droplet (CHECK).
+  evidence       Json?
+  /// WARP-2979 — Wilson 95 % lower bound of hits / anchors, 0..1. Set iff origin = droplet (CHECK).
+  confidence     Float?
+  /// WARP-2979 — LINK_RULES_VERSION that produced `evidence`. Set iff origin = droplet (CHECK).
+  rulesVersion   Int?                   @db.SmallInt
+  /// WARP-2979 — when `evidence` was computed. Proposed rows refresh it; active rows keep their activation evidence.
+  evidenceAt     DateTime?
 
   @@unique([zoneId, sourceKind, sourceRef])
   @@index([sourceKind, sourceRef, state])
   @@index([zoneId, state])
+  @@index([state, origin])
+}
+
+// ── WARP-2979 (ADR-059 P4, DS-006/DS-007): what Droplet's AI may do in Security ──
+
+/// What Droplet may do with links on its own.
+enum SecurityAiLinking {
+  /// Above the auto bar a link becomes active on its own, with a "Linked by Droplet" chip and Undo; the rest are suggested.
+  link_and_suggest
+  /// Everything is suggested; nothing becomes active without a person.
+  suggest_only
+  /// Droplet looks for no links.
+  off
+}
+
+/// Whether Droplet writes incident summaries (always on this box, never in the cloud).
+enum SecurityAiSummaries {
+  on
+  off
+}
+
+/// One row, created lazily (createMany skipDuplicates, then read; never upsert({update:{}})).
+/// Written only by the manage-level settings route, by compare-and-set on `version` (CHECK: id = 'singleton').
+model SecurityAiSettings {
+  id          String              @id @default("singleton")
+  linking     SecurityAiLinking   @default(link_and_suggest)
+  summaries   SecurityAiSummaries @default(on)
+  /// Lost-update guard for the settings form.
+  version     Int                 @default(0)
+  /// User.id of the last person who changed it (no FK: users are deletable; the audit chain is the record).
+  updatedById String?
+  updatedAt   DateTime            @updatedAt
 }
 
 enum SecurityHoursState {
@@ -9086,12 +9144,13 @@ model SecurityBaselineJobState {
 // Membership is SecurityEventTriage (one row per SecurityEvent, the exactly-once marker);
 // SecurityEvent stays append-only (a BEFORE UPDATE trigger refuses any update).
 // Values land with their first writer: out_of_place / unusual_volume / long_dwell and the verdict
-// columns landed with P5 PR-B (WARP-2980); camera_offline_during_activity lands with P4, the door
-// codes with ADR-055.
+// columns landed with P5 PR-B (WARP-2980); camera_offline_during_activity, the reasons' related
+// sources and the incident's "Summary by Droplet" columns with P4 (WARP-2979); the door codes with
+// ADR-055.
 //
 // Every shape rule Prisma cannot express is a hand-written CHECK in
-// 20260925030000_warp_2978_security_incidents (P5 PR-B's: 20260925060100_warp_2980_security_patterns_verdicts)
-// — explicit enums, never IS NULL as state.
+// 20260925030000_warp_2978_security_incidents (P5 PR-B's: 20260925060100_warp_2980_security_patterns_verdicts;
+// P4's: 20260926000100_warp_2979_security_ai) — explicit enums, never IS NULL as state.
 
 enum SecurityIncidentScope {
   /// One area. zoneId + zoneName + zoneKind are set (CHECK).
@@ -9147,6 +9206,9 @@ enum SecurityReasonCode {
   out_of_place
   unusual_volume
   long_dwell
+  /// WARP-2979 — a camera a person linked to the area stopped reporting soon after someone was seen there,
+  /// while the site was closed or away. Always an alert (CHECK SecurityIncidentReason_code_severity).
+  camera_offline_during_activity
 }
 
 /// WARP-2980 P5 PR-B — a person's judgement of an incident (brief §4.4). Explicit — never inferred from verdictAt.
@@ -9154,6 +9216,19 @@ enum SecurityIncidentVerdict {
   unreviewed
   expected
   not_expected
+}
+
+/// WARP-2979 (ADR-059 §4.5) — the incident's "Summary by Droplet". Explicit — never inferred from narrative IS NULL.
+enum SecurityNarrativeState {
+  /// None asked for: plain activity (severity info, CHECK), or a notice/alert incident still collecting.
+  none
+  /// Waiting for the narrator: set when a notice/alert incident seals, or by Regenerate.
+  pending
+  written
+  /// The narrator gave up after its maximum attempts; the page shows codes only.
+  failed
+  /// Still pending 7 days after the incident's last activity; never narrated.
+  expired
 }
 
 enum SecurityTriageOutcome {
@@ -9250,7 +9325,8 @@ model SecurityIncident {
   stateChangedById String?
   resolvedAt       DateTime?
   resolvedById     String?
-  /// CAS for the engine and for people. Bumped by every write.
+  /// CAS for the engine and for people. Bumped by every write — except the summary's (WARP-2979): a
+  /// summary never bumps it, so it can never make an acknowledgement 409.
   version          Int                      @default(0)
   updatedAt        DateTime                 @updatedAt
 
@@ -9268,6 +9344,24 @@ model SecurityIncident {
   /// Empty iff unreviewed (CHECK).
   verdictCodes     SecurityReasonCode[]     @default([])
 
+  /// WARP-2979 (DS-007) — "Summary by Droplet", written on this box only. Every incident before P4 stays
+  /// `none` (never narrated retroactively). Shape CHECKed (SecurityIncident_narrative_shape).
+  narrativeState         SecurityNarrativeState @default(none)
+  /// Plain text, ≤ 700 chars, checked before it is stored.
+  narrative              String?                @db.VarChar(700)
+  /// The model that wrote it (the response's `model`, else the requested local id).
+  narrativeModel         String?                @db.VarChar(120)
+  narrativePromptVersion Int?                   @db.SmallInt
+  narratedAt             DateTime?
+  /// {cameras: string[], threats: boolean, locks: boolean} — everything the text names. DS-005: shown only
+  /// to a viewer who can see all of it. Shape validated in code.
+  narrativeAudience      Json?
+  narrativeAttempts      Int                    @default(0) @db.SmallInt
+  /// Claim lease and last attempt (not state).
+  narrativeAttemptAt     DateTime?
+  /// Last failure: MODEL_ERROR | TIMEOUT | LENGTH | EMPTY | CHECK_FAILED:<rule>.
+  narrativeError         String?                @db.VarChar(64)
+
   reasons      SecurityIncidentReason[]
   members      SecurityEventTriage[]
   acks         SecurityIncidentAck[]
@@ -9280,6 +9374,7 @@ model SecurityIncident {
   @@index([zoneId, lastActivityAt])
   @@index([notifyState])
   @@index([verdict])
+  @@index([narrativeState, severity, lastActivityAt])
 }
 
 model SecurityIncidentReason {
@@ -9302,9 +9397,16 @@ model SecurityIncidentReason {
   evidenceAt      DateTime
   evidenceSummary String              @db.VarChar(500)
   /// The rule's numbers, per code (validated in code): after_hours_presence {mode, modeSource,
-  /// nonOpenAt, zoneKind}; camera_offline {offlineForSec|null, backAt|null}; threat_signal {activityId, kind}.
+  /// nonOpenAt, zoneKind}; camera_offline {offlineForSec|null, backAt|null}; threat_signal {activityId, kind};
+  /// camera_offline_during_activity {offlineForSec|null, backAt|null, mode, modeSource, activity}.
   detail          Json
   createdAt       DateTime            @default(now())
+  /// WARP-2979 — a SECOND camera the evidence names (camera_offline_during_activity: where the person was
+  /// seen). DS-005: the reason is visible only when this camera is visible too. Only on that code (CHECK).
+  relatedCamera   String?             @db.VarChar(64)
+  /// WARP-2979 (PR-4) — the evidence names a lock reading; visible only with mayReadLocks (DS-019).
+  /// Only on camera_offline_during_activity (CHECK).
+  relatedLock     Boolean             @default(false)
 
   @@unique([incidentId, code, evidenceEventId])
   @@index([incidentId])

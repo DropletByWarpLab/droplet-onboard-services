@@ -337,11 +337,20 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
     // Constraints a LATER migration adds to these tables — not this folder's to create.
     const LATER = new Set([
       "SecurityIncident_verdict_shape", // WARP-2980 PR-B, 20260925060100_warp_2980_security_patterns_verdicts
+      "SecurityIncident_narrative_shape", // WARP-2979, 20260926000100_warp_2979_security_ai
+      "SecurityIncidentReason_related", // WARP-2979, 20260926000100_warp_2979_security_ai
     ]);
+    // Constraints a LATER migration REDEFINES (drop + add): this folder must still create each one
+    // exactly once, but its text is the later folder's to pin (security-ai-schema.pg.test.ts).
+    const REDEFINED = new Set([
+      "SecurityIncidentReason_code_severity", // WARP-2979 adds the camera_offline_during_activity arm
+    ]);
+    const nameOnly = (rows: Array<{ name: string; def: string }>) =>
+      rows.map((r) => (REDEFINED.has(r.name) ? { name: r.name, def: "(redefined by a later migration)" } : r));
     const outcome = await prisma
       .$transaction(
         async (tx) => {
-          const expected = unqualified(await constraintsIn(tx, "public")).filter((c) => !LATER.has(c.name));
+          const expected = nameOnly(unqualified(await constraintsIn(tx, "public")).filter((c) => !LATER.has(c.name)));
           await tx.$executeRawUnsafe(`CREATE SCHEMA ${SCRATCH}`);
           await tx.$executeRawUnsafe(`SET LOCAL search_path TO ${SCRATCH}, public`);
           // The pre-review shape: the notice outcome without `outcome_unknown` …
@@ -384,7 +393,7 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
           const triggers = await tx.$queryRawUnsafe<Array<{ n: bigint }>>(
             `SELECT count(*) AS n FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = 'public."SecurityEvent"'::regclass AND tgname = 'SecurityEvent_append_only'`,
           );
-          const got = unqualified(await constraintsIn(tx, SCRATCH));
+          const got = nameOnly(unqualified(await constraintsIn(tx, SCRATCH)));
           throw new Rollback(JSON.stringify({ rows, column, labels: labels.map((x) => x.l), triggers: Number(triggers[0]!.n), got, expected }));
         },
         { timeout: 60_000 },
@@ -471,7 +480,7 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       const zone = await prisma.securityZone.create({ data: { name: `${TAG} Stock room`, nameKey: `${TAG} stock room`, kind: "interior" } });
       zoneId = zone.id;
       await prisma.securityZoneLink.create({
-        data: { zoneId, sourceKind: "camera", sourceRef: CAM, sourceLabel: "Back", state: "active" },
+        data: { zoneId, sourceKind: "camera", sourceRef: CAM, sourceLabel: "Back", state: "active", origin: "person", stateSetBy: "person" },
       });
     });
 
@@ -571,7 +580,7 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
         }
         for (const ref of links) {
           await prisma.securityZoneLink.create({
-            data: { zoneId: zone.id, sourceKind: ref.includes("/") ? "camera_zone" : "camera", sourceRef: ref, sourceLabel: "x", state: "active" },
+            data: { zoneId: zone.id, sourceKind: ref.includes("/") ? "camera_zone" : "camera", sourceRef: ref, sourceLabel: "x", state: "active", origin: "person", stateSetBy: "person" },
           });
         }
       }

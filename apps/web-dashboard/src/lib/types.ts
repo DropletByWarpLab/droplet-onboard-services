@@ -3598,7 +3598,62 @@ export type SecurityZoneKind = "entry" | "interior" | "perimeter" | "parking" | 
 export type SecurityZoneState = "active" | "archived";
 /** PR-2 adds "lock". */
 export type SecurityZoneSourceKind = "camera" | "camera_zone";
-export type SecurityZoneLinkState = "active" | "removed";
+/**
+ * `removed` = a person unlinked it. WARP-2979: `proposed` = Droplet suggests it
+ * (nothing uses it until a person adds it); `rejected` = a person turned
+ * Droplet's suggestion down, or undid Droplet's link. Route 3 lists `active`
+ * links only; suggestions come from route 23.
+ */
+export type SecurityZoneLinkState = "active" | "removed" | "proposed" | "rejected";
+/** WARP-2979 — who created a link (`origin`) and who set its current state (`setBy`). */
+export type SecurityLinkActor = "person" | "droplet";
+
+/**
+ * WARP-2979 (ADR-059 P4 §6.4) — why Droplet linked or suggested a source: the
+ * co-occurrence counts it decided on. Every number is an integer
+ * (`lambdaMilli` = expected by chance × 1000, `liftTenths` = lift × 10,
+ * `confidenceBp` = confidence × 10 000); `pAdj` is a string. The server sends
+ * it only to a viewer who can see every source it names (DS-005); the page
+ * turns it into sentences (components/security/link-evidence-copy.ts).
+ */
+export interface LinkEvidenceDirection {
+  n: number;
+  k: number;
+  excluded: number;
+  lambdaMilli: number;
+  liftTenths: number;
+  confidenceBp: number;
+}
+
+export interface LinkEvidenceSource {
+  sourceKind: "lock" | "camera" | "camera_zone";
+  sourceRef: string;
+  /** The camera's (or lock's) display name when the evidence was computed. */
+  label: string;
+}
+
+export interface LinkEvidenceView {
+  v: 1;
+  kind: "lock_camera" | "camera_camera";
+  /** ISO instants of the 14-day window. */
+  window: { from: string; to: string };
+  anchor: LinkEvidenceSource & { linkId: string };
+  candidate: LinkEvidenceSource;
+  /** The anchor's visits → the candidate. */
+  forward: LinkEvidenceDirection;
+  /** camera_camera only: the candidate's visits → the anchor. */
+  reverse: LinkEvidenceDirection | null;
+  chosen: "whole" | "part" | "lock";
+  wholeK: number | null;
+  /** Names are a tiebreak, never evidence: shown below the numbers. */
+  names: { match: boolean; shared: string[] };
+  hypotheses: number;
+  pAdj: string;
+  gate: "auto" | "propose";
+  /** Up to 5 recent hits, newest first; removed after 30 days (then `samplesTrimmedBefore` is set). */
+  samples: Array<{ anchorAt: string; hitAt: string }>;
+  samplesTrimmedBefore: string | null;
+}
 
 export interface SecurityZoneLinkView {
   id: string;
@@ -3616,6 +3671,16 @@ export interface SecurityZoneLinkView {
   label: string;
   state: SecurityZoneLinkState;
   stateChangedAt: string;
+  /** WARP-2979 — who created the link: a person, or Droplet (a suggestion or its own link). */
+  origin: SecurityLinkActor;
+  /**
+   * WARP-2979 — who set its current state. `origin droplet` + `setBy droplet`
+   * = "Linked by Droplet" (Keep / Undo); `origin droplet` + `setBy person` =
+   * a suggestion a person added or kept. Only person-set links make alerts.
+   */
+  setBy: SecurityLinkActor;
+  /** WARP-2979 — Droplet's evidence; null unless origin is droplet AND this viewer can see every source it names. */
+  evidence: LinkEvidenceView | null;
 }
 
 export interface SecurityZoneView {
@@ -3675,6 +3740,62 @@ export interface SecurityZoneCreated {
 /** PATCH, archive, unarchive and links → 200. `changed:false` = nothing to do (no audit row). */
 export interface SecurityZoneWriteResult {
   zone: SecurityZoneView;
+  changed: boolean;
+}
+
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+/** What Droplet may do with links on its own (manage). */
+export type SecurityAiLinking = "link_and_suggest" | "suggest_only" | "off";
+/** Whether Droplet writes incident summaries (on this Droplet only). */
+export type SecurityAiSummaries = "on" | "off";
+
+/** One of Droplet's open suggestions (route 23). */
+export interface SecurityLinkProposal {
+  linkId: string;
+  zone: { id: string; name: string; kind: SecurityZoneKind };
+  sourceKind: SecurityZoneSourceKind;
+  sourceRef: string;
+  /** The camera's display name (never the part — see SecurityZoneLinkView.label). */
+  label: string;
+  /** Wilson lower bound, 0..1. */
+  confidence: number;
+  evidence: LinkEvidenceView | null;
+  /** When the evidence behind it was last computed (ISO). */
+  suggestedAt: string;
+}
+
+/**
+ * GET /api/security/link-proposals. `proposals` is filled only at manage (or
+ * for an owner/admin with no per-person level); below it the list is empty,
+ * never refused. Ordered: a name match first, then confidence.
+ */
+export interface SecurityLinkProposalsView {
+  level: "view" | "act" | "manage" | null;
+  linking: SecurityAiLinking;
+  proposals: SecurityLinkProposal[];
+}
+
+/** POST /api/security/links/:id/{accept,reject} → 200. `changed:false` = already decided that way (no audit row). */
+export type SecurityLinkDecisionResult = SecurityZoneWriteResult;
+
+/** GET /api/security/ai-settings. */
+export interface SecurityAiSettingsView {
+  linking: SecurityAiLinking;
+  summaries: SecurityAiSummaries;
+  /** Send back as `expectedVersion`. */
+  version: number;
+}
+
+/** PUT /api/security/ai-settings (manage). */
+export interface SecurityAiSettingsBody {
+  linking: SecurityAiLinking;
+  summaries: SecurityAiSummaries;
+  expectedVersion: number;
+}
+
+/** PUT /api/security/ai-settings → 200. `changed:false` = nothing to change (no audit row). */
+export interface SecurityAiSettingsWriteResult extends SecurityAiSettingsView {
   changed: boolean;
 }
 
@@ -3840,7 +3961,14 @@ export type SecurityErrorCode =
   | "NO_RECIPIENT"
   | "NOT_ELIGIBLE"
   | "ROUTING_UNAVAILABLE"
-  | "USER_NOT_FOUND";
+  | "USER_NOT_FOUND"
+  // WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and the AI settings.
+  | "LINK_NOT_FOUND"
+  | "LINK_NOT_DECIDABLE"
+  | "LINK_CONFLICT"
+  | "LINK_LIMIT"
+  | "LINKS_UNAVAILABLE"
+  | "AI_SETTINGS_UNAVAILABLE";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {

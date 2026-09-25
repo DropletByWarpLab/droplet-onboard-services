@@ -160,9 +160,9 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
     office = b.id;
     await prisma.securityZoneLink.createMany({
       data: [
-        { zoneId: stockRoom, sourceKind: "camera", sourceRef: FRONT, sourceLabel: "Front", state: "active" },
-        { zoneId: stockRoom, sourceKind: "camera", sourceRef: BACK, sourceLabel: "Back", state: "active" },
-        { zoneId: office, sourceKind: "camera", sourceRef: SIDE, sourceLabel: "Side", state: "active" },
+        { zoneId: stockRoom, sourceKind: "camera", sourceRef: FRONT, sourceLabel: "Front", state: "active", origin: "person", stateSetBy: "person" },
+        { zoneId: stockRoom, sourceKind: "camera", sourceRef: BACK, sourceLabel: "Back", state: "active", origin: "person", stateSetBy: "person" },
+        { zoneId: office, sourceKind: "camera", sourceRef: SIDE, sourceLabel: "Side", state: "active", origin: "person", stateSetBy: "person" },
       ],
     });
   });

@@ -771,6 +771,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     NOT_ELIGIBLE: "This person can't open Security, so they can't be told about alerts.",
     ROUTING_UNAVAILABLE: "Droplet couldn't read who is told about alerts right now. Try again in a moment.",
     USER_NOT_FOUND: "That person isn't on this Droplet any more. Refresh the page.",
+    // WARP-2979 (ADR-059 P4 §7 routes 23–27) — Droplet's links and what its AI
+    // may do. A missing link and one on a camera this person can't see get ONE
+    // answer from the box (DS-005), so the copy never says which.
+    LINK_NOT_FOUND: "That link isn't there any more, or you can't see it. Refresh the page.",
+    LINK_NOT_DECIDABLE: "Someone already decided on that link. Refresh the page to see where it stands.",
+    LINK_CONFLICT: "Someone else changed this area at the same moment. Refresh the page and try again.",
+    LINK_LIMIT: "This area already has 32 cameras and parts linked. Remove one before adding another.",
+    LINKS_UNAVAILABLE: "Droplet couldn't load its suggestions right now. Try again in a moment.",
+    AI_SETTINGS_UNAVAILABLE: "Droplet couldn't load these settings right now. Try again in a moment.",
     // A route-level feature gate answers 404 module_disabled (a flat body, so
     // apiFetch carries no typed code — the status entry catches it): this
     // person's level changed under the page, or Security was switched off.

@@ -1000,6 +1000,9 @@ export function areaRows(
       sourceRef: ref,
       sourceLabel: ref.split("/")[0],
       state: "active",
+      // WARP-2979 — a person linked it (route 12); both explicit, like every writer.
+      origin: "person",
+      stateSetBy: "person",
     })),
   };
 }

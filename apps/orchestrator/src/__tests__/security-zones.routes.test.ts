@@ -69,7 +69,10 @@ interface LinkRow {
   sourceKind: "camera" | "camera_zone";
   sourceRef: string;
   sourceLabel: string;
-  state: "active" | "removed";
+  state: "active" | "removed" | "proposed" | "rejected";
+  /** WARP-2979 — who created the row and who set its state; every P2b row is a person's. */
+  origin: "person" | "droplet";
+  stateSetBy: "person" | "droplet";
   createdById: string | null;
   decidedById: string | null;
   stateChangedAt: Date;
@@ -114,6 +117,8 @@ function seed(): void {
     sourceRef,
     sourceLabel: `was ${sourceRef.split("/")[0]}`,
     state,
+    origin: "person",
+    stateSetBy: "person",
     createdById: "u-owner",
     decidedById: null,
     stateChangedAt: T0,

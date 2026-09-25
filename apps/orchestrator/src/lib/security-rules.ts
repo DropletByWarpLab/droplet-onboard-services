@@ -190,6 +190,8 @@ export const REASON_CODE_ORDER = [
   "out_of_place",
   "unusual_volume",
   "long_dwell",
+  // WARP-2979 (P4 S0) — the enum value lands with the schema; its rule is slice E's.
+  "camera_offline_during_activity",
 ] as const satisfies readonly SecurityReasonCode[];
 // Exhaustive at compile time: a code added to the enum without a place here fails tsc.
 type UnorderedCode = Exclude<SecurityReasonCode, (typeof REASON_CODE_ORDER)[number]>;
