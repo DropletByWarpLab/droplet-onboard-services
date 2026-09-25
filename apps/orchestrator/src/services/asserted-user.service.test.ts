@@ -10,8 +10,17 @@ import { describe, it, expect } from "vitest";
 import { resolveAssertedUser } from "./asserted-user.service.js";
 import { userDirectory, type DirectoryUser } from "../__tests__/helpers/user-directory.js";
 
-const MARIA: DirectoryUser = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "family" };
-const SAM: DirectoryUser = { id: "u-sam", username: "sam", nextcloudUsername: "sam", role: "owner" };
+const MARIA: DirectoryUser = {
+  id: "u-maria",
+  username: "maria",
+  nextcloudUsername: null,
+  role: "family",
+  displayName: "Maria",
+  email: "maria@acme.test",
+};
+const SAM: DirectoryUser = { id: "u-sam", username: "sam", nextcloudUsername: "sam", role: "owner", displayName: "Sam", email: null };
+/** WARP-3098 — the person, with the fields the acting-user sites read off them. */
+const MARIA_RESOLVED = { id: "u-maria", username: "maria", role: "family", displayName: "Maria", email: "maria@acme.test" };
 
 const prismaOf = (users: DirectoryUser[]) => ({ user: userDirectory(users) }) as never;
 
@@ -19,14 +28,14 @@ describe("resolveAssertedUser", () => {
   it("resolves an SSO / SCIM row (nextcloudUsername NULL) by username", async () => {
     expect(await resolveAssertedUser(prismaOf([MARIA, SAM]), "maria")).toEqual({
       ok: true,
-      user: { id: "u-maria", role: "family" },
+      user: MARIA_RESOLVED,
     });
   });
 
   it("resolves by User.id, which is what the HTTP transport sends", async () => {
     expect(await resolveAssertedUser(prismaOf([MARIA, SAM]), "u-maria")).toEqual({
       ok: true,
-      user: { id: "u-maria", role: "family" },
+      user: MARIA_RESOLVED,
     });
   });
 
@@ -34,14 +43,14 @@ describe("resolveAssertedUser", () => {
     const renamed: DirectoryUser = { ...SAM, username: "samuel" };
     expect(await resolveAssertedUser(prismaOf([MARIA, renamed]), "sam")).toEqual({
       ok: true,
-      user: { id: "u-sam", role: "owner" },
+      user: { id: "u-sam", username: "samuel", role: "owner", displayName: "Sam", email: null },
     });
   });
 
   it("treats one row matched by several columns as one person", async () => {
     expect(await resolveAssertedUser(prismaOf([SAM]), "sam")).toEqual({
       ok: true,
-      user: { id: "u-sam", role: "owner" },
+      user: { id: "u-sam", username: "sam", role: "owner", displayName: "Sam", email: null },
     });
   });
 
@@ -99,14 +108,16 @@ describe("resolveAssertedUser", () => {
     });
   });
 
-  it("asks the database once, for at most two rows of any status, and reads only id, role and status", async () => {
+  it("asks the database once, for at most two rows of any status, and reads only the person's fields and status", async () => {
     // Two is the fewest rows that can tell "one person" from "more than one".
+    // WARP-3098: username, displayName and email ride on the same read, so a
+    // site that needs them does not look the person up a second time.
     const prisma = { user: userDirectory([MARIA]) };
     await resolveAssertedUser(prisma as never, "maria");
     expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
     expect(prisma.user.findMany).toHaveBeenCalledWith({
       where: { OR: [{ username: "maria" }, { nextcloudUsername: "maria" }, { id: "maria" }] },
-      select: { id: true, role: true, directoryStatus: true },
+      select: { id: true, username: true, role: true, displayName: true, email: true, directoryStatus: true },
       take: 2,
     });
   });
