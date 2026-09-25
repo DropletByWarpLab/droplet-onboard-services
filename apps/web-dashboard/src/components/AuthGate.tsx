@@ -9,7 +9,7 @@ import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
-import { HELP_PATH, SECURITY_WALL_PATH } from "@/lib/routing";
+import { HELP_PATH, isSecurityWallPath } from "@/lib/routing";
 import { WallModulesKeeper } from "@/lib/hooks/useSecurity";
 
 // `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
@@ -330,7 +330,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // The keeper sits OUTSIDE the guard: it keeps the wall's modules read polling
   // (and mirroring into the guard's key) while the guard's card is up, so the
   // TV comes back by itself once Security is on again.
-  if (pathname === SECURITY_WALL_PATH) {
+  if (isSecurityWallPath(pathname)) {
     return (
       <>
         <WallModulesKeeper />

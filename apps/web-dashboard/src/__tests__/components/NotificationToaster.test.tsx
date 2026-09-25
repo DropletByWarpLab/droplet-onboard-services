@@ -186,8 +186,8 @@ describe("NotificationToaster on the Security wall (WARP-2981)", () => {
     (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
   });
 
-  it("a notification on /security/wall is not toasted — the socket stays up", async () => {
-    at("/security/wall");
+  it.each(["/security/wall", "/security/wall/"])("a notification on %s is not toasted — the socket stays up", async (path) => {
+    at(path);
     render(<NotificationToaster />);
     await act(async () => {
       await Promise.resolve();
@@ -196,6 +196,16 @@ describe("NotificationToaster on the Security wall (WARP-2981)", () => {
     expect(toastSpy).not.toHaveBeenCalled();
     expect(FakeWebSocket.instances).toHaveLength(1);
     expect(FakeWebSocket.instances[0]!.readyState).toBe(1);
+  });
+
+  it("…but on /security/wallpaper it is", async () => {
+    at("/security/wallpaper");
+    render(<NotificationToaster />);
+    await act(async () => {
+      await Promise.resolve();
+      deliver({ kind: "event", title: "Alert: person in the Stock room" });
+    });
+    expect(toastSpy).toHaveBeenCalledTimes(1);
   });
 
   it("the same notification on /security is toasted, and leaving the wall toasts again", async () => {

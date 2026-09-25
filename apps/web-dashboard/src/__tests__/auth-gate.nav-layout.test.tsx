@@ -87,9 +87,14 @@ describe("AuthGate — nav layout switch (WARP-2971)", () => {
 });
 
 describe("AuthGate — the Security wall has no chrome, but keeps the module guard (WARP-2981)", () => {
-  it.each(["sidebar", "workspace"] as const)("on /security/wall with the %s layout: no shell, no <main>, no help — the guard wraps the page", (layout) => {
+  it.each([
+    ["sidebar", "/security/wall"],
+    ["workspace", "/security/wall"],
+    // With Next's `trailingSlash` on, this is the path the wall is served at.
+    ["sidebar", "/security/wall/"],
+  ] as const)("with the %s layout on %s: no shell, no <main>, no help — the guard wraps the page", (layout, path) => {
     layoutRef.current = layout;
-    pathnameValue = "/security/wall";
+    pathnameValue = path;
     render(<AuthGate>wall page</AuthGate>);
     expect(screen.queryByTestId("sidebar-shell")).toBeNull();
     expect(screen.queryByTestId("workspace-shell")).toBeNull();
@@ -101,8 +106,8 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
     expect(screen.getByTestId("wall-modules-keeper").closest("[data-testid='module-guard']")).toBeNull();
   });
 
-  it("…and /security itself still gets the shell and the help launcher", () => {
-    pathnameValue = "/security";
+  it.each(["/security", "/security/wallpaper"])("…and %s still gets the shell and the help launcher", (path) => {
+    pathnameValue = path;
     render(<AuthGate>security page</AuthGate>);
     expect(screen.getByTestId("sidebar-shell")).toBeInTheDocument();
     expect(screen.getByTestId("help-launcher")).toBeInTheDocument();
