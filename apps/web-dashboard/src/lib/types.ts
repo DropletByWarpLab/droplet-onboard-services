@@ -698,6 +698,28 @@ export interface PutDepartmentProfilePayload {
   homeWidgets: DepartmentHomeWidget[];
 }
 
+// ── WARP-2981 (ADR-059 P6, DS-003): the active department, on the server ──
+
+/** The department a person's shell is arranged around, as the box answers it:
+ *  enough to label the switcher, nothing more. */
+export interface ActiveDepartmentView {
+  id: string;
+  slug: string;
+  name: string;
+  /** `null` is a real state: the department is not set up yet. */
+  profile: DepartmentProfileSummary | null;
+}
+
+/** GET/PUT /api/me/active-department. `scope` is explicit, never read off a
+ *  null: `unset` — the person has never chosen, on any device (the shell shows
+ *  Whole business, the default for everyone, and a choice this browser kept
+ *  from before P6 stands); `whole_business` — chosen; `department` — chosen,
+ *  and `department` is set then and only then. */
+export type ActiveDepartmentResponse =
+  | { scope: "unset"; department: null }
+  | { scope: "whole_business"; department: null }
+  | { scope: "department"; department: ActiveDepartmentView };
+
 export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
 
 /** One row of GET /api/departments/:id's `members` array — no email (the
@@ -3154,6 +3176,14 @@ export interface ToolCatalogResponse {
 export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 
 /**
+ * The hero hand-off: `sessionStorage[PENDING_PROMPT_KEY]` holds a prompt typed
+ * on Home or /help, and the next fresh `/chat` AUTO-SENDS it. WARP-2992 clears
+ * it (and PENDING_COMPOSER_KEY) on sign-out — a named key, so the writers,
+ * the reader and that purge cannot drift apart.
+ */
+export const PENDING_PROMPT_KEY = "droplet.pendingPrompt";
+
+/**
  * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
  * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
  * contract and change together.
@@ -3481,6 +3511,12 @@ export type SecurityEventKind =
   | "threat"
   /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource, fromMode]; site-wide. */
   | "mode_changed"
+  /**
+   * WARP-2978 PR-D — a person Frigate has tracked for 30 s and not ended yet:
+   * one row per person, endedAt null; their `end` is still its own
+   * `detection` row. Shown as "Still in view".
+   */
+  | "detection_ongoing"
   /**
    * WARP-2977 P2b-2 — a door lock's reading changed. labels = [reading], one of
    * locked | unlocked | not_fully_locked | unlatched | unknown. Only people with

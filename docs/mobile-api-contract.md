@@ -48,7 +48,7 @@ Refresh token is stored separately and only sent to `/api/auth/refresh`.
 | POST | `/auth/login?return=body` | none | `{ email, password, totp?, recoveryCode? }` | `{ user, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 | POST | `/auth/refresh` | refresh | `{ refreshToken }` | `{ accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 | POST | `/auth/logout` | Bearer | — | `{ status: "ok" }` |
-| GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role }` |
+| GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role, mustChangePassword, session: { endsAt } \| null }` |
 | POST | `/auth/totp/enroll` | Bearer | — | `{ otpauthUri, qrDataUrl, issuer }` |
 | POST | `/auth/totp/verify` | Bearer | `{ code }` (6-digit) | `{ enabled: true, recoveryCodes? }` |
 | POST | `/auth/recovery` | Bearer | `{ code }` | `{ ok: true, remaining }` |
@@ -63,6 +63,34 @@ is forced through before reaching anything else. Failure shapes (flat envelope, 
 (new fails policy), `400 SAME_PASSWORD` (new === current), `400 INVALID_REQUEST`
 (missing fields), `429 TOO_MANY_ATTEMPTS` (+ `retryAfterSeconds`, `Retry-After`
 header — progressive lock on repeated wrong current password).
+
+**The latest the sign-in can last (`session.endsAt`, WARP-2981).** `/auth/me`
+carries `session: { endsAt: "ISO-8601" }`: the sign-in time plus the **absolute**
+session limit (12 h for every role as shipped). Nothing extends it, token refresh
+included. It is a latest time, not a promise: the sign-in can end **sooner**, in
+any of three ways, and `endsAt` does not move when it does.
+
+- **Inactivity.** 30 minutes without an authenticated request ends it (every
+  role, as shipped). Any authenticated request resets that clock, `/auth/me`
+  included (the box records it at most every 30 s). **`/auth/refresh` does not
+  reset it**: a token refresh is not activity, so an app that only refreshes its
+  token in the background still goes idle, and its next refresh is refused. The
+  idle deadline is not offered, because every request moves it.
+- **Too many sign-ins.** One person holds at most 5 sign-ins at once. Their next
+  sign-in, on any device, ends the oldest one.
+- **Revocation.** Signing out; a password change or a newly enrolled second
+  factor (these end the person's other sign-ins); a role change; an admin ending
+  the person's sessions.
+
+So an app may warn as `endsAt` approaches, or say "you will be signed out by
+21:00 at the latest". It must not say "you will be signed out at 21:00", or treat
+a sign-in as good until then: the first `401` ends it, whatever `endsAt` said.
+The limits are read when used, so an operator changing them moves `endsAt` for
+sign-ins already open; read it again rather than keeping it from sign-in.
+`session` is `null` when the box cannot tell (a service token, a token minted
+before session records, the session store unreachable). Treat `null`, and a box
+too old to send the key, as "show nothing". Only `/auth/me` carries it; the login
+and refresh bodies do not.
 
 **Auth model (ADR-013 directory).** Login authenticates an **email +
 password (argon2id)** against the local directory — *not* Nextcloud
@@ -561,6 +589,59 @@ WARP-1341: this is a **business-only** build. `workspaceType` is always
 `"business"` — GET never returns `"home"`, and a POST with `"home"` is a
 `400 invalid_body`. Missing-row default is `"business"`, so mobile can treat
 a 404 the same way.
+
+### Active department (`/api/me/active-department` — WARP-2981)
+
+The department a person's app is arranged around (ADR-059, DS-003). It is kept
+on the box, so a switch made on one device reaches the others. It **arranges,
+never grants**: what the person can reach is the same whatever is chosen.
+
+| Method | Path | Auth | Body | 200 response |
+|---|---|---|---|---|
+| GET | `/me/active-department` | Bearer (a person) | — | `{ scope, department: ActiveDepartment \| null }` |
+| PUT | `/me/active-department` | Bearer (a person) | `{ departmentId: "<uuid>" \| null }` | `{ scope, department: ActiveDepartment \| null }` |
+
+`scope` is always present and says what the person chose:
+
+| `scope` | Meaning | `department` |
+|---|---|---|
+| `"unset"` | The person has never chosen, on any device. | `null` |
+| `"whole_business"` | The person chose Whole business. | `null` |
+| `"department"` | The person chose a department. | `ActiveDepartment` |
+
+`ActiveDepartment` is `{ id, slug, name, profile: { template, icon } | null }`.
+`profile: null` means the department is not set up yet.
+
+- **Key on `scope`, not on `department` being `null`.** Show Whole business, the
+  default for everyone (DS-014), for both `"unset"` and `"whole_business"`. They
+  differ in one way: `"unset"` means nobody chose anything, so a choice the app
+  already kept on the device may stand. `"whole_business"` was chosen, on this
+  device or another, and replaces whatever the device holds.
+- **PUT `null` chooses Whole business**, and the box records that choice: the
+  next GET answers `"whole_business"`, never `"unset"`. PUT a department's id to
+  choose it. PUT answers with the same shape as GET.
+- **What to offer.** `GET /api/departments` returns the rows the person may see.
+  Offer the `kind: "DEPARTMENT"` rows whose `state` is neither `archived` nor
+  `archiving`, sorted by name, plus Whole business. PUT accepts exactly that
+  set. With no such row, show no switcher.
+- **Each person reads and writes only their own choice.** Nothing in the request
+  names a person. A service token gets `403 HUMAN_ONLY`.
+- **The box checks the choice again on every read.** If the person has been
+  removed from the department, or it has been archived, GET answers
+  `"whole_business"`. The box keeps the choice, so it comes back if the
+  department is restored or the person is added back.
+- **Every PUT refusal looks the same.** A department the person may not choose
+  (missing, not theirs, archived or being archived, a team, the household) gets
+  one `404 DEPARTMENT_NOT_AVAILABLE` body, so the answer never shows whether a
+  department exists. The body is strict: an unknown key, a non-uuid id or a
+  missing `departmentId` is `400 VALIDATION_ERROR`.
+- **The last write wins** across devices. Read it again on launch and when the
+  app comes to the foreground, to pick up a switch made elsewhere. Nothing is
+  audited: it is a display preference.
+- **Errors are nested**, as on the Notifications routes:
+  `{ "error": { "code": "…", "message": "…" } }`. Key on `code`. A `404` with any
+  other code, or none, means the box is older than this route: keep the choice
+  on the device.
 
 ## Error shape
 

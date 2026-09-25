@@ -55,6 +55,7 @@ import { reachableInChat } from "@/lib/tool-domains";
 import { useAuth } from "@/lib/auth";
 import {
   PENDING_COMPOSER_KEY,
+  PENDING_PROMPT_KEY,
   type BusinessContextPinKind,
   type PendingComposerPayload,
   type PendingComposerToolPayload,
@@ -450,14 +451,14 @@ export default function ChatPage() {
     if (!selectedModel) return;
     let pending: string | null = null;
     try {
-      pending = window.sessionStorage.getItem("droplet.pendingPrompt");
+      pending = window.sessionStorage.getItem(PENDING_PROMPT_KEY);
     } catch {
       pending = null;
     }
     if (!pending) return;
     // One-shot: always remove it so a stale hero prompt can't resurface.
     try {
-      window.sessionStorage.removeItem("droplet.pendingPrompt");
+      window.sessionStorage.removeItem(PENDING_PROMPT_KEY);
     } catch {
       /* ignore */
     }

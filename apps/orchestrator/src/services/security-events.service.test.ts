@@ -7,6 +7,11 @@
  * proven against Postgres in security-events.pg.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// WARP-2978 — the retention leg hands the SAME `before` to the incident trim.
+const incidentTrim = vi.hoisted(() => vi.fn(async () => ({ marked: 0, deleted: 0 })));
+vi.mock("./security-incidents.service.js", () => ({ trimSecurityIncidents: incidentTrim }));
+
 import {
   buildSecurityHealth,
   createStatusTracker,
@@ -408,6 +413,26 @@ describe("trimSecurityEvents — 30 days by default", () => {
   });
 });
 
+describe("WARP-2978 — the retention leg trims incidents with the events' own horizon (§6.10)", () => {
+  it("calls trimSecurityIncidents with trimSecurityEvents' `before`, and records how many incidents went", async () => {
+    const scheduleCron = vi.fn();
+    const p = {
+      securityEvent: { deleteMany: vi.fn().mockResolvedValue({ count: 4 }) },
+      securityIngestState: { upsert: vi.fn().mockResolvedValue({}), update: vi.fn().mockResolvedValue({}) },
+    };
+    incidentTrim.mockResolvedValueOnce({ marked: 2, deleted: 3 });
+    registerSecurityJobs({ scheduleInterval: vi.fn(), scheduleCron }, p as never);
+    const leg = scheduleCron.mock.calls[0][1] as () => Promise<void>;
+    await leg();
+    const before = (p.securityEvent.deleteMany.mock.calls[0][0] as { where: { startedAt: { lt: Date } } }).where.startedAt.lt;
+    expect(incidentTrim).toHaveBeenCalledWith(p, before, expect.any(Date));
+    expect(p.securityIngestState.update).toHaveBeenCalledWith({
+      where: { id: "singleton" },
+      data: { retentionIncidentsDeleted: 3 },
+    });
+  });
+});
+
 describe("registerSecurityJobs — on the cron runtime, single-flighted", () => {
   it("schedules the mirror every minute and retention nightly, each under its own advisory lock", () => {
     // A bare setInterval / while(true) in place of the runtime fails this.
@@ -555,6 +580,23 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     expect(row(rows, "retention").state).toBe("quiet");
   });
 
+  it("WARP-2978: the retention row names events AND incidents (§6.10)", () => {
+    const ran = buildSecurityHealth({
+      ...base,
+      ingest: ingest(),
+      state: { threatMirrorRanAt: NOW, retentionRanAt: NOW, retentionDeleted: 3, retentionIncidentsDeleted: 1 },
+    });
+    expect(row(ran, "retention").detail).toBe("Keeps events 30 days and incidents a year; last removed 3 events and 1 incident");
+    const one = buildSecurityHealth({
+      ...base,
+      ingest: ingest(),
+      state: { threatMirrorRanAt: NOW, retentionRanAt: NOW, retentionDeleted: 1, retentionIncidentsDeleted: 0 },
+    });
+    expect(row(one, "retention").detail).toBe("Keeps events 30 days and incidents a year; last removed 1 event and 0 incidents");
+    const never = buildSecurityHealth({ ...base, ingest: ingest(), state: null });
+    expect(row(never, "retention").detail).toBe("Keeps events 30 days and incidents a year; not run yet");
+  });
+
   it("WARP-2977 P2b: a site_mode row is placed after threat_mirror and before retention, verbatim", () => {
     const siteMode = { id: "site_mode" as const, state: "down" as const, detail: "Not running", lastSeenAt: null };
     const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode });
@@ -585,15 +627,20 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
   it("WARP-2977 P2b-2: a locks row is placed after camera_system and before threat_mirror, verbatim — the full pinned order", () => {
     const siteMode = { id: "site_mode" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
     const locks = { id: "locks" as const, state: "not_configured" as const, detail: "No door locks paired", lastSeenAt: null };
+    const incidents = { id: "incidents" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const alerts = { id: "alerts" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
     const patterns = { id: "patterns" as const, state: "quiet" as const, detail: "x", lastSeenAt: null };
-    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode, locks, patterns });
-    // Every row both PRs add (WARP-2977 P2b-2 locks, WARP-2980 patterns), in the one pinned order.
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode, locks, incidents, alerts, patterns });
+    // Every row the ADR-059 PRs add (WARP-2977 P2b-2 locks, WARP-2978 incidents
+    // and alerts, WARP-2980 patterns), in the one pinned order.
     expect(rows.map((r) => r.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "locks",
       "threat_mirror",
       "site_mode",
+      "incidents",
+      "alerts",
       "patterns",
       "retention",
     ]);
@@ -608,6 +655,51 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
       "camera_ingest",
       "camera_system",
       "threat_mirror",
+      "retention",
+    ]);
+  });
+
+  // WARP-2978 (ADR-059 P3 §6.11) — the pinned order grows:
+  // camera_ingest, camera_system, (locks), threat_mirror, site_mode, incidents, alerts, retention.
+  it("WARP-2978: incidents and alerts sit after site_mode and before retention, verbatim", () => {
+    const siteMode = { id: "site_mode" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const incidents = { id: "incidents" as const, state: "down" as const, detail: "Not running", lastSeenAt: null };
+    const alerts = { id: "alerts" as const, state: "ok" as const, detail: "Alerts go to Stefan", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode, incidents, alerts });
+    expect(rows.map((r) => r.id)).toEqual([
+      "camera_ingest",
+      "camera_system",
+      "threat_mirror",
+      "site_mode",
+      "incidents",
+      "alerts",
+      "retention",
+    ]);
+    expect(row(rows, "incidents")).toBe(incidents);
+    expect(row(rows, "alerts")).toBe(alerts);
+  });
+
+  it("WARP-2978: each of the two rows is placed on its own (alerts is owner/admin only and may be absent)", () => {
+    const incidents = { id: "incidents" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, frigateConfigured: false, ingest: ingest(), incidents });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "incidents", "retention"]);
+  });
+
+  // P3 merged after P5 PR-A, so P3 moves the pin (security-events.service.ts's header).
+  it("WARP-2978 × WARP-2980: all three together — incidents, alerts, then patterns, then retention", () => {
+    const siteMode = { id: "site_mode" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const incidents = { id: "incidents" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const alerts = { id: "alerts" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const patterns = { id: "patterns" as const, state: "quiet" as const, detail: "x", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode, incidents, alerts, patterns });
+    expect(rows.map((r) => r.id)).toEqual([
+      "camera_ingest",
+      "camera_system",
+      "threat_mirror",
+      "site_mode",
+      "incidents",
+      "alerts",
+      "patterns",
       "retention",
     ]);
   });

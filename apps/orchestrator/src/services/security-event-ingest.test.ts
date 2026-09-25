@@ -9,11 +9,15 @@
 import { describe, it, expect } from "vitest";
 import {
   frigateEndToDraft,
+  frigateOngoingToDraft,
+  ongoingFrigateId,
+  parseFrigateInflight,
   parseFrigateStatus,
   statusTransitionToDraft,
   threatRowToDraft,
   SECURITY_MIN_SCORE,
   SECURITY_MIN_DURATION_SEC,
+  SECURITY_ONGOING_SUMMARY,
 } from "./security-event-ingest.js";
 
 const START = 1_790_000_000; // epoch seconds
@@ -260,5 +264,105 @@ describe("observed (WARP-2977 P2b-2) — every P2a row is timed when it happened
     expect(
       threatRowToDraft({ id: 1n, at: new Date(0), kind: "network", severity: "warn", what: "x" }).observed,
     ).toBe("live");
+    // WARP-2978 PR-D: a person still in view is timed from when Frigate started tracking them.
+    expect(
+      frigateOngoingToDraft({
+        id: "1790000000.123456-abc123",
+        camera: "front_door",
+        label: "person",
+        startedAt: new Date(0),
+        topScore: 0.9,
+        enteredZones: [],
+      }).observed,
+    ).toBe("live");
+  });
+});
+
+// ── WARP-2978 PR-D (ADR-059 P3 §6.12) — early presence ──────────────────
+
+describe("parseFrigateInflight — the raw new/update/end messages the in-flight map keeps", () => {
+  it("new and update are a track: the object so far (best score, Frigate's verdict, the zones entered)", () => {
+    for (const type of ["new", "update"]) {
+      expect(parseFrigateInflight(endMessage({ end_time: null }, type))).toEqual({
+        type: "track",
+        id: "1790000000.123456-abc123",
+        camera: "front_door",
+        label: "person",
+        startedAt: new Date(START * 1000),
+        topScore: 0.86,
+        falsePositive: false,
+        enteredZones: ["porch"],
+      });
+    }
+  });
+
+  it("end needs only the id — the entry is forgotten", () => {
+    expect(parseFrigateInflight(endMessage())).toEqual({ type: "end", id: "1790000000.123456-abc123" });
+    expect(parseFrigateInflight(endMessage({ camera: "../x", label: 7 }))).toEqual({ type: "end", id: "1790000000.123456-abc123" });
+  });
+
+  it("keeps Frigate's own false-positive verdict, and an out-of-range score as unknown", () => {
+    expect(parseFrigateInflight(endMessage({ false_positive: true }, "update"))).toMatchObject({ falsePositive: true });
+    expect(parseFrigateInflight(endMessage({ top_score: 1.3 }, "update"))).toMatchObject({ topScore: null });
+    expect(parseFrigateInflight(endMessage({ top_score: "0.9" }, "update"))).toMatchObject({ topScore: null });
+    expect(parseFrigateInflight(endMessage({ entered_zones: ["porch", "porch", "../x", 3, "till"] }, "update"))).toMatchObject({
+      enteredZones: ["porch", "till"],
+    });
+  });
+
+  it.each([
+    ["an unknown type", endMessage({}, "snapshot")],
+    ["no after", { type: "update" }],
+    ["a bad id", endMessage({ id: "a b" }, "update")],
+    ["a bad camera", endMessage({ camera: "a/b" }, "update")],
+    ["a bad label", endMessage({ label: "" }, "update")],
+    ["no start time", endMessage({ start_time: 0 }, "update")],
+    ["an end with a bad id", endMessage({ id: "" })],
+    ["not an object", "frigate"],
+  ])("ignores %s", (_name, message) => {
+    expect(parseFrigateInflight(message)).toBeNull();
+  });
+});
+
+describe("frigateOngoingToDraft — the ONE still-in-view row of a person", () => {
+  const o = {
+    id: "1790000000.123456-abc123",
+    camera: "front_door",
+    label: "person",
+    startedAt: new Date(START * 1000),
+    topScore: 0.86,
+    enteredZones: ["porch"],
+  };
+
+  it("is a Frigate detection_ongoing row: started when tracking did, not ended, keyed in its own namespace", () => {
+    expect(frigateOngoingToDraft(o)).toEqual({
+      source: "frigate",
+      kind: "detection_ongoing",
+      severity: "info",
+      camera: "front_door",
+      sourceRef: "front_door/1790000000.123456-abc123",
+      dedupeKey: "frigate-ongoing:1790000000.123456-abc123",
+      labels: ["person"],
+      cameraZones: ["porch"],
+      score: 0.86,
+      startedAt: new Date(START * 1000),
+      endedAt: null,
+      summary: "Person still in view after 30 s",
+      observed: "live",
+    });
+    expect(SECURITY_ONGOING_SUMMARY).toBe("Person still in view after 30 s");
+  });
+
+  it("never shares the key of the same object's end row (both rows are kept)", () => {
+    const end = frigateEndToDraft(endMessage())!;
+    expect(frigateOngoingToDraft(o).dedupeKey).not.toBe(end.dedupeKey);
+    expect(frigateOngoingToDraft(o).sourceRef).toBe(end.sourceRef);
+  });
+
+  it("ongoingFrigateId reads the id back from the key, and nothing from any other key", () => {
+    expect(ongoingFrigateId("frigate-ongoing:1790000000.123456-abc123")).toBe("1790000000.123456-abc123");
+    expect(ongoingFrigateId("frigate:1790000000.123456-abc123")).toBeNull();
+    expect(ongoingFrigateId("frigate-ongoing:")).toBeNull();
+    expect(ongoingFrigateId("frigate-ongoing:a b")).toBeNull();
   });
 });

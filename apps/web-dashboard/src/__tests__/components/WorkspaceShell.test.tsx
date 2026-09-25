@@ -63,6 +63,8 @@ vi.mock("swr", () => ({
 }));
 
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
+import { Composer } from "@/components/workshop/Composer";
+import { collect, readSheet } from "../helpers/css-cascade";
 
 function renderAt(path: string) {
   pathnameRef.current = path;
@@ -256,5 +258,111 @@ describe("WorkspaceShell — keyboard", () => {
     fireEvent.keyDown(tabs[tabs.length - 1], { key: "ArrowRight" });
     expect(document.activeElement).toBe(tabs[0]);
     expect(pushMock).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * WARP-3063 / WARP-3064 — workspace-nav.css loads on every authenticated route
+ * in BOTH nav layouts (AuthGate imports WorkspaceShell), and the Workshop's own
+ * classes share its `ws-` prefix: `.ws-status` is also the composer's notice
+ * line, `.ws-chip` its small status chips. A bare `.ws-status` rule styled that
+ * line as a bordered 32px pill, clipped to a 32px square below 1024px.
+ * Scoping under `.droplet-workspace` alone is not enough: in this layout the
+ * page renders inside `.droplet-workspace > .ws-main`. jsdom never applies the
+ * sheet, so these resolve the sheet's own selectors against the real DOM
+ * (css-cascade), @media rules included. Interaction states and pseudo-elements
+ * are dropped first, so a `:hover` or `:focus-visible` rule counts as reaching
+ * the element it would style.
+ */
+describe("WorkspaceShell — workspace-nav.css styles only the shell's own chrome (WARP-3063, WARP-3064)", () => {
+  const NAV_SHEET = collect(
+    readSheet("components/workspace/workspace-nav.css"),
+    "workspace-nav.css",
+  );
+  const SELECTORS = [...new Set(NAV_SHEET.map((d) => d.selector.replace(/\s+/g, " ")))];
+  /** The selector minus interaction states and pseudo-elements. */
+  const structural = (sel: string) =>
+    sel.replace(/::[\w-]+/g, "").replace(/:(?:hover|active|focus-visible|focus)(?![\w-])/g, "");
+  const rulesMatching = (el: Element) =>
+    NAV_SHEET.filter((d) => el.matches(structural(d.selector))).map(
+      (d) => `${d.conditions.join(" ")} ${d.selector} { ${d.prop}: ${d.value} }`.trim(),
+    );
+
+  const WS_CLASS = /\.ws-[\w-]+/;
+  /** The shell's own regions, each reached from its root by child combinators. */
+  const REGION = [
+    /^\.droplet-workspace > \.ws-(?:chrome|strip|bottom)(?![\w-])/,
+    /^\.droplet-workspace > \.ws-main > \.ws-views(?![\w-])/,
+    /^\.droplet-workspace > \.ws-main(?::[\w-]+)*$/,
+  ];
+  const wsSelectors = () => SELECTORS.filter((s) => WS_CLASS.test(s));
+
+  it("declares no bare .ws-* selector — every one starts at .droplet-workspace", () => {
+    expect(wsSelectors().length).toBeGreaterThan(40);
+    expect(wsSelectors().filter((s) => !s.startsWith(".droplet-workspace"))).toEqual([]);
+  });
+
+  it("anchors every .ws-* selector to a shell region, so the page under .ws-main is out of reach", () => {
+    expect(wsSelectors().filter((s) => !REGION.some((r) => r.test(s)))).toEqual([]);
+  });
+
+  const notice = "The run could not start.";
+  const workshop = (
+    // WorkshopSpace's own root, where the composer really sits.
+    <div className="droplet-shell chat-app workshop-app">
+      <Composer
+        workspaces={[]}
+        workspaceId=""
+        onWorkspaceId={() => {}}
+        busy={false}
+        onSubmit={async () => true}
+        status={{ text: notice }}
+      />
+    </div>
+  );
+
+  it.each([
+    ["Workspace tabs", () => <WorkspaceShell>{workshop}</WorkspaceShell>],
+    ["Sidebar", () => workshop],
+  ])(
+    "reaches nothing on the Workshop's status line or chips, at any width — %s layout",
+    (_layout, tree) => {
+      pathnameRef.current = "/workshop";
+      const { container } = render(tree());
+      const page = container.querySelector(".workshop-app") as HTMLElement;
+      const line = within(page).getByText(notice);
+      expect(line).toHaveClass("ws-status");
+      const chips = Array.from(page.querySelectorAll(".ws-chip"));
+      expect(chips).toHaveLength(2);
+      expect([line, ...chips].flatMap(rulesMatching)).toEqual([]);
+    },
+  );
+
+  it("still styles the header pill at both widths, and every ws- element the shell renders", () => {
+    const { container } = renderAt("/files/recents");
+    // The pill it exists for: desktop geometry and the phone's dot-only square.
+    const pill = container.querySelector("header .ws-status") as HTMLElement;
+    expect(pill).not.toBeNull();
+    const pillRules = rulesMatching(pill);
+    expect(pillRules).toContain(
+      ".droplet-workspace > .ws-chrome .ws-head .ws-status { height: 32px }",
+    );
+    expect(pillRules).toContain(
+      "@media (max-width: 1023.98px) .droplet-workspace > .ws-chrome .ws-head .ws-status { width: 32px }",
+    );
+
+    // Chips, view pills, strip and tab bar: an anchor that stops matching the
+    // markup (a region renamed or wrapped) leaves an element unstyled here.
+    const own = Array.from(container.querySelectorAll("*")).filter((el) =>
+      Array.from(el.classList).some((c) => c.startsWith("ws-")),
+    );
+    const classes = own.flatMap((el) => Array.from(el.classList));
+    for (const c of ["ws-chip", "ws-view", "ws-strip-health", "ws-bottom-item"]) {
+      expect(classes).toContain(c);
+    }
+    const unstyled = own
+      .filter((el) => rulesMatching(el).length === 0)
+      .map((el) => el.getAttribute("class"));
+    expect(unstyled).toEqual([]);
   });
 });

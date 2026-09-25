@@ -184,6 +184,33 @@ export interface PushPayload {
    *  the person taps the notification. Absent on the camera detection
    *  fan-out, which writes no row. */
   notificationId?: string;
+  /** WARP-2978 (ADR-059 P3 D37) — `alert` makes the dial long-lived and urgent
+   *  (`PUSH_ALERT_OPTIONS`) and tells the service worker to keep the
+   *  notification until it is handled. Absent: the default best-effort dial. */
+  priority?: NotificationPriority;
+}
+
+/** WARP-2978 — the one priority there is. A Security alert (§6.7). */
+export type NotificationPriority = "alert";
+
+/** Best-effort: a notification nobody could receive within a minute is stale. */
+export const PUSH_DEFAULT_TTL_S = 60;
+/**
+ * WARP-2978 (D37) — an alert about someone inside after hours must still reach
+ * a phone that has been asleep for longer than a minute: kept by the push
+ * service for an hour, delivered with `Urgency: high`.
+ */
+export const PUSH_ALERT_TTL_S = 3600;
+
+/** The web-push request options for one dial. */
+export function pushDialOptions(priority: NotificationPriority | undefined): {
+  TTL: number;
+  urgency?: "high";
+  timeout: number;
+} {
+  return priority === "alert"
+    ? { TTL: PUSH_ALERT_TTL_S, urgency: "high", timeout: PUSH_DIAL_TIMEOUT_MS }
+    : { TTL: PUSH_DEFAULT_TTL_S, timeout: PUSH_DIAL_TIMEOUT_MS };
 }
 
 /** WARP-2904 — what one push dial (or refusal) did, for the audit row. */
@@ -325,8 +352,9 @@ export async function dispatchToUser(
             keys: { p256dh: s.p256dhKey, auth: s.authKey },
           },
           body,
-          // TTL: best-effort, stale notifications past 1 min are useless.
-          { TTL: 60, timeout: PUSH_DIAL_TIMEOUT_MS },
+          // TTL: best-effort, stale notifications past 1 min are useless —
+          // except an alert (WARP-2978), which is kept for an hour.
+          pushDialOptions(payload.priority),
         );
         sent++;
         auditPushEgress(username, "allowed", s.host);

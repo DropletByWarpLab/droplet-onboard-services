@@ -433,6 +433,7 @@ describe("site-mode rows (WARP-2977 P2b)", () => {
   it("every event kind has an icon (a new kind fails the Record below at compile time)", () => {
     const KINDS: Record<SecurityEventKind, true> = {
       detection: true,
+      detection_ongoing: true,
       detection_low: true,
       camera_offline: true,
       camera_online: true,
@@ -517,6 +518,34 @@ describe("rows", () => {
     expect(screen.getByText("front_door · 41% sure · low confidence")).toBeInTheDocument();
   });
 
+  it("WARP-2978 PR-D — a person still in view reads \"Still in view\", with a person's glyph and their score so far", () => {
+    const { container } = render(
+      <SecurityFeed
+        {...props({
+          events: [
+            event({
+              id: "o1",
+              kind: "detection_ongoing",
+              endedAt: null,
+              cameraZones: [],
+              score: 0.88,
+              summary: "Person still in view after 30 s",
+            }),
+            event({ id: "d1" }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("Person still in view after 30 s")).toBeInTheDocument();
+    const rows = container.querySelectorAll("li.lrow[data-kind]");
+    expect(rows[0]).toHaveAttribute("data-kind", "detection_ongoing");
+    expect(rows[0]!.querySelector("[data-ongoing]")).toHaveTextContent("Still in view");
+    expect(rows[0]).toHaveTextContent("front_door · 88% sure");
+    // Only the ongoing row carries it; the person's finished detection does not.
+    expect(rows[1]!.querySelector("[data-ongoing]")).toBeNull();
+    expect(iconFor(event({ kind: "detection_ongoing" }))).toBe(iconFor(event({ kind: "detection" })));
+  });
+
   it("a threat has no camera link and names its kind; an alert-severity row is marked", () => {
     render(
       <SecurityFeed
@@ -568,8 +597,9 @@ describe("filters", () => {
 
   it("kindsForView: detections widen to low only when asked", () => {
     expect(kindsForView("all", false)).toBeUndefined();
-    expect(kindsForView("detections", false)).toEqual(["detection"]);
-    expect(kindsForView("detections", true)).toEqual(["detection", "detection_low"]);
+    // WARP-2978 PR-D — a person still in view is a detection too.
+    expect(kindsForView("detections", false)).toEqual(["detection", "detection_ongoing"]);
+    expect(kindsForView("detections", true)).toEqual(["detection", "detection_ongoing", "detection_low"]);
     expect(kindsForView("health", true)).toEqual(["camera_offline", "camera_online", "source_offline", "source_online"]);
     expect(kindsForView("network", false)).toEqual(["threat"]);
   });

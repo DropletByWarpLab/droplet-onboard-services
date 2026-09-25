@@ -430,9 +430,11 @@ the model on the Models page reaches it; an explicit `model` stays pinned
 `droplet/notifications/<username>` topic the park uses, with the result
 summary (or the error).
 
-**Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056), a
-Workspace nav item after Routines, owner/admin — the roles that may start a
-run. It shipped on `/admin/audit` and was deliberately not a nav item
+**Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056; since
+WARP-2974 the run is a transcript in the Workshop space). It is the last
+visible row of the sidebar's Work group, after Calendar, for owner/admin only,
+the roles that may start a run. WARP-2967 briefly tucked it behind Settings →
+Automation, and WARP-3063 put the row back. It shipped on `/admin/audit` and was deliberately not a nav item
 (WARP-2180); ADR-056 made the run the unit of every agentic slice that
 follows, so the panel moved to a surface with a door. Above it, the first
 dashboard caller of `POST /api/agent-runs`: a goal field whose copy says what

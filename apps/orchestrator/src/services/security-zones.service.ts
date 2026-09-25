@@ -298,8 +298,13 @@ export function zoneVisibleTo(
   return allActive.length === 0 || visible.length > 0;
 }
 
-/** Frigate detection rows — the ones a part of a view (`cameraZones`) can narrow. */
-const DETECTION_KINDS = ["detection", "detection_low"] as const;
+/**
+ * Frigate detection rows — the ones a part of a view (`cameraZones`) can
+ * narrow. WARP-2978 PR-D: a person's "still in view" row carries the zones
+ * they entered so far, and must land in the same areas as their `end` row —
+ * or it would group (and alert) elsewhere.
+ */
+const DETECTION_KINDS = ["detection", "detection_ongoing", "detection_low"] as const;
 /** The camera's own health rows — an area watched through any part of the view still shows them. */
 const CAMERA_STATUS_KINDS = ["camera_offline", "camera_online"] as const;
 
@@ -417,6 +422,55 @@ export function zonesForEvent(row: ZoneMatchableEvent, index: ZoneIndex): string
   return [...out].sort(byString);
 }
 
+/**
+ * WARP-2978 (ADR-059 P3 spec §6.2) — every active area one row matches, from
+ * ALL active links (never viewer-filtered: the incident engine groups for
+ * everyone, and DS-005 is applied when incidents are read). Exactly
+ * `zonesForEvent`'s rules — a whole camera matches every row with that
+ * camera; a part of a view matches that camera's detections whose
+ * cameraZones include it, and all of that camera's offline/online rows —
+ * plus, per area, the link ids that matched and whether a part-of-view link
+ * did (`specificity`, for the engine's rank). Sorted by zone id; link ids
+ * sorted. A property test pins that the zone ids agree with `zonesForEvent`.
+ */
+export function matchAreasForEvent(
+  row: ZoneMatchableEvent,
+  links: readonly ActiveZoneLink[],
+): Array<{
+  zoneId: string;
+  zoneName: string;
+  zoneKind: SecurityZoneKind;
+  linkIds: string[];
+  specificity: "part" | "whole";
+}> {
+  if (row.camera === null) return [];
+  const isStatus = (CAMERA_STATUS_KINDS as readonly string[]).includes(row.kind);
+  const isDetection = (DETECTION_KINDS as readonly string[]).includes(row.kind);
+  const byZone = new Map<
+    string,
+    { zoneId: string; zoneName: string; zoneKind: SecurityZoneKind; linkIds: string[]; specificity: "part" | "whole" }
+  >();
+  for (const l of links) {
+    const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+    // A lock link places only lock rows (the feed's chips); the engine never
+    // groups a lock row (D21), so it matches nothing here.
+    if (!parsed || isLockLinkRef(parsed) || parsed.camera !== row.camera) continue;
+    const matched =
+      parsed.frigateZone === null || isStatus || (isDetection && row.cameraZones.includes(parsed.frigateZone));
+    if (!matched) continue;
+    let m = byZone.get(l.zoneId);
+    if (!m) {
+      m = { zoneId: l.zoneId, zoneName: l.zoneName, zoneKind: l.zoneKind, linkIds: [], specificity: "whole" };
+      byZone.set(l.zoneId, m);
+    }
+    m.linkIds.push(l.linkId);
+    if (parsed.frigateZone !== null) m.specificity = "part";
+  }
+  return [...byZone.values()]
+    .map((m) => ({ ...m, linkIds: [...new Set(m.linkIds)].sort(byString) }))
+    .sort((a, b) => byString(a.zoneId, b.zoneId));
+}
+
 const linkKey = (l: DesiredZoneLink): string => `${l.sourceKind}\u0000${l.sourceRef}`;
 
 /** Route 12: requested links vs stored ones (deduped by `sourceKind` + `sourceRef`). */
@@ -471,6 +525,18 @@ export function viewerAreas(
     shown.push(...visible);
   }
   return { names, index: buildZoneIndex(shown) };
+}
+
+/**
+ * A row's area chips for one viewer — `{id, name}` of the VISIBLE areas it
+ * belongs to, sorted by name then id. The ONE resolver behind the feed's
+ * `zones` (route 1) and the incident page's member rows (route 18, WARP-2978
+ * review A), so the two can never disagree about what a viewer may see.
+ */
+export function zoneChipsFor(row: ZoneMatchableEvent, areas: ViewerAreas): Array<{ id: string; name: string }> {
+  return zonesForEvent(row, areas.index)
+    .map((id) => ({ id, name: areas.names.get(id) ?? "" }))
+    .sort((a, b) => a.name.localeCompare(b.name) || byString(a.id, b.id));
 }
 
 /**

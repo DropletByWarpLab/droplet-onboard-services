@@ -128,6 +128,7 @@ import type {
   DepartmentProfile,
   DepartmentProfileResponse,
   PutDepartmentProfilePayload,
+  ActiveDepartmentResponse,
   AccessRole,
   AccessRolePayload,
   AccessToolDomainsResponse,
@@ -9347,4 +9348,27 @@ export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } =
  */
 export function ackAllNotifications(ids: readonly string[]): Promise<NotificationAckAllResult> {
   return securityFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { ids }));
+}
+
+// ── WARP-2981 (ADR-059 P6, DS-003): the active department, on the server ──
+// The department a person's shell is arranged around follows them to every
+// device. Same transport as above (`securityFetch`: authFetch + typed errors),
+// so a refusal is told apart from a missing route: a PUT the box refuses is a
+// 404 with `.code === "DEPARTMENT_NOT_AVAILABLE"`; a 404 with any other code
+// is an orchestrator older than this route.
+
+export const ACTIVE_DEPARTMENT_PATH = "/api/me/active-department";
+
+/** P6-1 — the caller's choice, re-checked by the box now. `scope: "unset"` is
+ *  "never chosen", which is not the same answer as a chosen Whole business. */
+export function getActiveDepartment(): Promise<ActiveDepartmentResponse> {
+  return securityFetch<ActiveDepartmentResponse>(`${BASE}${ACTIVE_DEPARTMENT_PATH}`);
+}
+
+/** P6-2 — choose a department by id, or Whole business with null. */
+export function putActiveDepartment(departmentId: string | null): Promise<ActiveDepartmentResponse> {
+  return securityFetch<ActiveDepartmentResponse>(
+    `${BASE}${ACTIVE_DEPARTMENT_PATH}`,
+    jsonBody("PUT", { departmentId }),
+  );
 }

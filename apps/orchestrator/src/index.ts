@@ -12,7 +12,7 @@ import { connectMqtt } from "./services/mqtt.service.js";
 import { notifyOwnersAndAdmins } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
-import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
+import { initCameraService, securityOngoingSource, shutdownCameraService } from "./services/camera.service.js";
 import { attachWsBridge } from "./services/ws-bridge.service.js";
 import { attachClientDispatchBridge } from "./services/client-dispatch.service.js";
 import {
@@ -198,6 +198,9 @@ import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
+import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
+import { getEffectiveModuleIds } from "./services/modules.service.js";
+import { resolveEffectiveAccess } from "./services/effective-access.service.js";
 import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
@@ -1137,6 +1140,19 @@ async function main() {
   // reconciles SecurityModeState with the opening hours (level-triggered, on
   // its own advisory lock). Unconditional, like the jobs above.
   registerSecurityModeJobs(cronRuntime, prisma);
+  // WARP-2978 (ADR-059 P3) — the incident engine: every 10 s, on its own
+  // advisory lock, it sorts new SecurityEvent rows into incidents, attaches
+  // reason codes, seals quiet incidents and hands alerts to the notifier.
+  // Registered unconditionally (D29: incidents are grouped while the module is
+  // off; the notifier checks the box-wide toggle at send time and sends
+  // nothing). Registration is the `incidents` health row's boot assertion.
+  registerSecurityIncidentJobs(cronRuntime, prisma, {
+    isSecurityModuleOn: () => getEffectiveModuleIds(prisma, config).then((ids) => ids.has("security")),
+    resolveAccess: resolveEffectiveAccess,
+    // WARP-2978 PR-D — the people Frigate is tracking now (camera.service's
+    // in-flight map): a person in view for 30 s alerts before their `end`.
+    ongoing: securityOngoingSource(),
+  });
   // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
   // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
   // later), keeps the learning state, and rebuilds what normal looks like

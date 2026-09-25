@@ -112,6 +112,8 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
     await prisma.securityZoneLink.deleteMany({ where: { zoneId: { in: ids } } });
     await prisma.securityZone.deleteMany({ where: { id: { in: ids } } });
     await prisma.securityEvent.deleteMany({ where: { dedupeKey: { startsWith: `${TAG}:` } } });
+    // WARP-2978 PR-D — the generated still-in-view rows live in their own key namespace.
+    await prisma.securityEvent.deleteMany({ where: { dedupeKey: { startsWith: `frigate-ongoing:${TAG}-` } } });
   }
 
   beforeAll(async () => {
@@ -158,15 +160,21 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
   describe("zoneEventWhere and zonesForEvent are twins", () => {
     type Gen = { source: string; kind: string; camera: string | null; cameraZones: string[]; sourceRef?: string };
     const generated: Gen[] = [];
+    // The generated rows, by key: a lock row's sourceRef is its endpoint (not
+    // `${TAG}/prop-…`) and a still-in-view row's key is `frigate-ongoing:…`.
+    const PROP_ROWS = {
+      OR: [{ dedupeKey: { startsWith: `${TAG}:prop:` } }, { dedupeKey: { startsWith: `frigate-ongoing:${TAG}-prop-` } }],
+    };
 
     beforeAll(async () => {
       const r = rng(2977);
       for (let i = 0; i < 200; i++) {
-        const shape = pick(r, ["det", "det", "det", "low", "status", "status", "site", "threat", "mode", "lock", "lock"] as const);
+        const shape = pick(r, ["det", "det", "det", "low", "ongoing", "status", "status", "site", "threat", "mode", "lock", "lock"] as const);
         let g: Gen;
-        if (shape === "det" || shape === "low") {
+        if (shape === "det" || shape === "low" || shape === "ongoing") {
           const zones = PARTS.filter(() => r() < 0.35);
-          g = { source: "frigate", kind: shape === "det" ? "detection" : "detection_low", camera: pick(r, [...CAMS, UNLINKED]), cameraZones: zones };
+          const kind = shape === "det" ? "detection" : shape === "low" ? "detection_low" : "detection_ongoing";
+          g = { source: "frigate", kind, camera: pick(r, [...CAMS, UNLINKED]), cameraZones: zones };
         } else if (shape === "status") {
           g = { source: "frigate_status", kind: pick(r, ["camera_offline", "camera_online"]), camera: pick(r, [...CAMS, UNLINKED]), cameraZones: [] };
         } else if (shape === "site") {
@@ -188,7 +196,8 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
           severity: "info" as const,
           camera: g.camera,
           sourceRef: g.sourceRef ?? `${TAG}/prop-${i}`,
-          dedupeKey: `${TAG}:prop:${i}`,
+          // A still-in-view row's key is in its own namespace (SecurityEvent_ongoing_shape).
+          dedupeKey: g.kind === "detection_ongoing" ? `frigate-ongoing:${TAG}-prop-${i}` : `${TAG}:prop:${i}`,
           labels: g.kind === "mode_changed" ? ["closed", "manual", "open"] : g.kind === "lock_state" ? ["unlocked"] : ["person"],
           cameraZones: g.cameraZones,
           score: null,
@@ -202,7 +211,7 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
 
     async function assertTwins(links: ActiveZoneLink[], zoneIds: string[], label: string): Promise<number> {
       const rows = await prisma.securityEvent.findMany({
-        where: { dedupeKey: { startsWith: `${TAG}:prop:` } },
+        where: PROP_ROWS,
         select: { id: true, source: true, kind: true, camera: true, cameraZones: true, sourceRef: true },
       });
       const index = buildZoneIndex(links);
@@ -217,7 +226,7 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
         }
         const inSql = (
           await prisma.securityEvent.findMany({
-            where: { AND: [{ dedupeKey: { startsWith: `${TAG}:prop:` } }, clause] },
+            where: { AND: [PROP_ROWS, clause] },
             select: { id: true },
           })
         )

@@ -30,6 +30,7 @@ import {
 } from "../middleware/feature-gate.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
 import type { SecurityLockReader } from "./security-lock-adapter.js";
+import type { OngoingSource } from "./security-inflight.js";
 
 export interface SecurityViewerScope {
   /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
@@ -61,6 +62,12 @@ export interface SecurityRouteDeps {
    * the one index.ts started (`securityLockAdapter`); null = none is running.
    */
   locks?: () => SecurityLockReader | null;
+  /**
+   * WARP-2978 PR-D — who Frigate is tracking now (camera.service's in-flight
+   * map), for the incidents' "still happening" (security-incident-view.ts).
+   * The incidents router reads camera.service's own when absent.
+   */
+  ongoing?: Pick<OngoingSource, "inView">;
 }
 
 /** Moved from routes/security.ts (P2a) with the same semantics: role-based. */

@@ -94,8 +94,10 @@ describe("the main tree is four groups and a Settings row (WARP-2967)", () => {
       "href",
       "/settings",
     );
-    for (const href of ["/admin", "/users", "/tools", "/models", "/health", "/help", "/trust", "/downloads", "/integrations", "/routines", "/workshop", "/admin/audit"])
+    for (const href of ["/admin", "/users", "/tools", "/models", "/health", "/help", "/trust", "/downloads", "/integrations", "/routines", "/admin/audit"])
       expect(a.querySelector(`a[href='${href}']`), href).toBeNull();
+    // WARP-3063 — Workshop left the tuck: it is in the main tree, not the panel.
+    expect(within(a).getByRole("link", { name: /^workshop$/i })).toHaveAttribute("href", "/workshop");
   });
 });
 
@@ -122,7 +124,7 @@ describe("the sidebar swaps to the Settings panel inside Settings (WARP-2967)", 
     const panel = within(aside()).getByRole("navigation", { name: /settings/i });
     for (const caption of ["Account", "Workspace", "Automation", "System", "Advanced"])
       expect(within(panel).getByText(caption)).toBeInTheDocument();
-    for (const href of ["/users", "/admin", "/tools", "/models", "/health", "/help", "/trust", "/downloads", "/integrations", "/integrations/credentials", "/routines", "/workshop", "/admin/audit", "/admin/prompt", "/admin/files", "/knowledge", "/context", "/files/devices", "/admin/claude-activity", "/admin/rag-eval"])
+    for (const href of ["/users", "/admin", "/tools", "/models", "/health", "/help", "/trust", "/downloads", "/integrations", "/integrations/credentials", "/routines", "/admin/audit", "/admin/prompt", "/admin/files", "/knowledge", "/context", "/files/devices", "/admin/claude-activity", "/admin/rag-eval"])
       expect(panel.querySelector(`a[href='${href}']`), href).not.toBeNull();
   });
 

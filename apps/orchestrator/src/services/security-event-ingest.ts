@@ -6,6 +6,12 @@
  * Three sources in P2:
  *   · Frigate detections, persisted on `end` — one row per tracked object,
  *     carrying its whole life (start, end, best score, zones entered).
+ *     WARP-2978 PR-D (ADR-059 P3 §6.12): a PERSON still tracked 30 s after
+ *     Frigate started tracking them also gets ONE `detection_ongoing` row
+ *     (`frigateOngoingToDraft`), so an after-hours alert does not wait for
+ *     `end` — which, for someone standing still, may be many minutes away.
+ *     `parseFrigateInflight` reads the raw `new`/`update`/`end` messages the
+ *     in-flight map (security-inflight.ts) keeps.
  *   · Frigate per-camera health, `frigate/<camera>/status/detect`, plus
  *     Frigate's own LWT `frigate/available`. Only TRANSITIONS are events.
  *   · warn/err `network` and `auth` ActivityRows, mirrored (the rows
@@ -47,7 +53,13 @@ export type SecurityEventKind =
    * WARP-2977 P2b-2 — a door lock's reading changed (or was first seen).
    * labels = [reading]; sourceRef = `matter:<nodeId>/<endpointId>`; camera null.
    */
-  | "lock_state";
+  | "lock_state"
+  /**
+   * WARP-2978 PR-D — a person Frigate has tracked for 30 s and not ended yet:
+   * ONE row per object, written by the incident engine from the in-flight map
+   * (`frigateOngoingToDraft`). endedAt null; the `end` is still its own row.
+   */
+  | "detection_ongoing";
 
 export type SecuritySeverity = "info" | "notice" | "alert";
 
@@ -163,6 +175,119 @@ export function frigateEndToDraft(message: unknown): SecurityEventDraft | null {
     summary: cameraZones.length > 0 ? `${humanLabel(label)} in ${cameraZones.join(", ")}` : humanLabel(label),
     observed: "live",
   };
+}
+
+// ── WARP-2978 PR-D: early presence (ADR-059 P3 spec §6.12, D35) ──────────
+
+/** A person tracked at least this long, and not ended, gets its `detection_ongoing` row. */
+export const SECURITY_ONGOING_AFTER_MS = 30_000;
+/**
+ * The only label the in-flight map keeps. after_hours_presence reads persons
+ * only, and a parked car is tracked for hours: letting vehicles in would fill
+ * the 256-entry map with cars and evict the people it exists for.
+ */
+export const SECURITY_ONGOING_LABEL = "person";
+/** The copy of every ongoing row (spec §6.12). */
+export const SECURITY_ONGOING_SUMMARY = "Person still in view after 30 s";
+
+/** What one raw `frigate/events` message says about a tracked object. */
+export type FrigateInflightReading =
+  | {
+      type: "track";
+      id: string;
+      camera: string;
+      label: string;
+      startedAt: Date;
+      /** Frigate's best score so far, or null when it is missing or out of range. */
+      topScore: number | null;
+      /** Frigate's own verdict so far: true until the object passed its threshold. */
+      falsePositive: boolean;
+      /** Frigate's `entered_zones` so far, well-formed names only, at most 16. */
+      enteredZones: string[];
+    }
+  | { type: "end"; id: string };
+
+/**
+ * A raw `frigate/events` message → a `track` (a well-formed `new`/`update`)
+ * or an `end` (only the id is needed: the entry is forgotten), else null.
+ * The same grammar as `frigateEndToDraft`: anything that is not Frigate's is
+ * not tracked.
+ */
+export function parseFrigateInflight(message: unknown): FrigateInflightReading | null {
+  if (!isRecord(message)) return null;
+  const after = message.after;
+  if (!isRecord(after)) return null;
+  const id = typeof after.id === "string" ? after.id : "";
+  if (!FRIGATE_ID.test(id)) return null;
+  if (message.type === "end") return { type: "end", id };
+  if (message.type !== "new" && message.type !== "update") return null;
+
+  const camera = typeof after.camera === "string" ? after.camera : "";
+  const label = typeof after.label === "string" ? after.label : "";
+  if (!FRIGATE_NAME.test(camera) || !FRIGATE_NAME.test(label)) return null;
+  const startedAt = epochSeconds(after.start_time);
+  if (!startedAt) return null;
+  const top = after.top_score;
+  return {
+    type: "track",
+    id,
+    camera,
+    label,
+    startedAt,
+    topScore: typeof top === "number" && Number.isFinite(top) && top >= 0 && top <= 1 ? top : null,
+    falsePositive: after.false_positive === true,
+    enteredZones: Array.isArray(after.entered_zones)
+      ? [...new Set(after.entered_zones.filter((z): z is string => typeof z === "string" && FRIGATE_NAME.test(z)))].slice(
+          0,
+          MAX_ZONES,
+        )
+      : [],
+  };
+}
+
+/** The in-flight object an ongoing row is built from. */
+export interface OngoingObject {
+  id: string;
+  camera: string;
+  label: string;
+  startedAt: Date;
+  topScore: number;
+  enteredZones: readonly string[];
+}
+
+/**
+ * The ONE `detection_ongoing` row of a person still in view (spec §6.12):
+ * `startedAt` = when Frigate started tracking them, no end (the `end` is its
+ * own `detection` row, never an UPDATE of this one — SecurityEvent is
+ * append-only), the zones entered and the best score so far, and a key in its
+ * own `frigate-ongoing:` namespace so it never collides with the `end`'s
+ * `frigate:` key. The shape is what the SecurityEvent_ongoing_shape CHECK
+ * accepts.
+ */
+export function frigateOngoingToDraft(o: OngoingObject): SecurityEventDraft {
+  return {
+    source: "frigate",
+    kind: "detection_ongoing",
+    severity: "info",
+    camera: o.camera,
+    sourceRef: `${o.camera}/${o.id}`,
+    dedupeKey: `frigate-ongoing:${o.id}`,
+    labels: [o.label],
+    cameraZones: [...o.enteredZones].slice(0, MAX_ZONES),
+    score: o.topScore,
+    startedAt: o.startedAt,
+    endedAt: null,
+    summary: SECURITY_ONGOING_SUMMARY,
+    // startedAt is when Frigate started tracking them — when it happened.
+    observed: "live",
+  };
+}
+
+/** The Frigate id an ongoing row's key names, or null for any other key. */
+export function ongoingFrigateId(dedupeKey: string): string | null {
+  if (!dedupeKey.startsWith("frigate-ongoing:")) return null;
+  const id = dedupeKey.slice("frigate-ongoing:".length);
+  return FRIGATE_ID.test(id) ? id : null;
 }
 
 /** Health of one camera's detect stream, or of Frigate itself. */
