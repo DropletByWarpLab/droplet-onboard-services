@@ -10,7 +10,9 @@
  *      is front; never a mixed area, camera:back, an unlinked or archived
  *      area, or an area whose CELLS still hold a hidden camera (review item
  *      9); `quietedFlags` for owner/admin only; `canManage` is the server's
- *      answer (D22); an outage is a 503, never an empty list;
+ *      answer (D22); an outage is a 503, never an empty list; DS-019
+ *      (WARP-2977 P2b-2): without Devices view an area made only of door
+ *      locks is hidden, owner/admin included;
  *   33 (manage): the body exactly, the reason off the chain, the route's
  *      clock, the limit counted under the lock, the audit in the transaction;
  *   34 (manage): active → removed with who and when, once; a row past its
@@ -271,6 +273,42 @@ describe("32 GET /api/security/suppressions (view)", () => {
 
   it("any query string → 400", async () => {
     expect((await request(app("owner", "manage").server).get("/api/security/suppressions?all=1")).status).toBe(400);
+  });
+});
+
+describe("32 — DS-019 (WARP-2977 P2b-2): an area made only of door locks", () => {
+  const DOOR = "8a9b0c1d-2e3f-4a5b-8c6d-7e8f9a0b1c2d";
+  const DOOR_ROW = "a0000000-0000-4000-8000-000000000009";
+  const lockLink = (id: string, zoneId: string) => ({ id, zoneId, sourceKind: "lock", sourceRef: "matter:4660/1", sourceLabel: "Back door lock", state: "active" });
+  /** An admin at Security manage; `devices`: Devices (smart_home) view, what lets a person read door locks. */
+  const admin = (devices: boolean) =>
+    app("admin", "manage", async () => {
+      const a = access("manage", "admin");
+      return { ...a, features: [...a.features, ...(devices ? [{ moduleId: "smart_home", level: "view" }] : [])] } as EffectiveAccessResult;
+    }).server;
+  const listed = async (server: express.Express) => idsOf((await request(server).get("/api/security/suppressions")).body);
+
+  beforeEach(() => {
+    f.world.securityZone.push(zone(DOOR, "Back door"));
+    // The door's only link is a lock; the shop floor has a lock beside its two cameras.
+    f.world.securityZoneLink.push(lockLink("door-l1", DOOR), lockLink(`${MIXED.slice(0, 6)}-l3`, MIXED));
+    f.world.securitySuppression.push(sup(DOOR_ROW, { zoneId: DOOR }));
+  });
+
+  it("without Devices view it is hidden even from an admin (as on the Areas page); an area that also has a camera stays", async () => {
+    const ids = await listed(admin(false));
+    expect(ids).not.toContain(DOOR_ROW);
+    expect(ids).toContain(S.mixed);
+  });
+
+  it("with Devices view it is listed", async () => {
+    expect(await listed(admin(true))).toContain(DOOR_ROW);
+  });
+
+  it("removed (archived) too: removing an area keeps its links", async () => {
+    f.world.securityZone.find((z) => z.id === DOOR)!.state = "archived";
+    expect(await listed(admin(false))).not.toContain(DOOR_ROW);
+    expect(await listed(admin(true))).toContain(DOOR_ROW);
   });
 });
 

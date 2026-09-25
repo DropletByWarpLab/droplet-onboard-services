@@ -63,6 +63,19 @@ const findMany = vi.fn();
 const grants = vi.fn();
 const stateRow = vi.fn();
 const zoneLinks = vi.fn();
+/**
+ * The §9 resolver (`deps.resolve`). This file mounts the router alone, so
+ * nothing has memoised a resolution for the request; by default the user has
+ * no local row (null), so the role decides — P2a's semantics. The lock cases
+ * (WARP-2977 P2b-2) override it per test.
+ */
+const resolve = vi.fn();
+/**
+ * WARP-2977 P2b-2 — the lock adapter as the routes read it (`deps.locks`).
+ * Null = none was started: the header's locks row then says "Not running".
+ */
+let lockReader: null | { health: ReturnType<typeof vi.fn>; knownLocks: ReturnType<typeof vi.fn>; listLocks: ReturnType<typeof vi.fn> } =
+  null;
 const triage = vi.fn();
 
 function app(role: Role | null = "owner") {
@@ -79,7 +92,7 @@ function app(role: Role | null = "owner") {
     next();
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  server.use("/api", createSecurityRouter(prisma as any));
+  server.use("/api", createSecurityRouter(prisma as any, { resolve, locks: () => lockReader as never }));
   return server;
 }
 
@@ -114,6 +127,8 @@ beforeEach(() => {
   grants.mockReset().mockResolvedValue([{ camera: { name: "front" } }]);
   stateRow.mockReset().mockResolvedValue(null);
   zoneLinks.mockReset().mockResolvedValue([]);
+  resolve.mockReset().mockResolvedValue(null);
+  lockReader = null;
   triage.mockReset().mockResolvedValue([]);
   _resetIncidentHealthForTests();
   h.siteModeHealth.mockReset().mockImplementation(async () => h.siteMode);
@@ -144,10 +159,15 @@ describe("GET /api/security/events — DS-005 and the threat gate", () => {
     expect(grants).not.toHaveBeenCalled();
   });
 
-  it("family: only granted cameras (plus camera-less rows), and no mirrored threats", async () => {
+  it("family: only granted cameras (plus camera-less rows), no mirrored threats, and no door locks without Devices view", async () => {
     await request(app("family")).get("/api/security/events");
+    // WARP-2977 P2b-2 (DS-019): the lock clause joins AND[0] — deliberately red against P2b PR-1's pin.
     expect(visibilityOf(0)).toEqual({
-      AND: [{ OR: [{ camera: null }, { camera: { in: ["front"] } }] }, { source: { not: "activity_mirror" } }],
+      AND: [
+        { OR: [{ camera: null }, { camera: { in: ["front"] } }] },
+        { source: { not: "activity_mirror" } },
+        { source: { not: "matter_lock" } },
+      ],
     });
   });
 
@@ -244,11 +264,13 @@ describe("GET /api/security/health", () => {
     const res = await request(app("owner")).get("/api/security/health");
     expect(res.status).toBe(200);
     // WARP-2977 P2b: `site_mode` joins the pinned order — deliberately red against P2a's list.
+    // WARP-2977 P2b-2: so does `locks`, after camera_system (the owner reads locks).
     // WARP-2978: `incidents` and `alerts` join it after site_mode; WARP-2980's `patterns` follows
     // them, before retention (whichever merged second moved this pin).
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
+      "locks",
       "threat_mirror",
       "site_mode",
       "incidents",
@@ -369,7 +391,12 @@ describe("GET /api/security/events?zone= — DS-005 applied to places", () => {
     await request(app("family")).get(`/api/security/events?zone=${SHOP}&camera=front`);
     const and = findMany.mock.calls[0][0].where.AND;
     expect(and[0]).toEqual({
-      AND: [{ OR: [{ camera: null }, { camera: { in: ["front"] } }] }, { source: { not: "activity_mirror" } }],
+      AND: [
+        { OR: [{ camera: null }, { camera: { in: ["front"] } }] },
+        { source: { not: "activity_mirror" } },
+        // WARP-2977 P2b-2: no Devices view → no lock rows (intended change to this PR-1 pin).
+        { source: { not: "matter_lock" } },
+      ],
     });
     expect(and[3]).toEqual({ camera: "front" });
     // back/porch is hidden from this viewer, so only the front camera arm remains.
@@ -462,5 +489,143 @@ describe("the module gate that sits in front of this router", () => {
     expect(MODULE_BY_ID.get("security")?.routePrefixes).toEqual(["/api/security"]);
     expect(MODULE_BY_ID.get("security")?.navHrefs).toEqual(["/security"]);
     expect(FEATURE_GATED_MODULES.has("security")).toBe(true);
+  });
+});
+
+// ── WARP-2977 P2b-2: door locks on the feed and the header (DS-019) ──────
+
+describe("door locks on the feed and the header — Security view AND Devices view (DS-019)", () => {
+  const LOCK_A = "matter:4660/1";
+  const DOOR = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"; // links only the lock
+  const lockLink = (zoneId: string, name: string) => ({
+    id: `l-${zoneId.slice(0, 4)}-lock`,
+    zoneId,
+    sourceKind: "lock" as const,
+    sourceRef: LOCK_A,
+    zone: { name, kind: "entry" },
+  });
+  const lockRow = (id: number, observed: "live" | "polled" = "live") =>
+    dbRow(id, {
+      source: "matter_lock",
+      kind: "lock_state",
+      camera: null,
+      sourceRef: LOCK_A,
+      dedupeKey: `matter_lock:4660/1:after:none:unlocked-${id}`,
+      labels: ["unlocked"],
+      cameraZones: [],
+      score: null,
+      endedAt: null,
+      summary: observed === "polled" ? "Back door lock: unlocked (found when Droplet checked)" : "Back door lock: unlocked",
+      observed,
+    });
+  /** A resolved §9 catalog: Security at `security`, plus Devices (smart_home) view when `devices`. */
+  const catalog = (security: "view" | "act" | "manage", devices: boolean) => ({
+    features: [{ moduleId: "security", level: security }, ...(devices ? [{ moduleId: "smart_home", level: "view" }] : [])],
+  });
+  const LOCKS_ROW = { id: "locks", state: "ok", detail: "Listening to 1 lock", lastSeenAt: null };
+
+  beforeEach(() => {
+    zoneLinks.mockResolvedValue([...AREA_LINKS, lockLink(DOOR, "Back door"), lockLink(SHOP, "Shop floor")]);
+    lockReader = { health: vi.fn(() => LOCKS_ROW), knownLocks: vi.fn(() => []), listLocks: vi.fn() };
+  });
+
+  it("lock_state is a feed kind", async () => {
+    const res = await request(app("owner")).get("/api/security/events?kind=lock_state");
+    expect(res.status).toBe(200);
+    expect(findMany.mock.calls[0][0].where.AND).toContainEqual({ kind: { in: ["lock_state"] } });
+  });
+
+  it("an admin narrowed off Devices: every camera and the threats, but lock rows are removed INSIDE AND[0]", async () => {
+    resolve.mockResolvedValue(catalog("manage", false));
+    await request(app("admin")).get("/api/security/events");
+    expect(visibilityOf(0)).toEqual({ AND: [{ source: { not: "matter_lock" } }] });
+    expect(resolve).toHaveBeenCalledWith("u-1");
+  });
+
+  it("a family member WITH Devices view: the camera and threat clauses, and no lock clause", async () => {
+    resolve.mockResolvedValue(catalog("view", true));
+    await request(app("family")).get("/api/security/events");
+    expect(visibilityOf(0)).toEqual({
+      AND: [{ OR: [{ camera: null }, { camera: { in: ["front"] } }] }, { source: { not: "activity_mirror" } }],
+    });
+  });
+
+  it("a lock row names the areas its lock is linked to, says how it was observed, and no sourceRef reaches the wire", async () => {
+    findMany.mockResolvedValue([lockRow(1, "polled"), dbRow(2)]);
+    const res = await request(app("owner")).get("/api/security/events");
+    expect(res.status).toBe(200);
+    expect(res.body.events[0]).toMatchObject({
+      kind: "lock_state",
+      observed: "polled",
+      zones: [
+        { id: DOOR, name: "Back door" },
+        { id: SHOP, name: "Shop floor" },
+      ],
+    });
+    expect(res.body.events[0]).not.toHaveProperty("sourceRef");
+    expect(res.body).not.toHaveProperty("sourceRefs");
+    // A camera row is never put in an area through a lock link.
+    expect(res.body.events[1].zones.map((z: { id: string }) => z.id)).toEqual([SHOP]);
+  });
+
+  it("without Devices view an area made only of the lock filters to the empty page with NO query, and no row is put in it", async () => {
+    resolve.mockResolvedValue(catalog("manage", false));
+    const res = await request(app("admin")).get(`/api/security/events?zone=${DOOR}`);
+    expect(res.body).toEqual({ events: [], nextCursor: null });
+    expect(findMany).not.toHaveBeenCalled();
+
+    // Even a lock row that reached the page would name no area through a lock link.
+    findMany.mockResolvedValue([lockRow(1)]);
+    const page = await request(app("admin")).get("/api/security/events");
+    expect(page.body.events[0].zones).toEqual([]);
+  });
+
+  it("with Devices view, ?zone= on the lock area narrows to that lock's rows after the camera clause", async () => {
+    resolve.mockResolvedValue(catalog("view", true));
+    await request(app("family")).get(`/api/security/events?zone=${DOOR}`);
+    const and = findMany.mock.calls[0][0].where.AND;
+    expect(and[0]).toEqual(visibilityOf(0));
+    expect(and).toContainEqual({ OR: [{ source: "matter_lock", sourceRef: { in: [LOCK_A] } }] });
+  });
+
+  describe("the locks header row", () => {
+    const ids = (res: request.Response) => res.body.sources.map((s: { id: string }) => s.id);
+
+    it("owner: the adapter's row, verbatim, after camera_system", async () => {
+      const res = await request(app("owner")).get("/api/security/health");
+      expect(ids(res).slice(0, 3)).toEqual(["camera_ingest", "camera_system", "locks"]);
+      expect(res.body.sources[2]).toEqual(LOCKS_ROW);
+    });
+
+    it("no adapter was started → the row says 'Not running' (down), never absent", async () => {
+      lockReader = null;
+      const res = await request(app("owner")).get("/api/security/health");
+      expect(res.body.sources.find((s: { id: string }) => s.id === "locks")).toEqual({
+        id: "locks",
+        state: "down",
+        detail: "Not running",
+        lastSeenAt: null,
+      });
+    });
+
+    it("no row for a viewer without Devices view — family by default, and an admin narrowed off it", async () => {
+      expect(ids(await request(app("family")).get("/api/security/health"))).not.toContain("locks");
+      resolve.mockResolvedValue(catalog("manage", false));
+      expect(ids(await request(app("admin")).get("/api/security/health"))).not.toContain("locks");
+      expect(lockReader!.health).not.toHaveBeenCalled();
+    });
+
+    it("a family member with Devices view gets it (and still no threat row)", async () => {
+      resolve.mockResolvedValue(catalog("view", true));
+      const res = await request(app("family")).get("/api/security/health");
+      // WARP-2978: `incidents` is every viewer's; `alerts` (it names who is told) is owner/admin only.
+      expect(ids(res)).toEqual(["camera_ingest", "camera_system", "locks", "site_mode", "incidents", "patterns", "retention"]);
+    });
+
+    it("a resolver that cannot answer is a 503 of the header — never a header that guessed who may see locks", async () => {
+      resolve.mockRejectedValue(new Error("db down"));
+      const res = await request(app("family")).get("/api/security/health");
+      expect(res.status).toBe(503);
+    });
   });
 });

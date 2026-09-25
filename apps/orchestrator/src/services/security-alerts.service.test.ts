@@ -62,6 +62,7 @@ import {
   SECURITY_NOTIFY_MAX_ATTEMPTS,
   SECURITY_REDELIVER_AFTER_MS,
   _resetAlertsHealthForTests,
+  alertsReady,
   computeAlertsHealthRow,
   incidentTag,
   notifyPendingIncidents,
@@ -739,6 +740,31 @@ describe("the alerts health row (§6.11)", () => {
     });
     const onlyEntry = world({ securityZone: [{ ...areaRows(STOCK, "Door", "entry", ["back"]).zone }] });
     expect((await computeAlertsHealthRow(client(onlyEntry), resolve, NOW)).state).toBe("not_configured");
+  });
+
+  // WARP-2977 P2b-2 × WARP-2978 — lock rows feed no rule (D21): a door lock on an area is no camera.
+  it("not configured: an Inside / Staff only area whose only link is a door lock can never raise an alert", async () => {
+    const lockLink = { id: "stock-lock", zoneId: STOCK, sourceKind: "lock", sourceRef: "matter:7/1", sourceLabel: "Stock room lock", state: "active" };
+    const onlyLock = world({ securityZoneLink: [lockLink] });
+    expect(await alertsReady(client(onlyLock))).toBe(false);
+    expect((await computeAlertsHealthRow(client(onlyLock), resolve, NOW)).state).toBe("not_configured");
+    // A part of a camera's view does count, beside the lock.
+    onlyLock.world.securityZoneLink.push({ ...areaRows(STOCK, "Stock room", "interior", ["back/till"]).links[0]!, id: "stock-part" });
+    expect(await alertsReady(client(onlyLock))).toBe(true);
+  });
+
+  it("a door lock on an Inside area is not a camera nobody set to be told can see", async () => {
+    const f = world({
+      securityZoneLink: [
+        ...areaRows(STOCK, "Stock room", "interior", ["front"]).links,
+        { id: "stock-lock", zoneId: STOCK, sourceKind: "lock", sourceRef: "matter:7/1", sourceLabel: "Stock room lock", state: "active" },
+      ],
+      securityAlertRecipient: [{ ...receiving(STEFAN), state: "not_receiving" }, receiving(MARIA)],
+      pushSubscription: [{ id: "p2", username: "maria", endpoint: "https://fcm.googleapis.com/y" }],
+    });
+    LEVELS[MARIA] = "act";
+    // Maria sees the front camera: every camera an alert can come from is covered.
+    expect(await computeAlertsHealthRow(client(f), resolve, NOW)).toMatchObject({ state: "ok", detail: "Alerts go to Maria" });
   });
 
   it("down: an alert failed in the last day", async () => {

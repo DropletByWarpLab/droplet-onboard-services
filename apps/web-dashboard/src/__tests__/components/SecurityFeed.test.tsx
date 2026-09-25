@@ -6,15 +6,17 @@
  * is, and it says nothing at all until it knows.
  */
 import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { Moon, Plane, Shield, Store } from "lucide-react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { Lock, LockOpen, Moon, Plane, Shield, Store } from "lucide-react";
 import {
   COPY,
   SOURCE_LABEL,
   SecurityFeed,
+  canShowDoors,
   iconFor,
   kindsForView,
   sourcesForView,
+  viewFor,
   type SecurityFeedProps,
   type SecurityView,
 } from "@/components/security/SecurityFeed";
@@ -52,6 +54,7 @@ function event(over: Partial<SecurityEvent> = {}): SecurityEvent {
     summary: "Person in porch",
     frigateEventId: "171.5-abc",
     zones: [],
+    observed: "live",
     ...over,
   };
 }
@@ -424,6 +427,41 @@ describe("the source header", () => {
     const { container } = render(<SecurityFeed {...props()} />);
     expect(container.querySelector('[data-source="site_mode"]')).toHaveTextContent("Opening hours");
   });
+
+  it("names the incident engine's and the alerts' rows (WARP-2978), which the server sends after site_mode", () => {
+    expect(SOURCE_LABEL.incidents).toBe("Incidents");
+    expect(SOURCE_LABEL.alerts).toBe("Alerts");
+    const sources: SecurityHealthRow[] = [
+      ...OK.slice(0, 4),
+      { id: "incidents", state: "ok", detail: "Sorting events into incidents", lastSeenAt: NOW.toISOString() },
+      { id: "alerts", state: "ok", detail: "Alerts go to Stefan", lastSeenAt: null },
+      OK[4]!,
+    ];
+    const { container } = render(<SecurityFeed {...props({ sources })} />);
+    expect(container.querySelector('[data-source="incidents"] .nm')).toHaveTextContent("Incidents");
+    expect(container.querySelector('[data-source="alerts"] .nm')).toHaveTextContent("Alerts");
+  });
+
+  it("every id in the dashboard's SecurityHealthRow union has a non-blank label", () => {
+    // A hand copy of the union in lib/types.ts, compared as a set: SOURCE_LABEL's
+    // key order is not the header's order (SourcesCard renders rows as served).
+    // This does NOT read the orchestrator's SecurityHealthId — a row the server
+    // adds is caught only once lib/types.ts's union gains it, and then by the
+    // Record type on SOURCE_LABEL, at compile time.
+    const ids: SecurityHealthRow["id"][] = [
+      "camera_ingest",
+      "camera_system",
+      "locks",
+      "threat_mirror",
+      "site_mode",
+      "incidents",
+      "alerts",
+      "patterns",
+      "retention",
+    ];
+    expect(Object.keys(SOURCE_LABEL).sort()).toEqual([...ids].sort());
+    for (const id of ids) expect(SOURCE_LABEL[id], id).toMatch(/\S/);
+  });
 });
 
 describe("site-mode rows (WARP-2977 P2b)", () => {
@@ -438,6 +476,7 @@ describe("site-mode rows (WARP-2977 P2b)", () => {
       source_online: true,
       threat: true,
       mode_changed: true,
+      lock_state: true,
     };
     for (const kind of Object.keys(KINDS) as SecurityEventKind[]) {
       expect(iconFor(event({ kind })), kind).toBeTruthy();
@@ -610,5 +649,206 @@ describe("nav — every shell reaches /security, gated on its own module", () =>
 
   it("is a chip in the Workspace shell's Operations space", () => {
     expect(SPACES.find((s) => s.id === "ops")?.hrefs).toContain("/security");
+  });
+});
+
+// ── WARP-2977 P2b-2: door locks ──────────────────────────────────────────
+
+describe("door locks (WARP-2977 P2b-2)", () => {
+  const LOCKS_OK: SecurityHealthRow = { id: "locks", state: "ok", detail: "Listening to 2 locks", lastSeenAt: NOW.toISOString() };
+  /** The header as someone with Devices view gets it: `locks` after camera_system. */
+  const withLocks = (row: SecurityHealthRow = LOCKS_OK): SecurityHealthRow[] => [OK[0]!, OK[1]!, row, ...OK.slice(2)];
+
+  function lockRow(reading: string, over: Partial<SecurityEvent> = {}): SecurityEvent {
+    return event({
+      id: `lock-${reading}`,
+      source: "matter_lock",
+      kind: "lock_state",
+      severity: reading === "not_fully_locked" ? "notice" : "info",
+      camera: null,
+      labels: [reading],
+      cameraZones: [],
+      score: null,
+      endedAt: null,
+      summary: `Back door lock: ${reading}`,
+      frigateEventId: null,
+      ...over,
+    });
+  }
+
+  it("iconFor: a closed padlock only for locked; open for unlocked, not fully locked and unlatched; the neutral glyph when unknown", () => {
+    expect(iconFor(lockRow("locked"))).toBe(Lock);
+    expect(iconFor(lockRow("unlocked"))).toBe(LockOpen);
+    expect(iconFor(lockRow("not_fully_locked"))).toBe(LockOpen);
+    expect(iconFor(lockRow("unlatched"))).toBe(LockOpen);
+    expect(iconFor(lockRow("unknown"))).toBe(Shield);
+  });
+
+  it("kindsForView: the Doors view asks for lock rows only", () => {
+    expect(kindsForView("doors", false)).toEqual(["lock_state"]);
+    expect(kindsForView("doors", true)).toEqual(["lock_state"]);
+  });
+
+  it("sourcesForView: the locks row feeds Everything and Doors — only for someone who gets it", () => {
+    const owner = { canSeeThreats: true, areaSelected: false, canSeeLocks: true };
+    expect(sourcesForView("all", owner)).toEqual(["camera_ingest", "camera_system", "locks", "threat_mirror", "site_mode"]);
+    expect(sourcesForView("all", { ...owner, canSeeThreats: false })).toEqual(["camera_ingest", "camera_system", "locks", "site_mode"]);
+    expect(sourcesForView("doors", owner)).toEqual(["locks"]);
+    expect(sourcesForView("detections", owner)).toEqual(["camera_ingest", "camera_system"]);
+    // An area holds camera AND lock rows now; a camera view of it still reads the cameras only.
+    expect(sourcesForView("all", { ...owner, areaSelected: true })).toEqual(["camera_ingest", "camera_system", "locks"]);
+    expect(sourcesForView("doors", { ...owner, areaSelected: true })).toEqual(["locks"]);
+    expect(sourcesForView("health", { ...owner, areaSelected: true })).toEqual(["camera_ingest", "camera_system"]);
+    // Without the row (no Devices view) nothing expects it — PR-1's lists exactly.
+    expect(sourcesForView("all", { canSeeThreats: true, areaSelected: false })).toEqual([
+      "camera_ingest",
+      "camera_system",
+      "threat_mirror",
+      "site_mode",
+    ]);
+  });
+
+  it("canShowDoors: only when the header carries a locks row that isn't 'No door locks paired'", () => {
+    expect(canShowDoors(withLocks())).toBe(true);
+    expect(canShowDoors(withLocks({ ...LOCKS_OK, state: "down", detail: "Can't reach the device-control service" }))).toBe(true);
+    expect(canShowDoors(withLocks({ ...LOCKS_OK, state: "not_configured", detail: "No door locks paired" }))).toBe(false);
+    expect(canShowDoors(OK)).toBe(false);
+    expect(canShowDoors(null)).toBe(false);
+  });
+
+  it("viewFor: a picked Doors view falls back to Everything once the header says there are no doors — never while it loads", () => {
+    expect(viewFor("doors", withLocks())).toBe("doors");
+    expect(viewFor("doors", OK)).toBe("all");
+    expect(viewFor("doors", withLocks({ ...LOCKS_OK, state: "not_configured" }))).toBe("all");
+    expect(viewFor("doors", null)).toBe("doors");
+    for (const v of ["all", "detections", "health", "network"] as SecurityView[]) expect(viewFor(v, OK)).toBe(v);
+  });
+
+  it("the Doors chip is offered exactly when canShowDoors says so, between Camera health and Network", () => {
+    const { rerender } = render(<SecurityFeed {...props({ sources: withLocks() })} />);
+    const chips = within(screen.getByRole("group", { name: "Show" }))
+      .getAllByRole("button")
+      .map((b) => b.textContent);
+    expect(chips.slice(0, 5)).toEqual(["Everything", "People and vehicles", "Camera health", "Doors", "Network and sign-in"]);
+    rerender(<SecurityFeed {...props({ sources: OK })} />);
+    expect(screen.queryByRole("button", { name: "Doors" })).toBeNull();
+    rerender(<SecurityFeed {...props({ sources: withLocks({ ...LOCKS_OK, state: "not_configured" }) })} />);
+    expect(screen.queryByRole("button", { name: "Doors" })).toBeNull();
+  });
+
+  it("the header names the row 'Door locks'", () => {
+    expect(SOURCE_LABEL.locks).toBe("Door locks");
+    const { container } = render(<SecurityFeed {...props({ sources: withLocks() })} />);
+    expect(container.querySelector('[data-source="locks"] .nm')).toHaveTextContent("Door locks");
+  });
+
+  it("a live lock row: its summary is the title, it says it is a door lock, no camera link, its areas lead", () => {
+    const { container } = render(
+      <SecurityFeed {...props({ sources: withLocks(), events: [lockRow("unlocked", { zones: [{ id: "z9", name: "Back door" }] })] })} />,
+    );
+    const row = container.querySelector('[data-kind="lock_state"]')!;
+    expect(row.querySelector(".nm")).toHaveTextContent("Back door lock: unlocked");
+    expect(row.querySelector(".sub")).toHaveTextContent(`Back door${COPY.lockRowSub}`);
+    expect(row.querySelector(".sub")).not.toHaveTextContent(COPY.polledSub);
+    expect(row.querySelector(".ri svg")?.getAttribute("class")).toMatch(/lock-open/);
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("a POLLED lock row says it was found when Droplet checked — once, in its second line, not in the title too", () => {
+    const polled = lockRow("unlocked", {
+      observed: "polled",
+      summary: "Back door lock: unlocked (found when Droplet checked)",
+    });
+    const { container } = render(<SecurityFeed {...props({ sources: withLocks(), events: [polled] })} />);
+    const row = container.querySelector('[data-kind="lock_state"]')!;
+    expect(row.querySelector(".nm")?.textContent).toBe("Back door lock: unlocked");
+    expect(row.querySelector(".sub")).toHaveTextContent(`${COPY.lockRowSub} · ${COPY.polledSub}`);
+    expect(row).toHaveAttribute("data-observed", "polled");
+  });
+
+  it("the Doors view: its own row decides the empty state — down is never quiet, ok is", () => {
+    const down = render(
+      <SecurityFeed {...props({ view: "doors", sources: withLocks({ ...LOCKS_OK, state: "down", detail: "Can't reach the device-control service" }) })} />,
+    );
+    expect(emptyKind(down.container)).toBe("not-reporting");
+    expect(down.container.querySelector("[data-empty] .eh")).toHaveTextContent(COPY.emptyNotHearingLocks);
+    down.unmount();
+    // Cameras down say nothing about the doors.
+    const quiet = render(
+      <SecurityFeed {...props({ view: "doors", sources: withLocks().map((s) => (s.id === "camera_ingest" ? { ...s, state: "down" as const } : s)) })} />,
+    );
+    expect(emptyKind(quiet.container)).toBe("quiet");
+  });
+
+  it("Everything, with the locks row down → not a quiet site", () => {
+    const { container } = render(<SecurityFeed {...props({ sources: withLocks({ ...LOCKS_OK, state: "down" }) })} />);
+    expect(emptyKind(container)).toBe("not-reporting");
+    expect(container.querySelector("[data-empty] .eh")).toHaveTextContent(COPY.emptyNotHearingLocks);
+  });
+
+  describe("an area and what covers it", () => {
+    const AREAS = [
+      // Linked to a lock only.
+      { id: "z-door", name: "Back door", linkCount: 1, cameraLinkCount: 0, lockLinkCount: 1 },
+      // Linked to a camera only.
+      { id: "z-shop", name: "Shop floor", linkCount: 1, cameraLinkCount: 1, lockLinkCount: 0 },
+    ];
+    const at = (view: SecurityView, zone: string) =>
+      render(<SecurityFeed {...props({ view, zone, areas: AREAS, onZoneChange: vi.fn(), sources: withLocks(), canManageAreas: true })} />);
+
+    it("a camera view of an area only a lock covers: no camera covers it — never the quiet copy", () => {
+      const { container } = at("detections", "z-door");
+      expect(emptyKind(container)).toBe("not-covered");
+      expect(container.querySelector("[data-empty] .eh")).toHaveTextContent("No cameras cover Back door yet");
+    });
+
+    it("the Doors view of an area no lock covers says so, with the way to fix it for a manager", () => {
+      const { container } = at("doors", "z-shop");
+      expect(emptyKind(container)).toBe("not-covered");
+      expect(container.querySelector("[data-empty] .eh")).toHaveTextContent("No door locks are linked to Shop floor yet");
+      expect(screen.getByText(COPY.emptyNoLocksLinkedManageBody)).toBeInTheDocument();
+    });
+
+    it("Everything, over an area covered by a lock only, is still quiet when everything reports", () => {
+      expect(emptyKind(at("all", "z-door").container)).toBe("quiet");
+    });
+
+    it("the Doors view of a lock-covered area is quiet when the locks row reports", () => {
+      expect(emptyKind(at("doors", "z-door").container)).toBe("quiet");
+    });
+
+    // Review F6: an area's empty state reads only the sources that area uses.
+    const withRowState = (id: SecurityHealthRow["id"], state: SecurityHealthRow["state"]) =>
+      withLocks().map((s) => (s.id === id ? { ...s, state } : s));
+    const areaFeed = (view: SecurityView, zone: string, sources: SecurityHealthRow[]) =>
+      render(<SecurityFeed {...props({ view, zone, areas: AREAS, onZoneChange: vi.fn(), sources, canManageAreas: true })} />);
+
+    it("Everything over a CAMERA-only area: the door locks being down says nothing about it", () => {
+      const r = areaFeed("all", "z-shop", withRowState("locks", "down"));
+      expect(emptyKind(r.container)).toBe("quiet");
+      expect(r.container.querySelector("[data-empty]")).not.toHaveTextContent(COPY.emptyNotHearingLocks);
+    });
+
+    it("Everything over a LOCK-only area: the cameras being down says nothing about it; the locks being down does", () => {
+      expect(emptyKind(areaFeed("all", "z-door", withRowState("camera_ingest", "down")).container)).toBe("quiet");
+      cleanup();
+      const down = areaFeed("all", "z-door", withRowState("locks", "down"));
+      expect(emptyKind(down.container)).toBe("not-reporting");
+      expect(down.container.querySelector("[data-empty] .eh")).toHaveTextContent(COPY.emptyNotHearingLocks);
+    });
+
+    it("sourcesForView keys an area's rows on what covers it", () => {
+      const owner = { canSeeThreats: true, areaSelected: true, canSeeLocks: true };
+      expect(sourcesForView("all", { ...owner, areaLinks: { cameras: 1, locks: 0 } })).toEqual(["camera_ingest", "camera_system"]);
+      expect(sourcesForView("all", { ...owner, areaLinks: { cameras: 0, locks: 2 } })).toEqual(["locks"]);
+      expect(sourcesForView("all", { ...owner, areaLinks: { cameras: 1, locks: 1 } })).toEqual(["camera_ingest", "camera_system", "locks"]);
+      // Without Devices view a lock link never counts (the server sends none anyway).
+      expect(sourcesForView("all", { ...owner, canSeeLocks: false, areaLinks: { cameras: 1, locks: 1 } })).toEqual([
+        "camera_ingest",
+        "camera_system",
+      ]);
+      // Unknown counts keep PR-2's behaviour.
+      expect(sourcesForView("all", owner)).toEqual(["camera_ingest", "camera_system", "locks"]);
+    });
   });
 });

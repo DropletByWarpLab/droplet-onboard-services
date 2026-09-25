@@ -199,6 +199,11 @@ describe("each gate on its own: no flag, and the gate is counted under the site 
       [eventRow({ id: 502n, kind: "detection_low" }), areaGrouped()],
       [eventRow({ id: 503n, labels: ["a person"] }), areaGrouped()],
       [eventRow({ id: 504n }), areaGrouped({ key: { scope: "site_camera_system", zoneId: null, scopeCamera: null } })],
+      // WARP-2977 P2b-2: a real door-lock row (the engine never groups one, D21; judged as if it had been).
+      [
+        eventRow({ id: 505n, source: "matter_lock", kind: "lock_state", camera: null, labels: ["unlocked"], cameraZones: [], sourceRef: "matter:4660/1", endedAt: null }),
+        areaGrouped(),
+      ],
     ] as const) {
       expect(await flagPatterns(db(f), e as never, g, ctx, links, T0, tally)).toBe(0);
     }

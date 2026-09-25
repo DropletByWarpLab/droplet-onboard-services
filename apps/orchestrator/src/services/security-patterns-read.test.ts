@@ -30,8 +30,8 @@ const GONE = "0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6";
 const AREA_Z = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"; // links A and C
 const AREA_W = "6d7e8f9a-0b1c-4d2e-9f3a-4b5c6d7e8f9a"; // links A only
 
-const ALL: SecurityViewerScope = { visibleCameras: "all", mayReadThreats: true };
-const FAMILY: SecurityViewerScope = { visibleCameras: new Set([A]), mayReadThreats: false };
+const ALL: SecurityViewerScope = { visibleCameras: "all", mayReadThreats: true, mayReadLocks: true };
+const FAMILY: SecurityViewerScope = { visibleCameras: new Set([A]), mayReadThreats: false, mayReadLocks: false };
 
 function world(over: Partial<PatternsWorld> = {}): PatternsWorld {
   let id = 1n;
@@ -238,6 +238,45 @@ describe("DS-005 for an area with NO cells yet (review #2352, finding 1)", () =>
     const o = await readPatternsOverview(db(world()), ALL);
     expect(o.keys.map((k) => k.zoneKey)).not.toContain(`area:${AREA_Z}`);
     expect(o.keys.map((k) => k.zoneKey)).not.toContain(`area:${AREA_W}`);
+  });
+});
+
+describe("DS-019: an area judged on the links the viewer can see, lock links included (WARP-2977 P2b-2)", () => {
+  // Car park's camera link was replaced by a door lock after the ready build:
+  // its cells (camera A) stand until the area rebuild. A lock link is visible
+  // only with Devices view, so for a viewer without it every active link of
+  // the area is hidden — the area is absent, as on the Areas page.
+  const LOCK_ONLY = () => {
+    const w = world();
+    w.links = w.links.map((l) =>
+      l.zoneId === AREA_Y ? { ...l, sourceKind: "lock" as const, sourceRef: "matter:4660/1" } : l,
+    );
+    return w;
+  };
+  const FAMILY_WITH_DEVICES: SecurityViewerScope = { ...FAMILY, mayReadLocks: true };
+
+  it("without Devices view: absent from the overview, and route 30 / 31 answer exactly like a random id", async () => {
+    const o = await readPatternsOverview(db(LOCK_ONLY()), FAMILY);
+    expect(o.keys.map((k) => k.zoneKey)).toEqual([`camera:${A}`]);
+    const hidden = await readPatternCells(db(LOCK_ONLY()), FAMILY, `area:${AREA_Y}`, "person");
+    const missing = await readPatternCells(db(LOCK_ONLY()), FAMILY, `area:${GONE}`, "person");
+    expect(hidden).toEqual({ status: "not_found" });
+    expect(JSON.stringify(hidden)).toBe(JSON.stringify(missing));
+    expect(await explainSecurityPattern(db(LOCK_ONLY()), FAMILY, { zoneId: AREA_Y }, NOW)).toEqual({ status: "not_found" });
+  });
+
+  it("with Devices view and every camera behind the cells: shown", async () => {
+    const o = await readPatternsOverview(db(LOCK_ONLY()), FAMILY_WITH_DEVICES);
+    expect(o.keys.map((k) => k.zoneKey)).toEqual([`area:${AREA_Y}`, `camera:${A}`]);
+    expect((await readPatternCells(db(LOCK_ONLY()), FAMILY_WITH_DEVICES, `area:${AREA_Y}`, "person")).status).toBe("ok");
+  });
+
+  it("a lock link is never one of an area's baseline cameras", async () => {
+    const w = world();
+    w.links.push({ id: "l7", zoneId: AREA_W, sourceKind: "lock", sourceRef: "matter:4660/1", state: "active" });
+    const r = await explainSecurityPattern(db(w), FAMILY_WITH_DEVICES, { zoneId: AREA_W }, NOW);
+    if (r.status !== "ok") throw new Error(r.status);
+    expect(r.view.key.cameras).toEqual([A]);
   });
 });
 

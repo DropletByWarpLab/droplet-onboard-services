@@ -3516,10 +3516,16 @@ export type SecurityEventKind =
    * one row per person, endedAt null; their `end` is still its own
    * `detection` row. Shown as "Still in view".
    */
-  | "detection_ongoing";
+  | "detection_ongoing"
+  /**
+   * WARP-2977 P2b-2 — a door lock's reading changed. labels = [reading], one of
+   * locked | unlocked | not_fully_locked | unlatched | unknown. Only people with
+   * Devices view get these rows.
+   */
+  | "lock_state";
 
 /** Mirrors the orchestrator's SecurityEventSource enum. */
-export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode";
+export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode" | "matter_lock";
 
 /** An area a feed row belongs to — only areas the viewer can see. */
 export interface SecurityZoneRef {
@@ -3549,6 +3555,12 @@ export interface SecurityEvent {
    * area). Empty for site-wide rows (threats, Frigate health, mode changes).
    */
   zones: SecurityZoneRef[];
+  /**
+   * WARP-2977 P2b-2 — `live`: startedAt is when it happened. `polled`: when
+   * Droplet's 60 s check found it (a door lock changed while the live stream
+   * was down), so the time is not when it happened.
+   */
+  observed: "live" | "polled";
 }
 
 export interface SecurityEventsPage {
@@ -3558,16 +3570,17 @@ export interface SecurityEventsPage {
 
 /**
  * One line of the feed header: what the feed is listening to, and whether it
- * is reporting. Served in the order camera_ingest, camera_system,
- * threat_mirror, site_mode, incidents, alerts, patterns, retention (PR-2 adds
- * `locks` after camera_system). WARP-2978: `incidents` is every viewer's;
- * `alerts` (who alerts reach) is owner/admin only. `patterns` (WARP-2980) is
- * the baseline job's row.
+ * is reporting. Served in the order camera_ingest, camera_system, locks,
+ * threat_mirror, site_mode, incidents, alerts, patterns, retention. `locks`
+ * (WARP-2977 P2b-2) comes only to people with Devices view; `threat_mirror`
+ * and `alerts` (WARP-2978) only to owners and admins. `incidents` (WARP-2978)
+ * is the incident engine's row, `patterns` (WARP-2980) the baseline job's.
  */
 export interface SecurityHealthRow {
   id:
     | "camera_ingest"
     | "camera_system"
+    | "locks"
     | "threat_mirror"
     | "site_mode"
     | "incidents"
@@ -3586,14 +3599,14 @@ export interface SecurityHealthRow {
 
 export type SecurityZoneKind = "entry" | "interior" | "perimeter" | "parking" | "restricted";
 export type SecurityZoneState = "active" | "archived";
-/** PR-2 adds "lock". */
-export type SecurityZoneSourceKind = "camera" | "camera_zone";
+/** `lock` (WARP-2977 P2b-2): one Matter door-lock endpoint; shown only to people with Devices view. */
+export type SecurityZoneSourceKind = "camera" | "camera_zone" | "lock";
 export type SecurityZoneLinkState = "active" | "removed";
 
 export interface SecurityZoneLinkView {
   id: string;
   sourceKind: SecurityZoneSourceKind;
-  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`; lock: `matter:<nodeId>/<endpointId>`. */
   sourceRef: string;
   /**
    * ALWAYS the CAMERA's display name — the live camera name when the camera
@@ -3602,6 +3615,7 @@ export interface SecurityZoneLinkView {
    * link as "<label> (the '<part>' part of the view)", where the part is always
    * `sourceRef.slice(sourceRef.indexOf("/") + 1)`. The server snapshots
    * `sourceLabel` at link time as that same camera display name.
+   * A lock link's label is the lock's name.
    */
   label: string;
   state: SecurityZoneLinkState;
@@ -3630,12 +3644,30 @@ export interface SecurityZonesResponse {
 
 export type SecurityLinkStatus = "present" | "missing" | "unknown";
 
+/** One paired door-lock endpoint an area can be linked to (WARP-2977 P2b-2). */
+export interface SecurityLinkableLock {
+  /** `matter:<nodeId>/<endpointId>` — the link's sourceRef. */
+  ref: string;
+  nodeId: string;
+  endpointId: number;
+  label: string;
+  room: string | null;
+  /** Reporting to Droplet right now. A lock that isn't is still paired and linkable. */
+  connected: boolean;
+}
+
 /** GET /api/security/sources — what can be linked, and whether each link still points at something. */
 export interface SecuritySourcesView {
   frigate: "ok" | "unavailable";
   /** Visible cameras only. `parts` = the camera's Frigate zones ("parts of the camera's view"). */
   cameras: Array<{ name: string; label: string; parts: string[] }>;
   linkStatus: Array<{ linkId: string; status: SecurityLinkStatus }>;
+  /**
+   * WARP-2977 P2b-2. `hidden`: no Devices view (no items, and no lock link is
+   * shown anywhere). `unavailable`: the smart-home service couldn't answer —
+   * never an empty "no locks". `ok`: every paired lock, sorted by label.
+   */
+  locks: { state: "ok" | "hidden" | "unavailable"; items: SecurityLinkableLock[] };
 }
 
 /** POST /api/security/zones. */
@@ -3713,6 +3745,27 @@ export interface SecurityModeActionResult {
   mode: SecurityModeView;
   /** false = already in that state; nothing was written. */
   changed: boolean;
+  /**
+   * WARP-2977 P2b-2 — on a Close up or Away, for people with Devices view:
+   * the connected door locks last heard open, by name, when `locksChecked` is
+   * true. Never read as "all locked". Absent when `locksChecked` is false, and
+   * for everyone else.
+   */
+  unlockedLocks?: string[];
+  /**
+   * WARP-2977 P2b-2 (rjouffret, review of 4fa950c8) — beside `unlockedLocks`:
+   * the locks Droplet can't vouch for while the others' readings stand (not
+   * reporting, never heard, or unknown), by name. Same presence rules as
+   * `unlockedLocks`.
+   */
+  uncheckedLocks?: string[];
+  /**
+   * WARP-2977 P2b-2 (review F4) — false when every lock reading may be stale
+   * (no lock adapter, not checked yet, or the smart-home service unreachable):
+   * say so, name nothing, never "none open". Absent for people without
+   * Devices view.
+   */
+  locksChecked?: boolean;
 }
 
 export type SecurityHoursState = "not_set" | "set";

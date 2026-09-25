@@ -13,6 +13,10 @@
  * (`?zone=`). The area list is view-level and already filtered to what this
  * viewer may see. Incidents and alerts are P3.
  *
+ * WARP-2977 P2b-2: door locks, for people with Devices view — a Doors view
+ * while the header offers one (a picked Doors view falls back to Everything
+ * when it stops), and areas counted per kind of link.
+ *
  * WARP-2981 (ADR-059 P6) — the header's one action opens the Security wall
  * (/security/wall), the read-only TV view. It is not in the nav.
  */
@@ -21,7 +25,7 @@ import Link from "next/link";
 import { Shield, Tv } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ModeCard } from "@/components/security/ModeCard";
-import { SecurityFeed, kindsForView, type SecurityView } from "@/components/security/SecurityFeed";
+import { SecurityFeed, kindsForView, viewFor, type SecurityView } from "@/components/security/SecurityFeed";
 import { useCameraDisplayNames, useSecurityFeed, useSecurityHealth, useSecurityZones } from "@/lib/hooks/useSecurity";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
 import { useAuth } from "@/lib/auth";
@@ -33,20 +37,33 @@ const PAGE_SUB = "What your cameras saw, whether they're reporting, and network 
 export default function SecurityPage() {
   const { user } = useAuth();
   const canSeeThreats = user?.role === "owner" || user?.role === "admin";
-  const [view, setView] = useState<SecurityView>("all");
+  const [pickedView, setView] = useState<SecurityView>("all");
   const [includeLow, setIncludeLow] = useState(false);
   const [zone, setZone] = useState<string | null>(null);
 
   const canManageAreas = levelAtLeast(useModuleLevel("security"), "manage");
+  const health = useSecurityHealth();
+  const view = viewFor(pickedView, health.sources);
 
   const { zones } = useSecurityZones();
   // `links` is the viewer's VISIBLE active links — the set the server filters by —
   // so a count of 0 is an area nothing covers (the feed says so, never "quiet").
+  // Split by kind (P2b-2): a camera view of an area only a lock covers is "not
+  // covered" too.
   const areas = useMemo(
     () =>
       (zones ?? [])
         .filter((z) => z.state === "active")
-        .map((z) => ({ id: z.id, name: z.name, linkCount: z.links.length })),
+        .map((z) => {
+          const lockLinkCount = z.links.filter((l) => l.sourceKind === "lock").length;
+          return {
+            id: z.id,
+            name: z.name,
+            linkCount: z.links.length,
+            cameraLinkCount: z.links.length - lockLinkCount,
+            lockLinkCount,
+          };
+        }),
     [zones],
   );
   // An area removed (or no longer visible) since it was picked stops
@@ -64,7 +81,6 @@ export default function SecurityPage() {
     [view, includeLow, activeZone],
   );
   const feed = useSecurityFeed(filter);
-  const health = useSecurityHealth();
   const cameraLabel = useCameraDisplayNames();
 
   return (

@@ -1,6 +1,9 @@
 /**
  * WARP-2977 P2b — every hand-written CHECK in migration
- * 20260924000100_warp_2977_security_zones_hours_mode, on a real Postgres.
+ * 20260924000100_warp_2977_security_zones_hours_mode, on a real Postgres,
+ * plus the two PR-2 (Matter lock) ones in 20260925050100_warp_2977_security_lock_rows:
+ * `SecurityEvent_lock_shape` and the re-added `SecurityZoneLink_ref` with
+ * its third (`lock`) arm.
  *
  * Why this file exists: the CHECKs are invisible to `prisma migrate diff`, so
  * check-schema-drift cannot see one being dropped or loosened, and a mocked
@@ -375,6 +378,104 @@ describe.skipIf(!RUN)("P2b schema CHECKs live in the database (WARP-2977)", () =
       expect(await run(...modeRow(`${TAG}mode`, "open", "schedule", "none", false))).toEqual(
         rejectedBy("SecurityModeState_shape"),
       );
+    });
+  });
+
+  // ── PR-2: SecurityEvent_lock_shape (20260925050100) ───────────────────────
+
+  const lockRow = (
+    source: string,
+    kind: string,
+    camera: string | null,
+    labels: string,
+    sourceRef: string,
+    observed: string | null = null,
+  ): string =>
+    `INSERT INTO "SecurityEvent" ("source","kind","severity","camera","sourceRef","dedupeKey","labels","cameraZones","startedAt","summary"${observed ? `,"observed"` : ""})
+     VALUES ('${source}','${kind}','info',${q(camera)},${q(sourceRef)},'${TAG}ev-${++ev}',${labels},ARRAY[]::text[],now(),'${TAG}summary'${observed ? `,'${observed}'` : ""})`;
+
+  describe("SecurityEvent_lock_shape", () => {
+    it("accepts every reading, live and polled, on a canonical matter:<node>/<endpoint> ref", async () => {
+      for (const reading of ["locked", "unlocked", "not_fully_locked", "unlatched", "unknown"]) {
+        for (const observed of ["live", "polled"]) {
+          expect(
+            await run(lockRow("matter_lock", "lock_state", null, `ARRAY['${reading}']::text[]`, "matter:1/1", observed)),
+            `${reading}/${observed}`,
+          ).toBe("inserted");
+        }
+      }
+      // The largest uint64 node id and the largest application endpoint.
+      expect(
+        await run(lockRow("matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "matter:18446744073709551615/65534")),
+      ).toBe("inserted");
+    });
+
+    it("leaves every other row shape alone — P2a rows (NULL labels included) and site_mode rows", async () => {
+      expect(await run(event("frigate", "detection", `${TAG}cam`, "ARRAY['person']::text[]"))).toBe("inserted");
+      expect(await run(event("frigate_status", "source_offline", null, "NULL"))).toBe("inserted");
+      expect(await run(event("activity_mirror", "threat", null, "NULL"))).toBe("inserted");
+      expect(await run(event("site_mode", "mode_changed", null, "ARRAY['closed','manual','open']::text[]"))).toBe(
+        "inserted",
+      );
+    });
+
+    it("a row written without `observed` reads back live (the column default every P2a writer relies on)", async () => {
+      await expect(
+        prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(event("frigate", "detection", `${TAG}cam`, "ARRAY['person']::text[]"));
+          const rows = await tx.$queryRawUnsafe<Array<{ observed: string }>>(
+            `SELECT "observed"::text AS "observed" FROM "SecurityEvent" WHERE "dedupeKey" = '${TAG}ev-${ev}'`,
+          );
+          expect(rows).toEqual([{ observed: "live" }]);
+          throw new Rollback("probe");
+        }),
+      ).rejects.toBeInstanceOf(Rollback);
+    });
+
+    it.each([
+      ["a matter_lock row that is not lock_state", "matter_lock", "detection", null, "ARRAY['locked']::text[]", "matter:1/1"],
+      ["a lock_state row from another source", "frigate", "lock_state", null, "ARRAY['locked']::text[]", "matter:1/1"],
+      ["a lock_state row with a camera", "matter_lock", "lock_state", `${TAG}cam`, "ARRAY['locked']::text[]", "matter:1/1"],
+      ["a lock_state row with no labels", "matter_lock", "lock_state", null, "ARRAY[]::text[]", "matter:1/1"],
+      ["a lock_state row with 2 labels", "matter_lock", "lock_state", null, "ARRAY['locked','unlocked']::text[]", "matter:1/1"],
+      ["an unknown reading", "matter_lock", "lock_state", null, "ARRAY['open']::text[]", "matter:1/1"],
+      ["a reading in the sidecar's words", "matter_lock", "lock_state", null, "ARRAY['Locked']::text[]", "matter:1/1"],
+      ["NULL labels", "matter_lock", "lock_state", null, "NULL", "matter:1/1"],
+      ["a NULL reading", "matter_lock", "lock_state", null, "ARRAY[NULL]::text[]", "matter:1/1"],
+      ["a ref with no endpoint", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "matter:1"],
+      ["a ref with a non-numeric node", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "matter:abc/1"],
+      ["a ref with a negative node", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "matter:-1/1"],
+      ["a ref with 21 node digits", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", `matter:${"1".repeat(21)}/1`],
+      ["a ref with 6 endpoint digits", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "matter:1/123456"],
+      ["a ref with an extra segment", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "matter:1/1/0"],
+      ["a ref in another scheme", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "lock:1/1"],
+      ["a Frigate-style ref", "matter_lock", "lock_state", null, "ARRAY['locked']::text[]", "front_door/status/detect"],
+    ])("refuses %s", async (_name, source, kind, camera, labels, sourceRef) => {
+      expect(await run(lockRow(source, kind, camera, labels, sourceRef))).toEqual(rejectedBy("SecurityEvent_lock_shape"));
+    });
+  });
+
+  // ── PR-2: SecurityZoneLink_ref's third arm ────────────────────────────────
+
+  describe("SecurityZoneLink_ref — the lock arm (re-added in 20260925050100)", () => {
+    it("accepts a lock link on a matter:<node>/<endpoint> ref, and still accepts camera and camera_zone links", async () => {
+      expect(await run(...link("lock", "matter:1/1"))).toBe("inserted");
+      expect(await run(...link("lock", "matter:18446744073709551615/65534"))).toBe("inserted");
+      expect(await run(...link("camera", "front_door"))).toBe("inserted");
+      expect(await run(...link("camera_zone", "front_door/till-1"))).toBe("inserted");
+    });
+
+    it.each([
+      ["lock", "front_door", "a camera ref on a lock link"],
+      ["lock", "front_door/till", "a camera/zone ref on a lock link"],
+      ["lock", "matter:1", "no endpoint"],
+      ["lock", "matter:x/1", "a non-numeric node"],
+      ["lock", "matter:1/1/1", "an extra segment"],
+      ["lock", "", "an empty ref"],
+      ["camera", "matter:1/1", "a lock ref on a camera link"],
+      ["camera_zone", "matter:1/1", "a lock ref on a camera_zone link"],
+    ])("refuses a %s link with %j (%s)", async (kind, ref) => {
+      expect(await run(...link(kind, ref))).toEqual(rejectedBy("SecurityZoneLink_ref"));
     });
   });
 });

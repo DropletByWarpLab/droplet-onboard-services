@@ -316,7 +316,7 @@ describe("a verdict quiets nothing (D15)", () => {
     await tick(f, plus(T0, 30_000));
     const incident = f.world.securityIncident[0]!;
     expect(incident).toMatchObject({ severity: "info", state: "no_action" });
-    const owner = { userId: "u-owner", visibleCameras: "all" as const, mayReadThreats: true, ownerOrAdmin: true };
+    const owner = { userId: "u-owner", visibleCameras: "all" as const, mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
     const actor = { id: "u-owner", username: "stefan", role: "owner", displayName: "Stefan", sessionId: null, sessionChecked: false, client: null };
     expect(await setIncidentVerdict(db(f), { incidentId: incident.id as string, verdict: "expected", actor, viewer: owner, now: plus(T0, 40_000) })).toEqual({
       status: "ok",

@@ -14,10 +14,11 @@
  *     `createMany({skipDuplicates})` skips it), `{increment}`, orderBy, take,
  *     and `select` / `include` of relations;
  *   · FKs on delete: Cascade and Restrict (a Restrict throws P2003);
- *   · the WARP-2978 CHECKs — and WARP-2980 PR-B's (20260925060100: the
- *     verdict shape, the pattern flag, expected activity, the per-day
- *     count) — mirrored in JS, on every write, so an engine bug that would
- *     violate one fails here the way Postgres would. Like Prisma
+ *   · the WARP-2978 CHECKs — and WARP-2977 P2b-2's SecurityEvent_lock_shape
+ *     (20260925050100) and WARP-2980 PR-B's (20260925060100: the verdict
+ *     shape, the pattern flag, expected activity, the per-day count) —
+ *     mirrored in JS, on every write, so an engine bug that would violate
+ *     one fails here the way Postgres would. Like Prisma
  *     on Postgres, a `create` that omits a scalar list stores NULL (and the
  *     CHECKs refuse a NULL list); seeded rows get empty lists;
  *   · TRANSACTIONS on the shared WARP-1570 seam (`createTransactionSeam`):
@@ -426,7 +427,11 @@ function clone<T>(v: T): T {
 }
 
 // ── the CHECK mirrors (20260925030000_warp_2978_security_incidents; PR-D's 20260925030200;
+//    WARP-2977 P2b-2's SecurityEvent_lock_shape, 20260925050100;
 //    WARP-2980 PR-B's 20260925060100_warp_2980_security_patterns_verdicts) ──
+
+/** SecurityEvent_lock_shape's readings (the raw DoorLock.LockState, named). */
+const LOCK_READINGS: readonly unknown[] = ["locked", "unlocked", "not_fully_locked", "unlatched", "unknown"];
 
 function check(table: TableName, r: Row): void {
   const fail = (name: string) => {
@@ -441,6 +446,23 @@ function check(table: TableName, r: Row): void {
       typeof r.dedupeKey === "string" &&
       r.dedupeKey.startsWith("frigate-ongoing:");
     if (!ok) fail("SecurityEvent_ongoing_shape");
+  }
+  if (table === "securityEvent") {
+    // 20260925050100_warp_2977_security_lock_rows: a lock_state row is exactly a
+    // matter_lock row — no camera, one reading, the endpoint as sourceRef.
+    const lockRow = r.kind === "lock_state";
+    if ((r.source === "matter_lock") !== lockRow) fail("SecurityEvent_lock_shape");
+    if (lockRow) {
+      const labels = r.labels;
+      const ok =
+        r.camera == null &&
+        Array.isArray(labels) &&
+        labels.length === 1 &&
+        LOCK_READINGS.includes(labels[0]) &&
+        typeof r.sourceRef === "string" &&
+        /^matter:[0-9]{1,20}\/[0-9]{1,5}$/.test(r.sourceRef);
+      if (!ok) fail("SecurityEvent_lock_shape");
+    }
   }
   if (table === "securityIncident") {
     const codes = r.reasonCodes as unknown[];

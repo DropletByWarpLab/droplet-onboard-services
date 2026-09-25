@@ -101,6 +101,18 @@ export const COPY = {
   toastAway: "Set to away. It stays this way until someone changes it.",
   toastResumed: "Back to opening hours.",
   undo: "Undo",
+
+  // WARP-2977 P2b-2 — a Close up or Away answer names the door locks still
+  // open (people with Devices view only). There is no "all locked" line.
+  stillUnlockedOne: "{lock} is still unlocked.",
+  stillUnlockedTwo: "{a} and {b} are still unlocked.",
+  stillUnlockedMany: "{a} and {n} other locks are still unlocked.",
+  // The server could not vouch for any lock reading: never read as "none open".
+  locksNotChecked: "Droplet couldn't check the door locks.",
+  // The other readings stand, but these locks aren't reporting or said nothing Droplet can name.
+  notCheckedOne: "Droplet couldn't check {lock}.",
+  notCheckedTwo: "Droplet couldn't check {a} or {b}.",
+  notCheckedMany: "Droplet couldn't check {a} and {n} other locks.",
 } as const;
 
 /**
@@ -260,6 +272,48 @@ export function modeToast(action: SecurityModeAction["action"], view: SecurityMo
   return action === "resume" ? `${COPY.toastResumed} ${line}` : line;
 }
 
+/**
+ * WARP-2977 P2b-2 — the line a Close up / Away toast adds for the door locks
+ * the server reports still open (`unlockedLocks`, sorted by name). Null when
+ * there is nothing to name: the field is absent for people without Devices
+ * view, and empty when no lock is known to be open — which is never phrased
+ * as "all locked".
+ */
+export function unlockedLocksLine(names: readonly string[] | undefined): string | null {
+  if (!names || names.length === 0) return null;
+  if (names.length === 1) return fill(COPY.stillUnlockedOne, { lock: names[0]! });
+  if (names.length === 2) return fill(COPY.stillUnlockedTwo, { a: names[0]!, b: names[1]! });
+  return fill(COPY.stillUnlockedMany, { a: names[0]!, n: String(names.length - 1) });
+}
+
+/**
+ * The line naming the locks the server can't vouch for (`uncheckedLocks`,
+ * sorted by name) while the other readings stand. Null when there are none.
+ */
+export function uncheckedLocksLine(names: readonly string[] | undefined): string | null {
+  if (!names || names.length === 0) return null;
+  if (names.length === 1) return fill(COPY.notCheckedOne, { lock: names[0]! });
+  if (names.length === 2) return fill(COPY.notCheckedTwo, { a: names[0]!, b: names[1]! });
+  return fill(COPY.notCheckedMany, { a: names[0]!, n: String(names.length - 1) });
+}
+
+/**
+ * The door-lock line of a Close up / Away toast, from the server's answer:
+ * "Droplet couldn't check the door locks." when it could not vouch for any
+ * reading (`locksChecked: false`, review F4); else the names still open, then
+ * the ones it couldn't check (rjouffret, review of 4fa950c8); else nothing.
+ * Every field is absent for people without Devices view.
+ */
+export function doorLocksLine(
+  r: Pick<SecurityModeActionResult, "unlockedLocks" | "uncheckedLocks" | "locksChecked">,
+): string | null {
+  if (r.locksChecked === false) return COPY.locksNotChecked;
+  const lines = [unlockedLocksLine(r.unlockedLocks), uncheckedLocksLine(r.uncheckedLocks)].filter(
+    (l): l is string => l !== null,
+  );
+  return lines.length > 0 ? lines.join(" ") : null;
+}
+
 /** The stale warning, read off the `site_mode` health row's lastSeenAt. */
 export function staleLine(row: SecurityHealthRow | null, view: SecurityModeView, now: Date): string {
   if (!row) return COPY.staleUnknown;
@@ -302,8 +356,11 @@ export function ModeCard({ onModeChanged, now: nowProp }: ModeCardProps) {
         // Undo is "back to opening hours", which only reverses a change that
         // started FROM the opening hours — and only when something changed.
         const undoable = action.action !== "resume" && r.changed && prior.source === "schedule";
+        // WARP-2977 P2b-2 — the door locks still open follow the mode's own line.
+        const locksLine = doorLocksLine(r);
+        const line = modeToast(action.action, r.mode, nowProp ?? new Date());
         toast(
-          modeToast(action.action, r.mode, nowProp ?? new Date()),
+          locksLine ? `${line} ${locksLine}` : line,
           "success",
           undoable ? { label: COPY.undo, onClick: () => void run({ action: "resume" }, r.mode) } : undefined,
         );

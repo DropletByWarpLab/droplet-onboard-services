@@ -18,7 +18,7 @@ import { cellsFor, newPatternsWorld, patternsPrisma } from "../__tests__/securit
 const TZ = "America/New_York";
 const NOW = new Date("2026-09-22T18:10:00Z"); // Tue 2:10 PM in New York
 const B = "b-ready";
-const ALL = { visibleCameras: "all" as const, mayReadThreats: true };
+const ALL = { visibleCameras: "all" as const, mayReadThreats: true, mayReadLocks: true };
 
 function db() {
   return patternsPrisma(

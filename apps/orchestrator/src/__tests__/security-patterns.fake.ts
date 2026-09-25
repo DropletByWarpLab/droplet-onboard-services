@@ -38,7 +38,7 @@ export interface PatternsWorld {
   /** userId → granted camera names. */
   grants: Record<string, string[]>;
   zones: Array<{ id: string; name: string; kind: string; state: "active" | "archived"; version: number }>;
-  links: Array<{ id: string; zoneId: string; sourceKind: "camera" | "camera_zone"; sourceRef: string; state: "active" | "removed" }>;
+  links: Array<{ id: string; zoneId: string; sourceKind: "camera" | "camera_zone" | "lock"; sourceRef: string; state: "active" | "removed" }>;
   sources: Array<{
     sourceKey: string;
     camera: string;

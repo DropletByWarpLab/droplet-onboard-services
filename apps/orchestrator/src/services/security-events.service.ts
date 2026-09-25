@@ -17,6 +17,7 @@ import {
   statusTransitionToDraft,
   threatRowToDraft,
   type SecurityEventDraft,
+  type SecurityEventSource,
   type SourceHealth,
   type StatusReading,
 } from "./security-event-ingest.js";
@@ -42,6 +43,43 @@ type SecurityPrisma = Pick<PrismaClient, "securityEvent" | "securityIngestState"
 // ── the one writer ──────────────────────────────────────────────────────
 
 /**
+ * What one write did (WARP-2977 P2b-2):
+ *   · `recorded`  — a row landed;
+ *   · `duplicate` — the dedupeKey already had its row (a QoS-1 redelivery,
+ *     a second bridge, a retry of a write that did land) — nothing written,
+ *     and nothing wrong;
+ *   · `failed`    — the database refused or could not be reached.
+ * The lock adapter moves its memory only on the first two; a boolean would
+ * conflate the last two.
+ */
+export type SecurityWriteOutcome = "recorded" | "duplicate" | "failed";
+
+/**
+ * Store one observation, and say which of the three it was. Idempotent on
+ * `dedupeKey`. Never throws — the MQTT handler and the lock subscriber that
+ * call it must keep serving the live surface. Write health is kept per
+ * SOURCE, so one source's save never clears another's failure.
+ */
+export async function writeSecurityEvent(
+  prisma: Pick<PrismaClient, "securityEvent">,
+  draft: SecurityEventDraft,
+): Promise<SecurityWriteOutcome> {
+  try {
+    const { count } = await prisma.securityEvent.createMany({ data: [draft], skipDuplicates: true });
+    if (count === 0) return "duplicate";
+    ingestHealth.lastRecordedAt.set(draft.source, new Date());
+    return "recorded";
+  } catch (err) {
+    ingestHealth.lastWriteError.set(draft.source, {
+      at: new Date(),
+      message: err instanceof Error ? err.message : String(err),
+    });
+    logger.error({ err, dedupeKey: draft.dedupeKey, source: draft.source }, "security event write failed");
+    return "failed";
+  }
+}
+
+/**
  * Store one observation. Idempotent on `dedupeKey`: a QoS-1 redelivery of
  * the same Frigate `end` returns false and writes nothing. Never throws —
  * the MQTT handler that calls it must keep serving the live surface.
@@ -50,15 +88,7 @@ export async function recordSecurityEvent(
   prisma: Pick<PrismaClient, "securityEvent">,
   draft: SecurityEventDraft,
 ): Promise<boolean> {
-  try {
-    const { count } = await prisma.securityEvent.createMany({ data: [draft], skipDuplicates: true });
-    if (count > 0) ingestHealth.lastRecordedAt = new Date();
-    return count > 0;
-  } catch (err) {
-    ingestHealth.lastWriteError = { at: new Date(), message: err instanceof Error ? err.message : String(err) };
-    logger.error({ err, dedupeKey: draft.dedupeKey }, "security event write failed");
-    return false;
-  }
+  return (await writeSecurityEvent(prisma, draft)) === "recorded";
 }
 
 // ── camera / Frigate health: transitions only ───────────────────────────
@@ -123,13 +153,32 @@ export interface TrackedHealth {
  *
  * Readings for one camera are applied in arrival order (a per-key promise
  * chain): `offline` then `online` a millisecond apart must not race.
+ *
+ * WARP-2977 P2b-2 (review F1): `pending` IS the status half of camera_ingest's
+ * write health — the header reads down exactly while a row is queued here
+ * (`statusUnsaved`), and ok again once it lands or is dropped because the
+ * camera went back to what the store holds. A duplicate (the row already
+ * landed) counts as saved.
  */
+let statusTrackerSeq = 0;
+
 export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">): StatusTracker {
   const last = new Map<string | null, TrackedHealth>();
   const told = new Map<string | null, SourceHealth>();
   const persisted = new Map<string | null, SourceHealth | null>();
   const pending = new Map<string | null, SecurityEventDraft>();
   const chains = new Map<string | null, Promise<unknown>>();
+  // This tracker's keys in the shared health set (a second tracker — tests — never clears ours).
+  const trackerId = ++statusTrackerSeq;
+  const unsavedKey = (camera: string | null) => `${trackerId}\u0000${camera ?? ""}`;
+  const queue = (camera: string | null, draft: SecurityEventDraft) => {
+    pending.set(camera, draft);
+    ingestHealth.statusUnsaved.add(unsavedKey(camera));
+  };
+  const settle = (camera: string | null) => {
+    pending.delete(camera);
+    ingestHealth.statusUnsaved.delete(unsavedKey(camera));
+  };
 
   async function previousFromStore(camera: string | null): Promise<SourceHealth | null> {
     const row = await prisma.securityEvent.findFirst({
@@ -166,18 +215,20 @@ export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">)
     // `online` produce no row but still move the store's view forward.
     const fresh = statusTransitionToDraft(reading, inStore, now);
     if (!fresh) {
-      pending.delete(key);
+      settle(key);
       persisted.set(key, reading.health);
       return { broadcast, stored: null };
     }
     const retry = pending.get(key);
     const draft = retry && retry.kind === fresh.kind ? retry : fresh;
-    const stored = await recordSecurityEvent(prisma, draft);
+    // A duplicate means the row is already in the store (a retry of a write
+    // that did land): saved, never queued again.
+    const stored = (await writeSecurityEvent(prisma, draft)) !== "failed";
     if (stored) {
-      pending.delete(key);
+      settle(key);
       persisted.set(key, reading.health);
     } else {
-      pending.set(key, draft);
+      queue(key, draft);
     }
     return { broadcast, stored };
   }
@@ -330,8 +381,23 @@ interface IngestHealthState {
   frigateSubscribeError: string | null;
   frigateSubscribedAt: Date | null;
   lastFrigateMessageAt: Date | null;
-  lastRecordedAt: Date | null;
-  lastWriteError: { at: Date; message: string } | null;
+  /**
+   * WARP-2977 P2b-2 — per SOURCE, never one global: a lock save must never
+   * clear a failing Frigate save on `camera_ingest` (and the reverse). Only
+   * `writeSecurityEvent` writes these. mode_changed rows are written in-tx
+   * (`tx.securityEvent.create`) and never touch them.
+   */
+  lastRecordedAt: Map<SecurityEventSource, Date>;
+  lastWriteError: Map<SecurityEventSource, { at: Date; message: string }>;
+  /**
+   * WARP-2977 P2b-2 (review F1) — camera status rows the status tracker
+   * could not save and still holds for a retry (one entry per tracker and
+   * camera). camera_ingest's status half reads THIS, not "last error newer
+   * than last save": status rows are rare, and a failed one that no longer
+   * needs writing (the camera went back to its stored state) must not keep
+   * the header down until the next status row lands, weeks later.
+   */
+  statusUnsaved: Set<string>;
   jobsRegistered: boolean;
 }
 
@@ -340,10 +406,19 @@ const ingestHealth: IngestHealthState = {
   frigateSubscribeError: null,
   frigateSubscribedAt: null,
   lastFrigateMessageAt: null,
-  lastRecordedAt: null,
-  lastWriteError: null,
+  lastRecordedAt: new Map(),
+  lastWriteError: new Map(),
+  statusUnsaved: new Set(),
   jobsRegistered: false,
 };
+
+/** The latest write of `source` failed and nothing of it has been saved since. */
+function writeFailing(ingest: Readonly<IngestHealthState>, source: SecurityEventSource): boolean {
+  const failed = ingest.lastWriteError.get(source);
+  if (!failed) return false;
+  const saved = ingest.lastRecordedAt.get(source);
+  return !saved || failed.at > saved;
+}
 
 /** The topics the ingest needs. camera.service subscribes to exactly these. */
 export const SECURITY_FRIGATE_TOPICS = ["frigate/events", "frigate/+/status/detect", "frigate/available"] as const;
@@ -395,16 +470,18 @@ export type SourceState = "ok" | "quiet" | "down" | "not_configured";
 
 /**
  * The header's rows, in the pinned display order
- * `camera_ingest, camera_system, (locks — P2b PR-2), threat_mirror, site_mode, incidents, alerts, patterns, retention`.
- * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `incidents`
- * and `alerts` (WARP-2978 P3) are the incident engine's and the notifier's;
- * `patterns` (WARP-2980 P5) is the baseline job's. P4's `links, summaries` go
- * between alerts and patterns when they land — whichever merges second moves
- * this pin.
+ * `camera_ingest, camera_system, locks, threat_mirror, site_mode, incidents, alerts, patterns, retention`.
+ * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `locks`
+ * (P2b-2) is the Matter lock adapter's, shown only to viewers who may read
+ * locks (DS-019); `incidents` and `alerts` (WARP-2978 P3) are the incident
+ * engine's and the notifier's; `patterns` (WARP-2980 P5) is the baseline
+ * job's. P4's `links, summaries` go between alerts and patterns when they
+ * land — whichever merges second moves this pin.
  */
 export type SecurityHealthId =
   | "camera_ingest"
   | "camera_system"
+  | "locks"
   | "threat_mirror"
   | "site_mode"
   | "incidents"
@@ -447,6 +524,12 @@ export function buildSecurityHealth(input: {
    */
   siteMode?: SecurityHealthRow;
   /**
+   * WARP-2977 P2b-2 — the Matter lock adapter's row (`lockHealthRow`),
+   * placed after `camera_system`. Optional: the route passes it only to
+   * viewers who may read locks.
+   */
+  locks?: SecurityHealthRow;
+  /**
    * WARP-2978 — the incident engine's row (every viewer) and the alerts row
    * (owner/admin only: it names who is told), placed after `site_mode`. Each
    * optional and placed on its own.
@@ -477,9 +560,11 @@ export function buildSecurityHealth(input: {
   } else {
     const heard = ingest.lastFrigateMessageAt ?? ingest.frigateSubscribedAt;
     const quiet = !heard || now.getTime() - heard.getTime() > QUIET_AFTER_MS;
-    // The most recent write failed and nothing has been saved since.
-    const failing =
-      ingest.lastWriteError !== null && (!ingest.lastRecordedAt || ingest.lastWriteError.at > ingest.lastRecordedAt);
+    // Detections: the most recent detection write failed and none has been
+    // saved since (they are frequent, so the next one settles it). Camera
+    // status: the status tracker still holds a row it could not save. Each
+    // half on its own: a status save does not vouch for detections.
+    const failing = writeFailing(ingest, "frigate") || ingest.statusUnsaved.size > 0;
     rows.push({
       id: "camera_ingest",
       state: failing ? "down" : quiet ? "quiet" : "ok",
@@ -504,6 +589,8 @@ export function buildSecurityHealth(input: {
         : { id: "camera_system", state: "quiet", detail: "No word from the camera system since Droplet started", lastSeenAt: null },
     );
   }
+
+  if (input.locks) rows.push(input.locks);
 
   const mirrorRan = input.state?.threatMirrorRanAt ?? null;
   rows.push({
@@ -548,8 +635,9 @@ export function _resetSecurityIngestHealthForTests(): void {
     frigateSubscribeError: null,
     frigateSubscribedAt: null,
     lastFrigateMessageAt: null,
-    lastRecordedAt: null,
-    lastWriteError: null,
+    lastRecordedAt: new Map(),
+    lastWriteError: new Map(),
+    statusUnsaved: new Set(),
     jobsRegistered: false,
   } satisfies IngestHealthState);
 }
@@ -568,16 +656,21 @@ export interface SecurityFeedQuery {
  * Who may see which rows. Camera rows follow CameraAccessGrant — a camera
  * outside the grant is absent, not redacted (DS-005). Mirrored threats point
  * at owner/admin-only ActivityRows, so they are owner/admin-only here too.
+ * Lock rows (WARP-2977 P2b-2, DS-019) carry no camera, so the grant cannot
+ * hide them: they need `mayReadLocks` (Devices view), else they are removed
+ * here — inside the same AND[0].
  */
 export function feedVisibilityWhere(
   visibleCameras: "all" | ReadonlySet<string>,
   mayReadThreats: boolean,
+  mayReadLocks: boolean,
 ): Prisma.SecurityEventWhereInput {
   const and: Prisma.SecurityEventWhereInput[] = [];
   if (visibleCameras !== "all") {
     and.push({ OR: [{ camera: null }, { camera: { in: [...visibleCameras] } }] });
   }
   if (!mayReadThreats) and.push({ source: { not: "activity_mirror" } });
+  if (!mayReadLocks) and.push({ source: { not: "matter_lock" } });
   return and.length > 0 ? { AND: and } : {};
 }
 
@@ -633,10 +726,18 @@ export async function listSecurityEvents(
       startedAt: r.startedAt.toISOString(),
       endedAt: r.endedAt?.toISOString() ?? null,
       summary: r.summary,
+      // WARP-2977 P2b-2: `polled` = startedAt is when Droplet's check found it, not when it happened.
+      observed: r.observed,
       // A detection's Frigate id, for the clip/thumbnail routes (which run their own camera guard).
       frigateEventId: r.source === "frigate" ? r.sourceRef.slice(r.sourceRef.indexOf("/") + 1) : null,
     })),
     nextCursor: rows.length > q.limit && tail ? `${tail.startedAt.getTime()}.${tail.id}` : null,
+    /**
+     * NOT wire data (WARP-2977 P2b-2): each row's sourceRef by row id, for the
+     * caller's area matching — a lock row joins its areas on it. Kept off the
+     * rows so the wire shape stays what it was; a Map serialises to `{}`.
+     */
+    sourceRefs: new Map(page.map((r) => [r.id.toString(), r.sourceRef])),
   };
 }
 

@@ -12,14 +12,14 @@
  *     only made of it), never redacted.
  *   · `mayReadThreats` — mirrored warn/err network/auth ActivityRows point at
  *     owner/admin-only rows, so they are owner/admin-only here too.
- *
- * PR-2 (the Matter lock adapter) adds `mayReadLocks` — smart_home ≥ view,
- * resolved through `resolveEffectiveAccessForRequest(req, resolve)`, fail
- * closed to owner/admin on a null resolution. It is deliberately NOT a field
- * yet: a PR-1 scope with a constant `false` would be a rule nobody enforces,
- * and something would come to depend on it. PR-2 adds the field and every
- * reader together; `resolve` is already in the signature so no caller has
- * to change when it does.
+ *   · `mayReadLocks` (WARP-2977 P2b-2, DS-019) — lock_state rows, lock links,
+ *     the `locks` health row and the names in a Close up's `unlockedLocks` /
+ *     `uncheckedLocks` need Devices (smart_home) ≥ view on top of the
+ *     Security view every Security route already sits behind. Lock state is
+ *     presence data, and with `camera = null` the camera grant would
+ *     otherwise show it to every Security viewer. Unresolved (no local User
+ *     row) fails closed to owner/admin; a resolver failure rejects (the
+ *     caller's 503), never a guess.
  */
 import type { Request } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -28,7 +28,8 @@ import {
   resolveEffectiveAccessForRequest,
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
-import type { FeatureLevel } from "./access-catalog.js";
+import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
+import type { SecurityLockReader } from "./security-lock-adapter.js";
 import type { OngoingSource } from "./security-inflight.js";
 
 export interface SecurityViewerScope {
@@ -36,6 +37,8 @@ export interface SecurityViewerScope {
   visibleCameras: "all" | ReadonlySet<string>;
   /** Mirrored threats (and the threat_mirror health row) — owner/admin only. */
   mayReadThreats: boolean;
+  /** Lock rows, lock links, the `locks` health row (WARP-2977 P2b-2, DS-019) — `mayReadLocksFor`. */
+  mayReadLocks: boolean;
 }
 
 /**
@@ -52,6 +55,14 @@ export interface SecurityRouteDeps {
   /** Frigate's `/api/config`, for the sources list and link checks (one fetch, with a timeout). */
   frigateConfig?: () => Promise<unknown>;
   /**
+   * WARP-2977 P2b-2 — the Matter lock adapter, read at request time (a
+   * fresh lock list for the Areas page and link checks, the last sweep's
+   * locks for labels and a Close up's `unlockedLocks` / `uncheckedLocks`,
+   * whether those readings are current, the `locks` health row). Default:
+   * the one index.ts started (`securityLockAdapter`); null = none is running.
+   */
+  locks?: () => SecurityLockReader | null;
+  /**
    * WARP-2978 PR-D — who Frigate is tracking now (camera.service's in-flight
    * map), for the incidents' "still happening" (security-incident-view.ts).
    * The incidents router reads camera.service's own when absent.
@@ -65,17 +76,38 @@ export function mayReadThreats(req: Pick<Request, "user">): boolean {
 }
 
 /**
- * The viewer's scope for one request. `resolve` is unused until PR-2's
- * `mayReadLocks`; pass `deps.resolve` now so that change touches no caller.
+ * WARP-2977 P2b-2 (DS-019) — may this person see door locks on the Security
+ * surfaces? Devices (smart_home) at view or above in their resolved §9
+ * catalog; the owner's catalog always holds it (the resolver's §3 bypass).
+ *
+ *   · resolved → exactly that entry. An admin narrowed off Devices is out.
+ *   · unresolved (null: no local User row, a service principal, no
+ *     principal) → owner/admin only. Fail closed.
+ *   · the resolver throws → REJECTS. The caller answers 503; nothing guesses.
+ *     (In production the module gate has already resolved this request, and
+ *     `resolveEffectiveAccessForRequest` shares its memo, so this is one read.)
+ */
+export async function mayReadLocksFor(req: Request, resolve?: EffectiveAccessResolver): Promise<boolean> {
+  const access = await resolveEffectiveAccessForRequest(req, resolve);
+  if (!access) return req.user?.role === "owner" || req.user?.role === "admin";
+  const level = access.features.find((f) => f.moduleId === "smart_home")?.level;
+  return level !== undefined && FEATURE_LEVEL_RANK[level] >= FEATURE_LEVEL_RANK.view;
+}
+
+/**
+ * The viewer's scope for one request. `resolve` is `deps.resolve` (the §9
+ * resolver behind the gates); it decides `mayReadLocks`.
  */
 export async function securityViewerScope(
   prisma: PrismaClient,
   req: Request,
   resolve?: EffectiveAccessResolver,
 ): Promise<SecurityViewerScope> {
-  void resolve;
-  const visibleCameras = await visibleCameraNames(prisma, principalFromRequest(req));
-  return { visibleCameras, mayReadThreats: mayReadThreats(req) };
+  const [visibleCameras, mayReadLocks] = await Promise.all([
+    visibleCameraNames(prisma, principalFromRequest(req)),
+    mayReadLocksFor(req, resolve),
+  ]);
+  return { visibleCameras, mayReadThreats: mayReadThreats(req), mayReadLocks };
 }
 
 /**

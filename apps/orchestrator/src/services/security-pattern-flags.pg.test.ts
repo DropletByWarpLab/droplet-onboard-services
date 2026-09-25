@@ -18,6 +18,9 @@
  *                  and learning state, a 03:10 detection through the REAL
  *                  engine: one trial flag whose numbers are route 31's for the
  *                  same instant, and which a later rebuild never moves (D20);
+ *                  the area's door lock (WARP-2977 P2b-2) is linked too and
+ *                  unlocks a minute before: it is no baseline camera and its
+ *                  row is triaged context, never judged (D21);
  *   k            — only `detection` rows count, and the query is served by
  *                  the (camera, startedAt) index at 10k rows (D8);
  *   retention    — a marked plain incident outlives the event horizon; its
@@ -479,6 +482,24 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
   let n = 0;
   let saved: { engine: unknown; hours: unknown; days: unknown[]; mode: unknown } = { engine: null, hours: null, days: [], mode: null };
 
+  /** WARP-2977 P2b-2: the Front door's lock, linked to the same area. */
+  const LOCK = "matter:2980/1";
+  const lockRow = (at: Date): Prisma.SecurityEventCreateManyInput => ({
+    source: "matter_lock",
+    kind: "lock_state",
+    severity: "info",
+    camera: null,
+    sourceRef: LOCK,
+    dedupeKey: `${TAG}:lock-${++n}`,
+    labels: ["unlocked"],
+    cameraZones: [],
+    score: null,
+    startedAt: at,
+    endedAt: null,
+    summary: "Front door lock",
+    observed: "live",
+  });
+
   const person = (at: Date, over: Partial<Prisma.SecurityEventCreateManyInput> = {}): Prisma.SecurityEventCreateManyInput => ({
     source: "frigate",
     kind: "detection",
@@ -538,6 +559,9 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     const zone = await prisma.securityZone.create({ data: { name: `${TAG} Front door`, nameKey: `${TAG} front door`, kind: "entry" } });
     zoneId = zone.id;
     await prisma.securityZoneLink.create({ data: { zoneId, sourceKind: "camera", sourceRef: PCAM, sourceLabel: PCAM, state: "active" } });
+    // WARP-2977 P2b-2: and to its door lock. A lock link is never one of the area's
+    // baseline cameras, and a lock row feeds no rule (D21): nothing below moves for it.
+    await prisma.securityZoneLink.create({ data: { zoneId, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Front door lock", state: "active" } });
 
     // 28 days of coverage, and a person at noon every day of the window.
     await prisma.securityCoverageSpan.create({
@@ -585,8 +609,14 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     await prisma.securityIncidentEngineState.create({
       data: { id: "singleton", startedAtId: head, triageFloor: head, floorCandidate: head, floorCandidateAt: plus(NOW, -600_000) },
     });
-    await prisma.securityEvent.createMany({ data: [person(AT_0310)] });
+    // The door unlocked a minute before, after hours: triaged context, never judged or counted.
+    await prisma.securityEvent.createMany({ data: [lockRow(plus(AT_0310, -60_000)), person(AT_0310)] });
     await tickSecurityIncidents(prisma, { isSecurityModuleOn: async () => false, resolveAccess: async () => null, now: () => NOW });
+    const lock = await prisma.securityEvent.findFirstOrThrow({ where: { source: "matter_lock", dedupeKey: { startsWith: `${TAG}:` } }, select: { id: true } });
+    expect(await prisma.securityEventTriage.findUnique({ where: { eventId: lock.id }, select: { outcome: true, incidentId: true } })).toEqual({
+      outcome: "context",
+      incidentId: null,
+    });
 
     const incident = await prisma.securityIncident.findFirstOrThrow({ where: { cameras: { has: PCAM } } });
     expect(incident).toMatchObject({ scope: "area", zoneId, severity: "info", state: "no_action", reasonCodes: [] });
@@ -595,7 +625,7 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     expect(flags[0]).toMatchObject({ code: "out_of_place", effect: "trial", severity: "alert", zoneKey: `area:${zoneId}`, keyCameras: [PCAM], rulesetVersion: 3 });
     const detail = flags[0]!.detail as Record<string, unknown>;
 
-    const explained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true }, { zoneId, label: "person", at: AT_0310 }, NOW);
+    const explained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true, mayReadLocks: true }, { zoneId, label: "person", at: AT_0310 }, NOW);
     expect(explained.status).toBe("ok");
     const cell = (explained as Extract<typeof explained, { status: "ok" }>).view.cell!;
     expect(detail).toMatchObject({
@@ -622,7 +652,7 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     expect((await runFullBuild(prisma, "nightly", TZ, plus(NOW, 60_000))).status).toBe("built");
     const after = await prisma.securityPatternFlag.findUniqueOrThrow({ where: { id: flags[0]!.id } });
     expect(JSON.stringify(after.detail)).toBe(JSON.stringify(flags[0]!.detail));
-    const reexplained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true }, { zoneId, label: "person", at: AT_0310 }, NOW);
+    const reexplained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true, mayReadLocks: true }, { zoneId, label: "person", at: AT_0310 }, NOW);
     expect((reexplained as Extract<typeof reexplained, { status: "ok" }>).view.cell!.daysWithEvent).toBe(5);
   });
 

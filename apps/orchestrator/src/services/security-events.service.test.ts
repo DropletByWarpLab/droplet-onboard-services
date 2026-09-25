@@ -24,6 +24,7 @@ import {
   registerSecurityJobs,
   securityIngestHealthState,
   trimSecurityEvents,
+  writeSecurityEvent,
   _resetSecurityIngestHealthForTests,
   SECURITY_EVENT_RETENTION_DAYS,
   SECURITY_RETENTION_CRON,
@@ -49,8 +50,25 @@ function draft(over: Partial<SecurityEventDraft> = {}): SecurityEventDraft {
     startedAt: NOW,
     endedAt: NOW,
     summary: "Person",
+    observed: "live",
     ...over,
   };
+}
+
+/** A lock_state row as the lock adapter writes it. */
+function lockDraft(over: Partial<SecurityEventDraft> = {}): SecurityEventDraft {
+  return draft({
+    source: "matter_lock",
+    kind: "lock_state",
+    camera: null,
+    sourceRef: "matter:7/1",
+    dedupeKey: "matter_lock:7/1:after:none:unlocked",
+    labels: ["unlocked"],
+    score: null,
+    endedAt: null,
+    summary: "Back door lock: unlocked",
+    ...over,
+  });
 }
 
 beforeEach(() => {
@@ -66,10 +84,125 @@ describe("recordSecurityEvent — the one writer", () => {
     expect(createMany).toHaveBeenCalledWith({ data: [draft()], skipDuplicates: true });
   });
 
-  it("never throws — a failed write is recorded for the health header", async () => {
+  it("never throws — a failed write is recorded for the health header, under its source", async () => {
     const prisma = { securityEvent: { createMany: vi.fn().mockRejectedValue(new Error("pool exhausted")) } } as never;
     await expect(recordSecurityEvent(prisma, draft())).resolves.toBe(false);
-    expect(securityIngestHealthState().lastWriteError?.message).toBe("pool exhausted");
+    expect(securityIngestHealthState().lastWriteError.get("frigate")?.message).toBe("pool exhausted");
+  });
+});
+
+describe("writeSecurityEvent — the same writer, telling a duplicate from a failure (WARP-2977 P2b-2)", () => {
+  it("recorded / duplicate / failed — the lock adapter moves its memory only on the first two", async () => {
+    const createMany = vi
+      .fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 })
+      .mockRejectedValueOnce(new Error("pool exhausted"));
+    const prisma = { securityEvent: { createMany } } as never;
+    expect(await writeSecurityEvent(prisma, lockDraft())).toBe("recorded");
+    expect(await writeSecurityEvent(prisma, lockDraft())).toBe("duplicate");
+    expect(await writeSecurityEvent(prisma, lockDraft())).toBe("failed");
+    expect(createMany).toHaveBeenCalledWith({ data: [lockDraft()], skipDuplicates: true });
+  });
+
+  it("a duplicate is neither a save nor a failure in the write health", async () => {
+    const prisma = { securityEvent: { createMany: vi.fn().mockResolvedValue({ count: 0 }) } } as never;
+    await writeSecurityEvent(prisma, draft());
+    expect(securityIngestHealthState().lastRecordedAt.size).toBe(0);
+    expect(securityIngestHealthState().lastWriteError.size).toBe(0);
+  });
+});
+
+describe("write health is per SOURCE (WARP-2977 P2b-2) — one source's save never clears another's failure", () => {
+  const healthy = {
+    frigateConfigured: true,
+    frigate: { health: "online" as const, at: NOW },
+    state: { threatMirrorRanAt: NOW, retentionRanAt: NOW, retentionDeleted: 0 },
+    now: NOW,
+  };
+  const cameraIngest = () =>
+    buildSecurityHealth({
+      ...healthy,
+      ingest: { ...securityIngestHealthState(), frigateSubscribed: true, frigateSubscribedAt: NOW, lastFrigateMessageAt: NOW, jobsRegistered: true },
+    }).find((r) => r.id === "camera_ingest")!;
+
+  it("a lock write after a Frigate write failure leaves camera_ingest down", async () => {
+    const createMany = vi.fn().mockRejectedValueOnce(new Error("disk full")).mockResolvedValueOnce({ count: 1 });
+    const prisma = { securityEvent: { createMany } } as never;
+    await recordSecurityEvent(prisma, draft());
+    await writeSecurityEvent(prisma, lockDraft());
+    expect(securityIngestHealthState().lastRecordedAt.has("matter_lock")).toBe(true);
+    expect(cameraIngest()).toMatchObject({ state: "down", detail: "Camera events are arriving but could not be saved" });
+  });
+
+  it("a camera-status save does not clear a failed detection save either; a detection save does", async () => {
+    const createMany = vi.fn().mockRejectedValueOnce(new Error("disk full")).mockResolvedValue({ count: 1 });
+    const prisma = { securityEvent: { createMany } } as never;
+    await recordSecurityEvent(prisma, draft());
+    await recordSecurityEvent(
+      prisma,
+      draft({ source: "frigate_status", kind: "camera_online", sourceRef: "front_door/status/detect", dedupeKey: "frigate_status:x" }),
+    );
+    expect(cameraIngest().state).toBe("down");
+    await recordSecurityEvent(prisma, draft({ dedupeKey: "frigate:e2" }));
+    expect(cameraIngest().state).toBe("ok");
+  });
+
+  it("a failed LOCK write never turns camera_ingest down", async () => {
+    const prisma = { securityEvent: { createMany: vi.fn().mockRejectedValue(new Error("disk full")) } } as never;
+    await writeSecurityEvent(prisma, lockDraft());
+    expect(securityIngestHealthState().lastWriteError.get("matter_lock")?.message).toBe("disk full");
+    expect(cameraIngest().state).toBe("ok");
+  });
+
+  // Review F1: camera STATUS write health is "the status tracker still holds a
+  // row it could not save", not "the last status error is newer than the last
+  // status save" — status rows are rare, so the latter could stick for weeks.
+  describe("camera status rows: down exactly while the tracker holds an unsaved row", () => {
+    function statusStore(previousKind: string) {
+      const createMany = vi.fn().mockResolvedValue({ count: 1 });
+      const findFirst = vi.fn().mockResolvedValue({ kind: previousKind });
+      return { t: createStatusTracker({ securityEvent: { createMany, findFirst } } as never), createMany };
+    }
+
+    it("a failed status write, then the camera back in its stored state: nothing is left to save → ok", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockRejectedValueOnce(new Error("disk full"));
+      await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      expect(cameraIngest()).toMatchObject({ state: "down", detail: "Camera events are arriving but could not be saved" });
+      // Back to the state the store already holds: the queued offline row is dropped, nothing is owed.
+      await t.observe("frigate/cam1/status/detect", "online", new Date(NOW.getTime() + 60_000));
+      expect(cameraIngest().state).toBe("ok");
+    });
+
+    it("a failed status write, then its retry lands → ok", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockRejectedValueOnce(new Error("disk full"));
+      await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      expect(cameraIngest().state).toBe("down");
+      await t.observe("frigate/cam1/status/detect", "offline", new Date(NOW.getTime() + 60_000));
+      expect(cameraIngest().state).toBe("ok");
+    });
+
+    it("a retry that already landed (a duplicate) counts as saved — stored, nothing queued, ok", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockResolvedValueOnce({ count: 0 });
+      const r = await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      expect(r?.stored).toBe(true);
+      expect(cameraIngest().state).toBe("ok");
+      // …and the next reading does not re-send it.
+      await t.observe("frigate/cam1/status/detect", "offline", new Date(NOW.getTime() + 60_000));
+      expect(createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("one camera's unsaved row is not cleared by another camera's save", async () => {
+      const { t, createMany } = statusStore("camera_online");
+      createMany.mockRejectedValueOnce(new Error("disk full"));
+      await t.observe("frigate/cam1/status/detect", "offline", NOW);
+      await t.observe("frigate/cam2/status/detect", "offline", NOW);
+      expect(createMany).toHaveBeenCalledTimes(2);
+      expect(cameraIngest().state).toBe("down");
+    });
   });
 });
 
@@ -376,7 +509,10 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
   it("the latest write failed and nothing saved since → down", () => {
     const rows = buildSecurityHealth({
       ...base,
-      ingest: ingest({ lastRecordedAt: new Date(NOW.getTime() - 60_000), lastWriteError: { at: NOW, message: "x" } }),
+      ingest: ingest({
+        lastRecordedAt: new Map([["frigate", new Date(NOW.getTime() - 60_000)]]),
+        lastWriteError: new Map([["frigate", { at: NOW, message: "x" }]]),
+      }),
     });
     expect(row(rows, "camera_ingest").state).toBe("down");
   });
@@ -384,7 +520,31 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
   it("a write failure followed by a successful write → ok again", () => {
     const rows = buildSecurityHealth({
       ...base,
-      ingest: ingest({ lastWriteError: { at: new Date(NOW.getTime() - 60_000), message: "x" }, lastRecordedAt: NOW }),
+      ingest: ingest({
+        lastWriteError: new Map([["frigate", { at: new Date(NOW.getTime() - 60_000), message: "x" }]]),
+        lastRecordedAt: new Map([["frigate", NOW]]),
+      }),
+    });
+    expect(row(rows, "camera_ingest").state).toBe("ok");
+  });
+
+  it("WARP-2977 P2b-2 (review F1): a camera STATUS row the tracker could not save is a camera write too → down", () => {
+    const rows = buildSecurityHealth({ ...base, ingest: ingest({ statusUnsaved: new Set(["1\u0000cam1"]) }) });
+    expect(row(rows, "camera_ingest").state).toBe("down");
+  });
+
+  it("WARP-2977 P2b-2 (review F1): an old status write error with nothing left unsaved is NOT down", () => {
+    const rows = buildSecurityHealth({
+      ...base,
+      ingest: ingest({ lastWriteError: new Map([["frigate_status", { at: NOW, message: "x" }]]) }),
+    });
+    expect(row(rows, "camera_ingest").state).toBe("ok");
+  });
+
+  it("WARP-2977 P2b-2: a failed write of a source that is not a camera's (a lock, a mode change) leaves camera_ingest alone", () => {
+    const rows = buildSecurityHealth({
+      ...base,
+      ingest: ingest({ lastWriteError: new Map([["matter_lock", { at: NOW, message: "x" }]]) }),
     });
     expect(row(rows, "camera_ingest").state).toBe("ok");
   });
@@ -464,6 +624,41 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "site_mode", "retention"]);
   });
 
+  it("WARP-2977 P2b-2: a locks row is placed after camera_system and before threat_mirror, verbatim — the full pinned order", () => {
+    const siteMode = { id: "site_mode" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const locks = { id: "locks" as const, state: "not_configured" as const, detail: "No door locks paired", lastSeenAt: null };
+    const incidents = { id: "incidents" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const alerts = { id: "alerts" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const patterns = { id: "patterns" as const, state: "quiet" as const, detail: "x", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode, locks, incidents, alerts, patterns });
+    // Every row the ADR-059 PRs add (WARP-2977 P2b-2 locks, WARP-2978 incidents
+    // and alerts, WARP-2980 patterns), in the one pinned order.
+    expect(rows.map((r) => r.id)).toEqual([
+      "camera_ingest",
+      "camera_system",
+      "locks",
+      "threat_mirror",
+      "site_mode",
+      "incidents",
+      "alerts",
+      "patterns",
+      "retention",
+    ]);
+    expect(row(rows, "locks")).toBe(locks);
+  });
+
+  it("WARP-2977 P2b-2: with no camera system the locks row still follows camera_ingest; omitted, the header is PR-1's", () => {
+    const locks = { id: "locks" as const, state: "ok" as const, detail: "Listening to 1 lock", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, frigateConfigured: false, ingest: ingest(), locks });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "locks", "threat_mirror", "retention"]);
+    expect(buildSecurityHealth({ ...base, ingest: ingest() }).map((r) => r.id)).toEqual([
+      "camera_ingest",
+      "camera_system",
+      "threat_mirror",
+      "retention",
+    ]);
+  });
+
   // WARP-2978 (ADR-059 P3 §6.11) — the pinned order grows:
   // camera_ingest, camera_system, (locks), threat_mirror, site_mode, incidents, alerts, retention.
   it("WARP-2978: incidents and alerts sit after site_mode and before retention, verbatim", () => {
@@ -519,7 +714,7 @@ describe("listSecurityEvents — extraWhere narrows after the camera clause (WAR
   });
 
   it("visibility stays AND[0]; the extra clauses follow the camera clause; the cursor stays last", async () => {
-    const visibility = feedVisibilityWhere(new Set(["front"]), false);
+    const visibility = feedVisibilityWhere(new Set(["front"]), false, false);
     const zone = { camera: "front", OR: [{ kind: { in: ["camera_offline" as const, "camera_online" as const] } }] };
     const cursor = { startedAt: NOW, id: 9n };
     await listSecurityEvents(prisma, visibility, { limit: 10, includeLow: false, camera: "front", cursor }, [zone]);
@@ -535,25 +730,59 @@ describe("listSecurityEvents — extraWhere narrows after the camera clause (WAR
     await listSecurityEvents(prisma, {}, { limit: 10, includeLow: true });
     expect(findMany.mock.calls[0]![0].where.AND).toEqual([{}, {}, {}, {}, {}]);
   });
+
+  it("WARP-2977 P2b-2: each row says how it was observed (a polled lock row is never timing evidence)", async () => {
+    const at = new Date(NOW.getTime() - 1000);
+    findMany.mockResolvedValue([
+      {
+        id: 5n,
+        source: "matter_lock",
+        kind: "lock_state",
+        severity: "info",
+        camera: null,
+        sourceRef: "matter:7/1",
+        labels: ["unlocked"],
+        cameraZones: [],
+        score: null,
+        startedAt: at,
+        endedAt: null,
+        summary: "Back door lock: unlocked (found when Droplet checked)",
+        observed: "polled",
+      },
+    ]);
+    const page = await listSecurityEvents(prisma, {}, { limit: 10, includeLow: true });
+    expect(page.events[0]).toMatchObject({ id: "5", kind: "lock_state", observed: "polled", frigateEventId: null });
+  });
 });
 
-describe("feedVisibilityWhere — DS-005 and the threat gate", () => {
-  it("owner/admin with every camera: no constraint", () => {
-    expect(feedVisibilityWhere("all", true)).toEqual({});
+describe("feedVisibilityWhere — DS-005, the threat gate and the lock gate", () => {
+  it("owner/admin with every camera and Devices view: no constraint", () => {
+    expect(feedVisibilityWhere("all", true, true)).toEqual({});
   });
 
   it("granted cameras: rows from those cameras or from no camera", () => {
-    expect(feedVisibilityWhere(new Set(["front"]), true)).toEqual({
+    expect(feedVisibilityWhere(new Set(["front"]), true, true)).toEqual({
       AND: [{ OR: [{ camera: null }, { camera: { in: ["front"] } }] }],
     });
   });
 
   it("no grants at all: only camera-less rows", () => {
-    expect(feedVisibilityWhere(new Set(), true)).toEqual({ AND: [{ OR: [{ camera: null }, { camera: { in: [] } }] }] });
+    expect(feedVisibilityWhere(new Set(), true, true)).toEqual({ AND: [{ OR: [{ camera: null }, { camera: { in: [] } }] }] });
   });
 
   it("not owner/admin: mirrored threats are removed", () => {
-    expect(feedVisibilityWhere("all", false)).toEqual({ AND: [{ source: { not: "activity_mirror" } }] });
+    expect(feedVisibilityWhere("all", false, true)).toEqual({ AND: [{ source: { not: "activity_mirror" } }] });
+  });
+
+  it("WARP-2977 P2b-2 (DS-019): without Devices view, lock rows are removed — inside the same clause, after the others", () => {
+    expect(feedVisibilityWhere("all", true, false)).toEqual({ AND: [{ source: { not: "matter_lock" } }] });
+    expect(feedVisibilityWhere(new Set(["front"]), false, false)).toEqual({
+      AND: [
+        { OR: [{ camera: null }, { camera: { in: ["front"] } }] },
+        { source: { not: "activity_mirror" } },
+        { source: { not: "matter_lock" } },
+      ],
+    });
   });
 });
 

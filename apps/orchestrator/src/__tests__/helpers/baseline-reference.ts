@@ -11,7 +11,7 @@
  * Written for clarity, not speed: a few hundred events and spans.
  */
 import { buildZoneIndex, zonesForEvent, type ActiveZoneLink } from "../../services/security-zones.service.js";
-import { parseLinkRef } from "../../services/security-zones.service.js";
+import { isLockLinkRef, parseLinkRef } from "../../services/security-zones.service.js";
 import { BASELINE } from "../../lib/security-baseline-math.js";
 import type { BaselineSlot } from "../../lib/security-baseline-slots.js";
 
@@ -113,7 +113,8 @@ export function referenceCells(input: ReferenceInput): RefCell[] {
   const areas = new Map<string, { version: number; cams: string[] }>();
   for (const l of links) {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-    if (!parsed) continue;
+    // The build reads camera / camera_zone links only: a lock link has no camera.
+    if (!parsed || isLockLinkRef(parsed)) continue;
     const a = areas.get(l.zoneId) ?? { version: l.zoneVersion, cams: [] };
     if (!a.cams.includes(parsed.camera)) a.cams.push(parsed.camera);
     a.version = Math.max(a.version, l.zoneVersion);

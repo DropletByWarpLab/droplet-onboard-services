@@ -225,6 +225,31 @@ describe("/security/wall — what the strip says (T-D7)", () => {
     expect(text).toMatch(/may be behind/);
   });
 
+  it("WARP-2977 (DS-019): a Staff account with Devices view gets the door locks row — named 'Door locks' when not reporting, never behind", async () => {
+    box.counts = { openAlerts: 0, openNotices: 0 };
+    // The server's order; the row's detail names a lock, and the strip shows a source's label and state, never its detail.
+    box.sources = [
+      row("camera_ingest", "ok"),
+      row("camera_system", "ok"),
+      { ...row("locks", "down"), detail: "Stock room door isn't reporting" },
+      row("site_mode", "ok"),
+      row("incidents", "ok"),
+    ];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("sources")).getByText("1 not reporting")).toBeInTheDocument());
+    expect(within(cell("sources")).getByText("Door locks")).toBeInTheDocument();
+    expect(within(cell("sources")).getByText("Not reporting")).toHaveClass("badge", "danger", "sec-wall-badge");
+    // A lock row never forms an incident (D21): its outage cannot leave the count short.
+    expect(cell("attention").textContent).not.toMatch(/may be behind/);
+    expect(document.body.textContent).not.toContain("Stock room door");
+  });
+
+  it("WARP-2977 (DS-019): without Devices view the server sends no locks row, and the wall says nothing of door locks", async () => {
+    box.sources = [row("camera_ingest", "ok"), row("camera_system", "ok"), row("site_mode", "ok"), row("incidents", "ok")];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("sources")).getByText(WALL_COPY.sourcesAllReporting)).toBeInTheDocument());
+    expect(document.body.textContent).not.toMatch(/door lock/i);
+  });
 });
 
 describe("/security/wall — this account's own cameras (D6: \"Member wall, own cameras\")", () => {

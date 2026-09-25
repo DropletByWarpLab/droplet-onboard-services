@@ -13,6 +13,8 @@
  *                  change, a non-Frigate "detection" and (WARP-2978 PR-D) a
  *                  person's "still in view" row in the fixture change
  *                  nothing — the person is counted once, by their `end` row;
+ *                  nor do door-lock rows, a lock link on a camera area or an
+ *                  area made only of a lock (WARP-2977 P2b-2);
  *   CHECKs       — each refuses its bad row;
  *   indexes      — a second ready build, a second building one;
  *   the swap     — a reader in a REPEATABLE READ snapshot sees only the old
@@ -70,6 +72,8 @@ const BLIND = `${TAG}_c5`;
 const PARTS = ["porch", "drive", "yard", "till"];
 const LABELS = ["person", "person", "person", "person", "car", "car", "dog", "cat", "bicycle", "truck", "bird", "horse", "sheep", "cow", "boat"];
 const MIN = 60_000;
+/** A Matter DoorLock endpoint (WARP-2977 P2b-2): linked to area 1, and the only link of area 8. */
+const LOCK = "matter:4660/1";
 
 /** Deterministic PRNG (mulberry32). */
 function rng(seed: number): () => number {
@@ -117,7 +121,7 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
       await prisma.securityZoneLink.create({
         data: {
           zoneId: zone.id,
-          sourceKind: kind as "camera" | "camera_zone",
+          sourceKind: kind as "camera" | "camera_zone" | "lock",
           sourceRef: ref,
           sourceLabel: ref,
           state: opts.removed?.includes(ref) ? "removed" : "active",
@@ -189,13 +193,16 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
     // Areas: overlapping, whole cameras and parts, one camera twice in one area
     // (a whole link AND a part: DISTINCT must count its events once), an area
     // needing a blind camera, an archived area, a removed link.
-    await area(1, [["camera", CAMS[0]!], ["camera_zone", `${CAMS[0]}/porch`]]);
+    // Area 1 also links a door lock, and area 8 is only a lock (WARP-2977 P2b-2):
+    // a lock link is never a camera of an area, and never makes one.
+    await area(1, [["camera", CAMS[0]!], ["camera_zone", `${CAMS[0]}/porch`], ["lock", LOCK]]);
     await area(2, [["camera", CAMS[0]!], ["camera", CAMS[1]!]]);
     await area(3, [["camera_zone", `${CAMS[1]}/drive`], ["camera_zone", `${CAMS[2]}/yard`], ["camera_zone", `${CAMS[2]}/till`]]);
     await area(4, [["camera_zone", `${CAMS[3]}/porch`], ["camera", BLIND]]);
     await area(5, [["camera", CAMS[2]!], ["camera_zone", `${CAMS[3]}/till`]], { removed: [`${CAMS[3]}/till`] });
     await area(6, [["camera", CAMS[1]!]], { state: "archived" });
     await area(7, [["camera_zone", `${CAMS[3]}/drive`]]);
+    await area(8, [["lock", LOCK]]);
 
     const r = rng(2980);
     const closedSpan = (camera: string, start: number, end: number): Prisma.SecurityCoverageSpanCreateManyInput => ({
@@ -273,6 +280,25 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
         startedAt,
         endedAt: new Date(startedAt.getTime() + 30_000),
         summary: "noise",
+      });
+    }
+    // Door-lock rows in observed slots: presence data, never a detection.
+    for (let i = 0; i < 12; i += 1) {
+      const startedAt = new Date(BOUNDS.start.getTime() + Math.floor(r() * (BOUNDS.end.getTime() - BOUNDS.start.getTime())));
+      evRows.push({
+        source: "matter_lock",
+        kind: "lock_state",
+        severity: "info",
+        camera: null,
+        sourceRef: LOCK,
+        dedupeKey: `${TAG}:lock-${i}`,
+        labels: [i % 2 === 0 ? "unlocked" : "locked"],
+        cameraZones: [],
+        score: null,
+        startedAt,
+        endedAt: null,
+        summary: "Back door lock",
+        observed: i % 3 === 0 ? "polled" : "live",
       });
     }
     // WARP-2978 PR-D — people still in view 30 s in: confident, zoned, in observed
@@ -356,6 +382,11 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
     expect([...keys].filter((k) => k.startsWith("area:")).length).toBeGreaterThanOrEqual(3);
     expect([...keys].filter((k) => k.startsWith("camera:")).sort()).toEqual(CAMS.map((c) => `camera:${c}`).sort());
     expect(keys.has(`camera:${BLIND}`)).toBe(false);
+    // WARP-2977 P2b-2: the lock-only area has no key, and area 1's lock link is not one of its cameras.
+    expect(keys.has(`area:${zoneIds[7]}`)).toBe(false);
+    expect(new Set(got.filter((c) => c.zoneKey === `area:${zoneIds[0]}`).map((c) => JSON.stringify(c.cameras)))).toEqual(
+      new Set([JSON.stringify([CAMS[0]])]),
+    );
     expect(got.every((c) => new Set(got.filter((x) => x.zoneKey === c.zoneKey).map((x) => x.label)).size <= 8)).toBe(true);
     expect(got.some((c) => c.label === "traffic light")).toBe(false);
     expect(got.some((c) => c.observedMinutes > c.daysObserved * 60)).toBe(true); // the 120-minute fall-back hour

@@ -70,7 +70,7 @@ import { deliverNotification, recordNotification } from "./notifications.service
 import { webPushGate } from "./off-lan-gate.service.js";
 import { auditSecurityInTx, auditSecuritySystem, chainSafeText, stripUnsafeDisplayChars } from "./security-audit.js";
 import { summaryName } from "./security-mode.service.js";
-import { parseLinkRef } from "./security-zones.service.js";
+import { isLockLinkRef, parseLinkRef } from "./security-zones.service.js";
 import { alertCopy, type AlertEvidence } from "../lib/security-alert-copy.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { isValidIanaZone } from "../lib/zoned-time.js";
@@ -529,12 +529,21 @@ export async function redeliverStuckNotices(prisma: PrismaClient, now: Date, opt
 
 // ── the alerts health row (§6.11) ─────────────────────────────────────────
 
-/** Hours set AND at least one active Inside / Staff only area with an active link — what after-hours alerts need. */
+/**
+ * Hours set AND at least one active Inside / Staff only area with an active
+ * CAMERA link (whole camera or part of its view) — what after-hours alerts
+ * need. A door-lock link (WARP-2977 P2b-2) does not count: lock rows feed no
+ * rule (D21), so an area only a lock watches can never raise one.
+ */
 export async function alertsReady(prisma: Pick<PrismaClient, "securitySiteHours" | "securityZone">): Promise<boolean> {
   const hours = await prisma.securitySiteHours.findUnique({ where: { id: SINGLETON }, select: { state: true } });
   if (hours?.state !== "set") return false;
   const areas = await prisma.securityZone.count({
-    where: { state: "active", kind: { in: ["interior", "restricted"] }, links: { some: { state: "active" } } },
+    where: {
+      state: "active",
+      kind: { in: ["interior", "restricted"] },
+      links: { some: { state: "active", sourceKind: { in: ["camera", "camera_zone"] } } },
+    },
   });
   return areas > 0;
 }
@@ -572,7 +581,8 @@ async function uncoveredAlertCameras(prisma: PrismaClient, receivers: readonly R
   const cameras = new Set<string>();
   for (const l of links) {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-    if (parsed) cameras.add(parsed.camera);
+    // A door lock (WARP-2977 P2b-2) is no camera: lock rows feed no rule (D21).
+    if (parsed && !isLockLinkRef(parsed)) cameras.add(parsed.camera);
   }
   if (cameras.size === 0) return [];
   const covered = new Set<string>();
@@ -586,7 +596,7 @@ async function uncoveredAlertCameras(prisma: PrismaClient, receivers: readonly R
 
 /**
  * The `alerts` row — owner/admin only (it names who is told):
- *   · not_configured — no opening hours, or no Inside / Staff only area with a link;
+ *   · not_configured — no opening hours, or no Inside / Staff only area with a camera link;
  *   · down — an alert failed in the last day; or nobody set to be told is
  *     eligible; or an Inside / Staff only camera none of them can see (the
  *     owner fallback is what reaches anyone about it);

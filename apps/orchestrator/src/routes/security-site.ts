@@ -27,6 +27,18 @@
  * changed — every 5xx here means nothing changed; an hours write that
  * committed but cannot be read back answers 200 `{hours: null, mode: null}`.
  * User text is checked with `chainSafeText` BEFORE the transaction.
+ *
+ * WARP-2977 P2b-2 — a Close up or Away answer carries, for someone who may
+ * read locks (DS-019; for anyone else every field is absent):
+ *   · `locksChecked: true` + `unlockedLocks`: the names of the connected door
+ *     locks last heard open, + `uncheckedLocks`: the ones Droplet can't vouch
+ *     for (not reporting, never heard, or unknown). It never says "all
+ *     locked" — a lock last heard locked is simply not named;
+ *   · `locksChecked: false` and no names, when the adapter is not running,
+ *     has not checked yet, or can't reach the smart-home service: every
+ *     reading may be stale (review F4).
+ * Read from the adapter's memory AFTER the commit, so it can never turn a
+ * committed change into an error.
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -34,7 +46,8 @@ import { z } from "zod";
 import { requireRole } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
-import type { SecurityRouteDeps } from "../services/security-access.js";
+import { mayReadLocksFor, type SecurityRouteDeps } from "../services/security-access.js";
+import { securityLockAdapter, stillUnlockedLocks, uncheckedLocks } from "../services/security-lock-adapter.js";
 import { chainSafeText, hasUnsafeDisplayChars, isSecurityAuditUnavailable } from "../services/security-audit.js";
 import { businessViewForRole } from "../services/business-profile.service.js";
 import { ActivityChainPreconditionError } from "../services/activity.service.js";
@@ -263,6 +276,38 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
     }
   });
 
+  /**
+   * WARP-2977 P2b-2 — what a Close up / Away answer says about the door locks.
+   * In-memory (the last sweep's locks and the readings last heard), run after
+   * the commit, so a failure here is never a 5xx.
+   *
+   * Review F4: the names are only as good as the adapter's word. With no
+   * adapter, or readings that are not current (not running, nothing checked
+   * yet, the smart-home service unreachable), every reading may be stale:
+   * naming a lock "still unlocked" could be false, and an empty list would
+   * read as "none open". The answer is then `locksChecked: false` with no
+   * names — "nothing is reporting" never looks like "nothing is open".
+   *
+   * Only those (rjouffret, review of 4fa950c8): one lock that isn't reporting,
+   * or a change that couldn't be saved, also puts the header row down, but the
+   * other locks' readings still stand. The answer then names the connected
+   * locks last heard open AND the ones it can't vouch for (`uncheckedLocks`),
+   * rather than hiding the Back door behind a dead battery on the Side gate.
+   */
+  const doorLocksNow = ():
+    | { unlockedLocks: string[]; uncheckedLocks: string[]; locksChecked: true }
+    | { locksChecked: false } => {
+    try {
+      const reader = (deps.locks ?? securityLockAdapter)();
+      if (!reader || reader.readingsState() !== "current") return { locksChecked: false };
+      const known = reader.knownLocks();
+      return { unlockedLocks: stillUnlockedLocks(known), uncheckedLocks: uncheckedLocks(known), locksChecked: true };
+    } catch (err) {
+      logger.warn({ err }, "site mode changed; the door locks could not be read for the answer");
+      return { locksChecked: false };
+    }
+  };
+
   // 7 (act) — Close up / Open up / Away / Back to opening hours.
   router.post("/security/mode", ...actGate, async (req: Request, res: Response) => {
     const parsed = modeActionSchema.safeParse(req.body);
@@ -270,13 +315,21 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
       fail(res, 400, "VALIDATION_ERROR", "That isn't a mode change Droplet understands.", parsed.error.issues);
       return;
     }
+    const namesLocks = parsed.data.action === "close" || parsed.data.action === "away";
     try {
+      // BEFORE the change (DS-019): a resolver failure is a 503 with nothing
+      // changed. The act gate already resolved this request, so it is the memo.
+      const mayReadLocks = namesLocks && (await mayReadLocksFor(req, deps.resolve));
       const result = await actOnMode(prisma, requester(req), parsed.data, clock());
       if (result.status === "conflict") {
         fail(res, 409, "MODE_CONFLICT", "The mode was changed by someone else at the same moment. Try again.");
         return;
       }
-      res.json({ mode: result.mode, changed: result.changed });
+      res.json({
+        mode: result.mode,
+        changed: result.changed,
+        ...(mayReadLocks ? doorLocksNow() : {}),
+      });
     } catch (err) {
       writeFailed(res, err, "MODE_UNAVAILABLE", "site mode change");
     }

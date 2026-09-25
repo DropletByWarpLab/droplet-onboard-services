@@ -42,6 +42,7 @@ import type {
   SecurityZonePatchBody,
   SecurityZoneCreateBody,
   SecurityZoneLinksBody,
+  SecurityZoneLinkView,
   SecurityZoneView,
 } from "@/lib/types";
 import { AreaDialog, KIND_LABEL } from "./AreaDialog";
@@ -75,6 +76,10 @@ export const COPY = {
   retry: "Retry",
   // A lost race on an area: the panel has already re-read it, so the form or card shows their version.
   conflict: "Someone else changed this area while you were editing. What's shown now is their version, so make your change again.",
+  // WARP-2977 P2b-2 — door locks (only people with Devices view see lock links).
+  missingLock: "{lock} isn't paired any more",
+  unknownLocks: "Couldn't check the door locks",
+  lockReuseHint: "A door lock that's paired again shows up as a new lock, so it needs linking to this area again.",
 } as const;
 
 type Editor = { mode: "create" } | { mode: "edit"; id: string } | null;
@@ -95,22 +100,38 @@ export function coveredByLine(zone: Pick<SecurityZoneView, "links">): string {
 /**
  * What to flag on one area's card, from GET /api/security/sources:
  * one warn line per distinct `missing` source (a gone camera reads once, however
- * many of its parts covered the area), and at most one "couldn't check" line.
- * `sources === "failed"` (the request itself failed) means every link is
- * unknown; `null` (still loading) flags nothing yet.
+ * many of its parts covered the area), and at most one "couldn't check" line
+ * per kind. `sources === "failed"` (the request itself failed) means every
+ * link is unknown; `null` (still loading) flags nothing yet.
+ *
+ * WARP-2977 P2b-2 — door locks are their own half: a lock that isn't paired
+ * any more is `missingLocks` (a re-paired lock comes back as a NEW lock, so
+ * the camera's "comes back under the same name" hint would be wrong), and a
+ * smart-home service that couldn't answer is `unknownLocks`.
  */
 export function linkProblems(
   zone: Pick<SecurityZoneView, "links">,
   sources: SecuritySourcesView | "failed" | null,
-): { missing: string[]; unknown: boolean } {
-  if (sources === null || zone.links.length === 0) return { missing: [], unknown: false };
-  if (sources === "failed") return { missing: [], unknown: true };
+): { missing: string[]; unknown: boolean; missingLocks: string[]; unknownLocks: boolean } {
+  const none = { missing: [], unknown: false, missingLocks: [], unknownLocks: false };
+  if (sources === null || zone.links.length === 0) return none;
+  const isLock = (l: Pick<SecurityZoneLinkView, "sourceKind">) => l.sourceKind === "lock";
+  if (sources === "failed") {
+    return { ...none, unknown: zone.links.some((l) => !isLock(l)), unknownLocks: zone.links.some(isLock) };
+  }
   const status = new Map<string, SecurityLinkStatus>(sources.linkStatus.map((s) => [s.linkId, s.status]));
   const cameras = new Set(sources.cameras.map((c) => c.name));
   const missing = new Set<string>();
+  const missingLocks = new Set<string>();
   let unknown = false;
+  let unknownLocks = false;
   for (const link of zone.links) {
     const s = status.get(link.id);
+    if (isLock(link)) {
+      if (s === "unknown") unknownLocks = true;
+      if (s === "missing") missingLocks.add(fillCopy(COPY.missingLock, { lock: link.label }));
+      continue;
+    }
     if (s === "unknown") unknown = true;
     if (s !== "missing") continue;
     // A part whose whole camera is gone reads as the camera being gone.
@@ -120,7 +141,7 @@ export function linkProblems(
       missing.add(fillCopy(COPY.missingCamera, { camera: link.label }));
     }
   }
-  return { missing: [...missing], unknown };
+  return { missing: [...missing], unknown, missingLocks: [...missingLocks], unknownLocks };
 }
 
 export function AreasPanel() {
@@ -329,9 +350,12 @@ export function AreasPanel() {
               >
                 {coveredByLine(zone)}
               </p>
-              {(problems.missing.length > 0 || problems.unknown) && (
+              {(problems.missing.length > 0 ||
+                problems.unknown ||
+                problems.missingLocks.length > 0 ||
+                problems.unknownLocks) && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
-                  {problems.missing.map((m) => (
+                  {[...problems.missing, ...problems.missingLocks].map((m) => (
                     <span key={m} className="badge warn" data-link-status="missing" style={WRAPPING_BADGE}>
                       {m}
                     </span>
@@ -341,10 +365,18 @@ export function AreasPanel() {
                       {COPY.unknown}
                     </span>
                   )}
+                  {problems.unknownLocks && (
+                    <span className="badge muted" data-link-status="unknown" style={WRAPPING_BADGE}>
+                      {COPY.unknownLocks}
+                    </span>
+                  )}
                 </div>
               )}
               {problems.missing.length > 0 && (
                 <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{COPY.reuseHint}</p>
+              )}
+              {problems.missingLocks.length > 0 && (
+                <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{COPY.lockReuseHint}</p>
               )}
               {canManage && (
                 // Every card repeats these words; the area's name describes each

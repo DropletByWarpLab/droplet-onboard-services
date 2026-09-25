@@ -16,10 +16,21 @@ import { initCameraService, securityOngoingSource, shutdownCameraService } from 
 import { attachWsBridge } from "./services/ws-bridge.service.js";
 import { attachClientDispatchBridge } from "./services/client-dispatch.service.js";
 import {
+  getCommissionedDevices,
   initMatterService,
+  isMatterInitialized,
   shutdownMatterService,
   setPrismaForMatter,
+  subscribeConnectionChanges,
+  subscribeStateChanges,
 } from "./services/matter.service.js";
+import { enrichGrouped } from "./services/rooms.service.js";
+import {
+  createPrismaLockStore,
+  matterLockDeviceSource,
+  registerSecurityLockJobs,
+  startSecurityLockAdapter,
+} from "./services/security-lock-adapter.js";
 import {
   initDeviceRegistration,
   shutdownDeviceRegistration,
@@ -404,6 +415,25 @@ async function main() {
   } catch (err) {
     logger.warn("Matter controller unavailable: %s", (err as Error).message);
   }
+
+  // WARP-2977 P2b-2 (ADR-059 §3.2) — door locks into the Security event
+  // store: DoorLock.LockState changes from the Matter bridge's live stream as
+  // lock_state rows (transitions only), plus a 60 s sweep (registered with
+  // the other Security jobs below) that finds what the stream missed.
+  // Outside the try above on purpose: the bridge self-heals a failed init,
+  // and capture must be listening when it does. Unconditional, like the rest
+  // of the Security capture: the module toggles decide the surface (DS-015).
+  const securityLocks = startSecurityLockAdapter({
+    store: createPrismaLockStore(prisma),
+    source: matterLockDeviceSource({
+      getCommissionedDevices: async () => enrichGrouped(prisma, await getCommissionedDevices()),
+      isMatterInitialized,
+    }),
+    subscribeStateChanges,
+    // A change heard while its lock is not Connected is recorded as found
+    // (polled), not live: a reconnecting lock replays what changed while away.
+    subscribeConnectionChanges,
+  });
 
   // Connect OpenWrt router (non-fatal if unavailable)
   try {
@@ -1102,6 +1132,10 @@ async function main() {
   // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
   // the ingest itself: the module toggle decides the surface, not the capture.
   registerSecurityJobs(cronRuntime, prisma);
+  // WARP-2977 P2b-2 — the door-lock sweep: every 60 s, on its own advisory
+  // lock, it reads the paired locks and writes a `polled` row for any change
+  // the live stream missed (a sidecar restart, a dropped SSE frame).
+  registerSecurityLockJobs(cronRuntime, securityLocks);
   // WARP-2977 P2b (ADR-059 §3.6) — the site-mode ticker: every 60 s it
   // reconciles SecurityModeState with the opening hours (level-triggered, on
   // its own advisory lock). Unconditional, like the jobs above.
@@ -2070,6 +2104,10 @@ async function main() {
     // production, but explicit stop keeps shutdown ordering predictable).
     stopScreenQRPoller();
     shutdownDeviceRegistration();
+    // WARP-2977 P2b-2 — drop the lock adapter's subscriptions to the Matter
+    // bridge before the bridge goes: no lock frame starts a write during
+    // teardown (the sweep already stopped with the cron runtime). Never throws.
+    securityLocks.stop();
     await shutdownMatterService();
     await shutdownCameraService();
     // Stop the MCP stdio child first so it doesn't keep its Prisma

@@ -50,6 +50,7 @@ import {
   _resetBaselineHealthForTests,
   _resetBaselineJobForTests,
   baselineHealthState,
+  liveObservation,
   patternsHealthRow,
   registerSecurityBaselineJobs,
   securityPatternsHealth,
@@ -58,6 +59,7 @@ import {
   type PatternsHealthDb,
 } from "./security-baselines.service.js";
 import type { CoverageObservation } from "./security-coverage.js";
+import { _resetSecurityIngestHealthForTests, writeSecurityEvent } from "./security-events.service.js";
 
 const TZ = "America/New_York";
 const PID = "0b9f3c3e-7d0a-4b5e-9d64-1f2a3b4c5d6e";
@@ -813,7 +815,7 @@ describe("securityPatternsHealth — reads, scopes, never throws", () => {
       securityCoverageSpan: { findMany: vi.fn() },
     } as never;
     registerSecurityBaselineJobs({ scheduleInterval: vi.fn() }, {} as never);
-    const row = await securityPatternsHealth(prisma, { visibleCameras: "all", mayReadThreats: true }, new Date());
+    const row = await securityPatternsHealth(prisma, { visibleCameras: "all", mayReadThreats: true, mayReadLocks: true }, new Date());
     expect(row).toMatchObject({ id: "patterns", state: "down" });
   });
 
@@ -821,5 +823,26 @@ describe("securityPatternsHealth — reads, scopes, never throws", () => {
     registerSecurityBaselineJobs({ scheduleInterval: vi.fn() }, {} as never);
     const row = await securityPatternsHealth({} as never, null, new Date());
     expect(row).toMatchObject({ id: "patterns", state: "down", detail: "Couldn't read what normal looks like" });
+  });
+});
+
+describe("liveObservation — coverage reads Frigate's write health, never another source's (WARP-2977 P2b-2)", () => {
+  const failing = { securityEvent: { createMany: vi.fn().mockRejectedValue(new Error("db down")) } } as never;
+  const saving = { securityEvent: { createMany: vi.fn().mockResolvedValue({ count: 1 }) } } as never;
+  const draft = (source: "frigate" | "matter_lock", n: number) => ({ source, dedupeKey: `${source}:${n}` }) as never;
+  beforeEach(() => _resetSecurityIngestHealthForTests());
+
+  it("a failing lock save never fails coverage; a lock save never clears a failing detection save", async () => {
+    await writeSecurityEvent(failing, draft("matter_lock", 1));
+    expect(liveObservation().ingest.lastWriteError).toBeNull();
+
+    await writeSecurityEvent(failing, draft("frigate", 2));
+    expect(liveObservation().ingest.lastWriteError).not.toBeNull();
+    await writeSecurityEvent(saving, draft("matter_lock", 3));
+    expect(liveObservation().ingest.lastRecordedAt).toBeNull();
+
+    await writeSecurityEvent(saving, draft("frigate", 4));
+    const { lastRecordedAt, lastWriteError } = liveObservation().ingest;
+    expect(lastRecordedAt!.getTime()).toBeGreaterThanOrEqual(lastWriteError!.at.getTime());
   });
 });

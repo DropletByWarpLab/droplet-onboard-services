@@ -49,7 +49,7 @@ beforeEach(() => {
   api.getSecurityHours.mockResolvedValue(HOURS(3));
   api.getSecurityMode.mockResolvedValue(MODE("open", 1));
   api.getSecurityZones.mockResolvedValue({ zones: [] });
-  api.getSecuritySources.mockResolvedValue({ frigate: "ok", cameras: [], linkStatus: [] });
+  api.getSecuritySources.mockResolvedValue({ frigate: "ok", cameras: [], linkStatus: [], locks: { state: "hidden", items: [] } });
 });
 
 function mountHours() {
@@ -145,7 +145,7 @@ describe("useSecurityZones", () => {
     await waitFor(() => expect(result.current.sources.sources).not.toBeNull());
     writer.mockResolvedValue({ zone: ZONE, changed: true });
     api.getSecurityZones.mockResolvedValue({ zones: [ZONE] });
-    api.getSecuritySources.mockResolvedValue({ frigate: "ok", cameras: [], linkStatus: [{ linkId: "l1", status: "present" }] });
+    api.getSecuritySources.mockResolvedValue({ frigate: "ok", cameras: [], linkStatus: [{ linkId: "l1", status: "present" }], locks: { state: "hidden", items: [] } });
     await act(async () => {
       await write(result.current.zones);
     });

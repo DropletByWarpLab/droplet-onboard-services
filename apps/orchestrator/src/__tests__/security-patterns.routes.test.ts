@@ -80,8 +80,11 @@ function app(role: Role | null = "owner") {
     if (role !== null) (req as Request & { user?: unknown }).user = { id: `u-${role}`, username: role, displayName: role, role };
     next();
   });
+  // `resolve`: the viewer scope asks the §9 resolver whether door locks are
+  // readable (WARP-2977 P2b-2, DS-019). Mounted alone, nothing has resolved the
+  // request, so no local row (null) — the role decides, as in security.routes.test.ts.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  server.use("/api", createSecurityPatternsRouter(patternsPrisma(w) as any, { now: () => NOW }));
+  server.use("/api", createSecurityPatternsRouter(patternsPrisma(w) as any, { now: () => NOW, resolve: async () => null }));
   return server;
 }
 

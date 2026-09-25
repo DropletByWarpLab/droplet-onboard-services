@@ -75,6 +75,14 @@ const CAMS = [`${TAG}_c1`, `${TAG}_c2`, `${TAG}_c3`];
 /** A camera no area links — its rows must match nothing. */
 const UNLINKED = `${TAG}_c9`;
 const PARTS = ["porch", "drive", "yard", "till"];
+/**
+ * WARP-2977 P2b-2 — door-lock endpoints. A lock row's sourceRef is
+ * `matter:<digits>/<digits>` by CHECK, so it cannot carry the tag; the rows
+ * are still tagged by their dedupeKey (`warp2977b:prop:<i>`), which is what
+ * the cleanup keys on. The last ref is linked by no area.
+ */
+const LOCKS = ["matter:2977000901/1", "matter:2977000902/1", "matter:2977000902/2"];
+const UNLINKED_LOCK = "matter:2977000909/1";
 const T0 = new Date("2026-09-23T02:00:00Z");
 
 /** Deterministic PRNG (mulberry32) — a failure reproduces from its seed. */
@@ -150,13 +158,18 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
   }
 
   describe("zoneEventWhere and zonesForEvent are twins", () => {
-    type Gen = { source: string; kind: string; camera: string | null; cameraZones: string[] };
+    type Gen = { source: string; kind: string; camera: string | null; cameraZones: string[]; sourceRef?: string };
     const generated: Gen[] = [];
+    // The generated rows, by key: a lock row's sourceRef is its endpoint (not
+    // `${TAG}/prop-…`) and a still-in-view row's key is `frigate-ongoing:…`.
+    const PROP_ROWS = {
+      OR: [{ dedupeKey: { startsWith: `${TAG}:prop:` } }, { dedupeKey: { startsWith: `frigate-ongoing:${TAG}-prop-` } }],
+    };
 
     beforeAll(async () => {
       const r = rng(2977);
       for (let i = 0; i < 200; i++) {
-        const shape = pick(r, ["det", "det", "det", "low", "ongoing", "status", "status", "site", "threat", "mode"] as const);
+        const shape = pick(r, ["det", "det", "det", "low", "ongoing", "status", "status", "site", "threat", "mode", "lock", "lock"] as const);
         let g: Gen;
         if (shape === "det" || shape === "low" || shape === "ongoing") {
           const zones = PARTS.filter(() => r() < 0.35);
@@ -168,6 +181,9 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
           g = { source: "frigate_status", kind: pick(r, ["source_offline", "source_online"]), camera: null, cameraZones: [] };
         } else if (shape === "threat") {
           g = { source: "activity_mirror", kind: "threat", camera: null, cameraZones: [] };
+        } else if (shape === "lock") {
+          // WARP-2977 P2b-2: a lock_state row, keyed to its endpoint by sourceRef.
+          g = { source: "matter_lock", kind: "lock_state", camera: null, cameraZones: [], sourceRef: pick(r, [...LOCKS, UNLINKED_LOCK]) };
         } else {
           g = { source: "site_mode", kind: "mode_changed", camera: null, cameraZones: [] };
         }
@@ -179,22 +195,24 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
           kind: g.kind as never,
           severity: "info" as const,
           camera: g.camera,
-          sourceRef: `${TAG}/prop-${i}`,
+          sourceRef: g.sourceRef ?? `${TAG}/prop-${i}`,
           // A still-in-view row's key is in its own namespace (SecurityEvent_ongoing_shape).
           dedupeKey: g.kind === "detection_ongoing" ? `frigate-ongoing:${TAG}-prop-${i}` : `${TAG}:prop:${i}`,
-          labels: g.kind === "mode_changed" ? ["closed", "manual", "open"] : ["person"],
+          labels: g.kind === "mode_changed" ? ["closed", "manual", "open"] : g.kind === "lock_state" ? ["unlocked"] : ["person"],
           cameraZones: g.cameraZones,
           score: null,
           startedAt: new Date(T0.getTime() - i * 1000),
           summary: `${TAG} generated`,
         })),
       });
+      // Not vacuous: the generator really produced lock rows, linked and unlinked.
+      expect(generated.filter((g) => g.kind === "lock_state").length).toBeGreaterThan(10);
     });
 
     async function assertTwins(links: ActiveZoneLink[], zoneIds: string[], label: string): Promise<number> {
       const rows = await prisma.securityEvent.findMany({
-        where: { sourceRef: { startsWith: `${TAG}/prop-` } },
-        select: { id: true, source: true, kind: true, camera: true, cameraZones: true },
+        where: PROP_ROWS,
+        select: { id: true, source: true, kind: true, camera: true, cameraZones: true, sourceRef: true },
       });
       const index = buildZoneIndex(links);
       let matched = 0;
@@ -208,7 +226,7 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
         }
         const inSql = (
           await prisma.securityEvent.findMany({
-            where: { AND: [{ sourceRef: { startsWith: `${TAG}/prop-` } }, clause] },
+            where: { AND: [PROP_ROWS, clause] },
             select: { id: true },
           })
         )
@@ -225,27 +243,39 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
         { sourceKind: "camera", sourceRef: CAMS[0]! },
         { sourceKind: "camera_zone", sourceRef: `${CAMS[1]}/porch` },
         { sourceKind: "camera_zone", sourceRef: `${CAMS[2]}/till`, state: "removed" },
+        { sourceKind: "lock", sourceRef: LOCKS[0]! },
       ]);
       const b = await rawZone(`${TAG} twin b`, [
         { sourceKind: "camera_zone", sourceRef: `${CAMS[1]}/drive` },
         { sourceKind: "camera_zone", sourceRef: `${CAMS[1]}/yard` },
         { sourceKind: "camera_zone", sourceRef: `${CAMS[2]}/porch` },
+        { sourceKind: "lock", sourceRef: LOCKS[1]! },
+        { sourceKind: "lock", sourceRef: LOCKS[2]!, state: "removed" },
       ]);
-      const archived = await rawZone(`${TAG} twin archived`, [{ sourceKind: "camera", sourceRef: CAMS[2]! }], true);
+      const archived = await rawZone(
+        `${TAG} twin archived`,
+        [
+          { sourceKind: "camera", sourceRef: CAMS[2]! },
+          { sourceKind: "lock", sourceRef: LOCKS[2]! },
+        ],
+        true,
+      );
       const mine = (await loadActiveLinks(prisma)).filter((l) => [a.id, b.id, archived.id].includes(l.zoneId));
       expect(mine.map((l) => [l.zoneId === a.id ? "a" : l.zoneId === b.id ? "b" : "archived", l.sourceRef]).sort()).toEqual(
         [
           ["a", CAMS[0]],
           ["a", `${CAMS[1]}/porch`],
+          ["a", LOCKS[0]],
           ["b", `${CAMS[1]}/drive`],
           ["b", `${CAMS[1]}/yard`],
           ["b", `${CAMS[2]}/porch`],
+          ["b", LOCKS[1]],
         ].sort(),
       );
       expect(await assertTwins(mine, [a.id, b.id], "stored")).toBeGreaterThan(0);
     });
 
-    it("over 25 rounds of random link sets (5 areas each, whole cameras and parts mixed)", async () => {
+    it("over 25 rounds of random link sets (5 areas each, whole cameras, parts and door locks mixed)", async () => {
       const r = rng(59);
       let total = 0;
       for (let round = 0; round < 25; round++) {
@@ -256,13 +286,16 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
           ids.push(zoneId);
           const n = Math.floor(r() * 5); // 0–4 links; 0 exercises "none"
           for (let k = 0; k < n; k++) {
+            const roll = r();
+            const base = { linkId: `${zoneId}-${k}`, zoneId, zoneName: zoneId, zoneKind: "interior" as const };
+            if (roll < 0.2) {
+              links.push({ ...base, sourceKind: "lock", sourceRef: pick(r, LOCKS) });
+              continue;
+            }
             const camera = pick(r, CAMS);
-            const whole = r() < 0.3;
+            const whole = roll < 0.45;
             links.push({
-              linkId: `${zoneId}-${k}`,
-              zoneId,
-              zoneName: zoneId,
-              zoneKind: "interior",
+              ...base,
               sourceKind: whole ? "camera" : "camera_zone",
               sourceRef: whole ? camera : `${camera}/${pick(r, PARTS)}`,
             });
@@ -394,7 +427,7 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
         const outcomes = await Promise.allSettled(
           sets.map((links) =>
             replaceZoneLinks(prisma, ctx, zone.id, { links, expectedVersion: 0 }, {
-              scope: { visibleCameras: "all" },
+              scope: { visibleCameras: "all", mayReadLocks: true },
               cameraLabels: new Map(),
               frigateConfig,
             }),
@@ -416,7 +449,7 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
 
     it("remove then re-add: the row is reused (removed → active), never duplicated", async () => {
       const zone = await createZone(prisma, ctx, { name: `${TAG} Reuse`, kind: "entry" });
-      const deps = { scope: { visibleCameras: "all" as const }, cameraLabels: new Map([[CAMS[0]!, "Front camera"]]), frigateConfig };
+      const deps = { scope: { visibleCameras: "all" as const, mayReadLocks: true }, cameraLabels: new Map([[CAMS[0]!, "Front camera"]]), frigateConfig };
       const porch: DesiredZoneLink = { sourceKind: "camera_zone", sourceRef: `${CAMS[0]}/porch` };
       await replaceZoneLinks(prisma, ctx, zone.id, { links: [porch], expectedVersion: 0 }, deps);
       await replaceZoneLinks(prisma, ctx, zone.id, { links: [], expectedVersion: 1 }, deps);
@@ -441,7 +474,7 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
         expect(isSecurityAuditUnavailable(add)).toBe(true);
         const put = await refusal(
           replaceZoneLinks(prisma, ctx, zone.id, { links: [{ sourceKind: "camera", sourceRef: CAMS[0]! }], expectedVersion: 0 }, {
-            scope: { visibleCameras: "all" },
+            scope: { visibleCameras: "all", mayReadLocks: true },
             cameraLabels: new Map([[CAMS[0]!, "Front camera"]]),
             frigateConfig: async () => ({ cameras: {} }),
           }),

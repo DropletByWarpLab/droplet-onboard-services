@@ -30,11 +30,14 @@
  * P5-A's own `visibleKeyCameras`, the rule for that key's numbers (review
  * item 9): the row names a place, a time and a person's reason. An archived
  * or unlinked area's rows are therefore owner/admin only.
+ * DS-019 (WARP-2977 P2b-2) first, for everyone: without Devices view an area
+ * made only of door locks is hidden, owner/admin included and archived or
+ * not (removing an area keeps its links), as on the Areas page.
  */
 import type { PrismaClient, SecuritySuppressionDays } from "@prisma/client";
 import { auditSecurityInTx, auditSecuritySystem, stripUnsafeDisplayChars } from "./security-audit.js";
 import { summaryName } from "./security-mode.service.js";
-import { loadActiveLinks, loadCameraLabels } from "./security-zones.service.js";
+import { loadActiveLinks, loadCameraLabels, visibleLinks, zoneVisibleTo } from "./security-zones.service.js";
 import { visibleKeyCameras } from "./security-patterns-read.js";
 import type { SecurityViewerScope } from "./security-access.js";
 import type { PatternCode } from "../lib/security-baseline-math.js";
@@ -151,7 +154,7 @@ function viewOf(row: Row, cameraLabels: ReadonlyMap<string, string>, quieted: nu
  */
 export async function listSuppressions(
   prisma: PrismaClient,
-  viewer: { scope: Pick<SecurityViewerScope, "visibleCameras">; ownerOrAdmin: boolean },
+  viewer: { scope: Pick<SecurityViewerScope, "visibleCameras" | "mayReadLocks">; ownerOrAdmin: boolean },
   now: Date,
 ): Promise<SuppressionView[]> {
   const rows = (await prisma.securitySuppression.findMany({
@@ -161,8 +164,19 @@ export async function listSuppressions(
   if (rows.length === 0) return [];
   const { scope } = viewer;
   let visible = rows;
+  const areaIds = [...new Set(rows.filter((r) => r.targetKind === "area").map((r) => r.zoneId!))];
+  if (!scope.mayReadLocks && areaIds.length > 0) {
+    const links = await prisma.securityZoneLink.findMany({
+      where: { zoneId: { in: areaIds }, state: "active" },
+      select: { zoneId: true, sourceKind: true, sourceRef: true },
+    });
+    visible = visible.filter((r) => {
+      if (r.targetKind !== "area") return true;
+      const own = links.filter((l) => l.zoneId === r.zoneId);
+      return zoneVisibleTo({ id: r.zoneId! }, own, visibleLinks(own, scope));
+    });
+  }
   if (scope.visibleCameras !== "all") {
-    const areaIds = [...new Set(rows.filter((r) => r.targetKind === "area").map((r) => r.zoneId!))];
     const [links, ready] = await Promise.all([
       loadActiveLinks(prisma),
       prisma.securityBaselineBuild.findFirst({ where: { state: "ready" }, select: { id: true } }),
@@ -176,7 +190,7 @@ export async function listSuppressions(
           })
         : [];
     const cellCameras = new Map(cells.map((c) => [c.zoneId, c.cameras]));
-    visible = rows.filter((r) =>
+    visible = visible.filter((r) =>
       r.targetKind === "area"
         ? visibleKeyCameras({ kind: "area", zoneId: r.zoneId! }, links, cellCameras.get(r.zoneId) ?? null, scope) !== null
         : visibleKeyCameras({ kind: "camera", camera: r.camera! }, links, null, scope) !== null,

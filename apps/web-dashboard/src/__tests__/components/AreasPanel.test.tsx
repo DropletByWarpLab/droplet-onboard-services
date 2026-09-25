@@ -122,6 +122,8 @@ const SOURCES: SecuritySourcesView = {
     { linkId: "l4", status: "missing" },
     { linkId: "l5", status: "missing" },
   ],
+  // WARP-2977 P2b-2: a viewer without Devices view — no door locks anywhere.
+  locks: { state: "hidden", items: [] },
 };
 
 function typedError(code: string, status: number): Error {
@@ -288,9 +290,64 @@ describe("AreasPanel — what each card says", () => {
     expect(coveredByLine(FRONT)).toBe(
       "Covered by: Front camera (whole view), Back camera (the 'till' part of the view)",
     );
-    expect(linkProblems(STOCK, null)).toEqual({ missing: [], unknown: false });
-    expect(linkProblems(BARE, "failed")).toEqual({ missing: [], unknown: false });
-    expect(linkProblems(STOCK, "failed")).toEqual({ missing: [], unknown: true });
+    // WARP-2977 P2b-2: the lock halves ride along (intended change to these pins).
+    const none = { missing: [], unknown: false, missingLocks: [], unknownLocks: false };
+    expect(linkProblems(STOCK, null)).toEqual(none);
+    expect(linkProblems(BARE, "failed")).toEqual(none);
+    expect(linkProblems(STOCK, "failed")).toEqual({ ...none, unknown: true });
+  });
+});
+
+describe("AreasPanel — door locks (WARP-2977 P2b-2)", () => {
+  const DOOR: SecurityZoneView = {
+    id: "z-door",
+    name: "Back door",
+    kind: "entry",
+    state: "active",
+    version: 2,
+    links: [link("k1", "lock", "matter:4660/1", "Back door lock"), link("k2", "lock", "matter:7/1", "Old gate lock")],
+  };
+
+  it("names a linked lock as a door lock on the card", () => {
+    expect(coveredByLine({ links: [FRONT.links[0]!, DOOR.links[0]!] })).toBe(
+      "Covered by: Front camera (whole view), Back door lock (door lock)",
+    );
+  });
+
+  it("a lock no longer paired: its own words and its own hint — never the camera's 'comes back under the same name'", () => {
+    h.zones = [DOOR];
+    h.sources = {
+      ...SOURCES,
+      linkStatus: [
+        { linkId: "k1", status: "present" },
+        { linkId: "k2", status: "missing" },
+      ],
+      locks: { state: "ok", items: [] },
+    };
+    render(<AreasPanel />);
+    const door = card("Back door");
+    expect(door.getByText("Old gate lock isn't paired any more")).toHaveClass("badge", "warn");
+    expect(door.getByText(COPY.lockReuseHint)).toBeInTheDocument();
+    expect(door.queryByText(COPY.reuseHint)).toBeNull();
+    expect(door.queryByText("Back door lock isn't paired any more")).toBeNull();
+  });
+
+  it("the locks couldn't be checked: 'Couldn't check the door locks', not the camera system", () => {
+    h.zones = [DOOR];
+    h.sources = {
+      ...SOURCES,
+      linkStatus: DOOR.links.map((l) => ({ linkId: l.id, status: "unknown" as const })),
+      locks: { state: "unavailable", items: [] },
+    };
+    render(<AreasPanel />);
+    expect(card("Back door").getAllByText(COPY.unknownLocks)).toHaveLength(1);
+    expect(card("Back door").queryByText(COPY.unknown)).toBeNull();
+  });
+
+  it("linkProblems: a failed read flags each kind the card has — cameras, locks, or both", () => {
+    expect(linkProblems(DOOR, "failed")).toEqual({ missing: [], unknown: false, missingLocks: [], unknownLocks: true });
+    const both = { links: [...FRONT.links, DOOR.links[0]!] };
+    expect(linkProblems(both, "failed")).toMatchObject({ unknown: true, unknownLocks: true });
   });
 });
 
@@ -529,7 +586,8 @@ describe("AreasPanel — adding, changing, and what covers an area", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: LINKS_COPY.save }));
     await waitFor(() =>
       expect(h.toast).toHaveBeenCalledWith(
-        "One of those cameras or camera parts isn't set up any more, so nothing was changed. Refresh the list and try again.",
+        // WARP-2977 P2b-2: a link can be a door lock too (intended change to this pin).
+        "One of those cameras, camera parts or door locks isn't set up any more, so nothing was changed. Refresh the list and try again.",
         "error",
       ),
     );

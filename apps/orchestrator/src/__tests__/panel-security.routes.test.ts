@@ -456,8 +456,9 @@ describe("upToDate over the real /security header rows (T-O7)", () => {
     frigateSubscribeError: null,
     frigateSubscribedAt: NOW,
     lastFrigateMessageAt: NOW,
-    lastRecordedAt: NOW,
-    lastWriteError: null,
+    lastRecordedAt: new Map([["frigate", NOW]]),
+    lastWriteError: new Map(),
+    statusUnsaved: new Set(),
     jobsRegistered: true,
   };
   const header = (ingest: Partial<Ingest>, frigateConfigured = true) =>
@@ -479,7 +480,10 @@ describe("upToDate over the real /security header rows (T-O7)", () => {
 
   it("camera events: not subscribed or saves failing → false; quiet or no camera system → true", () => {
     expect(panelCountIsCurrent(rows({ cameraIngest: ingestRow({ frigateSubscribed: false }) }))).toBe(false);
-    const failing = ingestRow({ lastWriteError: { at: NOW, message: "boom" }, lastRecordedAt: new Date(NOW.getTime() - 60_000) });
+    const failing = ingestRow({
+      lastWriteError: new Map([["frigate", { at: NOW, message: "boom" }]]),
+      lastRecordedAt: new Map([["frigate", new Date(NOW.getTime() - 60_000)]]),
+    });
     expect(failing.state).toBe("down");
     expect(panelCountIsCurrent(rows({ cameraIngest: failing }))).toBe(false);
     const quiet = ingestRow({ lastFrigateMessageAt: new Date(NOW.getTime() - 7 * 3_600_000), frigateSubscribedAt: new Date(NOW.getTime() - 8 * 3_600_000) });
@@ -489,6 +493,17 @@ describe("upToDate over the real /security header rows (T-O7)", () => {
     expect(none.state).toBe("not_configured");
     expect(panelCountIsCurrent(rows({ cameraIngest: none }))).toBe(true);
     expect(panelCountIsCurrent(rows({ cameraIngest: ingestRow({}) }))).toBe(true);
+  });
+
+  it("WARP-2977: a door-lock save failing leaves camera events ok and the count current — a lock row never forms an incident (D21)", () => {
+    const lockFailing = ingestRow({
+      lastWriteError: new Map([["matter_lock", { at: NOW, message: "boom" }]]),
+      lastRecordedAt: new Map([["frigate", new Date(NOW.getTime() - 60_000)]]),
+    });
+    expect(lockFailing.state).toBe("ok");
+    expect(panelCountIsCurrent(rows({ cameraIngest: lockFailing }))).toBe(true);
+    // …and none of the three rows `upToDate` reads is the locks row.
+    expect(Object.values(panelHealthRows(NOW)).map((r) => r.id)).not.toContain("locks");
   });
 
   it("network and sign-in warnings: jobs never registered → false; registered, not run yet (quiet) → true", () => {
