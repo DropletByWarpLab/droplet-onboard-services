@@ -97,7 +97,16 @@ const STAGE: Record<string, string> = {
  * Every value that is meant to change, and to what. Each one is a decision,
  * listed so review sees it; a value missing from here that moves is a bug.
  */
-const INTENDED_DELTAS: Record<string, string> = {};
+const INTENDED_DELTAS: Record<string, string> = {
+  // The rail is a solid --surface tone against --bg (the Mac sidebar ships as
+  // surface), not glass.
+  "conv-rail background": "var(--surface)",
+  // The centred empty column may shrink instead of overflowing the header on
+  // a short window (flex-shrink 0 -> 1).
+  "empty-scroll flex": "0 1 auto",
+  // The head's workspace chip is a quiet `.chat-new` — no stroke.
+  "head-workspace border": "0",
+};
 
 /** What a property is when nothing authored sets it (after Tailwind's preflight). */
 function initialValue(prop: string): string {

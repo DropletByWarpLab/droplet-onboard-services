@@ -55,7 +55,7 @@ export function ThinkingMessage({
       <div className="msg-ava is-assistant" aria-hidden="true">
         <Brain size={15} />
       </div>
-      <div className="msg-col items-start">
+      <div className="msg-col is-assistant items-start">
         <div
           role="group"
           aria-label="How the assistant worked on this"

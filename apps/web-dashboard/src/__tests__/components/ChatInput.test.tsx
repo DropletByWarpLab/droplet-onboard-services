@@ -139,13 +139,95 @@ describe("ChatInput composer controls (WARP-855)", () => {
     expect(attach.className).toMatch(/(^|\s)chat-iconbtn(\s|$)/);
   });
 
-  it("Paperclip icon renders at the handoff's size 15", () => {
+  // WARP-3043 — the pill's leading `+` (the Mac composer and the Workshop's).
+  it("attach is the pill's Plus icon at 17", () => {
     render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
     const attach = screen.getByLabelText("Attach a file");
     const svg = attach.querySelector("svg");
     expect(svg).not.toBeNull();
-    expect(svg!.getAttribute("width")).toBe("15");
-    expect(svg!.getAttribute("height")).toBe("15");
+    expect(svg!.getAttribute("class")).toMatch(/lucide-plus\b/);
+    expect(svg!.getAttribute("width")).toBe("17");
+    expect(svg!.getAttribute("height")).toBe("17");
+  });
+});
+
+// ── WARP-3043: the pill composer (DropletAgent spec §5) ──
+
+describe("ChatInput pill (WARP-3043)", () => {
+  function withMic(run: () => void) {
+    vi.stubGlobal("AudioContext", class {});
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: { getUserMedia: vi.fn() },
+      configurable: true,
+    });
+    try {
+      run();
+    } finally {
+      vi.unstubAllGlobals();
+      // @ts-expect-error — cleanup of the test-injected property
+      delete navigator.mediaDevices;
+    }
+  }
+
+  it("one row in the Mac order: attach, field, model, mic, send", () => {
+    withMic(() => {
+      const { container } = render(
+        <ChatInput
+          onSend={vi.fn()}
+          onAttach={vi.fn()}
+          modelSelector={<span data-testid="model-slot">model</span>}
+        />,
+      );
+      const pill = container.querySelector(".chat-composer-inner")!;
+      const order = [
+        screen.getByLabelText("Attach a file"),
+        screen.getByRole("textbox"),
+        screen.getByTestId("model-slot"),
+        screen.getByRole("button", { name: /dictate a message/i }),
+        screen.getByLabelText("Send message"),
+      ];
+      for (const el of order) expect(el.parentElement).toBe(pill);
+      for (let i = 1; i < order.length; i++) {
+        expect(
+          order[i - 1].compareDocumentPosition(order[i]) & Node.DOCUMENT_POSITION_FOLLOWING,
+          `control ${i - 1} is not before control ${i}`,
+        ).toBeTruthy();
+      }
+      expect(container.querySelector(".chat-crow")).toBeNull();
+    });
+  });
+
+  it("renders suggestions inside the composer, after the pill", () => {
+    const { container } = render(
+      <ChatInput onSend={vi.fn()} suggestions={<div className="chat-suggs">chips</div>} />,
+    );
+    const composer = container.querySelector(".chat-composer")!;
+    const suggs = container.querySelector(".chat-suggs")!;
+    expect(suggs.parentElement).toBe(composer);
+    expect(composer.lastElementChild).toBe(suggs);
+    expect(composer.firstElementChild?.classList.contains("chat-composer-inner")).toBe(true);
+  });
+
+  it("carries no trust hint under the pill", () => {
+    const { container } = render(<ChatInput onSend={vi.fn()} />);
+    expect(container.querySelector(".chat-hint")).toBeNull();
+    expect(container.textContent).not.toMatch(/nothing leaves/i);
+  });
+
+  it("a click on the pill's empty space focuses the field", () => {
+    const { container } = render(<ChatInput onSend={vi.fn()} />);
+    const pill = container.querySelector(".chat-composer-inner") as HTMLElement;
+    fireEvent.mouseDown(pill);
+    expect(document.activeElement).toBe(screen.getByRole("textbox"));
+  });
+
+  it("a drag over the composer is a tone, not a ring", () => {
+    const { container } = render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
+    const composer = container.querySelector(".chat-composer") as HTMLElement;
+    fireEvent.dragOver(composer, { dataTransfer: { types: ["Files"] } });
+    const pill = container.querySelector(".chat-composer-inner")!;
+    expect(pill.className).not.toMatch(/\bring-/);
+    expect(pill.classList.contains("is-drop")).toBe(true);
   });
 });
 
