@@ -386,8 +386,9 @@ export interface ModelsCatalogPayload {
 export interface CloudProviderRow {
   /** WARP-2871: gemini removed — no gateway provider exists for it. */
   provider: "anthropic" | "openai";
-  /** Box-wide usable: `escapeEnabled && hasKey === true`. */
-  enabled: boolean;
+  /** Box-wide usable: `escapeEnabled && hasKey === true`. `null` = withheld
+   *  from a guest (WARP-3082). */
+  enabled: boolean | null;
   /** WARP-2871: null = the gateway could not be asked (render "Unknown",
    *  never "Not set up" — absence of an answer is not absence of a key). */
   hasKey: boolean | null;

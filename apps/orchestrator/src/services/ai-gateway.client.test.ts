@@ -125,6 +125,19 @@ describe("ai-gateway.client — WARP-303 timeouts", () => {
     expect(fetchMock.mock.calls[1][1].signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("deleteKey resolves false on the gateway's 404 (no key stored) and still throws on other errors (WARP-3083)", async () => {
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    const fail = (status: number) =>
+      ({ ok: false, status, text: vi.fn().mockResolvedValue("x"), headers: new Headers() }) as unknown as Response;
+
+    fetchMock.mockResolvedValueOnce(okResponse({ status: "deleted" }));
+    await expect(deleteKey("openai")).resolves.toBe(true);
+    fetchMock.mockResolvedValueOnce(fail(404));
+    await expect(deleteKey("openai")).resolves.toBe(false);
+    fetchMock.mockResolvedValueOnce(fail(500));
+    await expect(deleteKey("openai")).rejects.toThrow("Failed to delete key");
+  });
+
   it("saveKey and deleteKey keep a hostile provider inside one URL segment", async () => {
     // CodeQL js/request-forgery: `provider` is `req.params.provider`. Without
     // encoding, `../` or `?`/`#` could redirect the gateway call to another
