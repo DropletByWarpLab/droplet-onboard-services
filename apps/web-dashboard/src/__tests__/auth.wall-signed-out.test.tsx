@@ -21,6 +21,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { AuthProvider, WALL_SIGNED_OUT_EVENT, authFetch, useAuth } from "@/lib/auth";
+import { PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "@/lib/types";
 
 const USER_KEY = "droplet-auth-user";
 const realLocation = window.location;
@@ -59,6 +60,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   unload({ revalidate: false });
   localStorage.clear();
+  sessionStorage.clear();
   Object.defineProperty(window, "location", { configurable: true, writable: true, value: realLocation });
 });
 
@@ -82,14 +84,19 @@ describe("authFetch — a dead session on the Security wall never opens a sign-i
   // A second tab signed out (or hit its own dead path) first: it took the cached profile every tab
   // shares, and emptied only its own cache. This tab's wall does not navigate, so the next sign-in on
   // it — client-side, through "Sign in on this screen" — would mount over the last account's cameras.
-  it("the cached profile already gone (another tab signed out): the wall's cache is still emptied", async () => {
+  it("the cached profile already gone (another tab signed out): the wall's cache and this tab's chat hand-offs are still emptied", async () => {
     stubLocation("/security/wall");
     stubFetch(() => new Response("", { status: 401 }));
     localStorage.removeItem(USER_KEY);
+    sessionStorage.setItem(PENDING_PROMPT_KEY, "A's question");
+    sessionStorage.setItem(PENDING_COMPOSER_KEY, "A's draft");
     await mutate(["security-wall", "cameras"], [{ name: "a-back-office" }], { revalidate: false });
     await mutate(["security-wall", "snapshot", "a-back-office"], { value: "A's picture", at: 1 }, { revalidate: false });
 
     await authFetch("/api/security/mode");
+
+    expect(sessionStorage.getItem(PENDING_PROMPT_KEY)).toBeNull();
+    expect(sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
 
     const { cache } = SWRConfig.defaultValue;
     expect(JSON.stringify(Array.from(cache.keys(), (k) => cache.get(k)?.data ?? null))).not.toMatch(/a-back-office|A's picture/);
