@@ -17,6 +17,10 @@
  *                  (sourceRef, startedAt) index.
  *   the CHECK    — every draft the adapter builds (each reading, live and
  *                  polled) passes SecurityEvent_lock_shape.
+ *   #2354        — (WARP-2978) SecurityEvent is append-only in the database
+ *                  (a BEFORE UPDATE trigger), and the 30-day retention trims
+ *                  every source: a lock row cannot be changed, and it goes
+ *                  at 30 days with its triage ledger row like any other.
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL, like every *.pg.test.ts.
  *
@@ -44,7 +48,7 @@ import {
   type LockReading,
   type LockStore,
 } from "./security-lock-adapter.js";
-import { SECURITY_EVENT_RETENTION_DAYS, writeSecurityEvent } from "./security-events.service.js";
+import { SECURITY_EVENT_RETENTION_DAYS, trimSecurityEvents, writeSecurityEvent } from "./security-events.service.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -238,5 +242,35 @@ describe.skipIf(!RUN)("Matter lock adapter store — real Postgres (WARP-2977 P2
     // A second sweep with nothing new writes nothing.
     expect(await adapter.sweep()).toMatchObject({ status: "ok", recorded: 0 });
     expect(await rowsOf(ref(30))).toHaveLength(1);
+  });
+
+  it("WARP-2978: a lock row is append-only like every row, and 30-day retention takes it — with its triage row — like any other", async () => {
+    const old = new Date(Date.now() - (SECURITY_EVENT_RETENTION_DAYS + 1) * 86_400_000);
+    const row = {
+      source: "matter_lock",
+      kind: "lock_state",
+      severity: "info",
+      camera: null,
+      sourceRef: ref(90),
+      cameraZones: [] as string[],
+      score: null,
+      endedAt: null,
+      summary: `${TAG} Back door: unlocked`,
+      observed: "polled",
+    } as const;
+    const stale = await prisma.securityEvent.create({ data: { ...row, dedupeKey: `${TAG}:ret-old`, labels: ["unlocked"], startedAt: old } });
+    const fresh = await prisma.securityEvent.create({ data: { ...row, dedupeKey: `${TAG}:ret-new`, labels: ["locked"], startedAt: recent(60_000) } });
+    // The engine's ledger row for each: a lock row is `context` (D21).
+    await prisma.securityEventTriage.createMany({
+      data: [stale, fresh].map((e) => ({ eventId: e.id, outcome: "context" as const, incidentId: null, matchedLinkIds: [], alsoZoneIds: [], rulesetVersion: 1 })),
+    });
+
+    // Nothing may rewrite what a lock was found to be (the SecurityEvent_append_only trigger).
+    await expect(prisma.securityEvent.update({ where: { id: fresh.id }, data: { observed: "live" } })).rejects.toThrow(/append-only/);
+
+    await trimSecurityEvents(prisma);
+    expect((await rowsOf(ref(90))).map((r) => r.id)).toEqual([fresh.id]);
+    const ledger = await prisma.securityEventTriage.findMany({ where: { eventId: { in: [stale.id, fresh.id] } }, select: { eventId: true } });
+    expect(ledger.map((t) => t.eventId)).toEqual([fresh.id]);
   });
 });
