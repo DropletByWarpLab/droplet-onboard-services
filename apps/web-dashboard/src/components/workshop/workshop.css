@@ -308,8 +308,10 @@
 }
 .droplet-shell .ws-rail-act:hover { background: var(--surface-2); color: var(--text); }
 
-/* Small chips (the shell's `.badge`, one size smaller for rails). */
-.droplet-shell .ws-chip { font-size: 10.5px; padding: 1px 7px; }
+/* Small chips (the shell's `.badge`, one size smaller for rails). `nowrap` is
+   stated here: until WARP-3064 it leaked in from workspace-nav.css's bare
+   `.ws-chip`, and "Read · stays on LAN" must stay one chip, not two lines. */
+.droplet-shell .ws-chip { font-size: 10.5px; padding: 1px 7px; white-space: nowrap; }
 .droplet-shell .badge .dot.is-live { animation: ws-breathe 2s ease-in-out infinite; }
 @keyframes ws-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) {
