@@ -280,6 +280,8 @@ describe("/security/wall — freshness and the sign-out warning (T-D7)", () => {
     expect(strip().className).toContain("is-stale");
     // The warning mark /security's ModeCard uses — not the neutral look of the sign-out notice.
     expect(banner.querySelector(".badge.warn svg")).not.toBeNull();
+    // It scales with the badge's text on a TV.
+    expect(banner.querySelector(".badge.warn svg")).toHaveAttribute("width", "1em");
   });
 
   it("an outage across midnight: the banner and 'Updated' name the day, not only the time", async () => {
@@ -472,6 +474,11 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
     expect(code).toMatch(/\.sec-wall-tile-state \{ flex-shrink: 0; white-space: nowrap;/);
   });
 
+  it("the tiles line up with the banners and the strip (16 px sides)", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tiles \{[^}]*padding: 8px 16px;/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-banners \{[^}]*padding: 0 16px;/);
+  });
+
   it("≤ 640 px wide or ≤ 480 px tall (a phone either way up): the rows stack from the top — no empty bands between them", () => {
     expect(code).toMatch(/@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*\.droplet-shell\.sec-wall \{[^}]*align-content: start;/);
   });
@@ -499,6 +506,12 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
   it("the refusal and the signed-out notice fit the screen: border-box, so their padding never pushes past a phone's width or the TV's height", () => {
     expect(code).toMatch(/\.droplet-shell\.sec-wall-notice \{\s*box-sizing: border-box; min-height: 100dvh;/);
     expect(code).toMatch(/\.droplet-shell \.sec-wall-notice-card \{\s*box-sizing: border-box;[^}]*width: 100%;/);
+  });
+
+  it("the notices' buttons scale with their text on a TV, and keep the shell's 44 px touch target", () => {
+    expect(code).toMatch(
+      /\.droplet-shell \.sec-wall-notice-actions \.btn \{ font-size: inherit; height: auto; min-height: max\(2\.5em, 44px\); padding: 0\.5em 1em; \}/,
+    );
   });
 
   it("an old picture is dimmed and grey — never drawn as a current one", () => {

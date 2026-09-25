@@ -209,7 +209,9 @@ describe("WallCameras — a tile's own clock", () => {
     expect(tile("front")).toHaveClass("is-stale");
     expect(screen.getByAltText("Front, latest picture")).toBeInTheDocument();
     expect(tile("front")).toHaveTextContent(`Picture from ${time(t0)}`);
-    expect(tile("front").querySelector(".badge.warn svg")).not.toBeNull();
+    // The mark scales with the badge's text (a TV's clamp), never a fixed 12 px.
+    expect(tile("front").querySelector(".badge.warn svg")).toHaveAttribute("width", "1em");
+    expect(tile("front").querySelector(".badge.warn svg")).toHaveAttribute("height", "1em");
     // Answers again: live, no age.
     failing.clear();
     await advance(120_000);

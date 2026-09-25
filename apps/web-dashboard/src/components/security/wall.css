@@ -37,7 +37,7 @@
   background: var(--bg); overflow: hidden;
 }
 .droplet-shell .sec-wall-tiles {
-  align-self: stretch; flex: 1; min-width: 0; min-height: 0; display: grid; gap: 8px; padding: 8px;
+  align-self: stretch; flex: 1; min-width: 0; min-height: 0; display: grid; gap: 8px; padding: 8px 16px;
   grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
   grid-template-rows: repeat(var(--rows, 1), minmax(0, 1fr));
 }
@@ -136,4 +136,5 @@
 .droplet-shell .sec-wall-notice-card h1 { margin: 0; font-size: clamp(20px, 2vw, 36px); font-weight: 700; line-height: 1.2; }
 .droplet-shell .sec-wall-notice-card p { margin: 0; color: var(--text-muted); }
 .droplet-shell .sec-wall-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.droplet-shell .sec-wall-notice-actions .btn { font-size: inherit; height: auto; min-height: max(2.5em, 44px); padding: 0.5em 1em; }
 .droplet-shell .sec-wall-notice-actions .btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }

@@ -144,7 +144,7 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
             <div className="sec-wall-banner" role="status" aria-live="polite" data-banner={freshness.state}>
               {/* The warning mark /security's ModeCard puts on its stale line: this is not the neutral sign-out notice. */}
               <span className="badge warn sec-wall-badge" aria-hidden="true">
-                <TriangleAlert size={14} />
+                <TriangleAlert size="1em" />
               </span>
               <span className="sec-wall-banner-text">
                 <strong>{freshness.state === "offline" ? WALL_COPY.offlineTitle : WALL_COPY.staleTitle}</strong>

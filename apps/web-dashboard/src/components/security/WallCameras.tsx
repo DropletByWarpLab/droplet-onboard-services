@@ -111,7 +111,7 @@ function WallTile({ camera, now, time }: { camera: CameraInfo; now: number; time
           <span className="sec-wall-tile-state">
             {state === "stale" && (
               <span className="badge warn sec-wall-badge" aria-hidden="true">
-                <TriangleAlert size={12} />
+                <TriangleAlert size="1em" />
               </span>
             )}
             {line}
