@@ -2230,6 +2230,12 @@ export default function UsersPage() {
                 {editPassword && (
                   <PasswordRulesChecklist password={editPassword} />
                 )}
+                {/* WARP-3111: the box treats this as a reset. */}
+                {editPassword && !isSelf(editing) && (
+                  <p className="type-caption-1 mt-1.5" style={{ color: "var(--text-muted)" }}>
+                    They&apos;ll be signed out everywhere and asked to choose a new password when they next sign in.
+                  </p>
+                )}
               </div>
               )}
 
