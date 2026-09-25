@@ -31,6 +31,7 @@ import { useRouter } from "next/navigation";
 import { useToast, type ToastAction } from "./Toast";
 import { useAuth } from "@/lib/auth";
 import { ackNotification } from "@/lib/api";
+import { SECURITY_WALL_PATH } from "@/lib/routing";
 
 interface IncomingNotification {
   kind?: "reminder" | "event" | "system" | "ai";
@@ -133,6 +134,12 @@ export function NotificationToaster() {
         attempt = 0;
       };
       ws.onmessage = (event) => {
+        // WARP-2981 (ADR-059 §3.8) — no toast on the Security wall: it faces a
+        // room, and this person's reminders, shares and alert text naming an
+        // area are not the room's to read (nor its "Open" theirs to press).
+        // Checked per message, so leaving the wall toasts again at once; the
+        // socket stays up.
+        if (window.location.pathname === SECURITY_WALL_PATH) return;
         let data: { topic?: string; payload?: IncomingNotification };
         try {
           data = JSON.parse(typeof event.data === "string" ? event.data : "");
