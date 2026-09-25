@@ -54,6 +54,12 @@ android   blocked   WARP-1415   no signing secrets, no tag, no Play listing; box
 # serve a binary from the box regardless — when it ships, it ships `store`.
 ios       blocked   WARP-1955   no distribution pipeline at all; becomes `store` (never `installer`) once TestFlight exists
 
-# No macOS or Linux client is being built.
-macos     absent    -           no macOS client exists
+# macOS — DropletAgent builds a notarized DMG via scripts/release-dmg.sh
+# (WARP-3030), but no OTA release carries it yet: an operator stages each
+# Mac release on each box by hand with stage.sh. `blocked`, not `installer`,
+# because a release cannot carry it yet and `installer` would turn every
+# image build red.
+macos     blocked   WARP-3120   DropletAgent DMG exists (scripts/release-dmg.sh); staged by hand with stage.sh until the OTA release carries it
+
+# No Linux client is being built.
 linux     absent    -           no Linux client exists
