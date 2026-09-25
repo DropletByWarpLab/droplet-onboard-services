@@ -153,10 +153,10 @@ describe("GET /api/capabilities", () => {
     expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
   });
 
-  it("allows brief private caching so the nav doesn't re-probe every mount", async () => {
+  it("does not override the app-wide no-store (WARP-3097)", async () => {
     const res = await request(
       appWithUser({ role: "family" }, [{ moduleId: "projects", enabled: true }]),
     ).get("/api/capabilities");
-    expect(res.headers["cache-control"]).toBe("private, max-age=30");
+    expect(res.headers["cache-control"]).toBeUndefined();
   });
 });

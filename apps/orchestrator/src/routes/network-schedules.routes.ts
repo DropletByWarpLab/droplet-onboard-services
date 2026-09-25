@@ -28,8 +28,6 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
 
   router.get("/network/schedules", async (_req, res, next) => {
     try {
-      // WARP-111: SWR-friendly caching for the dashboard's polling reads.
-      res.set("Cache-Control", "private, max-age=5, stale-while-revalidate=10");
       const schedules = await scheduleApi.listSchedules();
       res.json({ schedules });
     } catch (err) {
@@ -189,9 +187,6 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
 
   router.get("/network/schedule-events", async (req, res, next) => {
     try {
-      // WARP-111: the event log is append-only and tolerates a slightly
-      // longer plain max-age (no SWR window).
-      res.set("Cache-Control", "private, max-age=15");
       let since: Date | undefined;
       if (typeof req.query.since === "string") {
         const d = new Date(req.query.since);

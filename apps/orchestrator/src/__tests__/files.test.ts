@@ -1436,7 +1436,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
   });
 
   describe("Thumbnail", () => {
-    it("GET /api/files/thumbnail streams bytes with Cache-Control", async () => {
+    it("GET /api/files/thumbnail streams bytes, no-store (WARP-3097)", async () => {
       const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
       ncMock.ncFetchThumbnail.mockResolvedValue({
         body: body.buffer,
@@ -1446,7 +1446,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files/thumbnail?path=/pixel.png");
       expect(res.status).toBe(200);
       expect(res.headers["content-type"]).toContain("image/png");
-      expect(res.headers["cache-control"]).toContain("max-age=3600");
+      expect(res.headers["cache-control"]).toBe("no-store");
     });
 
     it("GET /api/files/thumbnail returns 404 when preview is unavailable", async () => {

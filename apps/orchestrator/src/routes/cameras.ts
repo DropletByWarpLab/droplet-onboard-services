@@ -723,7 +723,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         "Content-Type",
         upstream.headers.get("content-type") || "image/jpeg",
       );
-      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const buffer = Buffer.from(await upstream.arrayBuffer());
       res.send(buffer);
     } catch (err) {
@@ -1588,7 +1588,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
-      res.setHeader("Cache-Control", "public, max-age=3600");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const buffer = Buffer.from(await upstream.arrayBuffer());
       res.send(buffer);
     } catch (err) {
@@ -1696,7 +1696,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
-      res.setHeader("Cache-Control", "public, max-age=3600");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const buffer = Buffer.from(await upstream.arrayBuffer());
       res.send(buffer);
     } catch (err) {
@@ -1773,7 +1773,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const frigateResp = await fetchEventThumbnail(req.params.eventId);
       const contentType = frigateResp.headers.get("content-type") || "image/jpeg";
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", "public, max-age=3600");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const buffer = Buffer.from(await frigateResp.arrayBuffer());
       res.send(buffer);
     } catch (err) {
@@ -2298,7 +2298,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const frigateResp = await fetchSnapshot(req.params.name, height);
       const contentType = frigateResp.headers.get("content-type") || "image/jpeg";
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", "public, max-age=5");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const buffer = Buffer.from(await frigateResp.arrayBuffer());
       res.send(buffer);
     } catch (err) {
@@ -2601,7 +2601,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
-      res.setHeader("Cache-Control", "private, max-age=300");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       if (upstream.body) {
         pipeUpstreamBody(upstream.body, res);
       } else {
@@ -2737,9 +2737,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       );
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
-      // Each segment is immutable for a given (camera, range, seg)
-      // tuple — long cache keeps repeat scrubs cheap.
-      res.setHeader("Cache-Control", "private, max-age=3600");
+      // Immutable per (camera, range, seg), but still footage: a scrub back
+      // re-fetches rather than leaving segments on the viewer's disk.
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       if (upstream.body) {
         pipeUpstreamBody(upstream.body, res);
       } else {

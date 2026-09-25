@@ -3680,7 +3680,6 @@ export function createFilesRouter(
         return;
       }
       res.setHeader("Content-Type", preview.contentType);
-      res.setHeader("Cache-Control", "private, max-age=3600");
       res.send(Buffer.from(preview.body));
     } catch (err) {
       handleFileError(err, res, next);
