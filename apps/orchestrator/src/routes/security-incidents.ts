@@ -11,6 +11,16 @@
  *   20  POST /api/security/incidents/:id/resolve         act
  *   21  GET  /api/security/alert-routing                 view   (a filter by level, not a gate)
  *   22  PUT  /api/security/alert-routing/:userId         manage
+ *   35  POST /api/security/incidents/:id/verdict         act, floored at owner/admin (WARP-2980 P5 PR-B)
+ *
+ * Route 35 (brief §4.4: "the owner or a Security manager can mark Expected /
+ * Not expected"): `sensitiveRateLimit, requireRole('owner','admin'),
+ * requireFeatureAccess('security','act')` — act is the level ADR §6 gives
+ * verdicts, and the owner/admin floor means nobody can overwrite a judgement
+ * about flags or cameras they cannot see (review item 2; P4 route S1's
+ * precedent). 409 NOT_JUDGEABLE when there is nothing for them to judge or
+ * their view is partial (one body). A verdict never changes the incident's
+ * state, severity, codes or notifications.
  *
  * Gates follow P2b exactly: every GET is `requireRole('owner','admin',
  * 'family')` only — a page load never produces a feature-gate denial, which
@@ -45,7 +55,7 @@ import {
   parseIncidentCursor,
   type IncidentViewer,
 } from "../services/security-incident-view.js";
-import { actOnIncident } from "../services/security-incident-actions.js";
+import { actOnIncident, setIncidentVerdict } from "../services/security-incident-actions.js";
 import { securityOngoingSource } from "../services/camera.service.js";
 import { alertsReady, readAlertRouting, setAlertRouting } from "../services/security-alerts.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
@@ -71,7 +81,9 @@ type ErrorCode =
   | "VERSION_CONFLICT"
   | "NO_RECIPIENT"
   | "NOT_ELIGIBLE"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  // WARP-2980 P5 PR-B — route 35.
+  | "NOT_JUDGEABLE";
 
 function fail(res: Response, status: number, code: ErrorCode, message: string, issues?: unknown[]): void {
   res.status(status).json({ error: issues ? { code, message, issues } : { code, message } });
@@ -93,6 +105,8 @@ const listQuerySchema = z
 const NOTIFICATION_ID = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const ackBodySchema = z.object({ notificationId: NOTIFICATION_ID.optional() }).strict();
 const resolveBodySchema = z.object({ note: z.string().max(280).optional() }).strict();
+/** Route 35: a verdict can change, never go back to unreviewed. */
+const verdictBodySchema = z.object({ verdict: z.enum(["expected", "not_expected"]) }).strict();
 const routingBodySchema = z
   .object({
     state: z.enum(["receiving", "not_receiving"]),
@@ -164,6 +178,8 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
   const resolver = deps.resolve ?? resolveEffectiveAccess;
   const actGate = [sensitiveRateLimit, requireRole(...ACT_ROLES), requireFeatureAccess("security", "act", deps.resolve)];
   const manageGate = [sensitiveRateLimit, requireRole(...MANAGE_ROLES), requireFeatureAccess("security", "manage", deps.resolve)];
+  // WARP-2980 PR-B — act level, owner/admin floor (review item 2).
+  const verdictGate = [sensitiveRateLimit, requireRole(...MANAGE_ROLES), requireFeatureAccess("security", "act", deps.resolve)];
 
   // 16 — the incident list, (the viewer's own last activity desc, id desc) — review R1.
   router.get("/security/incidents", requireRole(...VIEW_ROLES), async (req: Request, res: Response) => {
@@ -284,6 +300,39 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
 
   // 20 (act) — done, with an optional note. Seals the incident.
   router.post("/security/incidents/:id/resolve", ...actGate, (req: Request, res: Response) => act(req, res, "resolve"));
+
+  // 35 (act, owner/admin) — WARP-2980 P5 PR-B: Expected / Not expected.
+  router.post("/security/incidents/:id/verdict", ...verdictGate, async (req: Request, res: Response) => {
+    if (!UUID.safeParse(req.params.id).success) {
+      fail(res, 400, "VALIDATION_ERROR", "That isn't an incident id.");
+      return;
+    }
+    const body = verdictBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      fail(res, 400, "VALIDATION_ERROR", "That request isn't in a shape Droplet understands.", body.error.issues);
+      return;
+    }
+    const now = clock();
+    try {
+      const viewer = await viewerOf(prisma, req, deps);
+      const r = await setIncidentVerdict(prisma, { incidentId: req.params.id!, verdict: body.data.verdict, actor: actorOf(req), viewer, now });
+      switch (r.status) {
+        case "not_found":
+          fail(res, 404, "INCIDENT_NOT_FOUND", "There is no such incident.");
+          return;
+        case "not_judgeable":
+          fail(res, 409, "NOT_JUDGEABLE", "There's nothing here to mark.");
+          return;
+        case "conflict":
+          fail(res, 409, "INCIDENT_CONFLICT", "Someone else changed this incident at the same moment. Try again.");
+          return;
+      }
+      const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, await outputLevel(req, deps), now, presence);
+      res.json({ incident: detail, changed: r.changed });
+    } catch (err) {
+      writeFailed(res, err, "incident verdict", "INCIDENTS_UNAVAILABLE");
+    }
+  });
 
   // 21 — who is told. A filter by level, not a gate: below manage, the viewer's own line.
   router.get("/security/alert-routing", requireRole(...VIEW_ROLES), async (req: Request, res: Response) => {

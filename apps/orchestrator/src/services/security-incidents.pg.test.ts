@@ -334,10 +334,14 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       );
     const unqualified = (rows: Array<{ name: string; def: string }>) =>
       rows.map((r) => ({ name: r.name, def: r.def.replace(new RegExp(`\\b(public|${SCRATCH})\\.`, "g"), "") }));
+    // Constraints a LATER migration adds to these tables — not this folder's to create.
+    const LATER = new Set([
+      "SecurityIncident_verdict_shape", // WARP-2980 PR-B, 20260925060100_warp_2980_security_patterns_verdicts
+    ]);
     const outcome = await prisma
       .$transaction(
         async (tx) => {
-          const expected = unqualified(await constraintsIn(tx, "public"));
+          const expected = unqualified(await constraintsIn(tx, "public")).filter((c) => !LATER.has(c.name));
           await tx.$executeRawUnsafe(`CREATE SCHEMA ${SCRATCH}`);
           await tx.$executeRawUnsafe(`SET LOCAL search_path TO ${SCRATCH}, public`);
           // The pre-review shape: the notice outcome without `outcome_unknown` …

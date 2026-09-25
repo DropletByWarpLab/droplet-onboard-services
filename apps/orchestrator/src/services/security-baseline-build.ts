@@ -4,8 +4,9 @@
  *
  * This file is the only writer of `SecurityBaselineCell` (a grep test pins
  * it). Cells are derived facts, rebuilt from SecurityEvent (kept 30 days) and
- * the coverage spans; nobody edits them, and verdicts and suppressions (PR-B)
- * never reach them (brief §4.4).
+ * the coverage spans; nobody edits them, and verdicts and expected activity
+ * (PR-B) never reach them (brief §4.4; a static pin keeps this file from
+ * naming either).
  *
  * The statement never converts time: the site-local hour slots are cut in
  * TypeScript (lib/security-baseline-slots.ts) and arrive as UTC wall-clock
@@ -32,7 +33,8 @@
  */
 import type { PrismaClient, SecurityBaselineBuildTrigger } from "@prisma/client";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
-import { BASELINE, SECURITY_BASELINE_RULESET_VERSION } from "../lib/security-baseline-math.js";
+import { BASELINE } from "../lib/security-baseline-math.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import { windowBounds, windowFor, windowSlots, type BaselineSlot, type BaselineWindow } from "../lib/security-baseline-slots.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -297,7 +299,7 @@ export async function runFullBuild(
         timezone: zone,
         windowFrom: window.from,
         windowTo: window.to,
-        rulesetVersion: SECURITY_BASELINE_RULESET_VERSION,
+        rulesetVersion: SECURITY_RULESET_VERSION,
         startedAt: now,
       },
     });

@@ -14,8 +14,10 @@
  *     `createMany({skipDuplicates})` skips it), `{increment}`, orderBy, take,
  *     and `select` / `include` of relations;
  *   · FKs on delete: Cascade and Restrict (a Restrict throws P2003);
- *   · the WARP-2978 CHECKs, mirrored in JS, on every write — so an engine bug
- *     that would violate one fails here the way Postgres would. Like Prisma
+ *   · the WARP-2978 CHECKs — and WARP-2980 PR-B's (20260925060100: the
+ *     verdict shape, the pattern flag, expected activity, the per-day
+ *     count) — mirrored in JS, on every write, so an engine bug that would
+ *     violate one fails here the way Postgres would. Like Prisma
  *     on Postgres, a `create` that omits a scalar list stores NULL (and the
  *     CHECKs refuse a NULL list); seeded rows get empty lists;
  *   · TRANSACTIONS on the shared WARP-1570 seam (`createTransactionSeam`):
@@ -25,8 +27,13 @@
  *     write-conflict throws P2034. The isolation level asked for is recorded
  *     (`txLevels`).
  *
+ * WARP-2980 PR-B adds the baseline tables the pattern rules read (a build,
+ * its cells, the learning state per camera), the pattern flags, expected
+ * activity and the per-day count, and a minimal `groupBy({by: [one column],
+ * where, _count: {_all: true}})`.
+ *
  * Concurrency, the real CHECK text, the trigger and the advisory locks are
- * the pg lane's job (security-incidents.pg.test.ts).
+ * the pg lane's job (security-incidents.pg.test.ts, security-pattern-flags.pg.test.ts).
  *
  * `failOn(table, method, predicate?)` injects a throw into the next matching
  * call (or every one, with `{always: true}`), for the "a failing triage is
@@ -64,7 +71,14 @@ export type TableName =
   | "department"
   | "departmentProfile"
   | "departmentMembership"
-  | "workspace";
+  | "workspace"
+  // WARP-2980 P5 PR-B
+  | "securityPatternFlag"
+  | "securitySuppression"
+  | "securityBaselineBuild"
+  | "securityBaselineCell"
+  | "securityBaselineSource"
+  | "securityPatternDay";
 
 const TABLES: readonly TableName[] = [
   "securityEvent",
@@ -92,6 +106,12 @@ const TABLES: readonly TableName[] = [
   "departmentProfile",
   "departmentMembership",
   "workspace",
+  "securityPatternFlag",
+  "securitySuppression",
+  "securityBaselineBuild",
+  "securityBaselineCell",
+  "securityBaselineSource",
+  "securityPatternDay",
 ];
 
 interface Relation {
@@ -113,11 +133,23 @@ const RELATIONS: Partial<Record<TableName, Record<string, Relation>>> = {
     acks: { table: "securityIncidentAck", kind: "many", local: "id", foreign: "incidentId" },
     notices: { table: "securityIncidentNotice", kind: "many", local: "id", foreign: "incidentId" },
     zone: { table: "securityZone", kind: "one", local: "zoneId", foreign: "id" },
+    patternFlags: { table: "securityPatternFlag", kind: "many", local: "id", foreign: "incidentId" },
+  },
+  securityPatternFlag: {
+    incident: { table: "securityIncident", kind: "one", local: "incidentId", foreign: "id" },
+    suppression: { table: "securitySuppression", kind: "one", local: "suppressionId", foreign: "id" },
+  },
+  securitySuppression: {
+    zone: { table: "securityZone", kind: "one", local: "zoneId", foreign: "id" },
+    flags: { table: "securityPatternFlag", kind: "many", local: "id", foreign: "suppressionId" },
   },
   securityIncidentReason: { incident: { table: "securityIncident", kind: "one", local: "incidentId", foreign: "id" } },
   securityIncidentNotice: { incident: { table: "securityIncident", kind: "one", local: "incidentId", foreign: "id" } },
   securityIncidentAck: { incident: { table: "securityIncident", kind: "one", local: "incidentId", foreign: "id" } },
-  securityZone: { links: { table: "securityZoneLink", kind: "many", local: "id", foreign: "zoneId" } },
+  securityZone: {
+    links: { table: "securityZoneLink", kind: "many", local: "id", foreign: "zoneId" },
+    suppressions: { table: "securitySuppression", kind: "many", local: "id", foreign: "zoneId" },
+  },
   securityZoneLink: { zone: { table: "securityZone", kind: "one", local: "zoneId", foreign: "id" } },
   user: {
     securityAlertRecipient: { table: "securityAlertRecipient", kind: "one", local: "id", foreign: "userId" },
@@ -150,6 +182,12 @@ const UNIQUES: Partial<Record<TableName, string[][]>> = {
   activityRow: [["id"]],
   user: [["id"], ["username"]],
   notificationLog: [["id"]],
+  securityPatternFlag: [["id"], ["incidentId", "code", "evidenceEventId"]],
+  securitySuppression: [["id"]],
+  securityBaselineBuild: [["id"]],
+  securityBaselineCell: [["id"], ["buildId", "zoneKey", "label", "dayType", "hour"]],
+  securityBaselineSource: [["sourceKey"]],
+  securityPatternDay: [["date", "outcome"]],
 };
 
 /** FK behaviour when the parent row is deleted. */
@@ -160,7 +198,11 @@ const ON_DELETE: Partial<Record<TableName, Array<{ child: TableName; fk: string;
     { child: "securityIncidentReason", fk: "incidentId", key: "id", rule: "cascade" },
     { child: "securityIncidentAck", fk: "incidentId", key: "id", rule: "cascade" },
     { child: "securityIncidentNotice", fk: "incidentId", key: "id", rule: "cascade" },
+    { child: "securityPatternFlag", fk: "incidentId", key: "id", rule: "cascade" },
   ],
+  securitySuppression: [{ child: "securityPatternFlag", fk: "suppressionId", key: "id", rule: "restrict" }],
+  securityZone: [{ child: "securitySuppression", fk: "zoneId", key: "id", rule: "restrict" }],
+  securityBaselineBuild: [{ child: "securityBaselineCell", fk: "buildId", key: "id", rule: "cascade" }],
 };
 
 let seq = 1000n;
@@ -188,6 +230,13 @@ const DEFAULTS: Partial<Record<TableName, (now: Date) => Row>> = {
     resolvedById: null,
     version: 0,
     updatedAt: now,
+    // WARP-2980 PR-B: `verdictCodes` has @default([]) — a create that omits it stores [], not NULL.
+    verdict: "unreviewed",
+    verdictById: null,
+    verdictByName: null,
+    verdictAt: null,
+    verdictFirstAt: null,
+    verdictCodes: [],
   }),
   securityIncidentReason: (now) => ({ id: randomUUID(), createdAt: now, evidenceCamera: null, evidenceLabel: null }),
   securityIncidentAck: (now) => ({
@@ -234,12 +283,37 @@ const DEFAULTS: Partial<Record<TableName, (now: Date) => Row>> = {
     ackClient: null,
   }),
   activityRow: (now) => ({ id: ++seq, at: now, sub: null }),
+  securityPatternFlag: (now) => ({ id: randomUUID(), createdAt: now, suppressionId: null }),
+  securitySuppression: (now) => ({
+    id: randomUUID(),
+    zoneId: null,
+    camera: null,
+    state: "active",
+    createdAt: now,
+    endedAt: null,
+    endedById: null,
+  }),
+  securityBaselineBuild: (now) => ({ id: randomUUID(), cellsVersion: 0, startedAt: now, finishedAt: null, cellCount: 0, eventCount: 0, error: null }),
+  securityBaselineCell: (now) => ({
+    id: ++seq,
+    zoneId: null,
+    camera: null,
+    zoneVersion: null,
+    dwellSamples: 0,
+    durationP99Sec: null,
+    computedAt: now,
+  }),
+  securityBaselineSource: (now) => ({ updatedAt: now }),
+  securityPatternDay: (now) => ({ updatedAt: now }),
 };
 
 /** Scalar-list columns a seeded row gets as [] (a create that omits them stores NULL, as on Postgres). */
 const SEED_LISTS: Partial<Record<TableName, string[]>> = {
   securityIncident: ["zoneLinkIds", "reasonCodes", "cameras"],
   securityEventTriage: ["matchedLinkIds", "alsoZoneIds"],
+  securityPatternFlag: ["keyCameras"],
+  securitySuppression: ["codes"],
+  securityBaselineCell: ["cameras"],
 };
 
 /** Required JSON-object columns a seeded row may leave out (a `create` must still give them, as in Prisma). */
@@ -351,7 +425,8 @@ function clone<T>(v: T): T {
   return structuredClone(v);
 }
 
-// ── the CHECK mirrors (20260925030000_warp_2978_security_incidents; PR-D's 20260925030200) ──
+// ── the CHECK mirrors (20260925030000_warp_2978_security_incidents; PR-D's 20260925030200;
+//    WARP-2980 PR-B's 20260925060100_warp_2980_security_patterns_verdicts) ──
 
 function check(table: TableName, r: Row): void {
   const fail = (name: string) => {
@@ -387,6 +462,79 @@ function check(table: TableName, r: Row): void {
     const spans = r.spanByCamera;
     if (spans === null || typeof spans !== "object" || Array.isArray(spans)) fail("SecurityIncident_span");
     if ((r.rulesetVersion as number) < 1 || (r.notifyAttempts as number) < 0 || (r.notifyAttempts as number) > 10) fail("SecurityIncident_span");
+    // 20260925060100_warp_2980_security_patterns_verdicts (WARP-2980 PR-B). A
+    // row a test pushed straight into the world without these columns reads
+    // their defaults (unreviewed, []), as Postgres would give it; an explicit
+    // NULL still fails.
+    const vc = (r.verdictCodes === undefined ? [] : r.verdictCodes) as unknown[];
+    if (!Array.isArray(vc) || vc.some((c) => c == null)) fail("SecurityIncident_verdict_shape");
+    const unreviewed = (r.verdict ?? "unreviewed") === "unreviewed";
+    if (unreviewed !== (r.verdictAt == null)) fail("SecurityIncident_verdict_shape");
+    if ((r.verdictAt == null) !== (r.verdictFirstAt == null)) fail("SecurityIncident_verdict_shape");
+    if ((r.verdictAt == null) !== (r.verdictById == null)) fail("SecurityIncident_verdict_shape");
+    if ((r.verdictById == null) !== (r.verdictByName == null)) fail("SecurityIncident_verdict_shape");
+    if (unreviewed !== (vc.length === 0)) fail("SecurityIncident_verdict_shape");
+    if (r.verdictAt != null && cmp(r.verdictFirstAt, r.verdictAt) > 0) fail("SecurityIncident_verdict_shape");
+  }
+  if (table === "securityPatternFlag") {
+    const FRIGATE = /^[a-zA-Z0-9_-]{1,64}$/;
+    const pair =
+      ((r.code === "out_of_place" || r.code === "long_dwell") && (r.severity === "notice" || r.severity === "alert")) ||
+      (r.code === "unusual_volume" && (r.severity === "info" || r.severity === "notice"));
+    const cams = r.keyCameras as unknown[];
+    const key = typeof r.zoneKey === "string" ? r.zoneKey : "";
+    const ok =
+      pair &&
+      (r.severity !== "alert" || r.evidenceLabel === "person") &&
+      (r.code !== "long_dwell" || r.evidenceLabel === "person") &&
+      (r.effect === "suppressed") === (r.suppressionId != null) &&
+      typeof r.evidenceCamera === "string" &&
+      FRIGATE.test(r.evidenceCamera) &&
+      typeof r.evidenceLabel === "string" &&
+      FRIGATE.test(r.evidenceLabel) &&
+      /^(area:[0-9a-f-]{36}|camera:[a-zA-Z0-9_-]{1,64})$/.test(key) &&
+      Array.isArray(cams) &&
+      cams.length >= 1 &&
+      !cams.some((c) => c == null) &&
+      cams.includes(r.evidenceCamera) &&
+      (!key.startsWith("camera:") || (cams.length === 1 && cams[0] === key.slice(7))) &&
+      r.detail !== null &&
+      typeof r.detail === "object" &&
+      !Array.isArray(r.detail) &&
+      (r.rulesetVersion as number) >= 3;
+    if (!ok) fail("SecurityPatternFlag_shape");
+  }
+  if (table === "securitySuppression") {
+    const codes = r.codes as unknown[];
+    const allowed = ["out_of_place", "unusual_volume", "long_dwell"];
+    const created = (r.createdAt as Date).getTime();
+    const expires = (r.expiresAt as Date).getTime();
+    const ok =
+      (r.targetKind === "area") === (r.zoneId != null) &&
+      (r.targetKind === "camera") === (r.camera != null) &&
+      (r.camera == null || /^[a-zA-Z0-9_-]{1,64}$/.test(r.camera as string)) &&
+      /^[a-zA-Z0-9_-]{1,64}$/.test(r.label as string) &&
+      (r.hourFrom as number) >= 0 &&
+      (r.hourFrom as number) <= 23 &&
+      (r.hourCount as number) >= 1 &&
+      (r.hourCount as number) <= 24 &&
+      ((r.hourCount as number) < 24 || r.hourFrom === 0) &&
+      Array.isArray(codes) &&
+      !codes.some((c) => c == null) &&
+      codes.length >= 1 &&
+      codes.length <= 3 &&
+      codes.every((c) => allowed.includes(c as string)) &&
+      (!codes.includes("long_dwell") || r.label === "person") &&
+      String(r.reason).trim() !== "" &&
+      String(r.createdByName).trim() !== "" &&
+      expires > created &&
+      expires <= created + 365 * 86_400_000 &&
+      (r.state === "active") === (r.endedAt == null) &&
+      (r.state === "removed") === (r.endedById != null);
+    if (!ok) fail("SecuritySuppression_shape");
+  }
+  if (table === "securityPatternDay") {
+    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(r.date as string) || (r.count as number) < 0) fail("SecurityPatternDay_shape");
   }
   if (table === "securityIncidentReason") {
     const ok =
@@ -658,6 +806,15 @@ export function createFakeSecurityPrisma(init: Partial<FakeWorld> = {}, start: D
         maybeFail(table, "count", args);
         return find(args).length;
       },
+      /** WARP-2980 PR-B: one `by` column and `_count: {_all: true}` — exactly what the suppression list asks. */
+      groupBy: async (args: { by: string[]; where?: Where; _count?: { _all: true } }) => {
+        maybeFail(table, "groupBy", args);
+        if (args.by.length !== 1 || !args._count?._all) throw new Error("fake prisma: groupBy supports one `by` column and _count._all only");
+        const col = args.by[0]!;
+        const groups = new Map<unknown, number>();
+        for (const r of find(args)) groups.set(r[col] ?? null, (groups.get(r[col] ?? null) ?? 0) + 1);
+        return [...groups].map(([v, n]) => ({ [col]: v, _count: { _all: n } }));
+      },
       aggregate: async (args: { where?: Where; _max?: Record<string, true> }) => {
         maybeFail(table, "aggregate", args);
         const rows = find(args);
@@ -888,4 +1045,90 @@ export async function referenceProjectedIncidentPage(
     : keyed;
   kept.sort((a, b) => b.projectedLast.getTime() - a.projectedLast.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   return kept.slice(0, take);
+}
+
+// ── WARP-2980 P5 PR-B: a ready baseline build ───────────────────────────────
+
+export interface BaselineKeyFixture {
+  /** `area:<id>` or `camera:<name>`. */
+  zoneKey: string;
+  /** An area key's version when its cells were built (default 0, `areaRows`' version). */
+  zoneVersion?: number;
+  cameras: string[];
+  /** Default ["person"]. */
+  labels?: string[];
+  /** Overrides per (dayType, hour); default: 20 weekday / 8 weekend observed days, nothing ever seen (every hour rare). */
+  at?: (dayType: "weekday" | "weekend", hour: number, label: string) => Row;
+}
+
+/**
+ * A `ready` build (cut in `tz`, its window ending `windowTo`), all 48 cells of
+ * each key and label — as the build writes them — and one learning-state row
+ * per camera. Seed with `createFakeSecurityPrisma({securityBaselineBuild:
+ * [b.build], securityBaselineCell: b.cells, securityBaselineSource: b.sources})`.
+ */
+export function baselineRows(opts: {
+  buildId?: string;
+  tz?: string;
+  windowFrom?: string;
+  windowTo?: string;
+  keys: BaselineKeyFixture[];
+  sources: Array<{ camera: string; state: "learning" | "active" | "stale" }>;
+  at?: Date;
+}): { build: Row; cells: Row[]; sources: Row[] } {
+  const buildId = opts.buildId ?? "b-ready";
+  const at = opts.at ?? new Date("2026-09-23T04:10:00Z");
+  const cells: Row[] = [];
+  for (const k of opts.keys) {
+    const area = k.zoneKey.startsWith("area:");
+    for (const label of k.labels ?? ["person"]) {
+      for (const dayType of ["weekday", "weekend"] as const) {
+        for (let hour = 0; hour < 24; hour += 1) {
+          const n = dayType === "weekday" ? 20 : 8;
+          cells.push({
+            buildId,
+            zoneKey: k.zoneKey,
+            keyKind: area ? "area" : "camera",
+            zoneId: area ? k.zoneKey.slice(5) : null,
+            camera: area ? null : k.zoneKey.slice(7),
+            zoneVersion: area ? (k.zoneVersion ?? 0) : null,
+            cameras: [...k.cameras].sort(),
+            label,
+            dayType,
+            hour,
+            daysObserved: n,
+            daysWithEvent: 0,
+            eventCount: 0,
+            observedMinutes: n * 60,
+            dwellSamples: 0,
+            durationP99Sec: null,
+            ...(k.at?.(dayType, hour, label) ?? {}),
+          });
+        }
+      }
+    }
+  }
+  return {
+    build: {
+      id: buildId,
+      state: "ready",
+      trigger: "nightly",
+      timezone: opts.tz ?? "Europe/London",
+      windowFrom: opts.windowFrom ?? "2026-08-26",
+      windowTo: opts.windowTo ?? "2026-09-22",
+      rulesetVersion: 3,
+      startedAt: at,
+      finishedAt: at,
+    },
+    cells,
+    sources: opts.sources.map((s) => ({
+      sourceKey: `camera:${s.camera}`,
+      camera: s.camera,
+      state: s.state,
+      daysObserved: s.state === "learning" ? 9 : 20,
+      firstSeenAt: new Date("2026-08-01T00:00:00Z"),
+      lastSeenAt: at,
+      stateChangedAt: at,
+    })),
+  };
 }
