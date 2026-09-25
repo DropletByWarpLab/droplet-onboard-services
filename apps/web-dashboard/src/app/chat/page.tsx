@@ -54,6 +54,7 @@ import { reachableInChat } from "@/lib/tool-domains";
 import { useAuth } from "@/lib/auth";
 import { greetingLine } from "@/lib/greeting";
 import {
+  CHAT_DRAFT_KEY,
   PENDING_COMPOSER_KEY,
   PENDING_PROMPT_KEY,
   type BusinessContextPinKind,
@@ -1306,6 +1307,9 @@ export default function ChatPage() {
           )}
         <ChatInput
           ref={chatInputRef}
+          // WARP-3062 — a half-typed message survives leaving /chat and
+          // coming back (the assistant layout's Ask AI | Overview switch).
+          draftKey={CHAT_DRAFT_KEY}
           onSend={handleSend}
           disabled={isStreaming || !selectedModel}
           attachments={attachments}
