@@ -70,10 +70,12 @@ VOSK_DEFAULT_MODEL_DIRNAME = "vosk-model-small-en-us"
 # below this. 0.7 keeps real wakes reliable while gating the
 # living-room-TV false-accept storm observed live on the single-box
 # (9 false wakes in 12 minutes at the old evidence-free 0.5 default).
-# The generic DEFAULT_THRESHOLD (0.3, voice/pipeline.py) still applies
-# to openWakeWord, whose scores are sigmoid outputs with different
-# semantics.
-VOSK_DEFAULT_THRESHOLD = 0.7
+# Raised 0.7 → 0.85 (WARP-3128): on the bench, ambient conversation
+# cleared 0.7 at 0.73–0.94 many times an hour, while every real
+# "hey droplet" scored 1.00. The generic DEFAULT_THRESHOLD (0.3,
+# voice/pipeline.py) still applies to openWakeWord, whose scores are
+# sigmoid outputs with different semantics.
+VOSK_DEFAULT_THRESHOLD = 0.85
 
 
 @dataclasses.dataclass(frozen=True)
@@ -282,8 +284,9 @@ class VoskWakeWordDetector(WakeWordDetector):
     """Vosk (Kaldi) keyword spotting — recognizes ANY in-vocabulary
     phrase with no per-phrase model training.
 
-    This is how "droplet" and "hey droplet" both become first-class wake
-    words for every customer without shipping a trained .onnx: a small
+    This is how "hey droplet" (or any configured phrase list) becomes a
+    first-class wake word for every customer without shipping a trained
+    .onnx: a small
     general English acoustic model runs grammar-constrained to just the
     configured wake phrase(s) plus "[unk]" (everything else). Each 80 ms
     frame is fed to a KaldiRecognizer; when an utterance endpoint is
@@ -717,14 +720,20 @@ def _parse_wake_words(raw: str) -> list[str]:
 def build_detector_from_env() -> WakeWordDetector:
     """Resolve env config → detector instance.
 
-    `WAKE_WORD` is a comma-separated list of wake phrases and defaults to
-    "droplet,hey droplet" — the box wakes on "Droplet" OR "Hey Droplet"
-    (WARP-1431). Underscores map to spaces ("hey_droplet" == "hey droplet").
+    `WAKE_WORD` is a comma-separated list of wake phrases (WARP-1431) and
+    defaults to "hey droplet". Underscores map to spaces ("hey_droplet" ==
+    "hey droplet"). The default deliberately omits the bare one-word
+    "droplet" (WARP-3128): grammar-forced decoding squeezes any
+    two-syllable stretch of ambient speech into a lone "droplet", often at
+    confidence 1.00, so no threshold can separate it from a real wake. On
+    the bench it false-woke ~23x/hour on background conversation. A
+    two-word phrase rejects far better. Operators can still opt back in
+    with WAKE_WORD=droplet,hey droplet.
 
     `WAKE_ENGINE` (default "vosk") selects the backend:
       - "vosk" — recognizes the WAKE_WORD phrases out of the box via a
         grammar-constrained Vosk model, no per-phrase training. This is
-        how "droplet"/"hey droplet" work for every customer with no
+        how "hey droplet" works for every customer with no
         licensing fee. Falls back to openWakeWord if the Vosk model dir
         isn't present, so a stripped image still wakes (on the bundled
         hey_jarvis model) rather than going silent.
@@ -737,7 +746,7 @@ def build_detector_from_env() -> WakeWordDetector:
     Set `WAKE_WORD=__mock__` for a dev box with no wake runtime
     available (forces the MockWakeWordDetector).
     """
-    raw = os.environ.get("WAKE_WORD", "droplet,hey droplet")
+    raw = os.environ.get("WAKE_WORD", "hey droplet")
     if raw.strip() == "__mock__":
         logger.info("WAKE_WORD=__mock__ → MockWakeWordDetector (dev only)")
         return MockWakeWordDetector()

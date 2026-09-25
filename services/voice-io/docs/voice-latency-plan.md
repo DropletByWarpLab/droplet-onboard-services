@@ -35,6 +35,12 @@ compounds on top.
 
 ## Wave A — Wake word: accept "droplet" **and** "Hey Droplet"
 
+> **Superseded 2026-09-25 (WARP-3128):** the default is back to `hey droplet`
+> only. On the bench the bare one-word "droplet" false-woke ~23x/hour on
+> ambient conversation, often at confidence 1.00, so no threshold could filter
+> it. Multi-phrase support stays; operators can opt back in with
+> `WAKE_WORD=droplet,hey droplet`.
+
 **Decision: accept both** (Stefan, 2026-07-20). "Droplet" alone wakes it; "Hey
 Droplet" keeps working. No regression for boxes in the field, and all 14 shipped
 copy strings + the calibration wizard's 3-of-3 wake test stay valid.
