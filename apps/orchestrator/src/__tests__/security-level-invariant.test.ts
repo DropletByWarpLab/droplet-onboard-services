@@ -34,6 +34,13 @@
  * resolver); every GET stays at view, and the literal `/incidents/summary` is
  * declared before `/incidents/:id`. WARP-2980 (P5 PR-A):
  * createSecurityPatternsRouter (routes 29–31, all view), mounted last.
+ *
+ * WARP-2981 (P6): P6-3, the rack panel's count (routes/panel-security.ts), is
+ * NOT a Security router and is not in the table: it lives under /api/panel,
+ * before the module gates, and no person may call it. Its own block below
+ * walks its stack the same way and probes its guard over the same
+ * principals — `service:display` joins them, and every row above still
+ * refuses it (`requireRole` never admits the `service` role).
  */
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -51,6 +58,7 @@ import { createSecurityZonesRouter } from "../routes/security-zones.js";
 import { createSecuritySiteRouter } from "../routes/security-site.js";
 import { createSecurityIncidentsRouter } from "../routes/security-incidents.js";
 import { createSecurityPatternsRouter } from "../routes/security-patterns.js";
+import { createPanelSecurityRouter } from "../routes/panel-security.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
@@ -156,6 +164,8 @@ const PRINCIPALS: ReadonlyArray<readonly [label: string, user: { id: string; rol
   ["guest", { id: "u-guest", role: "guest" }],
   ["service:mcp", { id: "_service:mcp", role: "service" }],
   ["service:voice", { id: "_service:voice", role: "service" }],
+  // WARP-2981 — the rack panel's principal: admitted by P6-3 alone.
+  ["service:display", { id: "_service:display", role: "service" }],
   ["no role", { id: "u-norole", role: "" }],
   ["no user", undefined],
 ];
@@ -264,5 +274,33 @@ describe("Security level invariant — the four routers' real stacks (spec §7, 
     expect(pathRegex("/security/zones/:id").test("/security/zones/a/links")).toBe(false);
     expect(readFeatureGateMeta(sensitiveRateLimit)).toBeNull();
     expect(isRoleGuard(sensitiveRateLimit)).toBe(false);
+  });
+});
+
+describe("WARP-2981 — P6-3, the rack panel's count", () => {
+  const PANEL = routesOf("createPanelSecurityRouter", createPanelSecurityRouter(PRISMA, {}));
+
+  it("the router is exactly GET /panel/security — outside the Security prefix", () => {
+    expect(PANEL.map((r) => r.key)).toEqual(["GET /panel/security"]);
+    expect(PANEL[0]!.path.startsWith("/security")).toBe(false);
+  });
+
+  it("its guard admits exactly the panel's own principal — no person, no other service", () => {
+    const [guard, handler, ...rest] = PANEL[0]!.handles;
+    expect(rest).toEqual([]);
+    expect(handler).toBeTypeOf("function");
+    expect(admitted(guard!)).toEqual(["service:display"]);
+  });
+
+  it("no feature gate and no role-guard marker (requireRoleOrService carries none; nothing here is a person's route)", () => {
+    expect(PANEL[0]!.handles.map(readFeatureGateMeta).filter((m) => m !== null)).toEqual([]);
+    expect(PANEL[0]!.handles.filter(isRoleGuard)).toEqual([]);
+  });
+
+  it("app.ts mounts it once, at /api — and the Security mount pin above still lists only the five Security routers", () => {
+    const app = readFileSync(resolve(__dirname, "../app.ts"), "utf8");
+    expect(app.split('app.use("/api", createPanelSecurityRouter(prisma))').length - 1).toBe(1);
+    const mounts = [...app.matchAll(/app\.use\(\s*"\/api"\s*,\s*(createSecurity\w*Router)\(/g)].map((m) => m[1]);
+    expect(mounts).not.toContain("createPanelSecurityRouter");
   });
 });
