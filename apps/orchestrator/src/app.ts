@@ -74,6 +74,7 @@ import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
 import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
+import { createPanelSecurityRouter } from "./routes/panel-security.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSecurityRouter } from "./routes/security.js";
@@ -190,6 +191,9 @@ export function createApp(
   app.use(
     cors({
       credentials: true,
+      // WARP-3052 — browser clients on an allowed cross-origin must be able to
+      // read the Files degrade marker (it is not a CORS-safelisted header).
+      exposedHeaders: ["X-Droplet-Degraded"],
       origin: (origin, cb) => {
         if (!origin || config.corsAllowedOrigins.includes(origin)) {
           return cb(null, true);
@@ -368,6 +372,13 @@ export function createApp(
   // never depend on a dashboard toggle. Pinned by
   // src/__tests__/security-prefix-composition.test.ts.
   app.use("/api", createEgressAuditRouter());
+  // WARP-2981 (ADR-059 P6) — the rack panel's Security count, GET
+  // /api/panel/security: host plumbing like the collector above, for the
+  // panel's own service principal only. Outside every module prefix and
+  // before the gates so it can answer `off` — behind the gate a switched-off
+  // Security and a toggle that could not be read are the same 404. Pinned by
+  // the same test file and security-level-invariant.test.ts.
+  app.use("/api", createPanelSecurityRouter(prisma));
 
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);

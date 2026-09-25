@@ -272,9 +272,10 @@ describe("readListing", () => {
       status: 200,
       entries: [expect.objectContaining({ path: "/D/a.txt" })],
       possiblyDegraded: false,
+      unavailable: false,
     });
     const empty = await readListing(new Response("[]", { status: 200 }));
-    expect(empty).toEqual({ ok: true, status: 200, entries: [], possiblyDegraded: true });
+    expect(empty).toEqual({ ok: true, status: 200, entries: [], possiblyDegraded: true, unavailable: false });
   });
 
   it("a failed answer has no entries and is a failure, not a degrade", async () => {
@@ -283,7 +284,15 @@ describe("readListing", () => {
       status: 502,
       entries: [],
       possiblyDegraded: false,
+      unavailable: false,
     });
+  });
+
+  it("WARP-3077: an answer marked X-Droplet-Degraded is unavailable, never an empty folder", async () => {
+    const r = await readListing(
+      new Response("[]", { status: 200, headers: { "X-Droplet-Degraded": "nextcloud-unavailable" } }),
+    );
+    expect(r).toEqual({ ok: false, status: 503, entries: [], possiblyDegraded: false, unavailable: true });
   });
 
   it("an unparseable OK body reads as empty, and therefore as possibly degraded", async () => {
