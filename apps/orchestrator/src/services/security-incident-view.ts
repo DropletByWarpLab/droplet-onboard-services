@@ -44,6 +44,10 @@
  *   · notices: owner/admin see every one; anyone else only their own (D34).
  *   · members: the P2a feed query itself (`listSecurityEvents`), with the
  *     viewer's `feedVisibilityWhere` at AND[0] and the membership ANDed after.
+ *   · WARP-2981 (ADR-059 P6, §3.8) — the rack panel's numbers are the one
+ *     read that is no person's projection: `panelOpenIncidents` counts the
+ *     whole box as an owner sees it, and only the panel's own service route
+ *     (P6-3) reads it — never a route a person can call.
  *
  * The projection and the SQL builders are pure; the loaders below them read
  * and then project. The wire shapes are the ones P3 PR-C and P6 build on.
@@ -672,6 +676,35 @@ export async function incidentsSummary(
     listIncidents(prisma, v, { state: "attention" }, 3, now, presence),
   ]);
   return { openAlerts, openNotices, latest: latest.incidents };
+}
+
+/**
+ * WARP-2981 (ADR-059 P6 D20) — the box as the rack panel counts it: an
+ * owner's view, every camera and every threat. Not exported, and no person
+ * is ever this viewer: `panelOpenIncidents` is its one reader.
+ */
+const WHOLE_SITE: IncidentViewer = {
+  userId: "_service:display",
+  visibleCameras: "all",
+  mayReadThreats: true,
+  ownerOrAdmin: true,
+};
+
+/**
+ * P6-3's numbers: the incidents that need attention — state `open`, nobody on
+ * them yet; acknowledged, resolved and plain activity never count — over the
+ * whole box, and how many of them carry an alert. They are the owner's route-17
+ * answer by construction (`open` = openAlerts + openNotices, `alerts` =
+ * openAlerts): route 17's where, over a viewer who is never partial. §3.8's
+ * exception to DS-005, kept narrow: two numbers, no ids, names, areas or
+ * times, read only by the panel's own service principal.
+ */
+export async function panelOpenIncidents(prisma: Pick<Db, "securityIncident">): Promise<{ open: number; alerts: number }> {
+  const [open, alerts] = await Promise.all([
+    prisma.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention" }) }),
+    prisma.securityIncident.count({ where: incidentListWhere(WHOLE_SITE, { state: "attention", severity: "alert" }) }),
+  ]);
+  return { open, alerts };
 }
 
 /**

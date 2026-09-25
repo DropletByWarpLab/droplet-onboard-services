@@ -8,7 +8,9 @@
  *                        the last statement of its own transaction;
  *   a rolled-back ack  — an audit that cannot be written rolls the whole
  *                        acknowledgement back: no ack row, no state change, no
- *                        NotificationLog ack, and no ActivityRow.
+ *                        NotificationLog ack, and no ActivityRow;
+ *   the rack panel     — WARP-2981 (ADR-059 P6): acknowledging takes the
+ *                        incident off the panel's number (P6-3) at once.
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL. Fixtures are tagged
  * `warp2978d`; the audit chain is only walked and cleaned after this file's
@@ -20,7 +22,7 @@ import type { PrismaClient } from "@prisma/client";
 vi.unmock("@prisma/client");
 
 import { actOnIncident, type IncidentActor } from "./security-incident-actions.js";
-import type { IncidentViewer } from "./security-incident-view.js";
+import { panelOpenIncidents, type IncidentViewer } from "./security-incident-view.js";
 import { createActivityRecorder } from "./activity.service.js";
 import { _setActivityRecorderForTests } from "./activity.singleton.js";
 import { createHmacSigner } from "./audit-signing.service.js";
@@ -181,5 +183,17 @@ describe.skipIf(!RUN)("Incident acknowledgement against real Postgres (WARP-2978
     await actOnIncident(prisma, { incidentId: id, action: "acknowledge", actor: actor("maria", "family"), viewer: viewer("maria"), now: NOW });
     expect(await prisma.notificationLog.findUniqueOrThrow({ where: { id: log.id } })).toMatchObject({ ackState: "acked", ackMethod: "incident" });
     expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
+  });
+
+  it("WARP-2981: acknowledging an open incident takes exactly that one off the rack panel's number (P6-3)", async () => {
+    const before = await panelOpenIncidents(prisma);
+    const id = await openIncident(`${TAG}_c3`);
+    // A notice: one more open, no more alerts.
+    expect(await panelOpenIncidents(prisma)).toEqual({ open: before.open + 1, alerts: before.alerts });
+    expect(await actOnIncident(prisma, { incidentId: id, action: "acknowledge", actor: actor("owner", "owner"), viewer: viewer("owner"), now: NOW })).toEqual({
+      status: "ok",
+      changed: true,
+    });
+    expect(await panelOpenIncidents(prisma)).toEqual(before);
   });
 });

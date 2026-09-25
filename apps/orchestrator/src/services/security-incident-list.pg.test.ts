@@ -14,7 +14,12 @@
  *                   the incidents the pure `projectIncident` gives that state
  *                   and severity (review b7e1: the PARTIAL rule has three
  *                   copies — pure, Prisma, SQL — and this pins them together,
- *                   with the same code on two cameras always in the set).
+ *                   with the same code on two cameras always in the set);
+ *   the rack      — WARP-2981 (ADR-059 P6): the panel's numbers
+ *                   (`panelOpenIncidents`, the whole box) equal the owner's
+ *                   route-17 answer, `count(state = 'open')`, and the pure
+ *                   projection's over the whole table — its viewer is the
+ *                   fourth copy of the rule, and never a partial one.
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL. Every camera, area, event and
  * incident here is tagged `warp2978l`; the engine / mode / hours singletons
@@ -30,8 +35,10 @@ import { tickSecurityIncidents, _resetIncidentHealthForTests, type SecurityIncid
 import {
   INCIDENT_VIEW_SELECT,
   REASON_VIEW_SELECT,
+  incidentsSummary,
   listIncidents,
   loadIncidentDetail,
+  panelOpenIncidents,
   projectIncident,
   type IncidentListFilters,
   type IncidentProjection,
@@ -490,6 +497,32 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
 
       const p = (await projections(mine, front)).find((x) => x.row.id === ids.alertsAcknowledged)!.p!;
       expect(p).toMatchObject({ partial: true, actionable: false, state: "open", severity: "alert", codes: ["after_hours_presence"] });
+    });
+
+    // WARP-2981 (ADR-059 P6, D20) — the rack panel's numbers.
+    it("the rack's numbers (P6-3) are the owner's route-17 answer, count(state = 'open') and the pure projection's — over the whole table", async () => {
+      await seed(40, 2981);
+      const ids = await seedSameCode();
+      const now = plus(T0, 3_600_000);
+      const panel = await panelOpenIncidents(prisma);
+      const owner = await incidentsSummary(prisma, OWNER, now);
+      expect(panel).toEqual({ open: owner.openAlerts + owner.openNotices, alerts: owner.openAlerts });
+      // Every open incident carries a code (CHECK state_shape), so for a viewer who sees everything "needs attention" IS the state.
+      expect(panel.open).toBe(await prisma.securityIncident.count({ where: { state: "open" } }));
+      // The pure twin, over every row in the table (other files' rows included — the panel counts them too).
+      const rows = await prisma.securityIncident.findMany({ select: INCIDENT_VIEW_SELECT });
+      const reasons = await prisma.securityIncidentReason.findMany({ select: { incidentId: true, ...REASON_VIEW_SELECT } });
+      const pure = rows
+        .map((row) => projectIncident(row, reasons.filter((r) => r.incidentId === row.id), OWNER, now))
+        .filter((p): p is IncidentProjection => p !== null && p.state === "open");
+      expect(pure.every((p) => !p.partial)).toBe(true);
+      expect(panel).toEqual({ open: pure.length, alerts: pure.filter((p) => p.severity === "alert").length });
+      expect(panel.open).toBeGreaterThan(5); // not vacuous
+      // The rack is no person's view: the acknowledged same-code alert is open for a front-only viewer, never for the rack.
+      const front: IncidentViewer = { ...MARIA, visibleCameras: new Set([FRONT]) };
+      const frontOpen = (await projectedIncidentPage(prisma, front as CameraLimitedViewer, { state: "attention" }, 1000)).map((k) => k.id);
+      expect(frontOpen).toContain(ids.alertsAcknowledged);
+      expect(pure.map((p) => p.incident.id)).not.toContain(ids.alertsAcknowledged);
     });
 
     it("the order, the keys and the cursor do not depend on the session TimeZone (no time is converted in SQL)", async () => {
