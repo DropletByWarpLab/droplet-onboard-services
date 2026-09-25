@@ -832,7 +832,9 @@ async function deptSearchCorpora(
  * `degradeTo` (read endpoints only): when supplied AND the error means Nextcloud
  * is simply unreachable (down / 5xx / not resolvable), respond 200 with this
  * empty shape instead of a 500 so the dashboard's file surfaces don't dead-end
- * during a Nextcloud outage (mirrors models-summary.service.ts). Real errors —
+ * during a Nextcloud outage (mirrors models-summary.service.ts), and set
+ * `X-Droplet-Degraded: nextcloud-unavailable` so clients can tell it apart from
+ * a genuinely empty result (WARP-3052). Real errors —
  * auth/validation/403/404/OCS status — are handled by the checks ABOVE and keep
  * their existing behavior; only the unavailable-dependency path degrades, and we
  * deliberately do NOT cache the empty fallback so it self-heals on recovery.
@@ -847,6 +849,10 @@ async function deptSearchCorpora(
  * `NextcloudOcsError(503)` from a list fn still degrades instead of silently
  * 503-ing. The files-route test asserts exactly this.
  */
+/** WARP-3052 — marks a 200 served from `degradeTo` during a Nextcloud outage. */
+export const DEGRADED_HEADER = "X-Droplet-Degraded";
+export const DEGRADED_NEXTCLOUD = "nextcloud-unavailable";
+
 function handleFileError(
   err: unknown,
   res: Response,
@@ -899,6 +905,11 @@ function handleFileError(
   }
   if (degradeTo !== undefined && (isUpstreamUnavailable(err) || ocsOutage)) {
     logger.warn({ err }, "Nextcloud unreachable; serving empty file listing");
+    // WARP-3052 — the fallback body is byte-identical to a genuinely empty
+    // folder/Trash, so without this header no client can tell "nothing here"
+    // from "Nextcloud is down". Additive: old clients keep the 200 + empty
+    // body; new ones read the header and show "Files are unavailable".
+    res.setHeader(DEGRADED_HEADER, DEGRADED_NEXTCLOUD);
     res.json(degradeTo);
     return;
   }

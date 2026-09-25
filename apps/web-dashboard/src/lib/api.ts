@@ -1,3 +1,4 @@
+import { FilesUnavailableError } from "./files-unavailable";
 import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
@@ -5083,6 +5084,10 @@ export async function patchPersona(update: PersonaUpdate): Promise<PersonaSettin
 
 // --- File operations ---
 
+function throwIfFilesDegraded(res: Response): void {
+  if (res.headers?.get("X-Droplet-Degraded")) throw new FilesUnavailableError();
+}
+
 export async function fetchFiles(
   path: string,
   space: FileSpaceId = "personal"
@@ -5098,6 +5103,7 @@ export async function fetchFiles(
   if (space !== "personal") qs.set("space", space);
   const res = await authFetch(`${BASE}/api/files?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
+  throwIfFilesDegraded(res);
   return res.json();
 }
 
@@ -5656,6 +5662,7 @@ export async function fetchTrash(): Promise<TrashItemInfo[]> {
     if (res.status === 501) throw new TrashUnsupportedError();
     throw new Error(`Failed to fetch trash: ${res.status}`);
   }
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.items ?? [];
 }
@@ -5837,6 +5844,7 @@ export async function toggleFavorite(
 export async function fetchFavorites(): Promise<FileEntryInfo[]> {
   const res = await authFetch(`${BASE}/api/files/favorites`);
   if (!res.ok) throw new Error(`Failed to fetch favorites: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.items ?? [];
 }
@@ -5844,6 +5852,7 @@ export async function fetchFavorites(): Promise<FileEntryInfo[]> {
 export async function fetchRecents(limit = 50): Promise<FileEntryInfo[]> {
   const res = await authFetch(`${BASE}/api/files/recents?limit=${limit}`);
   if (!res.ok) throw new Error(`Failed to fetch recents: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.items ?? [];
 }
@@ -5961,6 +5970,7 @@ export async function deleteShare(shareId: number): Promise<void> {
 export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   const res = await authFetch(`${BASE}/api/files/shared-with-me`);
   if (!res.ok) throw new Error(`Failed to fetch shared-with-me: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.shares ?? [];
 }
@@ -5973,6 +5983,7 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
 export async function fetchSharedByMe(): Promise<ShareDetail[]> {
   const res = await authFetch(`${BASE}/api/files/shares-by-me`);
   if (!res.ok) throw new Error(`Failed to fetch shares-by-me: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.shares ?? [];
 }

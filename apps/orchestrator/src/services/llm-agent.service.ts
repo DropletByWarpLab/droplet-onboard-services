@@ -3043,7 +3043,11 @@ function isRetrievalClassTool(name: string): boolean {
  *                           directory route's body verbatim, and that route
  *                           `res.json(entries)` with a bare `FileEntryInfo[]`
  *                           on all three of its branches (cache hit, normal,
- *                           and the `handleFileError(…, [])` degrade).
+ *                           and the `handleFileError(…, [])` degrade). The
+ *                           degrade's `[]` never reaches here as data: it is
+ *                           marked `X-Droplet-Degraded` (WARP-3052) and the
+ *                           tool turns it into a FILES_UNAVAILABLE error
+ *                           (WARP-3077), so no citation is written for it.
  *   - `path`              — read_file, write_file, move_file, …
  *   - `results[].path`    — search_content hits
  *   - `items[].path`      — search_files, list_recent_files

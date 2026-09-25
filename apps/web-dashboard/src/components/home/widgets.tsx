@@ -77,6 +77,11 @@ import { useChat } from "@/lib/hooks/useChat";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
+import {
+  FILES_UNAVAILABLE_HINT,
+  FILES_UNAVAILABLE_TITLE,
+  isFilesUnavailableError,
+} from "@/lib/files-unavailable";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
@@ -808,11 +813,32 @@ export function ActivityWidget() {
 /* ─────────────────────────── Recent files ─────────────────────────── */
 export function FilesWidget() {
   const router = useRouter();
-  const { items } = useRecents(8);
+  const { items, error, refresh } = useRecents(8);
   const rows = items.slice(0, 8);
   const iconFor: Record<string, LucideIcon> = {
     doc: FileText, pdf: FileText, sheet: FileSpreadsheet, video: Video, image: ImageIcon,
   };
+  // WARP-3076 — the box marked Recents degraded (Nextcloud down): never
+  // "No recent files" during an outage.
+  if (isFilesUnavailableError(error)) {
+    return (
+      <WEmpty>
+        <div role="alert">
+          {FILES_UNAVAILABLE_TITLE}. {FILES_UNAVAILABLE_HINT}
+          <div>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => refresh()}
+              style={{ marginTop: 6 }}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      </WEmpty>
+    );
+  }
   if (rows.length === 0) {
     return <WEmpty>No recent files</WEmpty>;
   }

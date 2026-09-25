@@ -46,6 +46,14 @@ export function createHealthRouter(prisma: PrismaClient): Router {
     // within one POLL_INTERVAL_MS of boot.
     const displayOk = displayComponent ? displayComponent.status === "ok" : true;
 
+    // WARP-3052 — Nextcloud from the same cached snapshot (ncPing, 3s-capped,
+    // every 15s), so this adds no latency to the route. It is informational
+    // only: it never feeds `status`/the 503 below, so a Files outage never
+    // makes a client treat the whole box as down. Same pre-first-probe
+    // charity as display.
+    const nextcloudComponent = snapshot.components.find((c) => c.name === "nextcloud");
+    const nextcloudOk = nextcloudComponent ? nextcloudComponent.status === "ok" : true;
+
     const matterOk = isMatterInitialized();
     const allOk = dbOk && redisOk;
     const response: HealthResponse = {
@@ -69,6 +77,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
         frigate: frigateOk,
         switch: switchOk,
         display: displayOk,
+        nextcloud: nextcloudOk,
       },
     };
 
