@@ -84,7 +84,10 @@ export const WALL_COPY = {
   refusedGuestTitle: "This TV view doesn't run on a guest account",
   refusedGuestWhy: "A guest account can't see Security or its cameras, so there is nothing to show here.",
   refusedWhat: "Sign in here with a {tier} account instead. This screen then shows only the cameras that account has been given.",
-  refusedManage: "You can add that account, and choose its cameras, on the Users page.",
+  // Non-blocking 1 (rjouffret, round 3): a Staff account holds Security at Respond by default (the mode, acknowledging);
+  // a role based on Staff with Security at View has the server refuse those. Words as the role builder shows them.
+  refusedManage:
+    "Best is an account just for this screen. On the Users page, add it and choose its cameras. Then, in Roles & access, give it a role based on {tier}, with Cameras on and Security set to View, so it can't set the mode or acknowledge anything.",
   refusedManageLink: "Open Users",
   refusedSignOut: "Sign out on this screen",
   refusedGuestLeave: "Back to Overview",

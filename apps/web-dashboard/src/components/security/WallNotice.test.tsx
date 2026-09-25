@@ -15,7 +15,9 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: h.push, replace: v
 
 import { WallRefused } from "./WallNotice";
 import { WALL_COPY } from "./wall-status";
-import { tierLabel } from "@/lib/access";
+import { ACCESS_FEATURES, tierLabel } from "@/lib/access";
+import { ACCESS_COPY } from "@/components/access/copy";
+import { fill } from "./ModeCard";
 
 beforeEach(() => {
   h.logout.mockReset().mockResolvedValue(undefined);
@@ -35,6 +37,8 @@ describe("WallRefused (D6)", () => {
     expect(what.textContent).not.toMatch(/\{|family/);
     expect(screen.getByRole("link", { name: WALL_COPY.refusedManageLink })).toHaveAttribute("href", "/users");
     expect(screen.getByRole("link", { name: WALL_COPY.leave })).toHaveAttribute("href", "/security");
+    // Round 3 (rjouffret non-blocking 1): an account just for the screen, whose role sets Security to View.
+    expect(screen.getByText(/an account just for this screen/).textContent).toBe(fill(WALL_COPY.refusedManage, { tier: tierLabel("family") }));
     // Nothing is asked: the refusal is drawn from the session alone.
     expect(h.authFetch).not.toHaveBeenCalled();
   });
@@ -57,13 +61,28 @@ describe("WallRefused (D6)", () => {
     expect(screen.queryByText(WALL_COPY.refusedTitle)).toBeNull();
     expect(screen.queryByText(WALL_COPY.refusedWhy)).toBeNull();
     expect(screen.getByText(/Sign in here with a/).textContent).toContain(`with a ${tierLabel("family")} account`);
-    expect(screen.queryByText(WALL_COPY.refusedManage)).toBeNull();
+    expect(screen.queryByText(/an account just for this screen/)).toBeNull();
     expect(screen.queryByRole("link", { name: WALL_COPY.refusedManageLink })).toBeNull();
     // /security's own reads would be refused for a guest too: the way out is the Overview.
     expect(screen.queryByRole("link", { name: WALL_COPY.leave })).toBeNull();
     expect(screen.getByRole("link", { name: WALL_COPY.refusedGuestLeave })).toHaveAttribute("href", "/");
     expect(screen.getByRole("button", { name: WALL_COPY.refusedSignOut })).toHaveClass("btn", "primary");
     expect(h.authFetch).not.toHaveBeenCalled();
+  });
+
+  it("the dedicated-account advice uses the role builder's own words, and View is a level a Staff role can hold below Respond", () => {
+    // A Staff account holds Security at Respond by default (setting the mode, acknowledging). A role based on
+    // Staff with Security at View has the server refuse those (requireFeatureAccess("security", "act")).
+    const security = ACCESS_FEATURES.find((f) => f.moduleId === "security")!;
+    const cameras = ACCESS_FEATURES.find((f) => f.moduleId === "cameras")!;
+    const [view, respond] = security.levels;
+    expect([view!.value, respond!.value]).toEqual(["view", "act"]);
+    expect(view!.minTier).toBe("family");
+    const advice = fill(WALL_COPY.refusedManage, { tier: tierLabel("family") });
+    expect(advice).toContain(`in ${ACCESS_COPY.tab},`);
+    expect(advice).toContain(`a role based on ${tierLabel("family")},`);
+    expect(advice).toContain(`with ${cameras.label} on and ${security.label} set to ${view!.label},`);
+    expect(advice).not.toMatch(/\{|family/);
   });
 
   it.each(["owner", "guest"])("a %s: 'Sign out on this screen' signs out, then opens the sign-in that comes back to the wall", async (role) => {

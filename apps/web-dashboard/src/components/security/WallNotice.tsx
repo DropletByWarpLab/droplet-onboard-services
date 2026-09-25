@@ -10,7 +10,11 @@
  *     is its first action: an owner or admin reaches it as often from a
  *     laptop's "TV view" button as from a TV, so it names "this screen",
  *     never "this TV". An owner or admin manages people, so it also links to
- *     Users, where accounts are added and their cameras chosen. A guest
+ *     Users, where accounts are added and their cameras chosen, and advises
+ *     an account just for the screen whose role (Roles & access, based on
+ *     Staff) sets Security to View: Staff holds Security at Respond by
+ *     default, and at View the server refuses the mode and acknowledging
+ *     from the room's session. A guest
  *     can't see Security at all (every wall read is floored at Staff on the
  *     server), so a guest is told that, and led back to the Overview.
  *   · `WallSignedOut` — the TV's sign-in ended (the 12 h limit, 30 min with
@@ -62,7 +66,7 @@ export function WallRefused({ role }: { role: string | undefined }) {
     <Notice title={guest ? WALL_COPY.refusedGuestTitle : WALL_COPY.refusedTitle}>
       <p>{guest ? WALL_COPY.refusedGuestWhy : WALL_COPY.refusedWhy}</p>
       <p>{fill(WALL_COPY.refusedWhat, { tier: tierLabel("family") })}</p>
-      {!guest && <p>{WALL_COPY.refusedManage}</p>}
+      {!guest && <p>{fill(WALL_COPY.refusedManage, { tier: tierLabel("family") })}</p>}
       <div className="sec-wall-notice-actions">
         <button type="button" className="btn primary" onClick={() => void signOut()} disabled={leaving}>
           {WALL_COPY.refusedSignOut}
