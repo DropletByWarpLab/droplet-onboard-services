@@ -19,7 +19,10 @@
  * it (WARP-2982), and the server makes the two answers identical. `lost` is
  * retried on the wall's backoff (15 s, 30 s, 60 s, then every 2 min), and a
  * live stream reconnects every 5 min: a clean upstream end freezes the last
- * frame with no error, so only a reconnect bounds a frozen picture.
+ * frame with no error, so only a reconnect bounds a frozen picture. The new
+ * stream loads hidden under the old one and replaces it on its first frame
+ * (`load`), so a reconnect never blanks the screen; one that has not loaded
+ * by the next reconnect is replaced in turn (never more than two streams).
  *
  * Nothing is asked while `allowed` is not true: the page's modules read says
  * whether Cameras is open to this viewer, and every request to a gate that
@@ -48,8 +51,10 @@ export function WallCameras({ allowed, noCameraSystem }: WallCamerasProps) {
   // Bumped to ask again; `lost` counts its retries for the backoff.
   const [check, setCheck] = useState(0);
   const [retries, setRetries] = useState(0);
-  // Bumped every 5 min while live: a new `src` is a new stream.
-  const [generation, setGeneration] = useState(0);
+  // The stream on screen, and the one replacing it while a reconnect loads (a new `src` is a new stream).
+  const [shown, setShown] = useState(0);
+  const [next, setNext] = useState<number | null>(null);
+  const asked = next ?? shown;
 
   // Ask the route — whenever it may be asked and a (re)check is due.
   useEffect(() => {
@@ -64,6 +69,7 @@ export function WallCameras({ allowed, noCameraSystem }: WallCamerasProps) {
         if (ctrl.signal.aborted) return;
         if (status >= 200 && status < 300) {
           setRetries(0);
+          setNext(null);
           setState("live");
         } else {
           setState(status === 404 ? "unavailable" : "lost");
@@ -79,7 +85,7 @@ export function WallCameras({ allowed, noCameraSystem }: WallCamerasProps) {
   // The timers each state owns.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
-    if (state === "live") timer = setTimeout(() => setGeneration((g) => g + 1), CAMERA_RECONNECT_MS);
+    if (state === "live") timer = setTimeout(() => setNext(asked + 1), CAMERA_RECONNECT_MS);
     if (state === "unavailable") timer = setTimeout(() => setCheck((c) => c + 1), CAMERA_UNAVAILABLE_RECHECK_MS);
     if (state === "lost") {
       timer = setTimeout(() => {
@@ -90,17 +96,27 @@ export function WallCameras({ allowed, noCameraSystem }: WallCamerasProps) {
     return () => {
       if (timer !== null) clearTimeout(timer);
     };
-  }, [state, generation, retries]);
+  }, [state, asked, retries]);
 
   if (state === "live") {
+    const stream = (g: number) => `${getBirdseyeLiveUrl()}?w=${g}`;
     return (
       <div className="sec-wall-cameras">
-        <img
-          key={generation}
-          src={`${getBirdseyeLiveUrl()}?w=${generation}`}
-          alt={WALL_COPY.camerasAlt}
-          onError={() => setState("lost")}
-        />
+        <img key={shown} src={stream(shown)} alt={WALL_COPY.camerasAlt} onError={() => setState("lost")} />
+        {next !== null && (
+          <img
+            key={next}
+            src={stream(next)}
+            alt=""
+            aria-hidden="true"
+            className="is-pending"
+            onLoad={() => {
+              setShown(next);
+              setNext(null);
+            }}
+            onError={() => setState("lost")}
+          />
+        )}
       </div>
     );
   }

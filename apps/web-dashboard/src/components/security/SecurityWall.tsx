@@ -20,7 +20,9 @@
  * Always dark (a TV in a room, often at night): the `.droplet-shell` root sits
  * inside a `.dark` element, so the shell's dark ramp resolves whatever the
  * dashboard's theme. Tokens only (wall.css). Only the two banners are live
- * regions, so a screen reader is not re-read the strip every 15 s.
+ * regions, so a screen reader is not re-read the strip every 15 s. The way
+ * out, "Back to Security", is always visible (a phone or an installed app has
+ * no other), low-key beside Full screen and first in the tab order.
  */
 import "@/components/shell/indigo-tokens.css";
 import "@/components/shell/droplet-shell.css";
@@ -28,8 +30,9 @@ import "./wall.css";
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { TriangleAlert } from "lucide-react";
 import { useSecurityWall } from "@/lib/hooks/useSecurity";
-import { deviceTimeZone, formatSiteTime } from "@/lib/security-time";
+import { deviceTimeZone, formatSiteWhen } from "@/lib/security-time";
 import type { SecurityMode } from "@/lib/types";
 import { MODE_BADGE, displayZoneOf, fill, modeReason, staleLine } from "./ModeCard";
 import { SOURCE_LABEL, STATE_BADGE } from "./SecurityFeed";
@@ -108,7 +111,8 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
   const freshness = wallFreshness(wall.lastOkAt, wall.failed, online, now);
   const dimmed = freshness.state === "stale" || freshness.state === "offline";
   const zone = (wall.mode ? displayZoneOf(wall.mode) : deviceTimeZone()) ?? undefined;
-  const time = (ms: number) => formatSiteTime(new Date(ms), zone as string);
+  // With the day when it is not today: an outage can cross midnight.
+  const time = (ms: number) => formatSiteWhen(new Date(ms), zone as string, new Date(now));
 
   const sources = wall.sources;
   const cameraIngest = sources?.find((r) => r.id === "camera_ingest") ?? null;
@@ -122,9 +126,6 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
         <h1 id="sec-wall-h" className="sr-only">
           {WALL_COPY.heading}
         </h1>
-        <Link href="/security" className="sec-wall-leave">
-          {WALL_COPY.leave}
-        </Link>
 
         <WallCameras
           allowed={wall.access === null ? null : wall.access.security && wall.access.cameras}
@@ -134,11 +135,17 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
         <div className="sec-wall-banners">
           {dimmed && (
             <div className="sec-wall-banner" role="status" aria-live="polite" data-banner={freshness.state}>
-              <strong>{freshness.state === "offline" ? WALL_COPY.offlineTitle : WALL_COPY.staleTitle}</strong>
-              <span>
-                {freshness.updatedAt === null
-                  ? WALL_COPY.staleNeverBody
-                  : fill(freshness.state === "offline" ? WALL_COPY.offlineBody : WALL_COPY.staleBody, { time: time(freshness.updatedAt) })}
+              {/* The warning mark /security's ModeCard puts on its stale line: this is not the neutral sign-out notice. */}
+              <span className="badge warn sec-wall-badge" aria-hidden="true">
+                <TriangleAlert size={14} />
+              </span>
+              <span className="sec-wall-banner-text">
+                <strong>{freshness.state === "offline" ? WALL_COPY.offlineTitle : WALL_COPY.staleTitle}</strong>
+                <span>
+                  {freshness.updatedAt === null
+                    ? WALL_COPY.staleNeverBody
+                    : fill(freshness.state === "offline" ? WALL_COPY.offlineBody : WALL_COPY.staleBody, { time: time(freshness.updatedAt) })}
+                </span>
               </span>
             </div>
           )}
@@ -197,7 +204,9 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
                         {notReporting.map((r) => (
                           <li key={r.id}>
                             <span>{SOURCE_LABEL[r.id] ?? WALL_COPY.otherSource}</span>
-                            <span className={STATE_BADGE[r.state]?.cls ?? "badge muted"}>{STATE_BADGE[r.state]?.text ?? WALL_COPY.unknownValue}</span>
+                            <span className={`${STATE_BADGE[r.state]?.cls ?? "badge muted"} sec-wall-badge`}>
+                              {STATE_BADGE[r.state]?.text ?? WALL_COPY.unknownValue}
+                            </span>
                           </li>
                         ))}
                       </ul>
@@ -213,6 +222,9 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
               <dt>{WALL_COPY.updatedLabel}</dt>
               <dd>
                 <span className="sec-wall-value sm">{freshness.updatedAt === null ? WALL_COPY.waiting : time(freshness.updatedAt)}</span>
+                <Link href="/security" className="btn sm ghost sec-wall-leave">
+                  {WALL_COPY.leave}
+                </Link>
                 {canFullScreen && (
                   <button type="button" className="btn sm sec-wall-full" onClick={toggleFullScreen}>
                     {isFullScreen ? WALL_COPY.exitFullScreen : WALL_COPY.fullScreen}

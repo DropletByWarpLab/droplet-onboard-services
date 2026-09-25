@@ -26,6 +26,9 @@ vi.mock("@/components/workspace/WorkspaceShell", () => ({
 vi.mock("@/components/help/HelpLauncher", () => ({
   HelpLauncher: () => <div data-testid="help-launcher" />,
 }));
+vi.mock("@/lib/hooks/useSecurity", () => ({
+  WallModulesKeeper: () => <div data-testid="wall-modules-keeper" />,
+}));
 vi.mock("@/components/ModuleRouteGuard", () => ({
   ModuleRouteGuard: ({ children }: { children: React.ReactNode }) => <div data-testid="module-guard">{children}</div>,
 }));
@@ -93,6 +96,9 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
     expect(screen.queryByTestId("help-launcher")).toBeNull();
     expect(document.querySelector("main#main")).toBeNull();
     expect(screen.getByTestId("module-guard")).toHaveTextContent("wall page");
+    // The wall's modules keeper sits BESIDE the guard, never inside it: when the guard
+    // blocks and unmounts the wall, the keeper's read is what lets the TV back in.
+    expect(screen.getByTestId("wall-modules-keeper").closest("[data-testid='module-guard']")).toBeNull();
   });
 
   it("…and /security itself still gets the shell and the help launcher", () => {
@@ -101,5 +107,6 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
     expect(screen.getByTestId("sidebar-shell")).toBeInTheDocument();
     expect(screen.getByTestId("help-launcher")).toBeInTheDocument();
     expect(document.querySelector("main#main")).toHaveTextContent("security page");
+    expect(screen.queryByTestId("wall-modules-keeper")).toBeNull();
   });
 });

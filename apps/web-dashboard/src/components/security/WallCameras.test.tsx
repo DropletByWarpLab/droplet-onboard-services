@@ -5,9 +5,10 @@
  * is the request the page really makes: a GET (never HEAD — a continuous MJPEG
  * stream never answers one) whose signal is aborted as soon as the status is
  * read, and only when the viewer may ask at all. Then the state machine:
- * live and reconnecting every 5 min, a 404's one neutral line re-asked every
- * 10 min, anything else lost and retried on the wall's backoff, and nothing
- * left running after unmount.
+ * live and reconnecting every 5 min (the old frame kept until the new stream's
+ * first one), a 404's one neutral line re-asked every 10 min, anything else
+ * lost and retried on the wall's backoff, and nothing left running after
+ * unmount.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -37,6 +38,9 @@ async function advance(ms: number) {
 }
 
 const img = () => screen.queryByAltText(WALL_COPY.camerasAlt) as HTMLImageElement | null;
+/** Every stream element in the composite, on screen or loading under it. */
+const streams = () => [...document.querySelectorAll(".sec-wall-cameras > img")].map((i) => i.getAttribute("src"));
+const pending = () => document.querySelector(".sec-wall-cameras > img.is-pending") as HTMLImageElement;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -98,19 +102,50 @@ describe("WallCameras — the check", () => {
 });
 
 describe("WallCameras — live", () => {
-  it("2xx → the composite, reconnected every 5 minutes", async () => {
+  it("2xx → the composite, reconnected every 5 minutes — the old frame stays up until the new stream's first one", async () => {
     h.authFetch.mockReturnValue(answer(200));
     render(<WallCameras allowed={true} noCameraSystem={false} />);
     await settle();
-    expect(img()?.getAttribute("src")).toBe(`${URL}?w=0`);
+    expect(streams()).toEqual([`${URL}?w=0`]);
     await advance(5 * 60_000 - 1);
-    expect(img()?.getAttribute("src")).toBe(`${URL}?w=0`);
+    expect(streams()).toEqual([`${URL}?w=0`]);
     await advance(1);
+    // The new stream loads hidden (and unnamed) under the one on screen: the picture never blanks.
+    expect(streams()).toEqual([`${URL}?w=0`, `${URL}?w=1`]);
+    expect(img()?.getAttribute("src")).toBe(`${URL}?w=0`);
+    expect(pending()).toHaveAttribute("aria-hidden", "true");
+    expect(pending()).toHaveAttribute("alt", "");
+    fireEvent.load(pending());
+    await settle();
+    expect(streams()).toEqual([`${URL}?w=1`]);
     expect(img()?.getAttribute("src")).toBe(`${URL}?w=1`);
     await advance(5 * 60_000);
-    expect(img()?.getAttribute("src")).toBe(`${URL}?w=2`);
+    fireEvent.load(pending());
+    await settle();
+    expect(streams()).toEqual([`${URL}?w=2`]);
     // A reconnect is a new src, not another check.
     expect(h.authFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a reconnect that never loads is replaced by the next one — never more than two streams, the old frame still up", async () => {
+    h.authFetch.mockReturnValue(answer(200));
+    render(<WallCameras allowed={true} noCameraSystem={false} />);
+    await settle();
+    await advance(5 * 60_000);
+    expect(streams()).toEqual([`${URL}?w=0`, `${URL}?w=1`]);
+    await advance(5 * 60_000);
+    expect(streams()).toEqual([`${URL}?w=0`, `${URL}?w=2`]);
+  });
+
+  it("a reconnect that fails → lost, like the stream on screen failing", async () => {
+    h.authFetch.mockReturnValue(answer(200));
+    render(<WallCameras allowed={true} noCameraSystem={false} />);
+    await settle();
+    await advance(5 * 60_000);
+    fireEvent.error(pending());
+    await settle();
+    expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument();
+    expect(streams()).toEqual([]);
   });
 
   it("the stream failing → lost, then checked again on the backoff", async () => {

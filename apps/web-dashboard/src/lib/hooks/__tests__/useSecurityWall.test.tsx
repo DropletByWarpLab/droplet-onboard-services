@@ -11,7 +11,9 @@
  *   · every key is the wall's own (`["security-wall", …]`), never /security's;
  *   · every modules answer is mirrored into the nav gate's shared key;
  *   · a failed read is retried — a 404 included — and its success clears it;
- *   · a modules read that fails before it ever answers says so.
+ *   · a modules read that fails before it ever answers says so;
+ *   · when each read last answered lives in the cache WITH its answer, so a
+ *     remount over a warm cache still knows how old the values are.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
@@ -117,6 +119,19 @@ describe("useSecurityWall — gated on its own modules read (T-D6)", () => {
       expect(result.current.lastOkAt[k]).toBeTypeOf("number");
       expect(result.current.failed[k]).toBe(false);
     }
+  });
+
+  it("a remount over the same cache knows when each read last answered — cached values never come back as new or as 'never'", async () => {
+    const first = renderHook(() => useSecurityWall(), { wrapper });
+    await waitFor(() => expect(first.result.current.lastOkAt.mode).not.toBeNull());
+    const heardAt = first.result.current.lastOkAt;
+    first.unmount();
+    // Droplet stops answering; the second mount has only the cache.
+    for (const f of [api.getWallModules, api.getSecurityIncidentCounts, api.getSecurityWallHealth, api.getSecurityMode]) f.mockReturnValue(new Promise(() => {}));
+    const second = renderHook(() => useSecurityWall(), { wrapper });
+    expect(second.result.current.counts).toEqual(COUNTS);
+    expect(second.result.current.lastOkAt).toEqual(heardAt);
+    expect(Object.values(heardAt).every((t) => typeof t === "number")).toBe(true);
   });
 
   it("reads the sign-in's latest end", async () => {

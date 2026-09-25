@@ -10,6 +10,7 @@ import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
 import { HELP_PATH, SECURITY_WALL_PATH } from "@/lib/routing";
+import { WallModulesKeeper } from "@/lib/hooks/useSecurity";
 
 // `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
 // person so they can set their password at `/invite/<token>`. Omitting it made
@@ -326,8 +327,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // surface, so the module route guard stays: a person Security is not open
   // to, or a box that switched it off, gets the guard's card and its way out.
   // Both takeovers above still win — their redirects run earlier in the effect.
+  // The keeper sits OUTSIDE the guard: it keeps the wall's modules read polling
+  // (and mirroring into the guard's key) while the guard's card is up, so the
+  // TV comes back by itself once Security is on again.
   if (pathname === SECURITY_WALL_PATH) {
-    return <ModuleRouteGuard>{children}</ModuleRouteGuard>;
+    return (
+      <>
+        <WallModulesKeeper />
+        <ModuleRouteGuard>{children}</ModuleRouteGuard>
+      </>
+    );
   }
 
   // Authenticated — show sidebar + main content, plus the persistent help

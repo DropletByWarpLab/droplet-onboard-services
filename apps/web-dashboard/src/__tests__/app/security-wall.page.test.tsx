@@ -8,14 +8,18 @@
  *     needs-attention number with its alerts, the sources not reporting;
  *   · never a number before it was given one (no "0" while loading);
  *   · "nothing is reporting" never reads like "nothing happened";
- *   · stale after 45 s, offline when the browser says so, the sign-out warning
- *     in the sign-in's last half hour;
+ *   · stale after 45 s, offline when the browser says so (a warning mark, the
+ *     day when it is not today), the sign-out warning in the sign-in's last
+ *     half hour — and a remount over a warm cache keeps the values' own time;
+ *   · the way out is always visible; Full screen only where the browser
+ *     offers it;
  *   · every request is a GET to one of the six reads it is allowed (§4) —
  *     and no dashboard source can even name the rack panel's route (T-D13);
- *   · wall.css: tokens only, and nothing 375 px wide scrolls sideways.
+ *   · wall.css: tokens only, the strip on screen above 640 px, readable muted
+ *     badges, and nothing 375 px wide scrolls sideways.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -29,6 +33,7 @@ import SecurityWallPage from "@/app/security/wall/page";
 import { SecurityWall } from "@/components/security/SecurityWall";
 import { WALL_COPY } from "@/components/security/wall-status";
 import { COPY as MODE_COPY } from "@/components/security/ModeCard";
+import { COPY as FEED_COPY } from "@/components/security/SecurityFeed";
 import type { SecurityHealthRow, SecurityModeView } from "@/lib/types";
 
 // ── the box, as the wall's six reads see it ────────────────────────────────
@@ -126,7 +131,8 @@ describe("/security/wall — what the strip says (T-D7)", () => {
     expect(within(cell("mode")).getByText(MODE_COPY.badgeClosed)).toBeInTheDocument();
     expect(within(cell("sources")).getByText("1 not reporting")).toBeInTheDocument();
     expect(within(cell("sources")).getByText("Camera system")).toBeInTheDocument();
-    expect(within(cell("sources")).getByText("Not reporting")).toBeInTheDocument();
+    // At the wall's badge size, not the shell's 11 px: the state is the point of the list.
+    expect(within(cell("sources")).getByText("Not reporting")).toHaveClass("badge", "danger", "sec-wall-badge");
     // Route 17's `latest` never reaches the screen: the wall names no incident or area.
     expect(document.body.textContent).not.toContain("Stock room");
   });
@@ -136,6 +142,29 @@ describe("/security/wall — what the strip says (T-D7)", () => {
     await waitFor(() => expect(within(cell("mode")).getByText(MODE_COPY.badgeClosed)).toBeInTheDocument());
     expect(cell("mode").textContent).toContain("Closed up");
     expect(document.body.textContent).not.toMatch(/Stefan/);
+  });
+
+  it.each([
+    ["lagging", true],
+    ["keeping up", false],
+  ])("the opening-hours ticker %s: the mode cell says whether the mode may be out of date", async (_why, stale) => {
+    box.mode = { ...MODE, stale };
+    box.sources = [...box.sources.filter((r) => r.id !== "site_mode"), { ...row("site_mode", stale ? "down" : "ok"), lastSeenAt: "2026-09-25T19:00:00.000Z" }];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("sources")).getByText("1 not reporting")).toBeInTheDocument());
+    const line = /Droplet hasn't checked the opening hours since .+, so the mode may be out of date\./;
+    if (stale) expect(cell("mode").textContent).toMatch(line);
+    else expect(cell("mode").textContent).not.toMatch(/out of date/);
+  });
+
+  it("no camera system: says so — not 'isn't available here' — and never asks for the composite", async () => {
+    // No camera system means no FRIGATE_URL, so the Cameras module is not effective either.
+    box.modules = { modules: [{ id: "security", effective: true }, { id: "cameras", effective: false }] };
+    box.sources = [row("camera_ingest", "not_configured"), row("threat_mirror", "ok"), row("incidents", "ok")];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(FEED_COPY.emptyNoCameras)).toBeInTheDocument());
+    expect(screen.queryByText(WALL_COPY.camerasUnavailable)).toBeNull();
+    expect((h.authFetch.mock.calls as Array<[string]>).some(([url]) => url.startsWith("/api/cameras/"))).toBe(false);
   });
 
   it("before any answer: no number at all — dashes, 'Waiting for Droplet…', and no 0", async () => {
@@ -184,6 +213,40 @@ describe("/security/wall — freshness and the sign-out warning (T-D7)", () => {
     expect(banner.textContent).toMatch(/What you see is from \d{1,2}:\d{2}/);
     expect(within(cell("attention")).getByText("2")).toBeInTheDocument();
     expect(strip().className).toContain("is-stale");
+    // The warning mark /security's ModeCard uses — not the neutral look of the sign-out notice.
+    expect(banner.querySelector(".badge.warn svg")).not.toBeNull();
+  });
+
+  it("an outage across midnight: the banner and 'Updated' name the day, not only the time", async () => {
+    const t0 = Date.now();
+    const { rerender } = await settled(t0);
+    rerender(<SecurityWall now={t0 + 30 * 3_600_000} />);
+    const day = /(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2}/;
+    expect(screen.getByRole("status").textContent).toMatch(new RegExp(`What you see is from ${day.source}`));
+    expect(cell("updated").textContent).toMatch(day);
+  });
+
+  it("remounted over a warm cache while Droplet is down: the old values keep THEIR time — never 'Waiting', never 'haven't loaded'", async () => {
+    const cache = new Map();
+    const Warm = ({ children }: { children: ReactNode }) => (
+      <SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}>{children}</SWRConfig>
+    );
+    const t0 = Date.now();
+    const first = render(<SecurityWall now={t0} />, { wrapper: Warm });
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    first.unmount();
+    box.down = ["/api/modules", "/api/security/incidents/summary", "/api/security/health", "/api/security/mode"];
+    render(<SecurityWall now={t0 + 3_600_000} />, { wrapper: Warm });
+    expect(within(cell("attention")).getByText("2")).toBeInTheDocument();
+    expect(cell("updated").textContent).not.toContain(WALL_COPY.waiting);
+    expect(cell("updated").textContent).toMatch(/\d{1,2}:\d{2}/);
+    // The remount asks again, and every one of those reads fails.
+    const asked = (path: string) => (h.authFetch.mock.calls as Array<[string]>).filter(([url]) => url === path).length;
+    await waitFor(() => expect(asked("/api/security/mode")).toBe(2));
+    await new Promise((r) => setTimeout(r, 20));
+    const banner = screen.getByRole("status");
+    expect(banner.textContent).toMatch(/What you see is from .*\d{1,2}:\d{2}/);
+    expect(banner.textContent).not.toContain(WALL_COPY.staleNeverBody);
   });
 
   it("offline: says so, whatever the age", async () => {
@@ -212,10 +275,74 @@ describe("/security/wall — freshness and the sign-out warning (T-D7)", () => {
     expect(Boolean(warning)).toBe(shown);
   });
 
+  it("the sign-out notice is neutral: no warning mark", async () => {
+    const t0 = Date.now();
+    box.me = { id: "u1", session: { endsAt: new Date(t0 + 10 * 60_000).toISOString() } };
+    render(<SecurityWall now={t0} />, { wrapper: Wrap });
+    const notice = await screen.findByText(/will be signed out by .* at the latest/);
+    expect(notice.closest("[data-banner]")).toHaveAttribute("data-banner", "sign-out");
+    expect(notice.closest("[data-banner]")!.querySelector(".badge")).toBeNull();
+  });
+
   it("no session on /auth/me (an older orchestrator) → no warning", async () => {
     box.me = { id: "u1" };
     await settled();
     expect(screen.queryByText(/signed out/)).toBeNull();
+  });
+});
+
+describe("/security/wall — the way out, and Full screen", () => {
+  afterEach(() => {
+    for (const k of ["fullscreenEnabled", "fullscreenElement", "exitFullscreen"]) delete (document as unknown as Record<string, unknown>)[k];
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>).requestFullscreen;
+  });
+
+  it("'Back to Security' is always there — a visible control, first in the tab order, to /security", async () => {
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    const leave = await screen.findByRole("link", { name: WALL_COPY.leave });
+    expect(leave).toHaveAttribute("href", "/security");
+    expect(leave).toHaveClass("btn", "sm");
+    expect(leave.className).not.toMatch(/sr-only/);
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    const main = document.querySelector("main#main")!;
+    expect(main.querySelector("a[href], button, input, select, textarea, [tabindex]:not([tabindex='-1'])")).toBe(leave);
+  });
+
+  it("no Full screen button where the browser doesn't offer it (an iPhone)", async () => {
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await screen.findByRole("link", { name: WALL_COPY.leave });
+    expect(screen.queryByRole("button", { name: WALL_COPY.fullScreen })).toBeNull();
+  });
+
+  it("where it is offered: Full screen asks for the wall itself, and the label follows the browser", async () => {
+    let current: Element | null = null;
+    const request = vi.fn(function (this: Element) {
+      return Promise.resolve();
+    });
+    const exit = vi.fn(() => Promise.resolve());
+    Object.defineProperty(document, "fullscreenEnabled", { configurable: true, value: true });
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => current });
+    Object.defineProperty(document, "exitFullscreen", { configurable: true, value: exit });
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", { configurable: true, value: request });
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    const full = await screen.findByRole("button", { name: WALL_COPY.fullScreen });
+    // The way out still comes first in the tab order, before Full screen.
+    const controls = [...document.querySelectorAll("main#main a[href], main#main button")];
+    expect(controls).toEqual([screen.getByRole("link", { name: WALL_COPY.leave }), full]);
+    fireEvent.click(full);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.contexts[0]).toBe(document.querySelector("main#main"));
+    current = document.querySelector("main#main");
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    fireEvent.click(screen.getByRole("button", { name: WALL_COPY.exitFullScreen }));
+    expect(exit).toHaveBeenCalledTimes(1);
+    current = null;
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    expect(screen.getByRole("button", { name: WALL_COPY.fullScreen })).toBeInTheDocument();
   });
 });
 
@@ -262,6 +389,24 @@ describe("DS-005 source pin (T-D13)", () => {
 describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
   const css = readFileSync(packagePath("src/components/security/wall.css"), "utf8");
   const code = css.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  it("above 640 px the page is exactly the viewport's height, so the strip is never pushed below the fold", () => {
+    expect(code).toMatch(/@media \(min-width: 641px\) \{\s*\.droplet-shell\.sec-wall \{ height: 100dvh; \}\s*\}/);
+    expect(code).toMatch(/\.droplet-shell\.sec-wall \{[^}]*grid-template-rows: minmax\(0, 1fr\) auto auto;/);
+  });
+
+  it("≤ 640 px: the rows stack from the top — no empty bands between them", () => {
+    expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.droplet-shell\.sec-wall \{[^}]*align-content: start;/);
+  });
+
+  it("a muted badge on the strip is readable (4.41:1 → --text), and a stale strip's badges lose their colour", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-strip \.badge\.muted \{ color: var\(--text\); \}/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-strip\.is-stale \.badge \{ filter: grayscale\(1\); \}/);
+  });
+
+  it("the way out is never visually hidden", () => {
+    expect(code).not.toMatch(/\.sec-wall-leave[^{,]*\{[^}]*(clip|width: 1px|position: absolute)/);
+  });
 
   it("≤ 640 px: the composite goes 16:9 and the cells wrap at 150 px", () => {
     expect(code).toMatch(/@media \(max-width: 640px\) \{[^@]*\.sec-wall-cameras \{[^}]*aspect-ratio: 16 \/ 9;/);

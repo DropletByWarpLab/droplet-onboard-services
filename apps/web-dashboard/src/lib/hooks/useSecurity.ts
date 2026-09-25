@@ -16,7 +16,7 @@
  * useSWRInfinite keys — after a write that changes feed rows (a mode change,
  * an area's links), call the feed's own `refresh()` as well.
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import useSWR, { useSWRConfig, type Revalidator, type RevalidatorOptions } from "swr";
 import useSWRInfinite from "swr/infinite";
 import {
@@ -341,6 +341,48 @@ const WALL_SWR = {
   onErrorRetry: wallOnErrorRetry,
 } as const;
 
+/**
+ * A read's answer and when it came (epoch ms), cached TOGETHER under the
+ * wall's key. The SWR cache outlives the component — a remount (Back, a
+ * client navigation, the module guard letting the wall back in) draws the
+ * cached values at once — so their time has to come with them. Kept in
+ * component state it restarted at "never", and hour-old numbers read as
+ * "Waiting for Droplet…" instead of "from {time}" (D12).
+ */
+interface Heard<T> {
+  value: T;
+  at: number;
+}
+
+function heard<T>(read: () => Promise<T>): () => Promise<Heard<T>> {
+  return async () => ({ value: await read(), at: Date.now() });
+}
+
+/**
+ * The wall's own /api/modules read, each answer mirrored into the nav gate's
+ * shared key. Two components hold it: the wall (useSecurityWall) and
+ * `WallModulesKeeper`, which AuthGate mounts BESIDE the module route guard.
+ * Once the guard blocks, it unmounts the wall; the nav gate's own read stops
+ * polling after one error (`shouldRetryOnError: false`, and a TV never fires
+ * focus), so without the keeper a single failed poll would leave the TV on the
+ * guard's card for good. SWR shares the key: one request, not two.
+ */
+export function useWallModules() {
+  const { mutate } = useSWRConfig();
+  return useSWR<Heard<ModulesView>>([WALL_KEY, "modules"], heard(() => getWallModules()), {
+    ...WALL_SWR,
+    refreshInterval: WALL_MODULES_REFRESH_MS,
+    // A mutate with data also clears an error the nav gate's key has cached, so its own poll resumes.
+    onSuccess: (data) => void mutate(MODULE_GATE_KEY, data.value, { revalidate: false }),
+  });
+}
+
+/** Keeps `useWallModules` polling, and mirroring, while the module guard has the wall unmounted. Renders nothing. */
+export function WallModulesKeeper(): null {
+  useWallModules();
+  return null;
+}
+
 export interface SecurityWallState {
   /** Null until the wall's modules read has answered: nothing else is asked before. */
   access: { security: boolean; cameras: boolean } | null;
@@ -349,13 +391,11 @@ export interface SecurityWallState {
   mode: SecurityModeView | null;
   /** /auth/me `session.endsAt` (P6-A), or null. */
   signInEndsAt: string | null;
-  /** Epoch ms of each read's last success; null = never. */
+  /** Epoch ms of each read's last success, cached with its answer; null = never. */
   lastOkAt: Record<WallRead, number | null>;
   /** The read's latest attempt failed (its last value, if any, is still shown). */
   failed: Record<WallRead, boolean>;
 }
-
-const NEVER: Record<WallRead, number | null> = { modules: null, counts: null, sources: null, mode: null };
 
 /**
  * Everything /security/wall shows. Fails CLOSED on the module, the opposite of
@@ -364,38 +404,18 @@ const NEVER: Record<WallRead, number | null> = { modules: null, counts: null, so
  * Security is not open to — each such read would be a feature-gate denial,
  * which the threat mirror turns into a "threat". Every answer is mirrored into
  * the nav gate's shared key, so ModuleRouteGuard above the page blocks within
- * 2 min of Security going off.
+ * 2 min of Security going off (and lets it back in once it is on again).
  */
 export function useSecurityWall(): SecurityWallState {
-  const { mutate } = useSWRConfig();
-  const [lastOkAt, setLastOkAt] = useState<Record<WallRead, number | null>>(NEVER);
-  const heard = useCallback((read: WallRead) => () => setLastOkAt((prev) => ({ ...prev, [read]: Date.now() })), []);
-
-  const modules = useSWR<ModulesView>([WALL_KEY, "modules"], () => getWallModules(), {
-    ...WALL_SWR,
-    refreshInterval: WALL_MODULES_REFRESH_MS,
-    onSuccess: (data) => {
-      heard("modules")();
-      void mutate(MODULE_GATE_KEY, data, { revalidate: false });
-    },
-  });
+  const modules = useWallModules();
   const access = modules.data
-    ? { security: isModuleEffective(modules.data, "security"), cameras: isModuleEffective(modules.data, "cameras") }
+    ? { security: isModuleEffective(modules.data.value, "security"), cameras: isModuleEffective(modules.data.value, "cameras") }
     : null;
   const on = access?.security === true;
 
-  const counts = useSWR<SecurityIncidentCounts>(on ? [WALL_KEY, "counts"] : null, () => getSecurityIncidentCounts(), {
-    ...WALL_SWR,
-    onSuccess: heard("counts"),
-  });
-  const health = useSWR<{ sources: SecurityHealthRow[] }>(on ? [WALL_KEY, "health"] : null, () => getSecurityWallHealth(), {
-    ...WALL_SWR,
-    onSuccess: heard("sources"),
-  });
-  const mode = useSWR<SecurityModeView>(on ? [WALL_KEY, "mode"] : null, () => getSecurityMode(), {
-    ...WALL_SWR,
-    onSuccess: heard("mode"),
-  });
+  const counts = useSWR<Heard<SecurityIncidentCounts>>(on ? [WALL_KEY, "counts"] : null, heard(() => getSecurityIncidentCounts()), WALL_SWR);
+  const health = useSWR<Heard<{ sources: SecurityHealthRow[] }>>(on ? [WALL_KEY, "health"] : null, heard(() => getSecurityWallHealth()), WALL_SWR);
+  const mode = useSWR<Heard<SecurityModeView>>(on ? [WALL_KEY, "mode"] : null, heard(() => getSecurityMode()), WALL_SWR);
   const session = useSWR<string | null>([WALL_KEY, "session"], () => getSignInEndsAt(), {
     ...WALL_SWR,
     refreshInterval: WALL_SESSION_REFRESH_MS,
@@ -403,11 +423,16 @@ export function useSecurityWall(): SecurityWallState {
 
   return {
     access,
-    counts: counts.data ?? null,
-    sources: health.data?.sources ?? null,
-    mode: mode.data ?? null,
+    counts: counts.data?.value ?? null,
+    sources: health.data?.value.sources ?? null,
+    mode: mode.data?.value ?? null,
     signInEndsAt: session.data ?? null,
-    lastOkAt,
+    lastOkAt: {
+      modules: modules.data?.at ?? null,
+      counts: counts.data?.at ?? null,
+      sources: health.data?.at ?? null,
+      mode: mode.data?.at ?? null,
+    },
     failed: {
       modules: Boolean(modules.error),
       counts: Boolean(counts.error),

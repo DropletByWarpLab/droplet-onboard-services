@@ -21,9 +21,10 @@ import type { SecurityHealthRow } from "@/lib/types";
 import { fill } from "./ModeCard";
 
 export const WALL_COPY = {
-  link: "Wall",
+  // Plain words: "wall" is our name for it, not the person's.
+  link: "TV view",
   linkTitle: "A full-screen view for a TV. It shows what the signed-in account can see.",
-  heading: "Security wall",
+  heading: "Security TV view",
   leave: "Back to Security",
   fullScreen: "Full screen",
   exitFullScreen: "Leave full screen",
