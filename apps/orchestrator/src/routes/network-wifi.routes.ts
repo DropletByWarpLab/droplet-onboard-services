@@ -15,6 +15,7 @@ import {
   setGuestWifi,
   getGuestWifi,
   removeGuestWifi,
+  stripWirelessSecrets,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import {
@@ -38,10 +39,15 @@ export interface WifiDeps {
 export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
   const { prisma } = deps;
 
-  router.get("/network/wifi", async (_req, res, next) => {
+  // WARP-3091: owner/admin (+ the MCP principal for `get_wifi_settings`), and
+  // secrets stripped even for them — this read is radios, SSIDs and channels;
+  // the PSK lives on `/network/wifi/current`. Members lose it: the web
+  // Wi-Fi channel card falls back to its "couldn't read" notice, and the iOS
+  // Wi-Fi section needs WARP-3095 to stop calling it for non-admins.
+  router.get("/network/wifi", requireRoleOrMcpService("owner", "admin"), async (_req, res, next) => {
     try {
       const wifi = await getWifiSettings();
-      res.json(wifi);
+      res.json(stripWirelessSecrets(wifi));
     } catch (err) {
       next(err);
     }

@@ -85,6 +85,17 @@ export interface StatusDeps {
  */
 const ROUTER_PORT_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,30}$/;
 
+/**
+ * WARP-3091 — the device roster (every workspace device's name, MAC, IP and
+ * presence) is for employees, not external guests. Enforced per route rather
+ * than by flooring `network` view in access-catalog.ts: that floor gates the
+ * whole /api/network prefix, the Network nav entry and the network tool
+ * domain, which would also take status/summary away from guests.
+ * The MCP principal is admitted so `list_network_devices` still dispatches;
+ * the acting-user tool-domain gate is what keeps guests off that path.
+ */
+export const requireNetworkMember = requireRoleOrMcpService("owner", "admin", "family");
+
 export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   const { prisma, networkDeviceService } = deps;
 
@@ -116,7 +127,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // view (displayName, icon, notes, groups, online flag, signal). Callers
   // that still want the raw connected-devices snapshot can opt in via
   // `?legacy=1` — kept for one release while clients migrate.
-  router.get("/network/devices", async (req, res, next) => {
+  router.get("/network/devices", requireNetworkMember, async (req, res, next) => {
     try {
       // WARP-111: SWR-friendly caching so the dashboard's 15-30s polling
       // can serve a short max-age + revalidate window instead of hammering
@@ -138,7 +149,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   });
 
   // --- SSE stream for device changes (poll-based) ---
-  router.get("/network/devices/events", async (req, res) => {
+  router.get("/network/devices/events", requireNetworkMember, async (req, res) => {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -277,7 +288,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   );
 
   // --- DHCP ---
-  router.get("/network/dhcp/leases", async (_req, res, next) => {
+  router.get("/network/dhcp/leases", requireNetworkMember, async (_req, res, next) => {
     try {
       const leases = await getDhcpLeases();
       res.json({ leases });
@@ -1104,6 +1115,14 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     try {
       const { entityId, userId, limit, offset } = req.query;
       const effectiveUserId = (userId as string | undefined) || req.user?.id;
+      // WARP-3092: another person's network audit is owner/admin only.
+      if (
+        effectiveUserId !== req.user?.id &&
+        req.user?.role !== "owner" &&
+        req.user?.role !== "admin"
+      ) {
+        return res.status(403).json({ error: "Forbidden: role not permitted" });
+      }
       const effectiveLimit = Math.min(limit ? parseInt(limit as string, 10) : 50, 500);
       const logs = await getNetworkAuditLog(prisma, {
         entityId: entityId as string | undefined,

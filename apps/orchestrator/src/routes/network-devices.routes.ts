@@ -11,6 +11,7 @@ import type { Router } from "express";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireNetworkMember } from "./network-status.routes.js";
 
 export interface DeviceDeps {
   networkDeviceService: ReturnType<typeof createNetworkDeviceService>;
@@ -21,7 +22,7 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
 
   // --- WARP-82: single device + mutations ---
 
-  router.get("/network/devices/:mac", async (req, res, next) => {
+  router.get("/network/devices/:mac", requireNetworkMember, async (req, res, next) => {
     try {
       const result = await networkDeviceService.getDevice(req.params.mac);
       res.json(result);

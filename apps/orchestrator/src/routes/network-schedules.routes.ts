@@ -222,10 +222,26 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
           .status(400)
           .json({ error: "Body must be { blocked: boolean }" });
       }
-      const result = await scheduleApi.setManualBlock(
+      const { previousManualBlock, ...result } = await scheduleApi.setManualBlock(
         req.params.mac,
         req.body.blocked,
       );
+      // WARP-3092: cutting a device off the network is an admin action on
+      // someone's machine — it lands on the signed activity chain with the
+      // caller as actor, like the override writes above.
+      await recordActivity({
+        kind: "network",
+        severity: "ok",
+        sourceIcon: result.manualBlock ? "shield-off" : "shield",
+        what: result.manualBlock ? "Device blocked" : "Device unblocked",
+        sub: result.mac,
+        refs: {
+          deviceId: result.mac,
+          previousManualBlock,
+          manualBlock: result.manualBlock,
+        },
+        actor: actorFromRequest(req),
+      });
       res.json(result);
     } catch (err) {
       handleRegistryError(err, res, next);
