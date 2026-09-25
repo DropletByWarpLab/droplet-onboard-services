@@ -503,7 +503,7 @@ class TestDefaultPersona:
 
     def test_identity_states_local_privacy(self):
         assert "not a cloud service" in DEFAULT_LLM_SYSTEM_PROMPT
-        assert "stays right here in the house" in DEFAULT_LLM_SYSTEM_PROMPT
+        assert "stays right here on site" in DEFAULT_LLM_SYSTEM_PROMPT
 
     def test_spoken_delivery_constraints_present(self):
         # Every reply is read aloud by Piper — markdown and lists
@@ -512,9 +512,15 @@ class TestDefaultPersona:
         assert "read aloud" in DEFAULT_LLM_SYSTEM_PROMPT
         assert "one short spoken sentence" in DEFAULT_LLM_SYSTEM_PROMPT
 
-    def test_warm_housemate_tone_present(self):
-        assert "housemate" in DEFAULT_LLM_SYSTEM_PROMPT
+    def test_warm_colleague_tone_present(self):
+        assert "colleague" in DEFAULT_LLM_SYSTEM_PROMPT
         assert "warmly" in DEFAULT_LLM_SYSTEM_PROMPT
+
+    def test_no_household_framing(self):
+        # Business-only build: the voice persona must not frame the box
+        # as a home appliance.
+        for word in ("home", "house", "housemate"):
+            assert word not in DEFAULT_LLM_SYSTEM_PROMPT.lower()
 
     def test_read_only_honesty_present(self):
         # ADR-015 is not implemented yet — voice is read-only and the
@@ -718,7 +724,7 @@ class TestDefaultScopeContract:
 
     def test_covers_every_persona_promised_domain(self):
         # DEFAULT_LLM_SYSTEM_PROMPT promises cameras, network, files,
-        # smart devices, calendar, and reminders (read-only). Each must
+        # devices, calendar, and reminders (read-only). Each must
         # have at least its primary read tool in scope.
         scope = set(DEFAULT_VOICE_ALLOWED_TOOLS)
         assert "list_cameras" in scope          # cameras

@@ -45,7 +45,7 @@ INTERNAL_CERT_RENEW_WINDOW_S=2592000
 INTERNAL_CA_SERVICES=(
   orchestrator gateway ai-gateway mcp-server voice-io email-indexer rag-eval
   ops-console file-indexer routing switch oled-display matter-controller
-  camera-discovery broker frigate
+  camera-discovery broker frigate device-gateway
   # WARP-234: Redis server TLS — the compose `cache` service stages this
   # bundle as its server cert (docker-compose.yml cache.command); nextcloud
   # mounts its bundle for the phpredis CA pin (zz-redis-tls.config.php).
@@ -69,7 +69,7 @@ INTERNAL_CA_SERVICES=(
 # WARP-1061: camera-discovery joins — it is host-network too and its mesh
 # callers (orchestrator cameras.ts, mcp-server) dial it via
 # host.docker.internal:8085, so its server cert needs that SAN.
-INTERNAL_CA_HOSTNET_SERVICES=(routing switch oled-display matter-controller camera-discovery)
+INTERNAL_CA_HOSTNET_SERVICES=(routing switch oled-display matter-controller camera-discovery device-gateway)
 
 internal_ca_ensure() {
   mkdir -p "$INTERNAL_CA_DIR"

@@ -529,12 +529,12 @@ const SECTIONS: Section[] = [
   },
   {
     anchor: "devices",
-    title: "Smart devices",
+    title: "Device control",
     Icon: Cpu,
     body: (
       <>
         <p>
-          The Droplet speaks Matter — the smart-device protocol most new
+          The Droplet speaks Matter — the device-control protocol most new
           devices support. Pair a Matter-compatible light / switch /
           sensor / thermostat and it appears on the Devices page.
         </p>

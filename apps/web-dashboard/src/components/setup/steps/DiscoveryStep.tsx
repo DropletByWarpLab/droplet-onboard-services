@@ -500,8 +500,8 @@ export function DiscoveryStep({
                 // no-devices empty state, so the subtitle should match
                 // instead of contradicting it.
                 scanPhase === "stopped"
-                ? "No smart devices found yet"
-                : "Scanning your network for smart devices..."
+                ? "No devices found yet"
+                : "Scanning your network for devices..."
       }
       primary={{ label: "Continue", onClick: handleFinish, showArrow: true }}
       skip={{ label: "Skip for now", onClick: handleFinish }}
@@ -717,7 +717,7 @@ export function DiscoveryStep({
                 Device discovery didn&apos;t find any devices
               </p>
               <p className="type-subheadline text-label-secondary max-w-sm">
-                Make sure your smart devices are powered on and in pairing
+                Make sure your devices are powered on and in pairing
                 mode, then scan again. You can also enter a pairing code below,
                 or add devices later from the Devices page.
               </p>

@@ -243,7 +243,7 @@ export function ScheduleEditorModal({
               type="text"
               value={form.name}
               onChange={(e) => update("name", e.target.value)}
-              placeholder="e.g. Bedtime"
+              placeholder="e.g. After hours"
               className="w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[color:var(--text)] placeholder:text-[color:var(--text-muted)] focus:border-[var(--brand)]"
             />
           </div>

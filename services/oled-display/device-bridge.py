@@ -253,7 +253,7 @@ def _orchestrator_household_wifi(timeout=4.0):
         # access point has been approved", "run --sync-secrets", …). Pass it
         # through — a generic string here would throw away the one field that
         # tells someone at the rack what to do.
-        return None, str(body.get("detail") or "no household Wi-Fi is set")
+        return None, str(body.get("detail") or "no workspace Wi-Fi is set")
 
     return {
         "ssid": ssid,

@@ -45,7 +45,7 @@ const inputSchema = {
     display_name: {
       type: "string",
       description:
-        'The new household-facing name, e.g. "Driveway". 1-64 characters; spaces and accents are fine. This is a label only — the camera\'s underlying id is unchanged and existing recordings are unaffected.',
+        'The new display name, e.g. "Loading dock". 1-64 characters; spaces and accents are fine. This is a label only — the camera\'s underlying id is unchanged and existing recordings are unaffected.',
     },
   },
   required: ["camera", "display_name"],
@@ -164,7 +164,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "rename_camera",
   description:
-    'Rename a security camera to something the household actually calls it, e.g. turn "Xnv C8083r E43022502afd" into "Driveway". Accepts either the camera id or its current display name. This changes the label only — the camera\'s underlying id, its recordings, and its event history are all unaffected, and the change is instant and reversible. Use whenever the user asks to rename, re-label, or "call" a camera something.',
+    'Rename a security camera to something the team actually calls it, e.g. turn "Xnv C8083r E43022502afd" into "Loading dock". Accepts either the camera id or its current display name. This changes the label only — the camera\'s underlying id, its recordings, and its event history are all unaffected, and the change is instant and reversible. Use whenever the user asks to rename, re-label, or "call" a camera something.',
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

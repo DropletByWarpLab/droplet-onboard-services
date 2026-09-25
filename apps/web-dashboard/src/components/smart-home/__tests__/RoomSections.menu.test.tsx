@@ -63,10 +63,10 @@ describe("room options menu (WARP-1396)", () => {
   it("saving from the icon picker keeps the room's existing name", async () => {
     renderSections();
     openMenuItem("Choose icon");
-    fireEvent.click(screen.getByRole("button", { name: "Bedroom" }));
+    fireEvent.click(screen.getByRole("button", { name: "Conference room" }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await vi.waitFor(() =>
-      expect(actions.rename).toHaveBeenCalledWith("r1", { name: "Kitchen", icon: "bed" }),
+      expect(actions.rename).toHaveBeenCalledWith("r1", { name: "Kitchen", icon: "presentation" }),
     );
   });
 });

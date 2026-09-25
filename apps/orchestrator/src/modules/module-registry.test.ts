@@ -80,13 +80,14 @@ describe("route prefixes — must match a real router mount", () => {
     //   knowledge → /api/files/knowledge/* (files-knowledge.ts)
     //   docs      → /api/files/docs/status (files.ts)
     //   calendar  → /api/calendar/* (calendar.ts) — NOT /api/pm/events
-    //   smart_home→ /api/matter/* only (matter.ts); /api/devices is the
-    //               device registry/pairing/push surface, never gated here.
+    //   smart_home→ /api/matter/* (matter.ts) + /api/building/* (building.ts,
+    //               the device gateway); /api/devices is the device
+    //               registry/pairing/push surface, never gated here.
     const prefixes = (id: string) => MODULE_BY_ID.get(id as never)!.routePrefixes;
     expect(prefixes("knowledge")).toEqual(["/api/files/knowledge"]);
     expect(prefixes("docs")).toEqual(["/api/files/docs"]);
     expect(prefixes("calendar")).toEqual(["/api/calendar"]);
-    expect(prefixes("smart_home")).toEqual(["/api/matter"]);
+    expect(prefixes("smart_home")).toEqual(["/api/matter", "/api/building"]);
     expect(prefixes("smart_home")).not.toContain("/api/devices");
   });
 

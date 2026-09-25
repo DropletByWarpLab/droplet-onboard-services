@@ -22,7 +22,7 @@ const inputSchema = {
     },
     ssid: {
       type: "string",
-      description: "SSID the AP should serve (typically the household SSID).",
+      description: "SSID the AP should serve (typically the workspace SSID).",
       minLength: 1,
       maxLength: 32,
     },
@@ -99,7 +99,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "approve_ap",
   description:
-    "Approve a discovered coverage-extender AP and push the household wireless config. Destructive: changes the wireless surface and may briefly interrupt connected devices on the main AP during reload. Requires user confirmation.",
+    "Approve a discovered coverage-extender AP and push the workspace wireless config. Destructive: changes the wireless surface and may briefly interrupt connected devices on the main AP during reload. Requires user confirmation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

@@ -113,7 +113,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "control_device",
   description:
-    "Send a command to a smart-home device. Available commands depend on device type. Some commands (locks, extreme settings) require user confirmation and will return a confirmation_required result instead of executing immediately.",
+    "Send a command to a controlled device. Available commands depend on device type. Some commands (locks, extreme settings) require user confirmation and will return a confirmation_required result instead of executing immediately.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

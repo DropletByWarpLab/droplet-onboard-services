@@ -1911,6 +1911,44 @@ services:
     cpus: ${SWITCH_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
+  # --- Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) ---
+  # Device control for commercial/industrial equipment beside Matter.
+  # network_mode: host because BACnet Who-Is is a UDP broadcast (:47808) and
+  # KNX routing is multicast — neither crosses the Docker bridge. Only the
+  # orchestrator calls it (:8084, host-service ladder after routing 8080 /
+  # switch 8081 / display 8082 / matter 8083). Fails CLOSED without its
+  # bearer. Writes are plan-only until DEVICE_GATEWAY_LIVE_WRITES=1.
+  device-gateway:
+    build:
+      context: ..
+      dockerfile: services/device-gateway/Dockerfile
+    network_mode: host
+    environment:
+      # Must equal the orchestrator's SERVICE_TOKEN_DEVICE_GATEWAY (env_file).
+      - SERVICE_SECRET=${SERVICE_TOKEN_DEVICE_GATEWAY:-}
+      # Explicit boolean, never derived: 0 = writes are planned, not sent.
+      - DEVICE_GATEWAY_LIVE_WRITES=${DEVICE_GATEWAY_LIVE_WRITES:-0}
+      - DEVICE_GATEWAY_TIMEOUT_S=${DEVICE_GATEWAY_TIMEOUT_S:-3}
+      # The gateway's own BACnet identity; must be unique on the site network.
+      - DEVICE_GATEWAY_BACNET_INSTANCE=${DEVICE_GATEWAY_BACNET_INSTANCE:-4194000}
+      # "<ip>/<prefix>" of the LAN interface; empty = BACpypes3 picks the host.
+      - DEVICE_GATEWAY_BACNET_ADDRESS=${DEVICE_GATEWAY_BACNET_ADDRESS:-}
+      # WARP-1061: internal mTLS. No env_file on this service, so the knob is
+      # passed explicitly; 1 flips the :8084 listener to TLS + required
+      # client certs. 0 (default) = plaintext.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
+    volumes:
+      # Device + point registry (0600) — survives container rebuilds.
+      - device-gateway-state:/var/lib/droplet/device-gateway
+      # WARP-1061: this service's internal-CA bundle (CN = "device-gateway").
+      - ../data/secrets/service-tls/device-gateway:/data/service-tls:ro
+    profiles: ["full", "single-box"]
+    restart: always
+    <<: *default-logging
+    mem_limit: ${DEVICE_GATEWAY_MEM_LIMIT:-192m}
+    cpus: ${DEVICE_GATEWAY_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
   # --- Frigate NVR (camera management + AI detection) ---
   # Linux-only: requires /dev/dri/renderD128 (Intel/AMD VAAPI) and /dev/bus/usb,
   # neither of which exist in Docker Desktop on macOS. Setup writes
@@ -3753,6 +3791,8 @@ volumes:
   piper-voices:
   # ADR-018 item 12: switch provision-state persistence (last_provisioned_at).
   switch-state:
+  # Device gateway registry (BACnet/Modbus/SNMP/KNX devices + points, 0600).
+  device-gateway-state:
   # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
   # ollama + openwrt services are active. Declared unconditionally so
   # `docker volume ls` shows the names whether the profile is on or off;

@@ -181,6 +181,9 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "create_scene",
     // WARP-1447: room assignment (auto-creates the room when missing)
     "assign_device_room",
+    // Device gateway: BACnet/IP, Modbus TCP, SNMP, KNX/IP.
+    "get_building_devices",
+    "set_building_point",
   ],
   cameras: [
     "list_cameras",
@@ -336,7 +339,7 @@ const DOMAIN_BY_NAME: ReadonlyMap<string, ToolDomain> = new Map(
  */
 export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Network
-  list_network_devices: "See every device that uses your home network",
+  list_network_devices: "See every device that uses your network",
   get_network_status: "Check whether your internet and Wi-Fi are working",
   list_dhcp_leases: "See which devices are connected right now and their addresses",
   get_wifi_settings: "View your Wi-Fi name, password, and channel",
@@ -350,15 +353,15 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   add_port_forward: "Open an app or service to the internet",
   get_router_system_info: "Check your router's status and how long it's been running",
   restart_router: "Restart your router (takes 30–90 seconds; reconnects all devices automatically)",
-  network_summary: "See the health of your home network at a glance",
+  network_summary: "See the health of your network at a glance",
   list_ap_devices: "See your Wi-Fi extenders that boost coverage",
   approve_ap: "Add a Wi-Fi extender to spread coverage further",
   decommission_ap: "Remove a Wi-Fi extender from your network",
-  get_bandwidth_usage: "See how much internet your home is using",
-  list_vpn_peers: "See who has remote access to your home network",
+  get_bandwidth_usage: "See how much internet your network is using",
+  list_vpn_peers: "See who has remote access to your network",
   list_threat_events: "Review recent security alerts from your network",
   set_wifi_password: "Change your Wi-Fi password (every device reconnects)",
-  set_device_schedule: "Set internet time limits for a device, like bedtime hours",
+  set_device_schedule: "Set internet time limits for a device, like after hours",
   // Files
   list_files: "Browse the files on your Droplet",
   read_file: "Open and read one of your files",
@@ -385,17 +388,19 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
   organize_files: "Sort a folder's files into tidy subfolders",
   delete_files: "Clear out a list of files you have agreed to delete",
-  // Smart home
-  list_smart_home_devices: "See all your smart home devices",
-  get_smart_home_device: "Check the status of one smart home device",
-  control_device: "Turn a smart device on, off, or adjust it",
-  discover_matter_devices: "Find new smart home devices to add",
-  commission_device: "Set up a new smart home device",
-  get_command_history: "See recent actions taken on your smart devices",
-  run_scene: "Run a saved routine like 'movie night' or 'goodnight'",
-  remove_device: "Remove a smart home device you no longer use (asks first)",
-  create_scene: "Save a new routine like 'movie night' from a list of device actions",
-  assign_device_room: "Put a smart device in a room, like 'move the lamp to the den'",
+  // Device control
+  list_smart_home_devices: "See all your connected devices",
+  get_smart_home_device: "Check the status of one connected device",
+  control_device: "Turn a device on, off, or adjust it",
+  discover_matter_devices: "Find new devices to add",
+  commission_device: "Set up a new device",
+  get_command_history: "See recent actions taken on your devices",
+  run_scene: "Run a saved routine like 'open up' or 'close for the night'",
+  remove_device: "Remove a device you no longer use (asks first)",
+  create_scene: "Save a new routine like 'open up' from a list of device actions",
+  assign_device_room: "Put a device in a room, like 'the heater is in the conference room'",
+  get_building_devices: "See building systems like heating, meters, printers and UPSes, and their readings",
+  set_building_point: "Change a building setting, like a temperature setpoint (asks first)",
   // Cameras
   list_cameras: "See all your security cameras and their status",
   list_discovered_cameras: "See new cameras found but not yet added",
@@ -442,7 +447,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   list_drives: "See your storage drives and free space",
   list_storage_pools: "Check your storage pools and whether any need attention",
   get_drive_health: "Check your drives' health and temperature",
-  get_audit_log: "See what your Droplet and household have done recently",
+  get_audit_log: "See what your Droplet and team have done recently",
   get_update_status: "Check for software updates and their progress",
   apply_update: "Install the pending software update (services restart briefly)",
   // Memory

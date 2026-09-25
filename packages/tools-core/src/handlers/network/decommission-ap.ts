@@ -54,7 +54,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "decommission_ap",
   description:
-    "Remove a coverage-extender AP from the household network. Destructive: every device currently associated with that AP will be dropped at reload time and have to re-associate (either with the same AP after a fresh approval or with the main router / a different extender). Requires user confirmation.",
+    "Remove a coverage-extender AP from the workspace network. Destructive: every device currently associated with that AP will be dropped at reload time and have to re-associate (either with the same AP after a fresh approval or with the main router / a different extender). Requires user confirmation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

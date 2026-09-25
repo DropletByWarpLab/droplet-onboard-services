@@ -190,8 +190,8 @@ export function RoomSections({
               Group devices into rooms
             </p>
             <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
-              Rooms keep this page tidy — and let you say things like &ldquo;movie
-              time in the living room.&rdquo;
+              Rooms keep this page tidy — and let you say things like &ldquo;lights
+              off in the conference room.&rdquo;
             </p>
           </div>
           <button

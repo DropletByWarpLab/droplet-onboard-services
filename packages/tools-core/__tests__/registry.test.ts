@@ -94,6 +94,9 @@ const EXPECTED_TOOL_NAMES = [
   "remove_device",
   "create_scene",
   "assign_device_room",
+  // Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) via /api/building.
+  "get_building_devices",
+  "set_building_point",
   // ADR-045 — the `pm` and `crm` tool families are GONE, and that is the
   // decision this list exists to make somebody sign.
   //
@@ -400,6 +403,10 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("create_scene")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("assign_device_room")?.requiresWrite).toBe(true);
     expect(TOOLS.get("assign_device_room")?.requiresConfirmation).toBe(false);
+    // Building writes move real equipment: interceptor-confirmed, never route-owned.
+    expect(TOOLS.get("get_building_devices")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("set_building_point")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("set_building_point")?.requiresConfirmation).toBe(true);
     // WARP-1450 — appliance ops: reads are Tier-1 (audit/update-status also
     // role-gate the human INSIDE the handler); apply_update is Tier-2.
     expect(TOOLS.get("get_drive_health")?.requiresWrite).toBe(false);

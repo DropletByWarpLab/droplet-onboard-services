@@ -237,7 +237,7 @@ export function RouterPortsPanel() {
           open
           title={
             escalated.guard.code === "WAN_PORT"
-              ? "Take your home offline?"
+              ? "Take everyone offline?"
               : "Cut the connection you're using?"
           }
           description={escalated.guard.reason}

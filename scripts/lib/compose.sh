@@ -225,6 +225,7 @@ prepare_and_build() {
     # full profile (hardware-facing services)
     file-indexer
     switch
+    device-gateway
     camera-discovery
     oled-display
     # full profile (email ingestion — same drift fix as mcp-server above)

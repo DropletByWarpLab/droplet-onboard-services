@@ -292,9 +292,14 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // (one sandbox checkout is their whole reach), so none moves this
     // number. 41 + 1 = 42.
     //
+    // The device gateway then added ONE: `set_building_point` — a write to
+    // real building equipment (BACnet/Modbus/SNMP/KNX), confirmed by the
+    // interceptor. Its route mints no token of its own, so it is not a
+    // pass-through; `get_building_devices` is a read. 42 + 1 = 43.
+    //
     // The pass-through roster below is again unchanged: none of the tools
     // touched since relays a 202.
-    expect(confirming).toHaveLength(42);
+    expect(confirming).toHaveLength(43);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
