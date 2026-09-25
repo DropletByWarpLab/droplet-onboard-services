@@ -526,12 +526,21 @@ export async function redeliverStuckNotices(prisma: PrismaClient, now: Date, opt
 
 // ── the alerts health row (§6.11) ─────────────────────────────────────────
 
-/** Hours set AND at least one active Inside / Staff only area with an active link — what after-hours alerts need. */
+/**
+ * Hours set AND at least one active Inside / Staff only area with an active
+ * CAMERA link (whole camera or part of its view) — what after-hours alerts
+ * need. A door-lock link (WARP-2977 P2b-2) does not count: lock rows feed no
+ * rule (D21), so an area only a lock watches can never raise one.
+ */
 export async function alertsReady(prisma: Pick<PrismaClient, "securitySiteHours" | "securityZone">): Promise<boolean> {
   const hours = await prisma.securitySiteHours.findUnique({ where: { id: SINGLETON }, select: { state: true } });
   if (hours?.state !== "set") return false;
   const areas = await prisma.securityZone.count({
-    where: { state: "active", kind: { in: ["interior", "restricted"] }, links: { some: { state: "active" } } },
+    where: {
+      state: "active",
+      kind: { in: ["interior", "restricted"] },
+      links: { some: { state: "active", sourceKind: { in: ["camera", "camera_zone"] } } },
+    },
   });
   return areas > 0;
 }
@@ -584,7 +593,7 @@ async function uncoveredAlertCameras(prisma: PrismaClient, receivers: readonly R
 
 /**
  * The `alerts` row — owner/admin only (it names who is told):
- *   · not_configured — no opening hours, or no Inside / Staff only area with a link;
+ *   · not_configured — no opening hours, or no Inside / Staff only area with a camera link;
  *   · down — an alert failed in the last day; or nobody set to be told is
  *     eligible; or an Inside / Staff only camera none of them can see (the
  *     owner fallback is what reaches anyone about it);
