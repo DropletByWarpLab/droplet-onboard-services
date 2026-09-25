@@ -24,10 +24,10 @@ vi.mock("@/components/workspace/WorkspaceShell", () => ({
   ),
 }));
 vi.mock("@/components/help/HelpLauncher", () => ({
-  HelpLauncher: () => null,
+  HelpLauncher: () => <div data-testid="help-launcher" />,
 }));
 vi.mock("@/components/ModuleRouteGuard", () => ({
-  ModuleRouteGuard: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  ModuleRouteGuard: ({ children }: { children: React.ReactNode }) => <div data-testid="module-guard">{children}</div>,
 }));
 
 const layoutRef = { current: "sidebar" as "sidebar" | "workspace" };
@@ -80,5 +80,26 @@ describe("AuthGate — nav layout switch (WARP-2971)", () => {
     render(<AuthGate>page</AuthGate>);
     expect(screen.queryByTestId("workspace-shell")).toBeNull();
     expect(screen.queryByTestId("sidebar-shell")).toBeNull();
+  });
+});
+
+describe("AuthGate — the Security wall has no chrome, but keeps the module guard (WARP-2981)", () => {
+  it.each(["sidebar", "workspace"] as const)("on /security/wall with the %s layout: no shell, no <main>, no help — the guard wraps the page", (layout) => {
+    layoutRef.current = layout;
+    pathnameValue = "/security/wall";
+    render(<AuthGate>wall page</AuthGate>);
+    expect(screen.queryByTestId("sidebar-shell")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell")).toBeNull();
+    expect(screen.queryByTestId("help-launcher")).toBeNull();
+    expect(document.querySelector("main#main")).toBeNull();
+    expect(screen.getByTestId("module-guard")).toHaveTextContent("wall page");
+  });
+
+  it("…and /security itself still gets the shell and the help launcher", () => {
+    pathnameValue = "/security";
+    render(<AuthGate>security page</AuthGate>);
+    expect(screen.getByTestId("sidebar-shell")).toBeInTheDocument();
+    expect(screen.getByTestId("help-launcher")).toBeInTheDocument();
+    expect(document.querySelector("main#main")).toHaveTextContent("security page");
   });
 });

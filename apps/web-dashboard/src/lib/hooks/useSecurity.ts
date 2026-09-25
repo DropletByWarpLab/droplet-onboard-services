@@ -16,8 +16,8 @@
  * useSWRInfinite keys — after a write that changes feed rows (a mode change,
  * an area's links), call the feed's own `refresh()` as well.
  */
-import { useCallback, useMemo } from "react";
-import useSWR, { useSWRConfig } from "swr";
+import { useCallback, useMemo, useState } from "react";
+import useSWR, { useSWRConfig, type Revalidator, type RevalidatorOptions } from "swr";
 import useSWRInfinite from "swr/infinite";
 import {
   SECURITY_HOURS_PATH,
@@ -31,6 +31,10 @@ import {
   fetchCameras,
   getSecurityEvents,
   getSecurityHealth,
+  getSecurityIncidentCounts,
+  getSecurityWallHealth,
+  getSignInEndsAt,
+  getWallModules,
   getSecurityHours,
   getSecurityMode,
   getSecurityPatternCells,
@@ -54,6 +58,7 @@ import type {
   SecurityHoursExceptionBody,
   SecurityHoursView,
   SecurityHoursWriteResult,
+  SecurityIncidentCounts,
   SecurityModeAction,
   SecurityModeActionResult,
   SecurityModeView,
@@ -67,6 +72,8 @@ import type {
   SecurityZonesResponse,
   SecurityZoneWriteResult,
 } from "@/lib/types";
+import { MODULE_GATE_KEY, isModuleEffective, type ModulesView } from "@/lib/hooks/useModuleGate";
+import type { WallRead } from "@/components/security/wall-status";
 
 const REFRESH_MS = 15_000;
 
@@ -286,6 +293,127 @@ export function useSecurityHours() {
     save,
     saveException,
     deleteException,
+  };
+}
+
+// ── WARP-2981 (ADR-059 P6, §3.8): the Security wall ──
+//
+// A TV left on for hours with nobody to press Retry. The page's own SWR keys
+// (`["security-wall", …]`, never /security's) so its retry policy cannot
+// change /security's, and every read is retried — on its own backoff, capped
+// at 2 min — whatever the error:
+//   · SWR stops POLLING a key while its error is cached, and its default
+//     retry backs off to ~30 min; the wall's must come back within minutes;
+//   · a 404 is retried too: the module gate answers 404 on a toggle it could
+//     not read (fail closed), and a key that gave up on a 404 would stay dead.
+//     What stops a refused person's reads is the modules gate below, not the
+//     retry policy.
+// `revalidateOnFocus: false` also lets retries run in a tab the browser
+// thinks is inactive (SWR only retries an inactive page when one of focus /
+// reconnect revalidation is off).
+
+export const WALL_KEY = "security-wall";
+export const WALL_REFRESH_MS = 15_000;
+export const WALL_MODULES_REFRESH_MS = 120_000;
+export const WALL_SESSION_REFRESH_MS = 300_000;
+
+/** 15 s, 30 s, 60 s, then 120 s for good (SWR's retryCount starts at 1). */
+export function wallRetryDelayMs(retryCount: number): number {
+  return Math.min(120_000, 15_000 * 2 ** Math.max(0, retryCount - 1));
+}
+
+/** SWR `onErrorRetry`: every error, on `wallRetryDelayMs`. */
+export function wallOnErrorRetry(
+  _err: unknown,
+  _key: unknown,
+  _config: unknown,
+  revalidate: Revalidator,
+  opts: Required<RevalidatorOptions>,
+): void {
+  setTimeout(() => void revalidate(opts), wallRetryDelayMs(opts.retryCount));
+}
+
+const WALL_SWR = {
+  refreshInterval: WALL_REFRESH_MS,
+  refreshWhenHidden: true,
+  revalidateOnFocus: false,
+  shouldRetryOnError: true,
+  onErrorRetry: wallOnErrorRetry,
+} as const;
+
+export interface SecurityWallState {
+  /** Null until the wall's modules read has answered: nothing else is asked before. */
+  access: { security: boolean; cameras: boolean } | null;
+  counts: SecurityIncidentCounts | null;
+  sources: SecurityHealthRow[] | null;
+  mode: SecurityModeView | null;
+  /** /auth/me `session.endsAt` (P6-A), or null. */
+  signInEndsAt: string | null;
+  /** Epoch ms of each read's last success; null = never. */
+  lastOkAt: Record<WallRead, number | null>;
+  /** The read's latest attempt failed (its last value, if any, is still shown). */
+  failed: Record<WallRead, boolean>;
+}
+
+const NEVER: Record<WallRead, number | null> = { modules: null, counts: null, sources: null, mode: null };
+
+/**
+ * Everything /security/wall shows. Fails CLOSED on the module, the opposite of
+ * the nav gate: its own /api/modules read gates the Security reads (and the
+ * camera check), so nothing is asked before it answers, nor for a person
+ * Security is not open to — each such read would be a feature-gate denial,
+ * which the threat mirror turns into a "threat". Every answer is mirrored into
+ * the nav gate's shared key, so ModuleRouteGuard above the page blocks within
+ * 2 min of Security going off.
+ */
+export function useSecurityWall(): SecurityWallState {
+  const { mutate } = useSWRConfig();
+  const [lastOkAt, setLastOkAt] = useState<Record<WallRead, number | null>>(NEVER);
+  const heard = useCallback((read: WallRead) => () => setLastOkAt((prev) => ({ ...prev, [read]: Date.now() })), []);
+
+  const modules = useSWR<ModulesView>([WALL_KEY, "modules"], () => getWallModules(), {
+    ...WALL_SWR,
+    refreshInterval: WALL_MODULES_REFRESH_MS,
+    onSuccess: (data) => {
+      heard("modules")();
+      void mutate(MODULE_GATE_KEY, data, { revalidate: false });
+    },
+  });
+  const access = modules.data
+    ? { security: isModuleEffective(modules.data, "security"), cameras: isModuleEffective(modules.data, "cameras") }
+    : null;
+  const on = access?.security === true;
+
+  const counts = useSWR<SecurityIncidentCounts>(on ? [WALL_KEY, "counts"] : null, () => getSecurityIncidentCounts(), {
+    ...WALL_SWR,
+    onSuccess: heard("counts"),
+  });
+  const health = useSWR<{ sources: SecurityHealthRow[] }>(on ? [WALL_KEY, "health"] : null, () => getSecurityWallHealth(), {
+    ...WALL_SWR,
+    onSuccess: heard("sources"),
+  });
+  const mode = useSWR<SecurityModeView>(on ? [WALL_KEY, "mode"] : null, () => getSecurityMode(), {
+    ...WALL_SWR,
+    onSuccess: heard("mode"),
+  });
+  const session = useSWR<string | null>([WALL_KEY, "session"], () => getSignInEndsAt(), {
+    ...WALL_SWR,
+    refreshInterval: WALL_SESSION_REFRESH_MS,
+  });
+
+  return {
+    access,
+    counts: counts.data ?? null,
+    sources: health.data?.sources ?? null,
+    mode: mode.data ?? null,
+    signInEndsAt: session.data ?? null,
+    lastOkAt,
+    failed: {
+      modules: Boolean(modules.error),
+      counts: Boolean(counts.error),
+      sources: Boolean(health.error),
+      mode: Boolean(mode.error),
+    },
   };
 }
 

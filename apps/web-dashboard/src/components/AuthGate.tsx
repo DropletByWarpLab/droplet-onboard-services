@@ -9,7 +9,7 @@ import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
-import { HELP_PATH } from "@/lib/routing";
+import { HELP_PATH, SECURITY_WALL_PATH } from "@/lib/routing";
 
 // `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
 // person so they can set their password at `/invite/<token>`. Omitting it made
@@ -318,6 +318,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // public login page.
   if (pathname === "/change-password") {
     return <>{children}</>;
+  }
+
+  // WARP-2981 (ADR-059 §3.8) — the Security wall faces a room from a TV: no
+  // Sidebar, Workspace tabs, <main> or help launcher (the page draws its own
+  // <main id="main">). Unlike the tour and change-password it IS a module
+  // surface, so the module route guard stays: a person Security is not open
+  // to, or a box that switched it off, gets the guard's card and its way out.
+  // Both takeovers above still win — their redirects run earlier in the effect.
+  if (pathname === SECURITY_WALL_PATH) {
+    return <ModuleRouteGuard>{children}</ModuleRouteGuard>;
   }
 
   // Authenticated — show sidebar + main content, plus the persistent help

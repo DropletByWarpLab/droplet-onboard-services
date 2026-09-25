@@ -29,6 +29,10 @@
  *     cut out; the rest of the disclaimer is scanned like everything else.
  *   · P2a's COPY KEY `notAlarm` in SecurityFeed (a key name, never shown; its
  *     value is scanned).
+ * WARP-2981 (ADR-059 P6) adds the Security wall's modules and two banned
+ * phrases: "all clear" and "all locked" — the wall faces a room, and nothing on
+ * it may read as a verdict on the site ("All reporting" is about the sources).
+ *
  * A negation-aware rule was rejected: "doesn't … arm" and "isn't armed" read
  * the same to a regex as "arm it" after a clause break, so it would let
  * positive claims through whenever a "not" appears earlier in the sentence.
@@ -46,12 +50,16 @@ import * as HoursEditor from "./HoursEditor";
 import * as LearningList from "./LearningList";
 import * as ModeCard from "./ModeCard";
 import * as SecurityFeed from "./SecurityFeed";
+import * as SecurityWall from "./SecurityWall";
 import * as TimezoneSelect from "./TimezoneSelect";
 import * as UsualGrid from "./UsualGrid";
+import * as WallCameras from "./WallCameras";
 import * as PatternsCopy from "./patterns-copy";
+import * as WallStatus from "./wall-status";
 import * as SecurityPage from "@/app/security/page";
 import * as SecurityZonesPage from "@/app/security/zones/page";
 import * as SecuritySettingsPage from "@/app/security/settings/page";
+import * as SecurityWallPage from "@/app/security/wall/page";
 import * as SecurityPatternsPage from "@/app/security/patterns/page";
 
 const MODULES: Record<string, Record<string, unknown>> = {
@@ -64,6 +72,10 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/LearningList.tsx": LearningList,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
+  // WARP-2981 (P6) — the Security wall.
+  "src/components/security/SecurityWall.tsx": SecurityWall,
+  "src/components/security/WallCameras.tsx": WallCameras,
+  "src/components/security/wall-status.ts": WallStatus,
   "src/components/security/TimezoneSelect.tsx": TimezoneSelect,
   "src/components/security/UsualGrid.tsx": UsualGrid,
   "src/components/security/patterns-copy.ts": PatternsCopy,
@@ -71,6 +83,7 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/app/security/zones/page.tsx": SecurityZonesPage,
   "src/app/security/settings/page.tsx": SecuritySettingsPage,
   "src/app/security/patterns/page.tsx": SecurityPatternsPage,
+  "src/app/security/wall/page.tsx": SecurityWallPage,
 };
 
 const BANNED: ReadonlyArray<readonly [name: string, re: RegExp]> = [
@@ -83,6 +96,9 @@ const BANNED: ReadonlyArray<readonly [name: string, re: RegExp]> = [
   ["guard", /guard/i],
   ["space", /\bspaces?\b/i],
   ["zone (as a UI noun)", /\bzones?\b/i],
+  // WARP-2981 — a verdict on the site, which Droplet never gives.
+  ["all clear", /\ball\s+clear\b/i],
+  ["all locked", /\ball\s+locked\b/i],
 ];
 
 /** Sentences cut out of ONE value before the scan. Each must still be there. */
@@ -236,11 +252,15 @@ describe("Security copy lint (spec §8)", () => {
     ["This space is empty"],
     ["Add a zone"],
     ["Zones"],
+    ["All clear"],
+    ["Everything is all clear tonight"],
+    ["All locked"],
+    ["Doors: all  locked up"],
   ])("the matcher catches %j", (text) => {
     expect(violations([{ where: "probe", text }])).not.toEqual([]);
   });
 
-  it.each([["Times are in Europe/London (your timezone)"], ["Opening hours"], ["Warm up"], ["Farm shop"]])(
+  it.each([["Times are in Europe/London (your timezone)"], ["Opening hours"], ["Warm up"], ["Farm shop"], ["All reporting"], ["Clear all filters"]])(
     "the matcher lets %j through",
     (text) => {
       expect(violations([{ where: "probe", text }])).toEqual([]);

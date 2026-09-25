@@ -9372,3 +9372,107 @@ export function putActiveDepartment(departmentId: string | null): Promise<Active
     jsonBody("PUT", { departmentId }),
   );
 }
+
+// ── WARP-2981 (ADR-059 P6, §3.8): the Security wall ──
+// /security/wall reads only what /security already shows this viewer — each
+// read their own DS-005 projection, view level, never a write — and every read
+// goes through `securityFetch` (20 s, typed `.status`), so a request that
+// never answers fails and is retried instead of stalling its SWR key for the
+// TV's lifetime. The rack panel's box-wide count is for the panel's service
+// principal alone and is never read from here (pinned by the wall's page test).
+import type { SecurityIncidentCounts } from "./types";
+import type { ModulesView } from "./hooks/useModuleGate";
+
+/** Route 17. A local literal: PR-C defines its own constant, and the two fold together once both land. */
+const WALL_INCIDENT_SUMMARY_PATH = "/api/security/incidents/summary";
+
+/** A count the wall may draw: a non-negative safe integer — never a string, a negative or a missing 0. */
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+function unreadable(what: string): TypedError {
+  const e: TypedError = new Error(`${what} isn't in a shape Droplet understands.`);
+  e.code = "BAD_RESPONSE";
+  e.status = 200;
+  return e;
+}
+
+/**
+ * Route 17's two counts, validated: anything but two non-negative safe
+ * integers throws, so the wall never draws a number it was not given.
+ * `latest` is dropped here — the wall names no incident.
+ */
+export async function getSecurityIncidentCounts(): Promise<SecurityIncidentCounts> {
+  const body = await securityFetch<unknown>(`${BASE}${WALL_INCIDENT_SUMMARY_PATH}`);
+  const b = (body && typeof body === "object" ? body : {}) as { openAlerts?: unknown; openNotices?: unknown };
+  if (!isCount(b.openAlerts) || !isCount(b.openNotices)) throw unreadable("The incident counts");
+  return { openAlerts: b.openAlerts, openNotices: b.openNotices };
+}
+
+/** The P2a health read through `securityFetch` (the header's `getSecurityHealth` keeps its callers and its lack of a timeout). */
+export async function getSecurityWallHealth(): Promise<{ sources: SecurityHealthRow[] }> {
+  const body = await securityFetch<unknown>(`${BASE}/api/security/health`);
+  const sources = body && typeof body === "object" ? (body as { sources?: unknown }).sources : undefined;
+  if (!Array.isArray(sources)) throw unreadable("What Security listens to");
+  return { sources: sources as SecurityHealthRow[] };
+}
+
+/**
+ * `session.endsAt` of an /auth/me body when it is a string `Date.parse`
+ * accepts, else null. It is the LATEST the sign-in can last (P6-A), so it is
+ * shown as "by … at the latest"; absent, null or anything else shows nothing.
+ */
+export function signInEndsAtOf(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const session = (body as { session?: unknown }).session;
+  if (!session || typeof session !== "object") return null;
+  const endsAt = (session as { endsAt?: unknown }).endsAt;
+  return typeof endsAt === "string" && !Number.isNaN(Date.parse(endsAt)) ? endsAt : null;
+}
+
+/**
+ * /auth/me's `session.endsAt`, or null — read here, not from `useAuth().user`:
+ * a login response carries no `session`, and a cached profile can carry an
+ * old one.
+ */
+export async function getSignInEndsAt(): Promise<string | null> {
+  return signInEndsAtOf(await securityFetch<unknown>(`${BASE}/api/auth/me`));
+}
+
+/**
+ * The wall's own read of GET /api/modules (the nav gate's endpoint). The nav
+ * gate's shared read has no timeout and stops polling after one error, which a
+ * TV left for hours cannot afford; the wall mirrors each answer into that
+ * shared key (useSecurityWall).
+ */
+export async function getWallModules(): Promise<ModulesView> {
+  const body = await securityFetch<unknown>(`${BASE}/api/modules`);
+  if (!body || typeof body !== "object" || !Array.isArray((body as { modules?: unknown }).modules)) {
+    throw unreadable("Which features are on");
+  }
+  return body as ModulesView;
+}
+
+/**
+ * Whether the birdseye composite would play for this viewer: the HTTP status
+ * of a GET, read off its headers, and the request aborted at once — the body
+ * is an endless MJPEG stream and is never read. Never HEAD: Express runs the
+ * GET handler for a HEAD and Node sends a HEAD's headers only when the
+ * response ends, which a continuous stream never does. Through `authFetch`,
+ * so an expired access cookie is refreshed before the `<img>` needs it.
+ * Rejects on a timeout (20 s), a network failure, or `signal` aborting.
+ */
+export async function getBirdseyeStatus(signal?: AbortSignal): Promise<number> {
+  const ctrl = new AbortController();
+  const stop = () => ctrl.abort();
+  if (signal?.aborted) stop();
+  signal?.addEventListener("abort", stop, { once: true });
+  const timer = setTimeout(stop, DEFAULT_API_FETCH_TIMEOUT_MS);
+  try {
+    const res = await authFetch(getBirdseyeLiveUrl(), { signal: ctrl.signal });
+    return res.status;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+    ctrl.abort();
+  }
+}

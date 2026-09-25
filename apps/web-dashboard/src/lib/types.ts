@@ -3559,11 +3559,21 @@ export interface SecurityEventsPage {
 /**
  * One line of the feed header: what the feed is listening to, and whether it
  * is reporting. Served in the order camera_ingest, camera_system,
- * threat_mirror, site_mode, patterns, retention (PR-2 adds `locks` after
- * camera_system). `patterns` (WARP-2980) is the baseline job's row.
+ * threat_mirror, site_mode, incidents, alerts, patterns, retention (PR-2 adds
+ * `locks` after camera_system). WARP-2978: `incidents` is every viewer's;
+ * `alerts` (who alerts reach) is owner/admin only. `patterns` (WARP-2980) is
+ * the baseline job's row.
  */
 export interface SecurityHealthRow {
-  id: "camera_ingest" | "camera_system" | "threat_mirror" | "site_mode" | "patterns" | "retention";
+  id:
+    | "camera_ingest"
+    | "camera_system"
+    | "threat_mirror"
+    | "site_mode"
+    | "incidents"
+    | "alerts"
+    | "patterns"
+    | "retention";
   state: "ok" | "quiet" | "down" | "not_configured";
   detail: string;
   lastSeenAt: string | null;
@@ -3892,6 +3902,19 @@ export interface SecurityPatternExplainView {
   } | null;
   expected: Array<{ id: string; text: string; until: string }>;
   release: Record<SecurityPatternCode, SecurityPatternRelease>;
+}
+
+// ── WARP-2981 (ADR-059 P6): the Security wall ──
+
+/**
+ * The two numbers the wall reads off route 17 (GET
+ * /api/security/incidents/summary): open incidents with a visible alert, and
+ * open ones with only notices — already this viewer's DS-005 projection. The
+ * rest of that body is PR-C's.
+ */
+export interface SecurityIncidentCounts {
+  openAlerts: number;
+  openNotices: number;
 }
 
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──
