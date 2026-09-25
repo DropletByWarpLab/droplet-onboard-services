@@ -59,8 +59,8 @@ const T0 = new Date("2026-09-23T21:14:00Z");
 const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
 
 /** Maria: family, sees FRONT and SIDE — never BACK. */
-const MARIA: IncidentViewer = { userId: randomUUID(), visibleCameras: new Set([FRONT, SIDE]), mayReadThreats: false, ownerOrAdmin: false };
-const OWNER: IncidentViewer = { userId: randomUUID(), visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
+const MARIA: IncidentViewer = { userId: randomUUID(), visibleCameras: new Set([FRONT, SIDE]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
+const OWNER: IncidentViewer = { userId: randomUUID(), visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
 
 describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — real Postgres (WARP-2978 review R1)", () => {
   let prisma: PrismaClient;

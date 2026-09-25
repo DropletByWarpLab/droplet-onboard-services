@@ -893,6 +893,85 @@ describe("review A — incident events carry `zones`, like feed rows (the viewer
   });
 });
 
+describe("WARP-2977 × WARP-2978 — door locks on the incident surfaces follow DS-019 exactly as on the feed", () => {
+  const BACK_DOOR = "9c4d5e6f-7081-4c3d-8e4f-5a6b7c8d9ea4";
+  const LOCK = "matter:7/1";
+  /** Maria's resolved catalog, with or without Devices (smart_home) at view. */
+  const maria = (f: FakeSecurityPrisma, devices: boolean) => {
+    const a = app(f, "family", "act");
+    a.resolve.mockImplementation(async () => {
+      const base = access("act");
+      return devices
+        ? ({ ...base, features: [...base.features, { moduleId: "smart_home", level: "view" }] } as unknown as EffectiveAccessResult)
+        : base;
+    });
+    return a.server;
+  };
+
+  /**
+   * The engine never groups a lock row (D21 — security-incidents.service.test.ts
+   * pins that). This seeds one as a member anyway, beside a front detection,
+   * so the read path's own gate is what is tested.
+   */
+  function withLockMember(f: FakeSecurityPrisma) {
+    f.world.securityZone.push({ id: BACK_DOOR, name: "Back door", nameKey: "back door", kind: "entry", state: "active", version: 0 });
+    f.world.securityZoneLink.push({ id: "lk1", zoneId: BACK_DOOR, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Back door lock", state: "active" });
+    f.world.securityEvent.push(
+      {
+        id: 71n, source: "frigate", kind: "detection", severity: "info", camera: "front", sourceRef: "front/71.5-a", dedupeKey: "z:71",
+        labels: ["person"], cameraZones: [], score: 0.9, startedAt: T, endedAt: T, summary: "Person", createdAt: T, observed: "live",
+      },
+      {
+        id: 73n, source: "matter_lock", kind: "lock_state", severity: "info", camera: null, sourceRef: LOCK, dedupeKey: "lock:73",
+        labels: ["unlocked"], cameraZones: [], score: null, startedAt: T, endedAt: null, summary: "Back door lock unlocked", createdAt: T,
+        observed: "polled",
+      },
+    );
+    f.world.securityEventTriage.push(
+      // At triage the back-door area also watched the front camera; that link has
+      // since been swapped for the lock, so only a lock link shows the area now.
+      { eventId: 71n, outcome: "grouped", incidentId: SHARED, matchedLinkIds: [], alsoZoneIds: [BACK_DOOR], rulesetVersion: 1, error: null, triagedAt: T },
+      { eventId: 73n, outcome: "grouped", incidentId: SHARED, matchedLinkIds: [], alsoZoneIds: [], rulesetVersion: 1, error: null, triagedAt: T },
+    );
+  }
+
+  it("route 18: without Devices view a lock member is absent — not redacted — and an area only a lock shows is never named", async () => {
+    const f = world();
+    withLockMember(f);
+    const res = await request(maria(f, false)).get(`/api/security/incidents/${SHARED}`);
+    expect(res.status).toBe(200);
+    expect(res.body.events.map((e: { id: string }) => e.id)).toEqual(["71"]);
+    expect(JSON.stringify(res.body)).not.toContain("Back door");
+    expect(JSON.stringify(res.body)).not.toContain("matter");
+  });
+
+  it("route 18: with Devices view the lock member shows, how it was observed, and the area its lock is linked to", async () => {
+    const f = world();
+    withLockMember(f);
+    const res = await request(maria(f, true)).get(`/api/security/incidents/${SHARED}`);
+    const lock = res.body.events.find((e: { id: string }) => e.id === "73");
+    expect(res.body.events.map((e: { id: string }) => e.id).sort()).toEqual(["71", "73"]);
+    expect(lock).toMatchObject({ kind: "lock_state", observed: "polled", zones: [{ id: BACK_DOOR, name: "Back door" }] });
+    // …and the camera member's other area, which only its lock link shows her.
+    expect(res.body.events.find((e: { id: string }) => e.id === "71").alsoIn).toEqual([{ id: BACK_DOOR, name: "Back door" }]);
+    // The sourceRef joins the area in memory; it never reaches the wire.
+    expect(JSON.stringify(res.body)).not.toContain(LOCK);
+  });
+
+  it("route 16's ?zone=: an area whose only link is a lock is hidden without Devices view (the empty page), shown with it", async () => {
+    const f = world();
+    // SHARED's own area (its snapshot's zoneId) now links only a door lock — say its
+    // camera link was since swapped for the lock. Maria sees SHARED on the front camera.
+    const zoneId = f.world.securityIncident.find((i) => i.id === SHARED)!.zoneId as string;
+    f.world.securityZone.push({ id: zoneId, name: "Stock room", nameKey: "stock room", kind: "interior", state: "active", version: 0 });
+    f.world.securityZoneLink.push({ id: "lk2", zoneId, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Stock room lock", state: "active" });
+    const without = await request(maria(f, false)).get(`/api/security/incidents?zone=${zoneId}`);
+    expect(without.body).toEqual({ incidents: [], nextCursor: null });
+    const withDevices = await request(maria(f, true)).get(`/api/security/incidents?zone=${zoneId}`);
+    expect(withDevices.body.incidents.map((i: { id: string }) => i.id)).toContain(SHARED);
+  });
+});
+
 describe("review #11 — the sign-in behind an acknowledgement (box proof step 4)", () => {
   function withAcks(f: FakeSecurityPrisma) {
     f.world.securityIncidentAck.push(

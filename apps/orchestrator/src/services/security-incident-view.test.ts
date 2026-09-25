@@ -21,8 +21,8 @@ const T = new Date("2026-09-23T21:14:00Z");
 const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
 const NOW = plus(T, 60_000);
 
-const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
-const frontOnly: IncidentViewer = { userId: "u-maria", visibleCameras: new Set(["front"]), mayReadThreats: false, ownerOrAdmin: false };
+const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
+const frontOnly: IncidentViewer = { userId: "u-maria", visibleCameras: new Set(["front"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
 
 function incident(over: Partial<IncidentRowForView> = {}): IncidentRowForView {
   return {

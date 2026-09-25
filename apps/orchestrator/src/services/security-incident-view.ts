@@ -44,6 +44,9 @@
  *   · notices: owner/admin see every one; anyone else only their own (D34).
  *   · members: the P2a feed query itself (`listSecurityEvents`), with the
  *     viewer's `feedVisibilityWhere` at AND[0] and the membership ANDed after.
+ *     Door locks (WARP-2977 P2b-2, DS-019) exactly as on the feed: the engine
+ *     never groups a lock row (D21), but a member that is one is shown only
+ *     with Devices view, with the areas its lock is linked to.
  *
  * The projection and the SQL builders are pure; the loaders below them read
  * and then project. The wire shapes are the ones P3 PR-C and P6 build on.
@@ -78,6 +81,11 @@ export interface IncidentViewer {
   /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
   visibleCameras: "all" | ReadonlySet<string>;
   mayReadThreats: boolean;
+  /**
+   * WARP-2977 P2b-2 (DS-019) — door-lock rows among the members, and lock
+   * links when naming areas: the feed's own `mayReadLocks` (Devices view).
+   */
+  mayReadLocks: boolean;
   /** Owner/admin: every notice. Anyone else: their own (D34). */
   ownerOrAdmin: boolean;
 }
@@ -729,7 +737,7 @@ export async function loadIncidentDetail(
   if (row.eventsKept !== "removed") {
     const page = await listSecurityEvents(
       prisma,
-      feedVisibilityWhere(v.visibleCameras, v.mayReadThreats, false),
+      feedVisibilityWhere(v.visibleCameras, v.mayReadThreats, v.mayReadLocks),
       { limit: INCIDENT_EVENTS_MAX, includeLow: true },
       [{ triage: { is: { incidentId: id, outcome: "grouped" } } }],
     );
@@ -739,10 +747,10 @@ export async function loadIncidentDetail(
       select: { eventId: true, alsoZoneIds: true },
     });
     const also = new Map(triage.map((t) => [t.eventId.toString(), t.alsoZoneIds]));
-    const areas = viewerAreas(await loadActiveLinks(prisma), { visibleCameras: v.visibleCameras, mayReadLocks: false });
+    const areas = viewerAreas(await loadActiveLinks(prisma), { visibleCameras: v.visibleCameras, mayReadLocks: v.mayReadLocks });
     events = page.events.map((e) => ({
       ...e,
-      zones: zoneChipsFor(e, areas),
+      zones: zoneChipsFor({ ...e, sourceRef: page.sourceRefs.get(e.id) }, areas),
       alsoIn: (also.get(e.id) ?? [])
         .filter((zoneId) => areas.names.has(zoneId))
         .map((zoneId) => ({ id: zoneId, name: areas.names.get(zoneId)! })),
