@@ -10,6 +10,7 @@
  * same reason.
  */
 import path from "node:path";
+import { isFilesDegraded } from "./_unavailable.js";
 
 /**
  * Surfaced verbatim to the chat model, which relays it to the user — so it
@@ -39,6 +40,11 @@ export const ORGANIZE_MAX_MOVES = 500;
  * during an outage, so every result that could be explained by the degrade
  * carries this instead. `delete_files` refuses directories outright for the
  * same reason — see that handler's header.
+ *
+ * WARP-3077: the route now marks its outage fallback with `X-Droplet-Degraded`
+ * and `readListing` reports that as `unavailable`, so a real outage no longer
+ * lands here. The caveat stays as the conservative reading of an unmarked
+ * empty answer.
  */
 export const DEGRADED_LISTING_CAVEAT =
   "An empty folder listing and an unreachable file service look identical here, so this result may reflect a temporary outage rather than what is really stored. Say so rather than reporting the folder as clean, and offer to re-run it.";
@@ -109,11 +115,28 @@ export interface Listing {
    * #1985 each re-derived it its own way, with nothing holding them equal.
    */
   possiblyDegraded: boolean;
+  /**
+   * WARP-3077 — the route marked this answer as its outage fallback
+   * (X-Droplet-Degraded). Reported as `ok: false` so no caller can read the
+   * fallback's empty body as a folder's contents.
+   */
+  unavailable: boolean;
 }
 
 export async function readListing(res: Response): Promise<Listing> {
+  if (isFilesDegraded(res)) {
+    // 503: what the route would have said without its degrade, so a
+    // subfolder that lands in `WalkResult.errors` reads as the outage it is.
+    return { ok: false, status: 503, entries: [], possiblyDegraded: false, unavailable: true };
+  }
   const entries = res.ok ? parseEntries(await res.json().catch(() => null)) : [];
-  return { ok: res.ok, status: res.status, entries, possiblyDegraded: res.ok && entries.length === 0 };
+  return {
+    ok: res.ok,
+    status: res.status,
+    entries,
+    possiblyDegraded: res.ok && entries.length === 0,
+    unavailable: false,
+  };
 }
 
 /** Clamp an LLM-supplied number to an integer in [min, max], or a default. */
@@ -506,6 +529,8 @@ export interface WalkResult {
   errors: Array<{ path: string; status: number }>;
   /** HTTP status of the root listing. Non-2xx ⇒ nothing else was read. */
   rootStatus: number;
+  /** WARP-3077 — the root listing was the files API's outage fallback. Nothing else was read. */
+  rootUnavailable: boolean;
 }
 
 /**
@@ -531,6 +556,7 @@ export async function walkTree(
     cancelled: false,
     errors: [],
     rootStatus: 0,
+    rootUnavailable: false,
   };
   const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
   while (queue.length > 0) {
@@ -568,7 +594,10 @@ export async function walkTree(
         continue;
       }
       result.listed++;
-      if (dir === root) result.rootStatus = listing.status;
+      if (dir === root) {
+        result.rootStatus = listing.status;
+        result.rootUnavailable = listing.unavailable;
+      }
       if (!listing.ok) {
         if (dir === root) return result;
         result.errors.push({ path: dir, status: listing.status });

@@ -18,6 +18,7 @@ import React from "react";
 
 import { FileListSimple } from "@/components/FileManager/FileListSimple";
 import type { FileEntryInfo } from "@/lib/types";
+import { FilesUnavailableError } from "@/lib/files-unavailable";
 
 // StarButton calls into the favorites API on mount/click — stub it.
 vi.mock("@/components/FileManager/StarButton", () => ({
@@ -109,5 +110,27 @@ describe("FileListSimple — per-row actions (WARP-300)", () => {
     expect(
       screen.queryByRole("button", { name: /download photos/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// WARP-3076 — the box marked the answer degraded (Nextcloud down).
+describe("<FileListSimple> — Files unavailable (WARP-3076)", () => {
+  it("shows the unavailable copy and a retry instead of the page's own error copy", () => {
+    render(
+      <FileListSimple
+        files={[]}
+        isLoading={false}
+        error={new FilesUnavailableError()}
+        errorTitle="We couldn't load your favorites"
+        onRetry={vi.fn()}
+        emptyTitle="No favorites yet"
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Files are unavailable right now")).toBeInTheDocument();
+    expect(screen.getByText("Try again in a moment.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load your favorites/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no favorites yet/i)).not.toBeInTheDocument();
   });
 });

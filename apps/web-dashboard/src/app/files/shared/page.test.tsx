@@ -69,6 +69,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 import SharedPage from "./page";
+import { FilesUnavailableError } from "@/lib/files-unavailable";
 
 function share(overrides: Partial<ShareDetail>): ShareDetail {
   return {
@@ -260,5 +261,21 @@ describe("<SharedPage /> — fetch failure ≠ nothing shared (WARP-1555)", () =
 
     expect(screen.getByText("from-bob.pdf")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+// WARP-3076 — the box marked the answer degraded: say the file service is
+// down, with a retry, never "nothing shared".
+describe("<SharedPage /> — Files unavailable (WARP-3076)", () => {
+  it("shows the unavailable copy with a retry on either tab", () => {
+    withMeState.items = [];
+    withMeState.error = new FilesUnavailableError();
+    render(<SharedPage />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toMatch(/Files are unavailable right now/);
+    expect(alert.textContent).toMatch(/Try again in a moment\./);
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    expect(screen.queryByText(/nothing shared with you yet/i)).not.toBeInTheDocument();
   });
 });
