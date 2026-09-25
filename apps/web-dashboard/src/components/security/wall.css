@@ -120,12 +120,12 @@
 
 /* ── Instead of the wall: the D6 refusal (and the signed-out notice) ── */
 .droplet-shell.sec-wall-notice {
-  min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 24px 16px;
+  box-sizing: border-box; min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 24px 16px;
   background: var(--bg); color: var(--text);
 }
 .droplet-shell.sec-wall-notice:focus { outline: none; }
 .droplet-shell .sec-wall-notice-card {
-  display: grid; gap: 12px; width: 100%; max-width: 40em; padding: 24px; border-radius: var(--radius-card);
+  box-sizing: border-box; display: grid; gap: 12px; width: 100%; max-width: 40em; padding: 24px; border-radius: var(--radius-card);
   background: var(--surface); border: 1px solid var(--border);
   font-size: clamp(15px, 1.3vw, 24px); line-height: 1.5; overflow-wrap: anywhere;
 }

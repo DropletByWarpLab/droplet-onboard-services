@@ -481,6 +481,11 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
     expect(code).toMatch(/\.sec-wall-tiles \{[^}]*grid-template-columns: repeat\(var\(--cols, 1\), minmax\(0, 1fr\)\);\s*grid-template-rows: repeat\(var\(--rows, 1\), minmax\(0, 1fr\)\);/);
   });
 
+  it("the refusal and the signed-out notice fit the screen: border-box, so their padding never pushes past a phone's width or the TV's height", () => {
+    expect(code).toMatch(/\.droplet-shell\.sec-wall-notice \{\s*box-sizing: border-box; min-height: 100dvh;/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-notice-card \{\s*box-sizing: border-box;[^}]*width: 100%;/);
+  });
+
   it("an old picture is dimmed and grey — never drawn as a current one", () => {
     expect(code).toMatch(/\.sec-wall-tile\.is-stale \.sec-wall-tile-frame > img \{ opacity: 0\.4; filter: grayscale\(1\); \}/);
   });
