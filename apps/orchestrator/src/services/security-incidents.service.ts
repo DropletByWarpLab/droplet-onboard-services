@@ -30,6 +30,14 @@
  *      event), and the next tick retries it — up to TRIAGE_TRANSIENT_ATTEMPTS
  *      ticks, after which it is recorded `failed` so a poison event still
  *      cannot block the queue.
+ *      WARP-2980 P5 PR-B: once an event's triage transaction has COMMITTED
+ *      and grouped it (opened or joined), the pattern rules judge it
+ *      (security-pattern-rules.ts, `flagPatterns`): trial flags, written
+ *      after the commit and unable to throw, so a pattern bug can never turn
+ *      a detection `failed` and drop its after-hours alert. The context
+ *      (the ready build, learning states, area versions, expected activity)
+ *      is read once, on the tick's first grouped event; what was judged,
+ *      paused or failed is counted per site date at the end of the triage.
  *   3. Floor. Advanced only when the batch drained AND the floor candidate was
  *      seen at least FLOOR_SETTLE_MS ago: every id at or below a head read two
  *      minutes ago is committed or rolled back by now (every SecurityEvent
@@ -70,6 +78,14 @@ import { recordSecurityEvent } from "./security-events.service.js";
 import { frigateOngoingToDraft } from "./security-event-ingest.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { notifyPendingIncidents, recomputeAlertsHealth, redeliverStuckNotices } from "./security-alerts.service.js";
+import {
+  PatternTally,
+  flagPatterns,
+  loadPatternContextSafe,
+  recordPatternDays,
+  type GroupedInto,
+  type PatternContext,
+} from "./security-pattern-rules.js";
 import { READ_COMMITTED_TX, REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 import {
   RULESET,
@@ -372,6 +388,12 @@ interface TriageContext {
 
 export type TriageResult = "low" | "context" | "opened" | "joined" | "already";
 
+/** What `triageOne` did, and — for `opened` / `joined` — where the event went (the pattern rules' input). */
+export interface TriageOutcome {
+  result: TriageResult;
+  grouped: GroupedInto | null;
+}
+
 /** The reasons an event earns at triage (after_hours_presence, threat_signal). camera_offline is the timers' (§6.5). */
 async function triageReasons(
   tx: Tx,
@@ -444,12 +466,14 @@ export async function triageOne(
   prisma: PrismaClient,
   event: TriageEvent & ZoneMatchableEvent,
   ctx: TriageContext,
-): Promise<TriageResult> {
+): Promise<TriageOutcome> {
   const decision: ScopeDecision = scopeFor(event, event.camera ? matchAreasForEvent(event, ctx.links) : []);
   const span = eventSpan(event);
   const mode = modeAt(ctx.timeline, span.s).mode;
   return prisma.$transaction(async (tx) => {
-    if (await tx.securityEventTriage.findUnique({ where: { eventId: event.id }, select: { eventId: true } })) return "already";
+    if (await tx.securityEventTriage.findUnique({ where: { eventId: event.id }, select: { eventId: true } })) {
+      return { result: "already", grouped: null };
+    }
     const ledger = async (outcome: "low" | "context" | "grouped", incidentId: string | null) =>
       tx.securityEventTriage.create({
         data: {
@@ -479,7 +503,7 @@ export async function triageOne(
       const plan = planTriage(decision, candidates, span, mode);
       if (plan.action === "low" || plan.action === "context") {
         await ledger(plan.action, null);
-        return plan.action;
+        return { result: plan.action, grouped: null };
       }
       if (decision.outcome !== "group") throw new Error("unreachable: a join or open without a scope");
 
@@ -514,7 +538,7 @@ export async function triageOne(
         });
         if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(created.id, kept), skipDuplicates: true });
         await ledger("grouped", created.id);
-        return "opened";
+        return { result: "opened", grouped: { incidentId: created.id, key: decision.key, zoneKind: area?.zoneKind ?? null, mode } };
       }
 
       const i = plan.incident;
@@ -532,7 +556,8 @@ export async function triageOne(
       if (count !== 1) continue;
       if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(i.id, kept), skipDuplicates: true });
       await ledger("grouped", i.id);
-      return "joined";
+      // decision.key is the incident's (the candidate query); its mode is the event's (fitsIncident).
+      return { result: "joined", grouped: { incidentId: i.id, key: decision.key, zoneKind: i.zoneKind, mode: i.openedInMode } };
     }
     throw new IncidentConflictError(
       decision.outcome === "group" ? `${decision.key.scope}:${decision.key.zoneId ?? decision.key.scopeCamera ?? "site"}` : "?",
@@ -727,13 +752,17 @@ async function runTick(
     const links = await loadActiveLinks(prisma);
     const from = rows.reduce((m, r) => (r.startedAt < m ? r.startedAt : m), rows[0]!.startedAt);
     const timeline = await loadModeTimeline(prisma, from, now);
+    // WARP-2980 PR-B — read on the first grouped event, then shared by the tick.
+    let patterns: { ctx: PatternContext; tally: PatternTally } | null = null;
     for (const row of rows) {
       if (Date.now() > deadline) break;
       const key = row.id.toString();
+      let grouped: GroupedInto | null = null;
       try {
         const r = await triageOne(prisma, row, { links, timeline, now });
         transientAttempts.delete(key);
-        if (r !== "already") triaged++;
+        if (r.result !== "already") triaged++;
+        grouped = r.grouped;
       } catch (err) {
         if (isTransientTriageError(err)) {
           const attempts = (transientAttempts.get(key) ?? 0) + 1;
@@ -754,7 +783,13 @@ async function runTick(
         }
       }
       processed++;
+      // After the commit, never inside it (D4); flagPatterns never throws.
+      if (grouped) {
+        patterns ??= { ctx: await loadPatternContextSafe(prisma, now), tally: new PatternTally() };
+        await flagPatterns(prisma, row, grouped, patterns.ctx, links, now, patterns.tally);
+      }
     }
+    if (patterns) await recordPatternDays(prisma, patterns.tally, now);
   }
   const drained = processed === rows.length && rows.length < TRIAGE_BATCH;
 
@@ -853,7 +888,10 @@ export interface IncidentTrimResult {
  * Runs in the 03:50 retention leg right after `trimSecurityEvents`, with the
  * SAME `before` (its events are gone, and their triage rows with them):
  *   1. plain activity (severity info) whose events are all gone and whose
- *      activity ended before `before` is deleted — it follows its events;
+ *      activity ended before `before` is deleted — it follows its events —
+ *      unless a person gave it a verdict (WARP-2980 PR-B, D19): precision
+ *      needs marks older than the 30-day event horizon, so a marked incident
+ *      is kept a year like a coded one. Its pattern flags cascade with it;
  *   2. any incident whose activity ended more than a year ago and whose events
  *      are all gone is deleted (Cascade: its reasons, acks and notices);
  *   3. `eventsKept` follows what is left: `removed` when no member remains,
@@ -864,7 +902,7 @@ export interface IncidentTrimResult {
  */
 export async function trimSecurityIncidents(prisma: PrismaClient, before: Date, now: Date): Promise<IncidentTrimResult> {
   const plain = await prisma.securityIncident.deleteMany({
-    where: { severity: "info", lastActivityAt: { lt: before }, members: { none: {} } },
+    where: { severity: "info", verdict: "unreviewed", lastActivityAt: { lt: before }, members: { none: {} } },
   });
   const old = await prisma.securityIncident.deleteMany({
     where: { lastActivityAt: { lt: new Date(now.getTime() - SECURITY_INCIDENT_RETENTION_DAYS * DAY_MS) }, members: { none: {} } },

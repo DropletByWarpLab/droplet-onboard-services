@@ -50,6 +50,25 @@
  *
  * The projection and the SQL builders are pure; the loaders below them read
  * and then project. The wire shapes are the ones P3 PR-C and P6 build on.
+ *
+ * WARP-2980 P5 PR-B (spec D15, D16; review item 2) — route 18 gains the
+ * pattern flags, the verdict and whether this viewer may give one:
+ *   · a pattern flag is visible iff the viewer is owner/admin (in PR-B every
+ *     code is trial, "shown to owner/admin") AND sees its evidence camera AND
+ *     every camera behind its key — the camera clauses are always true for
+ *     owner/admin today; they are written now so P5 PR-D widens only the
+ *     role clause. Anyone else's detail skips the query: their body is
+ *     byte-identical to one with no flags in the world (absent, not
+ *     redacted);
+ *   · what a viewer can JUDGE: their visible counted codes, plus the codes of
+ *     their visible flags that would have been raised — `trial`, not
+ *     quietened by expected activity, not `info` (review item 3: precision
+ *     is "the share of raised flags that were right");
+ *   · the verdict is shown only to a viewer who sees every camera and may
+ *     read threats (P4's rule, independent of the incident), and route 35 is
+ *     floored at owner/admin — so nobody overwrites a judgement about things
+ *     they cannot see (review item 2). Everyone else: `verdict: null`,
+ *     `canGiveVerdict: false`. Routes 16–17 are untouched.
  */
 import type {
   Prisma,
@@ -72,7 +91,8 @@ import { loadActiveLinks, viewerAreas, zoneChipsFor } from "./security-zones.ser
 import { projectedIncidentPage } from "./security-incident-page.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
-import { QUIET_MS, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
+import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
+import type { PatternCode } from "../lib/security-baseline-math.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
@@ -129,10 +149,34 @@ export const REASON_VIEW_SELECT = {
 
 export type ReasonRowForView = Prisma.SecurityIncidentReasonGetPayload<{ select: typeof REASON_VIEW_SELECT }>;
 
+/** WARP-2980 PR-B — the verdict columns route 18 and route 35 read (beside INCIDENT_VIEW_SELECT, never inside it: routes 16–17 do not read them). */
+export const VERDICT_SELECT = {
+  verdict: true,
+  verdictByName: true,
+  verdictAt: true,
+  verdictFirstAt: true,
+  verdictCodes: true,
+} as const satisfies Prisma.SecurityIncidentSelect;
+
+/** WARP-2980 PR-B — a pattern flag as route 18 shows it, with its expected activity as it is now. */
+export const FLAG_VIEW_SELECT = {
+  code: true,
+  effect: true,
+  severity: true,
+  zoneKey: true,
+  keyCameras: true,
+  evidenceEventId: true,
+  evidenceCamera: true,
+  evidenceLabel: true,
+  evidenceAt: true,
+  evidenceSummary: true,
+  detail: true,
+  suppression: { select: { id: true, reason: true, state: true } },
+} as const satisfies Prisma.SecurityPatternFlagSelect;
+
 const SEVERITY_RANK: Readonly<Record<SecuritySeverity, number>> = { info: 0, notice: 1, alert: 2 };
 /** The severities a reason can carry (CHECK SecurityIncidentReason_code_severity). */
 const REASON_SEVERITIES = ["alert", "notice"] as const satisfies readonly SecuritySeverity[];
-const CODE_ORDER: readonly SecurityReasonCode[] = ["after_hours_presence", "camera_offline", "threat_signal"];
 const SITE_SCOPES: readonly SecurityIncidentScope[] = ["site_threat", "site_camera_system"];
 
 const seesCamera = (v: IncidentViewer, camera: string): boolean => v.visibleCameras === "all" || v.visibleCameras.has(camera);
@@ -265,7 +309,7 @@ export function projectIncident(
   const visible = reasons.filter((r) => reasonVisible(r, i, v));
   let severity: SecuritySeverity = "info";
   for (const r of visible) if (SEVERITY_RANK[r.severity] > SEVERITY_RANK[severity]) severity = r.severity;
-  const codes = CODE_ORDER.filter((c) => visible.some((r) => r.code === c));
+  const codes = REASON_CODE_ORDER.filter((c) => visible.some((r) => r.code === c));
   const counts = parseCounts(i.countsByCamera);
   const labels: Record<string, number> = {};
   let eventCount = 0;
@@ -312,6 +356,44 @@ export function projectIncident(
     labels,
     ...viewerSpan(i, v, now, heldBy),
   };
+}
+
+// ── WARP-2980 P5 PR-B: pattern flags and verdicts (D15, D16) ────────────────
+
+/** The flag columns visibility and judgement read. */
+export interface FlagForView {
+  code: SecurityReasonCode;
+  effect: "trial" | "suppressed";
+  severity: SecuritySeverity;
+  evidenceCamera: string;
+  keyCameras: readonly string[];
+}
+
+/** D16's camera clauses: the evidence camera AND every camera behind the key (DS-005 on derived numbers). */
+export function flagCamerasVisible(f: Pick<FlagForView, "evidenceCamera" | "keyCameras">, v: IncidentViewer): boolean {
+  return seesCamera(v, f.evidenceCamera) && f.keyCameras.every((c) => seesCamera(v, c));
+}
+
+/** D16: owner/admin (the trial rule — P5 PR-D widens only this clause) AND the camera clauses. */
+export function flagVisible(f: Pick<FlagForView, "evidenceCamera" | "keyCameras">, v: IncidentViewer): boolean {
+  return v.ownerOrAdmin && flagCamerasVisible(f, v);
+}
+
+/**
+ * The codes this viewer can judge (D16, review item 3): their visible counted
+ * codes, plus the codes of their visible flags that would have been RAISED —
+ * trial (never quietened by expected activity) and not info — in declaration
+ * order.
+ */
+export function judgeableCodes(p: Pick<IncidentProjection, "codes">, flags: readonly FlagForView[], v: IncidentViewer): SecurityReasonCode[] {
+  const codes = new Set<SecurityReasonCode>(p.codes);
+  for (const f of flags) if (f.effect === "trial" && f.severity !== "info" && flagVisible(f, v)) codes.add(f.code);
+  return REASON_CODE_ORDER.filter((c) => codes.has(c));
+}
+
+/** Review item 2 — who may see (and give) a verdict: a viewer who sees every camera and may read threats (P4's rule). */
+export function seesEverything(v: IncidentViewer): boolean {
+  return v.visibleCameras === "all" && v.mayReadThreats;
 }
 
 // ── the list's SQL (routes 16–17) ──────────────────────────────────────────
@@ -514,6 +596,30 @@ export type IncidentMemberView = Awaited<ReturnType<typeof listSecurityEvents>>[
   alsoIn: Array<{ id: string; name: string }>;
 };
 
+/** WARP-2980 PR-B — route 18's verdict (brief §4.4). */
+export interface IncidentVerdictView {
+  state: "unreviewed" | "expected" | "not_expected";
+  /** Display-safe; null iff unreviewed. */
+  byName: string | null;
+  at: string | null;
+  /** The codes judged when it was marked (`verdictCodes`). */
+  codes: SecurityReasonCode[];
+}
+
+/** WARP-2980 PR-B — one pattern flag on route 18 (owner/admin only in PR-B, D16). */
+export interface IncidentPatternFlagView {
+  code: PatternCode;
+  effect: "trial" | "suppressed";
+  /** What it would carry if it counted (spec D9). */
+  severity: SecuritySeverity;
+  key: { kind: "area" | "camera"; zoneId: string | null; camera: string | null };
+  evidence: { eventId: string; camera: string; label: string; at: string; summary: string };
+  /** The numbers behind it (spec §4.5): safe integers and exact strings. */
+  detail: Prisma.JsonValue;
+  /** effect = suppressed: the expected activity that quietened it, as it is NOW; else null. */
+  suppression: { id: string; reason: string; state: "active" | "removed" | "expired" } | null;
+}
+
 export interface IncidentDetail extends IncidentSummary {
   /**
    * Whether this viewer can act on the incident right now — exactly when a
@@ -536,7 +642,16 @@ export interface IncidentDetail extends IncidentSummary {
   acks: IncidentAckView[];
   notices: IncidentNoticeView[];
   eventsKept: SecurityIncidentEvents;
-  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
+  /** WARP-2980 PR-B: null unless the viewer sees every camera and may read threats (review item 2). */
+  verdict: IncidentVerdictView | null;
+  /** WARP-2980 PR-B: visible flags only (D16), in evidence order. */
+  patternFlags: IncidentPatternFlagView[];
+  /**
+   * `canGiveVerdict` — exactly when route 35 would accept a mark from them:
+   * owner/admin (its role floor) who see everything, at act or above, on a
+   * view that is not partial with something to judge.
+   */
+  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean; canGiveVerdict: boolean };
 }
 
 export function summaryOf(p: IncidentProjection, lastAck: { action: SecurityIncidentAckAction; byName: string; at: Date } | null): IncidentSummary {
@@ -695,7 +810,7 @@ export async function loadIncidentDetail(
   now: Date,
   presence?: PresenceSource,
 ): Promise<IncidentDetail | null> {
-  const row = await prisma.securityIncident.findUnique({ where: { id }, select: INCIDENT_VIEW_SELECT });
+  const row = await prisma.securityIncident.findUnique({ where: { id }, select: { ...INCIDENT_VIEW_SELECT, ...VERDICT_SELECT } });
   if (!row) return null;
   const reasons = await prisma.securityIncidentReason.findMany({
     where: { incidentId: id },
@@ -704,6 +819,17 @@ export async function loadIncidentDetail(
   });
   const p = projectIncident(row, reasons, v, now, (await holdsFor(prisma, [row], v, presence, now)).get(row.id));
   if (!p) return null;
+  // D16: only a viewer the role clause admits reads the flags at all.
+  const flags = v.ownerOrAdmin
+    ? (
+        await prisma.securityPatternFlag.findMany({
+          where: { incidentId: id },
+          orderBy: [{ evidenceAt: "asc" }, { id: "asc" }],
+          select: FLAG_VIEW_SELECT,
+        })
+      ).filter((f) => flagVisible(f, v))
+    : [];
+  const judgeable = judgeableCodes(p, flags, v);
 
   // Every ack when actionable; in a PARTIAL view only the viewer's own (what
   // she did herself — review b7e1); plain activity, none.
@@ -798,6 +924,35 @@ export async function loadIncidentDetail(
       settledAt: n.settledAt ? n.settledAt.toISOString() : null,
     })),
     eventsKept: row.eventsKept,
-    viewer: { level, acknowledged: acks.some((a) => a.byUserId === v.userId) },
+    verdict: seesEverything(v)
+      ? {
+          state: row.verdict,
+          byName: row.verdictByName === null ? null : stripUnsafeDisplayChars(row.verdictByName),
+          at: row.verdictAt ? row.verdictAt.toISOString() : null,
+          codes: [...row.verdictCodes],
+        }
+      : null,
+    patternFlags: flags.map((f) => ({
+      code: f.code as PatternCode,
+      effect: f.effect,
+      severity: f.severity,
+      key: f.zoneKey.startsWith("area:")
+        ? { kind: "area" as const, zoneId: f.zoneKey.slice(5), camera: null }
+        : { kind: "camera" as const, zoneId: null, camera: f.zoneKey.slice(7) },
+      evidence: {
+        eventId: f.evidenceEventId.toString(),
+        camera: f.evidenceCamera,
+        label: f.evidenceLabel,
+        at: f.evidenceAt.toISOString(),
+        summary: f.evidenceSummary,
+      },
+      detail: f.detail,
+      suppression: f.suppression ? { id: f.suppression.id, reason: f.suppression.reason, state: f.suppression.state } : null,
+    })),
+    viewer: {
+      level,
+      acknowledged: acks.some((a) => a.byUserId === v.userId),
+      canGiveVerdict: v.ownerOrAdmin && seesEverything(v) && level !== "view" && !p.partial && judgeable.length > 0,
+    },
   };
 }

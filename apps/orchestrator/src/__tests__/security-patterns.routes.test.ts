@@ -116,6 +116,17 @@ describe("29 GET /api/security/patterns", () => {
     expect(owner.body.keys).toHaveLength(4);
   });
 
+  it("WARP-2980 PR-B: precision for owner/admin only — null for family (it spans every camera)", async () => {
+    w.incidents = [{ id: "i1", verdict: "not_expected", verdictCodes: ["out_of_place"], verdictFirstAt: new Date(NOW.getTime() - 40 * 86_400_000) }];
+    const owner = await request(app("owner")).get("/api/security/patterns");
+    expect(owner.body.precision).toEqual({
+      showAfterDays: 30,
+      codes: [{ code: "out_of_place", marked: 1, notExpected: 1, firstMarkedAt: new Date(NOW.getTime() - 40 * 86_400_000).toISOString(), percentRight: 100 }],
+    });
+    expect((await request(app("admin")).get("/api/security/patterns")).body.precision).not.toBeNull();
+    expect((await request(app("family")).get("/api/security/patterns")).body.precision).toBeNull();
+  });
+
   it("an outage is a 503, never an empty 200", async () => {
     w.failReads = true;
     const res = await request(app()).get("/api/security/patterns");

@@ -18,7 +18,7 @@ import {
   rebuildAreas,
   runFullBuild,
 } from "./security-baseline-build.js";
-import { SECURITY_BASELINE_RULESET_VERSION } from "../lib/security-baseline-math.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 
 const NOW = new Date("2026-09-23T04:20:00Z"); // 00:20 in New York
 const TZ = "America/New_York";
@@ -141,7 +141,7 @@ describe("runFullBuild — claim, one transaction, swap, prune", () => {
         timezone: TZ,
         windowFrom: "2026-08-26",
         windowTo: "2026-09-22",
-        rulesetVersion: SECURITY_BASELINE_RULESET_VERSION,
+        rulesetVersion: SECURITY_RULESET_VERSION,
         startedAt: NOW,
       },
     });

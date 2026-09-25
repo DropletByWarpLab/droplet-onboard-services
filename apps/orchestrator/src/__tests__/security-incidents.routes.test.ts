@@ -173,6 +173,13 @@ function incident(id: string, over: Record<string, unknown> = {}) {
     countsByCamera: { front: { person: 2 }, back: { _status: 1 } },
     cameras: ["back", "front"],
     version: 4,
+    // WARP-2980 PR-B: the verdict columns' defaults (a row pushed into the world gets no create defaults).
+    verdict: "unreviewed",
+    verdictById: null,
+    verdictByName: null,
+    verdictAt: null,
+    verdictFirstAt: null,
+    verdictCodes: [],
     ...over,
   };
 }
@@ -435,10 +442,10 @@ describe("reading incidents — DS-005", () => {
     const family = await request(app(f, "family", "act").server).get(`/api/security/incidents/${SHARED}`);
     expect(family.body.reasons.map((r: { code: string }) => r.code)).toEqual(["after_hours_presence"]);
     expect(family.body.notices.map((n: { userId: string }) => n.userId)).toEqual([MARIA]);
-    expect(family.body.viewer).toEqual({ level: "act", acknowledged: false });
+    expect(family.body.viewer).toEqual({ level: "act", acknowledged: false, canGiveVerdict: false });
     const owner = await request(app(f, "owner", "manage").server).get(`/api/security/incidents/${SHARED}`);
     expect(owner.body.notices.map((n: { name: string }) => n.name).sort()).toEqual(["Maria", "Stefan"]);
-    expect(owner.body.viewer).toEqual({ level: "manage", acknowledged: false });
+    expect(owner.body.viewer).toEqual({ level: "manage", acknowledged: false, canGiveVerdict: true });
   });
 });
 
@@ -586,7 +593,7 @@ describe("review #1 (DS-005) — a viewer who sees only a LOWER code (front noti
     const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${MIXED}`);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ state: "open", severity: "notice", reasonCodes: ["camera_offline"], lastAck: null, acks: [], notices: [] });
-    expect(res.body.viewer).toEqual({ level: "act", acknowledged: false });
+    expect(res.body.viewer).toEqual({ level: "act", acknowledged: false, canGiveVerdict: false });
     expect(JSON.stringify(res.body)).not.toMatch(/skipped_not_visible|after_hours_presence|back/);
   });
 
@@ -671,7 +678,7 @@ describe("review b7e1 (DS-005) — the SAME code on a camera she cannot see (fro
       notices: [],
       actionable: false,
     });
-    expect(res.body.viewer).toEqual({ level: "act", acknowledged: false });
+    expect(res.body.viewer).toEqual({ level: "act", acknowledged: false, canGiveVerdict: false });
     expect(res.body.reasons.map((r: { evidence: { camera: string } }) => r.evidence.camera)).toEqual(["front"]);
     expect(JSON.stringify(res.body)).not.toMatch(/"back"|Stefan|log-same-m/);
   });

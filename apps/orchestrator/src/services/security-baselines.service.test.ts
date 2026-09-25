@@ -7,6 +7,11 @@
  * `zoneVersion`), so every case below is "given these rows, at this site
  * time, the tick does exactly this". The build and coverage writes are their
  * own modules' tests; here they are mocks and only their CALLS are pinned.
+ *
+ * WARP-2980 PR-B (spec D18): expected activity past its `expiresAt` is
+ * expired on every tick, zone or not, each with one system audit after its
+ * own commit; a failed audit is rethrown only once the tick has finished —
+ * `lastOkAt` set, `lastError` untouched.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +20,13 @@ const h = vi.hoisted(() => ({
   refreshBaselineSources: vi.fn(),
   runFullBuild: vi.fn(),
   rebuildAreas: vi.fn(),
+  record: vi.fn(),
+}));
+
+vi.mock("./activity.singleton.js", () => ({
+  recordActivity: vi.fn().mockResolvedValue(null),
+  recordActivityInTx: vi.fn(),
+  getActivityRecorder: () => ({ record: h.record }),
 }));
 
 vi.mock("./security-coverage.js", async (importOriginal) => {
@@ -66,6 +78,8 @@ interface World {
   newest: { state: string; startedAt: Date; error: string | null; timezone?: string } | null;
   areaCells: Array<{ zoneId: string; zoneVersion: number }>;
   liveAreas: Array<{ id: string; version: number }>;
+  /** WARP-2980 PR-B — SecuritySuppression rows (the expiry step). */
+  suppressions: Array<{ id: string; state: string; expiresAt: Date; endedAt: Date | null; targetKind: string; camera: string | null; zone: { name: string } | null }>;
 }
 
 function world(over: Partial<World> = {}): World {
@@ -75,6 +89,7 @@ function world(over: Partial<World> = {}): World {
     newest: null,
     areaCells: [],
     liveAreas: [],
+    suppressions: [],
     ...over,
   };
 }
@@ -101,16 +116,29 @@ function fakePrisma(w: World) {
   };
   const cell = { findMany: vi.fn(async () => w.areaCells.map((c) => ({ ...c }))) };
   const zone = { findMany: vi.fn(async () => w.liveAreas.map((z) => ({ ...z }))) };
+  const suppression = {
+    findMany: vi.fn(async (a: { where: { state: string; expiresAt: { lte: Date } } }) =>
+      w.suppressions.filter((r) => r.state === a.where.state && r.expiresAt.getTime() <= a.where.expiresAt.lte.getTime()).map((r) => ({ ...r })),
+    ),
+    updateMany: vi.fn(async (a: { where: { id: string; state: string }; data: { state: string; endedAt: Date } }) => {
+      const r = w.suppressions.find((x) => x.id === a.where.id && x.state === a.where.state);
+      if (!r) return { count: 0 };
+      Object.assign(r, a.data);
+      return { count: 1 };
+    }),
+  };
   return {
     prisma: {
       securityBaselineJobState: jobState,
       securityBaselineBuild: build,
       securityBaselineCell: cell,
       securityZone: zone,
+      securitySuppression: suppression,
     } as never,
     jobState,
     cell,
     zone,
+    suppression,
   };
 }
 
@@ -128,6 +156,72 @@ beforeEach(() => {
   h.refreshBaselineSources.mockReset().mockResolvedValue({ cameras: 1, created: 0, updated: 1, deleted: 0 });
   h.runFullBuild.mockReset().mockResolvedValue({ status: "built", buildId: "b-2", cellCount: 192, eventCount: 10 });
   h.rebuildAreas.mockReset().mockResolvedValue({ status: "rebuilt", buildId: "b-1", inserted: 0 });
+  h.record.mockReset().mockResolvedValue({ id: 1n });
+});
+
+describe("tickSecurityBaselines — expected activity past its expiresAt ends (WARP-2980 PR-B, D18)", () => {
+  const NOW_T = ny("15:30");
+  const due = (id: string, over: Partial<World["suppressions"][number]> = {}) => ({
+    id,
+    state: "active",
+    expiresAt: NOW_T,
+    endedAt: null,
+    targetKind: "area",
+    camera: null,
+    zone: { name: "Stock room" },
+    ...over,
+  });
+
+  it("expiresAt = now → expired with endedAt, and ONE system audit written after its commit", async () => {
+    const w = world({ suppressions: [due("s1"), due("s-later", { expiresAt: new Date(NOW_T.getTime() + 1) })] });
+    const f = fakePrisma(w);
+    h.record.mockImplementation(async () => {
+      // After the CAS: the row is already expired when its audit is written.
+      expect(w.suppressions[0]).toMatchObject({ state: "expired", endedAt: NOW_T });
+      return { id: 1n };
+    });
+    await tickSecurityBaselines(f.prisma, NOW_T, deps(TZ));
+    expect(w.suppressions.map((r) => r.state)).toEqual(["expired", "active"]);
+    expect(h.record).toHaveBeenCalledTimes(1);
+    expect(h.record.mock.calls[0]![0]).toMatchObject({
+      kind: "system",
+      what: "Security: expected activity ended in Stock room",
+      actor: { type: "system", id: null },
+      refs: { surface: "security", action: "suppression.expire", suppressionId: "s1" },
+    });
+  });
+
+  it("runs with no site zone, like coverage", async () => {
+    const w = world({ suppressions: [due("s1", { targetKind: "camera", camera: "front", zone: null })] });
+    await tickSecurityBaselines(fakePrisma(w).prisma, NOW_T, deps(null));
+    expect(w.suppressions[0]!.state).toBe("expired");
+    expect(h.record.mock.calls[0]![0]).toMatchObject({ what: "Security: expected activity ended on camera front" });
+  });
+
+  it("an audit that throws: every row is still audited, lastOkAt is set, lastError untouched, and the FIRST failure is thrown once the tick is done", async () => {
+    const w = world({ suppressions: [due("s1"), due("s2")] });
+    const f = fakePrisma(w);
+    h.record.mockRejectedValueOnce(new Error("chain down"));
+    await expect(tickSecurityBaselines(f.prisma, NOW_T, deps(TZ))).rejects.toThrow("chain down");
+    expect(h.record).toHaveBeenCalledTimes(2);
+    expect(w.suppressions.map((r) => r.state)).toEqual(["expired", "expired"]);
+    expect(baselineHealthState()).toMatchObject({ lastOkAt: NOW_T, lastError: null });
+    // The tick's other work still ran after the expiry step.
+    expect(f.jobState.findUnique).toHaveBeenCalled();
+  });
+
+  it("a row removed between the read and the CAS is not expired and not audited", async () => {
+    const w = world({ suppressions: [due("s1")] });
+    const f = fakePrisma(w);
+    f.suppression.findMany.mockImplementationOnce(async () => {
+      const rows = w.suppressions.map((r) => ({ ...r }));
+      w.suppressions[0]!.state = "removed";
+      return rows;
+    });
+    await tickSecurityBaselines(f.prisma, NOW_T, deps(TZ));
+    expect(w.suppressions[0]!.state).toBe("removed");
+    expect(h.record).not.toHaveBeenCalled();
+  });
 });
 
 describe("tickSecurityBaselines — coverage every tick, zone or not", () => {
@@ -615,6 +709,43 @@ describe("patternsHealthRow — every state (§6.14)", () => {
     // A raw database message never reaches the row.
     const raw = patternsHealthRow(running(), db({ ready: null, newest: { state: "failed", error: 'relation "SecurityZone" does not exist' } }), ALL, NOW);
     expect(raw.detail).toBe("Couldn't work out what normal looks like: something went wrong");
+  });
+});
+
+describe("patternsHealthRow — the incident engine's pattern evaluation (WARP-2980 PR-B, spec D23)", () => {
+  const failing = { lastOkAt: new Date(NOW.getTime() - 60_000), lastError: { at: NOW, message: "the database couldn't be read" } };
+  const fine = { lastOkAt: NOW, lastError: null };
+
+  it("the latest evaluation failed: down, in plain words, for a viewer who sees every camera", () => {
+    const row = patternsHealthRow(running(), db(), ALL, NOW, failing);
+    expect(row).toMatchObject({ state: "down", detail: "Couldn't compare new events with what's usual: the database couldn't be read" });
+    expect(row.detail).not.toMatch(BANNED);
+    expect(patternsHealthRow(running(), db(), ALL, NOW, { ...failing, lastError: { at: NOW, message: "something went wrong" } }).detail).toBe(
+      "Couldn't compare new events with what's usual: something went wrong",
+    );
+  });
+
+  it("cleared by the next evaluation that completes: the ok row keeps its trial note", () => {
+    expect(patternsHealthRow(running(), db(), ALL, NOW, fine)).toMatchObject({
+      state: "ok",
+      detail: "Knows what normal looks like for 3 cameras; 1 still learning · Trial: pattern flags aren't raised yet",
+    });
+  });
+
+  it("DS-005 (review item 15): a camera-limited viewer never sees it — its timing would reveal a detection on a hidden camera", () => {
+    expect(patternsHealthRow(running(), db(), { visibleCameras: new Set(["front"]) }, NOW, failing)).toMatchObject({
+      state: "ok",
+      detail: "Knows what normal looks like for 1 camera · Trial: pattern flags aren't raised yet",
+    });
+  });
+
+  it("comes after the area-rebuild check, and after the out-of-date build (which already pauses the rules)", () => {
+    expect(patternsHealthRow(running({ areaRebuildFailedAt: new Date(NOW.getTime() - 60_000) }), db(), ALL, NOW, failing).detail).toBe(
+      "Couldn't update what's usual after an area's cameras changed; trying again within the hour",
+    );
+    expect(
+      patternsHealthRow(running(), db({ ready: { finishedAt: ny("00:11", "2026-09-19"), windowTo: "2026-09-18" } }), ALL, NOW, failing).detail,
+    ).toBe("What normal looks like is out of date (last worked out Sat)");
   });
 });
 

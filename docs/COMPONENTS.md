@@ -6,7 +6,7 @@
 >
 > **Scope:** Every component in this repo (`droplet-onboard-services`, GitHub
 > `DropletByWarpLab/droplet-onboard-services`) — the **intelligence layer** of the
-> Droplet edge AI appliance. Inference (Ollama + `ollama-manager`) lives in the
+> Droplet edge AI appliance. Inference (Ollama + `inference-manager`) lives in the
 > sibling repo [`droplet-local-LLM`](../../droplet-local-LLM); the physical
 > appliance lives in `pcb-claude-tool`. See [`agentic-workflows.md`](agentic-workflows.md)
 > for the cross-repo picture and [`ADR-009-canonical-system-architecture.md`](ADR-009-canonical-system-architecture.md)
@@ -316,12 +316,19 @@ network. Host-published ports and host-network services are called out.
   / `Chat`. Cloud providers (OpenAI, Anthropic) go through **LiteLLM**; local
   Ollama goes through **direct httpx** to the OpenAI-compat endpoint.
 - **Ollama call path (critical):** chat goes **direct to Ollama `:11434`**, *not*
-  through `ollama-manager`'s `:8002/proxy` (whose 120 s read timeout blows up on
+  through `inference-manager`'s `:8002/proxy` (whose 120 s read timeout blows up on
   CPU inference / cold loads). `OLLAMA_URL` with a trailing `/proxy` is the smoking
   gun for "manager timed out my agent loop." See the CLAUDE.md "Ollama call path"
   section.
 - **gRPC consumers:** file-indexer (`EmbedText`), orchestrator/mcp-server
   (`Rerank`, `ClassifyQuery` for adaptive RAG routing).
+- **Planned — Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):**
+  a `Decide` RPC (WARP-3070) proxying to `droplet-local-LLM`'s `decision-model`
+  sidecar (`:8009`, profile `decision`, off by default): calibrated yes/no /
+  choice / score answers, no generated text. It is the **only** way in: nothing
+  else calls `:8009`. Consumers fail soft to today's behaviour and never sit on the
+  write-approval path. Not built until the bench-box go/no-go (WARP-3069) passes.
+  Full picture: `docs/agentic-workflows.md` § "Decision model (Kev)".
 - **Gotchas:** does **not** dispatch tools (forwards `tools[]` as-is, returns raw
   `tool_calls` to the orchestrator). Embed/rerank models lazy-load from HF on first
   call (cold start). Sessions are in-memory (lost on restart).

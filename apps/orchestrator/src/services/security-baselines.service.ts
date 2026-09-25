@@ -10,6 +10,13 @@
  *
  *   1. coverage — every tick, zone or not (spans are instants). The first
  *      tick of this process closes every span another process left open;
+ *   1b. WARP-2980 PR-B (spec D18) — expected activity whose `expiresAt` has
+ *      passed is marked `expired`, zone or not, each with its system audit
+ *      after its own commit (security-suppressions.service.ts). A failed
+ *      audit is rethrown only after the tick's work (and `lastOkAt`) — never
+ *      through `lastError`, whose words ("Couldn't check which cameras…")
+ *      would be false. Every reader also requires `expiresAt > now`, so a
+ *      tick that runs late never extends one;
  *   2. the zone — `resolveSecurityTimezone` (site zone, else a valid
  *      Workspace.tz). None → stop: nothing can be cut into site hours;
  *   3. the job-state row, created lazily at the current site hour;
@@ -55,7 +62,10 @@ import {
 import { fetchStats } from "./frigate.client.js";
 import { config } from "../config.js";
 import { rebuildAreas, runFullBuild, type FullBuildOutcome } from "./security-baseline-build.js";
-import { BASELINE, PATTERN_RELEASE } from "../lib/security-baseline-math.js";
+import { expireSuppressions } from "./security-suppressions.service.js";
+import { BASELINE } from "../lib/security-baseline-math.js";
+import { PATTERN_RELEASE } from "../lib/security-rules.js";
+import { patternRuleHealth, plainTickError, type PatternRuleHealth } from "./security-pattern-rules.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
 import { localPartsOf, ymdAddDays } from "../lib/zoned-time.js";
 import { siteDayClockCopy } from "../lib/security-hours.js";
@@ -75,8 +85,8 @@ export const SECURITY_BASELINE_INTERVAL_MS = 60_000;
 export const SECURITY_BASELINE_LOCK_KEY = "droplet:security-baselines";
 /** The nightly build waits until 00:10 site time, so yesterday's last `end` events have landed. */
 export const BASELINE_NIGHTLY_AFTER_MINUTE = 10;
-/** A ready build older than this pauses the rules (PR-B) and area rebuilds. */
-export const BASELINE_FRESH_WINDOW_DAYS = 2;
+/** A ready build older than this pauses the rules (`buildPause`, PR-B) and area rebuilds — one fingerprinted number. */
+export const BASELINE_FRESH_WINDOW_DAYS = BASELINE.freshWindowDays;
 /**
  * A full build that FAILED is not retried within this long (spec silent):
  * a build that times out at 45 s would otherwise run again every minute.
@@ -334,14 +344,14 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
   return due;
 }
 
+/**
+ * A tick failure in words the Sources card can show — moved to
+ * security-pattern-rules.ts (WARP-2980 PR-B), which the incident engine also
+ * uses and which must not import this file.
+ */
+export { plainTickError };
+
 /** Frigate's stats for this tick, or null when they did not answer (or Frigate is not set up). Never throws. */
-/** A tick failure in words the Sources card can show: never an error's own text (it can hold table names). */
-export function plainTickError(err: unknown): string {
-  const name = err instanceof Error ? err.name : "";
-  const code = (err as { code?: unknown } | null)?.code;
-  const fromDatabase = name.startsWith("PrismaClient") || (typeof code === "string" && /^P\d{4}$/.test(code));
-  return fromDatabase ? "the database couldn't be read" : "something went wrong";
-}
 
 async function readFrigateStats(deps: BaselineJobDeps, now: Date): Promise<FrigateStatsView | null> {
   const read =
@@ -363,6 +373,19 @@ export async function tickSecurityBaselines(
   now: Date = new Date(),
   deps: BaselineJobDeps = {},
 ): Promise<BaselineTickResult> {
+  const expiry: { auditError?: unknown } = {};
+  const result = await runBaselineTick(prisma, now, deps, expiry);
+  // D18: the tick's work (and lastOkAt) is done; a failed expiry audit reaches safeRun's canary now.
+  if (expiry.auditError !== undefined) throw expiry.auditError;
+  return result;
+}
+
+async function runBaselineTick(
+  prisma: JobDb,
+  now: Date,
+  deps: BaselineJobDeps,
+  expiry: { auditError?: unknown },
+): Promise<BaselineTickResult> {
   const processId = deps.processId ?? BOOT_PROCESS_ID;
   const clock = deps.clock ?? Date.now;
   const tickStart = clock();
@@ -377,6 +400,9 @@ export async function tickSecurityBaselines(
     await recordCoverage(prisma, { ingest: tracker.ingest, readings: seeded.readings, stats }, processId, now, { bootClose });
     bootClosed.add(processId);
 
+    // 1b. Expected activity past its expiresAt — zone or not (D18).
+    expiry.auditError = (await expireSuppressions(prisma, now)).auditError;
+
     const zone = await (deps.zone ?? (() => resolveSecurityTimezone(prisma)))();
     result.zone = zone;
     if (!zone) {
@@ -388,7 +414,6 @@ export async function tickSecurityBaselines(
     const hourEnd = slotOf(now, zone).start;
     if (hourEnd.getTime() > state.hourlyThrough.getTime()) {
       await refreshBaselineSources(prisma, zone, now);
-      // PR-B adds the suppression expiry here.
       await prisma.securityBaselineJobState.updateMany({
         where: { id: SINGLETON, hourlyThrough: state.hourlyThrough },
         data: { hourlyThrough: hourEnd },
@@ -485,6 +510,12 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
  *     but none confirmed is a fault, never a harmless not_configured;
  *   · down — the newest build failed and there is no ready build or it is
  *     out of date; or the ready build is out of date (the rules pause);
+ *   · down "Couldn't compare new events with what's usual: …" — WARP-2980
+ *     PR-B: the latest pattern evaluation of the incident engine failed
+ *     (`rules`, security-pattern-rules.ts). Only for a viewer who sees EVERY
+ *     camera: it flips on a detection's evaluation, so for anyone else its
+ *     timing would reveal a detection on a camera they cannot see (DS-005
+ *     covers times);
  *   · quiet — learning ("9 of 14 days", the most any visible camera has), or
  *     every visible camera silent for over two days;
  *   · ok — "Knows what normal looks like for 3 cameras; 1 still learning",
@@ -496,6 +527,7 @@ export function patternsHealthRow(
   db: PatternsHealthDb | null,
   scope: Pick<SecurityViewerScope, "visibleCameras"> | null,
   now: Date,
+  rules: Readonly<PatternRuleHealth> = patternRuleHealth(),
 ): SecurityHealthRow {
   const lastSeenAt = db?.ready?.finishedAt ? db.ready.finishedAt.toISOString() : null;
   const row = (s: SecurityHealthRow["state"], detail: string): SecurityHealthRow => ({ id: "patterns", state: s, detail, lastSeenAt });
@@ -543,6 +575,9 @@ export function patternsHealthRow(
   }
   if (state.areaRebuildFailedAt && nowMs - state.areaRebuildFailedAt.getTime() < BASELINE_AREA_REBUILD_RETRY_AFTER_MS * 2) {
     return row("down", "Couldn't update what's usual after an area's cameras changed; trying again within the hour");
+  }
+  if (rules.lastError && cams === "all") {
+    return row("down", `Couldn't compare new events with what's usual: ${rules.lastError.message}`);
   }
 
   const active = sources.filter((s) => s.state === "active");

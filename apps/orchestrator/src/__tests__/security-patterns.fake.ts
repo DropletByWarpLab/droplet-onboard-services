@@ -5,7 +5,9 @@
  * reuses: loadActiveLinks, loadCameraLabels, visibleCameraNames,
  * resolveSecurityTimezone) ask for. A `where` key it does not understand
  * throws, so a query the fake cannot answer truthfully fails loudly instead
- * of matching everything.
+ * of matching everything. PR-B adds the two reads routes 29 and 31 now make:
+ * active expected activity (`{state: "active", expiresAt: {gt}}`) and the
+ * marked incidents behind precision.
  */
 import { vi } from "vitest";
 
@@ -48,6 +50,10 @@ export interface PatternsWorld {
   }>;
   builds: Array<{ id: string; state: string; timezone: string; windowFrom: string; windowTo: string; finishedAt: Date | null; startedAt: Date }>;
   cells: FakeCell[];
+  /** WARP-2980 PR-B — SecuritySuppression rows (route 31's `expected`). */
+  suppressions?: Array<Record<string, unknown>>;
+  /** WARP-2980 PR-B — SecurityIncident verdict columns (route 29's `precision`). */
+  incidents?: Array<{ id: string; verdict: string; verdictCodes: string[]; verdictFirstAt: Date | null }>;
   /** Set to make every read reject (the 503 path). */
   failReads?: boolean;
 }
@@ -144,6 +150,28 @@ export function patternsPrisma(w: PatternsWorld) {
       findUnique: guard((a: { where: { id: string } }) => {
         const z = w.zones.find((zz) => zz.id === a.where.id);
         return z ? { ...z } : null;
+      }),
+    },
+    securitySuppression: {
+      findMany: guard((a: { where: { state: string; expiresAt: { gt: Date } } }) => {
+        const keys = Object.keys(a.where).sort().join(",");
+        if (keys !== "expiresAt,state" || a.where.state !== "active" || !(a.where.expiresAt.gt instanceof Date)) {
+          throw new Error(`patterns fake: unexpected suppression query ${JSON.stringify(a.where)}`);
+        }
+        return (w.suppressions ?? [])
+          .filter((r) => r.state === "active" && (r.expiresAt as Date).getTime() > a.where.expiresAt.gt.getTime())
+          .map((r) => ({ ...r }));
+      }),
+    },
+    securityIncident: {
+      findMany: guard((a: { where: { verdict: { in: string[] }; verdictCodes: { hasSome: string[] } } }) => {
+        const keys = Object.keys(a.where).sort().join(",");
+        if (keys !== "verdict,verdictCodes" || !Array.isArray(a.where.verdict.in) || !Array.isArray(a.where.verdictCodes.hasSome)) {
+          throw new Error(`patterns fake: unexpected incident query ${JSON.stringify(a.where)}`);
+        }
+        return (w.incidents ?? [])
+          .filter((i) => a.where.verdict.in.includes(i.verdict) && i.verdictCodes.some((c) => a.where.verdictCodes.hasSome.includes(c)))
+          .map((i) => ({ ...i }));
       }),
     },
     securityBaselineSource: {

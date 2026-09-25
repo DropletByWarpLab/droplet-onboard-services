@@ -750,6 +750,13 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     PATTERN_NOT_FOUND: "There's nothing to show for that area or camera. Pick another one.",
     PATTERNS_NOT_BUILT: "Droplet hasn't worked out what's usual yet. It does that every night.",
     NO_TIMEZONE: "Droplet needs the site's timezone first. Set the opening hours to choose it.",
+    // WARP-2980 (P5 PR-B) — expected activity. "Expected activity" is the UI's
+    // word; the route's "suppression" never reaches a person.
+    SUPPRESSIONS_UNAVAILABLE:
+      "Droplet couldn't load expected activity right now. This is not the same as there being none. Try again in a moment.",
+    SUPPRESSION_NOT_FOUND: "That expected activity isn't there any more. Refresh the page.",
+    SUPPRESSION_TARGET_NOT_FOUND: "That area or camera isn't there any more. Refresh the page.",
+    SUPPRESSION_LIMIT: "There can be up to 100 expected activities at a time. Remove one first. Nothing was changed.",
     VALIDATION_ERROR: "Some of that isn't quite right. Check what you entered and try again.",
     // A route-level feature gate answers 404 module_disabled (a flat body, so
     // apiFetch carries no typed code — the status entry catches it): this
