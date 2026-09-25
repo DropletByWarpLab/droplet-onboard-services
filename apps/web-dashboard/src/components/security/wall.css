@@ -14,9 +14,10 @@
  * never less than 72 px high: when the screen is too short for that (a 1080p
  * TV browser at 960×540 with 12 cameras and a banner), the page grows and
  * scrolls a little instead of squeezing the pictures away. At 640 px wide or
- * 480 px tall and below (a phone, either way up) the page scrolls: the tiles
- * stack one per row, each picture 16:9, the rows stack from the top, and the
- * strip's cells wrap two by two, so 375 px never scrolls sideways. Type
+ * 480 px tall and below (a phone, either way up) the page scrolls: the
+ * banners and the strip come first, then the tiles, one per row, each picture
+ * 16:9, the rows from the top, and the strip's cells wrap two by two, so
+ * 375 px never scrolls sideways. Type
  * scales with the screen (clamp) so a 55" TV reads from across the room. No
  * animation.
  */
@@ -120,9 +121,15 @@
 /* ── A phone, either way up ─────────────────────────────────── */
 @media (max-width: 640px), (max-height: 480px) {
   .droplet-shell.sec-wall { grid-template-rows: auto auto auto; align-content: start; }
+  /* The banners, then the strip, above the tiles: under a column of tiles they were thousands of px down,
+     and the strip's "Back to Security" is a phone's only way out. Nothing in the tiles takes focus, so the
+     tab order is unchanged. */
+  .droplet-shell .sec-wall-banners { order: -2; padding: 8px 16px; }
+  .droplet-shell .sec-wall-strip { order: -1; border-top: 0; border-bottom: 1px solid var(--border); }
   .droplet-shell .sec-wall-cameras { min-height: 200px; }
   .droplet-shell .sec-wall-tiles { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
-  .droplet-shell .sec-wall-tile-frame { aspect-ratio: 16 / 9; max-height: 75dvh; }
+  /* Full width (a grid item with a ratio would otherwise start-align): capped at 75dvh, the picture is letterboxed on --bg as on a TV. */
+  .droplet-shell .sec-wall-tile-frame { aspect-ratio: 16 / 9; max-height: 75dvh; justify-self: stretch; }
   .droplet-shell .sec-wall-strip > dl { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 }
 

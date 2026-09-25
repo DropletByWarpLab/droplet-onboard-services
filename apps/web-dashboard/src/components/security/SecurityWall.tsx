@@ -25,7 +25,8 @@
  * dashboard's theme. Tokens only (wall.css). Only the two banners are live
  * regions, so a screen reader is not re-read the strip every 15 s. The way
  * out, "Back to Security", is always visible (a phone or an installed app has
- * no other), low-key beside Full screen and first in the tab order.
+ * no other; on a phone the strip comes above the tiles), low-key beside Full
+ * screen and first in the tab order.
  */
 import "@/components/shell/indigo-tokens.css";
 import "@/components/shell/droplet-shell.css";

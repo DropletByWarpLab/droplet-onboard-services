@@ -498,8 +498,18 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
   it("≤ 640 px wide or ≤ 480 px tall: one tile per row, each picture 16:9 but never taller than the screen, and the cells wrap at 150 px", () => {
     const phone = /@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*/.exec(code)?.[0] ?? "";
     expect(phone).toMatch(/\.sec-wall-tiles \{ grid-template-columns: minmax\(0, 1fr\); grid-template-rows: none; \}/);
-    expect(phone).toMatch(/\.sec-wall-tile-frame \{ aspect-ratio: 16 \/ 9; max-height: 75dvh; \}/);
+    // Full width: capped at 75dvh, a grid item with a ratio start-aligned and left 291 px of an 812 px tile empty at 844×390.
+    expect(phone).toMatch(/\.sec-wall-tile-frame \{ aspect-ratio: 16 \/ 9; max-height: 75dvh; justify-self: stretch; \}/);
     expect(phone).toMatch(/\.sec-wall-strip > dl \{[^}]*repeat\(auto-fit, minmax\(150px, 1fr\)\)/);
+  });
+
+  it("≤ 640 px wide or ≤ 480 px tall: the banners, then the strip (and its way out), come above the tiles", () => {
+    // Internal review, round 4: under 12 stacked tiles the strip began at y = 4,082 on a phone on its side.
+    const phone = /@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*/.exec(code)?.[0] ?? "";
+    expect(phone).toMatch(/\.droplet-shell \.sec-wall-banners \{ order: -2;/);
+    expect(phone).toMatch(/\.droplet-shell \.sec-wall-strip \{ order: -1; border-top: 0; border-bottom: 1px solid var\(--border\); \}/);
+    // The tiles keep order 0, below both.
+    expect(code).not.toMatch(/\.sec-wall-(cameras|tiles) \{[^}]*order:/);
   });
 
   it("above 640 px the tiles are an equal --cols × --rows grid, so every camera fits the space the strip leaves", () => {
