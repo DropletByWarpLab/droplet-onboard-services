@@ -21,6 +21,7 @@ import {
   putAlertRouting,
   resolveSecurityIncident,
   securityIncidentsPath,
+  setSecurityIncidentVerdict,
 } from "@/lib/api";
 
 const ID = "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f";
@@ -113,6 +114,25 @@ describe("routes 19–20 — acknowledge and resolve", () => {
     await resolveSecurityIncident(ID, { note: "   " });
     [, init] = lastCall();
     expect(JSON.parse(String(init.body))).toEqual({});
+  });
+
+  // WARP-2980 (P5 PR-C) — route 35: Expected / Not expected.
+  it("verdict POSTs exactly {verdict} to …/verdict (the body is strict on the box)", async () => {
+    mockFetch.mockResolvedValue(ok({ incident: { id: ID }, changed: true }));
+    await expect(setSecurityIncidentVerdict(ID, "expected")).resolves.toEqual({ incident: { id: ID }, changed: true });
+    let [url, init] = lastCall();
+    expect(url).toBe(`/api/security/incidents/${ID}/verdict`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ verdict: "expected" });
+
+    await setSecurityIncidentVerdict(ID, "not_expected");
+    [, init] = lastCall();
+    expect(JSON.parse(String(init.body))).toEqual({ verdict: "not_expected" });
+  });
+
+  it("a verdict with nothing to judge throws NOT_JUDGEABLE with its status", async () => {
+    mockFetch.mockResolvedValueOnce(failing(409, "NOT_JUDGEABLE"));
+    await expect(setSecurityIncidentVerdict(ID, "expected")).rejects.toMatchObject({ code: "NOT_JUDGEABLE", status: 409 });
   });
 
   it("a lost race throws INCIDENT_CONFLICT with its status", async () => {

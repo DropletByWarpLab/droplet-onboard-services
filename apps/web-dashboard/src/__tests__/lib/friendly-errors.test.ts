@@ -802,6 +802,8 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "INCIDENT_CONFLICT",
     "NOT_ACTIONABLE",
     "INCIDENTS_UNAVAILABLE",
+    // WARP-2980 (P5 PR-C) — route 35, Expected / Not expected.
+    "NOT_JUDGEABLE",
     "NO_RECIPIENT",
     "NOT_ELIGIBLE",
     "ROUTING_UNAVAILABLE",

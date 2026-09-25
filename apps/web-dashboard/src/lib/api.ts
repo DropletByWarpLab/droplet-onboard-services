@@ -175,6 +175,7 @@ import type {
   AlertRoutingView,
   IncidentActionResult,
   IncidentDetail,
+  IncidentVerdict,
   IncidentsPage,
   IncidentsSummary,
 } from "./types";
@@ -9412,6 +9413,19 @@ export function resolveSecurityIncident(id: string, opts: { note?: string } = {}
   return securityFetch<IncidentActionResult>(
     `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/resolve`,
     jsonBody("POST", note ? { note } : {}),
+  );
+}
+
+/**
+ * 35 (act, owner/admin — WARP-2980 P5) — Expected / Not expected. The body is
+ * exactly `{verdict}` (strict on the box). It never acknowledges, resolves or
+ * changes who is told; 409 NOT_JUDGEABLE when there is nothing this viewer
+ * can mark (or their view is partial), 409 INCIDENT_CONFLICT on a lost race.
+ */
+export function setSecurityIncidentVerdict(id: string, verdict: IncidentVerdict): Promise<IncidentActionResult> {
+  return securityFetch<IncidentActionResult>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/verdict`,
+    jsonBody("POST", { verdict }),
   );
 }
 

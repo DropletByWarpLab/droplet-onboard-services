@@ -36,6 +36,7 @@ import {
   getSecurityIncidents,
   putAlertRouting,
   resolveSecurityIncident,
+  setSecurityIncidentVerdict,
   type SecurityIncidentsQuery,
   archiveSecurityZone,
   createSecurityZone,
@@ -71,6 +72,7 @@ import type {
   CameraInfo,
   IncidentActionResult,
   IncidentDetail,
+  IncidentVerdict,
   IncidentSummary,
   IncidentsPage,
   IncidentsSummary,
@@ -672,6 +674,11 @@ export function useSecurityIncident(id: string | null) {
     async (opts: { note?: string } = {}) => apply(await resolveSecurityIncident(id!, opts)),
     [apply, id],
   );
+  // WARP-2980 (P5 PR-C) — route 35: Expected / Not expected. The box returns the incident, like acknowledge.
+  const giveVerdict = useCallback(
+    async (verdict: IncidentVerdict) => apply(await setSecurityIncidentVerdict(id!, verdict)),
+    [apply, id],
+  );
 
   return {
     incident: data ?? null,
@@ -680,6 +687,7 @@ export function useSecurityIncident(id: string | null) {
     refresh: () => mutate(),
     acknowledge,
     resolve,
+    giveVerdict,
   };
 }
 

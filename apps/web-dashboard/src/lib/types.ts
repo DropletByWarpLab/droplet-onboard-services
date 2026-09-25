@@ -3840,7 +3840,9 @@ export type SecurityErrorCode =
   | "NO_RECIPIENT"
   | "NOT_ELIGIBLE"
   | "ROUTING_UNAVAILABLE"
-  | "USER_NOT_FOUND";
+  | "USER_NOT_FOUND"
+  // WARP-2980 (P5 PR-C) — route 35: nothing this viewer can mark, or a partial view (one body).
+  | "NOT_JUDGEABLE";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
@@ -4144,15 +4146,55 @@ export interface IncidentNoticeView {
  */
 export type IncidentMemberView = Omit<SecurityEvent, "incident"> & { alsoIn: SecurityZoneRef[] };
 
+/** WARP-2980 (P5 PR-B route 18, PR-C) — Expected / Not expected, as the box keeps it. */
+export type IncidentVerdictState = "unreviewed" | "expected" | "not_expected";
+/** Route 35's body: an answer can change, never go back to unreviewed. */
+export type IncidentVerdict = Exclude<IncidentVerdictState, "unreviewed">;
+
+/**
+ * Route 18's verdict — sent only to a viewer who sees every camera and may
+ * read threats (null to anyone else: an answer about things they can't see).
+ */
+export interface IncidentVerdictView {
+  state: IncidentVerdictState;
+  /** Display-safe; null iff unreviewed. */
+  byName: string | null;
+  at: string | null;
+  /** The codes judged when it was marked. */
+  codes: SecurityReasonCode[];
+}
+
+/**
+ * One pattern flag on route 18 (WARP-2980 P5 PR-B): what Droplet would have
+ * flagged (`trial` — every pattern code is trial until P5 PR-D) or what
+ * expected activity kept quiet (`suppressed`). Neither counts: neither sets
+ * the incident's severity or state, and neither told anyone. The box sends
+ * flags only to owner/admin who see the flag's cameras.
+ */
+export interface IncidentPatternFlagView {
+  code: SecurityPatternCode;
+  effect: "trial" | "suppressed";
+  /** What it would carry if it counted. Never shown as the incident's severity. */
+  severity: SecuritySeverity;
+  key: { kind: "area" | "camera"; zoneId: string | null; camera: string | null };
+  evidence: { eventId: string; camera: string; label: string; at: string; summary: string };
+  /**
+   * The numbers behind it (safe integers and exact strings): every flag
+   * `{dayType, hour, windowFrom, windowTo, mode, zoneKind, rulesetVersion}`;
+   * out_of_place `{daysObserved, daysWithEvent, …}`; unusual_volume `{k,
+   * lambda, typicalPerHour, …}`; long_dwell `{durationSec, p99Sec, …}`.
+   */
+  detail: Record<string, string | number | null> | null;
+  /** effect = suppressed: the expected activity that kept it quiet, as it is NOW; else null. */
+  suppression: { id: string; reason: string; state: "active" | "removed" | "expired" } | null;
+}
+
 /**
  * GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike.
  *
- * Deliberately NOT mirrored here: what P5 PR-B (WARP-2980) added to route 18
- * — `verdict`, `patternFlags` and `viewer.canGiveVerdict` — and route 35
- * (POST …/verdict, whose 409 is NOT_JUDGEABLE). The box sends them; this
- * page ignores them. P5 PR-C mirrors and renders them (the verdict bar, the
- * Trial chip, a flag quietened by expected activity), each with its own
- * viewer rule, so none of it is shown before that rule is.
+ * WARP-2980 (P5 PR-C) mirrors what P5 PR-B added — `verdict`, `patternFlags`
+ * and `viewer.canGiveVerdict` — and route 35 (POST …/verdict, 409
+ * NOT_JUDGEABLE), each rendered under its own viewer rule.
  */
 export interface IncidentDetail extends IncidentSummary {
   reasons: IncidentReasonView[];
@@ -4177,11 +4219,19 @@ export interface IncidentDetail extends IncidentSummary {
    * the cause.
    */
   actionable: boolean;
+  /** WARP-2980: null unless this viewer sees every camera and may read threats. */
+  verdict: IncidentVerdictView | null;
+  /** WARP-2980: the flags this viewer may see, in evidence order (owner/admin only, on the box). */
+  patternFlags: IncidentPatternFlagView[];
   /**
    * The viewer's Security level on the box, and whether they have acknowledged
    * or resolved this incident — kept in a partial view too (their own act).
+   * `canGiveVerdict` (WARP-2980): exactly when route 35 would accept an answer
+   * from them — owner/admin who see everything, at act or above, on a view
+   * that isn't partial, with something to judge. Independent of `actionable`:
+   * a trial-only incident has nothing to acknowledge and can still be judged.
    */
-  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
+  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean; canGiveVerdict: boolean };
 }
 
 /** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
