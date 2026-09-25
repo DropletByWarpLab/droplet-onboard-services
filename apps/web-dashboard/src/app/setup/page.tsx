@@ -171,7 +171,10 @@ export default function SetupPage() {
                 onClick={() => {
                   void retrySetupProbe();
                 }}
-                className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline"
+                /* `bg-accent-fill`, not `bg-accent`: `text-on-accent` on the
+                   vivid accent is the same 4.47:1 light-mode pair that
+                   `.dp-btn-primary` carries. */
+                className="rounded-full bg-accent-fill px-5 py-2 text-on-accent type-subheadline"
               >
                 Retry
               </button>

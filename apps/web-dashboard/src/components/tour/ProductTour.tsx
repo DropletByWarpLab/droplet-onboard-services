@@ -213,7 +213,10 @@ function MotifFiles({ files }: { files: FileEntryInfo[] | null }) {
 function MotifAi({ modelName }: { modelName: string | null }) {
   return (
     <div className="flex w-full flex-col gap-2.5 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
-      <div className="max-w-[78%] self-end rounded-[12px_12px_4px_12px] bg-accent px-3.5 py-2 type-footnote text-on-accent">
+      {/* `bg-accent-fill`, not `bg-accent`: `text-on-accent` on the vivid
+          accent measures 4.47:1 in light mode, and this is footnote-size
+          text — squarely under WCAG 1.4.3's 4.5:1 normal-text floor. */}
+      <div className="max-w-[78%] self-end rounded-[12px_12px_4px_12px] bg-accent-fill px-3.5 py-2 type-footnote text-on-accent">
         What can you help me with on this box?
       </div>
       <div className="max-w-[85%] self-start rounded-[12px_12px_12px_4px] border border-separator bg-surface-primary px-3.5 py-2">
