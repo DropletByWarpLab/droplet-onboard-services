@@ -442,9 +442,13 @@ describe("the source header", () => {
     expect(container.querySelector('[data-source="alerts"] .nm')).toHaveTextContent("Alerts");
   });
 
-  it("every row the server can send has a label — the orchestrator's pinned order, verbatim", () => {
-    // security-events.service.ts's SecurityHealthId, in buildSecurityHealth's order.
-    const served: SecurityHealthRow["id"][] = [
+  it("every id in the dashboard's SecurityHealthRow union has a non-blank label", () => {
+    // A hand copy of the union in lib/types.ts, compared as a set: SOURCE_LABEL's
+    // key order is not the header's order (SourcesCard renders rows as served).
+    // This does NOT read the orchestrator's SecurityHealthId — a row the server
+    // adds is caught only once lib/types.ts's union gains it, and then by the
+    // Record type on SOURCE_LABEL, at compile time.
+    const ids: SecurityHealthRow["id"][] = [
       "camera_ingest",
       "camera_system",
       "locks",
@@ -455,8 +459,8 @@ describe("the source header", () => {
       "patterns",
       "retention",
     ];
-    expect(Object.keys(SOURCE_LABEL).sort()).toEqual([...served].sort());
-    for (const id of served) expect(SOURCE_LABEL[id], id).toMatch(/\S/);
+    expect(Object.keys(SOURCE_LABEL).sort()).toEqual([...ids].sort());
+    for (const id of ids) expect(SOURCE_LABEL[id], id).toMatch(/\S/);
   });
 });
 
