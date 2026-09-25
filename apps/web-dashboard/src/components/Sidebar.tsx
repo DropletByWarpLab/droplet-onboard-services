@@ -339,7 +339,7 @@ export function Sidebar() {
           </div>
         ) : (
           <div className="flex items-center gap-2.5 pl-5 pr-3 h-16 shrink-0 overflow-hidden">
-            <DropletMark size={22} className="text-accent shrink-0" />
+            <DropletMark size={22} className="text-accent" />
             <span className="type-headline text-label-primary tracking-tight sidebar-fade-in">
               Droplet
             </span>
@@ -1033,8 +1033,7 @@ function NavLink({
           className="sidebar-sub"
           data-open={showChildren}
           aria-hidden={showChildren ? undefined : true}
-          // React 18 has no `inert` prop type; it passes the attribute through.
-          {...(showChildren ? {} : ({ inert: "" } as Record<string, string>))}
+          inert={!showChildren}
         >
           <div>
             <div
