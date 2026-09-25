@@ -616,6 +616,43 @@ describe("patternsHealthRow — every state (§6.14)", () => {
   });
 });
 
+describe("patternsHealthRow — the incident engine's pattern evaluation (WARP-2980 PR-B, spec D23)", () => {
+  const failing = { lastOkAt: new Date(NOW.getTime() - 60_000), lastError: { at: NOW, message: "the database couldn't be read" } };
+  const fine = { lastOkAt: NOW, lastError: null };
+
+  it("the latest evaluation failed: down, in plain words, for a viewer who sees every camera", () => {
+    const row = patternsHealthRow(running(), db(), ALL, NOW, failing);
+    expect(row).toMatchObject({ state: "down", detail: "Couldn't compare new events with what's usual: the database couldn't be read" });
+    expect(row.detail).not.toMatch(BANNED);
+    expect(patternsHealthRow(running(), db(), ALL, NOW, { ...failing, lastError: { at: NOW, message: "something went wrong" } }).detail).toBe(
+      "Couldn't compare new events with what's usual: something went wrong",
+    );
+  });
+
+  it("cleared by the next evaluation that completes: the ok row keeps its trial note", () => {
+    expect(patternsHealthRow(running(), db(), ALL, NOW, fine)).toMatchObject({
+      state: "ok",
+      detail: "Knows what normal looks like for 3 cameras; 1 still learning · Trial: pattern flags aren't raised yet",
+    });
+  });
+
+  it("DS-005 (review item 15): a camera-limited viewer never sees it — its timing would reveal a detection on a hidden camera", () => {
+    expect(patternsHealthRow(running(), db(), { visibleCameras: new Set(["front"]) }, NOW, failing)).toMatchObject({
+      state: "ok",
+      detail: "Knows what normal looks like for 1 camera · Trial: pattern flags aren't raised yet",
+    });
+  });
+
+  it("comes after the area-rebuild check, and after the out-of-date build (which already pauses the rules)", () => {
+    expect(patternsHealthRow(running({ areaRebuildFailedAt: new Date(NOW.getTime() - 60_000) }), db(), ALL, NOW, failing).detail).toBe(
+      "Couldn't update what's usual after an area's cameras changed; trying again within the hour",
+    );
+    expect(
+      patternsHealthRow(running(), db({ ready: { finishedAt: ny("00:11", "2026-09-19"), windowTo: "2026-09-18" } }), ALL, NOW, failing).detail,
+    ).toBe("What normal looks like is out of date (last worked out Sat)");
+  });
+});
+
 describe("securityPatternsHealth — reads, scopes, never throws", () => {
   it("a read failure is a down row, not a 503", async () => {
     const prisma = {

@@ -14,6 +14,12 @@
  *   the FKs      — an area or a suppression that something points at cannot
  *                  be deleted (Restrict); an incident takes its flags with it.
  *   re-runnable  — both folders applied a second time change nothing.
+ *   end to end   — 28 days of coverage and daytime detections, a REAL build
+ *                  and learning state, a 03:10 detection through the REAL
+ *                  engine: one trial flag whose numbers are route 31's for the
+ *                  same instant, and which a later rebuild never moves (D20);
+ *   k            — only `detection` rows count, and the query is served by
+ *                  the (camera, startedAt) index at 10k rows (D8).
  *
  * Every probe runs in a transaction that ALWAYS rolls back, so the file leaves
  * no row behind. Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL, like every
@@ -22,10 +28,18 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { MIGRATIONS_DIR } from "../__tests__/helpers/test-paths.js";
 
 vi.unmock("@prisma/client");
+
+import { runFullBuild } from "./security-baseline-build.js";
+import { refreshBaselineSources } from "./security-coverage.js";
+import { tickSecurityIncidents, _resetIncidentHealthForTests } from "./security-incidents.service.js";
+import { countSlotDetections, _resetPatternRulesForTests } from "./security-pattern-rules.js";
+import { explainSecurityPattern } from "./security-patterns-read.js";
+import { slotOf } from "../lib/security-baseline-slots.js";
+import { windowFor } from "../lib/security-baseline-slots.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -436,5 +450,218 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B schema against real Postgres", () => {
   it("the main folder leaves the P3 reasons CHECK alone (it never names code_severity)", () => {
     expect(migration(MAIN_FOLDER).replace(/^\s*--.*$/gm, "")).not.toMatch(/SecurityIncidentReason_code_severity/);
     expect(migration(CODES_FOLDER).replace(/^\s*--.*$/gm, "").trim().split("\n")).toHaveLength(3);
+  });
+});
+
+// ── 53–54: the engine and k on real rows ─────────────────────────────────────
+
+/**
+ * FIXTURE SCOPING — camera `warp2980p_front`, the area `warp2980p Front door`,
+ * events `warp2980p:*` / `frigate-ongoing:warp2980p-*`, and dates in March
+ * 2034 (the baseline-build pg file uses 2031 and 2033, coverage 2032). The
+ * engine, hours and mode singletons are saved before and restored after; the
+ * builds this file makes (window 2034-…) are deleted.
+ */
+describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () => {
+  const TAG = "warp2980p";
+  const PCAM = `${TAG}_front`;
+  const TZ = "Europe/London";
+  /** Wednesday 2034-03-15 03:12 in London (GMT): the window is 2034-02-15 … 2034-03-14 (20 weekdays). */
+  const NOW = new Date("2034-03-15T03:12:00Z");
+  const AT_0310 = new Date("2034-03-15T03:10:00Z");
+  const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
+  let prisma: PrismaClient;
+  let zoneId = "";
+  let n = 0;
+  let saved: { engine: unknown; hours: unknown; days: unknown[]; mode: unknown } = { engine: null, hours: null, days: [], mode: null };
+
+  const person = (at: Date, over: Partial<Prisma.SecurityEventCreateManyInput> = {}): Prisma.SecurityEventCreateManyInput => ({
+    source: "frigate",
+    kind: "detection",
+    severity: "info",
+    camera: PCAM,
+    sourceRef: `${PCAM}/${++n}.5-a`,
+    dedupeKey: `${TAG}:ev-${n}`,
+    labels: ["person"],
+    cameraZones: [],
+    score: 0.9,
+    startedAt: at,
+    endedAt: plus(at, 20_000),
+    summary: "Person seen by front",
+    ...over,
+  });
+
+  async function sweep(): Promise<void> {
+    const incidents = await prisma.securityIncident.findMany({ where: { cameras: { has: PCAM } }, select: { id: true } });
+    await prisma.securityEvent.deleteMany({ where: { OR: [{ dedupeKey: { startsWith: `${TAG}:` } }, { dedupeKey: { startsWith: `frigate-ongoing:${TAG}-` } }] } });
+    await prisma.securityIncident.deleteMany({ where: { id: { in: incidents.map((i) => i.id) } } });
+    const zones = await prisma.securityZone.findMany({ where: { name: { startsWith: `${TAG} ` } }, select: { id: true } });
+    await prisma.securityZoneLink.deleteMany({ where: { zoneId: { in: zones.map((z) => z.id) } } });
+    await prisma.securityZone.deleteMany({ where: { id: { in: zones.map((z) => z.id) } } });
+    await prisma.securityCoverageSpan.deleteMany({ where: { camera: { startsWith: `${TAG}_` } } });
+    await prisma.securityBaselineSource.deleteMany({ where: { camera: { startsWith: `${TAG}_` } } });
+    await prisma.securityBaselineBuild.deleteMany({ where: { windowFrom: { startsWith: "2034-" } } });
+    await prisma.securityPatternDay.deleteMany({ where: { date: { startsWith: "2034-" } } });
+  }
+
+  beforeAll(async () => {
+    const { PrismaClient: RealPrismaClient } = await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
+    prisma = new RealPrismaClient();
+    await prisma.$connect();
+    saved = {
+      engine: await prisma.securityIncidentEngineState.findUnique({ where: { id: "singleton" } }),
+      hours: await prisma.securitySiteHours.findUnique({ where: { id: "singleton" } }),
+      days: await prisma.securitySchedule.findMany(),
+      mode: await prisma.securityModeState.findUnique({ where: { id: "singleton" } }),
+    };
+    await sweep();
+    // One ready build at a time: this file needs the database's to be its own.
+    expect(await prisma.securityBaselineBuild.count({ where: { state: "ready" } })).toBe(0);
+
+    // A closed site in London (Mon–Fri 09–17) and a stored closed mode.
+    await prisma.securitySchedule.deleteMany({});
+    await prisma.securitySiteHours.deleteMany({});
+    await prisma.securityModeState.deleteMany({});
+    await prisma.securitySiteHours.create({ data: { id: "singleton", state: "set", timezone: TZ, version: 1 } });
+    await prisma.securitySchedule.createMany({
+      data: [1, 2, 3, 4, 5, 6, 7].map((weekday) =>
+        weekday <= 5 ? { weekday, kind: "hours" as const, opensMin: 540, closesMin: 1020 } : { weekday, kind: "closed" as const },
+      ),
+    });
+    await prisma.securityModeState.create({ data: { id: "singleton", mode: "closed", modeSource: "schedule", setAt: plus(NOW, -86_400_000) } });
+
+    // The Front door (entry), linked to the whole camera.
+    const zone = await prisma.securityZone.create({ data: { name: `${TAG} Front door`, nameKey: `${TAG} front door`, kind: "entry" } });
+    zoneId = zone.id;
+    await prisma.securityZoneLink.create({ data: { zoneId, sourceKind: "camera", sourceRef: PCAM, sourceLabel: PCAM, state: "active" } });
+
+    // 28 days of coverage, and a person at noon every day of the window.
+    await prisma.securityCoverageSpan.create({
+      data: {
+        camera: PCAM,
+        state: "closed",
+        startedAt: new Date("2034-02-14T00:00:00Z"),
+        coveredUntil: new Date("2034-03-15T03:00:00Z"),
+        closedAt: new Date("2034-03-15T03:00:00Z"),
+        processId: "0b9f3c3e-7d0a-4b5e-9d64-1f2a3b4c5d6e",
+      },
+    });
+    const window = windowFor(NOW, TZ);
+    expect(window).toEqual({ from: "2034-02-15", to: "2034-03-14" });
+    const noons: Prisma.SecurityEventCreateManyInput[] = [];
+    for (let d = new Date("2034-02-15T12:00:00Z"); d < new Date("2034-03-15T00:00:00Z"); d = plus(d, 86_400_000)) noons.push(person(d));
+    await prisma.securityEvent.createMany({ data: noons });
+  });
+
+  afterAll(async () => {
+    await sweep();
+    await prisma.securityIncidentEngineState.deleteMany({});
+    if (saved.engine) await prisma.securityIncidentEngineState.create({ data: saved.engine as Prisma.SecurityIncidentEngineStateCreateInput });
+    await prisma.securitySchedule.deleteMany({});
+    if (saved.days.length) await prisma.securitySchedule.createMany({ data: saved.days as Prisma.SecurityScheduleCreateManyInput[] });
+    await prisma.securitySiteHours.deleteMany({});
+    if (saved.hours) await prisma.securitySiteHours.create({ data: saved.hours as Prisma.SecuritySiteHoursCreateInput });
+    await prisma.securityModeState.deleteMany({});
+    if (saved.mode) await prisma.securityModeState.create({ data: saved.mode as Prisma.SecurityModeStateCreateInput });
+    await prisma.$disconnect();
+  });
+
+  it("53 — a 03:10 person at the Front door: one trial flag whose numbers are route 31's, unmoved by a later rebuild", async () => {
+    _resetIncidentHealthForTests();
+    _resetPatternRulesForTests();
+    const built = await runFullBuild(prisma, "first", TZ, NOW);
+    expect(built.status).toBe("built");
+    await refreshBaselineSources(prisma, TZ, NOW);
+    expect(await prisma.securityBaselineSource.findUnique({ where: { sourceKey: `camera:${PCAM}` } })).toMatchObject({ state: "active" });
+
+    // The engine starts at the store's head: only the 03:10 row is triaged.
+    const { _max } = await prisma.securityEvent.aggregate({ _max: { id: true } });
+    const head = _max.id ?? 0n;
+    await prisma.securityIncidentEngineState.deleteMany({});
+    await prisma.securityIncidentEngineState.create({
+      data: { id: "singleton", startedAtId: head, triageFloor: head, floorCandidate: head, floorCandidateAt: plus(NOW, -600_000) },
+    });
+    await prisma.securityEvent.createMany({ data: [person(AT_0310)] });
+    await tickSecurityIncidents(prisma, { isSecurityModuleOn: async () => false, resolveAccess: async () => null, now: () => NOW });
+
+    const incident = await prisma.securityIncident.findFirstOrThrow({ where: { cameras: { has: PCAM } } });
+    expect(incident).toMatchObject({ scope: "area", zoneId, severity: "info", state: "no_action", reasonCodes: [] });
+    const flags = await prisma.securityPatternFlag.findMany({ where: { incidentId: incident.id } });
+    expect(flags).toHaveLength(1);
+    expect(flags[0]).toMatchObject({ code: "out_of_place", effect: "trial", severity: "alert", zoneKey: `area:${zoneId}`, keyCameras: [PCAM], rulesetVersion: 3 });
+    const detail = flags[0]!.detail as Record<string, unknown>;
+
+    const explained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true }, { zoneId, label: "person", at: AT_0310 }, NOW);
+    expect(explained.status).toBe("ok");
+    const cell = (explained as Extract<typeof explained, { status: "ok" }>).view.cell!;
+    expect(detail).toMatchObject({
+      dayType: "weekday",
+      hour: 3,
+      daysObserved: cell.daysObserved,
+      daysWithEvent: 0,
+      smoothedDaysObserved: String(cell.smoothed.daysObserved),
+      smoothedDaysWithEvent: String(cell.smoothed.daysWithEvent),
+      p: cell.rarity.p.toPrecision(3),
+      windowFrom: "2034-02-15",
+      windowTo: "2034-03-14",
+    });
+    expect(cell.daysObserved).toBe(20);
+    expect(cell.rarity.wouldFlag).toBe(true);
+    expect(await prisma.securityPatternDay.findMany({ where: { date: "2034-03-15" }, select: { outcome: true, count: true } })).toEqual([
+      { outcome: "judged", count: 1 },
+    ]);
+
+    // New events at 03:05 on five window days, and a rebuild: the stored flag does not move (D20).
+    await prisma.securityEvent.createMany({
+      data: ["2034-03-06", "2034-03-07", "2034-03-08", "2034-03-09", "2034-03-10"].map((d) => person(new Date(`${d}T03:05:00Z`))),
+    });
+    expect((await runFullBuild(prisma, "nightly", TZ, plus(NOW, 60_000))).status).toBe("built");
+    const after = await prisma.securityPatternFlag.findUniqueOrThrow({ where: { id: flags[0]!.id } });
+    expect(JSON.stringify(after.detail)).toBe(JSON.stringify(flags[0]!.detail));
+    const reexplained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true }, { zoneId, label: "person", at: AT_0310 }, NOW);
+    expect((reexplained as Extract<typeof reexplained, { status: "ok" }>).view.cell!.daysWithEvent).toBe(5);
+  });
+
+  it("54 — k counts `detection` rows only, and the query uses the (camera, startedAt) index at 10k rows", async () => {
+    const slot = slotOf(AT_0310, TZ);
+    const inSlot = (min: number) => new Date(`2034-03-15T03:${String(min).padStart(2, "0")}:30Z`);
+    // Noise: 10k detections across other cameras and hours, so the planner has something to skip.
+    const noise: Prisma.SecurityEventCreateManyInput[] = [];
+    for (let i = 0; i < 10_000; i += 1) {
+      noise.push(person(new Date(Date.UTC(2034, 1, 15 + (i % 28), i % 24, i % 60)), { camera: `${TAG}_n${i % 10}`, sourceRef: `${TAG}_n/${i}` }));
+    }
+    for (let i = 0; i < noise.length; i += 2_000) await prisma.securityEvent.createMany({ data: noise.slice(i, i + 2_000) });
+    await prisma.securityEvent.createMany({
+      data: [
+        person(inSlot(1)),
+        person(inSlot(2)),
+        person(inSlot(3)),
+        person(inSlot(4), { kind: "detection_ongoing", endedAt: null, dedupeKey: `frigate-ongoing:${TAG}-1` }),
+      ],
+    });
+    const { _max } = await prisma.securityEvent.aggregate({ _max: { id: true } });
+    await prisma.$executeRawUnsafe(`ANALYZE "SecurityEvent"`);
+
+    const { PrismaClient: RealPrismaClient } = await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
+    const logging = new RealPrismaClient({ log: [{ emit: "event", level: "query" }] });
+    const seen: Array<{ query: string; params: string }> = [];
+    logging.$on("query", (e) => seen.push({ query: e.query, params: e.params }));
+    try {
+      // The 03:10 row from case 53 is in this slot too (id below the head): 3 + 1.
+      const k = await countSlotDetections(logging, { keyCameras: [PCAM], zoneId: null, label: "person", slot, eventId: _max.id!, links: [] });
+      expect(k).toBe(4);
+      const q = seen.find((x) => /FROM "public"\."SecurityEvent"/.test(x.query));
+      expect(q, "the k query was not captured").toBeDefined();
+      // Bound as UNTYPED literals, so Postgres infers each type from its column (as it does for Prisma's own bind).
+      const params = JSON.parse(q!.params) as unknown[];
+      const literal = (v: unknown): string =>
+        typeof v === "number" ? String(v) : Array.isArray(v) ? `'{${v.map((x) => `"${String(x)}"`).join(",")}}'` : `'${String(v).replace(/'/g, "''")}'`;
+      const sql = q!.query.replace(/\$(\d+)/g, (_m, i: string) => literal(params[Number(i) - 1]));
+      const plan = (await prisma.$queryRawUnsafe<Array<{ "QUERY PLAN": string }>>(`EXPLAIN ${sql}`)).map((r) => r["QUERY PLAN"]).join("\n");
+      expect(plan, plan).toMatch(/SecurityEvent_camera_startedAt_idx/);
+      expect(plan, plan).not.toMatch(/Seq Scan on "SecurityEvent"/);
+    } finally {
+      await logging.$disconnect();
+    }
   });
 });

@@ -1045,3 +1045,89 @@ export async function referenceProjectedIncidentPage(
   kept.sort((a, b) => b.projectedLast.getTime() - a.projectedLast.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   return kept.slice(0, take);
 }
+
+// ── WARP-2980 P5 PR-B: a ready baseline build ───────────────────────────────
+
+export interface BaselineKeyFixture {
+  /** `area:<id>` or `camera:<name>`. */
+  zoneKey: string;
+  /** An area key's version when its cells were built (default 0, `areaRows`' version). */
+  zoneVersion?: number;
+  cameras: string[];
+  /** Default ["person"]. */
+  labels?: string[];
+  /** Overrides per (dayType, hour); default: 20 weekday / 8 weekend observed days, nothing ever seen (every hour rare). */
+  at?: (dayType: "weekday" | "weekend", hour: number, label: string) => Row;
+}
+
+/**
+ * A `ready` build (cut in `tz`, its window ending `windowTo`), all 48 cells of
+ * each key and label — as the build writes them — and one learning-state row
+ * per camera. Seed with `createFakeSecurityPrisma({securityBaselineBuild:
+ * [b.build], securityBaselineCell: b.cells, securityBaselineSource: b.sources})`.
+ */
+export function baselineRows(opts: {
+  buildId?: string;
+  tz?: string;
+  windowFrom?: string;
+  windowTo?: string;
+  keys: BaselineKeyFixture[];
+  sources: Array<{ camera: string; state: "learning" | "active" | "stale" }>;
+  at?: Date;
+}): { build: Row; cells: Row[]; sources: Row[] } {
+  const buildId = opts.buildId ?? "b-ready";
+  const at = opts.at ?? new Date("2026-09-23T04:10:00Z");
+  const cells: Row[] = [];
+  for (const k of opts.keys) {
+    const area = k.zoneKey.startsWith("area:");
+    for (const label of k.labels ?? ["person"]) {
+      for (const dayType of ["weekday", "weekend"] as const) {
+        for (let hour = 0; hour < 24; hour += 1) {
+          const n = dayType === "weekday" ? 20 : 8;
+          cells.push({
+            buildId,
+            zoneKey: k.zoneKey,
+            keyKind: area ? "area" : "camera",
+            zoneId: area ? k.zoneKey.slice(5) : null,
+            camera: area ? null : k.zoneKey.slice(7),
+            zoneVersion: area ? (k.zoneVersion ?? 0) : null,
+            cameras: [...k.cameras].sort(),
+            label,
+            dayType,
+            hour,
+            daysObserved: n,
+            daysWithEvent: 0,
+            eventCount: 0,
+            observedMinutes: n * 60,
+            dwellSamples: 0,
+            durationP99Sec: null,
+            ...(k.at?.(dayType, hour, label) ?? {}),
+          });
+        }
+      }
+    }
+  }
+  return {
+    build: {
+      id: buildId,
+      state: "ready",
+      trigger: "nightly",
+      timezone: opts.tz ?? "Europe/London",
+      windowFrom: opts.windowFrom ?? "2026-08-26",
+      windowTo: opts.windowTo ?? "2026-09-22",
+      rulesetVersion: 3,
+      startedAt: at,
+      finishedAt: at,
+    },
+    cells,
+    sources: opts.sources.map((s) => ({
+      sourceKey: `camera:${s.camera}`,
+      camera: s.camera,
+      state: s.state,
+      daysObserved: s.state === "learning" ? 9 : 20,
+      firstSeenAt: new Date("2026-08-01T00:00:00Z"),
+      lastSeenAt: at,
+      stateChangedAt: at,
+    })),
+  };
+}

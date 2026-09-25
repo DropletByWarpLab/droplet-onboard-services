@@ -57,6 +57,7 @@ import { config } from "../config.js";
 import { rebuildAreas, runFullBuild, type FullBuildOutcome } from "./security-baseline-build.js";
 import { BASELINE } from "../lib/security-baseline-math.js";
 import { PATTERN_RELEASE } from "../lib/security-rules.js";
+import { patternRuleHealth, plainTickError, type PatternRuleHealth } from "./security-pattern-rules.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
 import { localPartsOf, ymdAddDays } from "../lib/zoned-time.js";
 import { siteDayClockCopy } from "../lib/security-hours.js";
@@ -330,14 +331,14 @@ async function rebuildChangedAreas(prisma: JobDb, zone: string, now: Date): Prom
   return due;
 }
 
+/**
+ * A tick failure in words the Sources card can show — moved to
+ * security-pattern-rules.ts (WARP-2980 PR-B), which the incident engine also
+ * uses and which must not import this file.
+ */
+export { plainTickError };
+
 /** Frigate's stats for this tick, or null when they did not answer (or Frigate is not set up). Never throws. */
-/** A tick failure in words the Sources card can show: never an error's own text (it can hold table names). */
-export function plainTickError(err: unknown): string {
-  const name = err instanceof Error ? err.name : "";
-  const code = (err as { code?: unknown } | null)?.code;
-  const fromDatabase = name.startsWith("PrismaClient") || (typeof code === "string" && /^P\d{4}$/.test(code));
-  return fromDatabase ? "the database couldn't be read" : "something went wrong";
-}
 
 async function readFrigateStats(deps: BaselineJobDeps, now: Date): Promise<FrigateStatsView | null> {
   const read =
@@ -481,6 +482,12 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
  *     but none confirmed is a fault, never a harmless not_configured;
  *   · down — the newest build failed and there is no ready build or it is
  *     out of date; or the ready build is out of date (the rules pause);
+ *   · down "Couldn't compare new events with what's usual: …" — WARP-2980
+ *     PR-B: the latest pattern evaluation of the incident engine failed
+ *     (`rules`, security-pattern-rules.ts). Only for a viewer who sees EVERY
+ *     camera: it flips on a detection's evaluation, so for anyone else its
+ *     timing would reveal a detection on a camera they cannot see (DS-005
+ *     covers times);
  *   · quiet — learning ("9 of 14 days", the most any visible camera has), or
  *     every visible camera silent for over two days;
  *   · ok — "Knows what normal looks like for 3 cameras; 1 still learning",
@@ -492,6 +499,7 @@ export function patternsHealthRow(
   db: PatternsHealthDb | null,
   scope: Pick<SecurityViewerScope, "visibleCameras"> | null,
   now: Date,
+  rules: Readonly<PatternRuleHealth> = patternRuleHealth(),
 ): SecurityHealthRow {
   const lastSeenAt = db?.ready?.finishedAt ? db.ready.finishedAt.toISOString() : null;
   const row = (s: SecurityHealthRow["state"], detail: string): SecurityHealthRow => ({ id: "patterns", state: s, detail, lastSeenAt });
@@ -539,6 +547,9 @@ export function patternsHealthRow(
   }
   if (state.areaRebuildFailedAt && nowMs - state.areaRebuildFailedAt.getTime() < BASELINE_AREA_REBUILD_RETRY_AFTER_MS * 2) {
     return row("down", "Couldn't update what's usual after an area's cameras changed; trying again within the hour");
+  }
+  if (rules.lastError && cams === "all") {
+    return row("down", `Couldn't compare new events with what's usual: ${rules.lastError.message}`);
   }
 
   const active = sources.filter((s) => s.state === "active");
