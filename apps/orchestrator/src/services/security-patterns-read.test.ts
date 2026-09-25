@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PrismaClient } from "@prisma/client";
-import { explainSecurityPattern, readPatternCells, readPatternsOverview } from "./security-patterns-read.js";
+import { explainSecurityPattern, readPatternCells, readPatternsOverview, verdictPrecision } from "./security-patterns-read.js";
 import { cellsFor, newPatternsWorld, patternsPrisma, type FakeCell, type PatternsWorld } from "../__tests__/security-patterns.fake.js";
 import { hourlyRate, isReady, rarityP, smoothCounts, slotRate, volumeThreshold } from "../lib/security-baseline-math.js";
 import type { SecurityViewerScope } from "./security-access.js";
@@ -387,5 +387,56 @@ describe("route 31 `paused` — the engine's own gates, so an explanation never 
     expect(r.status === "ok" && r.view.paused).toBeNull();
     const none = await explainSecurityPattern(db(world()), ALL, { camera: A, label: "dog" }, NOW);
     expect(none.status === "ok" && none.view.paused).toBeNull();
+  });
+});
+
+// ── WARP-2980 PR-B: route 29's `precision` (spec D17, review item 14) ────
+
+describe("route 29 `precision` — how often each pattern code was right, owner/admin only", () => {
+  const DAY = 86_400_000;
+  const ago = (ms: number) => new Date(NOW.getTime() - ms);
+  const marked = (first: Date) => [
+    { id: "i1", verdict: "not_expected", verdictCodes: ["after_hours_presence", "out_of_place"], verdictFirstAt: first },
+    { id: "i2", verdict: "expected", verdictCodes: ["out_of_place"], verdictFirstAt: ago(10 * DAY) },
+    { id: "i3", verdict: "not_expected", verdictCodes: ["out_of_place", "long_dwell"], verdictFirstAt: ago(2 * DAY) },
+    // A P3 code only: "Expected" says the event was fine, not that a rule was wrong — never counted.
+    { id: "i4", verdict: "not_expected", verdictCodes: ["after_hours_presence"], verdictFirstAt: ago(40 * DAY) },
+    { id: "i5", verdict: "expected", verdictCodes: ["long_dwell"], verdictFirstAt: ago(DAY) },
+  ];
+
+  it("family (camera-limited, no threats) → null; the incidents are never read", async () => {
+    const w = world({ incidents: marked(ago(30 * DAY)) });
+    const prisma = patternsPrisma(w);
+    const r = await readPatternsOverview(prisma as unknown as PrismaClient, FAMILY, NOW);
+    expect(r.precision).toBeNull();
+    expect(prisma.securityIncident.findMany).not.toHaveBeenCalled();
+  });
+
+  it("owner: per pattern code in order, Not expected counted right, Expected wrong; a percentage from the first mark's 30th day", async () => {
+    const r = await readPatternsOverview(db(world({ incidents: marked(ago(30 * DAY)) })), ALL, NOW);
+    expect(r.precision).toEqual({
+      showAfterDays: 30,
+      codes: [
+        { code: "out_of_place", marked: 3, notExpected: 2, firstMarkedAt: ago(30 * DAY).toISOString(), percentRight: 67 },
+        { code: "long_dwell", marked: 2, notExpected: 1, firstMarkedAt: ago(2 * DAY).toISOString(), percentRight: null },
+      ],
+    });
+  });
+
+  it("at 29 days 23 hours: the counts, no percentage yet", async () => {
+    const r = await readPatternsOverview(db(world({ incidents: marked(ago(30 * DAY - 3_600_000)) })), ALL, NOW);
+    expect(r.precision!.codes[0]).toMatchObject({ code: "out_of_place", marked: 3, notExpected: 2, percentRight: null });
+  });
+
+  it("verdictPrecision is pure: a code absent from verdictCodes is never credited; P3 codes are never listed", () => {
+    const p = verdictPrecision(
+      [
+        { verdict: "not_expected", verdictCodes: ["camera_offline"], verdictFirstAt: ago(60 * DAY) },
+        { verdict: "not_expected", verdictCodes: ["unusual_volume"], verdictFirstAt: ago(60 * DAY) },
+      ],
+      NOW,
+    );
+    expect(p.codes).toEqual([{ code: "unusual_volume", marked: 1, notExpected: 1, firstMarkedAt: ago(60 * DAY).toISOString(), percentRight: 100 }]);
+    expect(verdictPrecision([], NOW)).toEqual({ showAfterDays: 30, codes: [] });
   });
 });

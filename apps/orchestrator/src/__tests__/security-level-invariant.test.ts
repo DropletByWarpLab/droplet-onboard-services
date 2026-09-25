@@ -23,8 +23,8 @@
  *     source too);
  *   · no parameterised path precedes a literal sibling it would swallow,
  *     across the routers in app.ts's mount order;
- *   · the write-route count is 14 and the GET count 14 (P2b's 9 writes and 6
- *     GETs, WARP-2978's 3 writes and 4 GETs, WARP-2980 PR-A's 3 GETs, PR-B's 2
+ *   · the write-route count is 15 and the GET count 14 (P2b's 9 writes and 6
+ *     GETs, WARP-2978's 3 writes and 4 GETs, WARP-2980 PR-A's 3 GETs, PR-B's 3
  *     writes and 1 GET), so the table cannot pass over empty stubs or a
  *     dropped route. P4 adds its own rows.
  *
@@ -37,7 +37,9 @@
  * PR-B: expected activity in the same router — the list (32) is view; adding
  * (33) and removing (34) are manage, so family never passes their role floor
  * and neither does Droplet's AI (§4.9: it never creates, extends or widens a
- * suppression).
+ * suppression). The verdict (35, in the incidents router after resolve) is
+ * act with an owner/admin floor (review item 2): nobody overwrites a
+ * judgement about cameras they cannot see, and the AI gives none.
  */
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -92,6 +94,8 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["GET /security/incidents/:id", "view", VIEW_ROLES],
   ["POST /security/incidents/:id/acknowledge", "act", ACT_ROLES],
   ["POST /security/incidents/:id/resolve", "act", ACT_ROLES],
+  // WARP-2980 P5 PR-B — route 35: act, floored at owner/admin.
+  ["POST /security/incidents/:id/verdict", "act", MANAGE_ROLES],
   ["GET /security/alert-routing", "view", VIEW_ROLES],
   ["PUT /security/alert-routing/:userId", "manage", MANAGE_ROLES],
   // createSecurityPatternsRouter (WARP-2980, routes 29–31): read-only; all literal paths
@@ -107,9 +111,9 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
 /**
  * P2b spec §9's 9 write routes and 6 GETs; WARP-2978 adds 3 writes (19, 20, 22)
  * and 4 GETs (16, 17, 18, 21); WARP-2980 PR-A adds 3 GETs (29–31) and no
- * write; PR-B adds 2 writes (33, 34) and 1 GET (32).
+ * write; PR-B adds 3 writes (33, 34, 35) and 1 GET (32).
  */
-const WRITE_ROUTES = 14;
+const WRITE_ROUTES = 15;
 const GET_ROUTES = 14;
 
 type Handle = (req: unknown, res: unknown, next: () => void) => unknown;

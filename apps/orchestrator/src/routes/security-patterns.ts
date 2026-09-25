@@ -181,7 +181,7 @@ export function createSecurityPatternsRouter(prisma: PrismaClient, deps: Securit
     }
     try {
       const scope = await securityViewerScope(prisma, req, deps.resolve);
-      res.json(await readPatternsOverview(prisma, scope));
+      res.json(await readPatternsOverview(prisma, scope, clock()));
     } catch (err) {
       logger.error({ err }, "security patterns overview read failed");
       unavailable(res);

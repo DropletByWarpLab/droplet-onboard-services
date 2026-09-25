@@ -14,7 +14,9 @@
  *   · only grouped Frigate detections are judged (D5); a camera incident is
  *     judged against `camera:<name>`;
  *   · a pattern failure leaves the event grouped and the tick whole (D4);
- *   · 5 flags per (code, camera) per incident, and a re-run adds none.
+ *   · 5 flags per (code, camera) per incident, and a re-run adds none;
+ *   · a verdict quiets nothing: a later after-hours person still alerts;
+ *   · retention keeps a marked plain incident a year (D19); flags cascade.
  *
  * Every pre-existing engine suite seeds no build, so it runs through gate (b)
  * and proves "no build ⇒ exactly P3" (D26).
@@ -40,7 +42,8 @@ vi.mock("./activity.singleton.js", () => ({
   getActivityRecorder: () => null,
 }));
 
-import { _resetIncidentHealthForTests, tickSecurityIncidents, type SecurityIncidentDeps } from "./security-incidents.service.js";
+import { _resetIncidentHealthForTests, tickSecurityIncidents, trimSecurityIncidents, type SecurityIncidentDeps } from "./security-incidents.service.js";
+import { setIncidentVerdict } from "./security-incident-actions.js";
 import { PatternTally, _resetPatternRulesForTests, flagPatterns, loadPatternContext, patternRuleHealth } from "./security-pattern-rules.js";
 import { loadActiveLinks } from "./security-zones.service.js";
 import {
@@ -303,5 +306,88 @@ describe("the evidence cap (D4, spec test 20)", () => {
       expect(written).toBe(0);
     }
     expect(f.world.securityPatternFlag).toHaveLength(10);
+  });
+});
+
+describe("a verdict quiets nothing (D15)", () => {
+  it("Expected on a car's trial flag, then a person joins after hours: the alert still goes out", async () => {
+    const f = world({ keys: [{ zoneKey: `area:${STOCK}`, cameras: ["back"], labels: ["person", "car"] }] });
+    f.world.securityEvent.push(eventRow({ id: 10n, labels: ["car"], startedAt: T0 }));
+    await tick(f, plus(T0, 30_000));
+    const incident = f.world.securityIncident[0]!;
+    expect(incident).toMatchObject({ severity: "info", state: "no_action" });
+    const owner = { userId: "u-owner", visibleCameras: "all" as const, mayReadThreats: true, ownerOrAdmin: true };
+    const actor = { id: "u-owner", username: "stefan", role: "owner", displayName: "Stefan", sessionId: null, sessionChecked: false, client: null };
+    expect(await setIncidentVerdict(db(f), { incidentId: incident.id as string, verdict: "expected", actor, viewer: owner, now: plus(T0, 40_000) })).toEqual({
+      status: "ok",
+      changed: true,
+    });
+    f.world.securityEvent.push(eventRow({ id: 11n, startedAt: plus(T0, 50_000), createdAt: plus(T0, 71_000) }));
+    await tick(f, plus(T0, 80_000));
+    expect(f.world.securityIncident).toHaveLength(1);
+    expect(f.world.securityIncident[0]).toMatchObject({
+      severity: "alert",
+      state: "open",
+      reasonCodes: ["after_hours_presence"],
+      notifyState: "pending",
+      verdict: "expected",
+      verdictCodes: ["out_of_place"],
+    });
+  });
+});
+
+describe("retention keeps a marked incident (D19)", () => {
+  const BEFORE = new Date("2026-10-23T03:50:00Z");
+  const NOW_R = new Date("2026-10-24T03:50:00Z");
+  const plain = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    scope: "camera",
+    scopeCamera: "front",
+    openedInMode: "closed",
+    grouping: "closed",
+    closedAt: T0,
+    rulesetVersion: 3,
+    firstActivityAt: T0,
+    lastActivityAt: T0,
+    lastArrivalAt: T0,
+    eventCount: 1,
+    countsByCamera: {},
+    spanByCamera: {},
+    cameras: ["front"],
+    ...over,
+  });
+  const MARKED = "00000000-0000-4000-8000-000000000a01";
+  const UNMARKED = "00000000-0000-4000-8000-000000000a02";
+
+  it("plain activity with a verdict survives the event horizon; its unmarked twin goes — each with its flags", async () => {
+    const f = createFakeSecurityPrisma({
+      securityIncident: [
+        plain(MARKED, { verdict: "not_expected", verdictById: "u", verdictByName: "Stefan", verdictAt: T0, verdictFirstAt: T0, verdictCodes: ["out_of_place"] }),
+        plain(UNMARKED),
+      ],
+      securityPatternFlag: [MARKED, UNMARKED].map((incidentId, i) => ({
+        incidentId,
+        code: "out_of_place",
+        effect: "trial",
+        severity: "alert",
+        rulesetVersion: 3,
+        zoneKey: "camera:front",
+        keyCameras: ["front"],
+        evidenceEventId: BigInt(i + 1),
+        evidenceCamera: "front",
+        evidenceLabel: "person",
+        evidenceAt: T0,
+        evidenceSummary: "x",
+        detail: {},
+      })),
+    });
+    const r = await trimSecurityIncidents(db(f), BEFORE, NOW_R);
+    expect(r.deleted).toBe(1);
+    expect(f.world.securityIncident.map((i) => i.id)).toEqual([MARKED]);
+    expect(f.world.securityPatternFlag.map((x) => x.incidentId)).toEqual([MARKED]);
+    // A year on, it goes too — flags with it.
+    await trimSecurityIncidents(db(f), BEFORE, new Date(T0.getTime() + 366 * 86_400_000));
+    expect(f.world.securityIncident).toEqual([]);
+    expect(f.world.securityPatternFlag).toEqual([]);
   });
 });

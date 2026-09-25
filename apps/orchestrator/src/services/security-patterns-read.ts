@@ -36,6 +36,7 @@ import { loadActiveLinks, loadCameraLabels, parseLinkRef, visibleLinks, zoneVisi
 import {
   BASELINE,
   DWELL_MIN_SAMPLES,
+  PATTERN_CODES,
   RARITY_MAX_P,
   dwellThresholdSec,
   hourlyRate,
@@ -82,8 +83,52 @@ export interface PatternsOverview {
     labels: string[];
     learning: boolean;
   }>;
-  /** PR-B; always 0 before it. */
+  /** Always 0 until P5 PR-D: in PR-B nobody below owner/admin sees a pattern flag, so nothing waits for a manager. */
   waitingProposals: number;
+  /** WARP-2980 PR-B (spec D17): how often each pattern code was right — owner/admin only, null for anyone else. */
+  precision: PatternPrecision | null;
+}
+
+/**
+ * WARP-2980 PR-B (brief §4.4, §12; spec D17, review item 14) — per PATTERN
+ * code, over the incidents with a verdict whose `verdictCodes` hold it:
+ * `notExpected` of `marked` were right. The pattern codes only: for a P3 code
+ * "Expected" says the event was fine, not that the rule was wrong (a camera
+ * that went offline for maintenance did go offline). `firstMarkedAt` is the
+ * earliest FIRST mark (`verdictFirstAt`, which a changed verdict never
+ * moves), so a percentage, once shown, stays shown. It spans every camera:
+ * anyone who cannot see them all gets `null` (DS-005: absent, not redacted).
+ */
+export interface PatternPrecision {
+  showAfterDays: typeof PRECISION_SHOW_AFTER_DAYS;
+  /** In PATTERN_CODES order; a code with no mark is absent. */
+  codes: Array<{ code: PatternCode; marked: number; notExpected: number; firstMarkedAt: string; percentRight: number | null }>;
+}
+
+/** brief §4.4: "After 30 days, the /security/patterns page shows how often each code was right." */
+export const PRECISION_SHOW_AFTER_DAYS = 30;
+
+/** Pure: the precision rows from the marked incidents (route 29). */
+export function verdictPrecision(
+  rows: ReadonlyArray<{ verdict: string; verdictCodes: readonly string[]; verdictFirstAt: Date | null }>,
+  now: Date,
+): PatternPrecision {
+  const codes: PatternPrecision["codes"] = [];
+  for (const code of PATTERN_CODES) {
+    const marked = rows.filter((r) => r.verdict !== "unreviewed" && r.verdictFirstAt !== null && r.verdictCodes.includes(code));
+    if (marked.length === 0) continue;
+    const notExpected = marked.filter((r) => r.verdict === "not_expected").length;
+    const first = new Date(Math.min(...marked.map((r) => r.verdictFirstAt!.getTime())));
+    const shown = now.getTime() - first.getTime() >= PRECISION_SHOW_AFTER_DAYS * 86_400_000;
+    codes.push({
+      code,
+      marked: marked.length,
+      notExpected,
+      firstMarkedAt: first.toISOString(),
+      percentRight: shown ? Math.round((100 * notExpected) / marked.length) : null,
+    });
+  }
+  return { showAfterDays: PRECISION_SHOW_AFTER_DAYS, codes };
 }
 
 /** One (dayType, hour) of route 30. */
@@ -220,13 +265,21 @@ export function visibleKeyCameras(
 
 // ── route 29 ─────────────────────────────────────────────────────────────
 
-export async function readPatternsOverview(prisma: ReadDb, scope: SecurityViewerScope): Promise<PatternsOverview> {
-  const [timezone, sourceRows, labels, ready, links] = await Promise.all([
+export async function readPatternsOverview(prisma: ReadDb, scope: SecurityViewerScope, now: Date = new Date()): Promise<PatternsOverview> {
+  // Precision spans every camera: read only for a viewer who sees them all (and threats — P4's rule).
+  const mayReadPrecision = scope.visibleCameras === "all" && scope.mayReadThreats;
+  const [timezone, sourceRows, labels, ready, links, marked] = await Promise.all([
     resolveSecurityTimezone(prisma),
     prisma.securityBaselineSource.findMany(),
     loadCameraLabels(prisma),
     readyBuild(prisma),
     loadActiveLinks(prisma),
+    mayReadPrecision
+      ? prisma.securityIncident.findMany({
+          where: { verdict: { in: ["expected", "not_expected"] }, verdictCodes: { hasSome: [...PATTERN_CODES] } },
+          select: { verdict: true, verdictCodes: true, verdictFirstAt: true },
+        })
+      : Promise.resolve(null),
   ]);
   const visibleSources = sourceRows.filter((s) => canSee(scope, s.camera));
   const stateOf = new Map(visibleSources.map((s) => [s.camera, s.state as LearningState]));
@@ -292,7 +345,8 @@ export async function readPatternsOverview(prisma: ReadDb, scope: SecurityViewer
     }))
     .sort((a, b) => a.label.localeCompare(b.label) || byString(a.camera, b.camera));
 
-  const base = { timezone, release: { ...PATTERN_RELEASE }, sources, waitingProposals: 0 };
+  const precision = marked ? verdictPrecision(marked, now) : null;
+  const base = { timezone, release: { ...PATTERN_RELEASE }, sources, waitingProposals: 0, precision };
   if (!timezone) return { ...base, state: "not_configured", reason: "no_timezone", window: null, keys: [] };
   if (sources.length === 0) return { ...base, state: "not_configured", reason: "no_cameras", window: ready ? windowOf(ready) : null, keys };
   if (!ready) return { ...base, state: "not_built", reason: null, window: null, keys: [] };

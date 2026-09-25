@@ -3,10 +3,18 @@
  * ONE place. Four surfaces read incidents (the list, the detail, the counts,
  * the notifications) and a second copy of the rule is how a camera leaks, so
  * the projection and the list's SQL filters are pinned here, pure.
+ *
+ * WARP-2980 PR-B (spec D16; review items 2, 3): who sees a pattern flag, and
+ * what a viewer can judge.
  */
 import { describe, expect, it } from "vitest";
 import { QUIET_MS, SETTLE_MS } from "../lib/security-rules.js";
 import {
+  flagCamerasVisible,
+  flagVisible,
+  judgeableCodes,
+  seesEverything,
+  type FlagForView,
   incidentListWhere,
   incidentVisibilityWhere,
   projectIncident,
@@ -309,5 +317,74 @@ describe("the list's SQL mirrors the projection (DS-005 in the query, visibility
         { reasons: { none: { AND: [visibleReasonWhere(frontOnly), { severity: "alert" }] } } },
       ],
     });
+  });
+});
+
+// ── WARP-2980 PR-B: pattern flags and what a viewer can judge ──────────────
+
+describe("flagVisible (D16) — owner/admin, AND the evidence camera, AND every camera behind the key", () => {
+  const flag = (over: Partial<FlagForView> = {}): FlagForView => ({
+    code: "out_of_place",
+    effect: "trial",
+    severity: "alert",
+    evidenceCamera: "front",
+    keyCameras: ["front"],
+    ...over,
+  });
+  const bothCameras: IncidentViewer = { ...frontOnly, visibleCameras: new Set(["front", "back"]) };
+
+  it("owner/admin → yes", () => {
+    expect(flagVisible(flag({ keyCameras: ["back", "front"] }), owner)).toBe(true);
+  });
+
+  it("family → no in PR-B, even granted every camera behind it (the trial rule: shown to owner/admin)", () => {
+    expect(flagVisible(flag(), frontOnly)).toBe(false);
+    expect(flagVisible(flag({ keyCameras: ["back", "front"] }), bothCameras)).toBe(false);
+  });
+
+  it("the camera clauses PR-D will lean on: the evidence camera AND every key camera", () => {
+    expect(flagCamerasVisible(flag(), frontOnly)).toBe(true);
+    expect(flagCamerasVisible(flag({ keyCameras: ["back", "front"] }), frontOnly)).toBe(false);
+    expect(flagCamerasVisible(flag({ evidenceCamera: "back", keyCameras: ["back"] }), frontOnly)).toBe(false);
+    expect(flagCamerasVisible(flag({ keyCameras: ["back", "front"] }), bothCameras)).toBe(true);
+  });
+
+  it("an owner narrowed to some cameras (no such shape today) would still be refused a key camera it cannot see", () => {
+    const narrowOwner: IncidentViewer = { ...owner, visibleCameras: new Set(["front"]) };
+    expect(flagVisible(flag({ keyCameras: ["back", "front"] }), narrowOwner)).toBe(false);
+    expect(flagVisible(flag(), narrowOwner)).toBe(true);
+  });
+
+  it("seesEverything is every camera AND the threats (review item 2)", () => {
+    expect(seesEverything(owner)).toBe(true);
+    expect(seesEverything(frontOnly)).toBe(false);
+    expect(seesEverything({ ...owner, mayReadThreats: false })).toBe(false);
+  });
+});
+
+describe("judgeableCodes (D16, review item 3) — visible counted codes plus the visible flags that would have been RAISED", () => {
+  const f = (code: FlagForView["code"], over: Partial<FlagForView> = {}): FlagForView => ({
+    code,
+    effect: "trial",
+    severity: "notice",
+    evidenceCamera: "front",
+    keyCameras: ["front"],
+    ...over,
+  });
+
+  it("in declaration order, P3 codes first", () => {
+    const p = projectIncident(incident({ severity: "notice", reasonCodes: ["camera_offline"] }), [reason("camera_offline", "front", "notice")], owner, NOW)!;
+    expect(judgeableCodes(p, [f("long_dwell"), f("out_of_place")], owner)).toEqual(["camera_offline", "out_of_place", "long_dwell"]);
+  });
+
+  it("a flag expected activity quietened, or one at info, was never raised: not judgeable", () => {
+    const p = projectIncident(incident({ severity: "info", state: "no_action", reasonCodes: [] }), [], owner, NOW)!;
+    expect(judgeableCodes(p, [f("out_of_place", { effect: "suppressed" }), f("unusual_volume", { severity: "info" })], owner)).toEqual([]);
+    expect(judgeableCodes(p, [f("unusual_volume")], owner)).toEqual(["unusual_volume"]);
+  });
+
+  it("family on a trial-only incident → nothing (flags are owner/admin's in PR-B)", () => {
+    const p = projectIncident(incident({ severity: "info", state: "no_action", reasonCodes: [] }), [], frontOnly, NOW)!;
+    expect(judgeableCodes(p, [f("out_of_place")], frontOnly)).toEqual([]);
   });
 });

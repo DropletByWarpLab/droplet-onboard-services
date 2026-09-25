@@ -107,7 +107,14 @@ export type SecurityAuditAction =
   /** A person removed expected activity (in-tx, last). refs `{suppressionId}`. */
   | "suppression.remove"
   /** System actor, after its commit: expected activity passed its expiresAt (the baseline tick). refs `{suppressionId}`. */
-  | "suppression.expire";
+  | "suppression.expire"
+  /**
+   * WARP-2980 PR-B. A person marked an incident Expected / Not expected
+   * (in-tx, last). refs `{incidentId, verdict, from, codes, incidentCodes}`:
+   * `codes` what they judged (`verdictCodes`), `incidentCodes` the incident's
+   * counted codes.
+   */
+  | "incident.verdict";
 
 /** A JSON value exactly as the chain signs and stores it. */
 export type SecurityRefValue =

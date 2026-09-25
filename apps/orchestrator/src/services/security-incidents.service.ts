@@ -888,7 +888,10 @@ export interface IncidentTrimResult {
  * Runs in the 03:50 retention leg right after `trimSecurityEvents`, with the
  * SAME `before` (its events are gone, and their triage rows with them):
  *   1. plain activity (severity info) whose events are all gone and whose
- *      activity ended before `before` is deleted — it follows its events;
+ *      activity ended before `before` is deleted — it follows its events —
+ *      unless a person gave it a verdict (WARP-2980 PR-B, D19): precision
+ *      needs marks older than the 30-day event horizon, so a marked incident
+ *      is kept a year like a coded one. Its pattern flags cascade with it;
  *   2. any incident whose activity ended more than a year ago and whose events
  *      are all gone is deleted (Cascade: its reasons, acks and notices);
  *   3. `eventsKept` follows what is left: `removed` when no member remains,
@@ -899,7 +902,7 @@ export interface IncidentTrimResult {
  */
 export async function trimSecurityIncidents(prisma: PrismaClient, before: Date, now: Date): Promise<IncidentTrimResult> {
   const plain = await prisma.securityIncident.deleteMany({
-    where: { severity: "info", lastActivityAt: { lt: before }, members: { none: {} } },
+    where: { severity: "info", verdict: "unreviewed", lastActivityAt: { lt: before }, members: { none: {} } },
   });
   const old = await prisma.securityIncident.deleteMany({
     where: { lastActivityAt: { lt: new Date(now.getTime() - SECURITY_INCIDENT_RETENTION_DAYS * DAY_MS) }, members: { none: {} } },

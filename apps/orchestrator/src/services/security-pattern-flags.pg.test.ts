@@ -19,7 +19,9 @@
  *                  engine: one trial flag whose numbers are route 31's for the
  *                  same instant, and which a later rebuild never moves (D20);
  *   k            — only `detection` rows count, and the query is served by
- *                  the (camera, startedAt) index at 10k rows (D8).
+ *                  the (camera, startedAt) index at 10k rows (D8);
+ *   retention    — a marked plain incident outlives the event horizon; its
+ *                  unmarked twin does not, and takes its flags with it (D19).
  *
  * Every probe runs in a transaction that ALWAYS rolls back, so the file leaves
  * no row behind. Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL, like every
@@ -35,7 +37,7 @@ vi.unmock("@prisma/client");
 
 import { runFullBuild } from "./security-baseline-build.js";
 import { refreshBaselineSources } from "./security-coverage.js";
-import { tickSecurityIncidents, _resetIncidentHealthForTests } from "./security-incidents.service.js";
+import { tickSecurityIncidents, trimSecurityIncidents, _resetIncidentHealthForTests } from "./security-incidents.service.js";
 import { countSlotDetections, _resetPatternRulesForTests } from "./security-pattern-rules.js";
 import { explainSecurityPattern } from "./security-patterns-read.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
@@ -663,5 +665,60 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     } finally {
       await logging.$disconnect();
     }
+  });
+
+  it("55 — retention step 1 keeps plain activity a person marked, and deletes its unmarked twin with its flags", async () => {
+    const at = new Date("2034-01-10T03:00:00Z");
+    const make = (verdict: boolean) =>
+      prisma.securityIncident.create({
+        data: {
+          scope: "camera",
+          scopeCamera: PCAM,
+          openedInMode: "closed",
+          grouping: "closed",
+          closedAt: at,
+          rulesetVersion: 3,
+          firstActivityAt: at,
+          lastActivityAt: at,
+          lastArrivalAt: at,
+          eventCount: 1,
+          countsByCamera: {},
+          spanByCamera: {},
+          cameras: [PCAM],
+          reasonCodes: [],
+          zoneLinkIds: [],
+          ...(verdict
+            ? { verdict: "not_expected" as const, verdictById: "u-owner", verdictByName: "Stefan", verdictAt: at, verdictFirstAt: at, verdictCodes: ["out_of_place" as const] }
+            : {}),
+        },
+        select: { id: true },
+      });
+    const marked = await make(true);
+    const twin = await make(false);
+    for (const [i, incidentId] of [marked.id, twin.id].entries()) {
+      await prisma.securityPatternFlag.create({
+        data: {
+          incidentId,
+          code: "out_of_place",
+          effect: "trial",
+          severity: "alert",
+          rulesetVersion: 3,
+          zoneKey: `camera:${PCAM}`,
+          keyCameras: [PCAM],
+          evidenceEventId: BigInt(900_000 + i),
+          evidenceCamera: PCAM,
+          evidenceLabel: "person",
+          evidenceAt: at,
+          evidenceSummary: "x",
+          detail: {},
+        },
+      });
+    }
+    await trimSecurityIncidents(prisma, new Date("2034-02-10T03:50:00Z"), new Date("2034-02-10T03:50:00Z"));
+    const left = await prisma.securityIncident.findMany({ where: { id: { in: [marked.id, twin.id] } }, select: { id: true } });
+    expect(left.map((r) => r.id)).toEqual([marked.id]);
+    expect((await prisma.securityPatternFlag.findMany({ where: { incidentId: { in: [marked.id, twin.id] } }, select: { incidentId: true } })).map((r) => r.incidentId)).toEqual([
+      marked.id,
+    ]);
   });
 });
