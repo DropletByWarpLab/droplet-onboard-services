@@ -131,15 +131,6 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
           {WALL_COPY.heading}
         </h1>
 
-        <WallCameras
-          allowed={wall.access === null ? null : wall.access.security && wall.access.cameras}
-          noCameraSystem={cameraIngest?.state === "not_configured"}
-          cameras={wall.cameras.list}
-          listFailed={wall.cameras.failed}
-          now={now}
-          time={time}
-        />
-
         <div className="sec-wall-banners">
           {dimmed && (
             <div className="sec-wall-banner" role="status" aria-live="polite" data-banner={freshness.state}>
@@ -242,6 +233,17 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
             </div>
           </dl>
         </section>
+
+        {/* After the banners and the strip in the page, so a screen reader reaches them and the way out before every camera's
+            name; a TV draws the tiles above them (wall.css), a phone shows this order. */}
+        <WallCameras
+          allowed={wall.access === null ? null : wall.access.security && wall.access.cameras}
+          noCameraSystem={cameraIngest?.state === "not_configured"}
+          cameras={wall.cameras.list}
+          listFailed={wall.cameras.failed}
+          now={now}
+          time={time}
+        />
       </main>
     </div>
   );

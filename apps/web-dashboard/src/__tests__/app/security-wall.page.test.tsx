@@ -15,7 +15,8 @@
  *     gives (a Staff account with 2 of 4 cameras shows those 2), a picture
  *     asked for those alone (D6, Stefan: "Member wall, own cameras");
  *   · the way out is always visible; Full screen only where the browser
- *     offers it;
+ *     offers it; the banners and the strip come before the tiles in the page
+ *     (a TV alone draws the tiles first);
  *   · every request is a GET to one of the reads it is allowed (§4) — and no
  *     dashboard source can even name the rack panel's route (T-D13);
  *   · wall.css: tokens only, the strip at the bottom of a TV's screen, every
@@ -379,6 +380,19 @@ describe("/security/wall — the way out, and Full screen", () => {
     expect(main.querySelector("a[href], button, input, select, textarea, [tabindex]:not([tabindex='-1'])")).toBe(leave);
   });
 
+  it("in the page the banners and the strip come before the tiles: a screen reader reaches the way out before any camera's name", async () => {
+    // Review round 4 (rjouffret): a phone drew them above the tiles with `order`, but read every tile's name first.
+    // wall.css draws the tiles first on a TV alone (pinned below); a phone shows this order.
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => false });
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await screen.findByText(WALL_COPY.offlineTitle);
+    await waitFor(() => expect(document.querySelectorAll("figure.sec-wall-tile")).toHaveLength(2));
+    const main = document.querySelector("main#main")!;
+    expect([...main.children].map((e) => e.classList[0])).toEqual(["sr-only", "sec-wall-banners", "sec-wall-strip", "sec-wall-cameras"]);
+    expect(main.querySelector(".sec-wall-banners > [role='status']")).not.toBeNull();
+    expect(main.querySelector(".sec-wall-cameras > .sec-wall-tiles")).not.toBeNull();
+  });
+
   it("no Full screen button where the browser doesn't offer it (an iPhone)", async () => {
     render(<SecurityWallPage />, { wrapper: Wrap });
     await screen.findByRole("link", { name: WALL_COPY.leave });
@@ -507,13 +521,21 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
     expect(phone).toMatch(/\.sec-wall-strip > dl \{[^}]*repeat\(auto-fit, minmax\(150px, 1fr\)\)/);
   });
 
-  it("≤ 640 px wide or ≤ 480 px tall: the banners, then the strip (and its way out), come above the tiles", () => {
-    // Internal review, round 4: under 12 stacked tiles the strip began at y = 4,082 on a phone on its side.
+  it("≤ 640 px wide or ≤ 480 px tall: the banners, then the strip (and its way out), above the tiles, in the page's own order", () => {
+    // Internal review, round 4: under 12 stacked tiles the strip began at y = 4,082 on a phone on its side. Review round 4
+    // (rjouffret): `order: -2/-1` put them there on screen but not for a screen reader; the page has them first now (above).
     const phone = /@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*/.exec(code)?.[0] ?? "";
-    expect(phone).toMatch(/\.droplet-shell \.sec-wall-banners \{ order: -2;/);
-    expect(phone).toMatch(/\.droplet-shell \.sec-wall-strip \{ order: -1; border-top: 0; border-bottom: 1px solid var\(--border\); \}/);
-    // The tiles keep order 0, below both.
-    expect(code).not.toMatch(/\.sec-wall-(cameras|tiles) \{[^}]*order:/);
+    expect(phone).toMatch(/\.droplet-shell \.sec-wall-strip \{ border-top: 0; border-bottom: 1px solid var\(--border\); \}/);
+    expect(phone).not.toMatch(/order:/);
+  });
+
+  it("above 640 px wide and 480 px tall the tiles are drawn first, above the banners and the strip, and nowhere else", () => {
+    // The phone query's exact complement, so no size has neither layout (a zoomed 640.5 px window included).
+    expect(code).toMatch(
+      /@media not all and \(max-width: 640px\) \{\s*@media not all and \(max-height: 480px\) \{\s*\.droplet-shell \.sec-wall-cameras \{ order: -1; \}\s*\}\s*\}/,
+    );
+    // Nothing else is moved.
+    expect(code.match(/\border:/g)).toHaveLength(1);
   });
 
   it("the strip's buttons grow with the screen like its badges, and keep the shell's 44 px touch target at 720 px and below", () => {
