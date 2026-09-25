@@ -3994,7 +3994,14 @@ export type SecurityIncidentScope = "area" | "camera" | "site_threat" | "site_ca
 export type SecurityIncidentState = "no_action" | "open" | "acknowledged" | "resolved";
 /** Whether the incident still takes events. Explicit — never inferred from times. */
 export type SecurityIncidentGrouping = "collecting" | "closed";
-export type SecurityReasonCode = "after_hours_presence" | "camera_offline" | "threat_signal";
+/**
+ * Mirrors the orchestrator's `SecurityReasonCode` enum: P3's three rules, then
+ * P5's pattern codes (WARP-2980). A pattern code reaches `reasonCodes` and
+ * `reasons` only once P5 PR-D releases it as counted; until then it is a
+ * trial flag, which route 18 sends apart, in `patternFlags` (see
+ * IncidentDetail). The copy names every member (incident-copy.ts).
+ */
+export type SecurityReasonCode = "after_hours_presence" | "camera_offline" | "threat_signal" | SecurityPatternCode;
 /** Whether the events behind the incident are still kept (they are trimmed after 30 days; the incident stays a year). */
 export type SecurityIncidentEventsKept = "kept" | "partly_removed" | "removed";
 export type SecurityIncidentAckAction = "acknowledge" | "resolve";
@@ -4075,7 +4082,8 @@ export interface IncidentReasonView {
   /**
    * The rule's numbers: after_hours_presence `{mode, modeSource, nonOpenAt,
    * zoneKind}`; camera_offline `{offlineForSec, backAt}`; threat_signal
-   * `{activityId, kind}`.
+   * `{activityId, kind}`; a counted pattern code (P5 PR-D) the flag's own
+   * numbers, which P5 PR-C words — this page shows its name alone.
    */
   detail: Record<string, string | number | null> | null;
 }
@@ -4132,7 +4140,16 @@ export interface IncidentNoticeView {
  */
 export type IncidentMemberView = Omit<SecurityEvent, "incident"> & { alsoIn: SecurityZoneRef[] };
 
-/** GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike. */
+/**
+ * GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike.
+ *
+ * Deliberately NOT mirrored here: what P5 PR-B (WARP-2980) added to route 18
+ * — `verdict`, `patternFlags` and `viewer.canGiveVerdict` — and route 35
+ * (POST …/verdict, whose 409 is NOT_JUDGEABLE). The box sends them; this
+ * page ignores them. P5 PR-C mirrors and renders them (the verdict bar, the
+ * Trial chip, a flag quietened by expected activity), each with its own
+ * viewer rule, so none of it is shown before that rule is.
+ */
 export interface IncidentDetail extends IncidentSummary {
   reasons: IncidentReasonView[];
   /** Visible members while their events are kept, newest first. */

@@ -17,6 +17,11 @@
  * Nothing here reads `labels`: its `_`-keys (`_status`, `_threat`, and PR-D's
  * `_ongoing`) are the box's bookkeeping, never a label. A card counts events
  * (`eventCount`, every row the incident page lists), never people.
+ *
+ * WARP-2980 (P5 PR-B) — P5's pattern codes are named here by the Patterns
+ * page's own words (`PATTERN_NAME`, one copy for both). They reach this page
+ * as reasons only once P5 PR-D counts them; their numbers, the Trial chip and
+ * the verdict are P5 PR-C's to render.
  */
 import { formatSiteTime, formatSiteWhen, siteDateOf } from "@/lib/security-time";
 import type {
@@ -27,8 +32,10 @@ import type {
   SecurityHealthRow,
   SecurityIncidentState,
   SecurityMode,
+  SecurityReasonCode,
   SecuritySeverity,
 } from "@/lib/types";
+import { PATTERN_NAME } from "./patterns-copy";
 import { fill } from "./TimezoneSelect";
 
 export const INCIDENT_COPY = {
@@ -132,8 +139,15 @@ type Codes = IncidentSummary["reasonCodes"];
 
 const lowerFirst = (s: string): string => (s ? s[0]!.toLowerCase() + s.slice(1) : s);
 
+/**
+ * Every code's short name: P3's own, then P5's by the Patterns page's name.
+ * Typed as the whole union, so a code added to SecurityReasonCode without a
+ * name fails the build rather than reading "Flagged by Droplet".
+ */
+const CODE_SHORT: Readonly<Record<SecurityReasonCode, string>> = { ...INCIDENT_COPY.codeShort, ...PATTERN_NAME };
+
 function codeShort(code: string): string {
-  return (INCIDENT_COPY.codeShort as Record<string, string>)[code] ?? INCIDENT_COPY.codeShortUnknown;
+  return (CODE_SHORT as Record<string, string>)[code] ?? INCIDENT_COPY.codeShortUnknown;
 }
 
 /** The area's name (its snapshot), the camera's household name, or the site-wide words. */
@@ -248,6 +262,11 @@ export function codeSentence(r: IncidentReasonView): string {
       return r.evidence.camera === null ? INCIDENT_COPY.sentenceCameraSystemOffline : INCIDENT_COPY.sentenceCameraOffline;
     case "threat_signal":
       return INCIDENT_COPY.sentenceThreat;
+    case "out_of_place":
+    case "unusual_volume":
+    case "long_dwell":
+      // A counted pattern code (P5 PR-D): its name, as the Patterns page says it.
+      return PATTERN_NAME[r.code];
     default:
       return INCIDENT_COPY.sentenceUnknown;
   }
@@ -294,6 +313,13 @@ export function evidenceLine(r: IncidentReasonView, cameraLabel: CameraLabel, tz
     }
     case "threat_signal":
       parts = [e.label === "auth" ? INCIDENT_COPY.threatSignIn : e.label === "network" ? INCIDENT_COPY.threatNetwork : null, e.summary, time];
+      break;
+    case "out_of_place":
+    case "unusual_volume":
+    case "long_dwell":
+      // What was seen, on which camera, when. The numbers behind the flag
+      // (`detail`) are P5 PR-C's to word; none is shown raw here.
+      parts = [labelWord(e.label), camera, time];
       break;
     default:
       parts = [camera, e.summary, time];

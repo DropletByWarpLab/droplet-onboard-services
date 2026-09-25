@@ -24,6 +24,7 @@ import {
   stateLine,
   whatLine,
 } from "@/components/security/incident-copy";
+import { PATTERN_NAME } from "@/components/security/patterns-copy";
 import type { IncidentNoticeView, IncidentReasonView, IncidentSummary, SecurityHealthRow } from "@/lib/types";
 
 const TZ = "Europe/London";
@@ -119,6 +120,16 @@ describe("the card's three lines", () => {
     expect(whatLine(summary(off), TZ, NOW)).toBe("A camera stopped reporting · 2:14 AM – 2:20 AM");
   });
 
+  it("WARP-2980: a counted pattern code on line 2 is its Patterns-page name; a code a later box adds is `Flagged by Droplet`, never nothing", () => {
+    expect(whatLine(summary({ reasonCodes: ["after_hours_presence", "out_of_place"] }), TZ, NOW)).toBe(
+      "Someone inside after hours, not usual at this time · 2:14 AM – 2:20 AM",
+    );
+    expect(whatLine(summary({ reasonCodes: ["unusual_volume", "long_dwell"], severity: "notice" }), TZ, NOW)).toBe(
+      "Busier than usual, stayed longer than usual · 2:14 AM – 2:20 AM",
+    );
+    expect(whatLine(summary({ reasonCodes: ["door_forced" as never] }), TZ, NOW)).toBe("Flagged by Droplet · 2:14 AM – 2:20 AM");
+  });
+
   it("never says 0 events", () => {
     expect(whatLine(summary({ reasonCodes: [], eventCount: 0 }), TZ, NOW)).toBe("2:14 AM – 2:20 AM");
   });
@@ -192,7 +203,29 @@ describe("why Droplet flagged this", () => {
       codeSentence(reason({ code: "camera_offline", severity: "notice", evidence: { camera: null, kind: "source_offline" } })),
     ).toBe("The camera system stopped reporting for more than a minute");
     expect(codeSentence(reason({ code: "threat_signal", severity: "notice" }))).toBe("A network or sign-in warning");
-    expect(codeSentence(reason({ code: "unusual_volume" as never }))).toBe("A reason Droplet flagged");
+    // A code a later box adds renders as a generic sentence, never nothing.
+    expect(codeSentence(reason({ code: "door_forced" as never }))).toBe("A reason Droplet flagged");
+  });
+
+  it("WARP-2980: a counted pattern code (P5 PR-D) reads as the Patterns page names it, never the generic sentence", () => {
+    const pattern = (code: IncidentReasonView["code"]) => reason({ code, severity: "notice", detail: { k: 14, flagsFrom: 4, lambda: "0.400" } });
+    expect(codeSentence(pattern("out_of_place"))).toBe("Not usual at this time");
+    expect(codeSentence(pattern("unusual_volume"))).toBe("Busier than usual");
+    expect(codeSentence(pattern("long_dwell"))).toBe("Stayed longer than usual");
+    for (const code of ["out_of_place", "unusual_volume", "long_dwell"] as const) {
+      expect(codeSentence(pattern(code))).toBe(PATTERN_NAME[code]);
+    }
+  });
+
+  it("WARP-2980: a pattern code's evidence line is what, which camera and when — the flag's numbers are never shown raw", () => {
+    const r = reason({ code: "unusual_volume", severity: "notice", detail: { k: 14, flagsFrom: 4, lambda: "0.400", tailP: "1.2e-9" } });
+    expect(evidenceLine(r, label, TZ, NOW)).toBe("Person · Back camera · 2:14 AM");
+    expect(evidenceLine(reason({ code: "long_dwell", severity: "alert", detail: { durationSec: 360, thresholdSec: 120 } }), label, TZ, NOW)).toBe(
+      "Person · Back camera · 2:14 AM",
+    );
+    expect(evidenceLine(reason({ code: "out_of_place", severity: "notice", detail: null, evidence: { label: "car" } }), label, TZ, NOW)).toBe(
+      "Car · Back camera · 2:14 AM",
+    );
   });
 
   it("an after-hours evidence line: what, which camera, when, and the mode", () => {
