@@ -16,6 +16,11 @@ import { useCameras } from "@/lib/hooks/useCameras";
 import { useEvents } from "@/lib/hooks/useEvents";
 import { useReviews } from "@/lib/hooks/useReviews";
 import { searchEventsSemantic, setEventRetain } from "@/lib/api";
+import {
+  CAMERAS_UNAVAILABLE_TITLE,
+  FILES_UNAVAILABLE_HINT,
+  isCamerasUnavailableError,
+} from "@/lib/files-unavailable";
 import { EventCard } from "@/components/events/EventCard";
 import { EventClipModal } from "@/components/events/EventClipModal";
 import { EventFilterBar } from "@/components/events/EventFilterBar";
@@ -288,6 +293,7 @@ export default function EventsPage() {
           hasMore={eventsHook.hasMore}
           loadMore={eventsHook.loadMore}
           error={eventsHook.error}
+          onRetry={eventsHook.refresh}
           onOpen={setPlayingEvent}
         />
       ) : (
@@ -298,6 +304,7 @@ export default function EventsPage() {
           hasMore={reviewsHook.hasMore}
           loadMore={reviewsHook.loadMore}
           error={reviewsHook.error}
+          onRetry={reviewsHook.refresh}
           onOpen={setPlayingReview}
         />
       )}
@@ -332,6 +339,7 @@ function EventsBody({
   hasMore,
   loadMore,
   error,
+  onRetry,
   onOpen,
   searchMode,
 }: {
@@ -342,10 +350,12 @@ function EventsBody({
   loadMore: () => void;
   error: unknown;
   onOpen: (e: EventDetail) => void;
+  onRetry?: () => void;
   /** When true, the empty-state copy reflects a no-results-for-query
    *  state instead of the default "no events yet." */
   searchMode?: boolean;
 }) {
+  if (isCamerasUnavailableError(error)) return <CamerasUnavailable onRetry={onRetry} />;
   if (error) {
     return (
       <div className="card" style={{ marginBottom: 16, color: "#ef4444" }}>
@@ -418,6 +428,7 @@ function ReviewsBody({
   hasMore,
   loadMore,
   error,
+  onRetry,
   onOpen,
 }: {
   reviews: ReviewItem[];
@@ -427,7 +438,9 @@ function ReviewsBody({
   loadMore: () => void;
   error: unknown;
   onOpen: (rv: ReviewItem) => void;
+  onRetry?: () => void;
 }) {
+  if (isCamerasUnavailableError(error)) return <CamerasUnavailable onRetry={onRetry} />;
   if (error) {
     return (
       <div className="card" style={{ marginBottom: 16, color: "#ef4444" }}>
@@ -490,5 +503,26 @@ function ReviewsBody({
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * WARP-3105 — Frigate is down: the box marks its empty 200 degraded, so say
+ * the cameras are unavailable instead of "No events yet" / "All clear".
+ */
+function CamerasUnavailable({ onRetry }: { onRetry?: () => void }) {
+  return (
+    <div className="card" role="alert">
+      <div className="empty">
+        <span className="ei"><AlertTriangle size={24} /></span>
+        <span className="eh">{CAMERAS_UNAVAILABLE_TITLE}.</span>
+        <span style={{ maxWidth: "40ch" }}>{FILES_UNAVAILABLE_HINT}</span>
+        {onRetry && (
+          <button type="button" className="btn ghost sm" onClick={onRetry} style={{ marginTop: 10 }}>
+            Retry
+          </button>
+        )}
+      </div>
+    </div>
   );
 }

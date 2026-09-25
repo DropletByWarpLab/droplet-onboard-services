@@ -31,3 +31,29 @@ export function isFilesUnavailableError(err: unknown): boolean {
     (err as { code?: unknown }).code === FILES_UNAVAILABLE
   );
 }
+
+/**
+ * WARP-3105 — the same contract for cameras: the Events and Reviews routes
+ * answer a Frigate outage with 200 + an empty list marked
+ * `X-Droplet-Degraded: frigate-unavailable`. Kept here beside the Files guard
+ * so both "service unavailable" states share one module.
+ */
+export const CAMERAS_UNAVAILABLE = "CAMERAS_UNAVAILABLE";
+export const CAMERAS_UNAVAILABLE_TITLE = "Cameras are unavailable right now";
+
+export class CamerasUnavailableError extends Error {
+  readonly code = CAMERAS_UNAVAILABLE;
+
+  constructor() {
+    super(`${CAMERAS_UNAVAILABLE_TITLE}. ${FILES_UNAVAILABLE_HINT}`);
+    this.name = "CamerasUnavailableError";
+  }
+}
+
+export function isCamerasUnavailableError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === CAMERAS_UNAVAILABLE
+  );
+}

@@ -10,7 +10,7 @@
  * routes (/cameras/:name) to avoid shadowing.
  */
 
-import { Router, type RequestHandler } from "express";
+import { Router, type RequestHandler, type Response } from "express";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
@@ -152,6 +152,18 @@ import { z } from "zod";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("cameras-routes");
+
+/**
+ * WARP-3105 — the WARP-3052 contract for cameras: a 200 served from an empty
+ * fallback because Frigate is unreachable carries `X-Droplet-Degraded:
+ * frigate-unavailable`, so a client can tell an outage from a genuinely empty
+ * result ("no events" during an outage is the worst wrong answer a camera can
+ * give). Header name matches files.ts DEGRADED_HEADER; CORS exposes it in app.ts.
+ */
+function sendFrigateDegraded(res: Response, body: unknown): void {
+  res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
+  res.json(body);
+}
 
 /**
  * Empty CameraSystemStatus served when Frigate is unreachable — the dashboard's
@@ -891,7 +903,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
         logger.warn({ err }, "Frigate unreachable; serving empty system status");
-        res.json({ status: EMPTY_SYSTEM_STATUS });
+        sendFrigateDegraded(res, { status: EMPTY_SYSTEM_STATUS });
         return;
       }
       next(err);
@@ -1357,7 +1369,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
         logger.warn({ err }, "Frigate unreachable; serving empty events list");
-        res.json({ events: [], nextCursor: null });
+        sendFrigateDegraded(res, { events: [], nextCursor: null });
         return;
       }
       next(err);
@@ -1531,7 +1543,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
         logger.warn({ err }, "Frigate unreachable; serving empty reviews list");
-        res.json({ reviews: [], nextCursor: null });
+        sendFrigateDegraded(res, { reviews: [], nextCursor: null });
         return;
       }
       next(err);
@@ -1757,7 +1769,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
         logger.warn({ err }, "Frigate unreachable; serving empty recent events");
-        res.json({ events: [] });
+        sendFrigateDegraded(res, { events: [] });
         return;
       }
       next(err);

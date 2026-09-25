@@ -1,4 +1,4 @@
-import { FilesUnavailableError } from "./files-unavailable";
+import { CamerasUnavailableError, FilesUnavailableError } from "./files-unavailable";
 import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
@@ -2704,6 +2704,8 @@ export async function fetchReviewsFiltered(
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
+  // WARP-3105: a Frigate outage is a degraded 200 + empty list, not "all clear".
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   return res.json();
 }
 
@@ -3228,6 +3230,8 @@ export async function fetchEventsFiltered(
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
+  // WARP-3105: a Frigate outage is a degraded 200 + empty list, not "no events".
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   return res.json();
 }
 
