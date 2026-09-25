@@ -77,7 +77,7 @@ export const WALL_COPY = {
 
   // D6 (Stefan: "Member wall, own cameras") — an owner or admin session is refused. {tier} is tierLabel("family").
   refusedTitle: "This TV view doesn't run on an owner or admin account",
-  refusedWhy: "An owner or admin can change anything in Droplet, and a TV stays signed in, in a room, for hours.",
+  refusedWhy: "An owner or admin account can reach nearly everything in Droplet, and a TV stays signed in, in a room, for hours.",
   refusedWhat: "Sign in on this TV with a {tier} account instead. The TV then shows only the cameras that account has been given.",
   refusedManage: "You can add that account, and choose its cameras, on the Users page.",
   refusedManageLink: "Open Users",
@@ -107,7 +107,7 @@ export function wallRunsFor(role: string | null | undefined): boolean {
 export const WALL_STALE_AFTER_MS = 45_000;
 /** The sign-out warning shows in the sign-in's last half hour. */
 export const WALL_SESSION_WARN_MS = 30 * 60_000;
-/** A camera tile's picture older than this (five missed 3 s asks) is dimmed under its own time: never drawn as current. */
+/** A camera tile's picture older than this (its last few asks failed) is dimmed under its own time: never drawn as current. */
 export const WALL_TILE_STALE_AFTER_MS = 15_000;
 /** The render clock: "Updated", staleness and the sign-out warning are re-judged this often. */
 export const WALL_TICK_MS = 5_000;
