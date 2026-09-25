@@ -21,6 +21,8 @@
  *     grey, under "Picture from {time}" — its own age;
  *   · before the first picture: "Connecting…"; if that fails, "No picture
  *     yet" while it keeps trying.
+ * That line sits on the picture; the caption below is the camera's name
+ * alone, so a state never crowds the name out on a narrow tile.
  *
  * Nothing is asked while the modules read has not said Security and Cameras
  * are open to this person (every request to a gate that refuses them would be
@@ -104,9 +106,7 @@ function WallTile({ camera, now, time }: { camera: CameraInfo; now: number; time
         ) : (
           state !== "connecting" && <VideoOff size={32} aria-hidden="true" />
         )}
-      </div>
-      <figcaption>
-        <span className="sec-wall-tile-name">{label}</span>
+        {/* On the picture, not beside the name: the caption is the name's alone, whatever the tile's width. */}
         {line !== null && (
           <span className="sec-wall-tile-state">
             {state === "stale" && (
@@ -117,6 +117,9 @@ function WallTile({ camera, now, time }: { camera: CameraInfo; now: number; time
             {line}
           </span>
         )}
+      </div>
+      <figcaption>
+        <span className="sec-wall-tile-name">{label}</span>
       </figcaption>
     </figure>
   );

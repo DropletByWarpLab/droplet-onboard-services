@@ -40,7 +40,7 @@ export const WALL_COPY = {
   // One tile per camera; {camera} is the name the household gave it.
   tileAlt: "{camera}, latest picture",
   tileConnecting: "Connecting…",
-  // Short: a caption is one line, and the tile keeps asking without saying so.
+  // Short: it sits on the picture, which can be 72 px high, and the tile keeps asking without saying so.
   tileLost: "No picture yet",
   tileStale: "Picture from {time}",
   tileNotSending: "Not sending pictures",

@@ -223,7 +223,7 @@ describe("the TV view's copy (D6)", () => {
     expect(WALL_COPY.linkTitle).not.toMatch(/family|what the signed-in account can see/);
   });
 
-  it("a tile's state line is short enough for a one-line caption: a few words, no sentence", () => {
+  it("a tile's state line is short enough to sit on a 72 px picture: a few words, no sentence", () => {
     for (const key of ["tileConnecting", "tileLost", "tileNotSending", "tileOff"] as const) {
       expect(WALL_COPY[key].length).toBeLessThanOrEqual(20);
       expect(WALL_COPY[key]).not.toMatch(/\. /);

@@ -254,6 +254,31 @@ describe("WallCameras — a tile's own clock", () => {
     expect(tile("front")).toHaveTextContent(WALL_COPY.tileConnecting);
   });
 
+  it("every state line sits on the picture, and the caption is the camera's name alone — no state can crowd a name out", async () => {
+    // Internal review, round 4: in the caption beside the name, "⚠ Picture from 9:41 PM" left a 226 px tile's name 6–9 px.
+    const base = h.authFetch.getMockImplementation()!;
+    h.authFetch.mockImplementation((url: string, init: RequestInit) => (url.startsWith("/api/cameras/wait/") ? new Promise(() => {}) : base(url, init)));
+    failing.add("/api/cameras/lost/snapshot");
+    const cameras = [
+      cam("off", { displayName: "Front door", enabled: false }),
+      cam("quiet", { displayName: "Driveway", status: "offline" }),
+      cam("lost", { displayName: "Back garden" }),
+      cam("wait", { displayName: "Porch" }),
+      cam("old", { displayName: "Basement stairs" }),
+    ];
+    const { rerender } = render(<WallCameras {...props({ cameras })} />, { wrapper: Wrap });
+    await advance(0);
+    failing.add("/api/cameras/old/snapshot");
+    await advance(20_000);
+    rerender(<WallCameras {...props({ cameras, now: Date.now() })} />);
+    expect(cameras.map((c) => tile(c.name).getAttribute("data-state"))).toEqual(["off", "not_sending", "lost", "connecting", "stale"]);
+    for (const c of cameras) {
+      expect(tile(c.name).querySelector("figcaption")!.textContent).toBe(c.displayName);
+      expect(tile(c.name).querySelector(".sec-wall-tile-frame > .sec-wall-tile-state")).not.toBeNull();
+    }
+    expect(tile("old").querySelector(".sec-wall-tile-frame > .sec-wall-tile-state")).toHaveTextContent(/^Picture from T\d/);
+  });
+
   it("unmounting stops every tile asking", async () => {
     const { unmount } = render(<WallCameras {...props({ cameras: [cam("front"), cam("back")] })} />, { wrapper: Wrap });
     await advance(0);

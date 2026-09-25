@@ -10,7 +10,7 @@
  * viewport's height, and the camera tiles take what the banners and the strip
  * leave (grid rows `minmax(0, 1fr) auto auto`), so the strip is at the
  * bottom of the screen. The tiles are a `--cols` × `--rows` grid of equal
- * cells (tileGrid), each a picture over a one-line caption. A picture is
+ * cells (tileGrid), each a picture over its name. A picture is
  * never less than 72 px high: when the screen is too short for that (a 1080p
  * TV browser at 960×540 with 12 cameras and a banner), the page grows and
  * scrolls a little instead of squeezing the pictures away. At 640 px wide or
@@ -46,21 +46,25 @@
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden;
 }
 .droplet-shell .sec-wall-tile-frame {
-  position: relative; min-height: 72px; overflow: hidden; display: flex; align-items: center; justify-content: center;
-  background: var(--bg); color: var(--text-muted);
+  position: relative; min-height: 72px; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 4px 8px; background: var(--bg); color: var(--text-muted);
 }
 .droplet-shell .sec-wall-tile-frame > img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
 /* An old picture: dimmed and grey under its own time, never drawn as a current one. */
 .droplet-shell .sec-wall-tile.is-stale .sec-wall-tile-frame > img { opacity: 0.4; filter: grayscale(1); }
-/* One line, whatever the tile's width: a long name ends in "…", the state keeps its words. */
-.droplet-shell .sec-wall-tile > figcaption {
-  display: flex; align-items: center; gap: 12px; min-width: 0; padding: 8px 12px;
+/* What is wrong with the picture sits on the picture: over an old one (positioned, so above the <img>), under the
+   mark in an empty frame. The caption below is the camera's name alone, so no state can crowd a name out of it
+   on a narrow tile, and a state wraps rather than lose its time. */
+.droplet-shell .sec-wall-tile-state {
+  position: relative; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 8px;
+  border-radius: var(--radius-input); background: var(--surface); color: var(--text); text-align: center;
   font-size: clamp(14px, 1.2vw, 24px);
 }
+/* The name, on one line: a name longer than the tile ends in "…". */
+.droplet-shell .sec-wall-tile > figcaption { min-width: 0; padding: 8px 12px; font-size: clamp(14px, 1.2vw, 24px); }
 .droplet-shell .sec-wall-tile-name {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text);
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text);
 }
-.droplet-shell .sec-wall-tile-state { flex-shrink: 0; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
 .droplet-shell .sec-wall-cameras-note {
   display: grid; justify-items: center; gap: 10px; max-width: 36em; padding: 24px; text-align: center;
   color: var(--text-muted); font-size: clamp(14px, 1.4vw, 28px);

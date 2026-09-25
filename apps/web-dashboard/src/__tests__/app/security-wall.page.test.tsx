@@ -20,8 +20,8 @@
  *     dashboard source can even name the rack panel's route (T-D13);
  *   · wall.css: tokens only, the strip at the bottom of a TV's screen, every
  *     picture at least 72 px high (the page scrolls rather than squeeze one),
- *     one-line captions, readable muted badges, and nothing 375 px wide
- *     scrolls sideways.
+ *     a tile's state on its picture and its name alone in the caption,
+ *     readable muted badges, and nothing 375 px wide scrolls sideways.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -467,11 +467,14 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
     expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-frame \{\s*position: relative; min-height: 72px; overflow: hidden;/);
   });
 
-  it("a caption is one line: a long name ends in an ellipsis, the state keeps its words", () => {
-    expect(code).toMatch(/\.sec-wall-tile > figcaption \{[^}]*display: flex;/);
-    expect(code).not.toMatch(/\.sec-wall-tile > figcaption \{[^}]*flex-wrap: wrap/);
-    expect(code).toMatch(/\.sec-wall-tile-name \{\s*min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
-    expect(code).toMatch(/\.sec-wall-tile-state \{ flex-shrink: 0; white-space: nowrap;/);
+  it("a tile's state sits on its picture, above the <img>, and wraps rather than lose its time; the caption is the name alone, on one line", () => {
+    // Internal review, round 4: beside the name, a state that kept its words squeezed a stale tile's name to 6–9 px
+    // on a 960×540 TV browser with 12 cameras. The caption holds only the name now (WallCameras.test pins the markup).
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-frame \{[^}]*display: flex; flex-direction: column;/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-state \{\s*position: relative;[^}]*max-width: 100%;/);
+    expect(code).not.toMatch(/\.sec-wall-tile-state \{[^}]*(white-space: nowrap|flex-shrink: 0)/);
+    expect(code).toMatch(/\.sec-wall-tile-name \{\s*display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
+    expect(code).not.toMatch(/\.sec-wall-tile > figcaption \{[^}]*(display: flex|flex-wrap)/);
   });
 
   it("the tiles line up with the banners and the strip (16 px sides)", () => {
