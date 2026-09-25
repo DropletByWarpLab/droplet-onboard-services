@@ -396,6 +396,9 @@ async function notifyIncident(
         where: { id: incident.id, version: incident.version, notifyState: "pending" },
         data: { notifyState: "done", version: { increment: 1 } },
       });
+      // A lost CAS (e.g. a verdict bumped `version` after the read above) writes nothing and throws
+      // nothing, so no attempt is spent; notifyState stays pending and the next tick retries. Pinned by
+      // "a verdict landing between the read and the CAS" in security-alerts.service.test.ts.
       if (count !== 1) return null;
       const rows: Prisma.SecurityIncidentNoticeCreateManyInput[] = [];
       for (const recipient of planned) {
