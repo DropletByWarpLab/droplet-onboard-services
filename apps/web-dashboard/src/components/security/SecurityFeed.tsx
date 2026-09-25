@@ -129,6 +129,10 @@ export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
   threat_mirror: "Network and sign-in warnings",
   // WARP-2977 P2b — the ticker that follows the opening hours (the site mode).
   site_mode: "Opening hours",
+  // WARP-2978 (P3) — the engine that sorts events into incidents (every viewer),
+  // and who alerts go to (owners and admins only: it names people).
+  incidents: "Incidents",
+  alerts: "Alerts",
   // WARP-2980 (P5) — the job that learns what normal looks like.
   patterns: "Patterns",
   retention: "Record keeping",

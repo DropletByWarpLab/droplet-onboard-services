@@ -427,6 +427,37 @@ describe("the source header", () => {
     const { container } = render(<SecurityFeed {...props()} />);
     expect(container.querySelector('[data-source="site_mode"]')).toHaveTextContent("Opening hours");
   });
+
+  it("names the incident engine's and the alerts' rows (WARP-2978), which the server sends after site_mode", () => {
+    expect(SOURCE_LABEL.incidents).toBe("Incidents");
+    expect(SOURCE_LABEL.alerts).toBe("Alerts");
+    const sources: SecurityHealthRow[] = [
+      ...OK.slice(0, 4),
+      { id: "incidents", state: "ok", detail: "Sorting events into incidents", lastSeenAt: NOW.toISOString() },
+      { id: "alerts", state: "ok", detail: "Alerts go to Stefan", lastSeenAt: null },
+      OK[4]!,
+    ];
+    const { container } = render(<SecurityFeed {...props({ sources })} />);
+    expect(container.querySelector('[data-source="incidents"] .nm')).toHaveTextContent("Incidents");
+    expect(container.querySelector('[data-source="alerts"] .nm')).toHaveTextContent("Alerts");
+  });
+
+  it("every row the server can send has a label — the orchestrator's pinned order, verbatim", () => {
+    // security-events.service.ts's SecurityHealthId, in buildSecurityHealth's order.
+    const served: SecurityHealthRow["id"][] = [
+      "camera_ingest",
+      "camera_system",
+      "locks",
+      "threat_mirror",
+      "site_mode",
+      "incidents",
+      "alerts",
+      "patterns",
+      "retention",
+    ];
+    expect(Object.keys(SOURCE_LABEL).sort()).toEqual([...served].sort());
+    for (const id of served) expect(SOURCE_LABEL[id], id).toMatch(/\S/);
+  });
 });
 
 describe("site-mode rows (WARP-2977 P2b)", () => {
