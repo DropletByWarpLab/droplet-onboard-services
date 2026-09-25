@@ -69,8 +69,13 @@ import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("security-pattern-rules");
 
-/** `k` reads at most this many rows (D8): the Poisson tail is monotone in k, so at the cap k = 5000 still flags. */
+/** `k` counts at most this many matching rows (D8): the Poisson tail is monotone in k, so at the cap k = 5000 still flags. */
 export const PATTERN_K_CAP = 5000;
+/**
+ * …and reads at most this many rows to find them: past it, `k` is not known and volume is not
+ * judged (null), never judged on an undercount.
+ */
+export const PATTERN_K_SCAN_CEILING = 4 * PATTERN_K_CAP;
 /** SecurityPatternDay rows are kept this long (the incidents' own year). */
 export const PATTERN_DAY_KEEP_DAYS = 365;
 
@@ -272,28 +277,47 @@ export async function loadPatternContextSafe(prisma: Parameters<typeof loadPatte
  * when P2b's matcher puts it in the area (a camera's detection outside the
  * linked part of its view is not the area's). `labels[0]` is the label, as
  * the build counts it. The (camera, startedAt) index serves it.
+ *
+ * The cap applies AFTER both filters (review #2369): pages in
+ * id order until PATTERN_K_CAP rows match or the rows run out, so rows outside
+ * the area never use it up. The filters stay in TypeScript — `matchAreasForEvent`
+ * is the one matcher, and `labels[0]` has no Prisma filter. Reaching
+ * PATTERN_K_SCAN_CEILING first returns null: volume is not judged for this event.
  */
 export async function countSlotDetections(
   prisma: Pick<PrismaClient, "securityEvent">,
   q: { keyCameras: readonly string[]; zoneId: string | null; label: string; slot: Pick<BaselineSlot, "start" | "end">; eventId: bigint; links: readonly ActiveZoneLink[] },
-): Promise<number> {
-  const rows = await prisma.securityEvent.findMany({
-    where: {
-      source: "frigate",
-      kind: "detection",
-      camera: { in: [...q.keyCameras] },
-      labels: { has: q.label },
-      startedAt: { gte: q.slot.start, lt: q.slot.end },
-      id: { lte: q.eventId },
-    },
-    select: { id: true, source: true, kind: true, camera: true, cameraZones: true, labels: true },
-    take: PATTERN_K_CAP,
-  });
-  return rows.filter(
-    (r) =>
-      r.labels[0] === q.label &&
-      (q.zoneId === null || matchAreasForEvent(r as ZoneMatchableEvent, q.links).some((m) => m.zoneId === q.zoneId)),
-  ).length;
+): Promise<number | null> {
+  const inKey = (r: ZoneMatchableEvent & { labels: string[] }) =>
+    r.labels[0] === q.label && (q.zoneId === null || matchAreasForEvent(r, q.links).some((m) => m.zoneId === q.zoneId));
+  let k = 0;
+  let read = 0;
+  let after: bigint | null = null;
+  for (;;) {
+    const idRange: { lte: bigint; gt?: bigint } = after === null ? { lte: q.eventId } : { lte: q.eventId, gt: after };
+    const page = await prisma.securityEvent.findMany({
+      where: {
+        source: "frigate",
+        kind: "detection",
+        camera: { in: [...q.keyCameras] },
+        labels: { has: q.label },
+        startedAt: { gte: q.slot.start, lt: q.slot.end },
+        id: idRange,
+      },
+      select: { id: true, source: true, kind: true, camera: true, cameraZones: true, labels: true },
+      orderBy: { id: "asc" },
+      take: PATTERN_K_CAP,
+    });
+    k += page.filter(inKey).length;
+    if (k >= PATTERN_K_CAP) return PATTERN_K_CAP;
+    if (page.length < PATTERN_K_CAP) return k;
+    read += page.length;
+    if (read >= PATTERN_K_SCAN_CEILING) {
+      logger.warn({ eventId: q.eventId.toString(), read, k }, "security pattern rules: k not known within the scan ceiling — volume not judged");
+      return null;
+    }
+    after = page[page.length - 1]!.id;
+  }
 }
 
 // ── one event ─────────────────────────────────────────────────────────────

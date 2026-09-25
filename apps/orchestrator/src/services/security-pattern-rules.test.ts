@@ -9,7 +9,8 @@
  *   · `k` (D8): Frigate `detection` rows of the label, in the slot, with
  *     id ≤ the event's — including the two rows where that differs from
  *     `startedAt ≤` (review item 6); an area keeps only what its links match;
- *     the 5000 cap;
+ *     the 5000 cap, counted after those filters, and the scan ceiling past
+ *     which k is null (review #2369);
  *   · never throws (D4): a write failure is 0 flags, plain words on the
  *     health state, and a `failed` count; the next success clears it;
  *   · one cell query per judged event, none without a build (D21).
@@ -257,6 +258,32 @@ describe("k — what `unusual_volume` counts (D8)", () => {
     const rows = Array.from({ length: 5003 }, (_, i) => ({ id: BigInt(i + 1), startedAt: at("2026-09-23T21:20:00Z"), dedupeKey: `frigate:k${i}` }));
     const f = kWorld(rows);
     expect(await countSlotDetections(db(f), { keyCameras: ["back"], zoneId: null, label: "person", slot, eventId: 9_999n, links: [] })).toBe(5000);
+  });
+
+  describe("the cap counts matches, not rows read (review #2369)", () => {
+    const row = (id: number, zone: string) => ({ id: BigInt(id), startedAt: at("2026-09-23T21:20:00Z"), cameraZones: [zone], dedupeKey: `frigate:c${id}` });
+    const kArea = async (f: FakeSecurityPrisma) =>
+      countSlotDetections(db(f), { keyCameras: ["back"], zoneId: STOCK, label: "person", slot, eventId: 99_999n, links: await loadActiveLinks(db(f)) });
+
+    it("5000 rows outside the linked part never use it up — and pages go in id order, whatever order the rows come back in", async () => {
+      // Stored newest first, so a page that is not in id order loses the lowest ids: the three in the area.
+      const outside = Array.from({ length: 5000 }, (_, i) => row(5003 - i, "door"));
+      const f = kWorld([...outside, row(3, "aisle"), row(2, "aisle"), row(1, "aisle")], ["back/aisle"]);
+      expect(await kArea(f)).toBe(3);
+    });
+
+    it("5003 in the area among 2000 outside: k = 5000", async () => {
+      const f = kWorld(
+        Array.from({ length: 7003 }, (_, i) => row(i + 1, i < 2000 ? "door" : "aisle")),
+        ["back/aisle"],
+      );
+      expect(await kArea(f)).toBe(5000);
+    });
+
+    it("past the scan ceiling (20000 rows) k is not known: null, and volume is not judged", async () => {
+      const f = kWorld([...Array.from({ length: 20_000 }, (_, i) => row(i + 1, "door")), row(20_001, "aisle")], ["back/aisle"]);
+      expect(await kArea(f)).toBeNull();
+    });
   });
 
   it("a busy hour flags unusual_volume for the event that takes k past k*", async () => {
