@@ -483,6 +483,40 @@ describe("the notifier (§6.7)", () => {
     expect(h.recorded).toHaveLength(1);
   });
 
+  it("WARP-2980 D15: a verdict landing between the read and the CAS loses this tick's write — nothing written, no attempt spent — and the next tick tells", async () => {
+    const f = world();
+    // Route 35 bumps `version` (security-incident-actions.ts) after the notifier read the incident, before its CAS.
+    let marked = false;
+    const racing = {
+      ...deps(),
+      isSecurityModuleOn: async () => {
+        if (!marked) {
+          Object.assign(f.world.securityIncident[0]!, {
+            verdict: "expected",
+            verdictById: STEFAN,
+            verdictByName: "Stefan",
+            verdictAt: NOW,
+            verdictFirstAt: NOW,
+            verdictCodes: ["after_hours_presence"],
+            version: 3,
+          });
+        }
+        marked = true;
+        return true;
+      },
+    };
+    expect(await notifyPendingIncidents(client(f), racing, NOW)).toEqual({ incidents: 0 });
+    expect(f.world.securityIncident[0]).toMatchObject({ notifyState: "pending", notifyAttempts: 0, version: 3 });
+    expect(notices(f)).toHaveLength(0);
+    expect(f.world.notificationLog).toHaveLength(0);
+    expect(h.audit).not.toHaveBeenCalled();
+
+    expect(await notifyPendingIncidents(client(f), racing, plus(NOW, 60_000))).toEqual({ incidents: 1 });
+    expect(f.world.securityIncident[0]).toMatchObject({ notifyState: "done", notifyAttempts: 0, version: 4 });
+    expect(noticeOf(f, STEFAN)).toMatchObject({ outcome: "sent" });
+    expect(f.world.notificationLog).toHaveLength(1);
+  });
+
   it("a delivery that throws leaves the notice queued for redelivery — the record is already committed", async () => {
     const f = world();
     h.deliverFails = true;
