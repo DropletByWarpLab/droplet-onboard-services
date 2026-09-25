@@ -19,14 +19,14 @@ describe("resolveAssertedUser", () => {
   it("resolves an SSO / SCIM row (nextcloudUsername NULL) by username", async () => {
     expect(await resolveAssertedUser(prismaOf([MARIA, SAM]), "maria")).toEqual({
       ok: true,
-      user: { id: "u-maria", role: "family" },
+      user: { id: "u-maria", username: "maria", role: "family" },
     });
   });
 
   it("resolves by User.id, which is what the HTTP transport sends", async () => {
     expect(await resolveAssertedUser(prismaOf([MARIA, SAM]), "u-maria")).toEqual({
       ok: true,
-      user: { id: "u-maria", role: "family" },
+      user: { id: "u-maria", username: "maria", role: "family" },
     });
   });
 
@@ -34,14 +34,14 @@ describe("resolveAssertedUser", () => {
     const renamed: DirectoryUser = { ...SAM, username: "samuel" };
     expect(await resolveAssertedUser(prismaOf([MARIA, renamed]), "sam")).toEqual({
       ok: true,
-      user: { id: "u-sam", role: "owner" },
+      user: { id: "u-sam", username: "samuel", role: "owner" },
     });
   });
 
   it("treats one row matched by several columns as one person", async () => {
     expect(await resolveAssertedUser(prismaOf([SAM]), "sam")).toEqual({
       ok: true,
-      user: { id: "u-sam", role: "owner" },
+      user: { id: "u-sam", username: "sam", role: "owner" },
     });
   });
 
@@ -99,14 +99,14 @@ describe("resolveAssertedUser", () => {
     });
   });
 
-  it("asks the database once, for at most two rows of any status, and reads only id, role and status", async () => {
+  it("asks the database once, for at most two rows of any status, and reads only id, username, role and status", async () => {
     // Two is the fewest rows that can tell "one person" from "more than one".
     const prisma = { user: userDirectory([MARIA]) };
     await resolveAssertedUser(prisma as never, "maria");
     expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
     expect(prisma.user.findMany).toHaveBeenCalledWith({
       where: { OR: [{ username: "maria" }, { nextcloudUsername: "maria" }, { id: "maria" }] },
-      select: { id: true, role: true, directoryStatus: true },
+      select: { id: true, username: true, role: true, directoryStatus: true },
       take: 2,
     });
   });

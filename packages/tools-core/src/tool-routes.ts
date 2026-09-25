@@ -326,7 +326,9 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "email_summarize_thread", client: "orchestrator", hops: [admit("get", "/api/email/:accountId/threads/:threadId/analysis")] },
   { tool: "email_draft_reply", client: "orchestrator", hops: [admit("post", "/api/email/:accountId/drafts")] },
   { tool: "email_send", client: "orchestrator", hops: [admit("post", "/api/email/drafts/:id/send")] },
-  none("search_contacts"), // ctx.prisma (derived from indexed senders)
+  // WARP-3102: through the orchestrator, which resolves the acting person —
+  // it read EmailAccount via ctx.prisma by ctx.userId, a username in chat.
+  { tool: "search_contacts", client: "orchestrator", hops: [admit("get", "/api/email/contacts")] },
 
   // ── memory ──────────────────────────────────────────────────────────────
   none("memory_recall"), // ctx.prisma

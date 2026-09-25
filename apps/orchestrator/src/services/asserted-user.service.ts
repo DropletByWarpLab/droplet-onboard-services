@@ -53,6 +53,12 @@ import type { PrismaClient } from "@prisma/client";
 export interface AssertedUser {
   /** LOCAL `User.id` UUID — what every access decision is keyed on. */
   id: string;
+  /**
+   * The canonical handle, whatever column the header matched. Audit rows
+   * record the person by it (WARP-3102: the email send's `refs.actor`), so a
+   * `User.id` asserted over HTTP is recorded the way a username over stdio is.
+   */
+  username: string;
   role: string;
 }
 
@@ -69,12 +75,12 @@ export async function resolveAssertedUser(
   // Two rows are the fewest that tell "one person" from "more than one".
   const rows = await prisma.user.findMany({
     where: { OR: [{ username: asserted }, { nextcloudUsername: asserted }, { id: asserted }] },
-    select: { id: true, role: true, directoryStatus: true },
+    select: { id: true, username: true, role: true, directoryStatus: true },
     take: 2,
   });
   if (rows.length === 0) return { ok: false, reason: "not_found" };
   if (rows.length > 1) return { ok: false, reason: "ambiguous" };
   const [row] = rows;
   if (row.directoryStatus === "DEACTIVATED") return { ok: false, reason: "deactivated" };
-  return { ok: true, user: { id: row.id, role: row.role } };
+  return { ok: true, user: { id: row.id, username: row.username, role: row.role } };
 }
