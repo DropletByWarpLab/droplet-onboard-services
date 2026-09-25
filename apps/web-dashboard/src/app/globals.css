@@ -906,6 +906,37 @@ html {
   transition: none;
 }
 
+/* Sidebar sub-nav: always mounted, opened by animating the grid row from 0fr
+   to 1fr, so a section slides open to its content's own height instead of
+   snapping in and shoving every row below it. The closed state is also
+   `inert` (set in Sidebar.tsx) so its links leave the tab order. */
+.sidebar-sub {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sidebar-sub[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.sidebar-sub > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Labels arriving with an expand fade in after the width has mostly opened,
+   rather than popping in at the rail width and wrapping mid-animation. */
+@keyframes sidebar-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.sidebar-fade-in {
+  animation: sidebar-fade-in 180ms 60ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sidebar-w-transition {
     transition: none;
