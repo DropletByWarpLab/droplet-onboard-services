@@ -102,8 +102,8 @@ export interface CloudProviderInfo {
   /** `escapeEnabled && hasKey === true` — usable ON THIS BOX (not per
    *  person; the caller's own verdict is `cloudAccess.allowedForYou`).
    *  Overlaid per request by `overlayCloudState`; the cached build carries
-   *  false. */
-  enabled: boolean;
+   *  false. `null` = withheld from a guest (WARP-3082), never guessed. */
+  enabled: boolean | null;
   /** WARP-2871: a box-wide (shared-namespace) key is present. `null` = the
    *  gateway could not be asked (unreachable / timeout) — never guessed. The
    *  cached build carries null; the route overlays the real answer. */
