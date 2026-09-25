@@ -495,6 +495,17 @@ describe("upToDate over the real /security header rows (T-O7)", () => {
     expect(panelCountIsCurrent(rows({ cameraIngest: ingestRow({}) }))).toBe(true);
   });
 
+  it("WARP-2977: a door-lock save failing leaves camera events ok and the count current — a lock row never forms an incident (D21)", () => {
+    const lockFailing = ingestRow({
+      lastWriteError: new Map([["matter_lock", { at: NOW, message: "boom" }]]),
+      lastRecordedAt: new Map([["frigate", new Date(NOW.getTime() - 60_000)]]),
+    });
+    expect(lockFailing.state).toBe("ok");
+    expect(panelCountIsCurrent(rows({ cameraIngest: lockFailing }))).toBe(true);
+    // …and none of the three rows `upToDate` reads is the locks row.
+    expect(Object.values(panelHealthRows(NOW)).map((r) => r.id)).not.toContain("locks");
+  });
+
   it("network and sign-in warnings: jobs never registered → false; registered, not run yet (quiet) → true", () => {
     expect(panelCountIsCurrent(rows({ threatMirror: mirrorRow({ jobsRegistered: false }) }))).toBe(false);
     const registered = mirrorRow({});

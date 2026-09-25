@@ -97,6 +97,13 @@ describe("the sources cell (T-D2)", () => {
     expect(sourcesHeadline(rows)).toBe("1 not reporting");
   });
 
+  it("WARP-2977: the door locks are a source — in the server's order, and they move the headline like any other", () => {
+    const rows = [row("camera_ingest", "ok"), row("camera_system", "ok"), row("locks", "down"), row("threat_mirror", "ok"), row("incidents", "ok")];
+    expect(sourceRows(rows).map((r) => r.id)).toEqual(["camera_ingest", "camera_system", "locks", "threat_mirror"]);
+    expect(sourcesHeadline(rows)).toBe("1 not reporting");
+    expect(sourcesHeadline([row("camera_ingest", "ok"), row("locks", "not_configured")])).toBe("1 not set up");
+  });
+
   it("no source row at all is no claim", () => {
     expect(sourcesHeadline([row("patterns", "ok")])).toBe(WALL_COPY.unknownValue);
   });
@@ -129,6 +136,8 @@ describe("countBehind (T-D3) — one case per cause, each line true for it", () 
     ["no camera system", [row("incidents", "ok"), row("camera_ingest", "not_configured")]],
     ["the camera system itself down (that is an incident of its own)", [row("incidents", "ok"), row("camera_system", "down")]],
     ["a quiet warning mirror (registered, not run yet)", [row("incidents", "ok"), row("threat_mirror", "quiet")]],
+    // WARP-2977 (D21): a lock row never forms an incident, so a lock outage cannot leave the number short.
+    ["the door locks not reporting", [row("incidents", "ok"), row("camera_ingest", "ok"), row("locks", "down")]],
   ] as const)("%s → not behind", (_why, rows) => {
     expect(countBehind(rows as unknown as SecurityHealthRow[])).toBeNull();
   });
