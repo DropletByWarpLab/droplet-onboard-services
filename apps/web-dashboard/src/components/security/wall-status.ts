@@ -87,9 +87,10 @@ export const WALL_COPY = {
   // Non-blocking 1 (rjouffret, round 3): a Staff account holds Security at Respond by default (the mode, acknowledging);
   // a role based on Staff with Security at View has the server refuse those. Words as the role builder shows them.
   refusedManage:
-    "Best is an account just for this screen. On the Users page, add it and choose its cameras. Then, in Roles & access, give it a role based on {tier}, with Cameras on and Security set to View, so it can't set the mode or acknowledge anything.",
+    "It's best to make an account just for this screen. On the Users page, add it and choose its cameras. Then in Roles & access, give it a role based on {tier} with Cameras on and Security set to View, so it can't change the site mode or acknowledge alerts.",
   refusedManageLink: "Open Users",
-  refusedSignOut: "Sign out on this screen",
+  // "here", as "Sign in here" in the same card.
+  refusedSignOut: "Sign out here",
   refusedGuestLeave: "Back to Overview",
 
   // The sign-in ended while the wall was up, or there never was one: never a sign-in form in front of the room by itself.

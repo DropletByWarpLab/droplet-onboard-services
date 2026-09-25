@@ -80,12 +80,21 @@ describe("WallRefused (D6)", () => {
     expect(view!.minTier).toBe("family");
     const advice = fill(WALL_COPY.refusedManage, { tier: tierLabel("family") });
     expect(advice).toContain(`in ${ACCESS_COPY.tab},`);
-    expect(advice).toContain(`a role based on ${tierLabel("family")},`);
+    expect(advice).toContain(`a role based on ${tierLabel("family")} with`);
     expect(advice).toContain(`with ${cameras.label} on and ${security.label} set to ${view!.label},`);
     expect(advice).not.toMatch(/\{|family/);
+    // What View takes away, in the words the person meets: the strip's "Site mode", and Respond's own "acknowledge".
+    expect(advice).toContain(`can't change the ${WALL_COPY.modeLabel.toLowerCase()} or acknowledge alerts.`);
+    expect(respond!.grants).toMatch(/\backnowledge\b/);
+    expect(advice).toMatch(/^It's best to make an account just for this screen\./);
   });
 
-  it.each(["owner", "guest"])("a %s: 'Sign out on this screen' signs out, then opens the sign-in that comes back to the wall", async (role) => {
+  it("the sign-out button says 'here', as the card's 'Sign in here' does", () => {
+    expect(WALL_COPY.refusedSignOut).toBe("Sign out here");
+    expect(WALL_COPY.refusedWhat.startsWith(WALL_COPY.refusedSignOut.replace("out", "in"))).toBe(true);
+  });
+
+  it.each(["owner", "guest"])("a %s: 'Sign out here' signs out, then opens the sign-in that comes back to the wall", async (role) => {
     render(<WallRefused role={role} />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: WALL_COPY.refusedSignOut }));
