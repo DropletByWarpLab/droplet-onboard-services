@@ -185,6 +185,35 @@
   color: var(--text);
 }
 
+/* ── New custom tool: where a tool starts ─────────────────── */
+/* The dialog is portal-mounted with the `droplet-shell` scope, so these
+   resolve there too. The languages sit side by side and stack when narrow;
+   the whole card is the radio's hit target, and the chosen one is outlined. */
+.droplet-shell .ws-pick-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.droplet-shell .ws-pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 200ms var(--ease), border-color 200ms var(--ease);
+}
+.droplet-shell .ws-pick:hover { background: var(--surface-2); }
+.droplet-shell .ws-pick.is-on { border-color: var(--brand); background: var(--brand-subtle); }
+.droplet-shell .ws-pick:has(input:focus-visible) { outline: 2px solid var(--brand); outline-offset: 2px; }
+.droplet-shell .ws-pick:has(input:disabled) { cursor: default; opacity: 0.6; }
+.droplet-shell .ws-pick input { margin-top: 2px; flex-shrink: 0; accent-color: var(--brand); }
+.droplet-shell .ws-pick-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.droplet-shell .ws-pick-t { font-weight: 600; color: var(--text); }
+.droplet-shell .ws-pick-rt { margin-left: 6px; font-weight: 500; color: var(--text-muted); }
+.droplet-shell .ws-pick-code { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); overflow-wrap: anywhere; }
+.droplet-shell .ws-pick-d { font-size: 12px; color: var(--text-muted); }
+.droplet-shell .ws-pick-sub { margin: 6px 0 0; font-size: 12px; font-weight: 500; color: var(--text-muted); }
+.droplet-shell .ws-field-error { margin: 0; font-size: 12px; color: var(--danger-ink); }
+
 /* ── Transcript (center) ──────────────────────────────────── */
 .droplet-shell .ws-thread { display: flex; flex-direction: column; gap: 18px; }
 
