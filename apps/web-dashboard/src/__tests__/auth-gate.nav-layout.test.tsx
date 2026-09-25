@@ -122,19 +122,22 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
   });
 });
 
-describe("AuthGate — D6: the wall never runs on an owner or admin session (WARP-2981)", () => {
+describe("AuthGate — D6: the wall runs on a Staff session only (WARP-2981)", () => {
   it.each([
-    ["owner", "/security/wall"],
-    ["admin", "/security/wall"],
-    ["admin", "/security/wall/"],
+    ["owner", "/security/wall", WALL_COPY.refusedTitle],
+    ["admin", "/security/wall", WALL_COPY.refusedTitle],
+    ["admin", "/security/wall/", WALL_COPY.refusedTitle],
+    // Every read the wall makes is floored at owner/admin/family on the server: a guest wall would
+    // only collect 403s, each an audited denial that becomes a threat incident.
+    ["guest", "/security/wall", WALL_COPY.refusedGuestTitle],
     // A role this build doesn't know (or none at all): the wall can't vouch it is not an admin's.
-    ["service", "/security/wall"],
-    [undefined, "/security/wall"],
-  ])("a %s session on %s: the refusal alone — no keeper, no guard, no page", (role, path) => {
+    ["service", "/security/wall", WALL_COPY.refusedTitle],
+    [undefined, "/security/wall", WALL_COPY.refusedTitle],
+  ])("a %s session on %s: the refusal alone — no keeper, no guard, no page", (role, path, title) => {
     userRef.current = { ...userRef.current, role };
     pathnameValue = path;
     render(<AuthGate>wall page</AuthGate>);
-    expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedTitle })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: title })).toBeInTheDocument();
     expect(screen.queryByText("wall page")).toBeNull();
     expect(screen.queryByTestId("wall-modules-keeper")).toBeNull();
     expect(screen.queryByTestId("module-guard")).toBeNull();
@@ -142,12 +145,13 @@ describe("AuthGate — D6: the wall never runs on an owner or admin session (WAR
     expect(screen.queryByTestId("help-launcher")).toBeNull();
   });
 
-  it.each(["family", "guest"])("a %s session runs the wall", (role) => {
-    userRef.current = { ...userRef.current, role };
+  it("a family (Staff) session runs the wall", () => {
+    userRef.current = { ...userRef.current, role: "family" };
     pathnameValue = "/security/wall";
     render(<AuthGate>wall page</AuthGate>);
     expect(screen.getByTestId("module-guard")).toHaveTextContent("wall page");
     expect(screen.queryByText(WALL_COPY.refusedTitle)).toBeNull();
+    expect(screen.queryByText(WALL_COPY.refusedGuestTitle)).toBeNull();
   });
 
   it("an owner anywhere else is not refused", () => {

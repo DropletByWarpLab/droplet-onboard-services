@@ -128,8 +128,12 @@ describe("the wall behind the module guard (D11)", () => {
   });
 });
 
-describe("D6: an owner or admin session is refused (Stefan: \"Member wall, own cameras\")", () => {
-  it.each(["owner", "admin"])("a %s on the TV: the refusal, and not one request in 10 minutes — no modules, no Security, no cameras", async (role) => {
+describe("D6: only a Staff session runs the wall (Stefan: \"Member wall, own cameras\")", () => {
+  it.each([
+    ["owner", WALL_COPY.refusedTitle],
+    ["admin", WALL_COPY.refusedTitle],
+    ["guest", WALL_COPY.refusedGuestTitle],
+  ])("a %s on the TV: the refusal, and not one request from AuthGate's subtree in 10 minutes — no modules, no Security, no cameras", async (role, title) => {
     h.role = role;
     render(
       <SWRConfig value={{ provider: () => new Map() }}>
@@ -139,7 +143,7 @@ describe("D6: an owner or admin session is refused (Stefan: \"Member wall, own c
       </SWRConfig>,
     );
     await advance(10 * 60_000);
-    expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedTitle })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: title })).toBeInTheDocument();
     expect(wallShown()).toBe(false);
     expect(h.authFetch).not.toHaveBeenCalled();
   });

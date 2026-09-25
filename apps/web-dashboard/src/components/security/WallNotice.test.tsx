@@ -1,9 +1,10 @@
 /**
- * WARP-2981 (ADR-059 P6, D6) — what /security/wall shows an owner or admin
- * instead of the wall (Stefan: "Member wall, own cameras"): why, what to do —
- * sign in on the TV with a Staff account that has the cameras to show — where
- * such an account is made and given cameras (Users), and a way to sign out of
- * the TV straight into that sign-in.
+ * WARP-2981 (ADR-059 P6, D6) — what /security/wall shows an account it does
+ * not run on (Stefan: "Member wall, own cameras"): why, what to do — sign in
+ * here with a Staff account that has the cameras to show — and a way to sign
+ * out straight into that sign-in, first. An owner or admin also gets Users,
+ * where such an account is made and given cameras. A guest can't see Security
+ * at all, so it is told that and gets no Users link and no way into Security.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -24,12 +25,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("WallRefused (D6)", () => {
-  it("says why and what to do, in the household's words for the tier, and links to Users", () => {
-    render(<WallRefused />);
+  it.each(["owner", "admin", undefined])("a %s: says why and what to do, in the household's words for the tier, and links to Users", (role) => {
+    render(<WallRefused role={role} />);
     expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedTitle })).toBeInTheDocument();
     expect(screen.getByText(WALL_COPY.refusedWhy)).toBeInTheDocument();
     // `family` is shown as "Staff" everywhere (lib/access tierLabel); never the enum value.
-    const what = screen.getByText(/Sign in on this TV with a/);
+    const what = screen.getByText(/Sign in here with a/);
     expect(what.textContent).toContain(`with a ${tierLabel("family")} account`);
     expect(what.textContent).not.toMatch(/\{|family/);
     expect(screen.getByRole("link", { name: WALL_COPY.refusedManageLink })).toHaveAttribute("href", "/users");
@@ -38,8 +39,35 @@ describe("WallRefused (D6)", () => {
     expect(h.authFetch).not.toHaveBeenCalled();
   });
 
-  it("'Sign out of this TV' signs out, then opens the sign-in that comes back to the wall", async () => {
-    render(<WallRefused />);
+  it("signing out is the one primary action, and first; Users is a plain button", () => {
+    render(<WallRefused role="owner" />);
+    const signOut = screen.getByRole("button", { name: WALL_COPY.refusedSignOut });
+    const users = screen.getByRole("link", { name: WALL_COPY.refusedManageLink });
+    expect(signOut).toHaveClass("btn", "primary");
+    expect(users).toHaveClass("btn");
+    expect(users).not.toHaveClass("primary");
+    expect(document.querySelectorAll(".sec-wall-notice-actions .primary")).toHaveLength(1);
+    expect(document.querySelector(".sec-wall-notice-actions > :first-child")).toBe(signOut);
+  });
+
+  it("a guest: told the account can't see Security, sent to a Staff sign-in — no Users link, no way into Security", () => {
+    render(<WallRefused role="guest" />);
+    expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedGuestTitle })).toBeInTheDocument();
+    expect(screen.getByText(WALL_COPY.refusedGuestWhy)).toBeInTheDocument();
+    expect(screen.queryByText(WALL_COPY.refusedTitle)).toBeNull();
+    expect(screen.queryByText(WALL_COPY.refusedWhy)).toBeNull();
+    expect(screen.getByText(/Sign in here with a/).textContent).toContain(`with a ${tierLabel("family")} account`);
+    expect(screen.queryByText(WALL_COPY.refusedManage)).toBeNull();
+    expect(screen.queryByRole("link", { name: WALL_COPY.refusedManageLink })).toBeNull();
+    // /security's own reads would be refused for a guest too: the way out is the Overview.
+    expect(screen.queryByRole("link", { name: WALL_COPY.leave })).toBeNull();
+    expect(screen.getByRole("link", { name: WALL_COPY.refusedGuestLeave })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("button", { name: WALL_COPY.refusedSignOut })).toHaveClass("btn", "primary");
+    expect(h.authFetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["owner", "guest"])("a %s: 'Sign out on this screen' signs out, then opens the sign-in that comes back to the wall", async (role) => {
+    render(<WallRefused role={role} />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: WALL_COPY.refusedSignOut }));
     });

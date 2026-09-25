@@ -8,6 +8,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SecurityHealthRow } from "@/lib/types";
+import { tierLabel } from "@/lib/access";
 import { tileRetryDelayMs, wallOnErrorRetry, wallRetryDelayMs } from "@/lib/hooks/useSecurity";
 import {
   BEHIND_COPY,
@@ -204,7 +205,8 @@ describe("tileGrid — every camera on screen, in the nearest square", () => {
 describe("wallRunsFor (D6: \"Member wall, own cameras\")", () => {
   it.each([
     ["family", true],
-    ["guest", true],
+    // Every read the wall makes is floored at owner/admin/family on the server: a guest wall only collects 403s.
+    ["guest", false],
     ["owner", false],
     ["admin", false],
     ["service", false],
@@ -212,5 +214,21 @@ describe("wallRunsFor (D6: \"Member wall, own cameras\")", () => {
     [null, false],
   ])("%s → %s", (role, runs) => {
     expect(wallRunsFor(role)).toBe(runs);
+  });
+});
+
+describe("the TV view's copy (D6)", () => {
+  it("the header link's tooltip names the account a TV runs on, in the household's word for the tier", () => {
+    expect(WALL_COPY.linkTitle).toContain(`with a ${tierLabel("family")} account`);
+    expect(WALL_COPY.linkTitle).not.toMatch(/family|what the signed-in account can see/);
+  });
+
+  it("the notices name the device as the wall's banners do — 'this screen', never 'this TV'", () => {
+    for (const key of ["refusedWhat", "refusedSignOut", "signedOutBody", "signedOutAction"] as const) {
+      expect(WALL_COPY[key]).toMatch(/this screen|here/i);
+      expect(WALL_COPY[key]).not.toMatch(/this TV/i);
+    }
+    // A first visit was never signed in: no "again".
+    expect(WALL_COPY.signedOutBody).not.toMatch(/again/);
   });
 });

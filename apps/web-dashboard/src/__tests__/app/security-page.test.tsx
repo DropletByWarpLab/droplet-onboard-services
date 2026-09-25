@@ -100,7 +100,8 @@ describe("/security", () => {
     const link = within(await screen.findByTestId("phead-actions")).getByRole("link", { name: WALL_COPY.link });
     expect(link).toHaveAttribute("href", "/security/wall");
     expect(link).toHaveAttribute("title", WALL_COPY.linkTitle);
-    expect(WALL_COPY.linkTitle).toMatch(/what the signed-in account can see/);
+    // D6: a TV runs on a Staff account and shows that account's cameras.
+    expect(WALL_COPY.linkTitle).toMatch(/signed in with a Staff account\. It shows that account's cameras\./);
     // Plain words on the button itself: a tooltip never reaches a phone, and "wall" is our name for it.
     expect(link).toHaveTextContent("TV view");
     expect(link.textContent).not.toMatch(/wall/i);

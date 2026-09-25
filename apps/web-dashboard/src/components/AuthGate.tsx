@@ -341,12 +341,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // (and mirroring into the guard's key) while the guard's card is up, so the
   // TV comes back by itself once Security is on again.
   //
-  // D6 (Stefan: "Member wall, own cameras") — an owner or admin session never
-  // runs the wall: it would sit signed in, unattended, in a room, one click
-  // from everything that account can do. The refusal comes first and alone —
-  // no keeper, no guard, no page — so a refused session asks Droplet nothing.
+  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Staff
+  // session only. An owner or admin session would sit signed in, unattended,
+  // in a room, one click from everything that account can do; a guest's reads
+  // would all be refused by the server, each an audited denial. The refusal
+  // comes first and alone — no keeper, no guard, no page — so nothing under
+  // AuthGate asks Droplet anything (the layout's providers above it still
+  // make their one-time reads and open the notification socket).
   if (isSecurityWallPath(pathname)) {
-    if (!wallRunsFor(user.role)) return <WallRefused />;
+    if (!wallRunsFor(user.role)) return <WallRefused role={user.role} />;
     return (
       <>
         <WallModulesKeeper />

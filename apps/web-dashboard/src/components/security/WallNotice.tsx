@@ -4,11 +4,15 @@
  * WARP-2981 (ADR-059 P6, §3.8) — the two things /security/wall shows instead
  * of the wall. AuthGate renders them; neither asks Droplet for anything.
  *
- *   · `WallRefused` — D6 (Stefan: "Member wall, own cameras"): an owner or
- *     admin session never runs the wall. It says why, and what to do: sign in
- *     on the TV with a Staff account whose cameras are the ones to show. The
- *     refused person manages people, so it links to Users, where accounts
- *     are added and their cameras chosen, and offers to sign out of the TV.
+ *   · `WallRefused` — D6 (Stefan: "Member wall, own cameras"): the wall runs
+ *     on a Staff account only. It says why, and what to do: sign in here
+ *     with a Staff account whose cameras are the ones to show. Signing out
+ *     is its first action: an owner or admin reaches it as often from a
+ *     laptop's "TV view" button as from a TV, so it names "this screen",
+ *     never "this TV". An owner or admin manages people, so it also links to
+ *     Users, where accounts are added and their cameras chosen. A guest
+ *     can't see Security at all (every wall read is floored at Staff on the
+ *     server), so a guest is told that, and led back to the Overview.
  *   · `WallSignedOut` — the TV's sign-in ended (the 12 h limit, 30 min with
  *     no request, a fifth sign-in elsewhere, a revocation), or it never had
  *     one. It says so, and only a press opens the sign-in form: the screen
@@ -43,7 +47,7 @@ function Notice({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function WallRefused() {
+export function WallRefused({ role }: { role: string | undefined }) {
   const { logout } = useAuth();
   const router = useRouter();
   const [leaving, setLeaving] = useState(false);
@@ -52,21 +56,31 @@ export function WallRefused() {
     await logout();
     router.push(SECURITY_WALL_SIGN_IN_HREF);
   };
+  // A role this build doesn't know gets the owner/admin refusal: the wall can't vouch it is not an admin's.
+  const guest = role === "guest";
   return (
-    <Notice title={WALL_COPY.refusedTitle}>
-      <p>{WALL_COPY.refusedWhy}</p>
+    <Notice title={guest ? WALL_COPY.refusedGuestTitle : WALL_COPY.refusedTitle}>
+      <p>{guest ? WALL_COPY.refusedGuestWhy : WALL_COPY.refusedWhy}</p>
       <p>{fill(WALL_COPY.refusedWhat, { tier: tierLabel("family") })}</p>
-      <p>{WALL_COPY.refusedManage}</p>
+      {!guest && <p>{WALL_COPY.refusedManage}</p>}
       <div className="sec-wall-notice-actions">
-        <Link href="/users" className="btn primary">
-          {WALL_COPY.refusedManageLink}
-        </Link>
-        <button type="button" className="btn" onClick={() => void signOut()} disabled={leaving}>
+        <button type="button" className="btn primary" onClick={() => void signOut()} disabled={leaving}>
           {WALL_COPY.refusedSignOut}
         </button>
-        <Link href="/security" className="btn ghost">
-          {WALL_COPY.leave}
-        </Link>
+        {guest ? (
+          <Link href="/" className="btn ghost">
+            {WALL_COPY.refusedGuestLeave}
+          </Link>
+        ) : (
+          <>
+            <Link href="/users" className="btn">
+              {WALL_COPY.refusedManageLink}
+            </Link>
+            <Link href="/security" className="btn ghost">
+              {WALL_COPY.leave}
+            </Link>
+          </>
+        )}
       </div>
     </Notice>
   );

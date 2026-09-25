@@ -302,7 +302,7 @@ describe("AuthGate — no sign-in on the Security wall (WARP-2981)", () => {
   const signedOut = { user: null, isLoading: false, setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true } };
 
   it.each(["/security/wall", "/security/wall/"])(
-    "on %s: says the TV is signed out, with a 'Sign in on this TV' someone has to press — and never goes to /login by itself",
+    "on %s: says the screen is signed out, with a 'Sign in on this screen' someone has to press — and never goes to /login by itself",
     (path) => {
       pathnameValue = path;
       setAuth(signedOut);

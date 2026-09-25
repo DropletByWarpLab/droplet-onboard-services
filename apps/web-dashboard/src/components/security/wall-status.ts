@@ -23,7 +23,8 @@ import { fill } from "./ModeCard";
 export const WALL_COPY = {
   // Plain words: "wall" is our name for it, not the person's.
   link: "TV view",
-  linkTitle: "A full-screen view for a TV. It shows what the signed-in account can see.",
+  // D6: the tier is tierLabel("family"), pinned in wall-status.test.
+  linkTitle: "A full-screen view for a TV signed in with a Staff account. It shows that account's cameras.",
   heading: "Security TV view",
   leave: "Back to Security",
   fullScreen: "Full screen",
@@ -75,29 +76,37 @@ export const WALL_COPY = {
   offlineBody: "What you see is from {time}.",
   signOutSoon: "This screen will be signed out by {time} at the latest. Someone will need to sign in again to keep it on.",
 
-  // D6 (Stefan: "Member wall, own cameras") — an owner or admin session is refused. {tier} is tierLabel("family").
+  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Staff account only. {tier} is tierLabel("family").
+  // The device is named "this screen", as on the wall's banners: the refusal is as often a laptop's as a TV's.
   refusedTitle: "This TV view doesn't run on an owner or admin account",
   refusedWhy: "An owner or admin account can reach nearly everything in Droplet, and a TV stays signed in, in a room, for hours.",
-  refusedWhat: "Sign in on this TV with a {tier} account instead. The TV then shows only the cameras that account has been given.",
+  refusedGuestTitle: "This TV view doesn't run on a guest account",
+  refusedGuestWhy: "A guest account can't see Security or its cameras, so there is nothing to show here.",
+  refusedWhat: "Sign in here with a {tier} account instead. This screen then shows only the cameras that account has been given.",
   refusedManage: "You can add that account, and choose its cameras, on the Users page.",
   refusedManageLink: "Open Users",
-  refusedSignOut: "Sign out of this TV",
+  refusedSignOut: "Sign out on this screen",
+  refusedGuestLeave: "Back to Overview",
 
-  // The TV's sign-in ended while the wall was up: never a sign-in form in front of the room by itself.
+  // The sign-in ended while the wall was up, or there never was one: never a sign-in form in front of the room by itself.
   signedOutTitle: "This TV view is signed out",
-  signedOutBody: "Nothing is shown until someone signs in again on this TV.",
-  signedOutAction: "Sign in on this TV",
+  signedOutBody: "Nothing is shown until someone signs in on this screen.",
+  signedOutAction: "Sign in on this screen",
 } as const;
 
 /**
- * D6 — the roles a wall runs for. An owner or admin session is refused
- * (Stefan: "Member wall, own cameras"): a TV stays signed in, unattended, in
- * a room, one click from everything that account can do. A role this build
- * does not know is refused too: the wall cannot vouch that it is not an
- * admin's. The rule is the UI's: every read the wall makes is an ordinary
- * route this person may already call from /security or /cameras.
+ * D6 — the one role a wall runs for: Staff (`family`). An owner or admin
+ * session is refused (Stefan: "Member wall, own cameras"): a TV stays signed
+ * in, unattended, in a room, one click from everything that account can do.
+ * A guest is refused too: every read the wall makes (route 17's counts,
+ * /security/health, /security/mode, /api/cameras and its pictures) is floored
+ * at owner/admin/family on the server, so a guest wall would only collect
+ * 403s, and each 403 is an audited denial that becomes a threat incident. A
+ * role this build does not know is refused: the wall cannot vouch that it is
+ * not an admin's. The rule is the UI's: every read the wall makes is an
+ * ordinary route this person may already call from /security or /cameras.
  */
-const WALL_ROLES: ReadonlySet<string> = new Set(["family", "guest"]);
+const WALL_ROLES: ReadonlySet<string> = new Set(["family"]);
 
 export function wallRunsFor(role: string | null | undefined): boolean {
   return typeof role === "string" && WALL_ROLES.has(role);
