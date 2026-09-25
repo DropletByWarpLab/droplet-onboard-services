@@ -69,7 +69,7 @@ import { loadActiveLinks, viewerAreas, zoneChipsFor } from "./security-zones.ser
 import { projectedIncidentPage } from "./security-incident-page.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
-import { QUIET_MS, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
+import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
@@ -124,7 +124,6 @@ export type ReasonRowForView = Prisma.SecurityIncidentReasonGetPayload<{ select:
 const SEVERITY_RANK: Readonly<Record<SecuritySeverity, number>> = { info: 0, notice: 1, alert: 2 };
 /** The severities a reason can carry (CHECK SecurityIncidentReason_code_severity). */
 const REASON_SEVERITIES = ["alert", "notice"] as const satisfies readonly SecuritySeverity[];
-const CODE_ORDER: readonly SecurityReasonCode[] = ["after_hours_presence", "camera_offline", "threat_signal"];
 const SITE_SCOPES: readonly SecurityIncidentScope[] = ["site_threat", "site_camera_system"];
 
 const seesCamera = (v: IncidentViewer, camera: string): boolean => v.visibleCameras === "all" || v.visibleCameras.has(camera);
@@ -257,7 +256,7 @@ export function projectIncident(
   const visible = reasons.filter((r) => reasonVisible(r, i, v));
   let severity: SecuritySeverity = "info";
   for (const r of visible) if (SEVERITY_RANK[r.severity] > SEVERITY_RANK[severity]) severity = r.severity;
-  const codes = CODE_ORDER.filter((c) => visible.some((r) => r.code === c));
+  const codes = REASON_CODE_ORDER.filter((c) => visible.some((r) => r.code === c));
   const counts = parseCounts(i.countsByCamera);
   const labels: Record<string, number> = {};
   let eventCount = 0;

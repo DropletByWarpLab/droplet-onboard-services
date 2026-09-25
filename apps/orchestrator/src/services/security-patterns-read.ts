@@ -31,7 +31,6 @@ import { loadActiveLinks, loadCameraLabels, parseLinkRef, visibleLinks, zoneVisi
 import {
   BASELINE,
   DWELL_MIN_SAMPLES,
-  PATTERN_RELEASE,
   RARITY_MAX_P,
   dwellThresholdSec,
   hourlyRate,
@@ -47,6 +46,7 @@ import {
   type PatternRelease,
 } from "../lib/security-baseline-math.js";
 import { slotMinutes, slotOf } from "../lib/security-baseline-slots.js";
+import { PATTERN_RELEASE } from "../lib/security-rules.js";
 import { localPartsOf } from "../lib/zoned-time.js";
 import { siteClockCopy } from "../lib/security-hours.js";
 

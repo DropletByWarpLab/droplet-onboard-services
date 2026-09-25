@@ -55,7 +55,8 @@ import {
 import { fetchStats } from "./frigate.client.js";
 import { config } from "../config.js";
 import { rebuildAreas, runFullBuild, type FullBuildOutcome } from "./security-baseline-build.js";
-import { BASELINE, PATTERN_RELEASE } from "../lib/security-baseline-math.js";
+import { BASELINE } from "../lib/security-baseline-math.js";
+import { PATTERN_RELEASE } from "../lib/security-rules.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
 import { localPartsOf, ymdAddDays } from "../lib/zoned-time.js";
 import { siteDayClockCopy } from "../lib/security-hours.js";
@@ -75,8 +76,8 @@ export const SECURITY_BASELINE_INTERVAL_MS = 60_000;
 export const SECURITY_BASELINE_LOCK_KEY = "droplet:security-baselines";
 /** The nightly build waits until 00:10 site time, so yesterday's last `end` events have landed. */
 export const BASELINE_NIGHTLY_AFTER_MINUTE = 10;
-/** A ready build older than this pauses the rules (PR-B) and area rebuilds. */
-export const BASELINE_FRESH_WINDOW_DAYS = 2;
+/** A ready build older than this pauses the rules (`buildPause`, PR-B) and area rebuilds — one fingerprinted number. */
+export const BASELINE_FRESH_WINDOW_DAYS = BASELINE.freshWindowDays;
 /**
  * A full build that FAILED is not retried within this long (spec silent):
  * a build that times out at 45 s would otherwise run again every minute.

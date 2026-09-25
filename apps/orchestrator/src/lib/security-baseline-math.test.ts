@@ -54,6 +54,8 @@ describe("BASELINE — the pinned constants", () => {
       readyMinSmoothedDays: 10,
       labels: ["person", "car", "dog", "cat"],
       maxLabelsPerKey: 8,
+      // WARP-2980 PR-B: the rules' freshness pause, one fingerprinted number (BASELINE_FRESH_WINDOW_DAYS reads it).
+      freshWindowDays: 2,
     });
   });
 

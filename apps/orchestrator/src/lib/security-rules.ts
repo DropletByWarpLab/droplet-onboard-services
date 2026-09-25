@@ -35,6 +35,21 @@
  * written), and after_hours_presence accepts it — so the alert goes out at
  * about 30 s instead of at Frigate's `end`, and the later `end` row joins the
  * same incident.
+ *
+ * Version 3 (WARP-2980 P5 PR-B, p5b spec §4): the pattern codes. PATTERN_RULES
+ * holds out_of_place, unusual_volume and long_dwell — P5-A's arithmetic
+ * (lib/security-baseline-math.ts) behind them, the severity modifiers of brief
+ * §4.3 and the baseline numbers — and is fingerprinted WITH RULESET, so a
+ * pattern threshold changed under the same version fails too. Every pattern
+ * code is `release: "trial"`: judged per evidence and written to
+ * SecurityPatternFlag, never to a reason — it never changes an incident's
+ * severity, state, codes or notifications (the reasons CHECK refuses it until
+ * P5 PR-D flips a release, which moves the fingerprint and so the version).
+ * The build stamps this version too: cells are raw counts and the arithmetic
+ * is code, so the rules never gate on a build's version (an old build is still
+ * valid input). Expected activity ("suppressions" in code) quiets the pattern
+ * codes only, never after_hours_presence (spec D12): `suppressionFor` takes a
+ * PatternCode, and the engine never asks it about a P3 code.
  */
 import type {
   SecurityIncidentScope,
@@ -46,8 +61,35 @@ import type {
   SecurityZoneKind,
 } from "@prisma/client";
 import { nonOpenWithin, type ModeTimeline } from "./security-mode-history.js";
+import {
+  BASELINE,
+  DWELL_LABELS,
+  DWELL_MIN_SAMPLES,
+  DWELL_MIN_SEC,
+  PATTERN_CODES,
+  RARITY_MAX_P,
+  VOLUME_MAX_TAIL_P,
+  VOLUME_MIN_K,
+  dwellThresholdSec,
+  hourlyRate,
+  isRare,
+  isReady,
+  rarityP,
+  slotRate,
+  smoothCounts,
+  volumeThreshold,
+  wouldFlagDwell,
+  wouldFlagVolume,
+  type CellCounts,
+  type CellDwell,
+  type PatternCode,
+  type PatternRelease,
+} from "./security-baseline-math.js";
+import { poissonUpperTail } from "./security-stats.js";
+import { dayTypeOf, type SecurityDayTypeValue } from "./security-baseline-slots.js";
+import { isoWeekdayOf, localPartsOf, ymdAddDays } from "./zoned-time.js";
 
-export const SECURITY_RULESET_VERSION = 2;
+export const SECURITY_RULESET_VERSION = 3;
 
 export const RULESET = {
   after_hours_presence: {
@@ -60,6 +102,49 @@ export const RULESET = {
   camera_offline: { severity: "notice", minOfflineMs: 60_000 },
   threat_signal: { severity: "notice", ignoreActivitySubs: ["web_push"] },
 } as const;
+
+/**
+ * v3 (WARP-2980 P5 PR-B) — the pattern rules. Every code `trial` until P5 PR-D
+ * (spec D2). `severity`: brief §4.3's modifiers from `base` — the mode raises
+ * one step, a restricted area one step, busier-than-usual at an open entry is
+ * `info` — then capped: only a person reaches alert (spec D9).
+ */
+export const PATTERN_RULES = {
+  codes: {
+    out_of_place: {
+      release: "trial",
+      kinds: ["detection"],
+      maxP: RARITY_MAX_P,
+      severity: { base: "notice", maxPerson: "alert", maxOther: "notice" },
+    },
+    unusual_volume: {
+      release: "trial",
+      kinds: ["detection"],
+      maxTailP: VOLUME_MAX_TAIL_P,
+      minK: VOLUME_MIN_K,
+      severity: { base: "notice", maxPerson: "notice", maxOther: "notice", infoWhen: { mode: "open", zoneKind: "entry" } },
+    },
+    long_dwell: {
+      release: "trial",
+      kinds: ["detection"],
+      labels: DWELL_LABELS,
+      minSec: DWELL_MIN_SEC,
+      minSamples: DWELL_MIN_SAMPLES,
+      severity: { base: "notice", maxPerson: "alert", maxOther: "notice" },
+    },
+  },
+  raiseModes: ["closed", "away"],
+  raiseZoneKinds: ["restricted"],
+  baseline: BASELINE,
+} as const;
+
+/** What lib/ruleset-fingerprint.test.ts pins to SECURITY_RULESET_VERSION: every number either set of rules reads. */
+export const FINGERPRINTED_RULES = { ruleset: RULESET, patterns: PATTERN_RULES } as const;
+
+/** Each pattern code's release, from the fingerprinted rules (routes 29/31 and the patterns health row read it). */
+export const PATTERN_RELEASE: Readonly<Record<PatternCode, PatternRelease>> = Object.fromEntries(
+  PATTERN_CODES.map((c) => [c, PATTERN_RULES.codes[c].release]),
+) as Record<PatternCode, PatternRelease>;
 
 /** Event-time quiet that ends an incident (D13). */
 export const QUIET_MS = 300_000;
@@ -93,8 +178,23 @@ export const ZONE_KIND_RANK: Readonly<Record<SecurityZoneKind, number>> = {
 };
 
 const SEVERITY_RANK: Readonly<Record<SecuritySeverity, number>> = { info: 0, notice: 1, alert: 2 };
-/** Declaration order of SecurityReasonCode — how `reasonCodes` is kept sorted. */
-const CODE_ORDER: readonly SecurityReasonCode[] = ["after_hours_presence", "camera_offline", "threat_signal"];
+/**
+ * Declaration order of SecurityReasonCode — how `reasonCodes`, a viewer's
+ * codes and `verdictCodes` are kept sorted. security-rules.test.ts compares it
+ * with the enum block of prisma/schema.prisma.
+ */
+export const REASON_CODE_ORDER = [
+  "after_hours_presence",
+  "camera_offline",
+  "threat_signal",
+  "out_of_place",
+  "unusual_volume",
+  "long_dwell",
+] as const satisfies readonly SecurityReasonCode[];
+// Exhaustive at compile time: a code added to the enum without a place here fails tsc.
+type UnorderedCode = Exclude<SecurityReasonCode, (typeof REASON_CODE_ORDER)[number]>;
+const everyCodeOrdered: [UnorderedCode] extends [never] ? true : UnorderedCode = true;
+void everyCodeOrdered;
 
 // ── the event, as triage reads it ─────────────────────────────────────────
 
@@ -538,14 +638,19 @@ export function cameraOfflineVerdict(
 
 // ── what a reason does to its incident ────────────────────────────────────
 
+/** What `capEvidence` reads of a stored row or a draft: a reason or (PR-B) a pattern flag. */
+export interface EvidenceKey {
+  code: SecurityReasonCode;
+  evidenceCamera: string | null;
+  evidenceEventId: bigint;
+}
+
 /**
  * Evidence kept per (code, camera): what is already stored plus these drafts,
  * at most EVIDENCE_PER_CAMERA, never a duplicate of a stored evidence row.
+ * Reasons and pattern flags are capped by this one function.
  */
-export function capEvidence(
-  existing: ReadonlyArray<{ code: SecurityReasonCode; evidenceCamera: string | null; evidenceEventId: bigint }>,
-  drafts: readonly ReasonDraft[],
-): ReasonDraft[] {
+export function capEvidence<D extends EvidenceKey>(existing: ReadonlyArray<EvidenceKey>, drafts: readonly D[]): D[] {
   const key = (code: string, camera: string | null) => `${code}\u0000${camera ?? ""}`;
   const count = new Map<string, number>();
   const stored = new Set<string>();
@@ -553,7 +658,7 @@ export function capEvidence(
     count.set(key(r.code, r.evidenceCamera), (count.get(key(r.code, r.evidenceCamera)) ?? 0) + 1);
     stored.add(`${r.code}\u0000${r.evidenceEventId}`);
   }
-  const kept: ReasonDraft[] = [];
+  const kept: D[] = [];
   for (const d of drafts) {
     if (stored.has(`${d.code}\u0000${d.evidenceEventId}`)) continue;
     const k = key(d.code, d.evidenceCamera);
@@ -605,7 +710,7 @@ export function reasonPatch(i: ReasonState, drafts: readonly ReasonDraft[], now:
     codes.add(d.code);
     severity = maxSeverity(severity, d.severity);
   }
-  const sorted = CODE_ORDER.filter((c) => codes.has(c));
+  const sorted = REASON_CODE_ORDER.filter((c) => codes.has(c));
   if (sorted.length !== i.reasonCodes.length || sorted.some((c, n) => c !== i.reasonCodes[n])) patch.reasonCodes = sorted;
   if (severity === i.severity) return patch;
   patch.severity = severity;
@@ -621,4 +726,207 @@ export function reasonPatch(i: ReasonState, drafts: readonly ReasonDraft[], now:
     if (i.state === "acknowledged") reopen();
   }
   return patch;
+}
+
+// ── the pattern rules (WARP-2980 P5 PR-B, spec §4.2) ──────────────────────
+
+/** The three stored cells around the event's hour (h−1, h, h+1 of its day type) and the dwell half of h. */
+export interface PatternCells {
+  prev: CellCounts | null;
+  cur: CellCounts | null;
+  next: CellCounts | null;
+  dwell: CellDwell;
+}
+
+/** One pattern code's hit, with ITS numbers (§4.5: safe integers and exact strings only). */
+export interface PatternHit {
+  code: PatternCode;
+  detail: Record<string, string | number | null>;
+}
+
+/**
+ * D7: P5-A's functions and nothing else, so a flag never disagrees with the
+ * explanation (route 31): out_of_place ⟺ isRare(p); unusual_volume ⟺ λ exists
+ * and k is past k* for the event's own slot; long_dwell ⟺ person, ≥ 30
+ * samples, longer than max(p99, 120 s). Empty unless the cell is ready (n′ ≥
+ * 10). `k` null = volume not judged.
+ */
+export function patternHits(input: {
+  label: string;
+  durationSec: number | null;
+  slotMinutes: number;
+  k: number | null;
+  cells: PatternCells;
+}): PatternHit[] {
+  const { cells } = input;
+  const s = smoothCounts(cells.prev, cells.cur, cells.next);
+  if (!isReady(s.n)) return [];
+  const hits: PatternHit[] = [];
+  const p = rarityP(s);
+  if (isRare(p)) {
+    hits.push({
+      code: "out_of_place",
+      detail: {
+        daysObserved: cells.cur?.daysObserved ?? 0,
+        daysWithEvent: cells.cur?.daysWithEvent ?? 0,
+        // Multiples of 0.25: exact in binary, so String() is exact.
+        smoothedDaysObserved: String(s.n),
+        smoothedDaysWithEvent: String(s.d),
+        p: p.toPrecision(3),
+        flagsBelow: String(RARITY_MAX_P),
+      },
+    });
+  }
+  const perHour = hourlyRate(s);
+  if (input.k !== null && perHour !== null) {
+    const lambda = slotRate(perHour, input.slotMinutes);
+    if (wouldFlagVolume(input.k, lambda)) {
+      hits.push({
+        code: "unusual_volume",
+        detail: {
+          k: input.k,
+          flagsFrom: volumeThreshold(lambda),
+          lambda: lambda.toPrecision(3),
+          typicalPerHour: perHour.toPrecision(3),
+          tailP: poissonUpperTail(input.k, lambda).toExponential(2),
+          slotMinutes: input.slotMinutes,
+        },
+      });
+    }
+  }
+  if (input.durationSec !== null && wouldFlagDwell(input.label, input.durationSec, cells.dwell)) {
+    const threshold = dwellThresholdSec(input.label, cells.dwell)!;
+    hits.push({
+      code: "long_dwell",
+      detail: {
+        // Math.round is monotone, so the shown duration is never below the shown threshold.
+        durationSec: Math.round(input.durationSec),
+        p99Sec: Math.round(cells.dwell.durationP99Sec!),
+        thresholdSec: Math.round(threshold),
+        samples: cells.dwell.dwellSamples,
+      },
+    });
+  }
+  return hits;
+}
+
+const raise = (s: SecuritySeverity): SecuritySeverity => (s === "info" ? "notice" : "alert");
+const minSeverity = (a: SecuritySeverity, b: SecuritySeverity): SecuritySeverity => (SEVERITY_RANK[a] <= SEVERITY_RANK[b] ? a : b);
+
+/**
+ * D9, D10: what a pattern flag would carry if it counted. `mode` is the
+ * incident's `openedInMode` and `zoneKind` its snapshot (null on a camera key:
+ * no area modifier). Base notice; closed/away +1; restricted +1;
+ * busier-than-usual at an open entry is info; then the cap — only a person
+ * reaches alert, and unusual_volume never does.
+ */
+export function patternSeverity(code: PatternCode, label: string, mode: SecurityMode, zoneKind: SecurityZoneKind | null): SecuritySeverity {
+  const rule = PATTERN_RULES.codes[code].severity;
+  let s: SecuritySeverity = rule.base;
+  if ((PATTERN_RULES.raiseModes as readonly string[]).includes(mode)) s = raise(s);
+  if (zoneKind !== null && (PATTERN_RULES.raiseZoneKinds as readonly string[]).includes(zoneKind)) s = raise(s);
+  if ("infoWhen" in rule && mode === rule.infoWhen.mode && zoneKind === rule.infoWhen.zoneKind) s = "info";
+  return minSeverity(s, label === "person" ? rule.maxPerson : rule.maxOther);
+}
+
+/** A window of `hourCount` hours from `hourFrom`, wrapping past midnight: ((hour − hourFrom + 24) % 24) < hourCount. */
+export function hourInWindow(hour: number, hourFrom: number, hourCount: number): boolean {
+  return (hour - hourFrom + 24) % 24 < hourCount;
+}
+
+/** An expected activity as the match reads it (SecuritySuppression's columns). */
+export interface SuppressionMatchRow {
+  id: string;
+  targetKind: "area" | "camera";
+  zoneId: string | null;
+  camera: string | null;
+  label: string;
+  days: "every_day" | "weekdays" | "weekends";
+  hourFrom: number;
+  hourCount: number;
+  codes: readonly SecurityReasonCode[];
+  state: "active" | "removed" | "expired";
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+/** The key an expected activity is for: `area:<id>` or `camera:<name>` — the keys flags are judged against. */
+export function suppressionKey(row: Pick<SuppressionMatchRow, "targetKind" | "zoneId" | "camera">): string {
+  return row.targetKind === "area" ? `area:${row.zoneId}` : `camera:${row.camera}`;
+}
+
+/** Where and when a slot is: the key, the label, and the slot's site-local date and hour. */
+export interface SuppressionSlot {
+  zoneKey: string;
+  label: string;
+  /** Site-local 'YYYY-MM-DD' of the slot. */
+  ymd: string;
+  hour: number;
+}
+
+/**
+ * THE match rule — the engine (`suppressionFor`) and route 31's `expected`
+ * both use it (review item 10). True iff it is active and not yet past
+ * `expiresAt` (a lagging expiry job never extends one), its key and label are
+ * the slot's, the hour is in its window, and its days hold the day the window
+ * OPENED: a window past midnight belongs to the day it opens (the site's rule
+ * for wrapped hours, ADR §3.6 as built), so "Weekdays, 10 PM–2 AM" covers
+ * Friday night's 00–02 tail and not Sunday night's.
+ */
+export function suppressionCovers(row: SuppressionMatchRow, at: SuppressionSlot, now: Date): boolean {
+  if (row.state !== "active" || row.expiresAt.getTime() <= now.getTime()) return false;
+  if (suppressionKey(row) !== at.zoneKey || row.label !== at.label) return false;
+  if (!hourInWindow(at.hour, row.hourFrom, row.hourCount)) return false;
+  if (row.days === "every_day") return true;
+  const opened = at.hour < row.hourFrom ? ymdAddDays(at.ymd, -1) : at.ymd;
+  const dayType: SecurityDayTypeValue = dayTypeOf(isoWeekdayOf(opened));
+  return row.days === "weekdays" ? dayType === "weekday" : dayType === "weekend";
+}
+
+/**
+ * D11–D13: the expected activity that quiets this flag, or null. Takes a
+ * PatternCode only — after_hours_presence cannot reach it by type or by path.
+ * The oldest (createdAt, id) match wins, so the choice is deterministic.
+ */
+export function suppressionFor<R extends SuppressionMatchRow>(
+  flag: SuppressionSlot & { code: PatternCode },
+  active: readonly R[],
+  now: Date,
+): R | null {
+  const hits = active.filter((r) => r.codes.includes(flag.code) && suppressionCovers(r, flag, now));
+  hits.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || byString(a.id, b.id));
+  return hits[0] ?? null;
+}
+
+/** Why the pattern rules are paused for a key right now (review item 11: the engine and route 31 ask the same questions). */
+export type PatternPause = "zone_changed" | "stale_build" | "area_changed" | "camera_not_active";
+
+/**
+ * Gates (c) and (d): the ready build serves the rules only when it was cut in
+ * the site's zone and its window ends no more than BASELINE.freshWindowDays
+ * site dates before today (the patterns health row's out-of-date test).
+ */
+export function buildPause(zone: string, build: { timezone: string; windowTo: string }, now: Date): "zone_changed" | "stale_build" | null {
+  if (build.timezone !== zone) return "zone_changed";
+  const today = localPartsOf(now, zone).ymd;
+  return build.windowTo < ymdAddDays(today, -PATTERN_RULES.baseline.freshWindowDays) ? "stale_build" : null;
+}
+
+/**
+ * Gates (f) and (g) for one key's cells: an area's cells were built at its
+ * current version (a link edit makes them stale until the area rebuild) and
+ * hold the evidence camera; every camera behind the key is `active` — never
+ * while one is learning or stale. `liveVersion` null = the area is archived
+ * or gone.
+ */
+export function keyPause(
+  key: { kind: "area"; liveVersion: number | null } | { kind: "camera" },
+  cell: { zoneVersion: number | null; cameras: readonly string[] },
+  cameraState: ReadonlyMap<string, string>,
+  evidenceCamera?: string,
+): "area_changed" | "camera_not_active" | null {
+  if (key.kind === "area" && (key.liveVersion === null || cell.zoneVersion !== key.liveVersion)) return "area_changed";
+  if (evidenceCamera !== undefined && !cell.cameras.includes(evidenceCamera)) return "area_changed";
+  if (cell.cameras.length === 0 || cell.cameras.some((c) => cameraState.get(c) !== "active")) return "camera_not_active";
+  return null;
 }
