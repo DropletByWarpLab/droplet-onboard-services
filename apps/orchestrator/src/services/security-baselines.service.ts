@@ -13,10 +13,12 @@
  *   1b. WARP-2980 PR-B (spec D18) — expected activity whose `expiresAt` has
  *      passed is marked `expired`, zone or not, each with its system audit
  *      after its own commit (security-suppressions.service.ts). A failed
- *      audit is rethrown only after the tick's work (and `lastOkAt`) — never
- *      through `lastError`, whose words ("Couldn't check which cameras…")
- *      would be false. Every reader also requires `expiresAt > now`, so a
- *      tick that runs late never extends one;
+ *      audit, or the step's own throw (a database error), is rethrown only
+ *      after the tick's work (and `lastOkAt`) — never through `lastError`,
+ *      whose words ("Couldn't check which cameras…") would be false; a throw
+ *      is `expiryError` on the patterns row instead, until the step next
+ *      completes. A later step's throw still wins. Every reader also requires
+ *      `expiresAt > now`, so a tick that runs late never extends one;
  *   2. the zone — `resolveSecurityTimezone` (site zone, else a valid
  *      Workspace.tz). None → stop: nothing can be cut into site hours;
  *   3. the job-state row, created lazily at the current site hour;
@@ -128,9 +130,14 @@ export interface BaselineHealthState {
    * tick (review #2352), so it is shown here instead.
    */
   areaRebuildFailedAt?: Date | null;
+  /**
+   * WARP-2980 PR-B (D18): the expiry step threw on the last tick that ran it; null once it completes.
+   * Its own row words, never `lastError`'s: the tick ran on.
+   */
+  expiryError?: { at: Date; message: string } | null;
 }
 
-const baselineHealth: BaselineHealthState = { registeredAt: null, lastOkAt: null, lastError: null, areaRebuildFailedAt: null };
+const baselineHealth: BaselineHealthState = { registeredAt: null, lastOkAt: null, lastError: null, areaRebuildFailedAt: null, expiryError: null };
 
 export function baselineHealthState(): Readonly<BaselineHealthState> {
   return baselineHealth;
@@ -143,6 +150,7 @@ export function _resetBaselineHealthForTests(): void {
     lastOkAt: null,
     lastError: null,
     areaRebuildFailedAt: null,
+    expiryError: null,
   } satisfies BaselineHealthState);
 }
 
@@ -368,10 +376,10 @@ export async function tickSecurityBaselines(
   now: Date = new Date(),
   deps: BaselineJobDeps = {},
 ): Promise<BaselineTickResult> {
-  const expiry: { auditError?: unknown } = {};
+  const expiry: { error?: unknown } = {};
   const result = await runBaselineTick(prisma, now, deps, expiry);
-  // D18: the tick's work (and lastOkAt) is done; a failed expiry audit reaches safeRun's canary now.
-  if (expiry.auditError !== undefined) throw expiry.auditError;
+  // D18: the tick's work (and lastOkAt) is done; an expiry failure (its throw, or its first failed audit) reaches safeRun's canary now.
+  if (expiry.error !== undefined) throw expiry.error;
   return result;
 }
 
@@ -379,7 +387,7 @@ async function runBaselineTick(
   prisma: JobDb,
   now: Date,
   deps: BaselineJobDeps,
-  expiry: { auditError?: unknown },
+  expiry: { error?: unknown },
 ): Promise<BaselineTickResult> {
   const processId = deps.processId ?? BOOT_PROCESS_ID;
   const clock = deps.clock ?? Date.now;
@@ -395,8 +403,15 @@ async function runBaselineTick(
     await recordCoverage(prisma, { ingest: tracker.ingest, readings: seeded.readings, stats }, processId, now, { bootClose });
     bootClosed.add(processId);
 
-    // 1b. Expected activity past its expiresAt — zone or not (D18).
-    expiry.auditError = (await expireSuppressions(prisma, now)).auditError;
+    // 1b. Expected activity past its expiresAt — zone or not (D18). A throw here never reaches lastError: the tick runs on.
+    try {
+      expiry.error = (await expireSuppressions(prisma, now)).auditError;
+      baselineHealth.expiryError = null;
+    } catch (err) {
+      expiry.error = err;
+      baselineHealth.expiryError = { at: now, message: plainTickError(err) };
+      logger.error({ err }, "security baselines: expected activity past its end could not be marked ended — the tick runs on");
+    }
 
     const zone = await (deps.zone ?? (() => resolveSecurityTimezone(prisma)))();
     result.zone = zone;
@@ -496,6 +511,9 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
  *   · down "Hasn't checked which cameras Droplet can hear since 2:14 AM" —
  *     registered more than 3 minutes ago and no ok tick within 3 minutes
  *     (site clock; "for N minutes" without a zone);
+ *   · down "Couldn't record that expected activity ended: …" — WARP-2980
+ *     PR-B (D18): the tick's expiry step threw; the rest of the tick ran, and
+ *     every reader already treats a row past its `expiresAt` as ended;
  *   · down "Couldn't read what normal looks like" — the rows (or the
  *     viewer's grants) could not be read;
  *   · not_configured — no zone; no camera the viewer may see is set up;
@@ -544,6 +562,7 @@ export function patternsHealthRow(
         : `Hasn't checked which cameras Droplet can hear for ${Math.floor((nowMs - since.getTime()) / 60_000)} minutes`,
     );
   }
+  if (state.expiryError) return row("down", `Couldn't record that expected activity ended: ${state.expiryError.message}`);
   if (!db || !scope) return row("down", "Couldn't read what normal looks like");
   const tz = db.timezone;
   if (!tz) return row("not_configured", "Needs the site's timezone. Set the opening hours to choose it.");
