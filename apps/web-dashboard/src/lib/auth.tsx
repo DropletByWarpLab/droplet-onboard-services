@@ -16,7 +16,7 @@ import { unload, useSWRConfig } from "swr";
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
-import { HELP_PATH } from "./routing";
+import { HELP_PATH, isSecurityWallPath } from "./routing";
 import { clearChatHandoffs } from "./session-reset";
 
 export interface AuthUser {
@@ -466,6 +466,9 @@ async function attemptRefresh(): Promise<RefreshOutcome> {
   return refreshInFlight;
 }
 
+/** WARP-2981 — authFetch confirmed the session dead on the Security wall; the provider drops the user. */
+export const WALL_SIGNED_OUT_EVENT = "droplet:wall-signed-out";
+
 /**
  * WARP-1726 — the last-resort confirmation before we destroy a session.
  *
@@ -622,7 +625,14 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // provider's cache). They are the same cache only because the app mounts no
   // `<SWRConfig provider>`; adding one would leave this path emptying a cache
   // nobody reads.
-  if (hadSession) unload({ revalidate: false });
+  //
+  // WARP-2981 — on the Security wall the cache goes whatever storage says.
+  // The wall is never anonymous, and it does not navigate (below), so nothing
+  // else empties the cache before the next person signs in through its
+  // client-side "Sign in on this screen" — and its keys name no person. Another
+  // tab's sign-out may already have taken the cached profile.
+  const onWall = isSecurityWallPath(window.location.pathname);
+  if (hadSession || onWall) unload({ revalidate: false });
   // Public pages own their anonymous flow: a refresh failure on /setup (the
   // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
   // NOT hard-navigate to /login — AuthGate routes those contextually
@@ -636,13 +646,20 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     ["/login", "/setup"].some((p) =>
       window.location.pathname.startsWith(p),
     ) || window.location.pathname === HELP_PATH;
-  if (!onPublicPage) {
+  // WARP-2981 — the Security wall faces a room: it never opens a sign-in form
+  // by itself, so nobody is led into typing a password in front of it. The
+  // provider signs the tree out instead, and AuthGate's wall branch says the
+  // screen is signed out, with a "Sign in on this screen" someone has to press.
+  if (onWall) {
+    window.dispatchEvent(new Event(WALL_SIGNED_OUT_EVENT));
+  } else if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
     );
   }
   return res;
 }
+
 
 /**
  * WARP-2992 — whether the profile this browser cached names someone other
@@ -671,6 +688,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [completeSetupError, setCompleteSetupError] = useState<string | null>(
     null,
   );
+
+  // WARP-2981 — the wall's end of a confirmed-dead session (authFetch does not
+  // navigate there): no user, so AuthGate shows the signed-out notice and
+  // every wall read unmounts.
+  useEffect(() => {
+    const signedOut = () => setUser(null);
+    window.addEventListener(WALL_SIGNED_OUT_EVENT, signedOut);
+    return () => window.removeEventListener(WALL_SIGNED_OUT_EVENT, signedOut);
+  }, []);
 
   /**
    * M3 — the lifecycle probe. Fetches `GET /api/setup/state` and records an

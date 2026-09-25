@@ -356,9 +356,10 @@ RAIL_PAIR_QR_BYTE_BUDGET = 78
 BOOT_READINESS_URL = os.environ.get(
     "BOOT_READINESS_URL", "http://127.0.0.1/api/health")
 # Unverified context for the loopback HTTPS hop after the :80->:443 redirect.
-# Scoped to the two calls this module makes against that gateway — the
-# readiness probe and WARP-2668's storage read. The bridge endpoints are
-# plain-HTTP loopback and never touch it.
+# Scoped to the calls this module makes against that gateway — the readiness
+# probe, WARP-2668's storage read and the two reads on its cadence (WARP-2944's
+# TLS status, WARP-2981's Security count). The bridge endpoints are plain-HTTP
+# loopback and never touch it.
 #
 # WARP-1646 states the trade in full on the bridge side and it holds
 # identically here: this connection never leaves the box, and anyone able to
@@ -963,6 +964,13 @@ class TFTDisplay:
             # the footer only speaks when renewal is failing and time is
             # short, so an unpolled box says nothing — never a false alarm.
             "tls": {},
+            # WARP-2981 (ADR-059 P6) — band A's Security count, from the
+            # orchestrator's P6-3 (fetch_security). An EXPLICIT state, never
+            # an empty dict: "never asked" draws no chip at all, which is not
+            # the same thing as "asked, and the answer was unusable" (the chip
+            # reads `SECURITY: —`), so the two must not share a shape.
+            # `unasked` is this seed's alone; update_security never produces it.
+            "security": {"state": "unasked"},
             # WARP-1645 — filled by fetch_services(). All-None so a cold box
             # renders em dashes; see WARP-1643 on why not zeros.
             "services": {"up": None, "total": None, "status": None,
@@ -1136,6 +1144,8 @@ class TFTDisplay:
                 self.update_tls(data)
             elif mode == "pair":
                 self.update_pair_join(data)
+            elif mode == "security":
+                self.update_security(data)
         except Exception as e:                                  # noqa: BLE001
             logger.debug("v3 mirror (%s) failed: %s", mode, e)
 
@@ -2114,6 +2124,42 @@ class TFTDisplay:
         a stale `daysLeft` next to a fresh `state`."""
         if isinstance(data, dict):
             self._v3["tls"] = data
+
+    def update_security(self, data: dict, now_ts: Optional[float] = None) -> None:
+        """WARP-2981 (ADR-059 P6) — band A's Security chip, from P6-3's body
+        (see fetch_security).
+
+        Replaces wholesale, never merges, and builds the stored dict from
+        literals, so no key the orchestrator adds later can reach the glass
+        (the rack brief's §8: the room reads this panel). Three stored shapes,
+        each stamped with when it was learned (`at`, for the chip's
+        staleness):
+
+          * `{"security": "off"}` → `{"state": "off"}`: the box does not use
+            Security, so there is no chip;
+          * `{"security": "on", "open": n, "alerts": a, "upToDate": b}` with
+            `n` and `a` non-negative ints (a bool is not a count), `a <= n`,
+            and `b` a bool → `{"state": "on", ...}`;
+          * ANYTHING else → `{"state": "unknown"}`: the chip reads
+            `SECURITY: —`. A half-valid answer never shows a number — an
+            answer we cannot read is shown as unknown, not hidden.
+        """
+        at = time.time() if now_ts is None else now_ts
+        body = data if isinstance(data, dict) else {}
+        state = body.get("security")
+        if state == "off":
+            self._v3["security"] = {"state": "off", "at": at}
+            return
+        n, alerts, up = body.get("open"), body.get("alerts"), body.get("upToDate")
+
+        def count(v) -> bool:
+            return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+        if state == "on" and count(n) and count(alerts) and alerts <= n and isinstance(up, bool):
+            self._v3["security"] = {"state": "on", "open": n, "alerts": alerts,
+                                    "upToDate": up, "at": at}
+            return
+        self._v3["security"] = {"state": "unknown", "at": at}
 
     def update_pair_join(self, data: dict) -> None:
         """WARP-2954. Replaces wholesale, like update_wifi_join and for the
@@ -3900,6 +3946,47 @@ class TFTDisplay:
             return None
         return {"totals": body.get("totals")}
 
+    def fetch_security(self, timeout: float = 3.0) -> Optional[dict]:
+        """WARP-2981 (ADR-059 P6) — the Security count for band A's chip, from
+        the orchestrator's P6-3 GET /api/panel/security.
+
+        fetch_storage's transport verbatim — the same token chain, the same
+        loopback gateway and unverified context, the same 401/403 hint —
+        because it is the same principal: P6-3 admits `_service:display` and
+        nobody else. Returns the body dict, which update_security validates;
+        `None` when we could not ask (no token, gateway down, a 503 because
+        Droplet cannot read its incidents, a non-dict body), and the pump
+        then pushes nothing: the chip keeps its last answer until that is
+        too old to show (layout_wide.security_chip).
+
+        3 s, not storage's 6: this read shares the render loop's storage
+        cadence (the pump below), and a hung gateway stalls that loop for the
+        sum of the reads' timeouts. On loopback a healthy answer takes ms.
+        """
+        token = (os.environ.get("SERVICE_SECRET")
+                 or os.environ.get("BRIDGE_AUTH_TOKEN")
+                 or "").strip()
+        if not token:
+            logger.debug("no service token — skipping security read")
+            return None
+        req = urllib.request.Request(
+            PANEL_ORCHESTRATOR_URL + "/api/panel/security",
+            headers={"Authorization": "Bearer " + token})
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=timeout, context=_GATEWAY_SSL_CTX) as r:
+                body = json.loads(r.read().decode("utf-8"))
+        except Exception as e:                                       # noqa: BLE001
+            if getattr(e, "code", None) in (401, 403):
+                logger.warning("orchestrator rejected the panel's service "
+                               "token — run ./scripts/setup.sh --sync-secrets")
+            else:
+                logger.debug("security fetch failed: %s", e)
+            return None
+        if not isinstance(body, dict):
+            return None
+        return body
+
     def connect_wifi(self, ssid: str, password: str = "",
                      timeout: float = 30.0) -> dict:
         body = json.dumps({"ssid": ssid, "password": password}).encode()
@@ -4288,6 +4375,16 @@ class TFTDisplay:
                 tls = self.fetch_tls_status()
                 if tls is not None:
                     self._mirror_to_v3("tls", tls)
+                # WARP-2981 (ADR-059 P6) — band A's Security count, folded
+                # into this branch on purpose: no new cadence in this loop
+                # (CLAUDE.md's scheduling rule; the TLS read above is the
+                # precedent), the same wide-panel gate (the chip is
+                # layout_wide's), and mirrored straight into _v3 — no firmware
+                # knows a "security" mode. A count a minute behind is fine on
+                # a rack: the chip is a glance, and alerts reach people.
+                sec = self.fetch_security()
+                if sec is not None:
+                    self._mirror_to_v3("security", sec)
                 last_storage_push = now
             # WARP-1800 — the household join code for the rail's Wi-Fi face.
             #
