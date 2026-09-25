@@ -378,8 +378,8 @@
   text-align: left;
   cursor: pointer;
 }
-/* The composer turns every focus ring off inside the pill (chat-indigo.css),
-   so the focused row shows as a tonal fill — a native menu's highlight. */
+/* The pill's button focus ring skips menu items (chat-indigo.css), so the
+   focused row shows as a tonal fill — a native menu's highlight. */
 .droplet-shell .ws-workin-item:hover,
 .droplet-shell .ws-workin-item:focus { background: var(--surface-2); outline: none; }
 .droplet-shell .ws-workin-item-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }

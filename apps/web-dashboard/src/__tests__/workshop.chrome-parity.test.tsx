@@ -91,6 +91,9 @@ const STAGE: Record<string, string> = {
   "empty-scroll flex": "0 0 auto",
   "btn background": "transparent",
   "head-workspace border": "1px solid var(--border)",
+  "head-workspace background": "var(--surface)",
+  "head-workspace color": "var(--text)",
+  "active-title color": "var(--brand-soft)",
 };
 
 /**
@@ -104,8 +107,14 @@ const INTENDED_DELTAS: Record<string, string> = {
   // The centred empty column may shrink instead of overflowing the header on
   // a short window (flex-shrink 0 -> 1).
   "empty-scroll flex": "0 1 auto",
-  // The head's workspace chip is a quiet `.chat-new` — no stroke.
+  // The head's workspace chip is a quiet `.chat-new` — no stroke, no fill,
+  // muted ink (it shares the class with /chat's header New chat).
   "head-workspace border": "0",
+  "head-workspace background": "transparent",
+  "head-workspace color": "var(--text-muted)",
+  // The selected rail row is marked by its --brand-subtle tone; its title
+  // stays --text instead of turning brand.
+  "active-title color": "var(--text)",
 };
 
 /** What a property is when nothing authored sets it (after Tailwind's preflight). */
@@ -203,6 +212,7 @@ describe("Workshop chrome parity across the WARP-3043 move", () => {
       "empty-scroll": q(".chat-main.is-empty .chat-scroll"),
       btn,
       "head-workspace": headWorkspace,
+      "active-title": q(".conv-rail .conv-item.is-active .conv-it-t"),
     };
 
     const actual: Record<string, string> = {};
