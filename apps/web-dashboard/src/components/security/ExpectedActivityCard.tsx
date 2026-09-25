@@ -20,8 +20,17 @@
  *
  * One column on a phone: the Remove button wraps under the text
  * (patterns.css), so 375 px never scrolls sideways. Tokens only.
+ *
+ * Keyboard: Remove is aria-disabled, never `disabled`, while a remove is in
+ * flight, so the pressed button keeps focus (a ref refuses the second press,
+ * as AreasPanel's Restore does). A removed row leaves the list and takes its
+ * button with it; focus then moves to the Remove of the row that took its
+ * place, else the row above, else the card's heading — instead of dropping
+ * to <body>. The Add panel mounts on the first Add: a closed `Dialog` that
+ * mounts hands focus to its trigger a tick later, which would pull focus
+ * (and the scroll) to Add the moment the list loads.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CalendarCheck, Loader2, Plus, RefreshCw } from "lucide-react";
 import { useToast } from "@/components/Toast";
 import { createSecuritySuppression, removeSecuritySuppression } from "@/lib/api";
@@ -47,8 +56,16 @@ export function ExpectedActivityCard({ overview, now }: { overview: SecurityPatt
   const { list, error, mutate } = useSecuritySuppressions();
   const { toast } = useToast();
   const [adding, setAdding] = useState(false);
+  // Mounted on the first Add, then kept so closing hands focus back to Add.
+  const [panelMounted, setPanelMounted] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  // The in-flight guard itself: Remove stays focusable (aria-disabled), so a second press is refused here.
+  const removingRef = useRef(false);
+  // A removed row and where it sat, until the refreshed list no longer has it.
+  const [focusAfter, setFocusAfter] = useState<{ id: string; index: number } | null>(null);
   const addRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const tz = overview.timezone ?? deviceTimeZone() ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const canManage = list?.canManage === true;
   const noKeys = overview.keys.length === 0;
@@ -59,15 +76,27 @@ export function ExpectedActivityCard({ overview, now }: { overview: SecurityPatt
     await mutate();
   };
 
-  const onRemove = async (s: SecuritySuppressionView) => {
-    if (removing) return;
+  // Runs after each render that could have dropped the removed row: the refresh lands after the remove resolves.
+  useEffect(() => {
+    if (!focusAfter || !list || list.suppressions.some((s) => s.id === focusAfter.id)) return;
+    const buttons = listRef.current?.querySelectorAll<HTMLButtonElement>("li > button") ?? [];
+    const next = buttons[Math.min(focusAfter.index, buttons.length - 1)];
+    (next ?? headingRef.current)?.focus();
+    setFocusAfter(null);
+  }, [focusAfter, list]);
+
+  const onRemove = async (s: SecuritySuppressionView, index: number) => {
+    if (removingRef.current) return;
+    removingRef.current = true;
     setRemoving(s.id);
     try {
       await removeSecuritySuppression(s.id);
       toast(C.removed, "success");
+      setFocusAfter({ id: s.id, index });
     } catch (err) {
       toast(translateError(err, "security"), "error");
     } finally {
+      removingRef.current = false;
       setRemoving(null);
       await mutate();
     }
@@ -94,8 +123,8 @@ export function ExpectedActivityCard({ overview, now }: { overview: SecurityPatt
     body = <p className="expected-empty">{canManage ? C.emptyManage : C.empty}</p>;
   } else {
     body = (
-      <ul className="expected-list">
-        {list.suppressions.map((s) => {
+      <ul className="expected-list" ref={listRef}>
+        {list.suppressions.map((s, i) => {
           const what = expectedWhat(s);
           const when = expectedWhen(s);
           return (
@@ -118,8 +147,8 @@ export function ExpectedActivityCard({ overview, now }: { overview: SecurityPatt
                   type="button"
                   className="btn sm ghost"
                   aria-label={fillCopy(C.removeAria, { what, when })}
-                  disabled={removing !== null}
-                  onClick={() => void onRemove(s)}
+                  aria-disabled={removing !== null || undefined}
+                  onClick={() => void onRemove(s, i)}
                 >
                   {removing === s.id ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
                   {C.remove}
@@ -138,7 +167,7 @@ export function ExpectedActivityCard({ overview, now }: { overview: SecurityPatt
         <span className="ci">
           <CalendarCheck size={16} />
         </span>
-        <h2 className="ct" id="patterns-expected" style={{ margin: 0 }}>
+        <h2 className="ct" id="patterns-expected" ref={headingRef} tabIndex={-1} style={{ margin: 0 }}>
           {C.title}
         </h2>
         {canManage && (
@@ -149,7 +178,10 @@ export function ExpectedActivityCard({ overview, now }: { overview: SecurityPatt
             style={{ marginLeft: "auto" }}
             disabled={noKeys}
             aria-describedby={noKeys ? "patterns-expected-nokeys" : undefined}
-            onClick={() => setAdding(true)}
+            onClick={() => {
+              setPanelMounted(true);
+              setAdding(true);
+            }}
           >
             <Plus size={14} aria-hidden />
             {C.add}
@@ -163,12 +195,12 @@ export function ExpectedActivityCard({ overview, now }: { overview: SecurityPatt
         </p>
       )}
       {body}
-      {canManage && !noKeys && (
+      {canManage && !noKeys && panelMounted && (
         <ExpectedActivityDialog
           open={adding}
           onClose={() => setAdding(false)}
           keys={overview.keys}
-          timezone={overview.timezone}
+          timezone={tz}
           now={now}
           onCreate={onCreate}
           triggerRef={addRef}

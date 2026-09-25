@@ -5,7 +5,9 @@
  * Pins: `precision: null` (anyone but owner/admin) renders nothing at all; no
  * marks yet says so; counts until day 30 ("3 marks so far"), then "Right 3 of
  * 4 times (75%)" — words and numbers, never a colour; "since" is the SITE's
- * date. hoursSpan wraps past midnight and says "All day" for 24 hours;
+ * date. hoursSpan wraps past midnight and says "All day" for 24 hours from
+ * midnight only (a window belongs to the day it opens, so 24 hours from 5 PM
+ * is never shown as the whole day);
  * siteDate is the site's calendar day and adds the year only when it differs
  * from the site's current year.
  */
@@ -68,7 +70,8 @@ describe("hoursSpan", () => {
     [0, 1, "12 AM–1 AM"],
     [11, 1, "11 AM–12 PM"],
     [0, 24, "All day"],
-    [17, 24, "All day"],
+    // Refused by route 33 and the table; if one were ever shown, it says what it is.
+    [17, 24, "5 PM–5 PM"],
   ])("(%i, %i) → %s", (from, count, words) => {
     expect(hoursSpan(from, count)).toBe(words);
   });

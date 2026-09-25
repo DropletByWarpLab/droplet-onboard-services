@@ -59,7 +59,7 @@ export const COPY = {
 /** The card on /security/patterns. It never promises an alert: after-hours alerts need hours, an inside area and a person to tell. */
 export const EXPECTED_COPY = {
   title: "Expected activity",
-  hint: "Activity someone who can change Security settings has said is normal for a place and time. Droplet won't flag it as unusual until the date it ends. It never hides someone inside after hours.",
+  hint: "Activity that's normal for a place and time, as told to Droplet by someone who can change Security settings. Droplet won't flag it as unusual until it ends. It never hides someone inside after hours.",
   empty: "Nothing is marked as expected.",
   emptyManage: "Nothing is marked as expected. When something Droplet flags is normal for a place and time, add it here.",
   add: "Add expected activity",
@@ -83,7 +83,7 @@ export const EXPECTED_COPY = {
 /** The add form. */
 export const EXPECTED_DIALOG_COPY = {
   title: "Add expected activity",
-  intro: "Droplet stops flagging what you choose here as unusual, for this place and time, until the date you pick. It never hides someone inside after hours, and it keeps learning what's usual.",
+  intro: "Droplet won't flag what you pick here as unusual at this place and time, for as long as you choose. It never hides someone inside after hours, and it keeps learning what's usual.",
   where: "Area or camera",
   what: "What was seen",
   days: "Days",
@@ -92,17 +92,18 @@ export const EXPECTED_DIALOG_COPY = {
   flags: "Stop these flags",
   reason: "Why is this expected?",
   until: "For how long",
+  /** Under "For how long": the site date it ends, before the person commits. */
+  ends: "Ends {date}",
   hoursOne: "1 hour",
   hoursMany: "{n} hours",
   reasonPlaceholder: "The cleaner comes on weekday evenings",
   week: "A week",
-  month: "30 days",
+  month: "A month",
   quarter: "3 months",
   year: "A year",
   save: "Add",
   cancel: "Cancel",
   saving: "Adding…",
-  close: "Close",
   needFlag: "Choose at least one flag.",
   needReason: "Say why this is expected.",
   badReason: "The reason has characters Droplet can't store. Remove them and try again.",
@@ -121,7 +122,8 @@ export const EXPECTED_LENGTHS: ReadonlyArray<{ days: number; label: string }> = 
 /** The card owner/admin see: counts from the first mark, a percentage from day 30. */
 export const PRECISION_COPY = {
   title: "How often Droplet was right",
-  hint: "When someone marks a flagged incident Not expected, Droplet counts that flag as right. After 30 days of marks, this shows how often each kind of flag was right.",
+  // No verdict control ships yet (the incident page, F1): the hint never points at one. F1 restores the "marks … Not expected" wording.
+  hint: "Once people can mark flagged incidents as expected or not, this shows how often each kind of flag was right, as a percentage after 30 days of marks.",
   none: "Nothing has been marked yet.",
   soFarOne: "1 mark so far",
   soFarMany: "{n} marks so far",
@@ -221,9 +223,14 @@ export function formatPerDay(perDay: number): string {
   return `about ${n.toLocaleString("en-US")} ${n === 1 ? "detection" : "detections"} a day`;
 }
 
-/** A window of site hours: "10 PM–12 AM" (22, 2), "9 AM–5 PM" (9, 8); 24 hours is "All day". */
+/**
+ * A window of site hours: "10 PM–12 AM" (22, 2), "9 AM–5 PM" (9, 8); 24 hours
+ * from midnight is "All day". Only from midnight: a window belongs to the day
+ * it opens, so 24 hours from 3 PM is "3 PM–3 PM", never "All day" (route 33
+ * and the table refuse that row; this never dresses it up).
+ */
 export function hoursSpan(hourFrom: number, hourCount: number): string {
-  if (hourCount >= 24) return EXPECTED_COPY.allDay;
+  if (hourCount >= 24 && hourFrom === 0) return EXPECTED_COPY.allDay;
   return `${hourTick(hourFrom)}–${hourTick((hourFrom + hourCount) % 24)}`;
 }
 

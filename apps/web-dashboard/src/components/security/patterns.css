@@ -4,7 +4,7 @@
  * Droplet was right".
  *
  * Tokens only: every colour is a shell variable (--brand, --brand-soft,
- * --inset, --surface, --border, --text, --text-muted), mixed with
+ * --inset, --surface, --border, --text, --text-muted, --danger-ink), mixed with
  * color-mix() where a step between two of them is needed. Selectors are
  * scoped under .droplet-shell like the shell's own primitives, so utility
  * classes can't out-rank them.
@@ -116,6 +116,17 @@
   border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 14px;
 }
 .droplet-shell .expected-input:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+/* The form's selects stand as tall as its text field. */
+.droplet-shell .expected-select { height: 40px; }
+/* The one line that says why the form was refused: text ink, never the fill-only --danger. */
+.droplet-shell .expected-problem { margin: 0; font-size: 13px; color: var(--danger-ink); }
+
+/* A phone: every choice, select and field is a 44 px target, as the shell's own controls are (droplet-shell.css §4). */
+@media (max-width: 720px) {
+  .droplet-shell .expected-choice { min-height: 44px; }
+  .droplet-shell .expected-select,
+  .droplet-shell .expected-input { height: 44px; }
+}
 
 @media (max-width: 480px) {
   .droplet-shell .usual-halves { flex-direction: column; gap: 10px; }

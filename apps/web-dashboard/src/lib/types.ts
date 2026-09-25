@@ -3923,7 +3923,7 @@ export interface SecuritySuppressionView {
   target: { kind: "area"; zoneId: string; name: string; archived: boolean } | { kind: "camera"; camera: string; name: string };
   label: string;
   days: SecuritySuppressionDays;
-  /** Site-local hour 0–23, and how many hours from it (1–24; wraps past midnight). */
+  /** Site-local hour 0–23, and how many hours from it (1–24; wraps past midnight; 24, "All day", only from 0). */
   hourFrom: number;
   hourCount: number;
   codes: SecurityPatternCode[];

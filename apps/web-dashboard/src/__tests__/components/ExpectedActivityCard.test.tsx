@@ -14,9 +14,13 @@
  *     "Removed area" for an archived area, "Kept N flags quiet" only when the
  *     server sent a number;
  *   - Remove names its row, calls route 34, toasts, and refreshes through the
- *     hook's own mutate — also when it fails (friendly toast);
+ *     hook's own mutate — also when it fails (friendly toast); while it is in
+ *     flight the pressed button keeps focus (aria-disabled) and a second press
+ *     is refused; once the row has gone, focus moves to the row that took its
+ *     place, else the row above, else the card's heading — never <body>;
  *   - Add opens the form and a save calls route 33, toasts the site date and
- *     refreshes.
+ *     refreshes; the list loading never pulls focus to Add (the panel mounts
+ *     on first use), and closing the panel hands focus back to Add.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -228,6 +232,97 @@ describe("ExpectedActivityCard — remove", () => {
     expect(h.toast).toHaveBeenCalledWith(C.removed, "success");
   });
 
+  const ROW3: SecuritySuppressionView = { ...ROW, id: "sup-3", label: "dog", reason: "The neighbour's dog" };
+  const removeButtons = () => screen.getAllByRole("button", { name: /^Remove expected activity/ });
+  /** The refresh drops `id`, as route 32 would after a remove. */
+  const refreshDrops = (rows: SecuritySuppressionView[], id: string) =>
+    h.mutate.mockImplementation(async () => {
+      h.list = listOf(
+        rows.filter((r) => r.id !== id),
+        true,
+      );
+    });
+
+  it.each([
+    ["the middle row: focus goes to the row that took its place", 1, "sup-3"],
+    ["the last row: focus goes to the row above", 2, "sup-2"],
+    ["the first row: focus goes to the row that took its place", 0, "sup-2"],
+  ])("removing %s", async (_what, index, focusId) => {
+    const rows = [ROW, CAR_ROW, ROW3];
+    h.list = listOf(rows, true);
+    h.remove.mockResolvedValue({ changed: true });
+    refreshDrops(rows, rows[index]!.id);
+    renderCard();
+    const pressed = removeButtons()[index]!;
+    pressed.focus();
+    fireEvent.click(pressed);
+    await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(2));
+    const target = screen.getAllByRole("listitem").find((li) => li.dataset.suppressionId === focusId)!;
+    await waitFor(() => expect(within(target).getByRole("button")).toHaveFocus());
+  });
+
+  it("waits for the refresh: focus stays on the pressed Remove until its row has gone", async () => {
+    h.list = listOf([ROW, CAR_ROW], true);
+    h.remove.mockResolvedValue({ changed: true });
+    const { rerender } = renderCard();
+    const pressed = screen.getByRole("button", { name: REMOVE_ROW });
+    pressed.focus();
+    fireEvent.click(pressed);
+    await waitFor(() => expect(h.mutate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(pressed).not.toHaveAttribute("aria-disabled"));
+    expect(pressed).toHaveFocus();
+    // The refreshed list lands later.
+    h.list = listOf([CAR_ROW], true);
+    rerender(<ExpectedActivityCard overview={OVERVIEW} now={NOW} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /Car on Back camera/ })).toHaveFocus());
+  });
+
+  it("removing the only row: focus goes to the card's heading", async () => {
+    h.list = listOf([ROW], true);
+    h.remove.mockResolvedValue({ changed: true });
+    refreshDrops([ROW], ROW.id);
+    renderCard();
+    const pressed = screen.getByRole("button", { name: REMOVE_ROW });
+    pressed.focus();
+    fireEvent.click(pressed);
+    await waitFor(() => expect(screen.getByText(C.emptyManage)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: C.title })).toHaveFocus());
+  });
+
+  it("in flight: the pressed Remove keeps focus (aria-disabled, never disabled) and a second press is refused", async () => {
+    h.list = listOf([ROW, CAR_ROW], true);
+    let finish: (v: unknown) => void = () => undefined;
+    h.remove.mockReturnValue(new Promise((r) => (finish = r)));
+    renderCard();
+    const pressed = screen.getByRole("button", { name: REMOVE_ROW });
+    pressed.focus();
+    fireEvent.click(pressed);
+    await waitFor(() => expect(pressed).toHaveAttribute("aria-disabled", "true"));
+    expect(pressed).toBeEnabled();
+    expect(pressed).toHaveFocus();
+    fireEvent.click(pressed);
+    fireEvent.click(screen.getByRole("button", { name: /Car on Back camera/ }));
+    expect(h.remove).toHaveBeenCalledTimes(1);
+    finish({ changed: true });
+    await waitFor(() => expect(h.mutate).toHaveBeenCalledTimes(1));
+    expect(pressed).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("a refusal leaves the row and focus where they are, and Remove can be pressed again", async () => {
+    h.list = listOf([ROW, CAR_ROW], true);
+    h.remove.mockRejectedValue(typedError("SUPPRESSIONS_UNAVAILABLE", 503));
+    renderCard();
+    const pressed = screen.getByRole("button", { name: REMOVE_ROW });
+    pressed.focus();
+    fireEvent.click(pressed);
+    await waitFor(() => expect(h.mutate).toHaveBeenCalledTimes(1));
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(pressed).toHaveFocus();
+    h.remove.mockResolvedValue({ changed: true });
+    fireEvent.click(pressed);
+    await waitFor(() => expect(h.remove).toHaveBeenCalledTimes(2));
+  });
+
   it("a refusal is a friendly toast (never the server's words), then a refresh", async () => {
     h.list = listOf([ROW], true);
     h.remove.mockRejectedValue(typedError("SUPPRESSION_NOT_FOUND", 404));
@@ -240,6 +335,21 @@ describe("ExpectedActivityCard — remove", () => {
 });
 
 describe("ExpectedActivityCard — add", () => {
+  it("the list loading never pulls focus to Add; closing the panel hands it back", async () => {
+    h.list = listOf([ROW], true);
+    renderCard();
+    // A closed Dialog that mounts focuses its trigger one tick later; the panel mounts on first use instead.
+    await new Promise((r) => setTimeout(r, 20));
+    const add = screen.getByRole("button", { name: C.add });
+    expect(add).not.toHaveFocus();
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.click(add);
+    const dialog = await screen.findByRole("dialog", { name: D.title });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    fireEvent.click(within(dialog).getByRole("button", { name: D.cancel }));
+    await waitFor(() => expect(add).toHaveFocus());
+  });
+
   it("opens the form; a save calls route 33, toasts the site date it ends, and refreshes", async () => {
     h.list = listOf([], true);
     h.create.mockResolvedValue({ suppression: ROW });
