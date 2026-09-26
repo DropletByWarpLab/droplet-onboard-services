@@ -91,7 +91,9 @@ export function NavLayoutProvider({ children }: { children: React.ReactNode }) {
   // so a toggle that renders the new layout has already taken the request by
   // the time this runs. One nothing took (the new shell didn't render the
   // page it was made on) is dropped, not left to pull focus into a later,
-  // ordinary visit to Settings.
+  // ordinary visit to Settings. If the page ever mounted a commit late
+  // (Suspense, a lazy section), the request is dropped the same way: focus
+  // falls to <body> as it did before WARP-3139, and is never stolen.
   useEffect(() => {
     focusRequest.current = null;
   }, [layout]);

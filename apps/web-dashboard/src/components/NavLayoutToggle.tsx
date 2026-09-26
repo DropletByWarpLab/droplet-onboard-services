@@ -25,10 +25,19 @@ export function NavLayoutToggle() {
   const { layout, setLayout, focusRequest } = useNavLayout();
   const group = useRef<HTMLDivElement>(null);
 
-  // WARP-3139 — only a choice made in this control that actually changes the
-  // layout asks for focus; re-choosing the current one has nothing to restore.
+  const focusChecked = () =>
+    group.current
+      ?.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+      ?.focus();
+
+  // WARP-3139 — a choice that changes the layout asks for focus across the
+  // shell swap. Re-choosing the checked radio changes nothing, so nothing
+  // remounts and no effect runs: focus it here (an arrow from an unchecked
+  // radio lands on it) and record no request. Nothing would take one, and it
+  // would pull focus in the next time this control mounts.
   const choose = (next: NavLayout) => {
-    if (next !== layout) focusRequest.current = next;
+    if (next === layout) focusChecked();
+    else focusRequest.current = next;
     setLayout(next);
   };
 
@@ -38,41 +47,44 @@ export function NavLayoutToggle() {
   useEffect(() => {
     if (focusRequest.current !== layout) return;
     focusRequest.current = null;
-    group.current
-      ?.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
-      ?.focus();
+    focusChecked();
   }, [layout, focusRequest]);
 
   // WARP-3139 — relative to the radio that received the key, not the checked
   // one: DOM focus can sit on an unchecked radio (a press dragged off before
   // it became a click, a screen reader's cursor).
   const handleKey = (e: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    // Browser and OS shortcuts are not ours: Alt+Left is Back.
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
     const n = options.length;
+    let target: number;
     switch (e.key) {
       case "ArrowRight":
       case "ArrowDown":
-        e.preventDefault();
-        choose(options[(index + 1) % n].value);
+        target = (index + 1) % n;
         break;
       case "ArrowLeft":
       case "ArrowUp":
-        e.preventDefault();
-        choose(options[(index - 1 + n) % n].value);
+        target = (index - 1 + n) % n;
         break;
       case "Home":
-        e.preventDefault();
-        choose(options[0].value);
+        target = 0;
         break;
       case "End":
-        e.preventDefault();
-        choose(options[n - 1].value);
+        target = n - 1;
         break;
       case " ":
       case "Enter":
-        e.preventDefault();
-        choose(options[index].value);
+        target = index;
         break;
+      default:
+        return;
     }
+    e.preventDefault();
+    // Each step swaps the whole shell and remounts the page, its fetches
+    // included, so a held key takes one step rather than one per auto-repeat.
+    if (e.repeat) return;
+    choose(options[target].value);
   };
 
   return (

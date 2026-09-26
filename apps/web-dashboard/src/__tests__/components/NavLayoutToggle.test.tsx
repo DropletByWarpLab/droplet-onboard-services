@@ -200,42 +200,81 @@ describe("NavLayoutToggle — focus follows the choice (WARP-3139)", () => {
     expect(document.activeElement).toBe(elsewhere);
   });
 
-  it("re-choosing the checked radio leaves no request behind to steal focus later", () => {
-    // Space on the already-checked radio changes nothing, so no effect runs to
-    // consume a request. Had it recorded one, the layout coming back to that
-    // value from elsewhere would pull focus into the toggle.
-    function Elsewhere() {
-      const { setLayout } = useNavLayout();
-      return (
-        <>
-          <button type="button" onClick={() => setLayout("workspace")}>
-            to workspace
-          </button>
-          <button type="button" onClick={() => setLayout("sidebar")}>
-            to sidebar
-          </button>
-        </>
+  it.each([
+    ["Space", (el: HTMLElement) => fireEvent.keyDown(el, { key: " " })],
+    ["a click", (el: HTMLElement) => fireEvent.click(el)],
+  ])(
+    "re-choosing the checked radio by %s leaves no request behind for the next visit",
+    (_, choose) => {
+      // Re-choosing changes no layout, so no commit follows: neither this
+      // toggle's effect nor the provider's clear runs. A request recorded
+      // here would wait for the next mount of the toggle, an ordinary visit
+      // back to Settings with the same layout, and steal focus there.
+      function Page() {
+        const [open, setOpen] = useState(true);
+        return (
+          <>
+            <button type="button" onClick={() => setOpen(false)}>
+              leave settings
+            </button>
+            <button type="button" onClick={() => setOpen(true)}>
+              back to settings
+            </button>
+            {open && <NavLayoutToggle />}
+          </>
+        );
+      }
+      render(
+        <NavLayoutProvider>
+          <Page />
+        </NavLayoutProvider>,
       );
-    }
-    render(
-      <NavLayoutProvider>
-        <NavLayoutToggle />
-        <Elsewhere />
-      </NavLayoutProvider>,
-    );
-    focusOn(radio("Sidebar navigation"));
-    fireEvent.keyDown(radio("Sidebar navigation"), { key: " " });
-    expectCheckedAndFocused(radio("Sidebar navigation"));
+      focusOn(radio("Sidebar navigation"));
+      choose(radio("Sidebar navigation"));
+      expectCheckedAndFocused(radio("Sidebar navigation"));
 
-    const away = screen.getByRole("button", { name: "to workspace" });
-    const back = screen.getByRole("button", { name: "to sidebar" });
-    focusOn(away);
-    fireEvent.click(away);
-    focusOn(back);
-    fireEvent.click(back);
-    expect(radio("Sidebar navigation")).toHaveAttribute("aria-checked", "true");
-    expect(document.activeElement).toBe(back);
+      fireEvent.click(screen.getByRole("button", { name: "leave settings" }));
+      expect(screen.queryByRole("radiogroup")).toBeNull();
+      const back = screen.getByRole("button", { name: "back to settings" });
+      focusOn(back);
+      fireEvent.click(back);
+      expect(radio("Sidebar navigation")).toHaveAttribute("aria-checked", "true");
+      expect(document.activeElement).toBe(back);
+    },
+  );
+
+  it.each(["ArrowLeft", "Home"])(
+    "%s from a focused, unchecked radio onto the checked one moves focus there",
+    (key) => {
+      // Nothing changes and nothing remounts, so the toggle moves focus itself.
+      renderToggle();
+      focusOn(radio("Workspace tabs navigation"));
+      fireEvent.keyDown(radio("Workspace tabs navigation"), { key });
+      expectCheckedAndFocused(radio("Sidebar navigation"));
+    },
+  );
+
+  it("a held arrow key takes one step, not one per auto-repeat", () => {
+    renderToggle();
+    focusOn(radio("Sidebar navigation"));
+    // Still prevented, so a held key doesn't scroll the page either.
+    expect(
+      fireEvent.keyDown(radio("Sidebar navigation"), { key: "ArrowRight", repeat: true }),
+    ).toBe(false);
+    expectCheckedAndFocused(radio("Sidebar navigation"));
   });
+
+  it.each(["altKey", "ctrlKey", "metaKey"])(
+    "leaves an arrow with %s to the browser",
+    (modifier) => {
+      renderToggle();
+      focusOn(radio("Sidebar navigation"));
+      expect(
+        fireEvent.keyDown(radio("Sidebar navigation"), { key: "ArrowRight", [modifier]: true }),
+      ).toBe(true);
+      expectCheckedAndFocused(radio("Sidebar navigation"));
+    },
+  );
 
   it("drops a request no toggle took, so a later visit to Settings doesn't grab focus", () => {
     // Stands in for a shell that doesn't render the page the choice was made
