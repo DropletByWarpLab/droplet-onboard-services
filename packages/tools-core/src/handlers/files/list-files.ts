@@ -1,5 +1,6 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { filesUnavailable, isFilesDegraded } from "./_unavailable.js";
 
 const inputSchema = {
   type: "object",
@@ -50,6 +51,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       error: { code: "LIST_FAILED", message: `nextcloud returned ${res.status}` },
     };
   }
+  if (isFilesDegraded(res)) return filesUnavailable();
   const data = await res.json();
   return { ok: true, data };
 }

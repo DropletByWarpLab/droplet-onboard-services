@@ -1121,21 +1121,22 @@ export function createAccessRouter(
         const existing = await loadRole(req.params.id);
         if (!existing) return res.status(404).json({ error: "Role not found" });
 
+        // Pending = status pending and not yet past expiresAt (the deadline
+        // stays authoritative between daily sweeps, as in the accept route).
+        // The accept path would assign the role (T9), so these are future
+        // members and block exactly like current ones. WARP-3193 QUAL-3:
+        // one predicate, and the release below is its exact NOT.
+        const livePending = {
+          status: "pending" as const,
+          expiresAt: { gt: new Date() },
+        };
         const [members, pendingInvites] = await Promise.all([
           prisma.user.findMany({
             where: { accessRoleId: existing.id },
             select: { id: true, username: true, displayName: true },
           }),
-          // Pending = not accepted, not revoked, not past expiry. The
-          // accept path would assign the role (T9), so these are future
-          // members and block exactly like current ones.
           prisma.userInvite.findMany({
-            where: {
-              accessRoleId: existing.id,
-              acceptedAt: null,
-              revokedAt: null,
-              expiresAt: { gt: new Date() },
-            },
+            where: { accessRoleId: existing.id, ...livePending },
             select: { id: true, username: true, email: true },
           }),
         ]);
@@ -1166,14 +1167,7 @@ export function createAccessRouter(
           // pointer, the Restrict FK refuses the delete, and the whole
           // transaction (release included) rolls back → the same 409.
           await tx.userInvite.updateMany({
-            where: {
-              accessRoleId: existing.id,
-              OR: [
-                { acceptedAt: { not: null } },
-                { revokedAt: { not: null } },
-                { expiresAt: { lte: new Date() } },
-              ],
-            },
+            where: { accessRoleId: existing.id, NOT: livePending },
             data: { accessRoleId: null },
           });
           await tx.accessRole.delete({ where: { id: existing.id } });

@@ -322,6 +322,9 @@ export interface HealthResponse {
     // service is up — note this stays `true` even in "simulated" mode
     // (no physical USB device); query /display/status for the backend.
     display: boolean;
+    // WARP-3052 — file service (Nextcloud) reachability, from the cached
+    // health-monitor probe. Informational: never affects `status`.
+    nextcloud: boolean;
   };
 }
 

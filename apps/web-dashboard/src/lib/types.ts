@@ -386,8 +386,9 @@ export interface ModelsCatalogPayload {
 export interface CloudProviderRow {
   /** WARP-2871: gemini removed — no gateway provider exists for it. */
   provider: "anthropic" | "openai";
-  /** Box-wide usable: `escapeEnabled && hasKey === true`. */
-  enabled: boolean;
+  /** Box-wide usable: `escapeEnabled && hasKey === true`. `null` = withheld
+   *  from a guest (WARP-3082). */
+  enabled: boolean | null;
   /** WARP-2871: null = the gateway could not be asked (render "Unknown",
    *  never "Not set up" — absence of an answer is not absence of a key). */
   hasKey: boolean | null;
@@ -1742,6 +1743,10 @@ export interface InviteListItem {
   createdBy: string;
   createdAt: string;
   expiresAt: string;
+  /** WARP-3193 QUAL-3 — the invite lifecycle. The server already reads a
+   *  pending invite past `expiresAt` as `expired`, so this is the only field
+   *  the UI consults; the timestamps are detail, not state. */
+  status: "pending" | "accepted" | "revoked" | "expired";
   acceptedAt: string | null;
   revokedAt: string | null;
 }
@@ -2122,6 +2127,9 @@ export interface HealthResponse {
     // service is up — stays true in simulated mode too (no physical
     // device); /display/status surfaces the backend if needed.
     display: boolean;
+    // WARP-3052 — file service (Nextcloud) reachability. Informational: it
+    // never affects `status`. Optional: older boxes don't send it.
+    nextcloud?: boolean;
   };
 }
 

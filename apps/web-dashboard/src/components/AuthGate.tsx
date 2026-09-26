@@ -9,18 +9,10 @@ import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
-import { HELP_PATH, isSecurityWallPath } from "@/lib/routing";
+import { HELP_PATH, PUBLIC_PATHS, isSecurityWallPath } from "@/lib/routing";
 import { WallModulesKeeper } from "@/lib/hooks/useSecurity";
 import { WallRefused, WallSignedOut } from "@/components/security/WallNotice";
 import { wallRunsFor } from "@/components/security/wall-status";
-
-// `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
-// person so they can set their password at `/invite/<token>`. Omitting it made
-// AuthGate treat the page as protected and bounce the invitee to `/login` on a
-// claimed box (appliance "ready"), so the link "just goes to the sign-in page"
-// and they can never set a password. `startsWith` is safe — `/invite` is the
-// only route under that prefix.
-const PUBLIC_PATHS = ["/setup", "/login", "/invite"];
 
 // WARP-1079 — AuthGate renders ABOVE every page scope (`.droplet-shell`,
 // `.droplet-home`, the auth pages), so its full-screen loading / probe-error

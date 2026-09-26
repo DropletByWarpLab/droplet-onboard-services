@@ -220,6 +220,30 @@ export function createDeviceRegistry(
     },
 
     /**
+     * WARP-3193 PERF-13: retention for NetworkDevice itself. Randomised
+     * MACs add a row per rotation and nothing removed one, while the
+     * schedule ticker and egress reconciler read the table every 30 s.
+     *
+     * Deletes only devices unseen for `olderThanDays` that carry nothing the
+     * owner authored: no manual block, no schedule or override (both
+     * CASCADE from this row), no group membership (an implicit join the
+     * delete would drop). Presence rows cascade. A device that comes back
+     * is re-created by the next reconcile. Wired into the 03:00 daily purge.
+     */
+    async purgeStaleDevices(olderThanDays = 90): Promise<{ count: number }> {
+      const cutoff = new Date(Date.now() - olderThanDays * 86_400_000);
+      return prisma.networkDevice.deleteMany({
+        where: {
+          lastSeen: { lt: cutoff },
+          manualBlock: false,
+          schedules: { none: {} },
+          overrides: { none: {} },
+          groups: { none: {} },
+        },
+      });
+    },
+
+    /**
      * Explicit "forget this device" — deletes the NetworkDevice row; the
      * DevicePresenceDay rows cascade via the FK in the schema.
      */

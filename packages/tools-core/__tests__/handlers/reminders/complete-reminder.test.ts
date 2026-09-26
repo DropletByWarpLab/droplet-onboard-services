@@ -1,52 +1,47 @@
-import { describe, it, expect, vi } from "vitest";
-import type { Mock } from "vitest";
+import { describe, it, expect } from "vitest";
 import completeReminder from "../../../src/handlers/reminders/complete-reminder.js";
-import type { ToolContext } from "../../../src/types.js";
-
-function ctxWith(
-  findUnique: Mock,
-  update: Mock,
-  userId = "alice",
-): ToolContext {
-  return {
-    prisma: {
-      reminder: { findUnique, update },
-    } as unknown as ToolContext["prisma"],
-    http: {} as ToolContext["http"],
-    matter: {} as ToolContext["matter"],
-    userId,
-    signal: new AbortController().signal,
-  };
-}
+import { json, orchestratorCtx } from "../../helpers/orchestrator-ctx.js";
 
 describe("complete_reminder", () => {
-  it("404s when missing", async () => {
-    const findUnique = vi.fn().mockResolvedValue(null);
-    const r = await completeReminder.handler({ id: "x" }, ctxWith(findUnique, vi.fn()));
-    expect(r.ok).toBe(false);
+  it("rejects a missing id without a hop", async () => {
+    const o = orchestratorCtx();
+    const r = await completeReminder.handler({}, o.ctx);
+    expect(r).toMatchObject({ ok: false, error: { code: "INVALID_ARGS" } });
+    expect(o.patch).not.toHaveBeenCalled();
   });
 
-  it("forbids cross-user access", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "bob" });
-    const r = await completeReminder.handler({ id: "x" }, ctxWith(findUnique, vi.fn()));
-    expect(r.ok).toBe(false);
+  it("🔴 WARP-3101 completes through the orchestrator by default", async () => {
+    const o = orchestratorCtx();
+    o.patch.mockResolvedValueOnce(json(200, { reminder: { id: "x" } }));
+    const r = await completeReminder.handler({ id: "x" }, o.ctx);
+    expect(r).toEqual({ ok: true, data: { id: "x", completed: true } });
+    expect(o.patch).toHaveBeenCalledTimes(1);
+    expect(o.patch.mock.calls[0]!.slice(0, 2)).toEqual(["/api/reminders/x", { completed: true }]);
   });
 
-  it("sets completedAt to now by default", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "alice" });
-    const update = vi.fn().mockResolvedValue({});
-    await completeReminder.handler({ id: "x" }, ctxWith(findUnique, update));
-    const call = update.mock.calls[0][0];
-    expect(call.data.completedAt).toBeInstanceOf(Date);
+  it("re-opens with completed=false", async () => {
+    const o = orchestratorCtx();
+    o.patch.mockResolvedValueOnce(json(200, { reminder: { id: "x" } }));
+    const r = await completeReminder.handler({ id: "x", completed: false }, o.ctx);
+    expect(r).toEqual({ ok: true, data: { id: "x", completed: false } });
+    expect(o.patch.mock.calls[0]![1]).toEqual({ completed: false });
   });
 
-  it("clears completedAt when completed=false", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "alice" });
-    const update = vi.fn().mockResolvedValue({});
-    await completeReminder.handler(
-      { id: "x", completed: false },
-      ctxWith(findUnique, update),
-    );
-    expect(update).toHaveBeenCalledWith({ where: { id: "x" }, data: { completedAt: null } });
+  it("someone else's reminder answers like a missing one: NOT_FOUND (the route's ORCH-008 404)", async () => {
+    const o = orchestratorCtx();
+    o.patch.mockResolvedValueOnce(json(404, { error: "reminder_not_found" }));
+    const r = await completeReminder.handler({ id: "x" }, o.ctx);
+    expect(r).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
+  });
+
+  it.each([
+    [403, { error: "acting_user_required" }, "FORBIDDEN"],
+    [403, { error: "forbidden_tool_for_role", tool: "complete_reminder" }, "FORBIDDEN"],
+    [500, {}, "UPDATE_FAILED"],
+  ])("%i %j → %s", async (status, body, code) => {
+    const o = orchestratorCtx();
+    o.patch.mockResolvedValueOnce(json(status, body));
+    const r = await completeReminder.handler({ id: "x" }, o.ctx);
+    expect(r).toMatchObject({ ok: false, error: { code } });
   });
 });

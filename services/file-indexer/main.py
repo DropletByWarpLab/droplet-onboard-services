@@ -69,18 +69,36 @@ def build_http_app():
     place.
     """
     from fastapi import FastAPI, HTTPException
+    from fastapi.responses import JSONResponse
 
     api = FastAPI()
 
     @api.get("/health")
-    def health() -> dict:
+    def health():
         """Liveness probe for the orchestrator health-monitor + Docker
         healthcheck (WARP-598). file-indexer is otherwise MQTT/watcher-
         driven; a 200 here means the HTTP surface — and therefore the
         process hosting the watcher + scheduler threads — is alive. Kept
         dependency-free so the probe never blocks on the DB/MQTT/gRPC
         backends, matching routing's best-effort posture.
+
+        WARP-3193 QUAL-11: an extractor that cannot be imported (a missing
+        libmagic, `srt`, ...) silently skips every file of its type, so it is
+        a 503 `degraded` naming the modules, not a green probe. The check is
+        local (module imports only) and cached by Python after the first call.
         """
+        from extractors.registry import extractor_import_failures
+
+        failures = extractor_import_failures()
+        if failures:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "degraded",
+                    "service": "file-indexer",
+                    "extractorImportErrors": failures,
+                },
+            )
         return {"status": "ok", "service": "file-indexer"}
 
     @api.post("/reindex/{file_id}")

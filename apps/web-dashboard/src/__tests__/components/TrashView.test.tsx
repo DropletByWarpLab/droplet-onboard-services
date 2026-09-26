@@ -15,6 +15,7 @@ import React from "react";
 
 import { TrashView } from "@/components/FileManager/TrashView";
 import type { TrashItemInfo } from "@/lib/types";
+import { FilesUnavailableError } from "@/lib/files-unavailable";
 
 // Stub framer-motion so <Dialog> animations don't gate assertions.
 vi.mock("framer-motion", async () => {
@@ -183,5 +184,45 @@ describe("<TrashView> per-row Restore + Delete-forever actions (WARP-300)", () =
     // Hit-target floor.
     expect(restore.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
     expect(del.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
+  });
+});
+
+// WARP-3076 — during a Nextcloud outage the trash must never read "Trash is
+// empty" and must not offer Empty trash / Restore.
+describe("<TrashView> — Files unavailable (WARP-3076)", () => {
+  it("shows the unavailable copy with a retry, no empty state and no actions", () => {
+    const onRetry = vi.fn();
+    render(
+      <TrashView
+        items={[]}
+        isLoading={false}
+        error={new FilesUnavailableError()}
+        onRetry={onRetry}
+        onRestore={vi.fn()}
+        onDeleteForever={vi.fn()}
+        onEmpty={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Files are unavailable right now")).toBeInTheDocument();
+    expect(screen.getByText("Try again in a moment.")).toBeInTheDocument();
+    expect(screen.queryByText(/trash is empty/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /empty trash/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /restore/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(onRetry).toHaveBeenCalled();
+  });
+
+  it("keeps 'Trash is empty' for a genuinely empty trash", () => {
+    render(
+      <TrashView
+        items={[]}
+        isLoading={false}
+        onRestore={vi.fn()}
+        onDeleteForever={vi.fn()}
+        onEmpty={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/trash is empty/i)).toBeInTheDocument();
+    expect(screen.queryByText(/files are unavailable/i)).not.toBeInTheDocument();
   });
 });

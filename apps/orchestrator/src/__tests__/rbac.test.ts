@@ -213,7 +213,7 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/system/reset", allowed: ["owner"] },
 
   // ── cameras / matter / smart-home ── (owner + admin + family) ──
-  { method: "post", path: "/api/cameras", allowed: ["owner", "admin", "family"] },
+  { method: "post", path: "/api/cameras", allowed: ["owner", "admin"] }, // WARP-3193 SEC-INJ-5
   { method: "post", path: "/api/cameras/scan", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/cameras/groups", allowed: ["owner", "admin", "family"] },
   { method: "delete", path: "/api/cameras/abc", allowed: ["owner", "admin", "family"] },
@@ -284,6 +284,8 @@ const MATRIX: GuardedRoute[] = [
   // per-user (WARP-561); a shared credential is operator material.
   { method: "post", path: "/api/llm/keys/anthropic", allowed: ["owner", "admin"] },
   { method: "delete", path: "/api/llm/keys/anthropic", allowed: ["owner", "admin"] },
+  // WARP-3082: the keyed-provider list is the same operator material.
+  { method: "get", path: "/api/llm/keys", allowed: ["owner", "admin"] },
 
   // WARP-540: OTA update operator surface — owner+admin only INCLUDING
   // the GETs (voice-proxy posture: release SHAs, failure history, and the

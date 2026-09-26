@@ -306,6 +306,70 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
   });
 });
 
+// WARP-3111 — revoke-sessions ran requireRole alone, so any admin could sign
+// the owner out everywhere and a caller could revoke their own sessions.
+describe("POST /api/auth/users/:username/revoke-sessions — WARP-1526 rails", () => {
+  const owner = {
+    id: "owner-id",
+    username: "boss",
+    nextcloudUsername: "boss",
+    displayName: "Boss",
+    role: "owner",
+    directoryStatus: "ACTIVE",
+  };
+  const admin = {
+    id: "admin-id",
+    username: "ops",
+    nextcloudUsername: "ops",
+    displayName: "Ops",
+    role: "admin",
+    directoryStatus: "ACTIVE",
+  };
+  const otherAdmin = { ...admin, id: "u-admin2", username: "ops2", nextcloudUsername: "ops2" };
+
+  it("an admin signing out the OWNER → 403 OWNER_IMMUTABLE; nothing revoked, no audit row", async () => {
+    const app = buildApp(createPrismaMock([owner, admin]), "admin");
+    const res = await request(app).post("/api/auth/users/boss/revoke-sessions");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
+  });
+
+  it("the owner revoking their OWN sessions here → 409 SELF_ACTION_NOT_ALLOWED", async () => {
+    const app = buildApp(createPrismaMock([owner]), "owner");
+    const res = await request(app).post("/api/auth/users/boss/revoke-sessions");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+
+  it("an admin revoking their OWN sessions here → 409 SELF_ACTION_NOT_ALLOWED", async () => {
+    const app = buildApp(createPrismaMock([admin]), "admin");
+    const res = await request(app).post("/api/auth/users/ops/revoke-sessions");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+
+  it("an admin may sign out another admin (equal rank) and a member", async () => {
+    const app = buildApp(createPrismaMock([admin, otherAdmin, seededAlice()]), "admin");
+    const a = await request(app).post("/api/auth/users/ops2/revoke-sessions");
+    expect(a.status).toBe(200);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-admin2");
+    const m = await request(app).post("/api/auth/users/alice/revoke-sessions");
+    expect(m.status).toBe(200);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
+  });
+
+  it("the owner may sign out an admin", async () => {
+    const app = buildApp(createPrismaMock([owner, otherAdmin]), "owner");
+    const res = await request(app).post("/api/auth/users/ops2/revoke-sessions");
+    expect(res.status).toBe(200);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-admin2");
+  });
+});
+
 describe("POST /api/auth/users/:username/disable — revokes sessions", () => {
   it("disables on Nextcloud AND revokes the user's live sessions", async () => {
     const prisma = createPrismaMock([seededAlice()]);

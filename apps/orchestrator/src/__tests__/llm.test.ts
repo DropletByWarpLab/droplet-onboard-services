@@ -90,7 +90,7 @@ const mockListModels = vi.fn().mockResolvedValue({
 const mockChat = vi.fn();
 const mockSaveKey = vi.fn().mockResolvedValue(undefined);
 const mockListKeys = vi.fn().mockResolvedValue(["anthropic"]);
-const mockDeleteKey = vi.fn().mockResolvedValue(undefined);
+const mockDeleteKey = vi.fn().mockResolvedValue(true);
 
 vi.mock("../services/ai-gateway.client.js", () => ({
   // WARP-2851 — ollama publishes no window; `null` keeps these suites on
@@ -608,6 +608,19 @@ describe("LLM routes", () => {
       expect(mockDeleteKey.mock.calls[0]).toEqual(["anthropic"]);
       expect(mockCacheDel).toHaveBeenCalledWith("llm:models");
       expect(mockCacheDel).toHaveBeenCalledWith("models:page");
+    });
+
+    it("DELETE /api/llm/keys/:provider answers 204 when no key was stored (WARP-3083)", async () => {
+      mockDeleteKey.mockResolvedValueOnce(false);
+      const res = await request(app).delete("/api/llm/keys/openai");
+      expect(res.status).toBe(204);
+      expect(res.text).toBe("");
+    });
+
+    it("DELETE /api/llm/keys/:provider still 500s a real gateway failure", async () => {
+      mockDeleteKey.mockRejectedValueOnce(new Error("Failed to delete key: boom"));
+      const res = await request(app).delete("/api/llm/keys/openai");
+      expect(res.status).toBe(500);
     });
 
     it("DELETE /api/llm/keys/:provider 400s an unknown provider", async () => {

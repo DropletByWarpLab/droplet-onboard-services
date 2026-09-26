@@ -53,7 +53,20 @@ import type { PrismaClient } from "@prisma/client";
 export interface AssertedUser {
   /** LOCAL `User.id` UUID — what every access decision is keyed on. */
   id: string;
+  /**
+   * WARP-3101 / WARP-3098 — the canonical handle, whatever column the header
+   * matched. The calendar and reminder tables are keyed on it (`userId` holds
+   * the username there); agent runs and routines record the person by it
+   * (`triggeredBy`, activity refs, the tool context's `userId`).
+   * Audit rows record the person by it too (WARP-3102: the email
+   * send's `refs.actor`), so a `User.id` asserted over HTTP is recorded
+   * the way a username over stdio is.
+   */
+  username: string;
   role: string;
+  /** WARP-3098 — the workshop's commit author. */
+  displayName: string;
+  email: string | null;
 }
 
 export type AssertedUserFailure = "not_found" | "ambiguous" | "deactivated";
@@ -69,12 +82,12 @@ export async function resolveAssertedUser(
   // Two rows are the fewest that tell "one person" from "more than one".
   const rows = await prisma.user.findMany({
     where: { OR: [{ username: asserted }, { nextcloudUsername: asserted }, { id: asserted }] },
-    select: { id: true, role: true, directoryStatus: true },
+    select: { id: true, username: true, role: true, displayName: true, email: true, directoryStatus: true },
     take: 2,
   });
   if (rows.length === 0) return { ok: false, reason: "not_found" };
   if (rows.length > 1) return { ok: false, reason: "ambiguous" };
-  const [row] = rows;
-  if (row.directoryStatus === "DEACTIVATED") return { ok: false, reason: "deactivated" };
-  return { ok: true, user: { id: row.id, role: row.role } };
+  const [{ directoryStatus, ...user }] = rows;
+  if (directoryStatus === "DEACTIVATED") return { ok: false, reason: "deactivated" };
+  return { ok: true, user };
 }

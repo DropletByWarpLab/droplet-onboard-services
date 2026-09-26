@@ -375,18 +375,16 @@ describe("rename_file", () => {
 });
 
 describe("move_file & copy_file", () => {
-  it("move_file passes overwrite flag through to /move", async () => {
+  // WARP-3193 SEC-INJ-2: overwrite=true is refused, never passed through
+  // (overwrite-gate.test.ts owns the refusal).
+  it("move_file never sends overwrite=true to /move", async () => {
     const { ctx, ncPost } = makeCtx();
     await runTool(
       "move_file",
       { from_path: "/a.txt", to_path: "/b.txt", overwrite: true },
       ctx,
     );
-    expect(ncPost).toHaveBeenCalledWith(
-      "/move",
-      { from: "/a.txt", to: "/b.txt", overwrite: true },
-      expect.anything(),
-    );
+    expect(ncPost).not.toHaveBeenCalled();
   });
 
   it("move_file defaults overwrite to false", async () => {
@@ -418,18 +416,16 @@ describe("move_file & copy_file", () => {
     if (!res.ok) expect(res.error.message).toMatch(/root/);
   });
 
-  it("copy_file passes overwrite flag through to /copy", async () => {
+  // WARP-3193 SEC-INJ-2: overwrite=true is refused, never passed through
+  // (overwrite-gate.test.ts owns the refusal).
+  it("copy_file never sends overwrite=true to /copy", async () => {
     const { ctx, ncPost } = makeCtx();
     await runTool(
       "copy_file",
       { from_path: "/a.txt", to_path: "/b.txt", overwrite: true },
       ctx,
     );
-    expect(ncPost).toHaveBeenCalledWith(
-      "/copy",
-      { from: "/a.txt", to: "/b.txt", overwrite: true },
-      expect.anything(),
-    );
+    expect(ncPost).not.toHaveBeenCalled();
   });
 
   it("copy_file refuses root as either source or destination", async () => {

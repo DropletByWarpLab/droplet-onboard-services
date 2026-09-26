@@ -92,3 +92,19 @@ class TestRequireToken:
         # Generated token is 64 hex chars (32 bytes)
         assert len(auth_mod._OPS_TOKEN) == 64
         assert all(c in "0123456789abcdef" for c in auth_mod._OPS_TOKEN)
+
+    def test_ephemeral_token_is_never_logged(self, monkeypatch, caplog):
+        # WARP-3193 SEC-DATA-11: the token guards a docker.sock API, and
+        # container logs leave the box in support bundles. Only a short
+        # sha256 fingerprint may be logged, never the value.
+        import hashlib
+        import importlib
+        import logging
+        monkeypatch.delenv("OPS_TOKEN", raising=False)
+        with caplog.at_level(logging.DEBUG, logger="ops.auth"):
+            from ops import auth as auth_mod
+            importlib.reload(auth_mod)
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert auth_mod._OPS_TOKEN not in text
+        fingerprint = hashlib.sha256(auth_mod._OPS_TOKEN.encode()).hexdigest()[:8]
+        assert fingerprint in text

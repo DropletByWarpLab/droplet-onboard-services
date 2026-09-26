@@ -8,7 +8,7 @@ const logger = createLogger("error-handler");
  * Resolve the HTTP status for an error, in priority order:
  *
  *   1. An explicit `status` / `statusCode` carried by the error. This covers
- *      our typed errors (`HttpError`, `RouterError`, `DeviceRegistryError`)
+ *      our typed errors (`RouterError`, `DeviceRegistryError`)
  *      and the `http-errors` package.
  *   2. A `ZodError` → 400 (request validation failure).
  *   3. A Prisma known-request error, detected by `code`:
@@ -52,7 +52,7 @@ function resolveStatus(err: unknown): number | null {
  * client. Only our own typed errors — which deliberately carry a client-facing
  * message + a stable, documented `code` — qualify:
  *
- *   - `HttpError` / `RouterError` / `DeviceRegistryError` (own `status`/`code`)
+ *   - `RouterError` / `DeviceRegistryError` (own `status`/`code`)
  *   - `ZodError` (validation feedback is the whole point)
  *   - the `http-errors` package (carries `statusCode` + an HTTP-safe message)
  *
@@ -67,7 +67,6 @@ function isClientSafeError(err: unknown): boolean {
   if (err && typeof err === "object") {
     const name = (err as { name?: unknown }).name;
     if (
-      name === "HttpError" ||
       name === "RouterError" ||
       name === "DeviceRegistryError"
     ) {
@@ -143,7 +142,7 @@ export function errorHandler(
   };
 
   if (trusted) {
-    // Our own typed errors (`HttpError` / `RouterError` / `DeviceRegistryError`,
+    // Our own typed errors (`RouterError` / `DeviceRegistryError`,
     // `ZodError`, `http-errors`) carry a deliberately client-facing message —
     // surface it verbatim, regardless of status.
     //

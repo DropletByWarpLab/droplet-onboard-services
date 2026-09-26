@@ -74,6 +74,8 @@ import {
   validateAnswerAgainstTrace,
   describeToolUseVerdict,
 } from "./tool-use-validation.js";
+// WARP-3193 ARCH-10 — in types/ so tool-use-validation.ts needs nothing from here.
+import type { AgentTraceEntry } from "../types/agent-trace.js";
 import {
   assertToolAdvertisementFitsBudget,
   toolAdvertisementCeilingTokens,
@@ -514,13 +516,6 @@ export interface AgentCheckpointPort {
     text: string;
     isError: boolean;
   }): Promise<void>;
-}
-
-export interface AgentTraceEntry {
-  tool_call_id: string;
-  tool: string;
-  args: Record<string, unknown>;
-  result: unknown;
 }
 
 /**
@@ -3043,7 +3038,11 @@ function isRetrievalClassTool(name: string): boolean {
  *                           directory route's body verbatim, and that route
  *                           `res.json(entries)` with a bare `FileEntryInfo[]`
  *                           on all three of its branches (cache hit, normal,
- *                           and the `handleFileError(…, [])` degrade).
+ *                           and the `handleFileError(…, [])` degrade). The
+ *                           degrade's `[]` never reaches here as data: it is
+ *                           marked `X-Droplet-Degraded` (WARP-3052) and the
+ *                           tool turns it into a FILES_UNAVAILABLE error
+ *                           (WARP-3077), so no citation is written for it.
  *   - `path`              — read_file, write_file, move_file, …
  *   - `results[].path`    — search_content hits
  *   - `items[].path`      — search_files, list_recent_files

@@ -17,6 +17,11 @@ import type { TrashItemInfo } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { LibraryChip } from "./FileListSimple";
 import { isTrashUnsupportedError } from "@/lib/api";
+import {
+  FILES_UNAVAILABLE_HINT,
+  FILES_UNAVAILABLE_TITLE,
+  isFilesUnavailableError,
+} from "@/lib/files-unavailable";
 
 interface TrashViewProps {
   items: TrashItemInfo[];
@@ -170,11 +175,21 @@ export function TrashView({
           <span className="ei">
             <AlertTriangle size={24} />
           </span>
-          <p className="eh">We couldn&apos;t load your trash</p>
-          <p style={{ maxWidth: "42ch", fontSize: "13px" }}>
-            The box didn&apos;t answer when we asked what&apos;s in the trash.
-            Nothing has been deleted for good — try again in a moment.
-          </p>
+          {isFilesUnavailableError(error) ? (
+            /* WARP-3076 — the box said the file service is down. */
+            <>
+              <p className="eh">{FILES_UNAVAILABLE_TITLE}</p>
+              <p style={{ maxWidth: "42ch", fontSize: "13px" }}>{FILES_UNAVAILABLE_HINT}</p>
+            </>
+          ) : (
+            <>
+              <p className="eh">We couldn&apos;t load your trash</p>
+              <p style={{ maxWidth: "42ch", fontSize: "13px" }}>
+                The box didn&apos;t answer when we asked what&apos;s in the trash.
+                Nothing has been deleted for good — try again in a moment.
+              </p>
+            </>
+          )}
           {onRetry && (
             <button
               type="button"

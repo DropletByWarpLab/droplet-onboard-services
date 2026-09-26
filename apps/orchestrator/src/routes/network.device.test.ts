@@ -320,13 +320,10 @@ describe("Network devices + groups API (WARP-82)", () => {
       expect(res.body.devices).toHaveLength(0);
     });
 
-    // WARP-111: SWR-friendly caching header on the device-list read.
-    it("sets Cache-Control: private, max-age=5, stale-while-revalidate=10", async () => {
+    it("answers no-store (WARP-3097)", async () => {
       const res = await request(app).get("/api/network/devices");
       expect(res.status).toBe(200);
-      expect(res.headers["cache-control"]).toBe(
-        "private, max-age=5, stale-while-revalidate=10",
-      );
+      expect(res.headers["cache-control"]).toBe("no-store");
     });
 
     it("returns the legacy DHCP lease shape when ?legacy=1", async () => {
@@ -577,13 +574,10 @@ describe("Network devices + groups API (WARP-82)", () => {
       expect(res.body.groups[0]._count.devices).toBe(1);
     });
 
-    // WARP-111: SWR-friendly caching header on the group-list read.
-    it("sets Cache-Control: private, max-age=5, stale-while-revalidate=10", async () => {
+    it("answers no-store (WARP-3097)", async () => {
       const res = await request(app).get("/api/network/groups");
       expect(res.status).toBe(200);
-      expect(res.headers["cache-control"]).toBe(
-        "private, max-age=5, stale-while-revalidate=10",
-      );
+      expect(res.headers["cache-control"]).toBe("no-store");
     });
   });
 

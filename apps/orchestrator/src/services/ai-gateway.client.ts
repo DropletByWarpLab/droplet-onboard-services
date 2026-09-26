@@ -396,19 +396,23 @@ export async function listKeys(userId?: string): Promise<string[]> {
   }
 }
 
+/** Resolves false when the gateway had no key stored (its 404), true when
+ *  one was removed (WARP-3083). */
 export async function deleteKey(
   provider: string,
   userId?: string
-): Promise<void> {
+): Promise<boolean> {
   const res = await internalFetch(`${BASE_URL}/ai/keys/${encodeURIComponent(provider)}`, {
     method: "DELETE",
     headers: authHeaders(userId),
     signal: timeout(),
   });
+  if (res.status === 404) return false;
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Failed to delete key: ${body}`);
   }
+  return true;
 }
 
 export async function healthCheck(): Promise<boolean> {

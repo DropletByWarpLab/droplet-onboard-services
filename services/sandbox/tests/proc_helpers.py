@@ -17,11 +17,15 @@ needs_linux = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="p
 
 def alive(pid: int) -> bool:
     """The pid still runs. A zombie waiting for its reaper counts as gone:
-    it holds no memory, no file and no environment."""
+    it holds no memory, no file and no environment.
+
+    A pid that exits between the open and the read makes the read fail with
+    ESRCH (`ProcessLookupError`), not ENOENT — that is gone too (#2378 review:
+    the race redded `test_stop_kills_a_group_that_ignores_sigterm_after_the_grace`)."""
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
             return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
 
 

@@ -16,7 +16,7 @@ import { unload, useSWRConfig } from "swr";
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
-import { HELP_PATH, isSecurityWallPath } from "./routing";
+import { HELP_PATH, PUBLIC_PATHS, isSecurityWallPath } from "./routing";
 import { clearChatHandoffs } from "./session-reset";
 
 export interface AuthUser {
@@ -643,7 +643,7 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // session; without this mirror, authFetch 401s from ShellPage would hard-
   // navigate anonymous /help visitors to /login, destroying wizard context).
   const onPublicPage =
-    ["/login", "/setup"].some((p) =>
+    PUBLIC_PATHS.some((p) =>
       window.location.pathname.startsWith(p),
     ) || window.location.pathname === HELP_PATH;
   // WARP-2981 — the Security wall faces a room: it never opens a sign-in form

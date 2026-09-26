@@ -11,6 +11,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useSharedWithMe, useSharedByMe } from "@/lib/hooks/useShares";
+import {
+  FILES_UNAVAILABLE_HINT,
+  FILES_UNAVAILABLE_TITLE,
+  isFilesUnavailableError,
+} from "@/lib/files-unavailable";
 import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
 import { LibraryChip } from "@/components/FileManager/FileListSimple";
@@ -100,13 +105,21 @@ export default function SharedPage() {
           <div className="empty">
             <span className="ei"><AlertTriangle size={24} /></span>
             <span className="eh">
-              {tab === "with-me"
-                ? "We couldn't load what's been shared with you"
-                : "We couldn't load what you've shared"}
+              {isFilesUnavailableError(error)
+                ? FILES_UNAVAILABLE_TITLE
+                : tab === "with-me"
+                  ? "We couldn't load what's been shared with you"
+                  : "We couldn't load what you've shared"}
             </span>
             <span style={{ maxWidth: "44ch" }}>
-              The box didn&apos;t answer when we asked for your shares. Nothing
-              has been unshared — try again in a moment.
+              {isFilesUnavailableError(error) ? (
+                FILES_UNAVAILABLE_HINT
+              ) : (
+                <>
+                  The box didn&apos;t answer when we asked for your shares. Nothing
+                  has been unshared — try again in a moment.
+                </>
+              )}
             </span>
             <button
               type="button"
