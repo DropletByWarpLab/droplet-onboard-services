@@ -195,6 +195,20 @@ for dir in apps/*/; do
   check_dir "$dir" "$name" "app"
 done
 
+# --- docs/COMPONENTS.md (WARP-3193 ARCH-11) ---
+# The agent fact sheet must name EVERY services/* directory, Dockerfile or not
+# (erp-connector is a library, egress-audit a host unit). Seven services had
+# gone missing from it; a service the doc omits is one an implementer never
+# learns exists.
+for dir in services/*/; do
+  dir="${dir%/}"
+  if grep -qF "${dir}/" docs/COMPONENTS.md; then
+    ok "$dir — listed in docs/COMPONENTS.md"
+  else
+    note "$dir is not listed in docs/COMPONENTS.md — add an inventory row and a section"
+  fi
+done
+
 echo ""
 if [ $fail -ne 0 ]; then
   cat >&2 <<'EOF'
@@ -207,6 +221,8 @@ Every service in `services/` and app in `apps/` must have:
      name is accepted only if its own `on:` triggers path-filter on the
      directory (globs inside a job's dorny/paths-filter do NOT count).
   2. A test suite (tests/test_*.py, *.test.ts(x), *.spec.ts, or __tests__/).
+
+Every `services/*` directory must also be listed in docs/COMPONENTS.md.
 
 To intentionally exempt a path, add it one-per-line to
 `.github/ci-coverage-exempt` (lines starting with `#` are comments).

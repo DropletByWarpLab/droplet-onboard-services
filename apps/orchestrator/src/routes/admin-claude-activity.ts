@@ -33,13 +33,9 @@ import {
 } from "../services/claude-activity/compliance-parser.js";
 import { createLogger } from "../lib/logger.js";
 import { recordAccessDenied } from "../middleware/auth.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 const logger = createLogger("admin-claude-activity");
-
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
 
 export interface ClaudeActivityResponse {
   now: Awaited<ReturnType<typeof readSessionState>>["now"];
@@ -60,7 +56,7 @@ export function createAdminClaudeActivityRouter(): Router {
   router.get(
     "/admin/claude-activity",
     async (req: Request, res: Response, next: NextFunction) => {
-      if (!isAdmin(req)) {
+      if (!isOwnerOrAdmin(req)) {
         // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
         // local isAdmin() denials must not be silent (requireRole parity).
         recordAccessDenied(req, "role-not-permitted");

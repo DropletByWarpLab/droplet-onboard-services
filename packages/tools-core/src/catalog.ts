@@ -377,7 +377,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   search_content: "Search inside your files for what you need",
   read_document_text: "Read a whole PDF or scanned document end to end",
   list_recent_files: "See the files you changed most recently",
-  write_file: "Save a new file or update an existing one",
+  write_file: "Save a new file",
   delete_file: "Delete a file, or a folder and everything in it, from your Droplet",
   create_directory: "Make a new folder",
   rename_file: "Rename a file or folder",
