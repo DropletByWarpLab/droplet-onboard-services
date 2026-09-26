@@ -66,6 +66,10 @@ export const UPDATE_EVENTS = {
   /** warn — the installed helper predates reconcile-env; step 3b skipped
    *  (additive), so an OTA-only box is never stranded (#2320 review). */
   "update.env_reconcile_skipped": "apply",
+  /** info — WARP-3120: a client installer the release carries was staged into /downloads. */
+  "update.client_app_staged": "apply",
+  /** warn — WARP-3120: a client installer was NOT staged (reason); the box update goes on. */
+  "update.client_apps_skipped": "apply",
   /** info — step 4 done: `prisma migrate deploy` for this build ran. */
   "update.migrations_applied": "apply",
   /** info — verifying → applying committed; container swaps begin. */

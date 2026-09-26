@@ -23,6 +23,11 @@
  *      tokens, boot-unit profile flags) with the staged
  *      docker/ota/env-reconcile.sh; a failure refuses the release
  *      (`env_reconcile_failed`) before anything is swapped;
+ *   3c. WARP-3120: stage each client installer the release carries (the
+ *      manifest's optional `clients`, sha256-gated like configs) into the
+ *      box's /downloads; a failure is logged and skipped, never fatal. A
+ *      later rollback keeps the staged installer (it is newer and Warp Lab
+ *      signed; the platform directory was replaced, not versioned);
  *   4. `prisma migrate deploy` — gated on minOrchestratorSchema (the
  *      parse gate refuses `orchestrator_schema_unsupported` outright);
  *   5. recreate every manifest service EXCEPT the orchestrator via the
@@ -94,12 +99,18 @@
  * AND the DeviceUpdate audit table independently.
  */
 import { createHash } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { rm } from "node:fs/promises";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import type { PrismaClient } from "@prisma/client";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
 import { getSetupState } from "../setup.service.js";
 import {
   parseReleaseManifest,
+  type ReleaseClient,
   type ReleaseManifest,
   type ReleaseService,
   type UpdateFailureReason,
@@ -183,6 +194,21 @@ export interface ApplyRunner {
     configsTar: Buffer;
     manifest: ReleaseManifest;
   }): Promise<void>;
+  /**
+   * WARP-3120 — step 3c: stage one client installer the release carries into
+   * the box's app-downloads directory (what /downloads serves). The runner
+   * picks the file's path under this update's dir, awaits `write(dest)` (the
+   * caller streams the sha256-verified bytes there), then hands the file to
+   * the host helper's `stage-client-apps`, and removes its copy. Returns
+   * `already_staged` (nothing downloaded) when the box's catalog already
+   * serves that exact installer. Throws on any failure; the caller turns that
+   * into a skip, never a failed update.
+   */
+  stageClientApp(opts: {
+    updateId: string;
+    client: ReleaseClient;
+    write: (dest: string) => Promise<void>;
+  }): Promise<"staged" | "already_staged">;
   /** Step 4 — `prisma migrate deploy` for this build's migrations. */
   migrateDeploy(): Promise<void>;
   /** Steps 5/8 — recreate the named services on release/previous refs. */
@@ -608,6 +634,134 @@ async function recreateAndLog(
   );
 }
 
+function githubAuthHeaders(opts: ApplyUpdateOptions): Record<string, string> {
+  return opts.githubToken ? { authorization: `Bearer ${opts.githubToken}` } : {};
+}
+
+/**
+ * Find one asset of the release this row tracks, by exact name. Every
+ * failure is transient: the poller supersedes a row whose release moved on.
+ */
+async function releaseAssetUrl(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+  name: string,
+): Promise<{ ok: true; url: string } | { ok: false; detail: string }> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const authHeaders = githubAuthHeaders(opts);
+  try {
+    const res = await fetchImpl(opts.releasesLatestUrl, {
+      headers: { accept: "application/vnd.github+json", ...authHeaders },
+    });
+    if (!res.ok) return { ok: false, detail: `releases endpoint HTTP ${res.status}` };
+    const release = (await res.json()) as {
+      tag_name?: string;
+      assets?: Array<{ name: string; url: string }>;
+    };
+    if (row.releaseTag && release.tag_name && release.tag_name !== row.releaseTag) {
+      // The latest release moved on mid-apply; the poller will supersede
+      // this row on its next tick. Retry semantics keep us honest.
+      return { ok: false, detail: `latest release is ${release.tag_name}, row tracks ${row.releaseTag}` };
+    }
+    const url = release.assets?.find((a) => a.name === name)?.url;
+    return url ? { ok: true, url } : { ok: false, detail: `release has no ${name} asset` };
+  } catch (err) {
+    return {
+      ok: false,
+      detail: `releases endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * WARP-3120 — stream one client installer from the release to `dest`,
+ * hashing as it goes, and refuse it (file removed) unless its size and
+ * sha256 equal the VERIFIED manifest's. Streamed, never buffered: a DMG is
+ * tens of MB and the orchestrator runs under a 768 MB cap.
+ */
+async function downloadClientAsset(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+  client: ReleaseClient,
+  dest: string,
+): Promise<void> {
+  const lookup = await releaseAssetUrl(opts, row, client.file);
+  if (!lookup.ok) throw new Error(lookup.detail);
+  const res = await (opts.fetchImpl ?? fetch)(lookup.url, {
+    headers: { accept: "application/octet-stream", ...githubAuthHeaders(opts) },
+    redirect: "follow",
+  });
+  if (!res.ok || !res.body) throw new Error(`${client.file} download HTTP ${res.status}`);
+  const hash = createHash("sha256");
+  let size = 0;
+  try {
+    await pipeline(
+      Readable.fromWeb(res.body as WebReadableStream),
+      new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          size += chunk.length;
+          if (size > client.size) return cb(new Error(`${client.file} is larger than the manifest's ${client.size} bytes`));
+          hash.update(chunk);
+          cb(null, chunk);
+        },
+      }),
+      createWriteStream(dest),
+    );
+    if (size !== client.size) throw new Error(`${client.file} is ${size} bytes, manifest ${client.size}`);
+    const sha = hash.digest("hex");
+    if (sha !== client.sha256) throw new Error(`${client.file} sha256 ${sha} != manifest ${client.sha256}`);
+  } catch (err) {
+    await rm(dest, { force: true });
+    throw err;
+  }
+}
+
+/**
+ * WARP-3120 — step 3c: stage every client installer the release carries.
+ * A client app never fails the box's own update: each failure is logged as
+ * `update.client_apps_skipped` and the apply goes on. The box's audit and
+ * watchdog then report that platform stale or missing, like a missed stage.
+ */
+async function stageClientApps(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+  manifest: ReleaseManifest,
+  log: pino.Logger,
+): Promise<void> {
+  for (const client of manifest.clients ?? []) {
+    try {
+      const outcome = await opts.runner.stageClientApp({
+        updateId: row.id,
+        client,
+        write: (dest) => downloadClientAsset(opts, row, client, dest),
+      });
+      log.info(
+        {
+          event: "update.client_app_staged",
+          deviceUpdateId: row.id,
+          platform: client.platform,
+          version: client.version,
+          alreadyStaged: outcome === "already_staged",
+        },
+        outcome === "already_staged"
+          ? "OTA step 3c — /downloads already serves this client installer; nothing downloaded"
+          : "OTA step 3c — client installer staged into /downloads",
+      );
+    } catch (err) {
+      log.warn(
+        {
+          event: "update.client_apps_skipped",
+          deviceUpdateId: row.id,
+          platform: client.platform,
+          version: client.version,
+          reason: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+        },
+        "OTA step 3c skipped a client installer — the box update continues",
+      );
+    }
+  }
+}
+
 /**
  * Download the release's configs asset and verify it against the VERIFIED
  * manifest's sha256 — the signed manifest is the trust anchor, the asset
@@ -623,45 +777,10 @@ async function fetchConfigsAsset(
   | { ok: false; kind: "mismatch"; detail: string }
 > {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const authHeaders: Record<string, string> = opts.githubToken
-    ? { authorization: `Bearer ${opts.githubToken}` }
-    : {};
-  let assetUrl: string | undefined;
-  try {
-    const res = await fetchImpl(opts.releasesLatestUrl, {
-      headers: { accept: "application/vnd.github+json", ...authHeaders },
-    });
-    if (!res.ok) {
-      return { ok: false, kind: "transient", detail: `releases endpoint HTTP ${res.status}` };
-    }
-    const release = (await res.json()) as {
-      tag_name?: string;
-      assets?: Array<{ name: string; url: string }>;
-    };
-    if (row.releaseTag && release.tag_name && release.tag_name !== row.releaseTag) {
-      // The latest release moved on mid-apply; the poller will supersede
-      // this row on its next tick. Retry semantics keep us honest.
-      return {
-        ok: false,
-        kind: "transient",
-        detail: `latest release is ${release.tag_name}, row tracks ${row.releaseTag}`,
-      };
-    }
-    assetUrl = release.assets?.find((a) => a.name === manifest.configs.file)?.url;
-  } catch (err) {
-    return {
-      ok: false,
-      kind: "transient",
-      detail: `releases endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  if (!assetUrl) {
-    return {
-      ok: false,
-      kind: "transient",
-      detail: `release has no ${manifest.configs.file} asset`,
-    };
-  }
+  const lookup = await releaseAssetUrl(opts, row, manifest.configs.file);
+  if (!lookup.ok) return { ok: false, kind: "transient", detail: lookup.detail };
+  const assetUrl = lookup.url;
+  const authHeaders = githubAuthHeaders(opts);
 
   let configsTar: Buffer;
   try {
@@ -935,6 +1054,9 @@ export async function applyPendingUpdate(
       detail,
     };
   }
+
+  // ── step 3c (WARP-3120): client installers into /downloads (never fatal) ──
+  await stageClientApps(opts, row, manifest, log);
 
   // minOrchestratorSchema gate: enforced by parseReleaseManifest above
   // (orchestrator_schema_unsupported → rejected before any side effect).

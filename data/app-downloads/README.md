@@ -128,6 +128,43 @@ a box ends up serving last release's installer:
   after a reimage; commissioning a reimaged box without re-staging is how
   a customer gets the empty page.
 
+## `clients.lock.json`: installers the OTA release carries (WARP-3120)
+
+The tracked lock pins each client installer a release carries, today only
+the Droplet for Mac DMG, published as a GitHub release asset of
+DropletByWarpLab/DropletAgent:
+
+```json
+{ "schemaVersion": 1,
+  "clients": [ { "platform": "macos", "version": "0.2.0",
+                 "source": { "repo": "DropletByWarpLab/DropletAgent", "tag": "mac-v0.2.0" },
+                 "file": "Droplet-0.2.0.dmg", "size": 50331648,
+                 "sha256": "<64 hex>" } ] }
+```
+
+DropletAgent's `scripts/release-dmg.sh --publish` prints the entry.
+
+- **Publish** (`.github/workflows/publish-release.yml`, "Fetch client apps"):
+  `scripts/release/fetch-client-apps.py` downloads each entry with the
+  `DROPLET_CLIENT_APPS_TOKEN` secret (fine-grained, contents:read on
+  DropletAgent only) and refuses it unless size and sha256 equal the lock.
+  The entry goes into the cosign-signed `release.json` (`clients`), and the
+  file is attached to the OTA release. An empty lock needs no token; a lock
+  that pins an entry fails the publish without it.
+- **Apply** (`update-agent/apply.ts`, step 3c): the box downloads the file
+  from the OTA release, checks it against the signed manifest, and the host
+  helper (`docker/ota/apply-update.sh stage-client-apps`) runs
+  `stage.sh --no-restart` on it, then the update dir's copy is deleted. When
+  the catalog already serves that version with that sha256, nothing is
+  downloaded (most updates carry the same pinned DMG). A failure is logged
+  (`update.client_apps_skipped`) and never fails the box update. The
+  orchestrator sees the new catalog without a restart (`store.ts` re-reads
+  `catalog.json` when its inode, size or mtime change).
+- **Channel:** a lock bump is a normal PR, so stage boxes get the new Mac
+  build first and stable boxes on the promotion.
+- A box rollback keeps the newly staged installer (the platform directory
+  was replaced). Harmless: it is a newer, Warp Lab-signed build.
+
 ## What EXPECTED is for
 
 `EXPECTED` is the tracked declaration of what a release must carry, one
@@ -157,7 +194,9 @@ Two gates, and it matters which one is load-bearing:
   the bytes have not changed *since that stage*. It says nothing about
   whether they were the right bytes to begin with — that is what the
   operator's own verification of the release download is for, and why
-  `clients.lock.json` records what was staged.
+  `clients.lock.json` pins what the OTA release carries (for those, the
+  trust root is the tracked lock, and the signed manifest carries it to the
+  box).
 
   This distinction stops mattering the day anything fetches automatically:
   a gate that pins whatever it just downloaded is self-referential. Any

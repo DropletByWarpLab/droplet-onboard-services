@@ -1395,6 +1395,7 @@ async function main() {
           composeFile: config.DROPLET_OTA_COMPOSE_FILE,
           configRoot: config.DROPLET_OTA_CONFIG_ROOT,
           updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+          appDownloadsDir: config.DROPLET_APP_DOWNLOADS_DIR,
           githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
         })
       )?.runner ?? null)

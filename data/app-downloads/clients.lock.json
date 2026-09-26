@@ -1,0 +1,5 @@
+{
+  "$comment": "Client installers the signed OTA release carries (WARP-3120). publish-release.yml downloads each entry from its GitHub release, refuses it unless size and sha256 match this file, and records it in release.json; the box stages it into /downloads during the update. Bump through a PR like any code: stage boxes get it first, stable boxes on the promotion. Entry shape: README.md, 'clients.lock.json'.",
+  "schemaVersion": 1,
+  "clients": []
+}

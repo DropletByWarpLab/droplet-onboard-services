@@ -162,3 +162,52 @@ class TestLoudFailures:
                                channel="stage")
         assert proc.returncode == 0, proc.stderr
         assert json.loads(out.read_text())["release"]["channel"] == "stage"
+
+
+class TestClients:
+    """WARP-3120 — the optional `clients` array (client installers)."""
+
+    def _clients(self, tmp_path, body=b"dmg bytes", **over):
+        d = tmp_path / "clients"
+        d.mkdir()
+        (d / "Droplet-0.2.0.dmg").write_bytes(body)
+        entry = {"platform": "macos", "version": "0.2.0", "file": "Droplet-0.2.0.dmg",
+                 "size": len(b"dmg bytes"), "sha256": hashlib.sha256(b"dmg bytes").hexdigest()}
+        entry.update(over)
+        (d / "clients.json").write_text(json.dumps([entry]))
+        return d / "clients.json", entry
+
+    def test_without_clients_the_key_is_absent(self, tmp_path):
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": "sha256:" + "b" * 64})
+        assert proc.returncode == 0, proc.stderr
+        assert "clients" not in json.loads(out.read_text())
+
+    def test_clients_are_recorded(self, tmp_path):
+        cj, entry = self._clients(tmp_path)
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": "sha256:" + "b" * 64},
+                               extra_args=["--clients", str(cj)])
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(out.read_text())["clients"] == [entry]
+
+    def test_empty_clients_list_leaves_the_key_out(self, tmp_path):
+        cj = tmp_path / "clients.json"
+        cj.write_text("[]")
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": "sha256:" + "b" * 64},
+                               extra_args=["--clients", str(cj)])
+        assert proc.returncode == 0, proc.stderr
+        assert "clients" not in json.loads(out.read_text())
+
+    def test_file_that_does_not_match_its_entry_fails(self, tmp_path):
+        cj, _ = self._clients(tmp_path, body=b"dmg bytez")
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": "sha256:" + "b" * 64},
+                               extra_args=["--clients", str(cj)])
+        assert proc.returncode != 0
+        assert "does not match" in proc.stderr
+        assert not out.exists()
+
+    def test_extra_key_fails(self, tmp_path):
+        cj, _ = self._clients(tmp_path, url="https://example.com/x.dmg")
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": "sha256:" + "b" * 64},
+                               extra_args=["--clients", str(cj)])
+        assert proc.returncode != 0
+        assert not out.exists()

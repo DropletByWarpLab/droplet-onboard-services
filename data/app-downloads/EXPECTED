@@ -55,10 +55,16 @@ android   blocked   WARP-1415   no signing secrets, no tag, no Play listing; box
 ios       blocked   WARP-1955   no distribution pipeline at all; becomes `store` (never `installer`) once TestFlight exists
 
 # macOS — DropletAgent builds a notarized DMG via scripts/release-dmg.sh
-# (WARP-3030), but no OTA release carries it yet: an operator stages each
-# Mac release on each box by hand with stage.sh. `blocked`, not `installer`,
-# because a release cannot carry it yet and `installer` would turn every
-# image build red.
+# (WARP-3030). The OTA release can now carry it (WARP-3120: pinned in
+# clients.lock.json, fetched by publish-release.yml, staged by the box's
+# update), but the lock pins nothing yet. `blocked`, not `installer`, until
+# BOTH hold, in this order, or every image build goes red:
+#   1. clients.lock.json pins a macos build (needs the DROPLET_CLIENT_APPS_TOKEN
+#      secret and a published DropletAgent release);
+#   2. scripts/image/build-iso.sh stages the lock's installers before its
+#      pre-flight audit (WARP-3174; an image is built from a checkout, which has none).
+# Flip this row in the PR that lands the second. tests/app-downloads-audit.test.sh
+# refuses `installer` while the lock pins no macos build.
 macos     blocked   WARP-3120   DropletAgent DMG exists (scripts/release-dmg.sh); staged by hand with stage.sh until the OTA release carries it
 
 # No Linux client is being built.

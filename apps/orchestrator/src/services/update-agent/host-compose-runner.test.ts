@@ -12,7 +12,7 @@
  * exec boundary is faked so the command surface is asserted deterministically.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -240,6 +240,163 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(readFileSync(tarPath)).toEqual(configsTar);
     expect(calls[0]!.args[0]).toBe("stage-configs");
     expect(calls[0]!.args).toContain(tarPath);
+  });
+
+  it("stageClientApp lets the caller write into clients/ then hands the helper that HOST path (WARP-3120)", async () => {
+    const calls: Array<{ args: string[]; timeoutMs?: number }> = [];
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      helperUpdatesDir: "/host/updates",
+      exec: async (_file, args, opts) => {
+        calls.push({ args, timeoutMs: opts?.timeoutMs });
+        return { stdout: "", stderr: "" };
+      },
+    });
+    const client = {
+      platform: "macos" as const,
+      version: "0.2.0",
+      file: "Droplet-0.2.0.dmg",
+      size: 3,
+      sha256: "e".repeat(64),
+    };
+    let written = "";
+    await runner.stageClientApp({
+      updateId: "du-1",
+      client,
+      write: async (dest) => {
+        written = dest;
+        writeFileSync(dest, "dmg");
+      },
+    });
+    expect(written).toBe(path.join(workDir, "du-1", "clients", "Droplet-0.2.0.dmg"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args).toEqual([
+      "stage-client-apps",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-1",
+      "--platform",
+      "macos",
+      "--version",
+      "0.2.0",
+      "--file",
+      "/host/updates/du-1/clients/Droplet-0.2.0.dmg",
+    ]);
+    expect(calls[0]!.timeoutMs).toBeGreaterThan(60_000);
+    // The update dir's copy is gone once stage.sh has it.
+    expect(existsSync(written)).toBe(false);
+  });
+
+  describe("stageClientApp skips what /downloads already serves", () => {
+    const client = {
+      platform: "macos" as const,
+      version: "0.2.0",
+      file: "Droplet-0.2.0.dmg",
+      size: 3,
+      sha256: "e".repeat(64),
+    };
+    function catalogDir(entry: { version: string; name: string; sha256: string }): string {
+      const dir = path.join(workDir, "app-downloads");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        path.join(dir, "catalog.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          platforms: [
+            { platform: "macos", version: entry.version, primary: entry.name,
+              assets: [{ name: entry.name, kind: "installer", size: 3, sha256: entry.sha256 }] },
+          ],
+        }),
+      );
+      return dir;
+    }
+    function runnerWith(appDownloadsDir: string, exec: ExecFn) {
+      return createHostComposeRunner({
+        scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+        composeFile: "/opt/droplet/docker/docker-compose.yml",
+        updatesDir: workDir,
+        appDownloadsDir,
+        exec,
+      });
+    }
+
+    it("same version, file and sha256 → no download, no helper call", async () => {
+      const { fn, calls } = fakeExec();
+      const runner = runnerWith(
+        catalogDir({ version: "0.2.0", name: "Droplet-0.2.0.dmg", sha256: "e".repeat(64) }),
+        fn,
+      );
+      let wrote = false;
+      const outcome = await runner.stageClientApp({
+        updateId: "du-1",
+        client,
+        write: async () => {
+          wrote = true;
+        },
+      });
+      expect(outcome).toBe("already_staged");
+      expect(wrote).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
+
+    it.each([
+      ["a different version", { version: "0.1.0", name: "Droplet-0.2.0.dmg", sha256: "e".repeat(64) }],
+      ["a different sha256", { version: "0.2.0", name: "Droplet-0.2.0.dmg", sha256: "f".repeat(64) }],
+      ["a different file", { version: "0.2.0", name: "Droplet-0.2.0b.dmg", sha256: "e".repeat(64) }],
+    ])("%s in the catalog → downloads and stages", async (_l, entry) => {
+      const { fn, calls } = fakeExec();
+      const runner = runnerWith(catalogDir(entry), fn);
+      const outcome = await runner.stageClientApp({
+        updateId: "du-1",
+        client,
+        write: async (dest) => writeFileSync(dest, "dmg"),
+      });
+      expect(outcome).toBe("staged");
+      expect(calls[0]!.args[0]).toBe("stage-client-apps");
+    });
+
+    it("no catalog at all → downloads and stages", async () => {
+      const { fn, calls } = fakeExec();
+      const runner = runnerWith(path.join(workDir, "nothing-here"), fn);
+      await runner.stageClientApp({ updateId: "du-1", client, write: async (d) => writeFileSync(d, "dmg") });
+      expect(calls).toHaveLength(1);
+    });
+  });
+
+  it("stageClientApp removes the downloaded copy when the helper fails too", async () => {
+    const runner = makeRunner(async () => {
+      throw Object.assign(new Error("Command failed"), { stderr: "no stage.sh" });
+    });
+    let written = "";
+    await expect(
+      runner.stageClientApp({
+        updateId: "du-1",
+        client: { platform: "macos", version: "0.2.0", file: "D.dmg", size: 3, sha256: "e".repeat(64) },
+        write: async (dest) => {
+          written = dest;
+          writeFileSync(dest, "dmg");
+        },
+      }),
+    ).rejects.toThrow("Command failed");
+    expect(existsSync(written)).toBe(false);
+  });
+
+  it("stageClientApp never calls the helper when the download fails", async () => {
+    const { fn, calls } = fakeExec();
+    const runner = makeRunner(fn);
+    await expect(
+      runner.stageClientApp({
+        updateId: "du-1",
+        client: { platform: "macos", version: "0.2.0", file: "D.dmg", size: 1, sha256: "e".repeat(64) },
+        write: async () => {
+          throw new Error("sha256 mismatch");
+        },
+      }),
+    ).rejects.toThrow("sha256 mismatch");
+    expect(calls).toHaveLength(0);
   });
 
   it("recreateServices passes the service list + target and NOT the orchestrator implicitly", async () => {

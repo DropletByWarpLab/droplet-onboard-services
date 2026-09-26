@@ -2,18 +2,19 @@
 # droplet-android — they are never committed here (they'd bloat every
 # clone, and this is not the repo that builds them).
 #
-# NOTHING STAGES THEM FOR YOU. There is no image-build step, no setup.sh
-# path and no OTA payload that puts an installer in this directory; an
-# operator runs scripts/app-downloads/stage.sh on the box. If you are
-# reading this because /downloads is empty, that is why — see README.md,
-# and `bash scripts/app-downloads/audit.sh` will tell you what this
-# release is supposed to carry.
+# Two things put an installer here: an operator running
+# scripts/app-downloads/stage.sh on the box, and (WARP-3120) the box's own
+# OTA update, for the installers clients.lock.json pins. No image-build step
+# or setup.sh path does. If you are reading this because /downloads is
+# empty, see README.md; `bash scripts/app-downloads/audit.sh` will tell you
+# what this release is supposed to carry.
 #
 # Tracked here: only the hand-authored side of the contract, the docs,
-# and EXPECTED — the per-platform declaration the auditor reconciles
-# against what is actually staged.
+# EXPECTED — the per-platform declaration the auditor reconciles against
+# what is actually staged — and clients.lock.json, the pinned installers.
 *
 !.gitignore
 !README.md
 !platforms.example.json
 !EXPECTED
+!clients.lock.json
