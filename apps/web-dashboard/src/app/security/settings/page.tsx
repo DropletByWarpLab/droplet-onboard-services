@@ -7,6 +7,9 @@
  * Settings): the opening hours keep their section, and "Who's told about
  * alerts" (AlertRoutingPanel) follows it.
  *
+ * WARP-2979 (ADR-059 P4 §8) — then "Droplet's AI" (AiSettingsPanel): what
+ * Droplet may do with links on its own, and incident summaries.
+ *
  * When the site is normally open: the usual week, special days, the site's
  * timezone, and the server's own 7-day preview of what it will do with them.
  * Droplet reads this to tell ordinary activity from after-hours activity; it
@@ -28,6 +31,7 @@ import { useMemo } from "react";
 import { Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { AlertRoutingPanel, ROUTING_COPY, SETTINGS_COPY } from "@/components/security/AlertRoutingPanel";
+import { AI_COPY, AiSettingsPanel } from "@/components/security/AiSettingsPanel";
 import {
   BusinessProfileHint,
   COPY,
@@ -175,6 +179,10 @@ export default function SecuritySettingsPage() {
         <h2>{ROUTING_COPY.title}</h2>
       </div>
       <AlertRoutingPanel />
+      <div className="sect">
+        <h2>{AI_COPY.title}</h2>
+      </div>
+      <AiSettingsPanel />
     </ShellPage>
   );
 }

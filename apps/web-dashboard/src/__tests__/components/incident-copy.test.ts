@@ -265,6 +265,44 @@ describe("why Droplet flagged this", () => {
   });
 });
 
+describe("WARP-2979 — camera_offline_during_activity", () => {
+  const dropped = (mode: "closed" | "away" = "closed") =>
+    reason({
+      code: "camera_offline_during_activity",
+      severity: "alert",
+      relatedCamera: "till",
+      detail: {
+        offlineForSec: null,
+        backAt: null,
+        mode,
+        modeSource: "schedule",
+        activity: { eventId: "7", kind: "detection", label: "person", at: at("01:15"), zoneId: "z1", zoneName: "Stock room" },
+      },
+      evidence: { kind: "camera_offline", label: null, at: at("01:16"), summary: "Camera back_cam stopped reporting" },
+    });
+
+  it("its sentence, closed or away", () => {
+    expect(codeSentence(dropped())).toBe(
+      "A camera covering this area stopped reporting soon after someone was seen here, while the site was closed",
+    );
+    expect(codeSentence(dropped("away"))).toBe(
+      "A camera covering this area stopped reporting soon after someone was seen here, while the site was set to away",
+    );
+  });
+
+  it("its evidence line: the camera, when it stopped, and who was seen where and when", () => {
+    expect(evidenceLine(dropped(), label, TZ, NOW)).toBe("Back camera · stopped at 2:16 AM · someone on Till at 2:15 AM");
+    // Without the second camera (an older box), the line still says what stopped and when.
+    expect(evidenceLine({ ...dropped(), relatedCamera: null }, label, TZ, NOW)).toBe("Back camera · stopped at 2:16 AM");
+  });
+
+  it("the card's short name for it", () => {
+    expect(whatLine(summary({ reasonCodes: ["camera_offline_during_activity"] }), TZ, NOW)).toContain(
+      "A camera stopped reporting after someone was seen",
+    );
+  });
+});
+
 describe("who was told", () => {
   const cams = ["Back camera"];
 

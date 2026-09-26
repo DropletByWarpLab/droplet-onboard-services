@@ -60,6 +60,7 @@ import * as HoursEditor from "./HoursEditor";
 import * as LearningList from "./LearningList";
 import * as AckHistory from "./AckHistory";
 import * as AlertRoutingPanel from "./AlertRoutingPanel";
+import * as AiSettingsPanel from "./AiSettingsPanel";
 import * as IncidentCard from "./IncidentCard";
 import * as IncidentList from "./IncidentList";
 import * as IncidentView from "./IncidentView";
@@ -106,6 +107,7 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/AckHistory.tsx": AckHistory,
   "src/components/security/ResolveDialog.tsx": ResolveDialog,
   "src/components/security/AlertRoutingPanel.tsx": AlertRoutingPanel,
+  "src/components/security/AiSettingsPanel.tsx": AiSettingsPanel,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
   // WARP-2981 (P6) — the Security wall.

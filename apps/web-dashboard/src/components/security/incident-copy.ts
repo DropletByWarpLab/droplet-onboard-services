@@ -51,6 +51,8 @@ export const INCIDENT_COPY = {
     after_hours_presence: "Someone inside after hours",
     camera_offline: "A camera stopped reporting",
     threat_signal: "A network or sign-in warning",
+    // WARP-2979 (P4) — a camera a person linked went quiet right after someone was there.
+    camera_offline_during_activity: "A camera stopped reporting after someone was seen",
   },
   codeShortUnknown: "Flagged by Droplet",
   // Under a camera's or the camera system's own title, which camera is already said.
@@ -79,6 +81,11 @@ export const INCIDENT_COPY = {
   sentenceCameraOffline: "A camera stopped reporting for more than a minute",
   sentenceCameraSystemOffline: "The camera system stopped reporting for more than a minute",
   sentenceThreat: "A network or sign-in warning",
+  // WARP-2979 (p4-spec §6.7.2).
+  sentenceDroppedDuringActivityClosed: "A camera covering this area stopped reporting soon after someone was seen here, while the site was closed",
+  sentenceDroppedDuringActivityAway: "A camera covering this area stopped reporting soon after someone was seen here, while the site was set to away",
+  stoppedAt: "stopped at {at}",
+  seenOn: "someone on {camera} at {at}",
   sentenceUnknown: "A reason Droplet flagged",
   modeClosedSchedule: "Closed (opening hours)",
   modeClosedManual: "Closed up",
@@ -262,6 +269,10 @@ export function codeSentence(r: IncidentReasonView): string {
       return r.evidence.camera === null ? INCIDENT_COPY.sentenceCameraSystemOffline : INCIDENT_COPY.sentenceCameraOffline;
     case "threat_signal":
       return INCIDENT_COPY.sentenceThreat;
+    case "camera_offline_during_activity":
+      return detailString(r, "mode") === "away"
+        ? INCIDENT_COPY.sentenceDroppedDuringActivityAway
+        : INCIDENT_COPY.sentenceDroppedDuringActivityClosed;
     case "out_of_place":
     case "unusual_volume":
     case "long_dwell":
@@ -314,6 +325,19 @@ export function evidenceLine(r: IncidentReasonView, cameraLabel: CameraLabel, tz
     case "threat_signal":
       parts = [e.label === "auth" ? INCIDENT_COPY.threatSignIn : e.label === "network" ? INCIDENT_COPY.threatNetwork : null, e.summary, time];
       break;
+    case "camera_offline_during_activity": {
+      // `Back camera · stopped at 2:16 AM · someone on Stock cam at 2:15 AM` — the box sends this
+      // reason only to a viewer who can see both cameras.
+      const activity = r.detail?.activity;
+      const seenAt = activity && typeof activity === "object" && typeof activity.at === "string" ? activity.at : null;
+      const seenCamera = r.relatedCamera ? cameraLabel(r.relatedCamera) : null;
+      parts = [
+        camera,
+        fill(INCIDENT_COPY.stoppedAt, { at: time }),
+        seenAt && seenCamera ? fill(INCIDENT_COPY.seenOn, { camera: seenCamera, at: formatSiteWhen(seenAt, tz, now) }) : null,
+      ];
+      break;
+    }
     case "out_of_place":
     case "unusual_volume":
     case "long_dwell":

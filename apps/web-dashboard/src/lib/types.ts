@@ -4132,8 +4132,16 @@ export type SecurityIncidentGrouping = "collecting" | "closed";
  * `reasons` only once P5 PR-D releases it as counted; until then it is a
  * trial flag, which route 18 sends apart, in `patternFlags` (see
  * IncidentDetail). The copy names every member (incident-copy.ts).
+ * WARP-2979 (P4): `camera_offline_during_activity`, an alert — a camera a
+ * person linked to an area stopped reporting soon after someone was seen
+ * there, while the site was closed or away.
  */
-export type SecurityReasonCode = "after_hours_presence" | "camera_offline" | "threat_signal" | SecurityPatternCode;
+export type SecurityReasonCode =
+  | "after_hours_presence"
+  | "camera_offline"
+  | "threat_signal"
+  | SecurityPatternCode
+  | "camera_offline_during_activity";
 /** Whether the events behind the incident are still kept (they are trimmed after 30 days; the incident stays a year). */
 export type SecurityIncidentEventsKept = "kept" | "partly_removed" | "removed";
 export type SecurityIncidentAckAction = "acknowledge" | "resolve";
@@ -4216,8 +4224,16 @@ export interface IncidentReasonView {
    * zoneKind}`; camera_offline `{offlineForSec, backAt}`; threat_signal
    * `{activityId, kind}`; a counted pattern code (P5 PR-D) the flag's own
    * numbers, which P5 PR-C words — this page shows its name alone.
+   * WARP-2979 — camera_offline_during_activity `{offlineForSec, backAt, mode,
+   * modeSource, activity: {eventId, kind, label, at, zoneId, zoneName}}`.
    */
-  detail: Record<string, string | number | null> | null;
+  detail: Record<string, string | number | null | Record<string, string | number | null>> | null;
+  /**
+   * WARP-2979 — the second camera the evidence names (camera_offline_during_activity:
+   * where the person was seen), else null. The box sends the reason only when
+   * this viewer can see that camera too.
+   */
+  relatedCamera?: string | null;
 }
 
 export interface IncidentAckView {
