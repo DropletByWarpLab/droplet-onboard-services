@@ -27,6 +27,7 @@ without a soundcard.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any, Optional
@@ -52,7 +53,7 @@ from voice.pipeline import (
     transcript_is_actionable,
 )
 from voice.activity import ActivityReporter
-from voice.llm import LLMClient, LLMUnavailable, MockLLM
+from voice.llm import LLMClient, LLMUnavailable, MockLLM, SpokenCue
 from voice.stt import MockSTT, STTUnavailable, StreamingSTT
 from voice.tts import MockTTS, SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
@@ -2253,10 +2254,13 @@ class TestStreamingChunkedSpeak:
             "First sentence here.",
             "Second sentence here.",
         ]
-        # State was 'speaking' during BOTH sentences (never restored between).
-        assert tts.states_during == ["speaking", "speaking"]
-        # A concurrent speak() during EACH sentence was rejected — one lock
-        # held for the whole utterance, not re-acquired per sentence.
+        # A concurrent speak() during EACH sentence's synthesis was rejected —
+        # one lock held for the whole utterance, not re-acquired per sentence.
+        # WARP-3124: synthesis now runs ahead on the producer thread, so the
+        # lock (taken before it starts) covers it too. 'speaking' begins at
+        # the first AUDIO, not the first synth — the state-per-sentence
+        # guarantee is pinned during playback in
+        # TestSynthAhead.test_single_lock_and_speaking_state_hold_across_sentences.
         assert [r.get("error") for r in tts.reentrant_results] == [
             "already_speaking",
             "already_speaking",
@@ -2412,6 +2416,661 @@ class TestStreamingChunkedSpeak:
             "First sentence here.",
             "Second sentence here.",
         ]
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-3124 — synth-ahead speak + spoken cues + per-turn timing
+# ────────────────────────────────────────────────────────────────────
+
+# Bounded waits for cross-thread hand-offs: generous so a loaded CI box never
+# flakes, short enough that a regression fails instead of hanging pytest.
+_HANDOFF_WAIT_S = 2.0
+
+
+class _StampClock:
+    """Strictly increasing timestamps shared by the synth and play fakes.
+
+    `time.monotonic()` ticks in ~15.6 ms steps on Windows, so two causally
+    ordered events (synth N+1 starts, THEN play N ends) can share one stamp
+    and a `<` check can't see the order. This keeps real high-resolution
+    time (`perf_counter`) but never hands out the same value twice, so a
+    stamp taken after another is always larger on every platform."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def __call__(self) -> float:
+        with self._lock:
+            self._last = max(time.perf_counter(), self._last + 1e-6)
+            return self._last
+
+
+_stamp = _StampClock()
+
+
+class _EventLLM(LLMClient):
+    """Client whose `reply_events` yields a SCRIPTED mix of text deltas and
+    `SpokenCue` markers, optionally raising at the end, and records whether
+    the stream was torn down early (GeneratorExit — the WARP-329 abort)."""
+
+    def __init__(self, events, *, raise_at_end: Optional[BaseException] = None):
+        self._events = list(events)
+        self._raise_at_end = raise_at_end
+        self.requests: list[str] = []
+        self.closed = False
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def reply(self, user_text: str, *, tool_choice=None) -> str:
+        return ""
+
+    def reply_events(self, user_text: str, *, tool_choice=None):
+        self.requests.append(user_text)
+        try:
+            for event in self._events:
+                yield event
+            if self._raise_at_end is not None:
+                raise self._raise_at_end
+        except GeneratorExit:
+            self.closed = True
+            raise
+
+
+class _TaggingTTS(MockTTS):
+    """MockTTS whose PCM is the UTF-8 text itself, so a fake player can tell
+    exactly what played. Stamps the start of every synthesis (`_stamp`) and
+    can raise for chosen texts or on the Nth call; `on_synth(text)` runs at
+    the start of each call (on whichever thread synthesizes)."""
+
+    def __init__(
+        self,
+        *,
+        fail_texts: tuple[str, ...] = (),
+        raise_on_call: Optional[int] = None,
+        on_synth=None,
+        available: bool = True,
+    ):
+        super().__init__(available=available)
+        self._fail_texts = fail_texts
+        self._raise_on_call = raise_on_call
+        self._on_synth = on_synth
+        self.synth_starts: list[float] = []
+
+    def synthesize(self, text: str, voice: Optional[str] = None) -> SynthesizedAudio:
+        self.synth_starts.append(_stamp())
+        super().synthesize(text, voice)  # records texts_received / voices
+        if self._on_synth is not None:
+            self._on_synth(text)
+        if text in self._fail_texts or (
+            self._raise_on_call is not None
+            and len(self.texts_received) == self._raise_on_call
+        ):
+            raise TTSUnavailable(f"synth failed for {text!r} (test)")
+        return SynthesizedAudio(
+            pcm=text.encode("utf-8"), sample_rate=22050, sample_width=2, channels=1,
+        )
+
+
+class _TimedPlayer:
+    """Stands in for `WakePipeline._play_pcm`. Records what played (decoded
+    from `_TaggingTTS` PCM) with `_stamp` start/end stamps, the pipeline
+    state and a concurrent speak() result DURING each play, and can raise on
+    the Nth call or run `during(index)` while "playing"."""
+
+    def __init__(self, pipe: WakePipeline, *, raise_on_call=None, during=None):
+        self.pipe = pipe
+        self.played: list[str] = []
+        self.starts: list[float] = []
+        self.ends: list[float] = []
+        self.states_during: list[str] = []
+        self.reentrant_errors: list[Optional[str]] = []
+        self.threads: list[str] = []
+        self.raise_on_call = raise_on_call
+        self.during = during
+
+    def __call__(self, audio: SynthesizedAudio) -> None:
+        index = len(self.played)
+        self.starts.append(_stamp())
+        self.played.append(audio.pcm.decode("utf-8"))
+        self.threads.append(threading.current_thread().name)
+        self.states_during.append(self.pipe.status().state)
+        self.reentrant_errors.append(self.pipe.speak("intruder").get("error"))
+        try:
+            if self.during is not None:
+                self.during(index)
+            if self.raise_on_call is not None and index + 1 == self.raise_on_call:
+                raise RuntimeError("PortAudio write failed (test)")
+        finally:
+            self.ends.append(_stamp())
+
+
+def _wire_turn(llm, tts, *, reporter=None, player_kwargs=None, **pipe_kwargs):
+    """A pipeline mid-turn (state 'transcript_ready', as after
+    _finish_transcription) with the player swapped for a `_TimedPlayer`."""
+    pipe = WakePipeline(
+        detector=pipe_kwargs.pop("detector", None) or MockWakeWordDetector(),
+        input_device_index=0,
+        output_device_index=0,
+        threshold=0.5,
+        tts=tts,
+        llm=llm,
+        activity_reporter=reporter,
+        **pipe_kwargs,
+    )
+    pipe._tts_available = True
+    pipe._llm_available = True
+    pipe._state = "transcript_ready"
+    player = _TimedPlayer(pipe, **(player_kwargs or {}))
+    pipe._play_pcm = player  # instance attribute shadows the method
+    return pipe, player
+
+
+def _synth_threads_alive() -> list[str]:
+    return [
+        t.name for t in threading.enumerate()
+        if t.name == "voice-synth" and t.is_alive()
+    ]
+
+
+class TestSynthAhead:
+    """Sentence N+1 synthesizes while sentence N plays (WARP-3124), under the
+    same single-utterance guarantees WARP-626 established."""
+
+    def test_next_sentence_synthesizes_while_the_current_one_plays(self):
+        sentences = [
+            "First sentence here.",
+            "Second sentence here.",
+            "Third sentence here.",
+        ]
+        started = {s: threading.Event() for s in sentences}
+        tts = _TaggingTTS(on_synth=lambda text: started[text].set())
+        llm = _EventLLM([" ".join(sentences)])
+
+        def during(index: int) -> None:
+            # Hold sentence N "on the speaker" until sentence N+1's synthesis
+            # has begun. A serial loop only synthesizes N+1 after this
+            # returns, so the wait would time out and the asserts below fail.
+            if index + 1 < len(sentences):
+                started[sentences[index + 1]].wait(_HANDOFF_WAIT_S)
+
+        pipe, player = _wire_turn(llm, tts, player_kwargs={"during": during})
+        pipe._default_on_transcript("go now please")
+
+        assert player.played == sentences
+        # Synth N+1 STARTED before play N ENDED — the overlap itself.
+        assert tts.synth_starts[1] < player.ends[0]
+        assert tts.synth_starts[2] < player.ends[1]
+        # Synthesis ran off the turn thread; playback stayed on it.
+        assert "voice-synth" not in player.threads
+        assert _synth_threads_alive() == []
+
+    def test_single_lock_and_speaking_state_hold_across_sentences(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM(["First sentence here. Second sentence here."])
+        pipe, player = _wire_turn(llm, tts)
+        pipe._default_on_transcript("go now please")
+        assert player.played == ["First sentence here.", "Second sentence here."]
+        # 'speaking' from the first audio to the last — never restored between.
+        assert player.states_during == ["speaking", "speaking"]
+        # A concurrent speak() is rejected while each sentence plays: ONE
+        # non-blocking lock for the whole utterance, not one per sentence.
+        assert player.reentrant_errors == ["already_speaking", "already_speaking"]
+        # And released at the end — the next speak() is free to run.
+        assert pipe._speak_lock.acquire(blocking=False)
+        pipe._speak_lock.release()
+
+    def test_playback_failure_stops_the_producer_and_closes_the_stream(self):
+        reporter = _RecordingReporter()
+        tts = _TaggingTTS()
+        llm = _EventLLM([
+            "One sentence here now. Two sentence here now. Three sentence "
+            "here now. Four sentence here now. Five sentence here now.",
+        ])
+        pipe, player = _wire_turn(
+            llm, tts, reporter=reporter,
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            player_kwargs={"raise_on_call": 1},
+        )
+        pipe._default_on_transcript("go now please")
+
+        # WARP-329: the reply stream was torn down (orchestrator aborts),
+        # deterministically — before the turn returned.
+        assert llm.closed is True
+        assert player.played == ["One sentence here now."]
+        # Synth-ahead is bounded: the producer stopped instead of
+        # synthesizing the whole reply into a void.
+        assert len(tts.texts_received) <= 3
+        assert _synth_threads_alive() == []
+        s = pipe.status()
+        assert s.state == "error"
+        assert "playback" in (s.error_message or "")
+        # The speaker was driven, so the anti-feedback cooldown is armed.
+        assert pipe._speak_ended_at is not None
+        fires: list[WakeEvent] = []
+        pipe._on_wake = fires.append
+        pipe._run_wake_detect(_silence_frame())
+        assert fires == []
+        assert reporter.events == ["wake_heard"]
+
+    def test_tts_failure_before_any_audio_closes_stream_without_cooldown(self):
+        tts = _TaggingTTS(raise_on_call=1)
+        llm = _EventLLM(["First sentence here. Second sentence here."])
+        pipe, player = _wire_turn(llm, tts)
+        pipe._default_on_transcript("go now please")
+        assert llm.closed is True
+        assert player.played == []
+        s = pipe.status()
+        assert s.state == "error"
+        assert "(tts)" in (s.error_message or "")
+        # Nothing reached the speaker — no bleed to guard against.
+        assert pipe._speak_ended_at is None
+
+    def test_tts_failure_mid_utterance_closes_stream_and_arms_cooldown(self):
+        tts = _TaggingTTS(raise_on_call=2)
+        llm = _EventLLM([
+            "First sentence here. Second sentence here. Third sentence here.",
+        ])
+        pipe, player = _wire_turn(llm, tts)
+        pipe._default_on_transcript("go now please")
+        assert llm.closed is True
+        assert player.played == ["First sentence here."]
+        assert pipe.status().state == "error"
+        assert pipe._speak_ended_at is not None
+        assert _synth_threads_alive() == []
+
+    def test_llm_break_after_audio_surfaces_llm_error_and_arms_cooldown(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM(
+            ["The camera is online. "],
+            raise_at_end=LLMUnavailable("stream dropped mid-reply (test)"),
+        )
+        pipe, player = _wire_turn(llm, tts)
+        result = pipe._speak_reply_stream("status please", tool_choice=None)
+        assert player.played == ["The camera is online."]
+        assert result["ok"] is False
+        assert result["error_kind"] == "llm"
+        assert "stream dropped" in (pipe.status().error_message or "")
+        assert pipe._speak_ended_at is not None
+
+    def test_unexpected_synth_exception_surfaces_instead_of_hanging(self):
+        class _BuggyTTS(_TaggingTTS):
+            def synthesize(self, text, voice=None):
+                raise ValueError("bug inside the synthesizer (test)")
+
+        llm = _EventLLM(["First sentence here."])
+        pipe, player = _wire_turn(llm, _BuggyTTS())
+        result = pipe._speak_reply_stream("go now please", tool_choice=None)
+        assert result["ok"] is False
+        assert result["error_kind"] == "tts"
+        assert pipe.status().state == "error"
+        assert llm.closed is True
+        assert _synth_threads_alive() == []
+
+    def test_shutdown_mid_utterance_stops_after_the_current_sentence(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM([
+            "First sentence here. Second sentence here. Third sentence here.",
+        ])
+        pipe, player = _wire_turn(llm, tts)
+        player.during = lambda index: pipe._shutdown.set()
+        result = pipe._speak_reply_stream("go now please", tool_choice=None)
+        assert player.played == ["First sentence here."]
+        assert result["ok"] is True
+        assert llm.closed is True
+        assert pipe.status().state != "error"
+        assert pipe._speak_ended_at is not None
+        assert _synth_threads_alive() == []
+
+    def test_second_utterance_is_refused_while_one_is_speaking(self):
+        # The lock stays non-blocking: a second streamed reply started while
+        # the first holds the speaker gets `already_speaking`, never queues.
+        tts = _TaggingTTS()
+        llm = _EventLLM(["First sentence here."])
+        pipe, player = _wire_turn(llm, tts)
+        nested: list[dict] = []
+        player.during = lambda index: nested.append(
+            pipe._speak_reply_stream("again", tool_choice=None),
+        )
+        pipe._speak_reply_stream("go now please", tool_choice=None)
+        assert nested[0]["error"] == "already_speaking"
+        assert llm.requests == ["go now please"]
+
+
+class TestSpokenCues:
+    """A short cue fills the dead air of a tool dispatch or a cold model
+    load (WARP-3124): at most once per turn, never after the answer began,
+    part of the same utterance, and never able to fail a turn."""
+
+    def test_prime_cues_caches_both_phrases(self):
+        tts = MockTTS()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(), input_device_index=0, tts=tts,
+        )
+        pipe._tts_available = True
+        assert pipe.prime_cues() == 2
+        assert sorted(tts.texts_received) == sorted(
+            [pipeline_module.TOOL_CALL_CUE_TEXT, pipeline_module.MODEL_LOADING_CUE_TEXT],
+        )
+        assert pipeline_module.TOOL_CALL_CUE_TEXT == "Let me check."
+        assert pipeline_module.MODEL_LOADING_CUE_TEXT == "One moment."
+
+    def test_prime_cues_skips_when_tts_unavailable_and_never_raises(self):
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(), input_device_index=0,
+            tts=_TaggingTTS(raise_on_call=1),
+        )
+        pipe._tts_available = False
+        assert pipe.prime_cues() == 0
+        pipe._tts_available = True
+        assert pipe.prime_cues() == 1  # first cue failed, second cached
+
+    def test_cue_plays_exactly_once_on_the_first_tool_call(self):
+        reporter = _RecordingReporter()
+        tts = _TaggingTTS()
+        llm = _EventLLM([
+            SpokenCue("tool_call"),
+            SpokenCue("tool_call"),
+            "The front camera is online.",
+        ])
+        pipe, player = _wire_turn(llm, tts, reporter=reporter)
+        assert pipe.prime_cues() == 2
+        tts.texts_received.clear()
+        pipe._default_on_transcript("is the front camera online")
+        assert player.played == ["Let me check.", "The front camera is online."]
+        # Served from the warm-up cache — the turn synthesized only the answer.
+        assert tts.texts_received == ["The front camera is online."]
+        assert reporter.events == ["wake_answered"]
+
+    def test_model_loading_cue_plays(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM([SpokenCue("model_loading"), "Good morning to you."])
+        pipe, player = _wire_turn(llm, tts)
+        pipe.prime_cues()
+        pipe._default_on_transcript("good morning")
+        assert player.played == ["One moment.", "Good morning to you."]
+
+    def test_at_most_one_cue_per_turn(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM([
+            SpokenCue("model_loading"),
+            SpokenCue("tool_call"),
+            "All cameras are online.",
+        ])
+        pipe, player = _wire_turn(llm, tts)
+        pipe.prime_cues()
+        pipe._default_on_transcript("check the cameras")
+        assert player.played == ["One moment.", "All cameras are online."]
+
+    def test_no_cue_after_the_answer_started(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM([
+            "The camera is online. ",
+            SpokenCue("tool_call"),
+            "All good here now.",
+        ])
+        pipe, player = _wire_turn(llm, tts)
+        pipe.prime_cues()
+        pipe._default_on_transcript("check the cameras")
+        assert player.played == ["The camera is online.", "All good here now."]
+
+    def test_cache_miss_synthesizes_the_cue_on_demand(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM([SpokenCue("tool_call"), "All cameras are online."])
+        pipe, player = _wire_turn(llm, tts)
+        pipe._default_on_transcript("check the cameras")
+        assert player.played == ["Let me check.", "All cameras are online."]
+        assert tts.texts_received[0] == "Let me check."
+
+    def test_cue_synthesis_failure_never_fails_the_turn(self):
+        reporter = _RecordingReporter()
+        tts = _TaggingTTS(fail_texts=("Let me check.",))
+        llm = _EventLLM([SpokenCue("tool_call"), "All cameras are online."])
+        pipe, player = _wire_turn(llm, tts, reporter=reporter)
+        pipe._default_on_transcript("check the cameras")
+        assert player.played == ["All cameras are online."]
+        assert pipe.status().state != "error"
+        assert reporter.events == ["wake_answered"]
+
+    def test_cue_is_part_of_the_same_utterance(self):
+        tts = _TaggingTTS()
+        llm = _EventLLM([SpokenCue("tool_call"), "All cameras are online."])
+        pipe, player = _wire_turn(llm, tts)
+        pipe.prime_cues()
+        before = time.time()
+        pipe._default_on_transcript("check the cameras")
+        # Same lock + 'speaking' state through the cue AND the answer.
+        assert player.states_during == ["speaking", "speaking"]
+        assert player.reentrant_errors == ["already_speaking", "already_speaking"]
+        # One cooldown, stamped when the whole utterance (cue + answer) ended.
+        assert pipe._speak_ended_at is not None
+        assert pipe._speak_ended_at >= before
+
+    def test_cue_only_turn_drives_the_speaker_but_is_not_an_answer(self):
+        # tool_call cue plays, then the stream dies before any answer: the
+        # cue counts as real audio (cooldown), but the user heard no reply.
+        reporter = _RecordingReporter()
+        tts = _TaggingTTS()
+        llm = _EventLLM(
+            [SpokenCue("tool_call")],
+            raise_at_end=LLMUnavailable("orchestrator went away (test)"),
+        )
+        pipe, player = _wire_turn(llm, tts, reporter=reporter)
+        pipe.prime_cues()
+        pipe._default_on_transcript("check the cameras")
+        assert player.played == ["Let me check."]
+        assert pipe.status().state == "error"
+        assert pipe._speak_ended_at is not None
+        assert reporter.events == ["wake_heard"]
+
+    def test_cue_never_reaches_the_sentence_chunker(self):
+        # Partial text buffered in the chunker when the cue arrives is not
+        # an answer sentence yet — the cue plays, then the full sentence.
+        tts = _TaggingTTS()
+        llm = _EventLLM(["Sure, ", SpokenCue("tool_call"), "the camera is online."])
+        pipe, player = _wire_turn(llm, tts)
+        pipe.prime_cues()
+        pipe._default_on_transcript("check the camera")
+        assert player.played == ["Let me check.", "Sure, the camera is online."]
+
+
+class TestVoiceTurnTiming:
+    """ONE structured `voice_turn_timing` INFO line per turn (WARP-3124),
+    mirrored on /voice/status as `last_turn_timing`."""
+
+    FIELDS = {
+        "outcome",
+        "wake_to_capture_ms",
+        "speech_ms",
+        "capture_ms",
+        "vad_end",
+        "stt_ms",
+        "first_delta_ms",
+        "first_audio_ms",
+        "first_answer_audio_ms",
+        "total_ms",
+        "cue",
+        "sentences",
+        "error_kind",
+        "ended_at",
+    }
+
+    @staticmethod
+    def _timing_lines(caplog) -> list[dict]:
+        prefix = "voice_turn_timing "
+        return [
+            json.loads(r.getMessage()[len(prefix):])
+            for r in caplog.records
+            if r.name == "voice.pipeline" and r.getMessage().startswith(prefix)
+        ]
+
+    def _pipe(self, llm, tts=None, transcripts=("is the front camera online",), **kw):
+        stt = _RecordingSTT(scripted_transcripts=list(transcripts))
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            tts=tts or _TaggingTTS(),
+            llm=llm,
+            stt_max_record_s=kw.pop("stt_max_record_s", 0.05),
+            **kw,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = True
+        player = _TimedPlayer(pipe)
+        pipe._play_pcm = player
+        return pipe, player
+
+    @staticmethod
+    def _drive_capped_turn(pipe) -> None:
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin transcription + chunk
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())  # max-record cap → transcript → turn
+
+    def test_tool_turn_emits_one_line_with_every_field(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM([SpokenCue("tool_call"), "The front camera is online."])
+        pipe, player = self._pipe(llm)
+        self._drive_capped_turn(pipe)
+
+        lines = self._timing_lines(caplog)
+        assert len(lines) == 1
+        t = lines[0]
+        assert set(t) == self.FIELDS
+        assert t["outcome"] == "answered"
+        assert t["vad_end"] == "cap"
+        assert t["cue"] == "tool_call"
+        assert t["sentences"] == 1
+        assert t["error_kind"] is None
+        for key in (
+            "wake_to_capture_ms", "speech_ms", "capture_ms", "stt_ms",
+            "first_delta_ms", "first_audio_ms", "first_answer_audio_ms",
+            "total_ms",
+        ):
+            assert isinstance(t[key], int) and t[key] >= 0, key
+        assert t["capture_ms"] >= 50  # the capped capture window
+        # The cue is the first audio; the answer follows it.
+        assert t["first_audio_ms"] <= t["first_answer_audio_ms"] <= t["total_ms"]
+        assert isinstance(t["ended_at"], float)
+
+    def test_vad_silence_end_and_speech_duration(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        pipe, _ = self._pipe(
+            _EventLLM(["Turning them on now."]),
+            transcripts=("turn on the lights",),
+            stt_max_record_s=100.0,
+            vad_silence_s=0.2,
+            vad_min_speech_s=0.0,
+            vad_speech_rms=300.0,
+        )
+        speech = np.full(WAKE_FRAME_SAMPLES, 6000, dtype=np.int16)
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(speech)            # begin + speech
+        pipe._on_frame(speech)
+        for _ in range(4):                # trailing silence trips VAD
+            pipe._on_frame(_silence_frame())
+        (t,) = self._timing_lines(caplog)
+        assert t["vad_end"] == "silence"
+        assert t["speech_ms"] == 160  # two 80 ms speech frames
+        assert t["cue"] is None
+        assert t["first_audio_ms"] == t["first_answer_audio_ms"]
+
+    def test_fragment_turn_logs_with_nulls_for_skipped_stages(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM(["should never be asked"])
+        pipe, player = self._pipe(llm, transcripts=("it.",))
+        self._drive_capped_turn(pipe)
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "fragment"
+        assert t["stt_ms"] is not None
+        for key in ("first_delta_ms", "first_audio_ms", "first_answer_audio_ms", "cue"):
+            assert t[key] is None, key
+        assert t["sentences"] == 0
+        assert llm.requests == []
+
+    def test_no_llm_turn_logs(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        pipe, _ = self._pipe(_EventLLM(["unused"]))
+        pipe._llm_available = False
+        self._drive_capped_turn(pipe)
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "no_llm"
+        assert t["first_audio_ms"] is None
+
+    def test_empty_transcript_turn_logs(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        pipe, _ = self._pipe(_EventLLM(["unused"]), transcripts=("",))
+        self._drive_capped_turn(pipe)
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "empty"
+
+    def test_error_turn_logs_the_error_kind(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM([], raise_at_end=LLMUnavailable("orchestrator down (test)"))
+        pipe, _ = self._pipe(llm)
+        self._drive_capped_turn(pipe)
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "error"
+        assert t["error_kind"] == "llm"
+        assert t["first_delta_ms"] is None
+        assert t["first_audio_ms"] is None
+
+    def test_tts_unavailable_turn_logs_the_tts_error_kind(self, caplog):
+        # Piper down: the speak path bails before the reply stream opens.
+        # The line still says why, instead of an error with a null kind.
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM(["never synthesized"])
+        pipe, player = self._pipe(llm)
+        pipe._tts_available = False
+        self._drive_capped_turn(pipe)
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "error"
+        assert t["error_kind"] == "tts"
+        assert player.played == []
+        assert llm.requests == []  # the reply stream was never opened
+
+    def test_busy_speaker_turn_logs_the_busy_error_kind(self, caplog):
+        # Another utterance (e.g. POST /voice/say) holds the speaker.
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM(["never spoken"])
+        pipe, player = self._pipe(llm)
+        assert pipe._speak_lock.acquire(blocking=False)
+        try:
+            self._drive_capped_turn(pipe)
+        finally:
+            pipe._speak_lock.release()
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "error"
+        assert t["error_kind"] == "busy"
+        assert player.played == []
+        assert llm.requests == []
+
+    def test_status_carries_the_last_turn_timing(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        pipe, _ = self._pipe(_EventLLM(["The front camera is online."]))
+        assert pipe.status().last_turn_timing is None
+        self._drive_capped_turn(pipe)
+        (logged,) = self._timing_lines(caplog)
+        s = pipe.status()
+        assert s.last_turn_timing == logged
+        assert s.to_dict()["last_turn_timing"] == logged
+        # A snapshot, not a live reference into pipeline state.
+        s.last_turn_timing["outcome"] = "mutated"
+        assert pipe.status().last_turn_timing["outcome"] == "answered"
+
+    def test_calibration_wake_starts_no_turn_timing(self, caplog):
+        caplog.set_level("INFO", logger="voice.pipeline")
+        pipe, _ = self._pipe(_EventLLM(["unused"]))
+        pipe.enter_calibration_mode()
+        pipe._on_frame(_silence_frame())  # wake — counted, not handled
+        assert self._timing_lines(caplog) == []
+        assert pipe.status().last_turn_timing is None
 
 
 # ────────────────────────────────────────────────────────────────────

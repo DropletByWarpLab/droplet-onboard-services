@@ -349,7 +349,9 @@ _WARMUP_STT_PCM = b"\x00\x00" * 160
 
 
 def _warm_up_upstreams(
-    stt: Optional[StreamingSTT], tts: Optional[TextToSpeech],
+    stt: Optional[StreamingSTT],
+    tts: Optional[TextToSpeech],
+    pipeline: Optional[WakePipeline] = None,
 ) -> None:
     """Prime STT + TTS off the critical path (WARP-1433).
 
@@ -358,23 +360,46 @@ def _warm_up_upstreams(
     clients and for any upstream that isn't reachable right now. main.py runs
     this on a background daemon thread after pipeline.start(), so it never
     blocks startup or /health.
+
+    WARP-3124: once the Piper voice and STT are warm, it also
+    pre-synthesizes the pipeline's spoken cues ("Let me check." / "One
+    moment."), so a cue plays from memory the moment a tool dispatch or cold
+    model load begins. The cues go LAST: every first utterance needs STT
+    warm, only a tool or cold-model turn needs a cue.
     """
-    _warm_up_tts(tts)
+    tts_warm = _warm_up_tts(tts)
     _warm_up_stt(stt)
+    if tts_warm:
+        _warm_up_cues(pipeline)
 
 
-def _warm_up_tts(tts: Optional[TextToSpeech]) -> None:
+def _warm_up_tts(tts: Optional[TextToSpeech]) -> bool:
+    """Returns True when Piper answered the warm-up synth."""
     # MockTTS has no real Piper to warm — skip so a dev box does no work.
     if tts is None or isinstance(tts, MockTTS):
-        return
+        return False
     try:
         if not tts.available:
             logger.info("voice TTS warm-up skipped — Piper not reachable yet")
-            return
+            return False
         tts.synthesize(_WARMUP_TTS_TEXT)
         logger.info("voice TTS warm-up done — Piper voice loaded")
+        return True
     except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
         logger.info("voice TTS warm-up skipped: %s", exc)
+        return False
+
+
+def _warm_up_cues(pipeline: Optional[WakePipeline]) -> None:
+    # WARP-3124 — a cue that isn't cached synthesizes on first use instead,
+    # so a failure here only costs that one cue a Piper round trip.
+    if pipeline is None:
+        return
+    try:
+        cached = pipeline.prime_cues()
+        logger.info("voice cue warm-up done — %d cue(s) cached", cached)
+    except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
+        logger.info("voice cue warm-up skipped: %s", exc)
 
 
 def _warm_up_stt(stt: Optional[StreamingSTT]) -> None:
@@ -459,9 +484,10 @@ def _build_and_start_pipeline() -> None:
         _activity_reporter = build_reporter_from_env()
         # WARP-1119 — build the persona fetcher FIRST so the same instance
         # is shared by the LLM's greeting path and /health's observability
-        # fields. Prime it once off the event loop: the result is cached
-        # for the short TTL and, more importantly, /health shows a real
-        # fetch_ok immediately instead of null until the first greeting.
+        # fields. Prime it once: get_block() starts the first fetch in the
+        # background (WARP-3124 — it never blocks), so the block is normally
+        # cached before the first greeting and /health shows a real
+        # fetch_ok within seconds instead of null until the first greeting.
         # A failed prime is fine — greeting turns fall back and retry.
         _persona_fetcher = build_persona_fetcher_from_env()
         if _persona_fetcher is not None:
@@ -532,8 +558,9 @@ def _build_and_start_pipeline() -> None:
         _teardown_voice_runtime()
         return
     # WARP-1433 — prime STT + TTS off the critical path so the first real
-    # utterance isn't cold. Fire-and-forget on a daemon thread:
-    # best-effort, runs once, never blocks startup or /health.
+    # utterance isn't cold (WARP-3124: and cache the spoken cues).
+    # Fire-and-forget on a daemon thread: best-effort, runs once, never
+    # blocks startup or /health.
     #
     # WARP-1599 — spawned BELOW the try, with its own guard. Inside it,
     # a `Thread.start()` that raised (thread/memory exhaustion) would
@@ -545,7 +572,7 @@ def _build_and_start_pipeline() -> None:
     try:
         threading.Thread(
             target=_warm_up_upstreams,
-            args=(stt, tts),
+            args=(stt, tts, _pipeline),
             name="voice-warmup",
             daemon=True,
         ).start()
@@ -607,8 +634,11 @@ def _teardown_voice_runtime() -> bool:
     pooled httpx client or a parked reporter thread per toggle.
 
     Ordering matters. The pipeline worker holds the same LLM client and
-    persona fetcher, so those are only closed once `stop()` has joined
-    it and no reply()/persona fetch can still be in flight.
+    persona fetcher, so those are only closed once `stop()` has joined it.
+    Two background requests can still be in flight then (WARP-3124): a
+    synth-ahead producer that outlived its bounded join (its utterance is
+    already over, so nothing it still reads is spoken) and a persona
+    refresh, which the fetcher's close() waits for, bounded.
     """
     global _pipeline, _activity_reporter, _llm, _persona_fetcher
     global _draining_pipeline
@@ -648,8 +678,8 @@ def _teardown_voice_runtime() -> bool:
             logger.warning("activity reporter stop raised", exc_info=True)
         _activity_reporter = None
     # WARP-1433 — close the pooled httpx clients now that the pipeline worker
-    # has joined (no reply()/persona fetch is in flight). Both are
-    # best-effort: teardown must never raise.
+    # has joined (see the docstring for the background requests that may
+    # still be in flight). Both are best-effort: teardown must never raise.
     if _llm is not None:
         try:
             _llm.close()
@@ -717,6 +747,29 @@ class HealthResponse(BaseModel):
     # silently for months.
     personaFetchOk: Optional[bool] = None
     personaLastFetchAt: Optional[float] = None
+
+
+class VoiceTurnTiming(BaseModel):
+    """WARP-3124 — one voice turn's latency breakdown (see
+    voice/pipeline.py `_TurnTiming.summary`). Whole milliseconds measured
+    with time.monotonic(); null where the stage didn't happen this turn.
+    `first_*_ms` count from the transcript; `total_ms` from the wake."""
+
+    # answered | no_reply | error | empty | fragment | no_llm
+    outcome: str
+    wake_to_capture_ms: Optional[int] = None
+    speech_ms: Optional[int] = None       # voiced audio the VAD counted
+    capture_ms: Optional[int] = None      # capture-open → end of speech
+    vad_end: Optional[str] = None         # silence | cap
+    stt_ms: Optional[int] = None          # end of speech → transcript
+    first_delta_ms: Optional[int] = None  # → first content delta
+    first_audio_ms: Optional[int] = None  # → first audio (cue or answer)
+    first_answer_audio_ms: Optional[int] = None
+    total_ms: Optional[int] = None
+    cue: Optional[str] = None             # tool_call | model_loading
+    sentences: int = 0                    # answer sentences played
+    error_kind: Optional[str] = None      # tts | playback | llm | busy
+    ended_at: Optional[float] = None      # wall time the turn ended
 
 
 class VoiceStatusResponse(BaseModel):
@@ -791,6 +844,10 @@ class VoiceStatusResponse(BaseModel):
     # expiry the wizard renews; None when the mode is off.
     calibration_mode: bool = False
     calibration_mode_expires_at: Optional[float] = None
+    # WARP-3124 — the last voice turn's latency breakdown: the same fields
+    # as its `voice_turn_timing` log line (whole ms, null where a stage
+    # didn't happen). Null until the first turn completes.
+    last_turn_timing: Optional[VoiceTurnTiming] = None
 
 
 class SayRequest(BaseModel):
@@ -1070,6 +1127,11 @@ def voice_status() -> VoiceStatusResponse:
         dsp_last_restart_at=s.dsp_last_restart_at,
         calibration_mode=s.calibration_mode,
         calibration_mode_expires_at=s.calibration_mode_expires_at,
+        last_turn_timing=(
+            VoiceTurnTiming(**s.last_turn_timing)
+            if s.last_turn_timing is not None
+            else None
+        ),
     )
 
 

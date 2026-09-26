@@ -8,6 +8,20 @@
 > model (`gpt-oss:20b`, the architecture-guard one-model rule stands). Every win
 > here is streaming, prompt-shape, or wiring — not a model swap.
 
+## Status (2026-09-25)
+
+Waves A–E are shipped on `stage`. The wave sections below stay as the design
+record; this table is the current state. Wave 2 is the last section.
+
+| Wave | Ticket | PR | Status |
+|---|---|---|---|
+| A — wake word | WARP-1431 | #1183 | Shipped, then superseded by WARP-3128: the default is back to "hey droplet" only, because the bare "droplet" false-woke on ambient speech. |
+| B — streaming + sentence-chunked TTS | WARP-626 | #1187 | Shipped. |
+| C — voice turn shaping | WARP-1432 | #1185 | Shipped: `max_tokens`, `allowed_tools`, `ephemeral`. The reasoning-effort hint never shipped in voice-io; WARP-3123 sends it from ai-gateway. |
+| D — connection reuse + warm-up | WARP-1433 | #1190 | Shipped. |
+| E — capture/VAD tuning + config hygiene | WARP-1434 | #1190 | Shipped: `VAD_SILENCE_S` 0.6 s, VAD knobs env-wired, Whisper threads aligned to its `cpus` quota (2 / 2.0). WARP-3126 raises both to 4. |
+| Wave 2 | WARP-3123..3127 | — | In progress (see the Wave 2 section). |
+
 ## Where the time actually goes
 
 Measured/traced end-to-end from the four voice-io layers (`wake.py`, `stt.py`,
@@ -25,9 +39,13 @@ for a tool question. The dominant costs, ranked:
 | 6 | **No warm-up** — first utterance after boot pays cold CTranslate2 init; first *spoken* reply can race a 70 MB Piper voice download inside a 15 s timeout. | `main.py:298-302`, `tts.py:62` | **D** |
 | 7 | **1.0 s silence tail on every turn** + `STT_MAX_RECORD_S` drift (code/README say 3.0, box runs 5.0) + `--cpu-threads 4` inside `cpus: 2.0`. | `pipeline.py:290`, `docker-compose.yml:1750`, `:1823` | **E** |
 
-**Not the problem** (don't touch): Ollama `keep_alive` is a correct 24 h
-(`docker-compose.yml:2080`); `max_iter:2` is already tuned down; `--beam-size 1`
-is already greedy-optimal; STT is already 16 kHz-native with no disk I/O.
+**Not the problem** (don't touch): `max_iter:2` is already tuned down;
+`--beam-size 1` is already greedy-optimal; STT is already 16 kHz-native with no
+disk I/O. Model residency is short on purpose: `OLLAMA_KEEP_ALIVE` defaults to
+`5m` (WARP-1826, the `ollama` service in `docker/docker-compose.yml`), not 24 h.
+A day-long keep-alive pinned a bad CPU placement long after VRAM freed. Don't
+raise it for latency. The cold load after an idle gap is covered by the
+`model_loading` spoken cue (WARP-3124) and warm-on-wake (WARP-3127).
 
 The single highest-leverage change is **#1 (streaming)** — the overview doc
 already predicts it "would roughly halve perceived latency." Everything else
@@ -134,8 +152,61 @@ accepts `max_tokens` (`llm.ts:156`), `ephemeral` (`:176`), and `allowed_tools`.
 
 Waves B/C/D/E all touch `voice/llm.py` and/or `pipeline.py`, so they sequence
 (B → C → D → E, each rebased on the prior); **A is independent** and ships first.
-Each wave is one ticket → one branch off `main` → one PR through the harness
-(dev → qa → [ux] → manager → code-reviewer). **No merges to prod and no on-box
-changes without sign-off** (hard rule 1). Box verification is the gated finale:
-after the PRs merge, reflash `192.168.1.87` onto the new `main` and measure
-time-to-first-audio + run the wake-word soak — plan-then-confirm.
+Each wave is one ticket → one branch off `stage` → one PR into `stage` through
+the harness (dev → qa → [ux] → manager → code-reviewer). `stage` is the
+integration branch; `main` only moves through the periodic "Promote stage to
+main" PRs. **No merges to prod and no on-box changes without sign-off** (hard
+rule 1). Box verification is the gated finale: after the PRs merge, reflash
+`192.168.1.87` onto a build that carries them, measure time-to-first-audio
+(the `voice_turn_timing` line below) and run the wake-word soak —
+plan-then-confirm.
+
+## Wave 2 (WARP-3123..3127)
+
+Waves A–E made the reply stream. What was left is dead air and serial work
+inside a turn: a tool question sat silent for 8–15 s (two model round trips
+plus the dispatch, with the first round's text held back by WARP-1602), each
+sentence was synthesized only after the previous one finished playing, and
+nothing measured where a turn's time went. Scope approved 2026-09-25. The five
+tickets are parallel branches off `stage`, each kept to its own files so they
+merge in any order:
+
+| Ticket | Where | Change |
+|---|---|---|
+| WARP-3123 | `services/ai-gateway` | Send the reasoning-effort hint to DMR (the Wave C item that never shipped). |
+| WARP-3124 | `services/voice-io` | Spoken cues, synth-ahead TTS, the per-turn timing line, and a persona fetch that never blocks a turn (details below). |
+| WARP-3125 | orchestrator + `voice/llm.py` | Cache-stable voice prompt: explicit `allowed_tools` tool selection, one system message for the voice caller, and time context that doesn't break the cached prefix. |
+| WARP-3126 | compose | Whisper gets 4 CPUs and 4 threads. |
+| WARP-3127 | orchestrator + voice-io wake site | Warm-on-wake: `POST /api/llm/warm` at the wake, so a cold model loads while the user is still talking. |
+
+WARP-3124 in detail:
+
+- **Spoken cues.** voice-io reads the orchestrator's `tool_call` and
+  `model_loading` SSE frames (`OrchestratorLLM.reply_events`). The first
+  `tool_call` plays "Let me check."; `model_loading` plays "One moment." Both
+  are synthesized once at warm-up (`WakePipeline.prime_cues`). At most one cue
+  per turn, never once the answer has started, and a cue that can't be
+  synthesized is skipped, never a failed turn. A cue is ordinary `speaking`
+  audio: same `_speak_lock`, same single post-speak cooldown. There is no new
+  pipeline state.
+- **Synth-ahead.** A per-turn `voice-synth` producer thread reads the reply
+  stream and synthesizes sentence N+1 while the turn thread plays sentence N,
+  over a one-slot hand-off. The producer is the only thread that advances the
+  reply generator, so it also closes it (the WARP-329 SSE teardown) on any
+  bail-out.
+- **`voice_turn_timing`.** Exactly one INFO line per turn, JSON, whole ms from
+  `time.monotonic()`, null where a stage didn't happen: `outcome`,
+  `wake_to_capture_ms`, `speech_ms`, `capture_ms`, `vad_end`
+  (`silence`/`cap`), `stt_ms`, `first_delta_ms`, `first_audio_ms`,
+  `first_answer_audio_ms`, `total_ms`, `cue`, `sentences`, `error_kind`,
+  `ended_at`. The `first_*` fields count from the transcript and `total_ms`
+  counts from the wake. The last turn is also on `/voice/status` as
+  `last_turn_timing`.
+- **Persona stale-while-revalidate.** `PersonaFetcher.get_block()` returns the
+  cached block at once and refreshes in the background once the 60 s TTL
+  passes. A failed refresh keeps the last good block; `/health` still reports
+  the failure.
+
+Still on the hot path, left for a follow-up: `OrchestratorLLM._current_model()`
+(WARP-3047) makes a synchronous `GET /api/llm/models` (2 s timeout) once per
+30 s TTL, inside the chat-body build.

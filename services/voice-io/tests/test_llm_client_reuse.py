@@ -170,17 +170,28 @@ class TestPersonaClientReuse:
 
     def test_client_reused_across_fetches(self, monkeypatch):
         count = {"n": 0}
+        gets = {"n": 0}
+        ok = _ok_transport()
+
+        def _counting(req: httpx.Request) -> httpx.Response:
+            gets["n"] += 1
+            return ok.handle_request(req)
 
         def _factory() -> httpx.Client:
             count["n"] += 1
-            return httpx.Client(transport=_ok_transport())
+            return httpx.Client(transport=httpx.MockTransport(_counting))
 
         monkeypatch.setattr(voice.persona, "_new_httpx_client", _factory)
-        # ttl_s=0 forces a real fetch on every get_block(), so two calls
-        # exercise reuse rather than the in-session cache.
+        # ttl_s=0 makes every get_block() stale, so each call starts a real
+        # fetch — in the background since WARP-3124, so wait each one out
+        # (else the single-flight guard absorbs the second). Two completed
+        # fetches exercise reuse rather than the in-session cache.
         f = PersonaFetcher("http://test", ttl_s=0.0)
         f.get_block()
+        assert f.wait_for_refresh(5.0)
         f.get_block()
+        assert f.wait_for_refresh(5.0)
+        assert gets["n"] == 2
         assert count["n"] == 1
 
     def test_close_closes_pooled_client(self, monkeypatch):

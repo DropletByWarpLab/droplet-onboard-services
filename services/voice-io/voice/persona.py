@@ -16,20 +16,27 @@ surface. So:
   - tool-enabled path — untouched; the orchestrator base prompt is the
     single persona owner there (exactly one block per path, §16).
 
-Fetch semantics: per session start, never a long-lived cross-session
-cache — a short TTL (default 60 s) keeps greeting bursts from hammering
-the orchestrator and keeps a DOWN orchestrator from adding a connect
-timeout to every single greeting. Failures never raise: the caller falls
-back to the built-in prompt (voice must never break because the
-orchestrator is restarting) and the failure is LOUD — a warn log plus
-`fetch_ok` / `last_fetch_at`, surfaced on `/health` (`:8086`, the
-WARP-1092 precedent) so a rotated service token shows up in health, not as
-months of undiagnosed drift.
+Fetch semantics — stale-while-revalidate (WARP-3124): a greeting turn never
+waits on this GET. `get_block()` returns whatever is cached right now and,
+once the short TTL (default 60 s) has passed, starts ONE background refresh;
+the next greeting sees the result. Refreshes only start from a greeting, so
+a Settings change is heard on the SECOND greeting after it lands (the first
+one past the TTL still speaks the old block while it triggers the refresh),
+without a restart. The very first call (nothing cached yet) returns
+None — the built-in greeting prompt — while the first fetch runs; main.py
+primes at pipeline build so that fetch has normally landed before anyone
+speaks. The TTL also paces failures, so a DOWN orchestrator is asked at most
+once per TTL. Failures never raise, and a failed refresh keeps the last good
+block (a restarting orchestrator must not strip the owner's persona). The
+failure is still LOUD — a warn log plus `fetch_ok` / `last_fetch_at`,
+surfaced on `/health` (`:8086`, the WARP-1092 precedent) so a rotated service
+token shows up in health, not as months of undiagnosed drift.
 """
 from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Callable, Optional
 
@@ -55,20 +62,24 @@ def _new_httpx_client() -> httpx.Client:
 
 DEFAULT_PERSONA_PROMPT_PATH = "/api/persona/prompt"
 # Short in-session TTL (§14): a greeting burst inside one interaction is
-# served from cache; the next session (anything later than this) re-fetches
-# so a Settings change is live on the next voice session without a restart.
+# served from cache; the first greeting later than this starts a background
+# re-fetch (WARP-3124 stale-while-revalidate), so a Settings change is live
+# from the greeting after that one, without a restart.
 DEFAULT_PERSONA_TTL_S = 60.0
-# Keep the greeting path snappy: this rides synchronously in front of the
-# LLM call, so it gets the health-probe budget, not the chat budget.
+# The health-probe budget, not the chat budget. The GET runs on a background
+# refresh thread (WARP-3124), so this bounds how long a refresh — and close()
+# waiting on one — can take; it is never added to a greeting turn.
 DEFAULT_PERSONA_TIMEOUT_S = 2.0
 
 
 class PersonaFetcher:
     """Fetch (and briefly cache) the orchestrator's composed persona block.
 
-    Thread-safety note: called only from the single pipeline worker thread
-    (plus one optional startup prime before the worker exists), so plain
-    attributes are fine — same model as the rest of the pipeline state.
+    Thread-safety: `get_block()` runs on the pipeline worker thread (and once
+    at startup for the prime); refreshes run on a short-lived background
+    thread; /health reads `fetch_ok` / `last_fetch_at`. `_lock` guards the
+    cache and the single-flight flag, so at most one refresh is in flight and
+    a reader never sees a half-updated cache.
     """
 
     def __init__(
@@ -94,57 +105,118 @@ class PersonaFetcher:
         self.last_fetch_at: Optional[float] = None  # wall time (time.time())
 
         self._cached: Optional[str] = None
-        self._cached_at: Optional[float] = None  # via time_source
+        # When the cache was last settled (a refresh finished, either way),
+        # via time_source. None = never attempted → the first get_block()
+        # starts a refresh.
+        self._cached_at: Optional[float] = None
+        # WARP-3124 — single-flight background refresh + shutdown latch.
+        self._lock = threading.Lock()
+        self._refreshing = False
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._closed = False
         # WARP-1433 — ONE pooled httpx.Client reused across every fetch and
         # closed on shutdown; the mTLS material is applied once, on the pool.
         self._client = _new_httpx_client()
 
     def get_block(self) -> Optional[str]:
-        """The composed persona block, or None (caller falls back to the
-        built-in greeting prompt). Never raises."""
+        """The cached persona block, or None (caller falls back to the
+        built-in greeting prompt). Never raises and never waits on the
+        network: once the TTL has passed it starts ONE background refresh
+        and returns the stale value right away (stale-while-revalidate)."""
         now = self._time_source()
-        if self._cached_at is not None and (now - self._cached_at) < self._ttl_s:
-            return self._cached
-        return self._fetch(now)
+        with self._lock:
+            block = self._cached
+            stale = self._cached_at is None or (now - self._cached_at) >= self._ttl_s
+            if stale and not self._refreshing and not self._closed:
+                self._start_refresh_locked()
+        return block
 
-    def _fetch(self, now: float) -> Optional[str]:
-        self.last_fetch_at = time.time()
-        self._cached_at = now  # both outcomes hold for the TTL
+    def wait_for_refresh(self, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for an in-flight background refresh.
+        Returns True once none is running. Used by close() and tests — the
+        greeting path never calls it."""
+        with self._lock:
+            thread = self._refresh_thread
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
+
+    def _start_refresh_locked(self) -> None:
+        """Spawn the one background refresh. Caller holds `_lock`."""
+        thread = threading.Thread(
+            target=self._refresh, name="persona-refresh", daemon=True,
+        )
+        self._refreshing = True
+        try:
+            thread.start()
+        except RuntimeError as exc:  # thread exhaustion — retry next call
+            self._refreshing = False
+            logger.warning("persona refresh not started: %s", exc)
+            return
+        self._refresh_thread = thread
+
+    def _refresh(self) -> None:
+        try:
+            self._fetch()
+        finally:
+            with self._lock:
+                self._refreshing = False
+
+    def _fetch(self) -> None:
+        """One GET on the refresh thread. Settles the cache + health fields;
+        never raises."""
+        attempted_at = time.time()
         try:
             resp = self._client.get(
                 f"{self._base_url}{self._path}",
                 timeout=self._timeout_s,
                 headers=self._headers(),
             )
-        except (httpx.HTTPError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 — see below
+            # httpx / OS errors, or a client closed during shutdown: the
+            # refresh thread must record the failure, never die on it.
             logger.warning(
-                "persona fetch failed (%s%s): %s — greeting turns use the "
-                "built-in prompt until the next attempt",
+                "persona fetch failed (%s%s): %s — greeting turns keep the "
+                "last good persona (or the built-in prompt) until the next "
+                "attempt",
                 self._base_url,
                 self._path,
                 exc,
             )
-            self.fetch_ok = False
-            self._cached = None
-            return None
+            self._settle(ok=False, attempted_at=attempted_at)
+            return
 
         if not resp.is_success:
             logger.warning(
-                "persona fetch returned %s from %s%s — greeting turns use "
-                "the built-in prompt until the next attempt (a 401/403 here "
-                "usually means a rotated ORCHESTRATOR_TOKEN)",
+                "persona fetch returned %s from %s%s — greeting turns keep "
+                "the last good persona (or the built-in prompt) until the "
+                "next attempt (a 401/403 here usually means a rotated "
+                "ORCHESTRATOR_TOKEN)",
                 resp.status_code,
                 self._base_url,
                 self._path,
             )
-            self.fetch_ok = False
-            self._cached = None
-            return None
+            self._settle(ok=False, attempted_at=attempted_at)
+            return
 
-        self.fetch_ok = True
         block = (resp.text or "").strip()
-        self._cached = block or None  # an empty block is "no persona set"
-        return self._cached
+        # An empty block is a real answer: "no persona set".
+        self._settle(ok=True, attempted_at=attempted_at, block=block or None)
+
+    def _settle(
+        self, *, ok: bool, attempted_at: float, block: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            self.fetch_ok = ok
+            self.last_fetch_at = attempted_at
+            # Both outcomes hold for the TTL, so a down orchestrator is asked
+            # at most once per TTL.
+            self._cached_at = self._time_source()
+            if ok:
+                self._cached = block
+            # A failure keeps whatever was cached: the last good block, or
+            # None when nothing good was ever fetched.
 
     def _headers(self) -> dict[str, str]:
         h = {"Accept": "text/plain"}
@@ -153,7 +225,12 @@ class PersonaFetcher:
         return h
 
     def close(self) -> None:
-        """Close the pooled httpx.Client (WARP-1433). Idempotent."""
+        """Close the pooled httpx.Client (WARP-1433). Idempotent. Starts no
+        further refresh and waits, bounded by the fetch timeout, for one in
+        flight so it isn't cut off mid-request."""
+        with self._lock:
+            self._closed = True
+        self.wait_for_refresh(self._timeout_s + 1.0)
         self._client.close()
 
 
