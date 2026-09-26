@@ -65,7 +65,7 @@ describe("checkNarrative", () => {
       expect(checkNarrative(text, input(), NAMES)).toEqual({ ok: false, rule: "NAMES" });
     });
 
-    it("a token that is also an input name is exempt (the area 'Maria's office'); short tokens and substrings never count", () => {
+    it("an input name's own phrase may be written (the area 'Maria's office'); short tokens and substrings never count", () => {
       expect(checkNarrative("Someone was seen in Maria's office at 2:14 AM.", input(), NAMES).ok).toBe(true);
       // 'Al' is under 3 letters; 'Stefanie' is not the whole word 'Stefan'.
       expect(checkNarrative("Someone was seen by the alley at 2:14 AM. A mannequin named Stefanie was not.", input(), NAMES).ok).toBe(true);
@@ -73,6 +73,52 @@ describe("checkNarrative", () => {
       expect(checkNarrative("Someone was seen in Maria's office at 2:14 AM.", input({ place: { name: "Stock room", kind: "inside" } }), NAMES)).toEqual({
         ok: false,
         rule: "NAMES",
+      });
+    });
+
+    // #2423 review 1: an input name exempted its words EVERYWHERE, so any person whose name appeared in a place or
+    // camera name could be named anywhere in the text; and accents, fullwidth letters and invisible characters
+    // slipped a name past the word match. Now only the exact input phrase is set aside; the rest is checked against
+    // the whole directory, both sides compared without marks, format characters or width.
+    describe("an input name sets aside only its own exact phrase (#2423 review 1)", () => {
+      const DIR = ["Maria Lopez", "José Álvarez", "Renée Martin", "Stefan"];
+      it.each([
+        ["Maria outside the area's name", "Maria was seen near the office at 2:14 AM.", input()],
+        ["Maria next to the area's name", "Maria was in Maria's office at 2:14 AM.", input()],
+        ["Maria's office named, then Maria alone", "Someone was seen in Maria's office at 2:14 AM. Maria left at 2:16 AM.", input()],
+        [
+          "a camera called Maria's desk, then Maria",
+          "Maria was seen at 2:14 AM.",
+          input({ events: [{ at: "2:14 AM", until: null, what: "person", source: "Maria's desk", part: null, found: "live" }] }),
+        ],
+        ["Jose without the accent", "Jose was seen at 2:14 AM.", input()],
+        ["José with it", "José was seen at 2:14 AM.", input()],
+        // The mark mid-name: "Renée" read with its accent kept is "rene" + "e", and "Renee" would pass.
+        ["Renee for Renée", "Renee was seen at 2:14 AM.", input()],
+        ["José with a combining accent", "Jose\u0301 was seen at 2:14 AM.", input()],
+        ["a surname, upper case and accented", "Someone like ÁLVAREZ was seen at 2:14 AM.", input()],
+        ["Lopez split by a zero-width space", "Lo\u200bpez was seen at 2:14 AM.", input()],
+        ["Lopez split by a zero-width joiner", "Lo\u200dpez was seen at 2:14 AM.", input()],
+        ["Lopez split by a word joiner", "Lo\u2060pez was seen at 2:14 AM.", input()],
+        ["Lopez split by a soft hyphen", "Lo\u00adpez was seen at 2:14 AM.", input()],
+        ["Maria in fullwidth letters", "\uff2d\uff41\uff52\uff49\uff41 was seen at 2:14 AM.", input()],
+      ])("refuses %s", (_l, text, inp) => {
+        expect(checkNarrative(text, inp, DIR)).toEqual({ ok: false, rule: "NAMES" });
+      });
+
+      it.each([
+        ["the area's name", "Someone was seen in Maria's office at 2:14 AM."],
+        ["the area's name, any case", "Someone was seen in MARIA'S OFFICE at 2:14 AM."],
+        ["the area's name with a curly apostrophe", "Someone was seen in Maria\u2019s office at 2:14 AM."],
+        ["the camera and the part of its view", "Someone was seen on the Back camera in the 'till' part of the view at 2:14 AM."],
+      ])("passes %s", (_l, text) => {
+        expect(checkNarrative(text, input(), DIR)).toEqual({ ok: true, text });
+      });
+
+      it("the phrase is a whole phrase: a longer word that starts with it is not set aside", () => {
+        const inp = input({ place: { name: "Maria", kind: "inside" } });
+        expect(checkNarrative("Someone was seen in Maria at 2:14 AM.", inp, DIR).ok).toBe(true);
+        expect(checkNarrative("Someone was seen in Marias at 2:14 AM.", inp, [...DIR, "Marias"])).toEqual({ ok: false, rule: "NAMES" });
       });
     });
 

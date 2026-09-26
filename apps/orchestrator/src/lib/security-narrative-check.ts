@@ -8,12 +8,16 @@
  *   SHAPE  empty; over 700 chars; over 5 sentences; `http`, a backtick, `#`,
  *          `|`, `*` at a line start; a control, line-separator or bidi
  *          character (`hasUnsafeDisplayChars`);
- *   NAMES  a whole word, any case, that is a token (3+ letters) of a name
- *          from the box's directory (every display name and username) — and
- *          not also a token of a name the input itself carries (the area,
- *          cameras, parts of a view, the codes' facts), so "Maria's office"
- *          can be named while Maria cannot. The few words the prompt tells
- *          the model to write ("someone", "a person", "Droplet") never count;
+ *   NAMES  a whole word that is a token (3+ letters) of a name from the
+ *          box's directory (every display name and username). Both sides are
+ *          compared in one form (`compareForm`: NFKC, no combining marks, no
+ *          invisible format characters, straight apostrophes, lower case), so
+ *          "Jose", "José", "Lo<U+200B>pez" and fullwidth letters are the name.
+ *          Each exact phrase the input itself carries (the area, the cameras,
+ *          the parts of a view, the codes' string facts) is set aside first —
+ *          only that phrase: "Maria's office" may be written, and "Maria"
+ *          anywhere else is still the name. The few words the prompt tells the
+ *          model to write ("someone", "a person", "Droplet") never count;
  *   TIMES  a clock (`2:14`, `2:14 AM`) that is not one of the input's own
  *          times (case and the space before AM/PM aside; a bare `2:14` is
  *          `2:14 AM` when that is an input time). No times in, none out;
@@ -36,9 +40,30 @@ const WORDS = /\b(?:monitor(?:ed)?|alarm|armed|secured?|protected|guard(?:ed)?|z
 const CLOCK = /\b(\d{1,2}:\d{2})(\s?[ap]m)?\b/gi;
 const SENTENCE_END = /[.!?]+(?=\s|$)/g;
 
-/** Letter tokens (any script), lower-cased. */
+/**
+ * The one form both sides of a comparison are read in (#2423 review 1): NFKC
+ * (fullwidth and other compatibility letters fold), then every combining mark
+ * (`\p{M}`: é → e) and every invisible format character (`\p{Cf}`: U+200B–
+ * U+200D, U+2060, the soft hyphen, bidi marks) removed, curly apostrophes
+ * made straight, whitespace runs one space, lower case.
+ */
+export function compareForm(s: string): string {
+  return s
+    .normalize("NFKC")
+    .normalize("NFD")
+    .replace(/[\p{M}\p{Cf}]/gu, "")
+    .replace(/[\u2018\u2019\u02BC\uFF07]/g, "'")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+/** Letter tokens (any script) of an already compare-form string. */
 function tokens(s: string): string[] {
-  return s.toLowerCase().match(/\p{L}+/gu) ?? [];
+  return s.match(/\p{L}+/gu) ?? [];
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** "2:14 AM" / "2:14am" / "2:14 am" → "2:14 AM"; "2:14" stays "2:14". */
@@ -46,11 +71,11 @@ function normalClock(hm: string, ampm: string | undefined): string {
   return ampm ? `${hm} ${ampm.trim().toUpperCase()}` : hm;
 }
 
-/** The names the input carries (and may therefore be written): the area, sources, parts, and every string fact. */
-function inputNameTokens(input: NarrativeInputV1): Set<string> {
-  const out = new Set<string>();
+/** The names the input carries, and may therefore be written: the area, sources, parts, and every string fact. */
+function inputNames(input: NarrativeInputV1): string[] {
+  const out: string[] = [];
   const add = (s: string | null | undefined) => {
-    if (s) for (const t of tokens(s)) out.add(t);
+    if (s) out.push(s);
   };
   add(input.place?.name);
   for (const e of input.events) {
@@ -58,6 +83,22 @@ function inputNameTokens(input: NarrativeInputV1): Set<string> {
     add(e.part);
   }
   for (const c of input.codes) for (const v of Object.values(c.facts)) if (typeof v === "string") add(v);
+  return out;
+}
+
+/**
+ * `text` (compare form) with each exact input-name phrase replaced by a space:
+ * longest first, and only where it stands as a whole phrase (no letter or
+ * digit either side), so "Maria's office" goes and "Maria" beside it stays.
+ */
+function setAsideInputNames(text: string, input: NarrativeInputV1): string {
+  const phrases = [...new Set(inputNames(input).map((n) => compareForm(n).trim()))]
+    .filter((p) => /[\p{L}\p{N}]/u.test(p))
+    .sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const phrase of phrases) {
+    out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(phrase)}(?![\\p{L}\\p{N}])`, "gu"), " ");
+  }
   return out;
 }
 
@@ -77,13 +118,13 @@ export function checkNarrative(raw: string, input: NarrativeInputV1, forbiddenNa
     return { ok: false, rule: "SHAPE" };
   }
 
-  // NAMES
-  const allowed = inputNameTokens(input);
+  // NAMES — the text less its input-name phrases, against the WHOLE directory: no name is exempt.
+  const rest = setAsideInputNames(compareForm(text), input);
   const forbidden = new Set<string>();
   for (const name of forbiddenNames) {
-    for (const t of tokens(name)) if (t.length >= 3 && !allowed.has(t) && !PROMPT_WORDS.has(t)) forbidden.add(t);
+    for (const t of tokens(compareForm(name))) if (t.length >= 3 && !PROMPT_WORDS.has(t)) forbidden.add(t);
   }
-  if (tokens(text).some((t) => forbidden.has(t))) return { ok: false, rule: "NAMES" };
+  if (tokens(rest).some((t) => forbidden.has(t))) return { ok: false, rule: "NAMES" };
 
   // TIMES
   const times = new Set(input.times.map((t) => t.toUpperCase().replace(/\s+/g, " ")));
