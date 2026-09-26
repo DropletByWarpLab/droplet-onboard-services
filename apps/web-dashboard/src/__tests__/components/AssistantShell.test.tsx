@@ -179,6 +179,19 @@ describe("assistant-shell.css styles only the shell's own chrome", () => {
     );
   });
 
+  it("inks the unselected side in --nav-link, which clears AA on the track (not --text-muted)", () => {
+    const tabInk = SHEET.filter(
+      (d) => d.selector.endsWith(".da-tab") && d.prop === "color" && d.conditions.length === 0,
+    );
+    expect(tabInk.map((d) => d.value)).toEqual(["var(--nav-link)"]);
+  });
+
+  it("in forced colours marks the selected side on the thumb, never with an outline that would mask focus", () => {
+    const forced = SHEET.filter((d) => d.conditions.some((c) => c.includes("forced-colors")));
+    expect(forced.some((d) => d.selector.endsWith(".da-thumb") && d.prop === "border")).toBe(true);
+    expect(forced.filter((d) => /\.da-tab/.test(d.selector) && d.prop.startsWith("outline"))).toEqual([]);
+  });
+
   it("names no colour of its own — the bar reads the indigo ramp", () => {
     const colours = SHEET.filter(
       (d) => /color|background|border|outline|fill/.test(d.prop) && /#[0-9a-f]{3,8}\b/i.test(d.value),

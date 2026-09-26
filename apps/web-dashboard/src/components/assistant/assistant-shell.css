@@ -83,15 +83,17 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 8px;
   border-radius: var(--radius-pill);
   font-size: 13px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
-  color: var(--text-muted);
+  /* --nav-link, not --text-muted: muted measures ~4.4:1 on the track over
+     the glass, under AA for 13px text; --nav-link is ≥5.9:1 in both themes. */
+  color: var(--nav-link);
   text-decoration: none;
-  transition: color 200ms var(--ease);
+  transition: color 200ms var(--ease), background-color 200ms var(--ease);
 }
 /* 34px drawn, 46px to the pointer — the hit area reaches into the bar. */
 .droplet-assistant > .da-bar .da-tab::after {
@@ -105,8 +107,11 @@
   flex: none;
   transition: color 200ms var(--ease);
 }
-.droplet-assistant > .da-bar .da-tab:hover {
+/* Hover takes a fill as well as the ink, so a hovered side never reads as
+   the selected one — the thumb is a faint cue on its own. */
+.droplet-assistant > .da-bar .da-tab:hover:not([aria-selected="true"]) {
   color: var(--text);
+  background: var(--hover);
 }
 .droplet-assistant > .da-bar .da-tab[aria-selected="true"] {
   color: var(--text);
@@ -127,12 +132,13 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
-/* Forced colours drop the thumb's fill — keep a system-coloured edge on the
-   selected side so it is not left with weight alone. */
+/* Forced colours drop the thumb's fill — give the THUMB a system-coloured
+   edge so the selected side is not left with weight alone. On the thumb, not
+   as an outline on the tab: a tab outline would tie with, and override, the
+   :focus-visible ring on the one tab that is in the Tab order. */
 @media (forced-colors: active) {
-  .droplet-assistant > .da-bar .da-tab[aria-selected="true"] {
-    outline: 2px solid CanvasText;
-    outline-offset: -2px;
+  .droplet-assistant > .da-bar .da-thumb {
+    border: 2px solid CanvasText;
   }
 }
 
