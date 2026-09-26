@@ -78,7 +78,10 @@ export type TableName =
   | "securityBaselineBuild"
   | "securityBaselineCell"
   | "securityBaselineSource"
-  | "securityPatternDay";
+  | "securityPatternDay"
+  // WARP-2979 P4 PR-2 — the summaries switch, and the active chat model the narrator's resolver reads.
+  | "securityAiSettings"
+  | "workspaceSetting";
 
 const TABLES: readonly TableName[] = [
   "securityEvent",
@@ -112,6 +115,8 @@ const TABLES: readonly TableName[] = [
   "securityBaselineCell",
   "securityBaselineSource",
   "securityPatternDay",
+  "securityAiSettings",
+  "workspaceSetting",
 ];
 
 interface Relation {
@@ -188,6 +193,8 @@ const UNIQUES: Partial<Record<TableName, string[][]>> = {
   securityBaselineCell: [["id"], ["buildId", "zoneKey", "label", "dayType", "hour"]],
   securityBaselineSource: [["sourceKey"]],
   securityPatternDay: [["date", "outcome"]],
+  securityAiSettings: [["id"]],
+  workspaceSetting: [["key"]],
 };
 
 /** FK behaviour when the parent row is deleted. */
@@ -237,6 +244,16 @@ const DEFAULTS: Partial<Record<TableName, (now: Date) => Row>> = {
     verdictAt: null,
     verdictFirstAt: null,
     verdictCodes: [],
+    // WARP-2979 P4 PR-2 — the summary columns, at their migration defaults.
+    narrativeState: "none",
+    narrative: null,
+    narrativeModel: null,
+    narrativePromptVersion: null,
+    narratedAt: null,
+    narrativeAudience: null,
+    narrativeAttempts: 0,
+    narrativeAttemptAt: null,
+    narrativeError: null,
   }),
   // WARP-2979 — relatedCamera NULL and relatedLock false, as the migration defaults them.
   securityIncidentReason: (now) => ({ id: randomUUID(), createdAt: now, evidenceCamera: null, evidenceLabel: null, relatedCamera: null, relatedLock: false }),
@@ -306,6 +323,7 @@ const DEFAULTS: Partial<Record<TableName, (now: Date) => Row>> = {
   }),
   securityBaselineSource: (now) => ({ updatedAt: now }),
   securityPatternDay: (now) => ({ updatedAt: now }),
+  securityAiSettings: (now) => ({ id: "singleton", linking: "link_and_suggest", summaries: "on", version: 0, updatedById: null, updatedAt: now }),
 };
 
 /** Scalar-list columns a seeded row gets as [] (a create that omits them stores NULL, as on Postgres). */
@@ -476,6 +494,26 @@ function check(table: TableName, r: Row): void {
     if ((r.verdictById == null) !== (r.verdictByName == null)) fail("SecurityIncident_verdict_shape");
     if (unreviewed !== (vc.length === 0)) fail("SecurityIncident_verdict_shape");
     if (r.verdictAt != null && cmp(r.verdictFirstAt, r.verdictAt) > 0) fail("SecurityIncident_verdict_shape");
+    // WARP-2979 20260926000100_warp_2979_security_ai — SecurityIncident_narrative_shape. A row pushed
+    // straight into the world without these columns reads their defaults, as Postgres would give it.
+    const state = r.narrativeState ?? "none";
+    const text = r.narrative ?? null;
+    const attempts = (r.narrativeAttempts ?? 0) as number;
+    const same = (k: string) => (text === null) === ((r[k] ?? null) === null);
+    const audience = r.narrativeAudience ?? null;
+    const narrativeOk =
+      same("narrativeModel") &&
+      same("narrativePromptVersion") &&
+      same("narratedAt") &&
+      same("narrativeAudience") &&
+      (audience === null || (typeof audience === "object" && !Array.isArray(audience))) &&
+      (state !== "written" || text !== null) &&
+      (r.severity !== "info" || (state === "none" && text === null)) &&
+      (state !== "failed" || r.narrativeError != null) &&
+      attempts >= 0 &&
+      attempts <= 10 &&
+      (r.narrativePromptVersion == null || (r.narrativePromptVersion as number) >= 1);
+    if (!narrativeOk) fail("SecurityIncident_narrative_shape");
   }
   if (table === "securityPatternFlag") {
     const FRIGATE = /^[a-zA-Z0-9_-]{1,64}$/;

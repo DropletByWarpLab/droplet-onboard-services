@@ -246,7 +246,7 @@ describe("GET /api/security/health", () => {
     // WARP-2977 P2b: `site_mode` joins the pinned order — deliberately red against P2a's list.
     // WARP-2978: `incidents` and `alerts` join it after site_mode; WARP-2980's `patterns` follows
     // them, before retention (whichever merged second moved this pin). WARP-2979: `links` (Droplet's
-    // link proposals) sits between alerts and patterns.
+    // link proposals) sits between alerts and patterns; PR-2's `summaries` (the incident narrator) right after links.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
@@ -255,9 +255,22 @@ describe("GET /api/security/health", () => {
       "incidents",
       "alerts",
       "links",
+      "summaries",
       "patterns",
       "retention",
     ]);
+  });
+
+  it("WARP-2979 PR-2: the summaries row says DOWN 'Not running' while the narrator is not registered — for every viewer, naming nothing", async () => {
+    for (const role of ["owner", "family"] as const) {
+      const res = await request(app(role)).get("/api/security/health");
+      expect(res.body.sources.find((s: { id: string }) => s.id === "summaries"), role).toEqual({
+        id: "summaries",
+        state: "down",
+        detail: "Not running",
+        lastSeenAt: null,
+      });
+    }
   });
 
   it("WARP-2979: the links row says DOWN 'Not running' while the job is not registered — for every viewer, naming nothing", async () => {
@@ -310,13 +323,14 @@ describe("GET /api/security/health", () => {
   it("family does not get a threat row for a feed they cannot see, but does get the site mode and patterns", async () => {
     const res = await request(app("family")).get("/api/security/health");
     // WARP-2978: nor the alerts row (it names who is told); the incidents row is everyone's.
-    // WARP-2979: so is the links row.
+    // WARP-2979: so is the links row, and PR-2's summaries row.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "site_mode",
       "incidents",
       "links",
+      "summaries",
       "patterns",
       "retention",
     ]);

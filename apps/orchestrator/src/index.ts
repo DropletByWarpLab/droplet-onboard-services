@@ -189,6 +189,7 @@ import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
 import { registerSecurityLinkJobs } from "./services/security-link-proposals.service.js";
+import { registerSecurityNarratorJobs } from "./services/security-narrator.service.js";
 import { getEffectiveModuleIds } from "./services/modules.service.js";
 import { resolveEffectiveAccess } from "./services/effective-access.service.js";
 import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
@@ -1127,6 +1128,13 @@ async function main() {
   // the jobs above; `SecurityAiSettings.linking = off` is honoured inside the
   // tick. Registration is the `links` health row's boot assertion.
   registerSecurityLinkJobs(cronRuntime, prisma);
+  // WARP-2979 (ADR-059 P4 §6.9) — Droplet's incident summaries: every minute,
+  // with NO advisory lock (a model call outlives the lock's transaction), it
+  // writes a short summary for each sealed notice or alert incident, on THIS
+  // box's own model only (DS-007), standing aside whenever someone is
+  // chatting. Unconditional; `SecurityAiSettings.summaries = off` is honoured
+  // inside the tick. Registration is the `summaries` health row's boot assertion.
+  registerSecurityNarratorJobs(cronRuntime, prisma);
   // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
   // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
   // later), keeps the learning state, and rebuilds what normal looks like
