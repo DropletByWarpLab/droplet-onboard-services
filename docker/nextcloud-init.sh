@@ -620,8 +620,18 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
             --value="http://docserver/" || true
           occ_www config:app:set onlyoffice StorageUrl \
             --value="http://nextcloud/" || true
-          occ_www config:app:set onlyoffice jwt_secret \
-            --value="${ONLYOFFICE_JWT_SECRET}" || true
+          # WARP-3193 SEC-DATA-12: never put the secret on argv
+          # (/proc/<pid>/cmdline is world-readable). config:app:set has no
+          # stdin/file form, so write it to a 0600 JSON file (mktemp) owned by
+          # www-data and `config:import` that. printf is a builtin (no argv).
+          if oo_cfg=$(mktemp); then
+            printf '%s' "$ONLYOFFICE_JWT_SECRET" \
+              | php -r 'echo json_encode(["apps" => ["onlyoffice" => ["jwt_secret" => stream_get_contents(STDIN)]]]);' \
+              > "$oo_cfg" || true
+            chown www-data "$oo_cfg" 2>/dev/null || true
+            occ_www config:import "$oo_cfg" || true
+            rm -f "$oo_cfg"
+          fi
           occ_www config:app:set onlyoffice jwt_header \
             --value="Authorization" || true
           echo "[droplet] WARP-882: OnlyOffice connector configured (DOCS_ENGINE=onlyoffice)"

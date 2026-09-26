@@ -47,7 +47,9 @@ import {
 import {
   EVIDENCE_TTL_DAYS,
   PROPOSAL_TTL_DAYS,
+  SWEEP_BATCH,
   runFilingMaintenance,
+  __resetOrphanCursorForTests,
 } from "../services/filing/maintenance.js";
 import { explain, isReopenable, EXPLANATIONS } from "../services/filing/skipped.service.js";
 import { sentenceFor } from "../services/filing/rules.service.js";
@@ -58,6 +60,7 @@ beforeEach(() => {
   recordMock.mockReset();
   recordMock.mockResolvedValue({ id: 1n });
   __resetTickClockForTests();
+  __resetOrphanCursorForTests();
 });
 
 // ── Audit ──────────────────────────────────────────────────────────────────
@@ -353,6 +356,33 @@ describe("🔴 a proposal never outlives the document it came from", () => {
       .find((c) => c.where.status === "APPLIED");
     expect(retention).toBeTruthy();
     expect(retention!.where).toHaveProperty("evidence");
+  });
+
+  it("🔴 WARP-3193 PERF-15 the orphan sweep walks the candidates by id cursor across runs", async () => {
+    // Unordered and uncursored, `take: SWEEP_BATCH` re-read the same rows every
+    // night: once 500+ dead EXPIRED proposals existed, a PENDING orphan behind
+    // them was never looked at. Each run now resumes after the last id it saw
+    // and wraps to the start after a short page.
+    const full = Array.from({ length: SWEEP_BATCH }, (_, i) => ({
+      id: `p${String(i).padStart(4, "0")}`,
+      ncFileId: 1000 + i,
+    }));
+    const alive = full.map((c) => ({ ncFileId: c.ncFileId }));
+    const first = maintenancePrisma({ candidates: full, statuses: alive });
+    await runFilingMaintenance(first.prisma);
+    const firstArgs = (first.prisma as any).ingestProposal.findMany.mock.calls[0][0];
+    expect(firstArgs.orderBy).toEqual({ id: "asc" });
+    expect(firstArgs.where.id).toBeUndefined();
+
+    const second = maintenancePrisma({ candidates: [{ id: "p9999", ncFileId: 1 }], statuses: [{ ncFileId: 1 }] });
+    await runFilingMaintenance(second.prisma);
+    const secondArgs = (second.prisma as any).ingestProposal.findMany.mock.calls[0][0];
+    expect(secondArgs.where.id).toEqual({ gt: full[full.length - 1]!.id });
+
+    // The short page above wrapped the cursor: the next run starts over.
+    const third = maintenancePrisma({});
+    await runFilingMaintenance(third.prisma);
+    expect((third.prisma as any).ingestProposal.findMany.mock.calls[0][0].where.id).toBeUndefined();
   });
 
   it("the two windows are stated, not implied", () => {

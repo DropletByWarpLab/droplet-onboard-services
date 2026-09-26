@@ -293,6 +293,7 @@ import {
   type VendorLookup,
 } from "../canonical-row.js";
 import { sortByKey } from "../api-dto.js";
+import { SafeRestTransport } from "../rest/safe-transport.js";
 
 /** Provider key for this track. */
 export const BREVO_PROVIDER = "brevo";
@@ -1863,10 +1864,10 @@ export class BrevoConnector implements Connector {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly resolveApiKey: BrevoKeyResolver;
-  private readonly fetchImpl?: FetchLike;
   private readonly timeoutMs: number;
   private readonly baseUrl: string;
   private readonly budget: BrevoCallBudget;
+  private readonly transport: SafeRestTransport;
 
   private apiKey: string | null = null;
   private fingerprint: string | null = null;
@@ -1882,8 +1883,14 @@ export class BrevoConnector implements Connector {
     this.now = deps.now ?? (() => Date.now());
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.resolveApiKey = deps.resolveApiKey ?? blockedBrevoKeyResolver;
-    this.fetchImpl = deps.fetchImpl;
     this.timeoutMs = deps.timeoutMs ?? BREVO_REQUEST_TIMEOUT_MS;
+    // WARP-3193 QUAL-6 — no-redirect, timeout and the bounded 429 loop live in
+    // the shared transport; the classification below stays Brevo's.
+    this.transport = new SafeRestTransport({
+      fetchImpl: deps.fetchImpl,
+      timeoutMs: this.timeoutMs,
+      sleep: this.sleep,
+    });
     this.budget = deps.budget ?? new BrevoCallBudget(this.now);
     // Validated at CONSTRUCTION: a connection naming a destination we will not
     // dial should fail to build, loudly, rather than look fine until the first
@@ -1966,87 +1973,74 @@ export class BrevoConnector implements Connector {
     }
     const url = `${base}${path}${qs.toString() ? `?${qs}` : ""}`;
 
-    const doFetch = this.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
-    if (!doFetch) throw this.blocked(op, "no fetch implementation available");
-
-    for (let attempt = 0; attempt <= BREVO_MAX_RATE_LIMIT_RETRIES; attempt += 1) {
-      let res: Response;
-      try {
-        res = await doFetch(url, {
-          method: BREVO_HTTP_METHOD,
-          headers: {
-            // The credential, under Brevo's own header name. Built inline and
-            // never stored on a field, so there is one place in this file
-            // where the cleartext key exists.
-            [BREVO_AUTH_HEADER]: apiKey,
-            ...BREVO_CONSTANT_HEADERS,
-          },
-          // Never follow a 3xx: this API has no legitimate redirect, so one is
-          // a fault rather than a hop, and the key's safety must not rest on
-          // every runtime stripping credentials across origins correctly.
-          redirect: "error",
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
-      } catch (err) {
+    const res = await this.transport.send(
+      {
+        url,
+        method: BREVO_HTTP_METHOD,
+        headers: {
+          // The credential, under Brevo's own header name. Built inline and
+          // never stored on a field, so there is one place in this file
+          // where the cleartext key exists.
+          [BREVO_AUTH_HEADER]: apiKey,
+          ...BREVO_CONSTANT_HEADERS,
+        },
+      },
+      {
+        maxAttempts: BREVO_MAX_RATE_LIMIT_RETRIES + 1,
+        noFetch: () => this.blocked(op, "no fetch implementation available"),
         // The message is the RUNTIME's, not the vendor's, and the URL it may
         // quote carries no credential — the key travels in a header.
-        throw this.blocked(op, `Brevo API unreachable: ${(err as Error).message}`);
-      }
+        unreachable: (err) => this.blocked(op, `Brevo API unreachable: ${err.message}`),
+        rateLimited: (r, attempt, final) => {
+          if (final) {
+            throw this.blocked(
+              op,
+              `Brevo rate limit (429) persisted across ${attempt + 1} attempts — the ` +
+                `100 requests/hour catch-all covers campaigns, companies, deals and orders`,
+            );
+          }
+          return this.backoffMs(r, attempt);
+        },
+      },
+    );
 
-      if (res.status === 429) {
-        if (attempt >= BREVO_MAX_RATE_LIMIT_RETRIES) {
-          throw this.blocked(
-            op,
-            `Brevo rate limit (429) persisted across ${attempt + 1} attempts — the ` +
-              `100 requests/hour catch-all covers campaigns, companies, deals and orders`,
-          );
-        }
-        await this.sleep(this.backoffMs(res, attempt));
-        continue;
-      }
-
-      if (res.status === 401 || res.status === 403) {
-        // Read to CLASSIFY, never to propagate: the body is inspected for an
-        // IP-security signal and then discarded except for its code.
-        const body = await BrevoConnector.readBody(res);
-        const code = brevoErrorCode(body);
-        if (BrevoConnector.looksLikeIpBlock(body)) {
-          this.lastFailure = "ip_blocked";
-          throw new BrevoIpBlockedError(res.status, code);
-        }
-        if (res.status === 403) {
-          this.lastFailure = "capability_missing";
-          throw new BrevoCapabilityMissingError(path, res.status, code);
-        }
-        // A bare 401 is a dead key (deleted, expired, deactivated). It lands on
-        // the connection state, not only on the thrown error: `state()` reads
-        // this, and without it an expired key reports "connected" until somebody
-        // regenerates it. Overwrites an earlier ip_blocked deliberately - the
-        // remedies are opposites and a dead key can never produce the success
-        // that would otherwise clear the flag.
-        this.lastFailure = "needs_reconnect";
-        throw new BrevoReauthorizationRequiredError(res.status, code);
-      }
-
-      if (!res.ok) {
-        const code = brevoErrorCode(await BrevoConnector.readBody(res));
-        throw this.blocked(
-          op,
-          `Brevo API returned ${res.status}${code ? ` (${code})` : ""}`,
-        );
-      }
-
-      this.lastFailure = null;
+    if (res.status === 401 || res.status === 403) {
+      // Read to CLASSIFY, never to propagate: the body is inspected for an
+      // IP-security signal and then discarded except for its code.
       const body = await BrevoConnector.readBody(res);
-      if (body === undefined) {
-        throw this.blocked(op, "unparseable Brevo response");
+      const code = brevoErrorCode(body);
+      if (BrevoConnector.looksLikeIpBlock(body)) {
+        this.lastFailure = "ip_blocked";
+        throw new BrevoIpBlockedError(res.status, code);
       }
-      return body;
+      if (res.status === 403) {
+        this.lastFailure = "capability_missing";
+        throw new BrevoCapabilityMissingError(path, res.status, code);
+      }
+      // A bare 401 is a dead key (deleted, expired, deactivated). It lands on
+      // the connection state, not only on the thrown error: `state()` reads
+      // this, and without it an expired key reports "connected" until somebody
+      // regenerates it. Overwrites an earlier ip_blocked deliberately - the
+      // remedies are opposites and a dead key can never produce the success
+      // that would otherwise clear the flag.
+      this.lastFailure = "needs_reconnect";
+      throw new BrevoReauthorizationRequiredError(res.status, code);
     }
-    // Unreachable: the loop either returns, throws, or exhausts its retries
-    // into the 429 branch above. Present so the function has no implicit
-    // undefined return.
-    throw this.blocked(op, "Brevo request loop ended without a response");
+
+    if (!res.ok) {
+      const code = brevoErrorCode(await BrevoConnector.readBody(res));
+      throw this.blocked(
+        op,
+        `Brevo API returned ${res.status}${code ? ` (${code})` : ""}`,
+      );
+    }
+
+    this.lastFailure = null;
+    const body = await BrevoConnector.readBody(res);
+    if (body === undefined) {
+      throw this.blocked(op, "unparseable Brevo response");
+    }
+    return body;
   }
 
   /**
