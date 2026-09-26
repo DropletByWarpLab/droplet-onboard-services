@@ -29,7 +29,6 @@ export const WHY_COPY = {
   keep: "Keep",
   undo: "Undo",
   alertsOnceKept: "Alerts from this camera start once you keep it.",
-  close: "Close",
 } as const;
 
 /** The area kinds whose people-after-hours alerts need a person-kept link (after_hours_presence's areas). */
@@ -84,7 +83,9 @@ export function LinkWhyPopover({ open, link, zoneKind, canManage, tz, now, onClo
           <h2 id={titleId} style={{ margin: 0, fontSize: 17, fontWeight: 600, color: "var(--text)", overflowWrap: "anywhere" }}>
             {fill(WHY_COPY.title, { link: link ? linkPhrase(link) : "" })}
           </h2>
-          <button type="button" className="icon-btn" aria-label={WHY_COPY.close} onClick={onClose}>
+          {/* A literal label, like every side panel: the WARP-1787 guard reads it from the source. Below 720px this
+              panel is full-width, so this button is the only way out. */}
+          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
             <X size={18} aria-hidden />
           </button>
         </div>
