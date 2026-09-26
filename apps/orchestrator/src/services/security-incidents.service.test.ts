@@ -580,6 +580,16 @@ describe("camera_offline_during_activity at the tick (§6.7.2)", () => {
     expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
   });
 
+  it("only through PERSON links: the DROPPED camera linked by Droplet alone, a person on a person-linked camera → P3's notice only", async () => {
+    const f = world();
+    const stock = areaRows(STOCK, "Stock room", "interior", ["back", "stock_cam"]);
+    Object.assign(stock.links[0]!, { origin: "droplet", stateSetBy: "droplet" });
+    f.world.securityZoneLink = stock.links;
+    f.world.securityEvent.push(person(1n, plus(T0, -60_000), "stock_cam"), offline(2n, T0));
+    await tick(f, plus(T0, 61_000));
+    expect(f.world.securityIncidentReason.map((r) => r.code)).not.toContain("camera_offline_during_activity");
+  });
+
   it("no one seen in the window (the sighting 3 minutes before) → P3's notice only", async () => {
     const f = world({ securityEvent: [person(1n, plus(T0, -180_000)), offline(2n, T0)] });
     await tick(f, plus(T0, 61_000));

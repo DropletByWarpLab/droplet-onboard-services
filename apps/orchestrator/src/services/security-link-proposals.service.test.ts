@@ -190,8 +190,9 @@ function fake(w: World) {
         return w.links
           .filter(
             (l) =>
-              l.state === where.state &&
-              l.stateSetBy === where.stateSetBy &&
+              // An absent filter matches any value, as Prisma's does (a dropped `stateSetBy` must widen, not empty, the anchors).
+              (where.state === undefined || l.state === where.state) &&
+              (where.stateSetBy === undefined || l.stateSetBy === where.stateSetBy) &&
               where.sourceKind.in.includes(l.sourceKind) &&
               w.zones.find((z) => z.id === l.zoneId)?.state === where.zone.state,
           )
