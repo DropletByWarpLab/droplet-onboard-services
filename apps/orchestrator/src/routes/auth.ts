@@ -124,6 +124,7 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
+import { purgeUsernameKeyedData } from "../services/username-data-purge.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -1805,18 +1806,33 @@ export function createPublicAuthRouter(
         });
 
         // Native clients want the new tokens in body since they can't
-        // read Set-Cookie. Always include them — browsers ignore the
-        // body's accessToken (they use the cookie that was just set
-        // above), so this is non-breaking.
+        // read Set-Cookie. WARP-3193 SEC-AUTH-7: ONLY native clients — the
+        // same WARP-582 rule as /auth/login?return=body. A browser rotates
+        // through the cookies set above; tokens in its body would be
+        // readable by any XSS on the dashboard origin. Native = presented
+        // its refresh token in the body (ADR-008) AND carries no browser
+        // marker header (lib/browser-context.ts).
+        const browserMarker = browserMarkerHeader(req.headers);
+        if (refreshTokenBody !== null && browserMarker !== null) {
+          logger.warn(
+            { marker: browserMarker, sub },
+            "refresh: body tokens refused for a browser context — cookie-only rotation (WARP-582)",
+          );
+        }
+        const wantBody = refreshTokenBody !== null && browserMarker === null;
         res.json({
           status: "ok",
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-          accessTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-          refreshTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+          ...(wantBody
+            ? {
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken,
+                accessTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+                refreshTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+              }
+            : {}),
         });
         return;
       }
@@ -4008,9 +4024,24 @@ export function createProtectedAuthRouter(
       // No rails re-run here: a DEACTIVATED row holds no operator capacity
       // (rail 5 already excludes it), so removing it cannot strand the box.
       if (prisma && row) {
-        const removed = await prisma.user.deleteMany({
-          where: { id: row.id, directoryStatus: "DEACTIVATED" },
-        });
+        // WARP-3193 SEC-AUTH-6: the rows keyed by USERNAME (notes, calendar
+        // + CalDAV credentials, reminders, chats, push subscriptions) go in
+        // the SAME transaction as the row, and only when the row really goes
+        // — the username must never be free while data still answers to it,
+        // or the next account deriving it inherits that data.
+        const removed = await prisma.$transaction(async (tx) => {
+          const r = await tx.user.deleteMany({
+            where: { id: row.id, directoryStatus: "DEACTIVATED" },
+          });
+          if (r.count > 0) {
+            const purged = await purgeUsernameKeyedData(tx, row.username);
+            logger.info(
+              { username: req.params.username, userId: row.id, purged },
+              "Purged username-keyed private data with the deleted user row",
+            );
+          }
+          return r;
+        }, SERIALIZABLE_TX);
         if (removed.count === 0) {
           logger.warn(
             { username: req.params.username, userId: row.id },
