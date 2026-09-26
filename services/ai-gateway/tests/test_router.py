@@ -278,3 +278,62 @@ class TestReasoningEffortForwarding:
             )
         )
         assert "reasoning_effort" not in captured
+
+
+class TestSecurityNarratorLocalPin:
+    """WARP-2979 (ADR-059 P4 §6.10, DS-007) — Droplet's incident summaries are
+    written on the box only. The orchestrator's narrator sends
+    ``provider: "local"`` on every request (security-narrator.service.ts,
+    NARRATOR_PROVIDER), and relies on THIS behaviour: an explicit local
+    provider routes to the on-box runtime whatever the model is called — a
+    cloud-looking name included, with no configured LLM_MODEL to rescue it.
+    If this ever resolved a cloud provider, security events (presence data
+    about people) could leave the box."""
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_explicit_local_beats_every_cloud_looking_name(self, mock_key):
+        router = ProviderRouter()
+        assert router._local_model is None
+        assert router.resolve_provider("claude-sonnet-4", explicit_provider="local") is router.local
+        assert router.resolve_provider("gpt-4o", explicit_provider="local") is router.local
+        assert router.resolve_provider("x", explicit_provider="ollama") is router.local
+
+    @patch("router.check_off_lan_gate", new_callable=AsyncMock)
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value="sk-test")
+    async def test_a_local_request_never_reaches_a_cloud_provider_even_with_keys_saved(self, mock_key, mock_gate):
+        """End to end through ``chat``: keys saved (cloud usable), a cloud
+        model name, ``provider: "local"`` — the on-box provider answers, no
+        cloud provider is called, and the off-LAN gate sees ``local``."""
+        router = ProviderRouter()
+        calls: list[str] = []
+
+        def stub(name: str):
+            async def fake_chat(**kwargs):
+                calls.append(name)
+                return {"ok": True}
+
+            return fake_chat
+
+        router.local.chat = stub("local")  # type: ignore[method-assign]
+        await router.refresh_keys()
+        router.anthropic.chat = stub("anthropic")  # type: ignore[method-assign]
+        router.openai.chat = stub("openai")  # type: ignore[method-assign]
+        # refresh_keys runs again inside chat(); keep the stubs on whatever it builds.
+        original_refresh = router.refresh_keys
+
+        async def refresh_and_stub(user_id=None):
+            await original_refresh(user_id=user_id)
+            router.anthropic.chat = stub("anthropic")  # type: ignore[method-assign]
+            router.openai.chat = stub("openai")  # type: ignore[method-assign]
+
+        router.refresh_keys = refresh_and_stub  # type: ignore[method-assign]
+        for model in ["claude-sonnet-4", "gpt-4o"]:
+            await router.chat(
+                ChatRequest(
+                    model=model,
+                    provider="local",
+                    messages=[ChatMessage(role="user", content="{}")],
+                )
+            )
+        assert calls == ["local", "local"]
+        assert [c.args[0] for c in mock_gate.await_args_list] == ["local", "local"]
