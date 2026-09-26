@@ -107,6 +107,30 @@ describe("requestLogger credential redaction (WARP-1015)", () => {
     expect(output).not.toContain(SET_COOKIE);
   });
 
+  // WARP-3193 SEC-DATA-2: every file tool call sends the user's Nextcloud
+  // app-password in X-Nextcloud-Token; x-droplet-auth / x-api-key carry
+  // service credentials. None may reach a log line.
+  it.each([
+    ["x-nextcloud-token", "ncAppPw-SECRET-Q7wE9-rT2yU"],
+    ["x-droplet-auth", "SECRET-DROPLET-AUTH-a1b2c3d4"],
+    ["x-api-key", "SECRET-API-KEY-z9y8x7"],
+  ])("redacts the %s request header", (header, secret) => {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = mockReq("HDR-ID", { [header]: secret });
+    const res = mockRes();
+    runWithRequestId("HDR-ID", () => {
+      logger(req as never, res as never);
+    });
+    res.emit("finish");
+    expect(lines.join("")).not.toContain(secret);
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.headers[header]).toBe("[Redacted]");
+  });
+
   it("replaces the redacted headers with the pino placeholder", () => {
     const lines = runLoggedRequest();
     const completion = JSON.parse(lines[lines.length - 1]);
