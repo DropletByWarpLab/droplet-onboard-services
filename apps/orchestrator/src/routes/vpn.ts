@@ -63,7 +63,9 @@ import {
   type NetworkSummaryRead,
 } from "../lib/vpn-lan.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole } from "../middleware/auth.js";
+import { OVERLAY_PEER_USER_ID } from "@droplet/auth-policy";
+import { decidePeerRevoke } from "../lib/vpn-revoke-policy.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
 import { readLivePeerState } from "../lib/vpn-live-peers.js";
 import { overlayRequiresApproval } from "../services/overlay-enroll-policy.service.js";
@@ -648,6 +650,7 @@ export function createVpnRouter(
       try {
         const role = req.user?.role;
         if (!role || !OVERLAY_ENROLL_ROLES.has(role)) {
+          recordAccessDenied(req, role ? "role-not-permitted" : "no-role");
           audit({
             event: "overlay_enroll_refused",
             method: req.method,
@@ -697,7 +700,7 @@ export function createVpnRouter(
         const clash = await prisma.vpnPeer.findFirst({
           where: { publicKey: parsed.data.wg_public_key, status: "active" },
         });
-        if (clash && clash.userId !== owner && clash.userId !== "overlay") {
+        if (clash && clash.userId !== owner && clash.userId !== OVERLAY_PEER_USER_ID) {
           return res.status(409).json({
             error: "wg_key_conflict",
             message:
@@ -2080,9 +2083,10 @@ export function createVpnRouter(
   // the row (status="revoked", revokedAt set) so the dashboard can show a
   // brief "removed just now" state and so we have an audit trail.
   //
-  // Who may revoke:
+  // Who may revoke — lib/vpn-revoke-policy.ts is the rule (also driven by the
+  // RBAC matrix):
   //   • owner/admin — any peer (WARP-171, ADR-004 §3).
-  //   • anyone else — only an OVERLAY device they enrolled themselves
+  //   • member / guest — only an OVERLAY device they enrolled themselves
   //     (WARP-3121). Signing in is the enrollment (WARP-1882), so signing out
   //     of — or losing — that device has to be undoable by the same person;
   //     otherwise a forgotten or stolen laptop keeps a route into the office
@@ -2096,26 +2100,37 @@ export function createVpnRouter(
     async (req: Request, res: Response, next: NextFunction) => {
     try {
       const id = req.params.id;
-      const role = req.user?.role;
-      if (!role) {
-        return res.status(403).json({ error: "Forbidden: no role on session" });
+      const clientId = req.user?.id ?? "unknown";
+      // Parity with the requireRole guard this route used to have: a caller
+      // who could not revoke even a device of their OWN (no session, a service
+      // principal, an unknown role) is refused before the row is looked up.
+      const couldOwnAny = decidePeerRevoke(req.user, {
+        kind: "overlay",
+        userId: req.user?.username ?? "",
+      });
+      if (couldOwnAny === "no-role" || couldOwnAny === "not-yours") {
+        recordAccessDenied(req, couldOwnAny === "no-role" ? "no-role" : "role-not-permitted");
+        return res.status(403).json({
+          error:
+            couldOwnAny === "no-role"
+              ? "Forbidden: no role on session"
+              : "Forbidden: role not permitted",
+        });
       }
       const peer = await prisma.vpnPeer.findUnique({ where: { id } });
       if (!peer) {
         return res.status(404).json({ error: "Peer not found" });
       }
-      const admin = isAdmin(req);
-      const ownDevice =
-        peer.kind === "overlay" &&
-        !!req.user?.username &&
-        peer.userId === req.user.username;
-      if (!admin && !ownDevice) {
+      const decision = decidePeerRevoke(req.user, peer);
+      const admin = decision === "admin";
+      if (decision !== "admin" && decision !== "own") {
+        recordAccessDenied(req, "not-own-device");
         audit({
           event: "overlay_revoke_refused",
           method: req.method,
           route: "/vpn/peers/:id",
           status: 403,
-          clientId: req.user?.id ?? "unknown",
+          clientId,
           refs: { peer_id: id },
         });
         return res.status(403).json({
@@ -2148,6 +2163,14 @@ export function createVpnRouter(
             { err, peerId: id, publicKey: peer.publicKey },
             "vpn: HQ overlay revoke failed — device left enrolled; nothing revoked locally either",
           );
+          audit({
+            event: "overlay_revoke_failed",
+            method: req.method,
+            route: "/vpn/peers/:id",
+            status: 502,
+            clientId,
+            refs: { peer_id: id, outcome: "HQ_REVOKE_FAILED", device_owner: peer.userId },
+          });
           return res.status(502).json({
             code: "HQ_REVOKE_FAILED",
             error:
@@ -2174,6 +2197,14 @@ export function createVpnRouter(
             { peerId: id, publicKey: peer.publicKey, removed: removal.removed },
             "vpn: router staged the peer removal but never applied it — peer is still live on the interface; row left active",
           );
+          audit({
+            event: "overlay_revoke_failed",
+            method: req.method,
+            route: "/vpn/peers/:id",
+            status: 502,
+            clientId,
+            refs: { peer_id: id, outcome: "REVOKE_STAGED", device_owner: peer.userId },
+          });
           return res.status(502).json({
             code: "REVOKE_STAGED",
             error:
@@ -2215,7 +2246,7 @@ export function createVpnRouter(
         method: req.method,
         route: "/vpn/peers/:id",
         status: 200,
-        clientId: req.user?.id ?? "unknown",
+        clientId,
         refs: { peer_id: id, kind: peer.kind, device_owner: peer.userId, label: peer.deviceLabel },
       });
 

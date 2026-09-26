@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useAuth } from "@/lib/auth";
+import { OVERLAY_PEER_USER_ID } from "@droplet/auth-policy";
 import {
   fetchVpnStatus,
   fetchVpnPeers,
@@ -314,6 +315,7 @@ export default function RemoteAccessPage() {
               canRevoke={
                 isOwnerOrAdmin ||
                 (peer.kind === "overlay" &&
+                  peer.userId !== OVERLAY_PEER_USER_ID &&
                   !!currentUser?.username &&
                   peer.userId === currentUser.username)
               }

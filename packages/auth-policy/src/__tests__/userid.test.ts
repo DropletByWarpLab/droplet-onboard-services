@@ -48,6 +48,12 @@ describe("deriveUserId (pure, Set-backed isTaken)", () => {
     expect(deriveUserId("admin@x.com", () => false)).toBe("admin-2");
     expect(RESERVED_USERNAMES).toContain("admin");
   });
+  it("never returns the overlay placeholder id (WARP-3121)", () => {
+    // `overlay` is the synthetic owner of every QR-linked VPN peer; an account
+    // with that username would pass the own-device revoke check for all of them.
+    expect(deriveUserId("overlay@company.com", () => false)).toBe("overlay-2");
+    expect(isReservedUserId("Overlay")).toBe(true);
+  });
 });
 
 describe("nthUserIdCandidate / isReservedUserId", () => {

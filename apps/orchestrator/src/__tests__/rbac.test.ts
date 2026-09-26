@@ -20,6 +20,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction, Router } from "express";
+import { decidePeerRevoke } from "../lib/vpn-revoke-policy.js";
 
 // ── Config mock — must be hoisted above any route imports. ──
 vi.mock("../config.js", () => ({
@@ -143,9 +144,8 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/network/upnp", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/network/dhcp/static-lease", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/vpn/peers", allowed: ["owner", "admin"] },
-  // DELETE /api/vpn/peers/:id is not in this matrix since WARP-3121: a member
-  // may revoke their OWN overlay device, so its authz is per-resource (in the
-  // handler), not a role guard. Covered in vpn-overlay-qr-enroll.test.ts.
+  // DELETE /api/vpn/peers/:id has its own per-resource grid below (WARP-3121):
+  // admin → any peer; member/guest → own overlay device only.
   // WARP-446: extender AP onboarding writes — same posture as VPN peers,
   // since approving an AP changes the household's
   // wireless surface (ADR-005 §RBAC).
@@ -832,6 +832,42 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
 // src/__tests__/rbac-census.guard.test.ts holds the layers that must
 // outlive this file's worker, including the static ban on .skip / .only.
 
+// ── DELETE /api/vpn/peers/:id — per-resource rule (WARP-3121) ─────────
+//
+// Was a plain owner+admin row. Since WARP-3121 a member (or guest) may revoke
+// their OWN overlay device, so the guard is `decidePeerRevoke`, the same
+// function the route calls. Every principal requireRole used to refuse is
+// still refused unless it owns the row — and a service principal is refused
+// even then.
+describe("DELETE /api/vpn/peers/:id (WARP-3121 own-device rule)", () => {
+  const principals: Array<AuthUser | null> = [...ALL_ROLES.map(mkUser), null];
+  for (const user of principals) {
+    const label = user ? user.role : "no session";
+    for (const whose of ["own", "someone else's"] as const) {
+      const isAdminRole = user?.role === "owner" || user?.role === "admin";
+      const ownerRoleOk = user?.role === "family" || user?.role === "guest";
+      const expected = isAdminRole || (whose === "own" && ownerRoleOk) ? 200 : 403;
+      it(`${label} × ${whose} overlay device → ${expected}`, async () => {
+        const app = express();
+        app.use((req: Request, _res: Response, next: NextFunction) => {
+          if (user) (req as Request & { user: AuthUser }).user = user;
+          next();
+        });
+        const peer = {
+          kind: "overlay",
+          userId: whose === "own" && user ? user.username : "somebody-else",
+        };
+        app.delete("/api/vpn/peers/:id", (req, res) => {
+          const d = decidePeerRevoke(req.user, peer);
+          res.status(d === "admin" || d === "own" ? 200 : 403).json({ d });
+        });
+        const res = await request(app).delete("/api/vpn/peers/abc");
+        expect(res.status).toBe(expected);
+      });
+    }
+  }
+});
+
 /**
  * Hand-written (non-generated) test count, by block:
  *   3  RBAC guard — negative cases
@@ -839,12 +875,13 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
  *  65  switch router wiring — 13 mutating routes × 5 principals
  *   8  switch status GETs — 4 paths × 2 roles
  *   5  system-reset wiring — 3 denied roles + no-session + owner
+ *  12  DELETE /api/vpn/peers/:id — 6 principals × (own, someone else's)
  *
  * Adding an `it()` to any of those blocks must bump this number. That
  * friction is the point: an untracked test in the RBAC matrix means the
  * census can no longer tell "the run finished" from "the run stopped".
  */
-const HAND_WRITTEN_TESTS = 3 + 5 + 65 + 8 + 5;
+const HAND_WRITTEN_TESTS = 3 + 5 + 65 + 8 + 5 + 12;
 
 /** The generated grid plus the hand-written blocks. */
 const EXPECTED_TESTS = MATRIX.length * ALL_ROLES.length + HAND_WRITTEN_TESTS;
