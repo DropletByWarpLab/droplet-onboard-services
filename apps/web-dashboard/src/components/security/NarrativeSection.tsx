@@ -24,7 +24,10 @@
  * `disabled`, and a ref refuses a second press; a failure is a toast through
  * `translateError(err, "security")`, never the server's words. After a
  * request the incident is re-read every 5 s while it is pending, for at most
- * 2 minutes. No motion: the state changes in place, announced politely.
+ * 2 minutes. No motion: the state changes in place, announced politely. A
+ * request that lands moves focus to the section (tabIndex -1): the pressed
+ * button is gone once the summary is pending, and focus is never left on
+ * <body> (the incident page's rule, #2423 review 10).
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { useToast } from "@/components/Toast";
@@ -87,6 +90,7 @@ export function NarrativeSection({ narrative: n, grouping, canAct, paused, timez
   const titleId = useId();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const sectionRef = useRef<HTMLElement | null>(null);
   const [pollUntil, setPollUntil] = useState<number | null>(null);
   const pending = n?.state === "pending";
 
@@ -117,6 +121,8 @@ export function NarrativeSection({ narrative: n, grouping, canAct, paused, timez
     try {
       await onSummarise();
       setPollUntil(Date.now() + NARRATIVE_POLL_FOR_MS);
+      // The button is about to go (pending has none): carry focus to the section, where the new state is read out.
+      sectionRef.current?.focus();
     } catch (err) {
       toast(translateError(err, "security"), "error");
       refresh();
@@ -141,7 +147,15 @@ export function NarrativeSection({ narrative: n, grouping, canAct, paused, timez
       <div className="sect">
         <h2 id={titleId}>{NARRATIVE_COPY.title}</h2>
       </div>
-      <section className="card" aria-labelledby={titleId} data-testid="incident-narrative" data-state={n.state}>
+      <section
+        ref={sectionRef}
+        tabIndex={-1}
+        className="card"
+        aria-labelledby={titleId}
+        data-testid="incident-narrative"
+        data-state={n.state}
+        style={{ outlineOffset: 4 }}
+      >
         <div aria-live="polite" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {status && <p style={muted}>{status}</p>}
           {n.text !== null && (

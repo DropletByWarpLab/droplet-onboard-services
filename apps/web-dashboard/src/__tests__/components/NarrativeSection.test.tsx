@@ -115,6 +115,38 @@ describe("NarrativeSection — asking for a summary", () => {
     expect(JSON.stringify(toast.mock.calls)).not.toContain("raw server text");
   });
 
+  // #2423 review 10: a request that lands turns the section `pending`, which has no button — the pressed button
+  // unmounts and focus fell to <body>. It moves to the section (tabIndex -1), where the new state is announced:
+  // the incident page's own rule (IncidentView: "never on <body>").
+  it.each([
+    ["Regenerate", n(), NARRATIVE_COPY.regenerate, "closed" as const],
+    ["Summarise now", n({ state: "none", text: null, writtenAt: null, model: null, promptVersion: null }), NARRATIVE_COPY.summariseNow, "collecting" as const],
+  ])("after %s lands, focus is on the section — never on <body>", async (_l, narrative, name, grouping) => {
+    const { rerender, onSummarise, refresh } = setup({ narrative, grouping });
+    const button = screen.getByRole("button", { name });
+    button.focus();
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    const props = { grouping, canAct: true, paused: false, timezone: "Europe/London", now: NOW, onSummarise, refresh };
+    rerender(<NarrativeSection narrative={n({ state: "pending", text: narrative.text, writtenAt: null })} {...props} />);
+    expect(screen.queryByRole("button", { name })).toBeNull();
+    const section = screen.getByTestId("incident-narrative");
+    expect(document.activeElement).toBe(section);
+    expect(section.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("a request that fails leaves focus on its button (still there, the toast says why)", async () => {
+    const { onSummarise } = setup();
+    onSummarise.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "NARRATIVE_COOLDOWN", status: 409 }));
+    const button = screen.getByRole("button", { name: NARRATIVE_COPY.regenerate });
+    button.focus();
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(document.activeElement).toBe(button);
+  });
+
   it("a second press while one is in flight is refused; the button stays focusable (aria-disabled)", async () => {
     let release!: () => void;
     const { onSummarise } = setup();
