@@ -81,7 +81,13 @@ function SecurityCenter() {
   const router = useRouter();
   const params = useSearchParams();
   const canSeeThreats = user?.role === "owner" || user?.role === "admin";
-  const [tab, setTab] = useState<Tab>(params.get("tab") === "everything" ? "everything" : "incidents");
+  // The URL owns the tab (WARP-3185): a same-route navigation — the sidebar's
+  // Security link, an incident's way back — moves it, not only the first load.
+  const urlTab: Tab = params.get("tab") === "everything" ? "everything" : "incidents";
+  const [tab, setTab] = useState<Tab>(urlTab);
+  useEffect(() => {
+    setTab(urlTab);
+  }, [urlTab]);
   const [zone, setZone] = useState<string | null>(null);
   const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({ incidents: null, everything: null });
   const refreshTab = useRef<() => void>(() => {});

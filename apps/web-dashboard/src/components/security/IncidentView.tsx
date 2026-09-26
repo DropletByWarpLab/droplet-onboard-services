@@ -76,7 +76,8 @@ export const COPY = {
   back: "Security",
   acknowledge: "Acknowledge",
   // One sentence for every reason the box gives `actionable: false` (DS-005).
-  cantAct: "You can't acknowledge or resolve this incident. An owner or admin can.",
+  // Act-level members can act (the box folds level ≥ act into `actionable`), so not "an owner or admin" (WARP-3185).
+  cantAct: "You can't acknowledge or resolve this incident. Someone who can respond to Security events can.",
   resolve: "Resolve…",
   acknowledgedToast: "Acknowledged",
   resolvedToast: "Resolved",
@@ -112,6 +113,16 @@ export function notificationIdFrom(raw: string | null | undefined): string | nul
   return raw && NOTIFICATION_ID_RE.test(raw) ? raw : null;
 }
 
+/** The /security tab the incident page was opened from (`?from=`), validated: anything else is Incidents. */
+export type BackTab = "incidents" | "everything";
+export function backTabFrom(raw: string | null | undefined): BackTab {
+  return raw === "everything" ? "everything" : "incidents";
+}
+/** Where "‹ Security" goes: back to the tab the person came from. */
+export function backHref(tab: BackTab | undefined): string {
+  return tab === "everything" ? "/security?tab=everything" : "/security";
+}
+
 const isNotFound = (err: unknown): boolean => {
   const e = err as { code?: unknown; status?: unknown } | undefined;
   return e?.code === "INCIDENT_NOT_FOUND" || e?.status === 404;
@@ -125,23 +136,26 @@ export interface IncidentViewProps {
   id: string;
   /** The alert notification the page was opened from, already validated (`notificationIdFrom`). */
   notificationId: string | null;
+  /** The /security tab to go back to (`backTabFrom`). Incidents when absent. */
+  backTab?: BackTab;
   now?: Date;
 }
 
-export function IncidentView({ id, notificationId, now: nowProp }: IncidentViewProps) {
+export function IncidentView({ id, notificationId, backTab, now: nowProp }: IncidentViewProps) {
   const valid = UUID_RE.test(id);
   const q = useSecurityIncident(valid ? id : null);
-  if (!valid) return <NotFound />;
-  return <IncidentBody {...q} notificationId={notificationId} now={nowProp} />;
+  const back = backHref(backTab);
+  if (!valid) return <NotFound back={back} />;
+  return <IncidentBody {...q} notificationId={notificationId} back={back} now={nowProp} />;
 }
 
-function NotFound() {
+function NotFound({ back }: { back: string }) {
   return (
     <section className="card" data-testid="incident-not-found">
       <div className="empty">
         <span className="eh">{COPY.notFound}</span>
         <span style={{ maxWidth: "48ch" }}>{COPY.notFoundBody}</span>
-        <Link className="btn" href="/security" style={{ marginTop: 8 }}>
+        <Link className="btn" href={back} style={{ marginTop: 8 }}>
           {COPY.backToSecurity}
         </Link>
       </div>
@@ -158,8 +172,9 @@ function IncidentBody({
   acknowledge,
   resolve,
   notificationId,
+  back,
   now: nowProp,
-}: Query & { notificationId: string | null; now?: Date }) {
+}: Query & { notificationId: string | null; back: string; now?: Date }) {
   const now = nowProp ?? new Date();
   const level = useModuleLevel("security");
   const { mode } = useSecurityMode();
@@ -226,7 +241,7 @@ function IncidentBody({
   );
 
   if (error && (isNotFound(error) || !incident)) {
-    if (isNotFound(error)) return <NotFound />;
+    if (isNotFound(error)) return <NotFound back={back} />;
     return (
       <section className="card" role="alert" data-testid="incident-error">
         <div className="empty">
@@ -317,7 +332,7 @@ function IncidentBody({
   return (
     <>
       <Link
-        href="/security"
+        href={back}
         style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, color: "var(--text-muted)", alignSelf: "flex-start" }}
       >
         <ChevronLeft size={14} aria-hidden />

@@ -634,7 +634,8 @@ describe("WARP-2978 — incidents on the feed", () => {
   it("a row the engine grouped links to its incident; the link says where it goes", () => {
     render(<SecurityFeed {...props({ events: [event({ incident: { id: "inc-1" } })] })} />);
     const link = screen.getByRole("link", { name: COPY.inIncident });
-    expect(link).toHaveAttribute("href", "/security/incidents/inc-1");
+    // It says which tab it came from, so the incident page's way back returns there (WARP-3185 3).
+    expect(link).toHaveAttribute("href", "/security/incidents/inc-1?from=everything");
   });
 
   it("a row in no incident (or from a box older than P3) has no incident link", () => {

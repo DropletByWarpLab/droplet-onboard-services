@@ -658,7 +658,12 @@ export function useSecurityIncident(id: string | null) {
 
   const apply = useCallback(
     async (r: IncidentActionResult): Promise<IncidentActionResult> => {
-      await Promise.all([mutate(r.incident, { revalidate: false }), globalMutate(SECURITY_INCIDENT_SUMMARY_PATH)]);
+      // No incident in the answer (this person can't see it any more): re-read,
+      // so the page shows where it stands — caching null would spin forever (WARP-3185).
+      await Promise.all([
+        r.incident ? mutate(r.incident, { revalidate: false }) : mutate(),
+        globalMutate(SECURITY_INCIDENT_SUMMARY_PATH),
+      ]);
       return r;
     },
     [mutate, globalMutate],

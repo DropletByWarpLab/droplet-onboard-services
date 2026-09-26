@@ -88,7 +88,7 @@ function notice(over: Partial<IncidentNoticeView> = {}): IncidentNoticeView {
 }
 
 describe("the card's three lines", () => {
-  it("titles by scope: the area's name, the camera's household name, or the site-wide words", () => {
+  it("titles by scope: the area's name, the camera's given name, or the site-wide words", () => {
     expect(incidentTitle(summary(), label)).toBe("Stock room");
     expect(incidentTitle(summary({ scope: "camera", zone: null, camera: "back_cam" }), label)).toBe("Back camera");
     expect(incidentTitle(summary({ scope: "site_threat", zone: null }), label)).toBe("Network and sign-in");

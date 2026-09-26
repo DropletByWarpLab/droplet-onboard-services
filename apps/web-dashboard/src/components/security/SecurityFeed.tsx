@@ -576,7 +576,8 @@ export function SecurityEventRow({
         {e.incident && (
           <span className="sub">
             <Link
-              href={`/security/incidents/${encodeURIComponent(e.incident.id)}`}
+              // `from`: the incident page's way back returns to Everything (WARP-3185).
+              href={`/security/incidents/${encodeURIComponent(e.incident.id)}?from=everything`}
               style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--brand)" }}
             >
               {COPY.inIncident}

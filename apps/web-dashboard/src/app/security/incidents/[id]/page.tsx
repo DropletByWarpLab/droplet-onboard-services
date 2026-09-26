@@ -12,7 +12,7 @@ import { Suspense } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { Shield } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
-import { IncidentView, notificationIdFrom } from "@/components/security/IncidentView";
+import { IncidentView, backTabFrom, notificationIdFrom } from "@/components/security/IncidentView";
 
 export default function SecurityIncidentPage() {
   // useSearchParams needs a Suspense boundary.
@@ -29,7 +29,7 @@ function IncidentPage() {
   const id = typeof params?.id === "string" ? params.id : "";
   return (
     <ShellPage icon={<Shield size={15} />} label="Security" rhythm>
-      <IncidentView id={id} notificationId={notificationIdFrom(search.get("n"))} />
+      <IncidentView id={id} notificationId={notificationIdFrom(search.get("n"))} backTab={backTabFrom(search.get("from"))} />
     </ShellPage>
   );
 }

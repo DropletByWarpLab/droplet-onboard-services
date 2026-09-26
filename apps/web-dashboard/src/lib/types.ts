@@ -4186,7 +4186,8 @@ export interface IncidentDetail extends IncidentSummary {
 
 /** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
 export interface IncidentActionResult {
-  incident: IncidentDetail;
+  /** null when, after the write, this person can no longer see the incident (route 18 would answer 404). */
+  incident: IncidentDetail | null;
   changed: boolean;
 }
 

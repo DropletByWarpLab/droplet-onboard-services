@@ -111,7 +111,7 @@ describe("IncidentCard", () => {
     expect(link).not.toHaveTextContent(/ongoing|people/i);
   });
 
-  it("names a camera the household's way, and the site-wide scopes in words", () => {
+  it("names a camera by the name it was given, and the site-wide scopes in words", () => {
     const label = (n: string) => (n === "back_cam" ? "Back camera" : n);
     const { rerender } = render(
       <ul>
@@ -189,6 +189,21 @@ describe("IncidentList", () => {
     const { container } = render(<IncidentList {...props({ sources: null })} />);
     expect(container.querySelector("[data-empty]")).toBeNull();
     expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+  });
+
+  it("a refresh that fails with incidents already shown keeps them, and says they're the last list Droplet sent, with Retry (WARP-3185 1)", () => {
+    const onRetry = vi.fn();
+    render(<IncidentList {...props({ incidents: [incident()], error: new Error("503"), onRetry })} />);
+    expect(screen.getByRole("link")).toHaveAttribute("href", "/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f");
+    const line = screen.getByRole("status");
+    expect(line).toHaveTextContent("Couldn't refresh the incidents just now. This is the last list Droplet sent.");
+    fireEvent.click(within(line).getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalled();
+  });
+
+  it("no refresh line while the list is current", () => {
+    render(<IncidentList {...props({ incidents: [incident()] })} />);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("a failed read is an error with Retry — never an empty list", () => {

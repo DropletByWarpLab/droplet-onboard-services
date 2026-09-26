@@ -130,8 +130,8 @@ function Wrap({ children }: { children: ReactNode }) {
   return <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig>;
 }
 
-function renderView(props: { notificationId?: string | null } = {}) {
-  return render(<IncidentView id={ID} notificationId={props.notificationId ?? null} now={NOW} />, { wrapper: Wrap });
+function renderView(props: { notificationId?: string | null; backTab?: "incidents" | "everything" } = {}) {
+  return render(<IncidentView id={ID} notificationId={props.notificationId ?? null} backTab={props.backTab} now={NOW} />, { wrapper: Wrap });
 }
 
 beforeEach(() => {
@@ -339,6 +339,20 @@ describe("the page's order and content", () => {
     expect(screen.queryByRole("heading", { name: COPY.whyTitle })).toBeNull();
   });
 
+  it("the way back returns to the tab the person came from; Incidents by default (WARP-3185 3)", async () => {
+    const { unmount } = renderView({ backTab: "everything" });
+    expect(await screen.findByRole("link", { name: COPY.back })).toHaveAttribute("href", "/security?tab=everything");
+    unmount();
+    renderView();
+    expect(await screen.findByRole("link", { name: COPY.back })).toHaveAttribute("href", "/security");
+  });
+
+  it("not found keeps the way back to the right tab too", async () => {
+    h.getSecurityIncident.mockRejectedValue(typedError("INCIDENT_NOT_FOUND", 404));
+    renderView({ backTab: "everything" });
+    expect(await screen.findByRole("link", { name: COPY.backToSecurity })).toHaveAttribute("href", "/security?tab=everything");
+  });
+
   it("a missing incident and a hidden one read the same: not found, with the way back", async () => {
     h.getSecurityIncident.mockRejectedValue(typedError("INCIDENT_NOT_FOUND", 404));
     renderView();
@@ -455,7 +469,8 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
       unmount();
     }
     expect(new Set(texts)).toEqual(new Set([COPY.cantAct]));
-    expect(COPY.cantAct).toBe("You can't acknowledge or resolve this incident. An owner or admin can.");
+    // Act-level members can act (the box folds level ≥ act into `actionable`), so it isn't "an owner or admin" (WARP-3185 4).
+    expect(COPY.cantAct).toBe("You can't acknowledge or resolve this incident. Someone who can respond to Security events can.");
   });
 
   it("no can't-act sentence where there's nothing to act on: resolved, or plain activity", async () => {
@@ -592,6 +607,17 @@ describe("Acknowledge", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull());
     await waitFor(() => expect(screen.getByTestId("incident-state")).toHaveFocus());
     expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("a write whose answer carries no incident (the person can't see it any more) re-reads instead of spinning forever (WARP-3185 5)", async () => {
+    h.getSecurityIncident.mockReset();
+    h.getSecurityIncident.mockResolvedValueOnce(detail()).mockRejectedValue(typedError("INCIDENT_NOT_FOUND", 404));
+    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: null, changed: true });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    expect(await screen.findByText(COPY.notFound)).toBeInTheDocument();
+    expect(screen.queryByTestId("incident-loading")).toBeNull();
+    expect(h.getSecurityIncident.mock.calls.length).toBeGreaterThan(1);
   });
 
   it("an audit failure: nothing was changed, and the button is usable again", async () => {

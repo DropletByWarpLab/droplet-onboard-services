@@ -32,6 +32,8 @@ export const COPY = {
   all: "All",
   loadError: "Droplet can't read the incidents right now",
   loadErrorBody: "This is not the same as a quiet site. Try again in a moment.",
+  // WARP-3185 — a refresh that failed with incidents already shown: they stay, and say how old they are.
+  refreshFailed: "Couldn't refresh the incidents just now. This is the last list Droplet sent.",
   retry: "Retry",
   loadMore: "Show older",
   showEverything: "Show everything",
@@ -156,6 +158,19 @@ function ListBody(props: IncidentListProps & { now: Date }) {
 
   return (
     <>
+      {props.error && (
+        <p
+          role="status"
+          data-refresh-failed
+          style={{ margin: "0 0 8px", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13, color: "var(--text-muted)" }}
+        >
+          <span style={{ flex: "1 1 220px" }}>{COPY.refreshFailed}</span>
+          <button type="button" className="btn sm" onClick={props.onRetry}>
+            <RefreshCw size={14} aria-hidden />
+            {COPY.retry}
+          </button>
+        </p>
+      )}
       <ul ref={older.listRef} className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
         {props.incidents.map((i) => (
           <IncidentCard key={i.id} incident={i} cameraLabel={props.cameraLabel} timezone={props.timezone} now={props.now} />
