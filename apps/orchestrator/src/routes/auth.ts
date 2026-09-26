@@ -3629,6 +3629,9 @@ export function createProtectedAuthRouter(
             username: req.params.username,
             actor: actorFromRequest(req),
             ncMirror,
+            // WARP-3160: devices are keyed by the directory username, not the
+            // handle in the URL (which may be the Nextcloud name).
+            devices: { prisma, username: row.username },
           });
           res.json({
             status: "disabled",
@@ -3656,6 +3659,7 @@ export function createProtectedAuthRouter(
           // failure would have thrown), so the mirror is synced by
           // construction.
           ncMirror: "synced",
+          devices: prisma ? { prisma, username: req.params.username } : null,
         });
         res.json({
           status: "disabled",
@@ -4051,6 +4055,9 @@ export function createProtectedAuthRouter(
         targetRole: row?.role ?? null,
         actorUsername: req.user?.username ?? null,
         actor: actorFromRequest(req),
+        devices: prisma
+          ? { prisma, username: row?.username ?? req.params.username }
+          : null,
         // WARP-1565: the qualified headline existed only while the removal
         // was half-done (pr-reviewer #1229 B3 — "User removed" would have
         // been a false statement in an append-only, signature-chained audit

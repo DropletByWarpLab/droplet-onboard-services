@@ -58,6 +58,16 @@ vi.mock("./nextcloud-groups.client.js", () => ({
   ncAddUserToGroup: ncAddUserToGroupMock,
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
 }));
+const revokeUserVpnDevicesMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ revoked: 2, failed: 1, pendingDenied: 0 }),
+);
+const revokeOverlayDevicesForUserMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ revoked: 1, failed: 0, hqPending: 0, pendingDenied: 0 }),
+);
+vi.mock("./vpn-peer-revoke.service.js", () => ({
+  revokeUserVpnDevices: revokeUserVpnDevicesMock,
+  revokeOverlayDevicesForUser: revokeOverlayDevicesForUserMock,
+}));
 vi.mock("./department-provisioner.service.js", () => ({
   adminBasicToken: vi.fn(() => "basic:dGVzdDp0ZXN0"),
   DROPLET_ADMINS_GROUP: "droplet-admins",
@@ -810,6 +820,7 @@ describe("rail 6 — runRemovalPostEffects (revoke + denylist + 'User removed' A
       targetRole: "family",
       actorUsername: "stefan",
       actor: { type: "user", id: "owner-id" },
+      devices: null,
     });
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u1");
     expect(denylistUserMock).toHaveBeenCalledWith("u1", expect.any(Number));
@@ -837,6 +848,7 @@ describe("rail 6 — runRemovalPostEffects (revoke + denylist + 'User removed' A
       targetRole: null,
       actorUsername: "stefan",
       actor: { type: "user", id: "owner-id" },
+      devices: null,
     });
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
     expect(denylistUserMock).not.toHaveBeenCalled();
@@ -856,6 +868,7 @@ describe("rail 6 — runDisablePostEffects (revoke + pinned 'User disabled' Acti
       targetUserId: "u-alice",
       username: "alice",
       actor: { type: "user", id: "owner-id" },
+      devices: null,
     });
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
     expect(recordActivityMock).toHaveBeenCalledWith(
@@ -875,6 +888,7 @@ describe("rail 6 — runDisablePostEffects (revoke + pinned 'User disabled' Acti
       targetUserId: null,
       username: "legacy",
       actor: { type: "user", id: "owner-id" },
+      devices: null,
     });
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
     expect(recordActivityMock).toHaveBeenCalledWith(
@@ -1007,5 +1021,107 @@ describe("N2 — a DEACTIVATED target is never the last OPERATOR (no stuck rows)
       }),
     );
     expect(err.code).toBe("LAST_OWNER_INVARIANT");
+  });
+});
+
+// ── WARP-3160 — a leaver's VPN devices go with the account ─────────────
+describe("rail 6 — leaver VPN devices (WARP-3160)", () => {
+  const prisma = {} as any;
+
+  it("disable revokes the person's devices as a deactivation, by the admin, and counts them on the audit row", async () => {
+    await runDisablePostEffects({
+      targetUserId: "u-bob",
+      username: "bob-nc",
+      actor: { type: "user", id: "admin-1" },
+      devices: { prisma, username: "bob" },
+    });
+    expect(revokeUserVpnDevicesMock).toHaveBeenCalledWith(prisma, {
+      username: "bob",
+      actor: { type: "user", id: "admin-1" },
+      reason: "deactivation",
+    });
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User disabled",
+        refs: expect.objectContaining({ vpnDevicesRevoked: 2, vpnDevicesFailed: 1 }),
+      }),
+    );
+  });
+
+  it("delete revokes them as a removal", async () => {
+    await runRemovalPostEffects({
+      targetUserId: "u-bob",
+      targetUsername: "bob",
+      targetRole: "family",
+      actorUsername: "admin",
+      actor: { type: "user", id: "admin-1" },
+      devices: { prisma, username: "bob" },
+    });
+    expect(revokeUserVpnDevicesMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ username: "bob", reason: "removal" }),
+    );
+  });
+
+  it("devices: null touches nothing", async () => {
+    revokeUserVpnDevicesMock.mockClear();
+    await runDisablePostEffects({
+      targetUserId: null,
+      username: "legacy",
+      actor: { type: "user", id: "admin-1" },
+      devices: null,
+    });
+    expect(revokeUserVpnDevicesMock).not.toHaveBeenCalled();
+  });
+
+  // Cross-PR safety (#2404): a caller that predates `devices` still revokes.
+  it("an omitted `devices` falls back to revoking the post-effect's own username", async () => {
+    revokeOverlayDevicesForUserMock.mockClear();
+    await runRemovalPostEffects({
+      targetUserId: "u-bob",
+      targetUsername: "bob",
+      targetRole: "family",
+      actorUsername: "admin",
+      actor: { type: "user", id: "admin-1" },
+    });
+    expect(revokeOverlayDevicesForUserMock).toHaveBeenCalledWith(
+      "bob",
+      { type: "user", id: "admin-1" },
+      "removal",
+    );
+  });
+
+  it("a demotion to external guest revokes the person's devices (reason role_change)", async () => {
+    revokeOverlayDevicesForUserMock.mockClear();
+    await runRoleChangePostEffects({
+      target: { id: "u-bob", username: "bob", nextcloudUsername: null },
+      previousRole: "family",
+      nextRole: "guest",
+      actorUsername: "admin",
+      actor: { type: "user", id: "admin-1" },
+    });
+    expect(revokeOverlayDevicesForUserMock).toHaveBeenCalledWith(
+      "bob",
+      { type: "user", id: "admin-1" },
+      "role_change",
+    );
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Role changed",
+        refs: expect.objectContaining({ vpnDevicesRevoked: 1 }),
+      }),
+    );
+  });
+
+  it("any other role change leaves devices alone", async () => {
+    revokeOverlayDevicesForUserMock.mockClear();
+    await runRoleChangePostEffects({
+      target: { id: "u-bob", username: "bob", nextcloudUsername: null },
+      previousRole: "family",
+      nextRole: "admin",
+      actorUsername: "admin",
+      actor: { type: "user", id: "admin-1" },
+    });
+    expect(revokeOverlayDevicesForUserMock).not.toHaveBeenCalled();
   });
 });

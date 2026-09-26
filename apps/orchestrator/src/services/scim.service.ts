@@ -266,6 +266,7 @@ export async function deactivateUser(prisma: PrismaClient, id: string): Promise<
     targetUserId: existing.id,
     username: existing.username,
     actor: { type: "system", id: null },
+    devices: { prisma, username: existing.username },
   });
   return updated;
 }
