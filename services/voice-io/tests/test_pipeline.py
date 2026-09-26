@@ -3738,3 +3738,215 @@ class TestResamplerBuiltOncePerStreamOpen:
         raw = (np.arange(WAKE_FRAME_SAMPLES * 3) % 64).astype(np.int16) * 200
         expected = audio_io.resample_int16(raw, 48000, WAKE_SAMPLE_RATE)
         assert np.array_equal(det.frames[0], expected)
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-3127 — warm on wake
+# ────────────────────────────────────────────────────────────────────
+
+class _WarmRecordingLLM(LLMClient):
+    """Records warm() calls (count + calling thread). `delay_s` models a slow
+    orchestrator; `raises` models a client whose warm() blows up."""
+
+    def __init__(self, delay_s: float = 0.0, raises: Optional[BaseException] = None):
+        self._delay_s = delay_s
+        self._raises = raises
+        self.calls = 0
+        self.threads: list[str] = []
+        self.started = threading.Event()
+        self.finished = threading.Event()
+
+    def reply(self, user_text: str, *, tool_choice=None) -> str:
+        return ""
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def warm(self) -> None:
+        self.calls += 1
+        self.threads.append(threading.current_thread().name)
+        self.started.set()
+        if self._raises is not None:
+            raise self._raises
+        time.sleep(self._delay_s)
+        self.finished.set()
+
+
+def _warm_pipe(llm: Optional[LLMClient], *, stt: Optional[StreamingSTT] = None, **kw) -> WakePipeline:
+    """A pipeline whose every _run_wake_detect() fires (no fire debounce), with
+    STT wired and reachable so a wake leads into a turn."""
+    stt = stt if stt is not None else _RecordingSTT(scripted_transcripts=["hi"])
+    pipe = WakePipeline(
+        detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+        input_device_index=0,
+        threshold=0.5,
+        debounce_s=0.0,
+        stt=stt,
+        stt_max_record_s=100.0,
+        llm=llm,
+        **kw,
+    )
+    pipe._stt_available = True
+    return pipe
+
+
+def _join_warm(pipe: WakePipeline) -> None:
+    t = pipe._llm_warm_thread
+    if t is not None:
+        t.join(timeout=5.0)
+
+
+class TestWarmOnWake:
+    """On a fired wake the pipeline asks the orchestrator to start loading the
+    chat model (POST /api/llm/warm) so a reload after the 5 min residency
+    (WARP-1826) overlaps the user speaking + STT. Hard rule: the
+    'wake-pipeline' capture thread never waits on it."""
+
+    def test_wake_triggers_the_warm_off_the_capture_thread(self):
+        llm = _WarmRecordingLLM()
+        pipe = _warm_pipe(llm)
+        pipe._run_wake_detect(_silence_frame())
+        assert llm.finished.wait(2.0), "a fired wake must warm the LLM"
+        assert llm.calls == 1
+        assert llm.threads == ["llm-warm"]
+        assert threading.current_thread().name not in llm.threads
+
+    def test_an_injected_on_wake_does_not_bypass_the_warm(self):
+        # The trigger sits at the fire site, not in _default_on_wake — main.py
+        # or a test injecting its own on_wake still gets the warm.
+        fires: list[WakeEvent] = []
+        llm = _WarmRecordingLLM()
+        pipe = _warm_pipe(llm, on_wake=fires.append)
+        pipe._run_wake_detect(_silence_frame())
+        assert llm.finished.wait(2.0)
+        assert len(fires) == 1
+
+    def test_a_second_wake_within_60s_does_not_warm_again(self):
+        llm = _WarmRecordingLLM()
+        pipe = _warm_pipe(llm)
+        pipe._run_wake_detect(_silence_frame())
+        _join_warm(pipe)
+        pipe._run_wake_detect(_silence_frame())
+        pipe._run_wake_detect(_silence_frame())
+        _join_warm(pipe)
+        assert llm.calls == 1
+
+    def test_warms_again_once_the_60s_window_has_passed(self):
+        llm = _WarmRecordingLLM()
+        pipe = _warm_pipe(llm)
+        pipe._run_wake_detect(_silence_frame())
+        _join_warm(pipe)
+        # Monotonic stamp: age it past the window rather than sleeping 60 s.
+        pipe._llm_warm_at -= pipeline_module.DEFAULT_LLM_WARM_DEBOUNCE_S + 1.0
+        pipe._run_wake_detect(_silence_frame())
+        _join_warm(pipe)
+        assert llm.calls == 2
+
+    def test_debounce_window_is_60s(self):
+        assert pipeline_module.DEFAULT_LLM_WARM_DEBOUNCE_S == 60.0
+
+    def test_never_more_than_one_warm_thread_at_a_time(self):
+        # Even with the window elapsed, a warm still in flight (a wedged
+        # orchestrator) is not joined by a second thread.
+        llm = _WarmRecordingLLM(delay_s=1.0)
+        pipe = _warm_pipe(llm)
+        pipe._run_wake_detect(_silence_frame())
+        assert llm.started.wait(2.0)
+        first = pipe._llm_warm_thread
+        pipe._llm_warm_at -= pipeline_module.DEFAULT_LLM_WARM_DEBOUNCE_S + 1.0
+        pipe._run_wake_detect(_silence_frame())
+        assert pipe._llm_warm_thread is first
+        _join_warm(pipe)
+        assert llm.calls == 1
+
+    @pytest.mark.parametrize(
+        "exc",
+        [RuntimeError("warm bug"), OSError("network down"), ValueError("bad")],
+    )
+    def test_a_raising_client_never_propagates(self, exc, caplog):
+        fires: list[WakeEvent] = []
+        llm = _WarmRecordingLLM(raises=exc)
+        pipe = _warm_pipe(llm, on_wake=fires.append)
+        with caplog.at_level("DEBUG", logger="voice.pipeline"):
+            pipe._run_wake_detect(_silence_frame())  # must not raise
+            assert llm.started.wait(2.0)
+            _join_warm(pipe)
+        # The wake itself was fully handled.
+        assert len(fires) == 1
+        assert pipe.status().state == "wake_detected"
+        # Swallowed quietly: a flaky warm is not an operator-facing error.
+        loud = [r for r in caplog.records if r.name == "voice.pipeline" and r.levelno >= 30]
+        assert loud == []
+
+    def test_a_slow_client_does_not_delay_wake_or_stt_capture(self):
+        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        llm = _WarmRecordingLLM(delay_s=1.5)
+        pipe = _warm_pipe(llm, stt=stt)
+
+        started = time.monotonic()
+        pipe._run_wake_detect(_silence_frame())  # the wake fires
+        pipe._on_frame(_silence_frame())         # next frame opens the STT stream
+        pipe._on_frame(_silence_frame())         # and keeps streaming
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5, f"capture waited on the warm ({elapsed:.2f}s)"
+        assert pipe.status().state == "transcribing"
+        assert stt.sessions_opened == 1
+        assert len(stt.chunks_received) == 2
+        # The warm really was still running while capture moved on.
+        assert llm.started.wait(2.0)
+        assert not llm.finished.is_set()
+        _join_warm(pipe)
+        assert llm.finished.is_set()
+
+    def test_no_llm_no_warm_thread(self):
+        pipe = _warm_pipe(None)
+        pipe._run_wake_detect(_silence_frame())
+        assert pipe._llm_warm_thread is None
+
+    def test_no_warm_when_stt_is_absent(self):
+        # Without STT the interaction ends at the detection (wake_heard) — no
+        # turn follows, so loading the model would only take the GPU.
+        llm = _WarmRecordingLLM()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            llm=llm,
+        )
+        pipe._run_wake_detect(_silence_frame())
+        assert pipe._llm_warm_thread is None
+        assert llm.calls == 0
+
+    def test_no_warm_when_stt_is_unreachable(self):
+        llm = _WarmRecordingLLM()
+        pipe = _warm_pipe(llm)
+        pipe._stt_available = False
+        pipe._run_wake_detect(_silence_frame())
+        assert pipe._llm_warm_thread is None
+        assert llm.calls == 0
+
+    def test_no_warm_for_a_calibration_wake(self):
+        # The wizard's "say it three times" wakes are counted, not handled —
+        # nothing will be asked of the model.
+        llm = _WarmRecordingLLM()
+        pipe = _warm_pipe(llm)
+        pipe._calibration_mode_until = time.time() + 60.0
+        pipe._run_wake_detect(_silence_frame())
+        assert pipe._llm_warm_thread is None
+        assert llm.calls == 0
+
+    def test_no_warm_below_threshold(self):
+        llm = _WarmRecordingLLM()
+        pipe = _warm_pipe(llm)
+        pipe._detector = _ScriptedDetector([{"hey_jarvis": 0.1}])
+        pipe._run_wake_detect(_silence_frame())
+        assert pipe._llm_warm_thread is None
+
+    def test_mock_llm_inherits_a_no_op_warm(self):
+        # Every LLMClient can be asked to warm; the default does nothing.
+        pipe = _warm_pipe(MockLLM(echo=True))
+        pipe._run_wake_detect(_silence_frame())
+        _join_warm(pipe)
+        assert pipe.status().state == "wake_detected"

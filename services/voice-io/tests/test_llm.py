@@ -36,6 +36,7 @@ import voice.llm
 from voice.llm import (
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
+    DEFAULT_LLM_WARM_PATH,
     DEFAULT_VOICE_ALLOWED_TOOLS,
     DEFAULT_VOICE_MAX_TOKENS,
     LLMUnavailable,
@@ -101,6 +102,85 @@ class TestOrchestratorAvailable:
             raise httpx.ConnectError("connection refused")
         _install_mock_transport(monkeypatch, handler)
         assert OrchestratorLLM(base_url="http://test").available is False
+
+
+# ────────────────────────────────────────────────────────────────────
+# OrchestratorLLM — warm() (WARP-3127 warm on wake)
+# ────────────────────────────────────────────────────────────────────
+
+class TestOrchestratorWarm:
+    def test_warm_path_default(self):
+        assert DEFAULT_LLM_WARM_PATH == "/api/llm/warm"
+
+    def test_warm_posts_to_the_warm_path_with_the_service_bearer(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warming"}),
+        )
+        OrchestratorLLM(base_url="http://test", bearer_token="voice-secret").warm()
+        assert len(captured) == 1
+        req = captured[0]
+        assert req.method == "POST"
+        assert req.url.path == "/api/llm/warm"
+        assert req.headers["Authorization"] == "Bearer voice-secret"
+
+    def test_warm_names_no_model(self, monkeypatch):
+        # The orchestrator warms the box's ACTIVE model (resolveActiveModel).
+        # A client-chosen model would let a caller load a second model onto
+        # the GPU (WARP-1826 / one-model rule).
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "unknown"}),
+        )
+        OrchestratorLLM(base_url="http://test", model="qwen3:8b").warm()
+        body = json.loads(captured[0].content or b"{}")
+        assert "model" not in body
+
+    def test_warm_uses_a_short_timeout(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warm"}),
+        )
+        OrchestratorLLM(base_url="http://test", timeout_s=120.0).warm()
+        timeout = captured[0].extensions["timeout"]
+        # Never the 120 s agent-loop timeout: this is a nudge, not a turn.
+        assert all(v is not None and v <= 2.0 for v in timeout.values())
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 500, 503])
+    def test_warm_swallows_http_errors(self, monkeypatch, status):
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(status, text="nope"))
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ConnectError("connection refused"),
+            httpx.ReadTimeout("slow"),
+            httpx.RemoteProtocolError("reset"),
+            OSError("no route to host"),
+        ],
+    )
+    def test_warm_swallows_transport_errors(self, monkeypatch, exc):
+        def handler(req):
+            raise exc
+        _install_mock_transport(monkeypatch, handler)
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    def test_warm_failure_logs_at_debug_only(self, monkeypatch, caplog):
+        def handler(req):
+            raise httpx.ConnectError("connection refused")
+        _install_mock_transport(monkeypatch, handler)
+        with caplog.at_level("DEBUG", logger="voice.llm"):
+            OrchestratorLLM(base_url="http://test").warm()
+        records = [r for r in caplog.records if r.name == "voice.llm"]
+        assert records, "a failed warm leaves a debug breadcrumb"
+        assert all(r.levelno == 10 for r in records)
+
+    def test_warm_after_close_does_not_raise(self, monkeypatch):
+        # The warm runs on a background thread, so it can land after main.py's
+        # shutdown hook closed the pool. httpx raises RuntimeError (not an
+        # HTTPError) on a closed client; that must be swallowed too.
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(202, json={}))
+        client = OrchestratorLLM(base_url="http://test")
+        client.close()
+        client.warm()  # must not raise
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -319,6 +399,13 @@ class TestMockLLM:
 
     def test_available_false_when_explicitly_set(self):
         assert MockLLM(available=False).available is False
+
+    def test_warm_is_an_inherited_no_op(self):
+        # WARP-3127: warm() lives on the LLMClient interface so the pipeline
+        # can call it on whatever build_llm_from_env returned.
+        m = MockLLM(scripted_replies=["one"])
+        assert m.warm() is None
+        assert m.requests == []
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -103,6 +103,15 @@ DEFAULT_LLM_MODELS_PATH = "/api/llm/models"
 # the listing is never fetched per turn. Matches the orchestrator's own
 # 30 s model-list cache, so a shorter TTL would buy nothing.
 ACTIVE_MODEL_TTL_S = 30.0
+# WARP-3127 — warm on wake. The pipeline POSTs here the moment the wake word
+# fires, so the orchestrator starts loading the box's ACTIVE model while the
+# person is still speaking (a reload after WARP-1826's 5 min residency then
+# overlaps speech + STT instead of following them). The orchestrator answers
+# 202 at once and picks the model itself — the body names none.
+DEFAULT_LLM_WARM_PATH = "/api/llm/warm"
+# A nudge, not a turn: short enough that a wedged orchestrator holds the
+# background warm thread at most this long. Never the agent-loop timeout.
+LLM_WARM_TIMEOUT_S = 1.5
 # Model the orchestrator's agent loop will ask ai-gateway for. ai-gateway
 # routes `llama*`/`qwen*`/`mistral*`/`phi*` to the local Ollama instance
 # (or its ollama-manager sidecar when deployed); the model must already
@@ -383,6 +392,15 @@ class LLMClient(ABC):
         close its pooled httpx.Client; ``MockLLM`` inherits this no-op.
         """
 
+    def warm(self) -> None:
+        """Ask the backend to start loading its chat model (WARP-3127).
+
+        Called by the pipeline, off the capture thread, the moment the wake
+        word fires. No-op by default, so the pipeline can call it on whatever
+        ``build_llm_from_env`` returned; ``OrchestratorLLM`` overrides it and
+        ``MockLLM`` inherits this no-op. Implementations must never raise.
+        """
+
 
 # ────────────────────────────────────────────────────────────────────
 # Orchestrator — production HTTP client
@@ -488,6 +506,36 @@ class OrchestratorLLM(LLMClient):
                 exc,
             )
             return False
+
+    def warm(self) -> None:
+        """POST /api/llm/warm so the orchestrator starts loading the box's
+        active model now, while the person is still speaking (WARP-3127).
+
+        Rides the pooled client (no new connection or mTLS handshake per
+        wake). The body names no model: the orchestrator warms the model it
+        resolves as active — the one ``_current_model`` follows — so voice
+        can never put a second model on the GPU. Probe-first and
+        in-flight-guarded on that side; this side only has to be cheap.
+
+        Best-effort and never raises: every failure (orchestrator down, a
+        401/403, a timeout) logs at DEBUG only. A missed warm costs nothing
+        but the head start — the turn itself still loads the model.
+        """
+        try:
+            resp = self._client.post(
+                f"{self._base_url}{DEFAULT_LLM_WARM_PATH}",
+                json={},
+                timeout=LLM_WARM_TIMEOUT_S,
+                headers=self._headers(),
+            )
+            if resp.is_success:
+                logger.debug("llm warm requested: %s", resp.text[:80])
+            else:
+                logger.debug("llm warm refused: HTTP %s", resp.status_code)
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            # RuntimeError: httpx's "client has been closed" — the warm runs
+            # on a background thread and can land after shutdown's close().
+            logger.debug("llm warm failed (non-fatal): %s", exc)
 
     def close(self) -> None:
         """Close the pooled httpx.Client (WARP-1433).

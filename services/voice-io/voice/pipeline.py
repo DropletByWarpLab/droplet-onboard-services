@@ -301,6 +301,15 @@ DEFAULT_CALIBRATION_MODE_TTL_S = 90.0
 # wakes promptly.
 DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
 
+# Warm on wake (WARP-3127). A fired wake asks the orchestrator to start
+# loading the chat model (LLMClient.warm → POST /api/llm/warm), so a reload
+# after WARP-1826's 5 min residency overlaps the person speaking + STT
+# instead of starting once the transcript lands. At most one warm per this
+# window: a conversation's back-to-back wakes find the model resident
+# anyway, and the orchestrator side is probe-first and in-flight-guarded.
+# Monotonic, so a wall-clock step can't suppress or double the warm.
+DEFAULT_LLM_WARM_DEBOUNCE_S = 60.0
+
 # End-of-speech (VAD) for the STT capture window. Once the user has
 # actually started talking, the capture ends after a short run of
 # trailing silence — so the box stops listening the moment they finish
@@ -574,6 +583,11 @@ class WakePipeline:
         # LLM — commit 7. None disables the closed-loop behaviour;
         # transcript still lands in /voice/status but isn't spoken.
         self._llm = llm
+        # Warm on wake (WARP-3127) — monotonic stamp of the last warm handed
+        # off, and the daemon thread carrying it. Written only from the
+        # 'wake-pipeline' thread (_run_wake_detect → _maybe_warm_llm).
+        self._llm_warm_at: Optional[float] = None
+        self._llm_warm_thread: Optional[threading.Thread] = None
         # How often the background probe thread re-checks STT/TTS/LLM
         # reachability. Without this, an upstream that came up AFTER
         # voice-io (common at boot when whisper / piper / ai-
@@ -909,6 +923,61 @@ class WakePipeline:
             )
         except Exception:  # pragma: no cover — defensive
             logger.exception("activity reporter raised (event dropped)")
+
+    # ──────────────────────────────────────────────────────────────
+    # Warm on wake (WARP-3127)
+    # ──────────────────────────────────────────────────────────────
+
+    def _maybe_warm_llm(self) -> None:
+        """Ask the LLM backend to start loading its model — off-thread.
+
+        Called from the wake-fire site on the 'wake-pipeline' capture thread,
+        so it must never block and never raise: the warm itself runs on a
+        short-lived daemon thread ('llm-warm') and this returns as soon as
+        that thread is started. Skipped when:
+
+          - there is no LLM (nothing to warm);
+          - STT is absent or unreachable: the interaction ends at the
+            detection (wake_heard), no turn follows, so a load would only
+            take the GPU;
+          - a warm was handed off less than DEFAULT_LLM_WARM_DEBOUNCE_S ago
+            (monotonic), or the previous one is still running.
+
+        Every failure is swallowed at DEBUG: a missed warm only loses the
+        head start — the turn itself still loads the model.
+        """
+        try:
+            llm = self._llm
+            if llm is None:
+                return
+            if self._stt is None or not self._stt_available:
+                return
+            now = time.monotonic()
+            if (
+                self._llm_warm_at is not None
+                and now - self._llm_warm_at < DEFAULT_LLM_WARM_DEBOUNCE_S
+            ):
+                return
+            previous = self._llm_warm_thread
+            if previous is not None and previous.is_alive():
+                return
+            self._llm_warm_at = now
+            thread = threading.Thread(
+                target=self._warm_llm_worker, args=(llm,),
+                name="llm-warm", daemon=True,
+            )
+            self._llm_warm_thread = thread
+            thread.start()
+        except Exception:
+            logger.debug("llm warm hand-off failed (ignored)", exc_info=True)
+
+    @staticmethod
+    def _warm_llm_worker(llm: LLMClient) -> None:
+        """Body of the 'llm-warm' thread. Never lets an exception escape."""
+        try:
+            llm.warm()
+        except Exception:
+            logger.debug("llm warm raised (ignored)", exc_info=True)
 
     def _check_flatline_transition(self) -> None:
         """Emit dsp_wedge / dsp_recovered on `input_flatlined` edges.
@@ -2175,6 +2244,11 @@ class WakePipeline:
             # recognizer's half-decoded utterance into the next try.
             self._reset_detector()
             return
+
+        # WARP-3127: start loading the chat model now, while the person is
+        # still speaking. At the fire site (not in _default_on_wake) so an
+        # injected on_wake can't bypass it; hands off and returns at once.
+        self._maybe_warm_llm()
 
         try:
             self._on_wake(event)
