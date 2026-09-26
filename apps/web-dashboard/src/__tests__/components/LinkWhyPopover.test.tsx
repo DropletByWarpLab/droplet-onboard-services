@@ -60,3 +60,47 @@ describe("LinkWhyPopover — the Close control (WARP-1787)", () => {
     expect(onUndo).not.toHaveBeenCalled();
   });
 });
+
+describe("LinkWhyPopover — Keep and Undo in flight (review #2418)", () => {
+  it("in flight: Keep and Undo aria-disabled, never disabled; a second press is refused", async () => {
+    let release!: () => void;
+    const onClose = vi.fn();
+    const onKeep = vi.fn(() => new Promise<undefined>((r) => (release = () => r(undefined))));
+    const onUndo = vi.fn(async () => undefined);
+    render(
+      <LinkWhyPopover open link={LINK} zoneKind="interior" canManage tz="Europe/London" now={new Date("2026-09-23T22:00:00Z")} onClose={onClose} onKeep={onKeep} onUndo={onUndo} />,
+    );
+    const keep = screen.getByRole("button", { name: "Keep" });
+    fireEvent.click(keep);
+    fireEvent.click(keep);
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onKeep).toHaveBeenCalledTimes(1);
+    expect(onUndo).not.toHaveBeenCalled();
+    for (const name of ["Keep", "Undo"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
+      expect(screen.getByRole("button", { name })).not.toBeDisabled();
+    }
+    release();
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("a refused Keep (409) keeps the panel open and focus on Keep, inside it", async () => {
+    const onClose = vi.fn();
+    const onKeep = vi.fn(async () => {
+      throw Object.assign(new Error("x"), { code: "LINK_NOT_DECIDABLE", status: 409 });
+    });
+    render(
+      <LinkWhyPopover open link={LINK} zoneKind="interior" canManage tz="Europe/London" now={new Date("2026-09-23T22:00:00Z")} onClose={onClose} onKeep={onKeep} onUndo={vi.fn()} />,
+    );
+    const keep = screen.getByRole("button", { name: "Keep" });
+    // Let the dialog's own initial focus (a timer on open) land first, then press Keep from the keyboard's place.
+    await vi.waitFor(() => expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement));
+    keep.focus();
+    fireEvent.click(keep);
+    await vi.waitFor(() => expect(onKeep).toHaveBeenCalled());
+    await vi.waitFor(() => expect(keep).not.toHaveAttribute("aria-disabled"));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+    expect(document.activeElement).toBe(keep);
+  });
+});

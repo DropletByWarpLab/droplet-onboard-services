@@ -67,3 +67,38 @@ describe("LinkSuggestions", () => {
     expect(h.toast.mock.calls.flat().join(" ")).not.toContain(SECRET);
   });
 });
+
+// Review #2418 (finding 3) — in flight, Add it and Not this stay focusable (aria-disabled, never `disabled`) and a
+// ref refuses a second press; a decided suggestion's card goes, so the panel is told where focus should land.
+describe("LinkSuggestions — in flight and after", () => {
+  it("in flight: both buttons aria-disabled, never disabled; a second press is refused", async () => {
+    let release!: () => void;
+    const accept = vi.fn(() => new Promise((r) => (release = () => r({}))));
+    renderIt({ accept });
+    const add = screen.getByRole("button", { name: SUGGEST_COPY.add });
+    fireEvent.click(add);
+    fireEvent.click(add);
+    fireEvent.click(screen.getByRole("button", { name: SUGGEST_COPY.notThis }));
+    expect(accept).toHaveBeenCalledTimes(1);
+    for (const name of [SUGGEST_COPY.add, SUGGEST_COPY.notThis]) {
+      const b = screen.getByRole("button", { name });
+      expect(b).toHaveAttribute("aria-disabled", "true");
+      expect(b).not.toBeDisabled();
+    }
+    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: SUGGEST_COPY.add })).not.toHaveAttribute("aria-disabled"));
+  });
+
+  it("a decided suggestion names its area for focus; a refused one does not (its card stays, and so does focus)", async () => {
+    const onDecided = vi.fn();
+    renderIt({ onDecided });
+    fireEvent.click(screen.getByRole("button", { name: SUGGEST_COPY.add }));
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith("z1"));
+
+    const refused = vi.fn();
+    renderIt({ onDecided: refused, reject: vi.fn().mockRejectedValue(Object.assign(new Error("x"), { code: "LINK_NOT_DECIDABLE", status: 409 })) });
+    fireEvent.click(screen.getAllByRole("button", { name: SUGGEST_COPY.notThis })[1]!);
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.any(String), "error"));
+    expect(refused).not.toHaveBeenCalled();
+  });
+});

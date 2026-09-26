@@ -33,6 +33,7 @@ vi.mock("./security-audit.js", async (orig) => {
 import {
   LINK_HEALTH_STALE_MS,
   MAX_NEW_LINK_ROWS_PER_RUN,
+  planLinkChanges,
   MAX_OPEN_SUGGESTIONS_PER_AREA,
   SECURITY_LINK_INTERVAL_MS,
   SECURITY_LINK_LOCK_KEY,
@@ -47,7 +48,7 @@ import {
 } from "./security-link-proposals.service.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
-import { LINK_RULES_VERSION } from "../lib/security-cooccurrence.js";
+import { LINK_RULES_VERSION, type PairCandidateResult } from "../lib/security-cooccurrence.js";
 import { parseLinkEvidence } from "../lib/security-link-evidence.js";
 
 const S = 1000;
@@ -484,6 +485,53 @@ describe("the caps", () => {
     expect(w.links.filter((l) => l.state === "proposed")).toHaveLength(MAX_OPEN_SUGGESTIONS_PER_AREA);
     // The two added are the two most confident.
     expect(w.links.filter((l) => l.state === "proposed" && !l.sourceRef.startsWith("old_")).map((l) => l.sourceRef)).toEqual(["c01", "c02"]);
+  });
+
+  // Review #2418 (follow-up 6): the run's cap is applied BEFORE a create takes an area's slot. A create the cap
+  // drops must not use up the area's 32nd active link — which an existing suggestion could have been promoted to.
+  it("a create the run's cap drops never takes an area's slot: the suggestion behind it is still promoted", () => {
+    const res = (zoneId: string, cam: string, confidence: number): PairCandidateResult => ({
+      anchor: { linkId: `anchor-${zoneId}`, zoneId, zoneName: zoneId, sourceKind: "camera", sourceRef: `anchor_${zoneId}`, label: "Anchor" },
+      camera: cam,
+      part: null,
+      sourceKind: "camera",
+      sourceRef: cam,
+      label: cam,
+      forward: { n: 40, k: 36, lambda: 1, lift: 36, pChance: 1e-12, confidence },
+      reverse: { n: 40, k: 36, lambda: 1, lift: 36, pChance: 1e-12, confidence },
+      forwardPAdj: 1e-10,
+      reversePAdj: 1e-10,
+      gate: "auto",
+      confidence,
+      wholeK: null,
+      names: { match: false, shared: [] },
+    }) as unknown as PairCandidateResult;
+    const row = (zoneId: string, ref: string, state: "active" | "proposed", by: "person" | "droplet") => ({
+      id: `${zoneId}-${ref}`,
+      zoneId,
+      sourceKind: "camera",
+      sourceRef: ref,
+      state,
+      origin: by,
+      stateSetBy: by,
+    });
+    // Area A: 31 active links and Droplet's open suggestion on z_cam. Area B: empty.
+    const areaA = {
+      zoneId: "z-a",
+      zoneName: "A",
+      version: 1,
+      rows: [...Array.from({ length: 31 }, (_, i) => row("z-a", `filler_${i}`, "active", "person")), row("z-a", "z_cam", "proposed", "droplet")],
+    };
+    const areaB = { zoneId: "z-b", zoneName: "B", version: 1, rows: [] };
+    const results = [
+      res("z-a", "x_cam", 0.7), // new, auto: would take A's 32nd slot — but 20 creates outrank it
+      res("z-a", "z_cam", 0.6), // A's open suggestion, auto: the 32nd slot is its to take
+      ...Array.from({ length: MAX_NEW_LINK_ROWS_PER_RUN }, (_, i) => res("z-b", `b_${String(i).padStart(2, "0")}`, 0.9)),
+    ];
+    const plans = planLinkChanges([areaA, areaB], results, "link_and_suggest");
+    const a = plans.get("z-a")!;
+    expect(a.map((c) => `${c.op}:${c.op === "create" ? c.result.sourceRef : c.row.sourceRef}`)).toEqual(["activate:z_cam"]);
+    expect(plans.get("z-b")!.filter((c) => c.op === "create")).toHaveLength(MAX_NEW_LINK_ROWS_PER_RUN);
   });
 
   it("at most 20 new rows a run, the highest confidence first", async () => {
