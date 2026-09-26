@@ -797,12 +797,10 @@ describe("DELETE /api/vpn/peers/:id", () => {
     expect(res.status).toBe(404);
   });
 
-  it("403s a family-tier caller (WARP-171 — VPN write is owner+admin only)", async () => {
-    // Pre-WARP-171 this test exercised the per-resource ownership
-    // guard ("you can delete YOUR peer but not bob's"). After WARP-171
-    // the route-level guard rejects every family-tier caller at the
-    // door — they don't even reach the ownership check. The 403 still
-    // happens, just from `requireRole("owner", "admin")` instead.
+  it("403s a family-tier caller on a static peer (WARP-171; WARP-3121 only opens OWN overlay devices)", async () => {
+    // Members may revoke their own OVERLAY device (WARP-3121, covered in
+    // vpn-overlay-qr-enroll.test.ts). A static peer — and anyone else's
+    // device — stays owner/admin only.
     const prisma = createPrismaMock();
     prisma.rows.push({
       id: "p1", userId: "bob", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(),

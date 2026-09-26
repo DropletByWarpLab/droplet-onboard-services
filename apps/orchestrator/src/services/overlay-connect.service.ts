@@ -26,6 +26,7 @@
  *     surface + an HQ-side D1 success-rate recipe are documented in
  *     docs/overlay-connect-punch-telemetry.md.
  */
+import { OVERLAY_PEER_USER_ID } from "@droplet/auth-policy";
 import { createHash } from "node:crypto";
 import type { DeviceIdentityClient } from "./device-identity.client.js";
 
@@ -539,7 +540,7 @@ export async function installOrRefreshOverlayPeer(
  *  namespace (they carry no per-user Nextcloud identity in Stage 1b — Stage 2 /
  *  WARP-1386 wires real owner identity through enrollment). The idle-expiry
  *  sweep filters on `kind`, independent of this value. */
-const OVERLAY_PEER_USER = "overlay";
+const OVERLAY_PEER_USER = OVERLAY_PEER_USER_ID;
 
 function existing_label_fallback(row: OverlayVpnPeerRow): string {
   return (row as { deviceLabel?: string }).deviceLabel ?? "Remote device";

@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useAuth } from "@/lib/auth";
+import { OVERLAY_PEER_USER_ID } from "@droplet/auth-policy";
 import {
   fetchVpnStatus,
   fetchVpnPeers,
@@ -308,7 +309,16 @@ export default function RemoteAccessPage() {
               // synthetic userId "overlay" and so could never show the button
               // to anyone, while a family user WAS shown a button for their
               // own device that the API would 403.
-              canRevoke={isOwnerOrAdmin}
+              // WARP-3121: the API now also lets anyone revoke an OVERLAY
+              // device enrolled under their own username (a forgotten or lost
+              // laptop); static peers stay owner/admin only.
+              canRevoke={
+                isOwnerOrAdmin ||
+                (peer.kind === "overlay" &&
+                  peer.userId !== OVERLAY_PEER_USER_ID &&
+                  !!currentUser?.username &&
+                  peer.userId === currentUser.username)
+              }
               liveStateAvailable={liveState}
               onRevoke={() => setRevokeTarget(peer)}
             />
