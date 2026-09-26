@@ -63,10 +63,13 @@ async function dispatchDueReminders(prisma: PrismaClient): Promise<void> {
         where: { id: r.id },
         data: { notifiedAt: new Date() },
       });
-      // `Reminder.userId` holds a USERNAME: every writer stores
-      // `req.user.username` (routes/reminders.ts) or tools-core's
-      // `ctx.userId`. notification-recipient.guard.test.ts allow-lists this
-      // site and follows those writers, so that stays true.
+      // `Reminder.userId` holds a USERNAME: its one writer, routes/reminders.ts,
+      // stores the caller's `req.user.username` or, for the assistant's
+      // reminder tools, the username of the person they act for (WARP-3101 —
+      // the tools used to write `ctx.userId`, a User.id over the mcp-server's
+      // HTTP transport, and the send below threw on it after `notifiedAt` was
+      // stamped). notification-recipient.guard.test.ts allow-lists this site
+      // and follows that writer, so that stays true.
       await sendNotification(prisma, {
         username: r.userId,
         kind: "reminder",

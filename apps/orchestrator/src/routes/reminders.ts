@@ -4,11 +4,25 @@
  * Mark-complete is a PATCH with `{ completed: true }`. Notifications are
  * fired by the background poller when a reminder's dueAt elapses; this
  * route never directly publishes — see services/reminders-poller.ts.
+ *
+ * WARP-3101 — `Reminder.userId` holds the owner's USERNAME, and the poller
+ * notifies it. The list / create / update routes are also the assistant's
+ * reminder tools (REMINDER_TOOL_ROUTES): called as `_service:mcp` they act for
+ * the person named in `X-Nextcloud-User` and key the row on THAT person's
+ * username (services/tool-acting-user.service.ts). The tools used to write
+ * Reminder themselves with `ctx.userId`, a User.id on the mcp-server's HTTP
+ * transport — the poller then stamped the row notified and the send threw on
+ * the UUID, so the reminder was lost.
  */
 
 import { Router, type Request } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
+import {
+  sendToolActingUserDenial,
+  toolActingUser,
+  type RouteTools,
+} from "../services/tool-acting-user.service.js";
 
 function getUser(req: Request): string {
   const username = req.user?.username;
@@ -32,19 +46,31 @@ const reminderPatchSchema = z.object({
   completed: z.boolean().optional(),
 });
 
+/**
+ * WARP-3101 — the reminder routes the assistant's tools call (tools-core
+ * TOOL_ROUTES), and the tools each one serves. `set_timer` is a reminder due
+ * in N minutes, so it shares `create_reminder`'s route.
+ */
+export const REMINDER_TOOL_ROUTES = {
+  "get /api/reminders": ["list_reminders"],
+  "post /api/reminders": ["create_reminder", "set_timer"],
+  "patch /api/reminders/:id": ["complete_reminder"],
+} as const satisfies Record<string, RouteTools>;
+
 export function createRemindersRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   router.get("/reminders", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const person = await toolActingUser(prisma, req, REMINDER_TOOL_ROUTES["get /api/reminders"]);
+      if (!person.ok) return void sendToolActingUserDenial(res, person);
       const completed = req.query.completed as string | undefined;
       const dueBefore = req.query.due_before as string | undefined;
       const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
 
       const reminders = await prisma.reminder.findMany({
         where: {
-          userId: user,
+          userId: person.username,
           ...(completed === "true"
             ? { completedAt: { not: null } }
             : completed === "false"
@@ -68,9 +94,11 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
+      const person = await toolActingUser(prisma, req, REMINDER_TOOL_ROUTES["post /api/reminders"]);
+      if (!person.ok) return void sendToolActingUserDenial(res, person);
       const reminder = await prisma.reminder.create({
         data: {
-          userId: getUser(req),
+          userId: person.username,
           title: parsed.data.title,
           body: parsed.data.body ?? null,
           dueAt: new Date(parsed.data.dueAt),
@@ -90,11 +118,13 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
+      const person = await toolActingUser(prisma, req, REMINDER_TOOL_ROUTES["patch /api/reminders/:id"]);
+      if (!person.ok) return void sendToolActingUserDenial(res, person);
       // ORCH-008: ownership-scoped conditional write — 404 (not 403) on a
       // foreign/unknown id so an authed user can't enumerate which reminder
       // ids exist, and no findUnique→update TOCTOU.
       const upd = await prisma.reminder.updateMany({
-        where: { id: req.params.id, userId: getUser(req) },
+        where: { id: req.params.id, userId: person.username },
         data: {
           ...(parsed.data.title !== undefined ? { title: parsed.data.title } : {}),
           ...(parsed.data.body !== undefined ? { body: parsed.data.body } : {}),

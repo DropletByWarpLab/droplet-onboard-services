@@ -10,8 +10,9 @@
  * every lookup missed. These tests pin:
  *
  *   • mcp + X-Droplet-User reaches each of the five tool routes, and the
- *     account scoping runs AS the forwarded username (resolved via the
- *     User directory), never as "_service:mcp";
+ *     account scoping runs AS the forwarded person (resolved via the
+ *     User directory by `resolveAssertedUser` — WARP-3102: username,
+ *     nextcloudUsername or id), never as "_service:mcp";
  *   • mcp WITHOUT the header → 401 (fail closed, no fallback identity);
  *   • an unknown forwarded username → 404 (fail closed);
  *   • a human session with a spoofed X-Droplet-User header still scopes
@@ -46,6 +47,7 @@ import {
   type EmailGate,
 } from "../routes/email.js";
 import type { AuthUser } from "../middleware/auth.js";
+import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
 const mcpPrincipal: AuthUser = {
   id: "_service:mcp", username: "_service:mcp", displayName: "MCP Server", role: "service",
@@ -58,11 +60,17 @@ const guestUser: AuthUser = {
 };
 
 /** Directory rows the mcp path resolves X-Droplet-User against. */
-const DIRECTORY: Record<string, { id: string; role: string }> = {
-  romain: { id: "u-romain", role: "family" },
-  boss: { id: "u-boss", role: "owner" },
-  fam: { id: "u-family", role: "family" },
-};
+const DIRECTORY: DirectoryUser[] = [
+  { id: "u-romain", username: "romain", nextcloudUsername: "romain", role: "family" },
+  { id: "u-boss", username: "boss", nextcloudUsername: "boss", role: "owner" },
+  { id: "u-family", username: "fam", nextcloudUsername: "fam", role: "family" },
+];
+
+/** The one directory read `resolveAssertedUser` makes for `asserted`. */
+const lookupOf = (asserted: string) =>
+  expect.objectContaining({
+    where: { OR: [{ username: asserted }, { nextcloudUsername: asserted }, { id: asserted }] },
+  });
 
 const ACCOUNT = {
   id: "a1",
@@ -131,11 +139,7 @@ function createPrismaShim(opts: { draftStatus?: string } = {}) {
     opts.draftStatus !== undefined ? { status: opts.draftStatus } : {},
   );
   return {
-    user: {
-      findUnique: vi.fn(async ({ where }: { where: { username: string } }) =>
-        DIRECTORY[where.username] ?? null,
-      ),
-    },
+    user: userDirectory(DIRECTORY),
     emailAccount: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
         where.id === ACCOUNT.id ? { id: ACCOUNT.id, userId: ACCOUNT.userId } : null,
@@ -218,12 +222,8 @@ describe("email guards admit the MCP principal on the five tool routes (WARP-145
     expect(res.body.threads).toHaveLength(1);
     // Scoping ran AS the forwarded human: the directory was resolved for
     // "romain" — never for the service principal id.
-    expect(prisma.user.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { username: "romain" } }),
-    );
-    expect(prisma.user.findUnique).not.toHaveBeenCalledWith(
-      expect.objectContaining({ where: { username: "_service:mcp" } }),
-    );
+    expect(prisma.user.findMany).toHaveBeenCalledWith(lookupOf("romain"));
+    expect(prisma.user.findMany).not.toHaveBeenCalledWith(lookupOf("_service:mcp"));
   });
 
   it("GET thread detail — mcp + X-Droplet-User: romain gets the full thread", async () => {
@@ -294,6 +294,7 @@ describe("email guards admit the MCP principal on the five tool routes (WARP-145
 
       expect(res.status).toBe(401);
       // No identity → no directory resolution, no draft mutation.
+      expect(prisma.user.findMany).not.toHaveBeenCalled();
       expect(prisma.user.findUnique).not.toHaveBeenCalled();
       expect(prisma.emailDraft.create).not.toHaveBeenCalled();
       expect(prisma.emailDraft.updateMany).not.toHaveBeenCalled();
@@ -336,6 +337,7 @@ describe("human sessions: spoofed headers ignored, RBAC unchanged (WARP-1453)", 
 
     expect(res.status).toBe(404);
     // The human path never consults the directory — session identity rules.
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
     expect(prisma.user.findUnique).not.toHaveBeenCalled();
   });
 
@@ -348,6 +350,7 @@ describe("human sessions: spoofed headers ignored, RBAC unchanged (WARP-1453)", 
       .set("X-Droplet-User", "boss");
 
     expect(res.status).toBe(200);
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
     expect(prisma.user.findUnique).not.toHaveBeenCalled();
   });
 

@@ -90,7 +90,7 @@ Host/kernel reserve target: ~1 GB. Default-profile budget fits within ~6 GB.
 | camera-discovery | full | 256 MB | ONVIF scan |
 | frigate | linux | 1 GB | NVR + FFmpeg + detector. cgroups v2: the `shm_size: 256mb` tmpfs counts against `mem_limit`, so the effective process budget is ~768 MB. Single-stream is fine; for 2+ streams set `FRIGATE_MEM_LIMIT=1536m`. |
 | voice-io | linux | 512 MB | Voice loop |
-| wyoming-faster-whisper | linux | 1 GB | Whisper small.en ~470 MB |
+| wyoming-faster-whisper | linux | 1 GB | Whisper small.en ~470 MB. CPU-only, `cpus: 4.0` with `--cpu-threads 4` (WARP-3126); threads always equal the quota (WARP-1434). |
 | wyoming-piper | linux | 512 MB | Piper TTS |
 | oled-display | display | 128 MB | PyPortal serial bridge |
 | ops-console | ops | 256 MB | docker.sock operator UI |
@@ -139,6 +139,7 @@ DB_MEM_LIMIT=1g                DB_MEM_RESERVATION=512m              DB_CPUS=2.0
 CACHE_MEM_LIMIT=256m           CACHE_MEM_RESERVATION=128m           CACHE_CPUS=0.5
 OLLAMA_MEM_LIMIT=4g            OLLAMA_CPUS=4.0                      OLLAMA_PIDS_LIMIT=2048
 FRIGATE_MEM_LIMIT=1g           FRIGATE_CPUS=2.0                     FRIGATE_PIDS_LIMIT=1024
+WHISPER_MEM_LIMIT=1g           WHISPER_CPUS=4.0                     WHISPER_CPU_THREADS=4
 CONTAINER_PIDS_LIMIT=512       (global default for all others)
 ... (see CLAUDE.md Environment variables table for the full list)
 ```

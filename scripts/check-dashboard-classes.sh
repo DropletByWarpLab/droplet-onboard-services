@@ -70,6 +70,10 @@ BAD_CLASSES=(
   "text-positive"
   "text-warning"
   "bg-warning"
+  # Not generated: the on-accent ink is `accent.foreground` in
+  # tailwind.config.ts, so the utility is `text-accent-foreground` (the same
+  # remedy the white-on-accent rule names below).
+  "text-on-accent"
 )
 
 exit_code=0

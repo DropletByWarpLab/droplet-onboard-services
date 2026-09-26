@@ -38,6 +38,7 @@ import type { BrainPassTrigger } from "../services/brain/brain-pass-runner.js";
 import { config } from "../config.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   listDigests,
   listFindings,
@@ -115,11 +116,11 @@ async function resolveCaller(
     // call (context.ts `withActingUser`), so a handler need not ask for it.
     const named = (req.header("x-nextcloud-user") ?? "").trim();
     if (!named) return null;
-    const row = await prisma.user.findUnique({
-      where: { username: named },
-      select: { id: true, role: true },
-    });
-    return row;
+    // WARP-3098: the header is `User.username` (stdio) or `User.id` (HTTP).
+    // Nobody, more than one person, or a deactivated person is nobody.
+    const resolved = await resolveAssertedUser(prisma, named);
+    if (!resolved.ok) return null;
+    return { id: resolved.user.id, role: resolved.user.role };
   }
   return { id: user.id, role: user.role };
 }
