@@ -246,3 +246,66 @@ function messages_(call: unknown) {
   return (call as { messages: { role: string; tool_call_id?: string; content: string }[] })
     .messages;
 }
+
+// WARP-2896 — the workshop's tools reach the wire ONLY through a caller's
+// binding (`bound_tool_domains`, set by the agent-run worker for a workshop
+// run). Chat's explicit `allowed_tools` is narrowed by role/scope alone, so a
+// chat client can put workspace_* in the pool; without a binding the loop must
+// still never advertise them.
+describe("runAgent — bound_tool_domains (WARP-2896)", () => {
+  const WORKSPACE = ["workspace_read", "workspace_write", "workspace_run", "workspace_propose"];
+  const GOAL = "add a lines field to the word counter, run the tests, and propose it";
+
+  function depsWithWorkspace() {
+    const chat = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { role: "assistant", content: "done" } }] }),
+    }));
+    const listed = [...POOL_TOOLS, ...WORKSPACE.map((name) => ({ name, description: "d", inputSchema: {} }))];
+    const deps: AgentDeps = {
+      mcp: { listTools: vi.fn().mockResolvedValue(listed), callTool: vi.fn() } as never,
+      aiGateway: { chat } as never,
+    };
+    return { deps, chat };
+  }
+
+  it("a chat-shaped request that lists workspace tools in allowed_tools advertises none of them", async () => {
+    const { deps, chat } = depsWithWorkspace();
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: GOAL }],
+      allowed_tools: [...POOL_TOOLS.map((t) => t.name), ...WORKSPACE],
+      tool_selection_mode: "domains",
+    });
+    const names = toolNames(chat.mock.calls[0]![0]);
+    for (const name of WORKSPACE) expect(names, name).not.toContain(name);
+  });
+
+  it("the same request WITH the binding advertises all of them", async () => {
+    // MUTATION: drop `boundDomains: req.bound_tool_domains` from the loop's
+    // selection call and this goes red.
+    const { deps, chat } = depsWithWorkspace();
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: GOAL }],
+      allowed_tools: [...POOL_TOOLS.map((t) => t.name), ...WORKSPACE],
+      tool_selection_mode: "domains",
+      bound_tool_domains: ["workspace"],
+    });
+    const names = toolNames(chat.mock.calls[0]![0]);
+    for (const name of WORKSPACE) expect(names, name).toContain(name);
+  });
+
+  it("a binding cannot resurrect a tool outside allowed_tools", async () => {
+    const { deps, chat } = depsWithWorkspace();
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: GOAL }],
+      allowed_tools: POOL_TOOLS.map((t) => t.name),
+      tool_selection_mode: "domains",
+      bound_tool_domains: ["workspace"],
+    });
+    const names = toolNames(chat.mock.calls[0]![0]);
+    for (const name of WORKSPACE) expect(names, name).not.toContain(name);
+  });
+});

@@ -74,7 +74,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn(),
   touchNcToken: vi.fn(),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -95,6 +95,10 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+// WARP-2993: the /auth/users routes call Nextcloud as the box service
+// account, never with the caller's own NC credential ("caller-nc-token").
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+const SERVICE_NC_TOKEN = adminBasicToken();
 
 // ── In-memory userInvite + user store ──
 function createPrismaMock() {
@@ -177,7 +181,9 @@ function createPrismaMock() {
         let count = 0;
         for (let i = 0; i < userRows.length; i += 1) {
           const u = userRows[i];
+          // WARP-2858: the edit-user route pins its write by the resolved id.
           const match =
+            (where?.id !== undefined && u.id === where.id) ||
             (where?.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
             (where?.username !== undefined && u.username === where.username);
           if (match) {
@@ -622,7 +628,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     expect(Array.isArray(setCookie) ? setCookie.join(";") : String(setCookie)).toMatch(/droplet_session=/);
   });
 
-  it("creates an admin invitee in the admin group", async () => {
+  it("creates an admin invitee in droplet-admins, not NC instance admin (WARP-2993)", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
     // ADR-013: email required; username ("carla") is derived server-side.
@@ -639,7 +645,12 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
 
     const callArgs = (nc.ncCreateUser as any).mock.calls[0];
     const groups = callArgs[4] ?? [];
-    expect(groups).toContain("admin");
+    // WARP-2993: admin tier = droplet-admins, never NC instance admin; and
+    // the create runs as the box service account (a `basic:` token, not the
+    // old prefix-less base64 that went out as a Bearer).
+    expect(groups).toContain("droplet-admins");
+    expect(groups).not.toContain("admin");
+    expect(callArgs[0]).toMatch(/^basic:/);
   });
 
   it("rejects a password that doesn't meet the policy", async () => {
@@ -701,6 +712,44 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     const app = buildApp(prisma, null);
     const res = await request(app)
       .post(`/api/auth/invites/accept/${"x".repeat(43)}`)
+      .send({ password: "Accept-secret123" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid username/i);
+    expect(nc.ncCreateUser).not.toHaveBeenCalled();
+  });
+
+  // WARP-2911 — a username must never have the shape of a `User.id`:
+  // notifications refuse a UUID-shaped recipient (that is how an id in the
+  // username slot is caught), so such an account would be refused every one.
+  const UUID = "3b7d0195-6c1e-4f2a-9d8b-2a4c6e8f0a1b";
+
+  it("🔴 WARP-2911 an email whose local-part is a UUID derives `<uuid>-2`, never the UUID", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/auth/invites")
+      .send({ email: `${UUID}@corp.example`, displayName: "Svc", role: "user" });
+    expect(res.status).toBe(200);
+    expect(prisma.rows[0].username).toBe(`${UUID}-2`);
+  });
+
+  it("🔴 WARP-2911 re-validates a UUID-shaped invite username at accept time", async () => {
+    const prisma = createPrismaMock();
+    prisma.rows.push({
+      id: "inv-uuid",
+      token: "u".repeat(43),
+      username: UUID,
+      displayName: null,
+      email: null,
+      role: "user",
+      createdBy: "someone",
+      expiresAt: new Date(Date.now() + 60_000),
+      acceptedAt: null,
+      acceptedFrom: null,
+      revokedAt: null,
+      createdAt: new Date(),
+    });
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${"u".repeat(43)}`)
       .send({ password: "Accept-secret123" });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/invalid username/i);
@@ -880,7 +929,7 @@ describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () =
 
     expect(res.status).toBe(200);
     expect(nc.ncUpdateUser).toHaveBeenCalledWith(
-      "test-nc-token",
+      SERVICE_NC_TOKEN,
       "alice",
       "email",
       "alice@example.com",

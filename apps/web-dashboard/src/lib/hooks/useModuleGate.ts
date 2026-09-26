@@ -1,7 +1,7 @@
 "use client";
 
 import useSWR from "swr";
-import { authFetch } from "../auth";
+import { authFetch, useAuth } from "../auth";
 
 /**
  * WARP-1397 — the sidebar's module gate. Returns a predicate that answers
@@ -42,7 +42,8 @@ interface EffectiveFeature {
   moduleId: string;
   level: "view" | "act" | "manage";
 }
-interface ModulesView {
+/** Exported for the Security wall's own modules read (WARP-2981), which mirrors into this key. */
+export interface ModulesView {
   modules: ModuleState[];
   /**
    * WARP-1528 / ADR-032 §3(a) — the PER-USER view: workspace-effective ∩ this
@@ -95,18 +96,71 @@ export function isModuleEffective(
   return m ? m.effective : true;
 }
 
+const MODULES_SWR_OPTIONS = {
+  // Module state changes only when the owner reconfigures the box. The
+  // Features toggle revalidates this key explicitly for the instant update;
+  // revalidateOnFocus + a modest poll are the standalone safety net so the
+  // nav can't lag long without that mutate.
+  refreshInterval: 120_000,
+  revalidateOnFocus: true,
+  shouldRetryOnError: false,
+} as const;
+
 export function useModuleGate(): (moduleId: string) => boolean {
-  const { data } = useSWR<ModulesView>(MODULES_KEY, fetchModules, {
-    // Module state changes only when the owner reconfigures the box. The
-    // Features toggle revalidates this key explicitly for the instant update;
-    // revalidateOnFocus + a modest poll are the standalone safety net so the
-    // nav can't lag long without that mutate.
-    refreshInterval: 120_000,
-    revalidateOnFocus: true,
-    shouldRetryOnError: false,
-  });
+  const { data } = useSWR<ModulesView>(MODULES_KEY, fetchModules, MODULES_SWR_OPTIONS);
 
   return (moduleId: string): boolean => isModuleEffective(data, moduleId);
+}
+
+/** The caller's §9 level on one module, or `none` when they hold none of it. */
+export type ModuleLevel = "none" | "view" | "act" | "manage";
+
+/**
+ * WARP-2977 P2b — WHICH level the caller holds, for hiding act/manage
+ * controls. Extracted pure for testing.
+ *
+ * Fail-CLOSED for actions, the opposite posture to `isModuleEffective`, and
+ * deliberately so: a nav entry hidden by mistake is an annoyance, but a
+ * control rendered to someone the server will refuse turns every click into
+ * a `requireFeatureAccess` denial — an auth/warn ActivityRow that the
+ * Security threat mirror then shows as a threat. So:
+ *  - probe not resolved, or it failed (`data` undefined) → `view`;
+ *  - the server sent a (non-empty) PER-USER set → that entry's level, or
+ *    `none` when the module is absent from it;
+ *  - no per-user set (the caller has no local row, or the server's resolver
+ *    failed — it omits the field) → `manage` for an owner (the §3 bypass),
+ *    `view` for everyone else.
+ * An EMPTY `effectiveForUser` is treated as absent, as `isModuleEffective`
+ * does. Never infer manage from `isAdminRole`: admins can be narrowed.
+ */
+export function moduleLevelFor(
+  data: ModulesView | undefined,
+  moduleId: string,
+  role: string | undefined,
+): ModuleLevel {
+  if (!data) return "view";
+  const perUser = data.effectiveForUser;
+  if (perUser && perUser.length > 0) {
+    return perUser.find((f) => f.moduleId === moduleId)?.level ?? "none";
+  }
+  return role === "owner" ? "manage" : "view";
+}
+
+/**
+ * The caller's level on `moduleId`, off the same `/api/modules` fetch (and
+ * SWR key) as the nav gate. `requireFeatureAccess` on the orchestrator is
+ * still the boundary; this only decides which controls to render.
+ */
+export function useModuleLevel(moduleId: string): ModuleLevel {
+  const { user } = useAuth();
+  const { data } = useSWR<ModulesView>(MODULES_KEY, fetchModules, MODULES_SWR_OPTIONS);
+  return moduleLevelFor(data, moduleId, user?.role);
+}
+
+/** True when `level` is at least `min` — `levelAtLeast(level, "act")` to show an act control. */
+export function levelAtLeast(level: ModuleLevel, min: Exclude<ModuleLevel, "none">): boolean {
+  const rank: Record<ModuleLevel, number> = { none: 0, view: 1, act: 2, manage: 3 };
+  return rank[level] >= rank[min];
 }
 
 export const MODULE_GATE_KEY = MODULES_KEY;

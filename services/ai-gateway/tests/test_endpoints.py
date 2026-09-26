@@ -286,3 +286,63 @@ class TestReadinessEndpoint:
         data = resp.json()
         assert data["status"] == "ok"
         assert data["appliance"] is None
+
+
+class TestModelsRefreshEndpoint:
+    """WARP-3046 — POST /ai/models/refresh drops the registry's cached listing
+    so a model the orchestrator just finished pulling is listed at once,
+    instead of after the 60 s TTL (plus the orchestrator's own 30 s caches)."""
+
+    def _wire(self, monkeypatch, listings):
+        import main
+        from models.registry import ModelRegistry
+
+        router = AsyncMock()
+        router.list_all_models.side_effect = listings
+        monkeypatch.setattr(main, "provider_router", router)
+        monkeypatch.setattr(main, "model_registry", ModelRegistry())
+        return router
+
+    async def test_refresh_makes_the_next_listing_re_query_providers(self, client, monkeypatch):
+        from router import ModelListResult
+
+        before = ModelInfo(id="docker.io/ai/gpt-oss:20B-F16", provider="local", name="gpt-oss")
+        pulled = ModelInfo(id="docker.io/ai/llama3.2:3B-Q4_K_M", provider="local", name="llama3.2")
+        router = self._wire(monkeypatch, [
+            ModelListResult(models=[before], degraded_providers=[]),
+            ModelListResult(models=[before, pulled], degraded_providers=[]),
+        ])
+
+        assert [m["id"] for m in (await client.get("/ai/models")).json()["models"]] == [before.id]
+        # Cached: without a refresh the second read is the same list.
+        assert [m["id"] for m in (await client.get("/ai/models")).json()["models"]] == [before.id]
+
+        resp = await client.post("/ai/models/refresh")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "invalidated"}
+
+        listed = (await client.get("/ai/models")).json()["models"]
+        assert [m["id"] for m in listed] == [before.id, pulled.id]
+        assert router.list_all_models.call_count == 2
+
+    async def test_refresh_is_503_before_startup(self, client, monkeypatch):
+        import main
+        monkeypatch.setattr(main, "model_registry", None)
+        resp = await client.post("/ai/models/refresh")
+        assert resp.status_code == 503
+
+    async def test_refresh_requires_the_service_token(self, client, monkeypatch):
+        """Same gate as /ai/models: the route is not in _AUTH_EXEMPT_PATHS."""
+        import main
+        self._wire(monkeypatch, [])
+        monkeypatch.setattr(main, "SERVICE_TOKEN_AI_GATEWAY", "the-token")
+
+        assert (await client.post("/ai/models/refresh")).status_code == 401
+        bad = await client.post(
+            "/ai/models/refresh", headers={"Authorization": "Bearer wrong"}
+        )
+        assert bad.status_code == 401
+        ok = await client.post(
+            "/ai/models/refresh", headers={"Authorization": "Bearer the-token"}
+        )
+        assert ok.status_code == 200

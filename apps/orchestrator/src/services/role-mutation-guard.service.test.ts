@@ -76,6 +76,7 @@ import {
   assertRoleChangeAllowed,
   assertRemovalAllowed,
   assertDisableAllowed,
+  assertSessionRevokeAllowed,
   assertUsageWriteAllowed,
   assertAssignableForCreate,
   assertRoleChangeInvariantsTx,
@@ -499,6 +500,59 @@ describe("composites — assertRemovalAllowed / assertDisableAllowed / assertUsa
     ).toBe("OWNER_IMMUTABLE");
     expect(() =>
       assertUsageWriteAllowed({ target: { id: "u1", role: "family" } }),
+    ).not.toThrow();
+  });
+});
+
+describe("composite — assertSessionRevokeAllowed (WARP-3111: self → owner → rank)", () => {
+  it("refuses self, then the owner, then a target above the actor's rank", () => {
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "own-1", role: "owner" },
+          target: { id: "own-1", role: "owner" },
+        }),
+      ).code,
+    ).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "adm-1", role: "admin" },
+          target: { id: "own-1", role: "owner" },
+        }),
+      ).code,
+    ).toBe("OWNER_IMMUTABLE");
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "fam-1", role: "family" },
+          target: { id: "adm-1", role: "admin" },
+        }),
+      ).code,
+    ).toBe("ROLE_RANK_EXCEEDED");
+    // Fails closed on a missing role claim.
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "x", role: null },
+          target: { id: "u1", role: "guest" },
+        }),
+      ).code,
+    ).toBe("ROLE_RANK_EXCEEDED");
+  });
+
+  it("allows equal rank and below", () => {
+    expect(() =>
+      assertSessionRevokeAllowed({
+        actor: { id: "adm-1", role: "admin" },
+        target: { id: "adm-2", role: "admin" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertSessionRevokeAllowed({
+        actor: { id: "own-1", role: "owner" },
+        target: { id: "u1", role: "family" },
+      }),
     ).not.toThrow();
   });
 });

@@ -202,10 +202,20 @@ services:
     # Desktop) and lets URLs below target `host.docker.internal`.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # WARP-2895 — the orchestrator is the ONLY caller of the sandbox, so it
+    # joins `droplet-internal` in addition to the default bridge it has always
+    # been on. Listing `default` explicitly is load-bearing: a service with a
+    # `networks:` key is attached to exactly the networks it lists.
+    networks:
+      - default
+      - droplet-internal
     environment:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+      # WARP-2895: the code-execution service, reachable only over the
+      # internal network. SANDBOX_SERVICE_TOKEN arrives via env_file.
+      - SANDBOX_URL=http://sandbox:8030
       # WARP-2131: the model-catalog sidecar. SET EXPLICITLY — this is not
       # cosmetic. model-catalog.service.ts does NOT treat an unset value as
       # "no manager"; it falls back to http://host.docker.internal:8002, and
@@ -370,26 +380,19 @@ services:
       # eval profile" banner. Setting the URL unconditionally is correct;
       # the route detects the connection failure at request time.
       - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
-      # WARP-539 — OTA apply over the host compose socket. APPLY_SCRIPT points
-      # at the helper bind-mounted below; empty DISABLES the apply window (the
-      # box still polls + tracks pending releases).
-      # UPDATES_DIR is the in-container mount of the ota-updates volume.
+      # WARP-539 / WARP-3007 — OTA apply. APPLY_SCRIPT is the ENABLE flag:
+      # empty DISABLES the apply window (the box still polls + tracks pending
+      # releases); any value enables it. The helper that runs is ALWAYS the
+      # release-shipped <CONFIG_ROOT>/docker/ota/apply-update.sh, executed ON
+      # THE HOST in a one-shot `chroot /host` container the orchestrator
+      # creates over the socket below (host-exec.ts) — this image has no
+      # docker CLI, and compose run in here could not read the host .env.
+      # Convention: set it to that host path.
       #
-      # WARP-1669 — COMPOSE_FILE must resolve to the SAME absolute path on the
-      # host AND inside this container, which is why it derives from
-      # DROPLET_HOST_ROOT (setup.sh writes the repo's absolute host path into
-      # docker/.env) instead of being hardcoded. Both halves need it:
-      #   * the compose CLI runs INSIDE this container and reads the file
-      #     locally, so the path has to exist here;
-      #   * the relative bind mounts in that file (./certs,
-      #     ../data/secrets/…) are resolved by the CLI against the compose
-      #     file's directory and then handed to the HOST daemon, which
-      #     resolves them on the host.
-      # Mount the tree anywhere else and compose asks the daemon for host
-      # paths that don't exist — Docker creates them as empty directories and
-      # the stack comes back up with no certs and no secrets.
-      # CONFIG_ROOT is the repo root because CI packs configs as `docker/…`
-      # (publish-release.yml: `git archive HEAD docker`).
+      # COMPOSE_FILE and CONFIG_ROOT are HOST paths (DROPLET_HOST_ROOT, which
+      # setup.sh writes into docker/.env). UPDATES_DIR is this container's
+      # mount of the ota-updates volume; the host path behind it is resolved
+      # at boot from this container's own mounts.
       - DROPLET_OTA_APPLY_SCRIPT=${DROPLET_OTA_APPLY_SCRIPT:-}
       - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-${DROPLET_HOST_ROOT:-/opt/droplet}/docker/docker-compose.yml}
       - DROPLET_OTA_CONFIG_ROOT=${DROPLET_OTA_CONFIG_ROOT:-${DROPLET_HOST_ROOT:-/opt/droplet}}
@@ -406,26 +409,9 @@ services:
       # trust to the internal CA from the /data/service-tls bundle below.
       - REDIS_URL=rediss://orchestrator:${REDIS_PASSWORD_ORCHESTRATOR:-}@cache:6380
     volumes:
-      # WARP-539: the OTA apply host helper, bind-mounted read-only so the
-      # orchestrator can exec it against the docker socket below. Its container
-      # path is what DROPLET_OTA_APPLY_SCRIPT must be set to. Read-only — the
-      # orchestrator only ever execs it, never rewrites it.
-      - ../scripts/lib/apply-update.sh:${DROPLET_HOST_ROOT:-/opt/droplet}/scripts/lib/apply-update.sh:ro
-      # WARP-1669: the config tree the helper drives — THIS compose file plus
-      # everything a release's configs.tar.gz replaces — mounted at its own
-      # host path (see DROPLET_OTA_COMPOSE_FILE above for why the paths must
-      # be identical). Without it, `docker compose -f "$COMPOSE_FILE"` and
-      # every `tar -C "$(config_root)"` inside the helper fail on a path that
-      # exists only on the host: snapshot, stage-configs and restore-configs
-      # were all unrunnable on a real box.
-      #
-      # Read-WRITE, and deliberately scoped to `docker/` alone: stage-configs
-      # untars a release's configs over it and restore-configs rolls it back,
-      # so it cannot be :ro — but mounting the repo ROOT would hand this
-      # container data/secrets/internal-ca/ca.key and let it mint any
-      # service's TLS identity, which the single-file audit.key / doc-kek.key
-      # binds below exist specifically to avoid.
-      - ../docker:${DROPLET_HOST_ROOT:-/opt/droplet}/docker:rw
+      # WARP-3007: no apply-update.sh bind mount and no rw docker/ mount any
+      # more. The helper runs on the host and edits the host tree there; this
+      # container never needs to see (let alone write) docker/.
       # Client-app installers (Windows/Android/iOS) the box hands to a
       # browser at /downloads. NOT delivered by the image: the installers
       # are git-ignored and the box clones this repo, so an operator puts
@@ -449,7 +435,7 @@ services:
       # overwritten or deleted outright, letting a compromised orchestrator
       # report `off` while sshd is live, during exactly the incident this
       # feature exists to support. `:ro` is what makes the readback honest;
-      # same pattern as apply-update.sh and service-tls above.
+      # same pattern as service-tls above.
       - /var/lib/droplet-ssh-access:/var/lib/droplet-ssh-access:ro
       # ...and the writable half, scoped to the one file the container is
       # supposed to write. Nested under the read-only mount above (Docker
@@ -464,6 +450,12 @@ services:
       # `intent` by mktemp+rename, and a single-FILE bind is detached from the
       # container the moment its inode is replaced (the WARP-1908 failure).
       - /var/lib/droplet-ssh-access/intent.d:/var/lib/droplet-ssh-access/intent.d
+      # WARP-1405: the host restic backup's explicit status file
+      # (scripts/host/droplet-backup.sh writes status.json on EVERY exit),
+      # READ-ONLY — the orchestrator only reports it (Settings card + the
+      # hourly backup-health notification). A dedicated directory, NOT the
+      # backup state dir, which holds the staged pg_dumps.
+      - /var/lib/droplet/backup-status:/var/lib/droplet/backup-status:ro
       # WARP-234/236: this service's internal-TLS bundle (cert/key/ca) at the
       # canonical /data/service-tls path — the Redis client reads ca.pem.
       - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro
@@ -541,11 +533,14 @@ services:
       # deliberate, fenced basis:
       #   * this is the ONLY service in the whole compose file that mounts it —
       #     no sidecar, no gateway, no ai-gateway ever gets the socket;
-      #   * NOTHING in the codebase talks to the socket directly. Every daemon
-      #     op funnels through host-compose-runner.ts → the single audited host
-      #     helper scripts/lib/apply-update.sh, whose surface is a FIXED set of
-      #     subcommands invoked with an argv array (never a shell string), not
-      #     an arbitrary `docker` passthrough;
+      #   * exactly ONE module talks to the socket: host-exec.ts, and only to
+      #     create/start/wait/log/remove the one-shot below. Every daemon op
+      #     funnels through host-compose-runner.ts → the single audited host
+      #     helper docker/ota/apply-update.sh (run ON THE HOST in a one-shot,
+      #     no-network `chroot /host` container off this image, pinned by ID —
+      #     WARP-3007), whose surface is a FIXED set of subcommands invoked
+      #     with an argv array (never a shell string), not an arbitrary
+      #     `docker` passthrough;
       #   * only a cosign-VERIFIED (WARP-537) release whose configs.tar.gz
       #     sha256 matches the signed manifest (apply.ts) ever reaches the
       #     runner — the crypto verify chain is the gate in front of the socket.
@@ -1126,7 +1121,7 @@ services:
     command:
       - bash
       - -c
-      - install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c ssl_min_protocol_version=TLSv1.3 -c password_encryption=scram-sha-256 -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}
+      - for f in /certs-src/key.pem /certs-src/cert.pem; do [ -s "$$f" ] && head -c1 "$$f" >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) db cannot read $$f as uid $$(id -u) -- $$(ls -ln "$$f" 2>&1)" >&2; exit 1; }; done && install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c ssl_min_protocol_version=TLSv1.3 -c password_encryption=scram-sha-256 -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
@@ -1181,7 +1176,9 @@ services:
       - "sh"
       - "-c"
       - >-
-        install -o redis -g redis -m 600 /certs-src/key.pem /tmp/redis.key
+        for f in /certs-src/key.pem /certs-src/cert.pem /certs-src/ca.pem /etc/redis/users.acl; do [ -s "$$f" ] && head -c1 "$$f" >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) cache cannot read $$f as uid $$(id -u) -- $$(ls -ln "$$f" 2>&1)" >&2; exit 1; }; done
+        && { setpriv --reuid redis --regid redis --clear-groups head -c1 /etc/redis/users.acl >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) cache cannot read /etc/redis/users.acl as uid $$(id -u redis) (redis-server opens it after the entrypoint drops to redis) -- $$(ls -ln /etc/redis/users.acl 2>&1)" >&2; exit 1; }; }
+        && install -o redis -g redis -m 600 /certs-src/key.pem /tmp/redis.key
         && install -o redis -g redis -m 644 /certs-src/cert.pem /tmp/redis.crt
         && install -o redis -g redis -m 644 /certs-src/ca.pem /tmp/redis-ca.crt
         && exec docker-entrypoint.sh redis-server
@@ -1193,7 +1190,34 @@ services:
         --tls-auth-clients no
         --tls-protocols "TLSv1.3"
         --aclfile /etc/redis/users.acl
+        --appendonly yes
+        --appendfsync everysec
+        --save ""
+        --maxmemory ${CACHE_MAXMEMORY:-192mb}
+        --maxmemory-policy noeviction
+    # WARP-1401: persistence. Sessions (sess:rec:*), the refresh denylist
+    # (jwt:deny:*), lockout counters and Nextcloud app-passwords
+    # (auth:nc-token:*) must survive a recreate/reboot, or every deploy, OTA
+    # and reboot logs the whole box out and un-revokes logged-out refresh
+    # tokens. The image's /data was an ANONYMOUS volume that
+    # `compose down` (the systemd unit's ExecStop, i.e. every reboot) drops.
+    #  - AOF everysec bounds loss to ~1 s (RDB would lose a whole save
+    #    interval, including a just-written denylist entry). `--save ""`
+    #    turns off the default RDB snapshots so AOF is the only write stream
+    #    (SSD wear); auto-rewrite with the RDB preamble keeps reload fast.
+    #  - maxmemory sits under mem_limit so the AOF-rewrite fork has headroom
+    #    and a persisted dataset can't OOM-kill → replay → OOM-kill loop.
+    #  - noeviction: sessions share this keyspace with caches, and Nextcloud's
+    #    memcache keys carry 1-day TTLs, so any volatile-*/lru policy would
+    #    drop live sessions and lockout counters BEFORE those caches. At the
+    #    cap writes fail loudly; the orchestrator's cache helpers fail open.
+    # ponytail: one instance for sessions + caches; split into two if INFO
+    # used_memory ever approaches maxmemory on a real box.
+    # At rest: cache-data lives under the Docker data-root /data/docker (LUKS
+    # data LV, docs/security/at-rest-encryption.md). Wiped by factory reset,
+    # excluded from device-backup (a restore must not resurrect sessions).
     volumes:
+      - cache-data:/data
       - ../data/secrets/service-tls/cache:/certs-src:ro
       - ../data/secrets/redis/users.acl:/etc/redis/users.acl:ro
     restart: always
@@ -1223,11 +1247,18 @@ services:
     # stock entrypoint — the WARP-233 db / WARP-234 cache pattern. The ACL
     # copy (0640, mosquitto-owned) also clears mosquitto's world-readable /
     # wrong-owner acl_file warnings (2.x warns; future versions refuse).
+    # WARP-2548: the leading `for … done` is the secret-guard — each staging
+    # source must be non-empty and actually readable (a real read, not
+    # `test -r`, which lies for root under userns remap) BEFORE staging, or the
+    # container exits with ONE line naming the file, its `ls -ln` owner/mode
+    # and the uid that tried, instead of mosquitto's opaque "Check keyfile".
+    # Same guard on db and cache; tests/secret-readers.test.sh pins all three.
     command:
       - "sh"
       - "-c"
       - >-
-        install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls
+        for f in /certs-src/ca.pem /certs-src/cert.pem /certs-src/key.pem /acl-src/droplet.acl; do [ -s "$$f" ] && head -c1 "$$f" >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) broker cannot read $$f as uid $$(id -u) -- $$(ls -ln "$$f" 2>&1)" >&2; exit 1; }; done
+        && install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls
         && install -o mosquitto -g mosquitto -m 644 /certs-src/ca.pem /mosquitto/config/tls/ca.pem
         && install -o mosquitto -g mosquitto -m 644 /certs-src/cert.pem /mosquitto/config/tls/cert.pem
         && install -o mosquitto -g mosquitto -m 600 /certs-src/key.pem /mosquitto/config/tls/key.pem
@@ -1244,6 +1275,16 @@ services:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto.acl:/acl-src/droplet.acl:ro
       - ../data/secrets/service-tls/broker:/certs-src:ro
+    # WARP-2548: a broker that isn't LISTENING on 8883 is unhealthy, not
+    # "Up". A mTLS pub/sub probe would need a client cert the broker's own
+    # container shouldn't hold, so this reads the kernel's socket table:
+    # 22B3 = 8883, state 0A = LISTEN (tcp or tcp6). Needs only grep.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qE ':22B3 [0-9A-F]+:0000 0A' /proc/net/tcp /proc/net/tcp6"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: always
     <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
@@ -1778,16 +1819,17 @@ services:
       - orchestrator
     restart: always
     <<: *default-logging
-    # WARP-2734 — `email` joins `full`, and `scripts/lib/secrets.sh` appends
-    # that token to COMPOSE_PROFILES exactly when it provisions
-    # SERVICE_TOKEN_EMAIL. That is the same predicate the module registry
-    # already uses (`id: "email"`, `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`),
-    # so a box gets the container precisely when it can authenticate it.
-    #
-    # Better than both alternatives: an idle container on every box that will
-    # never have a mailbox, or a profile nobody remembers to set — which is
-    # what shipped, and why the IMAP subsystem has never run anywhere.
-    profiles: ["full", "email"]
+    # WARP-2970 — DEFAULT-ON, no `profiles:` key. WARP-2734 gated this on an
+    # `email` token that secrets.sh writes whenever it provisions
+    # SERVICE_TOKEN_EMAIL, which it always does. So the gate never chose a
+    # feature state. It only chose which boxes drifted: a box that got its
+    # code by OTA never re-runs secrets.sh (the orchestrator can't even see
+    # .env, it mounts ../docker only), so the token never reached
+    # COMPOSE_PROFILES and "Connect a mailbox" could only answer 503.
+    # Idle with no mailbox connected (FastAPI + aioimaplib, capped below).
+    # The `email` token that boxes already carry in COMPOSE_PROFILES is now
+    # inert: compose ignores a profile name no service uses. Pinned by
+    # tests/setup.test.sh, check (4c).
     mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
     cpus: ${EMAIL_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1867,6 +1909,44 @@ services:
     <<: *default-logging
     mem_limit: ${SWITCH_MEM_LIMIT:-128m}
     cpus: ${SWITCH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) ---
+  # Device control for commercial/industrial equipment beside Matter.
+  # network_mode: host because BACnet Who-Is is a UDP broadcast (:47808) and
+  # KNX routing is multicast — neither crosses the Docker bridge. Only the
+  # orchestrator calls it (:8084, host-service ladder after routing 8080 /
+  # switch 8081 / display 8082 / matter 8083). Fails CLOSED without its
+  # bearer. Writes are plan-only until DEVICE_GATEWAY_LIVE_WRITES=1.
+  device-gateway:
+    build:
+      context: ..
+      dockerfile: services/device-gateway/Dockerfile
+    network_mode: host
+    environment:
+      # Must equal the orchestrator's SERVICE_TOKEN_DEVICE_GATEWAY (env_file).
+      - SERVICE_SECRET=${SERVICE_TOKEN_DEVICE_GATEWAY:-}
+      # Explicit boolean, never derived: 0 = writes are planned, not sent.
+      - DEVICE_GATEWAY_LIVE_WRITES=${DEVICE_GATEWAY_LIVE_WRITES:-0}
+      - DEVICE_GATEWAY_TIMEOUT_S=${DEVICE_GATEWAY_TIMEOUT_S:-3}
+      # The gateway's own BACnet identity; must be unique on the site network.
+      - DEVICE_GATEWAY_BACNET_INSTANCE=${DEVICE_GATEWAY_BACNET_INSTANCE:-4194000}
+      # "<ip>/<prefix>" of the LAN interface; empty = BACpypes3 picks the host.
+      - DEVICE_GATEWAY_BACNET_ADDRESS=${DEVICE_GATEWAY_BACNET_ADDRESS:-}
+      # WARP-1061: internal mTLS. No env_file on this service, so the knob is
+      # passed explicitly; 1 flips the :8084 listener to TLS + required
+      # client certs. 0 (default) = plaintext.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
+    volumes:
+      # Device + point registry (0600) — survives container rebuilds.
+      - device-gateway-state:/var/lib/droplet/device-gateway
+      # WARP-1061: this service's internal-CA bundle (CN = "device-gateway").
+      - ../data/secrets/service-tls/device-gateway:/data/service-tls:ro
+    profiles: ["full", "single-box"]
+    restart: always
+    <<: *default-logging
+    mem_limit: ${DEVICE_GATEWAY_MEM_LIMIT:-192m}
+    cpus: ${DEVICE_GATEWAY_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Frigate NVR (camera management + AI detection) ---
@@ -2096,6 +2176,105 @@ services:
     mem_limit: ${DOC_RENDER_MEM_LIMIT:-384m}
     cpus: ${DOC_RENDER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- Sandbox — the box's one code-execution substrate (WARP-2895) ---
+  # ADR-056 §6.3 / ADR-047 §4. Runs a routine's `transform` / `when` steps
+  # (customer-written Python) and, in later slices, workshop runs and
+  # extension processes. ONE service with ONE hardening table, on purpose —
+  # two sandboxes with two tables is how one of them drifts.
+  #
+  # THE FIRST SERVICE ON AN INTERNAL-ONLY NETWORK. This file had no
+  # `networks:` block at all before this entry: every service shares the
+  # default bridge and can reach the internet. This container is attached to
+  # `droplet-internal` (`internal: true`, bottom of the file) and NOTHING
+  # else — the orchestrator reaches it because the orchestrator is also on
+  # that network; the sandbox can route to no LAN address, no WAN address and
+  # no other container. `npm install` / `pip install` from inside reach
+  # nothing, by construction. Its registered egress is NONE
+  # (docs/security/allowed-egress.yaml), which is the whole reason
+  # customer-written code is safe to run here. test-security.sh asserts this
+  # service has exactly that one network, no `ports:` and no `network_mode`.
+  #
+  # Hardening (the ADR-047 §4.2 table, verbatim): non-root (USER sandbox in
+  # the image), read-only rootfs, every capability dropped, no privilege
+  # escalation, a small tmpfs /tmp as the only writable path, ADR-021 limits
+  # from SANDBOX_* with a tight pid ceiling (one child per transform). No
+  # Docker socket on any profile. No `env_file`: the only secret this
+  # container holds is its own bearer — a code-execution container must not
+  # carry the box's .env.
+  #
+  # NOT profile-gated: a routine with a transform step must work on the small
+  # box too, and the image is python:3.12-slim + node 20 + git (~250 MB).
+  sandbox:
+    build:
+      context: ..
+      dockerfile: services/sandbox/Dockerfile
+    expose:
+      - "8030"
+    networks:
+      - droplet-internal
+    environment:
+      # Not one of the six FIPS provider-carrying images — pin the boot gate +
+      # OpenSSL config to the literal OFF posture (`environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Shared with the orchestrator's SANDBOX_SERVICE_TOKEN (delivered to the
+      # orchestrator by its env_file). EMPTY fails CLOSED at BOTH ends: this
+      # service 503s every non-/health route and the orchestrator refuses
+      # without dialling. `${...}` substitution resolves against the file
+      # scripts/lib/compose.sh passes as --env-file (the repo's .env); an ad-hoc
+      # `docker compose` without it leaves the token empty and the service
+      # closed, which is the safe direction. Rotate both sides in lockstep —
+      # change .env, then `up -d --force-recreate orchestrator sandbox`.
+      - SANDBOX_SERVICE_TOKEN=${SANDBOX_SERVICE_TOKEN:-}
+      # Slice H's process-supervision seam. Off until an operator turns it on;
+      # off, its routes are 404 and nothing on the box can discover them.
+      - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
+      # WARP-2900 (slice H2): where promoted extensions are installed (one
+      # read-only dir per <slug>/<version>, exported from the signed commit)
+      # and the loopback ports their host shims bind INSIDE this container.
+      # Nothing here changes the network: an extension listens on 127.0.0.1
+      # only and the orchestrator reaches it through /extensions/<slug>/rpc.
+      - SANDBOX_EXTENSIONS_DIR=/var/lib/workspace-ext
+      - SANDBOX_EXTENSION_PORT_RANGE=${SANDBOX_EXTENSION_PORT_RANGE:-18000-18999}
+      - PYTHONDONTWRITEBYTECODE=1
+    # WARP-2896: the workspace git store. Bare repos (the truth, backed up)
+    # and working checkouts (rebuildable from the bare repos) on two volumes,
+    # the only writable paths besides /tmp on this read-only rootfs.
+    # WARP-2900: installed extensions on a third, rebuildable from the store.
+    volumes:
+      - workspace-git:/var/lib/workspace-git
+      - workspace-checkouts:/var/lib/workspace
+      - extensions-installed:/var/lib/workspace-ext
+    # WARP-2900 / WARP-3012: a stopped extension's process group and a
+    # timed-out run's are killed with killpg; their orphans are reparented to
+    # PID 1. An init (Docker's tini) reaps them. Without it PID 1 is the
+    # Python server, which never does, and the zombies count against
+    # pids_limit until the container restarts. Pinned by test-security.sh 14b.
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # /health is the one route served without a bearer.
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8030/health',timeout=5)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${SANDBOX_MEM_LIMIT:-512m}
+    cpus: ${SANDBOX_CPUS:-1.0}
+    # Tighter than CONTAINER_PIDS_LIMIT on purpose: one short-lived child per
+    # transform, plus the server. A routine that fans out under this ceiling
+    # fails a step legibly ("transform process failed") rather than
+    # exhausting the box.
+    pids_limit: ${SANDBOX_PIDS_LIMIT:-128}
 
   # --- ERP direct-SQL bridge (WARP-1106) ---
   # The DB-touching half of the direct-SQL Eaglesoft track: unixODBC + pyodbc
@@ -2382,17 +2561,20 @@ services:
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_VOICE:-${ORCHESTRATOR_TOKEN:-}}
       # Wake-word backend. `vosk` (default) recognizes the WAKE_WORD
       # phrases out of the box — no per-phrase training, no licensing fee
-      # — so "droplet" and "hey droplet" both work on every box.
+      # — so "hey droplet" works on every box.
       # Automatically falls back to openWakeWord (hey_jarvis) if the
       # bundled Vosk model is absent. WAKE_WORD is a comma-separated list
-      # of phrases; the box wakes on ANY of them (WARP-1431).
+      # of phrases; the box wakes on ANY of them (WARP-1431). The default
+      # leaves out the bare one-word "droplet": Vosk forces ambient speech
+      # into it at confidence up to 1.00 (~23 false wakes/hour on the
+      # bench, WARP-3128). Opt back in with WAKE_WORD=droplet,hey droplet.
       - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
-      - WAKE_WORD=${WAKE_WORD:-droplet,hey droplet}
+      - WAKE_WORD=${WAKE_WORD:-hey droplet}
       # Threshold semantics are engine-aware (resolve_wake_threshold in
       # voice-io main.py). Under vosk every fire carries real acoustic
       # evidence — the MINIMUM per-word confidence of the finalized
       # phrase match (evidence-free matches never fire) — and a genuine
-      # spoken wake scores ~0.9+, so unset means the vosk default (0.7).
+      # spoken wake scores ~0.9+, so unset means the vosk default (0.85).
       # That gates the living-room-TV false accepts the old fixed-0.5
       # partial-fire scoring let through. Lower toward 0.5 if real wakes
       # get missed at distance; tune per docs/voice-assistant-plan.md.
@@ -2441,10 +2623,10 @@ services:
       # Set LLM_URL=__mock__ for a dev box with no orchestrator (transcript
       # echoes as the spoken reply).
       - LLM_URL=${LLM_URL:-http://orchestrator:3000}
-      # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct fits
-      # the inference host's 7 GB RAM budget with the rest of the stack up).
-      # Override via env if the appliance has a larger/different model
-      # loaded (see droplet-local-LLM /models/sync).
+      # FALLBACK ONLY (WARP-3047): voice follows the box's ACTIVE model — it
+      # asks the orchestrator's GET /api/llm/models for defaultModel (cached
+      # 30 s) — and sends LLM_MODEL only when the orchestrator can't name one.
+      # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
       # WARP-1432 — voice turn shaping (client-side request shape only).
       # Empty passthrough: the effective defaults live in
@@ -2515,18 +2697,24 @@ services:
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
-    # WARP-1434 — the CTranslate2 thread count MUST track the CPU quota
-    # (cpus: ${WHISPER_CPUS:-2.0} below). The old --cpu-threads 4 inside a
-    # 2.0-core cap oversubscribed: 4 compute threads contending for 2 cores
-    # adds context-switch churn without speeding transcription. Default 2 =
-    # the quota; if you raise WHISPER_CPUS, raise WHISPER_CPU_THREADS to match.
+    # WARP-1434 — the CTranslate2 thread count MUST equal the CPU quota
+    # (cpus: ${WHISPER_CPUS:-4.0} below). More threads than cores (the old
+    # --cpu-threads 4 inside a 2.0-core cap) only adds context-switch churn;
+    # fewer leaves part of the quota idle. WHISPER_CPUS and
+    # WHISPER_CPU_THREADS move together: change one, change the other.
+    # WARP-3126 — default 4 threads = a 4.0-core quota (was 2/2).
+    # Transcription starts only when the speaker stops, so this decode sits
+    # directly in front of the LLM call on every voice turn; 4 cores roughly
+    # halves it. Trade-off: the host lends STT two more cores of burst for
+    # about a second per turn, shared with Frigate, the inference runtime and
+    # the rest of the stack. On a CPU-tight host lower both knobs together.
     command: >
       --model ${WHISPER_MODEL:-small.en}
       --language ${WHISPER_LANGUAGE:-en}
       --uri tcp://0.0.0.0:10300
       --beam-size 1
       --compute-type ${WHISPER_COMPUTE:-int8}
-      --cpu-threads ${WHISPER_CPU_THREADS:-2}
+      --cpu-threads ${WHISPER_CPU_THREADS:-4}
     volumes:
       # Whisper model cache (~470 MB for small.en). Named volume so a
       # `docker compose down` doesn't redownload; mounted read-write so
@@ -2536,7 +2724,7 @@ services:
     <<: *default-logging
     # Whisper loads the full model into RAM at startup: small.en ~470 MB.
     mem_limit: ${WHISPER_MEM_LIMIT:-1g}
-    cpus: ${WHISPER_CPUS:-2.0}
+    cpus: ${WHISPER_CPUS:-4.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Piper TTS sidecar (WARP-154) ---
@@ -3186,6 +3374,16 @@ services:
       INFERENCE_RUNTIME_URL: http://dmr:12434
       MODEL_MANIFEST: /app/models/model-manifest.json
       VRAM_RESERVE_GB: ${VRAM_RESERVE_GB:-2}
+      # WARP-3046: the unified-memory VRAM budget (an APU-only or GPU-less box,
+      # both of which run the `dmr` service above on the CPU) is capped at the
+      # runtime's own cgroup — weights there live in THAT container's memory,
+      # and MemTotal offered models the 4 GiB default could only thrash on.
+      # 🔴 The default MUST equal the `dmr` service's `mem_limit` default: the
+      # same interpolation then yields the same value on every box, whichever
+      # env source compose resolves it from (tests/gpu-vendor-selection.test.sh
+      # asserts the two agree). `dmr-cuda`'s 16g never applies here — an
+      # NVIDIA box is sized by its card, or reported unknown.
+      DMR_MEM_LIMIT: ${DMR_MEM_LIMIT:-4g}
       # INFERENCE_AUTH_TOKEN is NOT listed here on purpose — it arrives via
       # `env_file: ../.env` below, and the vendored auth.py reads that exact
       # name. A `${INFERENCE_AUTH_TOKEN}` substitution here would resolve
@@ -3219,11 +3417,18 @@ services:
       # Read-only: the disk preflight only needs stat/traverse on the mount to
       # read the filesystem's free-space counters, never the model blobs.
       - dmr-models:/data/models:ro
-      # Read-only: vram.py reads
-      # /sys/class/drm/card*/device/mem_info_vram_total to size the VRAM gate,
-      # taking the MAX across cards so this box's 512 MiB iGPU cannot win over
-      # the 16 GB dGPU. Harmless when absent — detection falls back to
-      # /proc/meminfo.
+      # Read-only: vram.py reads each card's PCI vendor and, for an AMD card,
+      # /sys/class/drm/cardN/device/mem_info_vram_total to size the VRAM gate.
+      # WARP-3046: that memory node is amdgpu-only — an NVIDIA card publishes
+      # none, and the old "max across cards" rule then sized .195's RTX 5060 Ti
+      # from the 512 MiB Raphael iGPU (0 GB, empty catalog). An NVIDIA card is
+      # now sized by the host device-bridge's GET /gpu (DEVICE_BRIDGE_URL +
+      # BRIDGE_AUTH_TOKEN/SERVICE_TOKEN_DISPLAY, from the env_file above), and
+      # carve-out-sized nodes are skipped. Harmless when absent — detection
+      # falls back to /proc/meminfo, or reports the VRAM as unknown. (An
+      # NVIDIA card with no DRM node — nvidia-drm unloaded — is still seen:
+      # vram.py also reads GPU_VENDOR and the container's own
+      # /sys/bus/pci, which needs no mount.)
       - /sys/class/drm:/sys/class/drm:ro
     # Hardening: a FastAPI sidecar running as non-root that reads its own code
     # and makes outbound HTTP. It needs no capabilities and must not gain any.
@@ -3490,6 +3695,20 @@ services:
     cpus: ${FLEET_AGENT_CPUS:-0.25}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
+# WARP-2895 — the first named network in this file.
+#
+# Every service not listing `networks:` stays on the implicit `default`
+# bridge exactly as before. `droplet-internal` is `internal: true`: Docker
+# creates it with no gateway to the host's network stack, so a container
+# attached ONLY to it can reach the other members of this network and nothing
+# else — no LAN, no WAN, no host — while a container attached to both (the
+# orchestrator) bridges nothing: Docker does not route between a container's
+# networks. The sandbox is the first and, in this ticket, the only
+# only-internal member. Reviewed on its own: WARP-2922.
+networks:
+  droplet-internal:
+    internal: true
+
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
@@ -3515,6 +3734,9 @@ secrets:
 
 volumes:
   pgdata:
+  # WARP-1401: `cache` (Redis) AOF: sessions, refresh denylist, lockouts,
+  # Nextcloud app-passwords. Wiped on factory reset; never backed up.
+  cache-data:
   nvrdata:
   frigate-config:
   aikeys:
@@ -3547,6 +3769,21 @@ volumes:
   # RAG_EVAL_KEEP_RUNS (default 500) after each run (WARP-1192) — no
   # operator sweep needed.
   rag-eval-data:
+  # WARP-2896 (ADR-056 slice G) — the workshop's git store. workspace-git holds
+  # the bare repositories (<id>.git + templates.git): every workspace commit
+  # is pushed there straight away, so this volume alone is the customer's
+  # extension work and device-backup.sh captures it. workspace-checkouts holds
+  # the working trees a run edits and runs tests in — rebuildable by `git
+  # clone` from workspace-git, so excluded from backup like any cache. Both
+  # wiped by factory reset.
+  workspace-git:
+  workspace-checkouts:
+  # WARP-2900 (ADR-056 slice H2) — installed extensions: each promoted
+  # extension's signed commit exported read-only (and compiled, for node20).
+  # Rebuildable: the reconciler re-exports every enabled extension from
+  # workspace-git after re-verifying its signed statement, so it is excluded
+  # from backup like the checkouts. Wiped by factory reset.
+  extensions-installed:
   # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
   # Named so a container recreate never silently reverts the tuned
   # gain/threshold; factory-reset's volume sweep clears it.
@@ -3563,6 +3800,8 @@ volumes:
   piper-voices:
   # ADR-018 item 12: switch provision-state persistence (last_provisioned_at).
   switch-state:
+  # Device gateway registry (BACnet/Modbus/SNMP/KNX devices + points, 0600).
+  device-gateway-state:
   # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
   # ollama + openwrt services are active. Declared unconditionally so
   # `docker volume ls` shows the names whether the profile is on or off;

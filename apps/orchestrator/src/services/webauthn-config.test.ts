@@ -82,3 +82,14 @@ describe("deriveWebAuthnRp — rpID/origin from the request (LAN + air-gap safe)
     expect(rp.rpName.length).toBeGreaterThan(0);
   });
 });
+
+describe("isIpRpId (WARP-1157)", () => {
+  it("flags IPv4 and IPv6 literals, not hostnames", async () => {
+    const { isIpRpId } = await import("./webauthn-config.js");
+    expect(isIpRpId("192.168.9.195")).toBe(true);
+    expect(isIpRpId("fe80::1")).toBe(true);
+    expect(isIpRpId("droplet-ai.local")).toBe(false);
+    expect(isIpRpId("d-b5839920cb1b0d09.droplet-us.com")).toBe(false);
+    expect(isIpRpId("localhost")).toBe(false);
+  });
+});

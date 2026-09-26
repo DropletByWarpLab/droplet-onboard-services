@@ -13,6 +13,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
@@ -50,15 +51,23 @@ import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
+import { reachableInChat } from "@/lib/tool-domains";
 import { useAuth } from "@/lib/auth";
 import {
   PENDING_COMPOSER_KEY,
+  PENDING_PROMPT_KEY,
   type BusinessContextPinKind,
   type PendingComposerPayload,
   type PendingComposerToolPayload,
   type ToolCatalogEntry,
 } from "@/lib/types";
-import { createContextPin } from "@/lib/api";
+import {
+  createContextPin,
+  fetchCloudHistory,
+  setCloudHistoryConsent,
+  type CloudHistorySummary,
+} from "@/lib/api";
+import { CloudHistoryConsentDialog } from "@/components/chat/CloudHistoryConsentDialog";
 import type { ChatProject } from "@/lib/api";
 // WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
 // shared shell set; chat-indigo.css carries the chat-specific surface.
@@ -99,6 +108,15 @@ export default function ChatPage() {
   // may still be fetching on a cold deep-link — the effect below applies
   // it once both sides are ready, then clears.
   const [pendingRestoredModel, setPendingRestoredModel] = useState<string | null>(null);
+  // WARP-3048 — who chose the model the composer is on. 'auto' follows the
+  // box's active model (defaultModel) for as long as the chat is fresh, so
+  // a switch on /models reaches a /chat that is already open or was served a
+  // stale cache; a composer pick ('user') is never overridden by it. A
+  // reopened thread needs no source of its own: it has a conversation id,
+  // which already ends "fresh". New chat goes back to 'auto'.
+  const [selectionSource, setSelectionSource] = useState<"auto" | "user">(
+    "auto",
+  );
   // WARP-845 — the project the NEXT new chat is filed under (set by the
   // sidebar's per-project "+"). Ref-mirrored so the URL-clear reset
   // effect can seed the project persona without dep churn.
@@ -272,6 +290,8 @@ export default function ChatPage() {
       // a plain new chat starts blank.
       setSystemPrompt(activeProjectRef.current?.systemPrompt ?? "");
       setChatId(`chat-${Date.now()}`);
+      // WARP-3048 — a fresh chat follows the box's active model again.
+      setSelectionSource("auto");
     }
     // Intentionally only depend on urlConversationId. Including
     // conversationId / loadConversation / clearMessages would re-fire
@@ -296,10 +316,23 @@ export default function ChatPage() {
     window.history.replaceState(null, "", next.toString());
   }, [conversationId]);
   const chatInputRef = useRef<ChatInputHandle>(null);
-  const { models, defaultModel } = useModels();
+  const {
+    models,
+    defaultModel,
+    isLoading: modelsLoading,
+    error: modelsError,
+    degraded: modelsDegraded,
+  } = useModels();
   // The chat composer's "/" slash menu lists these tools; picking one seeds
   // the composer + pins the "Ready to use X" indicator (same as /tools).
-  const { tools: slashTools } = useToolCatalog();
+  //
+  // WARP-2969 — narrowed to what a turn can actually reach. `/tools` still
+  // SHOWS the withheld ones, with a chip saying why, because an MCP client
+  // can still call them; this menu cannot, because every row in it is an
+  // offer to act, and offering a tool chat policy withholds only ever buys
+  // the user a message that comes back "I can't do that".
+  const { tools: allTools } = useToolCatalog();
+  const slashTools = useMemo(() => allTools.filter(reachableInChat), [allTools]);
   const [selectedModel, setSelectedModel] = useState("");
   // WARP-904 — the provider backing the currently-selected model, looked
   // up from the same gated `/api/llm/models` list ModelSelector reads.
@@ -313,6 +346,13 @@ export default function ChatPage() {
   );
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  // WARP-2991 — the consent prompt at a local→cloud switch. The server
+  // enforces the rule on every turn; this is how the owner says yes.
+  const [historyPrompt, setHistoryPrompt] = useState<{
+    conversationId: string;
+    summary: CloudHistorySummary;
+    modelLabel: string;
+  } | null>(null);
   // WARP-829: the tool the composer was primed for via the /tools "Use in
   // chat" hand-off (null when the chat wasn't opened from a tool).
   // WARP-2582 — narrowed to the TOOL variant now that the hand-off payload is a
@@ -341,15 +381,50 @@ export default function ChatPage() {
   // model, then any model. `defaultModel` names the model the household chose
   // on /models — honour it so a new chat opens on that model instead of just
   // "the first one in the list".
+  //
+  // WARP-3048 — this used to run only while nothing was selected, so the
+  // FIRST answer stuck: a stale cached defaultModel on a client-side visit,
+  // or a switch on /models while /chat was open, never reached the composer.
+  // Now a fresh 'auto' chat (no messages, no conversation) re-applies
+  // defaultModel whenever it changes. Anything else keeps its model — a 30s
+  // poll must never move a thread mid-conversation — unless that model has
+  // left the list, where keeping it would only fail every send.
+  //
+  // Two limits on that fallback. A DEGRADED list is known to be incomplete
+  // (the box's runtime didn't answer — a model swap can do that — but the
+  // cloud still listed), so a model missing from it hasn't left: hold every
+  // selection until the list is whole. And a thread that has started only
+  // ever falls back to a LOCAL model: moving it to the cloud is the owner's
+  // call (WARP-2991 asks them), never a side effect of a listing.
   useEffect(() => {
-    if (!selectedModel && models.length > 0) {
-      const preferred =
-        (defaultModel && models.find((m) => m.id === defaultModel)) ||
-        models.find((m) => isLocalProvider(m.provider)) ||
-        models[0];
-      setSelectedModel(preferred.id);
-    }
-  }, [models, defaultModel, selectedModel]);
+    if (models.length === 0) return;
+    const current = selectedModel
+      ? models.find((m) => m.id === selectedModel)
+      : undefined;
+    const fresh = messages.length === 0 && !conversationId;
+    const freshAuto = selectionSource === "auto" && fresh;
+    if (current && !freshAuto) return;
+    if (modelsDegraded && selectedModel) return;
+    const isLocal = (m: { provider: string }) => isLocalProvider(m.provider);
+    const preferred = fresh
+      ? (defaultModel && models.find((m) => m.id === defaultModel)) ||
+        models.find(isLocal) ||
+        models[0]
+      : models.find((m) => m.id === defaultModel && isLocal(m)) ||
+        models.find(isLocal);
+    if (!preferred) return;
+    if (preferred.id !== selectedModel) setSelectedModel(preferred.id);
+    // A pick that is gone from the list is no longer anyone's choice.
+    if (!current && selectionSource !== "auto") setSelectionSource("auto");
+  }, [
+    models,
+    defaultModel,
+    selectedModel,
+    selectionSource,
+    messages.length,
+    conversationId,
+    modelsDegraded,
+  ]);
 
   // Restore the model a loaded conversation was held in — but only when
   // that model is still available on the gateway (an old chat may name a
@@ -376,14 +451,14 @@ export default function ChatPage() {
     if (!selectedModel) return;
     let pending: string | null = null;
     try {
-      pending = window.sessionStorage.getItem("droplet.pendingPrompt");
+      pending = window.sessionStorage.getItem(PENDING_PROMPT_KEY);
     } catch {
       pending = null;
     }
     if (!pending) return;
     // One-shot: always remove it so a stale hero prompt can't resurface.
     try {
-      window.sessionStorage.removeItem("droplet.pendingPrompt");
+      window.sessionStorage.removeItem(PENDING_PROMPT_KEY);
     } catch {
       /* ignore */
     }
@@ -587,6 +662,9 @@ export default function ChatPage() {
     clearAttachments();
     setSystemPrompt("");
     setChatId(`chat-${Date.now()}`);
+    // WARP-3048 — a new chat opens on the box's active model again, not on
+    // whatever the last thread was switched to.
+    setSelectionSource("auto");
   }, [clearMessages, clearAttachments]);
 
   // WARP-331: history panel interaction handlers.
@@ -605,6 +683,8 @@ export default function ChatPage() {
     // never fires — without this a just-seeded project persona would
     // silently ride into a plain "New chat".
     setSystemPrompt("");
+    // WARP-3048 — same URL no-op, same reason: reset the model source here.
+    setSelectionSource("auto");
     router.push("/chat");
   }, [router]);
 
@@ -615,6 +695,7 @@ export default function ChatPage() {
       setMobileHistoryOpen(false);
       setActiveProject(project);
       setSystemPrompt(project.systemPrompt ?? "");
+      setSelectionSource("auto"); // WARP-3048 — see handleNewChatFromPanel
       router.push("/chat");
     },
     [router],
@@ -740,6 +821,27 @@ export default function ChatPage() {
     const flat = first.replace(/\s+/g, " ");
     return flat.length > 64 ? `${flat.slice(0, 63)}…` : flat;
   }, [messages]);
+  const handleModelChange = useCallback(
+    (id: string) => {
+      setSelectedModel(id);
+      // WARP-3048 — an explicit pick is never moved by a defaultModel change.
+      setSelectionSource("user");
+      const target = models.find((m) => m.id === id);
+      if (!conversationId || !target || isLocalProvider(target.provider)) return;
+      const convo = conversationId;
+      fetchCloudHistory(convo)
+        .then((summary) => {
+          if (summary.unaskedOnBoxAnswers > 0) {
+            setHistoryPrompt({ conversationId: convo, summary, modelLabel: target.name || id });
+          }
+        })
+        // Unreadable state: no prompt, and the server keeps sending only the
+        // user's own messages — the fail-closed default.
+        .catch(() => {});
+    },
+    [models, conversationId],
+  );
+
   const isLocalModel = useMemo(
     () => isLocalProvider(models.find((m) => m.id === selectedModel)?.provider),
     [models, selectedModel],
@@ -946,7 +1048,7 @@ export default function ChatPage() {
               interview session: that surface is the walkthrough, and an empty
               frame of it (the beat before the transcript loads, or a
               self-healed session) reading "Ask Droplet anything · Dim the
-              living-room lights" is precisely the "it dropped me back into a
+              conference-room lights" is precisely the "it dropped me back into a
               chat" report. Keyed off `interviewSessionOpen` — the whole
               lifecycle AND the navigation into it — so a finished interview
               reopened after its history is gone stays quiet too, and so does
@@ -964,9 +1066,26 @@ export default function ChatPage() {
               </div>
               <p className="h">Ask Droplet anything</p>
               <p className="s">
-                {selectedModel
-                  ? "Your local AI is ready — nothing leaves the device."
-                  : "Select a model above to get started."}
+                {/* WARP-3048 — there is no picker "above": name the real
+                    reason nothing is selected, and where models live. A
+                    degraded list is an outage (WARP-1284), never "no model". */}
+                {selectedModel && !modelsDegraded ? (
+                  "Your local AI is ready — nothing leaves the device."
+                ) : modelsLoading ? (
+                  "Checking which AI model is ready…"
+                ) : modelsError ? (
+                  "Couldn’t reach this Droplet’s AI models — it keeps checking."
+                ) : modelsDegraded ? (
+                  "Couldn’t reach this Droplet’s AI service — it keeps checking."
+                ) : (
+                  <>
+                    No AI model is ready on this Droplet yet —{" "}
+                    <Link href="/models" className="text-accent hover:underline">
+                      see Models
+                    </Link>
+                    .
+                  </>
+                )}
               </p>
               {!isPrivileged && isBusinessBox && (
                 <p className="type-caption-1 text-label-quaternary mt-1">
@@ -978,7 +1097,7 @@ export default function ChatPage() {
                   {[
                     "What's using the most storage?",
                     "Summarize the files I uploaded today",
-                    "Dim the living-room lights to 30%",
+                    "Dim the conference-room lights to 30%",
                     "What joined the network this week?",
                   ].map((prompt) => (
                     <button
@@ -1207,7 +1326,7 @@ export default function ChatPage() {
           // scrolls it out of reach.
           modelSelector={
             <>
-              <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+              <ModelSelector value={selectedModel} onChange={handleModelChange} />
               {isLocalModel && <span className="chat-tag">local · on-device</span>}
             </>
           }
@@ -1286,6 +1405,17 @@ export default function ChatPage() {
           />
         </div>
       </Dialog>
+      <CloudHistoryConsentDialog
+        open={historyPrompt !== null}
+        summary={historyPrompt?.summary ?? null}
+        modelLabel={historyPrompt?.modelLabel ?? ""}
+        onDecide={(decision) =>
+          historyPrompt
+            ? setCloudHistoryConsent(historyPrompt.conversationId, decision)
+            : Promise.resolve()
+        }
+        onClose={() => setHistoryPrompt(null)}
+      />
     </div>
   );
 }

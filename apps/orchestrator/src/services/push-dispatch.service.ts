@@ -28,6 +28,16 @@ import webpush from "web-push";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import {
+  assertPushDestination,
+  vetPushEndpoint,
+  type VettedPushEndpoint,
+} from "../lib/push-endpoint.js";
+import { webPushGate } from "./off-lan-gate.service.js";
+import { recordActivity } from "./activity.singleton.js";
+import { canAccessCamera } from "./camera-access.service.js";
+// WARP-2911 — the leaf, never notifications.service (which imports this module).
+import { assertRecipientIsUsername } from "./notification-recipient.js";
 
 const logger = createLogger("push-dispatch");
 
@@ -169,26 +179,165 @@ export interface PushPayload {
    *  session cookie. */
   imageUrl?: string;
   data?: Record<string, unknown>;
+  /** WARP-2804 — the NotificationLog row this push is for. The service worker
+   *  acknowledges it (`POST /api/notifications/<id>/ack {via:'opened'}`) when
+   *  the person taps the notification. Absent on the camera detection
+   *  fan-out, which writes no row. */
+  notificationId?: string;
+  /** WARP-2978 (ADR-059 P3 D37) — `alert` makes the dial long-lived and urgent
+   *  (`PUSH_ALERT_OPTIONS`) and tells the service worker to keep the
+   *  notification until it is handled. Absent: the default best-effort dial. */
+  priority?: NotificationPriority;
+}
+
+/** WARP-2978 — the one priority there is. A Security alert (§6.7). */
+export type NotificationPriority = "alert";
+
+/** Best-effort: a notification nobody could receive within a minute is stale. */
+export const PUSH_DEFAULT_TTL_S = 60;
+/**
+ * WARP-2978 (D37) — an alert about someone inside after hours must still reach
+ * a phone that has been asleep for longer than a minute: kept by the push
+ * service for an hour, delivered with `Urgency: high`.
+ */
+export const PUSH_ALERT_TTL_S = 3600;
+
+/** The web-push request options for one dial. */
+export function pushDialOptions(priority: NotificationPriority | undefined): {
+  TTL: number;
+  urgency?: "high";
+  timeout: number;
+} {
+  return priority === "alert"
+    ? { TTL: PUSH_ALERT_TTL_S, urgency: "high", timeout: PUSH_DIAL_TIMEOUT_MS }
+    : { TTL: PUSH_DEFAULT_TTL_S, timeout: PUSH_DIAL_TIMEOUT_MS };
+}
+
+/** WARP-2904 — what one push dial (or refusal) did, for the audit row. */
+type PushEgressOutcome =
+  | "allowed"
+  | "refused_gate"
+  | "refused_endpoint"
+  | "pruned"
+  | "provider_error";
+
+/**
+ * WARP-2904 — one signed `network` activity row per dial and per refusal, the
+ * `routes/web.ts` egress-audit idiom, so /admin/audit shows push beside
+ * weather and mail. Fire-and-forget and fail-soft (`recordActivity` swallows).
+ *
+ * Carries the endpoint's HOST only: the full endpoint is a per-subscriber
+ * capability URL (anyone holding it plus the keys can push to that browser),
+ * and the payload never appears here at all.
+ */
+function auditPushEgress(userId: string, outcome: PushEgressOutcome, host?: string): void {
+  recordPushEgress(outcome, { userId, ...(host ? { dst: host } : {}) }, host);
+}
+
+/** The signed `network` row itself — shared by the per-recipient rows above
+ *  and the one-per-event camera refusal below. */
+function recordPushEgress(
+  outcome: PushEgressOutcome,
+  refs: Record<string, string | number>,
+  host?: string,
+): void {
+  void recordActivity({
+    kind: "network",
+    severity: outcome === "allowed" ? "info" : "warn",
+    sourceIcon: "globe",
+    what: host ? `Web push: ${host}` : "Web push",
+    sub: "web_push",
+    refs: { channel: "web_push", outcome, ...refs },
+    actor: { type: "system", id: null },
+  });
 }
 
 /**
- * Send a push to every active subscription for `userId`. Subscriptions
+ * WARP-2904: the endpoint check at DIAL time. The subscribe route runs the
+ * same structural check at registration, but rows stored before that check
+ * existed are never otherwise re-checked. Here the host is also resolved,
+ * so a push-service name that resolves inside the boundary is refused.
+ * Returns the vetted endpoint (the host web-push will actually connect to,
+ * plus the normalised URL to dial), or null when it may not be dialled.
+ * See lib/push-endpoint.ts for why this is not plain `assertOutboundUrlAllowed`.
+ */
+async function dialableEndpoint(endpoint: string): Promise<VettedPushEndpoint | null> {
+  try {
+    const vetted = vetPushEndpoint(endpoint);
+    await assertPushDestination(vetted);
+    return vetted;
+  } catch {
+    return null;
+  }
+}
+
+/** A dial that never answers must not stall the caller (the reminders poller
+ *  awaits each send in turn). */
+const PUSH_DIAL_TIMEOUT_MS = 10_000;
+
+export interface DispatchOutcome {
+  sent: number;
+  pruned: number;
+  /** Dials actually attempted — 0 with no `refused` means "no subscribers". */
+  attempted: number;
+  /** Set when the `web_push` off-LAN channel refused the whole dispatch. */
+  refused?: "egress_disabled";
+}
+
+/**
+ * Send a push to every active subscription for `username` — the recipient's
+ * Nextcloud username (`User.username`), never `User.id` (WARP-2911): that is
+ * what `PushSubscription.username` stores. Subscriptions
  * that come back with 404 or 410 are deleted — those are the standard
  * "this endpoint is dead, give up" status codes per the Web Push spec.
+ *
+ * WARP-2904 — this is the ONE dial site for web push, so the `web_push`
+ * off-LAN gate is read here, on every call, before a single subscription is
+ * loaded: sendNotification, the camera fan-out and the test button are all
+ * covered by it. A refusal is DATA (`refused`), never a throw — every caller
+ * treats push as best-effort and must not start failing its own write.
  */
 export async function dispatchToUser(
   prisma: PrismaClient,
-  userId: string,
+  username: string,
   payload: PushPayload,
-): Promise<{ sent: number; pruned: number }> {
+): Promise<DispatchOutcome> {
+  // WARP-2911 — FIRST, before the gate: a `User.id` here is a caller bug, not
+  // a refused dial, and this function has callers (the camera fan-out, the
+  // push test button) that never pass through sendNotification's own check.
+  assertRecipientIsUsername("dispatchToUser", username);
+  if (!(await webPushGate(prisma))) {
+    // Audit a refusal only when there was something to refuse. Push ships
+    // off, so an unconditional row here would mean one signed warning per
+    // notification (and per camera detection) on every box where nobody
+    // has even subscribed. Only a COUNT: no subscription row is loaded
+    // while the gate is closed. If the count cannot be read, the refusal is
+    // audited anyway.
+    const pending = await prisma.pushSubscription
+      .count({ where: { username } })
+      .catch(() => 1);
+    if (pending > 0) auditPushEgress(username, "refused_gate");
+    return { sent: 0, pruned: 0, attempted: 0, refused: "egress_disabled" };
+  }
   if (!configured) initPushDispatch();
-  const subs = await prisma.pushSubscription.findMany({ where: { userId } });
-  if (subs.length === 0) return { sent: 0, pruned: 0 };
+  const rows = await prisma.pushSubscription.findMany({ where: { username } });
+
+  // Refuse (and prune) any stored endpoint that fails the push-endpoint guard.
+  const blocked: string[] = [];
+  const subs: Array<(typeof rows)[number] & VettedPushEndpoint> = [];
+  for (const r of rows) {
+    const vetted = await dialableEndpoint(r.endpoint);
+    if (vetted) subs.push({ ...r, ...vetted });
+    else {
+      blocked.push(r.endpoint);
+      auditPushEgress(username, "refused_endpoint");
+    }
+  }
 
   const body = JSON.stringify(payload);
   let sent = 0;
   let pruned = 0;
-  const deadEndpoints: string[] = [];
+  const deadEndpoints: string[] = [...blocked];
 
   // Fan out in parallel — each push call is independent, and waiting
   // serially would compound latency on a slow push service.
@@ -197,19 +346,26 @@ export async function dispatchToUser(
       try {
         await webpush.sendNotification(
           {
-            endpoint: s.endpoint,
+            // The NORMALISED url, never the raw row: its host is the one
+            // that was vetted and the one the audit row names.
+            endpoint: s.url,
             keys: { p256dh: s.p256dhKey, auth: s.authKey },
           },
           body,
-          { TTL: 60 }, // Best-effort: stale notifications past 1 min are useless.
+          // TTL: best-effort, stale notifications past 1 min are useless —
+          // except an alert (WARP-2978), which is kept for an hour.
+          pushDialOptions(payload.priority),
         );
         sent++;
+        auditPushEgress(username, "allowed", s.host);
       } catch (err) {
         const status = (err as { statusCode?: number })?.statusCode;
         if (status === 404 || status === 410) {
           deadEndpoints.push(s.endpoint);
+          auditPushEgress(username, "pruned", s.host);
         } else {
-          logger.warn({ err, endpoint: s.endpoint.slice(0, 60) }, "push send failed");
+          auditPushEgress(username, "provider_error", s.host);
+          logger.warn({ err, host: s.host }, "push send failed");
         }
       }
     }),
@@ -222,14 +378,15 @@ export async function dispatchToUser(
       })
     ).count;
   }
+  if (subs.length === 0) return { sent, pruned, attempted: 0 };
   // Non-blocking: bump lastFiredAt for monitoring. Failure here is fine.
   prisma.pushSubscription
     .updateMany({
-      where: { userId, endpoint: { notIn: deadEndpoints } },
+      where: { username, endpoint: { notIn: deadEndpoints } },
       data: { lastFiredAt: new Date() },
     })
     .catch(() => {});
-  return { sent, pruned };
+  return { sent, pruned, attempted: subs.length };
 }
 
 /**
@@ -281,6 +438,48 @@ export async function dispatchDetectionEvent(
   });
   if (interestedPrefs.length === 0) return;
 
+  // WARP-2982: a pref is not access. Re-check each recipient against the
+  // per-camera grants at send time, so a person whose access was revoked
+  // (or whose role dropped below owner/admin) stops being told what this
+  // camera sees. Fail closed per user: an unknown user gets nothing.
+  //
+  // WARP-2911: the pref names its person by `User.id`; web push is keyed by
+  // `PushSubscription.username`. The username is selected here and is what
+  // `dispatchToUser` gets — handing it the pref's id matched no subscription
+  // on any box where the two differ, so detections reached nobody's phone.
+  const users = await prisma.user.findMany({
+    where: { id: { in: interestedPrefs.map((p) => p.userId) } },
+    select: { id: true, role: true, username: true },
+  });
+  const allowed: typeof users = [];
+  for (const u of users) {
+    if (await canAccessCamera(prisma, u, ev.cameraName)) allowed.push(u);
+  }
+  if (allowed.length === 0) return;
+
+  // WARP-2911 — the `web_push` gate is read ONCE per detection. `web_push`
+  // ships off and detections are the most frequent sender, so letting each
+  // recipient's `dispatchToUser` discover the closed gate wrote one signed
+  // refusal row per subscribed recipient per detection. Closed: at most ONE
+  // row for the event (and none when nobody is subscribed — push ships off,
+  // so "nothing to refuse" is the normal case), no subscription loaded,
+  // nothing dialled. Open: `dispatchToUser` still reads the gate itself, per
+  // recipient — it is the one dial site and keeps that contract.
+  if (!(await webPushGate(prisma))) {
+    const usernames = allowed.map((u) => u.username);
+    const pending = await prisma.pushSubscription
+      .count({ where: { username: { in: usernames } } })
+      .catch(() => 1);
+    if (pending > 0) {
+      recordPushEgress("refused_gate", {
+        source: "camera_detection",
+        camera: ev.cameraName,
+        subscriptions: pending,
+      });
+    }
+    return;
+  }
+
   const cameraDisplay = camera.displayName || ev.cameraName.replace(/_/g, " ");
   const payload: PushPayload = {
     title: `${ev.label[0].toUpperCase()}${ev.label.slice(1)} detected`,
@@ -294,9 +493,9 @@ export async function dispatchDetectionEvent(
   // Fan out per-user. We don't bother awaiting individual results —
   // dispatchToUser handles its own pruning, and the SSE handler that
   // called us is already fire-and-forget.
-  for (const pref of interestedPrefs) {
-    void dispatchToUser(prisma, pref.userId, payload).catch((err) =>
-      logger.warn({ err, userId: pref.userId }, "push dispatch user-failed"),
+  for (const recipient of allowed) {
+    void dispatchToUser(prisma, recipient.username, payload).catch((err) =>
+      logger.warn({ err, username: recipient.username }, "push dispatch user-failed"),
     );
   }
 }

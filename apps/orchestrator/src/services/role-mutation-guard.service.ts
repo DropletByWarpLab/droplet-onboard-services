@@ -457,6 +457,33 @@ export function assertDisableAllowed(args: {
 }
 
 /**
+ * Session revocation (POST /auth/users/:username/revoke-sessions) — WARP-3111.
+ * Same rails as disable (it is the "cut this person off now" half of a
+ * disable), plus the rank cap applied to the TARGET's role: you can only sign
+ * out someone whose rank is at or below your own. Before this the route ran
+ * requireRole alone, so any admin could sign the owner out everywhere.
+ *
+ * Self is refused (rail 2), not treated as "log out everywhere": this route
+ * has no `exceptSid`, so a self-revoke would kill the caller's own session
+ * mid-request, and self-service already has its own doors (POST /auth/logout,
+ * and POST /auth/password, which revokes every other session). Because self
+ * is refused, "never the owner unless the caller is the owner" collapses to
+ * rail 1: the only actor who could be the owner is the owner themselves.
+ */
+export function assertSessionRevokeAllowed(args: {
+  actor: GuardActor;
+  target: GuardTarget;
+}): void {
+  assertNotSelf(args.actor.id, args.target.id);
+  assertTargetNotOwner(args.target.role);
+  assertRankCap(
+    args.actor.role,
+    args.target.role,
+    "You cannot sign out someone with a higher role than your own",
+  );
+}
+
+/**
  * Scope rewrite (PATCH /people/:id/scope) — same two rails as removal:
  * the shipped self-action guard plus rail 1 (an owner's bindings are inert
  * — requireScope short-circuits owners — but they are still the owner's
@@ -756,6 +783,13 @@ export async function runRemovalPostEffects(args: {
  * Post-effects of a committed disable (WARP-116 immediate revocation +
  * the WARP-1062 mandatory-emit row, shape unchanged from auth.ts).
  */
+/**
+ * Outcome of the Nextcloud mirror on a directory write — an explicit enum,
+ * never derived from absence. `no_account` (WARP-2858): the row has no
+ * Nextcloud user (SSO/SCIM-provisioned), so there was nothing to mirror.
+ */
+export type NcMirror = "synced" | "failed" | "no_account";
+
 export async function runDisablePostEffects(args: {
   targetUserId: string | null;
   username: string;
@@ -766,8 +800,11 @@ export async function runDisablePostEffects(args: {
    * locally is not indistinguishable from a fully-applied one — NC is
    * proxied without orchestrator auth in front, so the difference is real
    * access, and the reconciler's mirror pass is what closes it.
+   *
+   * WARP-2858: `no_account` — the row has no Nextcloud user (SSO/SCIM-
+   * provisioned), so the local DEACTIVATED is the entire disable.
    */
-  ncMirror?: "synced" | "failed";
+  ncMirror?: NcMirror;
 }): Promise<void> {
   const sessionsRevoked = args.targetUserId
     ? await revokeAllSessions(args.targetUserId)

@@ -23,7 +23,9 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
   // below); scripts/setup.sh generates every one of these into .env.
   const REQUIRED_SECRET_KEYS = [
     "DEVICE_SECRET_KEY",
+    "DEVICE_SECRET",
     "SERVICE_TOKEN_SWITCH",
+    "SERVICE_TOKEN_DEVICE_GATEWAY",
     "SERVICE_TOKEN_AI_GATEWAY",
     "SERVICE_TOKEN_VOICE",
     "SERVICE_TOKEN_MCP",
@@ -34,6 +36,7 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
     NODE_ENV: process.env.NODE_ENV,
     AUTH_ENABLED: process.env.AUTH_ENABLED,
     JWT_SECRET: process.env.JWT_SECRET,
+    DROPLET_ENV: process.env.DROPLET_ENV,
     ...Object.fromEntries(REQUIRED_SECRET_KEYS.map((k) => [k, process.env[k]])),
   };
 
@@ -174,6 +177,14 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
       expect(
         findEmptyProductionSecrets({ ...good, DEVICE_SECRET_KEY: "change-me" }),
       ).toEqual(["DEVICE_SECRET_KEY"]);
+      // WARP-2985: DEVICE_SECRET is required too, and its old fallback
+      // literals are as public as the placeholder.
+      expect(
+        findEmptyProductionSecrets({ ...good, DEVICE_SECRET: "" }),
+      ).toEqual(["DEVICE_SECRET"]);
+      expect(
+        findEmptyProductionSecrets({ ...good, DEVICE_SECRET: "dev-only-not-secure" }),
+      ).toEqual(["DEVICE_SECRET"]);
     });
 
     it("rejects an empty DEVICE_SECRET_KEY in production at config load", async () => {
@@ -206,6 +217,64 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
       const { config } = await import("../config.js");
       expect(config.DEVICE_SECRET_KEY).toBe("");
       expect(config.SERVICE_TOKEN_VOICE).toBe("");
+    });
+  });
+  // WARP-2985 — DEVICE_SECRET is gated by the SHIPPED-BOX signal
+  // (DROPLET_ENV=production, written by setup.sh), because NODE_ENV is never
+  // set on a box and the production gate above is therefore dormant there.
+  describe("DEVICE_SECRET gate (DROPLET_ENV)", () => {
+    const armShippedBox = () => {
+      process.env.NODE_ENV = "development"; // what a box actually runs with
+      process.env.DROPLET_ENV = "production";
+    };
+
+    it.each([
+      ["unset", undefined],
+      ["empty", ""],
+      ["whitespace", "   "],
+      ["the .env.example placeholder", "change-me"],
+      ["the old claim-code fallback literal", "dev-only-not-secure"],
+      ["the old ai-gateway fallback literal", "dev-secret-change-in-production"],
+    ])("refuses to boot a shipped box whose DEVICE_SECRET is %s", async (_label, value) => {
+      armShippedBox();
+      if (value === undefined) delete process.env.DEVICE_SECRET;
+      else process.env.DEVICE_SECRET = value;
+      await expect(import("../config.js")).rejects.toThrow(/DEVICE_SECRET/);
+    });
+
+    it("never echoes the offending value in the boot error", async () => {
+      armShippedBox();
+      process.env.DEVICE_SECRET = "change-me";
+      await expect(import("../config.js")).rejects.toThrow(
+        expect.objectContaining({ message: expect.not.stringContaining("change-me") }),
+      );
+    });
+
+    it("boots a shipped box with a per-device DEVICE_SECRET", async () => {
+      armShippedBox();
+      process.env.DEVICE_SECRET = "Zm9vYmFyLXBlci1kZXZpY2UtdmFsdWUtMzItYnl0ZXM=";
+      const { config } = await import("../config.js");
+      expect(config.DEVICE_SECRET).toBe(process.env.DEVICE_SECRET);
+    });
+
+    it("stays dormant off a shipped box (dev laptop / vitest / DROPLET_ENV=development)", async () => {
+      process.env.NODE_ENV = "development";
+      delete process.env.DEVICE_SECRET;
+      for (const env of [undefined, "development"]) {
+        vi.resetModules();
+        if (env === undefined) delete process.env.DROPLET_ENV;
+        else process.env.DROPLET_ENV = env;
+        const { config } = await import("../config.js");
+        expect(config.DEVICE_SECRET).toBe("");
+      }
+    });
+
+    it("isShippedDropletEnv matches ai-gateway's production signal", async () => {
+      const { isShippedDropletEnv } = await import("../config.js");
+      expect(isShippedDropletEnv("production")).toBe(true);
+      expect(isShippedDropletEnv(" Prod ")).toBe(true);
+      expect(isShippedDropletEnv("development")).toBe(false);
+      expect(isShippedDropletEnv(undefined)).toBe(false);
     });
   });
 });

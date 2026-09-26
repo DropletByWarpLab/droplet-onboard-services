@@ -396,7 +396,7 @@ export function ApWifiCard({
                     setSsid(e.target.value);
                   }}
                   placeholder="Droplet"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -443,7 +443,7 @@ export function ApWifiCard({
                     setPassword(e.target.value);
                   }}
                   placeholder="Wi-Fi password"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10 pr-10"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10 pr-10"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",

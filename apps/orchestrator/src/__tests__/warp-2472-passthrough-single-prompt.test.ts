@@ -285,9 +285,21 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // no confirmation (a draft is inert) and `routine_list` a read, so
     // neither moves this number. 40 + 1 = 41.
     //
+    // WARP-2896 then added ONE: `workspace_propose` — Tier-2 because a
+    // proposal is what the person reviews, so nothing unattended may file
+    // one; the interceptor challenges it and the workshop run PARKS. The
+    // other seven workspace tools are four reads and three ungated writes
+    // (one sandbox checkout is their whole reach), so none moves this
+    // number. 41 + 1 = 42.
+    //
+    // The device gateway then added ONE: `set_building_point` — a write to
+    // real building equipment (BACnet/Modbus/SNMP/KNX), confirmed by the
+    // interceptor. Its route mints no token of its own, so it is not a
+    // pass-through; `get_building_devices` is a read. 42 + 1 = 43.
+    //
     // The pass-through roster below is again unchanged: none of the tools
     // touched since relays a 202.
-    expect(confirming).toHaveLength(41);
+    expect(confirming).toHaveLength(43);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",

@@ -35,7 +35,7 @@ test that reproduces it, then make it pass"; "refactor X" → "tests pass
 before and after"). For multi-step tasks, state a brief plan with a
 verify check per step — strong criteria let you loop independently.
 
-> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](../droplet-local-LLM). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](../droplet-local-LLM). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture. The sibling also serves (profile-gated) the **Kev decision model**, a non-generative model that returns calibrated yes/no, choice and score probabilities. Reach it only via the ai-gateway, never on the write-approval path; see § "Decision model (Kev)" there.
 
 Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains the orchestrator API, web dashboard, AI gateway proxy, file indexer service, and all supporting Docker infrastructure.
 
@@ -185,7 +185,7 @@ before you touch any of this:
   `ALLOWED_CHANNELS` (`scripts/release/gen-release-manifest.py`),
   `RELEASE_CHANNELS` (`update-agent/settings.ts`), the discovery rule in
   both pollers, and the cosign identity alternation in
-  `scripts/lib/apply-update.sh` — which is an enumerated `(main|stage)`
+  `docker/ota/apply-update.sh` — which is an enumerated `(main|stage)`
   on purpose. Never widen it to a wildcard.
 
 Full rationale: WARP-1670; device-side trust model: `docs/SECURITY.md`.

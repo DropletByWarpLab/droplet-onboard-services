@@ -223,6 +223,10 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // quietly.
   { pattern: /\b(leases?|agreements?|contracts?|statements?|warrant(y|ies)|quotes?|estimates?|reports?|manuals?|certificates?|licen[cs]es?|permits?|insurance|tax returns?)\b/i, domains: ["files"] },
   { pattern: /\b(lights?|lamps?|scenes?|thermostat|plugs?|sockets?|outlets?|switch(es)?|heating|cooling|air-?con(ditioning)?|fans?|temperature|dim|brightness|blinds?|curtains?|locks?|unlock|routines?|turn (on|off))\b/i, domains: ["smart-home"] },
+  // Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP): the building plant
+  // and office equipment a business asks about. Meters are named with what
+  // they meter — a bare "meter" would fire on every unit conversion.
+  { pattern: /\b(hvac|set-?points?|air[- ]?handl(ers?|ing)|ahus?|chillers?|boilers?|rooftop units?|rtus?|vavs?|ventilation|bacnet|modbus|knx|snmp|bms|building (systems?|management|controls?)|(energy|power|electric(ity)?|gas|water) meters?|meter readings?|kwh|printers?|toner|paper jams?|ups|battery backup|generators?|pumps?|compressors?)\b/i, domains: ["smart-home"] },
   { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|block(ed|s)?|unblock|bandwidth|devices?|online|offline|connected|guest|ethernet|vpn|slow)\b/i, domains: ["network"] },
   // The places a household points cameras, and the things it looks for —
   // NOT just the word "camera". See the WARP-1921 note above. Rename verbs
@@ -694,6 +698,28 @@ export function effectiveAdvertisedToolNames(opts: {
   priorToolNames?: readonly string[];
   pool: readonly string[];
   runtimeTools?: readonly RuntimeToolDescriptor[];
+  /**
+   * WARP-2896 — domains the CALLER's binding admits for every turn, whatever
+   * the sentence says. Today: the `workspace` domain of a workshop run, set by
+   * the agent-run worker from `run.workspaceId` and by nothing else.
+   *
+   * Why not a keyword rule: chat must never be promised the workshop's tools
+   * (`chat-tool-scope.test.ts` keeps `workspace` ruleless), and a workshop goal
+   * need not name them — "add a lines field to the word counter" is a workshop
+   * sentence with no workshop word in it. Found live on the bench box
+   * (2026-09-23): the run's pool carried all eight tools, selection advertised
+   * none, and the model answered that it had no way to edit, test or propose.
+   *
+   * Why not "the pool carries them": chat's explicit `allowed_tools` is a
+   * request filtered by role/scope only, never by the chat exclusion, so pool
+   * membership is NOT the binding — a chat client listing `workspace_run` would
+   * have had it advertised. The binding is the run's column; this is its echo.
+   *
+   * Parity (WARP-2552) is unaffected by construction: the only estimate site,
+   * routes/llm.ts, is chat, which has no binding and passes none. Still only
+   * ever a subset of `pool` — a bound domain admits nothing the pool lacks.
+   */
+  boundDomains?: readonly ToolDomain[];
 }): Set<string> {
   // WARP-2556 — no `off` short-circuit here on purpose. `selectAdvertisedTools`
   // already returns the whole pool for `off`, and duplicating that branch meant
@@ -714,7 +740,10 @@ export function effectiveAdvertisedToolNames(opts: {
     // would have re-opened the WARP-2552 split the moment one of them didn't.
     // Deriving it inside the one shared function makes the parity invariant
     // structural instead of a convention.
-    extraDomains: pinnedToolDomainsFromMessages(opts.messages),
+    extraDomains: [
+      ...pinnedToolDomainsFromMessages(opts.messages),
+      ...(opts.boundDomains ?? []),
+    ],
   });
   return new Set(advertised);
 }

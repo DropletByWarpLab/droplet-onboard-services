@@ -5,7 +5,7 @@
 ## TL;DR for future agents and developers
 
 - **`droplet-onboard-services`** (this repo) — runs **intelligence**. The orchestrator's ReAct agent loop, the MCP server with the tool registry, the AI gateway that proxies model requests to Ollama.
-- **`droplet-local-LLM`** (sibling repo) — runs **inference**. Ollama + a small Python sidecar that does manifest pulls and exposes `/models/eligible`. **No agent runtime there.**
+- **`droplet-local-LLM`** (sibling repo) — runs **inference**. Ollama + a small Python sidecar that does manifest pulls and exposes `/models/eligible`, plus (profile-gated) the Kev **decision model** — see § "Decision model (Kev)". **No agent runtime there.**
 - The two repos are deployed side-by-side on the same inference host (single device).
 
 If you're looking for "where is Ollama" or "how do I add a new model" — **the answer is the other repo, not this one**. There is intentionally zero inference-server code in `droplet-onboard-services`.
@@ -28,7 +28,7 @@ If you're looking for "where is Ollama" or "how do I add a new model" — **the 
               │             │                                              │
               │   droplet-local-LLM (this repo — LLM appliance)            │
               │   ─ ollama (Docker container)              :11434         │
-              │   ─ ollama-manager (FastAPI sidecar)        :8002         │
+              │   ─ inference-manager (FastAPI sidecar)     :8002         │
               │       /proxy/{path:path}    forwards to Ollama with      │
               │           tool-call observability + JSON repair          │
               │           + circuit breaker; chat-shaped paths get       │
@@ -40,18 +40,20 @@ If you're looking for "where is Ollama" or "how do I add a new model" — **the 
               │       /models/sync         (idempotent pulls)             │
               │       /models/pull         DELETE /models/{name}          │
               │   ─ ollama-metrics (sidecar)                :9101         │
+              │   ─ decision-model (Kev, profile `decision`) :8009        │
+              │       /v1/systemone  /v1/models   (ADR-006)              │
               └────────────────────────────────────────────────────────────┘
 ```
 
 For **chat**, the orchestrator's ai-gateway posts **directly to Ollama** at
 `OLLAMA_URL` (`http://...:11434`, the OpenAI-compat `/v1/chat/completions`) —
-NOT through `ollama-manager`'s `/proxy`, whose 120 s read leg the agent loop
+NOT through `inference-manager`'s `/proxy`, whose 120 s read leg the agent loop
 blows past on CPU inference and cold-loads of larger models (surfacing as 502
-from the manager, 500 from the orchestrator). `ollama-manager`'s `/proxy` is
+from the manager, 500 from the orchestrator). `inference-manager`'s `/proxy` is
 **opt-in observability** (tool-call counter, JSON repair, circuit breaker),
 used only when prompts fit the 120 s budget — point `OLLAMA_URL` at
 `:8002/proxy` deliberately, never by default.
-ai-gateway reads `/health.limits` (on `ollama-manager` `:8002`) at provider
+ai-gateway reads `/health.limits` (on `inference-manager` `:8002`) at provider
 init to size its outbound concurrency to match `OLLAMA_NUM_PARALLEL` on the
 appliance, and refreshes those limits on a 503.
 
@@ -71,19 +73,20 @@ bump both sides in lockstep when the contract changes.
 | Agent loop (read → tool-call → act → re-prompt) | `droplet-onboard-services/apps/orchestrator/src/services/llm-agent.service.ts` |
 | Tool definitions (~50 tools) | `droplet-onboard-services/packages/tools-core/` |
 | MCP server (stdio child of orchestrator) | `droplet-onboard-services/services/mcp-server/` |
-| Model routing (`llama*` → local, `claude*` → Anthropic, `gpt*` → OpenAI) | `droplet-onboard-services/services/ai-gateway/router.py` |
+| Model routing (`llama*`/`gpt-oss*` → local Ollama, `claude*` → Anthropic, `gpt*` → OpenAI; `gpt-oss` is registered before the cloud `gpt` prefix — WARP-604) | `droplet-onboard-services/services/ai-gateway/router.py` |
 | HTTP API exposed to the world (`/ai/chat`, `/ai/sessions/*`, `/ai/keys/*`) | `droplet-onboard-services/services/ai-gateway/main.py` |
 | BYOK API key storage (Fernet-encrypted) | `droplet-onboard-services/services/ai-gateway/` |
 | Model serving (Ollama process) | `droplet-local-LLM/docker/docker-compose.yml` (ollama service) |
-| Model lifecycle (pull/sync/list) | `droplet-local-LLM/services/ollama-manager/` |
-| Per-device VRAM detection | `droplet-local-LLM/services/ollama-manager/vram.py` |
+| Model lifecycle (pull/sync/list) | `droplet-local-LLM/services/inference-manager/` |
+| Per-device VRAM detection | `droplet-local-LLM/services/inference-manager/vram.py` |
 | Manifest of supported models | `droplet-local-LLM/models/model-manifest.json` |
+| Decision model serving (Kev) | `droplet-local-LLM/services/decision-model/` — see § "Decision model (Kev)" |
 
 ## How a chat request flows
 
 1. **Web dashboard or API client** → `POST /ai/chat` on the orchestrator (port 3000) or directly on ai-gateway (port 8000).
 2. **Orchestrator's agent loop** (`llm-agent.service.ts`) starts: get tools from MCP, send first turn to ai-gateway.
-3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, `gpt-oss*`, etc., route to `OLLAMA_URL` — **direct to Ollama** at `http://host.docker.internal:11434`'s OpenAI-compat `/v1/chat/completions`. (Model lifecycle — `/models/*`, `/health`, `/metrics` — goes to `ollama-manager` on `:8002`; the chat path does not.) **Routing collision guards (WARP-604):** `gpt-oss` is OpenAI's *open-weights* model served **locally** by Ollama, so it is matched **before** the cloud `gpt` prefix and never sent to the OpenAI cloud provider (which the off-LAN gate blocks with HTTP 451 — this was the live chat-failure root cause). The one configured `LLM_MODEL` also always resolves to local Ollama regardless of name. Genuine cloud models (`gpt-4o`, `o1`, `o3`) still route to OpenAI.
+3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, `gpt-oss*`, etc., route to `OLLAMA_URL` — **direct to Ollama** at `http://host.docker.internal:11434`'s OpenAI-compat `/v1/chat/completions`. (Model lifecycle — `/models/*`, `/health`, `/metrics` — goes to `inference-manager` on `:8002`; the chat path does not.) **Routing collision guards (WARP-604):** `gpt-oss` is OpenAI's *open-weights* model served **locally** by Ollama, so it is matched **before** the cloud `gpt` prefix and never sent to the OpenAI cloud provider (which the off-LAN gate blocks with HTTP 451 — this was the live chat-failure root cause). The one configured `LLM_MODEL` also always resolves to local Ollama regardless of name. Genuine cloud models (`gpt-4o`, `o1`, `o3`) still route to OpenAI.
 4. **Ollama on the inference host** (the `ollama` container in `droplet-local-LLM`) generates a response, possibly with `tool_calls`.
 5. **Orchestrator** parses `tool_calls`, dispatches each via `mcp.callTool()` (JSON-RPC over stdio), gets results, appends `role="tool"` messages, re-prompts.
 6. Loop until model produces final text or hits `MAX_ITERATIONS` (~10).
@@ -101,16 +104,58 @@ The inference host side (`droplet-local-LLM`) is involved only in step 3-4. We s
 
 **Change which provider a model name routes to:** edit `droplet-onboard-services/services/ai-gateway/router.py`. The inference host is unaware of which model the orchestrator chose; it just receives a `model` field in the API request and serves it.
 
+## Decision model (Kev) — ADR-006, epic WARP-3067
+
+> **This section is byte-identical in both copies of this file.** Edit it in both, or in neither.
+
+The box has a second, **non-generative** model beside the chat LLM: [Kev](https://github.com/jaredpalmer/kev). You send it a text (the *state*) plus typed questions and get back one **calibrated** probability distribution per question, from a single prefill pass with no generated tokens:
+
+| Type | Asks | Returns |
+|---|---|---|
+| `noul` | yes/no | probability of yes |
+| `choice` | pick one of 1–255 named options | probability per option + confidence |
+| `score` | a level on an ordered scale | mean level, probability per level + confidence |
+
+**Who owns what**
+
+| Concern | Location |
+|---|---|
+| Serving (`decision-model`, port 8009, profile `decision`, off by default) | `droplet-local-LLM/services/decision-model/`, compose service in `droplet-local-LLM/docker/docker-compose.yml` |
+| Decision record | `droplet-local-LLM/docs/ADR-006-decision-model-kev.md` |
+| The go/no-go instrument (latency on the bench box) | `droplet-local-LLM/scripts/bench-decision-model.py` (WARP-3069) |
+| The `Decide` gRPC RPC (the only way in) | `droplet-onboard-services/proto/inference.proto` + `services/ai-gateway/` (WARP-3070, not built yet) |
+| Consumers | `droplet-onboard-services` orchestrator. Planned: triage (WARP-3071), `ClassifyQuery` (WARP-3072), tool-domain selection (WARP-3073), `classify_items` tool (WARP-3074) |
+
+**How it plugs into the agent loop**
+
+1. **Harness-side (primary).** The orchestrator calls `Decide` at fixed points: which tool domains to advertise this turn, which kind of query this is, whether a retrieved passage answers the question, whether an inbox or alert item needs attention. **The LLM never sees Kev.**
+2. **As an LLM tool (secondary).** `classify_items` is read-only (`requiresWrite: false`), for *bulk* labelling. A single judgment the chat model can make itself gains nothing from a tool call.
+3. **Not "directly in chat".** Kev can't produce text, so it can't be a model the user talks to.
+
+**Rules that bind every consumer**
+
+- **Only through the ai-gateway.** Nothing calls port 8009 directly: not the orchestrator, not the LLM, not the dashboard.
+- **Fail soft.** Sidecar absent, slow or erroring means today's behaviour, with "unavailable" as an explicit state. Kev is never a hard dependency of chat.
+- **Never on the write-approval path.** "Reads run automatically, writes ask for a thumbs-up, destructive actions are blocked" is a product contract. A probability may annotate a confirmation, never approve one.
+- **Never phones home.** Weights are baked into the image and the Hub is forced offline. Fine-tuning happens at Warp Lab on staging/synthetic data, never on customer data (WARP-3075).
+- **Nothing is built on top of it until the bench-box go/no-go passes** (WARP-3069): latency beside gpt-oss:20b, and fewer missed tool domains than the keyword rules.
+
 ## What is NOT in this repo
 
 - ❌ Ollama process (it lives in `droplet-local-LLM`)
-- ❌ Model files / weights
+- ❌ Model files / weights (Kev's included — they are baked into `droplet-local-LLM`'s `decision-model` image)
 - ❌ Model lifecycle endpoints (`/models/sync`, `/models/pull`, `/models/eligible`)
 - ❌ VRAM detection
 - ❌ The `model-manifest.json`
 - ❌ Anything that talks Ollama's native protocol directly (we go through ai-gateway)
 
 If you find yourself wanting to add any of those here, **stop**. They go in `droplet-local-LLM`.
+
+## This file is mirrored
+
+> **Mirror note:** `droplet-local-LLM/docs/agentic-workflows.md` is the counterpart of this file. Keep both copies in sync when updating the architecture description; § "Decision model (Kev)" is byte-identical in both.
+>
+> **Known divergence:** this copy additionally carries orchestrator-side content — the "Citations & anchors (WARP-287)" section, the `/health` `schema_version` note, and the rationale for why chat defaults to direct Ollama rather than `/proxy` (the proxy's 120 s read leg).
 
 ## Historical note
 

@@ -99,7 +99,6 @@ export function createModulesRouter(
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
       const view = await getModulesView(prisma, cfg);
       const effectiveForUser = await resolveEffectiveForUser(req);
-      res.setHeader("Cache-Control", "private, max-age=30");
       // `?.length`, not a bare truthiness check: `[]` is truthy, so the bare
       // form SENT an empty array while the client's contract says the field is
       // omitted when unresolvable. The resolver's always-on floor now makes a
@@ -145,6 +144,8 @@ export function createModulesRouter(
   router.get("/business-types", async (req, res, next) => {
     try {
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
+      // Code-resident catalogue, identical on every box: the one kind of /api
+      // read allowed to override the app-wide no-store (WARP-3097).
       res.setHeader("Cache-Control", "private, max-age=300");
       res.json({ businessTypes: BUSINESS_TYPES });
     } catch (e) { next(e); }

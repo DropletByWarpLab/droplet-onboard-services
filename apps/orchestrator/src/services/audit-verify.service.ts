@@ -33,13 +33,22 @@ export interface ChainVerifyResult {
   brokenAtId: string | null;
 }
 
+/**
+ * Walk the chain and check every link and signature. `from` (optional) walks
+ * only the rows AFTER that row, the first one anchored on `from.signature`
+ * (its prev pointer must be `hashSignature(from.signature)`, which does not
+ * depend on the signer) — a segment walk, for the pg test lane, where files
+ * share one database and each verifies only the rows it appended. Omitted,
+ * it is the whole chain, trusting the first row's prev pointer as the origin.
+ */
 export async function verifyActivityChain(
   prisma: PrismaClient,
   signer: ActivityRowSigner,
+  from?: { id: bigint; signature: string } | null,
 ): Promise<ChainVerifyResult> {
   const PAGE = 200;
-  let cursor: bigint | undefined;
-  let prevSignature: string | null = null;
+  let cursor: bigint | undefined = from ? from.id : undefined;
+  let prevSignature: string | null = from ? from.signature : null;
   let rowsChecked = 0;
   let brokenAtId: string | null = null;
 
@@ -153,25 +162,34 @@ export async function runNightlyChainVerification(
     actor: { type: "system", id: null },
   });
   // The notifications subsystem is keyed by `User.username`, not `User.id` —
-  // `sendNotification` publishes to `droplet/notifications/${userId}` and the
-  // only subscriber is ws-bridge's `droplet/notifications/${user.username}`,
+  // `sendNotification` publishes to `droplet/notifications/${username}` and
+  // the only subscriber is ws-bridge's `droplet/notifications/${user.username}`,
   // while both readers of the persisted NotificationLog (routes/notifications.ts
-  // and the `list_notifications` tool) also filter by username. Selecting `id`
-  // here used to make this the one UUID-keyed caller in the codebase, so the
-  // toast was dropped by the broker AND the stored row was invisible to every
-  // reader — the single alert that must never be missed reached nobody. Select
-  // the username so this caller speaks the same vocabulary as the rest.
+  // and the `list_notifications` tool) also filter by username. This site used
+  // to select `id` (WARP-2783), so the toast was dropped by the broker AND the
+  // stored row was invisible to every reader — the single alert that must never
+  // be missed reached nobody. It was not the only such caller (WARP-2813,
+  // WARP-2910), and no comment can say it is the last: that is what
+  // `__tests__/notification-recipient.guard.test.ts` is for (every call site,
+  // swept), backed by the `NOTIFICATION_RECIPIENT_IS_ID` refusal at runtime.
   const admins = await prisma.user.findMany({
     where: { role: { in: ["owner", "admin"] } },
     select: { username: true },
   });
+  // WARP-2911 — contained PER RECIPIENT: one refused or failed send (e.g. an
+  // account whose username predates the ban on the User.id shape) must never
+  // cost the admins after it the one alert that must not be missed.
   for (const admin of admins) {
-    await sendNotification(prisma, {
-      userId: admin.username,
-      kind: "system",
-      title: "Audit log integrity check failed",
-      body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,
-    });
+    try {
+      await sendNotification(prisma, {
+        username: admin.username,
+        kind: "system",
+        title: "Audit log integrity check failed",
+        body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,
+      });
+    } catch (err) {
+      logger.error({ err, username: admin.username }, "audit-chain alert to one admin failed — continuing with the rest");
+    }
   }
   return result;
 }

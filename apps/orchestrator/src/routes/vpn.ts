@@ -53,7 +53,10 @@ import {
   fetchBridgeUplinkIp,
   fetchBridgeStunProbe,
 } from "../lib/vpn-home-endpoint.js";
-import { observePlacement } from "../services/overlay-placement.service.js";
+import {
+  observePlacement,
+  parsePortForward,
+} from "../services/overlay-placement.service.js";
 import {
   readNetworkSummary,
   resolveVpnLanRouting,
@@ -213,6 +216,16 @@ const overlayRouter: OverlayProvisionRouter = {
 async function resolveOverlayEndpointCandidates(
   read?: NetworkSummaryRead,
 ): Promise<OverlayEndpointCandidate[]> {
+  // WARP-3018 — an operator-declared gateway forward becomes the `mapped`
+  // candidate. Read per call like everything else here; a bad value costs the
+  // candidate, never the profile.
+  const { forward, error: forwardError } = parsePortForward(config.WIREGUARD_PUBLIC_FORWARD);
+  if (forwardError) {
+    logger.warn(
+      { value: config.WIREGUARD_PUBLIC_FORWARD, reason: forwardError },
+      "overlay: WIREGUARD_PUBLIC_FORWARD ignored — expected <port> or <public-ipv4>:<port>",
+    );
+  }
   const snapshot = await observePlacement(
     {
       wanAddress: () => fetchBridgeUplinkIp(),
@@ -223,7 +236,7 @@ async function resolveOverlayEndpointCandidates(
       // only on a POSITIVE address-dependent finding, never on absence of
       // evidence. Wiring a second server is the remaining half of WARP-1758.
     },
-    { listenPort: config.WIREGUARD_LISTEN_PORT },
+    { listenPort: config.WIREGUARD_LISTEN_PORT, forward },
   );
   if (snapshot.relayRequired) {
     logger.warn(

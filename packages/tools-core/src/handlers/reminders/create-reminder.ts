@@ -1,4 +1,16 @@
+/**
+ * `create_reminder` — a reminder for the person the assistant acts for.
+ *
+ * WARP-3101 — WRITTEN BY THE ORCHESTRATOR (`POST /api/reminders`), never here.
+ * This handler used to insert the row through `ctx.prisma` with
+ * `userId: ctx.userId`. `Reminder.userId` holds a username (the poller
+ * notifies it), and over the mcp-server's HTTP transport `ctx.userId` is a
+ * User.id: the poller stamped the reminder notified, the send threw on the
+ * UUID, and the reminder was lost. The route resolves the person from the
+ * acting-user header and files the reminder under their username.
+ */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { err, forbidden, invalid, refusalOf } from "../calendar/_route.js";
 
 const inputSchema = {
   type: "object",
@@ -18,10 +30,6 @@ function parseDate(input: unknown): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-function err(code: string, message: string): ToolResult {
-  return { ok: false, status: "error", error: { code, message } };
-}
-
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   if (!ctx.userId) return err("AUTH_REQUIRED", "auth_required");
   const title = typeof args.title === "string" ? args.title.trim() : "";
@@ -29,17 +37,25 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const dueAt = parseDate(args.due_at);
   if (!dueAt) return err("INVALID_ARGS", "invalid due_at — expected ISO-8601 timestamp");
 
-  const reminder = (await ctx.prisma.reminder.create({
-    data: {
-      userId: ctx.userId,
+  const res = await ctx.http.orchestrator.post(
+    "/api/reminders",
+    {
       title,
-      body: typeof args.body === "string" ? args.body : null,
-      dueAt,
-      calendarEventId:
-        typeof args.calendar_event_id === "string" ? args.calendar_event_id : null,
+      ...(typeof args.body === "string" ? { body: args.body } : {}),
+      // The route takes strict ISO-8601; send the instant the model named.
+      dueAt: dueAt.toISOString(),
+      ...(typeof args.calendar_event_id === "string" ? { calendarEventId: args.calendar_event_id } : {}),
     },
-  })) as unknown as { id: string; dueAt: Date };
-  return { ok: true, data: { id: reminder.id, due_at: reminder.dueAt.toISOString() } };
+    { headers: { Accept: "application/json" } },
+  );
+  if (!res.ok) {
+    const refusal = await refusalOf(res);
+    if (res.status === 403) return forbidden(refusal);
+    if (res.status === 400) return invalid(refusal);
+    return err("CREATE_FAILED", `orchestrator returned ${res.status}`);
+  }
+  const { reminder } = (await res.json()) as { reminder: { id: string; dueAt: string } };
+  return { ok: true, data: { id: reminder.id, due_at: new Date(reminder.dueAt).toISOString() } };
 }
 
 const tool: Tool = {

@@ -81,6 +81,9 @@ import removeDevice from "./handlers/smart-home/remove-device.js";
 import createScene from "./handlers/smart-home/create-scene.js";
 // WARP-1447: room assignment ("move the lamp to the den"; auto-creates rooms)
 import assignDeviceRoom from "./handlers/smart-home/assign-device-room.js";
+// Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) via /api/building
+import getBuildingDevices from "./handlers/smart-home/get-building-devices.js";
+import setBuildingPoint from "./handlers/smart-home/set-building-point.js";
 
 // cameras
 import listCameras from "./handlers/cameras/list-cameras.js";
@@ -239,6 +242,15 @@ import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
 import routineDraft from "./handlers/routines/routine-draft.js";
 import routineList from "./handlers/routines/routine-list.js";
 import routineRun from "./handlers/routines/routine-run.js";
+// WARP-2896 (ADR-056 §6.2): the workshop's workspace tools — run-bound.
+import workspaceRead from "./handlers/workspace/workspace-read.js";
+import workspaceSearch from "./handlers/workspace/workspace-search.js";
+import workspaceDiff from "./handlers/workspace/workspace-diff.js";
+import workspaceLog from "./handlers/workspace/workspace-log.js";
+import workspaceWrite from "./handlers/workspace/workspace-write.js";
+import workspaceCommit from "./handlers/workspace/workspace-commit.js";
+import workspaceRun from "./handlers/workspace/workspace-run.js";
+import workspacePropose from "./handlers/workspace/workspace-propose.js";
 
 const allTools: Tool[] = [
   // network
@@ -312,6 +324,8 @@ const allTools: Tool[] = [
   // WARP-1447: put a device in a room (write tier, no confirmation —
   // reversible household bookkeeping, same posture as create_reminder)
   assignDeviceRoom,
+  getBuildingDevices,
+  setBuildingPoint,
   // cameras
   listCameras,
   listDiscoveredCameras,
@@ -435,6 +449,19 @@ const allTools: Tool[] = [
   routineDraft,
   routineList,
   routineRun,
+  // WARP-2896 (ADR-056 §6.2): the workshop. Four reads; write / commit /
+  // run are Write-tier with NO confirmation — their whole blast radius is
+  // one checkout in the sandbox, and only a run bound to that workspace can
+  // reach them (routes/workspace.ts "run owns workspace"); propose is
+  // Tier-2 and ENDS the run. Every one refuses outside a workshop run.
+  workspaceRead,
+  workspaceSearch,
+  workspaceDiff,
+  workspaceLog,
+  workspaceWrite,
+  workspaceCommit,
+  workspaceRun,
+  workspacePropose,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

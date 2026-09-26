@@ -32,10 +32,13 @@ interface Toast {
 
 interface ToastContextValue {
   toast: (message: string, type?: ToastType, action?: ToastAction) => void;
+  /** WARP-2992 — drop every toast on screen (NotificationToaster, on sign-out). */
+  dismissAll: () => void;
 }
 
 const ToastContext = createContext<ToastContextValue>({
   toast: () => {},
+  dismissAll: () => {},
 });
 
 export function useToast() {
@@ -104,7 +107,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <ToastContext.Provider value={{ toast }}>
+    <ToastContext.Provider value={{ toast, dismissAll }}>
       {children}
       {/* Toast region — landmark for screen readers + aria-live polite so
           additions are announced. role="alert" is set per-toast for errors

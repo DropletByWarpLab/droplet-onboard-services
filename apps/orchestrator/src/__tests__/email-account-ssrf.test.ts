@@ -51,7 +51,13 @@ vi.mock("../lib/internal-tls.js", async (importOriginal) => ({
   internalFetch: internalFetchMock,
 }));
 
-import { connectMailbox, PROVISION_ERRORS } from "../services/email/provision.service.js";
+import {
+  connectMailbox,
+  MAILBOX_REASON_MESSAGES,
+  MAILBOX_STATUS_REASONS,
+  PROVISION_ERRORS,
+  recordMailboxStatus,
+} from "../services/email/provision.service.js";
 
 const BODY = {
   displayName: "Front desk",
@@ -280,6 +286,39 @@ describe("a public mail host reaches the indexer", () => {
     expect(JSON.stringify(create.mock.calls[0][0].data)).not.toContain(BODY.password);
   });
 
+  it("nudges the indexer to pick the new row up NOW, after the row is written (WARP-2957)", async () => {
+    const { prisma, create } = prismaMock();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, passwordEnc: "gAAAAA-ciphertext" }),
+      } as never)
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ active: 1 }) } as never);
+
+    await connectMailbox(prisma, BODY, "u-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [refreshUrl, refreshInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(refreshUrl).toMatch(/\/accounts\/refresh$/);
+    expect(refreshInit.method).toBe("POST");
+    // Ordered: the row exists before the indexer is told to look for it.
+    expect(create.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[1]);
+  });
+
+  it("a failed nudge never fails a connect that already succeeded — the cron is the fallback", async () => {
+    const { prisma, create } = prismaMock();
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, passwordEnc: "gAAAAA-ciphertext" }),
+    } as never);
+    // Second call (the refresh) falls through to the suite default: throws.
+    const account = await connectMailbox(prisma, BODY, "u-1");
+    expect(account.id).toBe("acct-1");
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
   it("checks the duplicate BEFORE spending an IMAP login", async () => {
     const prisma = {
       emailAccount: {
@@ -293,5 +332,54 @@ describe("a public mail host reaches the indexer", () => {
     // And the owner is told the real reason rather than watching a perfectly
     // good mailbox fail on a unique constraint.
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-2957 — recordMailboxStatus, the only writer of the health columns ──
+describe("recordMailboxStatus", () => {
+  function prismaUpdateMany(count: number) {
+    const updateMany = vi.fn(async (_a: { where: { id: string }; data: Record<string, unknown> }) => ({ count }));
+    return { prisma: { emailAccount: { updateMany } } as never, updateMany };
+  }
+
+  it("idle: stamps lastIdleAt and CLEARS lastError — a recovery is visible", async () => {
+    const { prisma, updateMany } = prismaUpdateMany(1);
+    const out = await recordMailboxStatus(prisma, "acct-1", { imapStatus: "idle" });
+    expect(out.updated).toBe(true);
+    const { where, data } = updateMany.mock.calls[0][0];
+    expect(where).toEqual({ id: "acct-1" });
+    expect(data).toEqual({ imapStatus: "idle", lastIdleAt: expect.any(Date), lastError: null });
+  });
+
+  it("error: stamps lastErrorAt and the sentence for the reason; unknown when none given", async () => {
+    const { prisma, updateMany } = prismaUpdateMany(1);
+    await recordMailboxStatus(prisma, "acct-1", { imapStatus: "error", reason: "decrypt_failed" });
+    await recordMailboxStatus(prisma, "acct-1", { imapStatus: "error" });
+    expect(updateMany.mock.calls[0][0].data).toEqual({
+      imapStatus: "error",
+      lastErrorAt: expect.any(Date),
+      lastError: MAILBOX_REASON_MESSAGES.decrypt_failed,
+    });
+    expect(updateMany.mock.calls[1][0].data.lastError).toBe(MAILBOX_REASON_MESSAGES.unknown);
+  });
+
+  it("reconnecting: status only — no health timestamp moves", async () => {
+    const { prisma, updateMany } = prismaUpdateMany(1);
+    await recordMailboxStatus(prisma, "acct-1", { imapStatus: "reconnecting" });
+    expect(updateMany.mock.calls[0][0].data).toEqual({ imapStatus: "reconnecting" });
+  });
+
+  it("reports updated:false for an unknown id rather than throwing", async () => {
+    const { prisma } = prismaUpdateMany(0);
+    await expect(recordMailboxStatus(prisma, "nope", { imapStatus: "idle" })).resolves.toEqual({
+      updated: false,
+    });
+  });
+
+  it("every reason has a sentence, and none of them is the token itself", () => {
+    for (const reason of MAILBOX_STATUS_REASONS) {
+      expect(MAILBOX_REASON_MESSAGES[reason]).toMatch(/[a-z]+ [a-z]+/);
+      expect(MAILBOX_REASON_MESSAGES[reason]).not.toBe(reason);
+    }
   });
 });

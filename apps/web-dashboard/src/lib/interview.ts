@@ -135,7 +135,12 @@ const KNOWN_CATEGORIES = new Set([
  */
 export function parseProposal(text: string): Proposal | null {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const raw = fenced ? fenced[1] : text;
+  // WARP-2965: a turn that opened a fence and never closed it used to hand
+  // JSON.parse the backticks themselves. Slice from the opener instead — a
+  // complete object missing only its closing fence parses; a genuinely
+  // truncated one still returns null and the card offers "Try again".
+  const open = /```(?:json)?\s*/i.exec(text);
+  const raw = fenced ? fenced[1] : open ? text.slice(open.index + open[0].length) : text;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.trim());

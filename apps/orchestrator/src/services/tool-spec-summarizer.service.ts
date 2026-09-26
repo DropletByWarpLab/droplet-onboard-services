@@ -18,10 +18,20 @@ import { createLogger } from "../lib/logger.js";
 const logger = createLogger("tool-spec-summarizer");
 
 /**
- * Prose, not JSON — so the ceiling is generous enough for five short
- * paragraphs without inviting an essay. The brief caps the tile at 2–5.
+ * Prose, not JSON — generous enough for five short paragraphs without
+ * inviting an essay. The brief caps the tile at 2–5.
+ *
+ * WARP-2964 — it was 700, which is what five paragraphs COST but not what
+ * they take to produce. On a reasoning model the budget is spent on the
+ * harmony analysis channel first, and `content` only starts once that is
+ * done: replaying a real daily report on gpt-oss:20B burned all 700 tokens
+ * in `reasoning_content`, returned `finish_reason: "length"` with zero
+ * characters of prose, and failed the run. The same prompt finished in
+ * ~1150 completion tokens when given room. 2100 leaves headroom for a
+ * longer day; this is one call every 24 h, so the ceiling costs nothing
+ * when it is not used.
  */
-const MAX_TOKENS = 700;
+const MAX_TOKENS = 2_100;
 
 /**
  * Low but not zero. Deterministic-sounding prose across seven days reads as
@@ -118,28 +128,68 @@ const SYSTEM = [
   "- If there is nothing of note, say that briefly rather than padding.",
 ].join("\n");
 
-export function createToolSpecSummarizer(): Summarizer {
+/**
+ * @param resolveModel WARP-3047 — the box's ACTIVE model, asked per summary
+ *   (routes/tools.ts passes `resolveActiveModel`). A routine run started from
+ *   a chat turn (`routine_run`) summarises on the model that turn already
+ *   has resident, instead of loading env DEFAULT_MODEL/LLM_MODEL next to it.
+ */
+export function createToolSpecSummarizer(
+  resolveModel: () => Promise<string | null>,
+): Summarizer {
   return {
     async summarize(prompt: string, facts: RunStepTrace[]): Promise<string> {
-      const model =
-        process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "mistral:7b-instruct";
+      const model = await resolveModel();
+      if (!model) {
+        // A failed step, said plainly — never a hardcoded tag the box does
+        // not host (the historic mistral fallback 404'd upstream).
+        throw new Error("no local model is available to write the summary");
+      }
 
-      const result = await completeOnce({
-        system: SYSTEM,
-        text: `${prompt}\n\nResults:\n${renderFacts(facts)}`,
-        model,
-        temperature: TEMPERATURE,
-        maxTokens: MAX_TOKENS,
-      });
+      const text = `${prompt}\n\nResults:\n${renderFacts(facts)}`;
+      const ask = (maxTokens: number, reasoningEffort?: "low") =>
+        completeOnce({
+          system: SYSTEM,
+          text,
+          model,
+          temperature: TEMPERATURE,
+          maxTokens,
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+        });
 
-      const content = result.content.trim();
+      let result = await ask(MAX_TOKENS);
+      let content = result.content.trim();
+      if (!content) {
+        // WARP-2964 — one retry, because the cause is nearly always the
+        // budget: the model thought until it was cut off. Double the room and
+        // ask for less thinking (the gateway scopes `reasoning_effort` to the
+        // gpt-oss family and DMR may ignore it — harmless either way). A
+        // non-blank first answer never gets here, so the daily cost is still
+        // one call.
+        logger.warn(
+          {
+            model,
+            factCount: facts.length,
+            finishReason: result.finishReason,
+            reasoningChars: result.reasoning.length,
+          },
+          "summarizer returned empty content; retrying with a doubled budget",
+        );
+        result = await ask(MAX_TOKENS * 2, "low");
+        content = result.content.trim();
+      }
       if (!content) {
         // `completeOnce` treats empty content as a non-error. Here it is one:
         // an empty narrative would render as a report with nothing to say,
         // which is indistinguishable from a quiet day. Fail so the tile shows
-        // its failure state instead.
-        logger.warn({ model, factCount: facts.length }, "summarizer returned empty content");
-        throw new Error("the model returned an empty summary");
+        // its failure state instead — and say WHY, because this string is the
+        // whole of what the owner and the next debugger get: the runner puts
+        // it verbatim into `trace[n].error` and `ToolRun.error`.
+        throw new Error(
+          `the model returned an empty summary (model=${model} ` +
+            `finish_reason=${result.finishReason ?? "unknown"} ` +
+            `reasoning_chars=${result.reasoning.length})`,
+        );
       }
       return content;
     },

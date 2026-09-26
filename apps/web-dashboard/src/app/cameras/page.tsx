@@ -302,13 +302,8 @@ export default function CamerasPage() {
       title="Cameras"
       sub={sub}
       actions={actions}
+      rhythm
     >
-      {/* Notifications — fixed-positioned toaster, renders outside flow */}
-      <CameraNotificationToast
-        notifications={notifications}
-        onDismiss={dismissNotification}
-      />
-
       {/* Secondary sub-nav (chip row) for the camera-related sub-routes —
           People / Plates / Notifications / System / Birdseye — plus the
           "Scan network" discovery action. */}
@@ -321,17 +316,15 @@ export default function CamerasPage() {
           slice their cameras by location/role without losing the page
           context. */}
       {totalCameras > 0 && (
-        <div className="mb-4">
-          <CameraGroupNav
-            groups={groupsHook.groups}
-            cameras={cameras}
-            selectedGroupId={selectedGroupId}
-            onSelect={setSelectedGroupId}
-            onNewGroup={openNewGroup}
-            onEditGroup={openEditGroup}
-            onDeleteGroup={handleDeleteGroup}
-          />
-        </div>
+        <CameraGroupNav
+          groups={groupsHook.groups}
+          cameras={cameras}
+          selectedGroupId={selectedGroupId}
+          onSelect={setSelectedGroupId}
+          onNewGroup={openNewGroup}
+          onEditGroup={openEditGroup}
+          onDeleteGroup={handleDeleteGroup}
+        />
       )}
 
       {/* What's on the network. WARP-1847: shown whenever there are candidates,
@@ -385,7 +378,7 @@ export default function CamerasPage() {
       ) : (
         <>
           {pinnedCameras.length > 0 && (
-            <div className="mb-6">
+            <>
               <div className="sect">
                 <h2>Pinned</h2>
                 <span className="sx">{pinnedCameras.length}</span>
@@ -396,7 +389,7 @@ export default function CamerasPage() {
                 pinnedSet={pinsHook.pinnedSet}
                 onTogglePin={handleTogglePin}
               />
-            </div>
+            </>
           )}
           {unpinnedCameras.length > 0 && (
             <>
@@ -418,11 +411,7 @@ export default function CamerasPage() {
       )}
 
       {/* Recent events */}
-      {recentEvents.length > 0 && (
-        <div className="mt-8">
-          <CameraEvents events={recentEvents} />
-        </div>
-      )}
+      {recentEvents.length > 0 && <CameraEvents events={recentEvents} />}
 
       {/* Add Camera Modal — opens on the discovered list when there is one, so
           "Add camera" answers "which camera?" before asking for an RTSP URL. */}
@@ -488,6 +477,15 @@ export default function CamerasPage() {
         }
         confirmLabel="Delete group"
         variant="destructive"
+      />
+
+      {/* Notifications — a fixed-position toaster, so it renders outside the
+          flow and belongs LAST: as child #2 it burned an nth-child slot in the
+          page's entrance stagger and, with the rhythm rule, would have taken a
+          24px margin that offsets a pinned box rather than spacing anything. */}
+      <CameraNotificationToast
+        notifications={notifications}
+        onDismiss={dismissNotification}
       />
     </ShellPage>
   );

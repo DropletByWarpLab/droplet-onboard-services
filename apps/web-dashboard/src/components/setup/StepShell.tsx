@@ -72,7 +72,7 @@ export const RAIL_LABELS: Record<Step, { label: string; Icon: LucideIcon }> = {
   wifi: { label: "Wi-Fi", Icon: Wifi },
   address: { label: "Internet address", Icon: Globe },
   storage: { label: "Storage", Icon: HardDrive },
-  discovery: { label: "Smart devices", Icon: Lightbulb },
+  discovery: { label: "Device control", Icon: Lightbulb },
   cameras: { label: "Cameras", Icon: Camera },
   vpn: { label: "Remote access", Icon: ShieldCheck },
   ai: { label: "Private AI", Icon: Sparkles },

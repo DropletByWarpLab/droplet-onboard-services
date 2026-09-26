@@ -31,11 +31,11 @@ langchain-community>=0.3,<0.4
 langchain-openai>=0.2,<0.4
 openai>=1.0
 datasets>=5.0.1
-pandas>=3.0.5
+pandas>=3.0.6
 pyyaml>=6.0.3
 
 # WARP-1948 — OSV floors, kept in LOCKSTEP with services/rag-eval/
 # requirements.txt (WARP-1406): the osv-nightly resolver scores transitive
 # deps at their minimum resolvable version; these state the real minimums.
 scipy>=1.18.1
-filelock>=3.32.6
+filelock>=4.0.0

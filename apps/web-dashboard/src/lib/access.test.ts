@@ -36,6 +36,8 @@ import {
   roleToDraft,
   blankRoleDraft,
   templateToDraft,
+  toolDomainGroupsWith,
+  deadToolGrants,
 } from "./access";
 import type { AccessRole, RoleTemplate } from "./types";
 import { ACCESS_COPY } from "@/components/access/copy";
@@ -80,6 +82,8 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
         "money",
         "network",
         "projects",
+        // WARP-2977 — the Security command center, on the same terms.
+        "security",
         "smart_home",
         "team_chat",
         "voice",
@@ -1101,5 +1105,196 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       "guest",
       "guest",
     ]);
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains in the role builder ──
+//
+// TOOL_DOMAIN_GROUPS stays a static, hand-kept table of COMPILED domains. A
+// runtime-only domain exists only on the box that has it attached, so the
+// builder fetches GET /api/access/tool-domains and appends an "Extensions"
+// row per runtime domain through toolDomainGroupsWith.
+describe("toolDomainGroupsWith — the Extensions section (WARP-2897)", () => {
+  const COMPILED_GROUPED = new Set(TOOL_DOMAIN_GROUPS.flatMap((g) => g.domains));
+
+  it("appends one row per runtime domain, each exactly once, after the static table", () => {
+    const groups = toolDomainGroupsWith([
+      { domain: "ext-bookings" },
+      { domain: "ext-intake" },
+      { domain: "ext-bookings" },
+    ]);
+    expect(groups.slice(0, TOOL_DOMAIN_GROUPS.length)).toEqual(TOOL_DOMAIN_GROUPS);
+    const ext = groups.slice(TOOL_DOMAIN_GROUPS.length);
+    expect(ext.map((g) => g.domains)).toEqual([["ext-bookings"], ["ext-intake"]]);
+    for (const g of ext) {
+      expect(g.section).toBe("extensions");
+      expect(g.feature).toBeNull();
+    }
+    // Every runtime domain exactly once across ALL groups (completeness for
+    // runtime domains, stated explicitly — the compiled pin above covers only
+    // grouped compiled domains).
+    const all = groups.flatMap((g) => g.domains);
+    for (const d of ["ext-bookings", "ext-intake"]) {
+      expect(all.filter((x) => x === d)).toHaveLength(1);
+    }
+  });
+
+  /**
+   * MUTATION: drop the compiled-collision filter -> `files` gets a second row
+   * and this goes red.
+   */
+  it("a runtime domain equal to a compiled domain is REJECTED (never a second row)", () => {
+    // `money` is compiled but in no row, so only the server's `compiled`
+    // list can say it is not a runtime domain.
+    const groups = toolDomainGroupsWith(
+      [{ domain: "files" }, { domain: "pm" }, { domain: "money" }, { domain: "erp" }],
+      ["files", "pm", "money", "team_chat"],
+    );
+    expect(groups).toEqual(TOOL_DOMAIN_GROUPS);
+    const all = groups.flatMap((g) => g.domains);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("with no runtime domains it is exactly TOOL_DOMAIN_GROUPS", () => {
+    expect(toolDomainGroupsWith([])).toEqual(TOOL_DOMAIN_GROUPS);
+  });
+
+  it("extension row ids never collide with a compiled group id", () => {
+    const groups = toolDomainGroupsWith([{ domain: "ext-bookings" }]);
+    const ids = groups.map((g) => g.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(COMPILED_GROUPED.has("ext-bookings")).toBe(false);
+  });
+});
+
+describe("extension rows in the draft ⇄ payload round trip (WARP-2897)", () => {
+  const groups = toolDomainGroupsWith([{ domain: "ext-bookings" }]);
+  const extId = groups[groups.length - 1]!.id;
+
+  it("a blank role grants NO extension domain until the operator picks a level", () => {
+    const draft = blankRoleDraft("family", groups);
+    expect(draft.tools[extId]).toBe("off");
+    const grants = draftToRolePayload(draft, groups).toolGrants;
+    expect(grants.map((g) => g.domain)).not.toContain("ext-bookings");
+    // …and choosing View emits exactly the one row.
+    draft.tools[extId] = "view";
+    expect(draftToRolePayload(draft, groups).toolGrants).toContainEqual({
+      domain: "ext-bookings",
+      level: "view",
+    });
+  });
+
+  it("role → draft → payload keeps an extension grant exactly", () => {
+    const role = {
+      id: "r1",
+      name: "Front desk",
+      slug: "front-desk",
+      description: null,
+      startingPoint: "family",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-09-22T00:00:00Z",
+      updatedAt: "2026-09-22T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [{ moduleId: "files", level: "act" }],
+      toolGrants: [
+        { domain: "files", level: "use", state: "live", deadReason: null },
+        { domain: "ext-bookings", level: "view", state: "live", deadReason: null },
+      ],
+      connectorGrants: [],
+    } as AccessRole;
+    const draft = roleToDraft(role, groups);
+    expect(draft.tools[extId]).toBe("view");
+    // Untouched: the rows pass through verbatim, state never on the wire.
+    expect(draftToRolePayload(draft, groups).toolGrants).toEqual([
+      { domain: "files", level: "use" },
+      { domain: "ext-bookings", level: "view" },
+    ]);
+    // Touched to OFF: the extension row is dropped, nothing else moves.
+    draft.tools[extId] = "off";
+    draft.touchedToolGroups = [extId];
+    expect(draftToRolePayload(draft, groups).toolGrants).toEqual([{ domain: "files", level: "use" }]);
+  });
+
+  it("a DEAD extension grant (its row no longer rendered) still rides through untouched", () => {
+    const role = {
+      id: "r1",
+      name: "Front desk",
+      slug: "front-desk",
+      description: null,
+      startingPoint: "family",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-09-22T00:00:00Z",
+      updatedAt: "2026-09-22T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [],
+      toolGrants: [{ domain: "ext-bookings", level: "view", state: "dead", deadReason: "not_provided" }],
+      connectorGrants: [],
+    } as AccessRole;
+    // Extension disabled: the builder has no row for it.
+    const draft = roleToDraft(role);
+    expect(draftToRolePayload(draft).toolGrants).toEqual([{ domain: "ext-bookings", level: "view" }]);
+    expect(deadToolGrants(role)).toEqual([{ domain: "ext-bookings", deadReason: "not_provided" }]);
+
+    /**
+     * Removing it is the builder's only way to revoke a dead grant — the
+     * domain has no row to set Off, and the server lets a held dead grant be
+     * kept. Without this, the grant revives at its old level if anything
+     * later registers a tool under the same domain.
+     *
+     * MUTATION: ignore `removedToolGrants` in draftToRolePayload -> red.
+     */
+    const removed = { ...draft, removedToolGrants: ["ext-bookings"] };
+    expect(draftToRolePayload(removed).toolGrants).toEqual([]);
+  });
+
+  it("a removed domain drops only its own original rows", () => {
+    const role = {
+      id: "r2",
+      name: "Back office",
+      slug: "back-office",
+      description: null,
+      startingPoint: "admin",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-09-22T00:00:00Z",
+      updatedAt: "2026-09-22T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [],
+      toolGrants: [
+        { domain: "ext-bookings", level: "use", state: "dead", deadReason: "not_provided" },
+        { domain: "erp", level: "view", state: "live", deadReason: null },
+      ],
+      connectorGrants: [],
+    } as AccessRole;
+    const draft = { ...roleToDraft(role), removedToolGrants: ["ext-bookings"] };
+    expect(draftToRolePayload(draft).toolGrants).toEqual([{ domain: "erp", level: "view" }]);
+  });
+
+  it("deadToolGrants lists only not_provided grants — crm/pm landing slots are not badged", () => {
+    const role = {
+      toolGrants: [
+        { domain: "crm", level: "view", state: "dead", deadReason: "empty_domain" },
+        { domain: "files", level: "use", state: "live", deadReason: null },
+        { domain: "files", level: "use" },
+      ],
+    } as unknown as AccessRole;
+    expect(deadToolGrants(role)).toEqual([]);
   });
 });

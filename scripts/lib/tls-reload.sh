@@ -28,6 +28,29 @@ if ! declare -F log_info >/dev/null 2>&1; then
   log_success() { printf '%s\n' "$*"; }
 fi
 
+# _refresh_avahi_advert_for_cert <cert> — WARP-2941: the `_droplet._tcp`
+# advertisement carries `state=` (bootstrap|issued) and `fqdn=` TXT hints
+# that must follow the certificate the gateway now serves, so they are
+# re-rendered in the same reload. Best-effort by design: a client that
+# reads a stale hint only takes the slower verified path (it never trusts
+# the hint for identity), whereas a failed reload leaves the new certificate
+# unserved — so this can never turn a successful reload into a failure.
+_refresh_avahi_advert_for_cert() {
+  local cert_file="$1"
+  if ! declare -F write_avahi_service_file >/dev/null 2>&1; then
+    # shellcheck source=avahi-service.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/avahi-service.sh"
+  fi
+  if [ ! -d "${AVAHI_SERVICE_DIR:-/etc/avahi/services}" ]; then
+    # No avahi on this host (dev laptop, macOS) — nothing advertises here.
+    return 0
+  fi
+  if ! write_avahi_service_file "$cert_file"; then
+    log_warn "reload_gateway_nginx: could not refresh the Avahi advertisement (state=/fqdn= hints may lag until the next setup run)"
+  fi
+  return 0
+}
+
 # reload_gateway_nginx — ask the running gateway container to `nginx -s reload`.
 #
 # Returns 0 when:
@@ -73,6 +96,7 @@ reload_gateway_nginx() {
 
   if docker compose -f "$compose_file" exec -T gateway nginx -s reload 2>/dev/null; then
     log_info "reload_gateway_nginx: hot-reloaded gateway nginx with the new cert"
+    _refresh_avahi_advert_for_cert "$repo_root/docker/certs/droplet.crt"
     return 0
   fi
 

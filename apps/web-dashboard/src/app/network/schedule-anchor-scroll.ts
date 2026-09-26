@@ -81,3 +81,17 @@ export function scheduleHashFromEvent(e: HashChangeEvent): string | undefined {
   const frag = e.newURL.slice(idx);
   return frag.startsWith("#schedule-") ? frag : undefined;
 }
+
+// WARP-2963 — put a tab arrival at the top of its own options. ~300px of page
+// chrome (shell bar, header, KPI strip, tab strip) sits above the first tab
+// card, and the browser's native scroll restoration across the Suspense →
+// skeleton → content swap left a deep-linked or switched tab showing its
+// middle. Never animated: a jump the user didn't ask for is exactly what
+// prefers-reduced-motion is about, so there is no `behavior: "smooth"` here.
+// Stands aside for a `#schedule-<id>` deep link — that jump owns the scroll
+// (scrollToScheduleAnchor above), and racing it would undo it.
+export function scrollTabToTop(): void {
+  if (typeof window === "undefined") return;
+  if (window.location.hash.startsWith("#schedule-")) return;
+  window.scrollTo({ top: 0 });
+}

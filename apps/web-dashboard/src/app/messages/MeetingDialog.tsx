@@ -206,7 +206,7 @@ export function MeetingDialog({
             value={location}
             onChange={(e) => setLocation(e.target.value)}
             maxLength={200}
-            placeholder="Kitchen, office, a call…"
+            placeholder="Conference room, office, a call…"
             className="mx-field"
           />
         </label>

@@ -45,6 +45,25 @@ vi.mock("../services/notifications.service.js", () => ({
   sendNotification: vi.fn().mockResolvedValue({ id: "n", channels: [], delivered: false }),
 }));
 
+// WARP-2997 — only ever read for a cloud-resolving model; every local-model
+// test in this file never reaches it.
+vi.mock("../services/effective-access.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/effective-access.service.js")>()),
+  resolveEffectiveAccess: vi.fn(async () => ({ cloud: false })),
+}));
+
+// WARP-3047 — a run with no `model` runs on the box's ACTIVE model. The
+// resolver (active-model.service, own suite) is observed here; by default it
+// answers what it answers on a box with a blank row and no confirmable
+// listing — LLM_MODEL — so the WARP-2180 cases below keep their meaning.
+const { resolveActiveModelMock } = vi.hoisted(() => ({
+  resolveActiveModelMock: vi.fn(),
+}));
+vi.mock("../services/active-model.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/active-model.service.js")>()),
+  resolveActiveModel: (...args: unknown[]) => resolveActiveModelMock(...args),
+}));
+
 import { createAgentRunsRouter } from "../routes/agent-runs.js";
 import { enqueueAgentRun } from "../services/agent-run-worker.service.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
@@ -75,6 +94,8 @@ function buildApp(user: AuthUser, db = createAgentRunPrismaMock({ users: [owner,
 beforeEach(() => {
   recordActivityMock.mockClear();
   process.env.LLM_MODEL = "gpt-oss:20b";
+  resolveActiveModelMock.mockReset();
+  resolveActiveModelMock.mockImplementation(async () => (process.env.LLM_MODEL ?? "").trim() || null);
 });
 
 describe("agent-runs routes — roles (WARP-2180)", () => {
@@ -105,6 +126,19 @@ describe("agent-runs routes — roles (WARP-2180)", () => {
     );
   });
 
+  it("WARP-2997: a cloud model the person may not use is refused up front — 451, chat's body, no row", async () => {
+    const { app, db } = buildApp(owner);
+    const run = await request(app).post("/api/agent-runs").send({ goal: "g", model: "claude-opus-4-20250514" });
+    expect(run.status).toBe(451);
+    expect(run.body).toMatchObject({ error: "off_lan_blocked", provider: "anthropic", scope: "per_person" });
+    const sched = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "g", model: "claude-opus-4-20250514", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(sched.status).toBe(451);
+    expect(db.rows).toHaveLength(0);
+    expect(db.schedules).toHaveLength(0);
+  });
+
   it("rejects an empty goal and, with no model configured, a missing model", async () => {
     const { app } = buildApp(owner);
     expect((await request(app).post("/api/agent-runs").send({ goal: "  " })).status).toBe(400);
@@ -112,6 +146,77 @@ describe("agent-runs routes — roles (WARP-2180)", () => {
     delete process.env.DEFAULT_MODEL;
     expect((await request(app).post("/api/agent-runs").send({ goal: "g" })).status).toBe(400);
     expect((await request(app).post("/api/agent-runs").send({ goal: "g", model: "m" })).status).toBe(201);
+  });
+});
+
+describe("agent-runs routes — a workshop run is bound to one workspace (WARP-2896)", () => {
+  async function seedWorkspace(db: ReturnType<typeof createAgentRunPrismaMock>, id: string, status = "active") {
+    await db.prisma.workshopWorkspace.create({ data: { id, userId: "u-owner", name: id, status } });
+  }
+
+  it("binds the run to an existing, active workspace and echoes it", async () => {
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-a");
+    const res = await request(app).post("/api/agent-runs").send({ goal: "add a tool", workspaceId: "ws-a" });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ status: "queued", workspaceId: "ws-a" });
+    expect(db.row(res.body.id)).toMatchObject({ workspaceId: "ws-a" });
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ refs: expect.objectContaining({ workspaceId: "ws-a" }) }),
+    );
+  });
+
+  it("404 for a workspace that does not exist; 409 for one already proposed", async () => {
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-done", "proposed");
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g", workspaceId: "ws-none" })).status).toBe(404);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "g", workspaceId: "ws-done" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/proposed/);
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("409 while another run is live in the workspace; free again once it ends", async () => {
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-a");
+    const first = await request(app).post("/api/agent-runs").send({ goal: "one", workspaceId: "ws-a" });
+    expect(first.status).toBe(201);
+    for (const status of ["queued", "running", "awaiting_confirmation"]) {
+      db.row(first.body.id).status = status;
+      const res = await request(app).post("/api/agent-runs").send({ goal: "two", workspaceId: "ws-a" });
+      expect(res.status, status).toBe(409);
+      expect(res.body.error).toMatch(/already working/);
+    }
+    db.row(first.body.id).status = "succeeded";
+    expect((await request(app).post("/api/agent-runs").send({ goal: "two", workspaceId: "ws-a" })).status).toBe(201);
+    expect(db.rows).toHaveLength(2);
+  });
+
+  it("two starts racing past the count: the partial unique index's P2002 is the same 409, not a 500", async () => {
+    // The count saw nothing; by the time the create runs, another start has
+    // landed. Postgres refuses it through AgentRun_workspaceId_active_key and
+    // the route must answer as if the count had seen it.
+    // Mutation: drop the catch around enqueueAgentRun → 500.
+    const { app, db } = buildApp(owner);
+    await seedWorkspace(db, "ws-a");
+    const clash = Object.assign(new Error("Unique constraint failed on the fields: (`workspaceId`)"), {
+      code: "P2002",
+      meta: { target: "AgentRun_workspaceId_active_key" },
+    });
+    db.prisma.agentRun.create.mockRejectedValueOnce(clash);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "two", workspaceId: "ws-a" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already working/);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a P2002 on an ORDINARY run is not a workspace clash — it stays an error", async () => {
+    // No workspace → no partial-index predicate can match; whatever tripped
+    // is a real fault and must not be dressed up as "workspace busy".
+    const { app, db } = buildApp(owner);
+    db.prisma.agentRun.create.mockRejectedValueOnce(Object.assign(new Error("clash"), { code: "P2002" }));
+    const res = await request(app).post("/api/agent-runs").send({ goal: "plain" });
+    expect(res.status).toBe(500);
   });
 });
 
@@ -146,6 +251,55 @@ describe("agent-runs routes — the mcp principal acts on behalf of a person (WA
     const res = await request(app).get("/api/agent-runs").query({ onBehalfOf: "romain" });
     expect(res.status).toBe(200);
     expect(res.body.items.map((r: { goal: string }) => r.goal)).toEqual(["mine"]);
+  });
+});
+
+// WARP-3098 — the header and `onBehalfOf` both carry the mcp-server's
+// `ctx.userId`: `User.username` on stdio, `User.id` over HTTP (the shipped
+// container). Resolved by resolveAssertedUser: one active person, or 403.
+describe("agent-runs routes — the acting person is named by username OR User.id (WARP-3098)", () => {
+  it("a caller named by User.id (the HTTP transport) starts a run as that person", async () => {
+    const { app, db } = buildApp(mcpPrincipal);
+    const res = await request(app).post("/api/agent-runs").set("X-Nextcloud-User", "u-admin").send({ goal: "g" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).userId).toBe("u-admin");
+  });
+
+  it("an onBehalfOf carrying a User.id lists that person's runs (agent_run_list sends ctx.userId)", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner, admin] });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "mine", model: "m" });
+    await enqueueAgentRun(db.prisma, { userId: "u-admin", goal: "theirs", model: "m" });
+    const { app } = buildApp(mcpPrincipal, db);
+    const res = await request(app).get("/api/agent-runs").query({ onBehalfOf: "u-owner" });
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((r: { goal: string }) => r.goal)).toEqual(["mine"]);
+  });
+
+  it("an SSO row (nextcloudUsername NULL) still resolves by username", async () => {
+    const maria = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "admin" };
+    const { app, db } = buildApp(mcpPrincipal, createAgentRunPrismaMock({ users: [owner, maria] }));
+    const res = await request(app).post("/api/agent-runs").set("X-Nextcloud-User", "maria").send({ goal: "g" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).userId).toBe("u-maria");
+  });
+
+  it("a value naming two people is refused — 403, no run, never the look-alike", async () => {
+    // One person's username is another's id: the value cannot say which of
+    // them is asking, and the look-alike here is an OWNER.
+    const lookalike = { id: "u-other", username: "u-admin", role: "owner" };
+    const db = createAgentRunPrismaMock({ users: [owner, admin, lookalike] });
+    const { app } = buildApp(mcpPrincipal, db);
+    expect((await request(app).post("/api/agent-runs").set("X-Nextcloud-User", "u-admin").send({ goal: "g" })).status).toBe(403);
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g", onBehalfOf: "u-admin" })).status).toBe(403);
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("a deactivated person is refused — nothing acts AS them", async () => {
+    const gone = { ...admin, directoryStatus: "DEACTIVATED" as const };
+    const db = createAgentRunPrismaMock({ users: [owner, gone] });
+    const { app } = buildApp(mcpPrincipal, db);
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g", onBehalfOf: "stefan" })).status).toBe(403);
+    expect(db.rows).toHaveLength(0);
   });
 });
 
@@ -271,6 +425,31 @@ describe("agent-runs routes — ownership, list, detail, cancel (WARP-2180)", ()
     expect(res.body).toMatchObject({ id, tool: "get_current_datetime", decision: "approved", status: "queued" });
     expect(db.row(id).status).toBe("queued");
   });
+
+  it("WARP-3044: a second confirm on the same park is a 409 and changes nothing — one approval, one decision on the row", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "g", model: "m" });
+    const { app } = buildApp(owner, db);
+    Object.assign(db.row(id), {
+      status: "awaiting_confirmation",
+      pendingTool: "get_current_datetime",
+      pendingBindingHash: "h",
+      pendingArgs: {},
+      parkedAt: new Date(),
+    });
+    expect((await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "approved" })).status).toBe(200);
+    const decided = { ...db.row(id) };
+    const again = await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "approved" });
+    expect(again.status).toBe(409);
+    expect(again.body).toEqual({ error: "not_parked", id });
+    // A late denial cannot overwrite the approval either.
+    expect((await request(app).post(`/api/agent-runs/${id}/confirm`).send({ decision: "denied" })).status).toBe(409);
+    const row = db.row(id);
+    expect(row.status).toBe("queued");
+    expect(row.pendingDecision).toBe("approved");
+    expect(row.pendingDecidedAt).toEqual(decided.pendingDecidedAt);
+    expect(row.deadlineAt).toEqual(decided.deadlineAt);
+  });
 });
 
 describe("agent-runs routes — recurring runs (WARP-2180)", () => {
@@ -294,5 +473,72 @@ describe("agent-runs routes — recurring runs (WARP-2180)", () => {
     expect((await request(buildApp(admin, db).app).delete(`/api/agent-runs/schedules/${res.body.id}`)).status).toBe(404);
     expect((await request(app).delete(`/api/agent-runs/schedules/${res.body.id}`)).status).toBe(204);
     expect(db.schedules).toHaveLength(0);
+  });
+});
+
+describe("agent-runs routes — runs follow the box's ACTIVE model (WARP-3047)", () => {
+  const ACTIVE = "docker.io/ai/qwen3:8B-Q4_K_M";
+
+  it("a run with no model is queued on the active model, asked for a TOOLS-capable one", async () => {
+    // LLM_MODEL still names the provisioned model; the owner switched to B.
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "tidy old files" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).model).toBe(ACTIVE);
+    expect(resolveActiveModelMock).toHaveBeenCalledWith(db.prisma, { requireTools: true });
+  });
+
+  it("an explicit model still wins and the resolver is not asked", async () => {
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "g", model: "gpt-oss:20b" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).model).toBe("gpt-oss:20b");
+    expect(resolveActiveModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a schedule with no model FOLLOWS the active model — the ticker resolves it at every fire", async () => {
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "sweep clips", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(res.status).toBe(201);
+    // `model` still holds a real id (what was active at creation): the
+    // fallback when nothing resolves at fire, and what an older build fires.
+    expect(db.schedules[0]).toMatchObject({ model: ACTIVE, followsActiveModel: true });
+    expect(resolveActiveModelMock).toHaveBeenCalledWith(db.prisma, { requireTools: true });
+
+    const listed = await request(app).get("/api/agent-runs/schedules");
+    expect(listed.body.schedules[0]).toMatchObject({ model: ACTIVE, followsActiveModel: true });
+  });
+
+  it("a schedule with an explicit model is pinned to it", async () => {
+    resolveActiveModelMock.mockResolvedValue(ACTIVE);
+    const { app, db } = buildApp(owner);
+    const res = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "sweep clips", model: "gpt-oss:20b", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(res.status).toBe(201);
+    expect(db.schedules[0]).toMatchObject({ model: "gpt-oss:20b", followsActiveModel: false });
+    expect(resolveActiveModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a schedule with no model on a box with no model at all → 400", async () => {
+    resolveActiveModelMock.mockResolvedValue(null);
+    const { app, db } = buildApp(owner);
+    const res = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "sweep clips", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(res.status).toBe(400);
+    expect(db.schedules).toHaveLength(0);
+  });
+
+  it("nothing resolvable → 400, never a queued run on a guessed model", async () => {
+    resolveActiveModelMock.mockResolvedValue(null);
+    const { app, db } = buildApp(owner);
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g" })).status).toBe(400);
+    expect(db.rows).toHaveLength(0);
   });
 });

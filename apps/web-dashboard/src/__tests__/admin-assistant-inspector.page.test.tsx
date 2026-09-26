@@ -14,9 +14,9 @@
  *     "132 withheld" with no reason is the page this slice replaced.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
-import { NAV_GROUPS, visibleItems } from "@/components/nav-config";
+import { NAV_GROUPS, settingsGroups, visibleItems } from "@/components/nav-config";
 
 const fetchUsersMock = vi.fn();
 const fetchToolInspectMock = vi.fn();
@@ -246,26 +246,37 @@ describe("nav", () => {
   const CAPS = { claudeActivity: true, ragEval: true, medicalConnector: true };
   const ALL_MODULES_ON = () => true;
 
-  it("puts Assistant in the operator nav and nowhere else", async () => {
-    const seen = (role: string) =>
-      NAV_GROUPS.flatMap((g) =>
-        visibleItems(g.items, role as never, CAPS, ALL_MODULES_ON),
-      );
+  // WARP-2967 tucked it behind Settings (→ Automation: it explains what the
+  // automated surfaces can reach). The ROLE gate is what these cases hold, and
+  // it did not move — only the surface that offers the door did.
+  const offered = (role: string) =>
+    settingsGroups(role as never, CAPS, ALL_MODULES_ON).flatMap((g) =>
+      g.items.map((i) => i.href),
+    );
 
-    expect(seen("owner").some((i) => i.href === "/admin/prompt")).toBe(true);
-    expect(seen("admin").some((i) => i.href === "/admin/prompt")).toBe(true);
-    expect(seen("family").some((i) => i.href === "/admin/prompt")).toBe(false);
-    expect(seen("guest").some((i) => i.href === "/admin/prompt")).toBe(false);
+  it("puts Assistant in the operator's Settings and nowhere else", async () => {
+    expect(offered("owner")).toContain("/admin/prompt");
+    expect(offered("admin")).toContain("/admin/prompt");
+    expect(offered("family")).not.toContain("/admin/prompt");
+    expect(offered("guest")).not.toContain("/admin/prompt");
+
+    // And on no nav surface, for any role — that is what the tuck means.
+    for (const role of ["owner", "admin", "family", "guest"])
+      expect(
+        NAV_GROUPS.flatMap((g) =>
+          visibleItems(g.items, role as never, CAPS, ALL_MODULES_ON),
+        ).some((i) => i.href === "/admin/prompt"),
+      ).toBe(false);
   });
 
-  it("🔴 stays visible with every module switched OFF", async () => {
+  it("🔴 stays reachable with every module switched OFF", async () => {
     // The reason it carries no `requiresModule`. A console page that explains
     // why the assistant cannot reach a module must not be gated on that
     // module — the box where it disappears is the box you needed it on.
-    const off = NAV_GROUPS.flatMap((g) =>
-      visibleItems(g.items, "owner" as never, CAPS, () => false),
+    const off = settingsGroups("owner" as never, CAPS, () => false).flatMap((g) =>
+      g.items.map((i) => i.href),
     );
-    expect(off.some((i) => i.href === "/admin/prompt")).toBe(true);
+    expect(off).toContain("/admin/prompt");
   });
 
   it("carries no module requirement", async () => {
@@ -276,5 +287,76 @@ describe("nav", () => {
     );
     expect(item).toBeTruthy();
     expect(item!.requiresModule).toBeUndefined();
+  });
+});
+
+// ─── WARP-2900 (ADR-056 slice H4) — runtime rows ────────────────────────────
+
+describe("the assistant inspector — extension tools", () => {
+  const RUNTIME = {
+    ...TOOLS,
+    counts: {
+      ...TOOLS.counts,
+      registered: 141,
+      advertised: 8,
+      refusedAtDispatch: 1,
+    },
+    rows: [
+      ...TOOLS.rows,
+      {
+        name: "ext-wc__word_count",
+        domain: "data",
+        homeDescription: "Word count, from the wc extension, version 0.1.0",
+        requiresWrite: false,
+        requiresConfirmation: false,
+        advertised: true,
+        gate: null,
+        reason: null,
+        alsoWithheldBy: [],
+        source: "extension:wc@0.1.0",
+        serverId: "ext-wc",
+        classification: { decision: "allow", code: null },
+      },
+      {
+        name: "ext-wc__delete_everything",
+        domain: "data",
+        homeDescription: "Delete everything, from the wc extension, version 0.1.0",
+        requiresWrite: true,
+        requiresConfirmation: true,
+        // Advertised: the real turn sends its schema; callTool refuses it.
+        advertised: true,
+        gate: null,
+        reason: null,
+        alsoWithheldBy: [],
+        callRefusal: "The assistant is shown it, but every call is refused: it starts as a change that asks first.",
+        source: "extension:wc@0.1.0",
+        serverId: "ext-wc",
+        classification: { decision: "deny", code: "REMOTE_WRITE_NOT_PERMITTED" },
+      },
+    ],
+  };
+
+  it("🔴 shows where a runtime tool comes from", async () => {
+    fetchToolInspectMock.mockResolvedValue(RUNTIME);
+    render(<AssistantInspectorPage />);
+    await selectPerson();
+    await screen.findByText("Word count, from the wc extension, version 0.1.0");
+    expect(screen.getAllByText("data · extension:wc@0.1.0").length).toBe(2);
+    // A built-in row stays labelled by its area alone.
+    expect(screen.getByText("files")).toBeTruthy();
+  });
+
+  it("🔴 lists a refused-at-dispatch tool among what reaches the assistant, with its refusal and verdict", async () => {
+    fetchToolInspectMock.mockResolvedValue(RUNTIME);
+    render(<AssistantInspectorPage />);
+    await selectPerson();
+    const refusal = await screen.findByText(/every call is refused/);
+    // In the advertised card, not a withheld group: the model IS shown it.
+    const card = refusal.closest(".card") as HTMLElement;
+    expect(within(card).getByText("What the assistant can use")).toBeTruthy();
+    expect(within(card).getByText("Blocked until reviewed")).toBeTruthy();
+    expect(screen.queryByText("Shown, but refused when called")).toBeNull();
+    // The KPI says how many of the advertised tools are refused when called.
+    expect(screen.getByText("1 of these is refused when called")).toBeTruthy();
   });
 });

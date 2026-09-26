@@ -168,7 +168,7 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
               value={deviceName}
               onChange={(e) => setDeviceName(e.target.value)}
               placeholder="Alice's MacBook"
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -278,7 +278,7 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
             <input
               readOnly
               value={pairing.pairUrl}
-              className="type-caption-1 flex-1 px-3 py-1.5 font-mono outline-none focus:border-[var(--brand)]"
+              className="type-caption-1 flex-1 px-3 py-1.5 font-mono outline-none focus:ring-2 focus:ring-[var(--brand)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",

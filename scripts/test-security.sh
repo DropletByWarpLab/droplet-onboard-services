@@ -394,6 +394,168 @@ else
 fi
 
 # =============================================================================
+# Test 14b: WARP-2895 — the sandbox sits on the internal-only network and
+# nowhere else
+# =============================================================================
+# The first `internal: true` network in the compose file. Customer-written
+# code runs in the sandbox, and the ONLY thing that keeps it off the LAN and
+# the internet is this network posture — so it is asserted, not assumed:
+#   - a top-level `networks.droplet-internal` with `internal: true`;
+#   - the sandbox attached to exactly that network — no `ports:`, no
+#     `network_mode`, no `env_file`, no docker socket;
+#   - the hardening stanza (read-only, cap_drop ALL, no-new-privileges, tmpfs
+#     /tmp, non-root image) and the ADR-021 trio incl. `pids_limit`;
+#   - `init: true` (WARP-2900 / WARP-3012): a stopped extension's or a timed-out
+#     run's process group is killed, and its orphans are reparented to PID 1.
+#     Without an init, PID 1 is the Python server, which never reaps them, and
+#     the zombies eat `pids_limit` until the container restarts;
+#   - the orchestrator on BOTH `default` and `droplet-internal`, so the
+#     internal network cannot silently become the orchestrator's only one.
+# MUTATION: remove `internal: true` and this goes red.
+
+_sandbox_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+
+problems = []
+nets = data.get("networks") or {}
+internal = nets.get("droplet-internal")
+if not isinstance(internal, dict) or internal.get("internal") is not True:
+    problems.append("networks.droplet-internal must exist with `internal: true`")
+
+sb = (data.get("services") or {}).get("sandbox")
+if not isinstance(sb, dict):
+    problems.append("services.sandbox is missing")
+    sb = {}
+
+if sb.get("networks") != ["droplet-internal"]:
+    problems.append(f"sandbox.networks must be exactly ['droplet-internal'], got {sb.get('networks')!r}")
+for key in ("ports", "network_mode", "env_file", "privileged", "devices"):
+    if key in sb:
+        problems.append(f"sandbox must not carry `{key}`")
+for vol in sb.get("volumes") or []:
+    if "docker.sock" in str(vol):
+        problems.append("sandbox must never mount the docker socket")
+if sb.get("read_only") is not True:
+    problems.append("sandbox must be read_only: true")
+if sb.get("cap_drop") != ["ALL"]:
+    problems.append("sandbox must cap_drop: [ALL]")
+if "no-new-privileges:true" not in (sb.get("security_opt") or []):
+    problems.append("sandbox must set security_opt no-new-privileges:true")
+if not any(str(t).startswith("/tmp") for t in (sb.get("tmpfs") or [])):
+    problems.append("sandbox must mount a tmpfs /tmp")
+for key in ("mem_limit", "cpus", "pids_limit"):
+    if key not in sb:
+        problems.append(f"sandbox must set `{key}` (ADR-021)")
+if sb.get("init") is not True:
+    problems.append("sandbox must set init: true (orphans of a killed process group are reaped)")
+env = sb.get("environment") or []
+env_keys = {str(e).split("=", 1)[0] for e in env} if isinstance(env, list) else set(env.keys())
+extra_secrets = {k for k in env_keys if k.endswith("_TOKEN") or k.endswith("_PASSWORD") or k.endswith("_SECRET")} - {"SANDBOX_SERVICE_TOKEN"}
+if extra_secrets:
+    problems.append(f"sandbox may hold only its own bearer, found {sorted(extra_secrets)}")
+
+orch = (data.get("services") or {}).get("orchestrator") or {}
+onets = orch.get("networks")
+if not isinstance(onets, list) or "default" not in onets or "droplet-internal" not in onets:
+    problems.append(f"orchestrator.networks must list both default and droplet-internal, got {onets!r}")
+
+for name, cfg in (data.get("services") or {}).items():
+    if name in ("sandbox", "orchestrator"):
+        continue
+    if "droplet-internal" in (cfg.get("networks") or []):
+        problems.append(f"{name} joined droplet-internal - every member is reachable from the sandbox; add it on purpose, here")
+
+if problems:
+    print("\n".join(problems), file=sys.stderr)
+    sys.exit(1)
+print("sandbox: internal-only network, hardened, ADR-021 limits; orchestrator on both networks")
+PYEOF
+)
+_sandbox_exit=$?
+
+if [ "$_sandbox_exit" -eq 0 ]; then
+  pass "docker-compose.yml: sandbox is on the internal-only network and nowhere else (WARP-2895)"
+else
+  fail "docker-compose.yml: sandbox network / hardening posture (WARP-2895)"
+  printf "${_RED}%s${_RESET}\n" "$_sandbox_output" >&2
+fi
+
+# =============================================================================
+# Test 14c: WARP-2898 (ADR-056 slice K1) — no base service is named ext-*
+# =============================================================================
+# `ext-<id>` is the namespace an extension container runs in: its compose
+# override (update-agent/extension-fragment.ts) ADDS one service with that
+# name. If the base file ever defined an ext-* service, an extension override
+# would MERGE its keys into a first-party service instead of adding its own,
+# so the name space is reserved here, not by convention. The same holds for
+# the top-level `ext-<id>-data` volume the override declares: a base volume
+# of that name would be merged, and extension <id> would mount first-party
+# data at /data. The check first runs against two throwaway fixtures (an
+# ext-foo service; an ext-foo-data volume), so a vacuous check (wrong key,
+# empty parse) cannot pass.
+# MUTATION: drop either startswith("ext-") test and its fixture self-check
+# goes red.
+
+_no_ext_services() {
+  python3 - "$1" <<'PYEOF'
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+services = (data or {}).get("services") or {}
+if not services:
+    print("no services parsed - refusing a vacuous pass", file=sys.stderr)
+    sys.exit(2)
+volumes = (data or {}).get("volumes") or {}
+reserved = sorted(name for name in services if str(name).startswith("ext-"))
+reserved += sorted("volume " + str(name) for name in volumes if str(name).startswith("ext-"))
+if reserved:
+    print("base services/volumes in the reserved ext-* namespace: " + ", ".join(reserved), file=sys.stderr)
+    sys.exit(1)
+print(f"{len(services)} base services and {len(volumes)} base volumes, none named ext-*")
+PYEOF
+}
+
+_ext_fixture_dir=$(mktemp -d)
+cat > "$_ext_fixture_dir/services.yml" <<'YAMLEOF'
+services:
+  orchestrator:
+    image: orchestrator
+  ext-foo:
+    image: foo
+YAMLEOF
+cat > "$_ext_fixture_dir/volumes.yml" <<'YAMLEOF'
+services:
+  orchestrator:
+    image: orchestrator
+volumes:
+  orchestrator-data:
+  ext-foo-data:
+YAMLEOF
+_ext_fixture_rc=0
+_no_ext_services "$_ext_fixture_dir/services.yml" >/dev/null 2>&1 || _ext_fixture_rc=$?
+_ext_vol_fixture_rc=0
+_no_ext_services "$_ext_fixture_dir/volumes.yml" >/dev/null 2>&1 || _ext_vol_fixture_rc=$?
+rm -rf "$_ext_fixture_dir"
+
+_ext_rc=0
+_ext_output=$(_no_ext_services "$COMPOSE_FILE" 2>&1) || _ext_rc=$?
+
+if [ "$_ext_fixture_rc" -ne 1 ]; then
+  fail "Test 14c self-check: a fixture with an ext-foo service was not refused (rc=$_ext_fixture_rc)"
+elif [ "$_ext_vol_fixture_rc" -ne 1 ]; then
+  fail "Test 14c self-check: a fixture with an ext-foo-data volume was not refused (rc=$_ext_vol_fixture_rc)"
+elif [ "$_ext_rc" -eq 0 ]; then
+  pass "docker-compose.yml: no base service or volume is named ext-* (the extension namespace, WARP-2898)"
+else
+  fail "docker-compose.yml: a base service or volume sits in the reserved ext-* namespace (WARP-2898)"
+  printf "${_RED}%s${_RESET}\n" "$_ext_output" >&2
+fi
+
+# =============================================================================
 # Test 14: WARP-573 — orchestrator migration-on-boot is guarded
 # =============================================================================
 # The orchestrator container must NOT boot via the old unguarded
@@ -468,7 +630,7 @@ fi
 # Two invariants that must never silently regress:
 #   1. cmd_pull_images verifies each ref BEFORE docker pull (fail-closed gate).
 #   2. publish-release.yml keyless-signs every pushed image.
-APPLY_UPDATE_SH="$REPO_ROOT/scripts/lib/apply-update.sh"
+APPLY_UPDATE_SH="$REPO_ROOT/docker/ota/apply-update.sh"
 if awk '/^cmd_pull_images\(\)/,/^}/' "$APPLY_UPDATE_SH" | grep -q 'verify_image_signature "\$img"'; then
   pass "apply-update.sh pull-images verifies signatures before docker pull (WARP-244)"
 else

@@ -20,13 +20,15 @@
  *
  *   2. COSIGN over catalog.json (opt-in, off by default). Enforced only
  *      when `requireSignature` is set — which `config.ts` derives from
- *      DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE. It is off by default on
- *      purpose: the OTA trust anchor is still the WARP-535 placeholder
- *      (`update-agent/verify.ts` refuses everything with
- *      `trust_anchor_placeholder`), so switching this on before the key
- *      ceremony turns every download into a 503. The flag exists so the
- *      ceremony can flip it without a code change — and so the "signed"
- *      claim in the API is never made unless it was actually checked.
+ *      DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE. `update-agent/cosign.pub`
+ *      has been a real P-256 key since the 2026-07-30 key ceremony
+ *      (commit 2e8cbff0c) — the trust anchor itself is not the blocker.
+ *      The flag stays off because nothing signs an on-box-generated
+ *      catalog.json today: turning it on would 503 every download, not
+ *      for a missing anchor but for a missing signature. The flag exists
+ *      so signing catalog.json can flip it on without a code change —
+ *      and so the "signed" claim in the API is never made unless it was
+ *      actually checked.
  *
  * The Windows minisign `.sig` and `latest.json` are passengers: declared
  * in the catalog, digest-checked like everything else, served verbatim,

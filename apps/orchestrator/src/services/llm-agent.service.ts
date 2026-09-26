@@ -31,7 +31,8 @@
  * (blocking `chat()` and streaming `chatStream()`) now agree on this.
  */
 
-import type { PrivateEnhancement } from "@droplet/tools-core";
+import type { PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
+import { redactConfirmationTokensForModel } from "@droplet/tools-core";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -66,6 +67,7 @@ import {
   toolNamesForDomain,
 } from "./tool-selection.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
+import { currentRuntimeToolLookup } from "./tool-layers.service.js";
 // WARP-2544 — output-side guard on tool use: does the finished answer match
 // what the tools actually did? Deterministic, no inference call.
 import {
@@ -74,7 +76,9 @@ import {
 } from "./tool-use-validation.js";
 import {
   assertToolAdvertisementFitsBudget,
+  toolAdvertisementCeilingTokens,
   ToolBudgetExceededError,
+  type ToolAdvertisementSize,
 } from "./tool-budget.service.js";
 import {
   ITERATION_MIN_HEADROOM,
@@ -409,6 +413,17 @@ export interface AgentRequest {
    * (allowed_tools / chat scope) — RBAC is decided before this field.
    */
   tool_selection_mode?: "off" | "domains";
+  /**
+   * WARP-2896 — tool domains the CALLER's binding admits on every turn under
+   * "domains" selection, whatever the sentence says. Set by the agent-run
+   * worker for a workshop run (`["workspace"]`, from `run.workspaceId`) and by
+   * no route: chat builds this request field by field and never sets it, so a
+   * chat client cannot reach it. Still bounded by the resolved pool — it
+   * admits a domain, never a tool the pool does not hold.
+   * See `effectiveAdvertisedToolNames` (`boundDomains`) for why this is not a
+   * keyword rule or pool membership.
+   */
+  bound_tool_domains?: readonly ToolDomain[];
   /**
    * WARP-1921 — tool names already used EARLIER in this conversation, read
    * server-side from the persisted trace by the route.
@@ -1269,6 +1284,59 @@ async function consumeChatStream(
   return { asst, wireEmitted: emittedAny, contentReleased };
 }
 
+/**
+ * WARP-2921 — the ADR-056 §7/§12 window-budget gate: one debug line per
+ * COMMITTED tool advertisement, carrying the size
+ * `assertToolAdvertisementFitsBudget` already measured and used to discard.
+ * Run the orchestrator at LOG_LEVEL=debug (docs/ENVIRONMENT.md) and join it
+ * with `agent_tool_result_size` by `turn_id`: this line says how much of the
+ * window the schemas took, that one how much the results took. Silent at the
+ * shipping `info` level.
+ *
+ * Names and sizes only — never a spec, a schema, a description, or the list
+ * of advertised names. `runtime_count` intersects by NAME with the runtime
+ * registry; runtime names are server-namespaced in practice, so a collision
+ * with a local tool is not a live case.
+ */
+function logToolPoolSize(p: {
+  size: ToolAdvertisementSize;
+  specs: readonly { function: { name: string } }[];
+  contextWindow: number;
+  selectionMode: string | undefined;
+  turnId: string;
+  iter: number;
+  phase: "initial" | "self_heal";
+  healedTool?: string;
+  agentRunId?: string;
+}): void {
+  // Silent at the shipping `info` level — skip the registry walk and the
+  // ceiling derivation entirely rather than building a line pino drops.
+  // Feature-tested: many suites stub the logger without `isLevelEnabled`.
+  if (typeof logger.isLevelEnabled === "function" && !logger.isLevelEnabled("debug")) return;
+  const runtimeNames = new Set(runtimeToolRegistry.list().map((t) => t.name));
+  logger.debug(
+    {
+      turn_id: p.turnId,
+      iter: p.iter,
+      phase: p.phase,
+      count: p.size.count,
+      chars: p.size.chars,
+      tokens: p.size.tokens,
+      // Same default fixed-block allowance the assert used, so the two agree.
+      ceiling_tokens: toolAdvertisementCeilingTokens({
+        contextWindow: p.contextWindow,
+      }),
+      context_window: p.contextWindow,
+      selection_mode: p.selectionMode,
+      runtime_count: p.specs.filter((s) => runtimeNames.has(s.function.name))
+        .length,
+      ...(p.healedTool ? { healed_tool: p.healedTool } : {}),
+      ...(p.agentRunId ? { agent_run_id: p.agentRunId } : {}),
+    },
+    "agent_tool_pool_size",
+  );
+}
+
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   // Spec §1 — both enforcement points (this clamp + the /api/llm/chat zod
   // bound) read config.agentMaxIter, so they cannot drift. WARP-2749: a
@@ -1286,6 +1354,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // to ALL be truthy (routes/llm.ts), so an ephemeral or service-token turn has
   // none and its failures would be unjoinable.
   const turnId = newAgentTurnId();
+  // WARP-2921 — the window both advertisement asserts (initial + self-heal)
+  // measure against, and the pool line reports. Derived once so they agree.
+  const poolContextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
+  // WARP-2921 — join keys for the assert's own `tool_budget_exceeded` line, so
+  // an over-ceiling advertisement (which throws before any pool line) is
+  // attributable to its turn and run like `agent_tool_pool_size` is.
+  const budgetJoin = {
+    turn_id: turnId,
+    ...(req.toolCallContext?.agentRunId ? { agent_run_id: req.toolCallContext.agentRunId } : {}),
+  };
   // Copy so we don't mutate the caller's array.
   const messages: ChatMessage[] = [...req.messages];
   const emit = deps.onEvent ?? (() => {});
@@ -1323,12 +1401,22 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // absent-scope case — the estimate side in `routes/llm.ts` narrows via the
   // same call, so the two cannot drift apart the way they did in the
   // WARP-2497 × WARP-2552 conflict (WARP-2556).
+  //
+  // WARP-2897 — and through the SAME runtime lookup routes/llm.ts's catalog
+  // build (`narrowAllowedToolsForRole`) resolves by default
+  // (`currentRuntimeToolLookup`, one helper for both), so a role grant
+  // on a runtime tool's domain admits that tool to a scoped person — and the
+  // dispatch gate below refuses it with the identical answer. Snapshotted
+  // once per turn: the advertisement and every dispatch decision in this turn
+  // read the same registry/classification state.
   const scoped = req.toolAccessScope;
+  const runtimeLookup = currentRuntimeToolLookup();
   const filtered = narrowToolsToScope(
     req.allowed_tools
       ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
       : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
     scoped,
+    runtimeLookup,
   );
   const toSpec = (t: (typeof filtered)[number]) => ({
     type: "function" as const,
@@ -1369,6 +1457,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // registers a remote server, and selection is byte-identical to its
       // pre-WARP-2443 behaviour while it is.
       runtimeTools: runtimeToolRegistry.list(),
+      boundDomains: req.bound_tool_domains,
     });
     activeTools = filtered.filter((t) => selected.has(t.name));
   }
@@ -1386,21 +1475,38 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // rollback lever rather than protect it. This gate polices SELECTION's
   // output; when there is no selection there is nothing for it to police.
   //
-  // Headroom, measured at this SHA: the worst single-domain turn is ~3.2K
-  // tokens and the worst four-domain turn ~8.0K, both far under the ceiling.
+  // Headroom, measured in-repo when WARP-2445 landed (not on a box): the
+  // worst single-domain turn is ~3.2K tokens and the worst four-domain turn
+  // ~8.0K, both far under the ceiling. Real per-turn numbers
+  // come from the `agent_tool_pool_size` debug line below (WARP-2921), which
+  // is what the ADR-056 §12 go/no-go is measured from.
   // The realistic route to tripping this is CONTINUITY ACCUMULATION — a long
   // conversation touching many domains grows `conversationToolNames` and so
   // the matched-domain set. That is precisely the case worth a loud failure
   // rather than a quiet one.
   if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
-    assertToolAdvertisementFitsBudget({
+    const poolSize = assertToolAdvertisementFitsBudget({
       specs: tools,
-      contextWindow: req.context_window ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: poolContextWindow,
       logContext: {
+        ...budgetJoin,
         model: req.model,
         selectionMode: req.tool_selection_mode,
         poolSize: filtered.length,
       },
+    });
+    // WARP-2921 — `iter: 0` because this is the advertisement iteration 0
+    // ships; logged once here rather than per iteration, since an unchanged
+    // pool would only repeat itself. A heal re-logs below.
+    logToolPoolSize({
+      size: poolSize,
+      specs: tools,
+      contextWindow: poolContextWindow,
+      selectionMode: req.tool_selection_mode,
+      turnId,
+      iter: 0,
+      phase: "initial",
+      agentRunId: req.toolCallContext?.agentRunId,
     });
   }
   // WARP-642 — the exact set of tool names the model was advertised this
@@ -1995,12 +2101,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // Unregistered names deliberately fall THROUGH to the WARP-642 guard,
       // which answers them with the valid-tool list so the model can
       // self-correct.
-      const denial = toolDispatchDenial(call.function.name, args, scoped);
+      const denial = toolDispatchDenial(call.function.name, args, scoped, runtimeLookup);
       if (denial) {
         // No sanitising pass here (unlike FINDING 3 below): a denial only
-        // fires for a name that IS in the tools-core catalog, so the string
-        // reflected back to the model is one of the registry's own fixed
-        // names, never model-authored text.
+        // fires for a name that IS in the tools-core catalog or (WARP-2897)
+        // exactly matches a REGISTERED runtime tool — whose namespaced name
+        // the multiplexer vetted at registration — so the string reflected
+        // back to the model is a registry name, never model-authored text.
         lastBadToolName = call.function.name;
         lastBadToolReason = "forbidden tool";
         const denialError = { status: "error" as const, error: denial };
@@ -2081,16 +2188,31 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           let healed = true;
           if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
             try {
-              assertToolAdvertisementFitsBudget({
+              const healedSize = assertToolAdvertisementFitsBudget({
                 specs: candidate,
-                contextWindow: req.context_window ?? DEFAULT_CONTEXT_WINDOW,
+                contextWindow: poolContextWindow,
                 logContext: {
+                  ...budgetJoin,
                   model: req.model,
                   selectionMode: req.tool_selection_mode,
                   poolSize: filtered.length,
                   phase: "self_heal",
                   healedTool: call.function.name,
                 },
+              });
+              // WARP-2921 — reached only when the widened advertisement FITS
+              // and is about to be committed. A refused heal throws above and
+              // is already on record as `tool_budget_exceeded`.
+              logToolPoolSize({
+                size: healedSize,
+                specs: candidate,
+                contextWindow: poolContextWindow,
+                selectionMode: req.tool_selection_mode,
+                turnId,
+                iter,
+                phase: "self_heal",
+                healedTool: call.function.name,
+                agentRunId: req.toolCallContext?.agentRunId,
               });
             } catch (err) {
               if (!(err instanceof ToolBudgetExceededError)) throw err;
@@ -2501,7 +2623,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-2178 — the cap is now config.AGENT_TOOL_RESULT_CAP_CHARS (default
       // the historical 8000), so it can be set from a measured distribution.
       const bounded = boundToolResultForModel(
-        text,
+        // WARP-2002 — the model never sees a confirmation token; see the helper.
+        isConfirmation ? redactConfirmationTokensForModel(text) : text,
         call.function.name,
         (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:
@@ -2920,7 +3043,11 @@ function isRetrievalClassTool(name: string): boolean {
  *                           directory route's body verbatim, and that route
  *                           `res.json(entries)` with a bare `FileEntryInfo[]`
  *                           on all three of its branches (cache hit, normal,
- *                           and the `handleFileError(…, [])` degrade).
+ *                           and the `handleFileError(…, [])` degrade). The
+ *                           degrade's `[]` never reaches here as data: it is
+ *                           marked `X-Droplet-Degraded` (WARP-3052) and the
+ *                           tool turns it into a FILES_UNAVAILABLE error
+ *                           (WARP-3077), so no citation is written for it.
  *   - `path`              — read_file, write_file, move_file, …
  *   - `results[].path`    — search_content hits
  *   - `items[].path`      — search_files, list_recent_files

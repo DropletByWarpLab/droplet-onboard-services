@@ -58,6 +58,7 @@ import type {
   AccessStartingPoint,
   AccessTier,
 } from "@/lib/types";
+import { ROSTER_SOURCE_LABEL, isIdpManaged } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
@@ -936,7 +937,9 @@ export default function UsersPage() {
     if (editDisplayName.trim() && editDisplayName !== editing.displayName) {
       patch.displayName = editDisplayName.trim();
     }
-    if (editPassword.trim()) {
+    // WARP-2858: the password field is not rendered for an IdP-managed row;
+    // this guard keeps a stale value from reaching the 409.
+    if (editPassword.trim() && !isIdpManaged(editing)) {
       if (!validatePassword(editPassword).ok) {
         setError("Password doesn't meet the requirements yet.");
         return;
@@ -952,7 +955,8 @@ export default function UsersPage() {
     // written (the fields render disabled with the honest reason, and the
     // save path skips the live usage endpoint entirely).
     let usagePatch: { storageQuotaBytes?: string | null; maxUploadSizeMb?: number | null } | null = null;
-    if (editing.userId && editing.role !== "owner") {
+    // WARP-2984: no file storage → no storage/upload limits to write.
+    if (editing.userId && editing.role !== "owner" && editing.hasStorage !== false) {
       // An empty field is an explicit "no limit"; a filled-but-unencodable
       // one is a typo, and gets told so rather than silently dropping the cap.
       const storageQuotaBytes = storageInputToBytes(editStorageValue, editStorageUnit);
@@ -1141,6 +1145,18 @@ export default function UsersPage() {
         <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>
           <KeyRound size={11} aria-hidden="true" />
           {roleLabel}
+        </span>
+      )}
+      {/* WARP-2984: where the account comes from. The roster lists every
+          account (local, SSO, SCIM, Nextcloud-only), so the origin is shown
+          rather than implied. No source sent → no chip, never a guess. */}
+      {u.source && (
+        <span
+          className="chip"
+          style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}
+          title={u.hasStorage === false ? "No file storage" : undefined}
+        >
+          {ROSTER_SOURCE_LABEL[u.source]}
         </span>
       )}
       {/* State, not just the affordance: without this the roster looked
@@ -1577,7 +1593,7 @@ export default function UsersPage() {
                       value={inviteEmail}
                       onChange={(e) => setInviteEmail(e.target.value)}
                       placeholder="you@company.com"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1595,7 +1611,7 @@ export default function UsersPage() {
                       value={inviteDisplay}
                       onChange={(e) => setInviteDisplay(e.target.value)}
                       placeholder="Display name"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1652,7 +1668,7 @@ export default function UsersPage() {
                         id={inviteTtlId}
                         value={inviteTtlHours}
                         onChange={(e) => setInviteTtlHours(Number(e.target.value))}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",
@@ -1803,7 +1819,7 @@ export default function UsersPage() {
                       <input
                         readOnly
                         value={inviteResult.url}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 type-footnote"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 type-footnote"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",
@@ -1904,7 +1920,7 @@ export default function UsersPage() {
                       value={createDisplay}
                       onChange={(e) => setCreateDisplay(e.target.value)}
                       placeholder="Display name"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1926,7 +1942,7 @@ export default function UsersPage() {
                       value={createEmail}
                       onChange={(e) => setCreateEmail(e.target.value)}
                       placeholder="alex@example.com"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1958,7 +1974,7 @@ export default function UsersPage() {
                       id={createRoleId}
                       value={createRole}
                       onChange={(e) => setCreateRole(e.target.value as CreateUserRole)}
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1982,7 +1998,7 @@ export default function UsersPage() {
                         id={createPasswordId}
                         value={createPassword}
                         onChange={(e) => setCreatePassword(e.target.value)}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",
@@ -2058,7 +2074,7 @@ export default function UsersPage() {
                     id={createEmailId}
                     readOnly
                     value={createEmail}
-                    className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono type-footnote"
+                    className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono type-footnote"
                     style={{
                       background: "var(--surface)",
                       border: "1px solid var(--border)",
@@ -2081,7 +2097,7 @@ export default function UsersPage() {
                       ref={createHandoffPwRef}
                       readOnly
                       value={createPassword}
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -2176,7 +2192,7 @@ export default function UsersPage() {
                   id={editDisplayNameId}
                   value={editDisplayName}
                   onChange={(e) => setEditDisplayName(e.target.value)}
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -2185,6 +2201,14 @@ export default function UsersPage() {
                   }}
                 />
               </div>
+              {/* WARP-2858/2984: an SSO/SCIM account's credential lives at the
+                  identity provider — the box refuses a local password, so the
+                  field is replaced by the reason instead of a 409. */}
+              {isIdpManaged(editing) ? (
+                <div className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+                  Signs in through your identity provider — its password is managed there, not on this Droplet.
+                </div>
+              ) : (
               <div>
                 <label htmlFor={editPasswordId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                   Set new password (leave blank to keep)
@@ -2194,7 +2218,7 @@ export default function UsersPage() {
                   type="password"
                   value={editPassword}
                   onChange={(e) => setEditPassword(e.target.value)}
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -2206,7 +2230,14 @@ export default function UsersPage() {
                 {editPassword && (
                   <PasswordRulesChecklist password={editPassword} />
                 )}
+                {/* WARP-3111: the box treats this as a reset. */}
+                {editPassword && !isSelf(editing) && (
+                  <p className="type-caption-1 mt-1.5" style={{ color: "var(--text-muted)" }}>
+                    They&apos;ll be signed out everywhere and asked to choose a new password when they next sign in.
+                  </p>
+                )}
               </div>
+              )}
 
               {/* WARP-1532 (T8) — Role + effective access (design brief
                   §6.1–§6.3). Local rows only: role assignment keys on the
@@ -2233,7 +2264,15 @@ export default function UsersPage() {
                   with a local User row (userId); the roster otherwise still
                   lists Nextcloud-only accounts, but they have no local
                   UsagePolicy surface to edit yet. */}
-              {editing.userId && (
+              {/* WARP-2984: an account with no Nextcloud user has no file
+                  storage — the limits below would have nothing to apply to,
+                  so the section says so instead of offering them. */}
+              {editing.userId && editing.hasStorage === false && (
+                <div className="pt-2 type-caption-1" style={{ borderTop: "1px solid var(--card-bd)", color: "var(--text-muted)" }}>
+                  No file storage — this account has no Files space, so storage and upload limits don&apos;t apply.
+                </div>
+              )}
+              {editing.userId && editing.hasStorage !== false && (
                 <div className="pt-2" style={{ borderTop: "1px solid var(--card-bd)" }}>
                   <div
                     className="type-caption-1 mb-1.5"
@@ -2261,7 +2300,7 @@ export default function UsersPage() {
                           aria-label="Storage limit"
                           disabled={editingIsOwner}
                           title={editUsageDisabledTitle}
-                          className="flex-1 px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
+                          className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -2275,7 +2314,7 @@ export default function UsersPage() {
                           aria-label="Storage limit unit"
                           disabled={editingIsOwner}
                           title={editUsageDisabledTitle}
-                          className="px-2.5 py-2.5 outline-none focus:border-[var(--brand)] transition-colors disabled:opacity-55"
+                          className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors disabled:opacity-55"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -2306,7 +2345,7 @@ export default function UsersPage() {
                         aria-label="Upload cap in megabytes"
                         disabled={editingIsOwner}
                         title={editUsageDisabledTitle}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",

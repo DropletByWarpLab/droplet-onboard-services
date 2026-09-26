@@ -68,6 +68,7 @@ import {
   tierPlural,
   featureDef,
   type RoleDraft,
+  type ToolDomainGroup,
 } from "@/lib/access";
 import { ACCESS_COPY } from "./copy";
 import { AccessToggle, GuardNote, LevelPills } from "./bits";
@@ -142,6 +143,16 @@ export interface RoleBuilderSheetProps {
    * both cases.
    */
   initialDirty?: boolean;
+  /**
+   * WARP-2897 — the tool rows to render: TOOL_DOMAIN_GROUPS plus one
+   * Extensions row per runtime domain (lib/access `toolDomainGroupsWith`).
+   * Must be the same list `base` was built with. Defaults to the static
+   * compiled table, which is every box with nothing attached.
+   */
+  toolDomainGroups?: readonly ToolDomainGroup[];
+  /** WARP-2897 — grants that reach nothing (lib/access `deadToolGrants`):
+   *  shown with a badge, never silently dropped. */
+  deadToolGrants?: ReadonlyArray<{ domain: string; deadReason: "not_provided" }>;
   onSave: (payload: AccessRolePayload) => void | Promise<void>;
   onClose: () => void;
   /** Files row deep-link → the Departments & teams tab (ADR-029 owns it). */
@@ -156,6 +167,8 @@ export function RoleBuilderSheet({
   connectors,
   busy = false,
   initialDirty = false,
+  toolDomainGroups = TOOL_DOMAIN_GROUPS,
+  deadToolGrants = [],
   onSave,
   onClose,
   onOpenDepartments,
@@ -176,6 +189,18 @@ export function RoleBuilderSheet({
   const slugPreview = mode === "edit" && draft.slug ? draft.slug : slugifyRoleName(draft.name);
 
   const patch = (p: Partial<RoleDraft>) => setDraft((d) => ({ ...d, ...p }));
+
+  /** WARP-2897 — mark (or unmark) a dead grant for removal on save. */
+  const toggleDeadGrant = (domain: string) =>
+    setDraft((d) => {
+      const current = d.removedToolGrants ?? [];
+      return {
+        ...d,
+        removedToolGrants: current.includes(domain)
+          ? current.filter((x) => x !== domain)
+          : [...current, domain],
+      };
+    });
 
   /** Usage edits mark the axis touched — untouched usage re-emits the
    *  server's raw values verbatim on save (review F2; lossy GB/TB input). */
@@ -226,7 +251,7 @@ export function RoleBuilderSheet({
       features: { ...d.features, [moduleId]: { ...d.features[moduleId]!, level } },
     }));
 
-  const setToolLevel = (groupId: string, level: ToolAccessLevel) =>
+  const setToolLevel = (groupId: string, level: ToolAccessLevel | "off") =>
     setDraft((d) => ({
       ...d,
       tools: { ...d.tools, [groupId]: level },
@@ -585,7 +610,9 @@ export function RoleBuilderSheet({
                 On-box tools
               </div>
               <div>
-                {TOOL_DOMAIN_GROUPS.map((group) => {
+                {toolDomainGroups
+                  .filter((group) => group.section !== "extensions")
+                  .map((group) => {
                   const gate = group.feature ? featureDef(group.feature) : null;
                   const featureOff = !!group.feature && !draft.features[group.feature]?.on;
                   const level = featureOff ? null : draft.tools[group.id] ?? "view";
@@ -628,6 +655,75 @@ export function RoleBuilderSheet({
                 })}
               </div>
             </div>
+
+            {/* WARP-2897 — runtime (extension) domains this box has attached.
+                Rendered only when there is one; each row starts Off on a new
+                role and offers Off, because unlike a compiled row there is no
+                feature toggle to switch it off with. */}
+            {toolDomainGroups.some((group) => group.section === "extensions") && (
+              <div data-testid="access-tools-extensions">
+                <div className="type-caption-1 mb-1" style={{ color: "var(--text-muted)", fontWeight: 600 }}>
+                  Extensions
+                </div>
+                {toolDomainGroups
+                  .filter((group) => group.section === "extensions")
+                  .map((group) => {
+                    const level = draft.tools[group.id] ?? "off";
+                    return (
+                      <div key={group.id} className="acc-tooldomain" data-testid={`access-tools-${group.id}`}>
+                        <Wrench size={16} aria-hidden="true" />
+                        <span className="tx">{group.label}</span>
+                        <div className="acc-seg" aria-label={`${group.label} tools`}>
+                          {(["off", "view", "use"] as const).map((option) => (
+                            <button
+                              key={option}
+                              type="button"
+                              className={level === option ? "on" : ""}
+                              aria-pressed={level === option}
+                              onClick={() => setToolLevel(group.id, option)}
+                            >
+                              {option === "off" ? "Off" : option === "view" ? "View" : "Use"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+
+            {/* WARP-2897 — grants on a domain nothing on this box provides any
+                more (its extension disabled). Kept, and saved back untouched,
+                unless the admin removes one here — a dead grant has no row to
+                set Off, so Remove is the only way to revoke it before it
+                revives when something provides that domain again. */}
+            {deadToolGrants.length > 0 && (
+              <div data-testid="access-tools-dead">
+                {deadToolGrants.map((grant) => {
+                  const isRemoved = (draft.removedToolGrants ?? []).includes(grant.domain);
+                  return (
+                    <div key={grant.domain} className="acc-tooldomain" data-testid={`access-tools-dead-${grant.domain}`}>
+                      <AlertTriangle size={16} aria-hidden="true" />
+                      <span className="tx">
+                        {grant.domain}
+                        <small>{isRemoved ? ACCESS_COPY.deadToolGrantRemoved : ACCESS_COPY.deadToolGrant}</small>
+                      </span>
+                      <span className="acc-badge" aria-label={`${grant.domain}: reaches nothing`}>
+                        Reaches nothing
+                      </span>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        aria-label={`${isRemoved ? "Keep" : "Remove"} ${grant.domain} grant`}
+                        onClick={() => toggleDeadGrant(grant.domain)}
+                      >
+                        {isRemoved ? "Keep" : "Remove"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Off the box — the caution block */}
             <div className="acc-caution">
@@ -732,7 +828,7 @@ export function RoleBuilderSheet({
             type="button"
             className="btn primary"
             disabled={!canSave}
-            onClick={() => onSave(draftToRolePayload(draft))}
+            onClick={() => onSave(draftToRolePayload(draft, toolDomainGroups))}
           >
             {busy ? "Saving…" : "Save role"}
           </button>

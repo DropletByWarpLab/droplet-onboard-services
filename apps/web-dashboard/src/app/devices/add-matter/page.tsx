@@ -152,7 +152,7 @@ export default function AddMatterDevicePage() {
           Back to devices
         </Link>
         <h1 className="type-title-2 font-bold text-[var(--text)] mt-2">
-          Add a smart device
+          Add a device
         </h1>
         <p className="type-subheadline text-[var(--text-muted)] mt-1">
           Anything that says <em>“Works with Matter”</em> — plugs, lights,

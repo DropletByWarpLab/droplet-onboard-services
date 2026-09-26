@@ -34,7 +34,7 @@
   "dependencies": {
     "@droplet/fips-selftest": "0.1.0",
     "@droplet/tools-core": "0.1.0",
-    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.8.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@prisma/client": "^5.14.0",
@@ -45,7 +45,7 @@
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^20.12.12",
+    "@types/node": "^20.19.43",
     "tsx": "^4.23.13",
     "typescript": "^5.4.5",
     "vitest": "^3.2.6"

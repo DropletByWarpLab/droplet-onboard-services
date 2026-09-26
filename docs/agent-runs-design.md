@@ -262,6 +262,13 @@ run is never more expensive than the original at the same iteration
   level and aggregate by `tool`. The lab box was unreachable when this landed,
   so the numbers are recorded on WARP-2178 as they are gathered; until then
   the default stays at the historical value.
+  WARP-2921 takes those numbers on the bench box, together with the
+  per-turn `agent_tool_pool_size` line (the schema side of the same window),
+  and records them in the ADR-056 brief's measurement appendix.
+  Two aggregation traps: an over-ceiling advertisement logs only the
+  error-level `tool_budget_exceeded` line (no pool line; it carries the same
+  `turn_id` / `agent_run_id` join keys), so it must be counted as the worst turn; and `iter` restarts at 0 when a run
+  resumes, so a run's iteration count comes from the AgentRun row or trace.
 
 **Not done, deliberately.** History compaction (a sliding window or a
 summarising manager over *older* iterations, the Strands shape) is not built:
@@ -308,30 +315,61 @@ with `pendingDecision` set and extends `deadlineAt` by the time spent parked,
 so a day waiting for a human is not a day of wall clock. Denial needs no
 reach check.
 
-**Resume.** The run is claimed like any other and resumes from its checkpoint
-— the top of the parked iteration — so the model re-issues the call. In
-`beforeToolCall`, a call whose binding matches the decided pending call is
-consumed:
+**Resume.** The run is claimed like any other. Its checkpoint is the top of
+the parked iteration, and the model is **not** asked to re-issue the call
+(WARP-3044): the worker consumes the decision on the **stored** call — tool,
+args and `tool_call_id` exactly as parked — before the loop runs.
 
-- *approved* — the worker performs the interceptor handshake itself: one
-  dispatch without a token, which returns a **fresh** challenge minted now,
-  seconds after the human decided; one dispatch presenting it. The
-  interceptor stays the single gate and the token's TTL starts at human
-  attention, which is where it was designed to start. The tool runs exactly
-  once. Anything other than a challenge on the first leg (a deny-tier
-  refusal, a tool that no longer confirms, an error) is the box's honest
-  answer and is handed back as-is.
-- *denied* — the model receives a `CONFIRMATION_DENIED` tool result and
-  adapts or finishes; the tool never runs.
+- *approved* — the stored args must still carry `pendingBindingHash` (what
+  runs is what the human was shown), and the tool must still be in the run's
+  pool as narrowed for the principal at **this** claim, and pass the loop's
+  args-dependent rule (§3 locks). Then the worker performs the interceptor
+  handshake itself: one dispatch without a token, which returns a **fresh**
+  challenge minted now, seconds after the human decided; one dispatch
+  presenting it. The interceptor stays the single gate and the token's TTL
+  starts at human attention, which is where it was designed to start. The
+  tool runs exactly once. Anything other than a challenge on the first leg (a
+  deny-tier refusal, a tool that no longer confirms, an error) is the box's
+  honest answer and is handed back as-is. A binding or reach failure
+  dispatches nothing and the model is told why.
+- *denied* — nothing is dispatched; the result is `CONFIRMATION_DENIED`.
 
-Either way the pending columns clear, the trace entry carries
-`confirmation: "confirmed" | "denied"`, and a `tool_call` row with
-`refs.agentRunId` records the outcome. Two rules from review: the decision is
-**consumed and the call's trace entry written before the first dispatch**
-(the replay guard's discipline), so a crash mid-handshake leaves an entry with
-no result that the resume re-dispatches without a token — the interceptor
-challenges again and the run re-parks, a second prompt rather than a silent
-duplicate — and both legs are wrapped so a thrown dispatch is a tool error,
+Either way the call (an assistant `tool_calls` message) and its result (the
+`role: "tool"` reply, bounded and token-redacted as the loop treats any
+result) are appended to the conversation, and the checkpoint advances past
+the parked iteration: the loop resumes one iteration later with the result
+already in front of the model, as if the call had run when first made. If the
+parked iteration was the run's last, the run ends on its iteration cap
+without another model call. An approved `workspace_propose` that runs ends a
+workshop run right there, `succeeded / proposed` (§8a).
+
+**Why not let the model re-issue it.** The binding matches only a
+byte-identical re-issue, and a model asked the same question again does not
+promise the same bytes. gpt-oss rewords free text on every ask: on the house
+unit, run 1efa11c8 parked `workspace_propose` and re-parked after each of three
+approvals because the `summary` came back reworded each time — "Both tsc and
+npm test exited with code 0.", then "Compilation exit code 0, tests exit code
+0", then "Compiled src/ with tsc (exit code 0). Ran npm test (exit code 0)." —
+and ended `succeeded / model_done` with nothing proposed.
+
+**No second prompt for a decided call.** A model that sends the decided call
+again with the same binding (`confirmed` aside, as the interceptor binds) gets
+the recorded answer from the trace — `REPEATED_CALL` for an approved call that
+ran, the same `CONFIRMATION_DENIED` for a denied one — never a second dispatch
+and never a second park. A *reworded* call is a different write and parks for
+its own approval, as any new write does. A second `POST …/confirm` finds the
+run no longer parked (409) and changes nothing.
+
+The pending columns clear, the trace entry carries `confirmation:
+"confirmed" | "denied"`, and a `tool_call` row with `refs.agentRunId` records
+the outcome. Two rules from review: the decision is **consumed and the call's
+trace entry written before the first dispatch** (the replay guard's
+discipline), and the result, the conversation and the advanced checkpoint
+then land in one write — so a crash mid-handshake leaves a `confirmed` entry
+with no result at the checkpoint's iteration. The next claim finds it before
+the loop and re-parks **that stored call**, with a notification saying it may
+already have run (WARP-2877), rather than asking about whatever the model
+would re-issue. Both legs are wrapped so a thrown dispatch is a tool error,
 not the death of the run. The audit label follows what happened: an approval
 whose redeem leg did not run the tool records `approved but did not run`.
 Every terminal write clears the parked-call columns, and both readers
@@ -382,15 +420,27 @@ reach. `runAfter` on the enqueued run is the fire time. An unparseable RRULE
 disables the schedule with a `system` row. No second clock. A due schedule whose owner row is gone
 is disabled inside the fire transaction with a `system` activity row
 (`reason: user_missing`) instead of enqueuing a run that could only fail —
-`AgentRunSchedule.userId` carries no FK (WARP-2744 item 4).
+`AgentRunSchedule.userId` carries no FK (WARP-2744 item 4). A schedule
+created without a `model` is stored `followsActiveModel` and runs on the
+box's active model as resolved at each fire (tools-capable), so switching
+the model on the Models page reaches it; an explicit `model` stays pinned
+(WARP-3047).
 
 **Completion** — a terminal status notifies the owner over the same
 `droplet/notifications/<username>` topic the park uses, with the result
 summary (or the error).
 
-**Dashboard** — `AgentRunsPanel` on `/admin/audit`, the signed activity log,
-which is the Activity surface (`/admin/claude-activity` under the "Activity"
-nav label is the unrelated engineer feed). Not a nav item. List on the left
+**Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056; since
+WARP-2974 the run is a transcript in the Workshop space). It is the last
+visible row of the sidebar's Work group, after Calendar, for owner/admin only,
+the roles that may start a run. WARP-2967 briefly tucked it behind Settings →
+Automation, and WARP-3063 put the row back. It shipped on `/admin/audit` and was deliberately not a nav item
+(WARP-2180); ADR-056 made the run the unit of every agentic slice that
+follows, so the panel moved to a surface with a door. Above it, the first
+dashboard caller of `POST /api/agent-runs`: a goal field whose copy says what
+a run may do (reads on its own, anything that changes something parks for
+approval, cancel at any time). `/admin/audit?run=<id>` forwards to
+`/workshop?run=<id>`, so the deep link never broke. List on the left
 with state pills; the selected run on the right: goal, state, step count,
 result or error, the trace, and — when parked — the confirm prompt with
 provenance: the run's goal, the tool, the PHI-free argument summary, when it
@@ -413,6 +463,102 @@ site: handler, registry, catalog + home copy, `TOOL_ROUTES`, `INVENTORY.md`,
 worker keeps `start_agent_run` out of every run's pool (structural) and the
 handler refuses when `ctx.agentRunId` is set (the mcp-server maps the
 stdio-trusted `_meta.agentRunId` onto the context for exactly this check).
+
+## 8a. The workshop run (WARP-2896, ADR-056 §6.2)
+
+A run started with a `workspaceId` is a **workshop run**: the same durable
+loop, bound for its whole life to one **workspace** — a bare git repository
+on the sandbox's `workspace-git` volume plus a working checkout on
+`workspace-checkouts` — in which it reads, edits, tests and finally
+**proposes** an extension. Nothing it builds runs on the box; a proposal is
+a tagged commit the review surface (slice I) picks up.
+
+**The store, not a forge.** `services/sandbox` (`gitstore.py`,
+`workspace.py`) holds the repositories and does every git operation: create
+from `templates.git` (seeded at first start from `extensions/templates/`,
+never re-seeded over an operator's commits), read / search / diff / log,
+write, commit (as the person, pushed to the bare repo at once — so the
+backup set is always current and a lost checkout is a `git clone` away),
+`run` of an **allow-listed** command (`npm test`, `npm run build`, `pytest`,
+`ruff`, `tsc`, plain arguments), and propose (manifest with `egress: none`
+pinned whatever the tree says, commit, `proposal/<version>` tag, push).
+`git http-backend` serves smart HTTP at `/git/<repo>.git` through the
+orchestrator's `/api/git/*` (nginx rewrites `/git/`), with the push decision
+made by the orchestrator (owner/admin push, family fetches, guest and the
+mcp principal nothing) and forwarded as a header — git's own default, which
+enables push the moment `REMOTE_USER` is set, is never relied on. The git
+CLI speaks Basic only, so on that prefix alone the auth middleware reads the
+credential's second slot as the session JWT.
+
+**Run owns workspace.** The eight `workspace_*` tools (four reads; `write`,
+`commit`, `run` as Write-tier with NO confirmation; `propose` Tier-2) reach
+`/api/workspace/:id/<op>` as the mcp principal with `X-Nextcloud-User` and
+`X-Droplet-Agent-Run`. The route loads the run and refuses unless it belongs
+to that person, is `running`, and carries THIS workspace's id — a column the
+route reads, never an argument the model supplies. Each handler refuses
+without a run id and a workspace id on its context (`_meta.workspaceId`,
+stdio-trusted like `agentRunId`), so a chat turn or an HTTP MCP client never
+reaches the route. The `run` allow-list is applied by the route BEFORE the
+sandbox is dialled, and again by the sandbox.
+
+**The checkout follows the repository.** The bare repository is the truth:
+an owner may push to `<id>.git` over `/git/` at any time (the AC's "push for
+owner/admin"), with nothing in the sandbox watching. So every workspace
+operation first fast-forwards the checkout onto `origin/work` — a local
+fetch, the bare is a path on the same volume. Fast-forward only: a checkout
+that has moved ahead is left alone (its next commit pushes again), and a
+checkout with uncommitted work, or one that has diverged, while the
+repository also moved is a **409** the run hears about at its next call —
+never a merge nobody asked for, never a commit over the owner's push
+refused later as a non-fast-forward.
+
+**One live run per workspace, held by the database.** Two runs on one
+checkout would commit over each other, so `POST /api/agent-runs` refuses a
+`workspaceId` that already has a `queued` / `running` /
+`awaiting_confirmation` run (409). The count it does first is the friendly
+answer; the guard that survives two starts racing past that count is the
+partial unique index `AgentRun_workspaceId_active_key` — `UNIQUE
+("workspaceId") WHERE "workspaceId" IS NOT NULL AND status IN (the three
+active statuses)` — in the migration's raw SQL (Prisma cannot express a
+filtered unique index; `PmCycle_projectId_active_key` is the precedent). The
+route maps its P2002 onto the same 409. A finished run releases the
+workspace by leaving the predicate; ordinary runs (NULL `workspaceId`) never
+match it. `agent-run-claim.pg.test.ts` shows Postgres raising and releasing
+it.
+
+**The pool exemption is structural.** `WORKSPACE_TOOLS` is derived from
+`TOOL_ROUTES`: every tool whose every hop is under `/api/workspace/`. A run
+WITH a workspace carries them on top of the ordinary pool; a run without
+carries none. They are the one family of ungated writes a run may hold
+besides `send_notification`, on the ground that their whole reach is one
+checkout on the internal-only network; `agent-run-worker.workshop.test.ts`
+enumerates the members, so a tool that grows a hop elsewhere is a visible
+diff. **Replay:** `write` is idempotent by contract (same bytes → `changed:
+false`), `commit` with nothing to commit is `changed: false`, `run` runs the
+tests again — all three re-dispatch loudly after a lost result instead of
+halting the run as `unknown_outcome`; `propose` is gated and follows the
+confirming rule.
+
+**Propose ends the run.** The worker reads `workspace_propose`'s own
+success (in `afterToolCall`, and — for a resumed park — right after it runs
+the approved STORED call, before the model is asked anything; §7, WARP-3044)
+and stops with `proposed`; the terminal write is `succeeded`
+with `stopReason: proposed` and the proposal as the run's result, the
+person is notified, and the model is never asked for a final answer — it
+would not stop itself reliably. The workspace row flips to `proposed` with
+the tag and takes no more writes.
+
+**Dashboard.** `/workshop` gains a "Work in" picker on the start form and a
+Workspaces section (list, create from a template); `/workshop/<id>` shows
+the branch and head, the proposal tag, the runs that worked there, the
+history, the uncommitted diff and the last command's output, all read from
+the store through `/api/workspace/:id/{log,diff,output}`, plus the clone URL.
+The write path is the run's alone; a person who wants to edit by hand
+clones and pushes.
+
+**Backup and reset.** `workspace-git` joins `DATA_VOLUMES` (the customer's
+extension work); `workspace-checkouts` joins `EXCLUDED_VOLUMES`
+(rebuildable); both are in factory-reset's wipe list.
 
 ## 9. Out of scope for the epic
 

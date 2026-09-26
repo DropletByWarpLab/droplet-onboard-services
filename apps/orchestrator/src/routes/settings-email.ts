@@ -14,6 +14,17 @@
  *                                               aes-256-gcm encrypted at rest via
  *                                               encryption.service and never
  *                                               echoed back or logged.
+ *                                               WARP-2957: when the saved
+ *                                               config is `enabled`, the relay
+ *                                               is verified in the same request
+ *                                               and the response carries the
+ *                                               outcome (`lastTestedAt`,
+ *                                               `lastError`) — a save IS a test.
+ *   POST  /api/settings/email/test            — owner+admin only. Dials the
+ *                                               saved relay (connect, greet,
+ *                                               TLS, AUTH — no mail sent) and
+ *                                               records the outcome on the row.
+ *                                               200 either way; `ok` says which.
  *   POST  /api/people/invites/:id/resend       — owner+admin only. Re-sends a
  *                                               pending/failed invite's email.
  *                                               A transport failure surfaces as
@@ -42,6 +53,7 @@ import {
   loadChannelConfig,
   redactChannelConfig,
   sendInviteEmail,
+  verifyChannel,
   type EmailChannelConfig,
   type RedactedEmailChannelConfig,
   type SendOptions,
@@ -165,11 +177,26 @@ export function createSettingsEmailRouter(
           updatedBy: actor,
         };
 
-        const saved = (await prisma.emailChannelSetting.upsert({
+        let saved = (await prisma.emailChannelSetting.upsert({
           where: { id: EMAIL_CHANNEL_SINGLETON_ID },
           create: { id: EMAIL_CHANNEL_SINGLETON_ID, ...writeFields },
           update: writeFields,
         })) as unknown as EmailChannelConfig;
+
+        // WARP-2957 — a save of an ENABLED relay is a test of it. Before this
+        // the row was written and the owner told "Saved"; the first evidence
+        // that a pasted app password was wrong was a failed invite days later.
+        // A disabled save is left alone: the owner may be parking a half-typed
+        // config, and stamping a failure on it would be noise.
+        let verify: Awaited<ReturnType<typeof verifyChannel>> | null = null;
+        if (data.enabled) {
+          verify = await verifyChannel(prisma, sendOptions);
+          saved = {
+            ...saved,
+            lastTestedAt: verify.testedAt,
+            lastError: verify.error,
+          };
+        }
 
         // Audit WHO changed the channel + the non-secret fields. NEVER the
         // password (it's a credential; the audit row is not where it lives).
@@ -189,12 +216,50 @@ export function createSettingsEmailRouter(
             fromAddress: data.fromAddress,
             // explicitly record only WHETHER a password is set, not the value
             hasPassword: passwordEnc.length > 0,
+            ...(verify ? { verified: verify.ok, verifyReason: verify.reason ?? null } : {}),
           },
         });
 
         res.json(redactChannelConfig(saved));
       } catch (err) {
         logger.warn({ err }, "PUT /settings/email failed");
+        next(err);
+      }
+    },
+  );
+
+  // ── POST /api/settings/email/test ───────────────────────────
+  // owner+admin only. Dials the SAVED relay and records the outcome. 200
+  // whether or not the relay answered: the test succeeded as an operation and
+  // the body says what it found. A 4xx/5xx here would read as "the request
+  // was wrong", which it was not.
+  router.post(
+    "/settings/email/test",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const result = await verifyChannel(prisma, sendOptions);
+        await recordActivity({
+          kind: "system",
+          severity: result.ok ? "ok" : "warn",
+          sourceIcon: "mail",
+          what: result.ok
+            ? "Outbound email channel verified"
+            : "Outbound email channel test failed",
+          sub: result.reason ?? undefined,
+          actor: actorFromRequest(req),
+          // The reason (a closed-set token), never a server line and never a
+          // credential — the same posture as the save audit above.
+          refs: { actor: req.user?.username ?? null, ok: result.ok, reason: result.reason ?? null },
+        });
+        res.json({
+          ok: result.ok,
+          reason: result.reason ?? null,
+          error: result.error,
+          lastTestedAt: result.testedAt,
+        });
+      } catch (err) {
+        logger.warn({ err }, "POST /settings/email/test failed");
         next(err);
       }
     },

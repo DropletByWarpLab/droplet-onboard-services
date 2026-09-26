@@ -207,7 +207,10 @@ export const MODULES: readonly ModuleDef[] = [
     // prefixes with their own toggles.
     category: "workspace", routePrefixes: ["/api/pm", "/api/mobile/pm"], navHrefs: ["/projects"],
     // WARP-1527: the tools-core domain for the PM suite is "pm".
-    toolDomains: ["pm"], core: false, defaultEnabled: false,
+    // WARP-2988: `business` is SHARED with `crm` — ADR-045's one door to the
+    // CRM and the tracker passes the feature intersection when EITHER module
+    // is held (access-catalog.ts `domainsForFeatures`, OR semantics).
+    toolDomains: ["pm", "business"], core: false, defaultEnabled: false,
     available: () => true, // native to the orchestrator
   },
   {
@@ -223,7 +226,9 @@ export const MODULES: readonly ModuleDef[] = [
     // WARP-2546 — claimed in the same change that adds the handlers, which is
     // what the registry's `unknown domain` invariant enforces: a domain the
     // tools-core catalog cannot resolve is a gate pointing at nothing.
-    toolDomains: ["crm"], core: false, defaultEnabled: false,
+    // WARP-2988: `business` is shared with `projects` (OR semantics) — see
+    // the projects entry above.
+    toolDomains: ["crm", "business"], core: false, defaultEnabled: false,
     // WARP-2558 — `requires: "projects"` is DELIBERATELY absent now.
     //
     // The bar for that field is "the child has no reachable surface of its own
@@ -239,13 +244,14 @@ export const MODULES: readonly ModuleDef[] = [
     description: "Invoices and bills landed from a connected ledger.",
     category: "workspace", routePrefixes: ["/api/money"],
     navHrefs: ["/money"],
-    // WARP-2581 — NO tool domain claimed. `money_list_open_documents` is
-    // excluded from the chat pool while `base-prompt-budget.test.ts` sits 59
-    // characters under its 60,000 tripwire (WARP-2547 owns that decision), and
-    // the registry's `unknown domain` invariant is about a gate pointing at
-    // nothing — a domain claimed here for a tool the model can never be
-    // offered would be exactly that.
-    toolDomains: [], core: false, defaultEnabled: false,
+    // WARP-2742 — claimed. WARP-2581 shipped this `[]` because the tool is
+    // kept out of the CHAT pool (EXCLUDED_FROM_CHAT_TOOLS), but it is still
+    // MCP-, ToolSpec- and dispatch-reachable, and an unclaimed domain used to
+    // pass the §3 feature intersection unconditionally: neither the Money
+    // toggle nor a role's Money grant withheld the ledger. The `money` domain
+    // exists in the tools-core catalog, so the `unknown domain` invariant is
+    // satisfied.
+    toolDomains: ["money"], core: false, defaultEnabled: false,
     // No `requires`. The bar is "the child has no reachable surface of its own
     // without the parent" — /money reads landed documents and needs neither the
     // CRM nor Projects to be on. A box that does its books in QuickBooks and
@@ -279,15 +285,33 @@ export const MODULES: readonly ModuleDef[] = [
     available: (c) => isSet(c.FRIGATE_URL),
   },
   {
+    // WARP-2977 (ADR-059 DS-004) — the command center. Not folded into
+    // `cameras`: network and sign-in threats are in it too, and ADR-055's
+    // doors will be. Camera grants still filter every camera row (DS-005).
+    // The `security` tool domain arrives with its read-only tools (P4) and is
+    // claimed here in the same change — never left unclaimed (WARP-2742).
+    //
+    // The event STORE ingests whether or not this toggle is on: patterns need
+    // 14 days of history (§4.3), and switching Security on must not start
+    // that clock from zero. The toggle decides the surface, not the capture.
+    id: "security", label: "Security",
+    description: "One feed for camera detections, camera health, and network and sign-in warnings.",
+    category: "operations", routePrefixes: ["/api/security"], navHrefs: ["/security"],
+    toolDomains: [], core: false, defaultEnabled: false,
+    available: () => true, // native to the orchestrator; threats need no camera
+  },
+  {
     id: "smart_home", label: "Devices",
-    description: "Smart-home devices over Matter.",
+    description: "Device control over Matter, BACnet, Modbus, SNMP and KNX.",
     // Gate ONLY the Matter/smart-home surface. "/api/devices" is deliberately
     // NOT gated here: it hosts the appliance/fleet device registry, device
     // pairing (/api/devices/pair*), push-notification subscribe
     // (/api/devices/push/*), and network device-clients (/api/devices/clients*)
     // — none of which are smart-home. Toggling this module off must never 404
     // pairing or push app-wide. Matter devices live under /api/matter/devices.
-    category: "operations", routePrefixes: ["/api/matter"], navHrefs: ["/devices"],
+    // `/api/building` is the device gateway (BACnet/Modbus/SNMP/KNX): the same
+    // Device control surface, so the same toggle and access grant gate it.
+    category: "operations", routePrefixes: ["/api/matter", "/api/building"], navHrefs: ["/devices"],
     // WARP-1527: the tools-core domain is "smart-home" ("matter"/"devices"
     // were never catalog values, so the module-off drop was a silent no-op).
     toolDomains: ["smart-home"], core: false, defaultEnabled: false,
@@ -520,18 +544,18 @@ export const BUSINESS_TYPES: readonly BusinessTypeDef[] = [
   },
   {
     id: "retail", label: "Retail",
-    description: "A store — cameras, smart devices, network, managed switch.",
-    modules: ["knowledge", "files", "calendar", "cameras", "smart_home", "network", "managed_switch"],
+    description: "A store — cameras, device control, network, managed switch.",
+    modules: ["knowledge", "files", "calendar", "cameras", "security", "smart_home", "network", "managed_switch"],
   },
   {
     id: "clinic", label: "Clinic / practice",
     description: "A practice — documents, scheduling, projects, cameras.",
-    modules: ["knowledge", "files", "docs", "calendar", "projects", "cameras", "network"],
+    modules: ["knowledge", "files", "docs", "calendar", "projects", "cameras", "security", "network"],
   },
   {
     id: "hospitality", label: "Hospitality",
     description: "A hotel / venue — rooms, devices, voice, cameras.",
-    modules: ["knowledge", "files", "calendar", "voice", "cameras", "smart_home", "network", "managed_switch"],
+    modules: ["knowledge", "files", "calendar", "voice", "cameras", "security", "smart_home", "network", "managed_switch"],
   },
   {
     id: "custom", label: "Custom",

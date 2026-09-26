@@ -1,49 +1,18 @@
 import { Request, Response, NextFunction } from "express";
 import { Buffer } from "node:buffer";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
-import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
-import { verifyAccessToken, resolveNcSessionRole, type Role } from "../services/jwt.service.js";
+import { verifyAccessToken, type Role } from "../services/jwt.service.js";
 import { checkSession } from "../services/session.service.js";
 import { isUserDenied } from "../services/auth-denylist.service.js";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import { EXTENSION_TOKEN_PREFIX } from "../services/extension-token.js";
+import { resolveExtensionPrincipal } from "../services/extension-principal.js";
 
 const logger = createLogger("auth");
-
-/**
- * WARP-485 — process-wide Prisma reference used by the OCS fallback to
- * look up the local `User` row that matches the Nextcloud user id. Set
- * once at app boot via `setAuthPrisma(prisma)`; null before boot or in
- * tests that don't wire one. Mirrors the `activity.singleton.ts`
- * pattern so the orchestrator's existing app-construction order
- * doesn't need a refactor.
- *
- * Kept in module scope (rather than threaded through `authMiddleware`
- * as a closure) so the dozens of `app.use(authMiddleware)` callsites
- * — including the tests that mount the production middleware directly —
- * don't all need to pass a prisma client. The fail-closed branch in
- * `validateNextcloudToken` covers the "not yet initialised" case so a
- * pre-boot request can never sneak past with an un-normalized id.
- */
-let authPrisma: PrismaClient | null = null;
-
-/**
- * Wire the Prisma client used by the OCS fallback to resolve
- * `nextcloudUsername → User.id`. Called once at app boot from
- * `createApp(prisma)`. Idempotent — subsequent calls overwrite the
- * binding, which is what tests want when they reset between cases.
- */
-export function setAuthPrisma(prisma: PrismaClient): void {
-  authPrisma = prisma;
-}
-
-/** Test-only handle — exported so vitest can reset between cases. */
-export function _setAuthPrismaForTests(prisma: PrismaClient | null): void {
-  authPrisma = prisma;
-}
 
 export interface AuthUser {
   id: string;
@@ -60,12 +29,12 @@ export interface AuthUser {
    */
   lastMfaAt?: Date | string | null;
   /** WARP-247 — session record id from the JWT's sid claim. Undefined for
-   *  legacy tokens, service principals, and the OCS fallback path. */
+   *  legacy tokens and service principals. */
   sid?: string;
   /**
    * WARP-1582 — the JWT's `accessRoleId` claim, verbatim and three-state:
    * `undefined` = the token carries none (legacy token, service principal,
-   * the OCS fallback, or AUTH_ENABLED=false), `null` = "no custom access
+   * or AUTH_ENABLED=false), `null` = "no custom access
    * role", a string = the assigned role's id.
    *
    * `undefined` and `null` are NOT interchangeable here. Consumers must
@@ -73,28 +42,32 @@ export interface AuthUser {
    * argument in services/tool-access.service.ts.
    */
   accessRoleId?: string | null;
+  /**
+   * WARP-2900 — set only on an extension's call-back principal
+   * (`_service:ext:<slug>`): the slug of the promoted extension whose `dxt_`
+   * bearer authenticated the request. `extension-principal-guard.ts`
+   * confines such a principal to its own two routes.
+   */
+  extensionId?: string;
 }
 
 declare global {
   namespace Express {
     interface Request {
       user?: AuthUser;
+      /**
+       * WARP-2804 — true only when THIS request's session record was confirmed
+       * live by the session store (`checkSession` → `ok`). `user.sid` always
+       * comes from the signed token, so it names the right sign-in; but the
+       * live check is skipped when the store is unreachable (fail open, below),
+       * on sid-less grace tokens, for service principals and with auth off.
+       * Anything that records "done from this sign-in" (a notification ack,
+       * WARP-2978's incident ack) records this beside the sid.
+       */
+      sessionChecked?: boolean;
     }
   }
 }
-
-const TOKEN_CACHE_PREFIX = "auth:token:";
-const TOKEN_CACHE_TTL = 300; // 5 minutes
-/**
- * WARP-303: bound the Nextcloud OCS validation fetch. On a Redis cache miss
- * (every 5 min idle, or after a restart), this fetch is the only thing
- * standing between the request and the route handler — and Nextcloud
- * occasionally takes long enough to hang the middleware indefinitely,
- * which surfaced to users as intermittent 401s on `/api/llm/models`. 5 s is
- * generous for an OCS user lookup; on timeout we fail closed (treat the
- * token as invalid) so the client retries or re-auths cleanly.
- */
-const OCS_VALIDATION_TIMEOUT_MS = 5_000;
 
 // ── Cookie configuration ──
 // Cookie max-ages derive from the TTL constants in jwt.service (single source
@@ -104,16 +77,36 @@ export const SESSION_COOKIE_NAME = "droplet_session";
 export const REFRESH_COOKIE_NAME = "droplet_refresh";
 
 /**
- * Auth middleware — validates JWT access tokens, with Nextcloud OCS fallback.
+ * Auth middleware — validates JWT access tokens and service-principal bearers.
  *
  * Token resolution order:
  *   1. `Authorization: Bearer <jwt>`        (API clients — JWT preferred)
- *   2. `droplet_session` HTTP-only cookie   (browser sessions — JWT or legacy Nextcloud token)
+ *   2. `droplet_session` HTTP-only cookie   (browser sessions — JWT)
  *
- * JWT tokens are self-verifying (no Redis/Nextcloud call needed).
- * Legacy Nextcloud tokens fall through to OCS validation with Redis cache.
+ * JWT tokens are self-verifying (no Nextcloud call). Anything else — including
+ * a Nextcloud credential or app-password — is a 401 (WARP-2994).
  */
+/**
+ * The session JWT the git CLI carries in a Basic credential's second slot
+ * (`<any name>:<jwt>`), or null when the header does not decode. It is a
+ * TOKEN — the same JWT the Bearer path verifies — never a password; nothing
+ * here hashes or stores a secret that is not already the session's own.
+ */
+function gitBasicSessionToken(b64: string): string | null {
+  try {
+    const decoded = Buffer.from(b64.trim(), "base64").toString("utf8");
+    const colon = decoded.indexOf(":");
+    if (colon < 0) return null;
+    const token = decoded.slice(colon + 1);
+    return token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
+  // WARP-2804 — false unless the session record is confirmed live below.
+  req.sessionChecked = false;
   if (!config.AUTH_ENABLED) {
     req.user = { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
     next();
@@ -221,10 +214,32 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // Resolve token: cookie first, then Authorization header
   const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
   const authHeader = req.headers.authorization;
-  const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  // WARP-2896 — the git smart-HTTP transport (`/api/git/<repo>.git/*`) is
+  // driven by the git CLI, which speaks HTTP Basic only: the credential's
+  // second slot carries the person's session JWT (what git would call a
+  // personal access token). The Basic form is accepted ON THAT PREFIX ALONE
+  // — everywhere else a Basic header stays what it always was, no credential
+  // — and the value is then the same JWT the Bearer path verifies.
+  const gitBasicToken =
+    authHeader?.startsWith("Basic ") && req.path.startsWith("/api/git/")
+      ? gitBasicSessionToken(authHeader.slice(6))
+      : null;
+  const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : gitBasicToken;
   const token = cookieToken || headerToken;
 
+  // WARP-2900 — an extension's bearer is a header credential and nothing
+  // else. In a cookie it is refused outright, before any other token path
+  // sees it.
+  if (cookieToken?.startsWith(EXTENSION_TOKEN_PREFIX)) {
+    res.status(401).json({ error: "Missing or invalid authentication" });
+    return;
+  }
+
   if (!token) {
+    if (req.path.startsWith("/api/git/")) {
+      // The challenge the git CLI needs before it will ask for credentials.
+      res.setHeader("WWW-Authenticate", 'Basic realm="Droplet workshop"');
+    }
     res.status(401).json({ error: "Missing or invalid authentication" });
     return;
   }
@@ -243,6 +258,31 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       next();
       return;
     }
+  }
+
+  // WARP-2900 (ADR-056 slice H3) — a promoted extension calling back. Its
+  // `dxt_` bearer is minted per process start and stored only as a sha256 on
+  // its Extension row, so the lookup is by that hash (a unique column; the
+  // plaintext never reaches the database). It resolves to the
+  // `_service:ext:<slug>` principal, which extension-principal-guard.ts
+  // confines to the extension's own routes. A `dxt_` bearer that does not
+  // resolve is a 401 HERE: it never falls through to the JWT path. The
+  // lookup reads its own Prisma binding (services/extension-principal.ts).
+  if (headerToken?.startsWith(EXTENSION_TOKEN_PREFIX)) {
+    void resolveExtensionPrincipal(headerToken)
+      .then((principal) => {
+        if (!principal) {
+          res.status(401).json({ error: "Missing or invalid authentication" });
+          return;
+        }
+        req.user = principal;
+        next();
+      })
+      .catch((err) => {
+        logger.error({ err }, "Extension bearer lookup failed");
+        res.status(500).json({ error: "Authentication service error" });
+      });
+    return;
   }
 
   // Try JWT first — self-verifying signature, no network call. WARP-247:
@@ -311,6 +351,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
           // valid ≤15-min credential and a cache restart must not brick
           // every route (same availability posture as
           // requirePasswordChangeGate). session.service already logged it.
+          // WARP-2804 — only "ok" CONFIRMED the sign-in is live.
+          req.sessionChecked = result.kind === "ok";
           req.user = user;
           next();
           return;
@@ -335,37 +377,20 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
-  // Fallback: validate against Nextcloud OCS (legacy tokens)
-  validateNextcloudTokenDetailed(token)
-    .then((result) => {
-      if (result.kind === "ok") {
-        req.user = result.user;
-        next();
-        return;
-      }
-      if (cookieToken) {
-        res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
-      }
-      // WARP-485 — surface a distinct structured error for "OCS token
-      // is valid, but no local User row maps to it" so the dashboard
-      // can prompt the operator to add the user via /api/people
-      // instead of treating it as a generic auth failure. Same 401
-      // status code (no privilege change) — just a code field clients
-      // can branch on.
-      if (result.kind === "user-not-provisioned") {
-        res.status(401).json({
-          error:
-            "User not provisioned. Ask an owner to add this account via /api/people.",
-          code: "USER_NOT_PROVISIONED",
-        });
-        return;
-      }
-      res.status(401).json({ error: "Invalid or expired token" });
-    })
-    .catch((err) => {
-      logger.error({ err }, "Token validation failed");
-      res.status(500).json({ error: "Authentication service error" });
-    });
+  // WARP-2994 — nothing else authenticates. The Nextcloud-credential
+  // fallback that used to live here (any non-JWT token forwarded to NC's
+  // OCS /cloud/user, `basic:<b64 user:pass>` as HTTP Basic) let a password
+  // or an NC app-password open a session without TOTP and without the
+  // /auth/login brute-force throttle (WARP-579). No shipped client used it
+  // (dashboard, iOS, Android, Windows, mcp-server and every service send a
+  // JWT or a SERVICE_TOKEN_*), so it is gone rather than narrowed: refusing
+  // only `basic:` would still accept an app-password minted from that same
+  // password. Password + TOTP + throttle (/auth/login), SSO and WebAuthn
+  // are the only ways in.
+  if (cookieToken) {
+    res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+  }
+  res.status(401).json({ error: "Invalid or expired token" });
 }
 
 /**
@@ -376,6 +401,8 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
   if (!token) return null;
+  // WARP-2900 — an extension never opens a WebSocket.
+  if (token.startsWith(EXTENSION_TOKEN_PREFIX)) return null;
 
   // Try JWT first. WARP-247: a sid-carrying token must also present a live
   // session record — a WS upgrade is user activity, so the default sliding
@@ -398,187 +425,8 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     };
   }
 
-  // Fallback to Nextcloud
-  return validateNextcloudToken(token);
-}
-
-/**
- * WARP-485 — discriminated return so the middleware can distinguish
- * "OCS token is valid but no local User row maps to it" (the fail-
- * closed branch) from "OCS rejected the token outright". Same 401
- * status either way; clients (and tests) branch on the `code` field
- * we render in the response body.
- */
-type OcsValidationResult =
-  | { kind: "ok"; user: AuthUser }
-  | { kind: "invalid" } // OCS rejected the token (bad creds, meta.status !== ok, network fail)
-  | { kind: "user-not-provisioned" }; // OCS accepted, no matching local User row
-
-/**
- * Validate a token against Nextcloud OCS API with Redis cache.
- * Returns a user with default "family" role (Nextcloud doesn't have role claims).
- *
- * WARP-485 — `req.user.id` shape contract across the JWT vs OCS paths:
- *
- *   • JWT path (`verifyAccessToken` above): `req.user.id = jwtPayload.sub`,
- *     which is the local `User.id` UUID. This is the source of truth.
- *
- *   • OCS path (this function, pre-WARP-485): `req.user.id = ocs.data.id`,
- *     which is the **Nextcloud username string** (e.g. `stefan-cruceru`),
- *     NOT a UUID. That mismatch silently broke WARP-480's self-action guard
- *     (`req.params.id === req.user?.id` on /api/people/:id mutations) under
- *     OCS auth — the comparison always returned false-negative, so an owner
- *     authenticated via the OCS fallback could DELETE themselves and lock
- *     the household out of every owner-only route.
- *
- *   • OCS path (WARP-485 fix): lookup `User` by `nextcloudUsername`, set
- *     `req.user.id = localUser.id`. Fail-closed with 401 `USER_NOT_PROVISIONED`
- *     when no matching User row exists — silent auto-provision would be a
- *     privilege-escalation vector (an attacker who somehow holds a valid
- *     OCS token for an unrelated NC user could otherwise mint a local row).
- *     `req.user.username` keeps the Nextcloud username for display, and
- *     `req.user.role` is resolved by `resolveNcSessionRole` — the OCS
- *     groups CAPPED at the local row's `User.role` (WARP-1636; before
- *     that cap the groups alone decided, and Nextcloud's built-in
- *     `admin` group mapped straight to `owner`). The JWT path's role
- *     takes precedence when a JWT is present.
- *
- * Downstream invariant: every `req.user.id` consumer (people self-action
- * guard, camera pins, /auth/me, brain-memory ownership checks, etc.) may
- * assume the value is a local User UUID regardless of auth path.
- */
-async function validateNextcloudTokenDetailed(
-  token: string,
-): Promise<OcsValidationResult> {
-  const cacheKey = TOKEN_CACHE_PREFIX + hashToken(token);
-
-  // The Redis cache stores fully-normalised AuthUser rows (already
-  // post-WARP-485 lookup). On hit we still return { kind: "ok", user }
-  // so the discriminator stays consistent end-to-end.
-  const cached = await cacheGet<AuthUser>(cacheKey);
-  if (cached) {
-    // ADR-013 (SCIM): the cached AuthUser was normalised at write time, but a
-    // directory deactivation (active:false / DELETE → DEACTIVATED, soft) can
-    // land while the entry is still warm. Without this re-check a deactivated
-    // user keeps passing auth for up to TOKEN_CACHE_TTL. Re-validate the soft
-    // status on every hit via an indexed single-column select on the primary
-    // key (cheap; no full-row fetch), and purge the stale entry on rejection.
-    // Mirrors the DEACTIVATED gate /auth/login, SSO, and WebAuthn enforce.
-    if (authPrisma) {
-      const row = await authPrisma.user.findUnique({
-        where: { id: cached.id },
-        select: { directoryStatus: true },
-      });
-      if (!row || row.directoryStatus === "DEACTIVATED") {
-        await cacheDel(cacheKey);
-        return { kind: "invalid" };
-      }
-      return { kind: "ok", user: cached };
-    }
-    // authPrisma not wired yet — treat as a cache miss so the DEACTIVATED
-    // re-check cannot be silently skipped; fall through to the live lookup.
-  }
-
-  try {
-    const url = `${config.NEXTCLOUD_URL}/ocs/v1.php/cloud/user`;
-    const authHeaderValue = token.startsWith("basic:")
-      ? `Basic ${token.slice(6)}`
-      : `Bearer ${token}`;
-    const resp = await fetch(url, {
-      headers: {
-        Authorization: authHeaderValue,
-        "OCS-APIRequest": "true",
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(OCS_VALIDATION_TIMEOUT_MS),
-    });
-
-    if (!resp.ok) return { kind: "invalid" };
-
-    const data = await resp.json();
-    const ocs = data?.ocs;
-    if (ocs?.meta?.status !== "ok") return { kind: "invalid" };
-
-    const groups: string[] = ocs.data.groups || [];
-    const ncUsername: string = ocs.data.id;
-
-    // WARP-485 — normalize req.user.id to the local User.id UUID so
-    // downstream consumers (people self-action guard, camera pins,
-    // /auth/me, etc.) get the same shape regardless of which path
-    // populated the session. Fail-closed when prisma isn't wired or
-    // when no local row matches — silent auto-provision would be a
-    // privilege-escalation vector (an attacker holding a valid OCS
-    // token for an unrelated NC user could otherwise mint a local
-    // row with the default `family` role).
-    if (!authPrisma) {
-      logger.warn(
-        { ncUsername },
-        "OCS auth: Prisma not initialised; refusing to populate req.user (WARP-485 fail-closed)",
-      );
-      return { kind: "user-not-provisioned" };
-    }
-    const localUser = await authPrisma.user.findUnique({
-      where: { nextcloudUsername: ncUsername },
-    });
-    if (!localUser) {
-      logger.warn(
-        { ncUsername },
-        "OCS auth: no local User row for Nextcloud user; operator must provision via /api/people",
-      );
-      return { kind: "user-not-provisioned" };
-    }
-    // ADR-013 (SCIM): a directory-deactivated row must be denied here too — and,
-    // critically, must NOT be written to the token cache below (a cached entry
-    // would otherwise survive for TOKEN_CACHE_TTL even after offboarding). Mirror
-    // the DEACTIVATED gate at webauthn.ts:397 / the /auth/login + SSO paths.
-    if (localUser.directoryStatus === "DEACTIVATED") {
-      logger.warn(
-        { ncUsername, userId: localUser.id },
-        "OCS auth: directory user is deactivated; rejecting token (ADR-013)",
-      );
-      return { kind: "invalid" };
-    }
-
-    const user: AuthUser = {
-      id: localUser.id,
-      username: ncUsername,
-      displayName: ocs.data["display-name"] || ncUsername,
-      // WARP-1636 — CAP the group-derived role at the role Droplet's own
-      // store holds. `roleFromGroups(groups)` alone read Nextcloud's
-      // built-in `admin` group back as `owner`, so a deliberately-narrowed
-      // admin (or anyone an NC administrator added to that group) could
-      // mint the one tier ADR-032 §3 says bypasses layer 2. `localUser` is
-      // already in hand from the WARP-485 lookup above, so the authority is
-      // free — see resolveNcSessionRole for the full rail.
-      role: resolveNcSessionRole(groups, localUser.role),
-    };
-
-    await cacheSet(cacheKey, user, TOKEN_CACHE_TTL);
-    return { kind: "ok", user };
-  } catch (err) {
-    logger.warn({ err }, "Failed to reach Nextcloud for token validation");
-    return { kind: "invalid" };
-  }
-}
-
-/**
- * Validate a Nextcloud OCS token and return the normalized AuthUser,
- * or null if the token is invalid OR the OCS user has no matching
- * local User row. Thin wrapper around `validateNextcloudTokenDetailed`
- * for the WebSocket-upgrade path (which has no way to surface a
- * structured error code — it just rejects the upgrade).
- */
-async function validateNextcloudToken(
-  token: string,
-): Promise<AuthUser | null> {
-  const result = await validateNextcloudTokenDetailed(token);
-  return result.kind === "ok" ? result.user : null;
-}
-
-function hashToken(token: string): string {
-  // Full SHA-256 output — a truncated hash would allow cache collisions that
-  // could return the wrong user's identity (serious auth bypass).
-  return createHash("sha256").update(token).digest("hex");
+  // WARP-2994 — no Nextcloud-credential fallback (see authMiddleware).
+  return null;
 }
 
 /**
@@ -705,6 +553,11 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
     // the panel's reach ever needs to be BOUNDED rather than described, that is
     // a per-route guard on the routes themselves, not an edit to this comment.
     //
+    // WARP-2981 (ADR-059 P6) adds a THIRD, display.py again: GET
+    // /api/panel/security, the Security count for band A. Pinned to this
+    // principal by id like join-code, and to it ALONE — no person may call it
+    // (routes/panel-security.ts says why).
+    //
     // Same token as the orchestrator → oled-display leg (WARP-165); compose
     // already gives both ends the value, so this adds a direction, not a
     // secret. The panel needs the household join code because its old source
@@ -765,8 +618,7 @@ export function recordAccessDenied(req: Request, reason: string): void {
 /**
  * WARP-171: per-route RBAC guard. Mounts after `authMiddleware`; assumes
  * `req.user.role` is populated by the upstream middleware (either from
- * a verified JWT, a matched service principal, or the Nextcloud OCS
- * fallback). Returns 403 — NOT 401 — when:
+ * a verified JWT or a matched service principal). Returns 403 — NOT 401 — when:
  *
  *   - `req.user` is absent (defense in depth; the upstream middleware
  *     should have already issued 401, but a misordered router would

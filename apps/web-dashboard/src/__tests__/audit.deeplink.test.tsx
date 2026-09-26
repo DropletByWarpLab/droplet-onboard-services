@@ -18,9 +18,11 @@ import React from "react";
 
 // ── next/navigation — the page reads ?kind= via useSearchParams. ──
 let mockSearchParamsString = "";
+// WARP-2925 — one shared spy, so the forwarding case can assert on it.
+const routerReplaceMock = vi.fn();
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(mockSearchParamsString),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: routerReplaceMock }),
   usePathname: () => "/admin/audit",
 }));
 
@@ -69,6 +71,7 @@ function jsonResponse(body: unknown) {
 
 beforeEach(() => {
   mockSearchParamsString = "";
+  routerReplaceMock.mockReset();
   authFetchMock.mockReset();
   authFetchMock.mockImplementation(async (url: string) => {
     if (url.includes("/api/activity/verify")) {
@@ -125,5 +128,34 @@ describe("/admin/audit ?kind= deep-link (WARP-1058)", () => {
       name: "Voice",
     }) as HTMLOptionElement;
     expect(option.value).toBe("voice");
+  });
+});
+
+describe("/admin/audit ?run= deep-link forwards to Workshop (WARP-2925)", () => {
+  it("?run=<id> replaces the location with /workshop?run=<id>", async () => {
+    mockSearchParamsString = "run=run-42";
+    render(<AuditPage />);
+    await waitFor(() => {
+      expect(routerReplaceMock).toHaveBeenCalledWith("/workshop?run=run-42");
+    });
+  });
+
+  it("encodes the id, so a crafted value cannot add its own query", async () => {
+    mockSearchParamsString = "run=a%26kind%3Dvoice";
+    render(<AuditPage />);
+    await waitFor(() => {
+      expect(routerReplaceMock).toHaveBeenCalledWith("/workshop?run=a%26kind%3Dvoice");
+    });
+  });
+
+  it("without ?run= it stays put and never asks for background runs", async () => {
+    render(<AuditPage />);
+    await firstListFetchUrl();
+    expect(routerReplaceMock).not.toHaveBeenCalled();
+    // The panel is gone from this page; its list fetch must be gone with it.
+    expect(
+      authFetchMock.mock.calls.some((c) => typeof c[0] === "string" && (c[0] as string).startsWith("/api/agent-runs")),
+    ).toBe(false);
+    expect(screen.getByRole("link", { name: "Workshop" })).toHaveAttribute("href", "/workshop");
   });
 });

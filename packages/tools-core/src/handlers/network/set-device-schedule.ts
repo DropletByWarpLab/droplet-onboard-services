@@ -434,7 +434,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "set_device_schedule",
   description:
-    "Manage a device's internet schedule (parental controls). The device's internet is blocked during " +
+    "Manage a device's internet schedule (access hours). The device's internet is blocked during " +
     "each weekly window and allowed at all other times. operation 'list' reads the current schedule " +
     "(no confirmation); 'set' creates or wholesale-replaces the device's schedule with the given " +
     "windows; 'clear' removes it. Windows take day names (monday..sunday) plus 24-hour HH:MM start/end; " +

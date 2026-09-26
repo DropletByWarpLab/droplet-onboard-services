@@ -252,4 +252,18 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   "set_wifi_password",
   "list_vpn_peers",
   "apply_update",
+  // WARP-2896 (ADR-056 §6.2) — the workshop's workspace tools. POLICY, and
+  // structural too: each refuses without a run id and a workspace id, which
+  // only the run worker forwards (`_meta`). A chat turn has neither, so the
+  // model would be offered eight tools that can only answer "not a workshop
+  // run". The worker admits them to a WORKSPACE-BOUND run's pool by itself
+  // (agent-run-worker WORKSPACE_TOOLS); this list keeps them out of chat.
+  "workspace_read",
+  "workspace_search",
+  "workspace_diff",
+  "workspace_log",
+  "workspace_write",
+  "workspace_commit",
+  "workspace_run",
+  "workspace_propose",
 ]);

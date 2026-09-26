@@ -156,7 +156,7 @@ def resolve_vad_config() -> dict[str, float]:
 # Compose passes WAKE_THRESHOLD through as "" when unset — treat empty
 # the same as absent (resolve_wake_threshold does too). Falls back to
 # the engine-agnostic DEFAULT_THRESHOLD: before build_detector_from_env
-# runs the detector type is unknowable, and reporting the Vosk 0.7 on a
+# runs the detector type is unknowable, and reporting the Vosk 0.85 on a
 # box that would resolve to openWakeWord (live gate 0.3) sends an
 # operator down the wrong path. resolve_wake_threshold owns the real,
 # engine-aware value once the pipeline exists.

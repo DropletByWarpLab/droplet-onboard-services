@@ -21,7 +21,7 @@
  * assertions rather than being a second, unchecked seam.
  */
 import { describe, it, expect } from "vitest";
-import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
+import { TOOL_DOMAINS } from "@droplet/tools-core";
 import type { ModuleId } from "@prisma/client";
 import {
   ROLE_TEMPLATES,
@@ -39,6 +39,7 @@ import {
   domainsForFeatures,
   tierReachableDomains,
 } from "./access-catalog.js";
+import { populatedDomains, toolLayers } from "./tool-layers.service.js";
 import { ASSIGNABLE_ROLES } from "./role-mutation-guard.service.js";
 import { MODULE_REQUIRES, satisfiedModuleIds } from "../modules/module-registry.js";
 
@@ -219,19 +220,16 @@ describe("access-role-templates — the resolver keeps what the template grants"
    * DOMAIN_GROUPS. A grant for one is dead config — it stores a row the roles
    * list then advertises as reach that no tool can ever satisfy.
    *
-   * The tier check above catches it only for family and guest, because those
-   * tiers derive reach FROM THE CATALOG while owner/admin get
-   * `new Set(TOOL_DOMAINS)` — the declared list, empty keys included. So an
-   * admin-based template granting an emptied domain passes there and is caught
-   * only here. That asymmetry is exactly how `crm` reached stage in three
-   * templates and `pm` in two.
-   *
-   * Stated against the catalog rather than a hardcoded list, so the day a
-   * domain is emptied every template holding it goes red in that commit —
-   * the third occurrence of this class (WARP-2583 found the emptied `pm`
-   * still granted by the dashboard's Projects row).
+   * WARP-2897 computes "holds tools" from BOTH layers through the same
+   * `populatedDomains` helper reachability uses (tool-layers.service.ts), so
+   * a domain populated only by a runtime tool counts, and a domain emptied by
+   * an extension's disable stops counting in the same derivation. It also
+   * moved owner/admin reach onto populated domains, so the tier check above
+   * now catches an emptied domain for admin-based templates too — the
+   * asymmetry that let `crm` reach stage in three templates is gone, and this
+   * spec is the second, independent statement of it.
    */
-  const DOMAINS_WITH_TOOLS = new Set<string>(TOOL_CATALOG.map((entry) => entry.domain));
+  const DOMAINS_WITH_TOOLS = populatedDomains(toolLayers());
 
   it.each(PAYLOADS)("%s grants no tool domain that holds zero tools", (_id, payload) => {
     for (const g of payload.toolGrants) {
@@ -243,9 +241,42 @@ describe("access-role-templates — the resolver keeps what the template grants"
   });
 
   /**
+   * WARP-2897 — the same two checks over an INJECTED runtime layer, because
+   * the shipped templates can only ever exercise the compiled one.
+   *
+   * An admin-based template granting a domain whose only tools are runtime
+   * tools is fine while they are attached, and must be flagged BY BOTH CHECKS
+   * the moment the extension (or remote server) is disabled.
+   *
+   * MUTATION 1 (the ticket's): restore `return new Set<string>(TOOL_DOMAINS)`
+   * for owner/admin in `tierReachableDomains` -> the tier check stops
+   * flagging the emptied `pm` and this goes red.
+   */
+  describe("an extension domain emptied by disable is flagged for admin templates", () => {
+    const adminFixture = (domain: string) => ({ startingPoint: "admin" as const, toolGrants: [{ domain }] });
+    const attached = (domain: string) =>
+      toolLayers([{ name: `ext__${domain}_tool`, domain, requiresWrite: true, source: "runtime:ext" }]);
+
+    it.each(["pm", "ext-bookings"])("%s: reachable and populated while attached", (domain) => {
+      const t = adminFixture(domain);
+      const layers = attached(domain);
+      expect(tierReachableDomains(t.startingPoint, layers).has(domain)).toBe(true);
+      expect(populatedDomains(layers).has(domain)).toBe(true);
+    });
+
+    it.each(["pm", "ext-bookings"])("%s: unreachable AND empty once disabled", (domain) => {
+      const t = adminFixture(domain);
+      const disabled = toolLayers([]);
+      expect(tierReachableDomains(t.startingPoint, disabled).has(domain), "tier check").toBe(false);
+      expect(populatedDomains(disabled).has(domain), "populated check").toBe(false);
+    });
+  });
+
+  /**
    * `domainsForFeatures` is the feature intersection: a CLAIMED domain passes
-   * only when its owning module is held, and every UNCLAIMED domain passes
-   * unconditionally (see the unclaimed-domain spec below).
+   * only when its owning module is held, a domain declared in
+   * FEATURE_UNGATED_TOOL_DOMAINS passes unconditionally, and anything else is
+   * denied (WARP-2742 — see the ungated-domain spec below).
    */
   it.each(PAYLOADS)("%s grants only tool domains its features reach", (_id, payload) => {
     const featureIds = new Set<ModuleId>(payload.featureGrants.map((g) => g.moduleId));
@@ -258,30 +289,36 @@ describe("access-role-templates — the resolver keeps what the template grants"
   });
 
   /**
-   * What is actually true about the unclaimed domains, stated rather than
-   * assumed — because four templates lean on it.
+   * What is actually true about the feature-ungated domains, stated rather
+   * than assumed — because several templates lean on it.
    *
-   * `money`, `business`, `data` and `system` are NOT module-gated: no module
-   * declares them in `toolDomains`, so `domainsForFeatures` passes them for
-   * ANY feature set, including the empty one. (`money` is the surprising one:
-   * the Money MODULE exists and is feature-gated, but it claims no tool
-   * domain — WARP-2581 kept `money_list_open_documents` out of the chat pool
-   * — so the `money` tool domain rides the other axes only.)
+   * `data` and `system` are declared FEATURE-UNGATED
+   * (access-catalog.ts FEATURE_UNGATED_TOOL_DOMAINS), so `domainsForFeatures`
+   * passes them for ANY feature set, including the empty one. Granting them is
+   * a real grant on the tool axis, but it is NOT narrowed by the feature
+   * grants, so the templates must not treat a feature grant as the thing that
+   * authorises them.
    *
-   * The consequence for this catalogue: granting those domains is a real
-   * grant on the tool axis (the role's grant set is still an intersection
-   * term), but it is NOT narrowed by the feature grants, so the templates
-   * must not treat a feature grant as the thing that authorises them.
+   * `business` is NOT among them either (WARP-2988): it is claimed by `crm`
+   * AND `projects` and passes when either is held.
+   *
+   * `money` is NOT among them any more (WARP-2742): the Money module claims
+   * the domain, so the Bookkeeper-shaped templates that grant the `money`
+   * tool domain also have to grant the Money feature, and the per-template
+   * "features reach" spec above holds them to it.
    */
-  it("the unclaimed domains this catalogue relies on pass with no features at all", () => {
+  it("the ungated domains this catalogue relies on pass with no features at all", () => {
     const noFeatures = domainsForFeatures(new Set<ModuleId>());
-    for (const domain of ["money", "business", "data", "system"]) {
-      expect(noFeatures.has(domain), `${domain} should be unclaimed`).toBe(true);
+    for (const domain of ["data", "system"]) {
+      expect(noFeatures.has(domain), `${domain} should be feature-ungated`).toBe(true);
     }
     // …and a claimed domain does not, which is what makes the above a real
     // distinction rather than "domainsForFeatures returns everything".
     expect(noFeatures.has("files")).toBe(false);
     expect(noFeatures.has("crm")).toBe(false);
+    expect(noFeatures.has("money")).toBe(false);
+    // WARP-2988 — `business` needs CRM or Projects.
+    expect(noFeatures.has("business")).toBe(false);
   });
 });
 

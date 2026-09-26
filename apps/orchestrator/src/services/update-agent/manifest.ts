@@ -52,7 +52,16 @@ export type UpdateFailureReason =
   | "schema_invalid"
   | "schema_downgrade"
   | "schema_unsupported"
-  | "orchestrator_schema_unsupported";
+  | "orchestrator_schema_unsupported"
+  // WARP-2900 (ADR-056 slice H1): the extension-statement verifier
+  // (extension-verify.ts). A usage mismatch is never reported as
+  // signature_failed: "the right key signed the wrong kind of thing" and
+  // "nobody we trust signed this" are different operator stories.
+  | "extension_kind_missing"
+  | "key_usage_mismatch"
+  | "extension_key_changed"
+  | "extension_schema_invalid"
+  | "extension_digest_mismatch";
 
 export type ManifestFailureReason = Extract<
   UpdateFailureReason,
@@ -119,6 +128,39 @@ const manifestSchema = z.object({
   }),
 });
 
+/**
+ * WARP-2898 (ADR-056 slice K1): the release/extension discriminator.
+ *
+ * `manifestSchema` is a non-strict zod object, so an unknown key is STRIPPED,
+ * not refused: a document carrying `kind: "extension"` beside release-shaped
+ * fields would otherwise parse as a release and could ride the apply path,
+ * which the apply_update LLM tool can trigger (WARP-1450). A release manifest
+ * may therefore carry `kind` only as the literal "release", and never a
+ * key-usage field (`usage`, or `keyUsage` as the extension statement spells
+ * it, extension-manifest.ts). Checked before the version gates: a
+ * non-release document is refused as what it is, whatever its version.
+ */
+const EXTENSION_SIGNING_FIELDS = ["usage", "keyUsage"] as const;
+
+function nonReleaseKindDetail(doc: Record<string, unknown>): string | null {
+  // A document with NO `kind` passes on purpose, for back-compat: no
+  // published release.json carries one (gen-release-manifest.py does not
+  // emit it), so requiring it would refuse every release already on every
+  // channel. The fence refuses a wrong kind, never a missing one. Requiring
+  // `kind: "release"` waits until the generator emits it and every channel's
+  // latest release carries it; then this parser and the fleet-agent port
+  // (release_verify.py) tighten together.
+  if (Object.prototype.hasOwnProperty.call(doc, "kind") && doc.kind !== "release") {
+    return `kind ${JSON.stringify(doc.kind)} is not a release — an extension document never parses as a release manifest`;
+  }
+  for (const field of EXTENSION_SIGNING_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(doc, field)) {
+      return `${field} is an extension-signing field — a release manifest never carries one`;
+    }
+  }
+  return null;
+}
+
 export type ReleaseManifest = z.infer<typeof manifestSchema>;
 export type ReleaseService = ReleaseManifest["services"][number];
 export type ReleaseServiceHealthcheck = ReleaseService["healthcheck"];
@@ -152,6 +194,12 @@ export function parseReleaseManifest(raw: string | Buffer): ManifestParseResult 
       failureReason: "malformed_manifest",
       detail: "release.json must be a JSON object",
     };
+  }
+
+  // Kind first (WARP-2898): an extension document is refused as one.
+  const kindDetail = nonReleaseKindDetail(doc as Record<string, unknown>);
+  if (kindDetail !== null) {
+    return { ok: false, failureReason: "schema_invalid", detail: kindDetail };
   }
 
   // Version gates BEFORE full shape validation: a downgraded/newer

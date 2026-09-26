@@ -18,7 +18,18 @@
    scoped under it so nothing leaks into the violet dashboard.
    ============================================================ */
 
-.droplet-shell {
+/* WARP-2971: `.droplet-workspace` (the Workspace navigation layout) shares
+   this ramp — it is a second SCOPE for the same tokens, not a second ramp.
+   Only the custom properties are shared; the descendant-scoped primitives
+   in droplet-shell.css stay `.droplet-shell`-only.
+
+   WARP-2976: `.dept-switcher` (the ADR-059 department switcher) is a third
+   scope, for the same reason. It renders at the top of the desktop sidebar,
+   which sits above every page scope, so without its own scope the ramp would
+   not resolve there. Tokens only, like `.droplet-workspace`. */
+.droplet-shell,
+.droplet-workspace,
+.dept-switcher {
   /* ── Indigo identity — LIGHT (default) ─────────────────── */
   --bg: #f5f6fb;
   --surface: #ffffff;
@@ -38,8 +49,20 @@
      `--color-on-accent` in globals.css, and `.dark .dh-edit-toggle.on` in
      home-bento.css. Never hardcode #fff on a --brand fill. WARP-1358. */
   --on-brand: #ffffff;
+  /* The primary button's fill (`.btn.primary`), one rung below --brand in
+     light. White on --brand #6366f1 is 4.47:1 — a hair under 4.5:1 for the
+     13.5px label — while white on indigo-600 #4f46e5 is 6.29:1. Its hover
+     is --brand-deep (indigo-700 #4338ca, 7.90:1). --brand itself is
+     untouched: it also paints tints, meters, tabs, chips and switches.
+     Same step globals.css takes for the tokenised primary button's fill. */
+  --brand-fill: #4f46e5;
   --success: #16a34a;
   --danger: #b91c1c;
+  /* Red for TEXT (an inline problem line), never a fill. --danger is the fill
+     token and its dark value (#7f1d1d) reads ~1.8:1 as text on the dark card;
+     this pair is .badge.danger's ramp: 6.5:1 on white, 9.5:1 on the dark
+     --card-bg. WARP-2980. */
+  --danger-ink: #b91c1c;
   --user-bubble: #dbe4ff;
   --user-bubble-text: #1c3a5e;
 
@@ -84,7 +107,9 @@
   font-family: var(--font-ui);
 }
 
-.dark .droplet-shell {
+.dark .droplet-shell,
+.dark .droplet-workspace,
+.dark .dept-switcher {
   /* ── Indigo identity — DARK (the original handoff ramp) ── */
   --bg: #0f1117;
   --surface: #1a1d27;
@@ -97,8 +122,10 @@
   --brand-soft: #a5b4fc;
   --brand-deep: #4f46e5;
   --on-brand: #1d1d1f;     /* dark ink — 5.64:1 on #818cf8 (white is 2.98:1) */
+  --brand-fill: #818cf8;   /* = dark --brand: the dark pair already clears AA */
   --success: #22c55e;
   --danger: #7f1d1d;
+  --danger-ink: #fca5a5;
   --user-bubble: #1e3a5f;
   --user-bubble-text: #dbe7f8;
 

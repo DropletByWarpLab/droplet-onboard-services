@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } 
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
 import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
+import { createHash } from "node:crypto";
+import http, { type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { Readable } from "node:stream";
 
 // Mock the ai-gateway client.
 vi.mock("../services/ai-gateway.client.js", () => ({
@@ -46,9 +50,14 @@ vi.mock("../services/nextcloud.client.js", async () => {
   return {
     // Re-export the real error class so handleFileError's instanceof check works
     NextcloudOcsError: actual.NextcloudOcsError,
+    NcPreconditionFailedError: actual.NcPreconditionFailedError,
     // File CRUD
     ncListFiles: vi.fn(),
     ncUploadFile: vi.fn(),
+    // WARP-2093 streamed-upload staging
+    ncStageUpload: vi.fn(),
+    ncCommitUpload: vi.fn(),
+    ncDiscardUpload: vi.fn(),
     ncDownloadFile: vi.fn(),
     ncDeleteFile: vi.fn(),
     ncCreateDirectory: vi.fn(),
@@ -74,11 +83,16 @@ vi.mock("../services/nextcloud.client.js", async () => {
     ncUpdateShare: vi.fn(),
     ncDeleteShare: vi.fn(),
     ncListSharedWithMe: vi.fn(),
+    // WARP-3052 — shares-by-me / shared-by-me degrade coverage
+    ncListOutboundShares: vi.fn(),
+    ncListMyShares: vi.fn(),
+    ncGetShare: vi.fn(),
     ncGetUserQuota: vi.fn(),
   };
 });
 
 import { createApp } from "../app.js";
+import { config } from "../config.js";
 import * as nc from "../services/nextcloud.client.js";
 import { initDeviceService } from "../services/device.service.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
@@ -95,6 +109,16 @@ type Mocked<T extends (...a: any[]) => any> = T & ReturnType<typeof vi.fn>;
 const ncMock = nc as unknown as {
   [K in keyof typeof nc]: Mocked<any>;
 };
+
+// WARP-2093: bytes each staged upload received, keyed by uploadId. The stage
+// mock DRAINS the stream the route hands it — exactly what the real streamed
+// PUT does — so what lands here is what Nextcloud would have received.
+const staged = new Map<string, Buffer>();
+async function drainStage(_t: string, _u: string, uploadId: string, body: AsyncIterable<Buffer>) {
+  const chunks: Buffer[] = [];
+  for await (const c of body) chunks.push(c);
+  staged.set(uploadId, Buffer.concat(chunks));
+}
 
 describe("File Operations (Nextcloud-backed routes)", () => {
   let app: ReturnType<typeof createApp>;
@@ -134,7 +158,11 @@ describe("File Operations (Nextcloud-backed routes)", () => {
     }
     // Default each mutation to succeed so tests only have to override failures.
     ncMock.ncCreateDirectory.mockResolvedValue(undefined);
-    ncMock.ncUploadFile.mockResolvedValue(undefined);
+    ncMock.ncUploadFile.mockResolvedValue("created");
+    staged.clear();
+    ncMock.ncStageUpload.mockImplementation(drainStage);
+    ncMock.ncCommitUpload.mockResolvedValue("created");
+    ncMock.ncDiscardUpload.mockResolvedValue(undefined);
     ncMock.ncDeleteFile.mockResolvedValue(undefined);
     ncMock.ncMoveFile.mockResolvedValue(undefined);
     ncMock.ncCopyFile.mockResolvedValue(undefined);
@@ -154,6 +182,8 @@ describe("File Operations (Nextcloud-backed routes)", () => {
     ncMock.ncSearchFiles.mockResolvedValue([]);
     ncMock.ncListSharedWithMe.mockResolvedValue([]);
     ncMock.ncListShares.mockResolvedValue([]);
+    ncMock.ncListOutboundShares.mockResolvedValue([]);
+    ncMock.ncListMyShares.mockResolvedValue([]);
 
     ncMock.ncGetFileId.mockResolvedValue(42);
   });
@@ -262,6 +292,42 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       expect(res.body).toEqual({ shares: [] });
     });
 
+    // WARP-3052 — every degraded 200 carries X-Droplet-Degraded so clients can
+    // tell an outage from a genuinely empty result; a healthy empty never does.
+    const degradedRoutes = [
+      { url: "/api/files?path=/", fn: "ncListFiles", empty: [] },
+      { url: "/api/files/trash", fn: "ncListTrash", empty: { items: [] } },
+      { url: "/api/files/favorites", fn: "ncListFavorites", empty: { items: [] } },
+      { url: "/api/files/recents", fn: "ncListRecents", empty: { items: [] } },
+      { url: "/api/files/shared-with-me", fn: "ncListSharedWithMe", empty: { shares: [] } },
+      { url: "/api/files/shares-by-me", fn: "ncListOutboundShares", empty: { shares: [] } },
+      { url: "/api/files/shared-by-me", fn: "ncListMyShares", empty: { shares: [] } },
+    ] as const;
+    const outages = [
+      ["upstream unreachable", () => fetchFailed()],
+      ["OCS 5xx", () => {
+        const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+        return new NextcloudOcsError("OCS failed (503)", 503);
+      }],
+    ] as const;
+
+    describe.each(degradedRoutes)("X-Droplet-Degraded on $url (WARP-3052)", ({ url, fn, empty }) => {
+      it.each(outages)("set on %s", async (_label, makeErr) => {
+        (ncMock as any)[fn].mockRejectedValue(makeErr());
+        const res = await request(app).get(url);
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual(empty);
+        expect(res.headers["x-droplet-degraded"]).toBe("nextcloud-unavailable");
+      });
+
+      it("absent on a healthy empty result", async () => {
+        const res = await request(app).get(url);
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual(empty);
+        expect(res.headers["x-droplet-degraded"]).toBeUndefined();
+      });
+    });
+
     it("does NOT degrade a real (non-connectivity) error — a 403 still surfaces, not a 200 empty list", async () => {
       // A WebDAV 403 is a genuine authorization failure, not "Nextcloud is
       // down" — it must keep its non-degraded behavior (untyped → 500),
@@ -300,6 +366,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files?path=/");
       expect(res.status).toBe(403);
       expect(res.body).not.toEqual([]);
+      expect(res.headers["x-droplet-degraded"]).toBeUndefined();
     });
   });
 
@@ -370,13 +437,19 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       expect(res.body.uploaded).toHaveLength(1);
       expect(res.body.uploaded[0].name).toBe("hello.txt");
       expect(res.body.uploaded[0].path).toBe("/hello.txt");
-      expect(ncMock.ncUploadFile).toHaveBeenCalledWith(
+      expect(res.body.uploaded[0].status).toBe("uploaded");
+      // WARP-2093: staged (streamed) then committed under the requested
+      // name, never replacing (`overwrite` false by default).
+      const uploadId = ncMock.ncStageUpload.mock.calls[0][2];
+      expect(staged.get(uploadId)?.toString()).toBe("hello");
+      expect(ncMock.ncCommitUpload).toHaveBeenCalledWith(
         expect.any(String),
         "dev",
-        "/",
-        "hello.txt",
-        expect.any(Buffer)
+        uploadId,
+        "/hello.txt",
+        false,
       );
+      expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
     });
 
     it("uploads multiple files", async () => {
@@ -389,7 +462,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       expect(res.body.uploaded).toHaveLength(2);
       expect(res.body.uploaded[0].path).toBe("/docs/a.txt");
       expect(res.body.uploaded[1].path).toBe("/docs/b.txt");
-      expect(ncMock.ncUploadFile).toHaveBeenCalledTimes(2);
+      expect(ncMock.ncCommitUpload).toHaveBeenCalledTimes(2);
     });
 
     it("returns 400 when no files are attached", async () => {
@@ -414,7 +487,12 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         `Too many files (max ${MAX_FILES_PER_UPLOAD} per upload)`,
       );
       expect(res.body.error).not.toMatch(/field name/i);
-      expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+      // WARP-2093: the parts before the over-count one were already staged;
+      // the failed request commits none and discards every one of them.
+      expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
+      expect(ncMock.ncDiscardUpload).toHaveBeenCalledTimes(
+        ncMock.ncStageUpload.mock.calls.length,
+      );
     });
 
     it("still reports a genuinely misnamed field as a field-name error", async () => {
@@ -425,7 +503,8 @@ describe("File Operations (Nextcloud-backed routes)", () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('Unexpected field name (use "files")');
-      expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+      expect(ncMock.ncStageUpload).not.toHaveBeenCalled();
+      expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
     });
 
     it("accepts a full batch of exactly MAX_FILES_PER_UPLOAD files", async () => {
@@ -437,7 +516,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.uploaded).toHaveLength(MAX_FILES_PER_UPLOAD);
-      expect(ncMock.ncUploadFile).toHaveBeenCalledTimes(MAX_FILES_PER_UPLOAD);
+      expect(ncMock.ncCommitUpload).toHaveBeenCalledTimes(MAX_FILES_PER_UPLOAD);
     });
 
     // WARP-1271 (T19a) — per-user upload cap (UserUsagePolicy.maxUploadSizeMb).
@@ -474,7 +553,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.bin");
         expect(res.status).toBe(413);
         expect(res.body.error).toMatch(/1MB/);
-        expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+        expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
       });
 
       // WARP-1912 — the dashboard's translator never echoes `error` prose
@@ -578,7 +657,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
             .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.bin");
           expect(res.status).toBe(413);
           expect(res.body.error).toMatch(/1MB/);
-          expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+          expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
         });
 
         it("a person row whose upload field is UNSET still inherits the role cap (field-by-field)", async () => {
@@ -633,6 +712,258 @@ describe("File Operations (Nextcloud-backed routes)", () => {
             .attach("files", Buffer.alloc(1024, 1), "small.bin");
           expect(res.status).toBe(200);
         });
+      });
+    });
+
+    // ── WARP-2093: streamed transport ──
+    describe("streamed transport (WARP-2093)", () => {
+      // A multipart body generated on the fly — the test never holds the
+      // file in memory either, so any growth measured is the server's.
+      function multipartBody(boundary: string, filename: string, bytes: number, chunk = 1 << 20) {
+        const head = Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="${filename}"\r\n` +
+            `Content-Type: application/octet-stream\r\n\r\n`,
+        );
+        const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+        const block = Buffer.alloc(chunk, 0x61);
+        return Readable.from(
+          (function* () {
+            yield head;
+            for (let sent = 0; sent < bytes; sent += chunk) {
+              yield sent + chunk <= bytes ? block : block.subarray(0, bytes - sent);
+            }
+            yield tail;
+          })(),
+        );
+      }
+
+      function post(server: Server, path: string, boundary: string) {
+        const { port } = server.address() as AddressInfo;
+        return http.request({
+          host: "127.0.0.1",
+          port,
+          path,
+          method: "POST",
+          headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+        });
+      }
+
+      let server: Server;
+      beforeAll(() => {
+        server = app.listen(0);
+      });
+      afterAll(() => {
+        server.close();
+      });
+
+      it("streams a 256 MB upload with bounded memory — the part is never buffered whole", async () => {
+        const MB = 1 << 20;
+        const size = 256 * MB;
+        const prevCap = config.MAX_UPLOAD_SIZE_MB;
+        (config as { MAX_UPLOAD_SIZE_MB: number }).MAX_UPLOAD_SIZE_MB = 512;
+        // Drain like the real PUT does, retaining nothing but a hash.
+        let received = 0;
+        const hash = createHash("sha256");
+        ncMock.ncStageUpload.mockImplementation(async (_t: string, _u: string, _id: string, body: AsyncIterable<Buffer>) => {
+          for await (const c of body) {
+            received += c.length;
+            hash.update(c);
+          }
+        });
+        const baseline = process.memoryUsage();
+        let peak = 0;
+        const sampler = setInterval(() => {
+          const m = process.memoryUsage();
+          peak = Math.max(peak, m.heapUsed + m.arrayBuffers - baseline.heapUsed - baseline.arrayBuffers);
+        }, 5);
+        try {
+          const status = await new Promise<number>((resolve, reject) => {
+            const req = post(server, "/api/files/upload?path=/", "b2093");
+            req.on("response", (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            });
+            req.on("error", reject);
+            multipartBody("b2093", "big.bin", size).pipe(req);
+          });
+          expect(status).toBe(200);
+        } finally {
+          clearInterval(sampler);
+          (config as { MAX_UPLOAD_SIZE_MB: number }).MAX_UPLOAD_SIZE_MB = prevCap;
+        }
+        expect(received).toBe(size);
+        expect(hash.digest("hex")).toBe(
+          createHash("sha256").update(Buffer.alloc(size, 0x61)).digest("hex"),
+        );
+        // Buffering the part whole holds >= 256 MB (measured ~500 MB with a
+        // buffer-then-PUT mutant); streaming measured 20-80 MB of GC-timing
+        // noise. Half the file size separates the two with room both ways.
+        expect(peak).toBeLessThan(size / 2);
+      }, 60_000);
+
+      it("a client abort mid-stream discards the staged upload and commits nothing", async () => {
+        let stageSettled: "complete" | "errored" | undefined;
+        ncMock.ncStageUpload.mockImplementation(async (_t: string, _u: string, _id: string, body: AsyncIterable<Buffer>) => {
+          try {
+            for await (const _c of body) {
+              /* drain */
+            }
+            stageSettled = "complete";
+          } catch (err) {
+            stageSettled = "errored";
+            throw err;
+          }
+        });
+        const req = post(server, "/api/files/upload?path=/", "abort2093");
+        req.on("error", () => undefined);
+        req.write(
+          `--abort2093\r\nContent-Disposition: form-data; name="files"; filename="half.bin"\r\n\r\n`,
+        );
+        req.write(Buffer.alloc(1 << 20, 0x62));
+        await vi.waitFor(() => expect(ncMock.ncStageUpload).toHaveBeenCalled());
+        req.destroy();
+        await vi.waitFor(() => expect(ncMock.ncDiscardUpload).toHaveBeenCalled(), { timeout: 3000 });
+        expect(stageSettled).toBe("errored");
+        expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
+      });
+    });
+
+    it("an over-cap part fails its staging PUT (never ends it cleanly) and discards the whole batch", async () => {
+      (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({ maxUploadSizeMb: 1 });
+      const outcomes: string[] = [];
+      ncMock.ncStageUpload.mockImplementation(async (_t: string, _u: string, _id: string, body: AsyncIterable<Buffer>) => {
+        try {
+          for await (const _c of body) {
+            /* drain */
+          }
+          outcomes.push("complete");
+        } catch (err) {
+          outcomes.push("errored");
+          throw err;
+        }
+      });
+      const res = await request(app)
+        .post("/api/files/upload?path=/")
+        .attach("files", Buffer.from("small"), "ok.txt")
+        .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.bin");
+      expect(res.status).toBe(413);
+      expect(res.body.code).toBe("UPLOAD_TOO_LARGE");
+      // The first part staged fine, the over-cap one was cut off with an
+      // error — a truncated part must never finish its PUT as if complete.
+      expect(outcomes).toEqual(["complete", "errored"]);
+      expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
+      const stagedIds = ncMock.ncStageUpload.mock.calls.map((c: unknown[]) => c[2]);
+      for (const id of stagedIds) expect(ncMock.ncDiscardUpload).toHaveBeenCalledWith(expect.any(String), "dev", id);
+    });
+
+    // ── WARP-2096: same-name handling + content hash ──
+    describe("same-name and duplicate handling (WARP-2096)", () => {
+      beforeEach(() => {
+        prismaMock.file = {
+          upsert: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+        };
+      });
+      afterEach(() => {
+        delete prismaMock.file;
+      });
+
+      it("a taken name keeps both: committed as 'name (1).ext', reported as renamed — never replaced", async () => {
+        ncMock.ncCommitUpload
+          .mockRejectedValueOnce(new nc.NcPreconditionFailedError())
+          .mockResolvedValueOnce("created");
+        const res = await request(app)
+          .post("/api/files/upload?path=/docs")
+          .attach("files", Buffer.from("v2"), "report.pdf");
+        expect(res.status).toBe(200);
+        expect(res.body.uploaded[0]).toMatchObject({
+          name: "report (1).pdf",
+          path: "/docs/report (1).pdf",
+          status: "renamed",
+          requestedName: "report.pdf",
+        });
+        const calls = ncMock.ncCommitUpload.mock.calls;
+        expect(calls.map((c: unknown[]) => c[3])).toEqual(["/docs/report.pdf", "/docs/report (1).pdf"]);
+        // Both attempts refuse to overwrite.
+        expect(calls.every((c: unknown[]) => c[4] === false)).toBe(true);
+        expect(ncMock.ncDiscardUpload).not.toHaveBeenCalled();
+      });
+
+      it("?overwrite=true is the explicit opt-in to replace, and says so", async () => {
+        ncMock.ncCommitUpload.mockResolvedValueOnce("replaced");
+        const res = await request(app)
+          .post("/api/files/upload?path=/&overwrite=true")
+          .attach("files", Buffer.from("v2"), "report.pdf");
+        expect(res.status).toBe(200);
+        expect(res.body.uploaded[0]).toMatchObject({ name: "report.pdf", status: "replaced" });
+        expect(ncMock.ncCommitUpload).toHaveBeenCalledWith(
+          expect.any(String),
+          "dev",
+          expect.any(String),
+          "/report.pdf",
+          true,
+        );
+      });
+
+      it("records the SHA-256 computed while streaming, and the size, on the registry row", async () => {
+        const bytes = Buffer.from("the quarterly numbers");
+        await request(app).post("/api/files/upload?path=/").attach("files", bytes, "q.txt");
+        expect(prismaMock.file.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            create: expect.objectContaining({
+              ncFileId: 42,
+              path: "/q.txt",
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              sizeBytes: bytes.length,
+            }),
+          }),
+        );
+      });
+
+      it("same bytes already in the caller's space → duplicateOf names the live copy (upload kept)", async () => {
+        const bytes = Buffer.from("same bytes");
+        prismaMock.file.findMany.mockResolvedValueOnce([{ ncFileId: 7, path: "/old/copy.txt" }]);
+        ncMock.ncGetFileId.mockImplementation(async (_t: string, _u: string, p: string) =>
+          p === "/old/copy.txt" ? 7 : 42,
+        );
+        const res = await request(app).post("/api/files/upload?path=/").attach("files", bytes, "new.txt");
+        expect(res.status).toBe(200);
+        expect(res.body.uploaded[0]).toMatchObject({
+          name: "new.txt",
+          status: "uploaded",
+          duplicateOf: "/old/copy.txt",
+        });
+        expect(ncMock.ncCommitUpload).toHaveBeenCalledTimes(1);
+        // Scoped to this owner + this space, excluding the file just written.
+        expect(prismaMock.file.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              departmentId: null,
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              NOT: { ncFileId: 42 },
+            }),
+          }),
+        );
+      });
+
+      it("a stale registry row (file since deleted or moved) is not reported as a duplicate", async () => {
+        prismaMock.file.findMany.mockResolvedValueOnce([{ ncFileId: 7, path: "/gone.txt" }]);
+        ncMock.ncGetFileId.mockImplementation(async (_t: string, _u: string, p: string) =>
+          p === "/gone.txt" ? null : 42,
+        );
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .attach("files", Buffer.from("x"), "x.txt");
+        expect(res.body.uploaded[0].duplicateOf).toBeUndefined();
+      });
+
+      it("a production-shaped JSON write past body-parser's 100 kb default reaches the route (5 MB)", async () => {
+        const bytes = Buffer.alloc(5 * 1024 * 1024, 7);
+        const res = await request(app)
+          .post("/api/files/upload")
+          .send({ dir: "/", filename: "big.bin", contentBase64: bytes.toString("base64") });
+        expect(res.status).toBe(200);
+        expect(res.body.uploaded[0]).toMatchObject({ name: "big.bin", status: "uploaded", size: bytes.length });
       });
     });
   });
@@ -1105,7 +1436,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
   });
 
   describe("Thumbnail", () => {
-    it("GET /api/files/thumbnail streams bytes with Cache-Control", async () => {
+    it("GET /api/files/thumbnail streams bytes, no-store (WARP-3097)", async () => {
       const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
       ncMock.ncFetchThumbnail.mockResolvedValue({
         body: body.buffer,
@@ -1115,7 +1446,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files/thumbnail?path=/pixel.png");
       expect(res.status).toBe(200);
       expect(res.headers["content-type"]).toContain("image/png");
-      expect(res.headers["cache-control"]).toContain("max-age=3600");
+      expect(res.headers["cache-control"]).toBe("no-store");
     });
 
     it("GET /api/files/thumbnail returns 404 when preview is unavailable", async () => {

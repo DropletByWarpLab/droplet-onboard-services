@@ -115,7 +115,7 @@ function MotifRecap({ health }: { health: SystemHealthStatus | null }) {
     [Wifi, "Wi-Fi"],
     [Globe, "Internet address"],
     [HardDrive, "Drives"],
-    [Lightbulb, "Smart devices"],
+    [Lightbulb, "Device control"],
     [Camera, "Cameras"],
     [ShieldCheck, "Remote access"],
     [Sparkles, "Private AI"],
@@ -213,7 +213,13 @@ function MotifFiles({ files }: { files: FileEntryInfo[] | null }) {
 function MotifAi({ modelName }: { modelName: string | null }) {
   return (
     <div className="flex w-full flex-col gap-2.5 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
-      <div className="max-w-[78%] self-end rounded-[12px_12px_4px_12px] bg-accent px-3.5 py-2 type-footnote text-on-accent">
+      {/* Footnote-size text, so WCAG 1.4.3's 4.5:1 normal-text floor
+          applies: `--color-on-accent` ink (via `text-accent-foreground`,
+          tailwind.config.ts `accent.foreground`) on `bg-accent-fill` —
+          6.29:1 light, 5.64:1 dark. The "on-accent" text class this used
+          to carry is not a utility Tailwind generates, so the bubble's
+          label fell through to body text (#000 on #4f46e5 = 3.34:1). */}
+      <div className="max-w-[78%] self-end rounded-[12px_12px_4px_12px] bg-accent-fill px-3.5 py-2 type-footnote text-accent-foreground">
         What can you help me with on this box?
       </div>
       <div className="max-w-[85%] self-start rounded-[12px_12px_12px_4px] border border-separator bg-surface-primary px-3.5 py-2">

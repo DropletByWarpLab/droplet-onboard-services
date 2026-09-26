@@ -14,14 +14,15 @@
  * the pinned `_service:mcp` principal the way the scenes routes do — that is
  * how the `start_agent_run` / `list_agent_runs` tools reach here from chat.
  * The mcp principal never acts as ITSELF: it names the chat user it acts for
- * (`onBehalfOf`, a username — the same stdio-trusted identity `_meta.userId`
- * already carries, WARP-202), and that person's role is checked here exactly
- * as a browser caller's is. A run is attributed to that person, whose reach
- * the worker re-resolves at every claim (WARP-1580), so delegation through
- * the model cannot launder privilege: a `family` member cannot start a run
- * from chat, and an `admin` who could gets a run that reaches only what they
- * reach. A person sees only their own runs; another person's run is a 404,
- * a wrong role is a 403.
+ * (`onBehalfOf` or `X-Nextcloud-User`, both the mcp-server's `ctx.userId`:
+ * `User.username` on stdio, `User.id` over HTTP — WARP-202, WARP-3098),
+ * resolved to one active person or refused, and that person's role is
+ * checked here exactly as a browser caller's is. A run is attributed to that
+ * person, whose reach the worker re-resolves at every claim (WARP-1580), so
+ * delegation through the model cannot launder privilege: a `family` member
+ * cannot start a run from chat, and an `admin` who could gets a run that
+ * reaches only what they reach. A person sees only their own runs; another
+ * person's run is a 404, a wrong role is a 403.
  *
  * WHAT IT DOES NOT DO. The worker owns every state transition
  * (agent-run-worker.service.ts); this file only enqueues, reads, and hands
@@ -33,12 +34,14 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { resolveActiveModel } from "../services/active-model.service.js";
 import {
   recordAccessDenied,
   requireRoleOrMcpService,
   type AuthUser,
 } from "../middleware/auth.js";
 import {
+  ACTIVE_AGENT_RUN_STATUSES,
   cancelAgentRun,
   decideAgentRun,
   enqueueAgentRun,
@@ -47,6 +50,9 @@ import {
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { summarizeToolArguments } from "../services/confirmation-summary.js";
+import { WORKSPACE_ID } from "../services/workspace.service.js";
+import { decideCloudTurn } from "../services/cloud-access.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   isSupportedRrule,
   isSupportedTimezone,
@@ -56,11 +62,20 @@ import {
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 
+/** Prisma's unique-constraint failure (`P2002`), without importing the class
+ *  — the unit suites stub the client, and a structural check is what a raw
+ *  `Prisma.PrismaClientKnownRequestError` satisfies too. */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
+}
+
 const startRunSchema = z.object({
   goal: z.string().trim().min(1).max(4000),
   model: z.string().trim().min(1).max(200).optional(),
   sessionId: z.string().trim().min(1).max(200).optional(),
   maxIter: z.coerce.number().int().positive().optional(),
+  /** WARP-2896 — a WORKSHOP run: bound to this workspace for its whole life. */
+  workspaceId: z.string().regex(WORKSPACE_ID).optional(),
   /** Username the mcp principal acts for. Ignored for everyone else. */
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
 });
@@ -72,6 +87,8 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   /** Opaque: `<createdAt ISO>|<id>` of the previous page's tail row. */
   cursor: z.string().min(1).max(300).optional(),
+  /** WARP-2896 — only the runs that worked in this workspace. */
+  workspaceId: z.string().regex(WORKSPACE_ID).optional(),
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
 });
 
@@ -114,11 +131,12 @@ async function resolveActor(
     const header = req.header("x-nextcloud-user");
     const named = onBehalfOf ?? (header && header.trim().length > 0 ? header.trim() : undefined);
     if (!named) return null;
-    const row = (await prisma.user.findFirst({
-      where: { username: named },
-      select: { id: true, username: true, role: true },
-    })) as Actor | null;
-    return row;
+    // WARP-3098: either value is `User.username` (stdio) or `User.id` (HTTP).
+    // Nobody, more than one person, or a deactivated person is nobody.
+    const resolved = await resolveAssertedUser(prisma, named);
+    if (!resolved.ok) return null;
+    const { id, username, role } = resolved.user;
+    return { id, username, role };
   }
   return { id: user.id, username: user.username, role: user.role };
 }
@@ -141,9 +159,18 @@ function encodeCursor(row: { createdAt: Date; id: string }): string {
   return `${row.createdAt.toISOString()}|${row.id}`;
 }
 
-function defaultModel(): string | null {
-  const m = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
-  return m.length > 0 ? m : null;
+/**
+ * WARP-3047 — a run with no explicit `model` runs on the box's ACTIVE model
+ * (tools-capable: an active model that states it cannot call tools falls back
+ * to LLM_MODEL), not env DEFAULT_MODEL/LLM_MODEL — on DMR a run on another
+ * model than chat is a second model competing for one GPU. A run resolves it
+ * when QUEUED (`AgentRun.model` is non-null; a run is claimed seconds later).
+ * A schedule with no model is stored `followsActiveModel` and the ticker
+ * resolves it again at every FIRE (agent-run-schedule-ticker.service.ts), so
+ * a switch reaches it; the value resolved here is only its fallback.
+ */
+function defaultModel(prisma: PrismaClient): Promise<string | null> {
+  return resolveActiveModel(prisma, { requireTools: true });
 }
 
 interface RunRow {
@@ -172,6 +199,10 @@ interface RunRow {
   parkedAt: Date | null;
   pendingDecision: string | null;
   pendingDecidedAt: Date | null;
+  workspaceId: string | null;
+  cloudGate: string;
+  offLanProvider: string | null;
+  offLanWithheldTools: string[];
 }
 
 function serializeRun(r: RunRow, withTrace: boolean) {
@@ -197,6 +228,12 @@ function serializeRun(r: RunRow, withTrace: boolean) {
     result: r.result,
     stopReason: r.stopReason,
     error: r.error,
+    // WARP-2896 — the workshop workspace, for the run list and the run page.
+    workspaceId: r.workspaceId,
+    // WARP-2997 — where the model ran, and what it was not given.
+    cloudGate: r.cloudGate,
+    offLanProvider: r.offLanProvider,
+    offLanWithheldTools: r.offLanWithheldTools ?? [],
     // WARP-2179 — the parked call with its provenance, for the confirm
     // surface: tool, a PHI-free argument summary, the raw args (the caller
     // is the run's owner), and when it parked. Meaningful ONLY while the run
@@ -244,6 +281,10 @@ const RUN_SELECT = {
   parkedAt: true,
   pendingDecision: true,
   pendingDecidedAt: true,
+  workspaceId: true,
+  cloudGate: true,
+  offLanProvider: true,
+  offLanWithheldTools: true,
 } as const;
 
 export function createAgentRunsRouter(prisma: PrismaClient): Router {
@@ -272,6 +313,19 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
     return actor;
   }
 
+  /**
+   * WARP-2997 — refuse a cloud model the person may not use up front, with
+   * chat's own 451/503 body and no row written. A courtesy, not the gate:
+   * the worker asks again at every claim, which is what holds for schedules
+   * and for any caller that enqueues without coming through here.
+   */
+  async function cloudAllowedOr451(res: Response, actor: Actor, model: string): Promise<boolean> {
+    const decision = await decideCloudTurn({ user: { id: actor.id, role: actor.role }, model });
+    if (decision.kind === "allowed") return true;
+    res.status(decision.status).json(decision.body);
+    return false;
+  }
+
   router.post("/agent-runs", gate, async (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = startRunSchema.safeParse(req.body);
@@ -281,18 +335,61 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
-      const model = parsed.data.model ?? defaultModel();
+      const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
-        res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
+        res.status(400).json({ error: "model is required (no active model is installed and LLM_MODEL is not set)" });
         return;
       }
-      const { id } = await enqueueAgentRun(prisma, {
-        userId: actor.id,
-        goal: parsed.data.goal,
-        model,
-        sessionId: parsed.data.sessionId ?? null,
-        maxIter: parsed.data.maxIter,
-      });
+      if (!(await cloudAllowedOr451(res, actor, model))) return;
+      // WARP-2896 — a workshop run needs a workspace that exists, is still
+      // active (a proposed one is read-only until reviewed) and has no other
+      // run working in it: two runs on one checkout would commit over each
+      // other. The binding is set once, here, and never changed. The count
+      // below is the friendly answer; the DURABLE guard is the partial unique
+      // index `AgentRun_workspaceId_active_key` (one active run per
+      // workspace), whose P2002 the create maps onto the same 409 when two
+      // starts race past the count.
+      if (parsed.data.workspaceId) {
+        const ws = await prisma.workshopWorkspace.findUnique({
+          where: { id: parsed.data.workspaceId },
+          select: { id: true, status: true },
+        });
+        if (!ws) {
+          res.status(404).json({ error: "No such workspace" });
+          return;
+        }
+        if (ws.status !== "active") {
+          res.status(409).json({ error: `workspace is ${ws.status}; start a new one to keep working` });
+          return;
+        }
+        const busy = await prisma.agentRun.count({
+          where: { workspaceId: ws.id, status: { in: [...ACTIVE_AGENT_RUN_STATUSES] } },
+        });
+        if (busy > 0) {
+          res.status(409).json({ error: "A run is already working in this workspace" });
+          return;
+        }
+      }
+      let id: string;
+      try {
+        ({ id } = await enqueueAgentRun(prisma, {
+          userId: actor.id,
+          goal: parsed.data.goal,
+          model,
+          sessionId: parsed.data.sessionId ?? null,
+          maxIter: parsed.data.maxIter,
+          workspaceId: parsed.data.workspaceId ?? null,
+        }));
+      } catch (err) {
+        // The only unique constraint a workshop run's create can trip is the
+        // one-active-run-per-workspace index: the row's own id is a fresh
+        // cuid. So a P2002 here IS the race the count above could not see.
+        if (parsed.data.workspaceId && isUniqueViolation(err)) {
+          res.status(409).json({ error: "A run is already working in this workspace" });
+          return;
+        }
+        throw err;
+      }
       await recordActivity({
         kind: "tool_run",
         severity: "info",
@@ -300,9 +397,14 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         what: "Agent run queued",
         sub: parsed.data.goal.length > 120 ? `${parsed.data.goal.slice(0, 117)}…` : parsed.data.goal,
         actor: actorFromRequest(req),
-        refs: { agentRunId: id, userId: actor.username, status: "queued" },
+        refs: {
+          agentRunId: id,
+          userId: actor.username,
+          status: "queued",
+          ...(parsed.data.workspaceId ? { workspaceId: parsed.data.workspaceId } : {}),
+        },
       });
-      res.status(201).json({ id, status: "queued" });
+      res.status(201).json({ id, status: "queued", workspaceId: parsed.data.workspaceId ?? null });
     } catch (err) {
       next(err);
     }
@@ -317,7 +419,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
-      const { status, limit, cursor } = parsed.data;
+      const { status, limit, cursor, workspaceId } = parsed.data;
       const after = cursor ? parseCursor(cursor) : null;
       if (cursor && !after) {
         res.status(400).json({ error: "Invalid cursor" });
@@ -327,6 +429,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         where: {
           userId: actor.id,
           ...(status ? { status } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
           ...(after
             ? {
                 OR: [
@@ -363,6 +466,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         id: string;
         goal: string;
         model: string;
+        followsActiveModel: boolean;
         maxIter: number;
         rrule: string;
         timezone: string;
@@ -376,6 +480,9 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           id: s.id,
           goal: s.goal,
           model: s.model,
+          // WARP-3047 — additive: true = runs on whatever model is active
+          // when it fires; `model` is then only the creation-time fallback.
+          followsActiveModel: s.followsActiveModel === true,
           maxIter: s.maxIter,
           rrule: s.rrule,
           timezone: s.timezone,
@@ -411,11 +518,16 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "Invalid timezone" });
         return;
       }
-      const model = parsed.data.model ?? defaultModel();
+      // WARP-3047 — no `model` = the schedule FOLLOWS the active model: the
+      // ticker resolves it at every fire. `model` still stores today's
+      // answer, as the fallback when nothing resolves at fire.
+      const followsActiveModel = parsed.data.model === undefined;
+      const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
-        res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
+        res.status(400).json({ error: "model is required (no active model is installed and LLM_MODEL is not set)" });
         return;
       }
+      if (!(await cloudAllowedOr451(res, actor, model))) return;
       const now = new Date();
       const nextFireAt = nextFireFromRrule(parsed.data.rrule, now, timezone);
       if (nextFireAt === null) {
@@ -430,6 +542,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           userId: actor.id,
           goal: parsed.data.goal,
           model,
+          followsActiveModel,
           maxIter: Math.max(1, Math.min(parsed.data.maxIter ?? cap, cap)),
           rrule: parsed.data.rrule,
           timezone,

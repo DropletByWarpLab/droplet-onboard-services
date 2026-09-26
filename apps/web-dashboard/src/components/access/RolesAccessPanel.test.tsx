@@ -23,6 +23,7 @@ const restoreAccessRoleMock = vi.fn();
 const assignAccessRoleMock = vi.fn();
 const listRoleTemplatesMock = vi.fn();
 const createRoleFromTemplateMock = vi.fn();
+const listAccessToolDomainsMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   listAccessRoles: (...a: any[]) => listAccessRolesMock(...a),
@@ -38,6 +39,8 @@ vi.mock("@/lib/api", () => ({
   // so the mock moves with the component's imports.
   listRoleTemplates: (...a: any[]) => listRoleTemplatesMock(...a),
   createRoleFromTemplate: (...a: any[]) => createRoleFromTemplateMock(...a),
+  // WARP-2897 — the builder's Extensions rows come from here.
+  listAccessToolDomains: (...a: any[]) => listAccessToolDomainsMock(...a),
 }));
 
 vi.mock("framer-motion", async () => {
@@ -173,6 +176,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   listAccessRolesMock.mockResolvedValue({ roles: [role()] });
   listRoleTemplatesMock.mockResolvedValue(TEMPLATES);
+  listAccessToolDomainsMock.mockResolvedValue({ compiled: [], runtime: [] });
 });
 
 afterEach(() => {
@@ -849,7 +853,10 @@ describe("WARP-2738 — the template gallery", () => {
     await waitFor(() => expect(screen.getByText(ACCESS_COPY.emptyRoles)).toBeInTheDocument());
     // The gallery is present…
     expect(await screen.findByTestId("access-template-gallery")).toBeInTheDocument();
-    expect(screen.getByText("Front Desk")).toBeInTheDocument();
+    // WARP-2756: the gallery section renders while its own templates read is
+    // still loading (skeletons), so the test-id is true one fetch too early.
+    // Wait for the card itself, not for its container.
+    expect(await screen.findByText("Front Desk")).toBeInTheDocument();
     // …and starting from nothing is still reachable, in the same card.
     expect(screen.getByRole("button", { name: /New role/ })).toBeInTheDocument();
   });
@@ -1126,5 +1133,56 @@ describe("WARP-2738 — the detail pane names the tool grants", () => {
     fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
     const detail = screen.getByTestId("access-role-detail");
     expect(within(detail).getByText(ACCESS_COPY.noToolsGranted)).toBeInTheDocument();
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains reach the builder ──────
+
+describe("WARP-2897 — the builder renders this box's runtime tool domains", () => {
+  const RUNTIME = {
+    compiled: ["files", "money"],
+    runtime: [
+      { domain: "ext-bookings", sources: ["runtime:bookings"], tools: 2, populated: true, readable: true },
+      // A compiled domain served as runtime is refused client-side too.
+      { domain: "money", sources: ["runtime:x"], tools: 1, populated: true, readable: false },
+    ],
+  };
+
+  it("New role shows one Extensions row per runtime domain, starting Off", async () => {
+    listAccessToolDomainsMock.mockResolvedValue(RUNTIME);
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    await waitFor(() => expect(listAccessToolDomainsMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "New role" }));
+    const row = await screen.findByTestId("access-tools-ext:ext-bookings");
+    expect(within(row).getByRole("button", { name: "Off" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("access-tools-ext:money")).not.toBeInTheDocument();
+  });
+
+  it("a failed tool-domains read keeps the static table (no Extensions section)", async () => {
+    listAccessToolDomainsMock.mockRejectedValue(new Error("boom"));
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "New role" }));
+    await screen.findByPlaceholderText("Name this role");
+    expect(screen.queryByTestId("access-tools-extensions")).not.toBeInTheDocument();
+  });
+
+  it("Edit badges a grant whose runtime domain is gone", async () => {
+    listAccessRolesMock.mockResolvedValue({
+      roles: [
+        role({
+          toolGrants: [
+            { domain: "files", level: "use", state: "live", deadReason: null },
+            { domain: "ext-bookings", level: "view", state: "dead", deadReason: "not_provided" },
+          ],
+        }),
+      ],
+    });
+    renderPanel();
+    await waitForRoleSelection();
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    const dead = await screen.findByTestId("access-tools-dead-ext-bookings");
+    expect(within(dead).getByText("Reaches nothing")).toBeInTheDocument();
   });
 });

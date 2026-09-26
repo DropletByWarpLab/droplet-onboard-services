@@ -31,6 +31,14 @@
 #                    On-Accent flips to #1d1d1f in dark mode, so these
 #                    are dark-mode contrast failures. Also its own PR.
 #
+#   card-outer-margin  a `.card` shipping its own `m[btxy]-N`. Page
+#                    spacing belongs to the page (`.page-inner.rhythm`,
+#                    droplet-shell.css), not to each card. Seeded from
+#                    origin/stage @ 0e492dfb (2026-09-20): 7 files,
+#                    14 hits. Clearing one means rolling its whole page
+#                    onto `<ShellPage rhythm>` in the same PR, because
+#                    the card margin and the page gap stack. WARP-2961.
+#
 # Out of scope entirely (never listed here, never scanned): the setup
 # wizard + auth routes and the components they solely own (WARP-1078),
 # and `__tests__/` + co-located `*.test.ts(x)`.
@@ -153,3 +161,11 @@ white-on-accent components/settings/BusinessProfileCard.tsx
 white-on-accent components/settings/ZoneEditor.tsx
 white-on-accent components/smart-home/RoomModal.tsx
 white-on-accent components/smart-home/RoomSections.tsx
+
+# ── card-outer-margin ──
+card-outer-margin app/cameras/[name]/recordings/page.tsx
+card-outer-margin app/files/page.tsx
+card-outer-margin app/network/page.tsx
+card-outer-margin components/events/EventFilterBar.tsx
+card-outer-margin components/events/ReviewFilterBar.tsx
+card-outer-margin components/FileManager/SelectionToolbar.tsx

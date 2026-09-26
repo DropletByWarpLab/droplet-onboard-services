@@ -83,6 +83,8 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createSsoRouter, safeReturnTo } from "./sso.js";
+import { isUserIdShaped } from "@droplet/auth-policy";
+import { authRateLimit } from "../middleware/rate-limit.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
 
 interface UserRow {
@@ -222,6 +224,11 @@ const stefan: UserRow = {
 };
 
 beforeEach(() => {
+  // The callback sits behind the shared 20/min `authRateLimit`, keyed on
+  // supertest's loopback. This file sends more callbacks than that in one
+  // run, so reset the one bucket per test (the auth.change-password.test.ts
+  // idiom); no single test comes near the budget.
+  authRateLimit.resetKey("127.0.0.1");
   vi.clearAllMocks();
   getOidcProviderConfig.mockReturnValue({
     provider: "google",
@@ -471,11 +478,35 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     expect(readUserEmail(created.email)).toBe("newhire@warp.test");
     expect(created.role).toBe("family"); // least privilege
     expect(created.passwordHash ?? null).toBeNull(); // SSO-only, can't password-login
+    expect(created.provisionSource).toBe("SSO"); // WARP-2858: explicit origin
     expect(created.isLocal).toBe(true);
     // Linked.
     expect(prisma.ssoIdentity.create).toHaveBeenCalledTimes(1);
     const session = sessionFromRes(res);
     expect(session?.role).toBe("family");
+  });
+
+  it("🔴 WARP-2911 never mints a User.id-shaped username: a UUID local-part is seeded as `sso-<uuid>`", async () => {
+    // Notifications refuse a UUID-shaped recipient (that is how a User.id in
+    // the username slot is caught), so a username with that shape would be
+    // refused every notification it is ever sent.
+    const UUID = "3B7D0195-6C1E-4F2A-9D8B-2A4C6E8F0A1B";
+    primeValidState();
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "google-sub-uuid",
+      email: `${UUID}@corp.example`,
+      emailVerified: true,
+      name: "Service Account",
+    });
+    const prisma = createPrismaMock([stefan]);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+
+    expect(res.status).toBe(302);
+    const created = prisma.user.create.mock.calls[0]![0].data;
+    expect(created.username).toBe(`sso-${UUID.toLowerCase()}`);
+    expect(isUserIdShaped(created.username)).toBe(false);
   });
 
   it("short-circuits via an existing SsoIdentity (by sub) without an email lookup", async () => {

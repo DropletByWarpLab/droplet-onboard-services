@@ -18,7 +18,9 @@ upstream being down never takes the bridge down; the display UI shows
 a "waiting for X" state instead.
 """
 
+import base64
 import datetime
+import hashlib
 import hmac
 import json
 import logging
@@ -251,7 +253,7 @@ def _orchestrator_household_wifi(timeout=4.0):
         # access point has been approved", "run --sync-secrets", …). Pass it
         # through — a generic string here would throw away the one field that
         # tells someone at the rack what to do.
-        return None, str(body.get("detail") or "no household Wi-Fi is set")
+        return None, str(body.get("detail") or "no workspace Wi-Fi is set")
 
     return {
         "ssid": ssid,
@@ -2523,6 +2525,135 @@ def uplink_ip_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# WARP-2954 / ADR-058 — the app-pairing link for the panel's rail
+# ---------------------------------------------------------------------------
+# The Droplet apps pair to a box by the box's OWN certificate key (droplet-
+# windows WARP-2953): a `droplet://pair?…spki=<pin>` link carries the
+# standard SPKI pin of the leaf the gateway serves, and the app then verifies
+# every connection against that key — no public CA, no HQ, nothing installed
+# on the phone or PC. The dashboard's pairing QR already carries it
+# (orchestrator lib/served-cert-pin.ts); the rack panel's rail is the channel
+# no network attacker can reach at all, so it shows the same key, in the
+# compact pin-only form that fits the rail's card (pair_link below).
+#
+# Runs here, on the host, because the panel container has no view of
+# docker/certs. The pin is computed with the openssl CLI over the SAME file
+# the gateway mounts, so it is byte-identical to what the orchestrator mints
+# and what the apps compute (`openssl x509 -pubkey | openssl pkey -pubin
+# -outform DER | sha256 | base64`). Cached by the file's mtime: a cert swap
+# (tls-issuance install, tls-reload) yields a new pin on the next poll.
+#
+# `server` (reported alongside, not encoded in the link) is the box's
+# default-route source address — the same address the panel prints under IP
+# and the one a phone on this LAN can reach. It doubles as the readiness
+# gate: a box with no LAN address yet has nothing a phone could pair to, so
+# the rail keeps its dashboard face until DHCP has answered.
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PAIR_CERT_PATH = os.environ.get(
+    "DROPLET_TLS_CERT", os.path.join(_REPO_ROOT, "docker", "certs", "droplet.crt")).strip()
+
+_pair_pin_cache = {"path": None, "mtime": None, "pin": None}
+
+
+def _first_pem_certificate(text):
+    """The first `-----BEGIN CERTIFICATE-----` block of a PEM bundle (the
+    leaf — an LE fullchain writes the leaf first), re-wrapped canonically.
+    None when there is none.
+
+    Canonical because openssl on stdin refuses anything but clean 64-column
+    LF lines ("Could not find certificate"), and a cert file can arrive with
+    CRLF, doubled CRs or odd wrapping after a trip through Windows tooling.
+    Only the base64 body carries the certificate, so that is all we keep."""
+    begin = text.find("-----BEGIN CERTIFICATE-----")
+    if begin < 0:
+        return None
+    body_start = begin + len("-----BEGIN CERTIFICATE-----")
+    end = text.find("-----END CERTIFICATE-----", body_start)
+    if end < 0:
+        return None
+    b64 = "".join(text[body_start:end].split())
+    if not b64:
+        return None
+    lines = [b64[i:i + 64] for i in range(0, len(b64), 64)]
+    return "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
+
+
+def served_cert_pin(cert_path=None):
+    """base64(SHA-256(DER SubjectPublicKeyInfo)) of the served leaf, or None.
+
+    Never raises: a missing/unreadable leaf, or an openssl that cannot parse
+    it, yields None and the panel simply keeps its dashboard-link face."""
+    path = cert_path or PAIR_CERT_PATH
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return None
+    c = _pair_pin_cache
+    if c["path"] == path and c["mtime"] == mtime and c["pin"]:
+        return c["pin"]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            leaf = _first_pem_certificate(fh.read())
+        if not leaf:
+            return None
+        pub = subprocess.run(
+            ["openssl", "x509", "-pubkey", "-noout"],
+            input=leaf.encode("utf-8"), capture_output=True, timeout=10, check=False)
+        if pub.returncode != 0 or not pub.stdout:
+            return None
+        der = subprocess.run(
+            ["openssl", "pkey", "-pubin", "-outform", "DER"],
+            input=pub.stdout, capture_output=True, timeout=10, check=False)
+        if der.returncode != 0 or not der.stdout:
+            return None
+        pin = base64.b64encode(hashlib.sha256(der.stdout).digest()).decode("ascii")
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("served-cert pin failed for %s: %s", path, e)
+        return None
+    _pair_pin_cache.update(path=path, mtime=mtime, pin=pin)
+    return pin
+
+
+def pair_link(pin):
+    """`droplet://pair?spki=<pin, base64url unpadded>` — the COMPACT form of
+    the link the orchestrator mints for the dashboard QR (lib/served-cert-pin.ts
+    buildPairUrl: `server=…&code=…&spki=<standard base64, URL-encoded>`).
+
+    Compact on purpose, and pin-ONLY: the rail's QR card holds a version-4
+    code at the 4px/module scan floor (layout_wide.QR_BYTE_BUDGET), which is
+    78 bytes at ECC L. The full link is ~100 bytes and cannot be scanned from
+    the glass; 63 bytes can. The box's address is deliberately not in it —
+    a phone that scanned the front of the rack is on the box's LAN, where the
+    app finds the box by mDNS (WARP-2926) and keeps the one whose served key
+    IS this pin. That also survives a DHCP address change, which a baked-in
+    address would not. base64url (`-`/`_`, no `=`) needs no URL-encoding;
+    the apps accept both encodings (droplet-windows trust.rs normalize_pin)."""
+    raw = base64.b64decode(pin)
+    return "droplet://pair?spki={}".format(
+        base64.urlsafe_b64encode(raw).decode("ascii").rstrip("="))
+
+
+def pair_qr_snapshot():
+    """{"ok": True, "server", "spki", "payload"} for the rail, or
+    {"ok": False, "error"} — honest about WHY there is nothing to show, so the
+    panel can keep its dashboard link rather than a broken QR."""
+    ip = None
+    try:
+        ip = uplink_ip_snapshot().get("uplinkIp")
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pair-qr: uplink ip probe failed: %s", e)
+    if not _usable_uplink_ip(ip):
+        return {"ok": False, "error": "no usable LAN address for the box yet"}
+    pin = served_cert_pin()
+    if not pin:
+        return {"ok": False, "error": "served certificate not readable"}
+    server = "https://{}".format(ip)
+    return {"ok": True, "server": server, "spki": pin,
+            "payload": pair_link(pin)}
+
+
+# ---------------------------------------------------------------------------
 # STUN reflexive-mapping probe (WARP-1385) — the box's own public UDP mapping
 # ---------------------------------------------------------------------------
 # The direct-punch remote-access overlay (ADR-030) needs the box to learn the
@@ -3443,6 +3574,125 @@ def run_tls_reload():
     return True, {"message": (out or "").strip() or "gateway reloaded"}
 
 
+# --- WARP-2944 (ADR-058): bootstrap-certificate refresh on address change ----
+# The self-signed bootstrap cert freezes its IP SANs at generation. When the
+# box moves (new LAN, new lease) the served cert stops naming the box's own
+# address, and every app that pinned the box's key (WARP-2953/2954) is refused
+# BY NAME while the pin is right. The host script regenerates the cert around
+# the SAME key so the SAN follows the box; this is what calls it OUTSIDE
+# setup.sh: once at boot, and whenever the uplink address it already samples
+# for the panel changes. Idempotent on the script side (a cert that names
+# every current address is untouched), rate-limited here.
+#
+# Mirrors run_tls_reload(): allow-listed shape (no args), host-script only,
+# synchronous + bounded, surfaces the script's exit honestly, never raises.
+
+TLS_BOOTSTRAP_REFRESH_SCRIPT = os.environ.get(
+    "DROPLET_TLS_BOOTSTRAP_REFRESH_SCRIPT",
+    "/usr/local/sbin/droplet-tls-bootstrap-refresh.sh").strip()
+# How often the watcher samples the uplink address. Cheap (one `ip route`
+# call), and a minute is the "heals about as fast as DHCP settles" cadence.
+TLS_REFRESH_WATCH_SECONDS = float(os.environ.get("DROPLET_TLS_REFRESH_WATCH_SECONDS", "60"))
+# Never run the host script more often than this without an address change
+# — the script is idempotent, but openssl + a possible nginx reload is not
+# free, and a flapping interface must not turn into a reload storm.
+TLS_REFRESH_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("DROPLET_TLS_REFRESH_MIN_INTERVAL_SECONDS", "600"))
+
+
+def run_tls_bootstrap_refresh():
+    """Regenerate the self-signed bootstrap cert's SAN around the same key if
+    it no longer names the box's current address. Returns (ok, info); never
+    raises — mirrors run_tls_reload()."""
+    try:
+        # openssl x2 + a possible `docker compose exec` reload.
+        rc, out, err = _run([TLS_BOOTSTRAP_REFRESH_SCRIPT], timeout=60)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("tls bootstrap refresh failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("tls bootstrap refresh refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    line = (out or "").strip().splitlines()
+    try:
+        body = json.loads(line[-1]) if line else {}
+    except ValueError:
+        body = {"message": (out or "").strip()}
+    if not isinstance(body, dict):
+        body = {"message": str(body)}
+    return True, body
+
+
+class TlsRefreshWatcher:
+    """The decision half of the watcher, pure so it is tested without threads:
+    given what the uplink looks like now, should the host script run?
+
+    Runs when (a) an address is seen for the first time since start (boot, or
+    the box just got a lease), or (b) the address CHANGED and has held for two
+    consecutive samples (a DHCP flap must not trigger twice), or (c) the
+    minimum interval has passed (a safety net for an address change the
+    sampler missed). Never runs while the box has no usable address."""
+
+    def __init__(self, min_interval=TLS_REFRESH_MIN_INTERVAL_SECONDS):
+        self.min_interval = min_interval
+        self.last_ip = None        # the address the last refresh ran for
+        self.pending_ip = None     # a new address seen once, awaiting confirmation
+        self.last_run_at = None
+
+    def decide(self, ip, now):
+        if not _usable_uplink_ip(ip):
+            self.pending_ip = None
+            return False
+        if self.last_ip is None:
+            return True
+        if ip != self.last_ip:
+            if self.pending_ip == ip:
+                return True
+            self.pending_ip = ip
+            return False
+        self.pending_ip = None
+        if self.last_run_at is None:
+            return True
+        return (now - self.last_run_at) >= self.min_interval
+
+    def ran(self, ip, now):
+        self.last_ip = ip
+        self.pending_ip = None
+        self.last_run_at = now
+
+
+def _tls_refresh_watch_loop():
+    watcher = TlsRefreshWatcher()
+    while True:
+        try:
+            ip = uplink_ip_snapshot().get("uplinkIp")
+            now = time.monotonic()
+            if watcher.decide(ip, now):
+                ok, info = run_tls_bootstrap_refresh()
+                watcher.ran(ip, now)
+                if ok and isinstance(info, dict) and info.get("changed"):
+                    logger.info("tls bootstrap refresh: certificate now names %s (pin %s)",
+                                ip, info.get("pin"))
+                elif not ok:
+                    logger.warning("tls bootstrap refresh: %s", info)
+        except Exception as e:                                          # noqa: BLE001
+            logger.debug("tls refresh watcher: %s", e)
+        time.sleep(TLS_REFRESH_WATCH_SECONDS)
+
+
+def start_tls_refresh_watcher():
+    """Daemon thread; DROPLET_TLS_REFRESH_WATCH_SECONDS=0 disables it
+    (dev laptops, the test harness)."""
+    if TLS_REFRESH_WATCH_SECONDS <= 0:
+        logger.info("tls refresh watcher disabled (DROPLET_TLS_REFRESH_WATCH_SECONDS=0)")
+        return None
+    t = threading.Thread(target=_tls_refresh_watch_loop,
+                         name="tls-refresh-watcher", daemon=True)
+    t.start()
+    return t
+
+
 # --- WARP-1639: rack-panel console handback ---------------------------------
 # THE DEBUG BUTTON'S PRIVILEGED HALF.
 #
@@ -4150,6 +4400,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, qr_snapshot())
+            if path == "/pair/qr":
+                # WARP-2954: the app-pairing link (served-cert pin) for the
+                # panel's rail, with the LAN address alongside. The pin is
+                # public (any TLS client sees the certificate) but the LAN
+                # address is box-internal topology — gate like /openwrt/qr;
+                # the panel sends the token on every GET.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, pair_qr_snapshot())
             if path == "/openwrt/wifi/guest":
                 # Guest Wi-Fi status (the body carries the guest PSK for the join
                 # QR) — auth-gated like /openwrt/qr. Only meaningful on the
@@ -4485,6 +4744,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, {"ok": False, "error": info})
             return self._send(202, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/tls/bootstrap-refresh":
+            # WARP-2944: regenerate the self-signed cert's SAN around the same
+            # key if the box's address moved. Auth-gated like /tls/reload;
+            # idempotent, so an operator (or the orchestrator's tick) may call
+            # it freely. Synchronous + bounded like the reload.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            ok, info = run_tls_bootstrap_refresh()
+            if not ok:
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/tls/reload":
             # ADR-023 (C2): reload the gateway nginx so a freshly-installed LE
             # cert is served immediately. Auth-gated exactly like the other
@@ -4678,4 +4949,7 @@ def _boot_banner():
 
 if __name__ == "__main__":
     _boot_banner()
+    # WARP-2944: heal a moved box's bootstrap certificate without waiting for
+    # a setup.sh re-run — once now, then on every uplink-address change.
+    start_tls_refresh_watcher()
     ThreadingHTTPServer((BRIDGE_BIND, BRIDGE_PORT), Handler).serve_forever()

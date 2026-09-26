@@ -219,7 +219,7 @@ function ReformatDriveCard() {
                   setSelectedUuid(e.target.value);
                   setOpError(null);
                 }}
-                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
@@ -402,7 +402,7 @@ function FactoryResetCard() {
               <div className="min-w-0">
                 <p className="type-headline" style={{ color: "var(--text)" }}>Factory reset</p>
                 <p className="type-footnote mt-1 leading-relaxed" style={{ color: "var(--text-muted)" }}>
-                  Erase every account, file, message, smart-home setup, and
+                  Erase every account, file, message, device setup, and
                   setting on this box and return it to first-run setup. This
                   cannot be undone.
                 </p>
@@ -430,7 +430,7 @@ function FactoryResetCard() {
         title="Factory reset this Droplet?"
         consequence={
           <>
-            This erases every account, file, message, smart-home setup, and
+            This erases every account, file, message, device setup, and
             setting on the box, and returns it to first-run setup. Your data
             cannot be recovered afterward. The dashboard will go offline while
             the reset runs. To confirm, type your device&rsquo;s name — you can

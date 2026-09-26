@@ -7,12 +7,97 @@ import {
   KeyRound,
   ArrowRight,
   ShieldCheck,
+  CircleAlert,
 } from "lucide-react";
 import { ONB_AUTH_FLAGS } from "./flags";
 import {
   SSO_PROVIDER_CATALOG,
   normalizeSsoProviderId,
 } from "@/lib/sso-providers";
+
+/* ─── Control styles — WARP-2973 ────────────────────────────────────
+   The login landing design (docs/design/login-landing.dc.html) sizes every
+   control in this column at 48px with an 8px radius, which is `h-12` +
+   `rounded-sm` (the dashboard's `sm` radius IS 8px — see
+   tailwind.config.ts, it is not Tailwind's default 2px).
+
+   These are local constants rather than new `dp-*` globals on purpose:
+   `dp-input` / `dp-btn-*` ship on ~70 call sites across the dashboard at
+   44px, and the auth surface is a deliberately separate visual identity
+   (WARP-1078). Resizing the shared token to suit one screen would move
+   every form in the product.
+
+   Unlike the hero, this column is TOKENS ONLY — it follows the theme. */
+const FIELD =
+  "w-full h-12 rounded-sm border border-separator bg-surface-secondary " +
+  "text-[16px] text-label-primary placeholder:text-label-tertiary " +
+  "outline-none transition-colors duration-200 ease-smooth " +
+  "hover:border-label-quaternary focus:border-accent focus:ring-2 focus:ring-accent";
+
+const BTN_PRIMARY =
+  "w-full h-12 inline-flex items-center justify-center gap-2 rounded-sm " +
+  // `bg-accent-fill`, not `bg-accent`: this is the same white-on-vivid-accent
+  // pair as `.dp-btn-primary`, which measures 4.47:1 in light mode (under AA).
+  // Hover takes `.dp-btn-primary`'s hover step, `bg-accent-fill-hover`
+  // (7.90:1 light, 8.44:1 dark). `hover:bg-accent-hover` no longer works: in
+  // light the new rest fill IS `--color-accent-hover` (both indigo-600), so
+  // it would leave this button with no visible hover feedback.
+  "bg-accent-fill text-accent-foreground text-[16px] font-semibold " +
+  "transition-all duration-200 ease-smooth hover:bg-accent-fill-hover " +
+  "active:scale-[0.97] disabled:opacity-60 disabled:pointer-events-none";
+
+const BTN_SECONDARY =
+  "w-full h-12 inline-flex items-center justify-center gap-2.5 rounded-sm " +
+  "border border-separator bg-surface-secondary text-label-primary " +
+  "text-[15px] font-medium transition-colors duration-200 ease-smooth " +
+  "hover:bg-surface-tertiary hover:border-label-quaternary active:scale-[0.97]";
+
+const LABEL = "type-footnote font-semibold text-label-primary";
+
+/** Leading glyph inside a 48px field. */
+const GLYPH =
+  "absolute left-3.5 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none";
+
+/** A thin uppercase rule. Only ever rendered when something follows it. */
+function Divider({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="flex-1 h-px bg-separator" />
+      <span className="type-caption-2 font-medium uppercase tracking-[0.14em] text-label-tertiary">
+        {label}
+      </span>
+      <span className="flex-1 h-px bg-separator" />
+    </div>
+  );
+}
+
+/**
+ * The form's error surface.
+ *
+ * The tint is a `color-mix`, not `bg-system-red/10`: every colour in
+ * tailwind.config.ts is a bare `var(--color-…)` with no `<alpha-value>`
+ * placeholder, so Tailwind drops EVERY `/NN` alpha utility built on one —
+ * silently, which is how the old alert shipped with no fill at all. Same
+ * failure mode the `accent-alpha` guard in check-dashboard-classes.sh
+ * exists for; it only polices the accent.
+ */
+function ErrorAlert({ message }: { message: string }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2.5 rounded-sm px-3.5 py-3 border border-system-red
+                 bg-[color-mix(in_srgb,var(--color-system-red)_12%,transparent)]
+                 type-footnote leading-snug text-system-red"
+    >
+      <CircleAlert
+        size={16}
+        aria-hidden="true"
+        className="flex-none mt-px"
+      />
+      <span>{message}</span>
+    </div>
+  );
+}
 
 /** A method whose backend hasn't shipped yet: visible, disabled, no-op. */
 function ComingSoon({
@@ -28,7 +113,7 @@ function ComingSoon({
       disabled
       aria-disabled="true"
       title="Coming soon"
-      className={`dp-btn-secondary w-full justify-center gap-2.5 !bg-surface-secondary !text-label-secondary border border-separator opacity-60 cursor-not-allowed ${className}`}
+      className={`${BTN_SECONDARY} !text-label-secondary opacity-60 cursor-not-allowed ${className}`}
     >
       {children}
       <span className="ml-1 type-caption-2 font-semibold uppercase tracking-wide text-label-tertiary">
@@ -69,7 +154,7 @@ function SsoProviderButton({
       ) : null}
       <button
         type="submit"
-        className="dp-btn-secondary w-full justify-center gap-2.5 !bg-surface-secondary !text-label-primary border border-separator hover:!bg-fill-secondary hover:border-label-tertiary/40"
+        className={BTN_SECONDARY}
       >
         {glyph}
         {label}
@@ -191,16 +276,12 @@ export function SignInForm({
           <div>
             <label
               htmlFor="login-recovery-code"
-              className="type-footnote font-semibold text-label-secondary block mb-1.5"
+              className={`${LABEL} block mb-2`}
             >
               Recovery code
             </label>
             <div className="relative">
-              <KeyRound
-                size={16}
-                aria-hidden="true"
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-              />
+              <KeyRound size={16} aria-hidden="true" className={GLYPH} />
               <input
                 id="login-recovery-code"
                 type="text"
@@ -210,17 +291,14 @@ export function SignInForm({
                 onChange={(e) => onRecoveryCodeChange?.(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && onSubmit()}
                 placeholder="xxxx-xxxx"
-                className="dp-input pl-10 font-mono"
+                className={`${FIELD} pl-11 pr-3.5 font-mono`}
                 autoFocus
               />
             </div>
           </div>
         ) : (
           <div>
-            <label
-              htmlFor="login-totp-code"
-              className="type-footnote font-semibold text-label-secondary block mb-1.5"
-            >
+            <label htmlFor="login-totp-code" className={`${LABEL} block mb-2`}>
               6-digit code
             </label>
             <input
@@ -236,29 +314,22 @@ export function SignInForm({
               }
               onKeyDown={(e) => e.key === "Enter" && onSubmit()}
               placeholder="123456"
-              className="dp-input text-center tracking-[0.5em] font-mono"
+              className={`${FIELD} px-3.5 text-center tracking-[0.5em] font-mono`}
               autoFocus
             />
           </div>
         )}
 
-        {error && (
-          <p
-            role="alert"
-            className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
-          >
-            {error}
-          </p>
-        )}
+        {error && <ErrorAlert message={error} />}
 
         <button
           type="button"
           onClick={onSubmit}
           disabled={submitting}
-          className="dp-btn-primary w-full mt-0.5 disabled:opacity-70"
+          className={BTN_PRIMARY}
         >
-          {submitting ? "Verifying…" : "Verify"}
-          {!submitting && <ArrowRight size={15} aria-hidden="true" />}
+          {submitting ? "Verifying" : "Verify"}
+          {!submitting && <ArrowRight size={16} aria-hidden="true" />}
         </button>
 
         <div className="flex items-center justify-between">
@@ -296,7 +367,7 @@ export function SignInForm({
   );
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       {/* SSO — local-first / SSO-optional (WARP-629). The login shows ONLY the
           identity providers this appliance has actually configured, discovered
           at runtime. No configured providers → no SSO section and no directory
@@ -316,30 +387,17 @@ export function SignInForm({
             ))}
           </div>
 
-          <div className="flex items-center gap-3 my-1">
-            <span className="flex-1 h-px bg-separator" />
-            <span className="type-caption-2 text-label-tertiary font-medium">
-              OR USE YOUR DIRECTORY ACCOUNT
-            </span>
-            <span className="flex-1 h-px bg-separator" />
-          </div>
+          <Divider label="Or use your directory account" />
         </>
       )}
 
       {/* Work email */}
       <div>
-        <label
-          htmlFor="login-email"
-          className="type-footnote font-semibold text-label-secondary block mb-1.5"
-        >
+        <label htmlFor="login-email" className={`${LABEL} block mb-2`}>
           Work email
         </label>
         <div className="relative">
-          <Mail
-            size={16}
-            aria-hidden="true"
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-          />
+          <Mail size={16} aria-hidden="true" className={GLYPH} />
           <input
             id="login-email"
             type="email"
@@ -348,7 +406,7 @@ export function SignInForm({
             onChange={(e) => onEmailChange(e.target.value)}
             placeholder="you@company.com"
             autoComplete="username"
-            className="dp-input pl-10"
+            className={`${FIELD} pl-11 pr-3.5`}
             autoFocus
           />
         </div>
@@ -356,11 +414,8 @@ export function SignInForm({
 
       {/* Password */}
       <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <label
-            htmlFor="login-password"
-            className="type-footnote font-semibold text-label-secondary"
-          >
+        <div className="flex items-center justify-between mb-2 min-h-[18px]">
+          <label htmlFor="login-password" className={LABEL}>
             Password
           </label>
           {/* Password reset isn't wired yet (see flags.ts). Until it is we
@@ -370,11 +425,10 @@ export function SignInForm({
               with the backend that makes it work. */}
         </div>
         <div className="relative">
-          <Lock
-            size={16}
-            aria-hidden="true"
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-          />
+          <Lock size={16} aria-hidden="true" className={GLYPH} />
+          {/* WARP-3135: `[&::-ms-reveal]:hidden` turns off Edge's native eye
+              (also in the Windows app, which is WebView2), which otherwise
+              sits beside the toggle below: two eyes on one field. */}
           <input
             id="login-password"
             type={showPassword ? "text" : "password"}
@@ -383,37 +437,30 @@ export function SignInForm({
             placeholder="Password"
             autoComplete="current-password"
             onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-            className="dp-input pl-10 pr-10"
+            className={`${FIELD} pl-11 pr-12 [&::-ms-reveal]:hidden`}
           />
           <button
             type="button"
             onClick={onTogglePassword}
             aria-label={showPassword ? "Hide password" : "Show password"}
             aria-pressed={showPassword}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary hover:text-label-secondary"
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 grid h-9 w-9 place-items-center rounded-sm text-label-tertiary transition-colors hover:bg-surface-tertiary hover:text-label-primary"
           >
             {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
           </button>
         </div>
       </div>
 
-      {error && (
-        <p
-          role="alert"
-          className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
-        >
-          {error}
-        </p>
-      )}
+      {error && <ErrorAlert message={error} />}
 
       <button
         type="button"
         onClick={onSubmit}
         disabled={submitting}
-        className="dp-btn-primary w-full mt-0.5 disabled:opacity-70"
+        className={BTN_PRIMARY}
       >
-        {submitting ? "Signing in…" : "Sign in"}
-        {!submitting && <ArrowRight size={15} aria-hidden="true" />}
+        {submitting ? "Signing in" : "Sign in"}
+        {!submitting && <ArrowRight size={16} aria-hidden="true" />}
       </button>
 
       {/* Passkey — an ALTERNATIVE to the primary action, not a second equal
@@ -429,27 +476,15 @@ export function SignInForm({
           - flag on + onPasskey wired (browser supports WebAuthn) → live button
           - flag on but no handler (browser can't do WebAuthn) → render nothing
           - flag off (backend not shipped) → disabled "Soon" placeholder */}
-      {ONB_AUTH_FLAGS.passkey && !onPasskey ? null : (
-        <div className="flex items-center gap-3 mt-1 mb-0.5">
-          <span className="flex-1 h-px bg-separator" />
-          <span className="type-caption-2 text-label-tertiary font-medium">
-            OR
-          </span>
-          <span className="flex-1 h-px bg-separator" />
-        </div>
-      )}
+      {ONB_AUTH_FLAGS.passkey && !onPasskey ? null : <Divider label="or" />}
       {!ONB_AUTH_FLAGS.passkey ? (
-        <ComingSoon className="type-footnote">
-          <KeyRound size={14} aria-hidden="true" />
+        <ComingSoon>
+          <KeyRound size={16} aria-hidden="true" className="text-accent" />
           Use a security key or passkey
         </ComingSoon>
       ) : onPasskey ? (
-        <button
-          type="button"
-          onClick={onPasskey}
-          className="dp-btn-secondary type-footnote w-full justify-center gap-2.5"
-        >
-          <KeyRound size={14} aria-hidden="true" />
+        <button type="button" onClick={onPasskey} className={BTN_SECONDARY}>
+          <KeyRound size={16} aria-hidden="true" className="text-accent" />
           Sign in with a passkey
         </button>
       ) : null}

@@ -5,6 +5,7 @@ import { z } from "zod";
 // it is a `import type`, so this adds NOTHING to config.ts's runtime module
 // graph — the concern the `resolveAgentIterLimits` note below is about.
 import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "./services/erp-sync/money-snapshot.service.js";
+import { PUBLIC_DEVICE_SECRET_VALUES, isWeakDeviceSecret } from "./lib/device-secret.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -105,13 +106,18 @@ export function resolveAgentRunLimits(
 // generates ALL of these (generate_env for fresh installs, migrate_env
 // backfills upgrades), so a provisioned device always passes this gate.
 //
-// Scope: DEVICE_SECRET_KEY (the FIPS-sealed master encryption key) + every
+// Scope: DEVICE_SECRET_KEY (the FIPS-sealed master encryption key),
+// DEVICE_SECRET (WARP-2985 — keys the claim-code hashes and clip share URLs;
+// ALSO gated on DROPLET_ENV below, since this list only runs under
+// NODE_ENV=production, which WARP-2551 has yet to arm) + every
 // SERVICE_TOKEN_* declared in the schema. Deliberately NOT the optional
 // integration secrets (ROUTING_SERVICE_TOKEN, DROPLET_SCIM_BEARER_TOKEN, …)
 // whose emptiness is a documented fail-closed feature posture.
 export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
   "DEVICE_SECRET_KEY",
+  "DEVICE_SECRET",
   "SERVICE_TOKEN_SWITCH",
+  "SERVICE_TOKEN_DEVICE_GATEWAY",
   "SERVICE_TOKEN_AI_GATEWAY",
   "SERVICE_TOKEN_VOICE",
   "SERVICE_TOKEN_MCP",
@@ -120,8 +126,10 @@ export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
 ];
 
 // `.env.example` ships `change-me` for DEVICE_SECRET_KEY — a copy-pasted
-// example file must fail the gate exactly like an empty value would.
-const PLACEHOLDER_SECRET_VALUES: ReadonlySet<string> = new Set(["change-me"]);
+// example file must fail the gate exactly like an empty value would. The set
+// also carries the dev literals DEVICE_SECRET used to fall back to (WARP-2985);
+// all of them are published in this repo.
+const PLACEHOLDER_SECRET_VALUES: ReadonlySet<string> = PUBLIC_DEVICE_SECRET_VALUES;
 
 /**
  * PURE — the subset of PRODUCTION_REQUIRED_SECRET_KEYS whose value in `env`
@@ -136,6 +144,13 @@ export function findEmptyProductionSecrets(
     const trimmed = v.trim();
     return trimmed === "" || PLACEHOLDER_SECRET_VALUES.has(trimmed);
   });
+}
+
+/** PURE — the shipped-box posture signal (mirrors ai-gateway
+ *  keystore._is_production). Exported for tests. */
+export function isShippedDropletEnv(v: string | undefined): boolean {
+  const t = (v ?? "").trim().toLowerCase();
+  return t === "production" || t === "prod";
 }
 
 /**
@@ -353,7 +368,11 @@ const envSchema = z.object({
   BUSINESS_PROFILE_REVIEW_DAYS: z.coerce.number().int().nonnegative().default(90),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-  MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
+  // WARP-2093: per-file upload ceiling. Uploads stream to Nextcloud (never
+  // buffered here), so this is no longer an OOM guard; 1024 matches the
+  // nextcloud:29-apache image's APACHE_BODY_LIMIT (1 GiB per request), past
+  // which Nextcloud itself answers 413. Per-user policies can only lower it.
+  MAX_UPLOAD_SIZE_MB: z.coerce.number().default(1024),
 
   // --- CORS (WARP-562) ---
   // Comma-separated allowlist of browser Origins permitted to make
@@ -429,15 +448,17 @@ const envSchema = z.object({
   // default lets tests run without setting the env var; production fails
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
+  // WARP-2985 — keys the setup claim-code HMAC and clip share URLs (readers
+  // take it from process.env at call time; declared here so the boot gates
+  // below can see it). No usable default exists: see lib/device-secret.ts.
+  DEVICE_SECRET: z.string().default(""),
 
   // --- Microsoft 365 cloud connector (WARP-2115, ADR-041) ---
-  // The Entra application (client) id of Droplet's multi-tenant app. NOT a
-  // secret: a public-client id is designed to ship inside the client, and the
-  // delegated device-code/auth-code flows use no client secret at all — which
-  // also sidesteps the tenant app-management policies that increasingly block
-  // long-lived secrets. Empty default = the connector is simply unavailable
-  // (isM365Configured() is false); it never half-starts.
-  M365_CLIENT_ID: z.string().default(""),
+  // There is deliberately NO box-wide client id (WARP-2705, removed
+  // M365_CLIENT_ID): each connection signs in through the customer's own Entra
+  // app registration, stored on its M365Connection row. A single Warp-Lab
+  // multitenant app is the PARTNER_GATED shape ADR-042 §3 rules out and would
+  // pool Graph's per-app throttling ceiling across every box we ship.
   // Entra login host. Overridable only so a national cloud (login.microsoftonline.us,
   // login.chinacloudapi.cn) can be pointed at without a code change; the
   // worldwide endpoint is correct for every commercial tenant. Whatever this
@@ -659,6 +680,16 @@ const envSchema = z.object({
   //   at a wrong guess. The box IP is DHCP, so there is intentionally no
   //   host-specific default here.
   WIREGUARD_HOME_ENDPOINT_HOST: z.string().default(""),
+  // WIREGUARD_PUBLIC_FORWARD (WARP-3018) — a UDP port forward the operator set
+  //   up on the upstream gateway to wg0. `<port>` (public IP taken from STUN on
+  //   every profile fetch, so a dynamic IP needs nothing) or
+  //   `<public-ipv4>:<port>` (static IP, or STUN unavailable). Advertised to
+  //   overlay clients as the `mapped` candidate. Needed whenever wg0 sits
+  //   behind a NAT that rewrites the source port, e.g. box behind an edge
+  //   router behind an ISP gateway. Empty (default) = no forward declared.
+  //   Parsed leniently per profile fetch (routes/vpn.ts): a bad value is
+  //   logged and ignored rather than failing boot.
+  WIREGUARD_PUBLIC_FORWARD: z.string().default(""),
   // REMOTE_ACCESS_MODE — how a phone reaches this box from OUTSIDE the home
   // LAN (WARP-993). Drives the honest `offLanReachable` boolean on
   // /api/vpn/status so the dashboard never promises "from anywhere" it can't
@@ -911,23 +942,20 @@ const envSchema = z.object({
   DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
   // WARP-539 — apply + health-gated swap + auto-rollback. The apply path is the
   // ONLY thing that drives the host Docker daemon, and only through the audited
-  // host helper scripts/lib/apply-update.sh over the mounted compose socket
+  // host helper docker/ota/apply-update.sh over the mounted compose socket
   // (docker/docker-compose.yml, orchestrator service ONLY — see the WARP-539
   // volume comment there).
-  //   APPLY_SCRIPT   — absolute path to apply-update.sh as mounted in the
-  //                    orchestrator container. Empty (the default) DISABLES the
-  //                    apply window: the box still polls + tracks pending
-  //                    releases, but never swaps containers. This is the correct
-  //                    posture for dev laptops + CI (no host socket) and until
-  //                    the compose socket mount is provisioned on a box.
-  //   COMPOSE_FILE   — the compose file the helper drives. WARP-1669: this
-  //                    path must be valid BOTH on the host and inside the
-  //                    orchestrator container, because the compose CLI runs
-  //                    in-container while the daemon resolves the file's
-  //                    relative bind mounts on the host. docker-compose.yml
-  //                    mounts the tree at its own host path (DROPLET_HOST_ROOT)
-  //                    to satisfy that; the default below is only the
-  //                    conventional install location.
+  //   APPLY_SCRIPT   — the ENABLE flag (WARP-3007). Empty (the default)
+  //                    DISABLES the apply window: the box still polls + tracks
+  //                    pending releases, but never swaps containers — the
+  //                    correct posture for dev laptops + CI. Any value enables
+  //                    it; by convention the helper's host path. The helper
+  //                    that runs is ALWAYS <CONFIG_ROOT>/docker/ota/
+  //                    apply-update.sh, shipped in every release and executed
+  //                    ON THE HOST (host-exec.ts). setup.sh writes it on
+  //                    Linux (on by default, WARP-3007); macOS gets it empty.
+  //   COMPOSE_FILE   — HOST path of the compose file the helper drives
+  //                    (derived from DROPLET_HOST_ROOT by docker-compose.yml).
   //   CONFIG_ROOT    — where a release's configs.tar.gz is extracted. CI packs
   //                    it as `docker/…` (`git archive HEAD docker`), so this is
   //                    the REPO ROOT, one level above the compose file. The
@@ -948,18 +976,20 @@ const envSchema = z.object({
   //                        legitimate state (dev boxes stage nothing) and the
   //                        surface degrades to "no apps available", never a 500.
   //   REQUIRE_SIGNATURE  — enforce the cosign signature over catalog.json.
-  //                        OFF by default and that is deliberate: the OTA trust
-  //                        anchor is still the WARP-535 placeholder, so turning
-  //                        this on before the key ceremony makes every download
-  //                        a 503. The always-on gate is the per-asset sha256
-  //                        re-check in services/app-downloads/store.ts, which
-  //                        works today; this flag exists so the ceremony can
+  //                        OFF by default and that is deliberate: update-agent/
+  //                        cosign.pub has been a real P-256 key since the
+  //                        2026-07-30 key ceremony, but nothing signs an
+  //                        on-box-generated catalog.json today, so turning
+  //                        this on makes every download a 503. The always-on
+  //                        gate is the per-asset sha256 re-check in
+  //                        services/app-downloads/store.ts, which works today;
+  //                        this flag exists so signing catalog.json can
   //                        upgrade the posture without a code change.
   //
   // EXPLICIT string→bool, NOT z.coerce.boolean(): coerce runs Boolean(...), so
   // the non-empty strings "0"/"false" would BOTH coerce to true — here that
-  // would silently ENABLE the signature requirement against a placeholder
-  // anchor and take every download offline. Only "1"/"true" enable it.
+  // would silently ENABLE the signature requirement against a catalog nothing
+  // signs and take every download offline. Only "1"/"true" enable it.
   DROPLET_APP_DOWNLOADS_DIR: z.string().default("/opt/droplet/app-downloads"),
   DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE: z
     .string()
@@ -1134,6 +1164,57 @@ const envSchema = z.object({
   // unauthenticated — and doc-render itself 503s, so both ends refuse.
   DOC_RENDER_SERVICE_TOKEN: z.string().default(""),
 
+  // --- Sandbox (WARP-2895, ADR-056 §6.3) ---
+  // SANDBOX_URL — compose-internal base URL of services/sandbox, the box's
+  // one code-execution substrate: a routine's `transform` / `when` steps run
+  // there, in a child interpreter, on the internal-only network. The
+  // orchestrator is its only caller.
+  SANDBOX_URL: z.string().default("http://sandbox:8030"),
+  // SANDBOX_SERVICE_TOKEN — outbound bearer for the sandbox. Minted by
+  // scripts/lib/secrets.sh (generate_env + migrate_env backfill). Empty →
+  // the transformer fails CLOSED (every transform step fails honestly) and
+  // the sandbox 503s, so both ends refuse.
+  SANDBOX_SERVICE_TOKEN: z.string().default(""),
+  // The CALLER-side deadline for one transform. The sandbox enforces its own
+  // (from the same number, sent in the request) — a service-only timeout
+  // fails open if the service itself hangs, so this side has to hold too.
+  SANDBOX_TRANSFORM_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
+  // The output cap a transform may return. Exceeding it FAILS the step with
+  // "output exceeded N bytes" — never a silent slice (ROUTINES brief §4.4).
+  SANDBOX_OUTPUT_CAP_BYTES: z.coerce.number().int().min(1_024).max(4_194_304).default(262_144),
+  // WARP-2900 (ADR-056 slice H2) — how often the extension reconciler asks
+  // the sandbox whether every installed extension is still running, and
+  // reinstalls (re-verify the signed statement, rotate the bearer, start)
+  // any it lost — a sandbox restart forgets every process. One tick with no
+  // Extension rows dials nothing. Ships dark with the sandbox's
+  // SANDBOX_PROCESS_SUPERVISION=0: no extension can be promoted then.
+  EXTENSION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(60_000),
+  // WARP-2900 (ADR-056 slice H3) — the orchestrator URL an extension calls
+  // back on (handed to the child as DROPLET_ORCHESTRATOR_URL, next to its own
+  // dxt_ bearer). The orchestrator's name on `droplet-internal`: the only
+  // network the sandbox is on. The bearer resolves to `_service:ext:<slug>`,
+  // which reaches /api/extensions/self and /self/call and nothing else.
+  // Must stay a compose service name: the sandbox refuses anything that is not
+  // an http(s) URL of host[:port].
+  EXTENSION_CALLBACK_URL: z.string().url().default("http://orchestrator:3000"),
+  // WARP-2900 (H3) — whether POST /api/extensions/self/call may run a static
+  // tool AS THE INSTALLING OWNER. On, the route admits only the pinned
+  // allowlist of box-local reads (EXTENSION_SELF_CALL_TOOLS in
+  // services/extension-self-call.ts, EMPTY in v1) and never a tool that
+  // reaches outside the box (egress screen, cloud or ERP connector, model,
+  // mail server), so the bearer never reaches anything off the box. OFF by
+  // default, separately from SANDBOX_PROCESS_SUPERVISION: every process in
+  // the sandbox shares one uid, so a workspace `run` child can read an
+  // installed extension's `dxt_` bearer from /proc
+  // (docs/security/extension-trust.md) and run what the allowlist admits as
+  // that owner. Off, the route answers 503 and GET /api/extensions/self
+  // still works. String + transform, not z.coerce.boolean: "false" must stay
+  // false.
+  EXTENSION_SELF_CALL_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),
@@ -1143,6 +1224,11 @@ const envSchema = z.object({
   // `network_mode: host`, so the bridged orchestrator must reach it via
   // the host gateway.
   SWITCH_SERVICE_URL: z.string().default("http://host.docker.internal:8081"),
+
+  // --- Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) ---
+  // services/device-gateway runs `network_mode: host` on :8084 (BACnet Who-Is
+  // and KNX routing are broadcast/multicast), so same host-gateway rationale.
+  DEVICE_GATEWAY_URL: z.string().default("http://host.docker.internal:8084"),
 
   // --- OLED / TFT Display ---
   // Same rationale again: the display service runs with `network_mode: host`
@@ -1179,6 +1265,11 @@ const envSchema = z.object({
   // falls back to SERVICE_SECRET so installs that pinned the legacy shared
   // secret keep working until setup.sh re-mints.
   SERVICE_TOKEN_SWITCH: z.string().default(""),
+
+  // SERVICE_TOKEN_DEVICE_GATEWAY — outbound bearer for device-gateway.client.ts
+  // → device gateway. Compose wires the gateway container's SERVICE_SECRET to
+  // the same value; the gateway fails CLOSED (403) without it.
+  SERVICE_TOKEN_DEVICE_GATEWAY: z.string().default(""),
 
   // SERVICE_TOKEN_AI_GATEWAY — WARP-560. Dedicated outbound bearer for
   // ai-gateway.client.ts → ai-gateway, which previously had NO inbound auth
@@ -1449,6 +1540,22 @@ if (parsed.NODE_ENV === "production") {
         "migrate_env backfills any keys added since this box was provisioned).",
     );
   }
+}
+
+// WARP-2985 — DEVICE_SECRET gate armed by the SHIPPED-BOX signal, not
+// NODE_ENV (which nothing sets on a box — WARP-2551 owns arming that one).
+// DROPLET_ENV=production is what setup.sh writes (and migrate_env backfills),
+// and is the same signal ai-gateway's keystore guard arms on. Scoped to
+// DEVICE_SECRET alone because it is the one required secret EVERY
+// setup.sh-generated .env has carried since the first heredoc (a generated
+// .env without it is treated as torn and restored), so arming this cannot
+// strand a box that took an OTA without re-running setup.sh.
+if (isShippedDropletEnv(process.env.DROPLET_ENV) && isWeakDeviceSecret(parsed.DEVICE_SECRET)) {
+  throw new Error(
+    "DROPLET_ENV=production requires a per-device DEVICE_SECRET; it is empty " +
+      "or a publicly-known placeholder. Run `sudo ./scripts/setup.sh --sync-secrets` " +
+      "(migrate_env generates one) and recreate the orchestrator.",
+  );
 }
 
 // --- WARP-562: resolve the CORS origin allowlist ---

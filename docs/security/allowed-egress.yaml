@@ -292,6 +292,43 @@ entries:
       purpose and in ADR-036 — declared so the gate can check it, and so it
       stays a known hole rather than a silent one. (WARP-2452)
 
+  - id: dmr-model-registry
+    kind: egress
+    service: dmr
+    destination:
+      # Measured 2026-09-23 with an anonymous pull of ai/llama3.2:3B-Q4_K_M:
+      # token from auth.docker.io, manifest + blob requests to
+      # registry-1.docker.io, which 307-redirects every blob to
+      # production.cloudfront.docker.com. production.cloudflare.docker.com is
+      # Docker Hub's other documented blob CDN (the redirect target varies by
+      # region). index.docker.io is deliberately absent: it is the NAME
+      # `docker.io/ai/...` normalises to, not a host the pull dials.
+      hosts: [auth.docker.io, registry-1.docker.io, production.cloudfront.docker.com, production.cloudflare.docker.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Model-weight download when an owner/admin installs a catalog model from
+      the Models page (WARP-1827 → inference-manager POST /models/pull → the
+      DMR daemon's POST /api/pull). The daemon (docker/model-runner, the
+      `dmr`/`dmr-cuda` service, container droplet-dmr) pulls the entry's
+      pinned `ai/<repo>:<tag>` OCI artifact anonymously from Docker Hub.
+      Inbound weights only — no box data is sent. Registered because without
+      it every UI-driven install is recorded by the WARP-268 audit as an
+      unlisted_destination anomaly (WARP-3046). This is the runtime DMR
+      channel only: the orchestrator->registry.ollama.ai row above and the
+      build-phase image pulls below are separate (service, host) tuples.
+    ticket: WARP-3046
+    added: 2026-09-23
+    review_by: 2027-09-23
+    code_refs: [services/inference-manager/runtime/dmr.py, services/inference-manager/models/model-manifest.json]
+    no_code_literal: >-
+      The DMR daemon owns the registry resolution: our code (runtime/dmr.py)
+      only hands it an `ai/<repo>:<tag>` reference from the manifest, and
+      docker/model-runner resolves the `ai/` namespace against Docker Hub
+      itself. No Droplet source names these hosts. (WARP-3046)
+
   - id: cloud-llm-providers-optin
     kind: egress
     service: ai-gateway
@@ -961,6 +998,56 @@ entries:
       - apps/orchestrator/src/lib/outbound-url-guard.ts
       - apps/orchestrator/src/services/caldav.client.ts
       - apps/orchestrator/src/services/calendar.service.ts
+
+  - id: web-push-services
+    kind: egress
+    service: orchestrator
+    destination:
+      # `notify.windows.com` is listed because code names it as the WNS suffix;
+      # lib/push-endpoint.ts only dials subdomains of it, never the bare name.
+      hosts: [fcm.googleapis.com, updates.push.services.mozilla.com, web.push.apple.com, "*.notify.windows.com", notify.windows.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Web Push (RFC 8030/8291) delivery to the browsers a user subscribed from
+      the dashboard. The browser hands over the endpoint at subscribe time,
+      and it is stored per PushSubscription row. It must be one of the push
+      services listed above: Google (Chrome/Edge via FCM), Mozilla (Firefox),
+      Apple (Safari) and Microsoft (legacy Edge via WNS, per-region
+      subdomains). Any other host is refused at registration and at dial time
+      (WARP-2904 review fix; before that the entry was kind: dynamic and any
+      public https host was accepted).
+
+      WHAT CROSSES: the RFC 8291 ciphertext (title, body and url are encrypted
+      to the subscription's own keys, so the push service CANNOT read them),
+      the endpoint itself (which identifies the subscriber's browser to the
+      vendor), the VAPID JWT with its mailto: contact, the ciphertext length
+      and the timing of every notification. That metadata is why this is an
+      off-LAN channel at all. The plaintext still lands in a vendor-managed
+      notification tray on the device, so notification text stays PHI-free
+      exactly as before.
+
+      THE ENFORCEMENT IS IN CODE. dispatchToUser is the one dial site and
+      reads the `web_push` off-LAN channel on every call, fail-closed
+      (default OFF; an admin opts in). lib/push-endpoint.ts parses each
+      endpoint with BOTH the WHATWG and the legacy url.parse parser (web-push
+      3.6.7 dials the legacy one), requires them to agree on a plain
+      [a-z0-9.-] host, pins that host to the list above, and dials a URL
+      rebuilt from the vetted parts. This runs at registration
+      (POST /api/devices/push/subscribe) and again at dial time, where the
+      host is also resolved and refused if any address is inside the
+      boundary. Every dial and every refusal writes one `network` activity
+      row carrying the host that was actually dialled.
+    ticket: WARP-2904
+    added: 2026-09-22
+    review_by: 2027-09-22
+    code_refs:
+      - apps/orchestrator/src/lib/push-endpoint.ts
+      - apps/orchestrator/src/services/push-dispatch.service.ts
+      - apps/orchestrator/src/services/off-lan-gate.service.ts
+      - apps/orchestrator/src/routes/device-clients.ts
 
   - id: sso-custom-issuer
     kind: dynamic
@@ -1770,6 +1857,37 @@ entries:
     review_by: 2027-09-02
     code_refs: [services/erp-connector/src/xero/connector.ts]
 
+  - id: ref-security-audit-identifiers
+    kind: reference
+    service: orchestrator
+    destination:
+      # NOT destinations. Two dotted identifiers whose last label is a
+      # delegated TLD (.open, .id), the same false positive that
+      # ref-dotted-identifier-keys describes:
+      #   * mode.open is a Security audit ACTION NAME: the `refs.action`
+      #     stored on the ActivityRow when a person switches the Security
+      #     mode to open (SecurityAuditAction in security-audit.ts, and
+      #     ACTION_AUDIT in security-mode.service.ts).
+      #   * prisma.client.transaction.id is a Symbol.for KEY: the
+      #     well-known symbol Prisma sets on an interactive-transaction
+      #     client, which the in-transaction chain append reads to refuse
+      #     a bare client and to serialise appends per transaction.
+      # Neither is ever resolved or dialled. Registered by EXACT name, so a
+      # real host under .open or .id is still denied.
+      hosts: [mode.open, prisma.client.transaction.id]
+    purpose: >-
+      Two orchestrator identifiers that parse as hostnames: the Security
+      audit action name mode.open and the Symbol.for key
+      prisma.client.transaction.id that Prisma's interactive-transaction
+      client carries. Neither is a destination, and the box never
+      resolves either.
+    ticket: WARP-2977
+    added: 2026-09-23
+    review_by: 2027-09-23
+    code_refs: [apps/orchestrator/src/services/security-audit.ts,
+                apps/orchestrator/src/services/security-mode.service.ts,
+                apps/orchestrator/src/services/activity.service.ts]
+
   - id: ref-xml-namespaces
     kind: reference
     service: repo
@@ -1883,10 +2001,12 @@ entries:
       # IDENTITY string matched inside the Fulcio-issued signing cert (GitHub
       # Actions OIDC); the box never opens a connection to it. cosign's only
       # network at verify time is in-process HTTPS to ghcr.io (the same
-      # registry the pull itself uses).
+      # registry the pull itself uses). WARP-3007: the helper runs on the
+      # host, so cosign runs in a throwaway `docker run --rm` off the
+      # orchestrator's own pinned image — same binary, same destination.
       hosts: [token.actions.githubusercontent.com]
     purpose: cosign keyless-signature OIDC issuer identity matched during OFFLINE OTA image verification — not a connection the box makes
     ticket: WARP-244
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [scripts/lib/apply-update.sh]
+    code_refs: [docker/ota/apply-update.sh]

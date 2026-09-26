@@ -32,6 +32,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 import { createToolsRouter } from "../routes/tools.js";
 import type { StepDispatcher } from "../services/tool-spec-runner.service.js";
 import type { AuthUser } from "../middleware/auth.js";
+import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
 const mcp: AuthUser = { id: "_service:mcp", username: "_service:mcp", displayName: "MCP Server", role: "service" };
 const owner: AuthUser = { id: "u-owner", username: "romain", displayName: "romain", role: "owner" };
@@ -39,6 +40,8 @@ const admin: AuthUser = { id: "u-admin", username: "stefan", displayName: "stefa
 const family: AuthUser = { id: "u-family", username: "kid", displayName: "kid", role: "family" };
 const guest: AuthUser = { id: "u-guest", username: "visitor", displayName: "visitor", role: "guest" };
 const USERS = [owner, admin, family, guest];
+/** The same people as rows. `nextcloudUsername` NULL, as on every SSO / SCIM account. */
+const DIRECTORY: DirectoryUser[] = USERS.map((u) => ({ id: u.id, username: u.username, nextcloudUsername: null, role: u.role }));
 
 interface StepRow {
   id: string;
@@ -85,7 +88,7 @@ function liveSpec(slug: string, tool: string, writes: boolean): SpecRow {
   };
 }
 
-function createPrismaMock(seed: SpecRow[] = []) {
+function createPrismaMock(seed: SpecRow[] = [], users: DirectoryUser[] = DIRECTORY) {
   const specs = new Map(seed.map((s) => [s.slug, s]));
   const runs: Array<{ specId: string; triggeredBy: string | null }> = [];
   let n = 1;
@@ -94,9 +97,11 @@ function createPrismaMock(seed: SpecRow[] = []) {
     runs,
     user: {
       findFirst: vi.fn(async ({ where }: { where: { username: string } }) => {
-        const u = USERS.find((x) => x.username === where.username);
+        const u = users.find((x) => x.username === where.username);
         return u ? { id: u.id, username: u.username, role: u.role } : null;
       }),
+      // WARP-3098 — resolveAssertedUser's `findMany OR [...] take 2`.
+      findMany: userDirectory(users).findMany,
       findUnique: vi.fn(async () => ({ accessRoleId: null, accessRole: null })),
     },
     toolSpec: {
@@ -182,6 +187,7 @@ describe("GET /api/tools as the mcp principal", () => {
     const res = await request(buildApp(prisma, owner)).get("/api/tools");
     expect(res.status).toBe(200);
     expect(prisma.user.findFirst).not.toHaveBeenCalled();
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
   });
 });
 
@@ -202,7 +208,9 @@ describe("POST /api/tools as the mcp principal (routine_draft)", () => {
     const created = prisma.toolSpec.create.mock.calls[0]![0].data as Record<string, unknown>;
     expect(created.ownerId).toBe("u-admin");
     expect(Object.keys(created)).not.toContain("onBehalfOf");
-    expect(Object.keys(created)).not.toContain("status");
+    // WARP-2897: the draft service writes `status: "draft"` EXPLICITLY — the
+    // body's "live" above never reaches the row.
+    expect(created.status).toBe("draft");
   });
 
   it("refuses a draft naming a tool this box does not have, with the names", async () => {
@@ -277,5 +285,58 @@ describe("POST /api/tools/:slug/runs as the mcp principal (routine_run)", () => 
       expect.anything(),
       expect.objectContaining({ userId: "_service:mcp" }),
     );
+  });
+});
+
+// WARP-3098 — the header and `onBehalfOf` both carry the mcp-server's
+// `ctx.userId`: `User.username` on stdio, `User.id` over HTTP (the shipped
+// container). Resolved by resolveAssertedUser: one active person, or 403.
+describe("routines — the acting person is named by username OR User.id (WARP-3098)", () => {
+  it("a caller named by User.id (the HTTP transport) lists as that person", async () => {
+    const prisma = createPrismaMock([liveSpec("daily-files", "list_files", false)]);
+    const res = await request(buildApp(prisma, mcp)).get("/api/tools").set("X-Nextcloud-User", "u-family");
+    expect(res.status).toBe(200);
+    expect(res.body.specs.map((s: { slug: string }) => s.slug)).toEqual(["daily-files"]);
+  });
+
+  it("an onBehalfOf carrying a User.id runs as that person, recorded by username", async () => {
+    const prisma = createPrismaMock([liveSpec("daily-files", "list_files", false)]);
+    const res = await request(buildApp(prisma, mcp)).post("/api/tools/daily-files/runs").send({ onBehalfOf: "u-family" });
+    expect(res.status).toBe(200);
+    expect(prisma.runs).toEqual([{ specId: "spec-daily-files", triggeredBy: "kid" }]);
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      "list_files",
+      expect.anything(),
+      expect.objectContaining({ userId: "kid", userRole: "family" }),
+    );
+  });
+
+  it("an SSO row (nextcloudUsername NULL) still resolves by username", async () => {
+    const maria: DirectoryUser = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "admin" };
+    const prisma = createPrismaMock([], [...DIRECTORY, maria]);
+    const res = await request(buildApp(prisma, mcp))
+      .post("/api/tools")
+      .send({ onBehalfOf: "maria", slug: "daily-files", name: "Daily files", steps: [{ tool: "list_files", args: {} }] });
+    expect(res.status).toBe(201);
+    expect((prisma.toolSpec.create.mock.calls[0]![0].data as Record<string, unknown>).ownerId).toBe("u-maria");
+  });
+
+  it("a value naming two people is refused — 403, nothing runs, never the look-alike", async () => {
+    // One person's username is another's id: the value cannot say which of
+    // them is asking, and the look-alike here is an OWNER. The spec is one
+    // either of them could run, so only the identity check can refuse it.
+    const lookalike: DirectoryUser = { id: "u-other", username: "u-family", nextcloudUsername: null, role: "owner" };
+    const prisma = createPrismaMock([liveSpec("daily-files", "list_files", false)], [...DIRECTORY, lookalike]);
+    expect((await request(buildApp(prisma, mcp)).post("/api/tools/daily-files/runs").send({ onBehalfOf: "u-family" })).status).toBe(403);
+    expect((await request(buildApp(prisma, mcp)).get("/api/tools").set("X-Nextcloud-User", "u-family")).status).toBe(403);
+    expect(prisma.runs).toEqual([]);
+    expect(dispatcher.call).not.toHaveBeenCalled();
+  });
+
+  it("a deactivated person is refused", async () => {
+    const gone = DIRECTORY.map((u) => (u.id === "u-admin" ? { ...u, directoryStatus: "DEACTIVATED" as const } : u));
+    const prisma = createPrismaMock([liveSpec("daily-files", "list_files", false)], gone);
+    expect((await request(buildApp(prisma, mcp)).post("/api/tools/daily-files/runs").send({ onBehalfOf: "stefan" })).status).toBe(403);
+    expect(prisma.runs).toEqual([]);
   });
 });

@@ -51,6 +51,7 @@ vi.mock("./nextcloud-groups.client.js", () => ({
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
 }));
 
+import { isUserIdShaped } from "@droplet/auth-policy";
 import { readUserEmail } from "./user-directory.service.js";
 import {
   provisionUser,
@@ -261,11 +262,29 @@ describe("provisionUser — create-or-update by normalized email, idempotent", (
     expect(user.directoryStatus).toBe("ACTIVE");
     // SCIM users cannot password-login.
     expect(prisma.user.create.mock.calls[0]![0].data.passwordHash ?? null).toBeNull();
+    // WARP-2858: the origin is written explicitly at creation.
+    expect(prisma.user.create.mock.calls[0]![0].data.provisionSource).toBe("SCIM");
     // Linked via the EXISTING SsoIdentity table under provider "okta".
     expect(prisma.ssoIdentity.create).toHaveBeenCalledTimes(1);
     const link = prisma.ssoIdentity.create.mock.calls[0]![0].data;
     expect(link.provider).toBe("okta");
     expect(link.subject).toBe("okta-1");
+  });
+
+  it("🔴 WARP-2911 never mints a User.id-shaped username: a UUID local-part is seeded as `scim-<uuid>`", async () => {
+    // Notifications refuse a UUID-shaped recipient (that is how a User.id in
+    // the username slot is caught), so a username with that shape would be
+    // refused every notification it is ever sent.
+    const UUID = "3b7d0195-6c1e-4f2a-9d8b-2a4c6e8f0a1b";
+    const prisma = createPrismaMock();
+    const { user } = await provisionUser(prisma, {
+      email: `${UUID}@acme.test`,
+      displayName: "Svc",
+      active: true,
+      externalId: "okta-uuid",
+    });
+    expect(user.username).toBe(`scim-${UUID}`);
+    expect(isUserIdShaped(user.username)).toBe(false);
   });
 
   it("is IDEMPOTENT: re-POSTing the same user updates in place, no duplicate, User.id preserved", async () => {

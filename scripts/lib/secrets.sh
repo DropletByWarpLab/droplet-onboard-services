@@ -7,6 +7,10 @@
 # when a caller sources secrets.sh standalone (tests, --sync-secrets).
 # shellcheck source=internal-ca.sh
 . "$(dirname "${BASH_SOURCE[0]}")/internal-ca.sh"
+# WARP-2548 — repair + assert that every mounted secret is readable by the
+# container uid that opens it (called at the end of materialize_artifacts).
+# shellcheck source=secret-readers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/secret-readers.sh"
 
 # Generate a random alphanumeric password of given length.
 _gen_password() {
@@ -469,7 +473,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
+  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_device_gateway service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -527,6 +531,11 @@ generate_env() {
   # MUST read the same value; compose wires both ends to
   # ${SERVICE_TOKEN_SWITCH}.
   service_token_switch=$(openssl rand -hex 32)
+  # Bearer the orchestrator presents to services/device-gateway (BACnet,
+  # Modbus, SNMP, KNX). device-gateway.client.ts and the gateway container's
+  # SERVICE_SECRET MUST read the same value; compose wires both ends to
+  # ${SERVICE_TOKEN_DEVICE_GATEWAY}.
+  service_token_device_gateway=$(openssl rand -hex 32)
   # WARP-560: bearer the orchestrator presents on every outbound call to
   # the ai-gateway. The gateway's ServiceAuthMiddleware requires it on all
   # /ai/* routes (except /ai/health) — before this the gateway had NO
@@ -607,6 +616,8 @@ generate_env() {
   # added to this function, which is why /api/web/* fails closed on a box
   # nobody hand-edited.
   doc_render_service_token=$(openssl rand -hex 32)
+  # WARP-2895: bearer for the code-execution sandbox (orchestrator → sandbox).
+  sandbox_service_token=$(openssl rand -hex 32)
   # WARP-2627: bearer the orchestrator presents to the services/mcp-bridge
   # container — the one component allowed to open an outbound MCP session
   # (ADR-043 §5). Minted unconditionally even though the `remote-mcp` compose
@@ -880,6 +891,13 @@ SERVICE_TOKEN_DISPLAY=$service_token_display
 # both ends to \${SERVICE_TOKEN_SWITCH}.
 SERVICE_TOKEN_SWITCH=$service_token_switch
 
+# --- Device gateway bearer (orchestrator → device-gateway HTTP) ---
+# The gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) runs network_mode: host
+# and fails CLOSED without it. device-gateway.client.ts and the gateway
+# container's SERVICE_SECRET MUST read the same value; compose wires both
+# ends to \${SERVICE_TOKEN_DEVICE_GATEWAY}.
+SERVICE_TOKEN_DEVICE_GATEWAY=$service_token_device_gateway
+
 # --- AI gateway service bearer (orchestrator → ai-gateway HTTP) ---
 # WARP-560. Required by the ai-gateway's ServiceAuthMiddleware on every
 # /ai/* route (chat, sessions, BYOK key CRUD) except /ai/health — the
@@ -958,6 +976,15 @@ RAGAS_EVAL_USER=eval-fixtures
 # its side is empty.
 DOC_RENDER_SERVICE_TOKEN=$doc_render_service_token
 
+# --- Sandbox bearer (orchestrator → sandbox) ---
+# WARP-2895. The orchestrator presents this on POST /transform to the sandbox
+# container, which runs a routine's transform / when steps in a child
+# interpreter on the internal-only network. The sandbox carries NO env_file —
+# this key reaches it by compose substitution and is the only secret it
+# holds. Both ends fail CLOSED when it is empty (sandbox 503s, orchestrator
+# refuses without dialling). Rotate in lockstep and recreate both.
+SANDBOX_SERVICE_TOKEN=$sandbox_service_token
+
 # --- Outbound MCP bridge bearer (orchestrator -> mcp-bridge) ---
 # WARP-2627 / ADR-043 §5. The orchestrator presents this to the mcp-bridge
 # container, which is the ONLY component that opens a session to a remote MCP
@@ -997,11 +1024,20 @@ SERVICE_TOKEN_EGRESS_AUDIT=$service_token_egress_audit
 # MQTT stays scheme-gated (mqtts://) independent of this knob (WARP-235).
 DROPLET_INTERNAL_TLS=0
 
+# --- OTA apply (WARP-3007) ---
+# Enable flag for the orchestrator's OTA apply window: any value turns it on,
+# empty leaves the box polling + tracking releases without ever applying one.
+# The helper that runs is always the release-shipped docker/ota/apply-update.sh
+# (executed on the HOST); this is its path by convention. On by default on
+# Linux (Romain 2026-09-23: V1.1 needs updates to work); empty on macOS, a dev
+# laptop must never self-update from the release feed.
+DROPLET_OTA_APPLY_SCRIPT=$([ "$(uname)" = "Linux" ] && printf '%s' "$REPO_ROOT/docker/ota/apply-update.sh")
+
 # --- Application ---
 STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
 FILES_ROOT=/data/files
-MAX_UPLOAD_SIZE_MB=100
+MAX_UPLOAD_SIZE_MB=1024
 
 # --- WARP-230 device identity ---
 # Selects the device-identity-svc backend.
@@ -1101,6 +1137,12 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 # 🔴 It shipped under \`profiles: ["full"]\` alone, and \`full\` is never in this
 # default — so the IMAP subsystem has never run on any box that ever shipped.
 # That is the defect WARP-2734 exists to close; the conditional is the close.
+#
+# WARP-2970: email-indexer is now default-on (no \`profiles:\` key), so on the
+# current compose file this token selects nothing. It is still written as a
+# COMPATIBILITY token: a box rolled back or reinstalled onto a compose file
+# from before WARP-2970 still gates email-indexer on \`email\`, and without it
+# that box silently loses mail ingest. Drop it once no such compose can return.
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')$([ -n "$service_token_email" ] && printf ',email')
 
 # --- NVR recordings target (WARP-2099) ---
@@ -1265,6 +1307,9 @@ migrate_env() {
   # refuse until someone hand-edited .env. Backfill is only-when-missing, so
   # an operator who already set one keeps it.
   _migrate_ensure_key DOC_RENDER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # WARP-2895: same backfill for the sandbox's bearer — without one every
+  # transform step fails closed until someone hand-edits .env.
+  _migrate_ensure_key SANDBOX_SERVICE_TOKEN "$(openssl rand -hex 32)"
   # WARP-2627: same backfill for the outbound MCP bridge's bearer. Only-when-
   # missing, so an operator who already set one keeps it.
   _migrate_ensure_key MCP_BRIDGE_SERVICE_TOKEN "$(openssl rand -hex 32)"
@@ -1325,6 +1370,8 @@ migrate_env() {
   # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
   # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
   _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
+  # Device-gateway backfill: installs that predate services/device-gateway.
+  _migrate_ensure_key SERVICE_TOKEN_DEVICE_GATEWAY "$(openssl rand -hex 32)"
   # WARP-2131 backfill: existing installs predate the inference-manager
   # sidecar. Without this key its AUTH_TOKEN would expand empty, which is
   # PERMISSIVE mode rather than a startup failure — so the gap would be silent.
@@ -1363,7 +1410,9 @@ migrate_env() {
   # because it fails silently and looks fine.
   #
   # Fresh installs get `email` from generate_env's heredoc; this is the upgrade
-  # path's half of the same decision. Compared as a whole list element (the
+  # path's half of the same decision. Since WARP-2970 the token is inert on the
+  # current compose (email-indexer is default-on); it stays as a compatibility
+  # token for a pre-2970 compose file (see the generate_env heredoc note). Compared as a whole list element (the
   # comma-wrapping) so a profile merely STARTING with "email" is never mistaken
   # for it, and an empty value does not gain a leading comma.
   if grep -qE '^COMPOSE_PROFILES=' "$stage"; then
@@ -1380,7 +1429,7 @@ migrate_env() {
         /^COMPOSE_PROFILES=/ { print "COMPOSE_PROFILES=" v; next } { print }
       ' "$stage" > "$stage.tmp" && mv "$stage.tmp" "$stage"
       normalized=true
-      log_info "Migrated .env: added 'email' to COMPOSE_PROFILES (WARP-2734 — email-indexer never started on an upgraded box)"
+      log_info "Migrated .env: added the 'email' compatibility token to COMPOSE_PROFILES (WARP-2734; inert on the current compose, where email-indexer is default-on — WARP-2970)"
     fi
     unset _current_profiles _new_profiles
   fi
@@ -1459,6 +1508,29 @@ migrate_env() {
     log_warn "DROPLET_DEVICE_ID equals this host's hostname ('${_current_device_id}') — kept, but a hostname is not a device identity. If this box was never provisioned at HQ, set DROPLET_DEVICE_ID=\$(_derive_device_id) before minting its token (ADR-058)."
   fi
 
+  # WARP-2985: DEVICE_SECRET must be a per-device value — the orchestrator
+  # refuses to boot on DROPLET_ENV=production without one, and the claim-code
+  # HMAC / clip share signing / ai-gateway BYOK keystore refuse a missing or
+  # public value. Generate one when the key is absent, empty, or a
+  # publicly-known placeholder (the .env.example `change-me` and every literal
+  # a code path or dev compose ever fell back to). ANY OTHER VALUE IS KEPT:
+  # rotating a real secret would orphan unclaimed claim codes, live clip
+  # links and every stored BYOK cloud key. Replacing a public value orphans
+  # only material that was already keyed by a string anyone could read.
+  # Logs the key name only — never the value.
+  local _device_secret_now
+  _device_secret_now="$(grep -E '^DEVICE_SECRET=' "$stage" | tail -1 | cut -d= -f2- || true)"
+  case "$(printf '%s' "$_device_secret_now" | tr -d '[:space:]')" in
+    ""|change-me|dev-only-not-secure|dev-secret-change-in-production|dev-only-device-secret-do-not-ship)
+      if grep -qE '^DEVICE_SECRET=' "$stage"; then
+        { grep -vE '^DEVICE_SECRET=' "$stage" || true; } > "$stage.ds"
+        chmod 600 "$stage.ds"
+        mv "$stage.ds" "$stage"
+      fi
+      _migrate_ensure_key DEVICE_SECRET "$(_gen_fernet_key)"
+      ;;
+  esac
+
   # WARP-234: per-service Redis ACL identities for pre-existing installs.
   _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
@@ -1497,6 +1569,12 @@ migrate_env() {
   # operator flipped it to 1 keeps that choice across setup re-runs.
   _migrate_ensure_key DROPLET_INTERNAL_TLS 0
 
+  # WARP-3007: OTA apply on by default on Linux (see generate_env). Only when
+  # ABSENT, so a box whose operator set it empty (apply off) keeps that.
+  local ota_apply_default=""
+  [ "$(uname)" = "Linux" ] && ota_apply_default="$REPO_ROOT/docker/ota/apply-update.sh"
+  _migrate_ensure_key DROPLET_OTA_APPLY_SCRIPT "$ota_apply_default"
+
   # WARP-235: move existing installs from the shared-password plaintext broker
   # to the mTLS endpoint (single listener :8883; identity = client cert CN).
   # Rewrite-in-place rather than append: compose interpolates these URLs
@@ -1528,6 +1606,16 @@ migrate_env() {
     sed -i.bak -E 's|^(DATABASE_URL=postgresql://[^?]*)$|\1?sslmode=require|' "$stage" && rm -f "$stage.bak"
     normalized=true
     log_info "Migrated .env: DATABASE_URL now pins sslmode=require (WARP-233)"
+  fi
+
+  # WARP-2093: uploads stream to Nextcloud now, so the 100 MB per-file cap —
+  # an OOM guard for the old buffered transport — rises to Nextcloud's own
+  # 1 GiB per-request limit. Rewrites ONLY the exact value every earlier
+  # generate_env wrote; an operator's own value is kept.
+  if grep -qE '^MAX_UPLOAD_SIZE_MB=100$' "$stage"; then
+    sed -i.bak -E 's|^MAX_UPLOAD_SIZE_MB=100$|MAX_UPLOAD_SIZE_MB=1024|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: MAX_UPLOAD_SIZE_MB 100 -> 1024 (WARP-2093 — uploads stream now)"
   fi
 
   if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then
@@ -1579,6 +1667,11 @@ materialize_artifacts() {
   sync_audit_signing_key
   sync_doc_kek_key
   sync_email_fernet_key
+  # WARP-2548: last, so it sees every file this function just wrote. Repairs
+  # pre-WARP-2154 key ownership/mode leftovers, then fails setup (set -e)
+  # when a non-root container reader can't open its secret — a loud setup
+  # error instead of a silent crash loop once the stack is up.
+  secret_readers_guard
 }
 
 # Generate /data/secrets/audit.key on first boot for WARP-456.
@@ -1991,6 +2084,54 @@ _REQUIRED_DNS_SANS=(
   droplet-ai.lan
 )
 
+# WARP-2944 (ADR-058) — the box's current addresses, one per line: every
+# non-loopback IPv4 with global scope (LAN, docker bridges, the WireGuard
+# gateway when up). `DROPLET_TLS_SAN_IPS` (space-separated) overrides the
+# discovery so a suite can drive a "box moved" without a network namespace;
+# SET-BUT-EMPTY means "this box has no LAN address" (loopback only), which is
+# what a fixture certificate naming only 127.0.0.1 needs to count as covered.
+_current_lan_ipv4s() {
+  if [ -n "${DROPLET_TLS_SAN_IPS+x}" ]; then
+    # shellcheck disable=SC2086  # word-splitting the list is the point
+    printf '%s\n' ${DROPLET_TLS_SAN_IPS}
+    return 0
+  fi
+  { ip -4 addr show scope global 2>/dev/null | grep -oP 'inet \K[\d.]+' 2>/dev/null; } \
+    || { ifconfig 2>/dev/null \
+         | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+         | grep -v '^127\.'; } \
+    || true
+}
+
+# The `IP Address:` entries of a certificate's SAN, one per line.
+_cert_ip_sans() {
+  openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null \
+    | grep -oE 'IP Address:[0-9A-Fa-f.:]+' \
+    | sed 's/^IP Address://'
+}
+
+# WARP-2944 — does the certificate name EVERY address the box has right now?
+#
+# The self-signed bootstrap cert freezes its IP SANs at generation. A box that
+# moves networks (or takes a new lease) then serves a cert that no longer
+# names its own address, and a client that pinned the box's key still refuses
+# by NAME — the pin is right, the SAN is stale (droplet-windows trust.rs
+# `NameMismatch`). Regenerating around the SAME key (see _generate_tls_cert)
+# makes the SAN follow the box while every pinned pairing keeps working.
+# Only meaningful for a self-signed leaf: a public-CA leaf never carries IP
+# SANs and is never regenerated here.
+_cert_covers_current_ips() {
+  local cert_file="$1"
+  local have ip
+  have="$(_cert_ip_sans "$cert_file")"
+  while IFS= read -r ip; do
+    [ -n "$ip" ] || continue
+    printf '%s\n' "$have" | grep -qxF "$ip" || return 1
+  done < <(_current_lan_ipv4s)
+  return 0
+}
+
 _cert_has_all_required_sans() {
   local cert_file="$1"
   local dns_list
@@ -2122,9 +2263,12 @@ _generate_tls_cert() {
     # WARP-595: the skip-guard must also verify the KEY belongs to the cert —
     # a torn pair (valid cert + unrelated/truncated key) previously passed
     # this check on every re-run and never converged.
+    # WARP-2944: a SELF-SIGNED leaf must also name every address the box has
+    # NOW (a public-CA leaf has no IP SANs and is preserved below).
     if openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
        && _cert_has_all_required_sans "$cert_file" \
-       && _tls_pair_matches "$cert_file" "$key_file"; then
+       && _tls_pair_matches "$cert_file" "$key_file" \
+       && { _cert_is_public_ca_leaf "$cert_file" || _cert_covers_current_ips "$cert_file"; }; then
       log_success "TLS certificate already exists, is valid, and covers all required SANs — skipping"
       return 0
     fi
@@ -2183,21 +2327,55 @@ _generate_tls_cert() {
       log_success "Restored TLS certificate from bootstrap copy:"
       log_info "  Cert: $cert_file"
       log_info "  Key:  $key_file"
-      if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
-        # shellcheck source=tls-reload.sh
-        source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+      # WARP-2944: the bootstrap copy names the addresses the box had at FIRST
+      # install. If the box has since moved, do not stop at the restore —
+      # fall through and regenerate around the restored (genuine) key so the
+      # served SAN names where the box is now. Same key, same pin.
+      if _cert_covers_current_ips "$cert_file"; then
+        if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+          # shellcheck source=tls-reload.sh
+          source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+        fi
+        reload_gateway_nginx || true
+        return 0
       fi
-      reload_gateway_nginx || true
-      return 0
+      log_warn "Restored bootstrap certificate does not name this box's current address(es) — regenerating around its key"
+      pair_broken=false
     fi
 
     if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1; then
       log_warn "TLS certificate expired or invalid — regenerating"
     elif [ "$pair_broken" = "true" ]; then
       log_warn "TLS certificate and key do not match (torn write from an interrupted run) — regenerating"
-    else
+    elif ! _cert_has_all_required_sans "$cert_file"; then
       log_warn "TLS certificate is missing one or more required DNS SANs — regenerating"
+    else
+      log_warn "TLS certificate does not name this box's current address(es) ($(_current_lan_ipv4s | tr '\n' ' ' | sed 's/ $//')) — regenerating around the same key"
     fi
+  fi
+
+  # WARP-2944 — KEEP THE KEY whenever it is genuinely ours. The key is the
+  # box's identity to every client that pinned it (the pairing QR's `spki=`,
+  # WARP-2953/2954): a fresh -newkey would make each of them see "identity
+  # changed" for a SAN refresh that changed nothing about who the box is.
+  # Reuse only a key that loads AND belongs to the installed cert — a torn
+  # pair's key was never the served identity, so there minting fresh is right.
+  local reuse_key=false
+  if [ -f "$cert_file" ] && [ -f "$key_file" ] \
+     && _tls_pair_matches "$cert_file" "$key_file" \
+     && openssl pkey -in "$key_file" -noout >/dev/null 2>&1; then
+    reuse_key=true
+  fi
+
+  # WARP-2944: an UNATTENDED caller (the device-bridge's refresh wrapper, every
+  # ten minutes on every box) may only ever regenerate AROUND the key. A key it
+  # cannot read — root-owned 0600 after a `sudo ./scripts/setup.sh` — looks
+  # exactly like a torn pair from here, and minting fresh over it would rotate
+  # the identity every pinned app holds, silently, on a timer. Refuse instead;
+  # a human runs setup.sh --sync-secrets to heal a pair deliberately.
+  if [ "$reuse_key" != "true" ] && [ -n "${DROPLET_TLS_NO_NEWKEY:-}" ]; then
+    log_error "TLS: a fresh private key would be minted here and this caller may not mint one (DROPLET_TLS_NO_NEWKEY): the served key is the box's identity to every paired app — run setup.sh --sync-secrets to heal the pair deliberately"
+    return 1
   fi
 
   log_info "Generating self-signed TLS certificate (valid 10 years)..."
@@ -2232,14 +2410,10 @@ _generate_tls_cert() {
     log_info "  Including per-device FQDN in SAN: $public_fqdn"
   fi
 
-  # Add all non-loopback IPv4 addresses
+  # Add all non-loopback IPv4 addresses (the same list the skip-guard checks
+  # the installed cert against, so the two can never disagree).
   local ip
-  for ip in $(ip -4 addr show scope global 2>/dev/null \
-              | grep -oP 'inet \K[\d.]+' 2>/dev/null || \
-              ifconfig 2>/dev/null \
-              | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-              | grep -v '^127\.'); do
+  for ip in $(_current_lan_ipv4s); do
     san="$san,IP:$ip"
   done
   # Always include loopback
@@ -2249,18 +2423,30 @@ _generate_tls_cert() {
   # run never leaves a half-written cert or key at the live paths. A crash
   # between the two renames leaves a MISMATCHED pair — which the pair-match
   # guard above now detects and heals on the next run.
-  openssl req -x509 -nodes -newkey rsa:2048 \
-    -days 3650 \
-    -keyout "$key_file.tmp" \
-    -out "$cert_file.tmp" \
-    -subj "/CN=Droplet Edge Device" \
-    -addext "subjectAltName=$san" \
-    2>/dev/null
+  if [ "$reuse_key" = "true" ]; then
+    log_info "  Reusing the existing private key — pinned pairings (apps) stay valid"
+    openssl req -x509 -nodes -key "$key_file" \
+      -days 3650 \
+      -out "$cert_file.tmp" \
+      -subj "/CN=Droplet Edge Device" \
+      -addext "subjectAltName=$san" \
+      2>/dev/null
+    chmod 644 "$cert_file.tmp"
+    mv "$cert_file.tmp" "$cert_file"
+  else
+    openssl req -x509 -nodes -newkey rsa:2048 \
+      -days 3650 \
+      -keyout "$key_file.tmp" \
+      -out "$cert_file.tmp" \
+      -subj "/CN=Droplet Edge Device" \
+      -addext "subjectAltName=$san" \
+      2>/dev/null
 
-  chmod 600 "$key_file.tmp"
-  chmod 644 "$cert_file.tmp"
-  mv "$key_file.tmp" "$key_file"
-  mv "$cert_file.tmp" "$cert_file"
+    chmod 600 "$key_file.tmp"
+    chmod 644 "$cert_file.tmp"
+    mv "$key_file.tmp" "$key_file"
+    mv "$cert_file.tmp" "$cert_file"
+  fi
 
   log_success "TLS certificate generated:"
   log_info "  Cert: $cert_file"

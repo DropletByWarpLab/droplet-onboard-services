@@ -170,6 +170,16 @@ model ChatSession {
   /// its original chronological spot, not to "Today".
   pinned          Boolean           @default(false)
   pinnedAt        DateTime?
+  /// WARP-2991 — may this conversation's on-box answers be replayed to a
+  /// cloud model? Explicit enum, never inferred from the timestamp. The
+  /// server replays assistant history to a cloud provider ONLY when this is
+  /// `granted` AND `cloudHistoryConsentAt` is later than every on-box answer
+  /// in the thread; anything else replays the user's own messages only.
+  /// A CHECK ties the state to its actor pair (not_asked ⇔ both NULL).
+  cloudHistoryConsent   CloudHistoryConsent @default(not_asked)
+  cloudHistoryConsentAt DateTime?
+  /// Username of the person who decided (ChatSession.userId is a username too).
+  cloudHistoryConsentBy String?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @default(now()) @updatedAt
   messages        ChatMessage[]
@@ -939,6 +949,15 @@ model ChatMessage {
   @@index([sessionId, status])
 }
 
+/// WARP-2991 — the owner's answer to "send this conversation's earlier
+/// on-box answers to the cloud model?". `not_asked` and `declined` both
+/// replay the user's own messages only; the difference is audit, not effect.
+enum CloudHistoryConsent {
+  not_asked
+  granted
+  declined
+}
+
 /// WARP-844 — thumbs rating on an assistant message.
 enum ChatMessageFeedback {
   up
@@ -1130,6 +1149,16 @@ enum Role {
 enum DirectoryUserStatus {
   ACTIVE
   DEACTIVATED
+}
+
+// WARP-2858 — how a User row came to exist. LOCAL: /auth/setup, admin
+// create, invite accept (the box owns the credential). SSO: just-in-time
+// created by an OIDC sign-in (sso.ts). SCIM: pushed by the IdP's directory
+// sync (scim.service.ts provisionUser).
+enum UserProvisionSource {
+  LOCAL
+  SSO
+  SCIM
 }
 
 /// WARP-1202: explicit pairing-code lifecycle. Persistent state lives in this
@@ -1424,7 +1453,8 @@ model CameraPin {
 // revoked permission).
 model PushSubscription {
   id             String    @id @default(uuid())
-  userId         String // Nextcloud username
+  /// Nextcloud username (`User.username`), never `User.id` (WARP-2911).
+  username       String
   endpoint       String    @unique
   // Push payload encryption keys, base64url. Required by Web Push protocol.
   p256dhKey      String
@@ -1438,7 +1468,7 @@ model PushSubscription {
   // Updated on every successful push so we can age out stale entries.
   lastFiredAt    DateTime?
 
-  @@index([userId])
+  @@index([username])
   @@index([deviceClientId])
 }
 
@@ -1995,6 +2025,41 @@ model Note {
 // `source = "local"` and are publishable via the /api/calendar/publish/... ICS
 // feed, so phones can subscribe without needing OAuth.
 
+/// WARP-2767: lifecycle of a calendar feed link. Persistent state lives in
+/// this enum, never inferred from a nullable timestamp (PairingCodeStatus is
+/// the precedent).
+///   - active  — the feed answers. `expiresAt` stays authoritative in real
+///               time: the feed refuses an overdue active row and stamps it
+///               `expired` on the spot.
+///   - rotated — replaced by a newer link via POST /calendar/publish/rotate.
+///   - revoked — turned off via POST /calendar/publish/revoke.
+///   - expired — past `expiresAt`.
+enum CalendarFeedTokenState {
+  active
+  rotated
+  revoked
+  expired
+}
+
+/// WARP-2767: a bearer credential for the pre-auth ICS feed at
+/// /api/calendar/publish/:user.ics. The URL token is `<id>.<secret>`; only
+/// sha256(secret) is stored, so a database read never yields a working link.
+/// Bound to exactly one account by FK — the feed also requires the URL's
+/// username to be that account's current username.
+model CalendarFeedToken {
+  id         String                 @id @default(uuid())
+  userId     String
+  secretHash String
+  state      CalendarFeedTokenState @default(active)
+  createdAt  DateTime               @default(now())
+  expiresAt  DateTime
+  /// Set when the row leaves `active` (rotated / revoked / expired).
+  endedAt    DateTime?
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, state])
+}
+
 model CalendarEvent {
   id           String   @id @default(uuid())
   userId       String // Nextcloud username
@@ -2279,17 +2344,88 @@ enum NotificationKind {
 // "recent notifications" panel and helps debug missing pushes.
 model NotificationLog {
   id          String           @id @default(cuid())
-  userId      String
+  /// Nextcloud username (`User.username`), never `User.id` (WARP-2911).
+  username    String
   kind        NotificationKind
   title       String
   body        String?
+  // WARP-2909 — deep link: a same-origin dashboard path (validated by
+  // assertNotificationLink) and small flat PHI-free client context.
+  url         String?
+  data        Json?
   // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
   error       String?
+  /// WARP-2904 — what the web-push leg did, explicitly. NULL only on rows
+  /// written before this column existed and on `recordNotification` rows
+  /// (queued, no transport yet); never inferred from `channels`/`error`.
+  pushOutcome PushOutcome?
   createdAt   DateTime         @default(now())
+  /// WARP-2804 — whether the recipient has seen it. Explicit, never inferred
+  /// from ackedAt. Rows written before WARP-2804 are `untracked` (backfilled
+  /// by the migration); every new row starts `unacked`.
+  ackState     NotificationAckState   @default(unacked)
+  ackedAt      DateTime?
+  ackMethod    NotificationAckMethod?
+  /// The sign-in's id (JWT `sid`) from the signed token that acked it: it
+  /// names the right sign-in, but its live-session check can be skipped when
+  /// the session store is unreachable — `ackSessionChecked` says whether it
+  /// ran. NULL when that token carried no sid (grace/legacy tokens).
+  ackSessionId String?                @db.VarChar(64)
+  /// What the acking client SAID it was (X-Droplet-Client, else a coarse
+  /// User-Agent label). Reported, never proof. NULL when it said nothing
+  /// usable.
+  ackClient    String?                @db.VarChar(120)
+  /// Whether the session store CONFIRMED that sign-in was live when it acked
+  /// (authMiddleware `req.sessionChecked`). False when the check was skipped
+  /// (store unreachable, no sid) and on every row not acked. DB CHECK
+  /// `NotificationLog_ack_session_checked`: true only on an acked row with a
+  /// sid.
+  ackSessionChecked Boolean             @default(false)
 
-  @@index([userId, createdAt])
+  @@index([username, createdAt])
+  // WARP-2804 — the unread count and the `state=unacked` list.
+  @@index([username, ackState, createdAt])
+}
+
+/// WARP-2804 — whether the RECIPIENT has seen a notification. Set only by the
+/// recipient (never by someone else's act). Explicit — never inferred from
+/// ackedAt. The DB CHECK `NotificationLog_ack_shape` pins the columns to it.
+enum NotificationAckState {
+  /// Not seen yet. The only state counted as unread.
+  unacked
+  acked
+  /// Written before WARP-2804: nobody can say. Never counted as unread; can
+  /// still be acked.
+  untracked
+}
+
+/// WARP-2804 — the path that acknowledged a notification.
+enum NotificationAckMethod {
+  /// POST /notifications/:id/ack (the default)
+  inbox
+  /// POST /notifications/:id/ack {via:'opened'} — the client REPORTS the
+  /// person opened its link
+  opened
+  /// POST /notifications/ack-all
+  all
+  /// The recipient acknowledged the Security incident this notification was
+  /// about (WARP-2978). Never set by a notification route.
+  incident
+}
+
+/// WARP-2904 — the web-push leg of one sendNotification call.
+///   sent           at least one subscription accepted the push
+///   no_subscribers the user has no (valid) PushSubscription row
+///   refused_gate   the `web_push` off-LAN channel is off (or unreadable)
+///   failed         subscribers existed and nothing was accepted, or the
+///                  push leg threw
+enum PushOutcome {
+  sent
+  no_subscribers
+  refused_gate
+  failed
 }
 
 // ── WARP-446: Coverage extender APs (auto-onboarded OpenWrt APs) ──
@@ -2671,6 +2807,13 @@ model User {
   // back to ACTIVE on re-activate. The login route + SSO callback fail
   // closed when this is DEACTIVATED. Explicit enum, never IS-NULL-derived.
   directoryStatus    DirectoryUserStatus @default(ACTIVE)
+  // WARP-2858: where this account was CREATED — written once, by the path
+  // that minted the row, never inferred from a null `passwordHash` or
+  // `nextcloudUsername`. SSO / SCIM rows authenticate through the IdP only:
+  // the box refuses to set, change or verify a local password on them,
+  // because a local password is a login the IdP's disable/deprovision cannot
+  // reach. A LOCAL row that later links an SSO identity stays LOCAL.
+  provisionSource    UserProvisionSource @default(LOCAL)
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was
@@ -2716,6 +2859,10 @@ model User {
   // was supplied up front). Anonymous passwordless-authenticate challenges
   // have a null userId, so they are NOT in this relation.
   webauthnChallenges  WebAuthnChallenge[]
+  // WARP-2767: calendar ICS feed links ("subscribe on my phone"). Deleting
+  // the user cascades them, so a reused username can never inherit an old
+  // link (see CalendarFeedToken).
+  calendarFeedTokens  CalendarFeedToken[]
 
   // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the
@@ -2730,6 +2877,9 @@ model User {
   departmentMemberships DepartmentMembership[]
   // WARP-1255: per-user storage/usage policy (quota, upload cap, LLM cap).
   usagePolicy           UserUsagePolicy?
+  // WARP-2981 (DS-003): the department this person's shell is arranged
+  // around. Absent = Whole business, the default for everyone (DS-014).
+  activeDepartmentChoice ActiveDepartmentChoice?
 
   // ADR-032 / WARP-1525 (RBAC v2): optional custom access role. Null = plain
   // built-in tier — today's world, fully backward compatible. Assigning a
@@ -2752,6 +2902,10 @@ model User {
   // access-control key, where an assignment is mere provenance.
   brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
   brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
+  // WARP-2251: the user's own morning briefings, one per box-local day.
+  morningBriefings   MorningBriefing[]
+  // WARP-2978: whether this person is told about Security alerts (no row = not told, except owners).
+  securityAlertRecipient SecurityAlertRecipient?
 
   @@index([role])
   @@index([accessRoleId])
@@ -2963,6 +3117,21 @@ enum DepartmentRight {
   manager // + create shares on dept content, manage dept membership (absorbs WARP-1245)
 }
 
+/// WARP-2976 (ADR-059 P1): which arrangement a department's profile starts
+/// from. A template is DATA — default nav destinations and home widgets the
+/// dashboard seeds a profile with; the owner or the department's manager edits
+/// both afterwards. It grants nothing: what a person may reach is still ADR-032
+/// + CameraAccessGrant. `custom` is an explicit choice, not a fallback.
+enum DepartmentTemplate {
+  security
+  sales
+  finance
+  operations
+  front_desk
+  it
+  custom
+}
+
 /// WARP-1255: department hierarchy kind. Departments are top-level; teams nest
 /// one level deep inside them. Household is the legacy WS-5 system department.
 enum DepartmentKind {
@@ -3143,6 +3312,11 @@ model WebAuthnCredential {
   // hybrid"). Optional — older authenticators omit it. Used only as a UX
   // hint to the browser on the next authenticate ceremony.
   transports   String?
+  // WARP-1157: owner-chosen label shown in Settings. NULL until renamed.
+  name         String?
+  // WARP-1157: the RP ID (host) this passkey was created on — passkeys only
+  // work on that address. NULL only for rows enrolled before it was recorded.
+  rpId         String?
   createdAt    DateTime  @default(now())
   // Bumped on every successful assertion so the dashboard can show
   // "last used 3 days ago" without a separate audit query.
@@ -3223,12 +3397,20 @@ model File {
   // Cached path for display. Refreshed from the file-indexer's MQTT
   // bridge when Nextcloud renames or moves the file.
   path         String?
+  // WARP-2096: SHA-256 (hex) of the bytes, computed while the upload streams
+  // through, and their length. Null for rows written before it or outside
+  // POST /files/upload. The (owner, sha256) index is deliberately NOT unique:
+  // a second copy of the same bytes is a legitimate file, so duplicates are
+  // reported to the uploader, never refused by the database.
+  sha256       String?
+  sizeBytes    BigInt?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@index([ownerUserId])
   @@index([scope])
   @@index([departmentId])
+  @@index([ownerUserId, sha256])
 }
 
 // ── WARP-456: signed append-only activity log ──
@@ -3945,6 +4127,33 @@ model AgentRun {
   /// runs rather than deleting the runs with it.
   scheduleId         String?
   schedule           AgentRunSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  /// WARP-2896 (ADR-056 slice G) — the workspace a WORKSHOP run works in.
+  /// NULL for every ordinary run. Set once at enqueue and never changed: the
+  /// `/api/workspace/:id/*` routes check that the run named in the request
+  /// carries THIS id ("run owns workspace"), so a run cannot reach any
+  /// workspace but its own. `onDelete: SetNull` — deleting a workspace keeps
+  /// the runs that worked in it, as the schedule FK above does.
+  ///
+  /// ONE LIVE RUN PER WORKSPACE is a partial unique index —
+  /// `AgentRun_workspaceId_active_key`, `UNIQUE ("workspaceId") WHERE
+  /// "workspaceId" IS NOT NULL AND "status" IN (queued, running,
+  /// awaiting_confirmation)` — in the warp_2896_workspace migration's raw SQL,
+  /// because Prisma cannot express a WHERE-filtered unique index (the
+  /// `PmCycle_projectId_active_key` pattern). `POST /api/agent-runs` still
+  /// counts first for the friendlier 409, and maps the index's P2002 onto the
+  /// same 409 when two starts race past the count.
+  workspaceId        String?
+  workspace          WorkshopWorkspace?       @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  /// WARP-2997 — the per-person cloud gate's verdict at the LATEST claim.
+  /// Explicit, like `status`: `unchecked` until the worker first claims the
+  /// row, never inferred from `offLanProvider` being NULL.
+  cloudGate          AgentRunCloudGate        @default(unchecked)
+  /// WARP-2997 — the non-local provider the run's model resolved to at the
+  /// latest claim; NULL when it stays on the box (`cloudGate` says which).
+  offLanProvider     String?
+  /// WARP-2997 — the stored-content tools withheld from the run's pool at
+  /// the latest claim (`withholdStoredContentTools`). Empty on a local run.
+  offLanWithheldTools String[]                @default([])
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
@@ -3952,6 +4161,8 @@ model AgentRun {
   @@index([status, runAfter])
   // WARP-2877 — the ticker's overlap probe: has this schedule an active run?
   @@index([scheduleId, status])
+  // WARP-2896 — a workspace's runs, for the workshop's extension page.
+  @@index([workspaceId, createdAt(sort: Desc)])
   // Reclaim scan: `status = running AND heartbeatAt < now() - threshold`.
   @@index([status, heartbeatAt])
   // "My runs", newest first — the list route in WARP-2180.
@@ -3973,6 +4184,142 @@ enum AgentRunStatus {
   cancelled
 }
 
+/// WARP-2896 (ADR-056 §6.2) — a workshop workspace: one bare git repository
+/// on the sandbox's `workspace-git` volume plus its working checkout, in
+/// which a workshop run reads, writes, commits, runs the allow-listed
+/// commands and finally PROPOSES. The row is the orchestrator's index of
+/// what the sandbox holds — the repository itself never lives in Postgres.
+///
+/// Named for the surface (the singleton `Workspace` below is the box itself —
+/// the org, its name, its slug; a WorkshopWorkspace is one extension's
+/// repository). `id` doubles as the repository name (`<id>.git`) and the sandbox's
+/// workspace id, so it is constrained to the sandbox's id grammar
+/// (`^[a-z0-9][a-z0-9-]{0,63}$`) at the route, not a uuid.
+///
+/// `status` is explicit: `active` (a run may work in it), `proposed` (a
+/// proposal tag exists; the review surface — slice I — reads it), `archived`
+/// (kept for history, no run may be started in it). Never inferred from the
+/// presence of a tag.
+model WorkshopWorkspace {
+  id          String          @id
+  /// The owning person (`User.id`). Runs in this workspace are attributed to
+  /// them; the dashboard shows an owner their own, an admin everyone's.
+  userId      String
+  name        String
+  /// The `templates.git` directory it was created from, when one was.
+  template    String?
+  status      WorkshopWorkspaceStatus @default(active)
+  /// The `proposal/<version>` tag the last `workspace_propose` wrote.
+  proposedTag String?
+  proposedAt  DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  runs        AgentRun[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+enum WorkshopWorkspaceStatus {
+  active
+  proposed
+  archived
+}
+
+/// WARP-2900 (ADR-056 slice H2) — a promoted extension: one per workshop
+/// workspace, keyed by its SLUG (deriveExtensionSlug(workspaceId), <= 27
+/// chars, so "ext-" + slug fits the multiplexer's 32-char server id).
+///
+/// `status` is explicit (CLAUDE.md "No guessing"): never inferred from a
+/// NULL token or a missing process.
+///   signed       — promoted and box-signed, not installed yet
+///   installed    — the sandbox is running its host shim
+///   live         — installed AND attached through the multiplexer (H3)
+///   disabled     — stopped by the owner; the signed versions stay
+///   failed       — the last install/verify failed (failureReason says why)
+///   uninstalled  — removed from the sandbox; the signed history stays
+///
+/// `serviceTokenHash` is the sha256 of the extension's call-back bearer
+/// (`dxt_...`), rotated on every start and cleared when it stops. The
+/// plaintext only ever exists in the sandbox child's environment.
+model Extension {
+  id                String             @id
+  workspaceId       String             @unique
+  name              String
+  /// The owner who promoted it: the person the extension acts for (H3).
+  installedByUserId String
+  status            ExtensionStatus    @default(signed)
+  /// The tool domain chosen at promote (domainSource "operator", H3).
+  operatorDomain    String?
+  currentVersionId  String?            @unique
+  currentVersion    ExtensionVersion?  @relation("ExtensionCurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+  serviceTokenHash  String?            @unique
+  failureReason     String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  versions          ExtensionVersion[] @relation("ExtensionVersions")
+
+  @@index([status])
+}
+
+/// One signed version of an extension: the statement the box (or Warp Lab's
+/// release key) signed, exactly as signed, and the manifest bytes it names.
+/// Every install re-verifies these bytes (update-agent/extension-verify.ts)
+/// with `signer` + `keyFingerprint` as the recorded expectation, so a
+/// rebuilt boot disk (a new box extension key) is extension_key_changed and
+/// needs a re-promote, never a silent re-sign.
+model ExtensionVersion {
+  id               String          @id @default(uuid())
+  extensionId      String
+  extension        Extension       @relation("ExtensionVersions", fields: [extensionId], references: [id], onDelete: Cascade)
+  currentOf        Extension?      @relation("ExtensionCurrentVersion")
+  version          String
+  /// The proposal/<version> tag the owner promoted.
+  tag              String
+  commit           String
+  tree             String
+  manifestBytes    Bytes
+  manifestSha256   String
+  statementBytes   Bytes
+  /// Base64 DER ECDSA-P256-SHA256 (the cosign sig-file format, both signers).
+  signature        String
+  signer           ExtensionSigner
+  /// "sha256:<hex>" of the signing key's SPKI.
+  keyFingerprint   String
+  promotedByUserId String
+  createdAt        DateTime        @default(now())
+
+  @@unique([extensionId, version])
+  @@index([extensionId, createdAt(sort: Desc)])
+}
+
+enum ExtensionStatus {
+  signed
+  installed
+  live
+  disabled
+  failed
+  uninstalled
+}
+
+enum ExtensionSigner {
+  box
+  release
+}
+
+/// WARP-2997 — where a run's model runs, and whether its owner may use it.
+/// `unchecked` (never claimed yet), `local` (on the box; nothing withheld),
+/// `cloud_allowed` (cloud model, person permitted; stored-content tools
+/// withheld), `cloud_refused` (451: the person may not use cloud models),
+/// `cloud_unverified` (503: the gate could not be read; fail-closed).
+enum AgentRunCloudGate {
+  unchecked
+  local
+  cloud_allowed
+  cloud_refused
+  cloud_unverified
+}
+
 /// WARP-2180 — a recurring background run: the same RRULE vocabulary as
 /// `ToolSchedule` / `SceneSchedule`, fired by the agent-run-schedule ticker
 /// on the ONE sanctioned clock (`cronRuntime.scheduleInterval`, its own lock
@@ -3984,6 +4331,12 @@ model AgentRunSchedule {
   userId      String
   goal        String
   model       String
+  /// WARP-3047 — true when the schedule was created WITHOUT a model: each
+  /// fire runs on the box's active model, resolved by the ticker at that
+  /// moment, so a switch reaches it. `model` then holds the model that was
+  /// active at creation — the fallback when nothing resolves at fire. False
+  /// (every schedule before this column) = pinned to `model`.
+  followsActiveModel Boolean @default(false)
   maxIter     Int
   rrule       String
   timezone    String    @default("UTC")
@@ -4134,6 +4487,10 @@ enum OffLanChannelKey {
   /// Bank)": the /api/web/weather + /api/web/rates routes' egress gate,
   /// fronting the services/web-fetch allowlisted fetcher.
   ambient_data
+  /// WARP-2904 — Web Push delivery: the dial to whichever push service
+  /// (Google / Apple / Mozilla) a PushSubscription row names. Read by
+  /// `webPushGate` in dispatchToUser, the one dial site, on every call.
+  web_push
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.
@@ -4345,6 +4702,11 @@ enum ModuleId {
   /// module because a box that keeps its books elsewhere should have no
   /// /money surface at all, rather than an empty one.
   money
+  /// WARP-2977 (ADR-059 DS-004) — the Security command center. Its own
+  /// module, not part of `cameras`: threats (and, with ADR-055, doors) are
+  /// in it too, and folding it into cameras would hide those behind a camera
+  /// grant. Camera grants still filter every camera row inside it (DS-005).
+  security
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -5249,6 +5611,27 @@ enum DeviceUpdateStatus {
   rejected
 }
 
+/// WARP-3007 follow-up (Stefan on #2302; Romain approved 2026-09-23): what an
+/// apply actually did to the box, recorded as an explicit column instead of
+/// being read out of status + failureReason + logs. `status` stays the
+/// advance-only lifecycle; `outcome` is the verdict an operator acts on —
+/// notably a committed update whose post-commit start of a newly-enabled
+/// service failed, which `status` (committed, final) cannot say.
+enum DeviceUpdateOutcome {
+  /// No swap outcome yet: pending, verifying, applying, rejected, superseded.
+  not_applied
+  /// Committed; the post-commit start of services new to this box is running.
+  starting_services
+  /// Committed; every service this box enables is running.
+  committed
+  /// Committed, but a newly-enabled service did not start or never went healthy.
+  services_start_failed
+  /// A health gate failed; the previous release is back and healthy.
+  rolled_back
+  /// The rollback's own health gate failed too (status failed, degraded_health).
+  rollback_failed
+}
+
 /// One row per release the update agent decided to track (signature-verified
 /// at discovery time — a release that fails signature verification writes NO
 /// row, only an `update.signature_failed` log event, per WARP-538).
@@ -5281,8 +5664,10 @@ model DeviceUpdate {
   /// apply-time verdict such as `degraded_health` (WARP-539). Null while the
   /// row is healthy.
   failureReason  String?
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  /// WARP-3007 — explicit apply outcome (see DeviceUpdateOutcome).
+  outcome        DeviceUpdateOutcome @default(not_applied)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   @@index([status, createdAt])
   @@index([gitSha])
@@ -6344,6 +6729,14 @@ model Department {
   // membership test, so an access key must never dangle.
   brainDigests      BrainDigest[]
   brainFindings     BrainFinding[]
+  /// WARP-2976 (ADR-059 P1): how this department is ARRANGED in the dashboard
+  /// (switcher, /d/<slug> home). Absent = "not set up" — a state the UI names,
+  /// never a template inferred from the department's name. Only DEPARTMENT rows
+  /// carry one: a TEAM reads its parent's, HOUSEHOLD has none.
+  profile           DepartmentProfile?
+  /// WARP-2981 (DS-003): the people whose shell is arranged around this
+  /// department. Back-relation only; a row cascades away with the department.
+  activeChoices     ActiveDepartmentChoice[]
 
   @@index([state])
   /// WARP-2634: declared to match `Department_parentId_idx`, which
@@ -6351,6 +6744,64 @@ model Department {
   /// not auto-index FK columns and the reconciler reads teams by parentId, so
   /// the index is doing real work — the datamodel was the side that was wrong.
   @@index([parentId])
+}
+
+/// WARP-2976 (ADR-059 P1) — a department's dashboard arrangement. Shows,
+/// never grants: `navHrefs` is intersected with the viewer's existing nav gates
+/// (role / capability / module) on the client, so a destination the person may
+/// not reach stays hidden and an href that no longer exists renders nothing.
+/// The server validates SHAPE only; the nav definition lives in the dashboard.
+model DepartmentProfile {
+  departmentId String             @id
+  department   Department         @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  template     DepartmentTemplate
+  /// lucide icon name, lowercase-dash (validated by the route's zod schema)
+  icon         String
+  /// ordered dashboard hrefs, e.g. ["/cameras", "/events"]
+  navHrefs     String[]
+  /// ordered [{ widget, size }] — unknown widget ids are skipped by the client
+  homeWidgets  Json
+  /// local User.id of the last writer (the ActivityRow carries the audit)
+  updatedBy    String
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+}
+
+/// WARP-2981 (ADR-059 DS-003) — the department a person's shell is arranged
+/// around, on every device (web, Android, the Windows WebView).
+///
+/// The row IS the person's choice, and `scope` says which: Whole business or a
+/// department. No row means they have never chosen, on any device. The box
+/// then shows Whole business (DS-014) without claiming they picked it, so a
+/// browser still holding a P1 choice keeps it. Choosing Whole business writes
+/// a `whole_business` row; only the cascades delete one.
+///
+/// `departmentId` is set exactly when `scope = department`: the
+/// `ActiveDepartmentChoice_scope_shape` CHECK in the migration (Prisma cannot
+/// declare it).
+///
+/// SHOWS, never grants (§2.5). The department must be choosable when written
+/// (PUT) and is re-checked when read (GET): a person removed from it, or a
+/// department archived since, reads as Whole business. The row is left in
+/// place on read (GET never writes); the next PUT replaces it.
+///
+/// Last write wins across devices; no version column — two devices racing to
+/// arrange one person's own shell is not a conflict worth a 409.
+model ActiveDepartmentChoice {
+  userId       String                @id
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scope        ActiveDepartmentScope
+  departmentId String?
+  department   Department?           @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  updatedAt    DateTime              @updatedAt
+
+  @@index([departmentId])
+}
+
+/// WARP-2981 — what a person chose to arrange their shell around.
+enum ActiveDepartmentScope {
+  whole_business
+  department
 }
 
 /// WARP-1255: department membership — explicit access rights for a user in a
@@ -6850,8 +7301,9 @@ model WorkspaceLocation {
 enum M365ConnectionState {
   /// No Microsoft account linked. The default, and where a disconnect returns.
   DISCONNECTED
-  /// A sign-in is in flight and Microsoft is waiting for the person to approve
-  /// it on another device. Expires — see `pendingFlowExpiresAt`.
+  /// A sign-in is in flight: the person is at Microsoft's sign-in page
+  /// (authorization code, WARP-2704) or approving a code on another device
+  /// (device code, the fallback). Expires — see `pendingFlowExpiresAt`.
   PENDING_CONSENT
   /// Usable. A refresh token is held and the last refresh succeeded.
   CONNECTED
@@ -6890,6 +7342,36 @@ model M365Connection {
   /// case where someone reconnects a DIFFERENT tenant than before.
   tenantId String?
 
+  /// WARP-2705 — the Application (client) id of the CUSTOMER'S OWN Entra app
+  /// registration this link signs in through. Not a secret: a public-client id
+  /// is designed to ship inside the client, and the flows use no client
+  /// secret. Per connection rather than one box-wide id, because a single
+  /// Warp-Lab multitenant app is the PARTNER_GATED shape ADR-042 §3 rules out
+  /// and pools Graph's per-app throttling ceiling across every customer.
+  ///
+  /// Survives a disconnect on purpose: it is configuration, not a credential,
+  /// and keeping it is what makes "connect again" one click.
+  appClientId String?
+
+  /// WARP-2705 — the tenant that app is registered in (a GUID or a verified
+  /// domain). The sign-in authority is `${M365_AUTHORITY_HOST}/${appTenantId}`:
+  /// a single-tenant registration only issues tokens on its own tenant
+  /// authority, never on `/organizations`. Survives a disconnect, like
+  /// `appClientId`. `tenantId` above is what Microsoft REPORTS for the
+  /// signed-in account; this is what the owner CONFIGURED.
+  appTenantId String?
+
+  /// WARP-2704 — SHA-256 (hex) of the OAuth `state` of an in-flight
+  /// authorization-code sign-in. The callback finds the row by it; the raw
+  /// value only ever travels in the redirect and an httpOnly cookie. Cleared
+  /// the moment a callback claims it, so a replayed callback finds nothing.
+  pendingStateHash String? @unique
+
+  /// WARP-2704 — `dcv1:` blob of the in-flight sign-in's PKCE code verifier,
+  /// nonce and redirect URI, sealed under the token-cache key with its own
+  /// AAD. Cleared together with `pendingStateHash`.
+  pendingFlowEnc String?
+
   /// User principal name (e.g. `sam@practice.com`), shown in the dashboard so
   /// the owner can see which account is connected. Not a secret.
   accountUpn String?
@@ -6910,10 +7392,23 @@ model M365Connection {
   /// workloads it is allowed to attempt.
   grantedScopes String?
 
+  /// WARP-3059 (#2347 review) — which link this person's M365DeltaCursor rows
+  /// were built under: a SHA-256 (hex) of the app client id, homeAccountId and
+  /// tenantId of the sign-in that last connected. A delta link and a folder id
+  /// are positions in one mailbox read through one app, so a sign-in that
+  /// completes as anything else purges the cursors before the row turns
+  /// CONNECTED; the same link keeps them. Unlike the account columns it
+  /// survives a sign-in STARTING, because the cursors do. A hash, so a
+  /// DISCONNECTED row still names no account through it. Cleared with the
+  /// cursors on disconnect; NULL means "not known" and counts as a change.
+  cursorLinkHash String?
+
   /// When the in-flight sign-in stops being valid. Microsoft expires a device
-  /// code in ~15 minutes. A PENDING_CONSENT row past this is swept back to
-  /// DISCONNECTED — an orchestrator restart drops the in-memory flow, and
-  /// without this the row would sit "pending" forever.
+  /// code in ~15 minutes, and an authorization-code sign-in gets the same
+  /// window. A PENDING_CONSENT row past this is swept back to DISCONNECTED —
+  /// an orchestrator restart drops the in-memory device-code flow, a person can
+  /// close the Microsoft tab, and without this the row would sit "pending"
+  /// forever.
   pendingFlowExpiresAt DateTime?
 
   /// First successful connect. Kept across a NEEDS_RECONNECT round-trip so the
@@ -6977,6 +7472,15 @@ model M365DeltaCursor {
   /// missing data rather than as a bad URL. Null = nothing synced yet, or a
   /// resync is pending (see `state`, which is what actually distinguishes them).
   deltaLink String?
+
+  /// WARP-3059 — where an enumeration too big for one tick resumes: the
+  /// `@odata.nextLink` of the last page the run HANDLED before its page budget
+  /// ran out. Separate from `deltaLink` on purpose — the cursor still advances
+  /// only when a run reaches its deltaLink; this is a checkpoint inside one run,
+  /// written only after every page before it was handled. Without it a folder
+  /// over the budget re-read the same pages every tick and never finished.
+  /// Cleared on completion and on a resync. Stored verbatim, never logged.
+  resumeLink String?
 
   state M365SyncState @default(IDLE)
 
@@ -8038,9 +8542,991 @@ model RemoteToolClassification {
   reviewedBy           String?
   reviewedAt           DateTime?
   wireDescription      String?
+  /// WARP-2900: sha256 of the tool's canonical inputSchema when it was last
+  /// discovered. A re-discovery with the same name and hash keeps the
+  /// reviewed classification; a changed hash resets it (H3).
+  inputSchemaHash      String?
   firstSeenAt          DateTime  @default(now())
   lastSeenAt           DateTime  @default(now())
 
   @@unique([serverId, toolName])
   @@index([serverId])
+}
+
+/// WARP-2251 — morning briefing: one agent-written day plan per user per
+/// box-local day. Self-only: every read is scoped by `userId` (decision 2,
+/// 2026-08-27). Status is an explicit enum (CLAUDE.md "No guessing"): never
+/// derive readiness from `body IS NOT NULL` or failure from `endedAt IS NULL`.
+/// `body` is NOT encrypted at rest in v1 (decision 1); 30-day retention.
+model MorningBriefing {
+  id            String              @id @default(uuid())
+  userId        String
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Box-local calendar date the briefing is FOR (not when it ran).
+  forDate       DateTime            @db.Date
+  status        BriefingStatus      @default(pending)
+  skipReason    String?
+  failureReason String?
+  headline      String?
+  vibe          BriefingVibe?
+  /// The validated output contract (WARP-2248). Null until status = ready.
+  body          Json?
+  /// Tool names actually called, from the agent trace.
+  sources       Json?
+  model         String?
+  iterations    Int?
+  artKind       BriefingArtKind     @default(ascii)
+  photoStatus   BriefingPhotoStatus @default(none)
+  /// "<YYYY-MM-DD>/<theme>/<pexelsId>" (WARP-2263); null when no photo.
+  photoRef      String?
+  triggeredBy   BriefingTrigger     @default(scheduler)
+  startedAt     DateTime?
+  endedAt       DateTime?
+  readAt        DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@unique([userId, forDate])
+  @@index([userId, forDate(sort: Desc)])
+  @@index([status, forDate])
+}
+
+enum BriefingStatus {
+  pending
+  running
+  ready
+  failed
+  skipped
+}
+
+enum BriefingVibe {
+  calm
+  focused
+  busy
+  urgent
+  celebratory
+  quiet
+  stormy
+  fresh
+}
+
+enum BriefingArtKind {
+  ascii
+  svg
+  photo
+}
+
+enum BriefingPhotoStatus {
+  none
+  fetched
+  fetch_failed
+  disabled
+}
+
+enum BriefingTrigger {
+  scheduler
+  user
+}
+
+// ── WARP-2977 (ADR-059 §3.3): the Security command center's event store ──
+//
+// One row per OBSERVATION: a tracked object Frigate finished following, a
+// camera's detect stream going down or coming back, a warn/err network or
+// auth ActivityRow. Append-only — a correction is a new row, never an update.
+//
+// NOT ActivityRow. That table is an HMAC hash chain recording who did what on
+// the box; detections are high-volume machine observations. Putting them in
+// the chain would sign every one, bury the audit trail in noise, and make the
+// 30-day retention below a deletion from a tamper-evident log. The chain
+// keeps the human-level facts (incident acknowledged, link changed — P3/P4).
+//
+// Written by `security-events.service.ts` only. Frigate detections are
+// ingested on `end` (one row per object, with its duration, best score and
+// zones), from the RAW message — never behind camera-event-gate, which drops
+// concurrent and cooldown events for the toast/push surface. WARP-2978 PR-D
+// adds ONE `detection_ongoing` row for a person still tracked after 30 s
+// (early presence); the `end` row still follows.
+//
+// Columns land with their first writer: `correlationKey` with ADR-055's
+// AccessEvent. Incident membership lives in SecurityEventTriage (WARP-2978):
+// SecurityEvent is append-only — a BEFORE UPDATE trigger refuses every
+// UPDATE — and never gains an incidentId. Zones resolve at read time from
+// SecurityZoneLink (camera, cameraZones, sourceRef); no zoneId column
+// (WARP-2977 P2b).
+
+/// Where a SecurityEvent came from. Explicit enum — never inferred from
+/// which columns are null.
+enum SecurityEventSource {
+  frigate
+  frigate_status
+  activity_mirror
+  /// WARP-2977 P2b — a change of the site mode (SecurityModeState). One row per change.
+  site_mode
+}
+
+enum SecurityEventKind {
+  /// A tracked object that cleared the ingest gate (best score >= 0.70 and
+  /// tracked >= 2 s). The only kind a baseline will count (P5). (WARP-2980:
+  /// `source = frigate` only; lock rows never.)
+  detection
+  /// Below the gate, or a false positive. KEPT, not dropped, so the
+  /// thresholds can be tuned against real data later.
+  detection_low
+  camera_offline
+  camera_online
+  /// Frigate as a whole (its `frigate/available` LWT) — every camera is
+  /// blind while this is the latest word. "Nothing reporting" must never
+  /// read as "all clear".
+  source_offline
+  source_online
+  /// A mirrored warn/err `network` or `auth` ActivityRow.
+  threat
+  /// The site mode changed. labels = [mode, modeSource, fromMode]; startedAt = the boundary instant.
+  mode_changed
+  /// WARP-2978 PR-D (ADR-059 P3 §6.12, D35) — a person Frigate has tracked for
+  /// 30 s and has not ended yet, written ONCE per object by the incident engine
+  /// so an after-hours alert need not wait for `end`. endedAt is NULL and the
+  /// key is `frigate-ongoing:<frigate id>` (CHECK SecurityEvent_ongoing_shape);
+  /// the object's `end` is still its own `detection` row. Never a baseline
+  /// input (P5 counts `detection` only).
+  detection_ongoing
+}
+
+/// info < notice < alert. On an event this is the source's own weight; the
+/// incident severity P3 derives from reason codes is a separate column.
+enum SecuritySeverity {
+  info
+  notice
+  alert
+}
+
+model SecurityEvent {
+  id          BigInt              @id @default(autoincrement())
+  source      SecurityEventSource
+  kind        SecurityEventKind
+  severity    SecuritySeverity
+  /// Frigate camera name. Every row with a camera is filtered by the
+  /// viewer's CameraAccessGrant — hidden entirely, counts included (DS-005).
+  camera      String?
+  /// `<camera>/<frigateId>`, `<camera>/status/detect`, `frigate/available`,
+  /// `activity:<ActivityRow.id>`.
+  sourceRef   String
+  /// Unique per observation. MQTT QoS 1 redelivers; a redelivered `end`
+  /// lands on this and adds nothing.
+  dedupeKey   String              @unique
+  labels      String[]
+  /// Frigate's in-frame zones the object entered. P2b's zone links join here.
+  cameraZones String[]
+  score       Float?
+  startedAt   DateTime
+  endedAt     DateTime?
+  summary     String
+  createdAt   DateTime            @default(now())
+  /// WARP-2978 — the engine's exactly-once marker and the incident membership.
+  triage      SecurityEventTriage?
+
+  @@index([startedAt])
+  @@index([camera, startedAt])
+  @@index([kind, startedAt])
+}
+
+/// Ingest bookkeeping — one row. The threat mirror's cursor is the last
+/// ActivityRow id it has read (ids are appended under the chain's advisory
+/// lock, so they are monotonic in commit order). The retention fields are
+/// what /security's health header shows for "last cleaned".
+model SecurityIngestState {
+  id                String    @id @default("singleton")
+  threatCursor      BigInt    @default(0)
+  threatMirrorRanAt DateTime?
+  retentionRanAt    DateTime?
+  retentionDeleted  Int       @default(0)
+  /// WARP-2978 — incidents the last retention run removed (§6.10).
+  retentionIncidentsDeleted Int @default(0)
+  updatedAt         DateTime  @updatedAt
+}
+
+// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
+//
+// Areas resolve against SecurityEvent at READ time — SecurityEvent gets no zoneId.
+// Values land with their first writer: link states proposed/rejected, origin,
+// evidence and confidence arrive with P4; the `lock` source kind with the Matter
+// adapter (P2b-2); departmentId when something reads it.
+//
+// Every shape rule below that Prisma cannot express is a hand-written CHECK in
+// 20260924000100_warp_2977_security_zones_hours_mode — explicit enums, never
+// IS NULL as state.
+
+enum SecurityZoneKind {
+  entry
+  interior
+  perimeter
+  parking
+  restricted
+}
+
+/// Areas are never row-deleted: P3 incidents and P5 suppressions will FK here with Restrict.
+enum SecurityZoneState {
+  active
+  archived
+}
+
+enum SecurityZoneSourceKind {
+  camera
+  camera_zone
+}
+
+/// `removed` = a person unlinked it. Kept (never deleted) so P4 never re-proposes it.
+enum SecurityZoneLinkState {
+  active
+  removed
+}
+
+model SecurityZone {
+  id          String             @id @default(uuid())
+  name        String             @db.VarChar(60)
+  /// lower(btrim(name)). Case-insensitive uniqueness in the database, not an app pre-check. CHECKed.
+  nameKey     String             @unique @db.VarChar(60)
+  kind        SecurityZoneKind
+  state       SecurityZoneState  @default(active)
+  /// Lost-update guard for the edit form and the link set. Bumped by every write to the area or its links.
+  version     Int                @default(0)
+  createdById String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  links       SecurityZoneLink[]
+  /// WARP-2978 — incidents scoped to this area (Restrict: areas are archived, never deleted).
+  incidents   SecurityIncident[]
+  /// WARP-2980 P5 PR-B — expected activity for this area (Restrict, for the same reason).
+  suppressions SecuritySuppression[]
+
+  @@index([state])
+}
+
+model SecurityZoneLink {
+  id             String                 @id @default(uuid())
+  zoneId         String
+  zone           SecurityZone           @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  sourceKind     SecurityZoneSourceKind
+  /// camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. Names, never a Camera FK:
+  /// SecurityEvent.camera, CameraAccessGrant reads and Frigate all key on the name, and a Cascade FK
+  /// would drop links unaudited (a Restrict one breaks DELETE /cameras/:name after Frigate was edited).
+  sourceRef      String                 @db.VarChar(160)
+  /// Display snapshot at link time. Shown only when the source no longer exists; never matched on.
+  sourceLabel    String                 @db.VarChar(120)
+  state          SecurityZoneLinkState
+  createdById    String?
+  createdAt      DateTime               @default(now())
+  decidedById    String?
+  stateChangedAt DateTime               @default(now())
+
+  @@unique([zoneId, sourceKind, sourceRef])
+  @@index([sourceKind, sourceRef, state])
+  @@index([zoneId, state])
+}
+
+enum SecurityHoursState {
+  not_set
+  set
+}
+
+enum SecurityDayKind {
+  closed
+  open_all_day
+  hours
+}
+
+enum SecurityMode {
+  open
+  closed
+  away
+}
+
+enum SecurityModeSource {
+  schedule
+  manual
+}
+
+/// How a manual mode ends. Explicit — never inferred from manualUntil (a CHECK ties them).
+enum SecurityManualEnd {
+  none          // modeSource = schedule
+  next_opening  // closed until the opening hours next open the site; recomputed when the hours change
+  at_time       // open until manualUntil (Open up: now + 1/2/4 h, capped at the next opening)
+  until_changed // away; or closed when no opening lies ahead (no hours set, or never open)
+}
+
+/// Opening-hours header, one row. The ONLY zone the evaluator uses — never Workspace.tz at
+/// runtime, never the process zone (the container sets no TZ).
+model SecuritySiteHours {
+  id          String             @id @default("singleton")
+  state       SecurityHoursState @default(not_set)
+  /// Canonical IANA zone (Intl resolvedOptions().timeZone). Set iff state = set (CHECK).
+  timezone    String?            @db.VarChar(64)
+  /// Bumped by every hours AND every exception write: the form's lost-update guard.
+  version     Int                @default(0)
+  updatedById String?
+  updatedAt   DateTime           @updatedAt
+}
+
+/// Brief §5 SecuritySchedule: one weekday's usual hours. Exactly 7 rows iff SecuritySiteHours.state = set.
+model SecuritySchedule {
+  /// ISO weekday of the site-local date the window OPENS on: 1 = Monday … 7 = Sunday.
+  weekday   Int             @id @db.SmallInt
+  kind      SecurityDayKind
+  /// Minutes since site-local midnight, 0–1439; set iff kind = hours (CHECK).
+  /// closesMin < opensMin ⇒ closes the next day. Equal is refused (that is open_all_day).
+  opensMin  Int?            @db.SmallInt
+  closesMin Int?            @db.SmallInt
+  updatedAt DateTime        @updatedAt
+}
+
+/// A date whose hours differ (holiday, late night). Replaces that date's OWN window only;
+/// the previous evening's past-midnight tail still ends when it normally would.
+model SecurityScheduleException {
+  /// Site-local 'YYYY-MM-DD'. A string, never @db.Date (which round-trips as UTC midnight).
+  date        String          @id @db.VarChar(10)
+  kind        SecurityDayKind
+  opensMin    Int?            @db.SmallInt
+  closesMin   Int?            @db.SmallInt
+  note        String          @default("") @db.VarChar(80)
+  createdById String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+/// Brief §5 SecurityModeState, one row. Writers: the act-level mode route, the hours routes and
+/// the mode ticker, all by compare-and-set on `version`. Readers resolve the EFFECTIVE mode with
+/// resolveMode(), so an expired manual mode reads as expired even before the ticker writes it.
+model SecurityModeState {
+  id          String             @id @default("singleton")
+  mode        SecurityMode       @default(open)
+  modeSource  SecurityModeSource @default(schedule)
+  manualEnd   SecurityManualEnd  @default(none)
+  manualUntil DateTime?
+  /// User.id of whoever set a manual mode (no FK: users are deletable; the audit chain is the record).
+  setById     String?
+  setAt       DateTime           @default(now())
+  /// Bumped by every mode write AND by every hours/exception write (invalidates a tick that read old hours).
+  version     Int                @default(0)
+  updatedAt   DateTime           @updatedAt
+}
+
+// ── WARP-2980 (ADR-059 P5 §4.3): what normal looks like ──
+//
+// Derived data. Cells are REBUILT from SecurityEvent (kept 30 days) and the
+// coverage spans below; nobody edits them. Verdicts and suppressions (PR-B)
+// never write here (brief §4.4: baselines stay pure counts).
+//
+// The one input that cannot be rebuilt is COVERAGE: whether Droplet was
+// provably listening to a camera. The camera MQTT client uses a clean session,
+// so a disconnected orchestrator loses events without leaving a row. Coverage
+// is therefore recorded as it happens, one span per continuous stretch.
+//
+// Explicit enums, never IS NULL as state. Shape rules Prisma cannot express
+// are hand-written CHECKs and partial unique indexes in
+// 20260925010000_warp_2980_security_baselines.
+
+/// The SITE-LOCAL date's ISO weekday: 1–5 weekday, 6–7 weekend (brief §4.3).
+enum SecurityDayType {
+  weekday
+  weekend
+}
+
+/// Per camera. Explicit — never inferred from counts or timestamps.
+enum SecurityBaselineState {
+  /// Fewer than 14 fully observed days in the 28-day window. No pattern flag fires.
+  learning
+  /// At least 14 fully observed days, and observed within the last 48 h.
+  active
+  /// Not observed for more than 48 h (camera down or disabled, or Droplet not listening).
+  stale
+}
+
+enum SecurityCoverageSpanState {
+  /// Being extended by the orchestrator process that opened it.
+  open
+  /// Ended: the camera stopped being observed, or that process is gone.
+  closed
+}
+
+enum SecurityBaselineBuildState {
+  building
+  /// The one build the rules and the page read (partial unique index).
+  ready
+  superseded
+  failed
+}
+
+enum SecurityBaselineBuildTrigger {
+  first
+  nightly
+  timezone_changed
+  catch_up
+}
+
+enum SecurityBaselineKeyKind {
+  /// zoneKey `area:<SecurityZone.id>`: events matching the area's active links at build time.
+  area
+  /// zoneKey `camera:<frigateCamera>`: the camera's whole view.
+  camera
+}
+
+/// One continuous stretch during which Droplet could prove it was listening to one camera:
+/// ingest subscribed, Frigate online, the camera's detect stream online and unchanged, and no
+/// failed write. Only the process that opened a span extends it; a restart closes it.
+model SecurityCoverageSpan {
+  id           BigInt                    @id @default(autoincrement())
+  camera       String                    @db.VarChar(64)
+  state        SecurityCoverageSpanState
+  startedAt    DateTime
+  coveredUntil DateTime
+  /// Random per orchestrator boot (crypto.randomUUID()).
+  processId    String                    @db.Uuid
+  closedAt     DateTime?
+
+  // At most one OPEN span per camera: a partial unique index in raw migration SQL
+  // ("SecurityCoverageSpan_one_open"; Prisma cannot express WHERE-filtered uniques).
+  @@index([camera, coveredUntil])
+  @@index([coveredUntil])
+}
+
+/// Brief §5 SecurityBaselineSource: the learning state per camera.
+model SecurityBaselineSource {
+  /// `camera:<frigateCamera>`. P5c adds `activity:<kind>` (§10).
+  sourceKey      String                @id @db.VarChar(72)
+  camera         String                @db.VarChar(64)
+  state          SecurityBaselineState
+  /// Site-local dates in the current window with ≥ 1200 observed minutes, 0–28.
+  daysObserved   Int                   @db.SmallInt
+  firstSeenAt    DateTime
+  /// The last observed instant (max coveredUntil).
+  lastSeenAt     DateTime
+  stateChangedAt DateTime
+  updatedAt      DateTime              @updatedAt
+}
+
+/// One full build of the cells. Exactly one is `ready` (partial unique index), and at most one
+/// is `building` (the database-level single-flight guard).
+model SecurityBaselineBuild {
+  id             String                       @id @default(uuid())
+  state          SecurityBaselineBuildState
+  trigger        SecurityBaselineBuildTrigger
+  /// The IANA zone the slots were cut in. A different current zone forces a new full build.
+  timezone       String                       @db.VarChar(64)
+  /// Site-local window, inclusive: 28 complete dates, the last one being the day before the build.
+  windowFrom     String                       @db.VarChar(10)
+  windowTo       String                       @db.VarChar(10)
+  rulesetVersion Int                          @db.SmallInt
+  /// Bumped by every change to this build's cells (the full insert, each area rebuild).
+  /// The engine keeps no cell cache: the rules read three cells per judged event (WARP-2980 PR-B).
+  cellsVersion   Int                          @default(0)
+  startedAt      DateTime                     @default(now())
+  finishedAt     DateTime?
+  cellCount      Int                          @default(0)
+  eventCount     Int                          @default(0)
+  error          String?                      @db.VarChar(500)
+  cells          SecurityBaselineCell[]
+
+  @@index([state, startedAt])
+}
+
+/// Brief §5 SecurityBaselineCell. RAW counts only; smoothing and scores are computed on read by
+/// lib/security-baseline-math.ts, so the stored row is a fact and the arithmetic is testable.
+/// Every kept (zoneKey, label) has all 48 (dayType, hour) rows, including never-observed hours
+/// (daysObserved = 0), so an unobserved hour is a stored value. A key with no observed slot at all
+/// in the window has no rows; the rules read that as the explicit gate `no_cell` (§6.8).
+model SecurityBaselineCell {
+  id              BigInt                  @id @default(autoincrement())
+  buildId         String
+  build           SecurityBaselineBuild   @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  /// `area:<SecurityZone.id>` or `camera:<frigateCamera>`.
+  zoneKey         String                  @db.VarChar(72)
+  keyKind         SecurityBaselineKeyKind
+  /// Set iff keyKind = area. No FK: derived rows, replaced nightly; areas are never row-deleted.
+  zoneId          String?
+  /// Set iff keyKind = camera.
+  camera          String?                 @db.VarChar(64)
+  /// area: SecurityZone.version when these rows were built. A link edit bumps the area's version,
+  /// which marks these rows out of date until the area is rebuilt (§6.7 step 6).
+  zoneVersion     Int?
+  /// The cameras whose events and coverage built this key, sorted. DS-005: an area key's numbers
+  /// are shown only to a viewer who can see every one of them.
+  cameras         String[]
+  label           String                  @db.VarChar(64)
+  dayType         SecurityDayType
+  hour            Int                     @db.SmallInt
+  /// n: window dates of this dayType on which this key was observed for ≥ 5/6 of the hour slot.
+  daysObserved    Int                     @db.SmallInt
+  /// d: of those, dates with ≥ 1 detection of `label`.
+  daysWithEvent   Int                     @db.SmallInt
+  /// c: detections of `label` in those observed slots.
+  eventCount      Int
+  /// m: Σ observed minutes over those slots (a fall-back hour holds up to 120).
+  observedMinutes Int
+  /// person only: detections with a duration in observed slots of hour−1, hour and hour+1 (same dayType).
+  dwellSamples    Int
+  /// percentile_disc(0.99) of those durations, seconds. NULL iff dwellSamples = 0 (CHECK).
+  durationP99Sec  Float?
+  computedAt      DateTime                @default(now())
+
+  @@unique([buildId, zoneKey, label, dayType, hour])
+  @@index([zoneId])
+}
+
+/// Job bookkeeping, one row. Created lazily on the first tick with a zone. (The spec's
+/// `SecurityBaselineState` model: renamed, because that name is the learning-state enum above.)
+model SecurityBaselineJobState {
+  id            String   @id @default("singleton")
+  /// End instant of the last site-local hour whose hourly step ran (§6.7 step 4).
+  hourlyThrough DateTime
+  updatedAt     DateTime @updatedAt
+}
+
+// ── WARP-2978 (ADR-059 §3.5, §3.7): incidents, reason codes, alert routing, acknowledgement ──
+//
+// Membership is SecurityEventTriage (one row per SecurityEvent, the exactly-once marker);
+// SecurityEvent stays append-only (a BEFORE UPDATE trigger refuses any update).
+// Values land with their first writer: out_of_place / unusual_volume / long_dwell and the verdict
+// columns landed with P5 PR-B (WARP-2980); camera_offline_during_activity lands with P4, the door
+// codes with ADR-055.
+//
+// Every shape rule Prisma cannot express is a hand-written CHECK in
+// 20260925030000_warp_2978_security_incidents (P5 PR-B's: 20260925060100_warp_2980_security_patterns_verdicts)
+// — explicit enums, never IS NULL as state.
+
+enum SecurityIncidentScope {
+  /// One area. zoneId + zoneName + zoneKind are set (CHECK).
+  area
+  /// A camera no active area covered when its first event was triaged. scopeCamera is set.
+  camera
+  /// Mirrored network / sign-in warnings. Owner/admin only, like the rows they come from.
+  site_threat
+  /// The camera system as a whole (source_offline / source_online, camera NULL).
+  site_camera_system
+}
+
+/// Whether the incident still accepts events. Explicit — never inferred from closedAt.
+enum SecurityIncidentGrouping {
+  collecting
+  closed
+}
+
+enum SecurityIncidentState {
+  /// Ordinary activity: no reason code. Nothing to acknowledge. Iff severity = info (CHECK).
+  no_action
+  open
+  acknowledged
+  resolved
+}
+
+enum SecurityIncidentNotify {
+  /// severity < alert
+  not_needed
+  /// reached alert; the notifier has not written its notices yet
+  pending
+  /// notices written (per-recipient outcomes on SecurityIncidentNotice)
+  done
+  /// the security module was off box-wide when it would have notified. Terminal.
+  module_off
+  /// the notifier failed SECURITY_NOTIFY_MAX_ATTEMPTS times. Terminal; shown on the alerts health row.
+  failed
+}
+
+enum SecurityIncidentEvents {
+  kept
+  partly_removed
+  removed
+}
+
+enum SecurityReasonCode {
+  after_hours_presence
+  camera_offline
+  threat_signal
+  /// WARP-2980 P5 PR-B (brief §4.3) — the pattern codes. In PR-B they appear on SecurityPatternFlag,
+  /// SecuritySuppression.codes and SecurityIncident.verdictCodes only: each ships `trial`, and
+  /// SecurityIncidentReason_code_severity refuses them until P5 PR-D makes one count.
+  out_of_place
+  unusual_volume
+  long_dwell
+}
+
+/// WARP-2980 P5 PR-B — a person's judgement of an incident (brief §4.4). Explicit — never inferred from verdictAt.
+enum SecurityIncidentVerdict {
+  unreviewed
+  expected
+  not_expected
+}
+
+enum SecurityTriageOutcome {
+  /// member of incidentId
+  grouped
+  /// detection_low — kept in the store, never grouped
+  low
+  /// never grouped: mode_changed, a lone camera_online/source_online, a kind P3 does not group
+  context
+  /// the triage transaction threw; `error` says why. Never retried automatically.
+  failed
+}
+
+enum SecurityIncidentAckAction {
+  acknowledge
+  resolve
+}
+
+enum SecurityAlertRecipientState {
+  receiving
+  not_receiving
+}
+
+enum SecurityAlertRecipientOrigin {
+  /// created lazily for an owner (the default recipient)
+  owner_default
+  /// created by a person in /security/settings
+  chosen
+}
+
+enum SecurityNoticeReason {
+  routed
+  /// no routed recipient could be told; the owner was told instead
+  fallback_owner
+}
+
+enum SecurityNoticeOutcome {
+  /// NotificationLog row written, transport not yet stamped
+  queued
+  sent
+  not_sent
+  /// the delivery was claimed (WARP-2804) but its outcome never recorded: it may or may not have
+  /// reached the person, and it cannot be sent again. Never reported as "not reached".
+  outcome_unknown
+  skipped_no_access
+  skipped_not_visible
+  skipped_capped
+  skipped_no_address
+}
+
+model SecurityIncident {
+  id               String                   @id @default(uuid())
+  scope            SecurityIncidentScope
+  zoneId           String?
+  zone             SecurityZone?            @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  /// Snapshots when the incident opened (brief §3.4 as built): renames, kind changes and link
+  /// changes after this never move the incident.
+  zoneName         String?                  @db.VarChar(60)
+  zoneKind         SecurityZoneKind?
+  /// The area's ACTIVE link ids at open.
+  zoneLinkIds      String[]
+  scopeCamera      String?                  @db.VarChar(64)
+  /// The site mode at the first event's start. An event in another mode never joins.
+  openedInMode     SecurityMode
+  grouping         SecurityIncidentGrouping @default(collecting)
+  state            SecurityIncidentState    @default(no_action)
+  /// max over reasons; info when none. Never lowered.
+  severity         SecuritySeverity         @default(info)
+  /// distinct codes, sorted; mirrors SecurityIncidentReason (maintained in the same tx)
+  reasonCodes      SecurityReasonCode[]
+  notifyState      SecurityIncidentNotify   @default(not_needed)
+  notifyAttempts   Int                      @default(0) @db.SmallInt
+  rulesetVersion   Int                      @db.SmallInt
+  /// Event-time span: min startedAt, max(endedAt ?? startedAt) over members.
+  firstActivityAt  DateTime
+  lastActivityAt   DateTime
+  /// createdAt of the newest member — the sealing clock's arrival half.
+  lastArrivalAt    DateTime
+  eventCount       Int
+  /// {"<camera>": {"<label>": n, "_status": n}, "": {"_threat": n, "_status": n}} — DS-005 counts that
+  /// survive the 30-day event trim. Shape validated in code.
+  countsByCamera   Json
+  /// distinct member cameras — DS-005 visibility after the trim
+  cameras          String[]
+  /// {"<camera>": {"first": ISO, "last": ISO}, "": {…}} — each camera's own event-time span, so a
+  /// viewer who cannot see every camera gets the times from hers (review #4). Shape validated in code.
+  spanByCamera     Json
+  eventsKept       SecurityIncidentEvents   @default(kept)
+  openedAt         DateTime                 @default(now())
+  closedAt         DateTime?
+  alertedAt        DateTime?
+  stateChangedAt   DateTime                 @default(now())
+  /// User.id (no FK: users are deletable; the ack rows and the chain are the record)
+  stateChangedById String?
+  resolvedAt       DateTime?
+  resolvedById     String?
+  /// CAS for the engine and for people. Bumped by every write.
+  version          Int                      @default(0)
+  updatedAt        DateTime                 @updatedAt
+
+  /// WARP-2980 P5 PR-B (brief §4.4) — Expected / Not expected, by owner/admin at act level. Never
+  /// changes state, severity, codes or notifications. CHECK SecurityIncident_verdict_shape.
+  verdict          SecurityIncidentVerdict  @default(unreviewed)
+  /// User.id (no FK, like stateChangedById) and User.displayName at the time, display-safe.
+  verdictById      String?
+  verdictByName    String?                  @db.VarChar(120)
+  /// The latest mark.
+  verdictAt        DateTime?
+  /// The first mark. Never moves when the verdict changes, so precision's 30 days are stable.
+  verdictFirstAt   DateTime?
+  /// The codes the person could judge when they marked it; precision is attributed to these.
+  /// Empty iff unreviewed (CHECK).
+  verdictCodes     SecurityReasonCode[]     @default([])
+
+  reasons      SecurityIncidentReason[]
+  members      SecurityEventTriage[]
+  acks         SecurityIncidentAck[]
+  notices      SecurityIncidentNotice[]
+  patternFlags SecurityPatternFlag[]
+
+  @@index([grouping, scope, zoneId, scopeCamera])
+  @@index([state, lastActivityAt])
+  @@index([lastActivityAt])
+  @@index([zoneId, lastActivityAt])
+  @@index([notifyState])
+  @@index([verdict])
+}
+
+model SecurityIncidentReason {
+  id              String              @id @default(uuid())
+  incidentId      String
+  incident        SecurityIncident    @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  code            SecurityReasonCode
+  severity        SecuritySeverity
+  rulesetVersion  Int                 @db.SmallInt
+  /// The SecurityEvent that satisfied the rule. No FK: events are trimmed at 30 d, reasons live
+  /// with the incident.
+  evidenceEventId BigInt
+  /// Snapshots of the evidence: DS-005 per viewer/recipient, and the page after the trim.
+  /// NULL = site-wide: a threat, or the camera system's own offline row — never on an area/camera
+  /// incident (CHECK SecurityIncidentReason_site_evidence).
+  evidenceCamera  String?             @db.VarChar(64)
+  evidenceSource  SecurityEventSource
+  evidenceKind    SecurityEventKind
+  evidenceLabel   String?             @db.VarChar(64)
+  evidenceAt      DateTime
+  evidenceSummary String              @db.VarChar(500)
+  /// The rule's numbers, per code (validated in code): after_hours_presence {mode, modeSource,
+  /// nonOpenAt, zoneKind}; camera_offline {offlineForSec|null, backAt|null}; threat_signal {activityId, kind}.
+  detail          Json
+  createdAt       DateTime            @default(now())
+
+  @@unique([incidentId, code, evidenceEventId])
+  @@index([incidentId])
+}
+
+/// One row per SecurityEvent the engine has looked at. The exactly-once marker AND the membership.
+model SecurityEventTriage {
+  eventId        BigInt                @id
+  event          SecurityEvent         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  outcome        SecurityTriageOutcome
+  incidentId     String?
+  /// Restrict: an incident is never deleted while a member still points at it (retention deletes
+  /// events first, and only memberless incidents after).
+  incident       SecurityIncident?     @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+  /// Area scope: the incident area's links that matched this event at triage.
+  matchedLinkIds String[]
+  /// Other active areas the event also matched at triage (display "also in Till").
+  alsoZoneIds    String[]
+  rulesetVersion Int                   @db.SmallInt
+  error          String?               @db.VarChar(500)
+  triagedAt      DateTime              @default(now())
+
+  @@index([incidentId])
+  @@index([outcome, triagedAt])
+}
+
+model SecurityIncidentAck {
+  id                String                    @id @default(uuid())
+  incidentId        String
+  incident          SecurityIncident          @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  action            SecurityIncidentAckAction
+  byUserId          String
+  /// User.displayName at the time, display-safe.
+  byName            String                    @db.VarChar(120)
+  at                DateTime                  @default(now())
+  /// The sign-in's id from the signed token (JWT `sid`). NULL when the token carried none.
+  sessionId         String?                   @db.VarChar(64)
+  /// Whether authMiddleware's live-session check actually ran on the request that acked (WARP-2804
+  /// `req.sessionChecked`). Explicit — never inferred from sessionId. True only with a sessionId (CHECK).
+  sessionChecked    Boolean                   @default(false)
+  /// What the device SAID it was (lib/client-descriptor.ts). Reported, never proof.
+  client            String?                   @db.VarChar(120)
+  /// The actor's own alert notification for THIS incident, verified via SecurityIncidentNotice.
+  /// Stored only when verified.
+  viaNotificationId String?                   @db.VarChar(64)
+  /// resolve only (CHECK)
+  note              String                    @default("") @db.VarChar(280)
+
+  @@index([incidentId, at])
+}
+
+model SecurityIncidentNotice {
+  id                String                @id @default(uuid())
+  incidentId        String
+  incident          SecurityIncident      @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  /// Recipient User.id. No FK: the notice is history.
+  userId            String
+  /// The address used (NotificationLog.username, WARP-2911).
+  username          String                @db.VarChar(120)
+  reason            SecurityNoticeReason
+  outcome           SecurityNoticeOutcome
+  /// Set iff a NotificationLog row was written. No FK: NotificationLog is purged at 90 d.
+  notificationLogId String?               @db.VarChar(64)
+  /// Snapshots of the transport outcome, so "who was told, how" survives the 90-day log purge.
+  channels          String                @default("") @db.VarChar(32)
+  pushOutcome       PushOutcome?
+  createdAt         DateTime              @default(now())
+  settledAt         DateTime?
+
+  @@unique([incidentId, userId])
+  @@index([userId, createdAt])
+  @@index([outcome, createdAt])
+}
+
+model SecurityAlertRecipient {
+  userId  String                       @id
+  user    User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  state   SecurityAlertRecipientState
+  origin  SecurityAlertRecipientOrigin
+  version Int                          @default(0)
+  /// NULL until a person changes it (owner_default rows are created by the system).
+  setById String?
+  setAt   DateTime                     @default(now())
+}
+
+/// Engine bookkeeping, one row. Every SecurityEvent id ≤ triageFloor is triaged or will never
+/// exist; ids ≤ startedAtId predate the engine and are never triaged.
+model SecurityIncidentEngineState {
+  id               String   @id @default("singleton")
+  startedAtId      BigInt
+  startedAt        DateTime @default(now())
+  triageFloor      BigInt
+  floorCandidate   BigInt
+  floorCandidateAt DateTime
+  updatedAt        DateTime @updatedAt
+}
+
+// ── WARP-2980 P5 PR-B (ADR-059 §4.3, §4.4): pattern flags, expected activity, verdicts ──
+//
+// Every P5 code ships `trial`: a hit is written to SecurityPatternFlag, never to
+// SecurityIncidentReason (whose code_severity CHECK refuses the P5 codes until PR-D). Shape rules
+// Prisma cannot express are hand-written CHECKs in 20260925060100_warp_2980_security_patterns_verdicts.
+
+/// Why a pattern flag did not count. Explicit — never inferred from suppressionId.
+enum SecurityPatternFlagEffect {
+  /// the code's release was `trial` when it was judged (every P5 code in ruleset v3)
+  trial
+  /// an active SecuritySuppression matched it — checked first, so it is recorded in trial too
+  suppressed
+}
+
+enum SecuritySuppressionTarget {
+  area
+  camera
+}
+
+/// Which days the window OPENS on (a window past midnight belongs to the day it opens).
+enum SecuritySuppressionDays {
+  every_day
+  weekdays
+  weekends
+}
+
+enum SecuritySuppressionState {
+  active
+  /// a person removed it (endedById set)
+  removed
+  /// its expiresAt passed (the baseline tick; endedById NULL)
+  expired
+}
+
+/// What the pattern rules did with one grouped Frigate detection (SecurityPatternDay).
+enum SecurityPatternOutcome {
+  /// every gate passed and the three rules ran, whether or not one hit
+  judged
+  no_build
+  /// the ready build was cut in another zone
+  zone_changed
+  stale_build
+  /// the key has no cells for this label
+  no_cell
+  /// the area's links changed since its cells were built
+  area_changed
+  /// a camera behind the key is learning or stale
+  camera_not_active
+  /// fewer than 10 smoothed observed days behind the cell
+  not_ready
+  /// the evaluation threw
+  failed
+}
+
+/// A pattern code judged on one detection that did NOT count (brief §4.3). Snapshots, so a rebuild
+/// or a removed suppression never moves it.
+model SecurityPatternFlag {
+  id              String                    @id @default(uuid())
+  incidentId      String
+  incident        SecurityIncident          @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  code            SecurityReasonCode
+  effect          SecurityPatternFlagEffect
+  /// What it would carry if it counted (spec D9).
+  severity        SecuritySeverity
+  suppressionId   String?
+  suppression     SecuritySuppression?      @relation(fields: [suppressionId], references: [id], onDelete: Restrict)
+  rulesetVersion  Int                       @db.SmallInt
+  /// `area:<id>` | `camera:<name>` — the key judged against — and the cameras behind it (DS-005 on
+  /// derived numbers: a flag is shown only to a viewer who sees every one of them).
+  zoneKey         String                    @db.VarChar(72)
+  keyCameras      String[]
+  /// The detection. No FK: events are trimmed at 30 d; flags live with the incident.
+  evidenceEventId BigInt
+  evidenceCamera  String                    @db.VarChar(64)
+  evidenceLabel   String                    @db.VarChar(64)
+  evidenceAt      DateTime
+  evidenceSummary String                    @db.VarChar(500)
+  /// The numbers behind the flag (spec §4.5): safe integers and strings only.
+  detail          Json
+  createdAt       DateTime                  @default(now())
+
+  @@unique([incidentId, code, evidenceEventId])
+  @@index([suppressionId])
+  @@index([createdAt])
+}
+
+/// "Expected activity" in the UI (brief §4.4). A person at Security manage said this is normal for
+/// one place, label and time window. It quiets the three pattern codes only (spec D12). Immutable:
+/// removed or expired, never edited or extended.
+model SecuritySuppression {
+  id            String                    @id @default(uuid())
+  targetKind    SecuritySuppressionTarget
+  zoneId        String?
+  zone          SecurityZone?             @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  camera        String?                   @db.VarChar(64)
+  label         String                    @db.VarChar(64)
+  days          SecuritySuppressionDays
+  /// Site-local wall-clock hour 0–23, and how many hours from it (1–24; wraps past midnight;
+  /// 24 — All day — only from 0, since a window belongs to the day it opens).
+  hourFrom      Int                       @db.SmallInt
+  hourCount     Int                       @db.SmallInt
+  codes         SecurityReasonCode[]
+  reason        String                    @db.VarChar(120)
+  state         SecuritySuppressionState  @default(active)
+  createdById   String
+  createdByName String                    @db.VarChar(120)
+  createdAt     DateTime                  @default(now())
+  expiresAt     DateTime
+  endedAt       DateTime?
+  endedById     String?
+  flags         SecurityPatternFlag[]
+
+  @@index([state, expiresAt])
+  @@index([zoneId])
+}
+
+/// Per site-local date: how many grouped Frigate detections the pattern rules judged, paused on each
+/// gate, or failed on — so a fortnight with no flag can be told from a fortnight in which nothing
+/// was judged (P5 PR-D's go/no-go measurement). Written once per engine tick.
+model SecurityPatternDay {
+  /// Site-local 'YYYY-MM-DD'.
+  date      String                 @db.VarChar(10)
+  outcome   SecurityPatternOutcome
+  count     Int
+  updatedAt DateTime               @updatedAt
+
+  @@id([date, outcome])
 }

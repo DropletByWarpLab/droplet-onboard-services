@@ -73,6 +73,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
 }));
 
 import { createCamerasRouter } from "../routes/cameras.js";
+import { userDirectory } from "./helpers/user-directory.js";
 import { deleteEvent } from "../services/frigate.client.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -88,14 +89,14 @@ const guest: AuthUser = {
   id: "u-guest", username: "guest", displayName: "guest", role: "guest",
 };
 
-function buildApp(user: AuthUser): express.Express {
+function buildApp(user: AuthUser, prisma: unknown = {}): express.Express {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
     (req as Request & { user: AuthUser }).user = user;
     next();
   });
-  app.use("/api", createCamerasRouter({} as unknown as PrismaClient));
+  app.use("/api", createCamerasRouter(prisma as PrismaClient));
   return app;
 }
 
@@ -146,7 +147,15 @@ describe("DELETE /api/cameras/events/:eventId", () => {
 
   describe("role guard (real requireRoleOrMcpService)", () => {
     it("admits the MCP service principal — the delete_clip tool's dispatch identity", async () => {
-      const res = await request(buildApp(mcpPrincipal)).delete("/api/cameras/events/ev-2");
+      // WARP-1975/2982: the MCP principal must assert the acting human (the
+      // mcp-server stamps X-Nextcloud-User on every orchestrator call); an
+      // owner acting through the assistant keeps owner scope.
+      const prisma = {
+        user: userDirectory([{ id: "u-owner", username: "romain", nextcloudUsername: "romain", role: "owner" }]),
+      };
+      const res = await request(buildApp(mcpPrincipal, prisma))
+        .delete("/api/cameras/events/ev-2")
+        .set("X-Nextcloud-User", "romain");
 
       expect(res.status).toBe(200);
       expect(mockDeleteEvent).toHaveBeenCalledWith("ev-2");

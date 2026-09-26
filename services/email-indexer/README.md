@@ -8,6 +8,16 @@ orchestrator, and drains the outbound SMTP queue.
 
 - One async IDLE loop per EmailAccount (apscheduler-managed, no
   `while True`). Exponential backoff on disconnect (1s → 60s cap).
+  Each cycle SYNCS FIRST, then IDLEs, then syncs again (WARP-2957):
+  first contact backfills the last 30 days (newest 200), later cycles
+  walk a UID watermark — never `UNSEEN`, which is "unread" and misses
+  everything the owner already read on their phone. A quiet IDLE is a
+  clean cycle, not a failure.
+- Every cycle reports its outcome via
+  `PATCH /api/email/accounts/:id/status` (WARP-2957) — `idle` moves
+  `lastIdleAt`, `error` moves `lastErrorAt` and sets `lastError` from a
+  closed-set reason. The orchestrator is the only writer of those
+  columns; this is how the dashboard's "Connected" became a fact.
 - MIME parser canonicalizes each new message into the shape the
   orchestrator's `POST /api/email/:accountId/messages-ingest`
   expects. RFC 5322 thread keying (References > In-Reply-To >
@@ -55,7 +65,7 @@ orchestrator, and drains the outbound SMTP queue.
 | `MQTT_HOST` / `MQTT_PORT` | `broker` / `8883` | MQTT broker (mTLS listener). |
 | `MQTT_TLS` | `1` | Present the service TLS bundle (identity = cert CN, WARP-235). `0` = plaintext dev broker. |
 | `OUTBOUND_POLL_SECONDS` | `10` | SMTP poller cadence. |
-| `ACCOUNT_REFRESH_SECONDS` | `300` | Account re-discovery cadence. |
+| `ACCOUNT_REFRESH_SECONDS` | `300` | Account re-discovery cadence (also stops loops for disconnected rows). The orchestrator additionally calls `POST /accounts/refresh` right after a connect or disconnect, so a new mailbox starts within seconds (WARP-2957). |
 | `DROPLET_FIPS_REQUIRED` | `true` | WARP-229 boot self-test. |
 
 ## Tests
@@ -87,8 +97,9 @@ deploy checklist:
    hosts against SSRF, asks this service to verify the mailbox and
    encrypt the password (`POST /accounts/provision`), and writes the
    row with `imapStatus = idle` only after the probe succeeds.
-2. Tail `email-indexer` logs — should see `IDLE session` + `ingest`
-   lines within ~10s.
+2. Tail `email-indexer` logs — should see `ingested N/N UIDs` (the
+   30-day backfill) within ~10s, and the Settings card flip from
+   "Checking…" to "Connected · checked just now".
 3. Send a test mail; confirm an EmailMessage row lands in postgres
    and `email/<accountId>/new` MQTT fires.
 4. Author a draft via the dashboard; click Send; confirm draft flips

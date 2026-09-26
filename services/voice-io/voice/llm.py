@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Callable, Iterator, Literal, Optional
@@ -94,6 +95,14 @@ ToolChoice = Literal["auto", "none"]
 DEFAULT_LLM_URL = "http://orchestrator:3000"
 DEFAULT_LLM_CHAT_PATH = "/api/llm/chat"
 DEFAULT_LLM_HEALTH_PATH = "/api/orchestrator/health"
+# WARP-3047 — where voice asks which model the box answers with: the same
+# `defaultModel` the dashboard chat defaults to (the owner's active model on
+# the Models page). GET endpoints admit the service principal (ADR-004 §3).
+DEFAULT_LLM_MODELS_PATH = "/api/llm/models"
+# How long one answer is reused. A switch reaches voice within this window;
+# the listing is never fetched per turn. Matches the orchestrator's own
+# 30 s model-list cache, so a shorter TTL would buy nothing.
+ACTIVE_MODEL_TTL_S = 30.0
 # Model the orchestrator's agent loop will ask ai-gateway for. ai-gateway
 # routes `llama*`/`qwen*`/`mistral*`/`phi*` to the local Ollama instance
 # (or its ollama-manager sidecar when deployed); the model must already
@@ -102,6 +111,11 @@ DEFAULT_LLM_HEALTH_PATH = "/api/orchestrator/health"
 # `/models/sync`). `qwen2.5:3b-instruct` is the agent docs' default —
 # tool-calling-capable, fits a 7 GB RAM budget. Override via LLM_MODEL
 # env if the deployment has a larger / different model loaded.
+#
+# WARP-3047: in production this is only the FALLBACK — build_llm_from_env
+# makes voice follow the box's active model (see OrchestratorLLM
+# `follow_active_model`), and LLM_MODEL is used only when the orchestrator
+# can't name one.
 DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
 # Agent loop can take noticeably longer than a single LLM call because
 # every tool_call adds an MCP round-trip + a re-prompt iteration.
@@ -188,15 +202,15 @@ DEFAULT_VOICE_ALLOWED_TOOLS: tuple[str, ...] = (
 # tool-enabled turn server-side; keep this compact so voice turns don't
 # pay for it twice.
 DEFAULT_LLM_SYSTEM_PROMPT = (
-    "You're Droplet — the private AI that lives on the little box in "
-    "this home, and you're its voice. You're not a cloud service: "
-    "everything you hear, say, and know stays right here in the house. "
-    "Talk warmly and casually, like a helpful housemate you'd hand a "
-    "coffee to — never a corporate bot: use contractions, keep it "
-    "natural, one short spoken sentence per reply. No markdown, no "
+    "You're Droplet — the private AI that runs on this business's own "
+    "appliance, and you're its voice. You're not a cloud service: "
+    "everything you hear, say, and know stays right here on site. "
+    "Talk warmly and plainly, like a capable colleague — never a "
+    "corporate bot: use contractions, keep it natural, one short "
+    "spoken sentence per reply. No markdown, no "
     "lists, no emojis — every reply gets read aloud. If you don't know, "
     "just say so plainly without apologizing twice. You can check the "
-    "home's cameras, network, files, smart devices, calendar, and "
+    "premises' cameras, network, files, devices, calendar, and "
     "reminders (read-only); changes still happen on the dashboard."
 )
 
@@ -391,11 +405,22 @@ class OrchestratorLLM(LLMClient):
         timezone: str = DEFAULT_TIMEZONE,
         now_provider: Optional[Callable[[], datetime]] = None,
         persona_fetcher: Optional[PersonaFetcher] = None,
+        follow_active_model: bool = False,
+        models_path: str = DEFAULT_LLM_MODELS_PATH,
+        time_source: Callable[[], float] = time.monotonic,
     ):
         self._base_url = _internal_base_url(base_url.rstrip("/"))
         self._chat_path = chat_path
         self._health_path = health_path
+        # WARP-3047 — `model` is the configured (env) model. With
+        # `follow_active_model` it is only the fallback: each turn sends the
+        # box's ACTIVE model, read from the orchestrator (`_current_model`).
         self._model = model
+        self._follow_active_model = follow_active_model
+        self._models_path = models_path
+        self._time_source = time_source
+        self._active_model: Optional[str] = None
+        self._active_checked_at: Optional[float] = None
         self._bearer_token = bearer_token
         self._system_prompt = system_prompt
         self._timeout_s = timeout_s
@@ -526,7 +551,7 @@ class OrchestratorLLM(LLMClient):
         #   * max_tokens — cap runaway generation (see DEFAULT_VOICE_MAX_
         #     TOKENS: covers gpt-oss reasoning + a short spoken answer).
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": self._current_model(),
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_text.strip()},
@@ -586,6 +611,73 @@ class OrchestratorLLM(LLMClient):
             raise LLMUnavailable(f"non-JSON response: {exc}") from exc
 
         return _extract_assistant_text(data)
+
+    def _current_model(self) -> str:
+        """The model this turn names (WARP-3047).
+
+        Following: the orchestrator's ``defaultModel`` — the box's active
+        model — fetched at most once per ``ACTIVE_MODEL_TTL_S`` on the pooled
+        client. Voice pinned to env LLM_MODEL kept asking for the old model
+        after an owner switched, and on DMR that loads it next to the active
+        one. Every failure is soft: the last known answer stands, else the
+        configured model — a voice turn never fails because this lookup did.
+        An active model the listing states can't call tools is not followed
+        (``_states_no_tools``): voice is a tool-driven loop.
+        """
+        if not self._follow_active_model:
+            return self._model
+        now = self._time_source()
+        if (
+            self._active_checked_at is not None
+            and now - self._active_checked_at < ACTIVE_MODEL_TTL_S
+        ):
+            return self._active_model or self._model
+        # Stamp before the fetch: both outcomes hold for the TTL, so an
+        # orchestrator that is down is asked once per window, not per turn.
+        self._active_checked_at = now
+        try:
+            resp = self._client.get(
+                f"{self._base_url}{self._models_path}",
+                timeout=2.0,
+                headers=self._headers(),
+            )
+            if resp.is_success:
+                data = resp.json()
+                default = data.get("defaultModel") if isinstance(data, dict) else None
+                if isinstance(default, str) and default.strip():
+                    default = default.strip()
+                    if _states_no_tools(data.get("models"), default):
+                        # Voice is a tool-driven loop (``allowed_tools``). An
+                        # active model the box says can't call tools (a
+                        # vision-only one) keeps voice on its configured
+                        # model — the rule agent runs get from the
+                        # orchestrator's resolveActiveModel({requireTools}).
+                        logger.info(
+                            "active model %s can't call tools — voice keeps %s",
+                            default,
+                            self._model,
+                        )
+                        self._active_model = None
+                    else:
+                        self._active_model = default
+                else:
+                    logger.info(
+                        "orchestrator named no active model — keeping %s",
+                        self._active_model or self._model,
+                    )
+            else:
+                logger.info(
+                    "active-model lookup got %d — keeping %s",
+                    resp.status_code,
+                    self._active_model or self._model,
+                )
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            logger.info(
+                "active-model lookup failed (%s) — keeping %s",
+                exc,
+                self._active_model or self._model,
+            )
+        return self._active_model or self._model
 
     def _headers(self, accept: str = "application/json") -> dict[str, str]:
         h = {"Content-Type": "application/json", "Accept": accept}
@@ -749,6 +841,24 @@ class OrchestratorLLM(LLMClient):
         if etype in ("tool_call", "tool_result"):
             logger.debug("voice stream: ignoring %s frame for audio", etype)
         return False
+
+
+def _states_no_tools(models: Any, model_id: str) -> bool:
+    """WARP-3047 — True only when the orchestrator's listing STATES that
+    ``model_id`` cannot call tools (``capabilities.tools is False``).
+
+    Absent from the listing, no ``capabilities``, or anything but an explicit
+    ``False`` reads as unknown — and unknown keeps the active model: moving
+    voice to another model is a second model on the GPU, so only a stated
+    "no" is worth that.
+    """
+    if not isinstance(models, list):
+        return False
+    for entry in models:
+        if isinstance(entry, dict) and entry.get("id") == model_id:
+            caps = entry.get("capabilities")
+            return isinstance(caps, dict) and caps.get("tools") is False
+    return False
 
 
 def _extract_error_detail(resp: "httpx.Response") -> str:
@@ -931,6 +1041,9 @@ def build_llm_from_env(
         base_url=raw,
         model=model,
         bearer_token=token,
+        # WARP-3047 — voice follows the box's active model; `model` (env
+        # LLM_MODEL) is only the fallback when the orchestrator can't name one.
+        follow_active_model=True,
         max_tokens=max_tokens,
         allowed_tools=allowed_tools,
         location=geo.description,

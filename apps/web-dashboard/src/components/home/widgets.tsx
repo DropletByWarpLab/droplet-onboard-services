@@ -39,7 +39,6 @@ import {
   Brain,
   Calendar,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Cloud,
@@ -78,6 +77,11 @@ import { useChat } from "@/lib/hooks/useChat";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
+import {
+  FILES_UNAVAILABLE_HINT,
+  FILES_UNAVAILABLE_TITLE,
+  isFilesUnavailableError,
+} from "@/lib/files-unavailable";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
@@ -117,6 +121,7 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
 } from "@/lib/types";
+import { PENDING_PROMPT_KEY } from "@/lib/types";
 // WARP-1803 — the hero's inline conversation reuses the chat surface's
 // message rendering (ChatMessage + the indigo chat skin). Both sheets are
 // fully `.droplet-shell`-scoped, so importing them here styles only the
@@ -396,7 +401,14 @@ function InlineChat({
 
 function ChatWidget({ w, h }: WidgetProps) {
   const router = useRouter();
-  const model = usePreferredModel();
+  const { models } = useModels();
+  const preferred = usePreferredModel();
+  // WARP-3048 — the hero's own pick from its model pill. Null follows the
+  // preferred model (so a switch on /models still reaches Home); a pick
+  // that leaves the list falls back the same way.
+  const [pickedId, setPickedId] = useState<string | null>(null);
+  const model =
+    (pickedId && models.find((m) => m.id === pickedId)) || preferred;
   const greeting = greetingNow();
   const fs = w >= 6 ? 33 : w >= 5 ? 29 : w >= 4 ? 25 : 22;
   const nSug = h >= 6 ? 4 : h >= 5 ? 3 : h >= 4 ? 2 : 1;
@@ -404,7 +416,7 @@ function ChatWidget({ w, h }: WidgetProps) {
     "Summarize the files I uploaded today",
     "What's using the most storage?",
     "Draft a changelog from recent notes",
-    "Dim the living-room lights to 30%",
+    "Dim the conference-room lights to 30%",
   ].slice(0, nSug);
   const [val, setVal] = useState("");
   // WARP-1803 — the prompt + model snapshot that flips the tile from hero to
@@ -422,7 +434,7 @@ function ChatWidget({ w, h }: WidgetProps) {
       // "select a model" empty state and its pendingPrompt effect sends the
       // prompt once a model is ready.
       try {
-        window.sessionStorage.setItem("droplet.pendingPrompt", body);
+        window.sessionStorage.setItem(PENDING_PROMPT_KEY, body);
       } catch {
         /* private mode — /chat still opens */
       }
@@ -465,12 +477,39 @@ function ChatWidget({ w, h }: WidgetProps) {
           placeholder="Ask Droplet anything — your files, cameras, network, devices…"
         />
         <div className="w-chat-cap-row">
-          {model ? (
-            <span className="w-chat-model" title={model.name}>
-              <span className="dot" />
+          {/* WARP-3048 — the pill used to be a <span> with a dropdown
+              chevron and no handler. 2+ models: a real picker that feeds
+              the inline chat's model. 1 model: nothing to pick, so it leads
+              to /models (the models brief's composer chip, WARP-1116). */}
+          {model && models.length > 1 ? (
+            <label
+              className="w-chat-model w-chat-model-control"
+              title={model.name}
+            >
+              <span className="dot" aria-hidden />
+              <select
+                aria-label="Model"
+                value={model.id}
+                onChange={(e) => setPickedId(e.target.value)}
+              >
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                    {m.capabilities?.vision ? " · vision" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : model ? (
+            <Link
+              href="/models"
+              className="w-chat-model w-chat-model-control"
+              title="Manage models"
+              aria-label={`Model: ${model.name} — manage on Models`}
+            >
+              <span className="dot" aria-hidden />
               <span className="nm">{model.name}</span>
-              <ChevronDown size={10} />
-            </span>
+            </Link>
           ) : (
             <span className="w-chat-model" style={{ opacity: 0.6 }}>
               <span className="dot" style={{ background: "var(--text-muted)" }} />
@@ -697,7 +736,7 @@ function StatusWidget({ w, h }: WidgetProps) {
   const stats: StatRow[] = [
     { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recently indexed", dot: "var(--success)", href: "/files" },
     { icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" },
-    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "smart devices online", dot: "var(--success)", href: "/devices" },
+    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" },
     { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
     voiceRow,
   ];
@@ -743,11 +782,11 @@ function StatusWidget({ w, h }: WidgetProps) {
 
 /* ─────────────────────────── Activity timeline ─────────────────────────── */
 const ACTIVITY: [string, "ok" | "warn" | "err", LucideIcon, string][] = [
-  ["07:14", "warn", Video, "Garage camera idle 1h 47m · no motion events"],
+  ["07:14", "warn", Video, "Loading-dock camera idle 1h 47m · no motion events"],
   ["08:30", "ok", Settings, "NAS snapshot completed · 64 GB written"],
   ["09:42", "ok", MessageSquare, "You asked for a storage breakdown · saved"],
-  ["10:15", "err", AlertTriangle, "Garage cam offline 4m · PoE flap port-7 · recovered"],
-  ["11:14", "ok", Lightbulb, "Living-room lights dimmed to 30% by you"],
+  ["10:15", "err", AlertTriangle, "Loading-dock cam offline 4m · PoE flap port-7 · recovered"],
+  ["11:14", "ok", Lightbulb, "Conference-room lights dimmed to 30% by you"],
   ["12:30", "ok", Network, "New device joined LAN · 192.168.4.51"],
 ];
 // Exported for the WARP-1992 deep-link test, the same reason CalendarWidget is.
@@ -774,11 +813,32 @@ export function ActivityWidget() {
 /* ─────────────────────────── Recent files ─────────────────────────── */
 export function FilesWidget() {
   const router = useRouter();
-  const { items } = useRecents(8);
+  const { items, error, refresh } = useRecents(8);
   const rows = items.slice(0, 8);
   const iconFor: Record<string, LucideIcon> = {
     doc: FileText, pdf: FileText, sheet: FileSpreadsheet, video: Video, image: ImageIcon,
   };
+  // WARP-3076 — the box marked Recents degraded (Nextcloud down): never
+  // "No recent files" during an outage.
+  if (isFilesUnavailableError(error)) {
+    return (
+      <WEmpty>
+        <div role="alert">
+          {FILES_UNAVAILABLE_TITLE}. {FILES_UNAVAILABLE_HINT}
+          <div>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => refresh()}
+              style={{ marginTop: 6 }}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      </WEmpty>
+    );
+  }
   if (rows.length === 0) {
     return <WEmpty>No recent files</WEmpty>;
   }
@@ -820,17 +880,17 @@ export function FilesWidget() {
   );
 }
 
-/* ─────────────────────────── Smart-home scenes ─────────────────────────── */
+/* ─────────────────────────── Device-control scenes ─────────────────────── */
 function ScenesWidget() {
   const [scene, setScene] = useState("Day");
-  const [devs, setDevs] = useState<Record<string, boolean>>({ living: true, office: false, door: false });
+  const [devs, setDevs] = useState<Record<string, boolean>>({ conference: true, office: false, door: false });
   const scenes: [string, LucideIcon][] = [
-    ["Morning", Sparkles], ["Day", Lightbulb], ["Night", Blinds], ["Away", Lock],
+    ["Opening", Sparkles], ["Day", Lightbulb], ["After hours", Blinds], ["Closed", Lock],
   ];
   const list: [string, LucideIcon, string, string][] = [
-    ["living", Lightbulb, "Living room", "3 lights · 30%"],
+    ["conference", Lightbulb, "Conference room", "3 lights · 30%"],
     ["office", Thermometer, "Office", "72°F · cooling"],
-    ["door", Lock, "Front door", "Locked"],
+    ["door", Lock, "Main entrance", "Locked"],
   ];
   return (
     <div className="w-scenes">
@@ -1975,7 +2035,7 @@ export const WIDGETS: Record<string, WidgetMeta> = {
 // Feature-flagged widgets (no backend yet — default OFF).
 const GATED_WIDGETS: Array<[boolean, string, WidgetMeta]> = [
   [FEATURES.homeActivity,    "activity", { title: "Activity",      icon: ActivityIcon, Comp: ActivityWidget, minW: 3, minH: 3, maxW: 6, maxH: 7, scroll: true }],
-  [FEATURES.homeScenes,      "scenes",   { title: "Smart devices", icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6, maxH: 5 }],
+  [FEATURES.homeScenes,      "scenes",   { title: "Device control", icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6, maxH: 5 }],
   [FEATURES.homeAutomations, "tools",    { title: "Automations",   icon: Wrench,       Comp: ToolsWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
   [FEATURES.homeTasks,       "tasks",    { title: "Tasks",         icon: Check,        Comp: TasksWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
 ];

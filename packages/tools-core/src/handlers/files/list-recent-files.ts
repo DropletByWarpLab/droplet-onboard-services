@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { filesUnavailable, isFilesDegraded } from "./_unavailable.js";
 
 const inputSchema = { type: "object", properties: {}, additionalProperties: false } as const;
 
@@ -26,6 +27,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
       error: { code: "RECENT_FAILED", message: `nextcloud returned ${res.status}` },
     };
   }
+  if (isFilesDegraded(res)) return filesUnavailable();
   const data = await res.json();
   return { ok: true, data };
 }

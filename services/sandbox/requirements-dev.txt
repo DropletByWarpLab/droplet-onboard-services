@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest-asyncio==1.4.0
+# TestClient lives behind httpx in starlette's test surface.
+httpx==0.28.1
+
+# WARP-1948 — OSV floor for pytest's transitive pygments.
+pygments>=2.20.0

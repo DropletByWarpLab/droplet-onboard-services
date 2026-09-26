@@ -1,0 +1,184 @@
+/**
+ * WARP-2977 P2b — /security wiring: the mode card sits on top, the area
+ * select becomes `?zone=` on the feed's own request, and a mode write
+ * refreshes the feed (whose useSWRInfinite keys a global mutate can't reach)
+ * and its header.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { act as rtlAct, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { SWRConfig, useSWRConfig } from "swr";
+import { SECURITY_ZONES_PATH } from "@/lib/api";
+import { ToastProvider } from "@/components/Toast";
+import SecurityPage from "@/app/security/page";
+import { COPY as FEED_COPY } from "@/components/security/SecurityFeed";
+import { COPY as MODE_COPY } from "@/components/security/ModeCard";
+import { WALL_COPY } from "@/components/security/wall-status";
+import type { SecurityModeView, SecurityZoneView } from "@/lib/types";
+
+const h = vi.hoisted(() => ({
+  authFetch: vi.fn(),
+  getSecurityEvents: vi.fn(),
+  getSecurityHealth: vi.fn(),
+  getSecurityZones: vi.fn(),
+  getSecurityMode: vi.fn(),
+  postSecurityMode: vi.fn(),
+  fetchCameras: vi.fn(),
+}));
+
+vi.mock("@/components/shell/ShellPage", () => ({
+  ShellPage: ({ title, actions, children }: { title?: string; actions?: ReactNode; children: ReactNode }) => (
+    <div className="droplet-shell">
+      {title ? <h1>{title}</h1> : null}
+      {actions ? <div data-testid="phead-actions">{actions}</div> : null}
+      {children}
+    </div>
+  ),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  authFetch: h.authFetch,
+  useAuth: () => ({ user: { id: "u1", role: "owner" } }),
+}));
+
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
+  getSecurityEvents: h.getSecurityEvents,
+  getSecurityHealth: h.getSecurityHealth,
+  getSecurityZones: h.getSecurityZones,
+  getSecurityMode: h.getSecurityMode,
+  postSecurityMode: h.postSecurityMode,
+  fetchCameras: h.fetchCameras,
+}));
+
+const MODE: SecurityModeView = {
+  mode: "open",
+  source: "schedule",
+  manualEnd: "none",
+  until: null,
+  setBy: null,
+  setAt: "2026-09-23T08:00:00.000Z",
+  hours: { state: "not_set" },
+  displayTimezone: null,
+  stale: false,
+  version: 1,
+};
+
+function zone(id: string, name: string, state: SecurityZoneView["state"] = "active"): SecurityZoneView {
+  return { id, name, kind: "entry", state, version: 0, links: [] };
+}
+
+function Wrap({ children }: { children: ReactNode }) {
+  return (
+    <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+      <ToastProvider>{children}</ToastProvider>
+    </SWRConfig>
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  h.authFetch.mockImplementation(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      modules: [{ id: "security", effective: true }],
+      effectiveForUser: [{ moduleId: "security", level: "manage" }],
+    }),
+  }));
+  h.getSecurityEvents.mockResolvedValue({ events: [], nextCursor: null });
+  h.getSecurityHealth.mockResolvedValue({ sources: [] });
+  h.getSecurityZones.mockResolvedValue({ zones: [zone("z1", "Front door"), zone("z9", "Old shed", "archived")] });
+  h.getSecurityMode.mockResolvedValue(MODE);
+  h.fetchCameras.mockResolvedValue([]);
+});
+
+describe("/security", () => {
+  // WARP-2981 (ADR-059 P6) — the header's one action: the Security wall.
+  it("offers the Security wall in the header, saying whose view it shows", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    const link = within(await screen.findByTestId("phead-actions")).getByRole("link", { name: WALL_COPY.link });
+    expect(link).toHaveAttribute("href", "/security/wall");
+    expect(link).toHaveAttribute("title", WALL_COPY.linkTitle);
+    // D6: a TV runs on a Staff account and shows that account's cameras.
+    expect(WALL_COPY.linkTitle).toMatch(/signed in with a Staff account\. It shows that account's cameras\./);
+    // Plain words on the button itself: a tooltip never reaches a phone, and "wall" is our name for it.
+    expect(link).toHaveTextContent("TV view");
+    expect(link.textContent).not.toMatch(/wall/i);
+  });
+
+  it("puts the mode card above the feed", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    await screen.findByText(MODE_COPY.notSet);
+    const titles = [...document.querySelectorAll(".card-h .ct")].map((t) => t.textContent);
+    expect(titles[0]).toBe(MODE_COPY.title);
+    expect(titles).toContain(FEED_COPY.feedTitle);
+  });
+
+  it("picking an area puts zone= on the feed's request; active areas only", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    const select = await screen.findByRole("combobox", { name: FEED_COPY.areaLabel });
+    expect([...select.querySelectorAll("option")].map((o) => o.textContent)).toEqual([FEED_COPY.allAreas, "Front door"]);
+    expect(h.getSecurityEvents).toHaveBeenLastCalledWith(expect.not.objectContaining({ zone: expect.anything() }));
+
+    fireEvent.change(select, { target: { value: "z1" } });
+    await waitFor(() => expect(h.getSecurityEvents).toHaveBeenLastCalledWith(expect.objectContaining({ zone: "z1" })));
+
+    // The network view's rows never sit in an area: it never sends one.
+    fireEvent.click(screen.getByRole("button", { name: "Network and sign-in" }));
+    await waitFor(() =>
+      expect(h.getSecurityEvents).toHaveBeenLastCalledWith(expect.objectContaining({ kinds: ["threat"] })),
+    );
+    expect(h.getSecurityEvents.mock.lastCall?.[0]).not.toHaveProperty("zone");
+  });
+
+  it("an area no camera covers reads as not covered — never quiet — with the way to the Areas page at manage", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    fireEvent.change(await screen.findByRole("combobox", { name: FEED_COPY.areaLabel }), { target: { value: "z1" } });
+    expect(await screen.findByText("No cameras cover Front door yet")).toBeInTheDocument();
+    expect(document.querySelector("[data-empty]")).toHaveAttribute("data-empty", "not-covered");
+    expect(await screen.findByRole("link", { name: FEED_COPY.openAreas })).toHaveAttribute("href", "/security/zones");
+  });
+
+  it("an area that disappears stops filtering instead of leaving an empty page", async () => {
+    let swrMutate: ((key: string) => Promise<unknown>) | undefined;
+    function Grab() {
+      swrMutate = useSWRConfig().mutate as unknown as (key: string) => Promise<unknown>;
+      return null;
+    }
+    render(
+      <>
+        <Grab />
+        <SecurityPage />
+      </>,
+      { wrapper: Wrap },
+    );
+    fireEvent.change(await screen.findByRole("combobox", { name: FEED_COPY.areaLabel }), { target: { value: "z1" } });
+    await waitFor(() => expect(h.getSecurityEvents).toHaveBeenLastCalledWith(expect.objectContaining({ zone: "z1" })));
+
+    h.getSecurityZones.mockResolvedValue({ zones: [zone("z1", "Front door", "archived")] });
+    await rtlAct(async () => {
+      await swrMutate!(SECURITY_ZONES_PATH);
+    });
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: FEED_COPY.areaLabel })).toBeNull());
+    await waitFor(() => expect(h.getSecurityEvents.mock.lastCall?.[0]).not.toHaveProperty("zone"));
+  });
+
+  it("a mode write refreshes the feed and its header", async () => {
+    h.postSecurityMode.mockResolvedValue({
+      mode: { ...MODE, mode: "closed", source: "manual", manualEnd: "until_changed" },
+      changed: true,
+    });
+    render(<SecurityPage />, { wrapper: Wrap });
+    const closeUp = await screen.findByRole("button", { name: MODE_COPY.closeUp });
+    await waitFor(() => expect(h.getSecurityEvents).toHaveBeenCalled());
+    await waitFor(() => expect(h.getSecurityHealth).toHaveBeenCalled());
+    await rtlAct(async () => {});
+    const eventsBefore = h.getSecurityEvents.mock.calls.length;
+    const healthBefore = h.getSecurityHealth.mock.calls.length;
+    fireEvent.click(closeUp);
+    await waitFor(() => expect(h.postSecurityMode).toHaveBeenCalledWith({ action: "close" }));
+    await waitFor(() => expect(h.getSecurityEvents.mock.calls.length).toBeGreaterThan(eventsBefore));
+    await waitFor(() => expect(h.getSecurityHealth.mock.calls.length).toBeGreaterThan(healthBefore));
+  });
+});

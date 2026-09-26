@@ -116,7 +116,7 @@ const tool: Tool = {
     "Read the structured business profile the box holds — what the business " +
     "does, its customers, team shape, tools/systems, a typical day, and goals, " +
     "plus a short summary. Tier-1 read; safe to call without operator " +
-    "confirmation. Output is role-filtered (family callers see the summary " +
+    "confirmation. Output is role-filtered (staff-tier callers see the summary " +
     "only). Use to ground answers about the business in its own recorded " +
     "context before falling back to memory_recall or search_content.",
   inputSchema,

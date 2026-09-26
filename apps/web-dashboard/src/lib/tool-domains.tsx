@@ -15,6 +15,8 @@ import {
   Building2,
   Calendar,
   Camera,
+  Cloud,
+  Contact,
   FolderOpen,
   HardDrive,
   Heater,
@@ -24,20 +26,33 @@ import {
   Network,
   ListChecks,
   Network as SwitchIcon,
+  PlayCircle,
+  Receipt,
+  Stethoscope,
   Wrench,
   type LucideIcon,
   Repeat,
+  Hammer,
 } from "lucide-react";
+
+import type { ToolCatalogEntry } from "./types";
 
 interface DomainMeta {
   label: string;
   icon: LucideIcon;
 }
 
-const DOMAIN_META: Record<string, DomainMeta> = {
+/**
+ * WARP-2969 — exported so `tool-domains.test.ts` can pin it against
+ * tools-core's `TOOL_DOMAINS`. It covered 16 of 21 domains for months and
+ * nothing said so: the fallback below is silent by design, so `crm` rendered
+ * as a wrench labelled "Crm" and looked like a styling bug rather than a
+ * missing entry. The drift test is the only thing that can notice.
+ */
+export const DOMAIN_META: Record<string, DomainMeta> = {
   network: { label: "Network", icon: Network },
   files: { label: "Files", icon: FolderOpen },
-  "smart-home": { label: "Smart devices", icon: Heater },
+  "smart-home": { label: "Device control", icon: Heater },
   cameras: { label: "Cameras", icon: Camera },
   switch: { label: "Switch", icon: SwitchIcon },
   calendar: { label: "Calendar", icon: Calendar },
@@ -57,6 +72,21 @@ const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-2894 (ADR-056) — the routine tools. Label matches the /routines
   // nav entry so the /tools filter chip and the sidebar say the same word.
   routines: { label: "Routines", icon: Repeat },
+  // ── WARP-2969: the five domains this map never covered ──
+  // WARP-2180 — durable background runs; "Background runs" is the word the
+  // Workshop surface (WARP-2925) uses for them.
+  agent_runs: { label: "Background runs", icon: PlayCircle },
+  // WARP-2497 — cloud_query_dataset, the one door to a remote dataset.
+  cloud: { label: "Cloud data", icon: Cloud },
+  // ADR-045 left `crm` and `pm` declared but empty — they are the landing
+  // slots for a remote catalog, so they can appear the day one registers.
+  crm: { label: "Contacts", icon: Contact },
+  erp: { label: "Practice", icon: Stethoscope },
+  // WARP-2581 — money_list_open_documents (invoices and bills).
+  money: { label: "Invoices", icon: Receipt },
+  // WARP-2896 (ADR-056) — the workshop's workspace tools. Label matches the
+  // /workshop nav entry for the same reason.
+  workspace: { label: "Workshop", icon: Hammer },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */
@@ -71,4 +101,30 @@ export function labelForDomain(domain: string): string {
 
 export function iconForDomain(domain: string): LucideIcon {
   return DOMAIN_META[domain]?.icon ?? Wrench;
+}
+
+/* ───────────────────────── WARP-2969: reach ───────────────────────── */
+
+/**
+ * `true` ⇔ asking the assistant for this tool would actually reach it.
+ *
+ * ONE definition, read by the `/chat` slash menu (which filters on it) and by
+ * the `/tools` card (which explains it, and drops its chat hand-off). A tool
+ * with no `reach` — an orchestrator from before the field shipped — counts as
+ * reachable: absence of evidence is not "withheld", and answering otherwise
+ * would empty the slash menu on the one box that cannot tell us better.
+ */
+export function reachableInChat(tool: ToolCatalogEntry): boolean {
+  return tool.reach ? tool.reach.chat === "allowed" : true;
+}
+
+/**
+ * The muted chip `/tools` puts on a tool a chat turn cannot reach, or null.
+ *
+ * "Dashboard & MCP only", not "Unavailable": the tool works, it is just not
+ * reachable by asking. Saying otherwise would send someone looking for a
+ * broken box.
+ */
+export function reachNote(tool: ToolCatalogEntry): string | null {
+  return reachableInChat(tool) ? null : "Dashboard & MCP only";
 }

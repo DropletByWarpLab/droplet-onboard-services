@@ -3,6 +3,14 @@ import { z } from "zod";
 import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { buildBrainBlock } from "../services/brain/brain-block.service.js";
+import {
+  decideHistoryReplay,
+  OFF_LAN_HISTORY_NOTICE,
+  recordCloudHistoryConsent,
+  summarizeCloudHistory,
+  userOnlyReplay,
+  type HistoryReplayMode,
+} from "../services/cloud-history-consent.service.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import {
   attachImageBlocksToLastUserMessage,
@@ -10,6 +18,7 @@ import {
   decideVisionRoute,
 } from "../services/vision-attachments.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { modelListGeneration } from "../services/model-list-generation.js";
 import { completeOnce } from "../services/llm-complete.service.js";
 import {
   runAgent,
@@ -45,6 +54,10 @@ import {
 // WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
 // domain selection, so it sizes the tools[] the model actually receives.
 import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
+import {
+  currentRuntimeToolLookup,
+  type RuntimeToolLookup,
+} from "../services/tool-layers.service.js";
 import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
@@ -64,7 +77,9 @@ import { decryptChunkRows } from "../services/file-search.service.js";
 import { probeColdModel } from "../services/model-readiness.service.js";
 import {
   readActiveChatModel,
+  resolveActiveModel,
   resolveStoredChatModel,
+  resolveTurnSideModel,
 } from "../services/active-model.service.js";
 import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
@@ -76,6 +91,8 @@ import {
 import {
   OFF_LAN_ATTACHMENT_NOTICE,
   OFF_LAN_WITHHELD_NOTICE,
+  withholdPromptBlocksForOffLan,
+  type OffLanPromptBlock,
   withholdStoredContentTools,
 } from "../services/stored-content-egress.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -465,7 +482,7 @@ type ReasoningEffort = "low" | "medium" | "high";
  * spoken sentence, so the gpt-oss reasoning channel is wasted decode latency;
  * defaulting to "low" trims the inaudible reasoning-token overhead WITHOUT any
  * voice-io change (the whole knob stays server-side). Read from
- * `VOICE_REASONING_EFFORT` at call time (like DEFAULT_MODEL below) so it's
+ * `VOICE_REASONING_EFFORT` at call time so it's
  * per-deployment overridable and testable. Anything other than a valid level
  * falls back to "low" — the point is trimming voice latency, so a misconfigured
  * env must not silently restore heavy reasoning.
@@ -512,19 +529,26 @@ export function resolveReasoningEffort(
  * chat-specific `undefined` handling (privileged ⇒ stay undefined; otherwise
  * materialise the live registry). The per-name verdict is not reimplemented
  * anywhere.
+ *
+ * WARP-2897 — `runtime` is the runtime-tool lookup the agent loop narrows
+ * with (`currentRuntimeToolLookup`, read once per call by default). Without
+ * it a scoped family/guest person — and a scoped admin sending
+ * `allowed_tools` — would never be handed a runtime tool their role's grant
+ * admits: the loop only intersects with the list materialised here.
  */
 export async function narrowAllowedToolsForRole(
   role: string | undefined,
   requestedAllowed: string[] | undefined,
   isVoice = false,
   scope: ToolAccessScope | null = null,
+  runtime: RuntimeToolLookup = currentRuntimeToolLookup(),
 ): Promise<string[] | undefined> {
   // Distinguish `undefined` (no list supplied → fall through to the
   // role default) from an explicit empty array (caller asked for ZERO
   // tools). `.length` truthiness would conflate the two and grant the
   // full non-write registry for an intentional `allowed_tools: []`.
   if (requestedAllowed !== undefined) {
-    return narrowToolNamesForPrincipal(requestedAllowed, role, scope, isVoice);
+    return narrowToolNamesForPrincipal(requestedAllowed, role, scope, isVoice, runtime);
   }
   if (isPrivilegedRole(role)) return undefined;
   // Default for unprivileged users: every tool the live MCP server
@@ -538,6 +562,7 @@ export async function narrowAllowedToolsForRole(
     role,
     scope,
     isVoice,
+    runtime,
   );
 }
 
@@ -908,6 +933,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
 
       let models: ModelsResponse;
+      const generation = modelListGeneration();
       try {
         models = await aiGateway.listModels();
       } catch (err) {
@@ -950,7 +976,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.json(await forCaller(await stampDefault({ ...models, degraded: true }, true)));
         return;
       }
-      await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
+      // WARP-3046: a download that finished while this read was in flight
+      // has already busted this key; its list predates the new model, so
+      // serve it without caching it (model-list-generation.ts).
+      if (generation === modelListGeneration()) {
+        await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
+      }
       res.json(await forCaller(await stampDefault(models)));
     } catch (err) {
       next(err);
@@ -1054,6 +1085,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         provider: chatReq.provider,
       });
       const isOffLanTurn = offLanProvider !== null;
+      // WARP-2746 — every prompt block `withholdPromptBlocksForOffLan` blanked
+      // on this turn, accumulated across its call sites and written to the
+      // turn's signed audit row. Empty on every local turn.
+      const offLanWithheld: OffLanPromptBlock[] = [];
+      // WARP-2991 — how this turn's history was replayed. Null on a local
+      // turn (the question does not arise); set below once the conversation
+      // is known.
+      let historyReplay: HistoryReplayMode | null = null;
+      let historyWithheldMessages = 0;
 
       // RBAC: write tools require owner/admin. /api/llm/chat is the
       // live MCP-backed route — without this gate any authenticated
@@ -1341,19 +1381,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
       // default no-enhancement path runs (byte-for-byte WARP-286).
-      // `DEFAULT_MODEL` matches `routes/admin-retrieval-eval.ts` which
-      // already canonicalised the env var name for the eval harness.
       const aiGatewayGrpcUrl =
         process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
-      // Fall back to LLM_MODEL (the model the box actually pulls —
-      // single-box.sh writes it to .env, and the orchestrator loads
-      // .env via env_file) before the historic hardcoded name, which
-      // production Ollama does not host. Without this, HyDE/multi-query
-      // rewrites would 404 upstream and silently no-op.
-      const defaultChatModel =
-        process.env.DEFAULT_MODEL ??
-        process.env.LLM_MODEL ??
-        "mistral:7b-instruct";
+      // WARP-3047 — HyDE / multi-query rewrites run on the model THIS turn
+      // is using when that model is local (it is already resident; asking
+      // for any other local model mid-turn is the DMR load collision — two
+      // runners on one GPU), else on the box's ACTIVE model. Never env
+      // DEFAULT_MODEL/LLM_MODEL. Asked lazily (only when a rewrite runs) and
+      // reads `agentModel` at that moment, so a vision auto-route below is
+      // honoured.
+      const resolveEnhancementModel = (): Promise<string | null> =>
+        resolveTurnSideModel(prisma, { model: agentModel, provider: agentProvider });
 
       const deps: AgentDeps = {
         mcp: mcpClient,
@@ -1377,7 +1415,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
-          defaultModel: defaultChatModel,
+          resolveModel: resolveEnhancementModel,
         }),
         // WARP-473 — fire-and-forget file citation enqueue. Only
         // wired when the turn is persisted (conversationId +
@@ -1529,6 +1567,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             messageId: assistantMessageId ?? undefined,
             iterations: liveToolCalls.length,
             status,
+            // WARP-2746 — what this turn did NOT send because it went to a
+            // cloud model. On the signed row so "was X sent to the provider?"
+            // is answerable from the audit chain, not from reading the code.
+            offLanProvider: offLanProvider ?? undefined,
+            offLanWithheld: offLanWithheld.length > 0 ? offLanWithheld : undefined,
+            historyReplay: historyReplay ?? undefined,
+            historyWithheldMessages:
+              historyWithheldMessages > 0 ? historyWithheldMessages : undefined,
           }),
         });
 
@@ -1561,6 +1607,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           completedAt: completedAt.toISOString(),
         });
       };
+
+      // ── WARP-2991 — history replay on a cloud turn ──────────────────
+      //
+      // The client replays the whole thread in `messages`. On an off-LAN
+      // turn the assistant side goes only when the owner consented for this
+      // conversation after its last on-box answer; otherwise only the user's
+      // own messages go. Decided HERE, before any splice below adds the
+      // server's own system messages, so the filter only ever sees the
+      // client's replay. Fails closed: see cloud-history-consent.service.ts.
+      if (isOffLanTurn) {
+        historyReplay = await decideHistoryReplay(prisma, {
+          conversationId,
+          userId,
+          excludeMessageId: assistantMessageId,
+        });
+        if (historyReplay === "user_only") {
+          const before = agentMessages.length;
+          agentMessages = userOnlyReplay(agentMessages);
+          historyWithheldMessages = before - agentMessages.length;
+        }
+      }
 
       // ── WARP-460 Phase B3 — Context-pin injection ─────────────────
       //
@@ -1605,7 +1672,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             const targets = await resolveBusinessPinTargets(prisma, pins, {
               scope: toolAccessScope,
             });
-            const block = renderContextPinBlock(pins, targets);
+            // WARP-2746 — pinned paths and customer names are stored content;
+            // a cloud turn gets none of them (stored-content-egress.service).
+            const gate = withholdPromptBlocksForOffLan(
+              { context_pins: renderContextPinBlock(pins, targets) ?? "" },
+              isOffLanTurn,
+            );
+            offLanWithheld.push(...gate.withheld);
+            const block = gate.blocks.context_pins;
             // `null` when nothing survived resolution (every pin unavailable,
             // or a business pin the resolver could not reach). A header with
             // no lines under it is prompt the model reads for nothing.
@@ -1946,6 +2020,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // gives us the identity+guidance chars without a persona block for the
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
+        // WARP-2746 — THE off-LAN filter for the system-prompt blocks. Runs
+        // BEFORE the size estimate so the estimate, `degradeToFit` and the
+        // wire all see the same text: a block withheld here can neither be
+        // sent nor charged against the window.
+        const promptGate = withholdPromptBlocksForOffLan(
+          { memory: memoryBlock, brain: brainBlock, business: businessBlock },
+          isOffLanTurn,
+        );
+        offLanWithheld.push(...promptGate.withheld);
+        memoryBlock = promptGate.blocks.memory;
+        brainBlock = promptGate.blocks.brain;
+        businessBlock = promptGate.blocks.business;
+
         const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
@@ -1984,6 +2071,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // Through the SHARED helper, not an inline re-expression of the same
         // rule: an inline copy here is what drifted out of step with the
         // dispatch-side filter in the first place.
+        //
+        // WARP-2897 — no runtime lookup here, deliberately: `pooledTools` is
+        // built from the compiled `TOOLS` map only, so the catalog answers for
+        // every name and a lookup could change nothing. Runtime tools are not
+        // sized by this estimate (see below); the runtime half of the scope
+        // rule lives where runtime names actually appear — the catalog build
+        // (`narrowAllowedToolsForRole`) and the agent loop, both through
+        // `currentRuntimeToolLookup`.
         const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
         // WARP-2552 — but the pool is NOT what the model receives, and sizing
         // it as though it were is the defect this fixes.
@@ -2091,7 +2186,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // error, an outage) or answers from its own weights as though it
             // had read the document. Stating the constraint is what lets it
             // tell the user the truth and name the remedy.
-            (isOffLanTurn ? "\n\n" + OFF_LAN_WITHHELD_NOTICE : ""),
+            (isOffLanTurn ? "\n\n" + OFF_LAN_WITHHELD_NOTICE : "") +
+            // WARP-2991 — say so when the earlier replies were held back.
+            (historyWithheldMessages > 0 ? "\n\n" + OFF_LAN_HISTORY_NOTICE : ""),
         };
         agentMessages = [baseSystemMessage, ...agentMessages];
       }
@@ -2425,14 +2522,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         return;
       }
       const body = parsed.data;
-      // Same default-model triad as the query-enhancement wiring in
-      // /llm/chat: DEFAULT_MODEL (canonical), then LLM_MODEL (what the box
-      // actually pulled), then the historic hardcoded name.
-      const model =
-        body.model ??
-        process.env.DEFAULT_MODEL ??
-        process.env.LLM_MODEL ??
-        "mistral:7b-instruct";
+      // WARP-3047 — no `model` means the box's ACTIVE model. The callers
+      // (translate_text / summarize_file) run INSIDE a chat turn on the
+      // active model, so this keeps them on the model that is already
+      // resident; env DEFAULT_MODEL/LLM_MODEL loaded a second model next to
+      // it on DMR, which fails once the GPU is full. Nothing resolvable is
+      // the same stable `llm_unavailable` every other failure maps to —
+      // never a hardcoded tag the box does not host.
+      const model = body.model ?? (await resolveActiveModel(prisma));
+      if (!model) {
+        res.status(502).json({ error: "llm_unavailable" });
+        return;
+      }
 
       // WARP-1530 — the same per-person cloud gate as /llm/chat. `model` is
       // caller-supplied here too, so without this a person denied cloud could
@@ -2461,7 +2562,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // lookup. Still forwarded as the request principal.
           userId: (req as AuthedRequest).user?.id,
         });
-        res.json(result);
+        // Projected, not spread: WARP-2964 grew `CompleteOnceResult` with the
+        // provider's `reasoning` / `finishReason` for in-box callers. This is
+        // a published wire contract (the translate_text / summarize_file MCP
+        // tools), so it stays exactly `{content, model}`.
+        res.json({ content: result.content, model: result.model });
       } catch (err) {
         // Gateway down, non-OK, or the 120 s belt-and-braces timeout in
         // completeOnce fired (CPU inference can be slow, but past that the
@@ -2663,6 +2768,79 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           return;
         }
         res.json({ feedback: parsed.data.feedback });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-2991 — what a cloud turn on this conversation would carry, so the
+  // dashboard can name it in the consent dialog at the model switch.
+  // Owner-scoped exactly like the GET above: another person's id is a 404.
+  router.get(
+    "/llm/conversations/:id/cloud-history",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const userId = (req as AuthedRequest).user?.username;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const summary = await summarizeCloudHistory(prisma, {
+          conversationId: req.params.id,
+          userId,
+        });
+        if (!summary) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+        res.json(summary);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-2991 — record the owner's answer. The server enforces the rule on
+  // every turn whatever is recorded here; this is how a person says yes.
+  router.put(
+    "/llm/conversations/:id/cloud-history",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const userId = (req as AuthedRequest).user?.username;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const decision = (req.body as { decision?: unknown })?.decision;
+        if (decision !== "granted" && decision !== "declined") {
+          res.status(400).json({ error: "invalid_decision" });
+          return;
+        }
+        const ok = await recordCloudHistoryConsent(prisma, {
+          conversationId: req.params.id,
+          userId,
+          decision,
+        });
+        if (!ok) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+        await recordActivity({
+          kind: "chat",
+          severity: "info",
+          sourceIcon: "message-square",
+          actor: actorFromRequest(req),
+          what:
+            decision === "granted"
+              ? "Allowed earlier on-box answers to go to a cloud model"
+              : "Kept earlier on-box answers off the cloud model",
+          sub: userId,
+          refs: { userId, conversationId: req.params.id, cloudHistoryConsent: decision },
+        });
+        res.json({ consent: decision });
       } catch (err) {
         next(err);
       }
@@ -2978,6 +3156,38 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // RBAC matches GET /llm/tools: owner/admin see every tool; everyone else
   // (family, guest, unauthenticated) sees read-only tools only, closing
   // the same information-disclosure gap on the destructive surface.
+  //
+  // WARP-2969 — every entry also carries `reach`, saying whether a chat turn
+  // can get to it at all. Without it this page listed all 142 registry tools
+  // as if asking for any of them would work, while 54 are withheld from chat
+  // by policy — reachable from their own screen or over MCP, never by asking
+  // — and the page named no reason for any of them.
+  //
+  // ANNOTATES, NEVER FILTERS. A withheld tool is still callable by an MCP
+  // client, so dropping it here would be a second, wrong answer to a
+  // different question. The field is additive; every WARP-555 field is
+  // untouched.
+  //
+  // The verdict is the SHIPPED list, called — not re-derived. Same rule
+  // `tool-inspect.service.ts` reports as its `chat_policy` gate, so the two
+  // surfaces cannot disagree.
+  //
+  // 🔴 ONE AXIS, AND THE MISSING ONE IS DELIBERATE. An earlier cut of this
+  // also reported a `module` axis from `domainsForFeatures`. It would have
+  // lied on every shipped box: §6 module gating never reaches the chat pool
+  // for an owner or for anybody holding no AccessRole.
+  // `resolveToolAccessScope` returns a NULL scope for them,
+  // `narrowToolsToScope` passes a null scope through byte-for-byte, and
+  // `llm-agent.service.ts` narrows by EXCLUDED_FROM_CHAT_TOOLS alone — so
+  // `list_cameras` reaches the model on a box with `cameras` switched off,
+  // and `moduleSetting` is never even read. A "Module off" chip would have
+  // been a confident false statement about a boundary. **WARP-2972** wires
+  // that gate for everyone; the axis belongs here again the day it is true,
+  // and not one day sooner.
+  //
+  // The PER-PERSON axes (role grants, off-LAN withholding, turn relevance)
+  // are deliberately NOT here either — they need a resolved principal and a
+  // modelled turn, which is what `GET /api/admin/tool-inspect/:userId` is for.
   router.get("/llm/tools/catalog", (req, res) => {
     const role = (req as AuthedRequest).user?.role;
     const tools = isPrivilegedRole(role)
@@ -2991,6 +3201,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         domain: t.domain,
         requiresWrite: t.requiresWrite,
         requiresConfirmation: t.requiresConfirmation,
+        reach: {
+          chat: EXCLUDED_FROM_CHAT_TOOLS.has(t.name) ? "excluded" : "allowed",
+        },
       })),
       domains: TOOL_DOMAINS,
     });
@@ -3025,7 +3238,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/llm/keys", async (_req, res, next) => {
+  // WARP-3082: which vendors the business holds a key for is operator
+  // material, same posture as the writes. Members and guests read the
+  // redacted view on GET /api/models instead.
+  router.get("/llm/keys", requireRole("owner", "admin"), async (_req, res, next) => {
     try {
       const providers = await aiGateway.listKeys();
       res.json({ providers });
@@ -3042,8 +3258,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "unknown_provider" });
         return;
       }
-      await aiGateway.deleteKey(provider);
+      const deleted = await aiGateway.deleteKey(provider);
       await Promise.all([cacheDel(MODELS_CACHE_KEY), cacheDel(MODELS_PAGE_CACHE_KEY)]);
+      // WARP-3083: no key stored (double-click, two admins) is the goal
+      // state already, not a server failure.
+      if (!deleted) {
+        res.status(204).end();
+        return;
+      }
       res.json({ status: "deleted" });
     } catch (err) {
       next(err);

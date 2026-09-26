@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   fetchEligibleCatalog,
   openPullStream,
+  readPullRefusal,
 } from "../services/model-catalog.service.js";
 
 function jsonResp(body: unknown, ok = true, status?: number): Response {
@@ -206,5 +207,119 @@ describe("openPullStream", () => {
     expect((init.headers as Record<string, string>).Authorization).toBe(
       "Bearer sekrit",
     );
+  });
+});
+
+// ── WARP-3046 — the catalog says WHY it is empty (contract C1) ─────────────
+
+describe("fetchEligibleCatalog — honesty flags (WARP-3046)", () => {
+  it("passes vram_source, tags_unreachable and degraded_manifest through", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResp({
+        detected_vram_gb: 16,
+        vram_source: "device_bridge",
+        tags_unreachable: true,
+        degraded_manifest: true,
+        models: [FULL_ENTRY],
+      }),
+    );
+    const catalog = await fetchEligibleCatalog();
+    expect(catalog.detected_vram_gb).toBe(16);
+    expect(catalog.vram_source).toBe("device_bridge");
+    expect(catalog.tags_unreachable).toBe(true);
+    expect(catalog.degraded_manifest).toBe(true);
+  });
+
+  it("keeps unknown VRAM null — never a fabricated 0", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResp({ detected_vram_gb: null, vram_source: null, tags_unreachable: false, models: [] }),
+    );
+    const catalog = await fetchEligibleCatalog();
+    expect(catalog.detected_vram_gb).toBeNull();
+    expect(catalog.vram_source).toBeNull();
+  });
+
+  it("reads absent flags (an older sidecar) as false / null", async () => {
+    fetchMock.mockResolvedValue(jsonResp({ detected_vram_gb: 16, models: [] }));
+    const catalog = await fetchEligibleCatalog();
+    expect(catalog.vram_source).toBeNull();
+    expect(catalog.tags_unreachable).toBe(false);
+    expect(catalog.degraded_manifest).toBe(false);
+  });
+});
+
+// ── WARP-3046 — a refused pull, in the orchestrator's own words (contract C2) ──
+//
+// The sidecar is FastAPI, so every refusal arrives as `{"detail": X}`: X is
+// the disk preflight's OBJECT on a 409 (which the dashboard rendered as a
+// React child and crashed on), or the runtime's own body relayed as a STRING
+// (DMR's `{"error":"Failed to pull model: …"}`) on anything else.
+
+function refusal(status: number, body: unknown, raw = false): Response {
+  return {
+    ok: false,
+    status,
+    text: async () => (raw ? String(body) : JSON.stringify(body)),
+  } as unknown as Response;
+}
+
+describe("readPullRefusal (WARP-3046)", () => {
+  it("maps the sidecar's disk-preflight 409 to insufficient_disk with a STRING detail", async () => {
+    const out = await readPullRefusal(
+      refusal(409, { detail: { error: "insufficient_disk", needed_gb: 28.1, free_gb: 12.4 } }),
+    );
+    expect(out.status).toBe(409);
+    expect(out.body).toEqual({
+      error: "insufficient_disk",
+      detail: expect.any(String),
+      needed_gb: 28.1,
+      free_gb: 12.4,
+    });
+    expect(out.body.detail).toMatch(/28\.1 GB/);
+    expect(out.body.detail).toMatch(/12\.4 GB/);
+  });
+
+  it("surfaces DMR's own pre-stream reason as a 502 pull_failed detail", async () => {
+    const dmr = JSON.stringify({
+      error: "Failed to pull model: reading model from registry: not found",
+    });
+    const out = await readPullRefusal(refusal(500, { detail: dmr }));
+    expect(out).toEqual({
+      status: 502,
+      body: {
+        error: "pull_failed",
+        detail: "Failed to pull model: reading model from registry: not found",
+      },
+    });
+  });
+
+  it("surfaces a transport-level reason the sidecar relayed as plain text", async () => {
+    const out = await readPullRefusal(refusal(502, { detail: "All connection attempts failed" }));
+    expect(out.body).toEqual({ error: "pull_failed", detail: "All connection attempts failed" });
+  });
+
+  it("uses a non-JSON body verbatim", async () => {
+    const out = await readPullRefusal(refusal(500, "upstream exploded", true));
+    expect(out.body.detail).toBe("upstream exploded");
+  });
+
+  it("falls back to generic copy when there is no reason at all", async () => {
+    const out = await readPullRefusal(refusal(500, "", true));
+    expect(out.status).toBe(502);
+    expect(out.body.error).toBe("pull_failed");
+    expect(typeof out.body.detail).toBe("string");
+    expect(out.body.detail.length).toBeGreaterThan(0);
+  });
+
+  it("never hands the dashboard a non-string detail", async () => {
+    const out = await readPullRefusal(refusal(409, { detail: { error: "something_else" } }));
+    expect(out.status).toBe(502);
+    expect(typeof out.body.detail).toBe("string");
+    expect(out.body.detail).toBe("something_else");
+  });
+
+  it("bounds an oversized reason", async () => {
+    const out = await readPullRefusal(refusal(500, { detail: "x".repeat(5000) }));
+    expect(out.body.detail.length).toBeLessThanOrEqual(500);
   });
 });

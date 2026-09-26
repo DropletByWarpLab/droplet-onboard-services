@@ -9,6 +9,7 @@
  * these specs keep the two from drifting on the load-bearing values.
  */
 import { describe, it, expect } from "vitest";
+import type { ModuleId } from "@prisma/client";
 import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import {
   GATEABLE_MODULE_IDS,
@@ -19,15 +20,20 @@ import {
   clampLevel,
   fullCatalogFeatures,
   domainsForFeatures,
+  isGrantableDomain,
   tierReachableDomains,
+  FEATURE_UNGATED_TOOL_DOMAINS,
+  unmappedToolDomains,
 } from "./access-catalog.js";
+import { toolLayers } from "./tool-layers.service.js";
+import { MODULES } from "../modules/module-registry.js";
 
 describe("access-catalog — module vocabulary", () => {
   // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
-  // WARP-2581 added `money` for 15. The list is pinned so a new ModuleId
-  // cannot arrive without someone writing its §9 ladder — which is exactly
-  // what this test caught each time they did.
-  it("gates the 15 non-core ModuleIds; chat is the always-on module at act", () => {
+  // WARP-2581 added `money` for 15; WARP-2977 added `security` for 16. The
+  // list is pinned so a new ModuleId cannot arrive without someone writing its
+  // §9 ladder — which is exactly what this test caught each time they did.
+  it("gates the 16 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
@@ -42,6 +48,7 @@ describe("access-catalog — module vocabulary", () => {
         "money",
         "network",
         "projects",
+        "security",
         "smart_home",
         "team_chat",
         "voice",
@@ -120,7 +127,7 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
 });
 
 describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () => {
-  it("maps features to tools-core domains; unclaimed domains always pass", () => {
+  it("maps features to tools-core domains; declared-ungated domains always pass", () => {
     const domains = domainsForFeatures(new Set(["calendar", "knowledge", "projects", "smart_home"]));
     // calendar claims its trio (the WARP-1532 grouping)
     expect(domains.has("calendar")).toBe(true);
@@ -134,19 +141,84 @@ describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () =>
     expect(domains.has("files")).toBe(false);
     expect(domains.has("network")).toBe(false);
     expect(domains.has("switch")).toBe(false);
-    // domains no module claims (system/business/data/erp) are not module-gated
-    expect(domains.has("system")).toBe(true);
-    expect(domains.has("business")).toBe(true);
-    expect(domains.has("data")).toBe(true);
-    expect(domains.has("erp")).toBe(true);
+    expect(domains.has("money")).toBe(false);
+    // the declared-ungated domains pass regardless
+    for (const d of Object.keys(FEATURE_UNGATED_TOOL_DOMAINS)) expect(domains.has(d), d).toBe(true);
   });
 
-  it("feature set ∅ still passes the unclaimed domains only", () => {
-    const domains = domainsForFeatures(new Set());
-    expect(domains.has("files")).toBe(false);
-    expect(domains.has("system")).toBe(true);
+  it("feature set ∅ passes exactly the declared-ungated domains", () => {
+    expect([...domainsForFeatures(new Set())].sort()).toEqual(
+      Object.keys(FEATURE_UNGATED_TOOL_DOMAINS).sort(),
+    );
+  });
+});
+
+// WARP-2742 — the feature intersection is fail-CLOSED and exhaustive. Every
+// assertion here derives the domain list from tools-core's TOOL_DOMAINS and
+// the claims from MODULES; nothing is hand-copied, so a new domain or a new
+// module claim is covered the day it lands.
+describe("access-catalog — every tool domain has a feature decision (WARP-2742)", () => {
+  const claimedBy = new Map<string, string[]>();
+  for (const m of MODULES) {
+    for (const d of m.toolDomains) claimedBy.set(d, [...(claimedBy.get(d) ?? []), m.id]);
+  }
+
+  it.each([...TOOL_DOMAINS])(
+    "%s is claimed by at least one module XOR declared feature-ungated",
+    (domain) => {
+      const owners = claimedBy.get(domain) ?? [];
+      const ungated = Object.prototype.hasOwnProperty.call(FEATURE_UNGATED_TOOL_DOMAINS, domain);
+      expect(
+        owners.length > 0 ? !ungated : ungated,
+        `${domain}: claim it in module-registry.ts toolDomains OR add it to ` +
+          "FEATURE_UNGATED_TOOL_DOMAINS with a reason — not both, not neither",
+      ).toBe(true);
+    },
+  );
+
+  // WARP-2988 — a second claim WIDENS a domain (any owner passes it), so the
+  // shared claims are pinned exactly. A new one is a deliberate edit here.
+  it("only `business` is shared, by exactly crm and projects (OR semantics)", () => {
+    const shared = Object.fromEntries(
+      [...claimedBy].filter(([, owners]) => owners.length > 1).map(([d, o]) => [d, [...o].sort()]),
+    );
+    expect(shared).toEqual({ business: ["crm", "projects"] });
   });
 
+  it("unmappedToolDomains() is empty — the gate denies anything that lands there", () => {
+    expect(unmappedToolDomains()).toEqual([]);
+  });
+
+  it("every declared-ungated domain is a real tools-core domain with a written reason", () => {
+    for (const [d, reason] of Object.entries(FEATURE_UNGATED_TOOL_DOMAINS)) {
+      expect(TOOL_DOMAINS as string[], d).toContain(d);
+      expect((reason ?? "").length, d).toBeGreaterThan(20);
+    }
+  });
+
+  it.each([...TOOL_DOMAINS].filter((d) => claimedBy.has(d)))(
+    "claimed domain %s passes iff at least one owning module is in the feature set",
+    (domain) => {
+      const owners = claimedBy.get(domain)! as ModuleId[];
+      const all = new Set<ModuleId>(MODULES.map((m) => m.id));
+      expect(domainsForFeatures(all).has(domain)).toBe(true);
+      const without = new Set(all);
+      for (const o of owners) without.delete(o);
+      expect(domainsForFeatures(without).has(domain)).toBe(false);
+      for (const o of owners) {
+        expect(domainsForFeatures(new Set([...without, o])).has(domain), `${domain} via ${o}`).toBe(
+          true,
+        );
+      }
+    },
+  );
+
+  it("the Money module claims the money domain (the ticket's plain bug)", () => {
+    expect(claimedBy.get("money")).toEqual(["money"]);
+  });
+});
+
+describe("access-catalog — grantable tool domains", () => {
   it("GRANTABLE_TOOL_DOMAINS is the tools-core union minus erp (connector axis owns erp)", () => {
     expect(GRANTABLE_TOOL_DOMAINS).not.toContain("erp");
     for (const d of GRANTABLE_TOOL_DOMAINS) {
@@ -175,10 +247,45 @@ describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () =>
   });
 });
 
-describe("access-catalog — tier write-filter reachability", () => {
-  it("owner/admin reach every catalog domain", () => {
-    expect([...tierReachableDomains("owner")].sort()).toEqual([...TOOL_DOMAINS].sort());
-    expect([...tierReachableDomains("admin")].sort()).toEqual([...TOOL_DOMAINS].sort());
+describe("access-catalog — tier write-filter reachability (two layers, WARP-2897)", () => {
+  /** A runtime layer holding one tool in `domain`. */
+  const runtimeTool = (domain: string, requiresWrite: boolean, name = `ext__${domain}_tool`) =>
+    toolLayers([{ name, domain, requiresWrite, source: "runtime:ext" }]);
+
+  /**
+   * WARP-2897 REVERSES the WARP-2761 owner/admin answer, deliberately (the
+   * PR's decision #1). Owner/admin used to take `TOOL_DOMAINS` unconditionally,
+   * so a domain holding NO tool — `crm`/`pm` today, and an extension's domain
+   * the moment it is disabled — still read as reachable for every admin
+   * template. They now reach the POPULATED domains of both layers: every
+   * domain some tool actually lives in, write or not.
+   *
+   * MUTATION 1: restore `if (tier === "owner" || tier === "admin") return new
+   * Set<string>(TOOL_DOMAINS);` -> this test goes red (crm/pm and the emptied
+   * extension domain come back).
+   */
+  it("owner/admin reach every POPULATED domain in either layer — and nothing else", () => {
+    const populated = new Set<string>(TOOL_CATALOG.map((t) => t.domain));
+    for (const tier of ["owner", "admin"] as const) {
+      expect([...tierReachableDomains(tier)].sort()).toEqual([...populated].sort());
+      // The declared-empty landing slots drop out (the WARP-2761 pin, rewritten).
+      expect(tierReachableDomains(tier).has("crm")).toBe(false);
+      expect(tierReachableDomains(tier).has("pm")).toBe(false);
+      // A write-only runtime domain IS reachable for admin (admin keeps writes).
+      expect(tierReachableDomains(tier, runtimeTool("ext-bookings", true)).has("ext-bookings")).toBe(true);
+    }
+  });
+
+  it("an extension domain emptied by disable is NOT reachable for admin", () => {
+    // Attached: the extension's one tool populates the domain.
+    expect(tierReachableDomains("admin", runtimeTool("ext-bookings", true)).has("ext-bookings")).toBe(true);
+    // Disabled/detached: the runtime layer no longer carries it.
+    expect(tierReachableDomains("admin", toolLayers([])).has("ext-bookings")).toBe(false);
+  });
+
+  it("a remote catalog landing in a declared-empty domain makes it reachable again", () => {
+    // The reason crm/pm stay declared: a remote Atlassian catalog in `pm`.
+    expect(tierReachableDomains("admin", runtimeTool("pm", true)).has("pm")).toBe(true);
   });
 
   it("family/guest reach only domains with at least one non-write tool", () => {
@@ -192,39 +299,67 @@ describe("access-catalog — tier write-filter reachability", () => {
   });
 
   /**
-   * WARP-2761 — an EMPTY domain is unreachable too, and that is a DECISION,
-   * not a side effect nobody looked at.
+   * MUTATION 2: drop the runtime layer (read `layers.catalog` only in
+   * `readableDomains`/`tierReachableDomains`) -> the read-classified extension
+   * tool is no longer reachable and this goes red.
+   */
+  it("family reaches a runtime domain whose tool the operator classified READ", () => {
+    expect(tierReachableDomains("family", runtimeTool("ext-bookings", false)).has("ext-bookings")).toBe(true);
+    expect(tierReachableDomains("guest", runtimeTool("ext-bookings", false)).has("ext-bookings")).toBe(true);
+  });
+
+  it("family does NOT reach a runtime domain whose every tool is a write", () => {
+    expect(tierReachableDomains("family", runtimeTool("ext-bookings", true)).has("ext-bookings")).toBe(false);
+  });
+
+  /**
+   * WARP-2761 — an EMPTY domain is unreachable for family/guest, and that is
+   * a DECISION, not a side effect nobody looked at. It is unchanged by
+   * WARP-2897; what changed is that owner/admin now agree with it (above).
    *
-   * The function adds a domain only on finding a non-write tool in it, so
-   * "every tool here writes" and "no tool here yet" produce the same answer.
-   * `crm` and `pm` are the second kind: ADR-045 moved their tools into
-   * `business` and catalog.ts keeps them declared as landing slots for a
-   * remote catalog. The alternative — returning a toolless domain as
-   * reachable — was rejected because this set is a live term in the
-   * effective-access intersection, and the first tool a remote catalog
-   * registers into such a domain may be a write that family and guest would
-   * already hold a grant for. The role templates gave up the grants instead.
+   * The alternative — returning a toolless domain as reachable — was rejected
+   * because this set is a live term in the effective-access intersection,
+   * and the first tool a remote catalog registers into such a domain may be a
+   * write that family and guest would already hold a grant for.
    *
-   * This pin is what makes reversing that a deliberate act. MUTATION: add
+   * MUTATION: add
    * `for (const d of TOOL_DOMAINS) if (!TOOL_CATALOG.some((t) => t.domain === d)) out.add(d)`
    * to `tierReachableDomains` -> red.
    */
-  it("a domain with no tools is NOT reachable for family/guest (the decision, pinned)", () => {
+  it("a domain with no tools is NOT reachable for any tier (the decision, pinned)", () => {
     const populated = new Set<string>(TOOL_CATALOG.map((t) => t.domain));
     const empty = TOOL_DOMAINS.filter((d) => !populated.has(d));
     // Guard the premise: if the catalogue ever refills these, this spec is
     // about nothing and should be re-read rather than deleted.
     expect(empty).toContain("crm");
     expect(empty).toContain("pm");
-    const family = tierReachableDomains("family");
-    const guest = tierReachableDomains("guest");
-    for (const d of empty) {
-      expect(family.has(d), `${d} holds no tools`).toBe(false);
-      expect(guest.has(d), `${d} holds no tools`).toBe(false);
-      // …while owner/admin keep it, by taking the union unconditionally —
-      // which is why the emptying showed up on family/guest templates only.
-      expect(tierReachableDomains("admin").has(d)).toBe(true);
+    for (const tier of ["owner", "admin", "family", "guest"] as const) {
+      const reach = tierReachableDomains(tier);
+      for (const d of empty) expect(reach.has(d), `${tier}: ${d} holds no tools`).toBe(false);
     }
+  });
+});
+
+describe("access-catalog — isGrantableDomain (two layers, WARP-2897)", () => {
+  const ext = toolLayers([{ name: "ext__slots", domain: "ext-bookings", requiresWrite: true, source: "runtime:ext" }]);
+
+  it("every compiled grantable domain is grantable, with or without a runtime layer", () => {
+    for (const d of GRANTABLE_TOOL_DOMAINS) {
+      expect(isGrantableDomain(d), d).toBe(true);
+      expect(isGrantableDomain(d, ext), d).toBe(true);
+    }
+  });
+
+  it("erp is never grantable — connector reach is the connectors axis", () => {
+    expect(isGrantableDomain("erp")).toBe(false);
+    const erpRuntime = toolLayers([{ name: "x__erp", domain: "erp", requiresWrite: false, source: "runtime:x" }]);
+    expect(isGrantableDomain("erp", erpRuntime)).toBe(false);
+  });
+
+  it("a runtime-only domain is grantable only while some runtime tool carries it", () => {
+    expect(isGrantableDomain("ext-bookings", ext)).toBe(true);
+    expect(isGrantableDomain("ext-bookings")).toBe(false);
+    expect(isGrantableDomain("ext-nothing", ext)).toBe(false);
   });
 });
 

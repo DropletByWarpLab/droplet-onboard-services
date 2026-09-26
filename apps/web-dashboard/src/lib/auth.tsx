@@ -8,13 +8,16 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
+import { unload, useSWRConfig } from "swr";
 // NOTE: api.ts imports `authFetch` from this module, so this is a module
 // cycle. It is safe: `patchSetupReady` is only INVOKED at runtime (inside the
 // `completeSetup` callback), never during module evaluation, so the live
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
-import { HELP_PATH } from "./routing";
+import { HELP_PATH, PUBLIC_PATHS, isSecurityWallPath } from "./routing";
+import { clearChatHandoffs } from "./session-reset";
 
 export interface AuthUser {
   id: string;
@@ -32,6 +35,19 @@ export interface AuthUser {
   // server-side regardless. Optional so a cached pre-WARP-824 profile is
   // treated as "not gated".
   mustChangePassword?: boolean;
+  // WARP-2981 (ADR-059 §6.2): the LATEST this sign-in can last — createdAt +
+  // the absolute limit (12 h as shipped), never extended. It can end SOONER,
+  // and endsAt does not move when it does: after 30 min with no authenticated
+  // request (any request resets that clock, /auth/me included, but a token
+  // refresh does not — /auth/refresh checks with touch:false); when the
+  // person's next sign-in pushes them past 5 at once, which evicts the oldest;
+  // or on revocation (sign-out, password or role change, an admin ending it).
+  // So show it as "by … at the latest", never as the time it ends; a 401 ends
+  // it whatever endsAt says. Only /auth/me carries it: absent after a login
+  // response or on an older orchestrator, null when the box cannot tell (a
+  // service principal, a grace-path token, an unreadable session record).
+  // Absent and null both mean "show nothing".
+  session?: { endsAt: string } | null;
 }
 
 /**
@@ -184,6 +200,9 @@ const SETUP_PROBE_RETRY_DELAYS_MS = [1_500, 3_000, 6_000];
  * retry with an already-aborted signal → instant `AbortError` → a valid-but-slow
  * session is wrongly treated as unauthenticated. A fresh, self-contained budget
  * keeps the single retry bounded without depending on the caller's clock.
+ *
+ * WARP-3048 — it bounds the wait for the response HEADERS only (see
+ * `fetchWithHeaderTimeout`), never the body.
  */
 const AUTHFETCH_RETRY_TIMEOUT_MS = 6_000;
 
@@ -223,6 +242,47 @@ function timeoutSignal(ms: number): AbortSignal {
   const ctrl = new AbortController();
   setTimeout(() => ctrl.abort(new DOMException("TimeoutError", "TimeoutError")), ms);
   return ctrl.signal;
+}
+
+/**
+ * WARP-3048 — `fetch` whose time budget ends when the response HEADERS
+ * arrive. An `AbortSignal.timeout` keeps ticking after `fetch` resolves and
+ * aborts the body mid-read, so a streamed response that needed the
+ * 401→refresh→retry path — a model download's NDJSON progress, a chat
+ * reply — was cut off six seconds in. Clearing the timer once the headers
+ * are in keeps "a silent box can't hang the retry" without putting a
+ * deadline on the body.
+ */
+async function fetchWithHeaderTimeout(
+  url: string,
+  init: RequestInit,
+  ms: number,
+  cancel?: AbortSignal | null,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(
+    () => ctrl.abort(new DOMException("TimeoutError", "TimeoutError")),
+    ms,
+  );
+  // WARP-3048 — the caller's CANCEL (chat Stop, a superseded lookup) still
+  // reaches the request, headers and body alike; the caller's CLOCK does
+  // not. A timeout aborts with a `TimeoutError` reason — `AbortSignal.timeout`
+  // and every house deadline (`timeoutSignal`, the Matter browse) — and that
+  // budget was spent on the first attempt + the refresh (onboard#477).
+  if (cancel) {
+    const forward = () => {
+      const reason: unknown = cancel.reason;
+      if ((reason as { name?: unknown } | undefined)?.name === "TimeoutError") return;
+      ctrl.abort(reason);
+    };
+    if (cancel.aborted) forward();
+    else cancel.addEventListener("abort", forward, { once: true });
+  }
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -406,6 +466,9 @@ async function attemptRefresh(): Promise<RefreshOutcome> {
   return refreshInFlight;
 }
 
+/** WARP-2981 — authFetch confirmed the session dead on the Security wall; the provider drops the user. */
+export const WALL_SIGNED_OUT_EVENT = "droplet:wall-signed-out";
+
 /**
  * WARP-1726 — the last-resort confirmation before we destroy a session.
  *
@@ -495,12 +558,14 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     // Give the retry a FRESH timeout instead of inheriting `init.signal`
     // (onboard#477): the caller's signal may already be spent by the initial
     // request + refresh, and spreading it here would abort the retry instantly.
-    const { signal: _staleSignal, ...rest } = init ?? {};
-    return fetch(url, {
-      ...withRid(rest),
-      signal: timeoutSignal(AUTHFETCH_RETRY_TIMEOUT_MS),
-      credentials: "same-origin",
-    });
+    // WARP-3048 — only its timeout is dropped; a cancel is still forwarded.
+    const { signal: callerSignal, ...rest } = init ?? {};
+    return fetchWithHeaderTimeout(
+      url,
+      { ...withRid(rest), credentials: "same-origin" },
+      AUTHFETCH_RETRY_TIMEOUT_MS,
+      callerSignal,
+    );
   }
 
   // WARP-1726 — the refresh failed but told us nothing about the session.
@@ -530,11 +595,44 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
 
   // Confirmed dead. Drop cached user and bounce to login so the UI doesn't
   // keep showing stale data while every call 401s.
+  //
+  // WARP-2992 — and forget what the dead session left in this tab
+  // (lib/session-reset.ts). The chat hand-offs ALWAYS: sessionStorage is this
+  // tab's own and outlives the bounce below, while the cached profile is
+  // shared by every tab — when A signed out in another tab it is already
+  // gone here, and it is no evidence that this tab's hand-offs are not A's.
+  // A hand-off dropped on an anonymous 401 costs a re-typed question; one
+  // kept acts as the next person to sign in.
+  //
+  // The SWR cache only when a session was signed in here (its cached profile
+  // was present, or storage would not say): an anonymous visitor's 401 on
+  // /setup or /help ends nobody's session, and emptying the wizard's cache
+  // would blank its steps. The bounce below is a full navigation, but the
+  // public-page branch does not navigate, and a client-side trip back to
+  // /login from there would carry the cache into the next sign-in.
+  // `revalidate: false`: the page is still up, and a refetch here is only
+  // one more 401 on the way to /login.
+  let hadSession = true;
   try {
+    hadSession = localStorage.getItem(USER_KEY) !== null;
     localStorage.removeItem(USER_KEY);
   } catch {
     /* ignore — privacy mode, etc. */
   }
+  clearChatHandoffs();
+  // The module-level `unload` always targets SWR's DEFAULT cache, while
+  // logout() and the sign-in check use `useSWRConfig().unload` (the
+  // provider's cache). They are the same cache only because the app mounts no
+  // `<SWRConfig provider>`; adding one would leave this path emptying a cache
+  // nobody reads.
+  //
+  // WARP-2981 — on the Security wall the cache goes whatever storage says.
+  // The wall is never anonymous, and it does not navigate (below), so nothing
+  // else empties the cache before the next person signs in through its
+  // client-side "Sign in on this screen" — and its keys name no person. Another
+  // tab's sign-out may already have taken the cached profile.
+  const onWall = isSecurityWallPath(window.location.pathname);
+  if (hadSession || onWall) unload({ revalidate: false });
   // Public pages own their anonymous flow: a refresh failure on /setup (the
   // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
   // NOT hard-navigate to /login — AuthGate routes those contextually
@@ -545,15 +643,37 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // session; without this mirror, authFetch 401s from ShellPage would hard-
   // navigate anonymous /help visitors to /login, destroying wizard context).
   const onPublicPage =
-    ["/login", "/setup"].some((p) =>
+    PUBLIC_PATHS.some((p) =>
       window.location.pathname.startsWith(p),
     ) || window.location.pathname === HELP_PATH;
-  if (!onPublicPage) {
+  // WARP-2981 — the Security wall faces a room: it never opens a sign-in form
+  // by itself, so nobody is led into typing a password in front of it. The
+  // provider signs the tree out instead, and AuthGate's wall branch says the
+  // screen is signed out, with a "Sign in on this screen" someone has to press.
+  if (onWall) {
+    window.dispatchEvent(new Event(WALL_SIGNED_OUT_EVENT));
+  } else if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
     );
   }
   return res;
+}
+
+
+/**
+ * WARP-2992 — whether the profile this browser cached names someone other
+ * than `id`. No cached profile is not someone else. One that cannot be read
+ * (blocked storage, a corrupt entry) cannot say whose it is, so it counts as
+ * someone else's.
+ */
+function cachedProfileIsNot(id: string): boolean {
+  try {
+    const cached = localStorage.getItem(USER_KEY);
+    return cached !== null && (JSON.parse(cached) as { id?: unknown }).id !== id;
+  } catch {
+    return true;
+  }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -568,6 +688,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [completeSetupError, setCompleteSetupError] = useState<string | null>(
     null,
   );
+
+  // WARP-2981 — the wall's end of a confirmed-dead session (authFetch does not
+  // navigate there): no user, so AuthGate shows the signed-out notice and
+  // every wall read unmounts.
+  useEffect(() => {
+    const signedOut = () => setUser(null);
+    window.addEventListener(WALL_SIGNED_OUT_EVENT, signedOut);
+    return () => window.removeEventListener(WALL_SIGNED_OUT_EVENT, signedOut);
+  }, []);
 
   /**
    * M3 — the lifecycle probe. Fetches `GET /api/setup/state` and records an
@@ -707,6 +836,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [isLoading, setupProbeError, setupState, setupRetryAttempt, probeSetupState]);
 
+  // WARP-2992 — the SWR cache in this provider's scope: SWR's default one,
+  // which every page reads (no `<SWRConfig provider>` is mounted; authFetch's
+  // dead path relies on that, see its note).
+  const { unload: unloadSwrCache } = useSWRConfig();
+
+  // WARP-2992 — a sign-in as someone other than the cached profile empties
+  // the cache before the new person renders. Every path that ends a session
+  // in this tab clears the profile and the cache together, so this is the
+  // backstop for a session that ended some other way (another tab signing
+  // someone else in over it, a profile left by a tab that never saw its
+  // session die): whatever the cache still holds was read as that profile.
+  // Called before the new profile is written over the old one; `unload()`
+  // revalidates what is mounted, as the person now signed in.
+  const forgetOtherIdentity = useCallback(
+    (next: AuthUser) => {
+      if (cachedProfileIsNot(next.id)) unloadSwrCache();
+    },
+    [unloadSwrCache],
+  );
+
   const login = useCallback(
     async (
       username: string,
@@ -753,6 +902,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const data = await res.json();
+    forgetOtherIdentity(data.user);
     // The server sets the HTTP-only cookie — we only store the user profile
     localStorage.setItem(USER_KEY, JSON.stringify(data.user));
     // WARP-867 — re-read the AUTHORITATIVE lifecycle state before exposing
@@ -769,11 +919,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // routes off that.
     await probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
     setUser(data.user);
-  }, [probeSetupState]);
+  }, [probeSetupState, forgetOtherIdentity]);
 
   const setUserFromPasskey = useCallback((u: AuthUser) => {
     // The cookie is already set server-side by authenticate/verify — same as
     // the password login, we only persist the profile for fast hydration.
+    forgetOtherIdentity(u);
     try {
       localStorage.setItem(USER_KEY, JSON.stringify(u));
     } catch {
@@ -788,7 +939,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // AuthGate routes off the last-known state — authenticated+unclaimed is
     // a stable wizard state now, so no flip-flop either way.
     void probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
-  }, [probeSetupState]);
+  }, [probeSetupState, forgetOtherIdentity]);
 
   const logout = useCallback(async () => {
     try {
@@ -797,8 +948,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // ignore — cookie will be cleared server-side; we clean up locally regardless
     }
     localStorage.removeItem(USER_KEY);
-    setUser(null);
-  }, []);
+    // WARP-2992 — every caller goes on to /login CLIENT-SIDE, so the heap
+    // survives the sign-out: empty the cache before the next person can
+    // render from it (lib/session-reset.ts).
+    //
+    // Sign the tree out FIRST, synchronously. AuthGate renders nothing on a
+    // protected route without a user, so once this commit lands no page is
+    // subscribed to the cache. `revalidate: false` for a hook ever left
+    // mounted: its refetch would go out on the dead cookie and 401 through
+    // authFetch's bounce to /login?next=<this person's page>, which the next
+    // person to sign in would be sent on to. Emptied, it waits for its next
+    // poll. After the POST, not before: a poll that fires in between can only
+    // 401, and every answer already in flight — an infinite feed page
+    // included — is discarded by `unload()` when it lands.
+    flushSync(() => setUser(null));
+    clearChatHandoffs();
+    unloadSwrCache({ revalidate: false });
+  }, [unloadSwrCache]);
 
   const completeSetup = useCallback(async (): Promise<boolean> => {
     setCompleteSetupError(null);

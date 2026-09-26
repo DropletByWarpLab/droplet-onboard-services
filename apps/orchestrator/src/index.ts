@@ -9,9 +9,10 @@ import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
+import { notifyOwnersAndAdmins } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
-import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
+import { initCameraService, securityOngoingSource, shutdownCameraService } from "./services/camera.service.js";
 import { attachWsBridge } from "./services/ws-bridge.service.js";
 import { attachClientDispatchBridge } from "./services/client-dispatch.service.js";
 import {
@@ -35,6 +36,11 @@ import {
   stopMcp,
 } from "./services/mcp-client.singleton.js";
 import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
+import {
+  createExtensionLifecycle,
+  EXTENSION_RECONCILE_LOCK_KEY,
+} from "./services/extension-lifecycle.service.js";
+import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
@@ -87,10 +93,12 @@ import {
   applyWindowTick,
   resumeInterruptedApply,
 } from "./services/update-agent/apply.js";
-import { createHostComposeRunner } from "./services/update-agent/host-compose-runner.js";
+import { getOtaHost, initOtaHost } from "./services/update-agent/host-exec.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
+import { createTlsNotifier } from "./services/tls-notify.service.js";
+import { createBackupHealthCheck } from "./services/backup-health.service.js";
 import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
   createHqIssuanceClient,
@@ -134,6 +142,7 @@ import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-
 import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
+import { createExtensionAttacher } from "./services/extension-attach.service.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
@@ -156,12 +165,13 @@ import {
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
+  grantCoversNoWorkload,
   runSyncTick,
   type M365SyncDeps,
 } from "./services/m365/m365-sync.service.js";
 import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
-import { createEntraClient, isM365Configured } from "./services/m365/entra-client.js";
+import { createEntraClient } from "./services/m365/entra-client.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -175,6 +185,12 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 // WARP-2408 — the Xero minted-token cache's expiry sweep. See its cron leg.
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
+import { registerSecurityJobs } from "./services/security-events.service.js";
+import { registerSecurityModeJobs } from "./services/security-mode.service.js";
+import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
+import { getEffectiveModuleIds } from "./services/modules.service.js";
+import { resolveEffectiveAccess } from "./services/effective-access.service.js";
+import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -186,6 +202,7 @@ import {
   migrateBrainMemoryDirectoryLayout,
 } from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { resolveActiveModel } from "./services/active-model.service.js";
 import { initAnalytics, analytics } from "./services/analytics/index.js";
 import { forwardHealthSnapshot } from "./services/analytics/service-health.js";
 import { createLogger } from "./lib/logger.js";
@@ -452,8 +469,9 @@ async function main() {
   // dashboard ~20 min after first boot without any manual `ollama pull`.
   // Non-blocking — the orchestrator is fully serving requests while the
   // model downloads in the background. See model-readiness.service.ts.
+  // WARP-3047: the boot warm is of the ACTIVE model, not LLM_MODEL.
   try {
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(() => resolveActiveModel(prisma));
   } catch (err) {
     logger.warn(
       "Model readiness check failed: %s (orchestrator continues serving requests)",
@@ -504,6 +522,40 @@ async function main() {
   // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
   // without dialling anything at all.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
+
+  // WARP-2900 (ADR-056 slice H2) — the extension reconciler, both ways. A
+  // sandbox restart forgets every extension process and a dead one is never
+  // restarted in place; each tick reinstalls any `installed`/`live`
+  // extension the sandbox no longer runs — re-verifying its signed statement
+  // and rotating its bearer first (install()), a bounded number of times for
+  // a process that keeps dying — and stops any process the sandbox runs for
+  // a row that must not run (review #2323). Same clock, its own lock key
+  // (the sandbox is one shared resource), never a `while True`. No Extension
+  // rows → the tick dials nothing, so a box with
+  // SANDBOX_PROCESS_SUPERVISION=0 (the shipped default) never calls out.
+  // H3: the same tick re-attaches every running extension this process has
+  // not attached (after an orchestrator restart the sandbox's processes
+  // outlive the in-memory attachment), and each restarted child gets the
+  // call-back URL.
+  const extensionSandbox = createExtensionSandboxClient();
+  const extensionIdentity = createDeviceIdentityClient();
+  const extensionLifecycle = createExtensionLifecycle({
+    prisma,
+    sandbox: extensionSandbox,
+    identity: extensionIdentity,
+    attach: createExtensionAttacher({ prisma, mux: mcpClient, sandbox: extensionSandbox, identity: extensionIdentity }),
+    orchestratorUrl: config.EXTENSION_CALLBACK_URL,
+  });
+  void extensionLifecycle.refreshInstalledIds().catch((err) => {
+    logger.warn({ err }, "extension installed-id refresh failed at boot");
+  });
+  cronRuntime.scheduleInterval(
+    config.EXTENSION_RECONCILE_INTERVAL_MS,
+    async () => {
+      await extensionLifecycle.reconcile();
+    },
+    { lockKey: EXTENSION_RECONCILE_LOCK_KEY },
+  );
 
   // Router-dependent schedulers only run when routing supervision is active.
   // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
@@ -687,10 +739,10 @@ async function main() {
     await seedBrainPasses(prisma);
 
     // Same resolution the agent-run routes use. Read at CALL time, not once at
-    // boot: `DEFAULT_MODEL` is what the box is configured with now, and a
-    // process that started before the operator set one should pick it up.
-    const resolveBrainModel = () =>
-      (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+    // boot: WARP-3047 — the pass follows the box's ACTIVE model, so a switch
+    // on the Models page moves the hourly pass too instead of it reloading
+    // the env model next to the active one.
+    const resolveBrainModel = async () => (await resolveActiveModel(prisma)) ?? "";
 
     // WARP-2850 — the pass BODIES, named once. The interval tick, the boot run
     // and the operator's "check now" are three callers of the same function
@@ -730,7 +782,7 @@ async function main() {
       // box has already recorded and the route has already reported started.
       [CORPUS_PASS_KEY]: async () => {
         const outcome = await runCorpusPass(
-          { prisma, chat: aiGateway.chat, model: resolveBrainModel() },
+          { prisma, chat: aiGateway.chat, model: await resolveBrainModel() },
           { limit: config.brain.corpusUnitsPerRun },
         );
         if (outcome.errors.length > 0) {
@@ -745,8 +797,8 @@ async function main() {
       // Corpus only. The detector pass is bounded indexed SQL and re-running
       // it costs the box nothing anyone would notice.
       manualMinIntervalMs: { [CORPUS_PASS_KEY]: config.brain.manualMinIntervalMs },
-      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and `DEFAULT_MODEL` are
-      // independent env vars with no cross-validation, so "brain on, no model
+      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and the active model are
+      // independent with no cross-validation, so "brain on, no model
       // configured" is a reachable box. On one of those, a check living inside
       // the runner would run only AFTER `claimPass` had stamped
       // `runState: "running"` and `lastRunAt` — the operator gets a 202 and
@@ -775,7 +827,7 @@ async function main() {
           (await isBrainEnabled(prisma)) ? null : "disabled",
         [CORPUS_PASS_KEY]: async () => {
           if (!(await isBrainEnabled(prisma))) return "disabled";
-          return resolveBrainModel() ? null : "no_model";
+          return (await resolveBrainModel()) ? null : "no_model";
         },
       },
     });
@@ -1045,6 +1097,36 @@ async function main() {
     );
   }
 
+  // WARP-2977 (ADR-059 §3.3) — the Security event store's two jobs: mirror
+  // warn/err network/auth ActivityRows every minute, trim to 30 days at 03:50
+  // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
+  // the ingest itself: the module toggle decides the surface, not the capture.
+  registerSecurityJobs(cronRuntime, prisma);
+  // WARP-2977 P2b (ADR-059 §3.6) — the site-mode ticker: every 60 s it
+  // reconciles SecurityModeState with the opening hours (level-triggered, on
+  // its own advisory lock). Unconditional, like the jobs above.
+  registerSecurityModeJobs(cronRuntime, prisma);
+  // WARP-2978 (ADR-059 P3) — the incident engine: every 10 s, on its own
+  // advisory lock, it sorts new SecurityEvent rows into incidents, attaches
+  // reason codes, seals quiet incidents and hands alerts to the notifier.
+  // Registered unconditionally (D29: incidents are grouped while the module is
+  // off; the notifier checks the box-wide toggle at send time and sends
+  // nothing). Registration is the `incidents` health row's boot assertion.
+  registerSecurityIncidentJobs(cronRuntime, prisma, {
+    isSecurityModuleOn: () => getEffectiveModuleIds(prisma, config).then((ids) => ids.has("security")),
+    resolveAccess: resolveEffectiveAccess,
+    // WARP-2978 PR-D — the people Frigate is tracking now (camera.service's
+    // in-flight map): a person in view for 30 s alerts before their `end`.
+    ongoing: securityOngoingSource(),
+  });
+  // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
+  // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
+  // later), keeps the learning state, and rebuilds what normal looks like
+  // nightly in the site's zone. One tick on its own advisory lock; database
+  // watermarks. Unconditional, like the jobs above (the DS-015 rule): the
+  // learning clock must not start from zero when the owner turns Security on.
+  registerSecurityBaselineJobs(cronRuntime, prisma);
+
   cronRuntime.scheduleCron(
     "0 3 * * *",
     async () => {
@@ -1092,9 +1174,11 @@ async function main() {
       // captured to <updatesDir>/<id>/self-swap-helper.log; running helpers
       // and in-flight update ids are never touched. Gated like the apply
       // window: no apply script provisioned → no docker surface → no-op.
-      const helperPurge = config.DROPLET_OTA_APPLY_SCRIPT
+      const otaHost = getOtaHost();
+      const helperPurge = otaHost
         ? await purgeSelfSwapHelpers(prisma, {
-            scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
+            scriptPath: otaHost.helperPath,
+            exec: otaHost.exec,
             updatesDir: config.DROPLET_OTA_UPDATES_DIR,
           })
         : { removed: 0, logsCaptured: 0 };
@@ -1209,7 +1293,10 @@ async function main() {
         result.adminGroupFailed > 0 ||
         // pr-reviewer #1229 N1: the directoryStatus → NC disable mirror.
         result.ncDisableMirrored > 0 ||
-        result.ncDisableMirrorFailed > 0
+        result.ncDisableMirrorFailed > 0 ||
+        // WARP-2993: humans stripped from NC instance admin.
+        result.ncInstanceAdminRemoved > 0 ||
+        result.ncInstanceAdminFailed > 0
       ) {
         logger.info(result, "department-reconciler tick complete");
       }
@@ -1299,43 +1386,64 @@ async function main() {
   // other cron in this file (checkForUpdate + applyWindowTick return typed
   // outcomes for expected failures; only genuine bugs throw).
   const updateAgentSettings = await getUpdateAgentSettings(prisma);
+  // WARP-3007 — DROPLET_OTA_APPLY_SCRIPT is the enable flag; the helper is
+  // always the release-shipped docker/ota/apply-update.sh, run ON THE HOST
+  // (host-exec.ts). A box whose host context can't be resolved keeps apply off.
   const otaApplyRunner = config.DROPLET_OTA_APPLY_SCRIPT
-    ? createHostComposeRunner({
-        scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
-        composeFile: config.DROPLET_OTA_COMPOSE_FILE,
-        updatesDir: config.DROPLET_OTA_UPDATES_DIR,
-      })
+    ? ((
+        await initOtaHost({
+          composeFile: config.DROPLET_OTA_COMPOSE_FILE,
+          configRoot: config.DROPLET_OTA_CONFIG_ROOT,
+          updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+          githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        })
+      )?.runner ?? null)
     : null;
+  // WARP-3017 — resolved in the server.listen callback below.
+  let markListening: () => void = () => undefined;
+  const whenListening = new Promise<void>((resolve) => {
+    markListening = resolve;
+  });
   const otaApplyOpts = otaApplyRunner
     ? {
         prisma,
         runner: otaApplyRunner,
         releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        // WARP-2911 — contained per recipient (notifications.service.ts).
+        notifyOwners: async (title: string, body: string) => {
+          await notifyOwnersAndAdmins(prisma, title, body);
+        },
       }
     : null;
-
   // onStart resume hook: if the previous orchestrator process died mid-apply,
   // this boot is either the freshly-swapped orchestrator (health-gate all +
   // commit) or the old one after a detached rollback (write the rolled_back /
-  // failed verdict). Runs BEFORE the window cron so a resumed apply settles
-  // before a new window can start. No-op when the row set is clean or apply is
-  // disabled on this box.
-  if (otaApplyOpts) {
-    try {
-      const resumed = await resumeInterruptedApply(otaApplyOpts);
-      if (resumed.outcome !== "nothing_to_resume") {
-        logger.info(
-          { event: "update.resume", outcome: resumed.outcome },
-          "OTA apply resume hook ran at boot",
-        );
-      }
-    } catch (err) {
-      // A resume failure must not block orchestrator boot — log loudly and
-      // let the next window retry (the row's status is still an exact cursor).
-      logger.error({ err, event: "update.resume_failed" }, "OTA apply resume hook threw at boot");
-    }
-  }
+  // failed verdict). No-op when the row set is clean or apply is disabled.
+  //
+  // WARP-3017 — NOT awaited here: its gates probe THIS process, which only
+  // answers after server.listen below, so they wait (bounded) on
+  // `whenListening` instead. The apply window awaits `otaResume` so a resumed
+  // apply still settles before a new window can start. A committed resume
+  // starts the newly-enabled services (WARP-2970) — by then we listen.
+  const otaResume: Promise<void> = otaApplyOpts
+    ? resumeInterruptedApply({ ...otaApplyOpts, whenListening })
+        .then((resumed) => {
+          if (resumed.outcome !== "nothing_to_resume") {
+            logger.info(
+              { event: "update.resume", outcome: resumed.outcome },
+              "OTA apply resume hook ran at boot",
+            );
+          }
+          // Never throws (it logs + notifies on its own failure).
+          if (resumed.outcome === "committed") void resumed.startNewServices();
+        })
+        .catch((err: unknown) => {
+          // A resume failure must not take the orchestrator down — log loudly
+          // and let the next window retry (the row's status is an exact cursor).
+          logger.error({ err, event: "update.resume_failed" }, "OTA apply resume hook threw at boot");
+        })
+    : Promise.resolve();
 
   cronRuntime.scheduleInterval(
     config.DROPLET_OTA_POLL_INTERVAL * 1000,
@@ -1356,6 +1464,7 @@ async function main() {
         // keeps tracking pending releases; the swap just never fires here.
         return;
       }
+      await otaResume;
       await applyWindowTick(otaApplyOpts);
     },
     { lockKey: "droplet:update-agent.apply-window" },
@@ -1617,6 +1726,10 @@ async function main() {
     // (POST /api/issuance/provision) on the 404 and retries issuance once. Empty
     // = self-provision disabled (dev/CI + boxes provisioned by another path).
     provisionToken: config.DROPLET_PROVISION_TOKEN,
+    // WARP-2944 — the owner hears when renewal starts failing and when the
+    // certificate is a week from expiry (owner + admin, system notifications;
+    // once per transition / per certificate, never per tick).
+    notifier: createTlsNotifier(prisma),
   });
   cronRuntime.scheduleCron(
     "0 4 * * *",
@@ -1630,6 +1743,21 @@ async function main() {
   // under the box's NEW FQDN. Composed once here (the collaborators are heavy);
   // the setup route reads it via reissueTlsNow() (a no-op until this runs).
   initTlsReissueHook(() => tlsIssuance.runOnce());
+
+  // WARP-1405 — backups can no longer fail silently. The host backup writes an
+  // explicit status file on every exit; this hourly check turns "no success in
+  // 48 h" or "repository no longer opens with this box's key" into ONE owner +
+  // admin notification per outage (deduped on NotificationLog, like
+  // tls-notify). lockKey: one replica per tick. Errors propagate to safeRun so
+  // the cron canary sees them.
+  const backupHealthCheck = createBackupHealthCheck({ prisma });
+  cronRuntime.scheduleCron(
+    "20 * * * *",
+    async () => {
+      await backupHealthCheck.runOnce();
+    },
+    { lockKey: "droplet:backup-health" },
+  );
   // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
   // reflash gets its publicly-trusted cert within seconds instead of waiting up
   // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);
@@ -1810,9 +1938,10 @@ async function main() {
   // resolves the grant — and none of them had anything calling them in
   // sequence, so no mailbox was ever read.
   //
-  // Gated on `isM365Configured()`: with no client id there is no app to
-  // authenticate against, and a tick that runs anyway would mark every cursor
-  // failed on a box that simply does not offer the feature.
+  // Not gated on configuration: since WARP-2705 each connection carries its
+  // own app registration, so there is no box-wide switch to read. A box where
+  // nobody has connected pays one indexed `findMany` per tick and dials
+  // nothing — the tick below walks CONNECTED rows only.
   //
   // Discovery runs BEFORE the tick, every time, and that ordering is
   // load-bearing rather than tidy: mail delta is per-folder, so a folder
@@ -1822,7 +1951,7 @@ async function main() {
   //
   // `lockKey` for the same reason as the ERP legs: without it a multi-instance
   // box double-polls Microsoft and spends the tenant's throttling budget twice.
-  if (isM365Configured()) {
+  {
     const m365Deps: M365SyncDeps = {
       prisma: prisma as never,
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
@@ -1853,6 +1982,15 @@ async function main() {
             logger.info(
               { skipped: found.skipped, registered: found.registered },
               "m365 discovery skipped workloads",
+            );
+          }
+          // `notGranted` alone is not logged (To Do's is expected), but a grant
+          // that covers NOTHING means this person syncs nothing, and silence
+          // would read as an empty mailbox (#2347 review).
+          if (grantCoversNoWorkload(found)) {
+            logger.warn(
+              { userId, notGranted: found.notGranted },
+              "m365 grant covers no workload; nothing syncs for this connection",
             );
           }
         }
@@ -1890,6 +2028,7 @@ async function main() {
   attachWsBridge(server);
   server.listen(config.PORT, () => {
     logger.info("API server listening on port %d", config.PORT);
+    markListening();
   });
 
   // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their

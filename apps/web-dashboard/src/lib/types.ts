@@ -364,8 +364,21 @@ export interface CatalogModelEntry {
 /** Wire shape of `GET /api/models/catalog` — the ELIGIBLE set (VRAM-gated,
  *  decided appliance-side by the inference-manager) with `pulled` flags. */
 export interface ModelsCatalogPayload {
+  /** null = the box couldn't measure it. */
   detected_vram_gb: number | null;
+  /** WARP-3048 — where `detected_vram_gb` came from (`override`,
+   *  `device_bridge`, `dgpu_sysfs`, `unified_memory`; null when unknown).
+   *  Its presence is what makes a 0 a measurement. Optional: an older
+   *  orchestrator drops it. */
+  vram_source?: string | null;
   models: CatalogModelEntry[];
+  /** WARP-3048 — the sidecar couldn't list what's installed, so `pulled`
+   *  can't be trusted (and downloads are refused). Optional: an older
+   *  orchestrator drops the flag. */
+  tags_unreachable?: boolean;
+  /** WARP-3048 — the box's model list file couldn't be read; the catalog
+   *  is last-known-good or empty. Optional, as above. */
+  degraded_manifest?: boolean;
 }
 
 /** One opt-in cloud provider on the Models page. WARP-2871 — the page is the
@@ -373,8 +386,9 @@ export interface ModelsCatalogPayload {
 export interface CloudProviderRow {
   /** WARP-2871: gemini removed — no gateway provider exists for it. */
   provider: "anthropic" | "openai";
-  /** Box-wide usable: `escapeEnabled && hasKey === true`. */
-  enabled: boolean;
+  /** Box-wide usable: `escapeEnabled && hasKey === true`. `null` = withheld
+   *  from a guest (WARP-3082). */
+  enabled: boolean | null;
   /** WARP-2871: null = the gateway could not be asked (render "Unknown",
    *  never "Not set up" — absence of an answer is not absence of a key). */
   hasKey: boolean | null;
@@ -619,7 +633,93 @@ export interface Department {
    *  batch lookup for the whole list). Null on any read failure or before
    *  discovery — never a fabricated 0. */
   usedBytes: string | null;
+  /**
+   * WARP-2976 (ADR-059 §2.2) — the row's OWN profile summary. `null` is a
+   * real state: the department is not set up yet, and the UI says so rather
+   * than guessing a template from the name. Optional because the key is
+   * absent (not null) on rows the server did not load it for — team
+   * summaries inside a detail read, or an orchestrator older than P1 — and
+   * absent must never be read as "not set up".
+   */
+  profile?: DepartmentProfileSummary | null;
 }
+
+// ── WARP-2976 (ADR-059 P1): department profiles ──
+
+/** The seven templates. A template is data — default nav hrefs, default home
+ *  widgets and a headline figure (`lib/departments/templates.ts`). */
+export type DepartmentTemplate =
+  | "security"
+  | "sales"
+  | "finance"
+  | "operations"
+  | "front_desk"
+  | "it"
+  | "custom";
+
+export type DepartmentWidgetSize = "s" | "m" | "l";
+
+/** One tile on a department home. `widget` is validated for SHAPE only on the
+ *  server; the dashboard skips an id its widget registry does not know. */
+export interface DepartmentHomeWidget {
+  widget: string;
+  size: DepartmentWidgetSize;
+}
+
+/** What GET /api/departments carries per row: enough to label the switcher. */
+export interface DepartmentProfileSummary {
+  template: DepartmentTemplate;
+  /** A lucide icon name (kebab-case); unknown names render a fallback glyph. */
+  icon: string;
+}
+
+/** The full profile — GET/PUT /api/departments/:id/profile. It ARRANGES what a
+ *  department shows; it grants nothing (ADR-059 §2.5). */
+export interface DepartmentProfile extends DepartmentProfileSummary {
+  departmentId: string;
+  /** Ordered nav hrefs. An href that is not in NAV_GROUPS never renders. */
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface DepartmentProfileResponse {
+  profile: DepartmentProfile | null;
+  /** Set for a TEAM: the parent department whose profile this is. */
+  inheritedFrom: string | null;
+  /** Owner/admin, or a manager of this department (or of its parent). */
+  canEdit: boolean;
+}
+
+export interface PutDepartmentProfilePayload {
+  template: DepartmentTemplate;
+  icon: string;
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
+}
+
+// ── WARP-2981 (ADR-059 P6, DS-003): the active department, on the server ──
+
+/** The department a person's shell is arranged around, as the box answers it:
+ *  enough to label the switcher, nothing more. */
+export interface ActiveDepartmentView {
+  id: string;
+  slug: string;
+  name: string;
+  /** `null` is a real state: the department is not set up yet. */
+  profile: DepartmentProfileSummary | null;
+}
+
+/** GET/PUT /api/me/active-department. `scope` is explicit, never read off a
+ *  null: `unset` — the person has never chosen, on any device (the shell shows
+ *  Whole business, the default for everyone, and a choice this browser kept
+ *  from before P6 stands); `whole_business` — chosen; `department` — chosen,
+ *  and `department` is set then and only then. */
+export type ActiveDepartmentResponse =
+  | { scope: "unset"; department: null }
+  | { scope: "whole_business"; department: null }
+  | { scope: "department"; department: ActiveDepartmentView };
 
 export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
 
@@ -1230,6 +1330,32 @@ export interface RosterUser extends AuthUser {
    *  orchestrator older than this field sends nothing, and `undefined` must
    *  read as enabled rather than painting the whole roster deactivated. */
   enabled?: boolean;
+  /** WARP-2984 — where the account comes from. `local`/`sso`/`scim` read the
+   *  local row's explicit provisionSource; `nextcloud` is a Nextcloud user
+   *  with no local row. Optional: an older orchestrator sends nothing, and the
+   *  UI then renders no source chip rather than guessing. */
+  source?: RosterSource;
+  /** WARP-2984 — false when the account has no Nextcloud user, i.e. no file
+   *  storage: storage/upload limits don't apply. Optional for the same
+   *  reason; only an explicit false hides the storage controls. */
+  hasStorage?: boolean;
+}
+
+/** WARP-2984 — see RosterUser.source. */
+export type RosterSource = "local" | "sso" | "scim" | "nextcloud";
+
+/** WARP-2984 — roster chip copy per source. */
+export const ROSTER_SOURCE_LABEL: Record<RosterSource, string> = {
+  local: "Local",
+  sso: "SSO",
+  scim: "SCIM",
+  nextcloud: "Nextcloud only",
+};
+
+/** WARP-2984 / WARP-2858 — the IdP owns the credential: the box refuses to set
+ *  a local password (409 SSO_MANAGED_ACCOUNT), so the UI never offers one. */
+export function isIdpManaged(u: { source?: RosterSource }): boolean {
+  return u.source === "sso" || u.source === "scim";
 }
 
 // ── WARP-217 invite types ──
@@ -1364,7 +1490,9 @@ export type AccessModuleId =
   | "contacts"
   | "crm"
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
-  | "money";
+  | "money"
+  /** WARP-2977 — the Security command center (ADR-059). */
+  | "security";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -1405,8 +1533,36 @@ export interface AccessRole {
   /** Present where the mutation cascades to NC / session revocation. */
   syncState?: AccessSyncState;
   featureGrants: AccessRoleFeatureGrant[];
-  toolGrants: AccessRoleToolGrant[];
+  toolGrants: AccessRoleToolGrantWithState[];
   connectorGrants: AccessRoleConnectorGrant[];
+}
+
+/**
+ * WARP-2897 — a tool grant as GET /api/access/roles serves it: the row plus
+ * whether it reaches anything. `dead` + `not_provided` = a runtime domain no
+ * attached tool carries (its extension disabled); `dead` + `empty_domain` =
+ * a compiled landing slot (crm/pm) with no tool yet. Optional so older boxes
+ * (and hand-built fixtures) still type-check; never sent back on a write.
+ */
+export interface AccessRoleToolGrantWithState extends AccessRoleToolGrant {
+  state?: "live" | "dead";
+  deadReason?: "empty_domain" | "not_provided" | null;
+}
+
+/** WARP-2897 — GET /api/access/tool-domains. */
+export interface AccessToolDomainsResponse {
+  /** The compiled grantable domains (server GRANTABLE_TOOL_DOMAINS). */
+  compiled: string[];
+  /** One entry per runtime-only domain some attached tool carries. */
+  runtime: Array<{
+    domain: string;
+    /** `runtime:<serverId>` per contributing server. */
+    sources: string[];
+    tools: number;
+    populated: boolean;
+    /** Holds a tool classified read — reachable for Staff/Guest-based roles. */
+    readable: boolean;
+  }>;
 }
 
 /** POST/PATCH body for /api/access/roles — §2 shape flattened. */
@@ -1967,6 +2123,9 @@ export interface HealthResponse {
     // service is up — stays true in simulated mode too (no physical
     // device); /display/status surfaces the backend if needed.
     display: boolean;
+    // WARP-3052 — file service (Nextcloud) reachability. Informational: it
+    // never affects `status`. Optional: older boxes don't send it.
+    nextcloud?: boolean;
   };
 }
 
@@ -2855,6 +3014,26 @@ export interface ScheduleEvent {
 // from `@droplet/tools-core`'s TOOL_CATALOG. `domain` is one of the
 // orchestrator's declared tool domains; it arrives as a string so the
 // dashboard never has to stay in lockstep with the registry's union.
+/**
+ * WARP-2969 — whether a chat turn can reach this tool at all.
+ *
+ * `excluded` is the chat-scope policy list (`EXCLUDED_FROM_CHAT_TOOLS`),
+ * which withholds a tool from ASKING while leaving it callable from its own
+ * screen or by an MCP client. It is "not by asking", never "unavailable".
+ *
+ * ONE AXIS. A `module` axis was cut before it shipped: §6 module gating is
+ * not applied to the chat pool for an owner or anybody holding no AccessRole,
+ * so a "Module off" chip would have been a confident false statement on every
+ * shipped box. WARP-2972 wires that gate; the axis returns here after it.
+ *
+ * The per-person axes (role grants, off-LAN withholding, turn relevance) need
+ * a resolved principal and a modelled turn, and live on `/admin/prompt`'s
+ * inspector instead.
+ */
+export interface ToolReach {
+  chat: "allowed" | "excluded";
+}
+
 export interface ToolCatalogEntry {
   name: string;
   /** Agent-facing description from the registry (may contain jargon). */
@@ -2864,6 +3043,14 @@ export interface ToolCatalogEntry {
   domain: string;
   requiresWrite: boolean;
   requiresConfirmation: boolean;
+  /**
+   * WARP-2969. Optional because the field is additive and an orchestrator
+   * from before it shipped answers without one — absence means "no evidence
+   * this is withheld", which is the pre-WARP-2969 behaviour, not "withheld".
+   * Read it through `reachableInChat` / `reachNote` (lib/tool-domains), never
+   * by hand, so both surfaces agree on what absence means.
+   */
+  reach?: ToolReach;
 }
 
 // ── WARP-2823: the admin console's prompt + tool inspector ────────────────
@@ -2902,6 +3089,21 @@ export interface ToolInspectRow {
   alsoWithheldBy: InspectGate[];
   /** Present on a lock-capable tool the person may not use for locks. */
   lockCaveat?: string;
+  /**
+   * WARP-2900 — `built-in`, `extension:<slug>@<version>` or
+   * `remote:<serverId>`. Optional only so an older orchestrator still types.
+   */
+  source?: string;
+  /** The runtime server that advertised it; null for a compiled tool. */
+  serverId?: string | null;
+  /** WARP-2900 — runtime rows only: what dispatch does with a call. */
+  classification?: RuntimeToolClassification;
+  /**
+   * WARP-2900 — runtime rows only, present ⇔ dispatch refuses every call.
+   * Not a withholding gate: an advertised row with one is a tool the model
+   * is shown and cannot use.
+   */
+  callRefusal?: string;
 }
 
 export interface ToolInspectResponse {
@@ -2915,6 +3117,11 @@ export interface ToolInspectResponse {
     advertised: number;
     withheld: number;
     byGate: Record<InspectGate, number>;
+    /**
+     * WARP-2900 — of `advertised`, how many dispatch refuses every call to.
+     * Optional only so an older orchestrator still types.
+     */
+    refusedAtDispatch?: number;
   };
   rows: ToolInspectRow[];
 }
@@ -2924,7 +3131,8 @@ export type PromptBlockStatus =
   | "absent"
   | "errored"
   | "dropped"
-  | "not_modelled";
+  | "not_modelled"
+  | "withheld_off_lan";
 
 export interface PromptBlockView {
   key: string;
@@ -2970,6 +3178,14 @@ export interface ToolCatalogResponse {
  * later without overloading the key.
  */
 export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
+
+/**
+ * The hero hand-off: `sessionStorage[PENDING_PROMPT_KEY]` holds a prompt typed
+ * on Home or /help, and the next fresh `/chat` AUTO-SENDS it. WARP-2992 clears
+ * it (and PENDING_COMPOSER_KEY) on sign-out — a named key, so the writers,
+ * the reader and that purge cannot drift apart.
+ */
+export const PENDING_PROMPT_KEY = "droplet.pendingPrompt";
 
 /**
  * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
@@ -3127,9 +3343,11 @@ export type RoutineStatus = "live" | "draft" | "suggested";
 export interface RoutineStep {
   id: string;
   idx: number;
-  /** "call" | "summarize" — a plain String column, extensible by design. */
+  /** "call" | "summarize" | "transform" | "when" — a plain String column,
+   *  extensible by design (WARP-2895 added the two sandbox kinds). */
   kind: string;
-  /** `{tool, args}` for a call, `{prompt?}` for a summarize. */
+  /** `{tool, args}` for a call, `{prompt?}` for a summarize, `{code, inputs?}`
+   *  for a transform / when. */
   args: Record<string, unknown> | null;
 }
 
@@ -3174,4 +3392,642 @@ export interface RoutineSchedule {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ─── WARP-2900 (ADR-056 slice H4) — runtime tools + extensions ──────────────
+
+/** What dispatch does with a call to a runtime tool, as the orchestrator's policy answers. */
+export interface RuntimeToolClassification {
+  decision: "allow" | "deny";
+  /** REMOTE_WRITE_NOT_PERMITTED, REMOTE_TOOL_DENIED, … Null on allow. */
+  code: string | null;
+}
+
+/**
+ * One row of `GET /api/llm/tools/runtime`. There is deliberately no
+ * description: a runtime tool's description is its author's claim.
+ */
+export interface RuntimeToolView {
+  name: string;
+  wireName: string;
+  serverId: string;
+  source: string;
+  extension: { id: string; version: string } | null;
+  domain: string;
+  domainSource: "operator" | "server" | "default";
+  classification: RuntimeToolClassification;
+}
+
+export interface RuntimeToolsResponse {
+  tools: RuntimeToolView[];
+}
+
+/** The promote readback, derived server-side from provides/resources/egress only. */
+export interface ExtensionReadback {
+  tools: { total: number; startsAsWriteWithConfirmation: number; proposedReadOnly: number };
+  routineDrafts: number;
+  proposedGrants: number;
+  memoryMb: number;
+  egress: string;
+  /** The sentences the confirm step shows, in order. */
+  lines: string[];
+}
+
+export interface ExtensionPreflightFinding {
+  code: string;
+  detail: string;
+}
+
+export interface ExtensionPreflight {
+  ok: boolean;
+  blocking: ExtensionPreflightFinding[];
+  advisory: ExtensionPreflightFinding[];
+  budget: { availableMb: number; requestedMb: number; ceilingMb: number };
+}
+
+export type ExtensionStatus = "signed" | "installed" | "live" | "disabled" | "failed" | "uninstalled";
+
+export interface ExtensionListItem {
+  id: string;
+  workspaceId: string;
+  name: string;
+  status: ExtensionStatus;
+  failureReason: string | null;
+  operatorDomain: string | null;
+  installedByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  version: {
+    version: string;
+    tag: string;
+    commit: string;
+    signer: string;
+    keyFingerprint: string;
+    promotedAt: string;
+  } | null;
+  readback: ExtensionReadback | null;
+}
+
+export interface ExtensionProposal {
+  workspaceId: string;
+  name: string;
+  userId: string;
+  tag: string;
+  version: string;
+  slug: string;
+  proposedAt: string | null;
+  promotable: boolean;
+  reason: string | null;
+  readback: ExtensionReadback | null;
+}
+
+/** Phase 1 of `POST /api/extensions/:workspaceId/promote` (202). */
+export interface ExtensionPromotePhase1 {
+  confirmationToken: string;
+  expiresAt: string;
+  workspaceId: string;
+  slug: string;
+  tag: string;
+  version: string;
+  commit: string;
+  manifestSha256: string;
+  readback: ExtensionReadback;
+  preflight: ExtensionPreflight;
+}
+
+/** Phase 2 (201). */
+export interface ExtensionPromoteResult {
+  version: string;
+  installed: boolean;
+  installError: { code: string; message: string } | null;
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center feed ──
+
+/** Mirrors the orchestrator's SecurityEventKind enum. */
+export type SecurityEventKind =
+  | "detection"
+  | "detection_low"
+  | "camera_offline"
+  | "camera_online"
+  | "source_offline"
+  | "source_online"
+  | "threat"
+  /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource, fromMode]; site-wide. */
+  | "mode_changed"
+  /**
+   * WARP-2978 PR-D — a person Frigate has tracked for 30 s and not ended yet:
+   * one row per person, endedAt null; their `end` is still its own
+   * `detection` row. Shown as "Still in view".
+   */
+  | "detection_ongoing";
+
+/** Mirrors the orchestrator's SecurityEventSource enum. */
+export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode";
+
+/** An area a feed row belongs to — only areas the viewer can see. */
+export interface SecurityZoneRef {
+  id: string;
+  name: string;
+}
+
+export interface SecurityEvent {
+  /** BigInt id, serialised as a string. */
+  id: string;
+  source: SecurityEventSource;
+  kind: SecurityEventKind;
+  severity: "info" | "notice" | "alert";
+  /** Frigate camera name; null for rows no camera produced. */
+  camera: string | null;
+  labels: string[];
+  cameraZones: string[];
+  score: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  summary: string;
+  /** Set on detections — the clip/thumbnail routes key on it. */
+  frigateEventId: string | null;
+  /**
+   * WARP-2977 P2b — the areas this row happened in, resolved at read time
+   * from the viewer's VISIBLE links of VISIBLE areas (never names a hidden
+   * area). Empty for site-wide rows (threats, Frigate health, mode changes).
+   */
+  zones: SecurityZoneRef[];
+}
+
+export interface SecurityEventsPage {
+  events: SecurityEvent[];
+  nextCursor: string | null;
+}
+
+/**
+ * One line of the feed header: what the feed is listening to, and whether it
+ * is reporting. Served in the order camera_ingest, camera_system,
+ * threat_mirror, site_mode, incidents, alerts, patterns, retention (PR-2 adds
+ * `locks` after camera_system). WARP-2978: `incidents` is every viewer's;
+ * `alerts` (who alerts reach) is owner/admin only. `patterns` (WARP-2980) is
+ * the baseline job's row.
+ */
+export interface SecurityHealthRow {
+  id:
+    | "camera_ingest"
+    | "camera_system"
+    | "threat_mirror"
+    | "site_mode"
+    | "incidents"
+    | "alerts"
+    | "patterns"
+    | "retention";
+  state: "ok" | "quiet" | "down" | "not_configured";
+  detail: string;
+  lastSeenAt: string | null;
+}
+
+// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
+// Wire shapes of /api/security/{zones,sources,mode,hours}. Mirrors the
+// orchestrator's views in services/security-zones.service.ts and
+// services/security-mode.service.ts. "Areas" in the UI, `zone` in code.
+
+export type SecurityZoneKind = "entry" | "interior" | "perimeter" | "parking" | "restricted";
+export type SecurityZoneState = "active" | "archived";
+/** PR-2 adds "lock". */
+export type SecurityZoneSourceKind = "camera" | "camera_zone";
+export type SecurityZoneLinkState = "active" | "removed";
+
+export interface SecurityZoneLinkView {
+  id: string;
+  sourceKind: SecurityZoneSourceKind;
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  sourceRef: string;
+  /**
+   * ALWAYS the CAMERA's display name — the live camera name when the camera
+   * exists, else the snapshot taken when it was linked — for camera AND
+   * camera_zone links alike. It NEVER includes the part: render a camera_zone
+   * link as "<label> (the '<part>' part of the view)", where the part is always
+   * `sourceRef.slice(sourceRef.indexOf("/") + 1)`. The server snapshots
+   * `sourceLabel` at link time as that same camera display name.
+   */
+  label: string;
+  state: SecurityZoneLinkState;
+  stateChangedAt: string;
+}
+
+export interface SecurityZoneView {
+  id: string;
+  name: string;
+  kind: SecurityZoneKind;
+  state: SecurityZoneState;
+  /** Send back as `expectedVersion` on every edit of this area or its links. */
+  version: number;
+  /** The viewer's visible active links only. */
+  links: SecurityZoneLinkView[];
+}
+
+/**
+ * GET /api/security/zones. `include=archived` is honoured only for an owner or
+ * admin whose Security level is manage (or has no per-person level at all);
+ * for anyone else it is ignored, not refused.
+ */
+export interface SecurityZonesResponse {
+  zones: SecurityZoneView[];
+}
+
+export type SecurityLinkStatus = "present" | "missing" | "unknown";
+
+/** GET /api/security/sources — what can be linked, and whether each link still points at something. */
+export interface SecuritySourcesView {
+  frigate: "ok" | "unavailable";
+  /** Visible cameras only. `parts` = the camera's Frigate zones ("parts of the camera's view"). */
+  cameras: Array<{ name: string; label: string; parts: string[] }>;
+  linkStatus: Array<{ linkId: string; status: SecurityLinkStatus }>;
+}
+
+/** POST /api/security/zones. */
+export interface SecurityZoneCreateBody {
+  name: string;
+  kind: SecurityZoneKind;
+}
+
+/** PATCH /api/security/zones/:id — at least one of name/kind. */
+export interface SecurityZonePatchBody {
+  name?: string;
+  kind?: SecurityZoneKind;
+  expectedVersion: number;
+}
+
+/** PUT /api/security/zones/:id/links — the whole desired set, at most 32. */
+export interface SecurityZoneLinksBody {
+  links: Array<{ sourceKind: SecurityZoneSourceKind; sourceRef: string }>;
+  expectedVersion: number;
+}
+
+/** POST /api/security/zones → 201. */
+export interface SecurityZoneCreated {
+  zone: SecurityZoneView;
+}
+
+/** PATCH, archive, unarchive and links → 200. `changed:false` = nothing to do (no audit row). */
+export interface SecurityZoneWriteResult {
+  zone: SecurityZoneView;
+  changed: boolean;
+}
+
+export type SecurityMode = "open" | "closed" | "away";
+export type SecurityModeSource = "schedule" | "manual";
+export type SecurityManualEnd = "none" | "next_opening" | "at_time" | "until_changed";
+
+/** GET /api/security/mode. `mode` is the EFFECTIVE mode. */
+export interface SecurityModeView {
+  mode: SecurityMode;
+  source: SecurityModeSource;
+  manualEnd: SecurityManualEnd;
+  /** When a manual mode ends (next_opening / at_time); null otherwise. */
+  until: string | null;
+  setBy: { id: string; name: string } | null;
+  setAt: string;
+  hours:
+    | { state: "not_set" }
+    | {
+        state: "set";
+        /** The SITE zone — format every time on this page in it, never the browser's. */
+        timezone: string;
+        scheduledMode: "open" | "closed";
+        upcoming: { at: string; mode: "open" | "closed" } | null;
+      };
+  /**
+   * The zone to format EVERY time on the mode card in (setAt, until, upcoming):
+   * the site timezone when the opening hours are set; else Workspace.tz when it
+   * is a valid IANA zone; else null — and then the dashboard formats in
+   * `deviceTimeZone()` (lib/security-time.ts). Never UTC.
+   */
+  displayTimezone: string | null;
+  /** The stored mode lags the effective one, or the opening-hours check is down. */
+  stale: boolean;
+  version: number;
+}
+
+/** POST /api/security/mode — an intent applied to the current state (no version). */
+export type SecurityModeAction =
+  | { action: "close" }
+  | { action: "open"; for: "1h" | "2h" | "4h" }
+  | { action: "away" }
+  | { action: "resume" };
+
+export interface SecurityModeActionResult {
+  mode: SecurityModeView;
+  /** false = already in that state; nothing was written. */
+  changed: boolean;
+}
+
+export type SecurityHoursState = "not_set" | "set";
+export type SecurityDayKind = "closed" | "open_all_day" | "hours";
+
+export interface SecurityHoursDay {
+  /** ISO weekday, 1 = Monday … 7 = Sunday. */
+  weekday: number;
+  kind: SecurityDayKind;
+  /** 'HH:MM' site-local; null unless kind = hours. closes < opens = closes the next day. */
+  opens: string | null;
+  closes: string | null;
+}
+
+export interface SecurityHoursException {
+  /** Site-local 'YYYY-MM-DD'. */
+  date: string;
+  kind: SecurityDayKind;
+  opens: string | null;
+  closes: string | null;
+  note: string;
+}
+
+/** GET /api/security/hours. */
+export interface SecurityHoursView {
+  state: SecurityHoursState;
+  timezone: string | null;
+  /** Send back as `expectedVersion` on every hours or special-day write. */
+  version: number;
+  /** 7 entries, Monday first. */
+  days: SecurityHoursDay[];
+  /** Upcoming special days (from site-local yesterday), at most 100. */
+  exceptions: SecurityHoursException[];
+  /** The next 7 days of open windows, computed by the server. */
+  preview: Array<{ startsAt: string; endsAt: string }>;
+  hint: {
+    /** The workspace's timezone, only when it is a valid IANA zone. */
+    workspaceTimezone: string | null;
+    /** The business profile's free-text typical day, read-only. "" below owner/admin (the profile's §15 audience ladder). */
+    typicalDay: string;
+  };
+}
+
+/** PUT /api/security/hours. */
+export type SecurityHoursBody =
+  | {
+      state: "set";
+      timezone: string;
+      /** Exactly 7, unique weekdays 1..7. opens/closes 'HH:MM', only for kind = hours. */
+      days: Array<{ weekday: number; kind: SecurityDayKind; opens?: string; closes?: string }>;
+      expectedVersion: number;
+    }
+  | { state: "not_set"; expectedVersion: number };
+
+/** PUT /api/security/hours/exceptions/:date. */
+export interface SecurityHoursExceptionBody {
+  kind: SecurityDayKind;
+  opens?: string;
+  closes?: string;
+  /** At most 80 characters. */
+  note?: string;
+  expectedVersion: number;
+}
+
+/**
+ * PUT /api/security/hours and PUT …/exceptions/:date → 200: both views, since
+ * the mode may move. Both null = SAVED (committed and audited), but the server
+ * could not read them back: re-read. Never an error — a 5xx means nothing changed.
+ */
+export interface SecurityHoursWriteResult {
+  hours: SecurityHoursView | null;
+  mode: SecurityModeView | null;
+}
+
+/** Every `error.code` the P2b Security routes answer with (`{error: {code, message, issues?}}`). */
+export type SecurityErrorCode =
+  | "VALIDATION_ERROR"
+  | "ZONES_UNAVAILABLE"
+  | "MODE_UNAVAILABLE"
+  | "HOURS_UNAVAILABLE"
+  | "MODE_CONFLICT"
+  | "AUDIT_UNAVAILABLE"
+  | "VERSION_CONFLICT"
+  | "ZONE_NOT_FOUND"
+  | "ZONE_NAME_TAKEN"
+  | "ZONE_LIMIT"
+  | "ZONE_ARCHIVED"
+  | "SOURCE_NOT_FOUND"
+  | "SOURCE_CHECK_UNAVAILABLE"
+  | "INVALID_TIMEZONE"
+  | "SAME_OPEN_CLOSE"
+  | "HOURS_NOT_SET"
+  | "EXCEPTION_NOT_FOUND"
+  | "EXCEPTION_LIMIT"
+  | "EXCEPTION_OUT_OF_RANGE"
+  // A 500: a programming error on the box (a refused audit precondition, a
+  // TypeError), never an outage — retrying the same request will not help.
+  | "INTERNAL_ERROR"
+  // WARP-2980 (P5 PR-A) — the read-only patterns routes 29–31.
+  | "PATTERNS_UNAVAILABLE"
+  | "PATTERN_NOT_FOUND"
+  | "PATTERNS_NOT_BUILT"
+  | "NO_TIMEZONE"
+  // WARP-2980 (P5 PR-B) — expected activity, routes 32–34 (ZONE_ARCHIVED and
+  // AUDIT_UNAVAILABLE above answer route 33 too).
+  | "SUPPRESSIONS_UNAVAILABLE"
+  | "SUPPRESSION_NOT_FOUND"
+  | "SUPPRESSION_TARGET_NOT_FOUND"
+  | "SUPPRESSION_LIMIT";
+
+/** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
+export interface SecurityApiErrorBody {
+  error: { code: SecurityErrorCode; message: string; issues?: unknown[]; archivedZoneId?: string };
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like ──
+// Wire shapes of GET /api/security/patterns{,/cells,/explain} (routes 29–31).
+// Mirrors apps/orchestrator/src/services/security-patterns-read.ts. "Patterns"
+// and "what's usual" in the UI; never "baseline" or "suppression".
+
+export type SecurityPatternCode = "out_of_place" | "unusual_volume" | "long_dwell";
+export type SecurityPatternRelease = "trial" | "live";
+export type SecurityLearningState = "learning" | "active" | "stale";
+export type SecurityDayType = "weekday" | "weekend";
+
+/** Route 29. */
+export interface SecurityPatternsOverview {
+  state: "not_configured" | "not_built" | "ready";
+  reason: "no_timezone" | "no_cameras" | null;
+  timezone: string | null;
+  window: { from: string; to: string; builtAt: string } | null;
+  release: Record<SecurityPatternCode, SecurityPatternRelease>;
+  /** Visible cameras Droplet has heard from. A camera with no row here has never reported. */
+  sources: Array<{
+    camera: string;
+    label: string;
+    state: SecurityLearningState;
+    daysObserved: number;
+    daysNeeded: 14;
+    lastSeenAt: string;
+    detectionsPerDay: number | null;
+  }>;
+  /** Areas first, then cameras; only keys whose every camera the viewer can see. */
+  keys: Array<{
+    zoneKey: string;
+    kind: "area" | "camera";
+    zoneId: string | null;
+    name: string;
+    cameras: string[];
+    labels: string[];
+    learning: boolean;
+  }>;
+  waitingProposals: number;
+  /** WARP-2980 PR-B: how often each pattern code was right — owner/admin only, else null. */
+  precision: SecurityPatternPrecision | null;
+}
+
+/** WARP-2980 PR-B — route 29's precision: per pattern code, counts from the first mark, a percentage from day 30. */
+export interface SecurityPatternPrecision {
+  showAfterDays: 30;
+  codes: Array<{ code: SecurityPatternCode; marked: number; notExpected: number; firstMarkedAt: string; percentRight: number | null }>;
+}
+
+/** One (dayType, hour) of route 30. */
+export interface SecurityPatternCellView {
+  dayType: SecurityDayType;
+  hour: number;
+  daysObserved: number;
+  daysWithEvent: number;
+  /** Enough observed days to judge this hour. */
+  ready: boolean;
+  /** Not usually seen at this hour. */
+  rare: boolean;
+  typicalPerHour: number | null;
+  longestUsualVisitSec: number | null;
+}
+
+/** Route 30: 48 cells, weekdays 0–23 then weekends 0–23. */
+export interface SecurityPatternCells {
+  key: string;
+  label: string;
+  window: { from: string; to: string; builtAt: string };
+  cells: SecurityPatternCellView[];
+}
+
+/** Route 31. */
+export interface SecurityPatternExplainView {
+  key: { zoneKey: string; kind: "area" | "camera"; zoneId: string | null; name: string; cameras: string[] };
+  at: { instant: string; local: string; dayType: SecurityDayType; hour: number; timezone: string };
+  window: { from: string; to: string; builtAt: string };
+  sources: Array<{ camera: string; state: SecurityLearningState; daysObserved: number; daysNeeded: 14; lastSeenAt: string }>;
+  cell: {
+    ready: boolean;
+    daysObserved: number;
+    daysWithEvent: number;
+    smoothed: { daysObserved: number; daysWithEvent: number };
+    rarity: { p: number; flagsBelow: 0.05; wouldFlag: boolean };
+    volume: { typicalPerHour: number | null; flagsFrom: number | null };
+    dwell: { longestUsualVisitSec: number | null; samples: number; wouldFlagAboveSec: number | null };
+    neighbours: Array<{ hour: number; daysObserved: number; daysWithEvent: number }>;
+  } | null;
+  /** WARP-2980 PR-B: why the pattern rules are paused for this key now; every "would flag" is off while set. */
+  paused: "zone_changed" | "stale_build" | "area_changed" | "camera_not_active" | null;
+  /** WARP-2980 PR-B: the active expected activity covering this slot. */
+  expected: Array<{ id: string; text: string; until: string; codes: SecurityPatternCode[] }>;
+  release: Record<SecurityPatternCode, SecurityPatternRelease>;
+}
+
+// ── WARP-2980 (ADR-059 P5 PR-B): expected activity (routes 32–34) ──
+// Mirrors apps/orchestrator/src/services/security-suppressions.service.ts.
+// "Suppression" is the route's and the code's word; the UI says "Expected activity".
+
+export type SecuritySuppressionDays = "every_day" | "weekdays" | "weekends";
+
+/** Route 32's row. */
+export interface SecuritySuppressionView {
+  id: string;
+  target: { kind: "area"; zoneId: string; name: string; archived: boolean } | { kind: "camera"; camera: string; name: string };
+  label: string;
+  days: SecuritySuppressionDays;
+  /** Site-local hour 0–23, and how many hours from it (1–24; wraps past midnight; 24, "All day", only from 0). */
+  hourFrom: number;
+  hourCount: number;
+  codes: SecurityPatternCode[];
+  reason: string;
+  createdByName: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Flags it quietened — owner/admin only; null for anyone else. */
+  quietedFlags: number | null;
+}
+
+/** Route 32. `canManage` is the server's answer: render Add / Remove from it, never from a level guess. */
+export interface SecuritySuppressionList {
+  suppressions: SecuritySuppressionView[];
+  canManage: boolean;
+  limit: number;
+}
+
+/** Route 33's body — exactly these keys. */
+export interface SecuritySuppressionCreateBody {
+  target: { kind: "area"; zoneId: string } | { kind: "camera"; camera: string };
+  label: string;
+  days: SecuritySuppressionDays;
+  hourFrom: number;
+  hourCount: number;
+  codes: SecurityPatternCode[];
+  reason: string;
+  expiresInDays: number;
+}
+
+// ── WARP-2981 (ADR-059 P6): the Security wall ──
+
+/**
+ * The two numbers the wall reads off route 17 (GET
+ * /api/security/incidents/summary): open incidents with a visible alert, and
+ * open ones with only notices — already this viewer's DS-005 projection. The
+ * rest of that body is PR-C's.
+ */
+export interface SecurityIncidentCounts {
+  openAlerts: number;
+  openNotices: number;
+}
+
+// ── WARP-2804: notification acknowledgement (routes N1–N4) ──
+
+export type NotificationKind = "reminder" | "event" | "system" | "ai";
+
+/** Whether the RECIPIENT has seen it. Unread means `unacked`; `untracked` rows
+ *  predate WARP-2804 and are never counted as unread (they can still be acked). */
+export type NotificationAckState = "unacked" | "acked" | "untracked";
+
+/** The path that acknowledged it. `incident` is WARP-2978's; no notification route sets it. */
+export type NotificationAckMethod = "inbox" | "opened" | "all" | "incident";
+
+/** One of the signed-in person's own notifications, as N1 returns it. The box
+ *  also records which sign-in acked it and what the client said it was; it
+ *  never returns either. */
+export interface NotificationRow {
+  id: string;
+  kind: NotificationKind;
+  title: string;
+  body: string | null;
+  /** A same-origin dashboard path, validated by the box. */
+  url: string | null;
+  data: Record<string, string | number | boolean> | null;
+  createdAt: string;
+  deliveredAt: string | null;
+  channels: string;
+  pushOutcome: "sent" | "no_subscribers" | "refused_gate" | "failed" | null;
+  error: string | null;
+  ackState: NotificationAckState;
+  ackedAt: string | null;
+  ackMethod: NotificationAckMethod | null;
+}
+
+/** N1. `nextCursor` is null on the last page. */
+export interface NotificationsPage {
+  notifications: NotificationRow[];
+  unread: number;
+  nextCursor: string | null;
+}
+
+/** N3. `changed: false` when it was already acked (the first ack stands). */
+export interface NotificationAckResult {
+  notification: NotificationRow;
+  changed: boolean;
+}
+
+/** N4 (`{ids}` in: the notifications shown). `unread` is what the badge should say now. */
+export interface NotificationAckAllResult {
+  acked: number;
+  unread: number;
 }

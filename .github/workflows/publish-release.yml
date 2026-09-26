@@ -71,7 +71,7 @@ jobs:
   #
   # The channel is derived, never an input. That is the whole safety
   # property: a release cannot claim a channel its branch didn't earn,
-  # and the device-side trust regexp (scripts/lib/apply-update.sh) only
+  # and the device-side trust regexp (docker/ota/apply-update.sh) only
   # accepts workflow identities from these same two refs.
   channel:
     name: resolve channel
@@ -198,6 +198,7 @@ jobs:
           - service: ai-gateway
           - service: routing
           - service: switch
+          - service: device-gateway
           - service: camera-discovery
           # WARP-970 coverage gate — keeps this list an exact mirror of
           # ci.yml's python matrix; same requirements-dev.txt + bare-pytest
@@ -269,10 +270,12 @@ jobs:
 
       # The manifest generator has its own unit suite (schema shape +
       # loud-failure paths). A release must never publish from an
-      # untested generator.
+      # untested generator. WARP-3001: the same suite carries the
+      # compose <-> services.json drift gate, so a release also refuses
+      # to publish while a compose-built service is missing from the list.
       - name: Test release manifest generator
         run: |
-          python3 -m pip install --upgrade pip pytest
+          python3 -m pip install --upgrade pip pytest pyyaml
           python3 -m pytest scripts/release/ -q
 
       # ubuntu-latest has ~14GB free. Building every appliance image
@@ -364,7 +367,7 @@ jobs:
       # key-based release.json signature below (WARP-536): the manifest key
       # is the device's offline OTA trust root ("this digest-set is a
       # release"); the keyless image signatures are the supply-chain gate
-      # ("this image was built by our CI") that scripts/lib/apply-update.sh
+      # ("this image was built by our CI") that docker/ota/apply-update.sh
       # enforces before any docker pull. NOTE: Rekor is a PUBLIC
       # transparency log — entries expose repo/workflow identity and image
       # digests (never contents). Mandated by WARP-244.

@@ -56,7 +56,9 @@ describe("CORS allowlist config parsing (WARP-562)", () => {
     const SECRET_KEYS = [
       "JWT_SECRET",
       "DEVICE_SECRET_KEY",
+      "DEVICE_SECRET",
       "SERVICE_TOKEN_SWITCH",
+      "SERVICE_TOKEN_DEVICE_GATEWAY",
       "SERVICE_TOKEN_AI_GATEWAY",
       "SERVICE_TOKEN_VOICE",
       "SERVICE_TOKEN_MCP",

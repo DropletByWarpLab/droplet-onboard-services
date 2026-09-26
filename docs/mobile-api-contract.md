@@ -48,7 +48,7 @@ Refresh token is stored separately and only sent to `/api/auth/refresh`.
 | POST | `/auth/login?return=body` | none | `{ email, password, totp?, recoveryCode? }` | `{ user, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 | POST | `/auth/refresh` | refresh | `{ refreshToken }` | `{ accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 | POST | `/auth/logout` | Bearer | — | `{ status: "ok" }` |
-| GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role }` |
+| GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role, mustChangePassword, session: { endsAt } \| null }` |
 | POST | `/auth/totp/enroll` | Bearer | — | `{ otpauthUri, qrDataUrl, issuer }` |
 | POST | `/auth/totp/verify` | Bearer | `{ code }` (6-digit) | `{ enabled: true, recoveryCodes? }` |
 | POST | `/auth/recovery` | Bearer | `{ code }` | `{ ok: true, remaining }` |
@@ -63,6 +63,34 @@ is forced through before reaching anything else. Failure shapes (flat envelope, 
 (new fails policy), `400 SAME_PASSWORD` (new === current), `400 INVALID_REQUEST`
 (missing fields), `429 TOO_MANY_ATTEMPTS` (+ `retryAfterSeconds`, `Retry-After`
 header — progressive lock on repeated wrong current password).
+
+**The latest the sign-in can last (`session.endsAt`, WARP-2981).** `/auth/me`
+carries `session: { endsAt: "ISO-8601" }`: the sign-in time plus the **absolute**
+session limit (12 h for every role as shipped). Nothing extends it, token refresh
+included. It is a latest time, not a promise: the sign-in can end **sooner**, in
+any of three ways, and `endsAt` does not move when it does.
+
+- **Inactivity.** 30 minutes without an authenticated request ends it (every
+  role, as shipped). Any authenticated request resets that clock, `/auth/me`
+  included (the box records it at most every 30 s). **`/auth/refresh` does not
+  reset it**: a token refresh is not activity, so an app that only refreshes its
+  token in the background still goes idle, and its next refresh is refused. The
+  idle deadline is not offered, because every request moves it.
+- **Too many sign-ins.** One person holds at most 5 sign-ins at once. Their next
+  sign-in, on any device, ends the oldest one.
+- **Revocation.** Signing out; a password change or a newly enrolled second
+  factor (these end the person's other sign-ins); a role change; an admin ending
+  the person's sessions.
+
+So an app may warn as `endsAt` approaches, or say "you will be signed out by
+21:00 at the latest". It must not say "you will be signed out at 21:00", or treat
+a sign-in as good until then: the first `401` ends it, whatever `endsAt` said.
+The limits are read when used, so an operator changing them moves `endsAt` for
+sign-ins already open; read it again rather than keeping it from sign-in.
+`session` is `null` when the box cannot tell (a service token, a token minted
+before session records, the session store unreachable). Treat `null`, and a box
+too old to send the key, as "show nothing". Only `/auth/me` carries it; the login
+and refresh bodies do not.
 
 **Auth model (ADR-013 directory).** Login authenticates an **email +
 password (argon2id)** against the local directory — *not* Nextcloud
@@ -137,7 +165,22 @@ in with no pair code and still use the app — Files goes through
 
 Sign-in + optional enrollment sequence:
 1. User enters the Droplet `server` URL + email + password. A scanned
-   `droplet://pair?server=<base>&code=<code>` QR pre-fills `server` (and `code`).
+   `droplet://pair?server=<base>&code=<code>&spki=<pin>` QR pre-fills `server`
+   (and `code`). `spki` (WARP-2954 / ADR-058) is the box's certificate key
+   fingerprint — base64 of SHA-256 over the DER SubjectPublicKeyInfo of the
+   leaf the box serves, byte-identical to
+   `openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64`.
+   It is the box saying "this is my key" through its own dashboard: a client
+   MAY accept the served certificate for `server`'s host iff its key hashes to
+   `spki`, the certificate names that host, and it is inside its validity
+   window — with no public CA, no HQ, and nothing installed in the OS trust
+   store. It is NOT trust-on-first-use: with no `spki` and no public chain the
+   client refuses as before, and a served key that does not match `spki` is an
+   identity error ("not the Droplet this QR came from"), never a retry. A
+   client that pins it keeps verifying every later connection (API, WebSocket,
+   WebView) against the same pin. Absent when the box cannot read its own
+   leaf; unknown parameters are ignored by older clients. Reference
+   implementation: droplet-windows `trust.rs` (WARP-2953).
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
@@ -377,14 +420,80 @@ controls existing devices but does NOT add new ones.
 
 ### Notifications (`/api/notifications`)
 
-| Method | Path | Auth | Returns / body |
-|---|---|---|---|
-| GET | `/notifications?since=…` | Bearer | `[{ id, type, ts, title, body, deepLink? }]` |
-| POST | `/notifications/:id/ack` | Bearer | `{ ok }` |
+> **Rewritten for WARP-2804 (notification acknowledgement).** The earlier
+> table (`?since=…`, a bare array, `{ ok }` from the ack) described no shipped
+> route. The routes below are what the orchestrator serves
+> (`apps/orchestrator/src/routes/notifications.ts`).
 
-Native apps fetch on launch and every 5 minutes when foregrounded.
-APNs / FCM push is the real-time delivery; this endpoint is for catch-up
-+ in-app inbox.
+A person reads and acknowledges **their own** notifications only; every
+route is keyed on the signed-in username. All four need a person's sign-in
+(Bearer JWT or the session cookie): N3 and N4 answer `403 HUMAN_ONLY` to a
+service token.
+
+| # | Method | Path | Body / query | 200 response |
+|---|---|---|---|---|
+| N1 | GET | `/notifications` | query: `limit` 1–200 (default 50), `cursor`, `state` = `unacked` \| `all` (default `all`) | `{ notifications: NotificationRow[], unread, nextCursor }` |
+| N2 | GET | `/notifications/unread-count` | — | `{ unread }` |
+| N3 | POST | `/notifications/:id/ack` | `{ via?: "inbox" \| "opened" }` (an empty body acks as `inbox`) | `{ notification: NotificationRow, changed }` |
+| N4 | POST | `/notifications/ack-all` | `{ ids: string[] }`, 1–200 ids: the notifications the app **showed** | `{ acked, unread }` |
+
+`NotificationRow`:
+
+```json
+{
+  "id": "clx…", "kind": "reminder" | "event" | "system" | "ai",
+  "title": "…", "body": "…" | null,
+  "url": "/calendar" | null, "data": { … } | null,
+  "createdAt": "ISO-8601", "deliveredAt": "ISO-8601" | null,
+  "channels": "toast,push", "pushOutcome": "sent" | "no_subscribers" | "refused_gate" | "failed" | null,
+  "error": "…" | null,
+  "ackState": "unacked" | "acked" | "untracked",
+  "ackedAt": "ISO-8601" | null,
+  "ackMethod": "inbox" | "opened" | "all" | "incident" | null
+}
+```
+
+- **Unread means `ackState = "unacked"`.** Rows written before WARP-2804 are
+  `untracked`: never counted as unread, and still ackable with N3. `unread`
+  (N1, N2, N4) counts `unacked` only.
+- **`url`** is a same-origin dashboard path (`/workshop?run=…`); map it to the
+  app's own screen. **`data`** is small, flat and PHI-free.
+- **Paging.** `nextCursor` is opaque (`<ms>.<id>`): pass it back as `cursor`
+  for the next (older) page. It is `null` on the last page.
+- **N1 is strict about its query.** An unknown key, a `limit` outside 1–200,
+  a `state` other than `unacked`/`all`, or a cursor the box did not mint is a
+  `400 VALIDATION_ERROR`, never silently ignored. Calling it with no query
+  (what the shipped iOS and Android apps do) returns the newest 50.
+- **N3 is idempotent; the first ack wins.** Acking an acked row is a 200 with
+  `changed: false` and the original `ackedAt`/`ackMethod`. Send
+  `{ "via": "opened" }` when the person opened the notification's link,
+  and nothing (or `{}`) for a plain "mark read" — the shipped iOS "Mark read"
+  POSTs an empty body, which acks as `inbox`.
+- **N3's id** must match `^[A-Za-z0-9_-]{1,64}$` (else `400`). Someone else's
+  id answers **exactly** like a missing one (`404 NOTIFICATION_NOT_FOUND`), so
+  the route never confirms that a notification exists.
+- **N4 takes ids, never a time.** Send the ids the app actually displayed. A
+  notification that is not the person's, or does not exist, is simply not
+  counted (no error). `untracked` rows are left as they are. Both bodies are
+  strict: an unknown key is a `400`.
+- **Errors on N1–N4 are nested**, unlike the flat envelope described under
+  [Error shape](#error-shape): `{ "error": { "code": "…", "message": "…" } }`
+  with `code` one of `VALIDATION_ERROR` (400), `HUMAN_ONLY` (403),
+  `NOTIFICATION_NOT_FOUND` (404). Key on `code`; `message` is for logs.
+
+**`X-Droplet-Client` (send it on N3 and N4).** The box records what the
+acking device *said* it was, labelled as reported (it proves nothing). Send
+`X-Droplet-Client: <product>/<version>`, optionally with a comment:
+`droplet-ios/1.4.0 (iOS 18.2)`. Grammar:
+`^[a-z0-9-]{1,32}/[0-9A-Za-z.+-]{1,24}( \([^()\r\n]{1,48}\))?$`. A header that
+does not match is ignored and the box falls back to a coarse User-Agent label
+("Safari on iPhone"). The box also records which sign-in acked (the token's
+session id) and whether its session store confirmed that sign-in live; none
+of the three is ever returned.
+
+Native apps fetch on launch and every 5 minutes when foregrounded. APNs / FCM
+push is the real-time delivery once it exists (see "Push status" above); this
+endpoint is for catch-up and the in-app inbox.
 
 ### VPN / remote access (`/api/vpn/*`)
 
@@ -480,6 +589,59 @@ WARP-1341: this is a **business-only** build. `workspaceType` is always
 `"business"` — GET never returns `"home"`, and a POST with `"home"` is a
 `400 invalid_body`. Missing-row default is `"business"`, so mobile can treat
 a 404 the same way.
+
+### Active department (`/api/me/active-department` — WARP-2981)
+
+The department a person's app is arranged around (ADR-059, DS-003). It is kept
+on the box, so a switch made on one device reaches the others. It **arranges,
+never grants**: what the person can reach is the same whatever is chosen.
+
+| Method | Path | Auth | Body | 200 response |
+|---|---|---|---|---|
+| GET | `/me/active-department` | Bearer (a person) | — | `{ scope, department: ActiveDepartment \| null }` |
+| PUT | `/me/active-department` | Bearer (a person) | `{ departmentId: "<uuid>" \| null }` | `{ scope, department: ActiveDepartment \| null }` |
+
+`scope` is always present and says what the person chose:
+
+| `scope` | Meaning | `department` |
+|---|---|---|
+| `"unset"` | The person has never chosen, on any device. | `null` |
+| `"whole_business"` | The person chose Whole business. | `null` |
+| `"department"` | The person chose a department. | `ActiveDepartment` |
+
+`ActiveDepartment` is `{ id, slug, name, profile: { template, icon } | null }`.
+`profile: null` means the department is not set up yet.
+
+- **Key on `scope`, not on `department` being `null`.** Show Whole business, the
+  default for everyone (DS-014), for both `"unset"` and `"whole_business"`. They
+  differ in one way: `"unset"` means nobody chose anything, so a choice the app
+  already kept on the device may stand. `"whole_business"` was chosen, on this
+  device or another, and replaces whatever the device holds.
+- **PUT `null` chooses Whole business**, and the box records that choice: the
+  next GET answers `"whole_business"`, never `"unset"`. PUT a department's id to
+  choose it. PUT answers with the same shape as GET.
+- **What to offer.** `GET /api/departments` returns the rows the person may see.
+  Offer the `kind: "DEPARTMENT"` rows whose `state` is neither `archived` nor
+  `archiving`, sorted by name, plus Whole business. PUT accepts exactly that
+  set. With no such row, show no switcher.
+- **Each person reads and writes only their own choice.** Nothing in the request
+  names a person. A service token gets `403 HUMAN_ONLY`.
+- **The box checks the choice again on every read.** If the person has been
+  removed from the department, or it has been archived, GET answers
+  `"whole_business"`. The box keeps the choice, so it comes back if the
+  department is restored or the person is added back.
+- **Every PUT refusal looks the same.** A department the person may not choose
+  (missing, not theirs, archived or being archived, a team, the household) gets
+  one `404 DEPARTMENT_NOT_AVAILABLE` body, so the answer never shows whether a
+  department exists. The body is strict: an unknown key, a non-uuid id or a
+  missing `departmentId` is `400 VALIDATION_ERROR`.
+- **The last write wins** across devices. Read it again on launch and when the
+  app comes to the foreground, to pick up a switch made elsewhere. Nothing is
+  audited: it is a display preference.
+- **Errors are nested**, as on the Notifications routes:
+  `{ "error": { "code": "…", "message": "…" } }`. Key on `code`. A `404` with any
+  other code, or none, means the box is older than this route: keep the choice
+  on the device.
 
 ## Error shape
 

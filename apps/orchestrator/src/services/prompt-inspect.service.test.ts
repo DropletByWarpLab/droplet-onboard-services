@@ -250,6 +250,18 @@ describe("🔴 the assembled prompt is the real string, in the real order", () =
     expect(both.assembled.length).toBeGreaterThan(plain.assembled.length);
   });
 
+  it("WARP-2746: an off-LAN preview withholds memory, brain and business, exactly as the turn does", async () => {
+    const r = await inspectPromptForPerson(prisma, { targetUserId: "u1", offLan: true });
+    for (const key of ["memory", "brain", "business"]) {
+      expect(blockOf(r, key).status).toBe("withheld_off_lan");
+      expect(blockOf(r, key).text).toBeNull();
+    }
+    expect(r.assembled).not.toContain("MEMORY");
+    expect(r.assembled).not.toContain("BRAIN");
+    expect(r.assembled).not.toContain("BUSINESS");
+    expect(r.assembled).toContain("PERSONA");
+  });
+
   it("passes the caller's allowed tool names to the guidance composer, verbatim", async () => {
     // WARP-642: guidance must never name a tool the person cannot call.
     // `undefined` is the builder's own encoding for "privileged, every tool"

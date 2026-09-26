@@ -84,28 +84,57 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 .droplet-shell .sect h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; color: var(--text); margin: 0; }
 .droplet-shell .sect .sx { font-size: 12px; color: var(--text-muted); }
 
+/* ── Page rhythm (opt-in: `.page-inner.rhythm`) ────────── */
+/* Every direct child of `.page-inner` is a section, and ONE gap owns the whole
+   page — no component carries an outer margin of its own. Before this, spacing
+   was per-component opt-in (`card mb-6` here, a `div.mb-4` wrapper there), so
+   a child that forgot one sat flush against its neighbour and a `.sect` that
+   got wrapped lost its 34px to `:first-child` above.
+   Opt-in rather than global because 48 surfaces render into `.page-inner` and
+   each still carries its own hand-rolled `mb-*`; rolling one over = strip its
+   margin utilities, then pass `rhythm` to `<ShellPage>`. Cameras is the first.
+   WARP-2961. */
+.droplet-shell .page-inner.rhythm > * + *     { margin-top: 24px; }
+.droplet-shell .page-inner.rhythm > .sect + * { margin-top: 0; }
+/* `* +` and not a bare `.sect`, so a first-child `.sect` keeps the 0 above. */
+.droplet-shell .page-inner.rhythm > * + .sect { margin-top: 34px; }
+/* Out-of-flow children (toasts, the non-portalled modals) are positioned, not
+   stacked: a margin there offsets the pinned box instead of spacing anything. */
+.droplet-shell .page-inner.rhythm > .fixed,
+.droplet-shell .page-inner.rhythm > .absolute,
+.droplet-shell .page-inner.rhythm > [data-overlay] { margin-top: 0; }
+
 /* ── Buttons ───────────────────────────────────────────── */
 .droplet-shell .btn { display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 15px; border-radius: var(--radius-input);
   font-size: 13.5px; font-weight: 500; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
   transition: background 180ms var(--ease), border-color 180ms var(--ease), transform 120ms var(--ease); }
 .droplet-shell .btn:hover { background: var(--surface-2); }
 .droplet-shell .btn:active { transform: scale(0.97); }
-.droplet-shell .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
-.droplet-shell .btn.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
-/* Dark hover steps UP the ramp, not down. --brand-hover is indigo-500 — a
-   light-theme idiom (darken on hover) that the dark block inherits, and it is
-   the one fill where NEITHER ink clears 4.5:1 for this 13.5px/500 label
-   (#1d1d1f 3.77:1, #fff 4.47:1). Brightening to --brand-soft (indigo-300)
-   instead keeps --on-brand valid through the whole interaction: 8.44:1.
-   Scoped to the primary button so the shared --brand-hover token is untouched
-   for its other consumers (chat-send, breadcrumb links). WARP-1358. */
+/* Fill is --brand-fill, not --brand: in light, white on --brand #6366f1 is
+   4.47:1 — under 4.5:1 for this 13.5px/500 label — and --brand-fill #4f46e5
+   is 6.29:1. Light hover takes the next rung, --brand-deep #4338ca: 7.90:1.
+   In dark --brand-fill is the unchanged #818cf8 (#1d1d1f ink, 5.64:1). */
+.droplet-shell .btn.primary { background: var(--brand-fill); border-color: var(--brand-fill); color: var(--on-brand); }
+.droplet-shell .btn.primary:hover { background: var(--brand-deep); border-color: var(--brand-deep); }
+/* Dark hover steps UP the ramp, not down. Darkening is a light-theme idiom
+   the dark block would inherit: the dark --brand-deep (#4f46e5) and
+   --brand-hover (#6366f1) both fail the dark ink #1d1d1f for this label
+   (2.68:1 and 3.77:1). Brightening to --brand-soft (indigo-300) instead keeps
+   --on-brand valid through the whole interaction: 8.44:1. Scoped to the
+   primary button so the shared tokens are untouched for their other
+   consumers (chat-send, breadcrumb links). WARP-1358. */
 .dark .droplet-shell .btn.primary:hover { background: var(--brand-soft); border-color: var(--brand-soft); }
 .droplet-shell .btn.ghost { background: transparent; }
 .droplet-shell .btn.ghost:hover { background: var(--surface); }
 .droplet-shell .btn.danger { background: #ef4444; border-color: #ef4444; color: #fff; }
 .droplet-shell .btn.danger:hover { background: #dc2626; border-color: #dc2626; }
 .droplet-shell .btn.sm { height: 30px; padding: 0 11px; font-size: 12.5px; }
-.droplet-shell .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* aria-disabled reads as inert too: a button that must keep keyboard focus while
+   it can't act (Security's Save, Restore and mode controls) cannot use the real
+   `disabled`, which drops focus to <body>. Every other aria-disabled .btn also
+   sets `disabled`, so it looks the same as before. */
+.droplet-shell .btn:disabled,
+.droplet-shell .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 
 .droplet-shell .icon-btn { width: 36px; height: 36px; border-radius: var(--radius-input); display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); cursor: pointer;
@@ -137,7 +166,11 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 /* `.droplet-shell .card` (0,2,0) out-specifies Tailwind's position utilities
    (0,1,0), so `card fixed` (ContextMenu), `card absolute` (SearchBar results)
    and `card sticky` (files detail column, cameras save bar) silently rendered
-   `position: relative`. Restore utility semantics at (0,3,0). */
+   `position: relative`. Restore utility semantics at (0,3,0).
+   `.droplet-shell .grid` above has the same problem with Tailwind's `gap-*`:
+   its `gap: 16px` wins, so `grid gap-4` is a coincidence and `grid gap-8`
+   would silently render at 16px. Not restored here — nothing needs a non-16
+   grid yet, and an unused `.grid.gap-N` ladder is worse than this note. */
 .droplet-shell .card.fixed { position: fixed; }
 .droplet-shell .card.absolute { position: absolute; }
 .droplet-shell .card.sticky { position: sticky; }

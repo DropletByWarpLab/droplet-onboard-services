@@ -6,7 +6,7 @@
 >
 > **Scope:** Every component in this repo (`droplet-onboard-services`, GitHub
 > `DropletByWarpLab/droplet-onboard-services`) — the **intelligence layer** of the
-> Droplet edge AI appliance. Inference (Ollama + `ollama-manager`) lives in the
+> Droplet edge AI appliance. Inference (Ollama + `inference-manager`) lives in the
 > sibling repo [`droplet-local-LLM`](../../droplet-local-LLM); the physical
 > appliance lives in `pcb-claude-tool`. See [`agentic-workflows.md`](agentic-workflows.md)
 > for the cross-repo picture and [`ADR-009-canonical-system-architecture.md`](ADR-009-canonical-system-architecture.md)
@@ -81,6 +81,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **ai-gateway** | `services/ai-gateway/` | Python + FastAPI | Inference router + gRPC embed/rerank |
 | **routing** | `services/routing/` | Python + FastAPI | OpenWrt control via ubus |
 | **switch** | `services/switch/` | Python + FastAPI | Managed-switch driver |
+| **device-gateway** | `services/device-gateway/` | Python + FastAPI | Device control over BACnet/IP, Modbus TCP, SNMP, KNX/IP |
 | **file-indexer** | `services/file-indexer/` | Python + watchdog | Filesystem indexer + embedder (RAG) |
 | **email-indexer** | `services/email-indexer/` | Python + FastAPI | IMAP IDLE ingest + SMTP send |
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
@@ -116,6 +117,7 @@ network. Host-published ports and host-network services are called out.
 | mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (profile `remote-mcp`) — holds the customer's vendor credential in memory |
 | routing | 8080 | HTTP | **host network mode** (direct router access) |
 | switch | 8081 | HTTP | host (profile `full`) |
+| device-gateway | 8084 | HTTP (+ BACnet UDP 47808, KNX 3671) | host (profiles `full`, `single-box`) |
 | oled-display | 8082 | HTTP | host network (display profile) |
 | camera-discovery | 8085 | HTTP | internal (profile `full`) |
 | erp-sql-bridge | 9095 | HTTP | internal only (profile `erp`) — holds the practice's DB credentials |
@@ -166,7 +168,7 @@ network. Host-published ports and host-network services are called out.
   (durable background agent runs, WARP-2176: `AgentRun` rows claimed under a
   lease, checkpointed per iteration, parked on Tier-2 confirmations; RRULE
   schedules enqueue runs; design in [`agent-runs-design.md`](agent-runs-design.md);
-  surface `/api/agent-runs`, panel on `/admin/audit`), `openwrt.client.ts`,
+  surface `/api/agent-runs`, panel on `/workshop` — WARP-2925), `openwrt.client.ts`,
   `switch.client.ts`, `camera.service.ts`, `nextcloud.client.ts`, plus
   pollers/tickers (device-reconcile, AP discovery, schedule, reminders,
   tool-schedule, agent-run claim/heartbeat, agent-run-schedule, screen-QR).
@@ -174,7 +176,7 @@ network. Host-published ports and host-network services are called out.
   switch / display / camera-discovery / frigate / nextcloud (HTTP), Redis,
   MQTT, device-identity-svc (gRPC unix socket). PM is served natively from the
   orchestrator's own Postgres (ADR-026) — no external PM service.
-- **Auth:** Bearer JWT (HS256 access + refresh) with Nextcloud OCS fallback;
+- **Auth:** Bearer JWT (HS256 access + refresh) or a service-principal bearer; no Nextcloud-credential fallback (removed, WARP-2994);
   roles `owner | admin | family | guest | service`; per-route RBAC via
   `requireRole` / `requireScope` (see [ADR-004](ADR-004-rbac-per-route-guards.md)).
   `WRITE_TOOLS` in `src/routes/llm.ts` is **derived from `requiresWrite`** in
@@ -316,12 +318,19 @@ network. Host-published ports and host-network services are called out.
   / `Chat`. Cloud providers (OpenAI, Anthropic) go through **LiteLLM**; local
   Ollama goes through **direct httpx** to the OpenAI-compat endpoint.
 - **Ollama call path (critical):** chat goes **direct to Ollama `:11434`**, *not*
-  through `ollama-manager`'s `:8002/proxy` (whose 120 s read timeout blows up on
+  through `inference-manager`'s `:8002/proxy` (whose 120 s read timeout blows up on
   CPU inference / cold loads). `OLLAMA_URL` with a trailing `/proxy` is the smoking
   gun for "manager timed out my agent loop." See the CLAUDE.md "Ollama call path"
   section.
 - **gRPC consumers:** file-indexer (`EmbedText`), orchestrator/mcp-server
   (`Rerank`, `ClassifyQuery` for adaptive RAG routing).
+- **Planned — Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):**
+  a `Decide` RPC (WARP-3070) proxying to `droplet-local-LLM`'s `decision-model`
+  sidecar (`:8009`, profile `decision`, off by default): calibrated yes/no /
+  choice / score answers, no generated text. It is the **only** way in: nothing
+  else calls `:8009`. Consumers fail soft to today's behaviour and never sit on the
+  write-approval path. Not built until the bench-box go/no-go (WARP-3069) passes.
+  Full picture: `docs/agentic-workflows.md` § "Decision model (Kev)".
 - **Gotchas:** does **not** dispatch tools (forwards `tools[]` as-is, returns raw
   `tool_calls` to the orchestrator). Embed/rerank models lazy-load from HF on first
   call (cold start). Sessions are in-memory (lost on restart).
@@ -346,6 +355,22 @@ network. Host-published ports and host-network services are called out.
   (future custom PCB) is a placeholder. `create_driver()` picks by `SWITCH_DRIVER`.
   Endpoints (ports, VLANs, PoE, WAN detect, one-click camera setup) are
   driver-agnostic. Bearer `SERVICE_SECRET`. Profile `full`.
+
+## services/device-gateway
+
+- **Purpose:** Device control for commercial/industrial equipment beside
+  Matter, under the same `smart_home` ("Device control") module. BACnet/IP
+  (BACpypes3), Modbus TCP (pymodbus), SNMP v2c/v3 (pysnmp), KNX/IP (xknx), one
+  `ProtocolDriver` each. The orchestrator fronts it at `/api/building/*`
+  (`routes/building.ts`); the LLM reaches it through `get_building_devices` /
+  `set_building_point`.
+- **Gotchas:** A point exists only if an admin registered it; writable only
+  when marked, with min/max for numbers; BACnet priorities 1-7 are refused.
+  Writes are **plan-only** until `DEVICE_GATEWAY_LIVE_WRITES=1`. The
+  orchestrator's write route audits fail-closed before sending. Registry at
+  `/var/lib/droplet/device-gateway/registry.json` (named volume
+  `device-gateway-state`, backed up and wiped on factory reset). Bearer
+  `SERVICE_TOKEN_DEVICE_GATEWAY`. README has the full contract.
 
 ## services/file-indexer
 

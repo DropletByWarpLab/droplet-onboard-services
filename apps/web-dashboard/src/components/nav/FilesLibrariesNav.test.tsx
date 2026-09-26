@@ -248,13 +248,60 @@ describe("accessibility", () => {
     );
   });
 
-  it("marks nothing active on a sub-route like /files/trash", () => {
-    // Trash is not a library; highlighting one there would claim a location
-    // the user is not in.
+  it("marks nothing active on a bare sub-route like /files/trash", () => {
+    // Trash spans every library, so with nothing in the URL saying otherwise
+    // there is no one library to highlight — claiming My Files here would
+    // claim a location the user is not in.
     renderNav("/files/trash");
     for (const link of screen.getAllByRole("link")) {
       expect(link).not.toHaveAttribute("aria-current");
     }
+  });
+
+  // WARP-2966 — the rail used to key its active state off `pathname ===
+  // "/files"` alone, so following a library and then opening Recent dropped
+  // the highlight entirely: the rail stayed on screen (it reveals on every
+  // /files/* route) while claiming the user was in no library at all.
+  it.each(["/files/recents", "/files/shared", "/files/trash", "/files/favorites"])(
+    "keeps the library lit on %s when the URL names one",
+    (pathname) => {
+      search = new URLSearchParams("space=dept:clinical");
+      renderNav(pathname);
+      expect(screen.getByRole("link", { name: /Clinical/ })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      expect(screen.getByRole("link", { name: /Billing/ })).not.toHaveAttribute(
+        "aria-current",
+      );
+    },
+  );
+
+  it("does not light a library on a route outside Files", () => {
+    search = new URLSearchParams("space=dept:clinical");
+    renderNav("/filesystem");
+    for (const link of screen.getAllByRole("link")) {
+      expect(link).not.toHaveAttribute("aria-current");
+    }
+  });
+});
+
+// WARP-2966 — the rail sits directly beneath the section's three sub-nav
+// rows, at the same indent, so its caption read as a fourth row rather than
+// the head of a different kind of list. A hairline is what separates the
+// places you can be from the libraries you can be in.
+describe("the Libraries group is visually separated from the sub-nav above it", () => {
+  it("carries a hairline above its caption", () => {
+    renderNav();
+    const rail = screen.getByRole("navigation", { name: "Libraries" });
+    // The rule lives in the sheet (`.files-rail-group`), like every other
+    // colour here — the sidebar renders above every page scope, so an inline
+    // `var()` would be a dropped declaration rather than a colour.
+    expect(rail.className).toMatch(/\bfiles-rail-group\b/);
+    // And it needs air on both sides, or it reads as an underline on the row
+    // above rather than a divider.
+    expect(rail.className).toMatch(/\bpt-\d/);
+    expect(rail.className).toMatch(/\bmt-\d/);
   });
 });
 

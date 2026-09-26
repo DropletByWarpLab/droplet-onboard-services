@@ -101,6 +101,7 @@ import {
   recordNotification,
 } from "./notifications.service.js";
 import { createLogger } from "../lib/logger.js";
+import { isUserIdShaped } from "@droplet/auth-policy";
 
 const logger = createLogger("activity-notify");
 
@@ -216,13 +217,45 @@ function tally(words: string[]): string {
 }
 
 interface Outgoing {
-  /** NotificationLog.userId is a USERNAME, not a User.id — the MQTT topic
+  /** NotificationLog.username is a USERNAME, not a User.id — the MQTT topic
    *  ws-bridge subscribes to is `droplet/notifications/{username}`
    *  (ws-bridge.service.ts) and routes/notifications.ts keys the panel the
    *  same way. Same clause as team-chat-reminders.service.ts. */
   username: string;
   title: string;
   body: string;
+}
+
+/**
+ * WARP-2911 — the username a resolved recipient can actually be notified on,
+ * or null.
+ *
+ * Null for a recipient with no directory row (deleted since the activity was
+ * written — not an error), and for an account whose username has the shape of
+ * a `User.id`. Such an account predates creation refusing that shape
+ * (auth-policy `isReservedUserId`), and every notification entry point refuses
+ * it. Handed to `recordNotification` inside the claim transaction, that
+ * refusal rolled back the WHOLE batch — every recipient's notification, on
+ * every 60 s tick, forever, and (PM runs first) the CRM sweep with it. So it
+ * is dropped HERE, before the transaction, and LOUDLY; a row left with no
+ * recipient then takes the same explicit `not_needed` terminal as any other
+ * undeliverable row, instead of sitting pending to fail again next tick.
+ */
+function deliverableUsername(
+  table: "pmActivity" | "crmActivity",
+  userId: string,
+  usernames: ReadonlyMap<string, string>,
+): string | null {
+  const username = usernames.get(userId);
+  if (!username) return null;
+  if (isUserIdShaped(username)) {
+    logger.error(
+      { table, userId, username, code: "NOTIFICATION_RECIPIENT_IS_ID" },
+      "activity-notify: a recipient's username has the shape of a User.id and cannot be notified — skipped; rename the account",
+    );
+    return null;
+  }
+  return username;
 }
 
 /**
@@ -283,7 +316,7 @@ async function claimAndNotify(
     const ids: string[] = [];
     for (const o of outgoing) {
       const log = await recordNotification(tx, {
-        userId: o.username,
+        username: o.username,
         kind: "event",
         title: o.title,
         body: o.body,
@@ -301,8 +334,11 @@ async function claimAndNotify(
   const delivered: string[] = [];
   const failed: string[] = [];
   outgoing.forEach((o, i) => {
+    // WARP-2804 — the toast carries the id of the row recorded for it in the
+    // claim transaction, so the toaster can acknowledge exactly this one.
     const { channels } = publishNotificationToast({
-      userId: o.username,
+      id: logIds[i]!,
+      username: o.username,
       kind: "event",
       title: o.title,
       body: o.body,
@@ -461,10 +497,10 @@ async function sweepPm(
   const outgoing: Outgoing[] = [];
   const reached = new Set<string>();
   for (const [userId, list] of perUser) {
-    const username = usernames.get(userId);
+    const username = deliverableUsername("pmActivity", userId, usernames);
     if (!username) {
-      // A recipient with no directory row (deleted since the activity was
-      // written). Not an error; their rows simply have one fewer recipient.
+      // Deleted since the activity was written, or not notifiable (see
+      // deliverableUsername). Their rows simply have one fewer recipient.
       continue;
     }
     for (const r of list) reached.add(r.id);
@@ -576,7 +612,7 @@ async function sweepCrm(
   const outgoing: Outgoing[] = [];
   const sendIds: string[] = [];
   for (const [userId, list] of perUser) {
-    const username = usernames.get(userId);
+    const username = deliverableUsername("crmActivity", userId, usernames);
     if (!username) continue;
     for (const item of list) sendIds.push(item.id);
     if (list.length === 1) {
