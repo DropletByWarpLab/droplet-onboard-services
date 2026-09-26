@@ -934,6 +934,26 @@ else
 fi
 
 # =============================================================================
+# Test 24: WARP-3193 SEC-DATA-14 — the OpenWrt overlay ships no Wi-Fi PSK
+# =============================================================================
+# openwrt/files/etc/config/wireless is copied verbatim into every image built
+# from it, so any `option key` there is one PSK shared by every such box. The
+# single-box shape generates a per-box PSK at runtime; the overlay's AP
+# sections ship with a blank key and `disabled '1'`.
+# MUTATION: set default_radio3's key back to 'ChangeMe!2024'.
+_WIRELESS="$REPO_ROOT/openwrt/files/etc/config/wireless"
+_psk_bad=$(awk '
+  /^config /             { sec=$3; iface=($2=="wifi-iface"); next }
+  iface && /^[[:space:]]*option key /  { k=$0; sub(/^[^'"'"']*'"'"'/, "", k); sub(/'"'"'.*$/, "", k); if (k != "") print sec " has a static key" }
+  iface && /^[[:space:]]*option disabled .0./ { print sec " is enabled" }
+' "$_WIRELESS")
+if [ -z "$_psk_bad" ]; then
+  pass "openwrt overlay: every AP ships disabled with no static PSK (SEC-DATA-14)"
+else
+  fail "openwrt overlay ships a static/enabled Wi-Fi AP (SEC-DATA-14): $(printf '%s' "$_psk_bad" | tr '\n' ';')"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
