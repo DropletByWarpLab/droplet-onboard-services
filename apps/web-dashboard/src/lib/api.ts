@@ -715,7 +715,7 @@ export async function deleteUser(username: string): Promise<{ deletionDueAt: str
   const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ disposition: "retain" }),
+    body: JSON.stringify({ disposition: "retention" }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || `Failed to delete user: ${res.status}`);

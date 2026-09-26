@@ -204,6 +204,17 @@ function createPrismaMock(seed: any[] = []) {
           const allowed = typeof del === "string" ? [del] : del.in;
           if (!allowed.includes(u.deletionStatus)) continue;
         }
+        // The nightly claim: OR of { status, due <= now } branches.
+        if (
+          where.OR &&
+          !where.OR.some(
+            (c: any) =>
+              u.deletionStatus === c.deletionStatus &&
+              (c.deletionDueAt === undefined || u.deletionDueAt <= c.deletionDueAt.lte),
+          )
+        ) {
+          continue;
+        }
         users[i] = { ...u, ...data };
         count += 1;
       }
@@ -292,7 +303,7 @@ function seededAlice() {
   };
 }
 
-const RETAIN = { disposition: "retain" };
+const RETAIN = { disposition: "retention" };
 function del(app: any, handle: string) {
   return request(app).delete(`/api/auth/users/${handle}`).send(RETAIN);
 }
@@ -316,13 +327,40 @@ beforeEach(() => {
 
 
 describe("DELETE /api/auth/users/:username — WARP-3113 schedules, never purges", () => {
-  it("refuses a bare DELETE (no disposition) and changes nothing", async () => {
+  it("a DELETE with no body (iOS/Mac on main) defaults to retention and the audit says so", async () => {
     const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
     const res = await request(buildApp(prisma)).delete("/api/auth/users/alice");
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("DELETE_NEEDS_DISPOSITION");
-    expect(prisma._users.find((u: any) => u.id === "u-alice").directoryStatus).toBe("ACTIVE");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("pending_deletion");
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      directoryStatus: "DEACTIVATED",
+      deletionStatus: "PENDING",
+    });
     expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User deletion scheduled",
+        refs: expect.objectContaining({
+          disposition: "retention",
+          dispositionDefaulted: true,
+          dispositionNote: "disposition defaulted: retention (client sent none)",
+        }),
+      }),
+    );
+  });
+
+  it("an explicit disposition is recorded as chosen, not defaulted; an unknown one is a 400", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const app = buildApp(prisma);
+    const bad = await request(app).delete("/api/auth/users/alice").send({ disposition: "purge_now" });
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe("UNKNOWN_DISPOSITION");
+    expect(prisma._users.find((u: any) => u.id === "u-alice").deletionStatus).toBe("NONE");
+
+    await del(app, "alice");
+    const row = vi.mocked(recordActivity).mock.calls.at(-1)![0] as any;
+    expect(row.refs).toMatchObject({ disposition: "retention", dispositionDefaulted: false });
+    expect(row.refs.dispositionNote).toBeUndefined();
   });
 
   it("revokes now, keeps the files, and marks PENDING 30 days out — audited with the actor", async () => {
@@ -350,7 +388,7 @@ describe("DELETE /api/auth/users/:username — WARP-3113 schedules, never purges
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
       expect.objectContaining({
         what: "User deletion scheduled",
-        refs: expect.objectContaining({ actor: "user-owner", targetUserId: "u-alice", disposition: "retain" }),
+        refs: expect.objectContaining({ actor: "user-owner", targetUserId: "u-alice", disposition: "retention" }),
         actor: expect.objectContaining({ type: "user" }),
       }),
     );
@@ -525,5 +563,58 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
     expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
     expect(nc.ncDeleteUser).not.toHaveBeenCalled();
     expect(prisma._users).toHaveLength(0);
+  });
+});
+
+describe("WARP-3113 review follow-ups", () => {
+  const due = (over: any = {}) => ({
+    ...seededAlice(),
+    directoryStatus: "DEACTIVATED",
+    deletionStatus: "PENDING",
+    deletionDueAt: new Date(Date.now() - DAY),
+    deletionRequestedBy: "user-owner",
+    ...over,
+  });
+
+  it("uses the person's Nextcloud login, not their username, to disable and to delete", async () => {
+    const row = { ...seededAlice(), username: "alice.m", nextcloudUsername: "amartin" };
+    const prisma = createPrismaMock([row, OWNER_ROW]);
+    expect((await del(buildApp(prisma), "amartin")).status).toBe(200);
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "amartin", false);
+
+    prisma._users.find((u: any) => u.id === "u-alice").deletionDueAt = new Date(Date.now() - DAY);
+    await purgeDueDeletions(prisma);
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "amartin");
+  });
+
+  it("scheduling denylists access tokens and runs the shared disable step ('User disabled')", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    await del(buildApp(prisma), "alice");
+    expect(denylistUserMock).toHaveBeenCalledWith("u-alice", expect.any(Number));
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "User disabled", refs: expect.objectContaining({ targetUserId: "u-alice" }) }),
+    );
+  });
+
+  it.todo("WARP-3160: scheduling revokes the person's overlay devices (revokeOverlayDevicesForUser, once #2403 is on stage)");
+
+  it("the job skips an ACTIVE row even if it is marked PENDING", async () => {
+    const prisma = createPrismaMock([due({ directoryStatus: "ACTIVE" })]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(prisma._users).toHaveLength(1);
+  });
+
+  it("the claim re-checks the due date: a cancel + re-delete after the job's read is not purged early", async () => {
+    const prisma = createPrismaMock([due()]);
+    // The job read a stale snapshot (due yesterday); meanwhile an admin
+    // cancelled and deleted again, so the stored date is 30 days out.
+    const stale = prisma._users.map((u: any) => ({ ...u }));
+    prisma.user.findMany.mockResolvedValueOnce(stale);
+    prisma._users[0].deletionDueAt = new Date(Date.now() + 30 * DAY);
+
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(prisma._users[0].deletionStatus).toBe("PENDING");
   });
 });

@@ -277,7 +277,15 @@ export async function deactivateUser(prisma: PrismaClient, id: string): Promise<
 export async function reactivateUser(prisma: PrismaClient, id: string): Promise<User | null> {
   const existing = await prisma.user.findUnique({ where: { id } });
   if (!existing) return null;
-  return prisma.user.update({ where: { id }, data: { directoryStatus: "ACTIVE" } });
+  // WARP-3113: pinned to NONE, as the dashboard enable is. A person
+  // scheduled for deletion (PENDING, or PURGING under the nightly job) is
+  // not brought back by the IdP; an admin cancels the deletion first.
+  const reactivated = await prisma.user.updateMany({
+    where: { id, deletionStatus: "NONE" },
+    data: { directoryStatus: "ACTIVE" },
+  });
+  if (reactivated.count === 0) throw RoleMutationRefusedError.deletionPending();
+  return prisma.user.findUnique({ where: { id } });
 }
 
 /** Apply a SCIM PATCH/PUT `active` change by id (true → ACTIVE, false →

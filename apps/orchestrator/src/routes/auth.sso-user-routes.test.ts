@@ -418,7 +418,7 @@ describe("PUT /api/auth/users/:username", () => {
 
 // WARP-3113: Delete schedules (files kept 30 days); the nightly job removes
 // the account — covered in auth.directory-deleteuser.test.ts.
-const RETAIN = { disposition: "retain" };
+const RETAIN = { disposition: "retention" };
 
 describe("DELETE /api/auth/users/:username", () => {
   it("local account: revoked now, Nextcloud login disabled, deletion scheduled, nothing purged", async () => {

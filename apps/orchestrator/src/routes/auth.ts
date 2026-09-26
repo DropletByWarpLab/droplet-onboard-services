@@ -60,16 +60,13 @@ import {
   assertRoleAssignable,
   assertRoleChangeAllowed,
   assertDirectoryEditAllowed,
-  assertRemovalAllowed,
   assertDisableAllowed,
   assertSessionRevokeAllowed,
   assertAssignableForCreate,
-  assertRemovalInvariantsTx,
   assertDisableInvariantsTx,
   readGuardTargetTx,
   isConcurrencyConflict,
   SERIALIZABLE_TX,
-  runRemovalPostEffects,
   runDisablePostEffects,
   type NcMirror,
 } from "../services/role-mutation-guard.service.js";
@@ -121,7 +118,7 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
 // before OCS is asked to provision an admin-tier account into it.
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
-import { deletionDueAt } from "../services/leaver-deletion.service.js";
+import { deleteDispositionSchema, scheduleUserDeletion } from "../services/leaver-deletion.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -314,9 +311,6 @@ const recoveryConsumeSchema = z.object({
 // Role enum so the DB column (now typed as `Role`) and the request body
 // share a vocabulary. The shared `inviteRoleField` is declared above
 // createUserSchema (WARP-1042 reuses it for direct user creation).
-// WARP-3113 — Delete must say what happens to the leaver's files. Only
-// "retain" (30 days, then purge) exists until hand-over lands.
-const deleteUserSchema = z.object({ disposition: z.literal("retain") });
 
 const createInviteSchema = z.object({
   displayName: z.string().min(1).max(128).optional(),
@@ -3726,13 +3720,7 @@ export function createProtectedAuthRouter(
             where: { id: row.id, deletionStatus: "NONE" },
             data: { directoryStatus: "ACTIVE" },
           });
-          if (reactivated.count === 0) {
-            res.status(409).json({
-              error: "This person is scheduled for deletion. Cancel the deletion first.",
-              code: "DELETION_PENDING",
-            });
-            return;
-          }
+          if (reactivated.count === 0) throw RoleMutationRefusedError.deletionPending();
         }
         const ncUsername = row ? row.nextcloudUsername : req.params.username;
         let ncMirror: NcMirror = "no_account";
@@ -3758,6 +3746,10 @@ export function createProtectedAuthRouter(
         });
         res.json({ status: "enabled", username: req.params.username, ncMirror });
       } catch (err: any) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
         if (err.message?.includes("403") || err.message?.includes("997")) {
           res.status(403).json({ error: "Admin access required" });
           return;
@@ -3910,7 +3902,7 @@ export function createProtectedAuthRouter(
   // ── Delete user (admin only) ──
   // WARP-3113: Delete no longer purges on the spot. An employee's work files
   // belong to the business, so the request must say what happens to them:
-  // `{ disposition: "retain" }` keeps everything for RETENTION_DAYS, then the
+  // `{ disposition: "retention" }` keeps everything for RETENTION_DAYS, then the
   // nightly leaver-deletion job (leaver-deletion.service.ts) completes the
   // removal. Until then an admin can cancel. Hand-over to a recipient is not
   // available yet (see that service's header), so it is the only disposition.
@@ -3918,18 +3910,19 @@ export function createProtectedAuthRouter(
   // What happens NOW is the revocation: the same guarded, SERIALIZABLE write
   // Deactivate makes (WARP-1526 rails 1/2/4/5, directoryStatus=DEACTIVATED),
   // plus the pending-deletion mark in the same transaction, then the
-  // Nextcloud enable-flag mirror and session revocation. A bare DELETE with
-  // no disposition is refused (400) so no client purges a leaver's files by
-  // accident.
+  // Nextcloud enable-flag mirror and session revocation. A DELETE with no
+  // disposition (iOS and the Mac on main send none) gets "retention", the
+  // non-destructive, cancellable option, and the audit row says it was
+  // defaulted, so the choice is recorded rather than guessed. An unknown
+  // disposition is still a 400.
   // WARP-171: per-route guard. owner + admin only.
   router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const parsed = deleteUserSchema.safeParse(req.body ?? {});
+      const parsed = deleteDispositionSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
         res.status(400).json({
-          error:
-            "Choose what happens to this person's files: keep them for 30 days, then delete.",
-          code: "DELETE_NEEDS_DISPOSITION",
+          error: "Unknown disposition. The only one available is \"retention\" (keep the files 30 days, then delete).",
+          code: "UNKNOWN_DISPOSITION",
         });
         return;
       }
@@ -3946,76 +3939,18 @@ export function createProtectedAuthRouter(
         });
         return;
       }
-      if (row.deletionStatus === "PENDING" || row.deletionStatus === "PURGING") {
-        // Idempotent: never extends the date an earlier request set.
-        res.json({
-          status: "pending_deletion",
-          username: req.params.username,
-          deletionDueAt: row.deletionDueAt,
-        });
-        return;
-      }
-      assertRemovalAllowed({
-        actor: { id: req.user?.id, role: req.user?.role },
-        target: row,
-      });
-      const dueAt = deletionDueAt(new Date());
-      await prisma.$transaction(async (tx) => {
-        const fresh = await readGuardTargetTx(tx, row.id);
-        if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
-        await assertRemovalInvariantsTx(tx, { target: fresh });
-        await tx.user.update({
-          where: { id: fresh.id, role: fresh.role },
-          data: {
-            directoryStatus: "DEACTIVATED",
-            deletionStatus: "PENDING",
-            deletionDueAt: dueAt,
-            deletionRequestedBy: req.user?.username ?? null,
-          },
-        });
-      }, SERIALIZABLE_TX);
-
-      // Nextcloud is proxied without orchestrator auth in front, so the
-      // enable flag is what cuts off WebDAV/desktop sync during retention.
-      // Best-effort, as on disable: the reconciler's mirror pass converges it.
-      let ncMirror: NcMirror = "no_account";
-      if (row.nextcloudUsername !== null) {
-        try {
-          await ncSetUserEnabled(adminBasicToken(), row.nextcloudUsername, false);
-          ncMirror = "synced";
-        } catch (err) {
-          ncMirror = "failed";
-          logger.error(
-            { err, username: req.params.username },
-            "schedule deletion: Nextcloud disable mirror failed (non-blocking)",
-          );
-        }
-      }
-      const sessionsRevoked = await revokeAllSessions(row.id);
-      await recordActivity({
-        kind: "auth",
-        severity: "warn",
-        sourceIcon: "user-x",
-        what: "User deletion scheduled",
-        sub: `${row.username} · files kept until ${dueAt.toISOString().slice(0, 10)}`,
-        refs: {
-          actor: req.user?.username ?? null,
-          targetUserId: row.id,
-          targetUsername: row.username,
-          role: row.role,
-          disposition: parsed.data.disposition,
-          sessionsRevoked,
-          deletionDueAt: dueAt.toISOString(),
-          ncMirror,
-        },
+      const scheduled = await scheduleUserDeletion(prisma, row, {
+        guardActor: { id: req.user?.id, role: req.user?.role },
+        actorUsername: req.user?.username ?? null,
         actor: actorFromRequest(req),
+        disposition: parsed.data.disposition ?? "retention",
+        dispositionDefaulted: parsed.data.disposition === undefined,
       });
-
       res.json({
         status: "pending_deletion",
         username: req.params.username,
-        deletionDueAt: dueAt,
-        ncMirror,
+        deletionDueAt: scheduled.deletionDueAt,
+        ...(scheduled.ncMirror ? { ncMirror: scheduled.ncMirror } : {}),
       });
     } catch (err) {
       if (err instanceof RoleMutationRefusedError) {

@@ -123,6 +123,18 @@ function createPrismaMock(seed: UserRow[] = []) {
   self.$transaction = seam.$transaction;
 
   self.user = {
+    // WARP-3113: reactivation is pinned to deletionStatus NONE (a missing
+    // field on a seeded row reads as NONE, the column default).
+    updateMany: vi.fn(async ({ where, data }: { where: any; data: any }) => {
+      const u = self._users.find(
+        (x: any) =>
+          x.id === where.id &&
+          (where.deletionStatus === undefined || (x.deletionStatus ?? "NONE") === where.deletionStatus),
+      );
+      if (!u) return { count: 0 };
+      Object.assign(u, data);
+      return { count: 1 };
+    }),
     findUnique: vi.fn(async ({ where }: { where: any }) => {
       // WARP-233: provisioning resolves users through the blind index.
       if (where.emailLookupHash !== undefined)
@@ -328,6 +340,21 @@ describe("provisionUser — create-or-update by normalized email, idempotent", (
     const { user } = await provisionUser(prisma, { email: "x@acme.test", displayName: "X", active: false, externalId: "okta-5" });
     expect(user.directoryStatus).toBe("DEACTIVATED");
     expect(prisma._users).toHaveLength(1);
+  });
+});
+
+describe("WARP-3113 — the IdP cannot reactivate a person scheduled for deletion", () => {
+  it.each(["PENDING", "PURGING"])("active:true on a %s row → 409 DELETION_PENDING, row unchanged", async (status) => {
+    const prisma = createPrismaMock([
+      {
+        id: "u-leaver", username: "leaver", nextcloudUsername: null, displayName: "Leaver",
+        email: "leaver@acme.test", passwordHash: null, role: "family", isLocal: true,
+        directoryStatus: "DEACTIVATED", deletionStatus: status,
+        createdAt: new Date(), updatedAt: new Date(),
+      } as any,
+    ]);
+    await expect(reactivateUser(prisma, "u-leaver")).rejects.toMatchObject({ code: "DELETION_PENDING", status: 409 });
+    expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
   });
 });
 

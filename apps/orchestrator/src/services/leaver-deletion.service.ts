@@ -14,13 +14,26 @@
  * do today without a design choice; tracked as WARP-3169.
  */
 import type { PrismaClient } from "@prisma/client";
-import { ncDeleteUser } from "./nextcloud.client.js";
+import { z } from "zod";
+import { ncDeleteUser, ncSetUserEnabled } from "./nextcloud.client.js";
 import { adminBasicToken } from "./department-provisioner.service.js";
 import { purgeUserData } from "./brain-memory.service.js";
 import { purgeM365ForUser } from "./m365/m365-auth.service.js";
-import { runRemovalPostEffects, type NcMirror } from "./role-mutation-guard.service.js";
+import {
+  assertRemovalAllowed,
+  assertRemovalInvariantsTx,
+  readGuardTargetTx,
+  RoleMutationRefusedError,
+  runDisablePostEffects,
+  runRemovalPostEffects,
+  SERIALIZABLE_TX,
+  type GuardActor,
+  type NcMirror,
+} from "./role-mutation-guard.service.js";
 import type { ActivityActor } from "./activity.service.js";
-import type { Role } from "./jwt.service.js";
+import { ACCESS_TOKEN_TTL_SECONDS, type Role } from "./jwt.service.js";
+import { denylistUser } from "./auth-denylist.service.js";
+import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("leaver-deletion");
@@ -37,6 +50,112 @@ interface RemovableRow {
   username: string;
   nextcloudUsername: string | null;
   role: Role;
+}
+
+/** The one disposition that exists until hand-over lands (WARP-3169). */
+export type DeletionDisposition = "retention";
+
+/** A delete request's body. `disposition` is optional: a client that sends
+ *  none (iOS and the Mac on main) gets "retention", recorded as defaulted. An
+ *  unknown value is refused by the routes (400 UNKNOWN_DISPOSITION). */
+export const deleteDispositionSchema = z.object({
+  disposition: z.enum(["retention"]).optional(),
+});
+
+/**
+ * Schedule a person's deletion — THE path for every delete surface
+ * (DELETE /api/auth/users/:username and DELETE /api/people/:id).
+ *
+ * Revocation happens now, exactly as Deactivate does it: the WARP-1526
+ * removal rails, then DEACTIVATED + PENDING in one SERIALIZABLE write pinned
+ * to the evaluated role, then the Nextcloud enable-flag mirror (WebDAV and
+ * sync are proxied without orchestrator auth, so this is what cuts them) and
+ * the SAME shared disable post-effects the disable route runs
+ * (`runDisablePostEffects`: sessions + the "User disabled" row, and whatever
+ * else hooks that step). Plus the access-token denylist, as the old
+ * immediate delete had, so a sid-less token doesn't live out its TTL.
+ * Nothing is purged here. Idempotent: an already-scheduled person keeps the
+ * first date.
+ *
+ * Throws RoleMutationRefusedError on a rail refusal or a lost race.
+ */
+export async function scheduleUserDeletion(
+  prisma: PrismaClient,
+  target: RemovableRow & { deletionStatus?: string | null; deletionDueAt?: Date | null },
+  req: {
+    guardActor: GuardActor;
+    actorUsername: string | null;
+    actor: ActivityActor;
+    disposition: DeletionDisposition;
+    /** True when the client sent no disposition and the box chose retention. */
+    dispositionDefaulted: boolean;
+  },
+): Promise<{ deletionDueAt: Date; ncMirror: NcMirror | null; alreadyScheduled: boolean }> {
+  if (target.deletionStatus === "PENDING" || target.deletionStatus === "PURGING") {
+    return { deletionDueAt: target.deletionDueAt as Date, ncMirror: null, alreadyScheduled: true };
+  }
+  assertRemovalAllowed({ actor: req.guardActor, target });
+  const dueAt = deletionDueAt(new Date());
+  await prisma.$transaction(async (tx) => {
+    const fresh = await readGuardTargetTx(tx, target.id);
+    if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+    await assertRemovalInvariantsTx(tx, { target: fresh });
+    await tx.user.update({
+      where: { id: fresh.id, role: fresh.role },
+      data: {
+        directoryStatus: "DEACTIVATED",
+        deletionStatus: "PENDING",
+        deletionDueAt: dueAt,
+        deletionRequestedBy: req.actorUsername,
+      },
+    });
+  }, SERIALIZABLE_TX);
+
+  // Best-effort, as on disable: the reconciler's mirror pass converges it.
+  let ncMirror: NcMirror = "no_account";
+  if (target.nextcloudUsername !== null) {
+    try {
+      await ncSetUserEnabled(adminBasicToken(), target.nextcloudUsername, false);
+      ncMirror = "synced";
+    } catch (err) {
+      ncMirror = "failed";
+      logger.error(
+        { err, username: target.username },
+        "schedule deletion: Nextcloud disable mirror failed (non-blocking)",
+      );
+    }
+  }
+  await runDisablePostEffects({
+    targetUserId: target.id,
+    username: target.username,
+    actor: req.actor,
+    ncMirror,
+  });
+  await denylistUser(target.id, ACCESS_TOKEN_TTL_SECONDS);
+  // WARP-3160: call revokeOverlayDevicesForUser once #2403 is on stage
+  // (a scheduled leaver's overlay/VPN devices are revoked now, not at purge).
+  await recordActivity({
+    kind: "auth",
+    severity: "warn",
+    sourceIcon: "user-x",
+    what: "User deletion scheduled",
+    sub: `${target.username} · files kept until ${dueAt.toISOString().slice(0, 10)}`,
+    refs: {
+      actor: req.actorUsername,
+      targetUserId: target.id,
+      targetUsername: target.username,
+      role: target.role,
+      disposition: req.disposition,
+      dispositionDefaulted: req.dispositionDefaulted,
+      ...(req.dispositionDefaulted
+        ? { dispositionNote: "disposition defaulted: retention (client sent none)" }
+        : {}),
+      deletionDueAt: dueAt.toISOString(),
+      ncMirror,
+    },
+    actor: req.actor,
+  });
+  return { deletionDueAt: dueAt, ncMirror, alreadyScheduled: false };
 }
 
 /**
@@ -97,6 +216,8 @@ export async function completeUserDeletion(
     }
   }
 
+  // WARP-3160: call revokeOverlayDevicesForUser once #2403 is on stage
+  // (or pass #2403's `devices` field here).
   await runRemovalPostEffects({
     targetUserId: row.id,
     targetUsername: row.username,
@@ -139,15 +260,20 @@ export async function purgeDueDeletions(
     try {
       // Claim: a cancel matches PENDING only, so once this lands the cancel
       // refuses and the removal cannot be half-undone.
+      // The due date is re-checked here, not trusted from the read: a
+      // cancel + re-delete between the read and this claim sets a NEW date.
       const claim = await prisma.user.updateMany({
         where: {
           id: row.id,
           directoryStatus: "DEACTIVATED",
-          deletionStatus: { in: ["PENDING", "PURGING"] },
+          OR: [
+            { deletionStatus: "PENDING", deletionDueAt: { lte: now } },
+            { deletionStatus: "PURGING" },
+          ],
         },
         data: { deletionStatus: "PURGING" },
       });
-      if (claim.count === 0) continue; // cancelled since the read
+      if (claim.count === 0) continue; // cancelled or re-scheduled since the read
       await completeUserDeletion(prisma, row as RemovableRow, {
         actor: { type: "system" },
         // Who asked for it 30 days ago — the job is only the clock.
