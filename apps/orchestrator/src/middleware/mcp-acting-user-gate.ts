@@ -8,9 +8,9 @@
  * MCP, but a caller that reaches the MCP server any other way (its HTTP
  * transport takes any orchestrator access token and runs only the write-tier
  * RBAC) arrives here unchecked. This gate closes that at the data boundary for
- * one tool domain: it resolves the ACTING user and asks the same question the
- * dispatch check asks — is `domain` in their scope, and for a write, may they
- * write it?
+ * each domain in `MCP_ACTING_USER_GATED_DOMAINS` (module-mounts.ts): it
+ * resolves the ACTING user and asks the same question the dispatch check asks
+ * — is `domain` in their scope, and for a write, may they write it?
  *
  * Identity: mcp-server stamps `X-Nextcloud-User` on every orchestrator call
  * (services/mcp-server/src/context.ts `withActingUser`). It is trusted ONLY
@@ -27,6 +27,11 @@
  *
  * Two questions, both about the acting person:
  *   1. the tool scope — is `domain` in their §3 reach (a write needs `use`)?
+ *      The method stands in for "a write": a GET is a read tool's hop. Where
+ *      the domain has NO read tool (`team_chat`: both tools send, and both
+ *      read the roster by GET first), every hop is some write tool's, so
+ *      every method needs `use` (WARP-3162). Otherwise a `view` grant, which
+ *      reaches none of that domain's tools, would still clear its GETs.
  *   2. the feature — ONLY where the browser asks it: when the module serving
  *      this prefix is in FEATURE_GATED_MODULES (module-mounts.ts), the acting
  *      person must hold it, the same check `requireFeatureAccess` makes of a
@@ -74,6 +79,7 @@ import {
 import type { EffectiveAccessResolver } from "./feature-gate.js";
 import { recordAccessDenied } from "./auth.js";
 import { createLogger } from "../lib/logger.js";
+import { readableDomains, toolLayers } from "../services/tool-layers.service.js";
 
 const logger = createLogger("mcp-acting-user-gate");
 
@@ -132,6 +138,9 @@ export function requireMcpActingUserToolDomain(
     logger.warn({ domain, reason }, "mcp_acting_user_denied");
     res.status(404).json({ error: "module_disabled", module: moduleId });
   }
+  // WARP-3162 — compiled catalog only: a runtime (remote MCP) tool never hops
+  // an orchestrator route, so it cannot make a request this gate sees.
+  const everyToolWrites = !readableDomains(toolLayers()).has(domain);
 
   return async function mcpActingUserGate(
     req: Request,
@@ -143,6 +152,18 @@ export function requireMcpActingUserToolDomain(
       return;
     }
     const asserted = (req.header("x-nextcloud-user") ?? "").trim();
+    // WARP-3162 — routes/team-chat.ts acts for `X-Droplet-User`, not the
+    // header this gate resolves. The mcp-server sets both from the same
+    // `ctx.userId` (`withActingUser`, and the team-chat handlers'
+    // `actingHeaders`), so on a real call they are equal. When they are not,
+    // this gate would clear one person while the route acts for another:
+    // refuse. That includes an `X-Droplet-User` with no `X-Nextcloud-User`,
+    // which would otherwise pass below as a call that names nobody.
+    const forwarded = (req.header("x-droplet-user") ?? "").trim();
+    if (forwarded && forwarded !== asserted) {
+      deny(req, res, "acting_user_headers_disagree");
+      return;
+    }
     if (!asserted) {
       next();
       return;
@@ -161,11 +182,10 @@ export function requireMcpActingUserToolDomain(
     }
     const scope = access.scope;
     if (scope !== null) {
-      const allowed = READ_METHODS.has(req.method)
-        ? scope.domains.has(domain)
-        : scope.writeDomains.has(domain);
+      const write = everyToolWrites || !READ_METHODS.has(req.method);
+      const allowed = write ? scope.writeDomains.has(domain) : scope.domains.has(domain);
       if (!allowed) {
-        deny(req, res, READ_METHODS.has(req.method) ? "domain_not_in_scope" : "domain_not_writable");
+        deny(req, res, write ? "domain_not_writable" : "domain_not_in_scope");
         return;
       }
     }

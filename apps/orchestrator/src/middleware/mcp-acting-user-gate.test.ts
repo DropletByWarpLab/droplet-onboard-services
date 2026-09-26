@@ -67,7 +67,7 @@ function appAs(
     next();
   });
   mountMcpActingUserGates(app, resolve, features);
-  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x"]) {
+  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x", "/api/team-chat/contacts"]) {
     app.get(path, (_q, res) => { res.json({ hit: path }); });
     app.post(path, (_q, res) => { res.json({ hit: path }); });
   }
@@ -142,6 +142,81 @@ describe("mcp acting-user gate — the acting user's scope decides", () => {
     };
     const res = await request(appAs(MCP, throwing)).get("/api/crm/companies").set("X-Nextcloud-User", "sam");
     expect(res.status).toBe(404);
+  });
+});
+
+// WARP-3162 — the method stands in for "a write" only where the domain has a
+// read tool. Both team_chat tools send, and both read the roster by GET first,
+// so every team_chat hop is a write tool's: a `view` grant (which reaches
+// neither tool in chat) must not clear the GET either.
+describe("mcp acting-user gate — a domain with no read tool needs `use` on every method", () => {
+  it("team_chat `view`: the roster GET and the writes are 404 module_disabled (team_chat)", async () => {
+    resolveMock.mockResolvedValue(ok(scope(["team_chat"])));
+    const app = appAs(MCP);
+    const read = await request(app).get("/api/team-chat/contacts").set("X-Nextcloud-User", "sam");
+    expect(read.status).toBe(404);
+    expect(read.body).toEqual({ error: "module_disabled", module: "team_chat" });
+    expect((await request(app).post("/api/team-chat/contacts").set("X-Nextcloud-User", "sam")).status).toBe(404);
+  });
+
+  it("team_chat `use`: the roster GET and the writes pass", async () => {
+    resolveMock.mockResolvedValue(ok(scope(["team_chat"], ["team_chat"])));
+    const app = appAs(MCP);
+    expect((await request(app).get("/api/team-chat/contacts").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    expect((await request(app).post("/api/team-chat/contacts").set("X-Nextcloud-User", "sam")).status).toBe(200);
+  });
+
+  it("a domain that has read tools still reads on `view` (business)", async () => {
+    resolveMock.mockResolvedValue(ok(scope(["business", "team_chat"])));
+    const app = appAs(MCP);
+    expect((await request(app).get("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    expect((await request(app).get("/api/team-chat/contacts").set("X-Nextcloud-User", "sam")).status).toBe(404);
+  });
+
+  it("of the gated domains, only team_chat has no read tool", () => {
+    const writeOnly = MCP_ACTING_USER_GATED_DOMAINS.filter((d) =>
+      TOOL_CATALOG.filter((t) => t.domain === d).every((t) => t.requiresWrite),
+    );
+    expect(writeOnly).toEqual(["team_chat"]);
+  });
+});
+
+// WARP-3162 — routes/team-chat.ts (like routes/email.ts) acts for
+// X-Droplet-User; the gate resolves X-Nextcloud-User. The mcp-server sets both
+// from ctx.userId, so a disagreement is never a real tool call.
+describe("mcp acting-user gate — X-Droplet-User must name the person the gate cleared", () => {
+  it("equal headers pass", async () => {
+    resolveMock.mockResolvedValue(ok(null));
+    const res = await request(appAs(MCP))
+      .post("/api/team-chat/contacts")
+      .set("X-Nextcloud-User", "sam")
+      .set("X-Droplet-User", "sam");
+    expect(res.status).toBe(200);
+  });
+
+  it("a different X-Droplet-User is refused, before the resolver runs", async () => {
+    resolveMock.mockResolvedValue(ok(null));
+    const res = await request(appAs(MCP))
+      .post("/api/team-chat/contacts")
+      .set("X-Nextcloud-User", "sam")
+      .set("X-Droplet-User", "fran");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "team_chat" });
+    expect(resolveMock).not.toHaveBeenCalled();
+  });
+
+  it("an X-Droplet-User with no X-Nextcloud-User is refused (it would otherwise pass as naming nobody)", async () => {
+    const res = await request(appAs(MCP)).post("/api/team-chat/contacts").set("X-Droplet-User", "fran");
+    expect(res.status).toBe(404);
+    expect(resolveMock).not.toHaveBeenCalled();
+  });
+
+  it("a human's mismatched headers are ignored — the gate never applies to them", async () => {
+    const res = await request(appAs({ id: "u-1", role: "admin" }))
+      .post("/api/team-chat/contacts")
+      .set("X-Nextcloud-User", "sam")
+      .set("X-Droplet-User", "fran");
+    expect(res.status).toBe(200);
   });
 });
 
@@ -309,9 +384,13 @@ describe("mcp acting-user gate — app.ts wiring", () => {
 // The gate refuses by route prefix, not by tool name, so it is only sound if
 // every tool hop under a gated module's prefixes belongs to the gated domain —
 // otherwise it would silently kill another domain's tool — and if reads are
-// GET and writes are not, since the write check keys off the method.
+// GET and writes are not, since the write check keys off the method. The one
+// exception is a domain with no read tool (WARP-3162): the gate asks `use` of
+// every method there, so a write tool's GET is checked as the write it serves.
 const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   business: ["business_find GET /api/brain/digests", "business_find GET /api/brain/findings"],
+  // WARP-3162: every team_chat hop is under /api/team-chat.
+  team_chat: [],
 };
 
 describe("mcp acting-user gate — the route manifest agrees with it", () => {
@@ -338,11 +417,17 @@ describe("mcp acting-user gate — the route manifest agrees with it", () => {
       expect(outside).toEqual(OUTSIDE_GATED_PREFIXES[domain]);
     });
 
-    it(`${domain}: every such hop is a ${domain} tool, reads GET and writes non-GET`, () => {
+    it(`${domain}: every such hop is a ${domain} tool, reads GET and writes non-GET (or the domain has no read tool)`, () => {
+      const everyToolWrites = TOOL_CATALOG.filter((t) => t.domain === domain).every((t) => t.requiresWrite);
       for (const h of hops) {
         const entry = catalog.get(h.tool);
-        expect(entry?.domain, `${h.tool} ${h.method} ${h.pathPattern}`).toBe(domain);
-        expect(h.method === "get", `${h.tool} ${h.method} ${h.pathPattern}`).toBe(!entry!.requiresWrite);
+        const label = `${h.tool} ${h.method} ${h.pathPattern}`;
+        expect(entry?.domain, label).toBe(domain);
+        // A read tool's non-GET hop would need `use` and kill the tool for a
+        // `view` grant; a write tool's GET would clear on `view` — unless the
+        // gate asks `use` of every method in this domain.
+        if (!entry!.requiresWrite) expect(h.method, label).toBe("get");
+        else if (!everyToolWrites) expect(h.method, label).not.toBe("get");
       }
     });
   }

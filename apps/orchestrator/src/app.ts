@@ -430,7 +430,9 @@ export function createApp(
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the
-  // registry's /api/team-chat prefix.
+  // registry's /api/team-chat prefix. WARP-3162: the team-chat tools'
+  // `_service:mcp` calls reach this router only past `mountMcpActingUserGates`
+  // above (the acting person needs `team_chat` with `use`).
   app.use("/api", createTeamChatRouter(prisma));
   app.use("/api", createMemoryRouter(prisma));
   // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
