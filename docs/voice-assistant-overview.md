@@ -21,7 +21,7 @@ false-fire).
 
 On wake, the next utterance streams to a local Whisper container
 (wyoming-faster-whisper, small.en, int8 CPU) with an energy-based
-voice-activity detector that ends capture after 1.0 s of trailing silence
+voice-activity detector that ends capture after 0.6 s of trailing silence
 (hard cap 5 s). The transcript passes two local gates: an actionability
 filter (drops fragments like "uh" from residual false wakes) and an intent
 gate (a regex classifier — greetings, "what time is it", "who are you",
@@ -100,18 +100,35 @@ closest bundled phonetic shape, and `/voice/status` exposes
 ## Latency character
 
 - Wake: near-instant (sub-second, per-frame scoring).
-- Capture: your utterance plus a 1.0 s silence tail (max 5 s).
+- Capture: your utterance plus a 0.6 s silence tail (`VAD_SILENCE_S`, max
+  5 s).
 - STT: about 1 s (small.en int8).
 - LLM: the dominant cost — each agent iteration is a full local-model round
   trip (roughly 2–4 s on the box), max 2 iterations; intent-gated small talk
-  skips tools entirely and is fastest.
-- TTS and playback: roughly 1–2 s synthesis, then real-time speech.
+  skips tools entirely and is fastest. The reply streams (WARP-626): speech
+  starts once the first sentence has arrived, not after the whole reply.
+- TTS and playback: each sentence is synthesized as it completes, and the
+  next one is synthesized while the current one plays (synth-ahead,
+  WARP-3124), so there's no synthesis gap between sentences.
 
-Typical end to end: about 4–6 s for "what time is it", about 8–15 s for a
-tool question ("is the front camera online?"). Known improvement path:
-WARP-626 — voice calls the LLM with `stream: false`, so speech cannot start
-until the whole reply is done; streaming plus sentence-chunked TTS would
-roughly halve perceived latency.
+Typical end to end, as last measured: about 4–6 s for "what time is it" and
+about 8–15 s for a tool question ("is the front camera online?"). With
+streaming, the first words arrive well before the end. A tool question is two
+model round trips plus the tool call, and the orchestrator holds back the
+first round's text until it knows a tool fired (WARP-1602). So the box says a
+short cue, "Let me check.", the moment the tool call starts instead of sitting
+silent. If the model has to load first, the cue is "One moment." There is at
+most one cue per turn, never once the answer has begun. A cue is ordinary
+speech, so `/voice/status` reads `speaking` from the cue to the end of the
+answer, including the quiet stretch while the tool runs (there is still no
+separate thinking state).
+
+To see where a turn's time goes, every turn logs one `voice_turn_timing` line
+(wake to capture, capture, STT, first reply text, first audio, first answer
+audio and total, in ms, plus the cue, sentence count and error kind).
+`/voice/status` carries the same fields for the last turn as
+`last_turn_timing`. The plan and history are in
+`services/voice-io/docs/voice-latency-plan.md`.
 
 ## Privacy story
 
@@ -157,7 +174,8 @@ the device rather than opening a second stream on it.
    hardware mute-switch integration, a self-expiring "be quiet for an hour"
    pause, and a `mute_mic` tool the assistant could call on request
    (WARP-627, unbuilt).
-2. Non-streaming replies (WARP-626) — TTS waits for the full agent reply.
+2. Tool questions are still slow — two model round trips plus the tool call
+   (about 8–15 s). The spoken cue fills the silence but doesn't shorten it.
 3. Read-only tools — voice cannot control devices in v1.
 4. Almost no user-facing surface: the wizard step (WARP-1036) is the first;
    there is still no settings page and no status indicator.
