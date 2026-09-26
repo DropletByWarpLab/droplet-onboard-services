@@ -20,11 +20,37 @@ import cookieParser from "cookie-parser";
 
 vi.unmock("@prisma/client");
 
+// WARP-3193 SEC-AUTH-5 — besides the owner cookie, tokens that are validly
+// SIGNED but must not edit a set-up workspace: a lower role, a session whose
+// server-side record is gone (revoked), and a hard-revoked (denylisted) user.
 vi.mock("../services/jwt.service.js", () => ({
-  verifyAccessToken: (token: string) =>
-    token === "valid-session"
-      ? { sub: "u1", username: "owner", displayName: "Owner", role: "owner" }
-      : null,
+  verifyAccessToken: (token: string) => {
+    const base = { username: "x", displayName: "X" };
+    switch (token) {
+      case "valid-session":
+        return { sub: "u1", username: "owner", displayName: "Owner", role: "owner" };
+      case "admin-session":
+        return { ...base, sub: "u-admin", role: "admin", sid: "sid-live" };
+      case "guest-session":
+        return { ...base, sub: "u-guest", role: "guest", sid: "sid-live" };
+      case "revoked-owner-session":
+        return { ...base, sub: "u1", role: "owner", sid: "sid-dead" };
+      case "denied-owner-session":
+        return { ...base, sub: "u-denied", role: "owner", sid: "sid-live" };
+      default:
+        return null;
+    }
+  },
+}));
+vi.mock("../services/session.service.js", () => ({
+  checkSession: vi.fn(async (sid: string) =>
+    sid === "sid-dead"
+      ? { kind: "missing" }
+      : { kind: "ok", record: { userId: "u1", role: "owner", createdAt: 0, lastSeenAt: 0 } },
+  ),
+}));
+vi.mock("../services/auth-denylist.service.js", () => ({
+  isUserDenied: vi.fn(async (userId: string) => userId === "u-denied"),
 }));
 
 import { createSetupRouter } from "./setup.js";
@@ -240,6 +266,34 @@ describe("POST /api/setup/org (PR #380)", () => {
       expect(res.status).toBe(200);
       expect(res.body.slug).toBe("acme-2");
       expect(prisma._workspace()!.displayName).toBe("Acme Renamed");
+    });
+
+    // WARP-3193 SEC-AUTH-5 — a signature alone is not enough once the box is
+    // set up: owner only, live session record, not hard-revoked (the same
+    // bar authMiddleware + settings/workspace apply).
+    it.each([
+      ["an admin", "admin-session", 403, "ORG_FORBIDDEN"],
+      ["a guest", "guest-session", 403, "ORG_FORBIDDEN"],
+      ["a revoked owner session", "revoked-owner-session", 401, "SESSION_EXPIRED"],
+      ["a denylisted (deleted) owner", "denied-owner-session", 401, "SESSION_EXPIRED"],
+    ])("refuses %s on a claimed appliance (no write)", async (_label, cookie, status, code) => {
+      prisma._seedSetup({
+        id: "singleton",
+        state: "ready",
+        setupStep: "done",
+        userTourCompleted: true,
+      });
+      prisma._seedWorkspace({ id: 1, slug: "acme", displayName: "Acme HQ", orgConfigured: true });
+
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .set("Cookie", `droplet_session=${cookie}`)
+        .send({ ...VALID_BODY, name: "Evil Rename", slug: "evil" });
+
+      expect(res.status).toBe(status);
+      expect(res.body.code).toBe(code);
+      expect(prisma._workspace()!.displayName).toBe("Acme HQ");
+      expect(prisma._workspace()!.slug).toBe("acme");
     });
 
     it("still allows first-run (unclaimed) setup WITHOUT a session — no regression", async () => {

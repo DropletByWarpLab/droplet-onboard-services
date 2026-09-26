@@ -898,8 +898,10 @@ model DnsBlockSample {
 /// rehydrated thread can render the same chips the user saw live;
 /// `toolCallId` ties a role=tool message back to the call it answered.
 /// `turnId` is a client-supplied UUID that lets us drop duplicate writes
-/// when a network retry resubmits the same turn — checked in code, not
-/// enforced at the DB level.
+/// when a network retry resubmits the same turn. WARP-3193 PERF-9: enforced
+/// by the partial unique index `ChatMessage_sessionId_turnId_role_key`
+/// (`("sessionId","turnId","role") WHERE "turnId" IS NOT NULL`), SQL-only
+/// because Prisma cannot express a partial index — see that migration.
 ///
 /// WARP-329: `status` + `completedAt` enable save-on-send. A user message
 /// is created with `status=completed` immediately on receipt; the matching
@@ -1059,6 +1061,11 @@ model UserInvite {
   role         Role      @default(family)
   createdBy    String // username of issuing admin
   expiresAt    DateTime
+  // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of the
+  // timestamps below (CLAUDE.md no-guessing rule; WARP-218
+  // BrainMemoryItemStatus is the precedent). Each writer sets it in the same
+  // statement that stamps acceptedAt / revokedAt. See enum InviteStatus.
+  status       InviteStatus @default(pending)
   acceptedAt   DateTime?
   acceptedFrom String? // ip address (optional, audit)
   revokedAt    DateTime?
@@ -1095,6 +1102,24 @@ model UserInvite {
   @@index([token])
   @@index([expiresAt])
   @@index([sendStatus])
+  @@index([status])
+}
+
+/// WARP-3193 QUAL-3 — invite lifecycle, replacing the derivation over
+/// acceptedAt / revokedAt / expiresAt that every reader used to repeat.
+///   - pending  — issued, acceptable. `expiresAt` stays authoritative for the
+///                deadline: readers reject an overdue pending row in real
+///                time; the daily 03:00 sweep writes pending→expired
+///                (PairingCodeStatus precedent).
+///   - accepted — consumed by the accept route (acceptedAt stamped with it).
+///   - revoked  — revoked by an admin or the owner-invite boot sweep
+///                (revokedAt stamped with it).
+///   - expired  — past `expiresAt`, stamped by the daily sweep.
+enum InviteStatus {
+  pending
+  accepted
+  revoked
+  expired
 }
 
 /// BUG-11 — invite-email delivery lifecycle. Mirrors the EmailDraftStatus
@@ -1630,6 +1655,9 @@ model FileIndexStatus {
   @@id([userId, path])
   @@index([userId, status])
   @@index([extractStatus, updatedAt])
+  // WARP-3193 PERF-15: the filing orphan sweep (filing/maintenance.ts) looks
+  // rows up by ncFileId alone, which led no index.
+  @@index([ncFileId])
 }
 
 /// ADR-048 — the filing claim state machine. Explicit enum, never derived from
@@ -2139,18 +2167,38 @@ model Reminder {
   title           String
   body            String?
   dueAt           DateTime
-  // null = not yet completed. When set, the dispatcher stops sending reminders.
+  // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of
+  // completedAt / notifiedAt. Each writer sets it in the same statement that
+  // stamps the timestamp. See enum ReminderStatus.
+  status          ReminderStatus @default(scheduled)
+  // When the reminder was completed (set with status = completed).
   completedAt     DateTime?
   // Optional link to the event this reminder is for.
   calendarEventId String?
-  // Tracks whether the dispatcher has fired the due-time notification for
-  // this reminder. Prevents double-fire when the poller re-runs.
+  // When the dispatcher fired the due-time notification (set with
+  // status = notified). Kept after completion, so un-completing knows
+  // whether the reminder had already fired.
   notifiedAt      DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
   @@index([userId, dueAt])
-  @@index([completedAt])
+  // WARP-3193 PERF-14: the poller's `status = 'scheduled' AND dueAt <= now
+  // ORDER BY dueAt LIMIT 100`.
+  @@index([status, dueAt])
+}
+
+/// WARP-3193 QUAL-3 — reminder lifecycle.
+///   - scheduled — waiting for dueAt; the poller's only input.
+///   - notified  — the poller fired the due-time notification.
+///   - completed — the person marked it done.
+/// Re-arming (a new dueAt) returns a scheduled/notified reminder to
+/// scheduled; un-completing returns to notified if it had already fired,
+/// else scheduled.
+enum ReminderStatus {
+  scheduled
+  notified
+  completed
 }
 
 // ── Remote Access (WireGuard VPN) ──
@@ -3486,6 +3534,12 @@ model ActivityRow {
   @@index([at])
   // WARP-181: "what did this user do" queries (actorId filter + at sort).
   @@index([actorId, at])
+  // WARP-3193 PERF-7: GET /api/activity pages `ORDER BY id DESC LIMIT n`.
+  // (kind, id DESC) serves the ?kind= filter; the trigram GIN indexes serve
+  // the ?q= ILIKE '%…%' on what/sub (pg_trgm, enabled by the migration).
+  @@index([kind, id(sort: Desc)])
+  @@index([what(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([sub(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 // ── WARP-237: device-key-signed daily roots over the activity chain ──
@@ -5632,6 +5686,13 @@ enum DeviceUpdateOutcome {
   rollback_failed
 }
 
+/// WARP-3193 PERF-3 — is an apply run holding this DeviceUpdate row? Explicit,
+/// never derived from `applyClaimId IS NULL` (CLAUDE.md "No guessing").
+enum DeviceUpdateApplyClaim {
+  unclaimed
+  claimed
+}
+
 /// One row per release the update agent decided to track (signature-verified
 /// at discovery time — a release that fails signature verification writes NO
 /// row, only an `update.signature_failed` log event, per WARP-538).
@@ -5666,6 +5727,17 @@ model DeviceUpdate {
   failureReason  String?
   /// WARP-3007 — explicit apply outcome (see DeviceUpdateOutcome).
   outcome        DeviceUpdateOutcome @default(not_applied)
+  /// WARP-3193 PERF-3 — whether an apply run owns this row right now. Taken
+  /// by a conditional `updateMany` (`applyClaim = unclaimed`) BEFORE any side
+  /// effect by every runner (POST /updates/apply-now, the cron apply window,
+  /// the boot resume), so two runners can never both snapshot and stage into
+  /// the same update directory. Handed back when the run ends; a claim left
+  /// by a process that died is cleared by `resumeInterruptedApply` at boot.
+  applyClaim     DeviceUpdateApplyClaim @default(unclaimed)
+  /// The run that holds the claim; the release is conditioned on it.
+  applyClaimId   String?
+  /// When the claim was taken (forensics only — nothing reads it as state).
+  applyClaimedAt DateTime?
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
 

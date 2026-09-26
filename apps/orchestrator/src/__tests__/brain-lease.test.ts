@@ -374,6 +374,69 @@ describe("runWithLease (WARP-2837)", () => {
     vi.useRealTimers();
   });
 
+  it("WARP-3193 QUAL-2: a beat that finds the lease GONE aborts the run's signal", async () => {
+    vi.useFakeTimers();
+    const { client, updateMany } = prismaWith(1);
+    let seen!: AbortSignal;
+    let release!: () => void;
+    const out = await runWithLease(
+      client,
+      KEY,
+      (signal) => {
+        seen = signal;
+        return new Promise<void>((r) => (release = r));
+      },
+      { now: NOW, workerId: W, heartbeatMs: 1000 },
+    );
+    expect(seen.aborted).toBe(false);
+
+    // Another worker reclaimed the pass: the fenced beat matches nothing.
+    updateMany.mockResolvedValue({ count: 0 });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(seen.aborted).toBe(true);
+    expect(logged.some((l) => l.level === "warn" && l.msg === "brain.pass.lease_lost")).toBe(true);
+    release();
+    await out.done;
+    vi.useRealTimers();
+  });
+
+  it("WARP-3193 QUAL-2: a beat that REJECTS is logged, never an unhandled rejection", async () => {
+    vi.useFakeTimers();
+    const { client, updateMany } = prismaWith(1);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    let seen!: AbortSignal;
+    let release!: () => void;
+    try {
+      const out = await runWithLease(
+        client,
+        KEY,
+        (signal) => {
+          seen = signal;
+          return new Promise<void>((r) => (release = r));
+        },
+        { now: NOW, workerId: W, heartbeatMs: 1000 },
+      );
+      updateMany.mockRejectedValueOnce(new Error("P1001 db unreachable"));
+      await vi.advanceTimersByTimeAsync(1000);
+      vi.useRealTimers();
+      await new Promise((r) => setImmediate(r));
+
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(
+        logged.some((l) => l.level === "warn" && l.msg === "brain.pass.heartbeat_failed"),
+      ).toBe(true);
+      // A failed beat is not a lost lease: the run keeps going.
+      expect(seen.aborted).toBe(false);
+      release();
+      await out.done;
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the heartbeat well inside the lease", () => {
     // The ratio is what absorbs a slow unit or a paused container without
     // losing the claim.

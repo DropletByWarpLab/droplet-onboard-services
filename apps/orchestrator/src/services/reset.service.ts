@@ -42,6 +42,7 @@ import {
 } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "./activity.singleton.js";
+import { isUniqueViolation } from "../lib/prisma-errors.js";
 
 const logger = createLogger("reset-service");
 
@@ -111,14 +112,6 @@ export class ResetError extends Error {
  * `instanceof Prisma.PrismaClientKnownRequestError` so the unit tests' plain
  * thrown objects behave like the real client error.
  */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: unknown }).code === "P2002"
-  );
-}
-
 /**
  * SERVER-side friction check (AC1): the value the owner typed must exactly
  * equal the device target name. This runs on the server — the client's

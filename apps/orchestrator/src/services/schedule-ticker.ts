@@ -51,8 +51,15 @@ export function createScheduleTicker(
 ): ScheduleTicker {
   async function tickOnce() {
     const now = new Date();
+    // WARP-3193 PERF-13: every 30 s over the whole table — read only what
+    // computeDesiredBlocked and the dispatch below use.
     const devices = await prisma.networkDevice.findMany({
-      include: { groups: true },
+      select: {
+        mac: true,
+        manualBlock: true,
+        lastAppliedBlocked: true,
+        groups: { select: { id: true } },
+      },
     });
     const schedules = await prisma.schedule.findMany({
       where: { enabled: true },
@@ -113,7 +120,7 @@ export function createScheduleTicker(
       // dispatched). Any mismatch — including null !== true/false —
       // triggers a dispatch, which matches the "ticker hasn't touched
       // this yet" bootstrap semantics from the original in-memory cache.
-      const previous: boolean | null = (device as any).lastAppliedBlocked ?? null;
+      const previous: boolean | null = device.lastAppliedBlocked ?? null;
       if (previous === desired) continue;
 
       try {
