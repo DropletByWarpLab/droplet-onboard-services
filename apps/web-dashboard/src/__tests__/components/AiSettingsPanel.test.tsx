@@ -62,7 +62,26 @@ describe("AiSettingsPanel", () => {
     expect(screen.getByRole("radio", { name: AI_COPY.linking.off })).not.toBeChecked();
     expect(screen.getByRole("switch", { name: AI_COPY.summaries })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByText(AI_COPY.summariesHelp)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: AI_COPY.save })).toBeDisabled();
+    // Review #2418: aria-disabled, never `disabled` — it keeps focus, and a press does nothing.
+    expect(screen.getByRole("button", { name: AI_COPY.save })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: AI_COPY.save })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: AI_COPY.save }));
+    expect(h.putSecurityAiSettings).not.toHaveBeenCalled();
+  });
+
+  it("in flight: Save stays focusable (aria-disabled) and a second press is refused", async () => {
+    let release!: () => void;
+    h.putSecurityAiSettings.mockImplementation(() => new Promise((r) => (release = () => r({ linking: "off", summaries: "on", version: 5, changed: true }))));
+    renderPanel();
+    fireEvent.click(await screen.findByRole("radio", { name: AI_COPY.linking.off }));
+    const save = screen.getByRole("button", { name: AI_COPY.save });
+    fireEvent.click(save);
+    fireEvent.click(save);
+    expect(h.putSecurityAiSettings).toHaveBeenCalledTimes(1);
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).not.toBeDisabled();
+    release();
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(AI_COPY.saved, "success"));
   });
 
   it("Save sends the whole choice with the version it was read at, then confirms", async () => {

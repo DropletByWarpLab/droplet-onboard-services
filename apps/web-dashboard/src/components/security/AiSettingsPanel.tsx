@@ -15,7 +15,7 @@
  * A failed read is an error with Retry, never the defaults: "Droplet links
  * cameras on its own" must not be shown when the box couldn't say.
  */
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
@@ -60,6 +60,8 @@ export function AiSettingsPanel() {
   const [linking, setLinking] = useState<SecurityAiLinking | null>(null);
   const [summaries, setSummaries] = useState<SecurityAiSummaries | null>(null);
   const [pending, setPending] = useState(false);
+  // Review #2418: the in-flight guard itself — Save stays focusable (aria-disabled), so a second press is refused here.
+  const pendingRef = useRef(false);
   const [conflict, setConflict] = useState(false);
 
   // The form follows every new version the box answers with (a save, a re-read after a conflict).
@@ -72,7 +74,8 @@ export function AiSettingsPanel() {
   const dirty = settings !== null && (linking !== settings.linking || summaries !== settings.summaries);
 
   const save = async () => {
-    if (!settings || !linking || !summaries || pending || !dirty) return;
+    if (!settings || !linking || !summaries || pendingRef.current || !dirty) return;
+    pendingRef.current = true;
     setPending(true);
     setConflict(false);
     try {
@@ -86,6 +89,7 @@ export function AiSettingsPanel() {
         toast(translateError(err, "security"), "error");
       }
     } finally {
+      pendingRef.current = false;
       setPending(false);
     }
   };
@@ -168,7 +172,7 @@ export function AiSettingsPanel() {
           </button>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <button type="button" className="btn primary" onClick={() => void save()} disabled={!dirty || pending}>
+          <button type="button" className="btn primary" onClick={() => void save()} aria-disabled={!dirty || pending || undefined}>
             {pending ? <Loader2 size={16} className="animate-spin" aria-hidden /> : null}
             {AI_COPY.save}
           </button>
