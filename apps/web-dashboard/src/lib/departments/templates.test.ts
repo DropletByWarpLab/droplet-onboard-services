@@ -99,7 +99,19 @@ describe("department templates", () => {
   it("names a headline figure for every template; custom's is the member count", () => {
     for (const t of DEPARTMENT_TEMPLATES) expect(t.headline).toBeTruthy();
     expect(templateFor("custom")?.headline).toBe("members");
-    expect(templateFor("security")?.headline).toBe("cameras_online");
+    // WARP-2978 (ADR-059 P3 §8, D38) — Security's tile counts what needs attention.
+    expect(templateFor("security")?.headline).toBe("open_incidents");
+  });
+
+  it("the Security home leads with its open incidents (WARP-2978, D38: new profiles only)", () => {
+    expect(templateFor("security")?.homeWidgets).toEqual([
+      { widget: "security-incidents", size: "m" },
+      { widget: "cameras", size: "m" },
+      { widget: "quick-links", size: "m" },
+      { widget: "members", size: "s" },
+    ]);
+    // The incidents widget reads the Security module, so it follows that module's gate.
+    expect(DEPARTMENT_WIDGETS["security-incidents"].requiresModule).toBe("security");
   });
 
   it("templateDefaults copies the lists, so an edit cannot mutate the template", () => {

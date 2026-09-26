@@ -3553,6 +3553,12 @@ export interface SecurityEvent {
    * area). Empty for site-wide rows (threats, Frigate health, mode changes).
    */
   zones: SecurityZoneRef[];
+  /**
+   * WARP-2978 (ADR-059 P3 route 1) — the incident the engine grouped this row
+   * into, or null. A row the viewer can see implies its incident is visible
+   * to them. Absent from a box older than P3.
+   */
+  incident?: { id: string } | null;
 }
 
 export interface SecurityEventsPage {
@@ -3825,7 +3831,16 @@ export type SecurityErrorCode =
   | "SUPPRESSIONS_UNAVAILABLE"
   | "SUPPRESSION_NOT_FOUND"
   | "SUPPRESSION_TARGET_NOT_FOUND"
-  | "SUPPRESSION_LIMIT";
+  | "SUPPRESSION_LIMIT"
+  // WARP-2978 (ADR-059 P3 §7 routes 16–22): incidents and who is told about alerts.
+  | "INCIDENT_NOT_FOUND"
+  | "INCIDENT_CONFLICT"
+  | "NOT_ACTIONABLE"
+  | "INCIDENTS_UNAVAILABLE"
+  | "NO_RECIPIENT"
+  | "NOT_ELIGIBLE"
+  | "ROUTING_UNAVAILABLE"
+  | "USER_NOT_FOUND";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
@@ -3966,6 +3981,245 @@ export interface SecuritySuppressionCreateBody {
   codes: SecurityPatternCode[];
   reason: string;
   expiresInDays: number;
+}
+
+// ── WARP-2978 (ADR-059 P3 §7, P6 §7.5): incidents, acknowledgement, alert routing ──
+// Wire shapes of routes 16–22, mirrored from the orchestrator's
+// services/security-incident-view.ts and services/security-alerts.service.ts.
+// P6's native clients decode the same shapes. Everything is VIEWER-PROJECTED
+// on the box (DS-005): a hidden camera's codes, counts, acks and notices are
+// simply absent, and the page renders what it is given — it never fills in.
+// The unions are what P3 sends; the copy helpers still render an unknown
+// value (a later code or scope) as a generic line rather than nothing.
+
+export type SecuritySeverity = "info" | "notice" | "alert";
+export type SecurityIncidentScope = "area" | "camera" | "site_threat" | "site_camera_system";
+/** `no_action` = ordinary activity (or no code the viewer can see): nothing to acknowledge. */
+export type SecurityIncidentState = "no_action" | "open" | "acknowledged" | "resolved";
+/** Whether the incident still takes events. Explicit — never inferred from times. */
+export type SecurityIncidentGrouping = "collecting" | "closed";
+/**
+ * Mirrors the orchestrator's `SecurityReasonCode` enum: P3's three rules, then
+ * P5's pattern codes (WARP-2980). A pattern code reaches `reasonCodes` and
+ * `reasons` only once P5 PR-D releases it as counted; until then it is a
+ * trial flag, which route 18 sends apart, in `patternFlags` (see
+ * IncidentDetail). The copy names every member (incident-copy.ts).
+ */
+export type SecurityReasonCode = "after_hours_presence" | "camera_offline" | "threat_signal" | SecurityPatternCode;
+/** Whether the events behind the incident are still kept (they are trimmed after 30 days; the incident stays a year). */
+export type SecurityIncidentEventsKept = "kept" | "partly_removed" | "removed";
+export type SecurityIncidentAckAction = "acknowledge" | "resolve";
+
+export interface IncidentAckSummary {
+  action: SecurityIncidentAckAction;
+  byName: string;
+  at: string;
+}
+
+/** Route 16's row, route 17's `latest`, and the head of route 18. */
+export interface IncidentSummary {
+  id: string;
+  scope: SecurityIncidentScope;
+  /** The area as it was when the incident opened (a snapshot). */
+  zone: { id: string; name: string; kind: SecurityZoneKind } | null;
+  /** The Frigate camera of a `camera`-scope incident. */
+  camera: string | null;
+  /** Viewer-projected. */
+  state: SecurityIncidentState;
+  /** The viewer's visible severity. */
+  severity: SecuritySeverity;
+  /** The viewer's visible codes. */
+  reasonCodes: SecurityReasonCode[];
+  grouping: SecurityIncidentGrouping;
+  /** The site mode at the first event. */
+  openedInMode: SecurityMode;
+  firstActivityAt: string;
+  lastActivityAt: string;
+  /**
+   * Visible events (survives the 30-day trim) — every row the incident page
+   * lists, a person's "still in view" row (PR-D) included: a 40-second visit
+   * is 2 events, the early row and the finished one.
+   */
+  eventCount: number;
+  /**
+   * Visible counts per label. Keys starting `_` are the box's bookkeeping,
+   * never a label to show: `_status` / `_threat` count status and threat rows,
+   * `_ongoing` a person's "still in view" row (PR-D) — that person is counted
+   * once, under their label, by their finished row.
+   */
+  labels: Record<string, number>;
+  /** The latest acknowledgement, by anyone — only in an actionable view: never a partial one, never plain activity. */
+  lastAck: IncidentAckSummary | null;
+}
+
+/** GET /api/security/incidents — `(lastActivityAt desc, id desc)`. */
+export interface IncidentsPage {
+  incidents: IncidentSummary[];
+  nextCursor: string | null;
+}
+
+/** GET /api/security/incidents/summary. */
+export interface IncidentsSummary {
+  /** Open incidents whose visible severity is alert. */
+  openAlerts: number;
+  /** Open incidents whose visible severity is notice. */
+  openNotices: number;
+  /** At most 3 that need attention, newest first. */
+  latest: IncidentSummary[];
+  /** Opening hours set AND an Inside / Staff only area with a camera: after-hours alerts can fire. */
+  alertsReady: boolean;
+}
+
+export interface IncidentReasonView {
+  code: SecurityReasonCode;
+  severity: SecuritySeverity;
+  /** A snapshot of the event that triggered the code — it outlives the event. */
+  evidence: {
+    eventId: string;
+    camera: string | null;
+    source: string;
+    kind: string;
+    label: string | null;
+    at: string;
+    summary: string;
+  };
+  /**
+   * The rule's numbers: after_hours_presence `{mode, modeSource, nonOpenAt,
+   * zoneKind}`; camera_offline `{offlineForSec, backAt}`; threat_signal
+   * `{activityId, kind}`; a counted pattern code (P5 PR-D) the flag's own
+   * numbers, which P5 PR-C words — this page shows its name alone.
+   */
+  detail: Record<string, string | number | null> | null;
+}
+
+export interface IncidentAckView {
+  action: SecurityIncidentAckAction;
+  byName: string;
+  at: string;
+  /** What the device SAID it was — reported, never proof. */
+  client: string | null;
+  /** The ack came from this person's own alert notification for the incident (verified on the box). */
+  viaNotification: boolean;
+  /** Resolve's note; "" when none. */
+  note: string;
+  /**
+   * The sign-in behind the ack — owner/admin ONLY (null for anyone else):
+   * whether the request carried a sign-in id, and whether the box confirmed
+   * that sign-in live. The id itself is never sent, not even truncated.
+   */
+  signIn: { recorded: boolean; confirmedLive: boolean } | null;
+}
+
+export type SecurityNoticeOutcome =
+  | "queued"
+  | "sent"
+  | "not_sent"
+  | "skipped_no_access"
+  | "skipped_not_visible"
+  | "skipped_capped"
+  | "skipped_no_address"
+  /** The delivery's status couldn't be established. */
+  | "outcome_unknown";
+/** `fallback_owner`: nobody chosen could be told (or see the camera), so an owner was told instead. */
+export type SecurityNoticeReason = "routed" | "fallback_owner";
+
+/** Who was told. Owner/admin receive every notice; anyone else only their own. */
+export interface IncidentNoticeView {
+  userId: string;
+  name: string;
+  outcome: SecurityNoticeOutcome;
+  reason: SecurityNoticeReason;
+  /** The channels that took it: "toast", "push" or "toast,push". */
+  channels: string;
+  pushOutcome: "sent" | "no_subscribers" | "refused_gate" | "failed" | null;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+/**
+ * A visible member event: the feed row — with `zones`, the viewer's VISIBLE
+ * areas from the feed's own resolver, but without route 1's `incident` (every
+ * member belongs to this one) — plus `alsoIn`, the other visible areas it
+ * matched when it was sorted.
+ */
+export type IncidentMemberView = Omit<SecurityEvent, "incident"> & { alsoIn: SecurityZoneRef[] };
+
+/**
+ * GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike.
+ *
+ * Deliberately NOT mirrored here: what P5 PR-B (WARP-2980) added to route 18
+ * — `verdict`, `patternFlags` and `viewer.canGiveVerdict` — and route 35
+ * (POST …/verdict, whose 409 is NOT_JUDGEABLE). The box sends them; this
+ * page ignores them. P5 PR-C mirrors and renders them (the verdict bar, the
+ * Trial chip, a flag quietened by expected activity), each with its own
+ * viewer rule, so none of it is shown before that rule is.
+ */
+export interface IncidentDetail extends IncidentSummary {
+  reasons: IncidentReasonView[];
+  /** Visible members while their events are kept, newest first. */
+  events: IncidentMemberView[];
+  /** More visible members than `events` carries. */
+  moreEvents: boolean;
+  /** Every acknowledgement when the view is actionable; in a partial view only this viewer's own; plain activity, none. */
+  acks: IncidentAckView[];
+  notices: IncidentNoticeView[];
+  eventsKept: SecurityIncidentEventsKept;
+  /**
+   * Whether THIS viewer can act on it right now: their Security level is at
+   * least act, a code is visible, it is open or acknowledged, and the view is
+   * not PARTIAL. Partial: a reason at the incident's top severity is on a
+   * camera they can't see — then the box sends only their own
+   * acknowledgements, no notices and no lastAck, the state is `open` until
+   * someone resolves it (never `acknowledged`), and routes 19–20 answer 409
+   * NOT_ACTIONABLE. The wire has no `partial` flag, and the page never infers
+   * one: the controls render only when this is true, and when it is false on
+   * an open or acknowledged incident the page says the same thing whatever
+   * the cause.
+   */
+  actionable: boolean;
+  /**
+   * The viewer's Security level on the box, and whether they have acknowledged
+   * or resolved this incident — kept in a partial view too (their own act).
+   */
+  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
+}
+
+/** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
+export interface IncidentActionResult {
+  /** null when, after the write, this person can no longer see the incident (route 18 would answer 404). */
+  incident: IncidentDetail | null;
+  changed: boolean;
+}
+
+/** Why a person can't be told about alerts right now. */
+export type AlertIneligibleReason = "inactive" | "role" | "no_address" | "no_access";
+
+export interface AlertRoutingPerson {
+  userId: string;
+  name: string;
+  role: string;
+  state: "receiving" | "not_receiving";
+  /** `owner_default`: an owner, told by default. null = nobody chose yet (not receiving). */
+  origin: "owner_default" | "chosen" | null;
+  /** Send back as `expectedVersion`; null = no row yet (create). */
+  version: number | null;
+  eligible: boolean;
+  ineligibleReason: AlertIneligibleReason | null;
+  /** Manages a department made from the Security template — a suggestion only, it grants nothing. */
+  managesSecurityDepartment: boolean;
+  /** `push`: a phone is set up and phone notifications are on; else only while Droplet is open. */
+  delivery: "push" | "in_app_only";
+}
+
+/** GET /api/security/alert-routing — the whole list at manage; below it, the viewer's own line. */
+export type AlertRoutingView =
+  | { level: "manage"; people: AlertRoutingPerson[]; fallbackActive: boolean }
+  | { level: "view" | "act"; self: { state: "receiving" | "not_receiving"; eligible: boolean } };
+
+/** PUT /api/security/alert-routing/:userId (manage). */
+export interface AlertRoutingSetBody {
+  state: "receiving" | "not_receiving";
+  expectedVersion: number | null;
 }
 
 // ── WARP-2981 (ADR-059 P6): the Security wall ──

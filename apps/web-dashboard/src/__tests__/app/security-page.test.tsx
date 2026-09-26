@@ -3,6 +3,10 @@
  * select becomes `?zone=` on the feed's own request, and a mode write
  * refreshes the feed (whose useSWRInfinite keys a global mutate can't reach)
  * and its header.
+ *
+ * WARP-2978 (ADR-059 P3 §8, D32) — the page opens on Incidents; the P2a feed
+ * is the Everything tab. The tab lives in the URL (`?tab=everything`), so Back
+ * from an incident reached through "In an incident" returns to the feed.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act as rtlAct, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -17,6 +21,10 @@ import { WALL_COPY } from "@/components/security/wall-status";
 import type { SecurityModeView, SecurityZoneView } from "@/lib/types";
 
 const h = vi.hoisted(() => ({
+  search: "",
+  replace: vi.fn(),
+  getSecurityIncidents: vi.fn(),
+  getSecurityIncidentSummary: vi.fn(),
   authFetch: vi.fn(),
   getSecurityEvents: vi.fn(),
   getSecurityHealth: vi.fn(),
@@ -36,6 +44,12 @@ vi.mock("@/components/shell/ShellPage", () => ({
   ),
 }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: h.replace, back: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(h.search),
+  usePathname: () => "/security",
+}));
+
 vi.mock("@/lib/auth", () => ({
   authFetch: h.authFetch,
   useAuth: () => ({ user: { id: "u1", role: "owner" } }),
@@ -49,6 +63,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   getSecurityMode: h.getSecurityMode,
   postSecurityMode: h.postSecurityMode,
   fetchCameras: h.fetchCameras,
+  getSecurityIncidents: h.getSecurityIncidents,
+  getSecurityIncidentSummary: h.getSecurityIncidentSummary,
 }));
 
 const MODE: SecurityModeView = {
@@ -78,6 +94,9 @@ function Wrap({ children }: { children: ReactNode }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.search = "";
+  h.getSecurityIncidents.mockResolvedValue({ incidents: [], nextCursor: null });
+  h.getSecurityIncidentSummary.mockResolvedValue({ openAlerts: 0, openNotices: 0, latest: [], alertsReady: true });
   h.authFetch.mockImplementation(async () => ({
     ok: true,
     status: 200,
@@ -93,7 +112,7 @@ beforeEach(() => {
   h.fetchCameras.mockResolvedValue([]);
 });
 
-describe("/security", () => {
+describe("/security — the Security wall link (WARP-2981)", () => {
   // WARP-2981 (ADR-059 P6) — the header's one action: the Security wall.
   it("offers the Security wall in the header, saying whose view it shows", async () => {
     render(<SecurityPage />, { wrapper: Wrap });
@@ -105,6 +124,12 @@ describe("/security", () => {
     // Plain words on the button itself: a tooltip never reaches a phone, and "wall" is our name for it.
     expect(link).toHaveTextContent("TV view");
     expect(link.textContent).not.toMatch(/wall/i);
+  });
+});
+
+describe("/security — the Everything tab (the P2a feed)", () => {
+  beforeEach(() => {
+    h.search = "tab=everything";
   });
 
   it("puts the mode card above the feed", async () => {
@@ -180,5 +205,96 @@ describe("/security", () => {
     await waitFor(() => expect(h.postSecurityMode).toHaveBeenCalledWith({ action: "close" }));
     await waitFor(() => expect(h.getSecurityEvents.mock.calls.length).toBeGreaterThan(eventsBefore));
     await waitFor(() => expect(h.getSecurityHealth.mock.calls.length).toBeGreaterThan(healthBefore));
+  });
+});
+
+describe("/security — Incidents (WARP-2978)", () => {
+  it("opens on Incidents, asking for what needs attention; the feed isn't read until Everything is chosen", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual(["Incidents", "Everything"]);
+    expect(screen.getByRole("tab", { name: /Incidents/ })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(h.getSecurityIncidents).toHaveBeenCalledWith(expect.objectContaining({ state: "attention" })));
+    expect(h.getSecurityEvents).not.toHaveBeenCalled();
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", screen.getByRole("tab", { name: /Incidents/ }).id);
+  });
+
+  it("All asks for every incident", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    fireEvent.click(await screen.findByRole("button", { name: "All" }));
+    await waitFor(() => expect(h.getSecurityIncidents).toHaveBeenLastCalledWith(expect.objectContaining({ state: "all" })));
+  });
+
+  it("picking an area puts zone= on the incidents request", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    fireEvent.change(await screen.findByRole("combobox", { name: FEED_COPY.areaLabel }), { target: { value: "z1" } });
+    await waitFor(() => expect(h.getSecurityIncidents).toHaveBeenLastCalledWith(expect.objectContaining({ zone: "z1" })));
+  });
+
+  it("choosing Everything shows the feed and puts the tab in the URL; Incidents takes it out", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    fireEvent.click(await screen.findByRole("tab", { name: "Everything" }));
+    expect(screen.getByRole("tab", { name: "Everything" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(h.getSecurityEvents).toHaveBeenCalled());
+    expect(h.replace).toHaveBeenLastCalledWith("/security?tab=everything", { scroll: false });
+    fireEvent.click(screen.getByRole("tab", { name: /Incidents/ }));
+    expect(h.replace).toHaveBeenLastCalledWith("/security", { scroll: false });
+  });
+
+  it("the tab follows the URL: a same-route navigation to /security brings Incidents back (WARP-3185 2)", async () => {
+    h.search = "tab=everything";
+    const { rerender } = render(<SecurityPage />, { wrapper: Wrap });
+    expect(await screen.findByRole("tab", { name: "Everything" })).toHaveAttribute("aria-selected", "true");
+    h.search = "";
+    rerender(<SecurityPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: /Incidents/ })).toHaveAttribute("aria-selected", "true"));
+    h.search = "tab=everything";
+    rerender(<SecurityPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Everything" })).toHaveAttribute("aria-selected", "true"));
+  });
+
+  it("the tabs follow the arrow keys (the tabs pattern), and only the selected tab is in the tab order", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    const incidents = await screen.findByRole("tab", { name: /Incidents/ });
+    expect(incidents).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("tab", { name: "Everything" })).toHaveAttribute("tabindex", "-1");
+    incidents.focus();
+    fireEvent.keyDown(incidents, { key: "ArrowRight" });
+    const everything = screen.getByRole("tab", { name: "Everything" });
+    expect(everything).toHaveAttribute("aria-selected", "true");
+    expect(everything).toHaveFocus();
+  });
+
+  it("the Incidents tab counts what needs attention — never a 0", async () => {
+    h.getSecurityIncidentSummary.mockResolvedValue({ openAlerts: 2, openNotices: 1, latest: [], alertsReady: true });
+    render(<SecurityPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByRole("tab", { name: /Incidents/ })).toHaveTextContent("Incidents3"));
+    // A screen reader hears what the number means.
+    expect(screen.getByRole("tab", { name: "Incidents, 3 need attention" })).toBeInTheDocument();
+  });
+
+  it("no count on the tab when nothing needs attention", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    await waitFor(() => expect(h.getSecurityIncidentSummary).toHaveBeenCalled());
+    await rtlAct(async () => {});
+    expect(screen.getByRole("tab", { name: /Incidents/ }).textContent).toBe("Incidents");
+  });
+
+  it("the alerts line follows the summary: ready, not ready, and nothing while unknown", async () => {
+    const { unmount } = render(<SecurityPage />, { wrapper: Wrap });
+    expect(await screen.findByText(FEED_COPY.alertsLine)).toBeInTheDocument();
+    unmount();
+
+    h.getSecurityIncidentSummary.mockResolvedValue({ openAlerts: 0, openNotices: 0, latest: [], alertsReady: false });
+    const second = render(<SecurityPage />, { wrapper: Wrap });
+    expect(await screen.findByText(FEED_COPY.alertsNotReady)).toBeInTheDocument();
+    second.unmount();
+
+    h.getSecurityIncidentSummary.mockRejectedValue(Object.assign(new Error("x"), { code: "INCIDENTS_UNAVAILABLE", status: 503 }));
+    render(<SecurityPage />, { wrapper: Wrap });
+    await waitFor(() => expect(h.getSecurityIncidentSummary).toHaveBeenCalled());
+    await rtlAct(async () => {});
+    expect(screen.queryByText(FEED_COPY.alertsLine)).toBeNull();
+    expect(screen.queryByText(FEED_COPY.alertsNotReady)).toBeNull();
   });
 });
