@@ -59,8 +59,9 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn().mockResolvedValue("tok"),
 }));
 
+const verifyPassword = vi.fn();
 vi.mock("../services/password.service.js", () => ({
-  verifyPassword: vi.fn(),
+  verifyPassword: (...a: unknown[]) => verifyPassword(...a),
   verifyDummyPassword: vi.fn(),
   hashPassword: vi.fn(),
 }));
@@ -77,12 +78,16 @@ vi.mock("../services/totp.service.js", () => ({
 }));
 
 const generateRecoveryCodes = vi.fn();
-const findMatchingRecoveryCodeHash = vi.fn();
-vi.mock("../services/recovery.service.js", () => ({
+// WARP-3193 ARCH-3 — the REAL consumeRecoveryCode runs (the route no longer
+// consumes inline). Its argon2 matcher calls the mocked verifyPassword(hash,
+// code) per stored hash, so `matchRecoveryHash("hash-2")` picks the row.
+vi.mock("../services/recovery.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/recovery.service.js")>()),
   generateRecoveryCodes: (...a: unknown[]) => generateRecoveryCodes(...a),
-  findMatchingRecoveryCodeHash: (...a: unknown[]) => findMatchingRecoveryCodeHash(...a),
-  RECOVERY_CODE_COUNT: 10,
 }));
+function matchRecoveryHash(hash: string | null): void {
+  verifyPassword.mockImplementation(async (h: unknown) => h === hash);
+}
 
 vi.mock("../services/jwt.service.js", async () => {
   const actual = await vi.importActual<typeof import("../services/jwt.service.js")>(
@@ -227,6 +232,7 @@ function buildApp(prismaMock: any, user: any = { id: "u-1", username: "stefan", 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  verifyPassword.mockReset();
   generateTotpEnrollment.mockReturnValue({
     secret: "BASE32SECRET",
     otpauthUri: "otpauth://totp/Droplet:stefan?secret=BASE32SECRET&issuer=Droplet",
@@ -487,7 +493,7 @@ describe("POST /auth/totp/verify", () => {
 
 describe("POST /auth/recovery", () => {
   it("valid unused code → 200 and that code row is marked used", async () => {
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce("hash-2");
+    matchRecoveryHash("hash-2");
     const prisma = createPrismaMock({
       recovery: [
         { id: "rc1", userId: "u-1", codeHash: "hash-1", usedAt: null },
@@ -508,7 +514,7 @@ describe("POST /auth/recovery", () => {
   });
 
   it("no match → 401, nothing consumed", async () => {
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce(null);
+    matchRecoveryHash(null);
     const prisma = createPrismaMock({
       recovery: [{ id: "rc1", userId: "u-1", codeHash: "hash-1", usedAt: null }],
     });
@@ -525,7 +531,7 @@ describe("POST /auth/recovery", () => {
   // write must fail the factor (401 RECOVERY_INVALID), not re-authenticate.
   // The atomic guarded update returns count 0 → treat as already used.
   it("already-used code (lost the race) → 401 RECOVERY_INVALID", async () => {
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce("hash-1");
+    matchRecoveryHash("hash-1");
     const prisma = createPrismaMock({
       // The findMany read still surfaces it as unused (stale read), but the
       // row was consumed by a concurrent racer before our guarded update.

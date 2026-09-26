@@ -76,12 +76,16 @@ vi.mock("../services/totp.service.js", () => ({
   TOTP_ISSUER: "Droplet",
 }));
 
-const findMatchingRecoveryCodeHash = vi.fn();
-vi.mock("../services/recovery.service.js", () => ({
-  findMatchingRecoveryCodeHash: (...a: unknown[]) => findMatchingRecoveryCodeHash(...a),
+// WARP-3193 ARCH-3 — the REAL consumeRecoveryCode runs (the route no longer
+// consumes inline). Its argon2 matcher calls the mocked verifyPassword(hash,
+// code) per stored hash, so `matchRecoveryHash("hash-2")` picks the row.
+vi.mock("../services/recovery.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/recovery.service.js")>()),
   generateRecoveryCodes: vi.fn(),
-  RECOVERY_CODE_COUNT: 10,
 }));
+function matchRecoveryHash(hash: string | null): void {
+  verifyPassword.mockImplementation(async (h: unknown) => h === hash);
+}
 
 vi.mock("../services/jwt.service.js", async () => {
   const actual = await vi.importActual<typeof import("../services/jwt.service.js")>(
@@ -212,6 +216,7 @@ const stefan: UserRow = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  verifyPassword.mockReset();
   verifyDummyPassword.mockResolvedValue(false);
 });
 
@@ -293,7 +298,7 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
   it("valid recovery code → 200 AND the matched code row is marked used", async () => {
     verifyPassword.mockResolvedValueOnce(true);
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce("hash-2");
+    matchRecoveryHash("hash-2");
     const prisma = createPrismaMock({
       users: [stefan],
       totp: [enabledTotp],
@@ -318,7 +323,7 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
   it("wrong recovery code → 401 TOTP_REQUIRED, nothing consumed", async () => {
     verifyPassword.mockResolvedValueOnce(true);
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce(null);
+    matchRecoveryHash(null);
     const prisma = createPrismaMock({
       users: [stefan],
       totp: [enabledTotp],
@@ -339,9 +344,9 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
   // usedAt:null) so exactly ONE login authenticates and the loser is failed
   // back to the TOTP gate. A check-then-id-update lets both win → RED here.
   it("two concurrent logins with the SAME recovery code → exactly ONE succeeds", async () => {
-    verifyPassword.mockResolvedValue(true);
-    // Both racers match the same unused row (rc1 → hash-1).
-    findMatchingRecoveryCodeHash.mockResolvedValue("hash-1");
+    // Both racers' passwords verify, and both match the same unused row
+    // (rc1 → hash-1): the mocked verifyPassword answers true for both.
+    verifyPassword.mockImplementation(async (h: unknown) => h === "hash-1" || h === stefan.passwordHash);
     const prisma = createPrismaMock({
       users: [stefan],
       totp: [enabledTotp],

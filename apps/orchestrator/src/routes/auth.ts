@@ -112,7 +112,7 @@ import {
 } from "../services/totp.service.js";
 import {
   generateRecoveryCodes,
-  findMatchingRecoveryCodeHash,
+  consumeRecoveryCode,
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
@@ -1256,30 +1256,9 @@ export function createPublicAuthRouter(
           const secret = decryptTotpSecret(totpCred.secretEnc);
           secondFactorOk = await verifyTotpCode(secret, totpCode);
         } else if (recoveryCode) {
-          // Match against the user's UNUSED codes only; consume exactly the
-          // matched row so a replay of the same code finds nothing.
-          const unused = await prisma.recoveryCode.findMany({
-            where: { userId, usedAt: null },
-          });
-          const matchHash = await findMatchingRecoveryCodeHash(
-            recoveryCode,
-            unused.map((r) => r.codeHash),
-          );
-          if (matchHash) {
-            const consumed = unused.find((r) => r.codeHash === matchHash);
-            if (consumed) {
-              // Atomic single-use: only flip the row if it is STILL unused.
-              // Two concurrent logins presenting the same code both read it
-              // unused above; the usedAt:null guard means exactly one update
-              // flips a row (count 1) and the loser sees count 0 → the factor
-              // fails. Mirrors claimRefreshRotation / invite single-use.
-              const claimed = await prisma.recoveryCode.updateMany({
-                where: { id: consumed.id, usedAt: null },
-                data: { usedAt: new Date() },
-              });
-              secondFactorOk = claimed.count > 0;
-            }
-          }
+          // WARP-3193 ARCH-3 — the shared single-use consume (atomic on
+          // `usedAt: null`; a replay or a concurrent loser is not consumed).
+          secondFactorOk = (await consumeRecoveryCode(prisma, userId, recoveryCode)).consumed;
         }
 
         if (!secondFactorOk) {
@@ -2794,37 +2773,14 @@ export function createProtectedAuthRouter(
       }
       const userId = req.user.id;
 
-      const unused = await prisma.recoveryCode.findMany({
-        where: { userId, usedAt: null },
-      });
-      const matchHash = await findMatchingRecoveryCodeHash(
-        parsed.data.code,
-        unused.map((r) => r.codeHash),
-      );
-      if (!matchHash) {
+      // WARP-3193 ARCH-3 — the same single-use consume /auth/login uses. A
+      // racer that spent the code first leaves this one unconsumed → 401.
+      const result = await consumeRecoveryCode(prisma, userId, parsed.data.code);
+      if (!result.consumed) {
         res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
         return;
       }
-      const consumed = unused.find((r) => r.codeHash === matchHash);
-      if (!consumed) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-      // Atomic single-use: the usedAt:null guard makes the consume safe
-      // against a concurrent step-up presenting the same code. If a racer
-      // already spent it between our read and here, count is 0 → reject as
-      // invalid rather than re-authenticating. Mirrors claimRefreshRotation.
-      const claimed = await prisma.recoveryCode.updateMany({
-        where: { id: consumed.id, usedAt: null },
-        data: { usedAt: new Date() },
-      });
-      if (claimed.count === 0) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-
-      const remaining = unused.length - 1;
-      res.json({ ok: true, remaining });
+      res.json({ ok: true, remaining: result.remaining });
     } catch (err) {
       next(err);
     }
