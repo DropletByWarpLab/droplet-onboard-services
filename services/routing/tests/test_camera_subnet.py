@@ -250,7 +250,9 @@ def test_teardown_reports_a_partial_failure_instead_of_ok(client, mock_router):
     body = resp.json()
     assert body["status"] == "error"
     assert body["error"] == "partial_teardown"
-    assert [f["step"] for f in body["failed"]] == ["firewall.cfg_rule delete"]
+    assert body["failed"] == [{"step": "firewall.cfg_rule delete", "reason": "router_error"}]
+    # Exception text stays server-side (CodeQL py/stack-trace-exposure).
+    assert "denied" not in resp.text
     # Best effort continued past the failure.
     assert ("dhcp", "cameras") in _deleted(mock_router)
 

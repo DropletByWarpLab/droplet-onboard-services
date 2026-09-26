@@ -1795,11 +1795,13 @@ def teardown_camera_subnet():
         except UbusError as exc:
             if _ubus_object_absent(exc):
                 return
+            # Detail stays in the log; the response names the step only, so no
+            # router/exception text reaches the caller.
             logger.warning("camera subnet teardown: %s failed: %s", label, exc)
-            failed.append({"step": label, "error": str(exc)})
+            failed.append({"step": label, "reason": "router_error"})
         except Exception as exc:
-            logger.warning("camera subnet teardown: %s failed: %s", label, exc)
-            failed.append({"step": label, "error": str(exc)})
+            logger.warning("camera subnet teardown: %s failed: %s", label, exc, exc_info=True)
+            failed.append({"step": label, "reason": "unexpected_error"})
 
     try:
         r = get_router()
