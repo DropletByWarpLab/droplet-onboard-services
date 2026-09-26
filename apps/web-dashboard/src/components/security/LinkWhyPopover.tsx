@@ -38,7 +38,7 @@ export const WHY_COPY = {
 } as const;
 
 /** The area kinds whose people-after-hours alerts need a person-kept link (after_hours_presence's areas). */
-const ALERTING_KINDS: readonly SecurityZoneKind[] = ["interior", "restricted"];
+export const ALERTING_KINDS: readonly SecurityZoneKind[] = ["interior", "restricted"];
 
 export interface LinkWhyPopoverProps {
   open: boolean;

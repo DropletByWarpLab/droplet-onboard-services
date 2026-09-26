@@ -28,7 +28,9 @@ import { SWRConfig } from "swr";
 import { IncidentView, COPY } from "@/components/security/IncidentView";
 import { INCIDENT_COPY } from "@/components/security/incident-copy";
 import { NARRATIVE_COPY } from "@/components/security/NarrativeSection";
-import type { IncidentDetail, IncidentMemberView, SecurityModeView } from "@/lib/types";
+import { fill } from "@/components/security/TimezoneSelect";
+import { translateError } from "@/lib/friendly-errors";
+import type { IncidentDetail, IncidentDropletLinkView, IncidentMemberView, SecurityModeView } from "@/lib/types";
 
 const h = vi.hoisted(() => ({
   level: "act" as "none" | "view" | "act" | "manage",
@@ -40,6 +42,7 @@ const h = vi.hoisted(() => ({
   fetchCameras: vi.fn(),
   getSecurityHealth: vi.fn(),
   requestSecurityIncidentNarrative: vi.fn(),
+  acceptSecurityLink: vi.fn(),
 }));
 
 vi.mock("framer-motion", async () => {
@@ -64,6 +67,7 @@ vi.mock("@/lib/api", async (orig) => ({
   fetchCameras: h.fetchCameras,
   getSecurityHealth: h.getSecurityHealth,
   requestSecurityIncidentNarrative: h.requestSecurityIncidentNarrative,
+  acceptSecurityLink: h.acceptSecurityLink,
 }));
 
 const ID = "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f";
@@ -190,6 +194,157 @@ describe("WARP-2979 PR-2 — Summary by Droplet on the incident page", () => {
     const view = renderView();
     await within(view.container).findByText(SUMMARY);
     expect(within(view.container).queryByRole("button", { name: NARRATIVE_COPY.regenerate })).toBeNull();
+  });
+});
+
+describe("WARP-3195 — a camera only Droplet linked: the line and Keep (route 24), at manage only", () => {
+  const BACK: IncidentDropletLinkView = {
+    linkId: "l-back",
+    zone: { id: "z1", name: "Stock room", kind: "interior" },
+    sourceKind: "camera",
+    sourceRef: "back_cam",
+    camera: "back_cam",
+    label: "Back camera",
+  };
+  const KEEP_BACK = fill(INCIDENT_COPY.keepLinkNamed, { camera: "Back camera" });
+  const atManage = (over: Partial<IncidentDetail> = {}) =>
+    detail({ dropletLinks: [BACK], viewer: { level: "manage", acknowledged: false }, ...over });
+
+  beforeEach(() => {
+    h.level = "manage";
+  });
+
+  it("🔴 under Why Droplet flagged this: the line, the camera it's about, and Keep", async () => {
+    h.getSecurityIncident.mockResolvedValue(atManage());
+    renderView();
+    const why = await screen.findByRole("region", { name: COPY.whyTitle });
+    const row = await within(why).findByText(INCIDENT_COPY.dropletLinked);
+    expect(within(why).getByText("Back camera")).toBeInTheDocument();
+    const keep = within(why).getByRole("button", { name: KEEP_BACK });
+    expect(keep).toHaveTextContent(INCIDENT_COPY.keepLink);
+    // After the reasons, inside the same section.
+    const reason = within(why).getByText("Someone was seen inside while the site was closed");
+    expect(reason.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("plain activity (nothing flagged — the camera was only Droplet's): the section is there for the line alone", async () => {
+    h.getSecurityIncident.mockResolvedValue(atManage({ severity: "info", state: "no_action", reasonCodes: [], reasons: [], actionable: false }));
+    renderView();
+    const why = await screen.findByRole("region", { name: COPY.whyTitle });
+    expect(within(why).getByText(INCIDENT_COPY.dropletLinked)).toBeInTheDocument();
+    expect(within(why).getByRole("button", { name: KEEP_BACK })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["the module level is act", "act", "manage"],
+    ["the box says act (viewer.level)", "manage", "act"],
+    ["the module level is still view", "view", "manage"],
+  ] as const)("🔴 not at manage — %s: no line and no Keep, even if the box sent a list", async (_l, moduleLevel, boxLevel) => {
+    h.level = moduleLevel;
+    h.getSecurityIncident.mockResolvedValue(atManage({ viewer: { level: boxLevel, acknowledged: false } }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByText(INCIDENT_COPY.dropletLinked)).toBeNull();
+    expect(screen.queryByRole("button", { name: KEEP_BACK })).toBeNull();
+  });
+
+  it.each([
+    ["null (the box's viewer rule)", null],
+    ["an empty list", []],
+    ["absent (a box before WARP-3195)", undefined],
+  ])("dropletLinks %s: no line", async (_l, links) => {
+    h.getSecurityIncident.mockResolvedValue(atManage({ dropletLinks: links as IncidentDetail["dropletLinks"] }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByText(INCIDENT_COPY.dropletLinked)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Keep/ })).toBeNull();
+  });
+
+  it("a part of a camera's view is named as that part", async () => {
+    h.getSecurityIncident.mockResolvedValue(atManage({ dropletLinks: [{ ...BACK, sourceKind: "camera_zone", sourceRef: "back_cam/door" }] }));
+    renderView();
+    expect(await screen.findByText("The 'door' part of Back camera's view")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: fill(INCIDENT_COPY.keepLinkNamed, { camera: "the 'door' part of Back camera's view" }) })).toBeInTheDocument();
+  });
+
+  it("🔴 Keep posts route 24 with the link, says so, re-reads — the line goes and focus lands on the state line", async () => {
+    let kept = false;
+    h.getSecurityIncident.mockImplementation(async () => (kept ? atManage({ dropletLinks: [] }) : atManage()));
+    h.acceptSecurityLink.mockImplementation(async () => {
+      kept = true;
+      return { zone: {}, changed: true };
+    });
+    renderView();
+    const keep = await screen.findByRole("button", { name: KEEP_BACK });
+    keep.focus();
+    fireEvent.click(keep);
+    await waitFor(() => expect(h.acceptSecurityLink).toHaveBeenCalledWith("l-back"));
+    await waitFor(() => expect(screen.queryByText(INCIDENT_COPY.dropletLinked)).toBeNull());
+    await waitFor(() => expect(screen.getByTestId("incident-state")).toHaveFocus());
+    expect(h.toast).toHaveBeenCalledWith(fill(INCIDENT_COPY.keptAlerts, { camera: "Back camera", area: "Stock room" }), "success");
+    expect(h.acceptSecurityLink).toHaveBeenCalledTimes(1);
+  });
+
+  it("outside Inside and Staff only, the toast doesn't promise people-after-hours alerts", async () => {
+    let kept = false;
+    const entry = { ...BACK, zone: { ...BACK.zone, kind: "entry" as const } };
+    h.getSecurityIncident.mockImplementation(async () => atManage({ dropletLinks: kept ? [] : [entry] }));
+    h.acceptSecurityLink.mockImplementation(async () => {
+      kept = true;
+      return { zone: {}, changed: true };
+    });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: KEEP_BACK }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(fill(INCIDENT_COPY.keptPlain, { camera: "Back camera", area: "Stock room" }), "success"));
+  });
+
+  it("🔴 in flight: aria-disabled, never disabled, keeps focus, and a second press is refused", async () => {
+    h.getSecurityIncident.mockResolvedValue(atManage());
+    h.acceptSecurityLink.mockImplementation(() => new Promise(() => {}));
+    renderView();
+    const keep = await screen.findByRole("button", { name: KEEP_BACK });
+    keep.focus();
+    fireEvent.click(keep);
+    await waitFor(() => expect(keep).toHaveAttribute("aria-disabled", "true"));
+    expect(keep).not.toBeDisabled();
+    expect(keep).toHaveFocus();
+    fireEvent.click(keep);
+    expect(h.acceptSecurityLink).toHaveBeenCalledTimes(1);
+  });
+
+  it("🔴 a 409: the friendly copy (never the server's message), a re-read, and focus stays on Keep", async () => {
+    h.getSecurityIncident.mockResolvedValue(atManage());
+    h.acceptSecurityLink.mockRejectedValue(typedError("LINK_CONFLICT", 409));
+    renderView();
+    const keep = await screen.findByRole("button", { name: KEEP_BACK });
+    keep.focus();
+    fireEvent.click(keep);
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(translateError(typedError("LINK_CONFLICT", 409), "security"), "error"));
+    expect(h.toast.mock.calls.flat().join(" ")).not.toContain("raw server text");
+    await waitFor(() => expect(h.getSecurityIncident.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(keep).not.toHaveAttribute("aria-disabled"));
+    expect(screen.getByRole("button", { name: KEEP_BACK })).toBe(keep);
+    expect(keep).toHaveFocus();
+  });
+
+  it("someone else decided it first (409, and the re-read has no line): focus lands on the state line, never the page", async () => {
+    let decided = false;
+    h.getSecurityIncident.mockImplementation(async () => (decided ? atManage({ dropletLinks: [] }) : atManage()));
+    h.acceptSecurityLink.mockImplementation(async () => {
+      decided = true;
+      throw typedError("LINK_NOT_DECIDABLE", 409);
+    });
+    renderView();
+    const keep = await screen.findByRole("button", { name: KEEP_BACK });
+    keep.focus();
+    fireEvent.click(keep);
+    await waitFor(() => expect(screen.queryByText(INCIDENT_COPY.dropletLinked)).toBeNull());
+    await waitFor(() => expect(screen.getByTestId("incident-state")).toHaveFocus());
+  });
+
+  it("the new words say area and person — never family or household", () => {
+    const words = [INCIDENT_COPY.dropletLinked, INCIDENT_COPY.keepLink, INCIDENT_COPY.keepLinkNamed, INCIDENT_COPY.keptAlerts, INCIDENT_COPY.keptPlain];
+    for (const w of words) expect(w).not.toMatch(/\bfamil(y|ies)\b|\bhouseholds?\b/i);
   });
 });
 

@@ -94,6 +94,13 @@ export const INCIDENT_COPY = {
   threatSignIn: "Sign-in",
   threatNetwork: "Network",
   labelWords: { person: "Person", car: "Car", dog: "Dog", cat: "Cat" },
+  // WARP-3195 (p4-spec §6.7.1, §8) — a camera only Droplet linked to this area groups here but never alerts.
+  dropletLinked: "Droplet linked this camera. Keep the link to get alerts from it.",
+  keepLink: "Keep",
+  // The button's name: its visible word first (WCAG 2.5.3), then which camera, since a page can carry several.
+  keepLinkNamed: "Keep the link to {camera}",
+  keptAlerts: "Kept. {camera} now counts for alerts in {area}.",
+  keptPlain: "Kept. {camera} now counts for {area}.",
 
   // ── Who was told ──
   noticeSentPhone: "{name} · sent to their phone at {at}",
