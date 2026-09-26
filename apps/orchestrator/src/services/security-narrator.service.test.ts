@@ -40,7 +40,7 @@ import {
 } from "./security-narrator.service.js";
 import { _resetInteractiveInferenceForTests, trackInteractiveInference } from "./interactive-inference.service.js";
 import { SECURITY_NARRATIVE_SYSTEM_PROMPT } from "../lib/security-narrative-prompt.js";
-import { createFakeSecurityPrisma, officeHours, type FakeSecurityPrisma } from "../__tests__/security-incidents.fake.js";
+import { createFakeSecurityPrisma, officeHours, type FakeSecurityPrisma, type FakeWorld } from "../__tests__/security-incidents.fake.js";
 
 /** 22:40 BST on Wednesday 23 September 2026 — an incident that sealed after 22:14. */
 const NOW = new Date("2026-09-23T21:40:00Z");
@@ -146,7 +146,7 @@ function seed(rows: Array<Record<string, unknown>>, extra: Record<string, unknow
         { id: "u1", username: "stefan", displayName: "Stefan Cruceru", role: "owner", isActive: true },
         { id: "u2", username: "maria", displayName: "Maria Lopez", role: "family", isActive: true },
       ],
-      ...(extra as never),
+      ...(extra as unknown as Partial<FakeWorld>),
     },
     NOW,
   );

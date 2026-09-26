@@ -651,6 +651,47 @@ describe("sealing (§6.1 step 5): quiet + settle, the last arrival, and a draine
     expect(incidents(f)[0]).toMatchObject({ grouping: "closed", closedAt: due });
   });
 
+  // WARP-2979 PR-2 (P4 §6.9.1) — a notice/alert incident asks for its summary when it seals.
+  it("WARP-2979: the seal sets the summary `pending` and clears its lease and attempts — in the same CAS'd update", async () => {
+    const f = world({ securityEvent: [eventRow({ id: 1n })] });
+    await tick(f);
+    const i = incidents(f)[0]!;
+    expect(i).toMatchObject({ severity: "alert", narrativeState: "none" });
+    // "Summarise now" while collecting, with a narration of the still-collecting incident in flight.
+    Object.assign(i, { narrativeState: "pending", narrativeAttemptAt: T0, narrativeAttempts: 1, narrativeError: "MODEL_ERROR" });
+    const version = i.version as number;
+    const due = plus(plus(T0, 20_000), QUIET_MS + SETTLE_MS);
+    await tick(f, due);
+    expect(incidents(f)[0]).toMatchObject({
+      grouping: "closed",
+      narrativeState: "pending",
+      narrativeAttemptAt: null,
+      narrativeAttempts: 0,
+      version: version + 1,
+    });
+  });
+
+  it("WARP-2979: plain activity seals with no summary asked for; summaries off seal with none either", async () => {
+    // A person on `yard` (no area, open hours → plain activity).
+    const plain = world({ securityEvent: [eventRow({ id: 1n, camera: "yard", sourceRef: "yard/1.5-abc", startedAt: NOON })] }, NOON);
+    await tick(plain, NOON);
+    await tick(plain, plus(NOON, 20_000 + QUIET_MS + SETTLE_MS));
+    expect(incidents(plain)[0]).toMatchObject({ severity: "info", grouping: "closed", narrativeState: "none" });
+
+    const off = world({ securityEvent: [eventRow({ id: 1n })], securityAiSettings: [{ id: "singleton", summaries: "off" }] });
+    await tick(off);
+    await tick(off, plus(plus(T0, 20_000), QUIET_MS + SETTLE_MS));
+    expect(incidents(off)[0]).toMatchObject({ severity: "alert", grouping: "closed", narrativeState: "none" });
+  });
+
+  it("WARP-2979: settings that cannot be read never stop a seal — the incident closes without a summary", async () => {
+    const f = world({ securityEvent: [eventRow({ id: 1n })] });
+    await tick(f);
+    f.failOn("securityAiSettings", "findUnique", undefined, { always: true });
+    await tick(f, plus(plus(T0, 20_000), QUIET_MS + SETTLE_MS));
+    expect(incidents(f)[0]).toMatchObject({ grouping: "closed", narrativeState: "none" });
+  });
+
   it("waits 90 s after the LAST ARRIVAL, however old its event time", async () => {
     const late = eventRow({ id: 1n, startedAt: plus(T0, -3_600_000 + 60_000), createdAt: T0 });
     late.endedAt = plus(late.startedAt as Date, 10_000);

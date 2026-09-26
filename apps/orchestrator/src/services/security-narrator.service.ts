@@ -106,8 +106,6 @@ export const SECURITY_NARRATIVE_MAX_ATTEMPTS = 3;
 export const NARRATOR_LEASE_MS = 5 * 60_000;
 /** `pending` this long after the incident's last activity → `expired`. */
 export const NARRATIVE_EXPIRE_MS = 7 * 86_400_000;
-/** Route 28: under this long since the last attempt or text → 409 NARRATIVE_COOLDOWN. */
-export const NARRATIVE_COOLDOWN_MS = 10 * 60_000;
 /** gpt-oss spends output tokens on reasoning first; 700 with effort low leaves room for the text. */
 export const NARRATOR_MAX_TOKENS = 700;
 export const NARRATOR_CALL_TIMEOUT_MS = 90_000;

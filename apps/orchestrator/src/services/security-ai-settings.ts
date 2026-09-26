@@ -74,6 +74,18 @@ export async function readSecurityAiSettings(
   return { linking: made.linking, summaries: made.summaries, version: made.version };
 }
 
+/**
+ * WARP-2979 P4 PR-2 — just the summaries switch, for the places that must
+ * never write while they ask: the engine's seal, a resolve that seals, and
+ * routes 18 and 28. It reads and never creates the row (a missing row is its
+ * default, `on`). Rejects when the database cannot be read; each caller
+ * decides (a seal or a resolve then asks for no summary; route 18 shows none).
+ */
+export async function readSummariesSetting(prisma: Pick<PrismaClient, "securityAiSettings">): Promise<SecurityAiSummaries> {
+  const row = await prisma.securityAiSettings.findUnique({ where: { id: SECURITY_AI_SETTINGS_ID }, select: { summaries: true } });
+  return row?.summaries ?? "on";
+}
+
 /** The audit line for a change, in the words the settings panel uses. */
 function changeCopy(from: SecurityAiSettingsView, to: SecurityAiSettingsInput): string {
   const parts: string[] = [];

@@ -33,6 +33,18 @@ import type { NarrativeAudience } from "../lib/security-narrative-prompt.js";
 import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
 import type { IncidentProjection, IncidentViewer } from "./security-incident-view.js";
 
+/**
+ * What a seal, a resolve that seals, and route 28 write to ask for the
+ * incident's summary (§6.9.1): `pending`, with the lease and the attempts
+ * cleared — so a narration in flight misses its write. Only on notice/alert
+ * incidents (plain activity is never narrated, CHECK), only while summaries
+ * are on. Never the incident's version.
+ */
+export const NARRATIVE_ON_SEAL = { narrativeState: "pending", narrativeAttemptAt: null, narrativeAttempts: 0 } as const;
+
+/** Route 28: under this long since the last attempt or the text → 409 NARRATIVE_COOLDOWN. */
+export const NARRATIVE_COOLDOWN_MS = 10 * 60_000;
+
 /** The incident columns this module reads. Route 18 selects these beside INCIDENT_VIEW_SELECT. */
 export const NARRATIVE_SELECT = {
   narrativeState: true,

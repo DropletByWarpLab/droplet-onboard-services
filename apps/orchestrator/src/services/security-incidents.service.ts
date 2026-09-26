@@ -57,6 +57,13 @@
  *      incident, one alert. Who holds what is `presenceHolds`
  *      (security-inflight.ts), the same answer a camera-limited viewer's
  *      "still happening" reads (security-incident-view.ts).
+ *      WARP-2979 (P4 §6.9.1): a notice or alert incident asks for its
+ *      "Summary by Droplet" as it seals — `narrativeState = pending`, the
+ *      lease and attempts cleared, in the SAME CAS'd update — when
+ *      `SecurityAiSettings.summaries = on` (read once per tick; settings that
+ *      cannot be read never stop a seal: it closes without a summary).
+ *      Clearing the lease makes any narration of the still-collecting
+ *      incident miss its write, so the finished incident is the one narrated.
  *   6. Notify (security-alerts.service.ts), then redeliver stuck notices.
  *   7. Health: lastOkAt when 1–6 completed; alerts health every 6th tick.
  *      A failed `incident.alerted` audit from step 6 is rethrown only after
@@ -96,6 +103,8 @@ import {
   type PatternContext,
 } from "./security-pattern-rules.js";
 import { READ_COMMITTED_TX, REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import { readSummariesSetting } from "./security-ai-settings.js";
+import { NARRATIVE_ON_SEAL } from "./security-narrative-view.js";
 import {
   RULESET,
   SECURITY_RULESET_VERSION,
@@ -770,10 +779,21 @@ async function offlineReasons(
   return out;
 }
 
+/** Whether this tick's seals ask for summaries. Never throws: an unreadable setting seals without one. */
+async function summariesOnForSeal(prisma: PrismaClient): Promise<boolean> {
+  try {
+    return (await readSummariesSetting(prisma)) === "on";
+  } catch (err) {
+    logger.warn({ err }, "security incidents: the AI settings could not be read — this tick's seals ask for no summary");
+    return false;
+  }
+}
+
 /**
  * Add the timers' reasons to one collecting incident and, when `seal`, close
  * it — ONE READ COMMITTED transaction, CAS on version with one re-read.
- * Returns whether anything was written.
+ * Returns whether anything was written. `narrate` (WARP-2979): a sealed
+ * notice/alert incident asks for its summary in the same update.
  */
 async function updateCollecting(
   prisma: PrismaClient,
@@ -781,6 +801,7 @@ async function updateCollecting(
   now: Date,
   seal: boolean,
   ctx: OfflineRuleContext | null,
+  narrate = false,
 ): Promise<boolean> {
   return prisma.$transaction(async (tx) => {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -794,9 +815,11 @@ async function updateCollecting(
       const kept = capEvidence(existing, await offlineReasons(tx, incidentId, now, ctx));
       const patch = reasonPatch(i, kept, now);
       if (!seal && Object.keys(patch).length === 0 && kept.length === 0) return false;
+      const severity = (patch as { severity?: Candidate["severity"] }).severity ?? i.severity;
+      const summary = seal && narrate && severity !== "info" ? NARRATIVE_ON_SEAL : {};
       const { count } = await tx.securityIncident.updateMany({
         where: { id: incidentId, version: i.version, grouping: "collecting" },
-        data: { ...patch, ...(seal ? { grouping: "closed" as const, closedAt: now } : {}), version: { increment: 1 } },
+        data: { ...patch, ...(seal ? { grouping: "closed" as const, closedAt: now } : {}), ...summary, version: { increment: 1 } },
       });
       if (count !== 1) continue;
       if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(incidentId, kept), skipDuplicates: true });
@@ -954,9 +977,11 @@ async function runTick(
     });
     // PR-D: a person still in view holds their incident open (presenceHolds).
     const held = await presenceHolds(prisma, due, deps.ongoing, now);
+    // WARP-2979: read once, only when something may seal.
+    const narrate = due.some((d) => !held.has(d.id)) ? await summariesOnForSeal(prisma) : false;
     for (const { id } of due) {
       if (held.has(id)) continue;
-      if (await updateCollecting(prisma, id, now, true, offlineCtx)) sealed++;
+      if (await updateCollecting(prisma, id, now, true, offlineCtx, narrate)) sealed++;
     }
   }
 
