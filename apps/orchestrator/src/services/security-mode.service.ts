@@ -1146,6 +1146,20 @@ export async function readModeView(prisma: PrismaClient, now: Date): Promise<Mod
   return buildModeView(prisma, stored, load.hours, now);
 }
 
+/**
+ * WARP-2979 (P4 §6.12.3) — the site's clock for the chat tools' periods: the
+ * hours the evaluator reads and the display zone (`resolveSecurityTimezone`),
+ * from ONE snapshot. Throws `HoursUnreadableError` when the stored hours
+ * cannot be evaluated (the caller then knows no zone), and on a read error.
+ */
+export async function readSiteClock(prisma: PrismaClient, now: Date): Promise<{ hours: SiteHours; timezone: string | null }> {
+  const { load } = await readModeSnapshot(prisma, now);
+  if (!load.ok) throw new HoursUnreadableError(load.reason);
+  const hours = load.hours;
+  const timezone = await resolveSecurityTimezone(prisma, hours.state === "set" ? { state: "set", timezone: hours.timezone } : { state: "not_set" });
+  return { hours, timezone };
+}
+
 const WEEK = [1, 2, 3, 4, 5, 6, 7] as const;
 
 /**

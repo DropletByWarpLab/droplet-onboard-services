@@ -441,6 +441,15 @@ export interface IncidentListFilters {
   severity?: "alert" | "notice";
   zoneId?: string;
   cursor?: { at: Date; id: string };
+  /**
+   * WARP-2979 (P4 §6.12.3) — the chat tools' period: incidents whose STORED
+   * span `[firstActivityAt, lastActivityAt]` meets `[from, to]`. A prefilter
+   * only: a viewer's own span lies inside the stored one, so this keeps every
+   * incident whose visible span meets the window, and the assistant route
+   * drops the ones whose visible span does not (DS-005: a hidden camera's
+   * activity must not pull an incident into her window).
+   */
+  activeBetween?: { from: Date; to: Date };
 }
 
 /**
@@ -503,6 +512,9 @@ export function incidentListWhere(v: IncidentViewer, f: IncidentListFilters): Pr
     });
   }
   if (f.zoneId) and.push({ zoneId: f.zoneId });
+  if (f.activeBetween) {
+    and.push({ lastActivityAt: { gte: f.activeBetween.from }, firstActivityAt: { lte: f.activeBetween.to } });
+  }
   if (f.cursor) {
     and.push({ OR: [{ lastActivityAt: { lt: f.cursor.at } }, { lastActivityAt: f.cursor.at, id: { lt: f.cursor.id } }] });
   }
