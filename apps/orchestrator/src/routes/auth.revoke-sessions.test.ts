@@ -150,6 +150,18 @@ function createPrismaMock(seed: any[] = []) {
       users[idx] = { ...users[idx], ...data };
       return users[idx];
     }),
+    // WARP-3113: enable reactivates only a row with no deletion scheduled.
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      const idx = users.findIndex(
+        (u) =>
+          u.id === where.id &&
+          (where.deletionStatus === undefined ||
+            (u.deletionStatus ?? "NONE") === where.deletionStatus),
+      );
+      if (idx < 0) return { count: 0 };
+      users[idx] = { ...users[idx], ...data };
+      return { count: 1 };
+    }),
     count: vi.fn(async ({ where }: any = {}) => {
       let n = 0;
       for (const u of users) {
@@ -580,6 +592,10 @@ describe("POST /api/auth/users/:username/enable — WARP-1526 local re-activate"
     expect(res.body).toMatchObject({ status: "enabled", username: "alice" });
     expect(prisma._users[0].directoryStatus).toBe("ACTIVE");
     expect(nc.ncSetUserEnabled).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", true);
+     // WARP-3113: reactivation is audited with the actor.
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "User reactivated" }),
+    );
   });
 
   it("legacy NC-only enable (no local row) keeps working", async () => {

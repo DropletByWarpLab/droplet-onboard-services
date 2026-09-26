@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Loader2,
   Mic,
+  Undo2,
 } from "lucide-react";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
@@ -27,6 +28,7 @@ import {
   fetchUsers,
   createUser as apiCreateUser,
   deleteUser as apiDeleteUser,
+  cancelUserDeletion,
   updateUser,
   setUserEnabled,
   createInvite,
@@ -41,6 +43,7 @@ import {
   putAccessExceptions,
   fetchEffectiveAccess,
 } from "@/lib/api";
+import { DELETE_USER_COPY, DELETION_RETENTION_DAYS } from "@/lib/leaver-deletion";
 import { fetchIntegrations } from "@/lib/api.erp";
 import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-policy";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -785,14 +788,25 @@ export default function UsersPage() {
     const u = deleteUserTarget;
     if (!u) return;
     try {
-      await apiDeleteUser(u.id);
+      const { deletionDueAt } = await apiDeleteUser(u.id);
       if (!mountedRef.current) return;
       setDeleteUserTarget(null);
-      toast(`Deleted ${u.id}.`, "success");
+      toast(`${u.id} will be deleted on ${formatDeletionDate(deletionDueAt)}.`, "success");
       await reload();
     } catch (err: any) {
       if (mountedRef.current) setError(err?.message || "Failed to delete user");
       throw err;
+    }
+  };
+
+  const performCancelDeletion = async (u: RosterUser) => {
+    try {
+      await cancelUserDeletion(u.id);
+      if (!mountedRef.current) return;
+      toast(`Deletion of ${u.id} cancelled. They stay deactivated.`, "success");
+      await reload();
+    } catch (err: any) {
+      if (mountedRef.current) setError(err?.message || "Failed to cancel the deletion");
     }
   };
 
@@ -1124,6 +1138,9 @@ export default function UsersPage() {
     // roster's `enabled` field sends nothing, and an undefined value has to
     // read as active. Only an explicit false deactivates a row.
     const isDeactivated = u.enabled === false;
+    // WARP-3113: explicit enum from the box; absent = an older box = NONE.
+    const deletionPending = u.deletionStatus === "PENDING";
+    const deletionRunning = u.deletionStatus === "PURGING";
     return (
     <div key={u.id} className="lrow">
       <span className="ri brand">
@@ -1168,6 +1185,17 @@ export default function UsersPage() {
         >
           <Shield size={11} aria-hidden="true" />
           Deactivated
+        </span>
+      )}
+      {(deletionPending || deletionRunning) && (
+        <span
+          className="chip"
+          style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12, color: "var(--system-red)" }}
+        >
+          <Trash2 size={11} aria-hidden="true" />
+          {deletionRunning
+            ? "Deleting"
+            : `Deletion on ${formatDeletionDate(u.deletionDueAt ?? null)}`}
         </span>
       )}
       {/* WARP-1271 (T19a): "used / limit" — mono, matches the
@@ -1224,7 +1252,16 @@ export default function UsersPage() {
                 everyone else, so an admin could cut someone off and had no
                 way to undo it from any screen — `performEnable` existed and
                 nothing ever called it with `true`. */}
-            {isDeactivated ? (
+            {deletionPending ? (
+              <button
+                onClick={() => void performCancelDeletion(u)}
+                aria-label={`Cancel deletion of ${label}`}
+                title="Cancel deletion"
+                className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+              >
+                <Undo2 size={14} />
+              </button>
+            ) : deletionRunning ? null : isDeactivated ? (
               <button
                 onClick={() => handleSetEnabled(u, true)}
                 aria-label={`Enable user ${label}`}
@@ -1245,6 +1282,7 @@ export default function UsersPage() {
                 <Shield size={14} />
               </button>
             )}
+            {!deletionPending && !deletionRunning && (
             <button
               onClick={() => handleDelete(u)}
               aria-label={`Delete user ${label}`}
@@ -1254,6 +1292,7 @@ export default function UsersPage() {
             >
               <Trash2 size={14} />
             </button>
+            )}
           </>
         )}
       </div>
@@ -2430,11 +2469,11 @@ export default function UsersPage() {
         onCancel={() => setDeleteUserTarget(null)}
         title={
           deleteUserTarget
-            ? `Delete user "${deleteUserTarget.id}"?`
+            ? `Delete "${deleteUserTarget.id}"?`
             : "Delete user?"
         }
-        description="The account, sessions, and all per-user state are removed. This cannot be undone."
-        confirmLabel="Delete"
+        description={DELETE_USER_COPY}
+        confirmLabel={`Keep for ${DELETION_RETENTION_DAYS} days, then delete`}
         variant="destructive"
       />
 
@@ -2453,4 +2492,14 @@ export default function UsersPage() {
       />
     </ShellPage>
   );
+}
+
+/** WARP-3113 — the day a scheduled deletion runs, in the viewer's locale. */
+function formatDeletionDate(iso: string | null): string {
+  if (!iso) return "a date the box didn't send";
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }

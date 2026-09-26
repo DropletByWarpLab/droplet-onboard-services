@@ -45,6 +45,7 @@ import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
+import { purgeDueDeletions, LEAVER_DELETION_LOCK_KEY } from "./services/leaver-deletion.service.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
@@ -1302,6 +1303,20 @@ async function main() {
       }
     },
     { lockKey: "droplet:department-reconciler" },
+  );
+
+  // WARP-3113: complete leaver deletions whose 30-day retention has run out
+  // (the person was revoked when the deletion was scheduled). 03:50 — clear
+  // of the 03:00–03:40 audit and sweep jobs.
+  cronRuntime.scheduleCron(
+    "50 3 * * *",
+    async () => {
+      const res = await purgeDueDeletions(prisma);
+      if (res.completed > 0 || res.failed > 0) {
+        logger.info(res, "leaver-deletion job complete");
+      }
+    },
+    { lockKey: LEAVER_DELETION_LOCK_KEY },
   );
 
   // WARP-237: nightly tamper detection. 03:25 — after the 03:00 purge

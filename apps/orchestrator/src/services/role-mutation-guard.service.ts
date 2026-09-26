@@ -119,7 +119,8 @@ export type RoleMutationRefusalCode =
   | "ROLE_NOT_ASSIGNABLE"
   | "LAST_OWNER_INVARIANT"
   | "LAST_OPERATOR_INVARIANT"
-  | "CONCURRENT_MUTATION";
+  | "CONCURRENT_MUTATION"
+  | "DELETION_PENDING";
 
 /**
  * The `$transaction` options EVERY guarded mutation must be opened with
@@ -248,6 +249,16 @@ export class RoleMutationRefusedError extends Error {
    * caller was authorized; the resource moved underneath it. Nothing was
    * applied, so retrying is safe and is what the copy asks for.
    */
+  /** WARP-3113 — reactivating a person scheduled for deletion (any surface:
+   *  dashboard enable, SCIM active:true) waits for the deletion's cancel. */
+  static deletionPending(): RoleMutationRefusedError {
+    return new RoleMutationRefusedError(
+      409,
+      "DELETION_PENDING",
+      "This person is scheduled for deletion. Cancel the deletion first.",
+    );
+  }
+
   static concurrentMutation(): RoleMutationRefusedError {
     return new RoleMutationRefusedError(
       409,

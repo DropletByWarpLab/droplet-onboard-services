@@ -89,6 +89,11 @@ vi.mock("../services/jwt.service.js", async () => {
   };
 });
 
+// WARP-3113: invite create/revoke are audited — observed, not persisted.
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: vi.fn().mockResolvedValue({ items: 0, chunks: 0 }),
 }));
@@ -502,6 +507,25 @@ describe("DELETE /api/auth/invites/:token — revoke", () => {
     const otherApp = buildApp(prisma, familyUser());
     const res = await request(otherApp).delete(`/api/auth/invites/${token}`);
     expect(res.status).toBe(403);
+  });
+
+  it("WARP-3113: a plain invite and its revoke are each audited once with the actor — never the token", async () => {
+    const { recordActivity } = await import("../services/activity.singleton.js");
+    const audit = vi.mocked(recordActivity);
+    audit.mockClear();
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
+    const token = create.body.token;
+    await request(app).delete(`/api/auth/invites/${token}`);
+    await request(app).delete(`/api/auth/invites/${token}`); // idempotent: no second row
+
+    const whats = audit.mock.calls.map((c: any) => c[0].what);
+    expect(whats).toEqual(["Teammate invited", "Invite revoked"]);
+    for (const [row] of audit.mock.calls as any[]) {
+      expect(row.refs.actor).toBe("admin-issuer");
+      expect(JSON.stringify(row)).not.toContain(token);
+    }
   });
 
   it("404s on unknown token", async () => {

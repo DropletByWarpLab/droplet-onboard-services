@@ -44,6 +44,7 @@ import {
   createUser,
   deleteUser as apiDeleteUser,
 } from "@/lib/api";
+import { DELETE_USER_COPY, DELETION_RETENTION_DAYS } from "@/lib/leaver-deletion";
 import { ROSTER_SOURCE_LABEL, type RosterUser } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect, Badge } from "@/components/shell/primitives";
@@ -674,11 +675,11 @@ export default function SettingsPage() {
           onCancel={() => setDeleteUserTarget(null)}
           title={
             deleteUserTarget
-              ? `Delete user "${deleteUserTarget}"?`
+              ? `Delete "${deleteUserTarget}"?`
               : "Delete user?"
           }
-          description="The account, sessions, and per-user state are removed. This cannot be undone."
-          confirmLabel="Delete"
+          description={DELETE_USER_COPY}
+          confirmLabel={`Keep for ${DELETION_RETENTION_DAYS} days, then delete`}
           variant="destructive"
         />
       </div>

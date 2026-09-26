@@ -28,6 +28,7 @@
  * Nextcloud fallback continues to populate `req.user` for legacy
  * sessions that haven't yet been mirrored locally.
  */
+import { deleteDispositionSchema, scheduleUserDeletion } from "../services/leaver-deletion.service.js";
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
@@ -51,13 +52,10 @@ import {
   assertNotSelf,
   assertRoleChangeAllowed,
   assertScopeChangeAllowed,
-  assertRemovalAllowed,
   assertUsageWriteAllowed,
   assertAssignableForCreate,
   assertRoleChangeInvariantsTx,
-  assertRemovalInvariantsTx,
   runRoleChangePostEffects,
-  runRemovalPostEffects,
 } from "../services/role-mutation-guard.service.js";
 // WARP-1527 (RBAC v2 T3): the per-person access surface — custom-role /
 // built-in-tier assignment, the §3 resolver read, and the feature-axis
@@ -796,8 +794,9 @@ export function createPeopleRouter(
   );
 
   // ── DELETE /api/people/:id ──────────────────────────────────
-  // owner + admin only. Cascade on User deletes ScopeBindings and
-  // GroupMemberships per the schema's onDelete: Cascade. We refuse to
+  // owner + admin only. WARP-3113: schedules the deletion (see below); the
+  // nightly job's row delete cascades ScopeBindings and GroupMemberships
+  // per the schema's onDelete: Cascade. We refuse to
   // delete OCS-owned rows (isLocal=false) — Nextcloud upstream owns
   // those identities; deleting locally would create drift the next
   // sync would rewrite anyway.
@@ -822,17 +821,6 @@ export function createPeopleRouter(
           return res.status(404).json({ error: "User not found" });
         }
 
-        // Rail 1 (WARP-1526 owner untouchable): owner rows cannot be
-        // removed by ANY actor — regardless of how many owner rows exist.
-        // Off-boarding an owner belongs to the future ownership-transfer
-        // flow. This supersedes the earlier two-owner off-boarding path
-        // and shadows the last-owner invariant below (kept as the in-tx
-        // backstop).
-        assertRemovalAllowed({
-          actor: { id: req.user?.id, role: req.user?.role },
-          target: { id: existing.id, role: existing.role },
-        });
-
         if (!existing.isLocal) {
           // 409 Conflict — \"the resource state forbids this\". 403 would
           // imply auth/permission; the caller IS allowed, the resource
@@ -842,36 +830,33 @@ export function createPeopleRouter(
           });
         }
 
-        // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
-        // WARP-1526 last-operator: removing the final non-disabled
-        // owner-or-admin is refused), then the delete — checks + write in
-        // one interactive $transaction so a concurrent demotion can't slip
-        // past the check window.
-        // SERIALIZABLE + in-tx re-read + optimistic delete (pr-reviewer
-        // #1229 B1/B2), same shape as PATCH /role above.
-        await prisma.$transaction(async (tx) => {
-          const fresh = await readGuardTargetTx(tx, req.params.id);
-          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
-          await assertRemovalInvariantsTx(tx, { target: fresh });
-          await tx.user.delete({
-            where: { id: req.params.id, role: fresh.role },
+        // WARP-3113: this surface used to hard-delete the local row with no
+        // retention and never touch Nextcloud, leaving the person's
+        // Nextcloud login ENABLED (WARP-3170). It now schedules exactly as
+        // DELETE /api/auth/users/:username does — the same rails (owner
+        // untouchable, last operator, SERIALIZABLE), revocation now, files
+        // kept 30 days, then the nightly job removes the account.
+        const parsedDisposition = deleteDispositionSchema.safeParse(req.body ?? {});
+        if (!parsedDisposition.success) {
+          return res.status(400).json({
+            error: "Unknown disposition. The only one available is \"retention\" (keep the files 30 days, then delete).",
+            code: "UNKNOWN_DISPOSITION",
           });
-        }, SERIALIZABLE_TX);
-
-        // Rail 6 (consolidated post-commit effects) — WARP-490 hard
-        // revocation: session RECORDS swept + the sid-less access-token
-        // denylist written (both best-effort; the row is already gone, so
-        // /auth/refresh fails closed regardless), then the mandatory-emit
-        // audit row.
-        await runRemovalPostEffects({
-          targetUserId: existing.id,
-          targetUsername: existing.username,
-          targetRole: existing.role,
+        }
+        const scheduled = await scheduleUserDeletion(prisma, existing, {
+          guardActor: { id: req.user?.id, role: req.user?.role },
           actorUsername: req.user?.username ?? null,
           actor: actorFromRequest(req),
+          disposition: parsedDisposition.data.disposition ?? "retention",
+          dispositionDefaulted: parsedDisposition.data.disposition === undefined,
         });
 
-        res.json({ ok: true, removed: existing.username });
+        return res.json({
+          ok: true,
+          status: "pending_deletion",
+          username: existing.username,
+          deletionDueAt: scheduled.deletionDueAt,
+        });
       } catch (err) {
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
