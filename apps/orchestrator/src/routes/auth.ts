@@ -4037,7 +4037,7 @@ export function createProtectedAuthRouter(
             );
           }
           return r;
-        });
+        }, SERIALIZABLE_TX);
         if (removed.count === 0) {
           logger.warn(
             { username: req.params.username, userId: row.id },

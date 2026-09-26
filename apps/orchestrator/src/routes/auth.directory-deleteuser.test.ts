@@ -543,10 +543,13 @@ describe("DELETE /api/auth/users/:username — serializable isolation", () => {
     const res = await request(app).delete("/api/auth/users/alice");
 
     expect(res.status).toBe(200);
-    // Two transactions: the removal rails (first, Serializable) and — after
-    // Nextcloud confirms — the row delete + username-keyed purge (WARP-3193
-    // SEC-AUTH-6), which runs no rails and so needs no isolation pin.
+    // Two transactions: the removal rails, then — after Nextcloud confirms —
+    // the row delete + username-keyed purge (WARP-3193 SEC-AUTH-6). Both at
+    // SERIALIZABLE, like every transaction on a guarded mutation.
     expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(prisma.$transaction.mock.calls[1][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
     expect(prisma.$transaction.mock.calls[0][1]).toEqual({
       isolationLevel: "Serializable",
     });
