@@ -121,6 +121,7 @@ import type {
   UsagePolicy,
   UsageWithMeta,
   AdminFilesUsageResponse,
+  CompanyPublicLink,
   Department,
   DepartmentDetail,
   DepartmentRight,
@@ -6367,6 +6368,14 @@ export async function fetchPromptInspect(
 }
 
 /** Admin usage roster — per-user + per-department storage (WARP-1271). */
+/** WARP-3168: owner/admin only. Throws on 503 (Nextcloud unreadable) — never an empty list. */
+export async function fetchCompanyPublicLinks(): Promise<CompanyPublicLink[]> {
+  const res = await authFetch(`${BASE}/api/admin/files/company-public-links`);
+  if (!res.ok) throw new Error(`Couldn't read the company's links (${res.status})`);
+  const body: { links: CompanyPublicLink[] } = await res.json();
+  return body.links;
+}
+
 export async function fetchAdminFilesUsage(): Promise<AdminFilesUsageResponse> {
   const res = await authFetch(`${BASE}/api/admin/files/usage`);
   if (!res.ok) {

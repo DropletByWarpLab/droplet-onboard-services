@@ -28,6 +28,7 @@ import type { AdminFilesUsageResponse, Department } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { UploadButton } from "@/components/UploadZone";
 import { CreateLibraryDialog } from "@/components/Departments/CreateLibraryDialog";
+import { CompanyPublicLinks } from "@/components/admin/CompanyPublicLinks";
 import type { DroppedSelection } from "@/components/FileManager/dropped-entries";
 import { requiredDirectories } from "@/components/FileManager/dropped-entries";
 import { runUpload } from "@/lib/run-upload";
@@ -461,6 +462,9 @@ export default function AdminFilesPage() {
               </div>
             )}
           </div>
+
+          {/* WARP-3168 — member-made links on company files, listed for review. */}
+          <CompanyPublicLinks />
         </>
       )}
 

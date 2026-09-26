@@ -34,6 +34,14 @@ vi.mock("../services/department-provisioner.service.js", () => ({
   adminBasicToken: vi.fn(() => "basic:dGVzdDp0ZXN0"),
 }));
 
+const { listMemberCompanyLinksMock } = vi.hoisted(() => ({
+  listMemberCompanyLinksMock: vi.fn(),
+}));
+vi.mock("../services/company-link-audit.service.js", () => ({
+  listMemberCompanyLinks: listMemberCompanyLinksMock,
+  queryNextcloudCompanyShares: vi.fn(),
+}));
+
 import { adminFilesRouter, createAdminFilesUsageRouter } from "./admin-files.js";
 
 function mkApp(opts: {
@@ -396,5 +404,34 @@ describe("GET /api/admin/files/usage", () => {
     expect(res.body.departments).toEqual([
       { id: "d1", name: "Sales", kind: "DEPARTMENT", sizeBytes: "—", quotaBytes: null },
     ]);
+  });
+});
+
+describe("GET /api/admin/files/company-public-links (WARP-3168)", () => {
+  beforeEach(() => {
+    listMemberCompanyLinksMock.mockReset();
+  });
+
+  it("403 for a member", async () => {
+    const app = mkUsageApp(mkUsagePrisma({}), { id: "u1", role: "family" });
+    const res = await request(app).get("/api/admin/files/company-public-links");
+    expect(res.status).toBe(403);
+    expect(listMemberCompanyLinksMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the list for an admin", async () => {
+    listMemberCompanyLinksMock.mockResolvedValue([{ shareId: 1 }]);
+    const app = mkUsageApp(mkUsagePrisma({}), { id: "u1", role: "admin" });
+    const res = await request(app).get("/api/admin/files/company-public-links");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ links: [{ shareId: 1 }] });
+  });
+
+  it("503, never an empty list, when Nextcloud's share table can't be read", async () => {
+    listMemberCompanyLinksMock.mockRejectedValue(new Error("db down"));
+    const app = mkUsageApp(mkUsagePrisma({}), { id: "u1", role: "owner" });
+    const res = await request(app).get("/api/admin/files/company-public-links");
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: "company_links_unavailable" });
   });
 });
