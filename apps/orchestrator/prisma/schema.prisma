@@ -3062,7 +3062,38 @@ model SsoLoginState {
   expiresAt    DateTime
   createdAt    DateTime  @default(now())
 
+  // ── Native handoff (RFC 8252) — the native Windows client's SSO leg ──
+  // The IdP still redirects to the box callback (ADR-016); a NATIVE row then
+  // hands the result to the app's own redirect instead of setting cookies.
+  // Which leg the callback takes is this explicit column, never derived from
+  // `nativeRedirectUri` being null. A migration CHECK pins that a NATIVE row
+  // always has its redirect + challenge.
+  flowKind            SsoFlowKind @default(BROWSER)
+  // http://127.0.0.1:<port>/<path>, http://[::1]:<port>/<path> or
+  // droplet://sso/callback — validated at /sso/oidc/native/begin.
+  nativeRedirectUri   String?
+  // The app's PKCE S256 challenge for the handoff (43-char base64url). Not
+  // the IdP-side verifier above, which never leaves the box.
+  nativeCodeChallenge String?
+  // sha256 (hex) of the one-time handoff code; the plaintext is never stored.
+  handoffCodeHash     String?     @unique
+  // Local User.id the callback resolved; re-read at redemption.
+  handoffUserId       String?
+  // 60 s after the callback minted the code.
+  handoffExpiresAt    DateTime?
+  // Single-use stamp for the redemption (same idiom as `consumedAt`).
+  handoffConsumedAt   DateTime?
+
   @@index([expiresAt])
+}
+
+/// Which leg an SSO login state finishes on. BROWSER: the dashboard flow
+/// (state cookie + session cookies). NATIVE: the RFC 8252 handoff to a
+/// native app's loopback / droplet:// redirect, redeemed with PKCE at
+/// POST /api/sso/oidc/native/token.
+enum SsoFlowKind {
+  BROWSER
+  NATIVE
 }
 
 // PR #375 — TOTP (RFC 6238) enrollment for the built-in directory's
