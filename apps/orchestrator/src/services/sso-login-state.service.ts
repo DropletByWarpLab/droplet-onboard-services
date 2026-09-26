@@ -12,6 +12,12 @@
  * that are still unconsumed AND unexpired, and exactly one caller observes
  * count===1. Same single-use idiom as `claimRefreshRotation` (jwt.service)
  * and `UserInvite.acceptedAt` (invite-accept).
+ *
+ * Native handoff (RFC 8252): a NATIVE row (explicit `flowKind`) also carries
+ * the native app's redirect and PKCE challenge. The callback parks a one-time
+ * handoff code on it (`setHandoff`, sha256 only) and
+ * `POST /sso/oidc/native/token` redeems it once (`consumeHandoff`), with the
+ * same conditional-claim idiom.
  */
 import type { PrismaClient, SsoLoginState } from "@prisma/client";
 
@@ -21,7 +27,7 @@ import type { SsoProvider } from "./sso-oidc.service.js";
  *  seconds; an abandoned flow must not be resumable minutes later. */
 export const SSO_LOGIN_STATE_TTL_SECONDS = 10 * 60;
 
-export interface CreateLoginStateInput {
+interface CreateLoginStateBase {
   provider: SsoProvider;
   state: string;
   nonce: string;
@@ -30,6 +36,22 @@ export interface CreateLoginStateInput {
   returnTo: string;
   ttlSeconds?: number;
 }
+
+/**
+ * BROWSER (the dashboard flow, the default) or NATIVE (RFC 8252 handoff for a
+ * native app: the callback parks a one-time code for the app's own redirect
+ * instead of setting cookies). The kind is written to an explicit column so
+ * the callback never infers it from a null redirect.
+ */
+export type CreateLoginStateInput =
+  | (CreateLoginStateBase & { flowKind?: "BROWSER" })
+  | (CreateLoginStateBase & {
+      flowKind: "NATIVE";
+      /** Loopback or droplet://sso/callback, validated upstream. */
+      nativeRedirectUri: string;
+      /** The app's PKCE S256 challenge (43-char base64url). */
+      nativeCodeChallenge: string;
+    });
 
 /** Persist a fresh login-state row. */
 export async function createLoginState(
@@ -45,6 +67,13 @@ export async function createLoginState(
       provider: input.provider,
       returnTo: input.returnTo,
       expiresAt: new Date(Date.now() + ttl * 1000),
+      ...(input.flowKind === "NATIVE"
+        ? {
+            flowKind: "NATIVE" as const,
+            nativeRedirectUri: input.nativeRedirectUri,
+            nativeCodeChallenge: input.nativeCodeChallenge,
+          }
+        : { flowKind: "BROWSER" as const }),
     },
   });
 }
@@ -76,6 +105,78 @@ export async function consumeLoginState(
   }
   // We won the claim; fetch the row to read its trusted fields.
   return prisma.ssoLoginState.findUnique({ where: { state } });
+}
+
+/**
+ * Read the row for `state` WITHOUT claiming it. The callback uses this only to
+ * learn the row's `flowKind` before its cookie check (a NATIVE flow has no
+ * browser cookie); the single-use claim is still `consumeLoginState`.
+ */
+export async function peekLoginState(
+  prisma: PrismaClient,
+  state: string,
+): Promise<SsoLoginState | null> {
+  return prisma.ssoLoginState.findUnique({ where: { state } });
+}
+
+/** One-time handoff code lifetime: the app redeems it right after the redirect. */
+export const SSO_NATIVE_HANDOFF_TTL_SECONDS = 60;
+
+export interface SetHandoffInput {
+  /** sha256 (hex) of the handoff code — the plaintext is never stored. */
+  codeHash: string;
+  /** Local User.id the callback resolved. */
+  userId: string;
+  expiresAt: Date;
+}
+
+/**
+ * Park the handoff on a NATIVE row. The write is conditional on
+ * `flowKind = NATIVE`, so a browser row can never be turned into a handoff;
+ * a miss throws (the callback then fails closed with a 500, minting nothing).
+ */
+export async function setHandoff(
+  prisma: PrismaClient,
+  stateId: string,
+  input: SetHandoffInput,
+): Promise<void> {
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: { id: stateId, flowKind: "NATIVE" },
+    data: {
+      handoffCodeHash: input.codeHash,
+      handoffUserId: input.userId,
+      handoffExpiresAt: input.expiresAt,
+    },
+  });
+  if (count !== 1) {
+    throw new Error("SSO handoff: no NATIVE login-state row to attach the code to");
+  }
+}
+
+/**
+ * Atomically redeem a handoff by its code hash. Returns the row (with the
+ * app's `nativeCodeChallenge` and the `handoffUserId`) on success, or null if
+ * the code is unknown, already redeemed (replay) or expired. Same race-safe
+ * conditional claim as `consumeLoginState`: exactly one caller sees count===1.
+ */
+export async function consumeHandoff(
+  prisma: PrismaClient,
+  codeHash: string,
+): Promise<SsoLoginState | null> {
+  const now = new Date();
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: {
+      handoffCodeHash: codeHash,
+      flowKind: "NATIVE",
+      handoffConsumedAt: null,
+      handoffExpiresAt: { gt: now },
+    },
+    data: { handoffConsumedAt: now },
+  });
+  if (count !== 1) {
+    return null;
+  }
+  return prisma.ssoLoginState.findUnique({ where: { handoffCodeHash: codeHash } });
 }
 
 /**
@@ -153,9 +254,27 @@ export async function pruneExpiredLoginStates(
   // never consumed and is expired. Guarding the expired branch on
   // `consumedAt: null` guarantees a freshly-consumed row (even one that has
   // since expired) is never swept inside the grace window.
+  //
+  // A consumed NATIVE row may still carry a redeemable handoff: the callback
+  // claims the state BEFORE the IdP code exchange, so the handoff can be
+  // minted well after `consumedAt`. Such a row is spared until its handoff is
+  // past the same grace window (which also covers `consumeHandoff`'s
+  // claim-then-read). A NATIVE row with no handoff (the callback failed) goes
+  // like a browser row.
   const where = {
     OR: [
-      { consumedAt: { lt: consumedCutoff } },
+      {
+        AND: [
+          { consumedAt: { lt: consumedCutoff } },
+          {
+            OR: [
+              { flowKind: "BROWSER" as const },
+              { handoffExpiresAt: null },
+              { handoffExpiresAt: { lt: consumedCutoff } },
+            ],
+          },
+        ],
+      },
       { AND: [{ consumedAt: null }, { expiresAt: { lt: now } }] },
     ],
   };
