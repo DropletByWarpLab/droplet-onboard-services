@@ -279,6 +279,8 @@ describe("mcp acting-user gate — app.ts wiring", () => {
 // GET and writes are not, since the write check keys off the method.
 const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   business: ["business_find GET /api/brain/digests", "business_find GET /api/brain/findings"],
+  // WARP-3145: every email hop is under /api/email.
+  email: [],
 };
 
 describe("mcp acting-user gate — the route manifest agrees with it", () => {
