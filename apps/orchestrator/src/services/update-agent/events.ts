@@ -45,6 +45,10 @@ export const UPDATE_EVENTS = {
   "update.status_transition": "transitions",
 
   // ── apply (apply.ts — pending → verifying → applying → verdict) ──
+  /** info — WARP-3193: another run holds this row's apply claim; nothing touched. */
+  "update.apply_claimed_elsewhere": "apply",
+  /** warn — WARP-3193: boot resume cleared apply claims a dead process left. */
+  "update.stale_claims_cleared": "apply",
   /** info — apply deferred: onboarding wizard in progress. */
   "update.apply_deferred": "apply",
   /** info — window reached with autoApply off; waiting for explicit apply. */

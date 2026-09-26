@@ -53,7 +53,12 @@ html {
   --color-accent: #6366f1;
   --color-accent-hover: #4f46e5;
   --color-accent-subtle: rgba(99, 102, 241, 0.10);
-  /* Text/icon color ON an accent fill — white on indigo-500 (~4.5:1). WARP-608. */
+  /* Text/icon color ON an accent fill. WARP-608 recorded this pair as
+     "~4.5:1"; recomputed, white on indigo-500 is 4.47:1 — a hair UNDER the
+     4.5:1 AA floor, not at it. The ink stays white because this token is
+     locked to the canon and white is the brand pairing (black would read —
+     4.70:1 — but is not the brand); the fill is what moves — see
+     `--color-accent-fill`, declared right after the `.dark` block. */
   --color-on-accent: #ffffff;
 
   /* Role colors — used by Business workspace (role pills, matrix headers).
@@ -151,8 +156,10 @@ html {
   --color-accent: #818cf8;
   --color-accent-hover: #a5b4fc;
   --color-accent-subtle: rgba(129, 140, 248, 0.15);
-  /* Dark accent is light indigo (#818cf8) — white text fails AA, so
-     on-accent flips to near-black (~9:1). WARP-608. */
+  /* Dark accent is light indigo (#818cf8) — white text fails AA there
+     (2.98:1), so on-accent flips to near-black. WARP-608 recorded "~9:1";
+     recomputed, #1d1d1f on #818cf8 is 5.64:1 — still comfortably over the
+     4.5:1 floor, but not 9. This pair is why the dark fill is left alone. */
   --color-on-accent: #1d1d1f;
 
   /* Role colors (dark variants — softer to avoid neon on black) */
@@ -191,6 +198,72 @@ html {
                  0 8px 24px -12px rgba(0, 0, 0, 0.6),
                  0 24px 48px -24px rgba(0, 0, 0, 0.45);
   --shadow-hero: 0 30px 80px -40px rgba(167, 139, 250, 0.45);
+}
+
+/* The accent as a SOLID FILL under text — `bg-accent-fill` in Tailwind.
+   Distinct from `--color-accent` (the brand accent: active nav, links, focus
+   rings, chips, tints, the aurora) and from `--color-accent-text` (the accent
+   AS a label, WARP-1581).
+
+   Measured with WCAG 2.1 relative luminance, white ink (#ffffff, L = 1.0):
+
+     light  #ffffff on --color-accent  #6366f1 (L = 0.185063) → 4.47:1  ✗
+     light  #ffffff on --color-accent-fill #4f46e5 (L = 0.116997) → 6.29:1  ✓
+
+   4.47:1 is under WCAG 1.4.3's 4.5:1 floor for normal text, so the tokenised
+   primary button (`.dp-btn-primary`, plus the sign-in, setup-retry and tour
+   call sites that repeat its pair) shipped a failing label. The ink stays
+   white: `--color-on-accent` is locked to the canon and white is the brand
+   pairing. (It is not the only legible ink — black on #6366f1 is 4.70:1 —
+   but swapping the ink would break the canon and the brand.) The FILL is
+   what moves.
+
+   This is WARP-1581's precedent applied one surface over. That ticket stepped
+   the accent one rung down the same indigo ramp (500 → 600) to make it legible
+   as TEXT on its own tint; this steps the same rung to make white legible ON
+   it. No new brand colour: #4f46e5 is indigo-600, already the canon's
+   `--color-accent-hover` and already `--color-accent-text`'s light value.
+
+   DARK REST IS UNCHANGED. The dark ramp flips — the accent is the much
+   lighter indigo-400 #818cf8 (L = 0.302006) and the ink flips to near-black
+   #1d1d1f (L = 0.012389), which measures 5.64:1 and already clears AA. Stepping
+   the dark fill down would move it the WRONG way. So dark keeps the accent
+   itself and only light takes the new step.
+
+   HOVER / PRESSED — `bg-accent-fill-hover`. In light the rest fill is now
+   the canon's `--color-accent-hover`, so hover takes the next rung down
+   instead: indigo-700 #4338ca (L = 0.082859), white ink 7.90:1. Dark goes
+   UP the ramp, like the canon's dark `--color-accent-hover`: indigo-300
+   #a5b4fc (L = 0.476701), #1d1d1f ink 8.44:1. A colour step rather than an
+   opacity fade: fading the button blends ink AND fill toward the page behind
+   it, and measured that way the old `hover:opacity-85` put the dark pair at
+   4.39:1 over #000 and `active:opacity-70` put the light pair at 3.41:1 over
+   a white card — both under AA while the finger is on the button.
+
+   On `html` / `html.dark, html .dark`, NOT in the `:root`/`.dark` blocks
+   above: those are locked byte-for-byte to the DropletByWarpLab/design-and-
+   style canon (WARP-1277 drift gate), which fails on an EXTRA property as
+   well as a drifted one — a new global token has to land in that repo first.
+   Kept AFTER the `.dark` block so that block stays the first `.dark {` rule
+   in the sheet, which is what the source-level contrast tests
+   (dp-btn-secondary, files-rail) read the dark contract tokens from.
+   The dark values also match `html .dark` because the ink they pair with,
+   `--color-on-accent`, flips under ANY `.dark` ancestor — and forced-dark
+   subtrees exist inside a light page (the Security wall, WallNotice). With
+   `html.dark` alone, a primary button in one of those would pair the dark
+   ink #1d1d1f with the light fill #4f46e5: 2.68:1. `html .dark` is not a
+   bare `.dark`, so the drift gate does not read it as a contract block.
+   Promoting both tokens to the canon is the follow-up. */
+html {
+  --color-accent-fill: #4f46e5;       /* indigo-600 — white ink 6.29:1 */
+  --color-accent-fill-hover: #4338ca; /* indigo-700 — white ink 7.90:1 */
+}
+html.dark,
+html .dark {
+  /* indigo-400, i.e. the dark --color-accent unchanged — #1d1d1f ink 5.64:1. */
+  --color-accent-fill: #818cf8;
+  /* indigo-300, the dark --color-accent-hover — #1d1d1f ink 8.44:1. */
+  --color-accent-fill-hover: #a5b4fc;
 }
 
 /* ============================================================
@@ -450,11 +523,18 @@ html {
 
   /* Primary button. `disabled:` lives here (not per-call-site) so every
      disabled primary button — wizard included — reads as inert instead of
-     still looking clickable. WARP-634. */
+     still looking clickable. WARP-634.
+
+     The fill is `bg-accent-fill`, not `bg-accent`: white on the vivid accent
+     measures 4.47:1 in light mode, under AA. Hover and press step to
+     `bg-accent-fill-hover` (7.90:1 light, 8.44:1 dark) instead of fading the
+     button, which took the label under AA while pressed. See
+     `--color-accent-fill` (after the `.dark` block) for the measurements. */
   .dp-btn-primary {
     @apply inline-flex items-center justify-center gap-2 px-5 py-2.5
-           bg-accent text-accent-foreground font-medium rounded-sm
-           hover:opacity-85 active:scale-[0.97] active:opacity-70
+           bg-accent-fill text-accent-foreground font-medium rounded-sm
+           hover:bg-accent-fill-hover active:scale-[0.97]
+           active:bg-accent-fill-hover
            disabled:opacity-60 disabled:pointer-events-none
            transition-all duration-200 ease-smooth
            min-h-[44px];

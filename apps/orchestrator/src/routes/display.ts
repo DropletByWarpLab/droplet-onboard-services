@@ -19,19 +19,25 @@ export function createDisplayRouter(_prisma: PrismaClient): Router {
     res.json(status);
   });
 
-  router.post("/display/stats", async (_req, res) => {
+  // WARP-3193 SEC-AUTH-11: every WRITE below is owner/admin only. The front
+  // panel is a trusted physical surface (it shows the claim code), so a guest
+  // must not be able to put arbitrary text on it. No service principal calls
+  // these routes (no tools-core handler, voice-io or other in-repo caller);
+  // the status read stays open to every authenticated principal.
+
+  router.post("/display/stats", requireRole("owner", "admin"), async (_req, res) => {
     const ok = await displayClient.showStats();
     if (!ok) return res.status(503).json({ error: "Display service unavailable" });
     res.json({ ok: true, mode: "stats" });
   });
 
-  router.post("/display/logo", async (_req, res) => {
+  router.post("/display/logo", requireRole("owner", "admin"), async (_req, res) => {
     const ok = await displayClient.showLogo();
     if (!ok) return res.status(503).json({ error: "Display service unavailable" });
     res.json({ ok: true, mode: "logo" });
   });
 
-  router.post("/display/message", async (req, res) => {
+  router.post("/display/message", requireRole("owner", "admin"), async (req, res) => {
     const { title, lines } = req.body;
     if (!title || !Array.isArray(lines)) {
       return res.status(400).json({ error: "title (string) and lines (string[]) required" });
@@ -41,7 +47,7 @@ export function createDisplayRouter(_prisma: PrismaClient): Router {
     res.json({ ok: true, mode: "message" });
   });
 
-  router.post("/display/brightness", async (req, res) => {
+  router.post("/display/brightness", requireRole("owner", "admin"), async (req, res) => {
     const { value } = req.body;
     if (typeof value !== "number" || value < 0 || value > 255) {
       return res.status(400).json({ error: "value must be 0-255" });
@@ -51,13 +57,13 @@ export function createDisplayRouter(_prisma: PrismaClient): Router {
     res.json({ ok: true, brightness: value });
   });
 
-  router.post("/display/cycle/resume", async (_req, res) => {
+  router.post("/display/cycle/resume", requireRole("owner", "admin"), async (_req, res) => {
     const ok = await displayClient.resumeCycle();
     if (!ok) return res.status(503).json({ error: "Display service unavailable" });
     res.json({ ok: true, cycling: true });
   });
 
-  router.post("/display/cycle/stop", async (_req, res) => {
+  router.post("/display/cycle/stop", requireRole("owner", "admin"), async (_req, res) => {
     const ok = await displayClient.stopCycle();
     if (!ok) return res.status(503).json({ error: "Display service unavailable" });
     res.json({ ok: true, cycling: false });

@@ -213,7 +213,7 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/system/reset", allowed: ["owner"] },
 
   // ── cameras / matter / smart-home ── (owner + admin + family) ──
-  { method: "post", path: "/api/cameras", allowed: ["owner", "admin", "family"] },
+  { method: "post", path: "/api/cameras", allowed: ["owner", "admin"] }, // WARP-3193 SEC-INJ-5
   { method: "post", path: "/api/cameras/scan", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/cameras/groups", allowed: ["owner", "admin", "family"] },
   { method: "delete", path: "/api/cameras/abc", allowed: ["owner", "admin", "family"] },

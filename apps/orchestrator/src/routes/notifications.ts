@@ -51,6 +51,7 @@ import {
 } from "../services/notifications.service.js";
 import { describeClient } from "../lib/client-descriptor.js";
 import { resolveAttributedToolAccess, toolAllowedForPrincipal } from "../services/tool-access.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 
 function getUser(req: Request): string {
   const username = req.user?.username;
@@ -78,9 +79,10 @@ type Recipient = { username: string; viaTool: boolean } | { denied: "acting_user
  * has. The person the assistant acts for is asserted in `X-Nextcloud-User`
  * (mcp-server context.ts `withActingUser`), trusted only from that principal:
  * a username on the stdio transport, a `User.id` on the HTTP one, so it is
- * looked up by username, then by id — the lookup
- * middleware/mcp-acting-user-gate.ts makes. That person is the only one the
- * tool can reach.
+ * resolved by `resolveAssertedUser` (WARP-3098) — every column at once, one
+ * active person or nobody, never "username, then id, first match wins" — as
+ * middleware/mcp-acting-user-gate.ts resolves it. That person is the only one
+ * the tool can reach.
  *
  * Then the question chat asks before it dispatches `tool`, asked of the same
  * person off their User row (`resolveAttributedToolAccess`): may their tier and
@@ -97,10 +99,9 @@ async function recipientFor(
   }
   const asserted = (req.header("x-nextcloud-user") ?? "").trim();
   if (!asserted) return { denied: "acting_user_required" };
-  const person =
-    (await prisma.user.findUnique({ where: { username: asserted }, select: { id: true, username: true } })) ??
-    (await prisma.user.findUnique({ where: { id: asserted }, select: { id: true, username: true } }));
-  if (!person) return { denied: "acting_user_required" };
+  const resolved = await resolveAssertedUser(prisma, asserted);
+  if (!resolved.ok) return { denied: "acting_user_required" };
+  const person = resolved.user;
   const access = await resolveAttributedToolAccess(prisma, person.id);
   if (access.unresolved) return { denied: "acting_user_required" };
   if (!toolAllowedForPrincipal(tool, access.tier ?? undefined, access.scope)) {

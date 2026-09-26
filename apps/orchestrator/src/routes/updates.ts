@@ -59,6 +59,7 @@
  * idempotent per row, and single-box deploys — every appliance today —
  * can't hit it.
  */
+import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -73,6 +74,8 @@ import {
 } from "../services/update-agent/poller.js";
 import {
   applyPendingUpdate,
+  claimDeviceUpdateForApply,
+  releaseDeviceUpdateClaim,
   type ApplyRunner,
   type ApplyUpdateOptions,
   type ApplyUpdateResult,
@@ -305,6 +308,7 @@ export function createUpdatesRouter(
     "/updates/apply-now",
     mcpToolGuard,
     async (req: Request, res: Response, next: NextFunction) => {
+      let claim: { deviceUpdateId: string; claimId: string } | null = null;
       try {
         const runner = deps.getApplyRunner();
         if (!runner) {
@@ -331,6 +335,16 @@ export function createUpdatesRouter(
           return res.status(409).json({ error: "nothing_pending" });
         }
 
+        // WARP-3193 PERF-3 — claim the row BEFORE any side effect. The status
+        // check above is a read; the apply window (or a second click) could
+        // take the same `verifying` row in between. The claim is atomic, and
+        // the dispatched apply inherits it and hands it back when it ends.
+        const claimId = randomUUID();
+        if (!(await claimDeviceUpdateForApply(prisma, row.id, claimId))) {
+          return res.status(409).json({ error: "apply_in_progress" });
+        }
+        claim = { deviceUpdateId: row.id, claimId };
+
         applyNowInFlight = true;
         await recordActivity({
           kind: "system",
@@ -356,6 +370,7 @@ export function createUpdatesRouter(
             runner,
             releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
             githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+            claimed: claim,
           })
           .then((result) => {
             logger.info(
@@ -378,6 +393,12 @@ export function createUpdatesRouter(
         return res.status(202).json({ started: true, deviceUpdateId: row.id });
       } catch (err) {
         applyNowInFlight = false;
+        // Never dispatched, so nothing else will hand the claim back.
+        if (claim) {
+          await releaseDeviceUpdateClaim(prisma, claim.deviceUpdateId, claim.claimId).catch(
+            () => {},
+          );
+        }
         return next(err);
       }
     },

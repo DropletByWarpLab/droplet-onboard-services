@@ -22,11 +22,11 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
-import {
-  actorFromRequest,
-  type ActivityActor,
-} from "../services/activity.service.js";
-import { executeScene } from "../services/scene-runner.service.js";
+import { actorFromRequest } from "../services/activity.service.js";
+import { executeScene, type MatterDispatcher } from "../services/scene-runner.service.js";
+// WARP-3193 ARCH-10 — defined in the service so the service never imports a
+// route; re-exported for this router's callers (app.ts, tests).
+export type { MatterDispatcher };
 import {
   isSupportedRrule,
   isSupportedTimezone,
@@ -115,24 +115,6 @@ interface SceneActionRow {
   deviceNodeId: string;
   command: string;
   args: unknown;
-}
-
-/**
- * Pluggable Matter dispatcher — tests inject a mock so the batch
- * executor is exercisable without standing up the Matter.js controller.
- * Production wiring imports the real `sendMatterCommand` (see app.ts /
- * createScenesRouter caller).
- */
-export interface MatterDispatcher {
-  sendCommand(
-    nodeId: string,
-    command: string,
-    // WARP-1010: per-command activity rows carry the scene's actor
-    // (the authed runner, or ai for the schedule ticker) instead of a
-    // hardcoded {ai, null}. Position mirrors sendMatterCommand.
-    actor: ActivityActor,
-    args?: Record<string, unknown>,
-  ): Promise<{ status: string; result?: unknown }>;
 }
 
 // TOOLS-01 / WARP-640 — scene-run confirmation tokens. A scene batches Tier-2

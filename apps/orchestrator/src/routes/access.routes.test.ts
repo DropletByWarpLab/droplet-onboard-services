@@ -142,8 +142,8 @@ interface InviteSeed {
   email?: string | null;
   username: string;
   accessRoleId: string | null;
-  acceptedAt?: Date | null;
-  revokedAt?: Date | null;
+  // WARP-3193 QUAL-3: the explicit lifecycle column (defaults to pending).
+  status?: "pending" | "accepted" | "revoked" | "expired";
   expiresAt: Date;
 }
 
@@ -182,7 +182,7 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
     });
   }
   for (const i of seed.invites ?? []) {
-    invites.set(i.id, { email: null, acceptedAt: null, revokedAt: null, ...i });
+    invites.set(i.id, { email: null, status: "pending", ...i });
   }
 
   const roleWithMeta = (row: any) => ({
@@ -332,8 +332,7 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
       findMany: vi.fn(async ({ where }: any = {}) => {
         let out = [...invites.values()];
         if (where?.accessRoleId !== undefined) out = out.filter((i) => i.accessRoleId === where.accessRoleId);
-        if (where?.acceptedAt === null) out = out.filter((i) => i.acceptedAt === null);
-        if (where?.revokedAt === null) out = out.filter((i) => i.revokedAt === null);
+        if (where?.status !== undefined) out = out.filter((i) => i.status === where.status);
         if (where?.expiresAt?.gt !== undefined) out = out.filter((i) => i.expiresAt > where.expiresAt.gt);
         return out.map((i) => ({ ...i }));
       }),
@@ -341,14 +340,12 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
         let count = 0;
         for (const i of invites.values()) {
           if (where?.accessRoleId !== undefined && i.accessRoleId !== where.accessRoleId) continue;
-          if (where?.OR !== undefined) {
-            const matches = where.OR.some((cond: any) => {
-              if (cond.acceptedAt?.not === null) return i.acceptedAt !== null;
-              if (cond.revokedAt?.not === null) return i.revokedAt !== null;
-              if (cond.expiresAt?.lte !== undefined) return i.expiresAt <= cond.expiresAt.lte;
-              return false;
-            });
-            if (!matches) continue;
+          if (where?.NOT !== undefined) {
+            // The release filter is NOT(the pending pre-check predicate).
+            const live =
+              (where.NOT.status === undefined || i.status === where.NOT.status) &&
+              (where.NOT.expiresAt?.gt === undefined || i.expiresAt > where.NOT.expiresAt.gt);
+            if (live) continue;
           }
           Object.assign(i, data);
           count += 1;
@@ -1489,8 +1486,8 @@ describe("DELETE /api/access/roles/:id", () => {
     const prisma = createPrismaMock({
       roles: [roleSeed],
       invites: [
-        { id: "inv-a", username: "was-accepted", accessRoleId: "r1", acceptedAt: PAST, expiresAt: FUTURE },
-        { id: "inv-r", username: "was-revoked", accessRoleId: "r1", revokedAt: PAST, expiresAt: FUTURE },
+        { id: "inv-a", username: "was-accepted", accessRoleId: "r1", status: "accepted", expiresAt: FUTURE },
+        { id: "inv-r", username: "was-revoked", accessRoleId: "r1", status: "revoked", expiresAt: FUTURE },
         { id: "inv-e", username: "expired", accessRoleId: "r1", expiresAt: PAST },
       ],
     });
@@ -1542,7 +1539,7 @@ describe("DELETE /api/access/roles/:id", () => {
     const prisma = createPrismaMock({
       roles: [roleSeed],
       invites: [
-        { id: "inv-accepted", username: "old", accessRoleId: "r1", acceptedAt: PAST, expiresAt: FUTURE },
+        { id: "inv-accepted", username: "old", accessRoleId: "r1", status: "accepted", expiresAt: FUTURE },
         { id: "inv-raced", username: "raced", accessRoleId: "r1", expiresAt: FUTURE },
       ],
     });
