@@ -127,7 +127,11 @@ function buildApp(asUser: { id: string; username: string; role: string }) {
   // Personal-space calls never touch these models; stubs exist so a
   // regression into the dept branch fails loudly instead of crashing.
   const prismaStub = {
-    department: { findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn().mockResolvedValue(null) },
+    department: {
+      findFirst: vi.fn().mockResolvedValue(null),
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]), // WARP-3053 company-library roots
+    },
     departmentMembership: { findUnique: vi.fn().mockResolvedValue(null) },
     departmentShare: { create: vi.fn() },
     // WARP-3117: the MCP principal's X-Nextcloud-User resolves to a person
