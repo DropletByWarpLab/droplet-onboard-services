@@ -1043,12 +1043,16 @@ export async function referenceProjectedIncidentPage(
   take: number,
 ): Promise<Array<{ id: string; projectedLast: Date }>> {
   const view = await import("../services/security-incident-view.js");
-  const db = prisma as { securityIncident: { findMany(a: unknown): Promise<Array<Parameters<typeof view.projectedLastActivity>[0] & { id: string }>> } };
+  const db = prisma as { securityIncident: { findMany(a: unknown): Promise<Array<Parameters<typeof view.projectedFirstActivity>[0] & { id: string }>> } };
   const rows = await db.securityIncident.findMany({
     where: view.incidentListWhere(v, { ...f, cursor: undefined }),
-    select: { id: true, scope: true, lastActivityAt: true, spanByCamera: true },
+    select: { id: true, scope: true, firstActivityAt: true, lastActivityAt: true, spanByCamera: true },
   });
-  const keyed = rows.map((r) => ({ id: r.id, projectedLast: view.projectedLastActivity(r, v) }));
+  // Review #2420: the period meets HER span (the SQL's projectedFirst / projectedLast).
+  const w = f.activeBetween;
+  const keyed = rows
+    .filter((r) => !w || (view.projectedLastActivity(r, v) >= w.from && view.projectedFirstActivity(r, v) <= w.to))
+    .map((r) => ({ id: r.id, projectedLast: view.projectedLastActivity(r, v) }));
   const c = f.cursor;
   const kept = c
     ? keyed.filter((k) => k.projectedLast.getTime() < c.at.getTime() || (k.projectedLast.getTime() === c.at.getTime() && k.id < c.id))

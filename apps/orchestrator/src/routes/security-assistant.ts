@@ -125,8 +125,6 @@ const INCIDENT_EVENTS_SHOWN = 30;
 const AREAS_PER_EVENT = 3;
 /** Evidence rows per code A2 carries. */
 const EVIDENCE_PER_CODE = 3;
-/** Pages A1 reads to fill one answer when a period drops incidents whose VISIBLE span misses it. */
-const WINDOW_ROUNDS = 4;
 
 const HUMAN_ROLES = new Set(["owner", "admin", "family"]);
 
@@ -300,10 +298,10 @@ function eventItem(e: EventLike, areas: ViewerAreas, labels: ReadonlyMap<string,
 }
 
 /**
- * A1's page for a period. The SQL prefilter is on the STORED span; an
- * incident is kept only when THIS viewer's span meets the window (a hidden
- * camera's activity must not pull it in). Reads up to WINDOW_ROUNDS pages to
- * fill `limit`, and resumes exactly after the last incident it returns.
+ * A1's page — for a period too. The period is judged in the query on THIS
+ * viewer's span (`activeBetween`, review #2420), so the page and its cursor
+ * are exactly the list she may see: a hidden camera's activity in the window
+ * can neither pull an incident in nor leave a cursor that leads nowhere.
  */
 async function incidentsFor(
   prisma: PrismaClient,
@@ -313,28 +311,8 @@ async function incidentsFor(
   now: Date,
   period: ResolvedAssistantPeriod | null,
 ): Promise<{ incidents: IncidentSummary[]; nextCursor: string | null }> {
-  const presence = securityOngoingSource();
-  if (!period) return listIncidents(prisma, viewer, f, limit, now, presence);
-  const meets = (s: IncidentSummary): boolean =>
-    Date.parse(s.lastActivityAt) >= period.from.getTime() && Date.parse(s.firstActivityAt) <= period.to.getTime();
-  const kept: IncidentSummary[] = [];
-  let cursor = f.cursor;
-  let resumeAt: string | null = null;
-  for (let round = 0; round < WINDOW_ROUNDS; round++) {
-    const page = await listIncidents(prisma, viewer, { ...f, cursor, activeBetween: { from: period.from, to: period.to } }, limit, now, presence);
-    for (const [i, s] of page.incidents.entries()) {
-      if (!meets(s)) continue;
-      kept.push(s);
-      if (kept.length === limit) {
-        const last = i === page.incidents.length - 1 && page.nextCursor === null;
-        return { incidents: kept, nextCursor: last ? null : incidentCursorOf(s) };
-      }
-    }
-    resumeAt = page.nextCursor;
-    if (!resumeAt) break;
-    cursor = parseIncidentCursor(resumeAt) ?? undefined;
-  }
-  return { incidents: kept, nextCursor: resumeAt };
+  const activeBetween = period ? { from: period.from, to: period.to } : undefined;
+  return listIncidents(prisma, viewer, { ...f, ...(activeBetween ? { activeBetween } : {}) }, limit, now, securityOngoingSource());
 }
 
 // ── the router ────────────────────────────────────────────────────────────

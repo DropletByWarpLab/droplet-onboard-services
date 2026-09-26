@@ -583,6 +583,52 @@ describe("periods", () => {
     expect(owner.body.incidents.map((i: { id: string }) => i.id)).toContain("1b1b1b1b-0000-4000-8000-000000000005");
   });
 
+  // Review #2420 (item 1): the period is judged on HER span in the query itself — never paged on the stored span
+  // and filtered after. Otherwise a hidden camera's activity pulls an incident into the page, the page carries a
+  // cursor, and following it returns nothing: the cursor alone says a hidden camera was active.
+  it("🔴 a hidden camera's activity in the window changes nothing she can read — every page, body for body, and no empty page with a cursor", async () => {
+    const X = "1b1b1b1b-0000-4000-8000-000000000006";
+    // X: front at 2 PM London (before last night), and — in world A only — back at 10:20 PM (inside it).
+    const worldWith = (backInWindow: boolean) => {
+      const w = world();
+      const frontSpan = { first: "2026-09-23T13:00:00.000Z", last: "2026-09-23T13:05:00.000Z" };
+      const back = new Date("2026-09-23T21:20:00Z");
+      w.world.securityIncident.push(
+        incident(X, {
+          zoneId: SHOP, zoneName: "Shop floor", zoneKind: "interior",
+          cameras: backInWindow ? ["back", "front"] : ["front"],
+          reasonCodes: ["after_hours_presence"],
+          countsByCamera: backInWindow ? { front: { person: 1 }, back: { person: 1 } } : { front: { person: 1 } },
+          firstActivityAt: new Date(frontSpan.first),
+          lastActivityAt: backInWindow ? back : new Date(frontSpan.last),
+          spanByCamera: backInWindow ? { front: frontSpan, back: { first: back.toISOString(), last: back.toISOString() } } : { front: frontSpan },
+        }),
+      );
+      w.world.securityIncidentReason.push(reason(X, "after_hours_presence", "front", "alert", 11n));
+      return w;
+    };
+    const pages = async (w: FakeSecurityPrisma) => {
+      const { server } = app(w);
+      const out: unknown[] = [];
+      let cursor: string | null = null;
+      for (let n = 0; n < 10; n++) {
+        const res = await get(server, `/api/security/assistant/incidents?period=last_night&limit=1${cursor ? `&cursor=${cursor}` : ""}`, "maria");
+        expect(res.status).toBe(200);
+        // Never an empty page that still carries a cursor.
+        if (res.body.incidents.length === 0) expect(res.body.nextCursor).toBeNull();
+        out.push(res.body);
+        cursor = res.body.nextCursor;
+        if (!cursor) break;
+      }
+      return out;
+    };
+    const a = await pages(worldWith(true));
+    const b = await pages(worldWith(false));
+    expect(a).toEqual(b);
+    // And X is in neither: her own span (front, 2 PM) never meets last night.
+    expect(JSON.stringify(a)).not.toContain(X);
+  });
+
   it("bad from/to → 400 BAD_REQUEST with the route's message", async () => {
     const { server } = app(f);
     const res = await get(server, "/api/security/assistant/events?from=2026-09-22T21:00:00", "stefan");
