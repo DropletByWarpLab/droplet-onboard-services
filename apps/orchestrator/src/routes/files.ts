@@ -510,34 +510,47 @@ async function activeDeptMountNames(
   // "list my files" request — fail open (nothing extra hidden) rather than
   // 500, same posture as the sharedAvailable probe above.
   try {
-    const depts = await prisma.department.findMany({
-      where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
-      select: {
-        name: true,
-        kind: true,
-        parentId: true,
-        memberships: { where: { userId }, select: { id: true } },
-      },
-    });
-
-    const names: string[] = [];
-    for (const dept of depts) {
-      if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
-      if (dept.kind === "TEAM" && dept.parentId) {
-        const parent = await prisma.department.findUnique({
-          where: { id: dept.parentId },
-          select: { name: true },
-        });
-        names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
-      } else {
-        names.push(dept.name);
-      }
-    }
-    return names;
+    return await loadDeptMountNames(prisma, userId, isOwnerOrAdmin);
   } catch (err) {
     logger.warn({ err, userId }, "activeDeptMountNames: department lookup failed; not hiding any dept mounts");
     return [];
   }
+}
+
+/**
+ * The same lookup WITHOUT the fail-open catch: throws on a DB error. Security
+ * gates (refuseUnapprovedMcpWrite) must use this one — an unresolvable
+ * department list has to narrow what is allowed, never what is protected.
+ */
+async function loadDeptMountNames(
+  prisma: PrismaClient,
+  userId: string,
+  isOwnerOrAdmin: boolean
+): Promise<string[]> {
+  const depts = await prisma.department.findMany({
+    where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
+    select: {
+      name: true,
+      kind: true,
+      parentId: true,
+      memberships: { where: { userId }, select: { id: true } },
+    },
+  });
+
+  const names: string[] = [];
+  for (const dept of depts) {
+    if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
+    if (dept.kind === "TEAM" && dept.parentId) {
+      const parent = await prisma.department.findUnique({
+        where: { id: dept.parentId },
+        select: { name: true },
+      });
+      names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
+    } else {
+      names.push(dept.name);
+    }
+  }
+  return names;
 }
 
 /**
@@ -3014,17 +3027,31 @@ export function createFilesRouter(
     if (overwrite) {
       what = `Replacing the existing ${to}`;
     } else {
-      const mounts = new Set([
-        SHARED_FOLDER_NAME,
-        ...(await activeDeptMountNames(prisma, req.user?.id ?? "", true)),
-      ]);
-      const mountOf = (p: string) => {
-        const top = p.split("/")[1] ?? "";
-        return mounts.has(top) ? top : null;
-      };
-      const dest = mountOf(to);
-      if (dest !== null && dest !== mountOf(from)) {
-        what = `Putting ${from} into the shared folder /${dest}`;
+      const topOf = (p: string) => p.split("/")[1] ?? "";
+      let deptMounts: string[] | null;
+      try {
+        deptMounts = await loadDeptMountNames(prisma, req.user?.id ?? "", true);
+      } catch (err) {
+        // Fail CLOSED: without the department list we cannot tell a
+        // department mount from a private folder, so any move/copy into a
+        // different top-level folder needs the user.
+        logger.warn({ err }, "refuseUnapprovedMcpWrite: department lookup failed; refusing cross-folder write");
+        deptMounts = null;
+      }
+      if (deptMounts === null) {
+        if (topOf(to) !== topOf(from)) {
+          what = `Putting ${from} into /${topOf(to)} (shared folders could not be resolved)`;
+        }
+      } else {
+        const mounts = new Set([SHARED_FOLDER_NAME, ...deptMounts]);
+        const mountOf = (p: string) => {
+          const top = topOf(p);
+          return mounts.has(top) ? top : null;
+        };
+        const dest = mountOf(to);
+        if (dest !== null && dest !== mountOf(from)) {
+          what = `Putting ${from} into the shared folder /${dest}`;
+        }
       }
     }
     if (what === null) return false;

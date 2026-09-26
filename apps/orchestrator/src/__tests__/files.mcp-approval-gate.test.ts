@@ -71,7 +71,10 @@ const ncMoveFile = nc.ncMoveFile as unknown as ReturnType<typeof vi.fn>;
 const ncCopyFile = nc.ncCopyFile as unknown as ReturnType<typeof vi.fn>;
 const ncGetFileId = nc.ncGetFileId as unknown as ReturnType<typeof vi.fn>;
 
-function buildApp(asUser: { id: string; username: string; role: string }) {
+function buildApp(
+  asUser: { id: string; username: string; role: string },
+  opts: { deptLookupFails?: boolean } = {},
+) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -83,9 +86,11 @@ function buildApp(asUser: { id: string; username: string; role: string }) {
       findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue(null),
       // One active department mounted as "/Engineering" in every member's home.
-      findMany: vi.fn().mockResolvedValue([
-        { name: "Engineering", kind: "DEPARTMENT", parentId: null, memberships: [] },
-      ]),
+      findMany: opts.deptLookupFails
+        ? vi.fn().mockRejectedValue(new Error("db down"))
+        : vi.fn().mockResolvedValue([
+            { name: "Engineering", kind: "DEPARTMENT", parentId: null, memberships: [] },
+          ]),
     },
     departmentMembership: { findUnique: vi.fn().mockResolvedValue(null) },
     user: userDirectory([{ id: "u-alice", username: "alice", nextcloudUsername: "alice", role: "family" }]),
@@ -114,6 +119,25 @@ describe("SEC-INJ-2 — /files/move and /files/copy for the mcp principal", () =
     ["move", () => ncMoveFile],
     ["copy", () => ncCopyFile],
   ] as const) {
+    it(`${route}: fails CLOSED when the department list cannot be resolved`, async () => {
+      const res = await asMcp(request(buildApp(MCP, { deptLookupFails: true })).post(`/api/files/${route}`)).send({
+        from: "/private/a.txt",
+        to: "/Engineering/specs/a.txt",
+      });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("USER_APPROVAL_REQUIRED");
+      expect(fn()).not.toHaveBeenCalled();
+    });
+
+    it(`${route}: still allows a move within one folder when the department list cannot be resolved`, async () => {
+      const res = await asMcp(request(buildApp(MCP, { deptLookupFails: true })).post(`/api/files/${route}`)).send({
+        from: "/private/a.txt",
+        to: "/private/b.txt",
+      });
+      expect(res.body.code).not.toBe("USER_APPROVAL_REQUIRED");
+      expect(fn()).toHaveBeenCalled();
+    });
+
     it(`${route}: refuses overwrite=true with USER_APPROVAL_REQUIRED`, async () => {
       const res = await asMcp(request(buildApp(MCP)).post(`/api/files/${route}`)).send({
         from: "/a.txt",
