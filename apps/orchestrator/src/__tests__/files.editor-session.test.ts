@@ -103,6 +103,8 @@ vi.mock("../services/docserver.client.js", async () => {
 // Resolve the NC session token to a non-null value by default (dev user → has a
 // token). Individual tests override to null to assert the 401 path.
 vi.mock("../services/nextcloud-session.service.js", () => ({
+  // createApp binds the paired-device Nextcloud fallback at boot.
+  bindNcTokenFallbackPrisma: vi.fn(),
   resolveNcToken: vi.fn().mockResolvedValue("nc-token"),
 }));
 

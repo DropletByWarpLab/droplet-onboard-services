@@ -120,6 +120,8 @@ vi.mock("../services/mcp-client.singleton.js", () => ({
 // Don't bother with the real nextcloud-session resolver in this test;
 // the route falls back to undefined ncToken when this returns null.
 vi.mock("../services/nextcloud-session.service.js", () => ({
+  // createApp binds the paired-device Nextcloud fallback at boot.
+  bindNcTokenFallbackPrisma: vi.fn(),
   resolveNcToken: vi.fn().mockResolvedValue(null),
 }));
 

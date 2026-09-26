@@ -65,6 +65,7 @@ import { createExtensionsRouter } from "./routes/extensions.js";
 import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
 import { createExtensionAttacher, lazyExtensionAttachPort } from "./services/extension-attach.service.js";
 import { bindExtensionPrincipalPrisma } from "./services/extension-principal.js";
+import { bindNcTokenFallbackPrisma } from "./services/nextcloud-session.service.js";
 import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 // WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
 import { createBrainRouter } from "./routes/brain.js";
@@ -297,6 +298,12 @@ export function createApp(
   // left with the Nextcloud fallback, WARP-2994). Bound before the first
   // request; unbound, every extension bearer is a 401.
   bindExtensionPrincipalPrisma(prisma);
+
+  // resolveNcToken's paired-device fallback: a passkey or SSO session has no
+  // per-user Nextcloud token in Redis (only a password login stores one), so
+  // Files / pairing read the caller's newest ACTIVE DeviceClient app password
+  // through this binding. Unbound, the fallback answers null.
+  bindNcTokenFallbackPrisma(prisma);
 
   // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
   // scope loader (same singleton discipline, same reason): layer-2

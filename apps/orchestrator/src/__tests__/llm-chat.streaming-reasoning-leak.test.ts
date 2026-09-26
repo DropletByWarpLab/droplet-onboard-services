@@ -127,6 +127,8 @@ vi.mock("../services/mcp-client.singleton.js", () => ({
 }));
 
 vi.mock("../services/nextcloud-session.service.js", () => ({
+  // createApp binds the paired-device Nextcloud fallback at boot.
+  bindNcTokenFallbackPrisma: vi.fn(),
   resolveNcToken: vi.fn().mockResolvedValue(null),
 }));
 

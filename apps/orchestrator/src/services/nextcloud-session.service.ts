@@ -1,6 +1,7 @@
 import type { Request } from "express";
 import { getRedis } from "./cache.service.js";
 import { verifyAccessToken } from "./jwt.service.js";
+import { decryptSecret } from "./encryption.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 
 /**
@@ -86,6 +87,49 @@ export async function touchNcToken(userId: string, ttlSeconds: number): Promise<
   }
 }
 
+/**
+ * The DeviceClient read behind the paired-device fallback in
+ * `resolveNcToken`. Typed to that one query so the binding carries nothing
+ * else; bound once by `createApp`, and while unbound the fallback answers
+ * null (the pre-fallback behaviour).
+ */
+interface NcTokenFallbackDirectory {
+  deviceClient: {
+    findFirst(args: {
+      where: { userId: string; status: "active" };
+      orderBy: { createdAt: "desc" };
+      select: { ncAppPassword: true };
+    }): Promise<{ ncAppPassword: string } | null>;
+  };
+}
+
+let fallbackDirectory: NcTokenFallbackDirectory | null = null;
+
+/** Bind the client the paired-device fallback reads. `null` unbinds (tests). */
+export function bindNcTokenFallbackPrisma(prisma: NcTokenFallbackDirectory | null): void {
+  fallbackDirectory = prisma;
+}
+
+/**
+ * The decrypted Nextcloud app password of the user's newest ACTIVE paired
+ * device, or null. `DeviceClient.userId` holds the USERNAME (the pairing
+ * route keys it that way). Revoked devices are never used. Any lookup or
+ * decrypt failure is null, the same answer as having no device.
+ */
+async function pairedDeviceNcPassword(username: string): Promise<string | null> {
+  if (!fallbackDirectory) return null;
+  try {
+    const device = await fallbackDirectory.deviceClient.findFirst({
+      where: { userId: username, status: "active" },
+      orderBy: { createdAt: "desc" },
+      select: { ncAppPassword: true },
+    });
+    return device ? decryptSecret(device.ncAppPassword) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Extract the raw session token from cookie or Authorization header. */
 function extractSessionToken(req: Request): string | null {
   const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
@@ -101,7 +145,12 @@ function extractSessionToken(req: Request): string | null {
  *
  * Resolution order:
  *   1. If the session token is a JWT (post-PR#12 browsers), look up the
- *      per-user Nextcloud app-password from Redis by `req.user.id`.
+ *      per-user Nextcloud app-password from Redis by `req.user.id`. Only a
+ *      password login (and invite-accept) fills that slot, so when it is
+ *      empty — a passkey (Windows Hello) or SSO sign-in after the person's
+ *      last password session ended — fall back to the app password of their
+ *      newest ACTIVE paired device, a credential that already belongs to the
+ *      same person.
  *   2. Otherwise, treat the session token as a legacy Nextcloud token and
  *      forward it unchanged.
  *   3. Dev-mode fallback: when `AUTH_ENABLED=false` the middleware injects
@@ -120,7 +169,7 @@ export async function resolveNcToken(req: Request): Promise<string | null> {
     // Nextcloud credential lives in Redis keyed by user id.
     if (verifyAccessToken(sessionToken)) {
       if (!req.user?.id) return null;
-      return await getNcToken(req.user.id);
+      return (await getNcToken(req.user.id)) ?? (await pairedDeviceNcPassword(req.user.username));
     }
     // Legacy path: session cookie IS the Nextcloud token (pre-JWT sessions
     // or OAuth2 access tokens from /auth/callback).
