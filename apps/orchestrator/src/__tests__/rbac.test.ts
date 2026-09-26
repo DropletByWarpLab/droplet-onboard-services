@@ -143,7 +143,9 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/network/upnp", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/network/dhcp/static-lease", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/vpn/peers", allowed: ["owner", "admin"] },
-  { method: "delete", path: "/api/vpn/peers/abc", allowed: ["owner", "admin"] },
+  // DELETE /api/vpn/peers/:id is not in this matrix since WARP-3121: a member
+  // may revoke their OWN overlay device, so its authz is per-resource (in the
+  // handler), not a role guard. Covered in vpn-overlay-qr-enroll.test.ts.
   // WARP-446: extender AP onboarding writes — same posture as VPN peers,
   // since approving an AP changes the household's
   // wireless surface (ADR-005 §RBAC).

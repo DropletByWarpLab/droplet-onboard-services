@@ -340,6 +340,10 @@ function getUser(req: Request): { username: string; role: string } {
   };
 }
 
+/** WARP-3121 — who may enroll a device into the overlay (the office LAN).
+ *  Owner, admin and member (wire role `family`); never an external `guest`. */
+const OVERLAY_ENROLL_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family"]);
+
 function isAdmin(req: Request): boolean {
   const role = req.user?.role;
   return role === "owner" || role === "admin";
@@ -623,9 +627,15 @@ export function createVpnRouter(
   // resolvers. That is the "two halves never joined" shape the epic already
   // hit once, sitting in the path that should have been the primary one.
   //
-  // Not owner/admin-gated. A family member enrolling THEIR OWN device is the
-  // ordinary case, and the peer is scoped to them — which is what makes it
-  // show up in their own device list and be revocable without an admin.
+  // Not owner/admin-gated. A member (role `family`) enrolling THEIR OWN device
+  // is the ordinary case, and the peer is scoped to them — which is what makes
+  // it show up in their own device list and be revocable without an admin
+  // (DELETE /vpn/peers/:id, WARP-3121).
+  //
+  // WARP-3121 — but it IS gated to the company's own people. The profile this
+  // returns routes the office LAN, so an external `guest` (or any role this
+  // route doesn't know) must never get one. Allow-list, not deny-list: a role
+  // added later stays locked out until someone decides otherwise here.
   //
   // Idempotent on the device's WireGuard public key: calling it again refreshes
   // and returns the same profile. That is deliberate and it is why there is no
@@ -636,6 +646,22 @@ export function createVpnRouter(
     "/vpn/overlay/devices",
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const role = req.user?.role;
+        if (!role || !OVERLAY_ENROLL_ROLES.has(role)) {
+          audit({
+            event: "overlay_enroll_refused",
+            method: req.method,
+            route: "/vpn/overlay/devices",
+            status: 403,
+            clientId: req.user?.id ?? `ip:${req.ip ?? "unknown"}`,
+            refs: { role: role ?? null },
+          });
+          return res.status(403).json({
+            code: "REMOTE_ACCESS_NOT_PERMITTED",
+            error:
+              "Remote access is for people in this company. Ask an owner or admin if you need it.",
+          });
+        }
         const parsed = overlayEnrollSchema.safeParse(req.body);
         if (!parsed.success) {
           return res.status(400).json({
@@ -2054,31 +2080,49 @@ export function createVpnRouter(
   // the row (status="revoked", revokedAt set) so the dashboard can show a
   // brief "removed just now" state and so we have an audit trail.
   //
-  // WARP-171: per-route guard. owner + admin only — matches the
-  // matrix in ADR-004 §3. This is a behavior change from
-  // pre-WARP-171: previously a family-tier user could delete their
-  // OWN peer (peer.userId === user.username escape hatch). Now they
-  // must ask an admin. The intent is consistency with POST: if a
-  // family user can't mint a peer self-service, they shouldn't be
-  // able to revoke one self-service either.
+  // Who may revoke:
+  //   • owner/admin — any peer (WARP-171, ADR-004 §3).
+  //   • anyone else — only an OVERLAY device they enrolled themselves
+  //     (WARP-3121). Signing in is the enrollment (WARP-1882), so signing out
+  //     of — or losing — that device has to be undoable by the same person;
+  //     otherwise a forgotten or stolen laptop keeps a route into the office
+  //     LAN until an admin happens to notice. "Themselves" is the row's
+  //     `userId`, which the sign-in enroll stamps with the caller's username
+  //     (and which GET /vpn/peers already uses to scope a member's list).
+  //     Static peers stay admin-only: a member can't mint one, so they don't
+  //     revoke one either (WARP-171's original reasoning still holds there).
   router.delete(
     "/vpn/peers/:id",
-    requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
     try {
       const id = req.params.id;
+      const role = req.user?.role;
+      if (!role) {
+        return res.status(403).json({ error: "Forbidden: no role on session" });
+      }
       const peer = await prisma.vpnPeer.findUnique({ where: { id } });
       if (!peer) {
         return res.status(404).json({ error: "Peer not found" });
       }
-      // WARP-171: per-resource ownership check used to live here
-      // (`peer.userId !== user.username && !isAdmin(req)` returning 403).
-      // After requireRole("owner", "admin") was added at the route guard
-      // above, the branch became unreachable: family-tier callers never
-      // pass the guard, and owner/admin always do. Removing the dead code
-      // so future readers don't think family users can still hit this
-      // handler. Behavior is unchanged — see the comment above the route
-      // for the WARP-171 family-tier deletion semantics.
+      const admin = isAdmin(req);
+      const ownDevice =
+        peer.kind === "overlay" &&
+        !!req.user?.username &&
+        peer.userId === req.user.username;
+      if (!admin && !ownDevice) {
+        audit({
+          event: "overlay_revoke_refused",
+          method: req.method,
+          route: "/vpn/peers/:id",
+          status: 403,
+          clientId: req.user?.id ?? "unknown",
+          refs: { peer_id: id },
+        });
+        return res.status(403).json({
+          code: "NOT_YOUR_DEVICE",
+          error: "You can only remove your own devices. Ask an owner or admin to remove this one.",
+        });
+      }
       if (peer.status === "revoked") {
         // Already gone in our world; treat as idempotent success.
         return res.json({ status: "revoked", id });
@@ -2164,6 +2208,16 @@ export function createVpnRouter(
           "vpn: peer left active status concurrently during revoke — treating as already revoked",
         );
       }
+
+      // WARP-3121 — every revoke leaves a signed trace naming who did it.
+      audit({
+        event: admin ? "overlay_revoke" : "overlay_revoke_own",
+        method: req.method,
+        route: "/vpn/peers/:id",
+        status: 200,
+        clientId: req.user?.id ?? "unknown",
+        refs: { peer_id: id, kind: peer.kind, device_owner: peer.userId, label: peer.deviceLabel },
+      });
 
       res.json({ status: "revoked", id });
     } catch (err) {
