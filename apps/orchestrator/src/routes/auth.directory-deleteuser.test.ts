@@ -141,7 +141,11 @@ vi.mock("../services/update-agent/host-exec.js", () => ({
 }));
 
 import { createProtectedAuthRouter } from "./auth.js";
-import { purgeDueDeletions } from "../services/leaver-deletion.service.js";
+import {
+  purgeDueDeletions,
+  releaseStaleHandovers,
+  HANDOVER_STALE_MS,
+} from "../services/leaver-deletion.service.js";
 import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
@@ -220,6 +224,13 @@ function createPrismaMock(seed: any[] = []) {
           const allowed = typeof del === "string" ? [del] : del.in;
           if (!allowed.includes(u.deletionStatus)) continue;
         }
+        // WARP-3176: the stale-claim release is pinned to the claim time read.
+        if (
+          where.handoverClaimedAt !== undefined &&
+          u.handoverClaimedAt?.getTime() !== where.handoverClaimedAt?.getTime()
+        ) {
+          continue;
+        }
         // The nightly claim: OR of { status, due <= now } branches.
         if (
           where.OR &&
@@ -239,12 +250,17 @@ function createPrismaMock(seed: any[] = []) {
     findMany: vi.fn(async ({ where }: any) =>
       users.filter(
         (u) =>
-          u.directoryStatus === where.directoryStatus &&
-          where.OR.some(
-            (c: any) =>
-              u.deletionStatus === c.deletionStatus &&
-              (c.deletionDueAt === undefined || u.deletionDueAt <= c.deletionDueAt.lte),
-          ),
+          (where.directoryStatus === undefined || u.directoryStatus === where.directoryStatus) &&
+          (where.deletionStatus === undefined || u.deletionStatus === where.deletionStatus) &&
+          // WARP-3176: the stale-claim sweep ages the claim.
+          (where.handoverClaimedAt === undefined ||
+            (u.handoverClaimedAt != null && u.handoverClaimedAt <= where.handoverClaimedAt.lte)) &&
+          (where.OR === undefined ||
+            where.OR.some(
+              (c: any) =>
+                u.deletionStatus === c.deletionStatus &&
+                (c.deletionDueAt === undefined || u.deletionDueAt <= c.deletionDueAt.lte),
+            )),
       ),
     ),
     count: vi.fn(async ({ where }: any = {}) => {
@@ -765,6 +781,13 @@ describe("DELETE /api/auth/users/:username — WARP-3169 hand-over", () => {
     await vi.waitFor(() => expect(hostExecMock).toHaveBeenCalledTimes(1));
     expect(prisma._users.find((u: any) => u.id === "u-alice").deletionStatus).toBe("HANDING_OVER");
 
+    // WARP-3176: the claim records when, what it replaced, and to whom.
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      handoverClaimedAt: expect.any(Date),
+      handoverPriorStatus: "NONE",
+      handoverRecipientId: "u-bob",
+    });
+
     const second = await handover(app, "u-bob");
     expect(second.status).toBe(409);
     // A retention delete can't overwrite the claim either.
@@ -782,7 +805,12 @@ describe("DELETE /api/auth/users/:username — WARP-3169 hand-over", () => {
     const prisma = createPrismaMock([OWNER_ROW, pending, BOB]);
     const res = await handover(buildApp(prisma, "owner"), "u-bob");
     expect(res.status).toBe(502);
-    expect(prisma._users.find((u: any) => u.id === "u-alice").deletionStatus).toBe("PENDING");
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      deletionStatus: "PENDING",
+      handoverClaimedAt: null,
+      handoverPriorStatus: null,
+      handoverRecipientId: null,
+    });
     expect(nc.ncDeleteUser).not.toHaveBeenCalled();
   });
 
@@ -814,5 +842,98 @@ describe("DELETE /api/auth/users/:username — WARP-3169 hand-over", () => {
       .send({ disposition: "handover", recipientId: "u-bob" });
     expect(res.status).toBe(403);
     expect(hostExecMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("releaseStaleHandovers — WARP-3176 crash recovery", () => {
+  const MIN = 60 * 1000;
+  const BOB = {
+    id: "u-bob",
+    username: "bob",
+    nextcloudUsername: "bob",
+    role: "family",
+    directoryStatus: "ACTIVE",
+    deletionStatus: "NONE",
+  };
+  const claimed = (ageMs: number, prior = "NONE") => ({
+    ...seededAlice(),
+    deletionStatus: "HANDING_OVER",
+    handoverClaimedAt: new Date(Date.now() - ageMs),
+    handoverPriorStatus: prior,
+    handoverRecipientId: "u-bob",
+    ...(prior === "PENDING"
+      ? { directoryStatus: "DEACTIVATED", deletionDueAt: new Date(Date.now() + 5 * DAY) }
+      : {}),
+  });
+  const alice = (prisma: any) => prisma._users.find((u: any) => u.id === "u-alice");
+
+  it("releases a claim older than the transfer timeout plus margin and audits it as interrupted", async () => {
+    const prisma = createPrismaMock([claimed(HANDOVER_STALE_MS + MIN), BOB]);
+    expect(await releaseStaleHandovers(prisma)).toEqual({ released: 1, failed: 0 });
+    expect(alice(prisma)).toMatchObject({
+      deletionStatus: "NONE",
+      handoverClaimedAt: null,
+      handoverPriorStatus: null,
+      handoverRecipientId: null,
+    });
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "File hand-over interrupted, may be partial",
+        sub: expect.stringContaining("alice → bob"),
+        refs: expect.objectContaining({
+          targetUsername: "alice",
+          recipientUsername: "bob",
+          mayBePartial: true,
+        }),
+        actor: { type: "system" },
+      }),
+    );
+    // Nothing is deleted or transferred by the release.
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+  });
+
+  it("leaves a live claim (inside the window) alone — occ may still be running on the host", async () => {
+    const live = HANDOVER_STALE_MS - MIN;
+    // 660 s is the transfer's own exec timeout; the window must exceed it.
+    expect(HANDOVER_STALE_MS).toBeGreaterThan(660_000);
+    const prisma = createPrismaMock([claimed(live), BOB]);
+    expect(await releaseStaleHandovers(prisma)).toEqual({ released: 0, failed: 0 });
+    expect(alice(prisma).deletionStatus).toBe("HANDING_OVER");
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
+  });
+
+  it("restores PENDING for a person already on retention, so the scheduled delete is not lost", async () => {
+    const prisma = createPrismaMock([claimed(HANDOVER_STALE_MS + MIN, "PENDING"), BOB]);
+    await releaseStaleHandovers(prisma);
+    expect(alice(prisma)).toMatchObject({ deletionStatus: "PENDING", directoryStatus: "DEACTIVATED" });
+  });
+
+  it("never releases a claim re-taken between the read and the release", async () => {
+    const prisma = createPrismaMock([claimed(HANDOVER_STALE_MS + MIN), BOB]);
+    const realFindMany = prisma.user.findMany;
+    prisma.user.findMany = vi.fn(async (args: any) => {
+      const rows = (await realFindMany(args)).map((r: any) => ({ ...r }));
+      // A fresh hand-over claims the row after the sweep read it.
+      alice(prisma).handoverClaimedAt = new Date();
+      return rows;
+    });
+    expect(await releaseStaleHandovers(prisma)).toEqual({ released: 0, failed: 0 });
+    expect(alice(prisma).deletionStatus).toBe("HANDING_OVER");
+  });
+
+  it("a released claim unblocks the next hand-over", async () => {
+    hostExecMock.mockReset();
+    hostExecMock.mockResolvedValue({ stdout: "Transferring files to bob/files/x ...\n", stderr: "" });
+    const prisma = createPrismaMock([OWNER_ROW, claimed(HANDOVER_STALE_MS + MIN), BOB]);
+    const app = buildApp(prisma, "owner");
+    const blocked = await request(app)
+      .delete("/api/auth/users/alice")
+      .send({ disposition: "handover", recipientId: "u-bob" });
+    expect(blocked.status).toBe(409);
+    await releaseStaleHandovers(prisma);
+    const res = await request(app)
+      .delete("/api/auth/users/alice")
+      .send({ disposition: "handover", recipientId: "u-bob" });
+    expect(res.status).toBe(200);
   });
 });
