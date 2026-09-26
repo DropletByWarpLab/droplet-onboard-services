@@ -200,13 +200,15 @@ beforeEach(() => {
 });
 
 describe("WARP-1269 (T17) — POST /files/share on a dept space", () => {
+  // WARP-3053: a dept manager who is a regular member shares INTERNALLY; a
+  // public link on a department library is owner/admin only.
   it("manager on the dept: mints with the ADMIN credential + writes a DepartmentShare row", async () => {
     const prisma = makePrismaStub({ departments: [DEPT_A], memberships: baseMemberships() });
     ncMock.ncCreateShareV2.mockResolvedValue({
       id: 101,
       url: null,
       token: null,
-      shareType: 3,
+      shareType: 0,
       permissions: 1,
       path: "/Alpha/Reports",
       expireDate: null,
@@ -222,24 +224,37 @@ describe("WARP-1269 (T17) — POST /files/share on a dept space", () => {
 
     const res = await request(app)
       .post("/api/files/share")
-      .send({ path: "/Reports", space: `dept:${DEPT_A.id}` });
+      .send({ path: "/Reports", space: `dept:${DEPT_A.id}`, shareType: 0, shareWith: "contrib-a" });
 
     expect(res.status).toBe(200);
     expect(res.body.id).toBe(101);
     expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
       expect.stringMatching(/^basic:/),
       "/Alpha/Reports",
-      expect.objectContaining({ shareType: 3 }),
+      expect.objectContaining({ shareType: 0 }),
     );
     expect(prisma.departmentShare.create).toHaveBeenCalledWith({
       data: {
         departmentId: DEPT_A.id,
         ncShareId: 101,
         createdById: MANAGER_A.id,
-        shareType: 3,
+        shareType: 0,
         path: "/Reports",
       },
     });
+  });
+
+  it("WARP-3053: manager who is a regular member, PUBLIC link on the dept: 403 before any OCS call", async () => {
+    const prisma = makePrismaStub({ departments: [DEPT_A], memberships: baseMemberships() });
+    const app = buildApp(prisma, MANAGER_A);
+
+    const res = await request(app)
+      .post("/api/files/share")
+      .send({ path: "/Reports", space: `dept:${DEPT_A.id}` });
+
+    expect(res.status).toBe(403);
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+    expect(prisma.departmentShare.create).not.toHaveBeenCalled();
   });
 
   it("contributor (non-manager) on the dept: 403 before any OCS call", async () => {
@@ -278,7 +293,7 @@ describe("WARP-1269 (T17) — POST /files/share on a dept space", () => {
 
     const res = await request(app)
       .post("/api/files/share")
-      .send({ path: "/Reports", space: `dept:${DEPT_A.id}` });
+      .send({ path: "/Reports", space: `dept:${DEPT_A.id}`, shareType: 0, shareWith: "contrib-a" });
 
     expect(res.status).toBe(403);
     expect(prisma.departmentShare.create).not.toHaveBeenCalled();

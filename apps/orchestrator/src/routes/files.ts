@@ -68,6 +68,13 @@ import {
 import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
+  exposesOutside,
+  libraryOfHomePath,
+  mayCreatePublicLink,
+  PUBLIC_LINK_REFUSAL,
+  type ShareLibrary,
+} from "../services/share-policy.js";
+import {
   assertedNextcloudLoginRefusal,
   resolveAssertedNextcloudLogin,
   type AssertedNextcloudLoginFailure,
@@ -2800,6 +2807,57 @@ export function createFilesRouter(
     }
   });
 
+  /**
+   * WARP-3053 — the role of the PERSON a share request acts for. The MCP
+   * service principal carries role "service"; the person it asserts is the
+   * one the share policy judges. An unresolvable assertion yields undefined,
+   * which the policy treats as "not owner/admin" (fail closed).
+   */
+  async function actingRole(req: Request): Promise<string | undefined> {
+    if (!isMcpService(req)) return req.user?.role;
+    const asserted = (req.header("x-nextcloud-user") ?? "").trim();
+    if (!asserted) return undefined;
+    const resolved = await resolveAssertedUser(prisma, asserted);
+    return resolved.ok ? resolved.user.role : undefined;
+  }
+
+  /**
+   * WARP-3053 — top-level folder names of every company library in a home:
+   * the Workspace plus every department/team mount, named as `rootForSpace`
+   * names them. Every state, not only active: an archived library's mount can
+   * linger in homes, and a stale name can only over-refuse (fail closed).
+   */
+  async function companyLibraryRoots(): Promise<string[]> {
+    const depts = await prisma.department.findMany({
+      where: { kind: { in: ["DEPARTMENT", "TEAM"] } },
+      select: { id: true, name: true, kind: true, parentId: true },
+    });
+    const nameById = new Map(depts.map((d) => [d.id, d.name]));
+    return [
+      SHARED_FOLDER_NAME,
+      ...depts.map((d) => {
+        const parent = d.kind === "TEAM" && d.parentId ? nameById.get(d.parentId) : undefined;
+        return parent ? `${parent} — ${d.name}` : d.name;
+      }),
+    ];
+  }
+
+  /**
+   * WARP-3053 — the library a share target sits in, whatever shape the client
+   * used. An explicit non-personal `space` is company data; a home path with
+   * no `space` (the web's and the Mac's shape) is classified by its first
+   * segment, so `/Household/...` is the Workspace either way.
+   */
+  async function shareLibrary(space: Space, homePath: string): Promise<ShareLibrary> {
+    if (space !== "personal") return "company";
+    return libraryOfHomePath(homePath, await companyLibraryRoots());
+  }
+
+  function refusePublicLink(req: Request, res: Response): void {
+    recordAccessDenied(req, "public-link-company-data");
+    res.status(403).json(PUBLIC_LINK_REFUSAL);
+  }
+
   // ── Create a share link ──
   //
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
@@ -2861,8 +2919,23 @@ export function createFilesRouter(
 
       const space = resolveSpace(spaceQueryOrBody(req));
       const targetPath = await rootForSpace(prisma, space, parsed.data.path);
+
       const departmentId = req.spaceDepartmentId ?? null;
       const shareToken = departmentId ? adminBasicToken() : await getToken(req);
+
+      // WARP-3053: a public link (or a re-share grant) on company data is
+      // owner/admin only, judged on the RESOLVED library so the home-path
+      // shape can't skip it. Owner/admin short-circuit the library lookup.
+      if (exposesOutside(parsed.data.shareType, parsed.data.permissions)) {
+        const role = await actingRole(req);
+        const allowed =
+          mayCreatePublicLink(role, "company") ||
+          mayCreatePublicLink(role, await shareLibrary(space, targetPath));
+        if (!allowed) {
+          refusePublicLink(req, res);
+          return;
+        }
+      }
 
       const share = await ncCreateShareV2(shareToken, targetPath, {
         shareType: parsed.data.shareType,
@@ -3750,12 +3823,12 @@ export function createFilesRouter(
     res: Response,
     shareId: number
   ): Promise<
-    | { ok: true; token: string; deptRow: { departmentId: string } | null }
+    | { ok: true; token: string; deptRow: { departmentId: string; shareType: number } | null }
     | { ok: false }
   > {
     const deptRow = await prisma.departmentShare.findUnique({
       where: { ncShareId: shareId },
-      select: { departmentId: true, createdById: true },
+      select: { departmentId: true, createdById: true, shareType: true },
     });
     if (!deptRow) {
       return { ok: true, token: await getToken(req), deptRow: null };
@@ -3780,7 +3853,11 @@ export function createFilesRouter(
       return { ok: false };
     }
 
-    return { ok: true, token: adminBasicToken(), deptRow: { departmentId: deptRow.departmentId } };
+    return {
+      ok: true,
+      token: adminBasicToken(),
+      deptRow: { departmentId: deptRow.departmentId, shareType: deptRow.shareType },
+    };
   }
 
   // ── Update existing share (PUT /api/files/share/:id) ──
@@ -3822,6 +3899,29 @@ export function createFilesRouter(
       const auth = await resolveShareMutationAuth(req, res, shareId);
       if (!auth.ok) return;
       const { token } = auth;
+
+      // WARP-3053: members may not edit a public link on company data, nor
+      // grant the re-share bit on it. Revoking (DELETE) stays open to them.
+      if (!mayCreatePublicLink(req.user?.role, "company")) {
+        const existing = auth.deptRow
+          ? { shareType: auth.deptRow.shareType, library: "company" as const }
+          : await ncGetShare(token, shareId).then(async (s) =>
+              s
+                ? {
+                    shareType: s.shareType,
+                    library: libraryOfHomePath(s.path, await companyLibraryRoots()),
+                  }
+                : null,
+            );
+        if (
+          existing &&
+          exposesOutside(existing.shareType, parsed.data.permissions ?? 0) &&
+          !mayCreatePublicLink(req.user?.role, existing.library)
+        ) {
+          refusePublicLink(req, res);
+          return;
+        }
+      }
 
       // OCS accepts one field per PUT — apply them sequentially.
       if (parsed.data.permissions !== undefined) {
