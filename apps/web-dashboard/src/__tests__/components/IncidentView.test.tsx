@@ -21,7 +21,7 @@
  *   · a person still in view (PR-D) is a "Still in view" row: a picture while
  *     their finished row isn't listed, never a Clip.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act as rtlAct, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { SWRConfig } from "swr";
@@ -630,6 +630,62 @@ describe("Acknowledge", () => {
   });
 });
 
+describe("a handled alert leaves this device's tray (WARP-3185 F)", () => {
+  const closeA = vi.fn();
+  const closeB = vi.fn();
+  const getNotifications = vi.fn(async () => [{ close: closeA }, { close: closeB }]);
+  const getRegistration = vi.fn(async () => ({ getNotifications }));
+
+  beforeEach(() => {
+    closeA.mockClear();
+    closeB.mockClear();
+    getNotifications.mockClear();
+    getRegistration.mockClear();
+    Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { getRegistration } });
+  });
+  afterEach(() => {
+    delete (navigator as unknown as { serviceWorker?: unknown }).serviceWorker;
+  });
+
+  it("acknowledging closes the notifications tagged for this incident", async () => {
+    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true } }), changed: true });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    await waitFor(() => expect(getNotifications).toHaveBeenCalledWith({ tag: `security-incident-${ID}` }));
+    await waitFor(() => expect(closeA).toHaveBeenCalled());
+    expect(closeB).toHaveBeenCalled();
+  });
+
+  it("resolving closes them too", async () => {
+    h.resolveSecurityIncident.mockResolvedValue({ incident: detail({ state: "resolved", viewer: { level: "act", acknowledged: true } }), changed: true });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: COPY.resolveConfirm }));
+    await waitFor(() => expect(closeA).toHaveBeenCalled());
+  });
+
+  it("a refused acknowledge leaves them", async () => {
+    h.acknowledgeSecurityIncident.mockRejectedValue(typedError("INCIDENT_CONFLICT", 409));
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.any(String), "error"));
+    await rtlAct(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(getNotifications).not.toHaveBeenCalled();
+    expect(closeA).not.toHaveBeenCalled();
+  });
+
+  it("a browser with no service worker (or none registered) acknowledges just the same", async () => {
+    getRegistration.mockResolvedValueOnce(undefined as never);
+    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true } }), changed: true });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(COPY.acknowledgedToast, "success"));
+    expect(getNotifications).not.toHaveBeenCalled();
+  });
+});
+
 describe("Resolve…", () => {
   it("opens a dialog with the optional note; Resolve sends it, and focus lands on the state once both buttons are gone", async () => {
     const after = detail({ state: "resolved", lastAck: { action: "resolve", byName: "Alex", at: at("01:31") }, viewer: { level: "act", acknowledged: true } });
@@ -657,6 +713,38 @@ describe("Resolve…", () => {
     await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.not.stringContaining("raw server text"), "error"));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(within(screen.getByRole("dialog")).getByLabelText(COPY.noteLabel)).toHaveValue("x");
+  });
+
+  it("a flat 404 (Security switched off, or the level taken away, under the page) closes the dialog — the incident isn't this person's to resolve any more (WARP-3185 D)", async () => {
+    h.resolveSecurityIncident.mockRejectedValue(
+      Object.assign(new Error("HTTP 404"), { code: "UNKNOWN", status: 404, body: { error: "module_disabled", module: "security" } }),
+    );
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: COPY.resolveConfirm }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.not.stringContaining("HTTP 404"), "error"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("a 409 (someone else moved it) closes the dialog too, and the page shows where it stands", async () => {
+    h.resolveSecurityIncident.mockRejectedValue(typedError("INCIDENT_CONFLICT", 409));
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: COPY.resolveConfirm }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(h.toast).toHaveBeenCalledWith("Someone else changed this incident at the same moment. Check it and try again.", "error");
+  });
+
+  it("an outage (503) keeps the dialog and the note, to try again", async () => {
+    h.resolveSecurityIncident.mockRejectedValue(typedError("INCIDENTS_UNAVAILABLE", 503));
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(COPY.noteLabel), { target: { value: "cleaner" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.resolveConfirm }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.any(String), "error"));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByLabelText(COPY.noteLabel)).toHaveValue("cleaner");
   });
 
   it("in flight: the dialog's Resolve is aria-disabled and refuses a second press", async () => {

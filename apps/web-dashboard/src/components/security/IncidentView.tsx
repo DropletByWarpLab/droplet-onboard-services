@@ -127,9 +127,17 @@ const isNotFound = (err: unknown): boolean => {
   const e = err as { code?: unknown; status?: unknown } | undefined;
   return e?.code === "INCIDENT_NOT_FOUND" || e?.status === 404;
 };
-const errorCode = (err: unknown): string | undefined => {
-  const c = (err as { code?: unknown } | undefined)?.code;
-  return typeof c === "string" ? c : undefined;
+/** What a refused write said: its typed code and HTTP status, when it had them. */
+interface WriteFailure {
+  code?: string;
+  status?: number;
+}
+const failureOf = (err: unknown): WriteFailure => {
+  const e = err as { code?: unknown; status?: unknown } | undefined;
+  return {
+    code: typeof e?.code === "string" ? e.code : undefined,
+    status: typeof e?.status === "number" ? e.status : undefined,
+  };
 };
 
 export interface IncidentViewProps {
@@ -210,7 +218,7 @@ function IncidentBody({
   }, [focusAfter, incident]);
 
   const run = useCallback(
-    async (action: "acknowledge" | "resolve", write: () => Promise<IncidentActionResult>): Promise<string | null> => {
+    async (action: "acknowledge" | "resolve", write: () => Promise<IncidentActionResult>): Promise<"BUSY" | WriteFailure | null> => {
       if (busyRef.current) return "BUSY";
       busyRef.current = true;
       setBusy(action);
@@ -231,7 +239,7 @@ function IncidentBody({
         } catch {
           // A failed re-read is the page's own "couldn't refresh" line.
         }
-        return errorCode(err) ?? "UNKNOWN";
+        return failureOf(err);
       } finally {
         busyRef.current = false;
         setBusy(null);
@@ -287,8 +295,11 @@ function IncidentBody({
     void run("resolve", () => resolve({ note })).then((failed) => {
       if (failed === "BUSY") return;
       // A note the box refused, or an outage: keep the dialog (and the note) to try again.
-      // The incident moved or went away: close it; the re-read shows where it stands.
-      if (failed === null || failed === "INCIDENT_CONFLICT" || failed === "NOT_ACTIONABLE" || failed === "INCIDENT_NOT_FOUND") {
+      // The incident moved (any 409) or isn't this person's to resolve any more
+      // (any 404 — INCIDENT_NOT_FOUND, or a flat one from the feature gate when
+      // Security or their level went away under the page, WARP-3185): close it;
+      // the re-read shows where it stands.
+      if (failed === null || failed.status === 404 || failed.status === 409) {
         setDialogOpen(false);
         setFocusAfter("resolve");
       }

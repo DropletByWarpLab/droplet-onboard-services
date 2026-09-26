@@ -184,18 +184,46 @@ describe("at manage", () => {
     await rtlAct(async () => finish({ person: person({ userId: "u-maria", name: "Maria" }) }));
   });
 
+  it("a switch the box took stays switched even when the re-read after it fails — the box's echoed row is the answer (WARP-3185 E)", async () => {
+    h.getAlertRouting.mockReset();
+    h.getAlertRouting.mockResolvedValueOnce(manageView(PEOPLE)).mockRejectedValue(typedError("ROUTING_UNAVAILABLE", 503));
+    h.putAlertRouting.mockResolvedValue({
+      person: person({ userId: "u-maria", name: "Maria", role: "admin", state: "receiving", origin: "chosen", version: 0, managesSecurityDepartment: true, delivery: "in_app_only" }),
+    });
+    render(<AlertRoutingPanel />, { wrapper: Wrap });
+    fireEvent.click(await screen.findByRole("switch", { name: "Tell Maria about alerts" }));
+    await waitFor(() => expect(h.putAlertRouting).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Tell Maria about alerts" })).not.toHaveAttribute("aria-disabled"));
+    expect(screen.getByRole("switch", { name: "Tell Maria about alerts" })).toHaveAttribute("aria-checked", "true");
+    expect(h.toast).not.toHaveBeenCalled();
+  });
+
+  it("the next change to that person sends the version the box echoed", async () => {
+    h.getAlertRouting.mockReset();
+    h.getAlertRouting.mockResolvedValueOnce(manageView(PEOPLE)).mockRejectedValue(typedError("ROUTING_UNAVAILABLE", 503));
+    h.putAlertRouting
+      .mockResolvedValueOnce({ person: person({ userId: "u-maria", name: "Maria", role: "admin", state: "receiving", origin: "chosen", version: 0 }) })
+      .mockResolvedValueOnce({ person: person({ userId: "u-maria", name: "Maria", role: "admin", state: "not_receiving", origin: "chosen", version: 1 }) });
+    render(<AlertRoutingPanel />, { wrapper: Wrap });
+    fireEvent.click(await screen.findByRole("switch", { name: "Tell Maria about alerts" }));
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Tell Maria about alerts" })).toHaveAttribute("aria-checked", "true"));
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Tell Maria about alerts" })).not.toHaveAttribute("aria-disabled"));
+    fireEvent.click(screen.getByRole("switch", { name: "Tell Maria about alerts" }));
+    await waitFor(() => expect(h.putAlertRouting).toHaveBeenLastCalledWith("u-maria", { state: "not_receiving", expectedVersion: 0 }));
+  });
+
   it("the last person told can't be switched off: the friendly NO_RECIPIENT copy, and the switch goes back", async () => {
     h.putAlertRouting.mockRejectedValue(typedError("NO_RECIPIENT", 409));
     render(<AlertRoutingPanel />, { wrapper: Wrap });
-    const sw = within(await waitFor(() => row("Stefan"))).getByRole("switch");
-    fireEvent.click(sw);
+    // By role and name, re-queried after each change — never a node held across a re-read (WARP-3185 G).
+    fireEvent.click(await screen.findByRole("switch", { name: "Tell Stefan about alerts" }));
     await waitFor(() => expect(h.toast).toHaveBeenCalledTimes(1));
     const [message, type] = h.toast.mock.calls[0]!;
     expect(type).toBe("error");
     expect(message).toMatch(/Someone who can open Security has to be told about alerts/);
     expect(message).not.toContain("raw server text");
-    await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
-    expect(sw).not.toHaveAttribute("aria-disabled");
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Tell Stefan about alerts" })).toHaveAttribute("aria-checked", "true"));
+    expect(screen.getByRole("switch", { name: "Tell Stefan about alerts" })).not.toHaveAttribute("aria-disabled");
   });
 
   it("the fallback banner when nobody chosen can be told", async () => {
