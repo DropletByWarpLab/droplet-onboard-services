@@ -1062,9 +1062,10 @@ services:
     depends_on:
       nextcloud:
         condition: service_started
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file. This container parses untrusted office
+    # documents, so it must not carry the box's .env (JWT_SECRET,
+    # DEVICE_SECRET_KEY, POSTGRES_PASSWORD, ...). Every knob either engine
+    # reads is set explicitly below; neither image reads any other .env key.
     environment:
       # ── Collabora CODE knobs (DOCS_ENGINE=collabora; OnlyOffice ignores) ──
       # aliasgroup1 is coolwsd's WOPI-host ALLOWLIST: the only WOPI host this
@@ -2018,12 +2019,18 @@ services:
       # mqtts:// broker connection — host/port/cert paths are static in
       # docker/frigate/config.yml now (no env substitution, no password).
       - ../data/secrets/service-tls/frigate:/data/service-tls:ro
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file. Frigate runs ffmpeg over untrusted
+    # camera streams, so it gets only the names it reads. A bare `- NAME`
+    # takes its value from .env (via --env-file / the docker/.env symlink) and
+    # stays UNSET when .env lacks it — the same semantics env_file had.
+    # A `{FRIGATE_*}` placeholder added to docker/frigate/config.yml must have
+    # its name listed here too, or Frigate KeyErrors at boot.
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+      # Frigate+ API key and container timezone (both optional).
+      - PLUS_API_KEY
+      - TZ
       # JP6 image only: ``YOLO_MODELS`` triggers the ``trt-model-prepare``
       # s6-overlay service which still expects legacy ``.cfg`` inputs and
       # fails with "file (yolov9-s.cfg) not found!" on the 0.17.1 image.
@@ -2059,15 +2066,24 @@ services:
       dockerfile: services/web-fetch/Dockerfile
     expose:
       - "8010"
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — this container parses untrusted web
+    # content. Only the names services/web-fetch + services/_shared read.
     environment:
       # Not one of the six FIPS provider-carrying images — pin the boot
       # gate + OpenSSL config to the literal OFF posture (see the
-      # device-identity-svc comment; `environment:` beats env_file).
+      # device-identity-svc comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Bare names: value from .env, unset when absent (env_file semantics).
+      - WEB_FETCH_SERVICE_TOKEN
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     profiles: ["web"]
     restart: unless-stopped
     <<: *default-logging
@@ -2162,15 +2178,24 @@ services:
       dockerfile: services/doc-render/Dockerfile
     expose:
       - "8020"
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — this container parses LLM-authored
+    # document specs. Only the names services/doc-render + services/_shared read.
     environment:
       # Not one of the six FIPS provider-carrying images — pin the boot
       # gate + OpenSSL config to the literal OFF posture (see the
-      # device-identity-svc comment; `environment:` beats env_file).
+      # device-identity-svc comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Bare names: value from .env, unset when absent (env_file semantics).
+      - DOC_RENDER_SERVICE_TOKEN
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     <<: *default-logging
     mem_limit: ${DOC_RENDER_MEM_LIMIT:-384m}
@@ -2357,20 +2382,34 @@ services:
     network_mode: host
     cap_add:
       - NET_ADMIN
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — this container parses ONVIF/RTSP
+    # responses from LAN cameras. Only the names services/camera-discovery +
+    # services/_shared read are passed (below).
     volumes:
       # WARP-235: this service's own TLS bundle (CN = "camera-discovery") for
       # the mqtts:// broker connection over the loopback :8883 publish.
       - ../data/secrets/service-tls/camera-discovery:/data/service-tls:ro
     environment:
       # WARP-317: no validated fips.so in this image — pin the FIPS boot
-      # gate + OpenSSL config to the literal OFF posture so a FIPS-on .env
-      # inherited via env_file can't crash-loop it (see the
-      # device-identity-svc comment; `environment:` beats env_file).
+      # gate + OpenSSL config to the literal OFF posture (see the
+      # device-identity-svc comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Bare names: value from .env, unset when absent (env_file semantics).
+      # DEVICE_SECRET is the bearer the orchestrator sends (main.py fails
+      # closed without it); ROUTING_SERVICE_TOKEN authenticates to routing.
+      - DEVICE_SECRET
+      - ROUTING_SERVICE_TOKEN
+      - CAMERA_ALLOW_NO_AUTH
+      - CAMERA_AUTO_INITIALIZE
+      - CAMERA_DEFAULT_USERNAME
+      - CAMERA_DEFAULT_PASSWORD
+      - CAMERA_CREDENTIALS_JSON
+      - ONVIF_WS_DISCOVERY_ENABLED
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
       # Host-mode service — dials the broker's host-loopback TLS publish
       # (127.0.0.1:8883) via MQTT_BROKER_LOCAL from .env
       - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtts://localhost:8883}
@@ -3627,9 +3666,11 @@ services:
     # AP resolver/LAN (192.168.20.1) that the tunnel's private-network route serves.
     network_mode: host
     command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — only the connector token. cloudflared
+    # maps its flags to TUNNEL_* env vars; TUNNEL_TOKEN is the only one .env
+    # carries (every other flag is on `command:` above).
+    environment:
+      - TUNNEL_TOKEN
     restart: unless-stopped
     mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
     cpus: ${CLOUDFLARED_CPUS:-0.5}

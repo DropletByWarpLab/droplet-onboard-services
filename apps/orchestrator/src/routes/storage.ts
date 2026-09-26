@@ -523,7 +523,12 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(`${BRIDGE_URL}/pools`, { signal: ctrl.signal });
+      // WARP-3193 SEC-DATA-6: /pools is token-gated on the bridge like /drives.
+      const token = bridgeAuthToken();
+      const r = await fetch(`${BRIDGE_URL}/pools`, {
+        signal: ctrl.signal,
+        ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+      });
       clearTimeout(timer);
       if (!r.ok) return undefined;
       const snap = (await r.json()) as BridgePoolsSnapshot;
@@ -1047,7 +1052,12 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(`${BRIDGE_URL}/pools`, { signal: ctrl.signal });
+      // WARP-3193 SEC-DATA-6: /pools is token-gated on the bridge like /drives.
+      const token = bridgeAuthToken();
+      const r = await fetch(`${BRIDGE_URL}/pools`, {
+        signal: ctrl.signal,
+        ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+      });
       clearTimeout(timer);
       if (!r.ok) {
         res.status(502).json({ pools: [], count: 0, error: `bridge returned ${r.status}` });
