@@ -2707,12 +2707,28 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           if (line.startsWith("#")) {
             // Attribute-list tags (#EXT-X-MAP, #EXT-X-KEY, …) carry their
             // own URI="…" that the segment-line branch below never sees.
-            const uriMatch = line.match(/URI="([^"]*)"/i);
-            if (!uriMatch) return line;
-            if (isRemoteUri(uriMatch[1])) {
-              throw new Error("HLS playlist: refused absolute URI attribute");
+            //
+            // Fail CLOSED: `/URI="([^"]*)"/i` only ever matched the strict
+            // double-quoted form, so a single-quoted (URI='...'), unquoted
+            // (URI=...) or otherwise-cased attribute fell through as
+            // "no match" and the ORIGINAL line — absolute URL included —
+            // was forwarded unchanged. Count every case-insensitive `URI=`
+            // occurrence and require each one to be in the strict form; any
+            // mismatch refuses the whole playlist rather than guessing.
+            const uriOccurrences = line.match(/URI\s*=/gi) ?? [];
+            if (uriOccurrences.length === 0) return line;
+            const strictMatches = [...line.matchAll(/URI\s*=\s*"([^"]*)"/gi)];
+            if (strictMatches.length !== uriOccurrences.length) {
+              throw new Error("HLS playlist: refused malformed URI attribute");
             }
-            return line.replace(uriMatch[0], `URI="${toProxyUri(uriMatch[1])}"`);
+            // Rewrite every strict match on the line (there can be more
+            // than one attribute-list tag's worth of URI= on one line).
+            return line.replace(/URI\s*=\s*"([^"]*)"/gi, (_full, uri: string) => {
+              if (isRemoteUri(uri)) {
+                throw new Error("HLS playlist: refused absolute URI attribute");
+              }
+              return `URI="${toProxyUri(uri)}"`;
+            });
           }
           // It's a segment URL line.
           const uri = line.trim();

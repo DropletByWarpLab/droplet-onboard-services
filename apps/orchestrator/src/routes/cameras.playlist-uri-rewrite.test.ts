@@ -237,4 +237,101 @@ describe("WARP-3122: recordings playlist rewrite", () => {
     const segLine = lines.find((l) => l.includes("playback.segment"));
     expect(segLine).toContain(`seg=${encodeURIComponent("0.ts")}`);
   });
+
+  // Fix-round-1 (review): `/URI="([^"]*)"/i` only matched the strict
+  // double-quoted form. A single-quoted, unquoted, or otherwise-cased
+  // attribute produced `!uriMatch` and forwarded the ORIGINAL line —
+  // absolute URL included — unchanged. These four cases must now refuse
+  // the playlist instead of silently letting the absolute URL through.
+
+  it("refuses a single-quoted #EXT-X-MAP:URI instead of forwarding it", async () => {
+    fetchHlsPlaylist.mockResolvedValue(
+      [
+        "#EXTM3U",
+        "#EXT-X-MAP:URI='http://attacker.example.com/init.mp4'",
+        "#EXTINF:10.0,",
+        "0.m4s",
+        "#EXT-X-ENDLIST",
+      ].join("\n"),
+    );
+
+    const res = await fetchPlaylist(before(), after());
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/malformed URI attribute/);
+  });
+
+  it("refuses an unquoted #EXT-X-MAP:URI instead of forwarding it", async () => {
+    fetchHlsPlaylist.mockResolvedValue(
+      [
+        "#EXTM3U",
+        "#EXT-X-MAP:URI=http://attacker.example.com/init.mp4",
+        "#EXTINF:10.0,",
+        "0.m4s",
+        "#EXT-X-ENDLIST",
+      ].join("\n"),
+    );
+
+    const res = await fetchPlaylist(before(), after());
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/malformed URI attribute/);
+  });
+
+  it("refuses a lowercase uri= attribute instead of forwarding it", async () => {
+    fetchHlsPlaylist.mockResolvedValue(
+      [
+        "#EXTM3U",
+        "#EXT-X-MAP:uri=http://attacker.example.com/init.mp4",
+        "#EXTINF:10.0,",
+        "0.m4s",
+        "#EXT-X-ENDLIST",
+      ].join("\n"),
+    );
+
+    const res = await fetchPlaylist(before(), after());
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/malformed URI attribute/);
+  });
+
+  it("rewrites two strict URI= attributes on the same line", async () => {
+    fetchHlsPlaylist.mockResolvedValue(
+      [
+        "#EXTM3U",
+        '#EXT-X-KEY:METHOD=AES-128,URI="key1.bin",IV=0x00,URI="key2.bin"',
+        "#EXTINF:10.0,",
+        "0.ts",
+        "#EXT-X-ENDLIST",
+      ].join("\n"),
+    );
+
+    const res = await fetchPlaylist(before(), after());
+
+    expect(res.status).toBe(200);
+    const lines = res.text.split("\n");
+    const keyLine = lines.find((l) => l.startsWith("#EXT-X-KEY:"));
+    expect(keyLine).toContain(`seg=${encodeURIComponent("key1.bin")}`);
+    expect(keyLine).toContain(`seg=${encodeURIComponent("key2.bin")}`);
+    // Neither raw filename survives unrewritten.
+    expect(keyLine).not.toContain('URI="key1.bin"');
+    expect(keyLine).not.toContain('URI="key2.bin"');
+  });
+
+  it("refuses two URI= attributes on one line if either is absolute", async () => {
+    fetchHlsPlaylist.mockResolvedValue(
+      [
+        "#EXTM3U",
+        '#EXT-X-KEY:METHOD=AES-128,URI="key1.bin",IV=0x00,URI="http://attacker.example.com/key2.bin"',
+        "#EXTINF:10.0,",
+        "0.ts",
+        "#EXT-X-ENDLIST",
+      ].join("\n"),
+    );
+
+    const res = await fetchPlaylist(before(), after());
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/absolute URI attribute/);
+  });
 });
