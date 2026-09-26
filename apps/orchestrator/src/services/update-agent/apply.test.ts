@@ -444,6 +444,7 @@ class FakeRunner implements ApplyRunner {
     await opts.write(dest);
     if (this.stageClientFails) throw new Error("stub: stage.sh failed on the host");
     this.staged[opts.client.platform] = readFileSync(dest);
+    return "staged" as const;
   }
 
   async migrateDeploy() {
@@ -1315,7 +1316,7 @@ describe("client installers the release carries (WARP-3120)", () => {
     expect(i).toBeLessThan(runner.calls.indexOf("migrateDeploy()"));
     expect(runner.staged.macos).toEqual(DMG);
     expect(logger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "update.client_app_staged", platform: "macos", version: "0.2.0" }),
+      expect.objectContaining({ event: "update.client_app_staged", platform: "macos", version: "0.2.0", alreadyStaged: false }),
       expect.any(String),
     );
   });

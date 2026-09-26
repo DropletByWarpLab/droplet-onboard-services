@@ -154,7 +154,9 @@ DropletAgent's `scripts/release-dmg.sh --publish` prints the entry.
 - **Apply** (`update-agent/apply.ts`, step 3c): the box downloads the file
   from the OTA release, checks it against the signed manifest, and the host
   helper (`docker/ota/apply-update.sh stage-client-apps`) runs
-  `stage.sh --no-restart` on it. A failure is logged
+  `stage.sh --no-restart` on it, then the update dir's copy is deleted. When
+  the catalog already serves that version with that sha256, nothing is
+  downloaded (most updates carry the same pinned DMG). A failure is logged
   (`update.client_apps_skipped`) and never fails the box update. The
   orchestrator sees the new catalog without a restart (`store.ts` re-reads
   `catalog.json` when its inode, size or mtime change).

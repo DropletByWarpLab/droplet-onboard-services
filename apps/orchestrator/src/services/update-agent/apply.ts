@@ -199,14 +199,16 @@ export interface ApplyRunner {
    * the box's app-downloads directory (what /downloads serves). The runner
    * picks the file's path under this update's dir, awaits `write(dest)` (the
    * caller streams the sha256-verified bytes there), then hands the file to
-   * the host helper's `stage-client-apps`. Throws on any failure; the caller
-   * turns that into a skip, never a failed update.
+   * the host helper's `stage-client-apps`, and removes its copy. Returns
+   * `already_staged` (nothing downloaded) when the box's catalog already
+   * serves that exact installer. Throws on any failure; the caller turns that
+   * into a skip, never a failed update.
    */
   stageClientApp(opts: {
     updateId: string;
     client: ReleaseClient;
     write: (dest: string) => Promise<void>;
-  }): Promise<void>;
+  }): Promise<"staged" | "already_staged">;
   /** Step 4 — `prisma migrate deploy` for this build's migrations. */
   migrateDeploy(): Promise<void>;
   /** Steps 5/8 — recreate the named services on release/previous refs. */
@@ -728,14 +730,22 @@ async function stageClientApps(
 ): Promise<void> {
   for (const client of manifest.clients ?? []) {
     try {
-      await opts.runner.stageClientApp({
+      const outcome = await opts.runner.stageClientApp({
         updateId: row.id,
         client,
         write: (dest) => downloadClientAsset(opts, row, client, dest),
       });
       log.info(
-        { event: "update.client_app_staged", deviceUpdateId: row.id, platform: client.platform, version: client.version },
-        "OTA step 3c — client installer staged into /downloads",
+        {
+          event: "update.client_app_staged",
+          deviceUpdateId: row.id,
+          platform: client.platform,
+          version: client.version,
+          alreadyStaged: outcome === "already_staged",
+        },
+        outcome === "already_staged"
+          ? "OTA step 3c — /downloads already serves this client installer; nothing downloaded"
+          : "OTA step 3c — client installer staged into /downloads",
       );
     } catch (err) {
       log.warn(
