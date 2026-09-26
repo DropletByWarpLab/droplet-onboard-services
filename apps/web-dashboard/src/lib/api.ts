@@ -706,11 +706,32 @@ export async function changePassword(
   }
 }
 
-export async function deleteUser(username: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/auth/users/${username}`, {
+/**
+ * WARP-3113 — schedule a person's deletion. They are cut off now; their files
+ * are kept for 30 days (lib/leaver-deletion.ts), then the box deletes the account.
+ * Resolves with the date the deletion runs.
+ */
+export async function deleteUser(username: string): Promise<{ deletionDueAt: string }> {
+  const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}`, {
     method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ disposition: "retain" }),
   });
-  if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Failed to delete user: ${res.status}`);
+  return { deletionDueAt: body.deletionDueAt };
+}
+
+/** WARP-3113 — cancel a scheduled deletion. The person stays deactivated. */
+export async function cancelUserDeletion(username: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/auth/users/${encodeURIComponent(username)}/cancel-deletion`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to cancel the deletion: ${res.status}`);
+  }
 }
 
 // --- PR #375 — TOTP 2FA enrollment ---

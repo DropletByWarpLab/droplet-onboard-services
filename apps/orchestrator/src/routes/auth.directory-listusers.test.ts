@@ -247,6 +247,8 @@ describe("GET /api/auth/users — directory carries the local userId UUID (WARP-
       accessRoleId: true,
       directoryStatus: true,
       provisionSource: true,
+      deletionStatus: true,
+      deletionDueAt: true,
     });
   });
 

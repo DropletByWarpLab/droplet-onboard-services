@@ -416,42 +416,40 @@ describe("PUT /api/auth/users/:username", () => {
   });
 });
 
+// WARP-3113: Delete schedules (files kept 30 days); the nightly job removes
+// the account — covered in auth.directory-deleteuser.test.ts.
+const RETAIN = { disposition: "retain" };
+
 describe("DELETE /api/auth/users/:username", () => {
-  it("local account: Nextcloud deleted, brain purged by User.id, row removed, audited", async () => {
+  it("local account: revoked now, Nextcloud login disabled, deletion scheduled, nothing purged", async () => {
     const prisma = createPrismaMock([LOCAL, OTHER_ADMIN]);
-    const res = await request(buildApp(prisma)).delete("/api/auth/users/alice");
+    const res = await request(buildApp(prisma)).delete("/api/auth/users/alice").send(RETAIN);
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: "deleted", ncMirror: "synced" });
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
-    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
-    expect(row(prisma, "u-alice")).toBeUndefined();
+    expect(res.body).toMatchObject({ status: "pending_deletion", ncMirror: "synced" });
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", false);
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(purgeUserDataMock).not.toHaveBeenCalled();
+    expect(row(prisma, "u-alice")).toMatchObject({ directoryStatus: "DEACTIVATED", deletionStatus: "PENDING" });
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
-      expect.objectContaining({ what: "User removed" }),
+      expect.objectContaining({ what: "User deletion scheduled" }),
     );
   });
 
-  it("SSO/SCIM account: row removed, sessions revoked, audited, Nextcloud skipped (was: 500, row left behind)", async () => {
+  it("SSO/SCIM account: scheduled, sessions revoked, Nextcloud skipped (no account)", async () => {
     const prisma = createPrismaMock([SSO, OTHER_ADMIN]);
-    const res = await request(buildApp(prisma)).delete("/api/auth/users/dana.chen");
+    const res = await request(buildApp(prisma)).delete("/api/auth/users/dana.chen").send(RETAIN);
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: "deleted", username: "dana.chen", ncMirror: "no_account" });
-    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
-    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-dana");
-    expect(row(prisma, "u-dana")).toBeUndefined();
+    expect(res.body).toMatchObject({ status: "pending_deletion", username: "dana.chen", ncMirror: "no_account" });
+    expect(nc.ncSetUserEnabled).not.toHaveBeenCalled();
+    expect(row(prisma, "u-dana")).toMatchObject({ deletionStatus: "PENDING" });
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-dana");
-    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
-      expect.objectContaining({
-        what: "User removed",
-        refs: expect.objectContaining({ targetUserId: "u-dana" }),
-      }),
-    );
   });
 
   it("SSO/SCIM owner cannot be deleted (403, row intact)", async () => {
     const prisma = createPrismaMock([{ ...SSO, role: "owner" }, OTHER_ADMIN]);
-    const res = await request(buildApp(prisma, "admin")).delete("/api/auth/users/dana.chen");
+    const res = await request(buildApp(prisma, "admin")).delete("/api/auth/users/dana.chen").send(RETAIN);
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("OWNER_IMMUTABLE");
@@ -481,11 +479,11 @@ describe("handle resolution order — nextcloudUsername before username", () => 
 
   it("delete resolves the mapping-key row, never the login-handle row", async () => {
     const prisma = createPrismaMock([A, B, OTHER_ADMIN]);
-    const res = await request(buildApp(prisma)).delete("/api/auth/users/sam");
+    const res = await request(buildApp(prisma)).delete("/api/auth/users/sam").send(RETAIN);
 
     expect(res.status).toBe(200);
-    expect(row(prisma, "u-a")).toBeUndefined();
-    expect(row(prisma, "u-b")).toBeDefined();
+    expect(row(prisma, "u-a").deletionStatus).toBe("PENDING");
+    expect(row(prisma, "u-b").deletionStatus).toBeUndefined();
   });
 });
 

@@ -1339,6 +1339,11 @@ export interface RosterUser extends AuthUser {
    *  storage: storage/upload limits don't apply. Optional for the same
    *  reason; only an explicit false hides the storage controls. */
   hasStorage?: boolean;
+  /** WARP-3113 — explicit deletion state. PENDING: deactivated, files kept
+   *  until `deletionDueAt`, cancellable. PURGING: the nightly job is removing
+   *  the account now. Optional: an older orchestrator sends nothing. */
+  deletionStatus?: "NONE" | "PENDING" | "PURGING";
+  deletionDueAt?: string | null;
 }
 
 /** WARP-2984 — see RosterUser.source. */

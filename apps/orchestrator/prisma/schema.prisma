@@ -1151,6 +1151,13 @@ enum DirectoryUserStatus {
   DEACTIVATED
 }
 
+// WARP-3113 — see User.deletionStatus.
+enum UserDeletionStatus {
+  NONE
+  PENDING
+  PURGING
+}
+
 // WARP-2858 — how a User row came to exist. LOCAL: /auth/setup, admin
 // create, invite accept (the box owns the credential). SSO: just-in-time
 // created by an OIDC sign-in (sso.ts). SCIM: pushed by the IdP's directory
@@ -2814,6 +2821,15 @@ model User {
   // because a local password is a login the IdP's disable/deprovision cannot
   // reach. A LOCAL row that later links an SSO identity stays LOCAL.
   provisionSource    UserProvisionSource @default(LOCAL)
+  // WARP-3113 — leaver deletion. Delete never purges a person's files on the
+  // spot: it parks the row (already DEACTIVATED) on PENDING with a due date,
+  // and the nightly leaver-deletion job completes the removal after the
+  // retention window. PURGING is the job's claim, so an admin's cancel can
+  // never land between the Nextcloud delete and the row delete. Explicit
+  // enum, never derived from a null `deletionDueAt`.
+  deletionStatus      UserDeletionStatus @default(NONE)
+  deletionDueAt       DateTime?
+  deletionRequestedBy String?
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was

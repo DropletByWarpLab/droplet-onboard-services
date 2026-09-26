@@ -26,7 +26,6 @@ import {
   ncDeleteAppPassword,
   ncGetCurrentUser,
   ncCreateUser,
-  ncDeleteUser,
   ncEnsureGroup,
   ncListUsers,
   ncUpdateUser,
@@ -122,8 +121,7 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
 // before OCS is asked to provision an admin-tier account into it.
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
-import { purgeUserData } from "../services/brain-memory.service.js";
-import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
+import { deletionDueAt } from "../services/leaver-deletion.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -316,6 +314,10 @@ const recoveryConsumeSchema = z.object({
 // Role enum so the DB column (now typed as `Role`) and the request body
 // share a vocabulary. The shared `inviteRoleField` is declared above
 // createUserSchema (WARP-1042 reuses it for direct user creation).
+// WARP-3113 — Delete must say what happens to the leaver's files. Only
+// "retain" (30 days, then purge) exists until hand-over lands.
+const deleteUserSchema = z.object({ disposition: z.literal("retain") });
+
 const createInviteSchema = z.object({
   displayName: z.string().min(1).max(128).optional(),
   // ADR-013: the invite email is the invitee's directory login key on
@@ -717,6 +719,8 @@ const DIRECTORY_USER_SELECT = {
   role: true,
   directoryStatus: true,
   provisionSource: true,
+  deletionStatus: true,
+  deletionDueAt: true,
 } as const;
 
 /**
@@ -2953,6 +2957,8 @@ export function createProtectedAuthRouter(
         accessRoleId: string | null;
         directoryStatus: string;
         provisionSource: string;
+        deletionStatus: string;
+        deletionDueAt: Date | null;
       };
       const [allUsers, localRows] = await Promise.all([
         ncListUsers(token),
@@ -2968,6 +2974,8 @@ export function createProtectedAuthRouter(
                 accessRoleId: true,
                 directoryStatus: true,
                 provisionSource: true,
+                deletionStatus: true,
+                deletionDueAt: true,
               },
             }) as Promise<LocalRosterRow[]>)
           : ([] as LocalRosterRow[]),
@@ -2994,6 +3002,9 @@ export function createProtectedAuthRouter(
           accessRoleId: local?.accessRoleId ?? null,
           source: local ? sourceOf(local) : ("nextcloud" satisfies RosterSource),
           hasStorage: true,
+          // WARP-3113: explicit enum; a Nextcloud-only account has no row to schedule.
+          deletionStatus: local?.deletionStatus ?? "NONE",
+          deletionDueAt: local?.deletionDueAt ?? null,
         };
       });
       // Local rows Nextcloud does not list: every SSO/SCIM account, plus any
@@ -3015,6 +3026,8 @@ export function createProtectedAuthRouter(
           accessRoleId: row.accessRoleId,
           source: sourceOf(row),
           hasStorage: false,
+          deletionStatus: row.deletionStatus,
+          deletionDueAt: row.deletionDueAt,
         });
       }
       res.json({ users });
@@ -3705,10 +3718,21 @@ export function createProtectedAuthRouter(
           ? await findDirectoryUserByHandle(prisma, req.params.username)
           : null;
         if (row && prisma) {
-          await prisma.user.update({
-            where: { id: row.id },
+          // WARP-3113: a person scheduled for deletion is reactivated only
+          // after the deletion is cancelled — two explicit decisions, never
+          // one click that silently keeps a purge date on a live account.
+          // Pinned to NONE so the nightly job's claim can't race this.
+          const reactivated = await prisma.user.updateMany({
+            where: { id: row.id, deletionStatus: "NONE" },
             data: { directoryStatus: "ACTIVE" },
           });
+          if (reactivated.count === 0) {
+            res.status(409).json({
+              error: "This person is scheduled for deletion. Cancel the deletion first.",
+              code: "DELETION_PENDING",
+            });
+            return;
+          }
         }
         const ncUsername = row ? row.nextcloudUsername : req.params.username;
         let ncMirror: NcMirror = "no_account";
@@ -3716,6 +3740,22 @@ export function createProtectedAuthRouter(
           await ncSetUserEnabled(token, ncUsername, true);
           ncMirror = "synced";
         }
+        // WARP-3113: reactivation restores access to the company's box, so
+        // it is audited with the actor, like disable.
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-check",
+          what: "User reactivated",
+          sub: req.params.username,
+          refs: {
+            actor: req.user?.username ?? null,
+            username: req.params.username,
+            targetUserId: row?.id ?? null,
+            ncMirror,
+          },
+          actor: actorFromRequest(req),
+        });
         res.json({ status: "enabled", username: req.params.username, ncMirror });
       } catch (err: any) {
         if (err.message?.includes("403") || err.message?.includes("997")) {
@@ -3868,198 +3908,115 @@ export function createProtectedAuthRouter(
   );
 
   // ── Delete user (admin only) ──
-  // WARP-205: Cascade brain-memory items + chunks + on-disk bytes the
-  // user owned. We do this AFTER Nextcloud-side delete succeeds so a
-  // failed upstream call doesn't leave the brain tier partially purged
-  // (the dashboard would then list a user that no longer exists in
-  // Nextcloud — strictly worse than the converse). The cascade is
-  // best-effort: if it throws we still return success, but log loud
-  // — orphaned local rows are recoverable later via a janitor job;
-  // returning 500 here would also fail to undo the upstream delete.
+  // WARP-3113: Delete no longer purges on the spot. An employee's work files
+  // belong to the business, so the request must say what happens to them:
+  // `{ disposition: "retain" }` keeps everything for RETENTION_DAYS, then the
+  // nightly leaver-deletion job (leaver-deletion.service.ts) completes the
+  // removal. Until then an admin can cancel. Hand-over to a recipient is not
+  // available yet (see that service's header), so it is the only disposition.
+  //
+  // What happens NOW is the revocation: the same guarded, SERIALIZABLE write
+  // Deactivate makes (WARP-1526 rails 1/2/4/5, directoryStatus=DEACTIVATED),
+  // plus the pending-deletion mark in the same transaction, then the
+  // Nextcloud enable-flag mirror and session revocation. A bare DELETE with
+  // no disposition is refused (400) so no client purges a leaver's files by
+  // accident.
   // WARP-171: per-route guard. owner + admin only.
   router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      // WARP-2993 — provisioning_api needs NC instance admin, which only the
-      // box service account holds. The caller's own NC credential is never
-      // used here; Droplet's requireRole + rails above/below are the authority.
-      const token = adminBasicToken();
-
-      // WARP-1526 rails. This surface predated every people-surface
-      // invariant — an admin could delete the owner's account here. Resolve
-      // the local row and run rails 2 + 1 pre-tx (self-delete, owner
-      // untouchable), then rails 4 + 5 inside a SERIALIZABLE transaction
-      // (SERIALIZABLE_TX — explicit; Prisma/Postgres default to READ
-      // COMMITTED) for a consistent count snapshot (the actual NC delete
-      // runs after commit — the same post-commit-mirror posture as every
-      // other NC effect).
-      // WARP-1565 residual 1 — the removal is no longer half-done. The
-      // transaction below still only REVOKES (directoryStatus=DEACTIVATED),
-      // because that is the half that must be atomic with the rails; the
-      // local row is deleted at the end, once Nextcloud has confirmed the
-      // account is gone. See the delete below for why that order.
+      const parsed = deleteUserSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          error:
+            "Choose what happens to this person's files: keep them for 30 days, then delete.",
+          code: "DELETE_NEEDS_DISPOSITION",
+        });
+        return;
+      }
       // WARP-2858: via the shared resolver so SSO/SCIM rows are removable.
       const row = prisma
         ? await findDirectoryUserByHandle(prisma, req.params.username)
         : null;
-      if (row && prisma) {
-        assertRemovalAllowed({
-          actor: { id: req.user?.id, role: req.user?.role },
-          target: row,
+      if (!row || !prisma) {
+        // A legacy Nextcloud-only account has no row to hold the retention
+        // state; purging it on the spot is exactly what WARP-3113 forbids.
+        res.status(409).json({
+          error: "This account has no directory entry, so its deletion can't be scheduled.",
+          code: "NO_DIRECTORY_ROW",
         });
-        // pr-reviewer #1229 B3: this transaction used to wrap a COUNT with
-        // no write — a read-only transaction pins nothing, so it read as
-        // protection without being any, and because the route never touched
-        // the local row the "removed" admin stayed role=admin/ACTIVE:
-        //   • it kept counting as a live operator for the NEXT removal's
-        //     rail 5, so admins could be emptied one DELETE at a time; and
-        //   • /auth/login verifies the LOCAL passwordHash, so once the
-        //     ACCESS_TOKEN_TTL denylist entry expired (~15 min) they could
-        //     simply sign back in with full admin.
-        // What this transaction owns is the REVOCATION: the same
-        // directoryStatus lever the disable path uses, which /auth/login,
-        // SSO, WebAuthn and the auth middleware all already fail closed on.
-        // Check and change commit together, at SERIALIZABLE, with the write
-        // optimistically pinned to the role the rails were evaluated
-        // against. The row's DELETION (WARP-1565) is deliberately not in
-        // here — see below.
-        await prisma.$transaction(async (tx) => {
-          const fresh = await readGuardTargetTx(tx, row.id);
-          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
-          await assertRemovalInvariantsTx(tx, { target: fresh });
-          await tx.user.update({
-            where: { id: fresh.id, role: fresh.role },
-            data: { directoryStatus: "DEACTIVATED" },
-          });
-        }, SERIALIZABLE_TX);
+        return;
       }
+      if (row.deletionStatus === "PENDING" || row.deletionStatus === "PURGING") {
+        // Idempotent: never extends the date an earlier request set.
+        res.json({
+          status: "pending_deletion",
+          username: req.params.username,
+          deletionDueAt: row.deletionDueAt,
+        });
+        return;
+      }
+      assertRemovalAllowed({
+        actor: { id: req.user?.id, role: req.user?.role },
+        target: row,
+      });
+      const dueAt = deletionDueAt(new Date());
+      await prisma.$transaction(async (tx) => {
+        const fresh = await readGuardTargetTx(tx, row.id);
+        if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+        await assertRemovalInvariantsTx(tx, { target: fresh });
+        await tx.user.update({
+          where: { id: fresh.id, role: fresh.role },
+          data: {
+            directoryStatus: "DEACTIVATED",
+            deletionStatus: "PENDING",
+            deletionDueAt: dueAt,
+            deletionRequestedBy: req.user?.username ?? null,
+          },
+        });
+      }, SERIALIZABLE_TX);
 
-      // WARP-2858: the Nextcloud account named by the RESOLVED row. An
-      // SSO/SCIM row has none — skip the call (it would fail against a user
-      // Nextcloud never had and strand the row DEACTIVATED-but-present) and
-      // say so in the response. Rowless legacy accounts: the param IS the
-      // Nextcloud user, as before.
-      const ncUsername = row ? row.nextcloudUsername : req.params.username;
+      // Nextcloud is proxied without orchestrator auth in front, so the
+      // enable flag is what cuts off WebDAV/desktop sync during retention.
+      // Best-effort, as on disable: the reconciler's mirror pass converges it.
       let ncMirror: NcMirror = "no_account";
-      if (ncUsername !== null) {
-        await ncDeleteUser(token, ncUsername);
-        ncMirror = "synced";
-      }
-
-      if (prisma && row) {
+      if (row.nextcloudUsername !== null) {
         try {
-          // WARP-2858: brain memory keys on the local `User.id` (WARP-493).
-          // This used to pass the path param — a username — so the
-          // delete-time purge matched nothing for any account.
-          const purged = await purgeUserData(prisma, row.id);
-          logger.info(
-            {
-              username: req.params.username,
-              items: purged.items,
-              chunks: purged.chunks,
-            },
-            "Cascaded brain-memory purge after user delete",
-          );
+          await ncSetUserEnabled(adminBasicToken(), row.nextcloudUsername, false);
+          ncMirror = "synced";
         } catch (err) {
-          // Don't fail the user-delete if the local cascade trips —
-          // the upstream NC delete already succeeded, and undoing it
-          // is awkward. Log loud so on-call can clean up later.
+          ncMirror = "failed";
           logger.error(
             { err, username: req.params.username },
-            "Brain-memory cascade purge failed (user already deleted in Nextcloud)",
+            "schedule deletion: Nextcloud disable mirror failed (non-blocking)",
           );
         }
-      } else {
-        // No local row (legacy NC-only account) owns no `User.id`-keyed brain
-        // memory; no prisma should never happen in production
-        // (createProtectedAuthRouter is invoked with prisma in app.ts).
-        logger.warn(
-          { username: req.params.username },
-          "purgeUserData skipped — no local directory row (or protected auth router instantiated without prisma)",
-        );
       }
-
-      // WARP-1565 residual 1 — finish the removal.
-      //
-      // WARP-1526 bounded the exposure of the surviving row (DEACTIVATED,
-      // and every login gate fails closed on it), but a route called DELETE
-      // whose Nextcloud account is genuinely gone left the local row behind.
-      // The consequence an operator actually hits is not the roster entry:
-      // `username`, `email` and `nextcloudUsername` are UNIQUE columns, so
-      // the orphan keeps holding an identity that is supposed to be free —
-      // and re-inviting the same person (the obvious next action after a
-      // mistaken removal, or when someone returns) collides on it.
-      //
-      // ORDER IS THE CONTRACT: after ncDeleteUser, never before. A row
-      // deleted first, followed by a failing NC call, would strand an
-      // account with working WebDAV — Nextcloud is proxied without
-      // orchestrator auth in front — and nothing local to reconcile it
-      // from. This way a failed NC delete leaves a fully-revoked row to
-      // retry against, which is exactly the pre-WARP-1565 state rather than
-      // a new hole.
-      //
-      // `deleteMany` pinned to DEACTIVATED, not `delete` by id: it is
-      // idempotent on a retry, and it refuses to remove a row that someone
-      // re-activated in the window since the transaction above — that row
-      // is live again and deleting it would be a silent second decision.
-      // No rails re-run here: a DEACTIVATED row holds no operator capacity
-      // (rail 5 already excludes it), so removing it cannot strand the box.
-      if (prisma && row) {
-        const removed = await prisma.user.deleteMany({
-          where: { id: row.id, directoryStatus: "DEACTIVATED" },
-        });
-        if (removed.count === 0) {
-          logger.warn(
-            { username: req.params.username, userId: row.id },
-            "local row not deleted after Nextcloud removal — re-activated concurrently; left for operator review",
-          );
-        } else {
-          // WARP-2115 — the deleted person may hold a Microsoft 365 link whose
-          // refresh token is still valid. Nothing cascades (userId is not an
-          // FK), and the /api/m365 routes scope to the requester's OWN
-          // connection, so an orphaned row could never be disconnected by
-          // anyone. Purge it here, gated on a CONFIRMED delete so a
-          // concurrently re-activated account keeps its link.
-          try {
-            const purgedM365 = await purgeM365ForUser(prisma, row.id);
-            if (purgedM365 > 0) {
-              logger.info(
-                { username: req.params.username, userId: row.id },
-                "Purged Microsoft 365 connection after user delete",
-              );
-            }
-          } catch (err) {
-            // Same posture as the brain-memory cascade above: the account is
-            // already gone upstream, so do not fail the request — but log loud,
-            // because what is left behind is a live cloud credential.
-            logger.error(
-              { err, username: req.params.username, userId: row.id },
-              "Microsoft 365 purge failed after user delete — a live refresh token may remain",
-            );
-          }
-        }
-      }
-
-      // Rail 6 (consolidated, WARP-490 parity): this surface previously
-      // revoked NOTHING and audited NOTHING on delete — the removed user's
-      // sessions rode out their TTL. Hard-revoke + denylist + the
-      // mandatory-emit "User removed" row now land here exactly as on
-      // DELETE /api/people/:id (legacy NC-only rows keep a null
-      // targetUserId and skip the revocation they never had).
-      await runRemovalPostEffects({
-        targetUserId: row?.id ?? null,
-        targetUsername: row?.username ?? req.params.username,
-        targetRole: row?.role ?? null,
-        actorUsername: req.user?.username ?? null,
+      const sessionsRevoked = await revokeAllSessions(row.id);
+      await recordActivity({
+        kind: "auth",
+        severity: "warn",
+        sourceIcon: "user-x",
+        what: "User deletion scheduled",
+        sub: `${row.username} · files kept until ${dueAt.toISOString().slice(0, 10)}`,
+        refs: {
+          actor: req.user?.username ?? null,
+          targetUserId: row.id,
+          targetUsername: row.username,
+          role: row.role,
+          disposition: parsed.data.disposition,
+          sessionsRevoked,
+          deletionDueAt: dueAt.toISOString(),
+          ncMirror,
+        },
         actor: actorFromRequest(req),
-        // WARP-1565: the qualified headline existed only while the removal
-        // was half-done (pr-reviewer #1229 B3 — "User removed" would have
-        // been a false statement in an append-only, signature-chained audit
-        // log). The Nextcloud account is gone AND the local row is deleted,
-        // so the shipped default is true again and this surface reads
-        // identically to DELETE /api/people/:id.
       });
 
-      res.json({ status: "deleted", username: req.params.username, ncMirror });
+      res.json({
+        status: "pending_deletion",
+        username: req.params.username,
+        deletionDueAt: dueAt,
+        ncMirror,
+      });
     } catch (err) {
       if (err instanceof RoleMutationRefusedError) {
         res.status(err.status).json(err.toJSON());
@@ -4075,6 +4032,53 @@ export function createProtectedAuthRouter(
       next(err);
     }
   });
+
+  // WARP-3113: cancel a scheduled deletion. The person stays deactivated;
+  // reactivating them is a separate, deliberate step. Matches PENDING only:
+  // once the nightly job has claimed the row (PURGING) the removal is under
+  // way and cannot be half-undone.
+  router.post(
+    "/auth/users/:username/cancel-deletion",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const row = prisma
+          ? await findDirectoryUserByHandle(prisma, req.params.username)
+          : null;
+        if (!row || !prisma) {
+          res.status(404).json({ error: "User not found" });
+          return;
+        }
+        const cancelled = await prisma.user.updateMany({
+          where: { id: row.id, deletionStatus: "PENDING" },
+          data: { deletionStatus: "NONE", deletionDueAt: null, deletionRequestedBy: null },
+        });
+        if (cancelled.count === 0) {
+          res.status(409).json({
+            error: "This person isn't scheduled for deletion, or the deletion is already running.",
+            code: "NO_PENDING_DELETION",
+          });
+          return;
+        }
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-check",
+          what: "User deletion cancelled",
+          sub: row.username,
+          refs: {
+            actor: req.user?.username ?? null,
+            targetUserId: row.id,
+            targetUsername: row.username,
+          },
+          actor: actorFromRequest(req),
+        });
+        res.json({ status: "disabled", username: req.params.username });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ────────────────────────────────────────────────────────────
   // WARP-217 — Admin invite management
@@ -4262,26 +4266,31 @@ export function createProtectedAuthRouter(
 
       // WARP-1533: an access-role invite lands in Activity with the ADR-032
       // §5 wording (kind `auth`, free-text `what`, refs carry the role UUID).
-      // Plain tier invites keep this surface's shipped behavior (log-only) —
-      // the people surface owns the "Teammate invited" entry.
-      if (inviteAccessRole) {
-        await recordActivity({
-          kind: "auth",
-          severity: "ok",
-          sourceIcon: "user-plus",
-          what: "Invite created with access role",
-          sub: `${parsed.data.email} · ${inviteAccessRole.name}`,
-          refs: {
-            actor: req.user?.username ?? null,
-            email: parsed.data.email,
-            role: parsed.data.role,
-            accessRoleId: inviteAccessRole.id,
-            accessRoleName: inviteAccessRole.name,
-            accessRoleStartingPoint: inviteAccessRole.startingPoint,
-          },
-          actor: actorFromRequest(req),
-        });
-      }
+      // WARP-3113: a plain tier invite is audited too, with the people
+      // surface's "Teammate invited" wording — an invite decides who can get
+      // into the company's box, whichever surface created it. Never the token.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "user-plus",
+        what: inviteAccessRole ? "Invite created with access role" : "Teammate invited",
+        sub: inviteAccessRole
+          ? `${parsed.data.email} · ${inviteAccessRole.name}`
+          : `${parsed.data.email} · ${parsed.data.role}`,
+        refs: {
+          actor: req.user?.username ?? null,
+          email: parsed.data.email,
+          role: parsed.data.role,
+          ...(inviteAccessRole
+            ? {
+                accessRoleId: inviteAccessRole.id,
+                accessRoleName: inviteAccessRole.name,
+                accessRoleStartingPoint: inviteAccessRole.startingPoint,
+              }
+            : {}),
+        },
+        actor: actorFromRequest(req),
+      });
 
       // BUG-11 — deliver the invite email. The row is created above; the email
       // is a separate, fallible step over the operator's SMTP relay.
@@ -4387,6 +4396,21 @@ export function createProtectedAuthRouter(
           await prisma.userInvite.update({
             where: { id: invite.id },
             data: { revokedAt: new Date() },
+          });
+          // WARP-3113: audited once, on the transition — never the token.
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "user-minus",
+            what: "Invite revoked",
+            sub: invite.email ?? invite.username,
+            refs: {
+              actor: req.user?.username ?? null,
+              inviteId: invite.id,
+              email: invite.email ?? null,
+              role: invite.role,
+            },
+            actor: actorFromRequest(req),
           });
         }
         res.json({ revoked: true });
