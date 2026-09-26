@@ -244,6 +244,25 @@ const ROUTES = [
 
 const MODULE_DISABLED = { error: "module_disabled", module: "security" };
 
+/** Droplet's own summary of INC_FRONT (PR-2's check already refused any name in it). */
+const SUMMARY = "A person was seen on the Shop floor at 10:14 PM while the site was closed. It was acknowledged at 10:19 PM.";
+const WRITTEN = new Date(T.getTime() + 600_000); // 10:24 PM London
+
+/** Give an incident a "Summary by Droplet" as the narrator writes it (the CHECK's shape), then `over`. */
+function withSummary(w: FakeSecurityPrisma, id: string, over: Record<string, unknown> = {}): void {
+  const row = w.world.securityIncident.find((r) => r.id === id);
+  if (!row) throw new Error(`no incident ${id}`);
+  Object.assign(row, {
+    narrativeState: "written",
+    narrative: SUMMARY,
+    narrativeModel: "llama3.2:3b",
+    narrativePromptVersion: 1,
+    narratedAt: WRITTEN,
+    narrativeAudience: { cameras: [...(row.cameras as string[])], threats: row.scope === "site_threat", locks: false },
+    ...over,
+  });
+}
+
 let f: FakeSecurityPrisma;
 beforeEach(() => {
   f = world();
@@ -423,6 +442,30 @@ describe("no person's name in any output (§6.12.5, D26)", () => {
     expect(text).not.toContain("jordan");
   });
 
+  // Part A (WARP-2979, spec §6.12.5): the one stored text A2 passes through is Droplet's own summary. PR-2's
+  // check keeps names out of it; this proves A2 adds none around it — "Maria" is seeded everywhere else
+  // the incident stores a name or free text, and none of it reaches the tool.
+  it("A2 with Droplet's summary: the summary reaches the tool; Maria, stored elsewhere in the incident, never does", async () => {
+    withSummary(f, INC_FRONT, { narrativeModel: "maria-local:3b", narrativeError: "Maria's earlier try was refused" });
+    Object.assign(f.world.securityIncident.find((r) => r.id === INC_FRONT)!, {
+      verdict: "expected",
+      verdictById: MARIA,
+      verdictByName: "Maria",
+      verdictAt: WRITTEN,
+      verdictFirstAt: WRITTEN,
+      verdictCodes: ["after_hours_presence"],
+    });
+    const { server } = app(f);
+    for (const who of ["stefan", "jordan"]) {
+      const res = await get(server, `/api/security/assistant/incidents/${INC_FRONT}`, who);
+      expect(res.status, who).toBe(200);
+      expect(res.body.incident.summaryByDroplet, who).toEqual({ text: SUMMARY, writtenAt: { at: WRITTEN.toISOString(), local: "10:24 PM" } });
+      // Seeded: the acknowledger (name, client, note), the verdict-giver, the evidence's stored summary and
+      // detail, the mode-setter, the model's id and the last error.
+      expect(JSON.stringify(res.body).toLowerCase(), who).not.toContain("maria");
+    }
+  });
+
   it("the acknowledgement is its time only; the mode says why, not who", async () => {
     const { server } = app(f);
     const a2 = await get(server, `/api/security/assistant/incidents/${INC_FRONT}`, "stefan");
@@ -482,9 +525,9 @@ describe("the shapes", () => {
         areas: ["Shop floor"],
       },
     ]);
-    expect(res.body.incident).toMatchObject({ moreEvents: false, eventsRemoved: false, resolved: null });
+    expect(res.body.incident).toMatchObject({ moreEvents: false, eventsRemoved: false, resolved: null, summaryByDroplet: null });
     expect(Object.keys(res.body.incident).sort()).toEqual(
-      ["acknowledged", "codes", "events", "eventsRemoved", "first", "id", "last", "moreEvents", "resolved", "severity", "state", "stillHappening", "title", "url"].sort(),
+      ["acknowledged", "codes", "events", "eventsRemoved", "first", "id", "last", "moreEvents", "resolved", "severity", "state", "stillHappening", "summaryByDroplet", "title", "url"].sort(),
     );
   });
 
@@ -518,6 +561,60 @@ describe("the shapes", () => {
     expect(owner.body.suggestionsWaiting).toBe(0);
     const maria = await get(server, "/api/security/assistant/areas", "maria");
     expect(maria.body.suggestionsWaiting).toBeNull();
+  });
+});
+
+// Part A (WARP-2979, spec §6.12.3 A2): `summaryByDroplet` follows `narrativeVisibleTo` — as built by PR-2, a
+// viewer-level rule: only a viewer who sees every camera AND may read threats — and is only ever a WRITTEN text.
+describe("A2 summaryByDroplet", () => {
+  const a2 = async (w: FakeSecurityPrisma, who: string, id = INC_FRONT) => {
+    const res = await get(app(w).server, `/api/security/assistant/incidents/${id}`, who);
+    expect(res.status, who).toBe(200);
+    return res.body;
+  };
+
+  it("the owner and an admin get the written text and when, as a local time", async () => {
+    withSummary(f, INC_FRONT);
+    withSummary(f, INC_THREAT, { narrative: "A sign-in failed twice at 10:12 PM." });
+    for (const who of ["stefan", "jordan"]) {
+      expect((await a2(f, who)).incident.summaryByDroplet, who).toEqual({ text: SUMMARY, writtenAt: { at: WRITTEN.toISOString(), local: "10:24 PM" } });
+      expect((await a2(f, who, INC_THREAT)).incident.summaryByDroplet.text, who).toBe("A sign-in failed twice at 10:12 PM.");
+    }
+  });
+
+  it("🔴 a camera-limited viewer gets null — even for an incident wholly on her own camera — and her answer is the same byte for byte as with no summary", async () => {
+    const without = await a2(world(), "maria");
+    withSummary(f, INC_FRONT);
+    const withIt = await a2(f, "maria");
+    expect(withIt.incident.summaryByDroplet).toBeNull();
+    expect(withIt).toEqual(without);
+    // The SSO family member granted `front` too: same rule, same null.
+    expect((await a2(f, "sam@example.com")).incident.summaryByDroplet).toBeNull();
+  });
+
+  it.each([
+    ["pending — a Regenerate in flight keeps the old text", { narrativeState: "pending" }],
+    ["pending, never written", { narrativeState: "pending", narrative: null, narrativeModel: null, narrativePromptVersion: null, narratedAt: null, narrativeAudience: null }],
+    ["failed, with an earlier text", { narrativeState: "failed", narrativeError: "CHECK_FAILED:TIMES" }],
+    ["expired, with an earlier text", { narrativeState: "expired" }],
+    ["none", { narrativeState: "none", narrative: null, narrativeModel: null, narrativePromptVersion: null, narratedAt: null, narrativeAudience: null }],
+  ])("null unless written: %s", async (_label, over) => {
+    withSummary(f, INC_FRONT, over);
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).toBeNull();
+  });
+
+  it("null while summaries are switched off, and back when they are on", async () => {
+    withSummary(f, INC_FRONT);
+    f.world.securityAiSettings.push({ id: "singleton", linking: "link_and_suggest", summaries: "off", version: 1, updatedById: null, updatedAt: T });
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).toBeNull();
+    f.world.securityAiSettings[0]!.summaries = "on";
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).not.toBeNull();
+  });
+
+  it("an unreadable summaries setting shows none, never a 503", async () => {
+    withSummary(f, INC_FRONT);
+    f.failOn("securityAiSettings", "findUnique", undefined, { always: true });
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).toBeNull();
   });
 });
 
@@ -737,6 +834,24 @@ describe("failure and size", () => {
     const a3next = await get(server, `/api/security/assistant/events?limit=40&cursor=${a3.body.nextCursor}`, "stefan");
     const seen = a3.body.events.length;
     expect(a3next.body.events[0].at.at).toBe(new Date(T.getTime() - seen * 60_000).toISOString());
+  });
+
+  // Part A: the summary counts toward the same budget, and it is the EVENTS that give way — never the summary.
+  it("A2 with a summary at its longest (700 chars): under the cap, the summary whole, fewer events and moreEvents", async () => {
+    const { incidents } = bigWorld();
+    const { server } = app(f);
+    const cap = 8_000 - '{"type":"security_incident",}'.length;
+    const path = `/api/security/assistant/incidents/${incidents[0]!.id}`;
+    const before = await get(server, path, "stefan");
+    const longest = "A person was seen at the front door while the site was closed, and stayed for a while. ".repeat(9).slice(0, 700).trim();
+    withSummary(f, incidents[0]!.id, { narrative: longest });
+    const after = await get(server, path, "stefan");
+    expect(after.status).toBe(200);
+    expect(JSON.stringify(after.body).length).toBeLessThan(cap);
+    expect(after.body.incident.summaryByDroplet.text).toBe(longest);
+    expect(after.body.incident.moreEvents).toBe(true);
+    expect(after.body.incident.events.length).toBeGreaterThan(0);
+    expect(after.body.incident.events.length).toBeLessThan(before.body.incident.events.length);
   });
 
   // #2420 review 12: the camera-limited viewer takes a different path (her own SQL page, the partial view),

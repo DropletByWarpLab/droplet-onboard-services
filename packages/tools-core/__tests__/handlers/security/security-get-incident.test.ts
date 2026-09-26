@@ -68,4 +68,19 @@ describe("security_get_incident", () => {
     expect(tool.description).toMatch(/never name or guess/i);
     expect((tool.inputSchema as { required?: string[] }).required).toEqual(["incident_id"]);
   });
+
+  // WARP-2979 Part A (§6.12.3): A2 carries `summaryByDroplet`; the model must read it as an explanation of the
+  // codes, never as a second source of truth beside them.
+  it("the description names Droplet's summary and says it only explains the reasons, which win", () => {
+    expect(tool.description).toMatch(/summaryByDroplet/);
+    expect(tool.description).toMatch(/only explains the reasons/i);
+    expect(tool.description).toMatch(/the reasons are right/i);
+  });
+
+  it("passes summaryByDroplet through untouched, inside the incident", async () => {
+    const summary = { text: "A person was seen at 10:14 PM.", writtenAt: { at: "2026-09-23T21:24:00.000Z", local: "10:24 PM" } };
+    const get = vi.fn().mockResolvedValue(reply(200, { incident: { id: ID, summaryByDroplet: summary } }));
+    const out = expectOk(await tool.handler({ incident_id: ID }, ctxWith(get)));
+    expect(out.data).toEqual({ type: "security_incident", incident: { id: ID, summaryByDroplet: summary } });
+  });
 });

@@ -49,9 +49,11 @@
  * mcp-server's HTTP transport runs only write-tier RBAC.
  *
  * What the tools see is built field by field in
- * services/security-assistant-view.ts: no person's name, no stored summary.
- * A read that cannot be answered is 503, never an empty 200: an empty list
- * reads as a quiet site.
+ * services/security-assistant-view.ts: no person's name, no stored event
+ * summary. The one stored text A2 passes is Droplet's own "Summary by
+ * Droplet" (`summaryByDroplet`), under `narrativeVisibleTo` and only once
+ * written. A read that cannot be answered is 503, never an empty 200: an
+ * empty list reads as a quiet site.
  */
 import { Router, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -102,6 +104,7 @@ import {
   nameKey,
   severityWord,
   stateWord,
+  summaryOut,
 } from "../services/security-assistant-view.js";
 import {
   ASSISTANT_PERIODS,
@@ -430,10 +433,13 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const base = {
         ...incidentItem(detail, labels, tz, now),
         codes,
+        // Route 18's `narrative` for this viewer (narrativeVisibleTo), written text only.
+        summaryByDroplet: summaryOut(detail.narrative, tz, now),
         eventsRemoved: detail.eventsKept === "removed",
         acknowledged: lastOf("acknowledge"),
         resolved: lastOf("resolve"),
       };
+      // The summary is in `base`, so it counts toward the budget: the events give way, never the summary.
       const n = fitList(events, (kept) => ({ incident: { ...base, events: kept, moreEvents: true } }));
       res.json({
         incident: { ...base, events: events.slice(0, n), moreEvents: detail.moreEvents || members.length > n },
