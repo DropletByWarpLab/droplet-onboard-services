@@ -202,7 +202,7 @@ export function SecurityWall({ now: nowProp }: SecurityWallProps) {
                       <ul className="sec-wall-sources">
                         {notReporting.map((r) => (
                           <li key={r.id}>
-                            <span>{SOURCE_LABEL[r.id] ?? WALL_COPY.otherSource}</span>
+                            <span>{SOURCE_LABEL[r.id]}</span>
                             <span className={`${STATE_BADGE[r.state]?.cls ?? "badge muted"} sec-wall-badge`}>
                               {STATE_BADGE[r.state]?.text ?? WALL_COPY.unknownValue}
                             </span>
