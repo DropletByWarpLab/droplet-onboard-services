@@ -140,6 +140,28 @@ describe("checkNarrative", () => {
       expect(checkNarrative("Someone was seen at 2:14 PM.", input(), NAMES)).toEqual({ ok: false, rule: "TIMES" });
     });
 
+    // #2423 review 6: "p.m." was not read as a meridiem, so "2:14 p.m." checked as the bare 2:14 of the input's
+    // 2:14 AM; and an hour with no minutes ("around 3 AM") was not read as a time at all.
+    it.each([
+      ["2:14 p.m. for 2:14 AM", "Someone was seen at 2:14 p.m."],
+      ["2:14 P.M. for 2:14 AM", "Someone was seen at 2:14 P.M."],
+      ["2:14 pm. for 2:14 AM", "Someone was seen at 2:14 pm."],
+      ["an hour with no minutes", "Someone was seen around 3 AM."],
+      ["an hour, joined", "Someone was seen around 3am."],
+      ["an hour with dots", "Someone was seen at about 3 a.m. inside."],
+      ["an input time's hour, rounded", "Someone was seen around 2 AM."],
+    ])("refuses %s", (_l, text) => {
+      expect(checkNarrative(text, input(), NAMES)).toEqual({ ok: false, rule: "TIMES" });
+    });
+
+    it("dotted and spaced meridiems are the same time; an hour on the hour is that input time", () => {
+      expect(checkNarrative("Someone was seen at 2:14 a.m. and left at 2:16 A.M.", input(), NAMES).ok).toBe(true);
+      expect(checkNarrative("Someone was seen at 3 AM.", input({ times: ["3:00 AM"] }), NAMES).ok).toBe(true);
+      expect(checkNarrative("Someone was seen at 3 PM.", input({ times: ["3:00 AM"] }), NAMES)).toEqual({ ok: false, rule: "TIMES" });
+      // Not a time: a number before a word that only starts like one.
+      expect(checkNarrative("Someone moved 3 amps of cable at 2:14 AM.", input(), NAMES).ok).toBe(true);
+    });
+
     it("no times in the input → any clock in the text fails", () => {
       expect(checkNarrative("Someone was seen at 2:14 AM.", input({ times: [] }), NAMES)).toEqual({ ok: false, rule: "TIMES" });
       expect(checkNarrative("Someone was seen inside while the site was closed.", input({ times: [] }), NAMES).ok).toBe(true);

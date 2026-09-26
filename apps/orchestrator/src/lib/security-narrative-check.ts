@@ -18,9 +18,11 @@
  *          only that phrase: "Maria's office" may be written, and "Maria"
  *          anywhere else is still the name. The few words the prompt tells the
  *          model to write ("someone", "a person", "Droplet") never count;
- *   TIMES  a clock (`2:14`, `2:14 AM`) that is not one of the input's own
- *          times (case and the space before AM/PM aside; a bare `2:14` is
- *          `2:14 AM` when that is an input time). No times in, none out;
+ *   TIMES  a clock (`2:14`, `2:14 AM`, `2:14 p.m.`) or an hour (`3 AM`,
+ *          `3am`, `3 a.m.`) that is not one of the input's own times (case,
+ *          dots and the space before AM/PM aside; a bare `2:14` is `2:14 AM`
+ *          when that is an input time; an hour is its `:00`, so "around 2 AM"
+ *          is not 2:14 AM). No times in, none out;
  *   WORDS  monitor(ed), alarm, armed, secure(d), protected, guard(ed),
  *          zone(s), intruder(s), burglar(s), thief, thieves, break-in,
  *          stole(n) — the page never promises protection or accuses anyone.
@@ -39,7 +41,10 @@ export type NarrativeCheckResult = { ok: true; text: string } | { ok: false; rul
 /** Words the prompt itself tells the model to write: never a name, whoever is called that. */
 const PROMPT_WORDS: ReadonlySet<string> = new Set(["someone", "person", "people", "droplet"]);
 const WORDS = /\b(?:monitor(?:ed)?|alarm|armed|secured?|protected|guard(?:ed)?|zones?|intruders?|burglars?|thief|thieves|break-in|stolen?|stole)\b/i;
-const CLOCK = /\b(\d{1,2}:\d{2})(\s?[ap]m)?\b/gi;
+/** `2:14`, `2:14 AM`, `2:14am`, `2:14 p.m.`: the clock, then the meridiem's letter if any. */
+const CLOCK = /(?<![\d:.])\b(\d{1,2}:\d{2})(?!\d)(?:\s?([ap])\.?\s?m\b\.?)?/gi;
+/** `3 AM`, `3am`, `3 a.m.`: an hour with a meridiem and no minutes (#2423 review 6). */
+const HOUR = /(?<![\d:.])\b(\d{1,2})\s?([ap])\.?\s?m\b/gi;
 const SENTENCE_END = /[.!?]+(?=\s|$)/g;
 
 /**
@@ -68,9 +73,9 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** "2:14 AM" / "2:14am" / "2:14 am" → "2:14 AM"; "2:14" stays "2:14". */
-function normalClock(hm: string, ampm: string | undefined): string {
-  return ampm ? `${hm} ${ampm.trim().toUpperCase()}` : hm;
+/** ("2:14", "a") → "2:14 AM"; ("2:14", undefined) stays "2:14". */
+function normalClock(hm: string, meridiem: string | undefined): string {
+  return meridiem ? `${hm} ${meridiem.toUpperCase()}M` : hm;
 }
 
 /** The names the input carries, and may therefore be written: the area, sources, parts, and every string fact. */
@@ -131,9 +136,12 @@ export function checkNarrative(raw: string, input: NarrativeInputV1, forbiddenNa
   // TIMES
   const times = new Set(input.times.map((t) => t.toUpperCase().replace(/\s+/g, " ")));
   const bare = new Set([...times].map((t) => t.replace(/\s?[AP]M$/, "")));
-  for (const m of text.matchAll(CLOCK)) {
+  for (const m of rest.matchAll(CLOCK)) {
     const clock = normalClock(m[1]!, m[2]);
     if (m[2] ? !times.has(clock) : !bare.has(clock)) return { ok: false, rule: "TIMES" };
+  }
+  for (const m of rest.matchAll(HOUR)) {
+    if (!times.has(normalClock(`${m[1]}:00`, m[2]))) return { ok: false, rule: "TIMES" };
   }
 
   // WORDS — on the same text less its input-name phrases: an area someone called "Secure storage" may be named.
