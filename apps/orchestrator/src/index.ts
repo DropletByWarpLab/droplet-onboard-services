@@ -1133,6 +1133,10 @@ async function main() {
       const eventsDeleted = await purgeScheduleEvents(prisma, 7);
       const overridesDeleted = await purgeExpiredOverrides(prisma, 24);
       const presenceDeleted = await deviceRegistry.purgePresenceRows(30);
+      // WARP-3193 PERF-13: NetworkDevice retention. Randomised MACs add a
+      // row per rotation; drop devices unseen for 90 days that carry no
+      // owner-authored block, schedule, override or group membership.
+      const staleDevicesDeleted = await deviceRegistry.purgeStaleDevices(90);
       // WARP-470: NetworkThroughputSample retention. 30 days keeps the
       // 24 h area chart's range comfortably within scope while bounding
       // table growth at ~43k rows (60 s sampler × 30 d).
@@ -1209,6 +1213,7 @@ async function main() {
           eventsDeleted,
           overridesDeleted,
           presenceDeleted: presenceDeleted.count,
+          staleDevicesDeleted: staleDevicesDeleted.count,
           throughputDeleted,
           offLanDeleted,
           dnsBlockDeleted,

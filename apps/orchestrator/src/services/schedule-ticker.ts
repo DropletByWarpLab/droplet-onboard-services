@@ -51,8 +51,15 @@ export function createScheduleTicker(
 ): ScheduleTicker {
   async function tickOnce() {
     const now = new Date();
+    // WARP-3193 PERF-13: every 30 s over the whole table — read only what
+    // computeDesiredBlocked and the dispatch below use.
     const devices = await prisma.networkDevice.findMany({
-      include: { groups: true },
+      select: {
+        mac: true,
+        manualBlock: true,
+        lastAppliedBlocked: true,
+        groups: { select: { id: true } },
+      },
     });
     const schedules = await prisma.schedule.findMany({
       where: { enabled: true },

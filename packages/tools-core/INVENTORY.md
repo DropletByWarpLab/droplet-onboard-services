@@ -9,7 +9,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 
 | Name | Domain | Description | requiresWrite | requiresConfirmation | Source |
 |---|---|---|---|---|---|
-| list_network_devices | network | List every network device the registry knows about (MAC, IP, hostname, vendor, presence, blocked flag). | false | false | both (was: `list_devices`/`get_connected_devices` in gateway) |
+| list_network_devices | network | List the 200 most-recently-seen network devices the registry knows about (MAC, IP, hostname, vendor, presence, blocked flag). | false | false | both (was: `list_devices`/`get_connected_devices` in gateway) |
 | get_network_status | network | WAN/LAN interface state, WiFi state, connected device count, router system info. | false | false | gateway |
 | list_dhcp_leases | network | Live DHCP lease table from the router. | false | false | orchestrator |
 | get_wifi_settings | network | Current Wi-Fi SSID, channel, encryption mode, associated wireless clients. | false | false | both (canonical name `get_wifi_settings`; was `get_wifi_info` in orchestrator) |
