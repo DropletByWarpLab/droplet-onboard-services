@@ -116,8 +116,149 @@ The same gate applies to the passkey `POST /auth/webauthn/authenticate/verify?re
 **Second factor.** If the account has TOTP enabled, `/auth/login` returns
 `401 { error, code: "TOTP_REQUIRED" }` until a valid `totp` (or unused
 `recoveryCode`) is included in the login body. The successful access
-token carries an MFA stamp used by `require-recent-mfa` routes. WebAuthn
-is not part of the app login path.
+token carries an MFA stamp used by `require-recent-mfa` routes. The iOS
+and Android apps do not use WebAuthn; the native Windows client signs in
+with a passkey (Windows Hello) as described next.
+
+#### Passkey sign-in for native clients (Windows Hello)
+
+The native Windows client uses Windows Hello as a WebAuthn **platform
+authenticator** through `webauthn.dll`, against the same public routes the
+dashboard uses. A passkey is a primary credential: it does not pass through the
+TOTP gate.
+
+| Method | Path | Auth | Body | Returns |
+|---|---|---|---|---|
+| POST | `/auth/webauthn/authenticate/options` | none | `{}` | `PublicKeyCredentialRequestOptionsJSON` (`challenge`, `rpId`, `userVerification: "preferred"`, empty `allowCredentials`) |
+| POST | `/auth/webauthn/authenticate/verify?return=body` | none | `{ response: AuthenticationResponseJSON }` | `{ user: { id, username, displayName, role }, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
+| POST | `/auth/webauthn/register/options` | Bearer | `{}` | `PublicKeyCredentialCreationOptionsJSON` |
+| POST | `/auth/webauthn/register/verify` | Bearer | `{ response: RegistrationResponseJSON }` | `{ verified: true }` |
+
+- **rpId and origin come from the request's `Host` header only.** `rpId` is
+  the host name with no port. `origin` is `https://<Host>`, and it must match
+  `clientDataJSON.origin` exactly. Behind the box gateway that is
+  `https://<lower-case host name>` with no port. `X-Forwarded-Host` is ignored
+  (the gateway never sets it). Do not send it.
+- **Pass the same host name as `pwszRpId`,** and call `options` and `verify` on
+  that host. A passkey is bound to the rpId it was registered on: one made at
+  `droplet-ai.local` does not work at `<name>.droplet-us.com`. Register and sign
+  in on the host the app keeps using, preferably the canonical named address.
+- **Never use a raw IP.** `options` and `register/*` answer
+  `400 { code: "origin_unsupported" }` for an IP host.
+- Use the `challenge` from `options` verbatim in `clientDataJSON.challenge`
+  (`type: "webauthn.get"`). It is single-use and lives 5 minutes. An expired or
+  replayed one is `400 { code: "challenge_expired" }`. A bad assertion or an
+  unknown credential is `401 { error: "Invalid credentials" }`.
+- **`?return=body`** returns the Bearer pair under the same native-only gate as
+  `/auth/login` (no `Origin` / `Referer` / `Sec-Fetch-*`). Without it, or from a
+  browser context, the session is cookie-only. The `user` object has no
+  `mustChangePassword` key; the server gate still enforces it.
+- **User verification is the MFA stamp.** When the authenticator reports user
+  verification (a Windows Hello PIN or biometric), the access token carries
+  `lastMfaAt`, the same stamp a TOTP login sets, so `require-recent-mfa` routes
+  accept the session. Request `dwUserVerificationRequirement = REQUIRED`.
+  Without user verification the session has no stamp.
+- **Files and pairing after a passkey or SSO sign-in.** Only a password
+  sign-in stores a Nextcloud credential for the person. When none is stored,
+  `/api/files/*`, `/devices/pair/claim` and the other routes that act on
+  Nextcloud for the person use the app password of their newest **active**
+  paired device (revoked devices are never used). With neither,
+  `/api/files/*` and `/devices/pair/claim` answer `401`. So a person with no
+  paired device yet needs one password sign-in before pairing the first one.
+
+#### SSO for native clients (`/api/sso/oidc/native/*`)
+
+A native client has no WebView to carry the browser flow's state cookie, so it
+uses a box-local handoff (RFC 8252 loopback or private-use scheme, with PKCE).
+The box stays the OIDC client: the identity provider still redirects to the
+box's own `/api/sso/oidc/callback`, and the redirect URI registered at the
+provider does not change (ADR-016). List the providers first with
+`GET /api/sso/oidc/providers` → `{ providers: ["google" | "entra" | "okta", …] }`.
+
+1. The app makes a PKCE pair: `codeVerifier` (43–128 chars of
+   `A-Z a-z 0-9 - . _ ~`) and `codeChallenge = BASE64URL(SHA256(codeVerifier))`
+   (43 chars, no padding). It opens a loopback listener on a random port and
+   path, or uses `droplet://sso/callback`.
+2. `POST /api/sso/oidc/native/begin` → `200 { authorizeUrl }`.
+3. The app opens `authorizeUrl` in the **system browser** (never an embedded
+   WebView). The person signs in at the provider, which redirects to the box.
+4. The box validates the sign-in and answers
+   `302 <redirectUri>?code=<handoff code>&state=<state>`. It sets no cookies.
+5. `POST /api/sso/oidc/native/token` with the handoff code and the verifier →
+   the `/auth/login?return=body` body.
+
+| Method | Path | Auth | Body | Returns |
+|---|---|---|---|---|
+| POST | `/sso/oidc/native/begin` | none | `{ provider, redirectUri, codeChallenge, codeChallengeMethod: "S256" }` | `200 { authorizeUrl }` (no cookie, no redirect) |
+| GET | `/sso/oidc/callback?code&state` | none (reached from the provider) | — | `302 <redirectUri>?code=<43-char handoff code>&state=<state>` |
+| POST | `/sso/oidc/native/token` | none | `{ code, codeVerifier }` | `200 { user: { id, username, displayName, role, mustChangePassword }, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
+
+```json
+POST /api/sso/oidc/native/begin
+{ "provider": "entra",
+  "redirectUri": "http://127.0.0.1:49152/sso/7f3a9c",
+  "codeChallenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+  "codeChallengeMethod": "S256" }
+
+200 { "authorizeUrl": "https://login.microsoftonline.com/…/authorize?…" }
+```
+
+```json
+POST /api/sso/oidc/native/token
+{ "code": "<handoff code from the redirect>", "codeVerifier": "<the app's verifier>" }
+
+200 { "user": { "id": "<uuid>", "username": "…", "displayName": "…", "role": "family", "mustChangePassword": false },
+      "accessToken": "<jwt>", "refreshToken": "<jwt>",
+      "accessTokenExpiresAt": 1790000000, "refreshTokenExpiresAt": 1790600000 }
+```
+
+**`redirectUri` rules.** It must be exactly one of these, in canonical form:
+
+- `http://127.0.0.1:<port>/<path>` or `http://[::1]:<port>/<path>`, where
+  `<port>` is 1024–65535 and written without leading zeros. `<path>` may be
+  just `/`. No query, no fragment, no user info.
+- exactly `droplet://sso/callback`.
+
+Anything else is refused, including the name `localhost`, `https`, another
+loopback or LAN address, a missing or default port, shorthand or
+non-canonical addresses, and an upper-case scheme. Prefer loopback with a
+random port and path: another local app can claim `droplet://`, although it
+could only redeem a code for a flow it started with its own verifier.
+
+**Handoff code.** 32 random bytes, base64url (43 chars). The box keeps only its
+SHA-256. It is valid for **60 seconds** and for **one** redemption. A
+redemption attempt consumes it **whatever the outcome**, so a wrong verifier
+burns the code and the app must start over at `begin`. The `state` in the
+redirect is the one the box minted; the app may check it against the
+`authorizeUrl` it opened.
+
+**`/native/token` answers.** No cookies are set and the response is
+`Cache-Control: no-store`. Like `?return=body`, it refuses a browser context
+(any `Origin`, `Referer` or `Sec-Fetch-*` header) without consuming the code.
+The session is an ordinary one: refresh with `/auth/refresh`, the same idle and
+absolute limits, no `lastMfaAt`.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | `begin`: a field is missing or not a string. `token`: `code` is not 43 base64url chars, or `codeVerifier` is not 43–128 unreserved chars |
+| 400 | `INVALID_REDIRECT_URI` | `begin`: `redirectUri` breaks the rules above |
+| 400 | `INVALID_CODE_CHALLENGE` | `begin`: `codeChallenge` is not 43 base64url chars, or `codeChallengeMethod` is not `S256` |
+| 400 | `SSO_PROVIDER_UNSUPPORTED` | `begin`: `provider` is not `google`, `entra` or `okta` |
+| 400 | `SSO_PROVIDER_NOT_CONFIGURED` | `begin`: this box has not configured that provider |
+| 401 | `SSO_HANDOFF_INVALID` | `token`: unknown, already used or expired code, or a verifier that does not match |
+| 401 | `SSO_ACCOUNT_UNAVAILABLE` | `token`: the account was deactivated or removed after the callback |
+| 403 | `NATIVE_CLIENT_REQUIRED` | `token`: the request carries a browser marker header |
+| 429 | — | shared `authRateLimit` (20/min/IP across the sign-in routes); `{ error: "Too many requests, slow down" }` |
+| 500 | `SSO_NO_PRISMA` | the directory is not wired |
+
+The callback's own failures are shown to the person in the browser and never
+reach the app: `401 { error: "Invalid or expired SSO state" }` (replayed or
+expired state), `401 { error: "Invalid SSO state" }` (unknown state),
+`401 { error: "SSO sign-in failed" }` (ID-token
+validation failed, no usable email, account deactivated), `401 { error: "SSO
+sign-in failed", code: "SSO_EMAIL_UNVERIFIED" }`, `400 { error: "Missing
+authorization code" }`. The app should give up waiting after the state's
+10-minute lifetime.
 
 **Recovery-code step-up.** `/auth/recovery` is a **Bearer-authenticated**
 step-up that consumes one unused recovery code for an already-signed-in
