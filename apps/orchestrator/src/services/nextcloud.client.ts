@@ -1,5 +1,6 @@
 import pino from "pino";
 import { config } from "../config.js";
+import { UnsafePathError } from "../lib/unsafe-path-error.js";
 import type {
   FileEntryInfo,
   FileVersionInfo,
@@ -40,6 +41,13 @@ function encodePathSegments(path: string): string {
  */
 function webdavUrl(user: string, path: string): string {
   const cleanPath = path.replace(/^\/+/, "");
+  // WARP-3193 SEC-INJ-6: `.`/`..` survive segment encoding and fetch's URL
+  // normalizer resolves them, re-targeting the request at any Nextcloud
+  // endpoint (e.g. `/../../ocs/...`) with the caller's token. The single
+  // choke point for every WebDAV call, so no route can forget the check.
+  if (cleanPath.split("/").some((s) => s === ".." || s === ".")) {
+    throw new UnsafePathError();
+  }
   return `${config.NEXTCLOUD_URL}${WEBDAV_BASE}/${encodeURIComponent(user)}/${encodePathSegments(cleanPath)}`;
 }
 
@@ -454,7 +462,7 @@ export async function ncCheckSetupRequired(): Promise<boolean> {
 
     // 2. Are there any non-default users? (i.e., has setup been completed?)
     const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
-    const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+    const adminPassword = config.NEXTCLOUD_ADMIN_PASSWORD;
     const basicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
 
     const usersResp = await fetch(
@@ -511,7 +519,7 @@ export async function ncInstallAndCreateAdmin(
   // The container creates a default admin account (NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD).
   // We use OCS to create the user's personal admin account.
   const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
-  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+  const adminPassword = config.NEXTCLOUD_ADMIN_PASSWORD;
   const adminBasicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
 
   // First verify Nextcloud is installed — OCS API returns HTML redirects when not installed
@@ -633,7 +641,7 @@ export async function ncInstallAndCreateAdmin(
  */
 export async function ncEnsureGroup(groupName: string): Promise<void> {
   const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
-  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+  const adminPassword = config.NEXTCLOUD_ADMIN_PASSWORD;
   const adminBasicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
 
   const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/groups?format=json"), {
@@ -1050,7 +1058,7 @@ export async function ncRegisterOAuth2Client(
   redirectUri: string
 ): Promise<{ clientId: string; clientSecret: string } | null> {
   const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
-  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+  const adminPassword = config.NEXTCLOUD_ADMIN_PASSWORD;
   const basicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
 
   try {
