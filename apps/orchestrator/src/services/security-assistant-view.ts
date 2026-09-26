@@ -29,6 +29,37 @@ import { assistantInstant } from "../lib/security-assistant-period.js";
 /** Leaves the tool's `type` and the transport's framing room under the 8,000-char tool cap. */
 export const ASSISTANT_BODY_BUDGET = 7_400;
 
+/**
+ * Review #2420 (item 6) — the words a detection's label may reach the model as.
+ * A Frigate label is free text (a custom model or a config can make it anything:
+ * a person's name, an instruction), so only these words pass; anything else is
+ * "something". Frigate's COCO object classes a site camera sees, plus its
+ * package class.
+ */
+export const OBJECT_WORDS: ReadonlySet<string> = new Set([
+  "person",
+  "car",
+  "truck",
+  "bus",
+  "motorcycle",
+  "bicycle",
+  "boat",
+  "dog",
+  "cat",
+  "bird",
+  "horse",
+  "sheep",
+  "cow",
+  "bear",
+  "deer",
+  "package",
+]);
+
+const objectWord = (label: string | undefined): string => {
+  const w = (label ?? "").trim().toLowerCase();
+  return OBJECT_WORDS.has(w) ? w : "something";
+};
+
 export type AssistantInstant = ReturnType<typeof assistantInstant>;
 
 /** Plain words for a reason code: what is TRUE, never a guess about who or why. */
@@ -88,7 +119,7 @@ export function eventWhat(kind: string, labels: readonly string[], camera: strin
     case "detection":
     case "detection_ongoing":
     case "detection_low":
-      return `${labels[0] ?? "something"} seen`;
+      return `${objectWord(labels[0])} seen`;
     case "camera_offline":
       return "camera stopped reporting";
     case "camera_online":
