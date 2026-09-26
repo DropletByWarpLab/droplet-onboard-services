@@ -419,6 +419,22 @@ describe("failures, expiry and the model", () => {
     expect(gw.chat).toHaveBeenCalledTimes(1);
   });
 
+  // #2423 review 3: a Regenerate keeps the old text while the new one is written. If that `pending` reaches the
+  // expiry first (the model paused, or the request came near the 7-day mark), the text goes back to `written` —
+  // never `expired`, which the page hides.
+  it("🔴 an expiring pending that still has its text goes back to written, the text and its time kept; no call", async () => {
+    const old = new Date(NOW.getTime() - 7 * 86_400_000 - 1);
+    const kept = { narrative: GOOD, narrativeModel: "gpt-oss:20b", narrativePromptVersion: 1, narratedAt: old, narrativeAudience: { cameras: ["back"], threats: false, locks: false } };
+    const [i, j] = seed([
+      incident({ firstActivityAt: old, lastActivityAt: old, lastArrivalAt: old, alertedAt: old, ...kept }),
+      incident({ firstActivityAt: old, lastActivityAt: old, lastArrivalAt: old, alertedAt: old }),
+    ]);
+    await tickSecurityNarrator(prisma, deps());
+    expect(byId(i!.id)).toMatchObject({ narrativeState: "written", ...kept });
+    expect(byId(j!.id).narrativeState).toBe("expired");
+    expect(gw.chat).not.toHaveBeenCalled();
+  });
+
   it("no local model → zero calls, zero attempts, still pending, health Paused", async () => {
     const [i] = seed([incident()]);
     registerSecurityNarratorJobs({ scheduleInterval: vi.fn() }, prisma);

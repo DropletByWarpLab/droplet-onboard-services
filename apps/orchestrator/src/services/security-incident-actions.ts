@@ -81,6 +81,7 @@ import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { readSummariesSetting } from "./security-ai-settings.js";
 import {
   NARRATIVE_COOLDOWN_MS,
+  NARRATIVE_EXPIRE_MS,
   NARRATIVE_ON_SEAL,
   NARRATIVE_SELECT,
   narrativeView,
@@ -345,6 +346,7 @@ export type NarrativeRequestResult =
   | { status: "not_found" }
   | { status: "not_actionable" }
   | { status: "summaries_off" }
+  | { status: "too_old" }
   | { status: "cooldown" }
   | { status: "conflict" };
 
@@ -354,6 +356,8 @@ export type NarrativeRequestResult =
  *   plain activity, or a viewer who cannot see ALL of it  → not_actionable (one 409 body:
  *     the summary would name what they cannot see — narrativeVisibleTo, DS-005)
  *   summaries off                                        → summaries_off
+ *   last activity over 7 days ago (NARRATIVE_EXPIRE_MS)  → too_old: a `pending` there would only
+ *     expire, and the page hides an expired summary (#2423 review 3)
  *   under 10 min since the last attempt or the text      → cooldown
  *   otherwise → `pending`, the lease and attempts cleared (a narration in flight
  *   loses its write), compare-and-set on the summary's own columns as read. The
@@ -376,6 +380,7 @@ export async function requestIncidentNarrative(
     if (!view) return { status: "not_found" };
     if (row.severity === "info" || view.codes.length === 0 || !narrativeVisibleTo(row, reasons, view, viewer)) return { status: "not_actionable" };
     if ((await readSummariesSetting(prisma)) !== "on") return { status: "summaries_off" };
+    if (row.lastActivityAt.getTime() < now.getTime() - NARRATIVE_EXPIRE_MS) return { status: "too_old" };
     const recent = (d: Date | null) => d !== null && now.getTime() - d.getTime() < NARRATIVE_COOLDOWN_MS;
     if (recent(row.narrativeAttemptAt) || recent(row.narratedAt)) return { status: "cooldown" };
 

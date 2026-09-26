@@ -46,6 +46,19 @@ export const NARRATIVE_COPY = {
   summariseNow: "Summarise now",
 } as const;
 
+/**
+ * The box refuses Summarise now / Regenerate once the incident's last activity
+ * is over this old (409 NARRATIVE_TOO_OLD — the orchestrator's
+ * NARRATIVE_EXPIRE_MS, #2423 review 3): a summary asked for then would expire
+ * before it is written. The page offers neither past it.
+ */
+export const NARRATIVE_ASK_WITHIN_MS = 7 * 86_400_000;
+
+/** Whether the page may offer Summarise now / Regenerate for an incident last active at `lastActivityAt`. */
+export function narrativeAskable(lastActivityAt: string, now: Date): boolean {
+  return now.getTime() - Date.parse(lastActivityAt) <= NARRATIVE_ASK_WITHIN_MS;
+}
+
 /** After a request: re-read this often while the summary is pending… */
 export const NARRATIVE_POLL_MS = 5_000;
 /** …for at most this long. */

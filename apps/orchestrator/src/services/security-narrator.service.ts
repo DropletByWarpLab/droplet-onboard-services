@@ -14,7 +14,9 @@
  * `running` flag plus the per-incident claim:
  *   1. `running` → return;
  *   2. summaries off → return (health not_configured);
- *   3. expire: `pending` 7 days after the last activity → `expired`;
+ *   3. expire: `pending` 7 days after the last activity → `expired`, or
+ *      back to `written` when it still has its text (a Regenerate keeps the
+ *      old text until the new one is written; `expired` would hide it);
  *   4. count what waits (and, every 10th tick, what failed in a day);
  *      nothing waiting → done (the model is not even listed);
  *   5. chat busy (`interactiveInferenceIdle`: in flight, or ended < 30 s
@@ -86,6 +88,7 @@ import {
 } from "../lib/security-narrative-prompt.js";
 import { checkNarrative, type NarrativeCheckRule } from "../lib/security-narrative-check.js";
 import { createLogger } from "../lib/logger.js";
+import { NARRATIVE_EXPIRE_MS } from "./security-narrative-view.js";
 
 const logger = createLogger("security-narrator");
 
@@ -104,8 +107,8 @@ export const NARRATOR_MAX_PER_TICK = 5;
 export const SECURITY_NARRATIVE_MAX_ATTEMPTS = 3;
 /** A claim younger than this is someone's lease; an attempt older than this may be retried. */
 export const NARRATOR_LEASE_MS = 5 * 60_000;
-/** `pending` this long after the incident's last activity → `expired`. */
-export const NARRATIVE_EXPIRE_MS = 7 * 86_400_000;
+/** `pending` this long after the incident's last activity → `expired` (route 28 refuses past it). */
+export { NARRATIVE_EXPIRE_MS };
 /** gpt-oss spends output tokens on reasoning first; 700 with effort low leaves room for the text. */
 export const NARRATOR_MAX_TOKENS = 700;
 export const NARRATOR_CALL_TIMEOUT_MS = 90_000;
@@ -486,9 +489,14 @@ async function runTick(prisma: PrismaClient, clock: () => Date, now: Date, resul
   const settings = await readSecurityAiSettings(prisma);
   if (settings.summaries === "off") return;
 
-  // 3. Expire.
+  // 3. Expire — a pending that still has its text keeps it, as `written` (#2423 review 3); the rest expire.
+  const expireBefore = new Date(nowMs - NARRATIVE_EXPIRE_MS);
   await prisma.securityIncident.updateMany({
-    where: { narrativeState: "pending", lastActivityAt: { lt: new Date(nowMs - NARRATIVE_EXPIRE_MS) } },
+    where: { narrativeState: "pending", lastActivityAt: { lt: expireBefore }, narrative: { not: null } },
+    data: { narrativeState: "written" },
+  });
+  await prisma.securityIncident.updateMany({
+    where: { narrativeState: "pending", lastActivityAt: { lt: expireBefore } },
     data: { narrativeState: "expired" },
   });
 

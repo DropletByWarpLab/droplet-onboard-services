@@ -782,6 +782,7 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     AI_SETTINGS_UNAVAILABLE: "Droplet couldn't load these settings right now. Try again in a moment.",
     // WARP-2979 P4 PR-2 (route 28) — "Summarise now" / "Regenerate".
     NARRATIVE_COOLDOWN: "Droplet wrote this in the last 10 minutes. Try again later.",
+    NARRATIVE_TOO_OLD: "Droplet writes summaries only for incidents active in the last 7 days.",
     SUMMARIES_OFF: "Summaries are turned off in Security settings.",
     // A route-level feature gate answers 404 module_disabled (a flat body, so
     // apiFetch carries no typed code — the status entry catches it): this

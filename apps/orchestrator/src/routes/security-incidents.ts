@@ -21,7 +21,8 @@
  * any summary; 404 INCIDENT_NOT_FOUND (missing or hidden, one body); 409
  * NOT_ACTIONABLE (plain activity, or a view the incident-level checks refuse —
  * one body); 409 NARRATIVE_COOLDOWN (under 10 min since the last attempt or
- * text); 409 SUMMARIES_OFF; 503. No audit (D23).
+ * text); 409 NARRATIVE_TOO_OLD (last activity over 7 days ago: a summary asked
+ * for then would expire first); 409 SUMMARIES_OFF; 503. No audit (D23).
  *
  * Route 35 (brief §4.4: "the owner or a Security manager can mark Expected /
  * Not expected"): `sensitiveRateLimit, requireRole('owner','admin'),
@@ -97,6 +98,7 @@ type ErrorCode =
   | "NOT_JUDGEABLE"
   // WARP-2979 P4 PR-2 — route 28.
   | "NARRATIVE_COOLDOWN"
+  | "NARRATIVE_TOO_OLD"
   | "SUMMARIES_OFF";
 
 function fail(res: Response, status: number, code: ErrorCode, message: string, issues?: unknown[]): void {
@@ -382,6 +384,9 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
           return;
         case "summaries_off":
           fail(res, 409, "SUMMARIES_OFF", "Summaries are turned off in Security settings.");
+          return;
+        case "too_old":
+          fail(res, 409, "NARRATIVE_TOO_OLD", "Droplet writes summaries only for incidents active in the last 7 days.");
           return;
         case "cooldown":
           fail(res, 409, "NARRATIVE_COOLDOWN", "Droplet wrote this in the last 10 minutes. Try again later.");

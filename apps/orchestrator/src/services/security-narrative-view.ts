@@ -60,6 +60,13 @@ export const NARRATIVE_ON_SEAL = { narrativeState: "pending", narrativeAttemptAt
 /** Route 28: under this long since the last attempt or the text → 409 NARRATIVE_COOLDOWN. */
 export const NARRATIVE_COOLDOWN_MS = 10 * 60_000;
 
+/**
+ * `pending` this long after the incident's last activity → `expired` (the
+ * narrator's tick). Route 28 refuses an incident past it (409
+ * NARRATIVE_TOO_OLD, #2423 review 3): a request there would only expire.
+ */
+export const NARRATIVE_EXPIRE_MS = 7 * 86_400_000;
+
 /** The incident columns this module reads. Route 18 selects these beside INCIDENT_VIEW_SELECT. */
 export const NARRATIVE_SELECT = {
   narrativeState: true,
