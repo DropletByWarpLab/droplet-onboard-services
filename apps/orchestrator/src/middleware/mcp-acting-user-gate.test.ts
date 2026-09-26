@@ -255,7 +255,7 @@ describe("actingUserAccessResolver — fail closed on identity", () => {
 });
 
 describe("mcp acting-user gate — app.ts wiring", () => {
-  it("app.ts mounts it with the real resolver, after the module gates and before the CRM / PM routers", () => {
+  it("app.ts mounts it with the real resolver, after the module gates and before the CRM / PM / Security-assistant routers", () => {
     const src = readFileSync(join(__dirname, "..", "app.ts"), "utf8");
     const gates = src.indexOf("mountModuleGates(app, moduleGate)");
     const acting = src.indexOf("mountMcpActingUserGates(app, actingUserAccessResolver(prisma))");
@@ -263,6 +263,8 @@ describe("mcp acting-user gate — app.ts wiring", () => {
       'app.use("/api", createPmNativeRouter(prisma))',
       'app.use("/api", createCrmRouter(prisma))',
       "app.use(createPmMobileRouter(prisma))",
+      // WARP-2979 — the `security` domain's only hops.
+      'app.use("/api", createSecurityAssistantRouter(prisma))',
     ].map((r) => [r, src.indexOf(r)] as const);
     expect(gates).toBeGreaterThan(-1);
     expect(acting).toBeGreaterThan(gates);
@@ -279,6 +281,8 @@ describe("mcp acting-user gate — app.ts wiring", () => {
 // GET and writes are not, since the write check keys off the method.
 const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   business: ["business_find GET /api/brain/digests", "business_find GET /api/brain/findings"],
+  // WARP-2979 — every security hop is under /api/security/assistant/, inside the gated prefix.
+  security: [],
 };
 
 describe("mcp acting-user gate — the route manifest agrees with it", () => {

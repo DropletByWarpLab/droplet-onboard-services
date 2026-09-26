@@ -600,6 +600,11 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "files", label: "Files", domains: ["files"], feature: "files" },
   { id: "smart-home", label: "Device control", domains: ["smart-home"], feature: "smart_home", locks: true },
   { id: "cameras", label: "Cameras", domains: ["cameras"], feature: "cameras" },
+  // WARP-2979 (ADR-059 P4 §6.12.7) — the read-only Security tools, so a custom
+  // role can be granted them (effective access counts only granted domains).
+  // Gated by the Security feature: switching Security off for a role takes
+  // the tools with it.
+  { id: "security", label: "Security", domains: ["security"], feature: "security" },
   { id: "switch", label: "Switch", domains: ["switch"], feature: "managed_switch" },
   {
     id: "calendar",

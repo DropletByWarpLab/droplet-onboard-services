@@ -78,8 +78,8 @@ const OWNER = { id: "u-owner", username: "romain", role: "owner" };
 const LOCAL_MODEL = "llama3.1:8b";
 const CLOUD_MODEL = "claude-opus-4";
 
-/** One tool from each withheld domain, plus one that stays. */
-const STORED = ["read_file", "search_files", "memory_recall", "business_find"];
+/** One tool from each withheld domain, plus one that stays. WARP-2979: Security never runs on a cloud model either. */
+const STORED = ["read_file", "search_files", "memory_recall", "business_find", "security_search_events"];
 const KEPT = "get_current_datetime";
 
 interface ModelRequest {

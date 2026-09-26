@@ -1056,3 +1056,43 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
     expect(advertised.has("list_network_devices")).toBe(false);
   });
 });
+
+describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4 §6.12.6)", () => {
+  const SECURITY = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"];
+  const SECURITY_POOL = [...POOL, ...SECURITY];
+  const select = (sentence: string) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: SECURITY_POOL, conversationToolNames: [] });
+
+  it.each([
+    "anything odd at the back door last night?",
+    "did anything happen while we were away",
+    "any security incidents this week?",
+    "is the stock room covered?",
+    "which areas had people after hours?",
+  ])("routes to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).toContain(name);
+  });
+
+  it.each(["add a dentist appointment tomorrow", "block my son's tablet"])("does not route to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains).not.toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).not.toContain(name);
+  });
+
+  it("is never in the core pool: pulled in by the turn, or not at all", () => {
+    for (const name of SECURITY) expect(CORE_TOOL_NAMES.has(name), name).toBe(false);
+    for (const name of SECURITY) expect(domainOfTool(name), name).toBe("security");
+  });
+
+  it("a follow-up keeps the domain by continuity", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the one before that?",
+      pool: SECURITY_POOL,
+      conversationToolNames: ["security_get_incident"],
+    });
+    expect(r.advertised).toContain("security_list_incidents");
+  });
+});
