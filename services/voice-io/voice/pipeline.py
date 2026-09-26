@@ -2294,7 +2294,11 @@ class WakePipeline:
             self._last_transcript_at = now
             self._state = "transcript_ready"
 
-        logger.info("transcript: %r", transcript)
+        # WARP-3193 SEC-DATA-9: the text is what the user said (PII, health
+        # details, spoken passwords) and INFO logs ship in support bundles.
+        # INFO carries the length; the text needs the LOG_LEVEL=DEBUG opt-in.
+        logger.info("transcript ready len=%d", len(transcript))
+        logger.debug("transcript: %r", transcript)
         try:
             self._on_transcript(transcript)
         except Exception:
@@ -2365,8 +2369,8 @@ class WakePipeline:
             # especially don't speak an answer to the television. The
             # transcript still lands in /voice/status for diagnosis.
             logger.info(
-                "transcript %r is a fragment, not a command — staying quiet",
-                transcript,
+                "transcript len=%d is a fragment, not a command — staying quiet",
+                len(transcript),
             )
             self._emit_activity(
                 "wake_ignored",
@@ -2375,8 +2379,8 @@ class WakePipeline:
             return
         if self._llm is None or not self._llm_available:
             logger.info(
-                "transcript ready (LLM unavailable, not speaking): %r",
-                transcript,
+                "transcript ready (LLM unavailable, not speaking): len=%d",
+                len(transcript),
             )
             self._emit_activity(
                 "wake_heard",
@@ -2391,7 +2395,8 @@ class WakePipeline:
         tool_choice = classify_tool_choice(transcript)
         if tool_choice == "none":
             logger.info(
-                "intent gate matched (no tools): transcript=%r", transcript,
+                "intent gate matched (no tools): transcript len=%d",
+                len(transcript),
             )
         # WARP-626 — stream the reply, sentence-chunk it, and speak each
         # chunk so first-audio starts after sentence 1 instead of after the
@@ -2404,8 +2409,8 @@ class WakePipeline:
         spoke = bool(result.get("ok") and result.get("spoke_any"))
         if not spoke and result.get("error"):
             logger.warning(
-                "voice reply for %r did not complete (%s): %s",
-                transcript, result.get("error_kind"), result.get("error"),
+                "voice reply for transcript len=%d did not complete (%s): %s",
+                len(transcript), result.get("error_kind"), result.get("error"),
             )
         # WARP-1058 — the §3.4 outcome row. "Answered" means the user
         # actually HEARD a reply; a failed / empty / rejected reply is

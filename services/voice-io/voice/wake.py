@@ -438,8 +438,11 @@ class VoskWakeWordDetector(WakeWordDetector):
             # Diagnostic: surface what Vosk actually heard on completed
             # utterances so misrecognitions are visible in the logs without
             # spamming a line per partial frame.
+            # WARP-3193 SEC-DATA-9: that text is ambient household speech,
+            # so INFO carries its length only; LOG_LEVEL=DEBUG shows it.
             if is_final:
-                logger.info("vosk: heard %r (no wake match)", text)
+                logger.info("vosk: heard len=%d (no wake match)", len(text))
+                logger.debug("vosk: heard %r (no wake match)", text)
             return {}
 
         # Matched the wake phrase. A partial hypothesis carries no per-word

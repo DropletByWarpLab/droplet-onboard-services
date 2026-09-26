@@ -1462,6 +1462,46 @@ class TestTranscribingFlow:
         pipe._on_frame(_silence_frame())
         assert captured == ["turn the lights off"]
 
+    def _run_one_transcript(self, text: str) -> None:
+        stt = _RecordingSTT(scripted_transcripts=[text])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            on_transcript=lambda _t: None,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.1)
+        pipe._on_frame(_silence_frame())
+
+    def test_transcript_text_is_not_logged_at_info(self, caplog):
+        # WARP-3193 SEC-DATA-9: what people say to the assistant (PII,
+        # health details, spoken passwords) must not land in INFO logs,
+        # which ship in support bundles. INFO carries the length only.
+        import logging as _logging
+        secret = "my bank pin is four four two one"
+        with caplog.at_level(_logging.INFO, logger="voice.pipeline"):
+            self._run_one_transcript(secret)
+        info = [r for r in caplog.records if r.levelno >= _logging.INFO]
+        assert not any(secret in r.getMessage() for r in info)
+        assert any(
+            f"len={len(secret)}" in r.getMessage() for r in info
+        )
+
+    def test_transcript_text_is_logged_only_at_debug(self, caplog):
+        # The full text stays available behind the explicit DEBUG opt-in
+        # (LOG_LEVEL=DEBUG) for on-box diagnosis.
+        import logging as _logging
+        secret = "turn the lights off"
+        with caplog.at_level(_logging.DEBUG, logger="voice.pipeline"):
+            self._run_one_transcript(secret)
+        hits = [r for r in caplog.records if secret in r.getMessage()]
+        assert hits and all(r.levelno == _logging.DEBUG for r in hits)
+
     def test_transcript_callback_exception_does_not_propagate(self):
         def bad_callback(_t: str) -> None:
             raise RuntimeError("callback bug")
@@ -1984,6 +2024,44 @@ class TestClosedLoop:
         assert play_calls == []             # nothing spoken
         # The transcript still lands in status for diagnosis.
         assert pipe.status().last_transcript == "it."
+
+    @pytest.mark.parametrize(
+        "text,llm_up",
+        [
+            ("what time is it", True),     # intent gate (no tools) + reply
+            ("it.", True),                 # fragment, staying quiet
+            ("unlock the back door", False),  # LLM unavailable
+        ],
+    )
+    def test_closed_loop_never_logs_transcript_text_above_debug(
+        self, monkeypatch, caplog, text, llm_up,
+    ):
+        # WARP-3193 SEC-DATA-9: every branch of the default closed loop
+        # logs the transcript length, never its text, at INFO and above.
+        import logging as _logging
+        _patch_play(monkeypatch)
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=7,
+            threshold=0.5,
+            stt=_RecordingSTT(scripted_transcripts=[text]),
+            tts=_RecordingTTS(scripted_audio=SynthesizedAudio(
+                pcm=b"\x00" * 200, sample_rate=22050, sample_width=2, channels=1,
+            )),
+            llm=_RecordingLLM(scripted_replies=["ok"]),
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = llm_up
+        with caplog.at_level(_logging.INFO, logger="voice.pipeline"):
+            pipe._on_frame(_silence_frame())
+            pipe._on_frame(_silence_frame())
+            time.sleep(0.08)
+            pipe._on_frame(_silence_frame())
+        assert pipe.status().last_transcript == text
+        assert not any(text in r.getMessage() for r in caplog.records)
 
     def test_llm_unavailable_does_not_break_wake_loop(self, monkeypatch):
         # If the orchestrator is down, the wake → STT → transcript path

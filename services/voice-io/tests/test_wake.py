@@ -450,6 +450,28 @@ class TestVoskWakeWordDetector:
         assert state["finals"] == 1
         assert state["resets"] == 1
 
+    def test_no_match_utterance_text_is_debug_only(
+        self, monkeypatch, tmp_path, caplog,
+    ):
+        # WARP-3193 SEC-DATA-9: a completed non-wake utterance is ambient
+        # household speech. INFO carries its length only; the text itself
+        # sits behind the explicit DEBUG opt-in.
+        import logging as _logging
+        heard = "the doctor said my results came back fine"
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={"text": heard, "result": []},
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        with caplog.at_level(_logging.DEBUG, logger="voice.wake"):
+            assert det.predict(_silence_frame()) == {}
+        info = [r for r in caplog.records if r.levelno >= _logging.INFO]
+        assert not any(heard in r.getMessage() for r in info)
+        assert any(f"len={len(heard)}" in r.getMessage() for r in info)
+        debug = [r for r in caplog.records if heard in r.getMessage()]
+        assert debug and all(r.levelno == _logging.DEBUG for r in debug)
+
     def test_does_not_fire_on_substring_only_match(self, monkeypatch, tmp_path):
         # Whole-word match (review item 6): "hey droplets" contains the
         # phrase as a substring but NOT as whole tokens — must NOT fire.
