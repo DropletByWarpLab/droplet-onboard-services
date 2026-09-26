@@ -82,4 +82,18 @@ describe("migration folder names (WARP-2896)", () => {
     expect(folders).not.toContain("20260924020000_warp_3059_m365_cursor_resume_link");
     expect(folders).toContain("20260924030000_warp_2900_extensions");
   });
+
+  it("the WARP-2977 lock migrations exist once, re-stamped after stage's newest and the other ADR-059 branches' stamps", () => {
+    // Written as 20260925000000 / 20260925000100, which sort before
+    // 20260925010000_warp_2980_security_baselines (#2352), now on stage.
+    // Re-stamped past it, past 20260925020000, and past the stamps the open
+    // ADR-059 branches hold (…030000, …030100, …030200, …040000). Values
+    // first: an enum value cannot be used in the transaction that adds it.
+    const folders = migrationFolders();
+    expect(folders).toContain("20260925050000_warp_2977_security_lock_values");
+    expect(folders).toContain("20260925050100_warp_2977_security_lock_rows");
+    expect(folders).not.toContain("20260925000000_warp_2977_security_lock_values");
+    expect(folders).not.toContain("20260925000100_warp_2977_security_lock_rows");
+    expect(folders).toContain("20260925010000_warp_2980_security_baselines");
+  });
 });

@@ -76,7 +76,7 @@ import {
   buildZoneIndex,
   loadActiveLinks,
   matchAreasForEvent,
-  parseLinkRef,
+  parseCameraLinkRef,
   zonesForEvent,
   type ActiveZoneLink,
   type ZoneIndex,
@@ -703,14 +703,14 @@ async function activityReason(
   if (!dropCountsForActivity(event, onlines, now, ctx.timeline)) return null;
   const personAreas = new Map<string, string>();
   for (const l of ctx.links) {
-    if (l.setBy === "person" && parseLinkRef(l.sourceKind, l.sourceRef)?.camera === event.camera) personAreas.set(l.zoneId, l.zoneName);
+    if (l.setBy === "person" && parseCameraLinkRef(l.sourceKind, l.sourceRef)?.camera === event.camera) personAreas.set(l.zoneId, l.zoneName);
   }
   if (personAreas.size === 0) return null;
   const cameras = [
     ...new Set(
       ctx.links
         .filter((l) => l.setBy === "person" && personAreas.has(l.zoneId))
-        .map((l) => parseLinkRef(l.sourceKind, l.sourceRef)?.camera)
+        .map((l) => parseCameraLinkRef(l.sourceKind, l.sourceRef)?.camera)
         .filter((c): c is string => c !== undefined),
     ),
   ].sort();

@@ -69,6 +69,55 @@ describe("cron-runtime.service", () => {
     rt.stop();
   });
 
+  it("scheduleInterval does NOT run at registration by default (the first tick waits a full interval)", async () => {
+    const rt = createCronRuntime();
+    const handler = vi.fn();
+    rt.scheduleInterval(1000, handler);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(handler).not.toHaveBeenCalled();
+    rt.stop();
+  });
+
+  // WARP-2977 P2b-2 (review F9): a job whose health reads "down" until its first run opts in.
+  it("runImmediately: one run at registration, then every interval — through the same advisory lock", async () => {
+    const prisma = makePrismaStub({ lockAcquired: true });
+    const rt = createCronRuntime(prisma, makeLogger());
+    const handler = vi.fn(async () => {});
+    rt.scheduleInterval(1000, handler, { lockKey: "test:lock-now", runImmediately: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handler).toHaveBeenCalledTimes(1);
+    const lockCalls = () =>
+      prisma.$queryRawUnsafe.mock.calls.filter((c) => String(c[0]).includes("pg_try_advisory_xact_lock"));
+    expect(lockCalls()).toHaveLength(1);
+    expect(lockCalls()[0]![1]).toBe("test:lock-now");
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(handler).toHaveBeenCalledTimes(3);
+    rt.stop();
+  });
+
+  it("runImmediately with the lock held elsewhere: the registration run is skipped like any tick", async () => {
+    const prisma = makePrismaStub({ lockAcquired: false });
+    const rt = createCronRuntime(prisma, makeLogger());
+    const handler = vi.fn(async () => {});
+    rt.scheduleInterval(1000, handler, { lockKey: "test:lock-held", runImmediately: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handler).not.toHaveBeenCalled();
+    rt.stop();
+  });
+
+  it("runImmediately: a throwing first run is contained and counted like any tick", async () => {
+    const logger = makeLogger();
+    const rt = createCronRuntime(undefined, logger);
+    const handler = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    rt.scheduleInterval(1000, handler, { runImmediately: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ consecutiveFailures: 1 }), expect.any(String));
+    rt.stop();
+  });
+
   it("stop() prevents further handler calls", async () => {
     const rt = createCronRuntime();
     const handler = vi.fn();

@@ -20,6 +20,7 @@ vi.mock("./camera-access.service.js", () => ({
 
 import {
   mayListArchivedZones,
+  mayReadLocksFor,
   mayReadThreats,
   securityLevelFor,
   securityScopeForPerson,
@@ -51,31 +52,93 @@ describe("mayReadThreats", () => {
 });
 
 describe("securityViewerScope", () => {
-  it("passes the request's principal to the camera grant and composes the threat gate", async () => {
+  /** No local User row: nothing narrows, so the role decides (the AUTH_ENABLED=false session). */
+  const unresolved = vi.fn(async () => null);
+
+  it("passes the request's principal to the camera grant and composes the threat and lock gates", async () => {
     const granted = new Set(["front"]);
     h.visible.mockResolvedValue(granted);
-    const scope = await securityViewerScope({} as never, req("family"));
-    expect(scope).toEqual({ visibleCameras: granted, mayReadThreats: false });
+    const scope = await securityViewerScope({} as never, req("family"), unresolved);
+    expect(scope).toEqual({ visibleCameras: granted, mayReadThreats: false, mayReadLocks: false });
     expect(h.visible.mock.calls[0]![1]).toMatchObject({ id: "u-family", role: "family" });
   });
 
-  it("an owner sees every camera and the threats", async () => {
+  it("an owner sees every camera, the threats and the locks", async () => {
     h.visible.mockResolvedValue("all");
-    expect(await securityViewerScope({} as never, req("owner"))).toEqual({ visibleCameras: "all", mayReadThreats: true });
+    expect(await securityViewerScope({} as never, req("owner"), unresolved)).toEqual({
+      visibleCameras: "all",
+      mayReadThreats: true,
+      mayReadLocks: true,
+    });
+  });
+
+  it("a family member granted Devices (smart_home) at view reads locks through the scope", async () => {
+    h.visible.mockResolvedValue(new Set());
+    const resolve = vi.fn(async () => resolved([{ moduleId: "smart_home", level: "view" }]));
+    expect((await securityViewerScope({} as never, req("family"), resolve)).mayReadLocks).toBe(true);
+    expect(resolve).toHaveBeenCalledWith("u-family");
   });
 
   it("a grant lookup failure propagates (the route answers 503, never an unfiltered page)", async () => {
     h.visible.mockRejectedValue(new Error("db down"));
-    await expect(securityViewerScope({} as never, req("family"))).rejects.toThrow("db down");
+    await expect(securityViewerScope({} as never, req("family"), unresolved)).rejects.toThrow("db down");
+  });
+});
+
+describe("mayReadLocksFor (WARP-2977 P2b-2, DS-019) — Security view AND Devices (smart_home) view", () => {
+  it("smart_home at any level → true; the owner's resolved catalog holds it (the §3 bypass)", async () => {
+    for (const level of ["view", "act", "manage"] as const) {
+      const resolve = vi.fn(async () => resolved([{ moduleId: "security", level: "view" }, { moduleId: "smart_home", level }]));
+      expect(await mayReadLocksFor(req("family"), resolve), level).toBe(true);
+    }
+  });
+
+  it("resolved without smart_home → false for EVERY role — an admin narrowed off Devices included", async () => {
+    for (const role of ["owner", "admin", "family"]) {
+      const resolve = vi.fn(async () => resolved([{ moduleId: "security", level: "manage" }, { moduleId: "cameras", level: "manage" }]));
+      expect(await mayReadLocksFor(req(role), resolve), role).toBe(false);
+    }
+  });
+
+  it("unresolved (no local row) fails closed to owner/admin", async () => {
+    const resolve = vi.fn(async () => null);
+    expect(await mayReadLocksFor(req("owner"), resolve)).toBe(true);
+    expect(await mayReadLocksFor(req("admin"), resolve)).toBe(true);
+    expect(await mayReadLocksFor(req("family"), resolve)).toBe(false);
+    expect(await mayReadLocksFor(req("guest"), resolve)).toBe(false);
+  });
+
+  it("no principal, or a service principal: nothing to resolve, and neither is owner/admin → false", async () => {
+    const untouched = vi.fn(async () => resolved([{ moduleId: "smart_home", level: "manage" }]));
+    expect(await mayReadLocksFor(req(), untouched)).toBe(false);
+    expect(await mayReadLocksFor(req("service"), untouched)).toBe(false);
+    expect(untouched).not.toHaveBeenCalled();
+  });
+
+  it("shares the per-request memo with the feature gate — one resolver read per request", async () => {
+    const resolve = vi.fn(async () => resolved([{ moduleId: "security", level: "view" }, { moduleId: "smart_home", level: "view" }]));
+    const r = req("family");
+    const gate = requireFeatureAccess("security", "view", resolve);
+    await new Promise<void>((done) => void gate(r, {} as never, () => done()));
+    expect(await mayReadLocksFor(r, resolve)).toBe(true);
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("a resolver failure rejects (the route answers 503; it never guesses)", async () => {
+    await expect(mayReadLocksFor(req("admin"), vi.fn(async () => Promise.reject(new Error("db down"))))).rejects.toThrow(
+      "db down",
+    );
   });
 });
 
 describe("securityScopeForPerson (WARP-2979 — the one scope computation; the chat tools pass the resolved person)", () => {
+  const unresolved = vi.fn(async () => null);
+
   it("scopes a family person to their grants, read by user id with a PLAIN principal (no asserted-user hop)", async () => {
     const granted = new Set(["front"]);
     h.visible.mockResolvedValue(granted);
-    const scope = await securityScopeForPerson({} as never, { id: "u-maria", role: "family" });
-    expect(scope).toEqual({ visibleCameras: granted, mayReadThreats: false });
+    const scope = await securityScopeForPerson({} as never, { id: "u-maria", role: "family" }, unresolved);
+    expect(scope).toEqual({ visibleCameras: granted, mayReadThreats: false, mayReadLocks: false });
     expect(h.visible).toHaveBeenCalledTimes(1);
     expect(h.visible.mock.calls[0]![1]).toEqual({ id: "u-maria", role: "family" });
   });
@@ -83,29 +146,59 @@ describe("securityScopeForPerson (WARP-2979 — the one scope computation; the c
   it("owner and admin see every camera and the threats; nobody else reads threats", async () => {
     h.visible.mockResolvedValue("all");
     for (const role of ["owner", "admin"]) {
-      expect(await securityScopeForPerson({} as never, { id: `u-${role}`, role })).toEqual({
+      expect(await securityScopeForPerson({} as never, { id: `u-${role}`, role }, unresolved)).toEqual({
         visibleCameras: "all",
         mayReadThreats: true,
+        mayReadLocks: true,
       });
     }
     h.visible.mockResolvedValue(new Set());
     for (const role of ["family", "guest", "service", undefined]) {
-      expect((await securityScopeForPerson({} as never, { id: "u-x", role })).mayReadThreats, String(role)).toBe(false);
+      expect((await securityScopeForPerson({} as never, { id: "u-x", role }, unresolved)).mayReadThreats, String(role)).toBe(false);
     }
+  });
+
+  it("mayReadLocks (DS-019) is the P2b-2 rule over the PERSON's resolved catalog: Devices at view or above", async () => {
+    h.visible.mockResolvedValue(new Set());
+    const withDevices = vi.fn(async () => resolved([{ moduleId: "security", level: "view" }, { moduleId: "smart_home", level: "view" }]));
+    expect((await securityScopeForPerson({} as never, { id: "u-maria", role: "family" }, withDevices)).mayReadLocks).toBe(true);
+    expect(withDevices).toHaveBeenCalledWith("u-maria");
+    const narrowed = vi.fn(async () => resolved([{ moduleId: "security", level: "manage" }]));
+    expect((await securityScopeForPerson({} as never, { id: "u-a", role: "admin" }, narrowed)).mayReadLocks).toBe(false);
+  });
+
+  it("an owner is never resolved (the §3 bypass) and reads locks", async () => {
+    h.visible.mockResolvedValue("all");
+    const untouched = vi.fn(async () => resolved([]));
+    expect((await securityScopeForPerson({} as never, { id: "u-owner", role: "owner" }, untouched)).mayReadLocks).toBe(true);
+    expect(untouched).not.toHaveBeenCalled();
+  });
+
+  it("no id, or a service role, is never resolved and never reads locks", async () => {
+    h.visible.mockResolvedValue(new Set());
+    const untouched = vi.fn(async () => resolved([{ moduleId: "smart_home", level: "manage" }]));
+    expect((await securityScopeForPerson({} as never, { role: "family" }, untouched)).mayReadLocks).toBe(false);
+    expect((await securityScopeForPerson({} as never, { id: "_service:mcp", role: "service" }, untouched)).mayReadLocks).toBe(false);
+    expect(untouched).not.toHaveBeenCalled();
   });
 
   it("securityViewerScope is exactly the person scope of req.user", async () => {
     const granted = new Set(["yard"]);
     h.visible.mockResolvedValue(granted);
-    const viaReq = await securityViewerScope({} as never, req("family"));
-    const viaPerson = await securityScopeForPerson({} as never, { id: "u-family", role: "family" });
+    const resolve = vi.fn(async () => resolved([{ moduleId: "smart_home", level: "act" }]));
+    const viaReq = await securityViewerScope({} as never, req("family"), resolve);
+    const viaPerson = await securityScopeForPerson({} as never, { id: "u-family", role: "family" }, resolve);
     expect(viaReq).toEqual(viaPerson);
+    expect(viaReq.mayReadLocks).toBe(true);
     expect(h.visible.mock.calls[0]![1]).toEqual(h.visible.mock.calls[1]![1]);
   });
 
-  it("a grant lookup failure propagates", async () => {
+  it("a grant lookup or resolver failure propagates", async () => {
     h.visible.mockRejectedValue(new Error("db down"));
-    await expect(securityScopeForPerson({} as never, { id: "u-maria", role: "family" })).rejects.toThrow("db down");
+    await expect(securityScopeForPerson({} as never, { id: "u-maria", role: "family" }, unresolved)).rejects.toThrow("db down");
+    h.visible.mockResolvedValue(new Set());
+    const failing = vi.fn(async () => Promise.reject(new Error("resolver down")));
+    await expect(securityScopeForPerson({} as never, { id: "u-maria", role: "family" }, failing)).rejects.toThrow("resolver down");
   });
 });
 

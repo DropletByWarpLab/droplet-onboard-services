@@ -80,7 +80,7 @@ import {
   loadActiveLinks,
   loadCameraLabels,
   loadZoneRecords,
-  parseLinkRef,
+  parseCameraLinkRef,
   viewerAreas,
   visibleZoneViews,
   zoneChipsFor,
@@ -209,6 +209,7 @@ function viewerOf(actor: SecurityActor, scope: SecurityViewerScope): IncidentVie
     userId: actor.id,
     visibleCameras: scope.visibleCameras,
     mayReadThreats: scope.mayReadThreats,
+    mayReadLocks: scope.mayReadLocks,
     ownerOrAdmin: actor.role === "owner" || actor.role === "admin",
   };
 }
@@ -480,7 +481,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const kinds = q.data.kind ? ASSISTANT_EVENT_KINDS[q.data.kind] : q.data.label ? ASSISTANT_EVENT_KINDS.detection : ASSISTANT_STORED_KINDS;
       const page = await listSecurityEvents(
         prisma,
-        feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats),
+        feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats, scope.mayReadLocks),
         { limit: q.data.limit, cursor: cursor ?? undefined, kinds: { in: [...kinds] }, includeLow: false },
         extraWhere,
       );
@@ -529,7 +530,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
         if (!r) return "unknown";
         return r.health === "online" ? "yes" : r.health === "disabled" ? "detection off" : "offline";
       };
-      const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats);
+      const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats, scope.mayReadLocks);
       const areas = await Promise.all(
         zones.map(async (z) => {
           const clause = zoneFilterFor(links, z.id, scope);
@@ -546,7 +547,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
               : null,
             openIncidents,
             coveredBy: z.links.map((l) => {
-              const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+              const parsed = parseCameraLinkRef(l.sourceKind, l.sourceRef);
               return {
                 source: l.label,
                 part: parsed?.frigateZone ?? null,

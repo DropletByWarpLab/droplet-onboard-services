@@ -254,6 +254,54 @@ describe("triage: one person in the Stock room after closing", () => {
   });
 });
 
+// ── WARP-2977 P2b-2 × WARP-2978: door locks feed no rule (D21) ─────────────
+
+describe("door-lock rows are context, never members or evidence (D21) — even in a linked area, after hours", () => {
+  const LOCK = "matter:7/1";
+  const lockRow = (id: bigint, at: Date) =>
+    eventRow({
+      id,
+      source: "matter_lock",
+      kind: "lock_state",
+      camera: null,
+      sourceRef: LOCK,
+      dedupeKey: `matter-lock:7/1:${id}`,
+      labels: ["unlocked"],
+      score: null,
+      startedAt: at,
+      endedAt: null,
+      summary: "Stock room lock unlocked",
+      observed: "polled",
+      createdAt: at,
+    });
+
+  it("beside a person in the Stock room and a sign-in warning, both collecting: the lock rows open nothing and join nothing", async () => {
+    const f = world({
+      activityRow: [{ id: 70n, sub: "login", kind: "auth", severity: "warn" }],
+      securityEvent: [
+        eventRow({ id: 1n }),
+        lockRow(2n, plus(T0, 60_000)),
+        eventRow({ id: 3n, kind: "threat", source: "activity_mirror", camera: null, sourceRef: "activity:70", labels: ["auth"], endedAt: null }),
+        lockRow(4n, plus(T0, 90_000)),
+      ],
+    });
+    // The Stock room also watches the lock (the feed puts its rows there, DS-019).
+    f.world.securityZoneLink.push({ id: "lock-l", zoneId: STOCK, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Stock room lock", state: "active" });
+    await tick(f);
+
+    for (const id of [2n, 4n]) {
+      expect(triage(f, id)).toMatchObject({ outcome: "context", incidentId: null, matchedLinkIds: [], alsoZoneIds: [] });
+    }
+    const area = incidents(f).find((i) => i.id === triage(f, 1n)!.incidentId)!;
+    const site = incidents(f).find((i) => i.id === triage(f, 3n)!.incidentId)!;
+    expect(area).toMatchObject({ scope: "area", zoneId: STOCK, eventCount: 1, cameras: ["back"], lastActivityAt: plus(T0, 20_000) });
+    expect(site).toMatchObject({ scope: "site_threat", eventCount: 1 });
+    expect(incidents(f)).toHaveLength(2);
+    // Never evidence: no reason names a lock row (SecurityIncidentReason_site_evidence would refuse one anyway).
+    expect(f.world.securityIncidentReason.map((r) => r.evidenceEventId).sort()).toEqual([1n, 3n]);
+  });
+});
+
 describe("exactly once, and never blocked", () => {
   it("a PERMANENT triage failure is recorded `failed` with why, and the next event still triages", async () => {
     const f = world({ securityEvent: [eventRow({ id: 1n }), eventRow({ id: 2n, camera: "yard", sourceRef: "yard/2.5-a" })] });

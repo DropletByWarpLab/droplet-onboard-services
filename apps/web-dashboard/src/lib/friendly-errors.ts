@@ -728,10 +728,11 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     ZONE_LIMIT: "You've reached the limit of 64 areas. Remove one before adding another.",
     ZONE_NOT_FOUND: "That area doesn't exist any more. Refresh the page.",
     ZONE_ARCHIVED: "That area was removed. Restore it before changing it.",
+    // WARP-2977 P2b-2: an area link can be a door lock too.
     SOURCE_NOT_FOUND:
-      "One of those cameras or camera parts isn't set up any more, so nothing was changed. Refresh the list and try again.",
+      "One of those cameras, camera parts or door locks isn't set up any more, so nothing was changed. Refresh the list and try again.",
     SOURCE_CHECK_UNAVAILABLE:
-      "Droplet couldn't check the camera system just now, so nothing was changed. Try again in a moment.",
+      "Droplet couldn't check the cameras or door locks just now, so nothing was changed. Try again in a moment.",
     INVALID_TIMEZONE: "Droplet doesn't recognise that timezone. Pick one from the list.",
     SAME_OPEN_CLOSE:
       "Opening and closing times can't be the same. For a day that never closes, choose Open all day.",

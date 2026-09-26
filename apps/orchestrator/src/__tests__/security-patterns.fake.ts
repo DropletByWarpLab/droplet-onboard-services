@@ -41,7 +41,7 @@ export interface PatternsWorld {
   links: Array<{
     id: string;
     zoneId: string;
-    sourceKind: "camera" | "camera_zone";
+    sourceKind: "camera" | "camera_zone" | "lock";
     sourceRef: string;
     state: "active" | "removed";
     /** WARP-2979 — who set the link; a person unless a case says otherwise. */
