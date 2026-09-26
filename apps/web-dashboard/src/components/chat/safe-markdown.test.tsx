@@ -49,7 +49,7 @@ describe("SAFE_MARKDOWN_COMPONENTS (SEC-INJ-1)", () => {
   });
 
   it("blocks javascript: links", () => {
-    const c = md("[click](javascript:alert(1))");
+    const c = md("[click](javascript:void(0))");
     const a = c.querySelector("a");
     expect(a?.getAttribute("href") ?? "").not.toMatch(/javascript/i);
   });

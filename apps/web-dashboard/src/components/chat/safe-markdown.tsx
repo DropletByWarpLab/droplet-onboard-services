@@ -22,7 +22,7 @@ function SafeImage({ node, src, alt, ...props }: ComponentPropsWithoutRef<"img">
     // eslint-disable-next-line @next/next/no-img-element
     return <img {...props} src={src} alt={alt ?? ""} />;
   }
-  return <span className="text-label-tertiary">[image: {alt || "not shown"}]</span>;
+  return <span className="text-[var(--text-faint)]">[image: {alt || "not shown"}]</span>;
 }
 
 function SafeLink({ node, ...props }: ComponentPropsWithoutRef<"a"> & ExtraProps) {
