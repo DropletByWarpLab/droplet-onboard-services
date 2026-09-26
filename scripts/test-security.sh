@@ -865,6 +865,51 @@ else
 fi
 
 # =============================================================================
+# Test 22: WARP-3193 SEC-DATA-1 — `env_file: ../.env` only on an allowlist
+# =============================================================================
+# The root .env carries JWT_SECRET, DEVICE_SECRET_KEY, POSTGRES_PASSWORD and
+# the rest of the box's keys. A container that parses untrusted input (office
+# documents, web content, camera streams, ONVIF replies) must get an explicit
+# `environment:` list instead — one parser RCE there must not yield the key an
+# owner JWT is forged from. Adding a service here is a security decision:
+# say in the PR why it needs the whole file.
+# MUTATION: add `env_file: [../.env]` to web-fetch and this goes red.
+_envfile_exit=0
+_envfile_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+ALLOWED = {
+    "ai-gateway", "cache", "db", "device-identity-svc", "erp-sql-bridge",
+    "file-indexer", "fleet-agent", "inference-manager", "mcp-bridge",
+    "mcp-server", "nextcloud", "orchestrator", "rag-eval", "voice-io",
+}
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+
+bad = []
+for name, cfg in sorted((data.get("services") or {}).items()):
+    ef = cfg.get("env_file")
+    if ef is None:
+        continue
+    entries = ef if isinstance(ef, list) else [ef]
+    paths = [e.get("path") if isinstance(e, dict) else e for e in entries]
+    if any(str(p).rstrip("/").endswith(".env") and "../.env" in str(p) for p in paths) \
+            and name not in ALLOWED:
+        bad.append(name)
+if bad:
+    print("services loading ../.env outside the allowlist: " + ", ".join(bad), file=sys.stderr)
+    sys.exit(1)
+PYEOF
+) || _envfile_exit=$?
+if [ "$_envfile_exit" -eq 0 ]; then
+  pass "docker-compose.yml: env_file ../.env only on allowlisted services (SEC-DATA-1)"
+else
+  fail "docker-compose.yml: env_file ../.env on a non-allowlisted service (SEC-DATA-1)"
+  printf "${_RED}%s${_RESET}\n" "$_envfile_output" >&2
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
