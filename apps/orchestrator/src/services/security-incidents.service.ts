@@ -105,6 +105,7 @@ import {
   afterHoursPresence,
   cameraOfflineDuringActivity,
   cameraOfflineVerdict,
+  dropCountsForActivity,
   capEvidence,
   eventSpan,
   joinPatch,
@@ -698,6 +699,8 @@ async function activityReason(
   ctx: OfflineRuleContext,
 ): Promise<ReasonDraft | null> {
   if (event.kind !== "camera_offline" || event.camera === null) return null;
+  // Review #2418: offline long enough and closed/away at the drop, BEFORE any sighting is read.
+  if (!dropCountsForActivity(event, onlines, now, ctx.timeline)) return null;
   const personAreas = new Map<string, string>();
   for (const l of ctx.links) {
     if (l.setBy === "person" && parseLinkRef(l.sourceKind, l.sourceRef)?.camera === event.camera) personAreas.set(l.zoneId, l.zoneName);

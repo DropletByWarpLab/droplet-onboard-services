@@ -676,6 +676,33 @@ describe("camera_offline_during_activity at the tick (§6.7.2)", () => {
     await tick(f, plus(NOON, 61_000));
     expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
   });
+
+  // Review #2418 (follow-up 5): the cheap checks first — a daytime drop, or a blip, never reads sightings.
+  const sightingReads = (f: FakeSecurityPrisma) => {
+    const spy = vi.spyOn(f.client.securityEvent as { findMany: (a: unknown) => Promise<unknown[]> }, "findMany");
+    return () => spy.mock.calls.filter(([a]) => (a as { where?: { labels?: { has?: string }; camera?: { in?: unknown } } }).where?.labels?.has === "person" && (a as { where: { camera?: { in?: unknown } } }).where.camera?.in !== undefined).length;
+  };
+
+  it("a drop in opening hours costs no sighting read; a drop after closing does (the check is ordered, not dropped)", async () => {
+    const day = world({ securityEvent: [person(1n, plus(NOON, -60_000)), offline(2n, NOON)] }, NOON);
+    const dayReads = sightingReads(day);
+    await tick(day, plus(NOON, 61_000));
+    expect(dayReads()).toBe(0);
+
+    const night = world({ securityEvent: [person(1n, plus(T0, -60_000)), offline(2n, T0)] });
+    const nightReads = sightingReads(night);
+    await tick(night, plus(T0, 61_000));
+    expect(nightReads()).toBe(1);
+    expect(night.world.securityIncidentReason.some((r) => r.code === "camera_offline_during_activity")).toBe(true);
+  });
+
+  it("a blip (back within the minute) costs no sighting read", async () => {
+    const online = eventRow({ id: 3n, kind: "camera_online", source: "frigate_status", camera: "back", sourceRef: "back/status/detect", labels: [], endedAt: null, startedAt: plus(T0, 30_000), createdAt: plus(T0, 30_000), summary: "Camera back is back" });
+    const f = world({ securityEvent: [person(1n, plus(T0, -60_000)), offline(2n, T0), online] });
+    const reads = sightingReads(f);
+    await tick(f, plus(T0, 61_000));
+    expect(reads()).toBe(0);
+  });
 });
 
 // Review 383d647e item 4: a camera-less reason on an area/camera incident is
