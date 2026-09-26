@@ -59,6 +59,7 @@ import {
   writesDisagreementBody,
 } from "../services/tool-spec-draft.service.js";
 import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -107,11 +108,12 @@ async function resolveActor(
       typeof onBehalfOf === "string" && onBehalfOf.trim().length > 0 ? onBehalfOf.trim() : undefined;
     const named = explicit ?? (header && header.trim().length > 0 ? header.trim() : undefined);
     if (!named) return null;
-    const row = (await prisma.user.findFirst({
-      where: { username: named },
-      select: { id: true, username: true, role: true },
-    })) as Actor | null;
-    return row;
+    // WARP-3098: either value is `User.username` (stdio) or `User.id` (HTTP).
+    // Nobody, more than one person, or a deactivated person is nobody.
+    const resolved = await resolveAssertedUser(prisma, named);
+    if (!resolved.ok) return null;
+    const { id, username, role } = resolved.user;
+    return { id, username, role };
   }
   return { id: user.id, username: user.username, role: user.role };
 }
