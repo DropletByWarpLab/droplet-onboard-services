@@ -401,7 +401,7 @@ export function judgeableCodes(p: Pick<IncidentProjection, "codes">, flags: read
 }
 
 /** Review item 2 — who may see (and give) a verdict: a viewer who sees every camera and may read threats (P4's rule). */
-export function seesEverything(v: IncidentViewer): boolean {
+export function seesEverything(v: Pick<IncidentViewer, "visibleCameras" | "mayReadThreats">): boolean {
   return v.visibleCameras === "all" && v.mayReadThreats;
 }
 

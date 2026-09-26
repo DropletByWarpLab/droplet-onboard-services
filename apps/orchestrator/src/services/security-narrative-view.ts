@@ -140,9 +140,10 @@ function requiredAudience(row: NarrativeRow, reasons: readonly NarrativeReasonRe
 /**
  * The viewer rule (see the header): sees every camera and may read threats —
  * `seesEverything`, the verdict's rule. Route 28 asks it before it reads an
- * incident, so its refusal is the same for every id.
+ * incident, so its refusal is the same for every id; /security/health asks it
+ * for the `summaries` row (#2423 review 2). It reads the viewer only.
  */
-export function mayReadSummaries(viewer: IncidentViewer): boolean {
+export function mayReadSummaries(viewer: Pick<IncidentViewer, "visibleCameras" | "mayReadThreats">): boolean {
   return seesEverything(viewer);
 }
 
