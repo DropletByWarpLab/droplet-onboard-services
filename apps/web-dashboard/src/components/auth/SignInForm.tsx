@@ -426,6 +426,9 @@ export function SignInForm({
         </div>
         <div className="relative">
           <Lock size={16} aria-hidden="true" className={GLYPH} />
+          {/* WARP-3135: `[&::-ms-reveal]:hidden` turns off Edge's native eye
+              (also in the Windows app, which is WebView2), which otherwise
+              sits beside the toggle below: two eyes on one field. */}
           <input
             id="login-password"
             type={showPassword ? "text" : "password"}
@@ -434,7 +437,7 @@ export function SignInForm({
             placeholder="Password"
             autoComplete="current-password"
             onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-            className={`${FIELD} pl-11 pr-12`}
+            className={`${FIELD} pl-11 pr-12 [&::-ms-reveal]:hidden`}
           />
           <button
             type="button"
