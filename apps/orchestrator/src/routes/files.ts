@@ -2330,6 +2330,7 @@ export function createFilesRouter(
         | { name: string; size: number; sha256: string; uploadId: string }
         | { name: string; size: number; sha256: string; buffer: Buffer };
       let uploads: PendingUpload[];
+      let jsonCreateOnly = false;
 
       if (files.length > 0) {
         rawTargetPath = (req.query.path as string) || "/";
@@ -2350,7 +2351,10 @@ export function createFilesRouter(
           dir?: unknown;
           filename?: unknown;
           contentBase64: string;
+          createOnly?: unknown;
         };
+        // WARP-3193 SEC-INJ-2: write_file asks for create-new only.
+        jsonCreateOnly = body.createOnly === true;
         rawTargetPath =
           typeof body.dir === "string" && body.dir.length > 0 ? body.dir : "/";
 
@@ -2445,7 +2449,26 @@ export function createFilesRouter(
             ));
             uncommitted.delete(file.uploadId);
           } else {
-            outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer);
+            if (jsonCreateOnly) {
+              // WARP-3193 SEC-INJ-2: `If-None-Match: *` — the server refuses
+              // atomically when the file exists; the tool asks the user.
+              try {
+                outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer, {
+                  ifNoneMatch: true,
+                });
+              } catch (uploadErr) {
+                if (uploadErr instanceof NcPreconditionFailedError) {
+                  res.status(409).json({
+                    error: "file already exists",
+                    path: joinDir(targetPath, file.name),
+                  });
+                  return;
+                }
+                throw uploadErr;
+              }
+            } else {
+              outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer);
+            }
           }
           const uploadedPath = joinDir(targetPath, finalName);
           const status: UploadEntryStatus =
@@ -2979,6 +3002,50 @@ export function createFilesRouter(
   }
 
   /**
+   * WARP-3193 SEC-INJ-2 — the move/copy writes the MODEL may not make alone.
+   *
+   * move_file / copy_file reach these routes as `_service:mcp`. Replacing a
+   * destination destroys it, and putting a private file into a shared folder
+   * (Household, or a department/team mount — each is a top-level folder in
+   * the caller's home) publishes it without share_file's gate. tools-core
+   * refuses both first; this is the mirror for the principal, answered as
+   * 403 USER_APPROVAL_REQUIRED so the tool can tell the model to ask the
+   * user. A move INSIDE one shared folder (rename, organize) is not a leak.
+   * A human session is never gated here: the dashboard click is the approval.
+   * `from`/`to` are the operational paths (after rootForSpace).
+   */
+  async function refuseUnapprovedMcpWrite(
+    req: Request,
+    res: Response,
+    overwrite: boolean,
+    from: string,
+    to: string,
+  ): Promise<boolean> {
+    if (!isMcpService(req)) return false;
+    let what: string | null = null;
+    if (overwrite) {
+      what = `Replacing the existing ${to}`;
+    } else {
+      const mounts = new Set([
+        SHARED_FOLDER_NAME,
+        ...(await activeDeptMountNames(prisma, req.user?.id ?? "", true)),
+      ]);
+      const mountOf = (p: string) => {
+        const top = p.split("/")[1] ?? "";
+        return mounts.has(top) ? top : null;
+      };
+      const dest = mountOf(to);
+      if (dest !== null && dest !== mountOf(from)) {
+        what = `Putting ${from} into the shared folder /${dest}`;
+      }
+    }
+    if (what === null) return false;
+    recordAccessDenied(req, "mcp-write-needs-user");
+    res.status(403).json({ error: `${what} needs the user's approval`, code: "USER_APPROVAL_REQUIRED" });
+    return true;
+  }
+
+  /**
    * Invalidate listing caches for the parents of the given targets (source +
    * destination).
    *
@@ -3128,6 +3195,8 @@ export function createFilesRouter(
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
+      if (await refuseUnapprovedMcpWrite(req, res, overwrite, from, to)) return;
+
       const user = await getUser(req, prisma);
       await ncMoveFile(await getToken(req), user, from, to, overwrite);
 
@@ -3192,6 +3261,8 @@ export function createFilesRouter(
       const toSpaceValue = resolveSpace(rawToSpace);
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
+
+      if (await refuseUnapprovedMcpWrite(req, res, overwrite, from, to)) return;
 
       const user = await getUser(req, prisma);
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
