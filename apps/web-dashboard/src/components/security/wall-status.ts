@@ -65,7 +65,6 @@ export const WALL_COPY = {
   quietMany: "{n} quiet",
   notSetUpOne: "1 not set up",
   notSetUpMany: "{n} not set up",
-  otherSource: "Another source",
 
   updatedLabel: "Updated",
   unknownValue: "—",
@@ -140,9 +139,10 @@ export function tileGrid(n: number): { cols: number; rows: number } {
 /**
  * What each /security health row is to the wall. Only event SOURCES count in
  * the sources cell (ADR §3.2): `patterns` reads quiet for its 14 learning
- * days, `retention` and `alerts` feed nothing on screen, `site_mode` is the
- * mode cell's and `incidents` the needs-attention cell's. A `Record`, so a new
- * row id (locks, summaries) cannot land without being classified here.
+ * days, `links` is off whenever linking is, `retention` and `alerts` feed
+ * nothing on screen, `site_mode` is the mode cell's and `incidents` the
+ * needs-attention cell's. A `Record`, so a new row id (locks, summaries)
+ * cannot land in the type without being classified here.
  */
 export type WallRowRole = "source" | "engine" | "mode" | "other";
 export const WALL_ROW_ROLE: Record<SecurityHealthRow["id"], WallRowRole> = {
@@ -152,14 +152,20 @@ export const WALL_ROW_ROLE: Record<SecurityHealthRow["id"], WallRowRole> = {
   site_mode: "mode",
   incidents: "engine",
   alerts: "other",
+  links: "other",
   summaries: "other",
   patterns: "other",
   retention: "other",
 };
 
-/** The source rows, in the server's order. An id this build does not know counts as a source: never hide what we can't classify. */
+/**
+ * The source rows, in the server's order. An id this build does not know is
+ * never a source (#2423 review 13): the cell claims only what it can name —
+ * an unclassified job row (`links` with linking off, before it was listed
+ * here) read "1 not set up" on every staff wall.
+ */
 export function sourceRows(rows: readonly SecurityHealthRow[]): SecurityHealthRow[] {
-  return rows.filter((r) => (WALL_ROW_ROLE[r.id] ?? "source") === "source");
+  return rows.filter((r) => WALL_ROW_ROLE[r.id] === "source");
 }
 
 /** "{n} things", or its singular. */
