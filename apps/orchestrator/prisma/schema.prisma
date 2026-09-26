@@ -1630,6 +1630,9 @@ model FileIndexStatus {
   @@id([userId, path])
   @@index([userId, status])
   @@index([extractStatus, updatedAt])
+  // WARP-3193 PERF-15: the filing orphan sweep (filing/maintenance.ts) looks
+  // rows up by ncFileId alone, which led no index.
+  @@index([ncFileId])
 }
 
 /// ADR-048 — the filing claim state machine. Explicit enum, never derived from

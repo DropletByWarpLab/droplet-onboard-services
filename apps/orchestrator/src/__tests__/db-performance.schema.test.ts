@@ -69,3 +69,12 @@ describe("WARP-3193 PERF-7 — activity feed indexes", () => {
     }
   });
 });
+
+describe("WARP-3193 PERF-15 — FileIndexStatus.ncFileId index", () => {
+  it("indexes the column the filing orphan sweep looks up by", () => {
+    expect(modelBlock("FileIndexStatus")).toMatch(/@@index\(\[ncFileId\]\)/);
+    const sql = migration("_warp_3193_file_index_status_ncfileid_index");
+    expect(has(sql, `ON "FileIndexStatus"("ncFileId")`)).toBe(true);
+  });
+});
+
