@@ -112,6 +112,7 @@ function world(users: FakeUser[] = [ALICE, BOB]): World {
   }));
   const reminders = makeFakeTable(() => ({
     body: null,
+    status: "scheduled", // the column's DB default (WARP-3193 QUAL-3)
     completedAt: null,
     calendarEventId: null,
     notifiedAt: null,
@@ -320,7 +321,7 @@ describe.each([
     const w = world();
     seedReminder(w, { id: "rm-a1", userId: "alice", title: "Soon", dueAt: at(10) });
     seedReminder(w, { id: "rm-a2", userId: "alice", title: "Later", dueAt: at(100) });
-    seedReminder(w, { id: "rm-a-done", userId: "alice", title: "Done", dueAt: at(5), completedAt: at(-1) });
+    seedReminder(w, { id: "rm-a-done", userId: "alice", title: "Done", dueAt: at(5), completedAt: at(-1), status: "completed" });
     seedReminder(w, { id: "rm-b1", userId: "bob", title: "Not yours", dueAt: at(10) });
 
     const r = await run("list_reminders", {}, toolCtx(w, acting));
@@ -504,7 +505,7 @@ describe("WARP-3101 the tools keep their contract through the routes", () => {
   it("list_reminders includes completed reminders when asked", async () => {
     const w = world();
     seedReminder(w, { id: "rm-open", userId: "alice", dueAt: at(10) });
-    seedReminder(w, { id: "rm-done", userId: "alice", dueAt: at(5), completedAt: at(-1) });
+    seedReminder(w, { id: "rm-done", userId: "alice", dueAt: at(5), completedAt: at(-1), status: "completed" });
 
     const r = await run("list_reminders", { include_completed: true }, toolCtx(w, STDIO));
 
@@ -517,7 +518,7 @@ describe("WARP-3101 the tools keep their contract through the routes", () => {
 
   it("complete_reminder with completed=false re-opens the reminder", async () => {
     const w = world();
-    const rm = seedReminder(w, { userId: "alice", completedAt: at(-1) });
+    const rm = seedReminder(w, { userId: "alice", completedAt: at(-1), status: "completed" });
 
     dataOf(await run("complete_reminder", { id: rm.id, completed: false }, toolCtx(w, STDIO)));
 
@@ -668,5 +669,111 @@ describe("WARP-3101 the calendar and reminder routes, as the MCP principal", () 
     expect(ev.body.events.map((e: { id: string }) => e.id)).toEqual(["ev-b"]);
     expect(rm.status).toBe(201);
     expect(w.reminders.rows.map((r) => r.userId)).toEqual(["bob", "bob"]);
+  });
+});
+
+// ── WARP-3193 QUAL-3 / PERF-14 — the lifecycle is an explicit status ────────
+//
+// The poller used to select `completedAt IS NULL AND notifiedAt IS NULL`:
+// state derived from two nullable timestamps, and unindexable. Every writer
+// now sets `status` in the same statement as the timestamp, and every reader
+// reads `status`.
+describe("WARP-3193 Reminder.status is written with its timestamp and read instead of it", () => {
+  const patch = (w: World, id: string, body: Record<string, unknown>) =>
+    request(appAs(browser(ALICE), w.prisma)).patch(`/api/reminders/${id}`).send(body);
+
+  it("the poller selects on status = scheduled and writes notified with notifiedAt", async () => {
+    const w = world();
+    seedReminder(w, { id: "rm-due", userId: "alice", dueAt: at(-1) });
+    // Inconsistent on purpose: a `notified` row with no notifiedAt. A poller
+    // that still reads the timestamp would fire it again.
+    seedReminder(w, { id: "rm-fired", userId: "alice", dueAt: at(-2), status: "notified" });
+
+    startRemindersPoller(w.prisma);
+    try {
+      await vi.waitFor(() => expect(w.log.rows).toHaveLength(1));
+    } finally {
+      stopRemindersPoller();
+    }
+
+    const where = (w.reminders.delegate.findMany.mock.calls[0] as unknown as [{ where: Record<string, unknown> }])[0].where;
+    expect(where).toMatchObject({ status: "scheduled" });
+    expect(where).not.toHaveProperty("completedAt");
+    expect(where).not.toHaveProperty("notifiedAt");
+    const due = w.reminders.rows.find((r) => r.id === "rm-due")!;
+    expect(due.status).toBe("notified");
+    expect(due.notifiedAt).toBeInstanceOf(Date);
+    expect(w.reminders.rows.find((r) => r.id === "rm-fired")!.notifiedAt).toBeNull();
+  });
+
+  it("the poller does not notify a reminder completed between its read and its claim", async () => {
+    const w = world();
+    const rm = seedReminder(w, { userId: "alice", dueAt: at(-1) });
+    const read = w.reminders.delegate.findMany.getMockImplementation()!;
+    w.reminders.delegate.findMany.mockImplementationOnce(async (args) => {
+      const rows = await read(args);
+      rm.status = "completed"; // the person ticks it off mid-tick
+      return rows;
+    });
+
+    startRemindersPoller(w.prisma);
+    try {
+      await vi.waitFor(() => expect(w.reminders.delegate.updateMany).toHaveBeenCalled());
+    } finally {
+      stopRemindersPoller();
+    }
+
+    expect(rm.status).toBe("completed");
+    expect(w.log.rows).toHaveLength(0);
+  });
+
+  it("completing writes status=completed with completedAt", async () => {
+    const w = world();
+    const rm = seedReminder(w, { userId: "alice" });
+    expect((await patch(w, rm.id as string, { completed: true })).status).toBe(200);
+    expect(rm.status).toBe("completed");
+    expect(rm.completedAt).toBeInstanceOf(Date);
+  });
+
+  it("un-completing returns to notified if it had fired, else to scheduled", async () => {
+    const w = world();
+    const fired = seedReminder(w, { userId: "alice", status: "completed", completedAt: at(-1), notifiedAt: at(-2) });
+    const unfired = seedReminder(w, { userId: "alice", status: "completed", completedAt: at(-1) });
+    await patch(w, fired.id as string, { completed: false });
+    await patch(w, unfired.id as string, { completed: false });
+    expect([fired.status, fired.completedAt]).toEqual(["notified", null]);
+    expect([unfired.status, unfired.completedAt]).toEqual(["scheduled", null]);
+  });
+
+  it("a new dueAt re-arms a notified reminder, but leaves a completed one completed", async () => {
+    const w = world();
+    const notified = seedReminder(w, { userId: "alice", status: "notified", notifiedAt: at(-1) });
+    const done = seedReminder(w, { userId: "alice", status: "completed", completedAt: at(-1) });
+    await patch(w, notified.id as string, { dueAt: at(60).toISOString() });
+    await patch(w, done.id as string, { dueAt: at(60).toISOString() });
+    expect([notified.status, notified.notifiedAt]).toEqual(["scheduled", null]);
+    expect(done.status).toBe("completed");
+  });
+
+  it("a PATCH that touches neither leaves the status alone, and a foreign id is still a 404", async () => {
+    const w = world();
+    const rm = seedReminder(w, { userId: "alice", status: "notified", notifiedAt: at(-1) });
+    const bobs = seedReminder(w, { userId: "bob" });
+    expect((await patch(w, rm.id as string, { title: "renamed" })).status).toBe(200);
+    expect([rm.title, rm.status]).toEqual(["renamed", "notified"]);
+    expect((await patch(w, bobs.id as string, { completed: true })).status).toBe(404);
+    expect(bobs.status).toBe("scheduled");
+  });
+
+  it("GET ?completed= filters on status", async () => {
+    const w = world();
+    seedReminder(w, { id: "rm-open", userId: "alice" });
+    seedReminder(w, { id: "rm-fired", userId: "alice", status: "notified", notifiedAt: at(-1) });
+    seedReminder(w, { id: "rm-done", userId: "alice", status: "completed", completedAt: at(-1) });
+    const app = appAs(browser(ALICE), w.prisma);
+    const open = await request(app).get("/api/reminders?completed=false");
+    const done = await request(app).get("/api/reminders?completed=true");
+    expect(open.body.reminders.map((r: { id: string }) => r.id).sort()).toEqual(["rm-fired", "rm-open"]);
+    expect(done.body.reminders.map((r: { id: string }) => r.id)).toEqual(["rm-done"]);
   });
 });

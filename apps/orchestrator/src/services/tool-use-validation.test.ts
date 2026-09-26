@@ -13,7 +13,7 @@
  * nothing. Most of this file is therefore negative cases.
  */
 import { describe, it, expect } from "vitest";
-import type { AgentTraceEntry } from "./llm-agent.service.js";
+import type { AgentTraceEntry } from "../types/agent-trace.js";
 import {
   classifyToolOutcome,
   detectCompletionClaims,

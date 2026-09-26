@@ -1,5 +1,6 @@
 """Pydantic models for the routing service REST API."""
 
+import ipaddress
 import os
 import re
 
@@ -61,14 +62,52 @@ class SetUpnpRequest(BaseModel):
 
 
 class StaticLeaseRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="Friendly device name")
+    """WARP-3193 SEC-INJ-4 — every field ends up on a line of dnsmasq's
+    generated config, so each is typed: a newline or separator smuggled into
+    any of them would otherwise become an extra dnsmasq directive."""
+
+    name: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$",
+        description="Device hostname (a single RFC 1123 label)",
+    )
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address")
-    ip: str = Field(..., description="Static IP to assign")
+    ip: str = Field(..., description="Static IPv4 to assign")
     leasetime: str = Field(default="infinite", description="Lease duration")
+
+    @field_validator("ip")
+    @classmethod
+    def _check_ip(cls, v: str) -> str:
+        try:
+            return str(ipaddress.IPv4Address(v))
+        except ValueError:
+            raise ValueError("ip must be a literal IPv4 address") from None
+
+    @field_validator("leasetime")
+    @classmethod
+    def _check_leasetime(cls, v: str) -> str:
+        if not _LEASETIME_PATTERN.fullmatch(v):
+            raise ValueError(
+                "leasetime must be a dnsmasq value like '12h', '30m', or 'infinite'"
+            )
+        return v
 
 
 class SetDnsRequest(BaseModel):
-    servers: list[str] = Field(..., min_length=1, description="List of DNS server IPs")
+    # WARP-3193 SEC-INJ-4 — joined into UCI `network.wan.dns` and from there
+    # into resolv/dnsmasq config, so each entry must be an IP literal.
+    servers: list[str] = Field(..., min_length=1, max_length=4, description="1-4 DNS server IPs")
+
+    @field_validator("servers")
+    @classmethod
+    def _check_servers(cls, v: list[str]) -> list[str]:
+        out = []
+        for s in v:
+            try:
+                out.append(str(ipaddress.ip_address(s)))
+            except ValueError:
+                raise ValueError(f"{s!r} is not an IP address") from None
+        return out
 
 
 # dnsmasq lease-time grammar: a positive integer followed by a unit

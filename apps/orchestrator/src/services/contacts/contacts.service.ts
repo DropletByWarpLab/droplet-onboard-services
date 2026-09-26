@@ -24,6 +24,7 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { normalizeEmail } from "@droplet/auth-policy";
 
 export const CONTACT_ERRORS = {
   CONTACT_NOT_FOUND: "contact_not_found",
@@ -128,11 +129,10 @@ function toApi(row: ContactRow): ApiContact {
 /**
  * The indexed lookup form of an address. Derived on write and never read from
  * user input, so a caller cannot supply an `addressLower` that disagrees with
- * `address` and quietly poison the dedupe key.
+ * `address` and quietly poison the dedupe key. The same trim+lowercase as the
+ * directory login key: @droplet/auth-policy's (WARP-3193 ARCH-9).
  */
-export function normalizeEmail(address: string): string {
-  return address.trim().toLowerCase();
-}
+export { normalizeEmail };
 
 /**
  * `tel:` scheme stripped, per WARP-2018. Everything else is left alone: phone

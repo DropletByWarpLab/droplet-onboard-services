@@ -26,7 +26,8 @@ interface ReminderJson {
   title: string;
   body: string | null;
   dueAt: string;
-  completedAt: string | null;
+  /** WARP-3193 QUAL-3 — the explicit lifecycle column. */
+  status: "scheduled" | "notified" | "completed";
 }
 
 function parseDate(input: unknown): Date | null {
@@ -59,7 +60,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         title: r.title,
         body: r.body,
         due_at: new Date(r.dueAt).toISOString(),
-        completed: r.completedAt !== null,
+        completed: r.status === "completed",
       })),
     },
   };

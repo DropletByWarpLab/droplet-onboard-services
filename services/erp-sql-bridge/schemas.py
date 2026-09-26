@@ -10,16 +10,23 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+# WARP-3193 SEC-INJ-3 — these three values are spliced into an ODBC connection
+# string, so they are restricted to characters that cannot close a parameter
+# (`;`), open a quoted value (`{`) or smuggle a line. Mirrored by the zod
+# connect schema in apps/orchestrator/src/routes/integrations.ts.
+HOST_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$"
+NAME_PATTERN = r"^[A-Za-z0-9_.-]{1,128}$"
+
 
 class TargetSpec(BaseModel):
     """Which database box to reach. None of these are secrets — they come from
     the IntegrationConnection row so the setup wizard's host field stays
     meaningful on a box that was deployed pointing somewhere else."""
 
-    host: str = Field(min_length=1)
+    host: str = Field(pattern=HOST_PATTERN)
     port: int = Field(default=2638, ge=1, le=65535)
-    serverName: str = Field(default="PattersonPM", min_length=1)
-    databaseName: str = Field(default="PattersonPM", min_length=1)
+    serverName: str = Field(default="PattersonPM", pattern=NAME_PATTERN)
+    databaseName: str = Field(default="PattersonPM", pattern=NAME_PATTERN)
 
 
 class Statement(BaseModel):

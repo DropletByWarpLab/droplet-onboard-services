@@ -29,7 +29,7 @@ import { healthCheck as fileIndexerHealth } from "./file-indexer.client.js";
 import { ncPing } from "./nextcloud.client.js";
 import { mqttHealth } from "./mqtt-status.js";
 import { config } from "../config.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import { bridgeAuthToken, isBridgeConnectionError } from "../lib/bridge-errors.js";
 import type { CronRuntime } from "./cron-runtime.service.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -153,8 +153,11 @@ export async function storagePoolsHealth(): Promise<boolean> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
+    // WARP-3193 SEC-DATA-6: /pools is token-gated on the bridge.
+    const token = bridgeAuthToken();
     const r = await fetch(`${config.DEVICE_BRIDGE_URL}/pools`, {
       signal: ctrl.signal,
+      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
     });
     if (!r.ok) throw new Error(`bridge returned ${r.status}`);
     const snap = (await r.json()) as {
