@@ -55,6 +55,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 import { readableDepartmentIdsFor, type SpaceAccessCaller } from "../../middleware/space.js";
+import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
 export const ENTITY_LINK_ERRORS = {
   SUBJECT_NOT_FOUND: "subject_not_found",
@@ -169,10 +170,6 @@ function pairWhere(
 
 function isPrismaCode(err: unknown, code: "P2002" | "P2003" | "P2025"): boolean {
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return isPrismaCode(err, "P2002");
 }
 
 /**

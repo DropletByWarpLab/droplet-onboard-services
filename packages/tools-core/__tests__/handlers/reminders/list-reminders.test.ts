@@ -3,8 +3,8 @@ import listReminders from "../../../src/handlers/reminders/list-reminders.js";
 import { json, orchestratorCtx, queryOf } from "../../helpers/orchestrator-ctx.js";
 
 const ROWS = [
-  { id: "r1", userId: "alice", title: "Pill", body: null, dueAt: "2026-04-01T08:00:00.000Z", completedAt: null },
-  { id: "r2", userId: "alice", title: "Bins", body: "Blue", dueAt: "2026-04-01T09:00:00.000Z", completedAt: "2026-04-01T09:01:00.000Z" },
+  { id: "r1", userId: "alice", title: "Pill", body: null, dueAt: "2026-04-01T08:00:00.000Z", status: "scheduled", completedAt: null },
+  { id: "r2", userId: "alice", title: "Bins", body: "Blue", dueAt: "2026-04-01T09:00:00.000Z", status: "completed", completedAt: "2026-04-01T09:01:00.000Z" },
 ];
 
 describe("list_reminders", () => {
@@ -28,6 +28,14 @@ describe("list_reminders", () => {
     const r = await listReminders.handler({ include_completed: true, due_before: "2026-04-02T00:00:00Z", limit: 7 }, o.ctx);
     expect(queryOf(o.get.mock.calls[0]![0])).toEqual({ limit: "7", due_before: "2026-04-02T00:00:00.000Z" });
     expect(r.ok && (r.data as { reminders: Array<{ completed: boolean }> }).reminders.map((x) => x.completed)).toEqual([false, true]);
+  });
+
+  // WARP-3193 QUAL-3: `completed` is the explicit status, not completedAt.
+  it("reads completed from status", async () => {
+    const o = orchestratorCtx();
+    o.get.mockResolvedValueOnce(json(200, { reminders: [{ ...ROWS[0], status: "completed" }] }));
+    const r = await listReminders.handler({ include_completed: true }, o.ctx);
+    expect(r.ok && (r.data as { reminders: Array<{ completed: boolean }> }).reminders[0]!.completed).toBe(true);
   });
 
   it("drops an unparseable due_before rather than sending it", async () => {

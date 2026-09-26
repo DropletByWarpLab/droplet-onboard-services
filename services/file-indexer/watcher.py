@@ -23,10 +23,14 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
+from apscheduler.schedulers.background import BackgroundScheduler
 from watchdog.events import FileDeletedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
@@ -112,9 +116,47 @@ GROUPFOLDERS_PATTERN = re.compile(
 # Nextcloud uploads generate create + modify events in rapid succession.
 # We debounce per-path: delay indexing by DEBOUNCE_SECONDS and reset the
 # timer on each new event for the same path.
+#
+# WARP-3193 PERF-4: this used to be one `threading.Timer` (one OS thread) per
+# path, each running the whole pipeline — a 5k-file copy meant 5k threads
+# extracting/OCRing/embedding at once. Now one apscheduler BackgroundScheduler
+# holds the per-path debounce (a `date` job keyed by path, replaced on every
+# new event), and on expiry hands the path to a fixed pool of INDEX_WORKERS.
+# `_queued` dedupes paths waiting for a worker; a path leaves it when its run
+# starts, so an edit made DURING indexing is still picked up afterwards.
 DEBOUNCE_SECONDS = 2.0
-_debounce_timers: dict[str, threading.Timer] = {}
+INDEX_WORKERS = 2
 _debounce_lock = threading.Lock()
+_debounce_scheduler: BackgroundScheduler | None = None
+_index_pool: ThreadPoolExecutor | None = None
+_queued: set[str] = set()
+
+
+def _get_debounce_scheduler() -> BackgroundScheduler:
+    """Lazily start the debounce scheduler + index pool (caller holds
+    `_debounce_lock`). Lazy so importing the module starts no threads."""
+    global _debounce_scheduler, _index_pool
+    if _debounce_scheduler is None:
+        _index_pool = ThreadPoolExecutor(
+            max_workers=INDEX_WORKERS, thread_name_prefix="file-index"
+        )
+        # apscheduler logs every add/run at INFO; per-file that is two lines
+        # per upload, so this scheduler's loggers are held at WARNING (named
+        # apart from scheduler_service's, which keeps its INFO lines).
+        sched_logger = logging.getLogger("watcher.debounce")
+        sched_logger.setLevel(logging.WARNING)
+        logging.getLogger("apscheduler.executors.debounce").setLevel(logging.WARNING)
+        _debounce_scheduler = BackgroundScheduler(
+            # The job only hands the path to _index_pool, so one thread is
+            # enough; misfire_grace_time=None means a late fire still runs
+            # rather than being dropped.
+            executors={"debounce": APSThreadPoolExecutor(max_workers=1)},
+            job_defaults={"misfire_grace_time": None, "coalesce": True},
+            logger=sched_logger,
+            daemon=True,
+        )
+        _debounce_scheduler.start()
+    return _debounce_scheduler
 
 
 @dataclass(frozen=True)
@@ -499,18 +541,30 @@ class IndexHandler(FileSystemEventHandler):
     def _schedule(self, path: str) -> None:
         """Debounce: delay indexing by DEBOUNCE_SECONDS, resetting on repeat events."""
         with _debounce_lock:
-            existing = _debounce_timers.get(path)
-            if existing:
-                existing.cancel()
-            timer = threading.Timer(DEBOUNCE_SECONDS, self._run_index, args=(path,))
-            timer.daemon = True
-            _debounce_timers[path] = timer
-            timer.start()
+            _get_debounce_scheduler().add_job(
+                self._enqueue_index,
+                trigger="date",
+                run_date=datetime.now(timezone.utc) + timedelta(seconds=DEBOUNCE_SECONDS),
+                args=(path,),
+                id=path,
+                replace_existing=True,
+                executor="debounce",
+            )
+
+    def _enqueue_index(self, path: str) -> None:
+        """Debounce expired: hand the path to the bounded pool, unless it is
+        already waiting there."""
+        with _debounce_lock:
+            if path in _queued:
+                return
+            _queued.add(path)
+            pool = _index_pool
+        pool.submit(self._run_index, path)
 
     def _run_index(self, path: str) -> None:
         """Run the indexing pipeline, called after debounce expires."""
         with _debounce_lock:
-            _debounce_timers.pop(path, None)
+            _queued.discard(path)
         try:
             self._index(path)
         except Exception as e:

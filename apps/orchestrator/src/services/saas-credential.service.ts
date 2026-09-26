@@ -78,7 +78,7 @@ import {
   isEncryptedColumn,
   saasCredentialAad,
 } from "./column-crypto.service.js";
-import { credentialsPurgedFor } from "./integrations.service.js";
+import { credentialsPurgedFor } from "./integration-status.js";
 
 /**
  * The `IntegrationStatus` values this service reads and writes. Kept as a

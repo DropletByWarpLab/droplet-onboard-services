@@ -2027,7 +2027,7 @@ export function createPublicAuthRouter(
       // ── WARP-490: single-use enforcement via compare-and-swap ──
       // Two near-simultaneous POSTs to the same token both clear the
       // isUsed() fast-path above before either write lands. The
-      // conditional updateMany (acceptedAt: null) is the atomic
+      // conditional updateMany (status: "pending") is the atomic
       // enforcement point: exactly one caller flips the row (count === 1)
       // and proceeds to create the account; the other sees count === 0
       // and 410s WITHOUT ever calling Nextcloud — so no duplicate NC
@@ -2042,9 +2042,13 @@ export function createPublicAuthRouter(
       // atomic single-use — a transient-failure auto-release would reopen
       // a (smaller) version of the same race.
       const acceptedFrom = getRequestIp(req);
+      // WARP-3193 QUAL-3: the guard is the explicit status, so a revoke or
+      // the expiry sweep landing between the fast-path read and this write
+      // also loses the race, not just a second accept.
       const claim = await prisma.userInvite.updateMany({
-        where: { id: invite.id, acceptedAt: null },
+        where: { id: invite.id, status: "pending" },
         data: {
+          status: "accepted",
           acceptedAt: new Date(),
           acceptedFrom: acceptedFrom ?? undefined,
         },
@@ -4358,6 +4362,11 @@ export function createProtectedAuthRouter(
         createdBy: r.createdBy,
         createdAt: r.createdAt,
         expiresAt: r.expiresAt,
+        // WARP-3193 QUAL-3: the lifecycle, so the client reads one field
+        // instead of re-deriving it from the timestamps. A pending row past
+        // expiresAt reads as expired here, exactly as the accept route
+        // treats it, until the 03:00 sweep stamps the column.
+        status: r.status === "pending" && isExpired(r) ? "expired" : r.status,
         acceptedAt: r.acceptedAt,
         revokedAt: r.revokedAt,
       }));
@@ -4383,12 +4392,14 @@ export function createProtectedAuthRouter(
           return;
         }
         // Idempotent: revoking an already-revoked invite is a no-op success.
-        if (!invite.revokedAt) {
-          await prisma.userInvite.update({
-            where: { id: invite.id },
-            data: { revokedAt: new Date() },
-          });
-        }
+        // WARP-3193 QUAL-3: only a pending or expired invite moves to
+        // revoked, in one conditional write with its timestamp. An accepted
+        // invite stays accepted — that person already holds the account, and
+        // the old unconditional stamp made the record claim otherwise.
+        await prisma.userInvite.updateMany({
+          where: { id: invite.id, status: { in: ["pending", "expired"] } },
+          data: { status: "revoked", revokedAt: new Date() },
+        });
         res.json({ revoked: true });
       } catch (err) {
         next(err);
