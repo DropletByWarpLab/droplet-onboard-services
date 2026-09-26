@@ -28,6 +28,7 @@ import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
 import { ThinkingMessage } from "@/components/chat/ThinkingMessage";
 import { ToolApprovalPrompt } from "@/components/chat/ToolApprovalPrompt";
+import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
 
@@ -429,6 +430,8 @@ export const ChatMessage = memo(function ChatMessage({
                 // languages render as plain <code> — no detection pass.
                 rehypePlugins={[rehypeHighlight]}
                 components={{
+                  // WARP-3193 SEC-INJ-1: no remote images; hardened links.
+                  ...SAFE_MARKDOWN_COMPONENTS,
                   // WARP-295: wrap GFM tables in a horizontal-scroll
                   // container so a wide table doesn't blow out the
                   // bubble's max-width on narrow viewports. Audit §5.4
