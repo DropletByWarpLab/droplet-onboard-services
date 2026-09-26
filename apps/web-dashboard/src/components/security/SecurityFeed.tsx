@@ -31,9 +31,19 @@
  * WARP-2978 PR-D — a person Frigate is still tracking 30 s in gets one
  * `detection_ongoing` row before their `end`: it reads "Still in view", sits
  * with the detections, and their later `end` is its own row.
+ *
+ * WARP-2978 (ADR-059 P3 §8) — this feed is the "Everything" tab under the
+ * Incidents one. Unchanged apart from:
+ *   - a row the engine grouped carries `In an incident →` to its incident;
+ *   - the header names the `incidents` and `alerts` rows;
+ *   - P2a's "Alerts come later" line is gone. `AlertsLine` (the page renders
+ *     it above both tabs) says what alerts do, or what they still need —
+ *     and nothing at all while that is unknown.
  */
+import type { ReactNode } from "react";
 import Link from "next/link";
 import {
+  ArrowRight,
   Car,
   Loader2,
   Moon,
@@ -54,7 +64,12 @@ import type { SecurityEvent, SecurityEventKind, SecurityHealthRow, SecurityZoneR
 export type SecurityView = "all" | "detections" | "health" | "network";
 
 export const COPY = {
-  notAlarm: "Droplet shows what happened here. Alerts come later.",
+  // WARP-2978 (ADR-059 P3 §8) — replaces P2a's "Alerts come later." line.
+  alertsLine:
+    "Droplet alerts the people chosen in Security settings when someone is seen inside after hours. It doesn't call anyone.",
+  alertsNotReady:
+    "Droplet shows what happened here. Alerts need opening hours and an area marked Inside or Staff only.",
+  inIncident: "In an incident",
   sourcesTitle: "What this feed is listening to",
   feedTitle: "Activity",
   feedDown: "The security feed isn't answering",
@@ -169,7 +184,7 @@ export function kindsForView(view: SecurityView, includeLow: boolean): SecurityE
  * One glyph per row. Exhaustive over `SecurityEventKind` — a new kind fails
  * the type check here (the `never` below) instead of rendering no icon.
  */
-export function iconFor(e: SecurityEvent): LucideIcon {
+export function iconFor(e: Pick<SecurityEvent, "kind" | "labels">): LucideIcon {
   switch (e.kind) {
     case "detection":
     case "detection_ongoing":
@@ -203,14 +218,16 @@ export function iconFor(e: SecurityEvent): LucideIcon {
   }
 }
 
+type RowEvent = Pick<SecurityEvent, "kind" | "camera" | "summary" | "labels" | "score">;
+
 /** Camera health reads better with the household's name for the camera in it. */
-function titleFor(e: SecurityEvent, cameraLabel: (name: string) => string): string {
+function titleFor(e: RowEvent, cameraLabel: (name: string) => string): string {
   if (e.camera && e.kind === "camera_offline") return `${cameraLabel(e.camera)} stopped reporting`;
   if (e.camera && e.kind === "camera_online") return `${cameraLabel(e.camera)} is reporting again`;
   return e.summary;
 }
 
-function subFor(e: SecurityEvent, cameraLabel: (name: string) => string): string {
+function subFor(e: RowEvent, cameraLabel: (name: string) => string): string {
   const parts: string[] = [];
   if (e.kind === "threat") parts.push(e.labels[0] === "auth" ? "Sign-in" : "Network");
   if (e.kind === "mode_changed") parts.push(COPY.modeRowSub);
@@ -256,6 +273,20 @@ export interface SecurityFeedProps {
   now?: Date;
 }
 
+/**
+ * WARP-2978 — the line under the mode card: what alerts do when they can fire
+ * (`alertsReady`, from the incidents summary), what they still need when they
+ * can't — and nothing while that is unknown. It never guesses either way.
+ */
+export function AlertsLine({ alertsReady }: { alertsReady: boolean | null }) {
+  if (alertsReady === null) return null;
+  return (
+    <p className="security-note" data-alerts-ready={alertsReady} style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>
+      {alertsReady ? COPY.alertsLine : COPY.alertsNotReady}
+    </p>
+  );
+}
+
 export function SecurityFeed(props: SecurityFeedProps) {
   const now = props.now ?? new Date();
   const views: SecurityView[] = props.canSeeThreats
@@ -266,10 +297,6 @@ export function SecurityFeed(props: SecurityFeedProps) {
 
   return (
     <div className="security-feed" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <p className="security-note" style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>
-        {COPY.notAlarm}
-      </p>
-
       <SourcesCard sources={props.sources} error={props.healthError} now={now} />
 
       <section className="card" aria-labelledby="security-feed-title">
@@ -315,8 +342,8 @@ export function SecurityFeed(props: SecurityFeedProps) {
   );
 }
 
-/** "All areas / <area>…" — a native select, so it behaves the same on a phone. */
-function AreaSelect({
+/** "All areas / <area>…" — a native select, so it behaves the same on a phone. WARP-2978: the Incidents tab reuses it. */
+export function AreaSelect({
   areas,
   zone,
   onChange,
@@ -455,55 +482,9 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
   return (
     <>
       <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
-        {props.events.map((e) => {
-          const Icon = iconFor(e);
-          const low = e.kind === "detection_low";
-          return (
-            <li className="lrow" key={e.id} data-kind={e.kind} style={low ? { opacity: 0.7 } : undefined}>
-              <span className={`ri${e.severity === "info" ? "" : " brand"}`} aria-hidden>
-                <Icon size={16} />
-              </span>
-              <span className="rt">
-                {/* The shell's row title is one ellipsised line; a security
-                    event's title is the part that must never be cut off. */}
-                <span className="nm" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
-                  {e.camera ? (
-                    <Link href={`/cameras/${encodeURIComponent(e.camera)}`}>{titleFor(e, cameraLabel)}</Link>
-                  ) : (
-                    titleFor(e, cameraLabel)
-                  )}
-                </span>
-                <span
-                  className="sub"
-                  style={e.zones.length > 0 ? { whiteSpace: "normal", overflowWrap: "anywhere" } : undefined}
-                >
-                  {/* In the second line, not beside the title: on a phone a
-                      badge column squeezes the headline to a word per line.
-                      The areas lead it (WARP-2977 P2b): where comes first. */}
-                  {e.zones.map((z) => (
-                    <span key={z.id} className="badge muted" data-area={z.id} style={{ margin: "0 6px 2px 0" }}>
-                      {z.name}
-                    </span>
-                  ))}
-                  {e.severity === "alert" && (
-                    <span className="badge danger" style={{ marginRight: 6 }}>
-                      Serious
-                    </span>
-                  )}
-                  {e.kind === "detection_ongoing" && (
-                    <span className="badge info" data-ongoing style={{ marginRight: 6 }}>
-                      {COPY.stillInView}
-                    </span>
-                  )}
-                  <span>{subFor(e, cameraLabel)}</span>
-                </span>
-              </span>
-              <time className="rmeta mono" dateTime={e.startedAt} title={new Date(e.startedAt).toLocaleString()}>
-                {formatRelativeTime(e.startedAt, props.now)}
-              </time>
-            </li>
-          );
-        })}
+        {props.events.map((e) => (
+          <SecurityEventRow key={e.id} event={e} cameraLabel={cameraLabel} now={props.now} />
+        ))}
       </ul>
       {props.hasMore && (
         <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
@@ -514,6 +495,92 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * One feed row. WARP-2978 — exported so the incident page renders its events
+ * with the same row. `zones` and `incident` are the feed route's decorations:
+ * an incident's member events arrive without them (route 18 adds `alsoIn`
+ * instead), so both are optional here. `children` go under the row's lines.
+ */
+export function SecurityEventRow({
+  event: e,
+  cameraLabel,
+  now,
+  children,
+  testId,
+}: {
+  event: Omit<SecurityEvent, "zones" | "incident"> & Partial<Pick<SecurityEvent, "zones" | "incident">>;
+  cameraLabel: (name: string) => string;
+  now: Date;
+  children?: ReactNode;
+  testId?: string;
+}) {
+  const Icon = iconFor(e);
+  const low = e.kind === "detection_low";
+  const zones = e.zones ?? [];
+  return (
+    <li
+      className="lrow"
+      data-kind={e.kind}
+      data-testid={testId}
+      // With media under it, the icon and time line up with the title, not the row's middle.
+      style={{ ...(low ? { opacity: 0.7 } : {}), ...(children ? { alignItems: "flex-start" } : {}) }}
+    >
+      <span className={`ri${e.severity === "info" ? "" : " brand"}`} aria-hidden>
+        <Icon size={16} />
+      </span>
+      <span className="rt">
+        {/* The shell's row title is one ellipsised line; a security
+            event's title is the part that must never be cut off. */}
+        <span className="nm" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
+          {e.camera ? (
+            <Link href={`/cameras/${encodeURIComponent(e.camera)}`}>{titleFor(e, cameraLabel)}</Link>
+          ) : (
+            titleFor(e, cameraLabel)
+          )}
+        </span>
+        <span className="sub" style={zones.length > 0 ? { whiteSpace: "normal", overflowWrap: "anywhere" } : undefined}>
+          {/* In the second line, not beside the title: on a phone a
+              badge column squeezes the headline to a word per line.
+              The areas lead it (WARP-2977 P2b): where comes first. */}
+          {zones.map((z) => (
+            <span key={z.id} className="badge muted" data-area={z.id} style={{ margin: "0 6px 2px 0" }}>
+              {z.name}
+            </span>
+          ))}
+          {e.severity === "alert" && (
+            <span className="badge danger" style={{ marginRight: 6 }}>
+              Serious
+            </span>
+          )}
+          {e.kind === "detection_ongoing" && (
+            <span className="badge info" data-ongoing style={{ marginRight: 6 }}>
+              {COPY.stillInView}
+            </span>
+          )}
+          <span>{subFor(e, cameraLabel)}</span>
+        </span>
+        {/* WARP-2978 — the incident the engine grouped this row into (a row the viewer
+            can see implies its incident is visible to them). */}
+        {e.incident && (
+          <span className="sub">
+            <Link
+              href={`/security/incidents/${encodeURIComponent(e.incident.id)}`}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--brand)" }}
+            >
+              {COPY.inIncident}
+              <ArrowRight size={12} aria-hidden />
+            </Link>
+          </span>
+        )}
+        {children}
+      </span>
+      <time className="rmeta mono" dateTime={e.startedAt} title={new Date(e.startedAt).toLocaleString()}>
+        {formatRelativeTime(e.startedAt, now)}
+      </time>
+    </li>
   );
 }
 

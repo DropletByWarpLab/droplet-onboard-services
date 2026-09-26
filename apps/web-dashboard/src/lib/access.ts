@@ -308,7 +308,8 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
       {
         value: "manage",
         label: "Manage",
-        grants: "Areas, opening hours and what counts as expected",
+        // WARP-2978 — choosing who is told about alerts is manage (P3 route 22).
+        grants: "Areas, opening hours, who's told about alerts and what counts as expected",
         minTier: ADMIN,
         dropNoun: "Manage security",
         dropVerb: "manage security",

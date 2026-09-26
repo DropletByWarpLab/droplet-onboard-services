@@ -200,6 +200,10 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     expect(within(dialog).getByRole("link", { name: /network/i })).toHaveAttribute("href", "/network");
     expect(within(dialog).getByRole("link", { name: /remote access/i })).toHaveAttribute("href", "/remote-access");
     expect(within(dialog).getByRole("link", { name: /^settings$/i })).toHaveAttribute("href", "/settings");
+    // WARP-2978 — Security's own Settings child shows "Settings" but is named for
+    // whose settings they are, so the drawer never holds two links called Settings.
+    expect(within(dialog).getByRole("link", { name: "Security settings" })).toHaveAttribute("href", "/security/settings");
+    expect(within(dialog).getByText("Settings", { selector: "a[href='/security/settings']" })).toBeInTheDocument();
 
     // WARP-2967 — and NOT the sixteen destinations that moved behind Settings.
     // The drawer flattens the nav definition, so a tuck that only held on the

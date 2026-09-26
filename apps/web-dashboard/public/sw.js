@@ -21,6 +21,14 @@
  * (review F1; see handOff). If no page takes it within a minute, the row
  * stays unread and findable.
  *
+ * WARP-2978 (ADR-059 P3 D36, D37) — a Security alert (`priority: "alert"`,
+ * pushed with TTL 1 h and urgency high) stays in the tray until it is handled
+ * (`requireInteraction`). It has NO action buttons: one tap opens the incident
+ * page — with `?n=<notificationId>`, so the page's Acknowledge records which
+ * alert it came from — where a failed acknowledge can be seen. A background
+ * ack from the tray could not show a 409/503 and would skip the page's level
+ * check.
+ *
  * No caching. The dashboard's main bundle is served by Next.js with
  * its own cache rules; the SW exists purely to register a push
  * receiver. We claim() so the very first install starts handling
@@ -57,9 +65,9 @@ self.addEventListener("push", (event) => {
     // WARP-2804 — `notificationId` last for the same reason: only the box's
     // own id for this push is ever acked, never one smuggled in `data`.
     data: { ...(payload.data || {}), url: payload.url || "/cameras", notificationId: payload.notificationId },
-    // Keep the notification in the tray until dismissed — security
-    // events are easy to miss otherwise.
-    requireInteraction: false,
+    // WARP-2978 — only a Security alert stays until it is handled. The box's
+    // own `priority`, never one in `data`. No `actions` (D36).
+    requireInteraction: payload.priority === "alert",
   };
 
   event.waitUntil(self.registration.showNotification(title, options));
@@ -76,6 +84,14 @@ const HANDOFF_WAIT_MS = 60000;
  * signed-in dashboard page to take them: notificationId → release().
  */
 const pendingAcks = new Map();
+
+/** An incident page, the only link that takes `?n=`. */
+const INCIDENT_PATH_RE = /^\/security\/incidents\/[A-Za-z0-9-]+$/;
+
+/** WARP-2978 — the incident link with the notification it came from; anything else as sent. */
+function withNotificationParam(url, id) {
+  return id && INCIDENT_PATH_RE.test(url) ? url + "?n=" + encodeURIComponent(id) : url;
+}
 
 /** The tapped notification's row id, when it is one. */
 function ackIdOf(data) {
@@ -145,8 +161,8 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || "/cameras";
   const id = ackIdOf(event.notification.data);
+  const url = withNotificationParam((event.notification.data && event.notification.data.url) || "/cameras", id);
   // Started first, awaited last: the focus/navigation below never waits on it.
   const ack = id ? ackOpened(id) : Promise.resolve(true);
 
