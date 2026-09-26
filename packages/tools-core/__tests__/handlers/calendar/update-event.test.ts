@@ -1,115 +1,49 @@
-import { describe, it, expect, vi } from "vitest";
-import type { Mock } from "vitest";
+import { describe, it, expect } from "vitest";
 import updateEvent from "../../../src/handlers/calendar/update-event.js";
-import type { ToolContext } from "../../../src/types.js";
-
-function ctxWith(
-  findUnique: Mock,
-  update: Mock,
-  userId = "alice",
-): ToolContext {
-  return {
-    prisma: {
-      calendarEvent: { findUnique, update },
-    } as unknown as ToolContext["prisma"],
-    http: {} as ToolContext["http"],
-    matter: {} as ToolContext["matter"],
-    userId,
-    signal: new AbortController().signal,
-  };
-}
+import { json, orchestratorCtx } from "../../helpers/orchestrator-ctx.js";
 
 describe("update_event", () => {
-  it("rejects missing id", async () => {
-    const r = await updateEvent.handler({}, ctxWith(vi.fn(), vi.fn()));
+  it("rejects missing id without a hop", async () => {
+    const o = orchestratorCtx();
+    const r = await updateEvent.handler({}, o.ctx);
     expect(r.ok).toBe(false);
+    expect(o.patch).not.toHaveBeenCalled();
   });
 
-  it("404s when event not found", async () => {
-    const findUnique = vi.fn().mockResolvedValue(null);
-    const r = await updateEvent.handler({ id: "missing" }, ctxWith(findUnique, vi.fn()));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("NOT_FOUND");
+  it("rejects an unparseable time without a hop", async () => {
+    const o = orchestratorCtx();
+    const r = await updateEvent.handler({ id: "x", starts_at: "garbage" }, o.ctx);
+    expect(r).toMatchObject({ ok: false, error: { code: "INVALID_ARGS" } });
+    expect(o.patch).not.toHaveBeenCalled();
   });
 
-  it("forbids editing another user's event", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "bob", source: "local" });
-    const r = await updateEvent.handler({ id: "x" }, ctxWith(findUnique, vi.fn()));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("FORBIDDEN");
+  it("🔴 WARP-3101 patches through the orchestrator, only the fields passed, dates as ISO-8601", async () => {
+    const o = orchestratorCtx();
+    o.patch.mockResolvedValueOnce(json(200, { event: { id: "x" } }));
+    const r = await updateEvent.handler({ id: "x", title: "new", ends_at: "2026-04-28T11:30" }, o.ctx);
+    expect(r).toEqual({ ok: true, data: { id: "x", updated: true } });
+    expect(o.patch).toHaveBeenCalledTimes(1);
+    const [path, body] = o.patch.mock.calls[0]!;
+    expect(path).toBe("/api/calendar/events/x");
+    expect(body).toEqual({ title: "new", endsAt: new Date("2026-04-28T11:30").toISOString() });
   });
 
-  it("rejects edits to externally-synced events", async () => {
-    const findUnique = vi.fn().mockResolvedValue({ userId: "alice", source: "google" });
-    const r = await updateEvent.handler({ id: "x" }, ctxWith(findUnique, vi.fn()));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("EXTERNAL_SOURCE");
-  });
-
-  it("updates only provided fields", async () => {
-    const findUnique = vi.fn().mockResolvedValue({
-      userId: "alice",
-      source: "local",
-      startsAt: new Date("2026-04-28T10:00:00Z"),
-      endsAt: new Date("2026-04-28T11:00:00Z"),
-    });
-    const update = vi.fn().mockResolvedValue({ id: "x" });
-    await updateEvent.handler({ id: "x", title: "new" }, ctxWith(findUnique, update));
-    expect(update).toHaveBeenCalledWith({ where: { id: "x" }, data: { title: "new" } });
-  });
-
-  // Range validation parity with the legacy calendar.service patch path.
-  // Reviewer flagged that the bulk port silently dropped this check —
-  // a partial update could create a backwards or zero-length range.
-  it("rejects ends_at <= starts_at when both are patched", async () => {
-    const findUnique = vi.fn().mockResolvedValue({
-      userId: "alice",
-      source: "local",
-      startsAt: new Date("2026-04-28T10:00:00Z"),
-      endsAt: new Date("2026-04-28T11:00:00Z"),
-    });
-    const r = await updateEvent.handler(
-      {
-        id: "x",
-        starts_at: "2026-04-28T14:00:00Z",
-        ends_at: "2026-04-28T13:00:00Z",
-      },
-      ctxWith(findUnique, vi.fn()),
-    );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("INVALID_RANGE");
-  });
-
-  it("rejects partial patch that would invert the range against the existing endsAt", async () => {
-    // Existing event 10:00–11:00. Patch starts_at to 12:00 only — ends_at
-    // (11:00, unchanged) is now before the new starts_at.
-    const findUnique = vi.fn().mockResolvedValue({
-      userId: "alice",
-      source: "local",
-      startsAt: new Date("2026-04-28T10:00:00Z"),
-      endsAt: new Date("2026-04-28T11:00:00Z"),
-    });
-    const r = await updateEvent.handler(
-      { id: "x", starts_at: "2026-04-28T12:00:00Z" },
-      ctxWith(findUnique, vi.fn()),
-    );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("INVALID_RANGE");
-  });
-
-  it("accepts a partial patch that keeps the range valid", async () => {
-    const findUnique = vi.fn().mockResolvedValue({
-      userId: "alice",
-      source: "local",
-      startsAt: new Date("2026-04-28T10:00:00Z"),
-      endsAt: new Date("2026-04-28T11:00:00Z"),
-    });
-    const update = vi.fn().mockResolvedValue({ id: "x" });
-    const r = await updateEvent.handler(
-      { id: "x", ends_at: "2026-04-28T11:30:00Z" },
-      ctxWith(findUnique, update),
-    );
-    expect(r.ok).toBe(true);
-    expect(update).toHaveBeenCalled();
+  // The route now makes the checks this handler used to make itself: whose
+  // event it is, whether it is local, and the range after the patch.
+  it.each([
+    [404, { error: "event_not_found" }, "NOT_FOUND"],
+    // The Calendar module gate: switched off is not "no such event".
+    [404, { error: "module_disabled", module: "calendar" }, "MODULE_DISABLED"],
+    [403, { error: "forbidden" }, "FORBIDDEN"],
+    [403, { error: "forbidden_tool_for_role", tool: "update_event" }, "FORBIDDEN"],
+    [409, { error: "cannot modify externally-synced event" }, "EXTERNAL_SOURCE"],
+    [400, { error: "endsAt must be after startsAt" }, "INVALID_RANGE"],
+    [400, { error: "invalid_request", details: { fieldErrors: { title: ["too small"] } } }, "INVALID_ARGS"],
+    [500, {}, "UPDATE_FAILED"],
+  ])("%i %j → %s", async (status, body, code) => {
+    const o = orchestratorCtx();
+    o.patch.mockResolvedValueOnce(json(status, body));
+    const r = await updateEvent.handler({ id: "x", title: "t" }, o.ctx);
+    expect(r).toMatchObject({ ok: false, error: { code } });
   });
 });

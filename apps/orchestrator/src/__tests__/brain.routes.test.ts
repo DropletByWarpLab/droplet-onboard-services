@@ -26,11 +26,13 @@ vi.mock("../middleware/space", () => ({
 
 import { createBrainRouter } from "../routes/brain.js";
 import type { AuthUser } from "../middleware/auth.js";
+import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
 const owner: AuthUser = { id: "u-owner", username: "stefan", displayName: "s", role: "owner" };
 const admin: AuthUser = { id: "u-admin", username: "romain", displayName: "r", role: "admin" };
 const family: AuthUser = { id: "u-family", username: "kid", displayName: "k", role: "family" };
 const guest: AuthUser = { id: "u-guest", username: "g", displayName: "g", role: "guest" };
+const STEFAN: DirectoryUser = { id: "u-owner", username: "stefan", nextcloudUsername: "stefan", role: "owner" };
 
 function db(over: Record<string, unknown> = {}) {
   return {
@@ -52,13 +54,9 @@ function db(over: Record<string, unknown> = {}) {
       findUnique: vi.fn(async () => null),
       upsert: vi.fn(async () => ({})),
     },
-    // The directory the mcp principal's asserted username is resolved against
-    // (WARP-2810). `stefan` is the owner; anyone else does not exist.
-    user: {
-      findUnique: vi.fn(async ({ where }: { where: { username: string } }) =>
-        where.username === "stefan" ? { id: "u-owner", role: "owner" } : null,
-      ),
-    },
+    // The directory the mcp principal's asserted user is resolved against
+    // (WARP-2810, WARP-3098). `stefan` is the owner; anyone else does not exist.
+    user: userDirectory([STEFAN]),
     ...over,
   } as never;
 }
@@ -276,6 +274,49 @@ describe("brain routes — the acting human behind the mcp principal (WARP-2810)
       prisma as unknown as { brainFinding: { findMany: ReturnType<typeof vi.fn> } }
     ).brainFinding.findMany.mock.calls[0]![0]!.where as { OR: Record<string, unknown>[] };
     expect(where.OR).toContainEqual({ scope: "personal", ownerId: "u-owner" });
+  });
+});
+
+// WARP-3098 — the header is the mcp-server's `ctx.userId`: `User.username` on
+// stdio, `User.id` over HTTP (the shipped container). Resolved by
+// resolveAssertedUser: one active person, or 403.
+describe("brain routes — the acting person is named by username OR User.id (WARP-3098)", () => {
+  const findingsWhere = (prisma: unknown) =>
+    (prisma as { brainFinding: { findMany: ReturnType<typeof vi.fn> } }).brainFinding.findMany.mock.calls[0]![0]!
+      .where as { OR: Record<string, unknown>[] };
+
+  it("a caller named by User.id (the HTTP transport) reads as that person", async () => {
+    const prisma = db();
+    const res = await request(buildApp(mcp, prisma)).get("/api/brain/findings").set("X-Nextcloud-User", "u-owner");
+    expect(res.status).toBe(200);
+    expect(findingsWhere(prisma).OR).toContainEqual({ scope: "personal", ownerId: "u-owner" });
+  });
+
+  it("an SSO row (nextcloudUsername NULL) still resolves by username", async () => {
+    const maria: DirectoryUser = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "admin" };
+    const prisma = db({ user: userDirectory([STEFAN, maria]) });
+    const res = await request(buildApp(mcp, prisma)).get("/api/brain/findings").set("X-Nextcloud-User", "maria");
+    expect(res.status).toBe(200);
+    expect(findingsWhere(prisma).OR).toContainEqual({ scope: "personal", ownerId: "u-maria" });
+  });
+
+  it("a value naming two people is refused — 403, the brain is never read", async () => {
+    // One person's username is another's id: the value cannot say which of
+    // them is asking.
+    const lookalike: DirectoryUser = { id: "u-other", username: "u-owner", nextcloudUsername: null, role: "admin" };
+    const prisma = db({ user: userDirectory([STEFAN, lookalike]) });
+    const res = await request(buildApp(mcp, prisma)).get("/api/brain/findings").set("X-Nextcloud-User", "u-owner");
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("actor_unresolved");
+    expect(
+      (prisma as unknown as { brainFinding: { findMany: ReturnType<typeof vi.fn> } }).brainFinding.findMany,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("a deactivated person is refused", async () => {
+    const prisma = db({ user: userDirectory([{ ...STEFAN, directoryStatus: "DEACTIVATED" }]) });
+    const res = await request(buildApp(mcp, prisma)).get("/api/brain/findings").set("X-Nextcloud-User", "stefan");
+    expect(res.status).toBe(403);
   });
 });
 

@@ -13,6 +13,7 @@ import { CodeBlock } from "@/components/CodeBlock";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ReasoningDisclosure } from "@/components/chat/ReasoningDisclosure";
+import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { isLocalProvider } from "@/lib/provider";
 
 // Module-level constants so ReactMarkdown receives stable references across
@@ -22,6 +23,8 @@ import { isLocalProvider } from "@/lib/provider";
 const REMARK_PLUGINS = [remarkGfm];
 const REHYPE_PLUGINS = [rehypeHighlight];
 const MARKDOWN_COMPONENTS = {
+  // WARP-3193 SEC-INJ-1: no remote images; hardened links.
+  ...SAFE_MARKDOWN_COMPONENTS,
   // WARP-295 parity: keep wide GFM tables from blowing out the answer card
   // on narrow viewports.
   table: ({ node, ...props }: any) => (

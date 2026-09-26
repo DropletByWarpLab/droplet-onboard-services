@@ -8,6 +8,13 @@
  * 2.98:1 — a WCAG 1.4.3 failure on the primary button of every converted
  * shell page. The fix is a themed `--on-brand` token in `indigo-tokens.css`.
  *
+ * The light pair was never AA either: white on --brand #6366f1 is 4.47:1,
+ * under 4.5:1 for the 13.5px label. `.btn.primary` — the most-used primary
+ * button in the dashboard — therefore fills with `--brand-fill` (indigo-600
+ * #4f46e5 in light, 6.29:1; the unchanged #818cf8 in dark, 5.64:1) and
+ * hovers to `--brand-deep` in light (indigo-700 #4338ca, 7.90:1) and
+ * `--brand-soft` in dark (8.44:1), so every state clears AA text.
+ *
  * This guard does not pin the hex values by eye: it parses them out of the
  * CSS and recomputes the WCAG 2.x relative-luminance ratio, so a future
  * ramp tweak that quietly breaks contrast fails here rather than in review.
@@ -93,14 +100,27 @@ describe("--on-brand token (WARP-1358)", () => {
     ["light", AA_TEXT],
     ["dark", AA_TEXT],
   ] as const)(
-    "%s: --on-brand on --brand-hover clears AA for the primary button label",
+    "%s: --on-brand on the primary button's rest fill (--brand-fill) clears AA",
     (theme, floor) => {
-      // The hover fill differs per theme: light darkens to --brand-hover,
-      // dark brightens to --brand-soft (see the scoped rule in
-      // droplet-shell.css — indigo-500 pairs with NEITHER ink at 4.5:1).
+      // light #ffffff on #4f46e5 → 6.29:1; dark #1d1d1f on #818cf8 → 5.64:1
+      expect(
+        contrast(token("--on-brand", theme), token("--brand-fill", theme)),
+      ).toBeGreaterThanOrEqual(floor);
+    },
+  );
+
+  it.each([
+    ["light", AA_TEXT],
+    ["dark", AA_TEXT],
+  ] as const)(
+    "%s: --on-brand on the primary button's hover fill clears AA",
+    (theme, floor) => {
+      // The hover fill differs per theme: light darkens one rung past the
+      // rest fill to --brand-deep (7.90:1), dark brightens to --brand-soft
+      // (8.44:1) — see the scoped rules in droplet-shell.css, pinned below.
       const fill =
         theme === "light"
-          ? token("--brand-hover", "light")
+          ? token("--brand-deep", "light")
           : token("--brand-soft", "dark");
       expect(contrast(token("--on-brand", theme), fill)).toBeGreaterThanOrEqual(
         floor,
@@ -115,17 +135,48 @@ describe("--on-brand token (WARP-1358)", () => {
     expect(
       contrast(token("--on-brand", "dark"), brand),
     ).toBeGreaterThanOrEqual(AA_TEXT);
+    // Dark keeps --brand as the button fill: that pair already passes.
+    expect(token("--brand-fill", "dark")).toBe(brand);
   });
 
-  it("light: --on-brand on --brand clears the non-text floor", () => {
-    // Light --brand is indigo-500 and white ink measures 4.47:1 — a hair
-    // under AA text. That is inherited from the shared brand ramp
-    // (globals.css pairs --color-accent #6366f1 with --color-on-accent
-    // #ffffff for exactly the same number), NOT introduced by the token, so
-    // it is pinned at the non-text floor here and left to the canon repo.
+  it("light: --brand itself is NOT a text-safe fill — why --brand-fill exists", () => {
+    // White on indigo-500 is 4.47:1, a hair under AA text, so the primary
+    // button cannot simply paint --brand. Pinned so the record of WHY the
+    // two tokens differ survives a future "they should be the same" cleanup.
+    const ratio = contrast(token("--on-brand", "light"), token("--brand", "light"));
+    expect(ratio).toBeLessThan(AA_TEXT);
+    expect(ratio).toBeGreaterThan(4.4);
+    expect(token("--brand-fill", "light")).not.toBe(token("--brand", "light"));
+  });
+
+  it("light: --on-brand on --brand clears the non-text floor (the .sw.on knob)", () => {
+    // The switch still fills its track with --brand and draws the knob in
+    // --on-brand — a graphic, not text, so WCAG 1.4.11's 3:1 is its floor.
     expect(
       contrast(token("--on-brand", "light"), token("--brand", "light")),
     ).toBeGreaterThanOrEqual(AA_NON_TEXT);
+  });
+});
+
+describe(".btn.primary paints the text-safe fills", () => {
+  const rule = (re: RegExp): string => {
+    const m = shellCss.match(re);
+    expect(m, `${re} must match a rule in droplet-shell.css`).not.toBeNull();
+    return m![1];
+  };
+
+  it("rest fills with --brand-fill, not --brand", () => {
+    const body = rule(/^\.droplet-shell \.btn\.primary\s*\{([^}]*)\}/m);
+    expect(body).toMatch(/background:\s*var\(--brand-fill\)/);
+    expect(body).toMatch(/border-color:\s*var\(--brand-fill\)/);
+    expect(body).not.toMatch(/var\(--brand\)/);
+  });
+
+  it("light hover fills with --brand-deep, one rung below the rest fill", () => {
+    const body = rule(/^\.droplet-shell \.btn\.primary:hover\s*\{([^}]*)\}/m);
+    expect(body).toMatch(/background:\s*var\(--brand-deep\)/);
+    expect(body).toMatch(/border-color:\s*var\(--brand-deep\)/);
+    expect(token("--brand-deep", "light")).not.toBe(token("--brand-fill", "light"));
   });
 });
 
@@ -160,7 +211,7 @@ describe("no hardcoded white on a --brand fill", () => {
       for (const [, selector, body] of css.matchAll(
         /([^{}]*\.droplet-shell[^{}]*)\{([^}]*)\}/g,
       )) {
-        if (!/background:\s*var\(--brand\)/.test(body)) continue;
+        if (!/background:\s*var\(--brand(?:-fill)?\)/.test(body)) continue;
         expect(
           body,
           `${file}: \`${selector.trim()}\` fills with --brand — use var(--on-brand), not literal white`,

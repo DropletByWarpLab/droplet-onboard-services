@@ -155,6 +155,10 @@ describe("admin-device-identity routes", () => {
       .calls[0][0];
     expect(typeof arg).toBe("string");
     expect(arg.length).toBeGreaterThan(0);
+    // WARP-3193 SEC-DATA-13: CSPRNG-backed (randomUUID), not Math.random().
+    expect(arg).toMatch(
+      /^op-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 
   it("POST /reseal returns 503 when the sidecar gRPC client throws", async () => {

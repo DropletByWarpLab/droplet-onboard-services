@@ -30,6 +30,22 @@ import {
   requireRoleOrMcpService,
   requireRoleOrService,
 } from "../middleware/auth.js";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("network-wifi-routes");
+
+/**
+ * The router's Wi-Fi settings, or null when the router can't be read — the
+ * callers still answer from the AP via getCurrentWifi. WARP-3193 QUAL-15: the
+ * fallback used to be a bare `.catch(() => null)`, so a router fault left no
+ * trace; it is logged before degrading.
+ */
+function wifiSettingsOrNull(route: string) {
+  return getWifiSettings().catch((err: unknown) => {
+    logger.warn({ err, route }, "router Wi-Fi read failed — falling back to the access point");
+    return null;
+  });
+}
 
 export interface WifiDeps {
   prisma: PrismaClient;
@@ -61,7 +77,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     try {
       // A router we can't reach must not fail the card — getCurrentWifi still
       // answers from the AP, and reports honestly when nothing can be read.
-      const wifi = await getWifiSettings().catch(() => null);
+      const wifi = await wifiSettingsOrNull("/network/wifi/current");
       res.json(await getCurrentWifi(prisma, wifi));
     } catch (err) {
       next(err);
@@ -91,7 +107,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     requireRoleOrService("_service:display", "owner", "admin"),
     async (_req, res, next) => {
       try {
-        const wifi = await getWifiSettings().catch(() => null);
+        const wifi = await wifiSettingsOrNull("/network/wifi/join-code");
         const current = await getCurrentWifi(prisma, wifi);
         res.json({
           ssid: current.ssid,
@@ -151,7 +167,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       // unaffected.
       const current = await getCurrentWifi(
         prisma,
-        await getWifiSettings().catch(() => null),
+        await wifiSettingsOrNull("/network/wifi/ssid"),
       );
       if (current.source === "ap") {
         return res.status(409).json({

@@ -187,7 +187,9 @@ done
 # MT7922 swap (see PR feat/openwrt-mt7922-support); keeping their uci-set
 # calls would be silent no-ops and confuse future readers. radio3 is the
 # MT7922 5 GHz primary AP, radio3_2g + radio4 stay disabled by default
-# per the wireless config file's own settings.
+# per the wireless config file's own settings. The default_radio3 AP iface
+# itself ships disabled with a blank key (WARP-3193 SEC-DATA-14) until the
+# operator sets a per-box PSK — see /etc/config/wireless.
 uci set wireless.radio3.disabled='0'
 uci commit wireless
 
