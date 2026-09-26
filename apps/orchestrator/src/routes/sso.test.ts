@@ -72,10 +72,19 @@ vi.mock("../services/sso-oidc.service.js", async () => {
 
 const createLoginState = vi.fn();
 const consumeLoginState = vi.fn();
+// The callback reads the row's flowKind before its cookie check (native
+// handoff); these browser-flow tests see no row there, so the cookie check
+// applies exactly as before. The native leg is covered end to end in
+// sso.native-handoff.test.ts.
+const peekLoginState = vi.fn();
 vi.mock("../services/sso-login-state.service.js", () => ({
   SSO_LOGIN_STATE_TTL_SECONDS: 600,
+  SSO_NATIVE_HANDOFF_TTL_SECONDS: 60,
   createLoginState: (...a: unknown[]) => createLoginState(...a),
   consumeLoginState: (...a: unknown[]) => consumeLoginState(...a),
+  peekLoginState: (...a: unknown[]) => peekLoginState(...a),
+  setHandoff: vi.fn(),
+  consumeHandoff: vi.fn(),
 }));
 
 vi.mock("../services/activity.singleton.js", () => ({
@@ -230,6 +239,7 @@ beforeEach(() => {
   // idiom); no single test comes near the budget.
   authRateLimit.resetKey("127.0.0.1");
   vi.clearAllMocks();
+  peekLoginState.mockResolvedValue(null);
   getOidcProviderConfig.mockReturnValue({
     provider: "google",
     issuer: "https://accounts.google.com",

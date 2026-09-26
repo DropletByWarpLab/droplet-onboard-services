@@ -6,10 +6,11 @@ import type { IncomingHttpHeaders } from "node:http";
  *
  * `?return=body` exists for NATIVE clients only: droplet-android (OkHttp) and
  * droplet-ios (URLSession) can't reliably read httpOnly Set-Cookie headers, so
- * ADR-008 §3 lets them opt into receiving the JWT pair in the JSON body.
- * droplet-windows never uses it — the Tauri shell navigates its WebView2 to
- * the box's own dashboard, which runs the ordinary cookie login (see the
- * droplet-windows README "Connect" flow).
+ * ADR-008 §3 lets them opt into receiving the JWT pair in the JSON body. The
+ * native Windows client (C#/WinUI 3, HttpClient) uses it too, for password
+ * and passkey sign-in, and the native SSO handoff's `/sso/oidc/native/token`
+ * applies the same gate. (The earlier Tauri shell ran the dashboard's cookie
+ * login inside WebView2 and never used it.)
  *
  * On a BROWSER, tokens in the response body defeat the httpOnly-cookie
  * posture: any XSS payload that can drive a fetch could read them, where the
@@ -28,9 +29,9 @@ import type { IncomingHttpHeaders } from "node:http";
  *   • `Referer` is a belt-and-braces third signal (sent by default unless a
  *     restrictive Referrer-Policy suppresses it).
  *
- * The native HTTP stacks the shipped clients use (OkHttp, URLSession) send
- * NONE of these unless the app author explicitly adds them, so the gate is
- * invisible to every legitimate `?return=body` caller. This is the
+ * The native HTTP stacks the clients use (OkHttp, URLSession, .NET
+ * HttpClient) send NONE of these unless the app author explicitly adds them,
+ * so the gate is invisible to every legitimate `?return=body` caller. This is the
  * least-breaking gate that genuinely blocks browsers: an in-browser call
  * cannot remove the forbidden headers, and a native client would have to go
  * out of its way to trip it.

@@ -1,0 +1,687 @@
+/**
+ * Native SSO handoff (RFC 8252 loopback / private-use scheme + PKCE) for the
+ * native Windows client, which has no WebView to carry the browser flow's
+ * state cookie.
+ *
+ *   POST /api/sso/oidc/native/begin   → 200 { authorizeUrl } (no cookie, no 302)
+ *   GET  /api/sso/oidc/callback       → NATIVE row: no cookie check, no session
+ *                                        cookies; 302 to the app's redirect
+ *                                        with a one-time handoff code
+ *   POST /api/sso/oidc/native/token   → { user, accessToken, refreshToken,
+ *                                        accessTokenExpiresAt, refreshTokenExpiresAt }
+ *
+ * The box stays the confidential OIDC client and the IdP still redirects to
+ * the box's own callback (ADR-016) — the handoff is a second, box-local leg.
+ *
+ * Unlike sso.test.ts (which stubs the login-state service), this file drives
+ * the REAL sso-login-state.service over an in-memory `ssoLoginState` delegate,
+ * so the single-use claims, the handoff expiry and the replay refusals run end
+ * to end. The IdP boundary (sso-oidc.service) and the Redis-backed session
+ * store are mocked.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import request from "supertest";
+import express from "express";
+import cookieParser from "cookie-parser";
+import { createHash, randomBytes } from "node:crypto";
+
+vi.mock("../config.js", () => ({
+  config: {
+    JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    REDIS_URL: "redis://localhost:6379",
+    ROUTING_MODE: "disabled",
+    WIREGUARD_ENDPOINT_HOST: "",
+    corsAllowedOrigins: ["https://droplet-ai.local"],
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
+  },
+}));
+
+const buildAuthorizeRequest = vi.fn();
+const exchangeCodeAndValidate = vi.fn();
+const getOidcProviderConfig = vi.fn();
+vi.mock("../services/sso-oidc.service.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/sso-oidc.service.js")>(
+    "../services/sso-oidc.service.js",
+  );
+  return {
+    ...actual,
+    buildAuthorizeRequest: (...a: unknown[]) => buildAuthorizeRequest(...a),
+    exchangeCodeAndValidate: (...a: unknown[]) => exchangeCodeAndValidate(...a),
+    getOidcProviderConfig: (...a: unknown[]) => getOidcProviderConfig(...a),
+  };
+});
+
+const createSession = vi.fn(async (_u: { id: string; role: string }) => ({
+  sid: "sid-native-0001",
+  evictedSids: [] as string[],
+}));
+vi.mock("../services/session.service.js", () => ({
+  createSession: (...a: unknown[]) => createSession(...(a as [{ id: string; role: string }])),
+}));
+
+const registerRefreshSession = vi.fn().mockResolvedValue(undefined);
+vi.mock("../services/jwt.service.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/jwt.service.js")>(
+    "../services/jwt.service.js",
+  );
+  return {
+    ...actual,
+    registerRefreshSession: (...a: unknown[]) => registerRefreshSession(...a),
+  };
+});
+
+const recordActivity = vi.fn().mockResolvedValue(undefined);
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: (...a: unknown[]) => recordActivity(...a),
+}));
+
+import { createSsoRouter } from "./sso.js";
+import { authRateLimit } from "../middleware/rate-limit.js";
+import {
+  verifyAccessToken,
+  ACCESS_TOKEN_TTL_SECONDS,
+  REFRESH_TOKEN_TTL_SECONDS,
+} from "../services/jwt.service.js";
+
+// ── In-memory Prisma ────────────────────────────────────────────────────────
+
+type Row = Record<string, any>;
+
+/** Evaluates the `where` shapes the login-state service emits. */
+function rowMatches(row: Row, where: Row): boolean {
+  for (const [key, cond] of Object.entries(where)) {
+    if (key === "OR") {
+      if (!(cond as Row[]).some((c) => rowMatches(row, c))) return false;
+    } else if (key === "AND") {
+      if (!(cond as Row[]).every((c) => rowMatches(row, c))) return false;
+    } else if (cond === null) {
+      if (row[key] !== null) return false;
+    } else if (typeof cond === "object" && !(cond instanceof Date)) {
+      const v = row[key];
+      if ("gt" in cond && !(v !== null && v > cond.gt)) return false;
+      if ("lt" in cond && !(v !== null && v < cond.lt)) return false;
+    } else if (row[key] !== cond) {
+      return false;
+    }
+  }
+  return true;
+}
+
+interface UserRow {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string | null;
+  role: string;
+  accessRoleId: string | null;
+  mustChangePassword: boolean;
+  directoryStatus: "ACTIVE" | "DEACTIVATED";
+}
+
+const stefan: UserRow = {
+  id: "u-uuid-stefan-7777",
+  username: "stefan",
+  displayName: "Stefan Cruceru",
+  email: "stefan@warp.test",
+  role: "owner",
+  accessRoleId: null,
+  mustChangePassword: false,
+  directoryStatus: "ACTIVE",
+};
+
+function createPrismaMock(users: UserRow[] = [{ ...stefan }]) {
+  const states: Row[] = [];
+  const identities: Row[] = [
+    { id: "i-1", userId: stefan.id, provider: "google", subject: "google-sub-1", email: stefan.email },
+  ];
+  const self: any = { _states: states, _users: users };
+  self.ssoLoginState = {
+    create: vi.fn(async ({ data }: { data: Row }) => {
+      const row: Row = {
+        id: `sls-${states.length + 1}`,
+        returnTo: "/",
+        consumedAt: null,
+        createdAt: new Date(),
+        flowKind: "BROWSER",
+        nativeRedirectUri: null,
+        nativeCodeChallenge: null,
+        handoffCodeHash: null,
+        handoffUserId: null,
+        handoffExpiresAt: null,
+        handoffConsumedAt: null,
+        ...data,
+      };
+      states.push(row);
+      return { ...row };
+    }),
+    findUnique: vi.fn(async ({ where }: { where: Row }) => {
+      const hit = states.find((r) =>
+        where.state !== undefined ? r.state === where.state : r.handoffCodeHash === where.handoffCodeHash,
+      );
+      return hit ? { ...hit } : null;
+    }),
+    updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => {
+      let count = 0;
+      for (const r of states) {
+        if (!rowMatches(r, where)) continue;
+        Object.assign(r, data);
+        count++;
+      }
+      return { count };
+    }),
+  };
+  self.user = {
+    findUnique: vi.fn(async ({ where }: { where: Row }) =>
+      where.id !== undefined ? (users.find((u) => u.id === where.id) ?? null) : null,
+    ),
+    findFirst: vi.fn(async () => null),
+    create: vi.fn(),
+  };
+  self.ssoIdentity = {
+    findUnique: vi.fn(async ({ where }: { where: Row }) => {
+      const ps = where.provider_subject;
+      const found = identities.find((i) => i.provider === ps.provider && i.subject === ps.subject);
+      return found ? { ...found, user: users.find((u) => u.id === found.userId) ?? null } : null;
+    }),
+    create: vi.fn(),
+  };
+  return self;
+}
+
+function buildApp(prisma: unknown) {
+  const app = express();
+  app.use(express.json());
+  app.use(cookieParser());
+  app.use("/api", createSsoRouter(prisma as never));
+  return app;
+}
+
+// ── PKCE + flow helpers ─────────────────────────────────────────────────────
+
+function pkcePair() {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+const LOOPBACK = "http://127.0.0.1:49152/sso/7f3a9c";
+
+function setCookies(res: request.Response): string[] {
+  const raw = res.headers["set-cookie"];
+  return Array.isArray(raw) ? raw : raw ? [raw] : [];
+}
+
+/** No droplet_session / droplet_refresh is SET (a clear of the CSRF cookie is fine). */
+function expectNoSessionCookies(res: request.Response): void {
+  for (const c of setCookies(res)) {
+    expect(c.startsWith("droplet_session=") || c.startsWith("droplet_refresh=")).toBe(false);
+  }
+}
+
+async function begin(app: express.Express, over: Record<string, unknown> = {}) {
+  return request(app)
+    .post("/api/sso/oidc/native/begin")
+    .send({
+      provider: "google",
+      redirectUri: LOOPBACK,
+      codeChallenge: pkcePair().challenge,
+      codeChallengeMethod: "S256",
+      ...over,
+    });
+}
+
+/** begin → IdP (mocked) → callback. Returns the handoff code the app receives. */
+async function completeNativeCallback(
+  app: express.Express,
+  redirectUri = LOOPBACK,
+): Promise<{ code: string; verifier: string; location: string; res: request.Response }> {
+  const { verifier, challenge } = pkcePair();
+  const b = await begin(app, { redirectUri, codeChallenge: challenge });
+  expect(b.status).toBe(200);
+  const res = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-nat");
+  expect(res.status).toBe(302);
+  const location = res.headers.location as string;
+  const code = new URL(location).searchParams.get("code") ?? "";
+  return { code, verifier, location, res };
+}
+
+beforeEach(() => {
+  authRateLimit.resetKey("127.0.0.1");
+  vi.clearAllMocks();
+  getOidcProviderConfig.mockReturnValue({
+    provider: "google",
+    issuer: "https://accounts.google.com",
+    clientId: "cid",
+    clientSecret: "sec",
+    redirectUri: "https://droplet-ai.local/api/sso/oidc/callback",
+  });
+  buildAuthorizeRequest.mockResolvedValue({
+    authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=st-nat",
+    state: "st-nat",
+    nonce: "no-nat",
+    codeVerifier: "box-verifier-nat",
+  });
+  exchangeCodeAndValidate.mockResolvedValue({
+    sub: "google-sub-1",
+    email: "stefan@warp.test",
+    emailVerified: true,
+    name: "Stefan Cruceru",
+  });
+});
+
+// ── begin ───────────────────────────────────────────────────────────────────
+
+describe("POST /api/sso/oidc/native/begin", () => {
+  it("returns 200 { authorizeUrl } — no cookie, no redirect — and persists a NATIVE row", async () => {
+    const prisma = createPrismaMock();
+    const { challenge } = pkcePair();
+    const res = await begin(buildApp(prisma), { codeChallenge: challenge });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=st-nat",
+    });
+    expect(res.headers.location).toBeUndefined();
+    expect(setCookies(res)).toEqual([]);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    // The IdP authorize request is the SAME one the browser flow builds: the
+    // IdP-registered redirect URI (the box callback) is untouched (ADR-016).
+    expect(buildAuthorizeRequest).toHaveBeenCalledWith("google");
+
+    expect(prisma._states).toHaveLength(1);
+    const row = prisma._states[0];
+    expect(row.flowKind).toBe("NATIVE");
+    expect(row.nativeRedirectUri).toBe(LOOPBACK);
+    expect(row.nativeCodeChallenge).toBe(challenge);
+    // The box's own IdP-side PKCE verifier + nonce stay server-side.
+    expect(row.codeVerifier).toBe("box-verifier-nat");
+    expect(row.nonce).toBe("no-nat");
+  });
+
+  it.each([
+    ["IPv4 loopback, lowest unprivileged port", "http://127.0.0.1:1024/"],
+    ["IPv4 loopback, highest port, nested path", "http://127.0.0.1:65535/sso/a/b"],
+    ["IPv6 loopback", "http://[::1]:49152/sso/cb"],
+    ["private-use scheme", "droplet://sso/callback"],
+  ])("accepts %s", async (_label, redirectUri) => {
+    const prisma = createPrismaMock();
+    const res = await begin(buildApp(prisma), { redirectUri });
+    expect(res.status).toBe(200);
+    expect(prisma._states[0].nativeRedirectUri).toBe(redirectUri);
+  });
+
+  it.each([
+    ["the name localhost (RFC 8252 §8.3)", "http://localhost:49152/sso/cb"],
+    ["https loopback", "https://127.0.0.1:49152/sso/cb"],
+    ["no port", "http://127.0.0.1/sso/cb"],
+    ["explicit default port", "http://127.0.0.1:80/sso/cb"],
+    ["privileged port", "http://127.0.0.1:1023/sso/cb"],
+    ["port out of range", "http://127.0.0.1:65536/sso/cb"],
+    ["zero-padded port", "http://127.0.0.1:049152/sso/cb"],
+    ["no path", "http://127.0.0.1:49152"],
+    ["a query", "http://127.0.0.1:49152/sso/cb?x=1"],
+    ["an empty query", "http://127.0.0.1:49152/sso/cb?"],
+    ["a fragment", "http://127.0.0.1:49152/sso/cb#f"],
+    ["userinfo (user:pass)", "http://user:pw@127.0.0.1:49152/sso/cb"],
+    ["userinfo (user)", "http://user@127.0.0.1:49152/sso/cb"],
+    ["another loopback address", "http://127.0.0.2:49152/sso/cb"],
+    ["shorthand IPv4", "http://127.1:49152/sso/cb"],
+    ["non-canonical IPv6", "http://[0:0:0:0:0:0:0:1]:49152/sso/cb"],
+    ["IPv6 without a port", "http://[::1]/sso/cb"],
+    ["a LAN address", "http://192.168.1.5:49152/sso/cb"],
+    ["a public host", "http://evil.example:49152/sso/cb"],
+    ["a backslash authority trick", "http://127.0.0.1:49152\\@evil.example/"],
+    ["upper-case scheme", "HTTP://127.0.0.1:49152/sso/cb"],
+    ["a longer custom-scheme path", "droplet://sso/callback/extra"],
+    ["a custom-scheme query", "droplet://sso/callback?x=1"],
+    ["another custom-scheme host", "droplet://pair"],
+    ["upper-case custom scheme", "DROPLET://sso/callback"],
+    ["javascript:", "javascript:alert(1)"],
+    ["an empty string", ""],
+  ])("rejects a redirect URI with %s → 400 INVALID_REDIRECT_URI", async (_label, redirectUri) => {
+    const prisma = createPrismaMock();
+    const res = await begin(buildApp(prisma), { redirectUri });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_REDIRECT_URI");
+    expect(buildAuthorizeRequest).not.toHaveBeenCalled();
+    expect(prisma._states).toHaveLength(0);
+  });
+
+  it.each([
+    ["42 chars", "a".repeat(42)],
+    ["44 chars", "a".repeat(44)],
+    ["standard-base64 alphabet", `${"a".repeat(42)}+`],
+    ["padding", `${"a".repeat(42)}=`],
+  ])("rejects a code challenge that is not 43-char base64url (%s)", async (_label, codeChallenge) => {
+    const prisma = createPrismaMock();
+    const res = await begin(buildApp(prisma), { codeChallenge });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_CODE_CHALLENGE");
+    expect(prisma._states).toHaveLength(0);
+  });
+
+  it("rejects the plain PKCE method", async () => {
+    const res = await begin(buildApp(createPrismaMock()), { codeChallengeMethod: "plain" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_CODE_CHALLENGE");
+  });
+
+  it.each([
+    ["no body", {}],
+    ["a missing redirectUri", { provider: "google", codeChallenge: "a".repeat(43), codeChallengeMethod: "S256" }],
+    ["a non-string field", { provider: "google", redirectUri: 49152, codeChallenge: "a".repeat(43), codeChallengeMethod: "S256" }],
+  ])("rejects %s → 400 INVALID_REQUEST", async (_label, body) => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma)).post("/api/sso/oidc/native/begin").send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_REQUEST");
+    expect(buildAuthorizeRequest).not.toHaveBeenCalled();
+    expect(prisma._states).toHaveLength(0);
+  });
+
+  it("rejects an unknown provider", async () => {
+    const res = await begin(buildApp(createPrismaMock()), { provider: "workday" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("SSO_PROVIDER_UNSUPPORTED");
+    expect(buildAuthorizeRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects a provider this box has not configured", async () => {
+    getOidcProviderConfig.mockReturnValue(null);
+    const res = await begin(buildApp(createPrismaMock()));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("SSO_PROVIDER_NOT_CONFIGURED");
+    expect(buildAuthorizeRequest).not.toHaveBeenCalled();
+  });
+
+  it("fails closed with no directory wired", async () => {
+    const app = express();
+    app.use(express.json());
+    app.use("/api", createSsoRouter());
+    const res = await begin(app);
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("SSO_NO_PRISMA");
+  });
+});
+
+// ── callback ────────────────────────────────────────────────────────────────
+
+describe("GET /api/sso/oidc/callback — native leg", () => {
+  it("needs no state cookie, sets no session cookie, and 302s to the app with a one-time code", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const { code, location, res } = await completeNativeCallback(app);
+
+    const url = new URL(location);
+    expect(`${url.origin}${url.pathname}`).toBe(LOOPBACK);
+    expect(url.searchParams.get("state")).toBe("st-nat");
+    expect([...url.searchParams.keys()]).toEqual(["code", "state"]);
+    // 32 random bytes, base64url.
+    expect(code).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expectNoSessionCookies(res);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(createSession).not.toHaveBeenCalled();
+
+    // Only the sha256 of the code is stored, with a 60 s lifetime.
+    const row = prisma._states[0];
+    expect(row.consumedAt).toBeInstanceOf(Date);
+    expect(row.handoffCodeHash).toBe(createHash("sha256").update(code).digest("hex"));
+    expect(JSON.stringify(row)).not.toContain(code);
+    expect(row.handoffUserId).toBe(stefan.id);
+    const ttlMs = row.handoffExpiresAt.getTime() - Date.now();
+    expect(ttlMs).toBeGreaterThan(55_000);
+    expect(ttlMs).toBeLessThanOrEqual(60_000);
+    expect(row.handoffConsumedAt).toBeNull();
+  });
+
+  it("audits the sign-in with method sso-native", async () => {
+    const app = buildApp(createPrismaMock());
+    await completeNativeCallback(app);
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const entry = recordActivity.mock.calls[0]![0];
+    expect(entry.kind).toBe("auth");
+    expect(entry.refs).toMatchObject({
+      outcome: "success",
+      method: "sso-native",
+      userId: stefan.id,
+      provider: "google",
+    });
+  });
+
+  it("hands off to the private-use scheme too", async () => {
+    const app = buildApp(createPrismaMock());
+    const { location } = await completeNativeCallback(app, "droplet://sso/callback");
+    expect(location).toMatch(/^droplet:\/\/sso\/callback\?code=[A-Za-z0-9_-]{43}&state=st-nat$/);
+  });
+
+  it("refuses a replayed callback for the same native state", async () => {
+    const app = buildApp(createPrismaMock());
+    await completeNativeCallback(app);
+    const again = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-nat");
+    expect(again.status).toBe(401);
+    expectNoSessionCookies(again);
+  });
+
+  it("mints no handoff when the ID token fails validation", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    exchangeCodeAndValidate.mockRejectedValue(new Error("bad signature"));
+    await begin(app);
+    const res = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-nat");
+    expect(res.status).toBe(401);
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+  });
+
+  it("mints no handoff when the IdP sends no code", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    await begin(app);
+    const res = await request(app).get("/api/sso/oidc/callback?state=st-nat");
+    expect(res.status).toBe(400);
+    expect(res.headers.location).toBeUndefined();
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+    expectNoSessionCookies(res);
+  });
+
+  it("mints no handoff for a DEACTIVATED user", async () => {
+    const prisma = createPrismaMock([{ ...stefan, directoryStatus: "DEACTIVATED" }]);
+    const app = buildApp(prisma);
+    await begin(app);
+    const res = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-nat");
+    expect(res.status).toBe(401);
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+  });
+});
+
+describe("GET /api/sso/oidc/callback — browser leg unchanged", () => {
+  async function browserAuthorize(app: express.Express) {
+    buildAuthorizeRequest.mockResolvedValue({
+      authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=st-web",
+      state: "st-web",
+      nonce: "no-web",
+      codeVerifier: "box-verifier-web",
+    });
+    const res = await request(app).post("/api/sso/oidc/authorize").send({ provider: "google" });
+    expect(res.status).toBe(302);
+    return res;
+  }
+
+  it("still requires the state cookie: a BROWSER state without it is refused and left unconsumed", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    await browserAuthorize(app);
+    expect(prisma._states[0].flowKind).toBe("BROWSER");
+
+    const res = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-web");
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "Invalid SSO state" });
+    expect(prisma._states[0].consumedAt).toBeNull();
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+    expect(exchangeCodeAndValidate).not.toHaveBeenCalled();
+    expectNoSessionCookies(res);
+  });
+
+  it("with the cookie, still sets the session cookies and redirects to returnTo (no handoff)", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    await browserAuthorize(app);
+
+    const res = await request(app)
+      .get("/api/sso/oidc/callback?code=idp-code&state=st-web")
+      .set("Cookie", "droplet_sso_state=st-web");
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/");
+    const cookies = setCookies(res);
+    const session = cookies.find((c) => c.startsWith("droplet_session="));
+    expect(session).toBeDefined();
+    expect(verifyAccessToken(session!.split(";")[0]!.replace("droplet_session=", ""))?.sub).toBe(
+      stefan.id,
+    );
+    expect(cookies.some((c) => c.startsWith("droplet_refresh="))).toBe(true);
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+    // Browser audit row is unchanged (no native method stamp).
+    expect(recordActivity.mock.calls[0]![0].refs.method).toBeUndefined();
+  });
+});
+
+// ── token ───────────────────────────────────────────────────────────────────
+
+describe("POST /api/sso/oidc/native/token", () => {
+  it("redeems the handoff once and returns EXACTLY the /auth/login?return=body shape", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const { code, verifier } = await completeNativeCallback(app);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post("/api/sso/oidc/native/token")
+      .send({ code, codeVerifier: verifier });
+    const after = Math.floor(Date.now() / 1000);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(
+      ["accessToken", "accessTokenExpiresAt", "refreshToken", "refreshTokenExpiresAt", "user"].sort(),
+    );
+    expect(res.body.user).toEqual({
+      id: stefan.id,
+      username: "stefan",
+      displayName: "Stefan Cruceru",
+      role: "owner",
+      mustChangePassword: false,
+    });
+    // Epoch SECONDS, same as the login body.
+    expect(res.body.accessTokenExpiresAt).toBeGreaterThanOrEqual(before + ACCESS_TOKEN_TTL_SECONDS);
+    expect(res.body.accessTokenExpiresAt).toBeLessThanOrEqual(after + ACCESS_TOKEN_TTL_SECONDS);
+    expect(res.body.refreshTokenExpiresAt).toBeGreaterThanOrEqual(before + REFRESH_TOKEN_TTL_SECONDS);
+    expect(res.body.refreshTokenExpiresAt).toBeLessThanOrEqual(after + REFRESH_TOKEN_TTL_SECONDS);
+
+    const access = verifyAccessToken(res.body.accessToken);
+    expect(access?.sub).toBe(stefan.id);
+    expect(access?.sid).toBe("sid-native-0001");
+    expect(access?.accessRoleId).toBeNull();
+    expect(createSession).toHaveBeenCalledWith({ id: stefan.id, role: "owner" });
+    expect(registerRefreshSession).toHaveBeenCalledWith(stefan.id, res.body.refreshToken);
+
+    // Bearer-only: no cookies, not cacheable.
+    expect(setCookies(res)).toEqual([]);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(prisma._states[0].handoffConsumedAt).toBeInstanceOf(Date);
+  });
+
+  it("refuses a replayed handoff", async () => {
+    const app = buildApp(createPrismaMock());
+    const { code, verifier } = await completeNativeCallback(app);
+    const first = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
+    expect(first.status).toBe(200);
+
+    const replay = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
+
+    expect(replay.status).toBe(401);
+    expect(replay.body.code).toBe("SSO_HANDOFF_INVALID");
+    expect(replay.body.accessToken).toBeUndefined();
+    expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a wrong verifier, and the attempt burns the code", async () => {
+    const app = buildApp(createPrismaMock());
+    const { code, verifier } = await completeNativeCallback(app);
+
+    const wrong = await request(app)
+      .post("/api/sso/oidc/native/token")
+      .send({ code, codeVerifier: pkcePair().verifier });
+    expect(wrong.status).toBe(401);
+    expect(wrong.body.code).toBe("SSO_HANDOFF_INVALID");
+
+    const retry = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
+    expect(retry.status).toBe(401);
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("refuses an expired handoff", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const { code, verifier } = await completeNativeCallback(app);
+    prisma._states[0].handoffExpiresAt = new Date(Date.now() - 1000);
+
+    const res = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SSO_HANDOFF_INVALID");
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unknown code", async () => {
+    const app = buildApp(createPrismaMock());
+    await completeNativeCallback(app);
+    const res = await request(app)
+      .post("/api/sso/oidc/native/token")
+      .send({ code: randomBytes(32).toString("base64url"), codeVerifier: pkcePair().verifier });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SSO_HANDOFF_INVALID");
+  });
+
+  it("refuses a user deactivated between the callback and the redemption", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const { code, verifier } = await completeNativeCallback(app);
+    prisma._users[0].directoryStatus = "DEACTIVATED";
+
+    const res = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SSO_ACCOUNT_UNAVAILABLE");
+    expect(res.body.accessToken).toBeUndefined();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("refuses a browser context without burning the code (WARP-582 posture)", async () => {
+    const app = buildApp(createPrismaMock());
+    const { code, verifier } = await completeNativeCallback(app);
+
+    const fromBrowser = await request(app)
+      .post("/api/sso/oidc/native/token")
+      .set("Origin", "https://droplet-ai.local")
+      .set("Sec-Fetch-Mode", "cors")
+      .send({ code, codeVerifier: verifier });
+    expect(fromBrowser.status).toBe(403);
+    expect(fromBrowser.body.code).toBe("NATIVE_CLIENT_REQUIRED");
+    expect(fromBrowser.body.accessToken).toBeUndefined();
+
+    const native = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
+    expect(native.status).toBe(200);
+  });
+
+  it.each([
+    ["no body", {}],
+    ["a short code", { code: "abc", codeVerifier: "a".repeat(43) }],
+    ["a short verifier (< 43, RFC 7636)", { code: "a".repeat(43), codeVerifier: "a".repeat(42) }],
+    ["a long verifier (> 128)", { code: "a".repeat(43), codeVerifier: "a".repeat(129) }],
+    ["a verifier outside the unreserved set", { code: "a".repeat(43), codeVerifier: `${"a".repeat(42)}+` }],
+  ])("rejects %s → 400 INVALID_REQUEST", async (_label, body) => {
+    const res = await request(buildApp(createPrismaMock())).post("/api/sso/oidc/native/token").send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_REQUEST");
+  });
+});
