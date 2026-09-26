@@ -248,19 +248,25 @@ export async function completeUserDeletion(
 
 /**
  * The nightly job: complete every deletion whose retention has run out.
- * Rows left on PURGING by a failed earlier run are retried. One person's
- * failure never stops the others.
+ * Rows left on PURGING by a failed earlier run are retried once their claim
+ * is older than HANDOVER_STALE_MS (WARP-3176). One person's failure never
+ * stops the others.
  */
 export async function purgeDueDeletions(
   prisma: PrismaClient,
   now: Date = new Date(),
 ): Promise<{ completed: number; failed: number }> {
+  // WARP-3176: a PURGING row is retried only once its claim is stale. A
+  // hand-over that has just revoked the person holds a fresh PURGING claim
+  // while it completes the removal inline; taking that over would run two
+  // removals of the same person at once.
+  const staleBefore = new Date(now.getTime() - HANDOVER_STALE_MS);
   const due = await prisma.user.findMany({
     where: {
       directoryStatus: "DEACTIVATED",
       OR: [
         { deletionStatus: "PENDING", deletionDueAt: { lte: now } },
-        { deletionStatus: "PURGING" },
+        { deletionStatus: "PURGING", deletionClaimedAt: { lte: staleBefore } },
       ],
     },
     select: {
@@ -286,10 +292,10 @@ export async function purgeDueDeletions(
           directoryStatus: "DEACTIVATED",
           OR: [
             { deletionStatus: "PENDING", deletionDueAt: { lte: now } },
-            { deletionStatus: "PURGING" },
+            { deletionStatus: "PURGING", deletionClaimedAt: { lte: staleBefore } },
           ],
         },
-        data: { deletionStatus: "PURGING" },
+        data: { deletionStatus: "PURGING", deletionClaimedAt: new Date() },
       });
       if (claim.count === 0) continue; // cancelled or re-scheduled since the read
       await completeUserDeletion(prisma, row as RemovableRow, {
@@ -353,7 +359,7 @@ const hostTransfer: NcTransferFn = async (from, to) => {
 };
 
 const CLAIM_CLEARED = {
-  handoverClaimedAt: null,
+  deletionClaimedAt: null,
   handoverPriorStatus: null,
   handoverRecipientId: null,
 } as const;
@@ -382,12 +388,12 @@ export async function releaseStaleHandovers(
   const stale = await prisma.user.findMany({
     where: {
       deletionStatus: "HANDING_OVER",
-      handoverClaimedAt: { lte: new Date(now.getTime() - HANDOVER_STALE_MS) },
+      deletionClaimedAt: { lte: new Date(now.getTime() - HANDOVER_STALE_MS) },
     },
     select: {
       id: true,
       username: true,
-      handoverClaimedAt: true,
+      deletionClaimedAt: true,
       handoverPriorStatus: true,
       handoverRecipientId: true,
     },
@@ -402,7 +408,7 @@ export async function releaseStaleHandovers(
         where: {
           id: row.id,
           deletionStatus: "HANDING_OVER",
-          handoverClaimedAt: row.handoverClaimedAt,
+          deletionClaimedAt: row.deletionClaimedAt,
         },
         data: { deletionStatus: restored, ...CLAIM_CLEARED },
       });
@@ -426,7 +432,7 @@ export async function releaseStaleHandovers(
           targetUsername: row.username,
           recipientUserId: row.handoverRecipientId,
           recipientUsername: recipient?.username ?? null,
-          claimedAt: row.handoverClaimedAt?.toISOString() ?? null,
+          claimedAt: row.deletionClaimedAt?.toISOString() ?? null,
           restoredStatus: restored,
           mayBePartial: true,
         },
@@ -532,6 +538,10 @@ export async function handOverAndDeleteUser(
 
   // Steps 1 + 2 in one SERIALIZABLE transaction: the invariants the revoke
   // re-checks, then the claim, pinned to the deletion state we read.
+  // `claimedAt` is this request's token: the release and the revoke below
+  // are pinned to it, so they can never act on a newer claim (one taken
+  // after the stale-claim sweep released ours).
+  const claimedAt = new Date();
   await prisma.$transaction(async (tx) => {
     const fresh = await readGuardTargetTx(tx, target.id);
     if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
@@ -541,7 +551,7 @@ export async function handOverAndDeleteUser(
         where: { id: fresh.id, deletionStatus: prior as "NONE" | "PENDING" },
         data: {
           deletionStatus: "HANDING_OVER",
-          handoverClaimedAt: new Date(),
+          deletionClaimedAt: claimedAt,
           handoverPriorStatus: prior as "NONE" | "PENDING",
           handoverRecipientId: recipient.id,
         },
@@ -557,13 +567,13 @@ export async function handOverAndDeleteUser(
   const releaseClaim = () =>
     prisma.user
       .update({
-        where: { id: target.id, deletionStatus: "HANDING_OVER" },
+        where: { id: target.id, deletionStatus: "HANDING_OVER", deletionClaimedAt: claimedAt },
         data: { deletionStatus: prior as "NONE" | "PENDING", ...CLAIM_CLEARED },
       })
       .catch((err: unknown) =>
         logger.error(
           { err, username: target.username },
-          "hand-over: could not release the HANDING_OVER claim; an operator must reset it",
+          "hand-over: could not release the HANDING_OVER claim; the stale-claim sweep releases it",
         ),
       );
 
@@ -635,12 +645,20 @@ export async function handOverAndDeleteUser(
       if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
       await assertRemovalInvariantsTx(tx, { target: fresh });
       await tx.user.update({
-        where: { id: fresh.id, role: fresh.role, deletionStatus: "HANDING_OVER" },
+        where: {
+          id: fresh.id,
+          role: fresh.role,
+          deletionStatus: "HANDING_OVER",
+          deletionClaimedAt: claimedAt,
+        },
         data: {
           directoryStatus: "DEACTIVATED",
           deletionStatus: "PURGING",
           deletionRequestedBy: req.actorUsername,
           ...CLAIM_CLEARED,
+          // The PURGING claim's own clock: the nightly retry leaves it
+          // alone while this request completes the removal inline.
+          deletionClaimedAt: new Date(),
         },
       });
     }, SERIALIZABLE_TX);
