@@ -25,6 +25,7 @@ import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist
 import { validatePassword } from "@droplet/auth-policy";
 import { getInvite, acceptInvite } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
+import { useRemaskOnLeave } from "@/lib/hooks/useRemaskOnLeave";
 import type { InvitePublicInfo } from "@/lib/types";
 
 type LoadState =
@@ -74,7 +75,12 @@ export default function InviteAcceptPage(props: PageProps) {
     loadInvite();
   }, [loadInvite]);
 
+  // WARP-3135: the revealed password masks again when the window loses focus
+  // or the page is hidden (Mac parity, WARP-3086); submit re-masks too.
+  useRemaskOnLeave(setShowPassword);
+
   const handleSubmit = async () => {
+    setShowPassword(false);
     setError(null);
     if (!validatePassword(password).ok) {
       setError("Password doesn't meet the requirements yet.");
@@ -211,6 +217,9 @@ export default function InviteAcceptPage(props: PageProps) {
               size={16}
               className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
             />
+            {/* WARP-3135: `[&::-ms-reveal]:hidden` turns off Edge's native
+                eye here and on the confirm field, whose type this toggle
+                also drives: one eye per field. */}
             <input
               id={passwordId}
               type={showPassword ? "text" : "password"}
@@ -218,7 +227,7 @@ export default function InviteAcceptPage(props: PageProps) {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Create a password"
               autoComplete="new-password"
-              className="dp-input pl-10 pr-10"
+              className="dp-input pl-10 pr-10 [&::-ms-reveal]:hidden"
               onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             />
             <button
@@ -226,6 +235,7 @@ export default function InviteAcceptPage(props: PageProps) {
               onClick={() => setShowPassword((s) => !s)}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary hover:text-label-secondary"
               aria-label={showPassword ? "Hide password" : "Show password"}
+              aria-pressed={showPassword}
             >
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
@@ -251,7 +261,7 @@ export default function InviteAcceptPage(props: PageProps) {
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="Type it again"
               autoComplete="new-password"
-              className="dp-input pl-10"
+              className="dp-input pl-10 [&::-ms-reveal]:hidden"
               onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             />
           </div>
