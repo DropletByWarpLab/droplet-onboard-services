@@ -98,9 +98,94 @@ const WARM_DEBOUNCE_MS = 10 * 60 * 1000;
  *  switches. */
 const lastWarmAttemptAt = new Map<string, number>();
 
-/** Exported for testing: clears the module-level warm debounce. */
+/** Exported for testing: clears the module-level warm debounce and the
+ *  WARP-3127 in-flight / on-demand warm state. */
 export function resetWarmStateForTests(): void {
   lastWarmAttemptAt.clear();
+  inFlightWarmRequests.clear();
+  lastWarmCompletedAt.clear();
+  onDemandWarmJobs.clear();
+  lastResidencyConfirmedAt = Number.NEGATIVE_INFINITY;
+}
+
+/** How one load request ended: the runtime answered 2xx (the model is
+ *  loaded), answered non-2xx (still pulling / could not load), or never
+ *  answered (runtime unreachable). */
+type WarmRequestOutcome = "loaded" | "failed" | "unreachable";
+
+/** WARP-3127 — the load request currently in flight, per model. EVERY
+ *  trigger (setup, login, switch, boot, pull-complete, wake) goes through
+ *  `issueWarmRequest`, so two triggers of one model share a single load
+ *  instead of stacking a second 30-90 s load on the runtime. */
+const inFlightWarmRequests = new Map<string, Promise<WarmRequestOutcome>>();
+
+/** WARP-3127 — when a warm of each model last COMPLETED (2xx). Read by the
+ *  on-demand path's "residency unknown" fallback. */
+const lastWarmCompletedAt = new Map<string, number>();
+
+/** WARP-3127 — last time ANY model was confirmed resident (a probe saw it in
+ *  /api/ps, or a warm completed). Box-wide on purpose: the box answers with
+ *  one active model (WARP-3047), and POST /api/llm/warm answers before it has
+ *  resolved which one. Feeds only the advisory `onDemandWarmState`. */
+let lastResidencyConfirmedAt = Number.NEGATIVE_INFINITY;
+
+/**
+ * The one load request every warm trigger shares — the OpenAI chat path,
+ * max_tokens=1, no keep_alive (see `warmDefaultModel` for why each). Joins
+ * the request already in flight for `model` when there is one. Never throws.
+ */
+function issueWarmRequest(model: string): Promise<WarmRequestOutcome> {
+  const inFlight = inFlightWarmRequests.get(model);
+  if (inFlight) return inFlight;
+  const request: Promise<WarmRequestOutcome> = sendWarmRequest(model).finally(() => {
+    // Only clear our own entry: a test reset may have replaced it.
+    if (inFlightWarmRequests.get(model) === request) inFlightWarmRequests.delete(model);
+  });
+  inFlightWarmRequests.set(model, request);
+  return request;
+}
+
+async function sendWarmRequest(model: string): Promise<WarmRequestOutcome> {
+  const startedAt = Date.now();
+  try {
+    const resp = await fetch(`${inferenceRuntimeUrl()}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+        stream: false,
+      }),
+    });
+    if (!resp.ok) {
+      // Drain the error body — under undici an unconsumed body can pin
+      // the socket until GC. Read as TEXT: DMR's load failure is a
+      // text/plain "unable to load runner: …" body, not JSON.
+      const detail = (await resp.text().catch(() => "")).slice(0, 300);
+      logger.warn(
+        { model, status: resp.status, detail },
+        "model_warm_failed (runtime non-2xx — 404: still pulling; 500: could not load, e.g. not enough GPU memory)",
+      );
+      return "failed";
+    }
+    // Drain the body so the socket is released; the response carries no
+    // useful payload for a load-only request.
+    await resp.json().catch(() => undefined);
+    const now = Date.now();
+    lastWarmCompletedAt.set(model, now);
+    lastResidencyConfirmedAt = now;
+    const elapsedSec = Math.floor((now - startedAt) / 1000);
+    logger.info({ model, elapsedSec }, "model_warm_complete");
+    return "loaded";
+  } catch (err) {
+    // ECONNREFUSED and friends — the runtime is not up yet. Non-fatal.
+    logger.debug(
+      { model, err: (err as Error).message },
+      "model_warm_failed (runtime unreachable — will retry on next trigger)",
+    );
+    return "unreachable";
+  }
 }
 
 /**
@@ -143,45 +228,15 @@ export async function warmDefaultModel(
   // Stamp at attempt start so concurrent triggers debounce against the
   // in-flight warm rather than stacking duplicate loads.
   lastWarmAttemptAt.set(target, now);
-  const startedAt = Date.now();
-  try {
-    const resp = await fetch(`${inferenceRuntimeUrl()}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: target,
-        messages: [{ role: "user", content: "ping" }],
-        max_tokens: 1,
-        stream: false,
-      }),
-    });
-    if (!resp.ok) {
-      // Drain the error body — under undici an unconsumed body can pin
-      // the socket until GC. Read as TEXT: DMR's load failure is a
-      // text/plain "unable to load runner: …" body, not JSON.
-      const detail = (await resp.text().catch(() => "")).slice(0, 300);
-      // A 404 is the model still pulling (first boot mid-pull); a 500 is a
-      // runtime that could not load it. Clear the debounce either way so
-      // the pull-complete hook (or the next trigger) can retry this boot.
-      lastWarmAttemptAt.delete(target);
-      logger.warn(
-        { model: target, status: resp.status, detail },
-        "model_warm_failed (runtime non-2xx — 404: still pulling; 500: could not load, e.g. not enough GPU memory)",
-      );
-      return;
-    }
-    // Drain the body so the socket is released; the response carries no
-    // useful payload for a load-only request.
-    await resp.json().catch(() => undefined);
-    const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
-    logger.info({ model: target, elapsedSec }, "model_warm_complete");
-  } catch (err) {
-    // ECONNREFUSED and friends — Ollama not up yet. Non-fatal.
+  // WARP-3127: the request itself is shared with the on-demand (wake) warm,
+  // and joins one already in flight for this model.
+  const outcome = await issueWarmRequest(target);
+  if (outcome !== "loaded") {
+    // A 404 is the model still pulling (first boot mid-pull); a 500 is a
+    // runtime that could not load it; unreachable is a runtime still
+    // booting. Clear the debounce in every case so the pull-complete hook
+    // (or the next trigger) can retry this boot.
     lastWarmAttemptAt.delete(target);
-    logger.debug(
-      { model: target, err: (err as Error).message },
-      "model_warm_failed (runtime unreachable — will retry on next trigger)",
-    );
   }
 }
 
@@ -294,6 +349,185 @@ export async function probeColdModel(
     );
     return null;
   }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// WARP-3127 — warm on wake. POST /api/llm/warm (voice-io, the moment the
+// wake word fires) asks for the active model to be loaded NOW, so a reload
+// after WARP-1826's 5-minute residency overlaps the person speaking + STT
+// instead of starting after them. The residency itself is untouched: no
+// keep_alive, no periodic keep-warm. Unlike the triggers above this one is
+// probe-first (it loads only a model that is not already resident) and has
+// NO debounce of its own: a wake after an unload must warm again.
+// ──────────────────────────────────────────────────────────────────
+
+/** A warm that completed this recently left the model resident for at least
+ *  another minute of the 5-minute residency (OLLAMA_KEEP_ALIVE, WARP-1826).
+ *  Consulted only when the probe cannot tell whether the model is loaded. */
+const RECENT_WARM_MS = 4 * 60 * 1000;
+
+/** Where a model stands in the serving runtime right now. */
+export type ModelResidency = "loaded" | "cold" | "unknown";
+
+/** How one on-demand warm ended (logged, and returned for tests). */
+export type OnDemandWarmOutcome =
+  | "no-model" // nothing resolved: no runtime traffic
+  | "loaded" // already resident: no warm
+  | "recently-warmed" // residency unknown, but a warm completed < ~4 min ago
+  | "warmed" // warm issued (or joined) and the runtime loaded the model
+  | "warm-failed"; // warm issued, runtime non-2xx or unreachable
+
+/** The advisory state POST /api/llm/warm answers with. */
+export type OnDemandWarmState = "warm" | "warming" | "unknown";
+
+/** The on-demand job (probe + warm) in flight, per model. Concurrent wakes
+ *  share one probe and one load. */
+const onDemandWarmJobs = new Map<string, Promise<OnDemandWarmOutcome>>();
+
+interface RuntimeModelEntry {
+  name?: unknown;
+  model?: unknown;
+}
+
+/** True when `list` (an /api/ps or /api/tags body) names `model`. Matches
+ *  Ollama's implicit `:latest` (canonicalModelName) AND DMR's registry-
+ *  qualified ids (`docker.io/ai/x` vs `ai/x`, normalizeModelReference). */
+function listsModel(list: { models?: unknown }, model: string): boolean {
+  const wanted = canonicalModelName(model);
+  const wantedRef = normalizeModelReference(model);
+  const entries: RuntimeModelEntry[] = Array.isArray(list.models) ? list.models : [];
+  return entries.some((entry) =>
+    [entry?.name, entry?.model].some(
+      (id) =>
+        typeof id === "string" &&
+        id.length > 0 &&
+        (canonicalModelName(id) === wanted || normalizeModelReference(id) === wantedRef),
+    ),
+  );
+}
+
+/**
+ * Tri-state residency probe for the on-demand warm: GET /api/ps (loaded in
+ * memory) + GET /api/tags (installed on disk) on one shared
+ * COLD_PROBE_BUDGET_MS. Both runtimes serve both; DMR's entries are
+ * registry-qualified (ADR-036), which `listsModel` folds.
+ *
+ *   - listed by /api/ps                        → "loaded"
+ *   - not in /api/ps, installed per /api/tags  → "cold"
+ *   - /api/ps unusable, or the model is in
+ *     neither list (or /api/tags unusable)     → "unknown"
+ *
+ * `probeColdModel` above keeps its contract for the chat hot path: its null
+ * covers "loaded", "not listed" AND "probe failed", so it cannot tell
+ * "loaded" from "don't know" — the one thing a warm decision needs.
+ * NEVER throws.
+ */
+export async function probeModelResidency(model: string): Promise<ModelResidency> {
+  try {
+    const signal = AbortSignal.timeout(COLD_PROBE_BUDGET_MS);
+    const [psSettled, tagsSettled] = await Promise.allSettled([
+      fetch(`${inferenceRuntimeUrl()}/api/ps`, { signal }),
+      fetch(`${inferenceRuntimeUrl()}/api/tags`, { signal }),
+    ]);
+    // Every body that resolved is read — and so drained (undici socket
+    // release) — even when its sibling rejected or it answered non-2xx.
+    const readList = async (
+      settled: PromiseSettledResult<Response>,
+    ): Promise<{ models?: unknown } | null> => {
+      if (settled.status !== "fulfilled") return null;
+      const body: unknown = await settled.value.json().catch(() => null);
+      return settled.value.ok && body !== null && typeof body === "object"
+        ? (body as { models?: unknown })
+        : null;
+    };
+    const [ps, tags] = await Promise.all([readList(psSettled), readList(tagsSettled)]);
+    if (ps === null) {
+      logger.debug({ model }, "residency_probe_unknown (/api/ps unreachable or non-2xx)");
+      return "unknown";
+    }
+    if (listsModel(ps, model)) return "loaded";
+    if (tags !== null && listsModel(tags, model)) return "cold";
+    return "unknown";
+  } catch (err) {
+    logger.debug(
+      { model, err: (err as Error).message },
+      "residency_probe_failed (non-fatal — treated as unknown)",
+    );
+    return "unknown";
+  }
+}
+
+/**
+ * WARP-3127 — load `model` (the box's active model, resolved by the caller:
+ * `warmActiveModelOnDemand` in active-model.service) only if it is not
+ * already resident. Never throws; resolves to what it did.
+ *
+ *   - a load of this model already in flight (any trigger) → join it
+ *   - probe "loaded"  → nothing to do
+ *   - probe "cold"    → warm
+ *   - probe "unknown" → warm, unless a warm of THIS model completed in the
+ *                       last ~4 min (still inside the 5 min residency)
+ *
+ * No debounce: a wake after the runtime unloaded the model must warm again.
+ * Concurrent calls for one model share a single probe + load. Info log when a
+ * warm is issued (plus `model_warm_complete` when it lands), debug otherwise.
+ */
+export function warmModelIfCold(model?: string | null): Promise<OnDemandWarmOutcome> {
+  const target = (model ?? "").trim();
+  if (!target) {
+    logger.debug("no active model resolved — skipping on-demand warm");
+    return Promise.resolve("no-model");
+  }
+  const inFlight = onDemandWarmJobs.get(target);
+  if (inFlight) return inFlight;
+  const job: Promise<OnDemandWarmOutcome> = runOnDemandWarm(target).finally(() => {
+    if (onDemandWarmJobs.get(target) === job) onDemandWarmJobs.delete(target);
+  });
+  onDemandWarmJobs.set(target, job);
+  return job;
+}
+
+async function runOnDemandWarm(model: string): Promise<OnDemandWarmOutcome> {
+  try {
+    const loading = inFlightWarmRequests.get(model);
+    if (loading) {
+      // A login / setup / switch warm of this model is already loading it.
+      logger.debug({ model }, "on-demand warm joined an in-flight warm");
+      return (await loading) === "loaded" ? "warmed" : "warm-failed";
+    }
+    const residency = await probeModelResidency(model);
+    if (residency === "loaded") {
+      lastResidencyConfirmedAt = Date.now();
+      logger.debug({ model }, "on-demand warm skipped (model already resident)");
+      return "loaded";
+    }
+    const lastCompleted = lastWarmCompletedAt.get(model) ?? Number.NEGATIVE_INFINITY;
+    if (residency === "unknown" && Date.now() - lastCompleted < RECENT_WARM_MS) {
+      logger.debug({ model }, "on-demand warm skipped (residency unknown, warmed < 4 min ago)");
+      return "recently-warmed";
+    }
+    logger.info({ model, residency }, "model_warm_on_demand (loading the active model ahead of the turn)");
+    return (await issueWarmRequest(model)) === "loaded" ? "warmed" : "warm-failed";
+  } catch (err) {
+    logger.debug({ model, err: (err as Error).message }, "on-demand warm failed (non-fatal)");
+    return "warm-failed";
+  }
+}
+
+/**
+ * The advisory state POST /api/llm/warm returns with its 202. Synchronous,
+ * because the route answers before it has resolved or probed anything:
+ *
+ *   - "warming" — a load is in flight right now (any trigger)
+ *   - "warm"    — a model was confirmed resident in the last ~4 min
+ *   - "unknown" — neither; the job the request just started will find out
+ *
+ * Box-wide rather than per model: the box answers with one active model
+ * (WARP-3047). A hint for logs, never a guarantee.
+ */
+export function onDemandWarmState(): OnDemandWarmState {
+  if (inFlightWarmRequests.size > 0) return "warming";
+  return Date.now() - lastResidencyConfirmedAt < RECENT_WARM_MS ? "warm" : "unknown";
 }
 
 // ──────────────────────────────────────────────────────────────────

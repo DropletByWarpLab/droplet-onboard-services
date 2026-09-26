@@ -21,7 +21,8 @@ const getCachedModelListing = vi.hoisted(() => vi.fn());
 const getModelProvider = vi.hoisted(() => vi.fn(async (_model: string) => undefined as string | undefined));
 vi.mock("./ai-gateway.client.js", () => ({ getCachedModelListing, getModelProvider }));
 const warmDefaultModel = vi.hoisted(() => vi.fn(async (_model?: string | null) => undefined));
-vi.mock("./model-readiness.service.js", () => ({ warmDefaultModel }));
+const warmModelIfCold = vi.hoisted(() => vi.fn(async (_model?: string | null) => "loaded" as const));
+vi.mock("./model-readiness.service.js", () => ({ warmDefaultModel, warmModelIfCold }));
 
 import {
   ACTIVE_CHAT_MODEL_KEY,
@@ -31,6 +32,7 @@ import {
   resolveActiveModel,
   resolveTurnSideModel,
   warmActiveModel,
+  warmActiveModelOnDemand,
 } from "./active-model.service.js";
 import type { ModelInfo } from "../types/index.js";
 
@@ -49,6 +51,7 @@ beforeEach(() => {
   vi.stubEnv("LLM_MODEL", "");
   getCachedModelListing.mockReset();
   warmDefaultModel.mockClear();
+  warmModelIfCold.mockClear();
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -314,6 +317,38 @@ describe("warmActiveModel (WARP-3047)", () => {
     getCachedModelListing.mockResolvedValue(null);
     await warmActiveModel(prismaStub(null));
     expect(warmDefaultModel).toHaveBeenCalledWith(null);
+  });
+});
+
+describe("warmActiveModelOnDemand — warm on wake (WARP-3127)", () => {
+  it("probe-first warms the ACTIVE model and never touches the 10-min debounced path", async () => {
+    vi.stubEnv("LLM_MODEL", A);
+    getCachedModelListing.mockResolvedValue(listing(listed));
+    await warmActiveModelOnDemand(prismaStub({ valueJson: B }));
+    expect(warmModelIfCold).toHaveBeenCalledTimes(1);
+    expect(warmModelIfCold).toHaveBeenCalledWith(B);
+    expect(warmDefaultModel).not.toHaveBeenCalled();
+  });
+
+  it("resolves the way the voice turn does: an active model that can't call tools warms the provisioned one", async () => {
+    // Voice is a tool-driven loop (llm.py `_states_no_tools`), so its turn
+    // runs on LLM_MODEL when the active model states tools:false. Warming the
+    // vision-only active model instead would load a model voice never asks
+    // for, next to the one it does.
+    vi.stubEnv("LLM_MODEL", A);
+    const visionOnly: ModelInfo[] = [
+      { ...listed[0], capabilities: { vision: true, tools: false } },
+      listed[1],
+    ];
+    getCachedModelListing.mockResolvedValue(listing(visionOnly));
+    await warmActiveModelOnDemand(prismaStub({ valueJson: B }));
+    expect(warmModelIfCold).toHaveBeenCalledWith(A);
+  });
+
+  it("hands null through when nothing resolves (the warm itself skips)", async () => {
+    getCachedModelListing.mockResolvedValue(null);
+    await warmActiveModelOnDemand(prismaStub(null));
+    expect(warmModelIfCold).toHaveBeenCalledWith(null);
   });
 });
 

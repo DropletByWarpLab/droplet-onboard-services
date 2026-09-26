@@ -35,7 +35,7 @@ import type { ModelInfo } from "../types/index.js";
 import { createLogger } from "../lib/logger.js";
 import { getCachedModelListing } from "./ai-gateway.client.js";
 import { isLocalProvider, resolveOffLanProvider } from "./cloud-access.service.js";
-import { warmDefaultModel } from "./model-readiness.service.js";
+import { warmDefaultModel, warmModelIfCold } from "./model-readiness.service.js";
 
 const logger = createLogger("active-model");
 
@@ -256,4 +256,17 @@ export async function resolveTurnSideModel(
  */
 export async function warmActiveModel(prisma: PrismaClient): Promise<void> {
   await warmDefaultModel(await resolveActiveModel(prisma));
+}
+
+/**
+ * WARP-3127 — the wake-time warm behind POST /api/llm/warm: probe-first,
+ * no debounce, one load per model however many wakes arrive
+ * (`warmModelIfCold`). Resolves the model the way the voice turn will name
+ * it: voice is a tool-driven loop and follows the orchestrator's
+ * `defaultModel` except when that model states it cannot call tools
+ * (voice/llm.py `_states_no_tools`) — the same rule `requireTools` applies —
+ * so this never loads a model voice would not use. Never throws.
+ */
+export async function warmActiveModelOnDemand(prisma: PrismaClient): Promise<void> {
+  await warmModelIfCold(await resolveActiveModel(prisma, { requireTools: true }));
 }

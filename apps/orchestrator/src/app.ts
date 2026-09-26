@@ -16,6 +16,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createLlmWarmRouter } from "./routes/llm-warm.js";
 import { createToolsRuntimeRouter } from "./routes/tools-runtime.js";
 import { resolveToolAccessScope } from "./services/tool-access.service.js";
 import { createTeamChatRouter } from "./routes/team-chat.js";
@@ -427,6 +428,11 @@ export function createApp(
       resolveScope: (user) => resolveToolAccessScope(prisma, user),
     }),
   );
+  // WARP-3127 — POST /api/llm/warm: voice-io starts loading the active model
+  // the moment the wake word fires. Mounted BEFORE createLlmRouter so no
+  // `/llm/:param` route there can ever shadow it; the `chat` module gate
+  // (`/api/llm`) covers it like /api/llm/chat.
+  app.use("/api", createLlmWarmRouter(prisma));
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the

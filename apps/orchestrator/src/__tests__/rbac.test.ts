@@ -90,7 +90,12 @@ vi.mock("../services/network-safety.service.js", () => ({
     .mockResolvedValue({ confirmed: true, operation: "switch_port_enable", params: { port: 3 } }),
 }));
 
-import { requireRole, authMiddleware, type AuthUser } from "../middleware/auth.js";
+import {
+  requireRole,
+  requireRoleOrService,
+  authMiddleware,
+  type AuthUser,
+} from "../middleware/auth.js";
 import type { Role } from "../services/jwt.service.js";
 import { createSwitchRouter } from "../routes/switch.js";
 import { createSystemResetRouter } from "../routes/system-reset.routes.js";
@@ -286,6 +291,15 @@ const MATRIX: GuardedRoute[] = [
   { method: "delete", path: "/api/llm/keys/anthropic", allowed: ["owner", "admin"] },
   // WARP-3082: the keyed-provider list is the same operator material.
   { method: "get", path: "/api/llm/keys", allowed: ["owner", "admin"] },
+  // WARP-3127: warm-on-wake — start loading the box's active model. Owner +
+  // admin among humans (loading a model is a GPU decision, not a household
+  // action). The route ALSO admits the pinned `_service:voice` principal via
+  // requireRoleOrService — this synthetic requireRole grid covers the coarse
+  // roles only, so its `service` column (a non-voice principal) is a 403 here
+  // exactly as on the real route. The voice acceptance is proven through the
+  // real authMiddleware in the service-principal block below and in
+  // routes/llm-warm.test.ts.
+  { method: "post", path: "/api/llm/warm", allowed: ["owner", "admin"] },
 
   // WARP-540: OTA update operator surface — owner+admin only INCLUDING
   // the GETs (voice-proxy posture: release SHAs, failure history, and the
@@ -527,6 +541,16 @@ describe("service-principal regression (WARP-171 AC #6)", () => {
         res.status(200).json({ ok: true });
       },
     );
+    // WARP-3127 — POST /llm/warm pins the voice principal BY ID (the same
+    // guard routes/llm-warm.ts mounts); every other service principal is
+    // refused even though it carries the same coarse `service` role.
+    router.post(
+      "/llm/warm",
+      requireRoleOrService("_service:voice", "owner", "admin"),
+      (_req, res) => {
+        res.status(202).json({ state: "unknown" });
+      },
+    );
     app.use("/api", router);
     return app;
   }
@@ -580,6 +604,24 @@ describe("service-principal regression (WARP-171 AC #6)", () => {
       .set("Authorization", "Bearer test-voice-token-32chars-padding-xyz")
       .send({});
     expect(res.status).toBe(200);
+  });
+
+  it("service token (voice) is accepted on POST /api/llm/warm (WARP-3127 — warm on wake)", async () => {
+    const app = buildAppWithRealAuth();
+    const res = await request(app)
+      .post("/api/llm/warm")
+      .set("Authorization", "Bearer test-voice-token-32chars-padding-xyz")
+      .send({});
+    expect(res.status).toBe(202);
+  });
+
+  it("service token (mcp) is rejected on POST /api/llm/warm (voice is pinned by id)", async () => {
+    const app = buildAppWithRealAuth();
+    const res = await request(app)
+      .post("/api/llm/warm")
+      .set("Authorization", "Bearer test-mcp-token-32chars-padding-1234a")
+      .send({});
+    expect(res.status).toBe(403);
   });
 });
 
@@ -833,7 +875,7 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
 /**
  * Hand-written (non-generated) test count, by block:
  *   3  RBAC guard — negative cases
- *   5  service-principal regression
+ *   7  service-principal regression
  *  65  switch router wiring — 13 mutating routes × 5 principals
  *   8  switch status GETs — 4 paths × 2 roles
  *   5  system-reset wiring — 3 denied roles + no-session + owner
@@ -842,7 +884,7 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
  * friction is the point: an untracked test in the RBAC matrix means the
  * census can no longer tell "the run finished" from "the run stopped".
  */
-const HAND_WRITTEN_TESTS = 3 + 5 + 65 + 8 + 5;
+const HAND_WRITTEN_TESTS = 3 + 7 + 65 + 8 + 5;
 
 /** The generated grid plus the hand-written blocks. */
 const EXPECTED_TESTS = MATRIX.length * ALL_ROLES.length + HAND_WRITTEN_TESTS;
