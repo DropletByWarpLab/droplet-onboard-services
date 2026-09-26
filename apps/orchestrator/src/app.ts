@@ -695,7 +695,7 @@ export function createApp(
   // has a shell to arrange. Service principals are refused in the router.
   app.use("/api", createMeDepartmentRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
-  app.use("/api", createActivityRouter(prisma));
+  app.use("/api", createActivityRouter(prisma, createDeviceIdentityClient()));
   // WARP-237: device-key-signed daily-root read surface.
   app.use("/api", createAuditRootsRouter(prisma));
   // WARP-823: owner/admin downloadable, secret-redacted diagnostics log

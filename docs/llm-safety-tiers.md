@@ -129,7 +129,7 @@ Camera IP addresses and MAC addresses are stripped from LLM tool responses (`get
 
 ## Audit Trail
 
-As of WARP-456, **`ActivityRow`** is the canonical audit table for every observable event on the device — chat turns, MCP tool calls, file indexing, camera writes, network ops, smart-home commands, email sends, auth events, scheduled tool runs, and system events. Every row carries an HMAC-SHA256 `signature` over its canonical content + the `prevSignatureHash` of the row before it, forming a tamper-evident hash chain. The chain is verifiable offline via `POST /api/activity/export`, which streams a sealed JSON-Lines bundle plus the public verification bytes.
+As of WARP-456, **`ActivityRow`** is the canonical audit table for every observable event on the device — chat turns, MCP tool calls, file indexing, camera writes, network ops, smart-home commands, email sends, auth events, scheduled tool runs, and system events. Every row carries an HMAC-SHA256 `signature` over its canonical content + the `prevSignatureHash` of the row before it, forming a tamper-evident hash chain. `POST /api/activity/export` streams a JSON-Lines bundle sealed with the device identity key; it carries only the device certificate, never the HMAC key (WARP-3153). Offline verification: `docs/security/audit-bundle-verification.md`.
 
 `CommandAuditLog` is now a **read view** kept for the existing `GET /api/network/audit` query path; all new writes flow through `activity.service.ts::record({kind, severity, sourceIcon, what, sub?, refs?})`, which dual-writes the legacy `CommandAuditLog` row alongside the signed `ActivityRow`. Future audit consumers should read `ActivityRow` directly (filtered by `kind="network"` for the safety-tier-specific subset).
 
@@ -141,7 +141,7 @@ Both tables capture the same per-command facts:
 
 Operator-facing query paths:
 - `GET /api/activity?kind=network&from=&to=&q=` — paginated, filterable, signed rows (owner/admin).
-- `POST /api/activity/export` — sealed JSONL bundle for offline verification.
+- `POST /api/activity/export` — sealed JSONL bundle for offline verification (`scripts/verify-activity-bundle.mjs`).
 - `GET /api/network/audit` — legacy `CommandAuditLog` view (kept for backwards compatibility).
 
 ### Factory-reset era boundary

@@ -329,20 +329,6 @@ describe("WARP-456 — full chain integrity", () => {
     }
   });
 
-  it("offline verifier with only `publicKey` bytes + canonical shape reaches the same verdict", async () => {
-    await seedChain(5);
-    // Mimic an offline verifier: receive only the row content +
-    // metadata + the public bytes — nothing about the orchestrator's
-    // process.
-    const offlineSigner = createHmacSigner(signer.exportPublicBytes());
-    expect(verifyChain(prismaState.rows, offlineSigner)).toBe(-1);
-    // Now corrupt one row and re-verify with the offline signer —
-    // breaks at the same index a verifier inside the orchestrator
-    // would report.
-    prismaState.rows[3]!.what = "MODIFIED OFFLINE";
-    expect(verifyChain(prismaState.rows, offlineSigner)).toBe(3);
-  });
-
   it("the chain survives mixed kinds + nullable sub/refs", async () => {
     await recorder.record({
       kind: "system",
