@@ -64,7 +64,9 @@ import {
 import {
   effectiveAdvertisedToolNames,
   domainOfTool,
+  selectionAssertsToolBudget,
   toolNamesForDomain,
+  type ToolSelectionMode,
 } from "./tool-selection.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { currentRuntimeToolLookup } from "./tool-layers.service.js";
@@ -411,8 +413,14 @@ export interface AgentRequest {
    * WARP-642 guard. Unset/"off" → full-pool advertisement, byte-for-byte
    * today's behavior. Only ever SUBSETS the pool this loop already resolved
    * (allowed_tools / chat scope) — RBAC is decided before this field.
+   *
+   * WARP-3125 — "explicit" advertises the resolved pool whole, like "off",
+   * but still asserts the tool budget. Only the chat route sets it, for a
+   * service principal that named its own `allowed_tools`
+   * (`resolveTurnToolSelectionMode`), so the advertised set is identical
+   * turn to turn.
    */
-  tool_selection_mode?: "off" | "domains";
+  tool_selection_mode?: ToolSelectionMode;
   /**
    * WARP-2896 — tool domains the CALLER's binding admits on every turn under
    * "domains" selection, whatever the sentence says. Set by the agent-run
@@ -1484,7 +1492,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // conversation touching many domains grows `conversationToolNames` and so
   // the matched-domain set. That is precisely the case worth a loud failure
   // rather than a quiet one.
-  if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+  //
+  // WARP-3125 — `explicit` (a service principal's own set, unselected) is
+  // policed too. No selection shrinks that set, so this assert is the only
+  // check that it still fits the window.
+  if (selectionAssertsToolBudget(req.tool_selection_mode) && toolChoice !== "none") {
     const poolSize = assertToolAdvertisementFitsBudget({
       specs: tools,
       contextWindow: poolContextWindow,
@@ -2186,7 +2198,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             .filter((t) => keep.has(t.name))
             .map(toSpec);
           let healed = true;
-          if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+          // Same gate as the initial assert. Under `explicit` the whole pool
+          // is already advertised, so this branch is unreachable there.
+          if (selectionAssertsToolBudget(req.tool_selection_mode) && toolChoice !== "none") {
             try {
               const healedSize = assertToolAdvertisementFitsBudget({
                 specs: candidate,

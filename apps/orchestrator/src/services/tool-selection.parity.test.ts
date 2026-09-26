@@ -75,7 +75,18 @@ describe("one derivation, two call sites", () => {
     // Under TOOL_SELECTION_MODE=off the pool genuinely IS the wire payload.
     // Hardcoding "domains" here would under-charge the one mode that needs
     // the full estimate. Mutation: replace with a literal → red.
-    expect(ROUTE_SRC).toContain("mode: config.TOOL_SELECTION_MODE");
+    //
+    // WARP-3125 — the route now resolves ONE per-turn mode from the configured
+    // one (`explicit` for a service principal's own set), and the estimate and
+    // BOTH runAgent calls must read that same value. Mutation: hand either
+    // runAgent call `config.TOOL_SELECTION_MODE` again, or the estimate a
+    // literal → red, and an explicit voice turn is sized as a selected one.
+    expect(ROUTE_SRC).toMatch(
+      /const toolSelectionMode = resolveTurnToolSelectionMode\(\{\s*configured: config\.TOOL_SELECTION_MODE,/,
+    );
+    expect(ROUTE_SRC).toContain("mode: toolSelectionMode,");
+    expect(ROUTE_SRC.match(/tool_selection_mode: toolSelectionMode,/g)).toHaveLength(2);
+    expect(ROUTE_SRC).not.toMatch(/tool_selection_mode: (config\.TOOL_SELECTION_MODE|")/);
   });
 });
 
