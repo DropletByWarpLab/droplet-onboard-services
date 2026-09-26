@@ -203,6 +203,18 @@ export function createApp(
     }),
   );
   app.use(helmet());
+  // WARP-3097 — every /api response is `no-store` unless its route says
+  // otherwise. `private, max-age` still lets the CLIENT's own cache keep the
+  // body, and Apple's URLCache / a browser disk cache writes it to disk: Wi-Fi
+  // passwords, API keys, company data and camera footage at rest after
+  // sign-out. Routes may override only for code-resident catalogues with no
+  // per-box or per-person content (see the route-by-route audit in the PR);
+  // SSE handlers keep their `no-cache`. Mounted before every /api router,
+  // public ones included, so a 401/403/404 is covered too.
+  app.use("/api", (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
   app.use(cookieParser());
   app.use(requestIdMiddleware);
   app.use(requestLogger);

@@ -2,7 +2,10 @@
  * /api/notifications/* — the recipient's notifications, their acknowledgement,
  * and a manual send.
  *
- *   N1  GET  /notifications               the list (keyset-paged) + the unread count
+ *   N1  GET  /notifications               the list (keyset-paged) + the unread count;
+ *                                         also the LLM `list_notifications` tool
+ *                                         (WARP-3099: the person it acts for —
+ *                                         see recipientFor)
  *   N2  GET  /notifications/unread-count  the badge alone
  *   N3  POST /notifications/:id/ack       ack one ({via?: 'inbox'|'opened'})
  *   N4  POST /notifications/ack-all       ack the listed ids ({ids}: the ones the client showed)
@@ -16,6 +19,9 @@
  * missing one (404 NOTIFICATION_NOT_FOUND), so N3 never confirms a row
  * exists. Service principals (`_service:*`) never own rows, and N3/N4 refuse
  * them outright (403 HUMAN_ONLY) so a script cannot probe other people's ids.
+ * The one exception is the assistant's tools, which arrive as `_service:mcp`:
+ * on N1 and /send they act for the person named in `X-Nextcloud-User`, and
+ * only for that person (recipientFor).
  * Behind authMiddleware (core, not module-gated). Errors on N1–N4 are
  * `{error: {code, message}}`; /send keeps its original shape.
  *
@@ -45,6 +51,7 @@ import {
 } from "../services/notifications.service.js";
 import { describeClient } from "../lib/client-descriptor.js";
 import { resolveAttributedToolAccess, toolAllowedForPrincipal } from "../services/tool-access.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 
 function getUser(req: Request): string {
   const username = req.user?.username;
@@ -56,42 +63,48 @@ function getUser(req: Request): string {
 
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const SEND_TOOL = "send_notification";
+const LIST_TOOL = "list_notifications";
 
 type Recipient = { username: string; viaTool: boolean } | { denied: "acting_user_required" | "forbidden_tool_for_role" };
 
 /**
- * WARP-3060 — who a POST /notifications/send is FOR.
+ * WARP-3060 / WARP-3099 — whose notifications a request is about: the person a
+ * POST /notifications/send notifies, the person whose list N1 reads.
  *
- * A person in the browser notifies themselves: `req.user.username`.
+ * A person in the browser acts for themselves: `req.user.username`.
  *
- * The `send_notification` tool arrives as the `_service:mcp` principal, whose
- * own username is nobody's — sending on it publishes to a topic no one
- * subscribes to. The person the assistant acts for is asserted in
- * `X-Nextcloud-User` (mcp-server context.ts `withActingUser`), trusted only
- * from that principal: a username on the stdio transport, a `User.id` on the
- * HTTP one, so it is looked up by username, then by id — the lookup
- * middleware/mcp-acting-user-gate.ts makes. That person is the only recipient
+ * The assistant's tools (`send_notification`, `list_notifications`) arrive as
+ * the `_service:mcp` principal, whose own username is nobody's — sending on it
+ * publishes to a topic no one subscribes to, and listing it reads rows no one
+ * has. The person the assistant acts for is asserted in `X-Nextcloud-User`
+ * (mcp-server context.ts `withActingUser`), trusted only from that principal:
+ * a username on the stdio transport, a `User.id` on the HTTP one, so it is
+ * resolved by `resolveAssertedUser` (WARP-3098) — every column at once, one
+ * active person or nobody, never "username, then id, first match wins" — as
+ * middleware/mcp-acting-user-gate.ts resolves it. That person is the only one
  * the tool can reach.
  *
- * Then the question chat asks before it dispatches the tool, asked of the
- * same person off their User row (`resolveAttributedToolAccess`): may their
- * tier and access role use `send_notification`? Nobody named, nobody found, a
- * deactivated account or a refusal → 403. Never the service principal, never
- * a wider identity.
+ * Then the question chat asks before it dispatches `tool`, asked of the same
+ * person off their User row (`resolveAttributedToolAccess`): may their tier and
+ * access role use it? Nobody named, nobody found, a deactivated account or a
+ * refusal → denied. Never the service principal, never a wider identity.
  */
-async function recipientFor(prisma: PrismaClient, req: Request): Promise<Recipient> {
+async function recipientFor(
+  prisma: PrismaClient,
+  req: Request,
+  tool: typeof SEND_TOOL | typeof LIST_TOOL,
+): Promise<Recipient> {
   if (!(req.user?.id === MCP_PRINCIPAL_ID && req.user.role === "service")) {
     return { username: getUser(req), viaTool: false };
   }
   const asserted = (req.header("x-nextcloud-user") ?? "").trim();
   if (!asserted) return { denied: "acting_user_required" };
-  const person =
-    (await prisma.user.findUnique({ where: { username: asserted }, select: { id: true, username: true } })) ??
-    (await prisma.user.findUnique({ where: { id: asserted }, select: { id: true, username: true } }));
-  if (!person) return { denied: "acting_user_required" };
+  const resolved = await resolveAssertedUser(prisma, asserted);
+  if (!resolved.ok) return { denied: "acting_user_required" };
+  const person = resolved.user;
   const access = await resolveAttributedToolAccess(prisma, person.id);
   if (access.unresolved) return { denied: "acting_user_required" };
-  if (!toolAllowedForPrincipal(SEND_TOOL, access.tier ?? undefined, access.scope)) {
+  if (!toolAllowedForPrincipal(tool, access.tier ?? undefined, access.scope)) {
     return { denied: "forbidden_tool_for_role" };
   }
   return { username: person.username, viaTool: true };
@@ -118,7 +131,12 @@ const sendSchema = z.object({
 
 // ── WARP-2804 ────────────────────────────────────────────────────────────────
 
-type ErrorCode = "VALIDATION_ERROR" | "NOTIFICATION_NOT_FOUND" | "HUMAN_ONLY";
+type ErrorCode =
+  | "VALIDATION_ERROR"
+  | "NOTIFICATION_NOT_FOUND"
+  | "HUMAN_ONLY"
+  | "ACTING_USER_REQUIRED"
+  | "FORBIDDEN_TOOL_FOR_ROLE";
 
 function fail(res: Response, status: number, code: ErrorCode, message: string): void {
   res.status(status).json({ error: { code, message } });
@@ -178,10 +196,24 @@ export function createNotificationsRouter(prisma: PrismaClient): Router {
         fail(res, 400, "VALIDATION_ERROR", "Those list options aren't in a shape Droplet understands.");
         return;
       }
-      const username = getUser(req);
+      // WARP-3099 — `list_notifications` reads the list of the person it acts
+      // for; `_service:mcp`'s own list is empty and nobody's.
+      const recipient = await recipientFor(prisma, req, LIST_TOOL);
+      if ("denied" in recipient) {
+        if (recipient.denied === "forbidden_tool_for_role") {
+          fail(res, 403, "FORBIDDEN_TOOL_FOR_ROLE", "This person's access doesn't include their notifications.");
+        } else {
+          fail(res, 403, "ACTING_USER_REQUIRED", "The assistant must name the person it is acting for.");
+        }
+        return;
+      }
       const [page, unread] = await Promise.all([
-        listNotifications(prisma, username, { limit: q.data.limit ?? 50, cursor: q.data.cursor, state: q.data.state }),
-        countUnread(prisma, username),
+        listNotifications(prisma, recipient.username, {
+          limit: q.data.limit ?? 50,
+          cursor: q.data.cursor,
+          state: q.data.state,
+        }),
+        countUnread(prisma, recipient.username),
       ]);
       res.json({ notifications: page.rows, unread, nextCursor: page.nextCursor });
     } catch (err) {
@@ -251,7 +283,7 @@ export function createNotificationsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
-      const recipient = await recipientFor(prisma, req);
+      const recipient = await recipientFor(prisma, req, SEND_TOOL);
       if ("denied" in recipient) {
         res.status(403).json(
           recipient.denied === "forbidden_tool_for_role"

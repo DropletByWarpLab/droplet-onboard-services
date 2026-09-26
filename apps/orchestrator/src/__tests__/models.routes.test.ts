@@ -525,6 +525,37 @@ describe("WARP-471 — /api/models route", () => {
     expect(res.body.cloud.every((c: { hasKey: unknown }) => c.hasKey === null)).toBe(true);
   });
 
+  it("withholds every keyed-vendor signal from a guest, not only hasKey (WARP-3082)", async () => {
+    // enabled = escape && hasKey, lastUsedAt and the per-provider latency
+    // sample each reveal which vendor is keyed. An admin still gets them all.
+    listModelsMock.mockResolvedValue({ models: [] });
+    listKeysMock.mockResolvedValue(["anthropic"]);
+    fetchLatencyMock.mockResolvedValue({ providers: { local: 10, anthropic: 300, openai: null } });
+    const escape = { enabled: true, lastChangedBy: "romain", lastChangedAt: new Date("2026-09-01T10:00:00.000Z") };
+
+    const guest = await request(
+      buildApp({ id: "g1", username: "visitor", role: "guest" }, createPrismaMock(null, escape)),
+    ).get("/api/models");
+    expect(guest.status).toBe(200);
+    for (const row of guest.body.cloud) {
+      expect(row.hasKey).toBeNull();
+      expect(row.enabled).toBeNull();
+      expect(row.lastUsedAt).toBeNull();
+    }
+    expect(guest.body.endpointLatencyMs).toEqual({ local: 10, anthropic: null, openai: null });
+    expect(guest.body.avgLatencyMs).toBe(10);
+
+    const admin = await request(
+      buildApp({ id: "a1", username: "romain", role: "admin" }, createPrismaMock(null, escape)),
+    ).get("/api/models");
+    const anthropic = admin.body.cloud.find((c: { provider: string }) => c.provider === "anthropic");
+    expect(anthropic.hasKey).toBe(true);
+    expect(anthropic.enabled).toBe(true);
+    expect(admin.body.endpointLatencyMs.anthropic).toBe(300);
+    expect(admin.body.avgLatencyMs).toBe(155);
+    fetchLatencyMock.mockResolvedValue(null);
+  });
+
   it("serves a degraded payload UNCACHED so it self-heals (WARP-1289)", async () => {
     // Mirror of the WARP-1284 rule on /api/llm/models: never cache the
     // degraded fallback — the next request retries the gateway so the page

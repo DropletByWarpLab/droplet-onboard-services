@@ -37,6 +37,7 @@ import { createLogger } from "../lib/logger.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import { modelListGeneration } from "../services/model-list-generation.js";
 import {
+  averageLatencyMs,
   getModelsPagePayload,
   overlayCloudState,
   type ModelsPagePayload,
@@ -152,10 +153,26 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         // WARP-2871: GET /api/settings/off-lan 403s a guest — who flipped the
         // escape, when, and which vendors are keyed must not leak here either.
         // The switch state and the guest's own verdict are still served.
+        // WARP-3082: `enabled` (= escape && hasKey), `lastUsedAt` and the
+        // per-provider latency sample each reveal the same "which vendor is
+        // keyed" fact, so they go too; the average falls back to local only.
         if (user?.role === "guest") {
           overlaid.cloudAccess.escapeChangedBy = null;
           overlaid.cloudAccess.escapeChangedAt = null;
-          overlaid.cloud = overlaid.cloud.map((row) => ({ ...row, hasKey: null }));
+          overlaid.cloud = overlaid.cloud.map((row) => ({
+            ...row,
+            hasKey: null,
+            enabled: null,
+            lastUsedAt: null,
+          }));
+          if (overlaid.endpointLatencyMs) {
+            overlaid.endpointLatencyMs = {
+              ...overlaid.endpointLatencyMs,
+              anthropic: null,
+              openai: null,
+            };
+          }
+          overlaid.avgLatencyMs = averageLatencyMs(overlaid.endpointLatencyMs ?? null, []);
         }
         res.json({ ...overlaid, activeModel });
       } catch (err) {

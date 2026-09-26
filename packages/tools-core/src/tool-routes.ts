@@ -289,23 +289,30 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "setup_camera_ports", client: "orchestrator", hops: [admit("post", "/api/switch/setup/cameras")] },
 
   // ── calendar ────────────────────────────────────────────────────────────
-  none("create_event"), // ctx.prisma
-  none("list_events"), // ctx.prisma
-  none("update_event"), // ctx.prisma
-  none("delete_event"), // ctx.prisma
-  none("search_calendar_events"), // ctx.prisma
+  // WARP-3101 — through the orchestrator's calendar routes, which key the rows
+  // on the acting person's username. Through ctx.prisma the key was
+  // ctx.userId, a User.id on the HTTP transport, matching no row.
+  { tool: "create_event", client: "orchestrator", hops: [admit("post", "/api/calendar/events")] },
+  { tool: "list_events", client: "orchestrator", hops: [admit("get", "/api/calendar/events")] },
+  { tool: "update_event", client: "orchestrator", hops: [admit("patch", "/api/calendar/events/:id")] },
+  { tool: "delete_event", client: "orchestrator", hops: [admit("delete", "/api/calendar/events/:id")] },
+  { tool: "search_calendar_events", client: "orchestrator", hops: [admit("get", "/api/calendar/events")] },
 
   // ── reminders ───────────────────────────────────────────────────────────
-  none("create_reminder"), // ctx.prisma
-  none("list_reminders"), // ctx.prisma
-  none("complete_reminder"), // ctx.prisma
-  none("set_timer"), // ctx.prisma
+  // WARP-3101 — same reason; a reminder written with a User.id was never
+  // delivered (the poller notifies Reminder.userId as a username).
+  { tool: "create_reminder", client: "orchestrator", hops: [admit("post", "/api/reminders")] },
+  { tool: "list_reminders", client: "orchestrator", hops: [admit("get", "/api/reminders")] },
+  { tool: "complete_reminder", client: "orchestrator", hops: [admit("patch", "/api/reminders/:id")] },
+  { tool: "set_timer", client: "orchestrator", hops: [admit("post", "/api/reminders")] },
 
   // ── notifications ───────────────────────────────────────────────────────
   // WARP-3060 — through the orchestrator's sendNotification (toast + push); a
   // row written here through ctx.prisma was never delivered by anything.
   { tool: "send_notification", client: "orchestrator", hops: [admit("post", "/api/notifications/send")] },
-  none("list_notifications"), // ctx.prisma
+  // WARP-3099 — N1 reads the list of the person the tool acts for; a ctx.prisma
+  // read by `ctx.userId` found nothing over the HTTP transport (a User.id).
+  { tool: "list_notifications", client: "orchestrator", hops: [admit("get", "/api/notifications")] },
 
   // ── system ──────────────────────────────────────────────────────────────
   { tool: "get_system_health", client: "orchestrator", hops: [admit("get", "/api/orchestrator/health")] },

@@ -61,9 +61,6 @@ export function createAdminCapabilitiesRouter(): Router {
       claudeActivity: githubConfigured() || jiraConfigured(),
       ragEval: ragEvalWired(),
     };
-    // Optional surfaces flip only on a deploy/env change; let the browser cache
-    // briefly so the nav doesn't re-probe on every client mount.
-    res.setHeader("Cache-Control", "private, max-age=30");
     res.json(body);
   });
 
