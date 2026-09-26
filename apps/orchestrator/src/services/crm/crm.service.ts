@@ -21,6 +21,7 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
 export const CRM_ERRORS = {
   COMPANY_NOT_FOUND: "company_not_found",
@@ -343,14 +344,6 @@ export async function ensureDefaultPipeline(prisma: PrismaClient): Promise<ApiCr
     if (isUniqueViolation(err)) return ensureDefaultPipeline(prisma);
     throw err;
   }
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: unknown }).code === "P2002"
-  );
 }
 
 export async function listPipelines(

@@ -283,8 +283,7 @@ export function createSettingsEmailRouter(
               token: string;
               email: string | null;
               role: string;
-              acceptedAt: Date | null;
-              revokedAt: Date | null;
+              status: "pending" | "accepted" | "revoked" | "expired";
               expiresAt: Date;
             }
           | null;
@@ -292,13 +291,14 @@ export function createSettingsEmailRouter(
         if (!invite) {
           return res.status(404).json({ error: "Invite not found" });
         }
-        if (invite.acceptedAt) {
+        // WARP-3193 QUAL-3: the explicit lifecycle column, not the timestamps.
+        if (invite.status === "accepted") {
           return res.status(409).json({
             error: "Invite already accepted",
             code: "INVITE_ALREADY_ACCEPTED",
           });
         }
-        if (invite.revokedAt) {
+        if (invite.status === "revoked") {
           return res.status(409).json({
             error: "Invite has been revoked",
             code: "INVITE_REVOKED",

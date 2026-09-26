@@ -48,6 +48,9 @@ RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
 COPY docker/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.default.conf
 COPY docker/nginx/cipher-profile.fips.conf    /etc/nginx/cipher-profile.fips.conf
 COPY docker/nginx/nginx.conf                  /etc/nginx/nginx.conf
+# WARP-3193 SEC-DATA-8: response-header sets nginx.conf includes per leg.
+COPY docker/nginx/security-headers.conf          /etc/nginx/security-headers.conf
+COPY docker/nginx/security-headers.upstream.conf /etc/nginx/security-headers.upstream.conf
 COPY docker/nginx/docker-entrypoint-fips.sh   /docker-entrypoint.d/00-fips-profile.sh
 # WARP-1061: first-party upstream scheme variants + the selector that picks
 # one from DROPLET_INTERNAL_TLS at container start (same pattern as the

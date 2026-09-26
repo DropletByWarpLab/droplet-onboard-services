@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -114,6 +115,21 @@ def _credentials(identity: str) -> tuple[str, str]:
     raise BridgeConfigError(f"unknown identity {identity!r}")
 
 
+def _encode_value(field: str, value: str) -> str:
+    """Brace-quote a value containing a reserved character, exactly as the
+    TypeScript builder does (services/erp-connector/src/connection-string.ts).
+
+    WARP-3193 SEC-INJ-3: without this a `;` in any value opened a second driver
+    parameter. A value containing `}` cannot be encoded and is a hard error —
+    the name is reported, never the value (it may be the password). A `=`
+    inside a value needs no quoting: the parser splits each segment on its
+    first `=`, and quoting would corrupt `TLS(trusted_certificates=...)`.
+    """
+    if "}" in value:
+        raise BridgeConfigError(f'{field} contains a "}}" which cannot be encoded in a connection string')
+    return f"{{{value}}}" if re.search(r"[;\s{]", value) else value
+
+
 def build_connection_string(target: Target, identity: str) -> str:
     """Assemble the ODBC connection string.
 
@@ -133,31 +149,39 @@ def build_connection_string(target: Target, identity: str) -> str:
     # Postgres ODBC (test lane) speaks a different keyword vocabulary than the
     # SAP client. Detected by driver name so production is never affected.
     if "postgres" in (driver or "").lower():
-        return (
-            f"DRIVER={{{driver}}};"
-            f"SERVER={target.host};PORT={target.port};"
-            f"DATABASE={target.database_name};"
-            f"UID={user};PWD={password};"
+        pg_parts = [
+            ("SERVER", target.host),
+            ("PORT", str(target.port)),
+            ("DATABASE", target.database_name),
+            ("UID", user),
+            ("PWD", password),
+        ]
+        return f"DRIVER={{{driver}}};" + "".join(
+            f"{k}={_encode_value(k, v)};" for k, v in pg_parts
         )
 
     parts = [
-        f"DRIVER={{{driver}}}",
-        f"Host={target.host}:{target.port}",
-        f"ServerName={target.server_name}",
-        f"DatabaseName={target.database_name}",
-        f"UID={user}",
-        f"PWD={password}",
-        f"Encryption={_env('ERP_DB_ENCRYPTION', 'NONE')}",
+        ("Host", f"{target.host}:{target.port}"),
+        ("ServerName", target.server_name),
+        ("DatabaseName", target.database_name),
+        ("UID", user),
+        ("PWD", password),
+        ("Encryption", _env("ERP_DB_ENCRYPTION", "NONE") or "NONE"),
     ]
-    return ";".join(parts) + ";"
+    return ";".join(
+        [f"DRIVER={{{driver}}}"] + [f"{k}={_encode_value(k, v)}" for k, v in parts]
+    ) + ";"
 
 
 def redact(text: str) -> str:
     """Strip anything password-shaped out of a string before it is logged or
     returned. pyodbc puts the whole connection string into some error
     messages, so this is not theoretical."""
+    # A brace-quoted password (see _encode_value) may itself contain `;`, so
+    # it is collapsed whole before the per-segment pass below.
+    text = re.sub(r"(?i)\b(pwd|password)(\s*=\s*)\{[^}]*\}?", r"\1=***", str(text))
     out = []
-    for chunk in str(text).split(";"):
+    for chunk in text.split(";"):
         low = chunk.strip().lower()
         if low.startswith("pwd=") or low.startswith("password="):
             out.append(chunk.split("=", 1)[0] + "=***")
