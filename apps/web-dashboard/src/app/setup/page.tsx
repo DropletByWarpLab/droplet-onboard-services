@@ -171,10 +171,13 @@ export default function SetupPage() {
                 onClick={() => {
                   void retrySetupProbe();
                 }}
-                /* `bg-accent-fill`, not `bg-accent`: `text-on-accent` on the
-                   vivid accent is the same 4.47:1 light-mode pair that
-                   `.dp-btn-primary` carries. */
-                className="rounded-full bg-accent-fill px-5 py-2 text-on-accent type-subheadline"
+                /* The same pair as `.dp-btn-primary`: `--color-on-accent`
+                   ink (via `text-accent-foreground`, tailwind.config.ts
+                   `accent.foreground`) on `bg-accent-fill` — 6.29:1 light,
+                   5.64:1 dark. The "on-accent" text class this used to
+                   carry is not a utility Tailwind generates, so the label
+                   fell through to body text (#000 on #4f46e5 = 3.34:1). */
+                className="rounded-full bg-accent-fill px-5 py-2 text-accent-foreground type-subheadline"
               >
                 Retry
               </button>
