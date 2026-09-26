@@ -207,6 +207,9 @@ describe("POST /api/auth/users/:username/revoke-sessions — same identifier as 
   const DIRECTORY: DirectoryRow[] = [
     // Local/Nextcloud-mirrored: both columns carry the same handle.
     { id: "u-owner", username: "stefan", nextcloudUsername: "stefan", displayName: "Stefan", role: "owner" },
+    // Local/Nextcloud-mirrored member. WARP-3111: the revoke target, since the
+    // owner row (the caller's own) is now refused by the self/owner rails.
+    { id: "u-lea", username: "lea", nextcloudUsername: "lea", displayName: "Lea", role: "family" },
     // SSO/SCIM-provisioned: no Nextcloud mapping key at all.
     { id: "u-sso", username: "dana.chen", nextcloudUsername: null, displayName: "Dana Chen", role: "family" },
   ];
@@ -241,10 +244,10 @@ describe("POST /api/auth/users/:username/revoke-sessions — same identifier as 
   });
 
   it("still resolves a Nextcloud-mirrored account by its mapping key (WARP-116 contract)", async () => {
-    const { revoked } = await listThenRevoke("Stefan");
+    const { revoked } = await listThenRevoke("Lea");
 
     expect(revoked.status).toBe(200);
-    expect(revokeAllSessions).toHaveBeenCalledWith("u-owner");
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-lea");
   });
 
   it("prefers the nextcloudUsername match when one column names a different row", async () => {

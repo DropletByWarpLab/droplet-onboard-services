@@ -105,9 +105,6 @@ export function createAdminClaudeActivityRouter(): Router {
         const lastModified =
           mostRecentTimestamp(session, github, jira, compliance) ?? generatedAt;
         res.setHeader("Last-Modified", lastModified.toUTCString());
-        // Strong cache-control: data is per-user-role and we don't want
-        // intermediaries serving a stale admin payload to a guest browser.
-        res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
 
         const ifModifiedSince = req.headers["if-modified-since"];
         if (typeof ifModifiedSince === "string") {

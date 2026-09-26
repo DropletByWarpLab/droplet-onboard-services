@@ -260,3 +260,52 @@ describe("<Sidebar> Files section reads as one idea (WARP-2966)", () => {
     ).toBeInTheDocument();
   });
 });
+
+/**
+ * A section's pages used to be reachable only from inside the section, and
+ * the collapsed rail never showed them at all. The chevron opens a section in
+ * place; the rail shows an open section's pages as labelled glyphs.
+ */
+describe("<Sidebar> section disclosure", () => {
+  beforeEach(() => {
+    pathnameRef.current = "/network";
+    capsRef.current = { claudeActivity: false, ragEval: false };
+    localStorage.clear();
+  });
+
+  it("opens and closes a section from its chevron without navigating", () => {
+    render(<Sidebar />);
+    const aside = desktopAside();
+    expect(within(aside).queryByRole("link", { name: /events/i })).toBeNull();
+
+    const toggle = within(aside).getByRole("button", { name: "Show Cameras pages" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+
+    expect(within(aside).getByRole("link", { name: /events/i })).toHaveAttribute("href", "/events");
+    fireEvent.click(within(aside).getByRole("button", { name: "Hide Cameras pages" }));
+    expect(within(aside).queryByRole("link", { name: /events/i })).toBeNull();
+  });
+
+  it("keeps a closed section's links out of the tab order", () => {
+    render(<Sidebar />);
+    const events = desktopAside().querySelector("a[href='/events']")!;
+    expect(events.closest("[inert]")).not.toBeNull();
+  });
+
+  it("shows an open section's pages in the collapsed rail, each with a name", () => {
+    localStorage.setItem("droplet.sidebar.collapsed", "1");
+    render(<Sidebar />);
+    const aside = desktopAside();
+    expect(within(aside).getByRole("link", { name: "Remote access" })).toHaveAttribute(
+      "href",
+      "/remote-access",
+    );
+    // The rail's expand control takes the header slot, ahead of every link.
+    const expand = within(aside).getByRole("button", { name: "Expand sidebar" });
+    expect(
+      expand.compareDocumentPosition(within(aside).getAllByRole("link")[0]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});

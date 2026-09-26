@@ -63,6 +63,7 @@ import {
   assertDirectoryEditAllowed,
   assertRemovalAllowed,
   assertDisableAllowed,
+  assertSessionRevokeAllowed,
   assertAssignableForCreate,
   assertRemovalInvariantsTx,
   assertDisableInvariantsTx,
@@ -576,6 +577,10 @@ const updateUserSchema = z
     quota: z.union([z.string().min(1).max(32), z.number().int().min(0)]).optional(),
     // ADR-013: same shared policy the setup/add-user/invite paths enforce.
     password: passwordZod.optional(),
+    // WARP-3111: an admin password reset signs the person out everywhere by
+    // default. `true` keeps their live sessions (the forced change still
+    // applies). Only meaningful alongside `password`; not a field on its own.
+    keepSessions: z.boolean().optional(),
   })
   .refine(
     (d) =>
@@ -3346,7 +3351,18 @@ export function createProtectedAuthRouter(
       }
 
       const { username } = req.params;
-      const { displayName, email, quota, password } = parsed.data;
+      const { displayName, email, quota, password, keepSessions } = parsed.data;
+      // WARP-3111: a password set by SOMEONE ELSE is a reset — the admin now
+      // knows it, and a reset is what an admin does when an account may be
+      // compromised or the person is leaving. So it is temporary (the WARP-824
+      // forced change) and, unless `keepSessions: true`, ends every live
+      // session. Your OWN password through this route is plain maintenance:
+      // forcing a change of a password you just chose is noise, and revoking
+      // your own sessions would sign you out mid-request (self-service
+      // changes go through POST /auth/password, which revokes the others).
+      // Rowless targets have no local flag or sessions to act on.
+      const isReset =
+        password !== undefined && target !== null && req.user?.id !== target.id;
 
       // WARP-2858: the Nextcloud user this row mirrors to. A row with no
       // mapping key (SSO/SCIM-provisioned) has NO Nextcloud account, so the
@@ -3401,6 +3417,7 @@ export function createProtectedAuthRouter(
         // WARP-233: an email change re-encrypts + re-indexes atomically.
         if (email !== undefined) Object.assign(data, emailWriteData(email));
         if (password !== undefined) data.passwordHash = await hashPassword(password);
+        if (isReset) data.mustChangePassword = true;
         if (Object.keys(data).length > 0) {
           const updated = await prisma.user.updateMany({
             // WARP-1564 (review L2): PIN `role` to the value rail 1b decided
@@ -3459,11 +3476,43 @@ export function createProtectedAuthRouter(
         }
       }
 
+      // WARP-3111: the local credential is committed, so the old holder is
+      // cut off now, not at their 12 h session limit. Before the Nextcloud
+      // mirror, so an NC failure below can't leave the sessions alive.
+      // `sessionsRevoked` is null when the admin opted out (distinct from 0 =
+      // nothing was signed in).
+      let sessionsRevoked: number | null = null;
+      if (isReset && target) {
+        if (keepSessions !== true) {
+          sessionsRevoked = await revokeAllSessions(target.id);
+        }
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "key-round",
+          what: "Password reset",
+          sub: `for user ${username}`,
+          refs: {
+            targetUserId: target.id,
+            username,
+            mustChangePassword: true,
+            sessionsRevoked,
+          },
+          actor: actorFromRequest(req),
+        });
+      }
+      const resetFields = isReset ? { mustChangePassword: true, sessionsRevoked } : {};
+
       // Mirror the changes to Nextcloud (the WebDAV account + NC-side
       // attributes). One OCS PUT per field; the plaintext password is sent
       // here so the user's Files/WebDAV login keeps working.
       if (ncUsername === null) {
-        res.json({ status: "ok", username, ncMirror: "no_account" satisfies NcMirror });
+        res.json({
+          status: "ok",
+          username,
+          ncMirror: "no_account" satisfies NcMirror,
+          ...resetFields,
+        });
         return;
       }
       if (displayName !== undefined) {
@@ -3478,7 +3527,7 @@ export function createProtectedAuthRouter(
       if (password !== undefined) {
         await ncUpdateUser(token, ncUsername, "password", password);
       }
-      res.json({ status: "ok", username, ncMirror: "synced" satisfies NcMirror });
+      res.json({ status: "ok", username, ncMirror: "synced" satisfies NcMirror, ...resetFields });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
         res.status(403).json({ error: "Admin access required" });
@@ -3781,6 +3830,20 @@ export function createProtectedAuthRouter(
         if (!row) {
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
+        }
+        // WARP-3111: the WARP-1526 rails — never yourself, never the owner,
+        // never someone above your rank. See assertSessionRevokeAllowed.
+        try {
+          assertSessionRevokeAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: row,
+          });
+        } catch (err) {
+          if (err instanceof RoleMutationRefusedError) {
+            res.status(err.status).json(err.toJSON());
+            return;
+          }
+          throw err;
         }
         // WARP-247 — kill session RECORDS (access tokens die at the next
         // middleware check) as well as the refresh denylist (swept internally

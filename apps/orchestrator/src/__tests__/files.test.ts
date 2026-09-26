@@ -83,6 +83,10 @@ vi.mock("../services/nextcloud.client.js", async () => {
     ncUpdateShare: vi.fn(),
     ncDeleteShare: vi.fn(),
     ncListSharedWithMe: vi.fn(),
+    // WARP-3052 — shares-by-me / shared-by-me degrade coverage
+    ncListOutboundShares: vi.fn(),
+    ncListMyShares: vi.fn(),
+    ncGetShare: vi.fn(),
     ncGetUserQuota: vi.fn(),
   };
 });
@@ -178,6 +182,8 @@ describe("File Operations (Nextcloud-backed routes)", () => {
     ncMock.ncSearchFiles.mockResolvedValue([]);
     ncMock.ncListSharedWithMe.mockResolvedValue([]);
     ncMock.ncListShares.mockResolvedValue([]);
+    ncMock.ncListOutboundShares.mockResolvedValue([]);
+    ncMock.ncListMyShares.mockResolvedValue([]);
 
     ncMock.ncGetFileId.mockResolvedValue(42);
   });
@@ -286,6 +292,42 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       expect(res.body).toEqual({ shares: [] });
     });
 
+    // WARP-3052 — every degraded 200 carries X-Droplet-Degraded so clients can
+    // tell an outage from a genuinely empty result; a healthy empty never does.
+    const degradedRoutes = [
+      { url: "/api/files?path=/", fn: "ncListFiles", empty: [] },
+      { url: "/api/files/trash", fn: "ncListTrash", empty: { items: [] } },
+      { url: "/api/files/favorites", fn: "ncListFavorites", empty: { items: [] } },
+      { url: "/api/files/recents", fn: "ncListRecents", empty: { items: [] } },
+      { url: "/api/files/shared-with-me", fn: "ncListSharedWithMe", empty: { shares: [] } },
+      { url: "/api/files/shares-by-me", fn: "ncListOutboundShares", empty: { shares: [] } },
+      { url: "/api/files/shared-by-me", fn: "ncListMyShares", empty: { shares: [] } },
+    ] as const;
+    const outages = [
+      ["upstream unreachable", () => fetchFailed()],
+      ["OCS 5xx", () => {
+        const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+        return new NextcloudOcsError("OCS failed (503)", 503);
+      }],
+    ] as const;
+
+    describe.each(degradedRoutes)("X-Droplet-Degraded on $url (WARP-3052)", ({ url, fn, empty }) => {
+      it.each(outages)("set on %s", async (_label, makeErr) => {
+        (ncMock as any)[fn].mockRejectedValue(makeErr());
+        const res = await request(app).get(url);
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual(empty);
+        expect(res.headers["x-droplet-degraded"]).toBe("nextcloud-unavailable");
+      });
+
+      it("absent on a healthy empty result", async () => {
+        const res = await request(app).get(url);
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual(empty);
+        expect(res.headers["x-droplet-degraded"]).toBeUndefined();
+      });
+    });
+
     it("does NOT degrade a real (non-connectivity) error — a 403 still surfaces, not a 200 empty list", async () => {
       // A WebDAV 403 is a genuine authorization failure, not "Nextcloud is
       // down" — it must keep its non-degraded behavior (untyped → 500),
@@ -324,6 +366,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files?path=/");
       expect(res.status).toBe(403);
       expect(res.body).not.toEqual([]);
+      expect(res.headers["x-droplet-degraded"]).toBeUndefined();
     });
   });
 
@@ -1393,7 +1436,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
   });
 
   describe("Thumbnail", () => {
-    it("GET /api/files/thumbnail streams bytes with Cache-Control", async () => {
+    it("GET /api/files/thumbnail streams bytes, no-store (WARP-3097)", async () => {
       const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
       ncMock.ncFetchThumbnail.mockResolvedValue({
         body: body.buffer,
@@ -1403,7 +1446,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files/thumbnail?path=/pixel.png");
       expect(res.status).toBe(200);
       expect(res.headers["content-type"]).toContain("image/png");
-      expect(res.headers["cache-control"]).toContain("max-age=3600");
+      expect(res.headers["cache-control"]).toBe("no-store");
     });
 
     it("GET /api/files/thumbnail returns 404 when preview is unavailable", async () => {

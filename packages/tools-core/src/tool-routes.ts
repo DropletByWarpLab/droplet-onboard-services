@@ -305,7 +305,9 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // WARP-3060 — through the orchestrator's sendNotification (toast + push); a
   // row written here through ctx.prisma was never delivered by anything.
   { tool: "send_notification", client: "orchestrator", hops: [admit("post", "/api/notifications/send")] },
-  none("list_notifications"), // ctx.prisma
+  // WARP-3099 — N1 reads the list of the person the tool acts for; a ctx.prisma
+  // read by `ctx.userId` found nothing over the HTTP transport (a User.id).
+  { tool: "list_notifications", client: "orchestrator", hops: [admit("get", "/api/notifications")] },
 
   // ── system ──────────────────────────────────────────────────────────────
   { tool: "get_system_health", client: "orchestrator", hops: [admit("get", "/api/orchestrator/health")] },
