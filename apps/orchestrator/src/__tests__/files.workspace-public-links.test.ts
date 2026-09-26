@@ -49,13 +49,16 @@ vi.mock("../config.js", () => ({
 
 import { createFilesRouter } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
-import { libraryOfHomePath, mayCreatePublicLink } from "../services/share-policy.js";
+import { exposesOutside, libraryOfHomePath, mayCreatePublicLink } from "../services/share-policy.js";
 
 const ncMock = nc as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 const HOUSEHOLD = { id: "hh", name: "Household", parentId: null, kind: "HOUSEHOLD", state: "active" };
 const ALPHA = { id: "11111111-1111-4111-8111-111111111111", name: "Alpha", parentId: null, kind: "DEPARTMENT", state: "active" };
 const OPS = { id: "33333333-3333-4333-8333-333333333333", name: "Ops", parentId: ALPHA.id, kind: "TEAM", state: "active" };
+const SALES_EMEA = { id: "44444444-4444-4444-8444-444444444444", name: "Sales/EMEA", parentId: null, kind: "DEPARTMENT", state: "active" };
+const NORTH = { id: "55555555-5555-4555-8555-555555555555", name: "North", parentId: SALES_EMEA.id, kind: "TEAM", state: "active" };
+const CAFE = { id: "66666666-6666-4666-8666-666666666666", name: "Caf\u00e9", parentId: null, kind: "DEPARTMENT", state: "active" };
 
 const MEMBER = { id: "u-member", username: "mia", role: "family" };
 const ADMIN = { id: "u-admin", username: "ada", role: "admin" };
@@ -63,7 +66,7 @@ const OWNER = { id: "u-owner", username: "olly", role: "owner" };
 const MCP = { id: "_service:mcp", username: "_service:mcp", role: "service" };
 
 function makePrisma() {
-  const depts = [HOUSEHOLD, ALPHA, OPS];
+  const depts = [HOUSEHOLD, ALPHA, OPS, SALES_EMEA, NORTH, CAFE];
   const users = [
     { id: MEMBER.id, username: MEMBER.username, role: MEMBER.role, directoryStatus: "ACTIVE", nextcloudUsername: "mia" },
     { id: ADMIN.id, username: ADMIN.username, role: ADMIN.role, directoryStatus: "ACTIVE", nextcloudUsername: "ada" },
@@ -134,6 +137,62 @@ describe("WARP-3053 — POST /files/share public links on company data", () => {
     const res = await request(app(MEMBER)).post("/api/files/share").send({ path });
     expect(res.status).toBe(403);
     expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["email (4)", 4],
+    ["federated (6)", 6],
+    ["an unknown type (5)", 5],
+    ["a group share with re-share (1 + bit 16)", 1],
+  ])("member, %s on a Workspace item: 403 (allowlist, not denylist)", async (_label, shareType) => {
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({
+        path: "/Household/Plan.pdf",
+        shareType,
+        shareWith: "someone@example.com",
+        permissions: shareType === 1 ? 17 : 1,
+      });
+    expect(res.status).toBe(403);
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("member, internal GROUP share (1) of a Workspace item without re-share: allowed", async () => {
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Household/Plan.pdf", shareType: 1, shareWith: "staff", permissions: 1 });
+    expect(res.status).toBe(200);
+  });
+
+  it("admin, email share (4) of a Workspace item: allowed", async () => {
+    const res = await request(app(ADMIN))
+      .post("/api/files/share")
+      .send({ path: "/Household/Plan.pdf", shareType: 4, shareWith: "x@example.com" });
+    expect(res.status).toBe(200);
+  });
+
+  it("a backslash path is refused outright (400), whoever asks", async () => {
+    for (const who of [MEMBER, ADMIN]) {
+      const res = await request(app(who)).post("/api/files/share").send({ path: "\\Household\\x" });
+      expect(res.status).toBe(400);
+    }
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a department name sent in NFD", "/Cafe\u0301/menu.pdf"],
+    ["a department whose name contains a slash", "/Sales/EMEA/q3.pdf"],
+    ["that department's root itself", "/Sales/EMEA"],
+    ["a team under it, in the Parent — Team form", "/Sales/EMEA — North/plan.pdf"],
+  ])("member, public link on %s: 403", async (_label, path) => {
+    const res = await request(app(MEMBER)).post("/api/files/share").send({ path });
+    expect(res.status).toBe(403);
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("member, public link on a personal folder that only shares a first segment with a library: allowed", async () => {
+    const res = await request(app(MEMBER)).post("/api/files/share").send({ path: "/Sales/pipeline.xlsx" });
+    expect(res.status).toBe(200);
   });
 
   it("member granting the re-share bit on a Workspace item internally: 403", async () => {
@@ -215,6 +274,19 @@ describe("WARP-3053 — PUT/DELETE /files/share/:id on company data", () => {
     expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
   });
 
+  it.each([4, 6, 5])("member editing an existing type-%i share on a Workspace item: 403", async (shareType) => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, shareType, path: "/Household/Plan.pdf" });
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ note: "hi" });
+    expect(res.status).toBe(403);
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("member editing a Workspace share whose NC path is in NFD form: 403", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, path: "/Cafe\u0301/menu.pdf" });
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ note: "hi" });
+    expect(res.status).toBe(403);
+  });
+
   it("member adding the re-share bit to an internal Workspace share: 403", async () => {
     ncMock.ncGetShare.mockResolvedValue({ ...created, shareType: 0, path: "/Household/Plan.pdf" });
     const res = await request(app(MEMBER)).put("/api/files/share/7").send({ permissions: 19 });
@@ -257,12 +329,25 @@ describe("WARP-3053 — share-policy", () => {
     expect(mayCreatePublicLink("owner", "company")).toBe(true);
   });
 
-  it("classifies by the first home segment only", () => {
-    const roots = ["Household", "Alpha"];
+  it("classifies by whole-prefix match on normalized paths", () => {
+    const roots = ["Household", "Alpha", "Sales/EMEA", "Caf\u00e9"];
     expect(libraryOfHomePath("/Household", roots)).toBe("company");
     expect(libraryOfHomePath("//Alpha/x", roots)).toBe("company");
     expect(libraryOfHomePath("/Docs/Household/x", roots)).toBe("personal");
     expect(libraryOfHomePath("/Householder", roots)).toBe("personal");
+    expect(libraryOfHomePath("/Sales/EMEA/x", roots)).toBe("company");
+    expect(libraryOfHomePath("/Sales/EMEAx", roots)).toBe("personal");
+    expect(libraryOfHomePath("/Sales", roots)).toBe("personal");
+    expect(libraryOfHomePath("/Cafe\u0301/x", roots)).toBe("company");
+    expect(libraryOfHomePath("/Cafe\u0301/x", ["Cafe\u0301"])).toBe("company");
+    expect(libraryOfHomePath("\\Household\\x", roots)).toBe("company");
     expect(libraryOfHomePath("/", roots)).toBe("personal");
+  });
+
+  it("exposesOutside is an allowlist: only user/group without re-share is internal", () => {
+    expect(exposesOutside(0, 3)).toBe(false);
+    expect(exposesOutside(1, 1)).toBe(false);
+    expect(exposesOutside(0, 19)).toBe(true);
+    for (const t of [3, 4, 6, 7, 9, 10, 12, 15, 42]) expect(exposesOutside(t, 1)).toBe(true);
   });
 });

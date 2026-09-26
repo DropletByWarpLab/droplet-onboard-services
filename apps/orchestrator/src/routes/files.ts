@@ -2916,6 +2916,12 @@ export function createFilesRouter(
         res.status(400).json({ error: "path must not contain '..' segments" });
         return;
       }
+      // WARP-3053: no legitimate share path carries a backslash, and one
+      // could dress a company path up as a personal one for the classifier.
+      if (parsed.data.path.includes("\\")) {
+        res.status(400).json({ error: "path must not contain backslashes" });
+        return;
+      }
 
       const space = resolveSpace(spaceQueryOrBody(req));
       const targetPath = await rootForSpace(prisma, space, parsed.data.path);
@@ -2923,9 +2929,10 @@ export function createFilesRouter(
       const departmentId = req.spaceDepartmentId ?? null;
       const shareToken = departmentId ? adminBasicToken() : await getToken(req);
 
-      // WARP-3053: a public link (or a re-share grant) on company data is
-      // owner/admin only, judged on the RESOLVED library so the home-path
-      // shape can't skip it. Owner/admin short-circuit the library lookup.
+      // WARP-3053: on company data, anything but an internal user/group share
+      // without the re-share bit (see exposesOutside) is owner/admin only,
+      // judged on the RESOLVED library so the home-path shape can't skip it.
+      // Owner/admin short-circuit the library lookup.
       if (exposesOutside(parsed.data.shareType, parsed.data.permissions)) {
         const role = await actingRole(req);
         const allowed =
@@ -3900,8 +3907,9 @@ export function createFilesRouter(
       if (!auth.ok) return;
       const { token } = auth;
 
-      // WARP-3053: members may not edit a public link on company data, nor
-      // grant the re-share bit on it. Revoking (DELETE) stays open to them.
+      // WARP-3053: members may not edit any non-internal share (link, email,
+      // federated, ...) on company data, nor grant the re-share bit on it.
+      // Revoking (DELETE) stays open to them.
       if (!mayCreatePublicLink(req.user?.role, "company")) {
         const existing = auth.deptRow
           ? { shareType: auth.deptRow.shareType, library: "company" as const }

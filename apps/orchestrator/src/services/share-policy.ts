@@ -19,8 +19,8 @@
 
 export type ShareLibrary = "personal" | "company";
 
-/** OCS public-link share type. */
-export const SHARE_TYPE_PUBLIC_LINK = 3;
+/** OCS share types that stay inside the company: a named user (0) or group (1). */
+const INTERNAL_SHARE_TYPES: ReadonlySet<number> = new Set([0, 1]);
 /** OCS re-share permission bit. */
 export const PERM_SHARE = 16;
 
@@ -29,26 +29,52 @@ export function mayCreatePublicLink(role: string | undefined, library: ShareLibr
   return role === "owner" || role === "admin";
 }
 
-/** True when this share would let data leave the company (link, or a re-share grant). */
+/**
+ * True when this share could let data leave the company. An ALLOWLIST: only
+ * a user (0) or group (1) share WITHOUT the re-share bit is internal. Link
+ * (3), email (4, an external token link), federated (6, 9), circle (7),
+ * Talk room (10), deck (12), ScienceMesh (15) and any type Nextcloud adds
+ * later all count as leaving.
+ *
+ * Ruling (WARP-3053 fix round 1): circles and Talk rooms are NOT internal.
+ * The box installs neither app and sends neither type, and both can hold
+ * guests or federated members, so an unknown audience fails closed.
+ */
 export function exposesOutside(shareType: number, permissions: number): boolean {
-  return shareType === SHARE_TYPE_PUBLIC_LINK || (permissions & PERM_SHARE) !== 0;
+  return !INTERNAL_SHARE_TYPES.has(shareType) || (permissions & PERM_SHARE) !== 0;
+}
+
+/** Canonical form for comparison: NFC, case-folded, `.`/empty segments dropped. */
+function canonical(path: string): string {
+  return path
+    .normalize("NFC")
+    .toLowerCase()
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".")
+    .join("/");
 }
 
 /**
- * Classify a home-relative path by its first segment. Nextcloud mounts the
- * Workspace and every department/team library as a top-level folder in each
- * member's home, so the web's and the Mac's "full home path, no `space`"
- * shape still names the library. Compared case-insensitively on purpose:
- * a personal folder that differs from a library only by case is treated as
- * company data (fail closed, costs that member a public link, never a leak).
+ * Classify a home-relative path. Nextcloud mounts the Workspace and every
+ * department/team library as a folder in each member's home, so the web's
+ * and the Mac's "full home path, no `space`" shape still names the library.
+ *
+ * Roots are matched as whole path prefixes, longest first, because a
+ * department name may itself contain `/` (`Sales/EMEA`). Comparison is NFC
+ * and case-insensitive: a personal folder that differs from a library only
+ * by case or Unicode form is treated as company data (fail closed; costs a
+ * member a public link, never a leak). A backslash is refused upstream and
+ * classified as company here for the same reason.
  */
 export function libraryOfHomePath(homePath: string, companyRoots: readonly string[]): ShareLibrary {
-  const first = homePath
-    .split("/")
-    .find((seg) => seg !== "" && seg !== ".");
-  if (!first) return "personal";
-  const f = first.toLowerCase();
-  return companyRoots.some((r) => r.toLowerCase() === f) ? "company" : "personal";
+  if (homePath.includes("\\")) return "company";
+  const p = canonical(homePath);
+  if (!p) return "personal";
+  const roots = companyRoots
+    .map(canonical)
+    .filter((r) => r !== "")
+    .sort((a, b) => b.length - a.length);
+  return roots.some((r) => p === r || p.startsWith(r + "/")) ? "company" : "personal";
 }
 
 export const PUBLIC_LINK_REFUSAL = {

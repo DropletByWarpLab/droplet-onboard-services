@@ -140,7 +140,9 @@ function makePrismaStub(opts: {
         const id = args?.where?.ncShareId;
         if (id === undefined) return null;
         const row = shareStore.get(id);
-        return row ? { departmentId: row.departmentId, createdById: row.createdById } : null;
+        return row
+          ? { departmentId: row.departmentId, createdById: row.createdById, shareType: row.shareType }
+          : null;
       }),
       findMany: vi.fn(async (args?: { where?: { createdById?: string; revokedAt?: null } }) => {
         const createdById = args?.where?.createdById;
@@ -353,6 +355,15 @@ describe("WARP-1269 (T17) — PUT/DELETE /files/share/:id authz matrix", () => {
           departmentId: DEPT_A.id,
           ncShareId: 101,
           createdById: MANAGER_A.id,
+          // WARP-3053: an internal share, so a member manager may still edit it.
+          shareType: 0,
+          path: "/Reports",
+          revokedAt: null,
+        },
+        {
+          departmentId: DEPT_A.id,
+          ncShareId: 102,
+          createdById: MANAGER_A.id,
           shareType: 3,
           path: "/Reports",
           revokedAt: null,
@@ -360,6 +371,19 @@ describe("WARP-1269 (T17) — PUT/DELETE /files/share/:id authz matrix", () => {
       ],
     });
   }
+
+  it("WARP-3053: the member manager who minted a dept PUBLIC link may not edit it (403) but may revoke it", async () => {
+    const prisma = seededPrisma();
+    ncMock.ncDeleteShare.mockResolvedValue(undefined);
+    const app = buildApp(prisma, MANAGER_A);
+
+    const put = await request(app).put("/api/files/share/102").send({ note: "x" });
+    expect(put.status).toBe(403);
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+
+    const del = await request(app).delete("/api/files/share/102");
+    expect(del.status).toBe(200);
+  });
 
   it("creator (the manager who minted it) can update — admin credential used", async () => {
     const prisma = seededPrisma();
