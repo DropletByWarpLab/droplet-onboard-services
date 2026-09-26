@@ -230,4 +230,90 @@ describe("cron-runtime.service", () => {
 
     rt.stop();
   });
+
+  // ── WARP-3193 PERF-1: no overlap, and no lock lost mid-run ──
+
+  it("never overlaps a handler with itself: a tick during a run is skipped", async () => {
+    const logger = makeLogger();
+    const rt = createCronRuntime(undefined, logger);
+    let running = 0;
+    let maxRunning = 0;
+    const handler = vi.fn(async () => {
+      running += 1;
+      maxRunning = Math.max(maxRunning, running);
+      await new Promise((r) => setTimeout(r, 3500));
+      running -= 1;
+    });
+    rt.scheduleInterval(1000, handler);
+
+    // Ticks at 1s, 2s, 3s, 4s: the run started at 1s ends at 4.5s, so the
+    // 2s/3s/4s ticks must all be skipped rather than stacked.
+    await vi.advanceTimersByTimeAsync(4200);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(maxRunning).toBe(1);
+
+    // Once the run finishes the next tick runs normally.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(maxRunning).toBe(1);
+    rt.stop();
+  });
+
+  it("overlap guard is per registration, and also covers scheduleCron", async () => {
+    const rt = createCronRuntime();
+    let release!: () => void;
+    const slow = vi.fn(() => new Promise<void>((r) => (release = r)));
+    const other = vi.fn(async () => {});
+    rt.scheduleCron("* * * * * *", slow);
+    rt.scheduleInterval(1000, other);
+
+    await vi.advanceTimersByTimeAsync(3500);
+    // The cron job is stuck in its first run: later cron ticks are skipped.
+    expect(slow).toHaveBeenCalledTimes(1);
+    // A different registration is not held back by it.
+    expect(other).toHaveBeenCalledTimes(3);
+
+    release();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(slow).toHaveBeenCalledTimes(2);
+    rt.stop();
+  });
+
+  it("a locked handler that outlives 60 s keeps the advisory lock for its whole run", async () => {
+    // Model Prisma's interactive-transaction timeout: when it expires the
+    // transaction is rolled back and Postgres releases the xact lock, while
+    // the handler (which is not cancelled) keeps running. That is the bug.
+    const events: string[] = [];
+    const $queryRawUnsafe = vi.fn(async () => [{ locked: true }]);
+    const $transaction = vi.fn(
+      async (fn: (tx: unknown) => Promise<unknown>, opts?: { timeout?: number }) => {
+        const timeout = opts?.timeout ?? 5_000; // Prisma's default
+        const expiry = setTimeout(() => events.push("lock-released-by-timeout"), timeout);
+        try {
+          return await fn({ $queryRawUnsafe });
+        } finally {
+          clearTimeout(expiry);
+          events.push("lock-released-at-tx-end");
+        }
+      },
+    );
+    const prisma = { $queryRawUnsafe, $transaction } as unknown as CronRuntimePrisma;
+    const logger = makeLogger();
+    const rt = createCronRuntime(prisma, logger);
+
+    // e.g. the OTA apply window: pull + recreate takes many minutes.
+    const handler = vi.fn(async () => {
+      events.push("handler-start");
+      await new Promise((r) => setTimeout(r, 45 * 60_000));
+      events.push("handler-end");
+    });
+    rt.scheduleInterval(60_000, handler, { lockKey: "test:long" });
+
+    await vi.advanceTimersByTimeAsync(60_000 + 45 * 60_000 + 1_000);
+    expect(events).toEqual(["handler-start", "handler-end", "lock-released-at-tx-end"]);
+    // And the ticks that fired during the run did not start a second copy.
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(logger.error).not.toHaveBeenCalled();
+    rt.stop();
+  });
 });
