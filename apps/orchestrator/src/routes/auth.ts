@@ -1805,18 +1805,33 @@ export function createPublicAuthRouter(
         });
 
         // Native clients want the new tokens in body since they can't
-        // read Set-Cookie. Always include them — browsers ignore the
-        // body's accessToken (they use the cookie that was just set
-        // above), so this is non-breaking.
+        // read Set-Cookie. WARP-3193 SEC-AUTH-7: ONLY native clients — the
+        // same WARP-582 rule as /auth/login?return=body. A browser rotates
+        // through the cookies set above; tokens in its body would be
+        // readable by any XSS on the dashboard origin. Native = presented
+        // its refresh token in the body (ADR-008) AND carries no browser
+        // marker header (lib/browser-context.ts).
+        const browserMarker = browserMarkerHeader(req.headers);
+        if (refreshTokenBody !== null && browserMarker !== null) {
+          logger.warn(
+            { marker: browserMarker, sub },
+            "refresh: body tokens refused for a browser context — cookie-only rotation (WARP-582)",
+          );
+        }
+        const wantBody = refreshTokenBody !== null && browserMarker === null;
         res.json({
           status: "ok",
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-          accessTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-          refreshTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+          ...(wantBody
+            ? {
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken,
+                accessTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+                refreshTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+              }
+            : {}),
         });
         return;
       }
