@@ -1381,8 +1381,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
       // default no-enhancement path runs (byte-for-byte WARP-286).
-      const aiGatewayGrpcUrl =
-        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const aiGatewayGrpcUrl = config.AI_GATEWAY_GRPC_URL;
       // WARP-3047 — HyDE / multi-query rewrites run on the model THIS turn
       // is using when that model is local (it is already resident; asking
       // for any other local model mid-turn is the DMR load collision — two

@@ -212,6 +212,18 @@ describe("POST /api/voice/enroll/start", () => {
     );
   });
 
+  it("forwards a Prisma failure to the error handler instead of hanging (WARP-3193 QUAL-8)", async () => {
+    const prisma = mkPrisma(DIRECTORY);
+    prisma.user.findUnique.mockRejectedValueOnce(new Error("db down"));
+    const { app } = buildApp(mkUser("owner"), prisma);
+    const res = await request(app)
+      .post("/api/voice/enroll/start")
+      .send({ userId: "u-nadia" })
+      .timeout(3000);
+    expect(res.status).toBe(500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("relays voice-io's 503 (model not installed) verbatim", async () => {
     fetchSpy.mockResolvedValue(
       upstreamJson(503, { detail: "voice model isn't installed" }),

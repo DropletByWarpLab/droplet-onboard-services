@@ -3,8 +3,7 @@
  *
  *  - `GET /api/files/knowledge/recent`  → cursor-paginated recent chunks
  *  - `GET /api/files/knowledge/search`  → semantic search via shared
- *    `file-search.service.ts` (WARP-202). Falls back to 503 when the
- *    module isn't available yet.
+ *    `file-search.service.ts` (WARP-202).
  *
  * These routes are intentionally namespaced under `/files/knowledge/`
  * to avoid colliding with the long-standing Nextcloud filename routes
@@ -46,10 +45,8 @@ vi.mock("../config.js", () => ({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
-// Mock the WARP-202 modules the search route dynamically imports. We keep
-// the dynamic import surface alive (so loadEmbeddingClient/loadSearchService
-// don't fall through to the 503 path) and inject controllable test
-// doubles. Tests can override these via the hoisted spies.
+// Mock the WARP-202 modules the search route imports and inject
+// controllable test doubles. Tests can override these via the hoisted spies.
 // ─────────────────────────────────────────────────────────────────────────
 const { embedSpy, searchByVectorSpy, searchHybridSpy, listRecentSpy } =
   vi.hoisted(() => ({

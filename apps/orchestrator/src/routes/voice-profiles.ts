@@ -30,6 +30,7 @@
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
+import { asyncHandler } from "../lib/async-handler.js";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -183,7 +184,9 @@ export function createVoiceProfilesRouter(prisma: PrismaClient): Router {
   });
 
   // ── POST /api/voice/enroll/start — open a Flow B session ──
-  router.post("/voice/enroll/start", guard, async (req, res) => {
+  // asyncHandler: the Prisma lookup below has no try/catch of its own
+  // (WARP-3193 QUAL-8) — a DB error must reach the error handler, not hang.
+  router.post("/voice/enroll/start", guard, asyncHandler(async (req, res) => {
     const userId: unknown = req.body?.userId;
     if (typeof userId !== "string" || !USER_ID_RE.test(userId)) {
       res.status(400).json({ error: "invalid_user_id" });
@@ -201,7 +204,7 @@ export function createVoiceProfilesRouter(prisma: PrismaClient): Router {
       return;
     }
     await proxy(res, "POST", "/speaker/enroll/start", { user_id: userId });
-  });
+  }));
 
   /** Validate + forward one session-scoped enrollment call. */
   function sessionBody(req: Request, res: Response): string | null {

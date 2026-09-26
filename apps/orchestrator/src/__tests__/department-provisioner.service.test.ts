@@ -62,6 +62,7 @@ import {
   MASK_RO,
   MASK_ADMIN,
   DROPLET_ADMINS_GROUP,
+  adminBasicToken,
 } from "../services/department-provisioner.service.js";
 
 interface FakeDepartment {
@@ -620,5 +621,22 @@ describe("archiveDepartment", () => {
     const row = prisma.rows.get(d.id)!;
     expect(row.state).toBe("archive_failed");
     expect(row.provisionError).toContain("nc down");
+  });
+});
+
+// WARP-3193 SEC-DATA-10: a missing/torn .env must not silently authenticate
+// as admin:admin — the password comes from config (empty outside production,
+// where the boot gate refuses to start without it).
+describe("adminBasicToken", () => {
+  it("never falls back to the `admin` password when the env lacks it", () => {
+    const saved = process.env.NEXTCLOUD_ADMIN_PASSWORD;
+    delete process.env.NEXTCLOUD_ADMIN_PASSWORD;
+    try {
+      const token = adminBasicToken();
+      const decoded = Buffer.from(token.replace(/^basic:/, ""), "base64").toString();
+      expect(decoded.split(":")[1]).not.toBe("admin");
+    } finally {
+      if (saved !== undefined) process.env.NEXTCLOUD_ADMIN_PASSWORD = saved;
+    }
   });
 });
