@@ -126,7 +126,8 @@ const RETRY_LINE: Readonly<Record<NarrativeCheckRule, string>> = {
   SHAPE: "Your last answer was not in the right form. Write two to four plain sentences, under 600 characters, with no markdown, links, lists or symbols.",
   NAMES: "Your last answer named a person. Do not name anyone: say someone or a person.",
   TIMES: "Your last answer gave a time that is not in the JSON. Give only the times written in the JSON, exactly as written.",
-  WORDS: "Your last answer used a word that is not allowed. Do not say monitored, alarm, armed, secure, protected, guarded, zone, intruder, burglar, thief, break-in or stolen.",
+  WORDS:
+    "Your last answer used a word that is not allowed. Do not say monitored, alarm, armed, secure, protected, guarded, zone, intruder, burglar, burglary, thief, theft, steal, stolen, robbery, break-in or break in.",
 };
 
 export type NarrativeError = "MODEL_ERROR" | "TIMEOUT" | "LENGTH" | "EMPTY" | `CHECK_FAILED:${NarrativeCheckRule}`;

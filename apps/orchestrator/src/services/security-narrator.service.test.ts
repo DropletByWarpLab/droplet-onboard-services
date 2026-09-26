@@ -467,6 +467,17 @@ describe("failures, expiry and the model", () => {
     expect(byId(i!.id)).toMatchObject({ narrativeAttempts: 1, narrativeError: "CHECK_FAILED:NAMES", narrative: null });
   });
 
+  // #2423 review 7: the WORDS retry tells the model which words the check refuses — the new ones included.
+  it("a WORDS retry names every refused word, the review's additions too", async () => {
+    seed([incident()]);
+    gw.chat.mockImplementation(async () => reply("There was a theft in the Stock room at 10:14 PM."));
+    await tickSecurityNarrator(prisma, deps());
+    const line = gw.chat.mock.calls[1]![0].messages[0].content.slice(SECURITY_NARRATIVE_SYSTEM_PROMPT.length);
+    for (const w of ["burglar", "burglary", "thief", "theft", "steal", "stolen", "robbery", "break-in", "break in", "intruder", "secure", "zone"]) {
+      expect(line, w).toMatch(new RegExp(`\\b${w}\\b`, "i"));
+    }
+  });
+
   it("a retry that passes is written", async () => {
     const [i] = seed([incident()]);
     gw.chat.mockImplementationOnce(async () => reply("An intruder was seen at 10:14 PM.")).mockImplementationOnce(async () => reply(GOOD));
