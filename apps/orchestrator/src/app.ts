@@ -82,6 +82,7 @@ import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
 import { createSecurityIncidentsRouter } from "./routes/security-incidents.js";
 import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
+import { createSecurityAssistantRouter } from "./routes/security-assistant.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createBuildingRouter } from "./routes/building.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -632,8 +633,14 @@ export function createApp(
   // paths (`/incidents/summary`) are declared before `/incidents/:id`.
   app.use("/api", createSecurityIncidentsRouter(prisma));
   // WARP-2980 (ADR-059 P5) — "what normal looks like", read-only (routes
-  // 29–31). Same /api/security module gate; the last Security router.
+  // 29–31). Same /api/security module gate.
   app.use("/api", createSecurityPatternsRouter(prisma));
+  // WARP-2979 (ADR-059 P4 §6.12) — what the read-only `security` chat tools
+  // read (A1–A4): GET only, the `_service:mcp` principal only, for the person
+  // X-Nextcloud-User names. Same /api/security module gate, and the WARP-2988
+  // acting-user gate above (`security` is in MCP_ACTING_USER_GATED_DOMAINS).
+  // The last Security router: every path is under the literal /assistant/.
+  app.use("/api", createSecurityAssistantRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).
   app.use("/api", createBuildingRouter(prisma));

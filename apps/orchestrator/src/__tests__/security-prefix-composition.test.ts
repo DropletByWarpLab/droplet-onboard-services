@@ -170,10 +170,18 @@ describe("the egress-audit collector is not behind the Security toggle", () => {
     // before or after the gate.
     const routes = join(SRC, "routes");
     // WARP-2978 adds incidents, acknowledgement and alert routing (security-incidents.ts);
-    // WARP-2980 adds "what normal looks like" (security-patterns.ts).
+    // WARP-2980 adds "what normal looks like" (security-patterns.ts);
+    // WARP-2979 (P4) the chat tools' read-only routes (security-assistant.ts).
     // WARP-2981's panel-security.ts is deliberately NOT here and needs no
     // exemption: its path is /api/panel/security, outside the module prefix.
-    const SECURITY_MODULE_ROUTERS = new Set(["security.ts", "security-zones.ts", "security-site.ts", "security-incidents.ts", "security-patterns.ts"]);
+    const SECURITY_MODULE_ROUTERS = new Set([
+      "security.ts",
+      "security-zones.ts",
+      "security-site.ts",
+      "security-incidents.ts",
+      "security-patterns.ts",
+      "security-assistant.ts",
+    ]);
     const offenders = readdirSync(routes)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
       .filter((f) => !SECURITY_MODULE_ROUTERS.has(f) && f !== "egress-audit.ts")
@@ -196,9 +204,21 @@ describe("the egress-audit collector is not behind the Security toggle", () => {
       'app.use("/api", createSecurityIncidentsRouter(prisma))',
       // WARP-2980 (P5) — "what normal looks like".
       'app.use("/api", createSecurityPatternsRouter(prisma))',
+      // WARP-2979 (P4) — the chat tools' routes: a switched-off Security is off for Droplet's AI too.
+      'app.use("/api", createSecurityAssistantRouter(prisma))',
     ]) {
       expect(src.indexOf(mount), mount).toBeGreaterThan(gates);
     }
+  });
+
+  it("WARP-2979: the chat tools' router sits behind the WARP-2988 acting-user gate too", () => {
+    // `security` is in MCP_ACTING_USER_GATED_DOMAINS: the gate narrows the
+    // `_service:mcp` principal by the person's own tool scope on /api/security,
+    // which only works when it is mounted in front of the router it guards.
+    const src = readFileSync(join(SRC, "app.ts"), "utf8");
+    const acting = src.indexOf("mountMcpActingUserGates(app, ");
+    expect(acting).toBeGreaterThan(src.indexOf("mountModuleGates(app, moduleGate)"));
+    expect(src.indexOf('app.use("/api", createSecurityAssistantRouter(prisma))')).toBeGreaterThan(acting);
   });
 });
 

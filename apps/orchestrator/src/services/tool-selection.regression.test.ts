@@ -303,6 +303,15 @@ const TURNS: Turn[] = [
     message: "what did we bill last week",
     requires: "cloud_query_dataset",
   },
+  {
+    // WARP-2980 (ADR-059 P5 PR-E) — the box-proof sentence from the spec, word
+    // for word. It names no Security vocabulary at all ("someone" only pulls
+    // `cameras`), which is exactly how the tool would ship advertised on zero
+    // of the turns it exists for.
+    label: "security / what is usual for a place at an hour",
+    message: "is it normal for someone to be in the stock room at 2 AM?",
+    requires: "security_explain_pattern",
+  },
 ];
 
 const select = (t: Turn) =>

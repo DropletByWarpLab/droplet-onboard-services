@@ -33,6 +33,7 @@ import {
 } from "./security-pattern-rules.js";
 import { loadActiveLinks } from "./security-zones.service.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import {
   areaRows,
   baselineRows,
@@ -113,7 +114,7 @@ describe("a judged event (every gate passes)", () => {
       effect: "trial",
       severity: "alert",
       suppressionId: null,
-      rulesetVersion: 3,
+      rulesetVersion: SECURITY_RULESET_VERSION,
       zoneKey: `area:${STOCK}`,
       keyCameras: ["back"],
       evidenceEventId: 500n,
@@ -127,7 +128,7 @@ describe("a judged event (every gate passes)", () => {
         windowTo: "2026-09-22",
         mode: "closed",
         zoneKind: "interior",
-        rulesetVersion: 3,
+        rulesetVersion: SECURITY_RULESET_VERSION,
         daysObserved: 20,
         daysWithEvent: 0,
         smoothedDaysObserved: "30",

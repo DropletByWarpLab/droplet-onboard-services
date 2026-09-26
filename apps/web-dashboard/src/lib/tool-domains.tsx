@@ -33,6 +33,7 @@ import {
   type LucideIcon,
   Repeat,
   Hammer,
+  ShieldCheck,
 } from "lucide-react";
 
 import type { ToolCatalogEntry } from "./types";
@@ -87,6 +88,9 @@ export const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-2896 (ADR-056) — the workshop's workspace tools. Label matches the
   // /workshop nav entry for the same reason.
   workspace: { label: "Workshop", icon: Hammer },
+  // WARP-2979 (ADR-059 P4) — the read-only Security tools. Label matches the
+  // /security nav entry.
+  security: { label: "Security", icon: ShieldCheck },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

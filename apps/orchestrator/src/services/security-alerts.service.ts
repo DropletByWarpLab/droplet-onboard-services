@@ -72,6 +72,7 @@ import { auditSecurityInTx, auditSecuritySystem, chainSafeText, stripUnsafeDispl
 import { summaryName } from "./security-mode.service.js";
 import { parseLinkRef } from "./security-zones.service.js";
 import { alertCopy, type AlertEvidence } from "../lib/security-alert-copy.js";
+import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { isValidIanaZone } from "../lib/zoned-time.js";
 import { createLogger } from "../lib/logger.js";
@@ -188,6 +189,30 @@ async function copyZone(prisma: PrismaClient): Promise<string | null> {
   return ws?.tz && isValidIanaZone(ws.tz) ? ws.tz : null;
 }
 
+/**
+ * One alert reason as the copy reads it (WARP-2979: the code decides the
+ * words; camera_offline_during_activity names where the person was seen).
+ */
+function alertEvidenceOf(
+  r: { code: string; evidenceCamera: string | null; evidenceAt: Date; detail: unknown; relatedCamera: string | null },
+  labels: ReadonlyMap<string, string>,
+): AlertEvidence {
+  const detail = (r.detail ?? {}) as Record<string, unknown>;
+  const activity = (detail.activity ?? null) as Record<string, unknown> | null;
+  return {
+    code: r.code === "camera_offline_during_activity" ? "camera_offline_during_activity" : "after_hours_presence",
+    cameraLabel: r.evidenceCamera ? (labels.get(r.evidenceCamera) ?? r.evidenceCamera) : "The camera system",
+    at: r.evidenceAt,
+    mode: String(detail.mode ?? "closed"),
+    ...(r.code === "camera_offline_during_activity"
+      ? {
+          seenAt: typeof activity?.at === "string" ? new Date(activity.at) : null,
+          seenCameraLabel: r.relatedCamera ? (labels.get(r.relatedCamera) ?? r.relatedCamera) : null,
+        }
+      : {}),
+  };
+}
+
 interface PlannedNotice {
   user: RecipientUser;
   reason: SecurityNoticeReason;
@@ -206,7 +231,7 @@ const INCIDENT_SELECT = {
   scope: true,
   reasons: {
     where: { severity: "alert" as const },
-    select: { evidenceCamera: true, evidenceAt: true, detail: true },
+    select: { code: true, evidenceCamera: true, evidenceAt: true, detail: true, relatedCamera: true, relatedLock: true },
   },
 } as const satisfies Prisma.SecurityIncidentSelect;
 type NotifyIncident = Prisma.SecurityIncidentGetPayload<{ select: typeof INCIDENT_SELECT }>;
@@ -264,7 +289,9 @@ async function planNotices(
     orderBy: { userId: "asc" },
   });
 
-  const cameras = [...new Set(incident.reasons.map((r) => r.evidenceCamera).filter((c): c is string => c !== null))];
+  const cameras = [
+    ...new Set(incident.reasons.flatMap((r) => [r.evidenceCamera, r.relatedCamera]).filter((c): c is string => c !== null)),
+  ];
   const labels = new Map(
     (await prisma.camera.findMany({ where: { name: { in: cameras } }, select: { name: true, displayName: true } })).map((c) => [
       c.name,
@@ -278,16 +305,13 @@ async function planNotices(
     if (!eligibility.eligible) {
       return { user, reason, outcome: eligibility.reason === "no_address" ? "skipped_no_address" : "skipped_no_access", copy: null };
     }
-    // DS-005, per recipient: only the alert evidence on cameras they can see.
+    // DS-005, per recipient: only the alert evidence they may see — `reasonVisibleTo`, the one rule (WARP-2979: a
+    // reason that names where a person was seen needs that camera visible too).
     const visible = await visibleCameraNames(prisma, { id: user.id, role: user.role });
     const ownerOrAdmin = user.role === "owner" || user.role === "admin";
     const evidence: AlertEvidence[] = incident.reasons
-      .filter((r) => (r.evidenceCamera === null ? ownerOrAdmin : visible === "all" || visible.has(r.evidenceCamera)))
-      .map((r) => ({
-        cameraLabel: r.evidenceCamera ? (labels.get(r.evidenceCamera) ?? r.evidenceCamera) : "The camera system",
-        at: r.evidenceAt,
-        mode: String((r.detail as Record<string, unknown> | null)?.mode ?? "closed"),
-      }));
+      .filter((r) => reasonVisibleTo(r, { visibleCameras: visible }, ownerOrAdmin))
+      .map((r) => alertEvidenceOf(r, labels));
     if (evidence.length === 0) return { user, reason, outcome: "skipped_not_visible", copy: null };
     const recent = await prisma.securityIncidentNotice.count({
       where: { userId: user.id, outcome: { in: [...COUNTED] }, createdAt: { gte: hourAgo } },

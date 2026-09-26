@@ -218,6 +218,15 @@ const EXPECTED_TOOL_NAMES = [
   "workspace_commit",
   "workspace_run",
   "workspace_propose",
+  // WARP-2979 security (ADR-059 P4 §6.12) — four Tier-1 reads, and the domain
+  // may never hold anything else (the read-only pin below).
+  "security_list_incidents",
+  "security_get_incident",
+  "security_search_events",
+  "security_zone_status",
+  // WARP-2980 (ADR-059 P5 PR-E, §6.18) — what normal looks like for one place;
+  // a Tier-1 read like the other four.
+  "security_explain_pattern",
 ];
 
 describe("TOOLS registry", () => {
@@ -502,6 +511,26 @@ describe("TOOLS registry", () => {
     // A mutating-verb tool with requiresWrite:false is exactly the WARP-466
     // email_draft_reply regression class — fail loudly.
     expect(offenders).toEqual([]);
+  });
+
+  // WARP-2979 (ADR-059 P4 §6.12.4; ADR-055 §11.5 extended by brief §4.6) —
+  // Droplet's AI never acknowledges, resolves, changes the mode, hours,
+  // routing or links, and never touches doors or grants. A write or
+  // confirming tool in the `security` domain is a design change, not a diff:
+  // this pin fails it, and the assistant router has no route it could call.
+  it("the security domain holds no write or confirming tool", () => {
+    const security = TOOL_CATALOG.filter((e) => e.domain === "security");
+    // Non-vacuous: the five tools are there to be checked (WARP-2980 added the fifth).
+    expect(security.map((e) => e.name).sort()).toEqual(
+      ["security_explain_pattern", "security_get_incident", "security_list_incidents", "security_search_events", "security_zone_status"],
+    );
+    const offenders = security.filter((e) => e.requiresWrite || e.requiresConfirmation).map((e) => e.name);
+    expect(offenders).toEqual([]);
+    for (const e of security) {
+      const t = TOOLS.get(e.name)!;
+      expect(t.requiresWrite, e.name).toBe(false);
+      expect(t.requiresConfirmation, e.name).toBe(false);
+    }
   });
 
   it("TOOL_CATALOG is in 1:1 correspondence with TOOLS (completeness)", () => {

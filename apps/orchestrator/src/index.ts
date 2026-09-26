@@ -188,6 +188,7 @@ import { registerErpDriftRetention } from "./services/erp-sync/drift-record.serv
 import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
+import { registerSecurityLinkJobs } from "./services/security-link-proposals.service.js";
 import { getEffectiveModuleIds } from "./services/modules.service.js";
 import { resolveEffectiveAccess } from "./services/effective-access.service.js";
 import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
@@ -1119,6 +1120,13 @@ async function main() {
     // in-flight map): a person in view for 30 s alerts before their `end`.
     ongoing: securityOngoingSource(),
   });
+  // WARP-2979 (ADR-059 P4 §6.3) — Droplet's link proposals: every hour, on its
+  // own advisory lock, it compares when things happen at a source a person
+  // placed in an area with every other camera, and suggests (or, above a
+  // higher bar, makes) links — never an alert by itself. Unconditional, like
+  // the jobs above; `SecurityAiSettings.linking = off` is honoured inside the
+  // tick. Registration is the `links` health row's boot assertion.
+  registerSecurityLinkJobs(cronRuntime, prisma);
   // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
   // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
   // later), keeps the learning state, and rebuilds what normal looks like

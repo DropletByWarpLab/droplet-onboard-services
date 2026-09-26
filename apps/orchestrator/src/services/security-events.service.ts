@@ -21,6 +21,7 @@ import {
   type StatusReading,
 } from "./security-event-ingest.js";
 import { trimSecurityIncidents } from "./security-incidents.service.js";
+import { trimLinkEvidence } from "./security-zones.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("security-events");
@@ -294,6 +295,10 @@ export async function trimSecurityEvents(
  * WARP-2978 (§6.10): the retention leg trims incidents right after the
  * events, with the events' own `before`, so an incident's `eventsKept` says
  * exactly what the trim removed.
+ *
+ * WARP-2979 (P4 §6.16): then Droplet's link evidence samples — presence data
+ * (when someone stood at a door) — with that SAME `before`, so no sample
+ * outlives the events it was counted from.
  */
 export function registerSecurityJobs(
   cronRuntime: Pick<CronRuntime, "scheduleInterval" | "scheduleCron">,
@@ -316,6 +321,8 @@ export function registerSecurityJobs(
       const i = await trimSecurityIncidents(prisma, r.before, now);
       if (i.marked > 0 || i.deleted > 0) logger.info(i, "security incident retention trim");
       await prisma.securityIngestState.update({ where: { id: SINGLETON }, data: { retentionIncidentsDeleted: i.deleted } });
+      const l = await trimLinkEvidence(prisma, r.before);
+      if (l.trimmed > 0) logger.info(l, "security link evidence retention trim");
     },
     { lockKey: SECURITY_RETENTION_LOCK_KEY },
   );
@@ -395,12 +402,12 @@ export type SourceState = "ok" | "quiet" | "down" | "not_configured";
 
 /**
  * The header's rows, in the pinned display order
- * `camera_ingest, camera_system, (locks — P2b PR-2), threat_mirror, site_mode, incidents, alerts, patterns, retention`.
+ * `camera_ingest, camera_system, (locks — P2b PR-2), threat_mirror, site_mode, incidents, alerts, links, (summaries — P4 PR-2), patterns, retention`.
  * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `incidents`
  * and `alerts` (WARP-2978 P3) are the incident engine's and the notifier's;
- * `patterns` (WARP-2980 P5) is the baseline job's. P4's `links, summaries` go
- * between alerts and patterns when they land — whichever merges second moves
- * this pin.
+ * `links` (WARP-2979 P4) is Droplet's link-proposal job's; `patterns`
+ * (WARP-2980 P5) is the baseline job's. P4 PR-2's `summaries` goes right
+ * after `links`.
  */
 export type SecurityHealthId =
   | "camera_ingest"
@@ -409,6 +416,7 @@ export type SecurityHealthId =
   | "site_mode"
   | "incidents"
   | "alerts"
+  | "links"
   | "patterns"
   | "retention";
 
@@ -453,6 +461,13 @@ export function buildSecurityHealth(input: {
    */
   incidents?: SecurityHealthRow;
   alerts?: SecurityHealthRow;
+  /**
+   * WARP-2979 P4 — Droplet's link-proposal job's row (`securityLinksHealth`
+   * in security-link-proposals.service.ts), every viewer; it names no area,
+   * camera or incident. Placed right after `alerts`. Optional: omitted, the
+   * header is exactly P5's.
+   */
+  links?: SecurityHealthRow;
   /**
    * WARP-2980 P5 — the baseline job's row (`patternsHealthRow` in
    * security-baselines.service.ts), placed right before `retention`.
@@ -520,6 +535,7 @@ export function buildSecurityHealth(input: {
   if (input.siteMode) rows.push(input.siteMode);
   if (input.incidents) rows.push(input.incidents);
   if (input.alerts) rows.push(input.alerts);
+  if (input.links) rows.push(input.links);
   if (input.patterns) rows.push(input.patterns);
 
   const retentionRan = input.state?.retentionRanAt ?? null;

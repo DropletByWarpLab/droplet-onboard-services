@@ -72,7 +72,16 @@ import type { Prisma, PrismaClient, SecurityIncident, SecurityZoneKind } from "@
 import type { CronRuntime } from "./cron-runtime.service.js";
 import type { SecurityHealthRow } from "./security-events.service.js";
 import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
-import { loadActiveLinks, matchAreasForEvent, type ActiveZoneLink, type ZoneMatchableEvent } from "./security-zones.service.js";
+import {
+  buildZoneIndex,
+  loadActiveLinks,
+  matchAreasForEvent,
+  parseLinkRef,
+  zonesForEvent,
+  type ActiveZoneLink,
+  type ZoneIndex,
+  type ZoneMatchableEvent,
+} from "./security-zones.service.js";
 import { loadSiteHours } from "./security-mode.service.js";
 import { recordSecurityEvent } from "./security-events.service.js";
 import { frigateOngoingToDraft } from "./security-event-ingest.js";
@@ -92,7 +101,9 @@ import {
   SECURITY_RULESET_VERSION,
   QUIET_MS,
   SETTLE_MS,
+  MAX_SPAN_MS,
   afterHoursPresence,
+  cameraOfflineDuringActivity,
   cameraOfflineVerdict,
   capEvidence,
   eventSpan,
@@ -394,15 +405,20 @@ export interface TriageOutcome {
   grouped: GroupedInto | null;
 }
 
-/** The reasons an event earns at triage (after_hours_presence, threat_signal). camera_offline is the timers' (§6.5). */
+/**
+ * The reasons an event earns at triage (after_hours_presence, threat_signal).
+ * camera_offline and camera_offline_during_activity are the timers' (§6.5).
+ * `personLinked` (WARP-2979): the event's primary area was matched through a
+ * link a PERSON made or kept — the only way after_hours_presence can fire.
+ */
 async function triageReasons(
   tx: Tx,
   event: TriageEvent,
-  scope: { scope: SecurityIncident["scope"]; zoneKind: SecurityZoneKind | null },
+  scope: { scope: SecurityIncident["scope"]; zoneKind: SecurityZoneKind | null; personLinked: boolean },
   timeline: ModeTimeline,
 ): Promise<ReasonDraft[]> {
   const out: ReasonDraft[] = [];
-  const ahp = afterHoursPresence({ scope: scope.scope, zoneKind: scope.zoneKind, event, timeline });
+  const ahp = afterHoursPresence({ scope: scope.scope, zoneKind: scope.zoneKind, personLinked: scope.personLinked, event, timeline });
   if (ahp) out.push(ahp);
   if (event.kind === "threat") {
     const id = parseActivityRef(event.sourceRef);
@@ -427,6 +443,8 @@ function reasonRows(incidentId: string, drafts: readonly ReasonDraft[]): Prisma.
     evidenceAt: d.evidenceAt,
     evidenceSummary: d.evidenceSummary,
     detail: d.detail,
+    // WARP-2979 — where the person was seen (camera_offline_during_activity); CHECK SecurityIncidentReason_related.
+    relatedCamera: d.relatedCamera ?? null,
   }));
 }
 
@@ -509,7 +527,12 @@ export async function triageOne(
 
       if (plan.action === "open") {
         const area = decision.area;
-        const drafts = await triageReasons(tx, event, { scope: decision.key.scope, zoneKind: area?.zoneKind ?? null }, ctx.timeline);
+        const drafts = await triageReasons(
+          tx,
+          event,
+          { scope: decision.key.scope, zoneKind: area?.zoneKind ?? null, personLinked: area?.personLinked ?? false },
+          ctx.timeline,
+        );
         const kept = capEvidence([], drafts);
         const created = await tx.securityIncident.create({
           data: {
@@ -546,7 +569,13 @@ export async function triageOne(
         where: { incidentId: i.id },
         select: { code: true, severity: true, evidenceCamera: true, evidenceEventId: true },
       });
-      const drafts = await triageReasons(tx, event, { scope: i.scope, zoneKind: i.zoneKind }, ctx.timeline);
+      // The event's primary area IS the incident's (the candidate query is keyed on it).
+      const drafts = await triageReasons(
+        tx,
+        event,
+        { scope: i.scope, zoneKind: i.zoneKind, personLinked: decision.area?.personLinked ?? false },
+        ctx.timeline,
+      );
       const kept = capEvidence(existing, drafts);
       const late = await lateEvidencePatch(tx, i, existing, kept);
       const { count } = await tx.securityIncident.updateMany({
@@ -629,42 +658,130 @@ async function recordFailed(prisma: PrismaClient, eventId: bigint, err: unknown)
 
 const OFFLINE_KINDS = ["camera_offline", "source_offline"] as const;
 
-/** camera_offline drafts for one incident's offline members that no reason covers yet (§6.5). */
-async function offlineReasons(prisma: PrismaClient | Tx, incidentId: string, now: Date): Promise<ReasonDraft[]> {
+/**
+ * WARP-2979 — what camera_offline_during_activity reads besides the incident:
+ * every active link (with who set it), the person-only matcher over them, and
+ * the mode timeline back to the earliest offline member. Loaded once per tick,
+ * only when some collecting incident has an offline member.
+ */
+export interface OfflineRuleContext {
+  links: readonly ActiveZoneLink[];
+  personIndex: ZoneIndex;
+  timeline: ModeTimeline;
+}
+
+/** How far before a drop a sighting may have STARTED and still overlap the window (a long visit). */
+const ACTIVITY_LOOKBACK_MS = MAX_SPAN_MS;
+/** At most this many candidate sightings are read per drop (the latest ones). */
+const ACTIVITY_ROWS = 200;
+
+/**
+ * camera_offline_during_activity for one offline member (§6.7.2): Areas(C) from
+ * the PERSON-set links on C (a part of C counts), the person sightings on every
+ * camera person-linked to those areas — read from the store by (camera,
+ * startedAt), not from the incident's members, so activity that went to
+ * another incident still counts — each matched through the person-only index.
+ */
+async function activityReason(
+  prisma: PrismaClient | Tx,
+  event: TriageEvent,
+  onlines: ReadonlyArray<{ startedAt: Date }>,
+  now: Date,
+  ctx: OfflineRuleContext,
+): Promise<ReasonDraft | null> {
+  if (event.kind !== "camera_offline" || event.camera === null) return null;
+  const personAreas = new Map<string, string>();
+  for (const l of ctx.links) {
+    if (l.setBy === "person" && parseLinkRef(l.sourceKind, l.sourceRef)?.camera === event.camera) personAreas.set(l.zoneId, l.zoneName);
+  }
+  if (personAreas.size === 0) return null;
+  const cameras = [
+    ...new Set(
+      ctx.links
+        .filter((l) => l.setBy === "person" && personAreas.has(l.zoneId))
+        .map((l) => parseLinkRef(l.sourceKind, l.sourceRef)?.camera)
+        .filter((c): c is string => c !== undefined),
+    ),
+  ].sort();
+  const rule = RULESET.camera_offline_during_activity;
+  const drop = event.startedAt.getTime();
+  const rows = await prisma.securityEvent.findMany({
+    where: {
+      camera: { in: cameras },
+      kind: { in: [...rule.kinds] },
+      labels: { has: rule.label },
+      startedAt: { gte: new Date(drop - rule.activityBeforeMs - ACTIVITY_LOOKBACK_MS), lte: new Date(drop + rule.activityAfterMs) },
+    },
+    orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+    take: ACTIVITY_ROWS,
+  });
+  return cameraOfflineDuringActivity({
+    offline: event,
+    onlines,
+    now,
+    personAreas,
+    activity: rows.map((r) => ({ ...r, personZoneIds: zonesForEvent(r, ctx.personIndex) })),
+    timeline: ctx.timeline,
+  });
+}
+
+/**
+ * The timer drafts for one incident's offline members that no reason covers
+ * yet (§6.5): camera_offline, and (WARP-2979, with `ctx`)
+ * camera_offline_during_activity — each judged per member, once.
+ */
+async function offlineReasons(
+  prisma: PrismaClient | Tx,
+  incidentId: string,
+  now: Date,
+  ctx: OfflineRuleContext | null,
+): Promise<ReasonDraft[]> {
   const members = await prisma.securityEventTriage.findMany({
     where: { incidentId, outcome: "grouped", event: { is: { kind: { in: [...OFFLINE_KINDS] } } } },
     select: { event: true },
   });
   if (members.length === 0) return [];
-  const judged = new Set(
-    (
-      await prisma.securityIncidentReason.findMany({
-        where: { incidentId, code: "camera_offline" },
-        select: { evidenceEventId: true },
-      })
-    ).map((r) => r.evidenceEventId.toString()),
-  );
+  const covered = await prisma.securityIncidentReason.findMany({
+    where: { incidentId, code: { in: ["camera_offline", "camera_offline_during_activity"] } },
+    select: { code: true, evidenceEventId: true },
+  });
+  const judged = new Set(covered.filter((r) => r.code === "camera_offline").map((r) => r.evidenceEventId.toString()));
+  const judgedActivity = new Set(covered.filter((r) => r.code === "camera_offline_during_activity").map((r) => r.evidenceEventId.toString()));
   const out: ReasonDraft[] = [];
   for (const { event } of members) {
-    if (judged.has(event.id.toString())) continue;
+    const id = event.id.toString();
+    const wantActivity = ctx !== null && event.kind === "camera_offline" && event.camera !== null && !judgedActivity.has(id);
+    if (judged.has(id) && !wantActivity) continue;
     const onlines = await prisma.securityEvent.findMany({
       where: { camera: event.camera, kind: onlineKindFor(event.kind), startedAt: { gte: event.startedAt } },
       orderBy: [{ startedAt: "asc" }, { id: "asc" }],
       take: 3,
       select: { startedAt: true },
     });
-    const v = cameraOfflineVerdict(event, onlines, now);
-    if (v.verdict === "fire") out.push(v.reason);
+    if (!judged.has(id)) {
+      const v = cameraOfflineVerdict(event, onlines, now);
+      if (v.verdict === "fire") out.push(v.reason);
+    }
+    if (wantActivity) {
+      const d = await activityReason(prisma, event, onlines, now, ctx!);
+      if (d) out.push(d);
+    }
   }
   return out;
 }
 
 /**
- * Add camera_offline reasons to one collecting incident and, when `seal`,
- * close it — ONE READ COMMITTED transaction, CAS on version with one re-read.
+ * Add the timers' reasons to one collecting incident and, when `seal`, close
+ * it — ONE READ COMMITTED transaction, CAS on version with one re-read.
  * Returns whether anything was written.
  */
-async function updateCollecting(prisma: PrismaClient, incidentId: string, now: Date, seal: boolean): Promise<boolean> {
+async function updateCollecting(
+  prisma: PrismaClient,
+  incidentId: string,
+  now: Date,
+  seal: boolean,
+  ctx: OfflineRuleContext | null,
+): Promise<boolean> {
   return prisma.$transaction(async (tx) => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const i = await tx.securityIncident.findUnique({ where: { id: incidentId }, select: CANDIDATE_SELECT });
@@ -674,7 +791,7 @@ async function updateCollecting(prisma: PrismaClient, incidentId: string, now: D
         where: { incidentId },
         select: { code: true, evidenceCamera: true, evidenceEventId: true },
       });
-      const kept = capEvidence(existing, await offlineReasons(tx, incidentId, now));
+      const kept = capEvidence(existing, await offlineReasons(tx, incidentId, now, ctx));
       const patch = reasonPatch(i, kept, now);
       if (!seal && Object.keys(patch).length === 0 && kept.length === 0) return false;
       const { count } = await tx.securityIncident.updateMany({
@@ -811,10 +928,17 @@ async function runTick(
       incident: { is: { grouping: "collecting" } },
       event: { is: { kind: { in: [...OFFLINE_KINDS] } } },
     },
-    select: { incidentId: true },
+    select: { incidentId: true, event: { select: { startedAt: true } } },
   });
+  // WARP-2979 — camera_offline_during_activity's context, read once, only when needed.
+  let offlineCtx: OfflineRuleContext | null = null;
+  if (offline.length > 0) {
+    const links = await loadActiveLinks(prisma);
+    const from = offline.reduce((m, o) => (o.event.startedAt < m ? o.event.startedAt : m), offline[0]!.event.startedAt);
+    offlineCtx = { links, personIndex: buildZoneIndex(links, { personOnly: true }), timeline: await loadModeTimeline(prisma, from, now) };
+  }
   for (const id of new Set(offline.map((o) => o.incidentId).filter((x): x is string => x !== null))) {
-    await updateCollecting(prisma, id, now, false);
+    await updateCollecting(prisma, id, now, false, offlineCtx);
   }
 
   // 5. Seal — only with the backlog drained.
@@ -832,7 +956,7 @@ async function runTick(
     const held = await presenceHolds(prisma, due, deps.ongoing, now);
     for (const { id } of due) {
       if (held.has(id)) continue;
-      if (await updateCollecting(prisma, id, now, true)) sealed++;
+      if (await updateCollecting(prisma, id, now, true, offlineCtx)) sealed++;
     }
   }
 

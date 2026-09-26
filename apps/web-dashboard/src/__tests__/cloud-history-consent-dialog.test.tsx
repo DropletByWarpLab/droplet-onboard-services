@@ -13,13 +13,14 @@ const summary = {
   unaskedOnBoxAnswers: 3,
   userMessages: 4,
   drewOn: ["documents", "memory"],
+  neverSent: [] as string[],
 };
 
-function renderDialog(onDecide = vi.fn(async () => {}), onClose = vi.fn()) {
+function renderDialog(onDecide = vi.fn(async () => {}), onClose = vi.fn(), over: Partial<typeof summary> = {}) {
   render(
     <CloudHistoryConsentDialog
       open
-      summary={summary}
+      summary={{ ...summary, ...over }}
       modelLabel="Claude Opus"
       onDecide={onDecide}
       onClose={onClose}
@@ -47,6 +48,21 @@ describe("CloudHistoryConsentDialog", () => {
     const { onDecide } = renderDialog();
     fireEvent.click(screen.getByRole("button", { name: "Send the whole conversation" }));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith("granted"));
+  });
+
+  // WARP-2979 (ADR-059 P4 §6.13) — the server never replays an answer that used Security, whatever is chosen.
+  it("with a Security answer: says it stays on the Droplet, and offers only what will happen", async () => {
+    const { onDecide } = renderDialog(undefined, undefined, { neverSent: ["Security"] });
+    expect(screen.getByText(/Answers that used Security stay on this Droplet/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send the whole conversation" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Only my messages" }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith("declined"));
+  });
+
+  it("without one, both choices stay and Security is not mentioned", () => {
+    renderDialog();
+    expect(screen.queryByText(/Security/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Send the whole conversation" })).toBeTruthy();
   });
 
   it("stays open and says so when the choice cannot be saved", async () => {

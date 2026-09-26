@@ -93,6 +93,7 @@ import { projectedIncidentPage } from "./security-incident-page.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
+import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
 import type { PatternCode } from "../lib/security-baseline-math.js";
 import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 
@@ -142,6 +143,9 @@ export const REASON_VIEW_SELECT = {
   evidenceAt: true,
   evidenceSummary: true,
   detail: true,
+  // WARP-2979 — a second source the evidence names; `reasonVisibleTo` reads both.
+  relatedCamera: true,
+  relatedLock: true,
 } as const satisfies Prisma.SecurityIncidentReasonSelect;
 
 export type ReasonRowForView = Prisma.SecurityIncidentReasonGetPayload<{ select: typeof REASON_VIEW_SELECT }>;
@@ -185,15 +189,21 @@ export function incidentVisible(i: Pick<IncidentRowForView, "scope" | "cameras">
   return i.cameras.some((c) => seesCamera(v, c));
 }
 
+/** The reason columns visibility reads (WARP-2979: plus the second source the evidence names). */
+export type ReasonVisibilityRow = Pick<ReasonRowForView, "evidenceCamera" | "relatedCamera" | "relatedLock">;
+
+// WARP-2979 — THE reason-visibility rule lives in a leaf module (the notifier imports it too, and this module sits on an
+// import cycle with it); it is re-exported here, beside its callers.
+export { reasonVisibleTo } from "../lib/security-reason-visibility.js";
+
 /**
- * Whether this viewer may see one reason: its evidence camera, or the incident's own scope rule for a camera-less one.
+ * Whether this viewer may see one reason: `reasonVisibleTo` with the incident's own scope rule for a camera-less one.
  * A camera-less reason exists only on a site scope (CHECK SecurityIncidentReason_site_evidence; §6.2 routes its evidence
  * nowhere else), where this and the SQL twins (`visibleReasonWhere`, the list's `visReason`) agree. On area/camera this
  * says hidden and they say shown — a row that cannot exist (review 383d647e item 4).
  */
-export function reasonVisible(r: Pick<ReasonRowForView, "evidenceCamera">, i: Pick<IncidentRowForView, "scope">, v: IncidentViewer): boolean {
-  if (r.evidenceCamera === null) return i.scope === "site_threat" ? v.mayReadThreats : SITE_SCOPES.includes(i.scope);
-  return seesCamera(v, r.evidenceCamera);
+export function reasonVisible(r: ReasonVisibilityRow, i: Pick<IncidentRowForView, "scope">, v: IncidentViewer): boolean {
+  return reasonVisibleTo(r, v, i.scope === "site_threat" ? v.mayReadThreats : SITE_SCOPES.includes(i.scope));
 }
 
 export interface IncidentProjection {
@@ -410,11 +420,18 @@ export function incidentVisibilityWhere(v: IncidentViewer): Prisma.SecurityIncid
 /**
  * A reason the viewer may see — on an incident the visibility clause already let through. A camera-less reason is
  * shown: it is site-wide evidence (CHECK SecurityIncidentReason_site_evidence) that §6.2 groups only into a site scope,
- * where `reasonVisible` shows it too.
+ * where `reasonVisible` shows it too. WARP-2979: `reasonVisibleTo`'s related-camera and related-lock clauses, in SQL.
  */
 export function visibleReasonWhere(v: IncidentViewer): Prisma.SecurityIncidentReasonWhereInput {
   if (v.visibleCameras === "all") return {};
-  return { OR: [{ evidenceCamera: { in: [...v.visibleCameras] } }, { evidenceCamera: null }] };
+  const cams = [...v.visibleCameras];
+  return {
+    AND: [
+      { OR: [{ evidenceCamera: { in: cams } }, { evidenceCamera: null }] },
+      { OR: [{ relatedCamera: null }, { relatedCamera: { in: cams } }] },
+      { relatedLock: false },
+    ],
+  };
 }
 
 export type IncidentStateFilter = "attention" | "open" | "acknowledged" | "resolved" | "activity" | "all";
@@ -424,6 +441,15 @@ export interface IncidentListFilters {
   severity?: "alert" | "notice";
   zoneId?: string;
   cursor?: { at: Date; id: string };
+  /**
+   * WARP-2979 (P4 §6.12.3) — the chat tools' period: incidents whose STORED
+   * span `[firstActivityAt, lastActivityAt]` meets `[from, to]`. A prefilter
+   * only: a viewer's own span lies inside the stored one, so this keeps every
+   * incident whose visible span meets the window, and the assistant route
+   * drops the ones whose visible span does not (DS-005: a hidden camera's
+   * activity must not pull an incident into her window).
+   */
+  activeBetween?: { from: Date; to: Date };
 }
 
 /**
@@ -486,6 +512,9 @@ export function incidentListWhere(v: IncidentViewer, f: IncidentListFilters): Pr
     });
   }
   if (f.zoneId) and.push({ zoneId: f.zoneId });
+  if (f.activeBetween) {
+    and.push({ lastActivityAt: { gte: f.activeBetween.from }, firstActivityAt: { lte: f.activeBetween.to } });
+  }
   if (f.cursor) {
     and.push({ OR: [{ lastActivityAt: { lt: f.cursor.at } }, { lastActivityAt: f.cursor.at, id: { lt: f.cursor.id } }] });
   }
@@ -546,8 +575,17 @@ export interface IncidentReasonView {
     at: string;
     summary: string;
   };
-  /** The rule's numbers (§4): after_hours_presence {mode, modeSource, nonOpenAt, zoneKind}; camera_offline {offlineForSec, backAt}; threat_signal {activityId, kind}. */
+  /**
+   * The rule's numbers (§4): after_hours_presence {mode, modeSource, nonOpenAt, zoneKind}; camera_offline {offlineForSec,
+   * backAt}; threat_signal {activityId, kind}; camera_offline_during_activity {offlineForSec, backAt, mode, modeSource,
+   * activity: {eventId, kind, label, at, zoneId, zoneName}}.
+   */
   detail: Prisma.JsonValue;
+  /**
+   * WARP-2979 — the second camera the evidence names (camera_offline_during_activity: where the person was seen), else
+   * null. Present only on a reason this viewer may see, which needs this camera visible too.
+   */
+  relatedCamera: string | null;
 }
 
 export interface IncidentAckView {
@@ -940,6 +978,7 @@ export async function loadIncidentDetail(
         summary: r.evidenceSummary,
       },
       detail: r.detail,
+      relatedCamera: r.relatedCamera,
     })),
     events,
     moreEvents,

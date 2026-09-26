@@ -55,7 +55,9 @@ export async function projectedIncidentPage(
   // visibleReasonWhere: a visible camera's code, or a camera-less one: site-wide
   // evidence (CHECK SecurityIncidentReason_site_evidence) that §6.2 groups only
   // into a site scope, where `reasonVisible` shows it too.
-  const visReason = Prisma.sql`(r."evidenceCamera" = ANY(${vis}::text[]) OR r."evidenceCamera" IS NULL)`;
+  // WARP-2979 — `reasonVisibleTo`'s related-camera and related-lock clauses (never NULL: relatedLock is NOT NULL,
+  // and the camera clause is guarded by IS NULL).
+  const visReason = Prisma.sql`((r."evidenceCamera" = ANY(${vis}::text[]) OR r."evidenceCamera" IS NULL) AND (r."relatedCamera" IS NULL OR r."relatedCamera" = ANY(${vis}::text[])) AND r."relatedLock" = false)`;
   const reasons = (extra: Prisma.Sql) =>
     Prisma.sql`EXISTS (SELECT 1 FROM "SecurityIncidentReason" r WHERE r."incidentId" = i."id" AND ${visReason}${extra})`;
   const someVisible = reasons(Prisma.empty);
@@ -97,6 +99,12 @@ export async function projectedIncidentPage(
   if (f.severity === "alert") where.push(visibleAlert);
   if (f.severity === "notice") where.push(Prisma.sql`(${visibleNotice} AND NOT ${visibleAlert})`);
   if (f.zoneId) where.push(Prisma.sql`i."zoneId" = ${f.zoneId}`);
+  // WARP-2979 — the chat tools' period, on the STORED span (incidentListWhere's twin; a prefilter, see IncidentListFilters).
+  if (f.activeBetween) {
+    where.push(
+      Prisma.sql`(i."lastActivityAt" >= ${f.activeBetween.from.toISOString()}::timestamp AND i."firstActivityAt" <= ${f.activeBetween.to.toISOString()}::timestamp)`,
+    );
+  }
 
   const seen = Prisma.sql`((e.key = '' AND i."scope" IN ('site_threat', 'site_camera_system')) OR (e.key <> '' AND e.key = ANY(${vis}::text[])))`;
   const after = f.cursor
