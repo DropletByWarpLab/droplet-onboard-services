@@ -123,6 +123,8 @@ export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
   "SERVICE_TOKEN_MCP",
   "SERVICE_TOKEN_EMAIL",
   "SERVICE_TOKEN_EGRESS_AUDIT",
+  // WARP-3193 SEC-DATA-10 — generated since the first secrets.sh heredoc.
+  "NEXTCLOUD_ADMIN_PASSWORD",
 ];
 
 // `.env.example` ships `change-me` for DEVICE_SECRET_KEY — a copy-pasted
@@ -392,6 +394,12 @@ const envSchema = z.object({
 
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
+  // WARP-3193 SEC-DATA-10 — the Nextcloud admin account the OCS provisioning
+  // calls authenticate as. Empty default for dev/test; a production boot
+  // refuses an empty/placeholder value (PRODUCTION_REQUIRED_SECRET_KEYS).
+  // There is deliberately no `admin` fallback: a torn .env must fail, not
+  // silently try admin:admin. secrets.sh generates it (an _ENV_CORE_KEYS key).
+  NEXTCLOUD_ADMIN_PASSWORD: z.string().default(""),
   // NEXTCLOUD_PUBLIC_PATH — browser-facing path the gateway fronts Nextcloud
   //   on (nginx `location /nextcloud/`). Used for URLs the dashboard's
   //   browser actually loads (the doc-editor iframe) — NEXTCLOUD_URL above is
