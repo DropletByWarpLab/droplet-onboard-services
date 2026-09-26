@@ -9,6 +9,8 @@
  */
 
 import type { Router } from "express";
+import { isIP } from "node:net";
+import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import {
   getNetworkOverview,
@@ -70,6 +72,25 @@ import { setSshAccess, setSshLogin } from "../services/ssh-access.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+
+/**
+ * WARP-3193 SEC-INJ-4 — static-lease and upstream-DNS values land on lines of
+ * dnsmasq's generated config, so a newline or separator in any of them could
+ * become an extra directive (e.g. a LAN-wide `address=/bank.example/…`). They
+ * are typed here, before the safety evaluator or the router sees them, and
+ * again by services/routing/schemas.py (StaticLeaseRequest / SetDnsRequest).
+ */
+const staticLeaseSchema = z.object({
+  name: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/),
+  mac: z.string().regex(/^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/),
+  ip: z.string().refine((v) => isIP(v) === 4),
+});
+const dnsServersSchema = z.object({
+  servers: z
+    .array(z.string().refine((v) => isIP(v) !== 0))
+    .min(1)
+    .max(4),
+});
 
 export interface StatusDeps {
   prisma: PrismaClient;
@@ -292,10 +313,15 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const { name, mac, ip } = req.body;
-        if (!name || !mac || !ip) {
-          return res.status(400).json({ error: "Missing 'name', 'mac', or 'ip'" });
+        const parsed = staticLeaseSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error:
+              "Provide 'name' (a hostname: letters, digits, '-'), 'mac' (AA:BB:CC:DD:EE:FF) and 'ip' (IPv4)",
+            details: parsed.error.flatten(),
+          });
         }
+        const { name, mac, ip } = parsed.data;
 
         const userId = req.user?.id;
         const result = await evaluateNetworkCommand(
@@ -317,22 +343,20 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // WARP-871: set the upstream/custom DNS resolvers dnsmasq forwards to (e.g.
   // Pi-hole, NextDNS, 1.1.1.1). owner/admin only — DNS shapes every device's
   // name resolution. set_dns is Tier 1 (low-risk, no partition), so it applies
-  // immediately; the routing /dhcp/dns validator only requires a non-empty list.
+  // immediately. The body is typed here and again by the routing /dhcp/dns
+  // validator (WARP-3193 SEC-INJ-4).
   router.post(
     "/network/dns",
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const { servers } = req.body;
-        if (
-          !Array.isArray(servers) ||
-          servers.length === 0 ||
-          !servers.every((s) => typeof s === "string" && s.trim().length > 0)
-        ) {
+        const parsed = dnsServersSchema.safeParse(req.body);
+        if (!parsed.success) {
           return res
             .status(400)
-            .json({ error: "Provide 'servers' as a non-empty list of IP strings" });
+            .json({ error: "Provide 'servers' as a list of 1-4 IP addresses" });
         }
+        const { servers } = parsed.data;
 
         const userId = req.user?.id;
         const result = await evaluateNetworkCommand(
