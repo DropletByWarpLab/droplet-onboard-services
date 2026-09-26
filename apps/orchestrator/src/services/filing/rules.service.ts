@@ -22,6 +22,7 @@
  * described three different ways.
  */
 import type { PrismaClient, IngestKeyKind, FilingDecisionKind } from "@prisma/client";
+import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
 export interface FilingRule {
   id: string;
@@ -179,10 +180,6 @@ export async function teachNotSame(
 /** Structural P2002 check — same shape the rest of the repo uses, without
  *  importing Prisma's error classes (which the mocked-client unit lane does not
  *  construct). */
-function isUniqueViolation(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
-}
-
 /** Create the NOT_SAME rule, or return the one that beat us to it. */
 async function createOrLoadNotSame(
   prisma: PrismaClient,

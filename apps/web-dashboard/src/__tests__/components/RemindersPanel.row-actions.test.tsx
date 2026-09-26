@@ -49,6 +49,7 @@ function makeReminder(overrides: any = {}) {
     title: "Walk the dog",
     body: null,
     dueAt: new Date(Date.now() + 3_600_000).toISOString(),
+    status: "scheduled",
     completedAt: null,
     calendarEventId: null,
     notifiedAt: null,
@@ -166,7 +167,7 @@ describe("RemindersPanel — per-row delete (WARP-292)", () => {
 
   it("checked-state visual cue is preserved (system-green inner square)", () => {
     useRemindersMock.mockReturnValue({
-      reminders: [makeReminder({ completedAt: new Date().toISOString() })],
+      reminders: [makeReminder({ status: "completed", completedAt: new Date().toISOString() })],
       isLoading: false,
       refresh: vi.fn(),
     });

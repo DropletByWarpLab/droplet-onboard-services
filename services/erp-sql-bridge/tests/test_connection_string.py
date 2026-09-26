@@ -123,6 +123,39 @@ class TestSqlAnywhereConnectionString:
         assert "UID=droplet_ro" not in cs
 
 
+class TestValueEncoding:
+    """WARP-3193 SEC-INJ-3 — values are brace-quoted the way the TypeScript
+    builder (services/erp-connector/src/connection-string.ts) does, so a `;`
+    in any value can never open a second driver parameter. The request schema
+    already refuses such values; this is the second wall for env-sourced ones
+    (a password is allowed to contain `;`)."""
+
+    def test_a_value_with_a_separator_is_brace_quoted(self, monkeypatch):
+        monkeypatch.setenv("ERP_DB_RO_PASSWORD", "pa;ss")
+        cs = build_connection_string(Target(host="10.0.0.5", database_name="X;START=calc"), "read")
+        assert "DatabaseName={X;START=calc}" in cs
+        assert "PWD={pa;ss}" in cs
+        assert ";START=calc;" not in cs
+
+    def test_postgres_branch_quotes_too(self, monkeypatch):
+        monkeypatch.setenv("ERP_DB_RO_PASSWORD", "pa;ss")
+        monkeypatch.setenv("ERP_ODBC_DRIVER", "PostgreSQL Unicode")
+        cs = build_connection_string(Target(host="127.0.0.1", database_name="a b"), "read")
+        assert "DATABASE={a b};" in cs
+        assert "PWD={pa;ss};" in cs
+
+    def test_a_closing_brace_cannot_be_encoded_and_is_a_config_error(self, monkeypatch):
+        monkeypatch.setenv("ERP_DB_RO_PASSWORD", "pa}ss")
+        with pytest.raises(BridgeConfigError, match="PWD"):
+            build_connection_string(Target(host="10.0.0.5"), "read")
+
+    def test_plain_values_stay_unquoted(self, monkeypatch):
+        monkeypatch.setenv("ERP_DB_RO_PASSWORD", "ro-pw")
+        cs = build_connection_string(Target(host="10.0.0.5"), "read")
+        assert "PWD=ro-pw;" in cs
+        assert "Host=10.0.0.5:2638;" in cs
+
+
 class TestPostgresConnectionString:
     """The test-lane branch. Selected by DRIVER NAME, so production can never
     take it by accident."""
@@ -167,6 +200,14 @@ class TestRedact:
         out = redact("DRIVER={SQL Anywhere 17};Host=10.0.0.5:2638;PWD=x")
         assert "10.0.0.5:2638" in out
         assert "SQL Anywhere 17" in out
+
+    def test_a_brace_quoted_password_is_redacted_whole(self):
+        """WARP-3193 SEC-INJ-3 — the builder now brace-quotes a password that
+        contains `;`, so splitting on `;` alone would leak its tail."""
+        out = redact("UID=droplet_ro;PWD={pa;ss word};Host=a:1")
+        assert "ss word" not in out
+        assert "pa" not in out.replace("PWD=***", "")
+        assert "Host=a:1" in out
 
     def test_a_string_with_no_password_is_unchanged(self):
         assert redact("connection timed out") == "connection timed out"

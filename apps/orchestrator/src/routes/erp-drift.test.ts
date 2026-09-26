@@ -74,10 +74,10 @@ function buildApp(user: { id?: string; role?: string } | undefined, prisma = pri
 
 beforeEach(() => {
   recordActivityMock.mockReset();
-  // WARP-3192: the fixtures sit at NOW − 1 day, and the route reads the real
-  // clock (driftForConnection's `now` defaults to new Date()) against a 30-day
-  // window, so without this the suite went red on 2026-09-26T12:00Z. Fake Date
-  // only, so supertest's timers stay real.
+  // The route's window is computed from the wall clock; pin it to the same
+  // NOW the fixture rows are dated against, or the suite rots once real time
+  // passes NOW + the 30-day default window. Only Date is faked so supertest's
+  // timers keep running.
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW);
 });
