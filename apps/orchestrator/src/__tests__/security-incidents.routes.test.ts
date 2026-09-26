@@ -198,6 +198,9 @@ function reason(incidentId: string, code: string, camera: string | null, severit
     evidenceAt: T,
     evidenceSummary: "x",
     detail: {},
+    // WARP-2979 — every real row has them (the migration's defaults); a pushed row must too.
+    relatedCamera: null,
+    relatedLock: false,
   };
 }
 

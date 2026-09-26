@@ -50,6 +50,15 @@
  * valid input). Expected activity ("suppressions" in code) quiets the pattern
  * codes only, never after_hours_presence (spec D12): `suppressionFor` takes a
  * PatternCode, and the engine never asks it about a P3 code.
+ *
+ * Version 4 (WARP-2979 P4 PR-1, p4-spec §6.7): alerts come only through links
+ * a PERSON made or kept. `rankPick` prefers a person-linked area, and
+ * after_hours_presence needs its primary area person-linked — an area matched
+ * only through a link Droplet activated on its own still groups the event
+ * (context), and never wakes anyone. And a new alert code,
+ * camera_offline_during_activity: a camera a person linked to an area stops
+ * reporting for over a minute, within two minutes of someone being seen in one
+ * of its person-linked areas, while the site is closed or away.
  */
 import type {
   SecurityIncidentScope,
@@ -60,7 +69,7 @@ import type {
   SecuritySeverity,
   SecurityZoneKind,
 } from "@prisma/client";
-import { nonOpenWithin, type ModeTimeline } from "./security-mode-history.js";
+import { modeAt, nonOpenWithin, type ModeTimeline } from "./security-mode-history.js";
 import {
   BASELINE,
   DWELL_LABELS,
@@ -89,7 +98,7 @@ import { poissonUpperTail } from "./security-stats.js";
 import { dayTypeOf, type SecurityDayTypeValue } from "./security-baseline-slots.js";
 import { isoWeekdayOf, localPartsOf, ymdAddDays } from "./zoned-time.js";
 
-export const SECURITY_RULESET_VERSION = 3;
+export const SECURITY_RULESET_VERSION = 4;
 
 export const RULESET = {
   after_hours_presence: {
@@ -101,6 +110,22 @@ export const RULESET = {
   },
   camera_offline: { severity: "notice", minOfflineMs: 60_000 },
   threat_signal: { severity: "notice", ignoreActivitySubs: ["web_push"] },
+  /**
+   * v4 (WARP-2979, D12 of p4-spec): a person-linked camera offline ≥ 60 s, a
+   * person seen through a person link in one of its areas within
+   * [drop − 120 s, drop + 60 s], the site closed or away at the drop. The
+   * offline condition is camera_offline's own (`minOfflineMs`), reused.
+   */
+  camera_offline_during_activity: {
+    severity: "alert",
+    minOfflineMs: 60_000,
+    activityBeforeMs: 120_000,
+    activityAfterMs: 60_000,
+    label: "person",
+    /** A person's sighting; PR-D's still-in-view row too (a camera that dies mid-visit may never write the `end`). */
+    kinds: ["detection", "detection_ongoing"],
+    modes: ["closed", "away"],
+  },
 } as const;
 
 /**
@@ -190,7 +215,7 @@ export const REASON_CODE_ORDER = [
   "out_of_place",
   "unusual_volume",
   "long_dwell",
-  // WARP-2979 (P4 S0) — the enum value lands with the schema; its rule is slice E's.
+  // WARP-2979 (P4) — camera_offline_during_activity; the order is the enum's (schema.prisma).
   "camera_offline_during_activity",
 ] as const satisfies readonly SecurityReasonCode[];
 // Exhaustive at compile time: a code added to the enum without a place here fails tsc.
@@ -230,6 +255,12 @@ export interface AreaMatch {
   linkIds: string[];
   /** `part` when a part-of-view (camera_zone) link matched, else `whole`. */
   specificity: "part" | "whole";
+  /**
+   * WARP-2979 (§6.7.1) — true when a matching link was made or kept by a
+   * PERSON. An area matched only through links Droplet activated on its own
+   * is context: it groups, and never alerts.
+   */
+  personLinked: boolean;
 }
 
 /** What makes two events candidates for the same incident. */
@@ -257,11 +288,17 @@ export type ScopeDecision =
 
 const byString = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** D12: kind rank, then a part-of-view link over a whole-camera one, then the lowest zone id. `matches` is non-empty. */
+/**
+ * D12 + WARP-2979 (§6.7.1): an area a PERSON linked first (so a link Droplet
+ * made on its own can never move an event out of an area a person set), then
+ * the kind rank, then a part-of-view link over a whole-camera one, then the
+ * lowest zone id. `matches` is non-empty.
+ */
 export function rankPick(matches: readonly AreaMatch[]): AreaMatch {
   if (matches.length === 0) throw new Error("rankPick: no areas");
   return [...matches].sort(
     (a, b) =>
+      Number(b.personLinked) - Number(a.personLinked) ||
       ZONE_KIND_RANK[b.zoneKind] - ZONE_KIND_RANK[a.zoneKind] ||
       (a.specificity === b.specificity ? 0 : a.specificity === "part" ? -1 : 1) ||
       byString(a.zoneId, b.zoneId),
@@ -507,6 +544,9 @@ function toSpanJson(json: unknown): SpanByCamera {
 
 // ── the rules (§6.5) ──────────────────────────────────────────────────────
 
+/** A `detail` value: strings, safe integers, null, or (camera_offline_during_activity's `activity`) one flat object of them. */
+export type ReasonDetailValue = string | number | null | { [key: string]: string | number | null };
+
 /** A reason row to write: the code, its severity, and the evidence snapshot. */
 export interface ReasonDraft {
   code: SecurityReasonCode;
@@ -519,11 +559,17 @@ export interface ReasonDraft {
   evidenceLabel: string | null;
   evidenceAt: Date;
   evidenceSummary: string;
-  /** The rule's numbers (§4): strings, safe integers or null only. */
-  detail: Record<string, string | number | null>;
+  /** The rule's numbers (§4): strings, safe integers or null (and one flat object for camera_offline_during_activity). */
+  detail: Record<string, ReasonDetailValue>;
+  /**
+   * WARP-2979 — a SECOND camera the evidence names (camera_offline_during_activity:
+   * where the person was seen). DS-005: the reason is shown only to a viewer who
+   * can see this camera too (`reasonVisibleTo`). Absent = none.
+   */
+  relatedCamera?: string | null;
 }
 
-/** The P3 codes: each has ONE severity in RULESET. The pattern codes (P5) never reach `evidenceOf`. */
+/** The P3 codes (and P4's), each with ONE severity in RULESET. The pattern codes (P5) never reach `evidenceOf`. */
 export type P3Code = keyof typeof RULESET;
 
 function evidenceOf(
@@ -553,16 +599,22 @@ function evidenceOf(
  * `zoneKind` is the INCIDENT's snapshot (the most sensitive area, D12).
  * v2 (PR-D): a `detection_ongoing` row counts too, over `[startedAt,
  * createdAt]` (`eventSpan`) — the person was in view that whole time.
+ * v4 (WARP-2979, §6.7.1): only through an area a PERSON linked (`personLinked`,
+ * the event's primary match): an event matched only through a link Droplet
+ * activated on its own groups there but never alerts.
  */
 export function afterHoursPresence(input: {
   scope: SecurityIncidentScope;
   zoneKind: SecurityZoneKind | null;
+  /** WARP-2979 — the event's primary area was matched through a person-set link. */
+  personLinked: boolean;
   event: TriageEvent;
   timeline: ModeTimeline;
 }): ReasonDraft | null {
   const rule = RULESET.after_hours_presence;
   const { event } = input;
   if (input.scope !== "area" || input.zoneKind === null) return null;
+  if (!input.personLinked) return null;
   if (!(rule.zoneKinds as readonly string[]).includes(input.zoneKind)) return null;
   if (!(rule.kinds as readonly string[]).includes(event.kind) || !event.labels.includes(rule.label)) return null;
   const span = eventSpan(event);
@@ -635,6 +687,87 @@ export function cameraOfflineVerdict(
       offlineForSec: back ? Math.round((back.startedAt.getTime() - o) / 1000) : null,
       backAt: back ? back.startedAt.toISOString() : null,
     }),
+  };
+}
+
+/**
+ * WARP-2979 (p4-spec §6.7.2) — one activity row the new rule may cite: a
+ * person sighting on a camera, with the person-linked areas it matched
+ * (`zonesForEvent` over the PERSON-ONLY index, `buildZoneIndex(…, {personOnly})`).
+ */
+export interface ActivitySighting extends TriageEvent {
+  /** The active areas this row matched through links a person made or kept. */
+  personZoneIds: readonly string[];
+}
+
+/**
+ * camera_offline_during_activity (alert, p4-spec D12). For a `camera_offline`
+ * row `o` on camera C, it fires when ALL hold:
+ *   1. offline for real — camera_offline's own verdict (`cameraOfflineVerdict`,
+ *      reused, not copied) says `fire`: no recovery within 60 s, judged once
+ *      60 s have passed;
+ *   2. C is person-linked: `personAreas` (the active areas where C, or a part
+ *      of it, has an active link a PERSON made or kept) is not empty;
+ *   3. activity there: a person sighting (`detection`, or PR-D's still-in-view
+ *      row) whose span `[startedAt, endedAt ?? …]` meets `[o − 120 s, o + 60 s]`
+ *      and whose person-linked areas meet `personAreas`. C's own sighting
+ *      counts (someone walked up, then the camera died). The LATEST such row
+ *      is the evidence;
+ *   4. after hours: the mode at the drop is closed or away (in opening hours
+ *      P3's camera_offline notice covers it — usually Wi-Fi).
+ * Not Frigate-wide: `source_offline` (camera NULL) never fires it (Frigate
+ * restarts nightly). Late activity — a sighting written after the incident
+ * sealed — is missed (p4-spec R11).
+ */
+export function cameraOfflineDuringActivity(input: {
+  offline: TriageEvent;
+  /** C's recovery rows at or after the drop (`cameraOfflineVerdict`'s input). */
+  onlines: ReadonlyArray<{ startedAt: Date }>;
+  now: Date;
+  /** Areas(C): active areas where C has a person-set active link. */
+  personAreas: ReadonlyMap<string, string>;
+  activity: readonly ActivitySighting[];
+  timeline: ModeTimeline;
+}): ReasonDraft | null {
+  const rule = RULESET.camera_offline_during_activity;
+  const o = input.offline;
+  if (o.kind !== "camera_offline" || o.camera === null) return null;
+  if (input.personAreas.size === 0) return null;
+  const verdict = cameraOfflineVerdict(o, input.onlines, input.now);
+  if (verdict.verdict !== "fire") return null;
+  const mode = modeAt(input.timeline, o.startedAt);
+  if (!(rule.modes as readonly string[]).includes(mode.mode)) return null;
+  const from = o.startedAt.getTime() - rule.activityBeforeMs;
+  const to = o.startedAt.getTime() + rule.activityAfterMs;
+  let best: { a: ActivitySighting; zoneId: string } | null = null;
+  for (const a of input.activity) {
+    if (a.camera === null || !(rule.kinds as readonly string[]).includes(a.kind) || !a.labels.includes(rule.label)) continue;
+    const span = eventSpan(a);
+    if (span.s.getTime() > to || span.e.getTime() < from) continue;
+    const zoneId = [...a.personZoneIds].sort(byString).find((z) => input.personAreas.has(z));
+    if (zoneId === undefined) continue;
+    if (!best || a.startedAt.getTime() > best.a.startedAt.getTime() || (a.startedAt.getTime() === best.a.startedAt.getTime() && a.id > best.a.id)) {
+      best = { a, zoneId };
+    }
+  }
+  if (!best) return null;
+  const offlineDetail = verdict.reason.detail;
+  return {
+    ...evidenceOf("camera_offline_during_activity", o, null, {
+      offlineForSec: offlineDetail.offlineForSec ?? null,
+      backAt: offlineDetail.backAt ?? null,
+      mode: mode.mode,
+      modeSource: mode.source,
+      activity: {
+        eventId: best.a.id.toString(),
+        kind: best.a.kind === "detection_ongoing" ? "detection_ongoing" : "detection",
+        label: rule.label,
+        at: best.a.startedAt.toISOString(),
+        zoneId: best.zoneId,
+        zoneName: input.personAreas.get(best.zoneId)!,
+      },
+    }),
+    relatedCamera: best.a.camera,
   };
 }
 

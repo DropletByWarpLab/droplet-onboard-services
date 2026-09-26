@@ -502,6 +502,97 @@ describe("camera_offline at the tick", () => {
   });
 });
 
+// ── WARP-2979 (p4-spec §6.7) ────────────────────────────────────────────────
+
+describe("alerts only through links a person made or kept (§6.7.1)", () => {
+  it("a person after closing on a camera only DROPLET linked: grouped into that area, but no alert", async () => {
+    const f = world();
+    for (const l of f.world.securityZoneLink) Object.assign(l, { origin: "droplet", stateSetBy: "droplet" });
+    f.world.securityEvent.push(eventRow({ id: 1n }));
+    await tick(f, plus(T0, 5_000));
+    expect(incidents(f)).toHaveLength(1);
+    expect(incidents(f)[0]).toMatchObject({ scope: "area", zoneId: STOCK, severity: "info", reasonCodes: [] });
+  });
+
+  it("once a person KEEPS the link, the next sighting alerts", async () => {
+    const f = world();
+    for (const l of f.world.securityZoneLink) Object.assign(l, { origin: "droplet", stateSetBy: "person" });
+    f.world.securityEvent.push(eventRow({ id: 1n }));
+    await tick(f, plus(T0, 5_000));
+    expect(incidents(f)[0]).toMatchObject({ severity: "alert", reasonCodes: ["after_hours_presence"] });
+  });
+});
+
+describe("camera_offline_during_activity at the tick (§6.7.2)", () => {
+  const offline = (id: bigint, at: Date, camera = "back") =>
+    eventRow({
+      id,
+      kind: "camera_offline",
+      source: "frigate_status",
+      camera,
+      sourceRef: `${camera}/status/detect`,
+      labels: [],
+      endedAt: null,
+      startedAt: at,
+      createdAt: at,
+      summary: `Camera ${camera} stopped reporting`,
+    });
+  const person = (id: bigint, at: Date, camera = "back") =>
+    eventRow({ id, camera, sourceRef: `${camera}/${id}.5-abc`, dedupeKey: `z:${id}`, startedAt: at, endedAt: plus(at, 5_000), createdAt: plus(at, 6_000) });
+
+  it("a person-linked camera drops within two minutes of someone being seen there, after closing → an ALERT naming where they were seen", async () => {
+    const f = world({ securityEvent: [person(1n, plus(T0, -90_000)), offline(2n, T0)] });
+    await tick(f, plus(T0, 61_000));
+    const i = incidents(f)[0]!;
+    expect(i).toMatchObject({ severity: "alert", reasonCodes: ["after_hours_presence", "camera_offline", "camera_offline_during_activity"] });
+    const r = f.world.securityIncidentReason.find((x) => x.code === "camera_offline_during_activity")!;
+    expect(r).toMatchObject({ severity: "alert", evidenceEventId: 2n, evidenceCamera: "back", relatedCamera: "back" });
+    expect(r.detail).toMatchObject({ mode: "closed", activity: { eventId: "1", kind: "detection", zoneId: STOCK, zoneName: "Stock room" } });
+    // Idempotent: another tick adds nothing.
+    await tick(f, plus(T0, 71_000));
+    expect(f.world.securityIncidentReason.filter((x) => x.code === "camera_offline_during_activity")).toHaveLength(1);
+  });
+
+  it("the activity may be on ANOTHER camera person-linked to the area, and in another incident", async () => {
+    const f = world();
+    const stock = areaRows(STOCK, "Stock room", "interior", ["back", "stock_cam"]);
+    f.world.securityZoneLink = stock.links;
+    f.world.securityEvent.push(person(1n, plus(T0, -60_000), "stock_cam"), offline(2n, T0));
+    await tick(f, plus(T0, 61_000));
+    const r = f.world.securityIncidentReason.find((x) => x.code === "camera_offline_during_activity")!;
+    expect(r).toMatchObject({ evidenceCamera: "back", relatedCamera: "stock_cam" });
+  });
+
+  it("only through PERSON links: the dropped camera linked by Droplet alone → P3's notice only", async () => {
+    const f = world({ securityEvent: [person(1n, plus(T0, -60_000)), offline(2n, T0)] });
+    for (const l of f.world.securityZoneLink) Object.assign(l, { origin: "droplet", stateSetBy: "droplet" });
+    await tick(f, plus(T0, 61_000));
+    expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
+  });
+
+  it("only through PERSON links: the sighting on a camera Droplet alone linked to the area does not count", async () => {
+    const f = world();
+    const stock = areaRows(STOCK, "Stock room", "interior", ["back", "stock_cam"]);
+    Object.assign(stock.links[1]!, { origin: "droplet", stateSetBy: "droplet" });
+    f.world.securityZoneLink = stock.links;
+    f.world.securityEvent.push(person(1n, plus(T0, -60_000), "stock_cam"), offline(2n, T0));
+    await tick(f, plus(T0, 61_000));
+    expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
+  });
+
+  it("no one seen in the window (the sighting 3 minutes before) → P3's notice only", async () => {
+    const f = world({ securityEvent: [person(1n, plus(T0, -180_000)), offline(2n, T0)] });
+    await tick(f, plus(T0, 61_000));
+    expect(f.world.securityIncidentReason.map((r) => r.code).sort()).toEqual(["after_hours_presence", "camera_offline"]);
+  });
+
+  it("in opening hours → P3's notice only", async () => {
+    const f = world({ securityEvent: [person(1n, plus(NOON, -60_000)), offline(2n, NOON)] }, NOON);
+    await tick(f, plus(NOON, 61_000));
+    expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
+  });
+});
+
 // Review 383d647e item 4: a camera-less reason on an area/camera incident is
 // the one row `reasonVisible` hides while `visibleReasonWhere` and the list
 // SQL show it. CHECK SecurityIncidentReason_site_evidence refuses it at the
@@ -528,6 +619,8 @@ describe("a camera-less reason is site-wide, never on an area or camera incident
       .sort((a, b) => String(a.kind).localeCompare(String(b.kind)) || String(a.camera).localeCompare(String(b.camera)));
     expect(written).toEqual([
       { scope: "area", code: "camera_offline", kind: "camera_offline", camera: "back" },
+      // WARP-2979 — `back` is person-linked to the Stock room and a person was seen there at the drop, after closing.
+      { scope: "area", code: "camera_offline_during_activity", kind: "camera_offline", camera: "back" },
       { scope: "camera", code: "camera_offline", kind: "camera_offline", camera: "yard" },
       { scope: "area", code: "after_hours_presence", kind: "detection", camera: "back" },
       { scope: "area", code: "after_hours_presence", kind: "detection_ongoing", camera: "back" },

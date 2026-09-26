@@ -325,6 +325,51 @@ describe("the notifier (§6.7)", () => {
     expect(body("stefan")).toBe("Back camera saw someone at 10:19 PM. The site was closed. It happened 1 more time.");
   });
 
+  // WARP-2979 (p4-spec §6.7.2) — the related camera: a recipient who can see the camera that dropped but not where the
+  // person was seen is skipped_not_visible (the alert text would reveal presence there).
+  const dropped = (camera: string, related: string, at: Date) =>
+    reason(camera, at, {
+      code: "camera_offline_during_activity",
+      evidenceKind: "camera_offline",
+      evidenceSource: "frigate_status",
+      evidenceLabel: null,
+      relatedCamera: related,
+      detail: {
+        offlineForSec: null,
+        backAt: null,
+        mode: "closed",
+        modeSource: "schedule",
+        activity: { eventId: "7", kind: "detection", label: "person", at: plus(at, -60_000).toISOString(), zoneId: STOCK, zoneName: "Stock room" },
+      },
+    });
+
+  it("WARP-2979: camera_offline_during_activity naming a camera she cannot see → she is skipped_not_visible; the owner gets the new words", async () => {
+    const f = world({
+      securityAlertRecipient: [{ userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN }],
+      securityIncidentReason: [dropped("front", "back", plus(NOW, -30_000))],
+      securityIncident: [incident({ cameras: ["back", "front"], reasonCodes: ["camera_offline_during_activity"] })],
+    });
+    LEVELS[MARIA] = "act";
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_not_visible" });
+    const owner = f.world.notificationLog.find((r) => r.username === "stefan")!;
+    expect(owner.title).toBe("A camera in Stock room stopped reporting after hours");
+    expect(owner.body).toBe("Front door stopped reporting at 10:19 PM, soon after someone was seen in Stock room. The site was closed.");
+  });
+
+  it("WARP-2979: …and when she can see both, she is told in the new words", async () => {
+    const f = world({
+      securityAlertRecipient: [{ userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN }],
+      securityIncidentReason: [dropped("front", "front", plus(NOW, -30_000))],
+      securityIncident: [incident({ cameras: ["front"], reasonCodes: ["camera_offline_during_activity"] })],
+    });
+    LEVELS[MARIA] = "act";
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(f.world.notificationLog.find((r) => r.username === "maria")!.body).toBe(
+      "Front door stopped reporting at 10:19 PM, soon after someone was seen in Stock room. The site was closed.",
+    );
+  });
+
   it("the owner fallback: the only routed person lost access → the owner is told (fallback_owner), the routed one skipped_no_access", async () => {
     const f = world({
       securityAlertRecipient: [

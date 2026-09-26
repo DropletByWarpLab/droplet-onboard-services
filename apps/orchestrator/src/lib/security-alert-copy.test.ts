@@ -89,4 +89,42 @@ describe("alertCopy", () => {
   it("an empty evidence list is a programming error, not an empty alert", () => {
     expect(() => alertCopy({ zoneName: "Office", evidence: [], tz: null })).toThrow();
   });
+
+  // ── WARP-2979 (p4-spec §6.7.2) — camera_offline_during_activity ──
+  const dropped = (at: Date, mode: AlertEvidence["mode"] = "closed"): AlertEvidence => ({
+    code: "camera_offline_during_activity",
+    cameraLabel: "Back camera",
+    at,
+    mode,
+    seenAt: plus(at, -60_000),
+    seenCameraLabel: "Stock cam",
+  });
+
+  it("a camera that stopped reporting soon after someone was seen: its own title and sentence, in the site clock", () => {
+    expect(alertCopy({ zoneName: "Stock room", evidence: [dropped(plus(T, 120_000))], tz: "Europe/London" })).toEqual({
+      title: "A camera in Stock room stopped reporting after hours",
+      body: "Back camera stopped reporting at 2:16 AM, soon after someone was seen in Stock room. The site was closed.",
+    });
+    expect(alertCopy({ zoneName: "Stock room", evidence: [dropped(T, "away")], tz: null }).body).toBe(
+      "Back camera stopped reporting, soon after someone was seen in Stock room. The site was set to away.",
+    );
+  });
+
+  it("a sighting the recipient can see leads, counted alone; the camera wording is only for a recipient who sees no sighting", () => {
+    const both = alertCopy({ zoneName: "Stock room", evidence: [dropped(T), back(plus(T, 60_000))], tz: "Europe/London" });
+    expect(both.title).toBe("Person in Stock room after hours");
+    expect(both.body).toBe("Back camera saw someone at 2:15 AM. The site was closed.");
+  });
+
+  it("the new wording passes the BANNED list and names no person", () => {
+    for (const v of [
+      alertCopy({ zoneName: "Office", evidence: [dropped(T)], tz: "Europe/London" }),
+      alertCopy({ zoneName: "Office", evidence: [dropped(T), dropped(plus(T, 5_000), "away")], tz: null }),
+    ]) {
+      for (const text of [v.title, v.body]) {
+        for (const [name, re] of BANNED) expect(text, `${name} in "${text}"`).not.toMatch(re);
+        expect(text).not.toMatch(/(Stefan|Maria|he|she|they)/);
+      }
+    }
+  });
 });
