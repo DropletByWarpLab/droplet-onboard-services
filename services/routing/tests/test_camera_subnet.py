@@ -180,3 +180,86 @@ def test_setup_refuses_when_bridge_membership_unknown(client, mock_router):
     assert mock_router.uci.add.call_count == 0
     assert mock_router.uci.set.call_count == 0
     mock_router.safe_apply.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# DELETE /network/subnets/cameras — WARP-3193 QUAL-4
+# ---------------------------------------------------------------------------
+#
+# Every UCI delete/commit used to sit in `except Exception: pass`. That hid a
+# real failure (orphaned camera firewall rules on a security boundary) behind a
+# 200 "ok", and it also swallowed ConnectionLost, so safe_apply never saw the
+# loss and its rollback never triggered. Now: not-found is fine (already
+# gone), ConnectionLost propagates, and anything else is collected and
+# reported as a partial teardown.
+
+
+_FW = {
+    "cfg_zone": {".type": "zone", "name": "cameras"},
+    "cfg_fwd": {".type": "forwarding", "src": "lan", "dest": "cameras"},
+    "cfg_rule": {".type": "rule", "name": "Allow-Camera-DNS", "src": "cameras"},
+    "cfg_lan": {".type": "zone", "name": "lan"},
+}
+
+
+def _wire_teardown(mock_router, delete_side_effect=None):
+    # Let exceptions escape the mocked safe_apply the way the real one does.
+    mock_router.safe_apply.return_value.__exit__.return_value = False
+    mock_router.uci.get.return_value = dict(_FW)
+    if delete_side_effect is not None:
+        mock_router.uci.delete.side_effect = delete_side_effect
+
+
+def _deleted(mock_router):
+    return [tuple(c.args[:2]) for c in mock_router.uci.delete.call_args_list]
+
+
+def test_teardown_happy_path_is_ok(client, mock_router):
+    _wire_teardown(mock_router)
+    resp = client.delete("/network/subnets/cameras", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "ok"
+    assert set(_deleted(mock_router)) == {
+        ("network", "cameras"),
+        ("firewall", "cfg_zone"),
+        ("firewall", "cfg_fwd"),
+        ("firewall", "cfg_rule"),
+        ("dhcp", "cameras"),
+    }
+
+
+def test_teardown_treats_not_found_as_already_gone(client, mock_router):
+    def delete(config, section):
+        if (config, section) in {("network", "cameras"), ("dhcp", "cameras")}:
+            raise UbusError(NOT_FOUND, "section not found")
+
+    _wire_teardown(mock_router, delete)
+    resp = client.delete("/network/subnets/cameras", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "ok"
+
+
+def test_teardown_reports_a_partial_failure_instead_of_ok(client, mock_router):
+    def delete(config, section):
+        if (config, section) == ("firewall", "cfg_rule"):
+            raise UbusError(PERMISSION_DENIED, "denied")
+
+    _wire_teardown(mock_router, delete)
+    resp = client.delete("/network/subnets/cameras", headers=AUTH)
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["status"] == "error"
+    assert body["error"] == "partial_teardown"
+    assert [f["step"] for f in body["failed"]] == ["firewall.cfg_rule delete"]
+    # Best effort continued past the failure.
+    assert ("dhcp", "cameras") in _deleted(mock_router)
+
+
+def test_teardown_connection_lost_reaches_safe_apply(client, mock_router):
+    _wire_teardown(mock_router, ConnectionLost("router unreachable"))
+    resp = client.delete("/network/subnets/cameras", headers=AUTH)
+    assert resp.status_code == 503
+    exit_args = mock_router.safe_apply.return_value.__exit__.call_args.args
+    assert exit_args[0] is ConnectionLost
+    # The first delete lost the link; nothing after it was attempted.
+    assert _deleted(mock_router) == [("network", "cameras")]

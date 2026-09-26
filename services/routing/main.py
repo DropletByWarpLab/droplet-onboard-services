@@ -1724,17 +1724,38 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
 
 @app.delete("/network/subnets/cameras")
 def teardown_camera_subnet():
-    """Remove the camera subnet (VLAN, firewall zone, DHCP pool)."""
+    """Remove the camera subnet (VLAN, firewall zone, DHCP pool).
+
+    WARP-3193 QUAL-4: best effort, but never silent. A NOT_FOUND/NO_DATA means
+    the section is already gone and is fine. ConnectionLost propagates so
+    safe_apply sees it and the rollback arms. Any other failure is collected,
+    the remaining steps still run, and the response is a 500
+    `partial_teardown` naming each failed step — a leftover camera firewall
+    rule is a security-boundary fault, not an "ok".
+    """
+    failed: list[dict] = []
+
+    def _step(label: str, fn) -> None:
+        try:
+            fn()
+        except ConnectionLost:
+            raise
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return
+            logger.warning("camera subnet teardown: %s failed: %s", label, exc)
+            failed.append({"step": label, "error": str(exc)})
+        except Exception as exc:
+            logger.warning("camera subnet teardown: %s failed: %s", label, exc)
+            failed.append({"step": label, "error": str(exc)})
+
     try:
         r = get_router()
 
         with r.safe_apply(timeout=60):
             # Remove network interface
-            try:
-                r.uci.delete("network", "cameras")
-                r.uci.commit("network")
-            except Exception:
-                pass
+            _step("network.cameras delete", lambda: r.uci.delete("network", "cameras"))
+            _step("network commit", lambda: r.uci.commit("network"))
 
             # Remove firewall zone and rules related to cameras
             fw_config = r.uci.get("firewall")
@@ -1757,19 +1778,23 @@ def teardown_camera_subnet():
                             to_delete.append(name)
 
                 for name in to_delete:
-                    try:
-                        r.uci.delete("firewall", name)
-                    except Exception:
-                        pass
-                r.uci.commit("firewall")
+                    _step(f"firewall.{name} delete", lambda name=name: r.uci.delete("firewall", name))
+                _step("firewall commit", lambda: r.uci.commit("firewall"))
 
             # Remove DHCP pool
-            try:
-                r.uci.delete("dhcp", "cameras")
-                r.uci.commit("dhcp")
-            except Exception:
-                pass
+            _step("dhcp.cameras delete", lambda: r.uci.delete("dhcp", "cameras"))
+            _step("dhcp commit", lambda: r.uci.commit("dhcp"))
 
+        if failed:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "error": "partial_teardown",
+                    "action": "camera_subnet_removed",
+                    "failed": failed,
+                },
+            )
         return {"status": "ok", "action": "camera_subnet_removed"}
 
     except ConnectionLost as exc:
