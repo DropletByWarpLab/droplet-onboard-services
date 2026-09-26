@@ -2386,8 +2386,8 @@ class WakePipeline:
         # Intent gate: short-circuit speculative tool calls on greetings,
         # time-of-day, and who-are-you utterances. The orchestrator's
         # agent loop honors tool_choice="none" by advertising zero
-        # tools — the model can only answer from the system prompt
-        # context, which already carries the live time + location.
+        # tools — the model can only answer from its prompt, whose user
+        # turn opens with the live time + location (llm.build_turn_context).
         tool_choice = classify_tool_choice(transcript)
         if tool_choice == "none":
             logger.info(

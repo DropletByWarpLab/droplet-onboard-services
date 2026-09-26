@@ -9,7 +9,7 @@ Service choice: **ipapi.co/json/** — no auth, HTTPS, 1000 req/day free
 (we make ONE call per process lifetime, refreshed on container
 restart). Returns city + region + country + timezone in one shot. We
 fall back to UTC silently if the call fails — the model just gets a
-slightly less informed system prompt rather than crashing on lookup.
+slightly less informed turn context rather than crashing on lookup.
 
 This module is deliberately small + dependency-light: just `httpx`
 (already in requirements for voice/llm.py) and the stdlib. No

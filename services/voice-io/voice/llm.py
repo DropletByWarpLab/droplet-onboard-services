@@ -201,6 +201,13 @@ DEFAULT_VOICE_ALLOWED_TOOLS: tuple[str, ...] = (
 # (apps/orchestrator/data/droplet-identity.md) still rides on every
 # tool-enabled turn server-side; keep this compact so voice turns don't
 # pay for it twice.
+#
+# WARP-3125 — on tool-enabled turns the orchestrator folds this text into
+# its own index-0 system message (after its base prompt), because the
+# gpt-oss chat template drops any system message that is not first. It
+# carries no clock or location — those open the user turn instead
+# (`build_turn_context`) — so it is byte-identical on every turn and stays
+# inside the prompt prefix llama-server can reuse.
 DEFAULT_LLM_SYSTEM_PROMPT = (
     "You're Droplet — the private AI that runs on this business's own "
     "appliance, and you're its voice. You're not a cloud service: "
@@ -220,22 +227,33 @@ DEFAULT_LLM_SYSTEM_PROMPT = (
 DEFAULT_TIMEZONE = "UTC"
 
 
-def build_system_prompt(
-    base: str,
+def build_turn_context(
     *,
     location: Optional[str],
     timezone: str,
     now: Optional[datetime] = None,
 ) -> str:
-    """Compose the system prompt for ONE LLM call.
+    """The one-line context that opens the user turn of ONE LLM call.
 
-    The base prompt (a constant) defines the voice persona. We append a
-    fresh "Right now" footer with current local time + the device's
-    configured location so the model can answer "what time is it?" or
-    "what's the weather in our area?" without freelancing.
+    Current local time (minute resolution, with weekday and zone) and the
+    device's configured location, so the model can answer "what time is
+    it?" or "what's the weather in our area?" without freelancing.
+
+    WARP-3125 — this used to be a "Right now" footer on the system
+    message. It moved to the user turn for two reasons:
+
+    * Prefix caching. llama-server reuses the KV cache only for the prompt
+      prefix that is byte-identical to the previous request, and the
+      system message sits at the front. A minute clock there made the
+      prefix different every minute. The user turn is past the cacheable
+      prefix anyway.
+    * It never reached the model on tool turns. The orchestrator puts its
+      own system message at index 0 on tool-enabled turns, and the gpt-oss
+      chat template drops any system message after index 0. The user turn
+      is rendered on every path.
 
     Pure function — `now` is injectable for tests + the timezone is an
-    explicit arg so we can construct prompts deterministically.
+    explicit arg so we can construct the line deterministically.
     """
     tz = _safe_zone(timezone)
     if now is None:
@@ -248,15 +266,19 @@ def build_system_prompt(
     # "Wednesday, May 14, 2026 at 9:34 PM EDT" — explicit weekday lets
     # the model handle "is it the weekend?" without extra reasoning.
     when = now.strftime("%A, %B %d, %Y at %I:%M %p %Z").replace(" 0", " ")
-    parts = [base, f"\n\nRight now it is {when}."]
-    if location and location.strip():
-        parts.append(f"\nThe Droplet is located in {location.strip()}.")
-    parts.append(
-        "\nIf the user asks for the time, the date, or anything tied "
-        "to location, use the information above directly — do not say "
-        "you don't have access to the time or location."
+    # Collapse whitespace so an operator's multi-line location cannot
+    # split the line.
+    place = " ".join((location or "").split())
+    if place:
+        return (
+            f"[Context: it is {when}; the Droplet is located in {place}. "
+            "Use this for time, date, and location questions; do not say "
+            "you don't have access to them.]"
+        )
+    return (
+        f"[Context: it is {when}. Use this for time and date questions; "
+        "do not say you don't have access to them.]"
     )
-    return "".join(parts)
 
 
 def _safe_zone(name: str) -> ZoneInfo:
@@ -441,7 +463,7 @@ class OrchestratorLLM(LLMClient):
         # Context-enrichment fields. `location` is a free-form string
         # ("Greenwich, CT, USA") — what the operator set in env, no
         # geocoding. `timezone` is an IANA name; we resolve it to a
-        # ZoneInfo at call time (in build_system_prompt) so a typo
+        # ZoneInfo at call time (in build_turn_context) so a typo
         # falls back to UTC instead of crashing reply().
         self._location = location
         self._timezone = timezone
@@ -512,13 +534,15 @@ class OrchestratorLLM(LLMClient):
         Wire shape matches `apps/orchestrator/src/routes/llm.ts`
         `chatRequestSchema` (Zod). Carries all Wave-C turn shaping
         (WARP-1432): ephemeral + max_tokens + the curated allowed_tools
-        scope + the per-turn tool_choice, plus a fresh "right now"
-        timestamp (rebuilt every call) and the WARP-1119 workspace persona
-        on the greeting fast path.
+        scope + the per-turn tool_choice, plus the WARP-1119 workspace
+        persona on the greeting fast path.
+
+        WARP-3125 — the system message is the persona text only, identical
+        on every turn; the live time + location open the user turn instead
+        (`build_turn_context`, rebuilt every call).
         """
-        # Build a fresh system prompt on every call so the embedded
-        # "right now" timestamp is current. Cheap (string concat +
-        # one datetime.now()) — no need to cache.
+        # Resample the clock on every call so the context line is current.
+        # Cheap (string concat + one datetime.now()) — no need to cache.
         now = self._now_provider() if self._now_provider else None
         # WARP-1119 (§14): greeting turns (tool_choice="none") skip the
         # orchestrator base prompt, so the workspace persona block is
@@ -533,8 +557,10 @@ class OrchestratorLLM(LLMClient):
             persona_block = self._persona_fetcher.get_block()
             if persona_block:
                 base_prompt = f"{persona_block}\n\n{self._system_prompt}"
-        system_msg = build_system_prompt(
-            base_prompt,
+        # WARP-3125 — the context line leads the user turn, the transcript
+        # follows on its own line. The system message stays `base_prompt`
+        # verbatim so it is byte-identical turn to turn.
+        context_line = build_turn_context(
             location=self._location,
             timezone=self._timezone,
             now=now,
@@ -553,8 +579,8 @@ class OrchestratorLLM(LLMClient):
         body: dict[str, Any] = {
             "model": self._current_model(),
             "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_text.strip()},
+                {"role": "system", "content": base_prompt},
+                {"role": "user", "content": f"{context_line}\n{user_text.strip()}"},
             ],
             "stream": stream,
             "max_iter": self._max_iter,
