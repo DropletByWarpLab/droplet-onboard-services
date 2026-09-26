@@ -550,4 +550,23 @@ describe("ncTransferOwnership (WARP-3169 leaver hand-over)", () => {
     expect(logged).toContain("unknown Nextcloud user: anna");
     expect(logged).not.toContain("name.pdf");
   });
+
+  it("a timeout after occ started is flagged as possibly partial; a pre-start refusal is not", async () => {
+    const timedOut = new Error("OTA host exec: nc-transfer-ownership did not finish within 660000 ms");
+    const e1 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(timedOut), from: "tomas", to: "anna", logger: { error: vi.fn() } as any }).catch((e) => e);
+    expect(e1).toMatchObject({ mayBePartial: true, reason: "timed out" });
+    expect(e1.message).toMatch(/may already be in/);
+
+    const refused: any = new Error("exited 1");
+    refused.stderr = "[apply-update] ERROR: unknown Nextcloud user: anna\n";
+    const e2 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(refused), from: "tomas", to: "anna", logger: { error: vi.fn() } as any }).catch((e) => e);
+    expect(e2).toMatchObject({ mayBePartial: false, reason: "unknown Nextcloud user: anna" });
+
+    const occFailed: any = new Error("OTA host helper nc-transfer-ownership exited 1: boom");
+    occFailed.stderr = "[apply-update] nc-transfer-ownership tomas -> anna\nboom /files/secret.pdf\n";
+    const logger: any = { error: vi.fn() };
+    const e3 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(occFailed), from: "tomas", to: "anna", logger }).catch((e) => e);
+    expect(e3).toMatchObject({ mayBePartial: true, reason: "exited 1" });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret.pdf");
+  });
 });

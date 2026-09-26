@@ -233,11 +233,17 @@ function createPrismaMock(initialRows: MockUser[] = []) {
           data: Partial<MockUser>;
           select?: any;
         }) => {
-          const existing = rows.get(where.id);
+          const existing: any = rows.get(where.id);
           // WARP-1526 (pr-reviewer #1229 B2): honour the optimistic-
           // concurrency guard — a `where` that pins `role` must MISS (real
           // Prisma throws P2025) when the stored row no longer carries it.
-          if (!existing || (where.role !== undefined && existing.role !== where.role)) {
+          // WARP-3169: same for a pinned deletion state.
+          if (
+            !existing ||
+            (where.role !== undefined && existing.role !== where.role) ||
+            ((where as any).deletionStatus !== undefined &&
+              (existing.deletionStatus ?? "NONE") !== (where as any).deletionStatus)
+          ) {
             const err: any = new Error("not found");
             err.code = "P2025";
             throw err;
@@ -1064,7 +1070,7 @@ describe("DELETE /api/people/:id", () => {
     expect(ncSetUserEnabledMock).toHaveBeenCalledWith(expect.any(String), "alice-nc", false);
     expect(prisma.user.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "u1", role: "family" },
+        where: { id: "u1", role: "family", deletionStatus: "NONE" },
         data: expect.objectContaining({ directoryStatus: "DEACTIVATED", deletionStatus: "PENDING" }),
       }),
     );
@@ -1144,7 +1150,7 @@ describe("DELETE /api/people/:id", () => {
       const prisma = createPrismaMock(seed());
       const res = await request(buildApp(prisma))
         .delete("/api/people/u1")
-        .send({ disposition: "handover", recipient: "gus" });
+        .send({ disposition: "handover", recipientId: "u3" });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe("RECIPIENT_ROLE");
       expect(hostExecMock).not.toHaveBeenCalled();
@@ -1157,12 +1163,13 @@ describe("DELETE /api/people/:id", () => {
       const prisma = createPrismaMock(seed());
       const res = await request(buildApp(prisma))
         .delete("/api/people/u1")
-        .send({ disposition: "handover", recipient: "bob" });
+        .send({ disposition: "handover", recipientId: "u2" });
       expect(res.status).toBe(502);
-      expect(res.body.code).toBe("HANDOVER_FAILED");
+      // No helper ERROR line proves occ never ran, so it may be partial.
+      expect(res.body.code).toBe("HANDOVER_INCOMPLETE");
       expect(hostExecMock).toHaveBeenCalledTimes(1);
+      // The HANDING_OVER claim was taken and released: state as it was.
       expect(prisma.rows.get("u1")).toMatchObject({ directoryStatus: "ACTIVE", deletionStatus: "NONE" });
-      expect(prisma.user.update).not.toHaveBeenCalled();
       expect(ncSetUserEnabledMock).not.toHaveBeenCalled();
       expect(ncDeleteUserMock).not.toHaveBeenCalled();
       expect(revokeAllSessionsMock).not.toHaveBeenCalled();

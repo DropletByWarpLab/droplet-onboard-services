@@ -305,7 +305,7 @@ export default function UsersPage() {
   // boolean) lets the dialog body render the username/displayName.
   const [revokeInvite, setRevokeInvite] = useState<InviteListItem | null>(null);
   const [deleteUserTarget, setDeleteUserTarget] = useState<AuthUser | null>(null);
-  // WARP-3169 — "" = keep for 30 days; otherwise the recipient's username.
+  // WARP-3169 — "" = keep for 30 days; otherwise the recipient's local user id.
   const [handoverRecipient, setHandoverRecipient] = useState("");
   const [disableUserTarget, setDisableUserTarget] = useState<AuthUser | null>(
     null,
@@ -795,8 +795,14 @@ export default function UsersPage() {
     const u = deleteUserTarget;
     if (!u) return;
     try {
-      const recipient = handoverRecipient || undefined;
-      const { deletionDueAt, folder } = await apiDeleteUser(u.id, { recipient });
+      const recipientId = handoverRecipient || undefined;
+      const recipient = recipientId
+        ? (() => {
+            const r = users.find((x) => x.userId === recipientId);
+            return r?.displayName || r?.id || "the recipient";
+          })()
+        : undefined;
+      const { deletionDueAt, folder } = await apiDeleteUser(u.id, { recipientId });
       if (!mountedRef.current) return;
       setDeleteUserTarget(null);
       toast(
@@ -1153,7 +1159,7 @@ export default function UsersPage() {
     const isDeactivated = u.enabled === false;
     // WARP-3113: explicit enum from the box; absent = an older box = NONE.
     const deletionPending = u.deletionStatus === "PENDING";
-    const deletionRunning = u.deletionStatus === "PURGING";
+    const deletionRunning = u.deletionStatus === "PURGING" || u.deletionStatus === "HANDING_OVER";
     return (
     <div key={u.id} className="lrow">
       <span className="ri brand">
@@ -2505,21 +2511,22 @@ export default function UsersPage() {
               {users
                 .filter(
                   (r) =>
+                    !!r.userId &&
                     r.id !== deleteUserTarget?.id &&
                     r.enabled !== false &&
                     (r.deletionStatus ?? "NONE") === "NONE" &&
                     HANDOVER_RECIPIENT_ROLES.has(r.role ?? ""),
                 )
                 .map((r) => (
-                  <option key={r.id} value={r.id}>
+                  <option key={r.id} value={r.userId ?? ""}>
                     {r.displayName || r.id}
                   </option>
                 ))}
             </select>
             {handoverRecipient && (
               <span className="text-label-tertiary">
-                Their files move to a new folder in {handoverRecipient}&apos;s files, then the
-                account is deleted right away. If the move fails, nothing changes.
+                Their files move to a new folder in the recipient&apos;s files, then the
+                account is deleted right away. If the move fails, nothing is deleted.
               </span>
             )}
           </label>

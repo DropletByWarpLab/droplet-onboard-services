@@ -3911,7 +3911,7 @@ export function createProtectedAuthRouter(
   // `{ disposition: "retention" }` keeps everything for RETENTION_DAYS, then the
   // nightly leaver-deletion job (leaver-deletion.service.ts) completes the
   // removal. Until then an admin can cancel. WARP-3169: or
-  // `{ disposition: "handover", recipient }` moves the files to an active
+  // `{ disposition: "handover", recipientId }` moves the files to an active
   // owner/admin/member first and completes the deletion at once.
   //
   // What happens NOW is the revocation: the same guarded, SERIALIZABLE write
@@ -3950,7 +3950,7 @@ export function createProtectedAuthRouter(
           guardActor: { id: req.user?.id, role: req.user?.role },
           actorUsername: req.user?.username ?? null,
           actor: actorFromRequest(req),
-          recipient: parsed.data.recipient,
+          recipientId: parsed.data.recipientId,
         });
         res.json({
           status: handed.removed ? "deleted" : "deletion_retrying",

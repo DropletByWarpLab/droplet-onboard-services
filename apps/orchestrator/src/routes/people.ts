@@ -852,7 +852,7 @@ export function createPeopleRouter(
             guardActor: { id: req.user?.id, role: req.user?.role },
             actorUsername: req.user?.username ?? null,
             actor: actorFromRequest(req),
-            recipient: parsedDisposition.data.recipient,
+            recipientId: parsedDisposition.data.recipientId,
           });
           return res.json({
             ok: true,

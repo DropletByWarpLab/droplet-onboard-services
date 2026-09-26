@@ -711,20 +711,20 @@ export async function changePassword(
  * are kept for 30 days (lib/leaver-deletion.ts), then the box deletes the account.
  * Resolves with the date the deletion runs.
  *
- * WARP-3169 — with a `recipient`, the box first hands the files to that
- * person (a new folder in their home) and then deletes the account at once.
- * A failed hand-over rejects and changes nothing.
+ * WARP-3169 — with a `recipientId` (the recipient's local user id), the box
+ * first hands the files to that person (a new folder in their home) and then
+ * deletes the account at once. A failed hand-over rejects; nothing is deleted.
  */
 export async function deleteUser(
   username: string,
-  opts: { recipient?: string } = {},
+  opts: { recipientId?: string } = {},
 ): Promise<{ deletionDueAt?: string; folder?: string | null; status?: string }> {
   const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(
-      opts.recipient
-        ? { disposition: "handover", recipient: opts.recipient }
+      opts.recipientId
+        ? { disposition: "handover", recipientId: opts.recipientId }
         : { disposition: "retention" },
     ),
   });

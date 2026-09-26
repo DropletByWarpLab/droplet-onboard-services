@@ -571,13 +571,25 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
  */
 export const NC_USER_ID_RE = /^[A-Za-z0-9_.@][A-Za-z0-9_.@-]{0,63}$/;
 
-/** A hand-over that did not happen. `message` is safe to show an admin. */
+/**
+ * A hand-over that failed. `mayBePartial` is false ONLY when the helper
+ * proves it refused before occ ran (a validation or unknown-user die, with no
+ * start marker); a timeout, an occ failure or an exec fault may have moved
+ * some files already. `reason` is short and names no file.
+ */
 export class NcTransferError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly mayBePartial = false,
+    readonly reason = "",
+  ) {
     super(message);
     this.name = "NcTransferError";
   }
 }
+
+/** The helper logs this line right before it runs occ (apply-update.sh). */
+const TRANSFER_STARTED_RE = /^\[apply-update\] nc-transfer-ownership /m;
 
 /**
  * WARP-3169 — move every file `from` owns into a new folder in `to`'s home
@@ -613,16 +625,32 @@ export async function ncTransferOwnership(args: {
       { timeoutMs: args.timeoutMs ?? 660_000 },
     ));
   } catch (err) {
-    // Only the helper's last stderr line: occ's progress output lists file
-    // names, which have no place in the orchestrator log.
+    // Never occ's stdout or its stderr body: both can name files. Only the
+    // helper's own ERROR line (pre-transfer refusals name user ids only) or
+    // the exit code / timeout.
     const stderr = (err as { stderr?: unknown }).stderr;
-    const last =
-      typeof stderr === "string" ? (stderr.trim().split("\n").at(-1) ?? "").slice(0, 300) : "";
+    const text = typeof stderr === "string" ? stderr : "";
+    const msg = err instanceof Error ? err.message : String(err);
+    const refusedBeforeStart =
+      !TRANSFER_STARTED_RE.test(text) && /^\[apply-update\] ERROR: /m.test(text);
+    const reason = refusedBeforeStart
+      ? (/^\[apply-update\] ERROR: (.*)$/m.exec(text)?.[1] ?? "").slice(0, 200)
+      : /exited 124\b|did not finish within|timed? ?out/i.test(msg)
+        ? "timed out"
+        : /exited (\d+)/.exec(msg)
+          ? `exited ${/exited (\d+)/.exec(msg)?.[1]}`
+          : "helper failed";
     log.error(
-      { event: "people.handover_transfer_failed", err: last || (err instanceof Error ? err.message : String(err)) },
+      { event: "people.handover_transfer_failed", reason, mayBePartial: !refusedBeforeStart },
       "Nextcloud hand-over failed",
     );
-    throw new NcTransferError("The files could not be handed over, so nothing was changed.");
+    throw new NcTransferError(
+      refusedBeforeStart
+        ? "The files could not be handed over, so nothing was changed."
+        : `The hand-over didn't finish (${reason}). Some files may already be in the recipient's "Transferred from…" folder. Nothing was deleted.`,
+      !refusedBeforeStart,
+      reason,
+    );
   }
   const target = /^Transferring files to (.+?)(?: \.\.\.)?\s*$/m.exec(stdout)?.[1];
   return { folder: target ? path.posix.basename(target) : null };

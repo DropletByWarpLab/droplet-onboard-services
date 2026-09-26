@@ -1151,11 +1151,13 @@ enum DirectoryUserStatus {
   DEACTIVATED
 }
 
-// WARP-3113 — see User.deletionStatus.
+// WARP-3113 — see User.deletionStatus. WARP-3169: HANDING_OVER is a
+// hand-over's claim while its file transfer runs.
 enum UserDeletionStatus {
   NONE
   PENDING
   PURGING
+  HANDING_OVER
 }
 
 // WARP-2858 — how a User row came to exist. LOCAL: /auth/setup, admin
@@ -2826,7 +2828,9 @@ model User {
   // and the nightly leaver-deletion job completes the removal after the
   // retention window. PURGING is the job's claim, so an admin's cancel can
   // never land between the Nextcloud delete and the row delete. Explicit
-  // enum, never derived from a null `deletionDueAt`.
+  // enum, never derived from a null `deletionDueAt`. WARP-3169: HANDING_OVER
+  // holds the row while a hand-over's file transfer runs; the previous value
+  // is restored if the transfer fails.
   deletionStatus      UserDeletionStatus @default(NONE)
   deletionDueAt       DateTime?
   deletionRequestedBy String?
