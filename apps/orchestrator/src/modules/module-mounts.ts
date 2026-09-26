@@ -190,7 +190,7 @@ export function mountModuleGates(
  * WARP-2988 — tool domains whose routes narrow the `_service:mcp` principal by
  * the ACTING user's §3 tool scope (middleware/mcp-acting-user-gate.ts).
  *
- * `business` only, deliberately: it is the domain Romain's "CRM or Projects"
+ * `business` first: it is the domain Romain's "CRM or Projects"
  * decision is about, and the one whose routes sit under two modules. The gate
  * mounts on the prefixes of every module that CLAIMS the domain — derived from
  * the registry, never hand-listed — and `middleware/mcp-acting-user-gate.test.ts`
@@ -205,8 +205,18 @@ export function mountModuleGates(
  *     filter.
  *   - `business_profile_get` reads through `ctx.prisma`, no HTTP hop at all.
  * Both rely on the tool-level gate (the chat / runner dispatch check).
+ *
+ * `team_chat` (WARP-3162): `team_chat_send_message` and
+ * `team_chat_send_meeting_invite` reach routes/team-chat.ts as `_service:mcp`,
+ * and the route resolves the acting person for thread membership but never
+ * asked their tool scope, so over the HTTP transport (WARP-2989) a person whose
+ * role leaves Messages out could message and invite members in their own name.
+ * Every `team_chat` hop is under `/api/team-chat` (the same test pins it). Both
+ * tools write, so the gate asks for `use` on the roster GET as well. The
+ * `team_chat` module is not feature-gated for humans, so the gate asks question
+ * 1 only, and browser sessions are untouched.
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business"];
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "team_chat"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(
