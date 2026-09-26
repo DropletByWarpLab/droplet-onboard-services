@@ -125,6 +125,13 @@ function getSecret(): string {
 }
 
 /**
+ * WARP-3193 SEC-DATA-15 — every verify pins the one algorithm the signers
+ * above use (jsonwebtoken's HS256 default). Without it, a string secret
+ * accepts any HS* variant; the mcp-server's verifyJwt already pins the same.
+ */
+const VERIFY_OPTIONS: jwt.VerifyOptions = { algorithms: ["HS256"] };
+
+/**
  * Sign a short-lived access token (15 min).
  * Access tokens carry `type: "access"` to prevent confusion with refresh tokens.
  */
@@ -206,7 +213,7 @@ export function signRefreshToken(user: {
  */
 export function verifyAccessToken(token: string): JwtPayload | null {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & Partial<JwtPayload> & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & Partial<JwtPayload> & {
       type?: string;
     };
     if (decoded.type !== "access") return null;
@@ -248,7 +255,7 @@ export async function verifyRefreshToken(
   token: string,
 ): Promise<JwtPayload | null> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & Partial<JwtPayload> & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & Partial<JwtPayload> & {
       type?: string;
     };
     if (decoded.type !== "refresh") return null;
@@ -281,7 +288,7 @@ export async function verifyRefreshToken(
  */
 export async function denyRefreshToken(token: string): Promise<void> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload;
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload;
     if (!decoded?.exp) return;
 
     const ttl = decoded.exp - Math.floor(Date.now() / 1000);
@@ -338,7 +345,7 @@ export async function registerRefreshSession(
   token: string,
 ): Promise<void> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & {
       type?: string;
     };
     if (decoded.type !== "refresh" || !decoded.exp) return;
@@ -362,7 +369,7 @@ export async function unregisterRefreshSession(
   token: string,
 ): Promise<void> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & {
       type?: string;
     };
     if (decoded.type !== "refresh" || !decoded.exp) return;

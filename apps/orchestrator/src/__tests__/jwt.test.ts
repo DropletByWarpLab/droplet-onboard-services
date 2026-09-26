@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import jwt from "jsonwebtoken";
+import { config } from "../config.js";
 
 // Set JWT_SECRET before imports
 process.env.JWT_SECRET = "test-jwt-secret-for-unit-tests-only-not-production";
@@ -183,6 +185,36 @@ describe("JWT Service", () => {
 
     it("should not throw for an already-expired token", async () => {
       await expect(denyRefreshToken("expired.token.here")).resolves.not.toThrow();
+    });
+  });
+
+  // WARP-3193 SEC-DATA-15 — the issuer signs HS256 only; every verify pins
+  // that algorithm, so a token signed with the same secret under any other
+  // HMAC variant is refused rather than accepted by jsonwebtoken's default
+  // "any HS* for a string secret" rule.
+  describe("algorithm pinning (WARP-3193 SEC-DATA-15)", () => {
+    const secret = config.JWT_SECRET;
+    const claims = { sub: "user-1", username: "alice", displayName: "Alice", role: "family" };
+
+    it("control: an HS256 token signed with the same secret verifies", () => {
+      const token = jwt.sign({ ...claims, type: "access" }, secret, { algorithm: "HS256", expiresIn: 60 });
+      expect(verifyAccessToken(token)).not.toBeNull();
+    });
+
+    it("verifyAccessToken rejects an HS384-signed access token", () => {
+      const token = jwt.sign({ ...claims, type: "access" }, secret, { algorithm: "HS384", expiresIn: 60 });
+      expect(verifyAccessToken(token)).toBeNull();
+    });
+
+    it("verifyRefreshToken rejects an HS512-signed refresh token", async () => {
+      const token = jwt.sign({ ...claims, type: "refresh" }, secret, { algorithm: "HS512", expiresIn: 60 });
+      expect(await verifyRefreshToken(token)).toBeNull();
+    });
+
+    it("denyRefreshToken writes nothing for an HS384-signed token", async () => {
+      const token = jwt.sign({ ...claims, type: "refresh" }, secret, { algorithm: "HS384", expiresIn: 60 });
+      await denyRefreshToken(token);
+      expect(cacheStore.size).toBe(0);
     });
   });
 
