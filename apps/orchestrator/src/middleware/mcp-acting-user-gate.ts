@@ -66,10 +66,10 @@ import {
   type AttributedToolAccess,
 } from "../services/tool-access.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
-import { readableDomains, toolLayers } from "../services/tool-layers.service.js";
 import type { EffectiveAccessResolver } from "./feature-gate.js";
 import { recordAccessDenied } from "./auth.js";
 import { createLogger } from "../lib/logger.js";
+import { readableDomains, toolLayers } from "../services/tool-layers.service.js";
 
 const logger = createLogger("mcp-acting-user-gate");
 
