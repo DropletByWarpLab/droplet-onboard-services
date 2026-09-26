@@ -9344,7 +9344,7 @@ export async function deleteSecurityHoursException(date: string, version: number
 // Every call goes through `securityFetch`: a failure throws with `.code` (the
 // server's `error.code`) and `.status` — render it with
 // `translateError(err, "security")`, never `err.message`. Reads are view-level
-// for every household role and never produce a feature-gate denial (the threat
+// for every role in the business and never produce a feature-gate denial (the threat
 // mirror would show one as a threat); acknowledge/resolve are act, the routing
 // PUT is manage, and the page renders those controls only at that level.
 // Everything a read returns is already projected for the viewer (DS-005).

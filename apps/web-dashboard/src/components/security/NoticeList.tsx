@@ -17,7 +17,7 @@ export function NoticeList({
   labelledBy,
 }: {
   notices: readonly IncidentNoticeView[];
-  /** The household names of the alert evidence cameras — what a `skipped_not_visible` person couldn't see. */
+  /** The business's names for the alert evidence cameras — what a `skipped_not_visible` person couldn't see. */
   cameras: readonly string[];
   timezone: string;
   now: Date;

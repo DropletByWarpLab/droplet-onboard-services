@@ -150,7 +150,7 @@ function codeShort(code: string): string {
   return (CODE_SHORT as Record<string, string>)[code] ?? INCIDENT_COPY.codeShortUnknown;
 }
 
-/** The area's name (its snapshot), the camera's household name, or the site-wide words. */
+/** The area's name (its snapshot), the business's name for the camera, or the site-wide words. */
 export function incidentTitle(i: Pick<IncidentSummary, "scope" | "zone" | "camera">, cameraLabel: CameraLabel): string {
   switch (i.scope) {
     case "area":
@@ -327,7 +327,7 @@ export function evidenceLine(r: IncidentReasonView, cameraLabel: CameraLabel, tz
   return parts.filter((p): p is string => Boolean(p)).join(" · ");
 }
 
-/** The cameras of the alert-severity evidence the viewer can see, by household name, deduplicated. */
+/** The cameras of the alert-severity evidence the viewer can see, by the business's name for each, deduplicated. */
 export function alertCameras(reasons: readonly IncidentReasonView[], cameraLabel: CameraLabel): string[] {
   const out: string[] = [];
   for (const r of reasons) {
