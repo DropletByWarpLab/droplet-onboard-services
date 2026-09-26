@@ -86,16 +86,18 @@ time and score, last transcript, last spoken reply, per-stage loaded flags.
 
 ## The wake word
 
-"Droplet" **or** "Hey Droplet" — both recognized out of the box by the
-grammar-constrained Vosk engine (no per-phrase model training, no licensing).
-`WAKE_WORD` is a comma-separated list of phrases (default `droplet,hey
-droplet`) and the box wakes on ANY of them; each fires scored on its own
-window, so the shorter "droplet" and the two-word "hey droplet" both carry
-real per-word confidence evidence (WARP-1431). "Hey Droplet" remains the
-primary spoken form in the UI copy. Engine fallback: if the Vosk model is
+"Hey Droplet", recognized out of the box by the grammar-constrained Vosk
+engine (no per-phrase model training, no licensing). `WAKE_WORD` is a
+comma-separated list of phrases (default `hey droplet`) and the box wakes on
+ANY of them, each scored on its own window (WARP-1431). The bare one-word
+"droplet" is off by default: grammar-forced decoding squeezes ambient speech
+into a lone "droplet" at confidence up to 1.00, so no threshold can filter it
+(~23 false wakes/hour on the bench, WARP-3128). Operators can opt back in with
+`WAKE_WORD=droplet,hey droplet`. "Hey Droplet" is also the spoken form in the
+UI copy. Engine fallback: if the Vosk model is
 missing, openWakeWord takes over (single-model) with "hey jarvis" as the
 closest bundled phonetic shape, and `/voice/status` exposes
-`using_wake_fallback` so a UI can say "configured: droplet/hey droplet
+`using_wake_fallback` so a UI can say "configured: hey droplet
 (currently answering to hey jarvis)".
 
 ## Latency character

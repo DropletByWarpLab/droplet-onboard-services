@@ -312,7 +312,8 @@ class VoskWakeWordDetector(WakeWordDetector):
         sample_rate: int = WAKE_SAMPLE_RATE,
     ):
         # Accept a single phrase (str — the historical shape) OR a list of
-        # phrases (WARP-1431: fire on "droplet" OR "hey droplet"). A bare
+        # phrases (WARP-1431: fire on "droplet" OR "hey droplet" when
+        # configured; the default is "hey droplet" only, WARP-3128). A bare
         # str keeps its exact spelling as the canonical label so
         # /voice/status and the fire key are byte-for-byte unchanged; a
         # list reports the comma-joined spoken phrases.

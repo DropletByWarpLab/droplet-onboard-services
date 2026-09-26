@@ -67,8 +67,9 @@ Implementation:
 
 **Caveats to price in (and soak-test on the box):**
 - A single common word ("droplet") false-accepts more than a two-word unit. Keep
-  the Vosk threshold at its 0.7 default (min per-word confidence over one word is
-  weaker than over two) and re-run the living-room-TV soak.
+  the Vosk threshold at its 0.7 default (now 0.85, WARP-3128): min per-word
+  confidence over one word is weaker than over two. Re-run the living-room-TV
+  soak.
 - The timing-plausibility gate's 0.2 s span floor bites a clipped sub-200 ms
   "droplet"; that's a new (honest, logged) failure mode "Hey Droplet" never had.
 - openWakeWord path is unaffected (it already falls back to `hey_jarvis` with no
