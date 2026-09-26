@@ -49,15 +49,23 @@ config wifi-device 'radio3'
     option noscan '1'
     option disabled '0'
 
+# WARP-3193 SEC-DATA-14: ships DISABLED with a BLANK key. A static key here
+# was one PSK shared by every box built from this overlay. This legacy image
+# path is retired (ADR-011) and has no provisioning step to mint a per-box
+# PSK, so the operator sets one before enabling:
+#   uci set wireless.default_radio3.key='<per-box PSK>'
+#   uci set wireless.default_radio3.disabled=0; uci commit wireless; wifi reload
+# (The single-box shape generates its per-box PSK at runtime and does not read
+# this file.) The other AP sections below ship blank for the same reason.
 config wifi-iface 'default_radio3'
     option device 'radio3'
     option network 'lan'
     option mode 'ap'
     option ssid 'Droplet-AI'
     option encryption 'psk2'
-    option key 'ChangeMe!2024'
+    option key ''
     option ieee80211w '0'
-    option disabled '0'
+    option disabled '1'
 
 # --- 2.4 GHz — disabled by default ---
 #
@@ -65,6 +73,7 @@ config wifi-iface 'default_radio3'
 # adds beacon airtime and IoT-device support overhead. Left disabled until
 # the operator decides they want a 2.4 GHz AP (some legacy IoT devices
 # can't see 5 GHz). To enable: `uci set wireless.radio3_2g.disabled=0;
+# uci set wireless.default_radio3_2g.key='<per-box PSK>';
 # uci set wireless.default_radio3_2g.disabled=0; uci commit; wifi reload`.
 config wifi-device 'radio3_2g'
     option type 'mac80211'
@@ -82,7 +91,7 @@ config wifi-iface 'default_radio3_2g'
     option mode 'ap'
     option ssid 'Droplet-AI-2G'
     option encryption 'psk2'
-    option key 'ChangeMe!2024'
+    option key ''
     option ieee80211w '0'
     option disabled '1'
 
@@ -109,7 +118,7 @@ config wifi-iface 'default_radio4'
     option mode 'ap'
     option ssid 'Droplet-AI-Onboard'
     option encryption 'psk2'
-    option key 'ChangeMe!2024'
+    option key ''
     option ieee80211w '0'
     option disabled '1'
 
@@ -144,7 +153,7 @@ config wifi-iface 'droplet_easymesh_fh'
     option mode 'ap'
     option ssid 'Droplet-AI'
     option encryption 'psk2'
-    option key 'ChangeMe!2024'
+    option key ''
     option ieee80211w '0'
     # hostapd Multi-AP fronthaul — the nl80211-supported onboarding primitive.
     option multi_ap '1'

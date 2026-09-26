@@ -31,6 +31,7 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
     "SERVICE_TOKEN_MCP",
     "SERVICE_TOKEN_EMAIL",
     "SERVICE_TOKEN_EGRESS_AUDIT",
+    "NEXTCLOUD_ADMIN_PASSWORD",
   ] as const;
   const ORIGINAL: Record<string, string | undefined> = {
     NODE_ENV: process.env.NODE_ENV,

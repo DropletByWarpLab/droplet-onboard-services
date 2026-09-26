@@ -208,7 +208,8 @@ export async function assertAssignableDepartment(
  *
  * No `kind` branch is needed. `validateDepartmentHierarchy` (WARP-1255, the
  * 2026-07-11 amendment) permits exactly one level of nesting — a TEAM's parent
- * must be a DEPARTMENT and a TEAM can never be a parent — so the `parentId`
+ * must be a DEPARTMENT and a TEAM can never be a parent — and it gates the only
+ * write that sets `parentId` (`POST /departments/:id/teams`), so the `parentId`
  * arm of this query returns rows only when the target is a DEPARTMENT, and
  * returns them all in one hop. Adding a kind check would be a second encoding
  * of the same rule, free to drift from it.

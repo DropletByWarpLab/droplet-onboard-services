@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { errorHandler } from "./error-handler.js";
-import { HttpError } from "../types/http-error.js";
+import { DeviceRegistryError } from "../types/device-registry-error.js";
 import { RouterError } from "../types/router-error.js";
 
 function mockRes(): Response {
@@ -33,11 +33,11 @@ describe("errorHandler", () => {
     process.env.NODE_ENV = ORIGINAL_ENV;
   });
 
-  it("honors an explicit `status` on the error (HttpError) → 404", () => {
+  it("honors an explicit `status` on the error (DeviceRegistryError) → 404", () => {
     const res = mockRes();
-    errorHandler(HttpError.notFound("device gone"), req, res, next);
+    errorHandler(DeviceRegistryError.notFound("device"), req, res, next);
     expect(statusOf(res)).toBe(404);
-    expect(bodyOf(res).message).toBe("device gone");
+    expect(bodyOf(res).message).toBe("device not found");
   });
 
   it("honors `statusCode` (http-errors shape) → 401", () => {
@@ -112,10 +112,10 @@ describe("errorHandler", () => {
   it("still exposes code for a trusted typed 4xx error", () => {
     process.env.NODE_ENV = "production";
     const res = mockRes();
-    errorHandler(HttpError.conflict("group still in use"), req, res, next);
+    errorHandler(DeviceRegistryError.groupInUse("g1"), req, res, next);
     expect(statusOf(res)).toBe(409);
-    expect(bodyOf(res).message).toBe("group still in use");
-    expect(bodyOf(res).code).toBe("CONFLICT");
+    expect(bodyOf(res).message).toBe("Group g1 still has devices");
+    expect(bodyOf(res).code).toBe("GROUP_IN_USE");
   });
 
   it("hands off to next() and writes nothing when headers were already sent", () => {
@@ -169,9 +169,9 @@ describe("errorHandler", () => {
   it("never redacts a 4xx message, even in production", () => {
     process.env.NODE_ENV = "production";
     const res = mockRes();
-    errorHandler(HttpError.badRequest("mac is required"), req, res, next);
+    errorHandler(DeviceRegistryError.invalidMac("zz"), req, res, next);
     expect(statusOf(res)).toBe(400);
-    expect(bodyOf(res).message).toBe("mac is required");
+    expect(bodyOf(res).message).toBe("Invalid MAC: zz");
   });
 
   // WARP-807 (K3): when OpenWrt/routing is unreachable, network WRITE routes

@@ -15,6 +15,9 @@
  *     probe before a create — the linchpin of idempotency).
  */
 
+// Directory login key form (#374 trim+lowercase), shared with SSO (WARP-3193 ARCH-9).
+import { normalizeEmail } from "@droplet/auth-policy";
+
 /** Canonical SCIM 2.0 schema URNs (RFC 7643 §8.7, RFC 7644 §3.4 / §3.12). */
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
 export const SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group";
@@ -163,11 +166,6 @@ export function scimError(status: number, detail: string, scimType?: string): Sc
   };
   if (scimType) body.scimType = scimType;
   return body;
-}
-
-/** Normalize an email to the directory login key form (#374 trim+lowercase). */
-export function normalizeEmail(raw: string): string {
-  return raw.trim().toLowerCase();
 }
 
 /**

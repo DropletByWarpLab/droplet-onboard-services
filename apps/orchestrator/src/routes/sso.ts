@@ -51,7 +51,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
 import { createLogger } from "../lib/logger.js";
 import { authRateLimit } from "../middleware/rate-limit.js";
-import { isUserIdShaped } from "@droplet/auth-policy";
+import { isUserIdShaped, normalizeEmail } from "@droplet/auth-policy";
 
 const logger = createLogger("sso-oidc-route");
 
@@ -65,13 +65,6 @@ const authorizeSchema = z.object({
   // path below so it can't become an open redirect.
   returnTo: z.string().optional(),
 });
-
-/** #374 normalization — the directory login key is trim+lowercase. SSO must
- *  resolve/create against the same canonical form or it would mint a second
- *  row for an owner who already exists under a differently-cased address. */
-function normalizeEmail(raw: string): string {
-  return raw.trim().toLowerCase();
-}
 
 /**
  * Resolve `returnTo` to a SAFE same-origin path for the post-login redirect.
@@ -208,6 +201,9 @@ async function ensureLinkedUser(
   if (!identity.email) {
     return null;
   }
+  // #374 — resolve/create against the directory's canonical form
+  // (@droplet/auth-policy, WARP-3193 ARCH-9), or a differently-cased address
+  // would mint a second row for an owner who already exists.
   const email = normalizeEmail(identity.email);
   if (!email) {
     return null;
