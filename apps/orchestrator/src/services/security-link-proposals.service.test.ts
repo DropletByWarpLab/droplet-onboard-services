@@ -505,7 +505,7 @@ describe("the caps", () => {
       confidence,
       wholeK: null,
       names: { match: false, shared: [] },
-    }) as PairCandidateResult;
+    }) as unknown as PairCandidateResult;
     const row = (zoneId: string, ref: string, state: "active" | "proposed", by: "person" | "droplet") => ({
       id: `${zoneId}-${ref}`,
       zoneId,

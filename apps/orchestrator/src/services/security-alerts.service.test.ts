@@ -372,7 +372,7 @@ describe("the notifier (§6.7)", () => {
 
   it("review #2418: the push names the area where the person was SEEN (detail.activity.zoneName), not the incident's", async () => {
     const r = dropped("front", "back", plus(NOW, -30_000));
-    (r.detail as { activity: { zoneName: string } }).activity.zoneName = "Back door";
+    (r.detail as unknown as { activity: { zoneName: string } }).activity.zoneName = "Back door";
     const f = world({ securityIncidentReason: [r], securityIncident: [incident({ cameras: ["back", "front"], reasonCodes: ["camera_offline_during_activity"] })] });
     await notifyPendingIncidents(client(f), deps(), NOW);
     const owner = f.world.notificationLog.find((x) => x.username === "stefan")!;
