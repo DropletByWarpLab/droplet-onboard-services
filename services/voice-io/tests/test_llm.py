@@ -41,6 +41,7 @@ from voice.llm import (
     LLMUnavailable,
     MockLLM,
     OrchestratorLLM,
+    SpokenCue,
     _extract_assistant_text,
     _extract_error_detail,
     build_llm_from_env,
@@ -1184,4 +1185,108 @@ class TestMockReplyStreamFallbackDefault:
     def test_mock_reply_stream_threads_tool_choice(self):
         m = MockLLM(scripted_replies=["ok"])
         list(m.reply_stream("good morning", tool_choice="none"))
+        assert m.last_tool_choice == "none"
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-3124 — spoken cues: `reply_events` surfaces tool_call and
+# model_loading as typed SpokenCue items (opt-in; reply_stream stays str)
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestReplyEventsCues:
+    """`reply_events` is the cue-aware sibling of `reply_stream`: the same
+    SSE consume, but the first tool_call frame and the model_loading frame
+    come through as `SpokenCue` markers IN ORDER with the text deltas, so the
+    pipeline can fill the 8-15 s tool-dispatch silence. `reply_stream`'s
+    plain-str contract is untouched (see test_tool_frames_ignored_for_audio)."""
+
+    def test_first_tool_call_yields_one_cue_in_order(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("tool_result", {"id": "t1", "ok": True, "data": []}),
+                ("tool_call", {"id": "t2", "name": "get_camera", "args": {}}),
+                ("tool_result", {"id": "t2", "ok": True, "data": {}}),
+                ("content_delta", {"text": "All cameras are online."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        # ONE cue for the first tool_call only; tool_result never surfaces.
+        assert list(llm.reply_events("check cameras")) == [
+            SpokenCue("tool_call"),
+            "All cameras are online.",
+        ]
+
+    def test_model_loading_yields_a_cue(self, monkeypatch):
+        # On DMR sizeGb is always null — the cue carries no size at all.
+        def handler(req):
+            return _sse_response(
+                ("model_loading", {"model": "gpt-oss:20b", "sizeGb": None}),
+                ("content_delta", {"text": "Good morning."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("good morning")) == [
+            SpokenCue("model_loading"),
+            "Good morning.",
+        ]
+
+    def test_reply_stream_still_yields_str_only(self, monkeypatch):
+        # Opt-in: the plain reply_stream never carries a cue object.
+        def handler(req):
+            return _sse_response(
+                ("model_loading", {"model": "m", "sizeGb": 12.5}),
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("content_delta", {"text": "Done."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("check")) == ["Done."]
+
+    def test_blocking_fallback_yields_no_cues(self, monkeypatch):
+        # The stream POST fails → blocking reply() → one str, never a cue.
+        def handler(req):
+            if "text/event-stream" in req.headers.get("accept", ""):
+                raise httpx.ConnectError("stream connect refused")
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "blocking reply won"},
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("hi")) == ["blocking reply won"]
+
+    def test_cue_then_transport_break_still_falls_back(self, monkeypatch):
+        # A cue is not content: a break after only a cue re-runs the blocking
+        # reply() (no audio would be doubled), exactly as before cues existed.
+        calls = {"n": 0}
+
+        def handler(req):
+            calls["n"] += 1
+            if "text/event-stream" in req.headers.get("accept", ""):
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=_BreakingByteStream(_sse(
+                        ("tool_call", {"id": "t1", "name": "x", "args": {}}),
+                    )),
+                )
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "fallback answer"},
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("check")) == [
+            SpokenCue("tool_call"),
+            "fallback answer",
+        ]
+        assert calls["n"] == 2
+
+    def test_base_client_reply_events_delegates_to_reply_stream(self):
+        # MockLLM and every reply_stream-only client get str-only events.
+        m = MockLLM(scripted_replies=["the whole reply"])
+        assert list(m.reply_events("hi", tool_choice="none")) == ["the whole reply"]
         assert m.last_tool_choice == "none"

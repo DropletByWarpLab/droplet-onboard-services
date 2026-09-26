@@ -45,8 +45,9 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -330,6 +331,30 @@ class LLMUnavailable(Exception):
     playback)."""
 
 
+# WARP-3124 — the orchestrator SSE events worth a short spoken cue. A tool
+# question is two serial generations plus a dispatch (8-15 s of silence on
+# the box), and the orchestrator holds the first generation's text until it
+# knows the turn called a tool (WARP-1602 deferContent) — so `tool_call` is
+# the first frame such a turn sees. `model_loading` precedes a cold load.
+CueKind = Literal["tool_call", "model_loading"]
+_CUE_EVENT_TYPES: frozenset[str] = frozenset(("tool_call", "model_loading"))
+
+
+@dataclass(frozen=True)
+class SpokenCue:
+    """A non-text item in a reply-event stream (WARP-3124): the orchestrator
+    reported something the listener should hear a short cue for, in order
+    with the text deltas. Carries only the kind — never the model name or a
+    size (`model_loading.sizeGb` is always null on DMR), so the spoken copy
+    can't state something the box doesn't know."""
+
+    kind: CueKind
+
+
+# What `LLMClient.reply_events` yields: text deltas and cue markers.
+ReplyEvent = Union[str, SpokenCue]
+
+
 # ────────────────────────────────────────────────────────────────────
 # Abstract interface
 # ────────────────────────────────────────────────────────────────────
@@ -369,6 +394,18 @@ class LLMClient(ABC):
         text = self.reply(user_text, tool_choice=tool_choice)
         if text:
             yield text
+
+    def reply_events(
+        self, user_text: str, *, tool_choice: Optional[ToolChoice] = None,
+    ) -> Iterator[ReplyEvent]:
+        """Yield the reply as text pieces interleaved, in order, with
+        `SpokenCue` markers (WARP-3124). The voice pipeline consumes this.
+
+        Default: exactly `reply_stream()` — text only, no cues — so MockLLM
+        and every client that only knows `reply()`/`reply_stream()` keep
+        working unchanged. `OrchestratorLLM` overrides it to surface the
+        first `tool_call` and the `model_loading` SSE frames as cues."""
+        yield from self.reply_stream(user_text, tool_choice=tool_choice)
 
     @property
     @abstractmethod
@@ -702,7 +739,8 @@ class OrchestratorLLM(LLMClient):
         line, JSON payload on `data:`):
           * content_delta → yield `.text`
           * tool_call / tool_result / reasoning_step / model_loading →
-            ignored for audio (tool activity logged at debug)
+            ignored for audio (tool activity logged at debug) — use
+            `reply_events()` to receive the WARP-3124 spoken-cue markers
           * done → stop; a done with stop_reason:"error" (the WARP-854
             empty-completion rewrite) raises LLMUnavailable
 
@@ -714,6 +752,28 @@ class OrchestratorLLM(LLMClient):
         LLMUnavailable rather than re-running reply() (which would double
         the audio).
         """
+        for piece in self._stream_reply(user_text, tool_choice, cues=False):
+            if isinstance(piece, str):
+                yield piece
+
+    def reply_events(
+        self, user_text: str, *, tool_choice: Optional[ToolChoice] = None,
+    ) -> Iterator[ReplyEvent]:
+        """`reply_stream()` plus spoken-cue markers (WARP-3124): the SAME
+        SSE consume and fallbacks, but the FIRST `tool_call` frame and the
+        `model_loading` frame are yielded as `SpokenCue` items in order with
+        the text deltas (each kind at most once per stream). The blocking
+        fallbacks carry no cues — they only ever see a finished reply."""
+        yield from self._stream_reply(user_text, tool_choice, cues=True)
+
+    def _stream_reply(
+        self,
+        user_text: str,
+        tool_choice: Optional[ToolChoice],
+        *,
+        cues: bool,
+    ) -> Iterator[ReplyEvent]:
+        """The shared body of `reply_stream` / `reply_events`."""
         if not user_text or not user_text.strip():
             return
         body = self._build_chat_body(
@@ -755,8 +815,12 @@ class OrchestratorLLM(LLMClient):
                     if text:
                         yield text
                     return
-                for piece in self._parse_sse(resp):
-                    yielded = True
+                for piece in self._parse_sse(resp, cues=cues):
+                    # Only CONTENT makes a later break unrecoverable: a cue
+                    # is not part of the answer, so re-running reply() after
+                    # a cue-only prefix can't double any spoken reply.
+                    if isinstance(piece, str):
+                        yielded = True
                     yield piece
                 return
         except httpx.HTTPError as exc:
@@ -783,16 +847,23 @@ class OrchestratorLLM(LLMClient):
         if text:
             yield text
 
-    def _parse_sse(self, resp: "httpx.Response") -> Iterator[str]:
-        """Yield content_delta text pieces from an SSE response. Raises
+    def _parse_sse(
+        self, resp: "httpx.Response", *, cues: bool = False,
+    ) -> Iterator[ReplyEvent]:
+        """Yield content_delta text pieces from an SSE response — plus, with
+        `cues`, one `SpokenCue` per cue kind (WARP-3124). Raises
         LLMUnavailable on a done error frame; stops after the done frame."""
+        # Cue kinds already surfaced on THIS stream; None = cues off.
+        cues_sent: Optional[set[str]] = set() if cues else None
         event_type: Optional[str] = None
         data_lines: list[str] = []
         for line in resp.iter_lines():
             if line == "":
                 # Blank line = frame boundary — dispatch what we accumulated.
                 if event_type is not None or data_lines:
-                    stop = yield from self._dispatch_frame(event_type, data_lines)
+                    stop = yield from self._dispatch_frame(
+                        event_type, data_lines, cues_sent,
+                    )
                     if stop:
                         return
                 event_type, data_lines = None, []
@@ -805,15 +876,23 @@ class OrchestratorLLM(LLMClient):
                 data_lines.append(line[len("data:"):].lstrip())
         # A trailing frame with no terminating blank line.
         if event_type is not None or data_lines:
-            yield from self._dispatch_frame(event_type, data_lines)
+            yield from self._dispatch_frame(event_type, data_lines, cues_sent)
 
     def _dispatch_frame(
-        self, event_type: Optional[str], data_lines: list[str],
-    ) -> Iterator[str]:
+        self,
+        event_type: Optional[str],
+        data_lines: list[str],
+        cues_sent: Optional[set[str]] = None,
+    ) -> Iterator[ReplyEvent]:
         """Handle one SSE frame: yield content text (if any) and RETURN True
         when the stream should stop (the `done` frame). Raises LLMUnavailable
         on a done error frame. The generator's return value is read by the
-        caller via `yield from`."""
+        caller via `yield from`.
+
+        `cues_sent` (WARP-3124) is the stream's set of cue kinds already
+        yielded, or None when the caller didn't ask for cues. A tool_call or
+        model_loading frame yields a `SpokenCue` only the first time its kind
+        appears, so a two-tool turn cues once."""
         raw = "\n".join(data_lines)
         try:
             payload = json.loads(raw) if raw else {}
@@ -836,10 +915,18 @@ class OrchestratorLLM(LLMClient):
                     or "stream ended with stop_reason=error",
                 )
             return True
-        # tool_call / tool_result / reasoning_step / model_loading are not
-        # spoken. Log tool activity at debug for diagnosis; drop the rest.
+        # tool_call / tool_result / reasoning_step / model_loading are never
+        # spoken as text. Log tool activity at debug for diagnosis; surface
+        # tool_call + model_loading as cue markers when asked; drop the rest.
         if etype in ("tool_call", "tool_result"):
-            logger.debug("voice stream: ignoring %s frame for audio", etype)
+            logger.debug("voice stream: %s frame", etype)
+        if (
+            cues_sent is not None
+            and etype in _CUE_EVENT_TYPES
+            and etype not in cues_sent
+        ):
+            cues_sent.add(etype)
+            yield SpokenCue(etype)
         return False
 
 
