@@ -199,6 +199,8 @@ export interface OverlayPendingEnrollmentRow {
   label: string;
   approvedBy: string | null;
   enrolledAt: Date | null;
+  /** WARP-3152: the member who asked; null ⇒ QR / legacy (admin-only). */
+  requestedBy?: string | null;
 }
 
 /** Structural Prisma surface — tests pass a minimal in-memory stub. */
@@ -468,7 +470,7 @@ export async function installOrRefreshOverlayPeer(
   // who linked which QR. Best-effort + guarded — a peer from the owner-JWT
   // /devices path (no pending row) or a runtime without the model just gets no
   // provenance, never an error.
-  const provenance = await resolveOverlayProvenance(
+  const { requestedBy: ownerOf, ...provenance } = await resolveOverlayProvenance(
     prisma,
     offer.clientPublicKey,
     now,
@@ -509,7 +511,7 @@ export async function installOrRefreshOverlayPeer(
     assignedIp = await deps.allocateIp();
     row = await prisma.vpnPeer.create({
       data: {
-        userId: OVERLAY_PEER_USER,
+        userId: ownerOf ?? OVERLAY_PEER_USER,
         deviceLabel: offer.clientLabel ?? "Remote device",
         publicKey: offer.clientPublicKey,
         assignedIp,
@@ -554,7 +556,7 @@ async function resolveOverlayProvenance(
   prisma: OverlayConnectPrisma,
   publicKey: string,
   now: Date,
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, unknown> & { requestedBy?: string | null }> {
   const model = prisma.pendingOverlayEnrollment;
   if (!model?.findFirst) return {};
   try {
@@ -567,6 +569,9 @@ async function resolveOverlayProvenance(
       linkTokenId: approved.linkTokenId,
       linkTokenLabel: approved.label,
       enrolledAt: approved.enrolledAt ?? now,
+      // WARP-3152: only used when the tick CREATES the peer (approval-time
+      // provisioning failed); never re-homes an existing row.
+      requestedBy: approved.requestedBy ?? null,
     };
   } catch {
     return {};

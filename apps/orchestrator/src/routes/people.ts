@@ -869,6 +869,7 @@ export function createPeopleRouter(
           targetRole: existing.role,
           actorUsername: req.user?.username ?? null,
           actor: actorFromRequest(req),
+          devices: { prisma, username: existing.username },
         });
 
         res.json({ ok: true, removed: existing.username });

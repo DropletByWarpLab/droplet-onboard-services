@@ -990,6 +990,8 @@ describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
               label: "Alice iPhone",
               approvedBy: "owner-1",
               enrolledAt,
+              // WARP-3152: a member's staged sign-in enrollment.
+              requestedBy: "bob",
             }
           : null,
     };
@@ -1005,6 +1007,9 @@ describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
       } as OverlayConnectDeps,
       offer,
     );
+    // WARP-3152: the tick that creates the peer gives it to the requester.
+    expect((row as unknown as Record<string, unknown>).userId).toBe("bob");
+    expect(row).not.toHaveProperty("requestedBy");
     expect(row).toMatchObject({
       linkTokenEnrolledBy: "owner-1",
       linkTokenId: "tok-1",
@@ -1031,5 +1036,6 @@ describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
       offer,
     );
     expect((row as unknown as Record<string, unknown>).linkTokenId).toBeUndefined();
+    expect((row as unknown as Record<string, unknown>).userId).toBe("overlay");
   });
 });

@@ -1781,6 +1781,46 @@ describe("POST /api/vpn/overlay/devices — approval gate (WARP-1882)", () => {
     expect(res.status).toBe(200);
     expect(res.body.profile).toBeTruthy();
   });
+
+  // WARP-3152 — the member who asked owns the approved device. It used to land
+  // under the synthetic `overlay` user: invisible in their own list and
+  // removable only by an admin.
+  it("gives the approved device to the member who asked, not to `overlay`", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    expect(prisma._pendings[0].requestedBy).toBe("bob");
+
+    const { app: ownerApp } = buildApp({ prisma });
+    const queue = await request(ownerApp).get("/api/vpn/overlay/pending-enrollments");
+    expect(queue.body[0].requested_by).toBe("bob");
+
+    const approved = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(approved.status).toBe(200);
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.userId).toBe("bob");
+
+    const mine = await request(app).get("/api/vpn/peers");
+    expect(mine.status).toBe(200);
+    const list = mine.body.peers ?? mine.body;
+    expect(list.map((p: any) => p.publicKey)).toContain(VALID_WG_KEY);
+  });
+
+  it("leaves a row staged before the column existed admin-only (`overlay`)", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    delete prisma._pendings[0].requestedBy; // pre-migration row: NULL
+
+    const { app: ownerApp } = buildApp({ prisma });
+    await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.userId).toBe("overlay");
+  });
 });
 
 // ── WARP-3121 — who may enroll, and who may revoke ─────────────────────────

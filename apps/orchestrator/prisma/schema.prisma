@@ -2309,6 +2309,10 @@ model PendingOverlayEnrollment {
   approvedBy         String?
   enrolledAt         DateTime?
   hqDeviceRef        String?
+  // WARP-3152: username of the account that asked, for a sign-in enrollment
+  // staged for owner review. Becomes the peer's owner at approval. NULL for a
+  // QR-linked device and for rows staged before the column existed (admin-only).
+  requestedBy        String?
 
   @@index([state])
   @@index([linkTokenId])

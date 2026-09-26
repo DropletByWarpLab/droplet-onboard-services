@@ -78,6 +78,11 @@ import type { Role } from "./jwt.service.js";
 import { ACCESS_TOKEN_TTL_SECONDS, ROLE_RANK } from "./jwt.service.js";
 import { revokeAllSessions } from "./session.service.js";
 import { denylistUser } from "./auth-denylist.service.js";
+import {
+  revokeUserVpnDevices,
+  type UserDeviceRevokePrisma,
+  type UserDeviceRevokeSummary,
+} from "./vpn-peer-revoke.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import {
@@ -739,6 +744,26 @@ export async function runRoleChangePostEffects(args: {
 }
 
 /**
+ * WARP-3160 — whose VPN devices to revoke. Required on both lifecycle
+ * post-effects so a new caller has to decide; `null` only where there is no
+ * directory to read (the legacy NC-only rowless path with no Prisma).
+ */
+export type LeaverDevices = { prisma: UserDeviceRevokePrisma; username: string } | null;
+
+async function revokeLeaverDevices(
+  devices: LeaverDevices,
+  actor: ActivityActor,
+  reason: "deactivation" | "removal",
+): Promise<UserDeviceRevokeSummary | null> {
+  if (!devices) return null;
+  return revokeUserVpnDevices(devices.prisma, {
+    username: devices.username,
+    actor,
+    reason,
+  });
+}
+
+/**
  * Post-effects of a committed removal (WARP-490 hard revocation + audit).
  * `targetUserId: null` is the legacy NC-only path (no local row): nothing
  * to revoke or denylist, but the mandatory-emit audit row still lands —
@@ -758,11 +783,14 @@ export async function runRemovalPostEffects(args: {
   targetRole: Role | null;
   actorUsername: string | null;
   actor: ActivityActor;
+  /** WARP-3160: the person's VPN devices are revoked with the account. */
+  devices: LeaverDevices;
 }): Promise<void> {
   if (args.targetUserId) {
     await revokeAllSessions(args.targetUserId);
     await denylistUser(args.targetUserId, ACCESS_TOKEN_TTL_SECONDS);
   }
+  const vpn = await revokeLeaverDevices(args.devices, args.actor, "removal");
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -774,6 +802,7 @@ export async function runRemovalPostEffects(args: {
       targetUserId: args.targetUserId,
       targetUsername: args.targetUsername,
       role: args.targetRole,
+      ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
     },
     actor: args.actor,
   });
@@ -805,10 +834,13 @@ export async function runDisablePostEffects(args: {
    * provisioned), so the local DEACTIVATED is the entire disable.
    */
   ncMirror?: NcMirror;
+  /** WARP-3160: a deactivated person loses their VPN devices too. */
+  devices: LeaverDevices;
 }): Promise<void> {
   const sessionsRevoked = args.targetUserId
     ? await revokeAllSessions(args.targetUserId)
     : 0;
+  const vpn = await revokeLeaverDevices(args.devices, args.actor, "deactivation");
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -820,6 +852,7 @@ export async function runDisablePostEffects(args: {
       targetUserId: args.targetUserId,
       sessionsRevoked,
       ...(args.ncMirror ? { ncMirror: args.ncMirror } : {}),
+      ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
     },
     actor: args.actor,
   });
