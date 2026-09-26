@@ -21,18 +21,8 @@
  * this worker, so asking THAT question would answer "yes" for the one caller
  * that must be told no.
  */
-import type { PrismaClient } from "@prisma/client";
-
-import * as aiGateway from "../ai-gateway.client.js";
 import { completeOnce } from "../llm-complete.service.js";
 import { extractJson } from "../llm-json.js";
-import {
-  readActiveChatModel,
-  resolveStoredChatModel,
-} from "../active-model.service.js";
-import { resolveOffLanProvider } from "../cloud-access.service.js";
-import { createLogger } from "../../lib/logger.js";
-import type { ModelInfo } from "../../types/index.js";
 
 import {
   ClassifyOut,
@@ -48,8 +38,6 @@ import {
   buildUserTurn,
 } from "./prompts.js";
 import { MENTIONS_CONFIDENCE_CAP } from "./policy.js";
-
-const logger = createLogger("filing-extract");
 
 /** The subset of `ExtractReason` this module can produce. Narrower than the
  *  enum on purpose: a reason nothing writes is a reason nobody has to read. */
@@ -89,60 +77,15 @@ const EXTRACT_MAX_TOKENS = 2048;
  *  read twice should read the same way twice. */
 const TEMPERATURE = 0;
 
-export type ResolvedModel =
-  | { ok: true; model: string }
-  | { ok: false; reason: "model_unreachable" | "cloud_model_refused"; detail?: string };
-
 /**
  * Which model will do the reading — and whether it is allowed to.
  *
- * CATALOGUE-FIRST, per `resolveOffLanProvider`: the prefix mirror
- * (`providerForModelName`) returns `undefined` for an id it does not know,
- * which reads as "local" and is precisely how an uncatalogued cloud id would
- * slip through. The catalogue is asked first and its answer wins.
- *
- * A gateway that cannot be listed is `model_unreachable`, not a fallback to a
- * hardcoded tag: `email-analysis.service.ts` used to carry a
- * `mistral:7b-instruct` fallback (removed in WARP-3047) that was not pulled in
- * production and 404'd upstream, which turned every analysis into a silent
- * default. A worker that writes must fail loudly.
+ * WARP-2979: the resolver moved, verbatim, to services/local-background-model.ts
+ * so Droplet's incident summaries ask the same local-only question; filing
+ * keeps its name for it. See that file for the rules (catalogue-first, a
+ * degraded listing is unreachable, `resolveOffLanProvider` as a second check).
  */
-export async function resolveFilingModel(prisma: PrismaClient): Promise<ResolvedModel> {
-  let installed: ModelInfo[];
-  try {
-    const models = await aiGateway.listModels();
-    // 🔴 A DEGRADED listing is treated as unreachable, not as "no local
-    // models". `resolveActiveChatModel` accepts `null` for "could not confirm"
-    // and passes the stored tag through unresolved, which is right for a
-    // dashboard that must render something — and wrong here. Extracting
-    // against a model we could not confirm is installed is how a filing run
-    // ends up dispatched to whatever the gateway falls back to.
-    if (models.degraded === true || (models.degraded_providers?.length ?? 0) > 0) {
-      return { ok: false, reason: "model_unreachable", detail: "model listing degraded" };
-    }
-    installed = models.models ?? [];
-  } catch (err) {
-    logger.warn({ err }, "filing: could not list models");
-    return { ok: false, reason: "model_unreachable", detail: "model listing failed" };
-  }
-
-  // WARP-2882: the same resolver as GET /api/models — a stored legacy
-  // display name maps to the runtime id instead of the first installed model.
-  const model = resolveStoredChatModel(await readActiveChatModel(prisma), installed);
-  if (!model) {
-    return { ok: false, reason: "model_unreachable", detail: "no local model installed" };
-  }
-
-  // Belt and braces. `resolveStoredChatModel` already filtered to local
-  // providers, so a non-local answer here means the catalogue disagrees with
-  // itself — and a disagreement about whether a request leaves the LAN is
-  // resolved in the direction of not sending it.
-  const offLan = await resolveOffLanProvider({ user: undefined, model });
-  if (offLan) {
-    return { ok: false, reason: "cloud_model_refused", detail: offLan };
-  }
-  return { ok: true, model };
-}
+export { resolveLocalBackgroundModel as resolveFilingModel, type ResolvedModel } from "../local-background-model.js";
 
 /** One JSON-shaped call, with the single repair retry. Returns the raw parsed
  *  value or null; the schema — not this function — decides what is valid. */
