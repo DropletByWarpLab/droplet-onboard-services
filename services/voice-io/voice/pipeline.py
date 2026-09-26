@@ -1398,19 +1398,21 @@ class WakePipeline:
         `chunks` is consumed lazily and MAY raise LLMUnavailable mid-stream
         (the SSE broke) — that's surfaced like a synth failure. Returns a
         result dict: ok / duration_s / spoke_any (an ANSWER sentence played)
-        / error / error_kind, plus the turn-timing fields first_audio_at /
-        first_answer_audio_at (time.monotonic) / cue / sentences.
+        / error / error_kind (tts | playback | llm, or busy when another
+        utterance holds the speaker), plus the turn-timing fields
+        first_audio_at / first_answer_audio_at (time.monotonic) / cue /
+        sentences.
         """
         if self._tts is None or not self._tts_available:
             return {
-                "ok": False, "error": "TTS unavailable",
+                "ok": False, "error": "TTS unavailable", "error_kind": "tts",
                 "duration_s": 0.0, "spoke_any": False,
             }
         # ONE lock for the WHOLE utterance. Non-blocking so a second speaker
         # never queues audio to play out of order (same contract as speak()).
         if not self._speak_lock.acquire(blocking=False):
             return {
-                "ok": False, "error": "already_speaking",
+                "ok": False, "error": "already_speaking", "error_kind": "busy",
                 "duration_s": 0.0, "spoke_any": False,
             }
         try:

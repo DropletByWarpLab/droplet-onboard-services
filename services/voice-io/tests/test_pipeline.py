@@ -3021,6 +3021,36 @@ class TestVoiceTurnTiming:
         assert t["first_delta_ms"] is None
         assert t["first_audio_ms"] is None
 
+    def test_tts_unavailable_turn_logs_the_tts_error_kind(self, caplog):
+        # Piper down: the speak path bails before the reply stream opens.
+        # The line still says why, instead of an error with a null kind.
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM(["never synthesized"])
+        pipe, player = self._pipe(llm)
+        pipe._tts_available = False
+        self._drive_capped_turn(pipe)
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "error"
+        assert t["error_kind"] == "tts"
+        assert player.played == []
+        assert llm.requests == []  # the reply stream was never opened
+
+    def test_busy_speaker_turn_logs_the_busy_error_kind(self, caplog):
+        # Another utterance (e.g. POST /voice/say) holds the speaker.
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM(["never spoken"])
+        pipe, player = self._pipe(llm)
+        assert pipe._speak_lock.acquire(blocking=False)
+        try:
+            self._drive_capped_turn(pipe)
+        finally:
+            pipe._speak_lock.release()
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "error"
+        assert t["error_kind"] == "busy"
+        assert player.played == []
+        assert llm.requests == []
+
     def test_status_carries_the_last_turn_timing(self, caplog):
         caplog.set_level("INFO", logger="voice.pipeline")
         pipe, _ = self._pipe(_EventLLM(["The front camera is online."]))

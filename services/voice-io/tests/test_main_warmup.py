@@ -166,6 +166,20 @@ class TestWarmUpPrimesCues:
         assert pipeline.primed == 1
         assert len(tts.synth_calls) == 1  # the voice warm-up itself
 
+    def test_cues_prime_after_the_stt_warm_up(self):
+        # Every first utterance needs STT warm; only a tool or cold-model
+        # turn needs a cue, so the cue synths must not delay the STT warm-up.
+        stt = _RecordingSTT()
+        stt_finished_at_prime: list[int] = []
+
+        class _OrderPipeline(_RecordingPipeline):
+            def prime_cues(self) -> int:
+                stt_finished_at_prime.append(stt.finished)
+                return super().prime_cues()
+
+        main._warm_up_upstreams(stt, _RecordingTTS(), _OrderPipeline())
+        assert stt_finished_at_prime == [1]
+
     def test_cue_priming_failure_is_non_fatal(self):
         stt = _RecordingSTT()
         main._warm_up_upstreams(stt, _RecordingTTS(), _RecordingPipeline(raises=True))

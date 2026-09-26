@@ -19,8 +19,10 @@ surface. So:
 Fetch semantics — stale-while-revalidate (WARP-3124): a greeting turn never
 waits on this GET. `get_block()` returns whatever is cached right now and,
 once the short TTL (default 60 s) has passed, starts ONE background refresh;
-the next greeting sees the result, so a Settings change is live within about
-one TTL without a restart. The very first call (nothing cached yet) returns
+the next greeting sees the result. Refreshes only start from a greeting, so
+a Settings change is heard on the SECOND greeting after it lands (the first
+one past the TTL still speaks the old block while it triggers the refresh),
+without a restart. The very first call (nothing cached yet) returns
 None — the built-in greeting prompt — while the first fetch runs; main.py
 primes at pipeline build so that fetch has normally landed before anyone
 speaks. The TTL also paces failures, so a DOWN orchestrator is asked at most
@@ -60,8 +62,9 @@ def _new_httpx_client() -> httpx.Client:
 
 DEFAULT_PERSONA_PROMPT_PATH = "/api/persona/prompt"
 # Short in-session TTL (§14): a greeting burst inside one interaction is
-# served from cache; the next session (anything later than this) re-fetches
-# so a Settings change is live on the next voice session without a restart.
+# served from cache; the first greeting later than this starts a background
+# re-fetch (WARP-3124 stale-while-revalidate), so a Settings change is live
+# from the greeting after that one, without a restart.
 DEFAULT_PERSONA_TTL_S = 60.0
 # The health-probe budget, not the chat budget. The GET runs on a background
 # refresh thread (WARP-3124), so this bounds how long a refresh — and close()

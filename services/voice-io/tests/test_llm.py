@@ -957,6 +957,60 @@ class _BreakingByteStream(httpx.SyncByteStream):
         pass
 
 
+class _ClosableSSEStream(httpx.SyncByteStream):
+    """A complete SSE body that records whether the response was closed,
+    i.e. whether the orchestrator would see the client disconnect."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+        self.closed = False
+
+    def __iter__(self):
+        yield self._body
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestStreamTeardown:
+    """WARP-329: a caller that stops reading early closes the SSE at once,
+    so the orchestrator aborts its agent loop instead of finishing a reply
+    nobody hears. Both public generators share `_stream_reply`; the spy
+    keeps a live reference to it so the test cannot pass through GC."""
+
+    @pytest.mark.parametrize("method", ["reply_stream", "reply_events"])
+    def test_early_close_tears_the_sse_down_now(self, monkeypatch, method):
+        body = _sse(
+            ("content_delta", {"text": "The camera is online. "}),
+            ("content_delta", {"text": "It is recording."}),
+            ("done", {"iterations": 1, "stop_reason": "model_done"}),
+        )
+        streams: list[_ClosableSSEStream] = []
+
+        def handler(req):
+            s = _ClosableSSEStream(body)
+            streams.append(s)
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=s,
+            )
+
+        _install_mock_stream(monkeypatch, handler)
+        inners: list = []
+        real = OrchestratorLLM._stream_reply
+
+        def spy(self, *args, **kwargs):
+            gen = real(self, *args, **kwargs)
+            inners.append(gen)  # a live reference: teardown cannot lean on GC
+            return gen
+
+        monkeypatch.setattr(OrchestratorLLM, "_stream_reply", spy)
+        llm = OrchestratorLLM(base_url="http://test")
+        gen = getattr(llm, method)("is the camera up")
+        assert next(gen) == "The camera is online. "
+        gen.close()
+        assert streams and streams[0].closed is True
+
+
 class TestReplyStreamSSE:
     def test_yields_content_deltas_in_order(self, monkeypatch):
         def handler(req):

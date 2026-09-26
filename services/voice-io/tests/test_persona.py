@@ -265,9 +265,14 @@ class TestPersonaFetcher:
         assert started.wait(_REFRESH_WAIT_S)
         closer = threading.Thread(target=f.close)
         closer.start()
+        # close() waits for the refresh in flight instead of closing the
+        # pooled client under it.
+        closer.join(0.2)
+        assert closer.is_alive()
         release.set()
         closer.join(_REFRESH_WAIT_S)
         assert not closer.is_alive()  # close() returned, and did not raise
+        assert f.fetch_ok is True     # the GET finished on an open client
         assert f.wait_for_refresh(_REFRESH_WAIT_S)
         # A closed fetcher never starts another refresh, even once stale.
         clock[0] += 61.0

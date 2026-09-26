@@ -530,8 +530,12 @@ class OrchestratorLLM(LLMClient):
         """Close the pooled httpx.Client (WARP-1433).
 
         Idempotent — httpx.Client tolerates a double close. main.py calls
-        this from its shutdown hook AFTER the pipeline worker has joined, so
-        no reply()/reply_stream() can be in flight.
+        this from its shutdown hook AFTER the pipeline worker has joined.
+        A stream can still be in flight: a WARP-3124 synth-ahead producer
+        that outlived its bounded join, or a worker that outlived stop().
+        That turn is already over (its channel is closed or the shutdown
+        flag is set), so nothing more of the reply is spoken, whatever the
+        read then does.
         """
         self._client.close()
 
@@ -752,9 +756,15 @@ class OrchestratorLLM(LLMClient):
         LLMUnavailable rather than re-running reply() (which would double
         the audio).
         """
-        for piece in self._stream_reply(user_text, tool_choice, cues=False):
-            if isinstance(piece, str):
-                yield piece
+        inner = self._stream_reply(user_text, tool_choice, cues=False)
+        try:
+            for piece in inner:
+                if isinstance(piece, str):
+                    yield piece
+        finally:
+            # A caller that stops early must tear the SSE down now, not
+            # whenever the inner generator is collected (WARP-329).
+            inner.close()
 
     def reply_events(
         self, user_text: str, *, tool_choice: Optional[ToolChoice] = None,

@@ -361,13 +361,16 @@ def _warm_up_upstreams(
     this on a background daemon thread after pipeline.start(), so it never
     blocks startup or /health.
 
-    WARP-3124: once the Piper voice is warm, it also pre-synthesizes the
-    pipeline's spoken cues ("Let me check." / "One moment."), so a cue plays
-    from memory the moment a tool dispatch or cold model load begins.
+    WARP-3124: once the Piper voice and STT are warm, it also
+    pre-synthesizes the pipeline's spoken cues ("Let me check." / "One
+    moment."), so a cue plays from memory the moment a tool dispatch or cold
+    model load begins. The cues go LAST: every first utterance needs STT
+    warm, only a tool or cold-model turn needs a cue.
     """
-    if _warm_up_tts(tts):
-        _warm_up_cues(pipeline)
+    tts_warm = _warm_up_tts(tts)
     _warm_up_stt(stt)
+    if tts_warm:
+        _warm_up_cues(pipeline)
 
 
 def _warm_up_tts(tts: Optional[TextToSpeech]) -> bool:
@@ -631,8 +634,11 @@ def _teardown_voice_runtime() -> bool:
     pooled httpx client or a parked reporter thread per toggle.
 
     Ordering matters. The pipeline worker holds the same LLM client and
-    persona fetcher, so those are only closed once `stop()` has joined
-    it and no reply()/persona fetch can still be in flight.
+    persona fetcher, so those are only closed once `stop()` has joined it.
+    Two background requests can still be in flight then (WARP-3124): a
+    synth-ahead producer that outlived its bounded join (its utterance is
+    already over, so nothing it still reads is spoken) and a persona
+    refresh, which the fetcher's close() waits for, bounded.
     """
     global _pipeline, _activity_reporter, _llm, _persona_fetcher
     global _draining_pipeline
@@ -672,8 +678,8 @@ def _teardown_voice_runtime() -> bool:
             logger.warning("activity reporter stop raised", exc_info=True)
         _activity_reporter = None
     # WARP-1433 — close the pooled httpx clients now that the pipeline worker
-    # has joined (no reply()/persona fetch is in flight). Both are
-    # best-effort: teardown must never raise.
+    # has joined (see the docstring for the background requests that may
+    # still be in flight). Both are best-effort: teardown must never raise.
     if _llm is not None:
         try:
             _llm.close()
@@ -762,7 +768,7 @@ class VoiceTurnTiming(BaseModel):
     total_ms: Optional[int] = None
     cue: Optional[str] = None             # tool_call | model_loading
     sentences: int = 0                    # answer sentences played
-    error_kind: Optional[str] = None      # tts | playback | llm
+    error_kind: Optional[str] = None      # tts | playback | llm | busy
     ended_at: Optional[float] = None      # wall time the turn ended
 
 
