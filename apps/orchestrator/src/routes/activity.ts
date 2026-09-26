@@ -35,9 +35,14 @@ const logger = createLogger("activity-export");
 
 /**
  * WARP-3153: what the export needs from device-identity-svc. Structural
- * subset of DeviceIdentityClient so tests pass a stub. The device key is
- * TPM-held (non-extractable on a real backend); only its cert (public)
- * goes into the bundle.
+ * subset of DeviceIdentityClient so tests pass a stub. Only the key's cert
+ * (public) goes into the bundle.
+ *
+ * Honesty note: on the mock backend (today's default, DROPLET_TPM_BACKEND=
+ * mock) the device key is a software key in a file on the box, so root on
+ * the box can forge seals. The real TPM backend's `_tpm_sign` is still a
+ * placeholder that returns an empty signature (WARP-1181), which the
+ * export refuses (below).
  */
 export interface ActivityBundleSealer {
   getDeviceCert(): Promise<string>;
@@ -51,7 +56,8 @@ export interface ActivityBundleSealer {
 export const ACTIVITY_BUNDLE_TYPE = "droplet.activity-bundle.v3";
 /** Domain-separation prefix for the seal signature, so a bundle seal can
  * never be replayed as any other device-key statement (daily roots sign
- * bare JSON starting with `{`, TLS/registration use their own prefixes). */
+ * bare JSON starting with `{`, TLS/registration use their own prefixes).
+ * Signed bytes = prefix || the seal's `statement` string, verbatim. */
 export const ACTIVITY_BUNDLE_SEAL_PREFIX = "droplet-activity-bundle:v3:";
 /** Cap on row ids listed in the seal when the box's own HMAC check fails. */
 const MAX_LISTED_HMAC_FAILURES = 100;
@@ -363,6 +369,15 @@ export function createActivityRouter(
         try {
           if (!bundleSealer) throw new Error("no device identity client wired");
           deviceCertPem = await bundleSealer.getDeviceCert();
+          // Probe the key once: the real TPM backend's placeholder signs
+          // with an empty signature (WARP-1181). The probe bytes are not
+          // JSON, so a verifier can never accept them as a seal statement.
+          const probe = await bundleSealer.signWithDeviceKey(
+            Buffer.from(`${ACTIVITY_BUNDLE_SEAL_PREFIX}probe`, "utf8"),
+          );
+          if (probe.signature.length === 0) {
+            throw new Error("device key returned an empty signature");
+          }
         } catch (err) {
           logger.warn({ err }, "audit export refused: device identity unavailable");
           res.status(503).json({
@@ -465,22 +480,29 @@ export function createActivityRouter(
         }
 
         const digestB64 = digest.digest("base64url");
-        const sealBase = {
+        // Every seal field lives in `statement`, the exact string the device
+        // key signs, so none of them (the HMAC verdict included) can be
+        // edited without breaking the signature.
+        const statement = JSON.stringify({
           type: `${ACTIVITY_BUNDLE_TYPE}.seal`,
+          digest: digestB64,
           rowCount: exported,
           // The box's HMAC check of each row's signature over its content
           // and stored prev link, at export time.
           rowHmac: { checked: exported, failed: hmacFailed, failedRowIds: hmacFailedRowIds },
-          digest: digestB64,
-        };
+        });
+        const sealLine = { type: `${ACTIVITY_BUNDLE_TYPE}.seal`, statement };
         let sealed = false;
         try {
           const s = await bundleSealer!.signWithDeviceKey(
-            Buffer.from(ACTIVITY_BUNDLE_SEAL_PREFIX + digestB64, "utf8"),
+            Buffer.from(ACTIVITY_BUNDLE_SEAL_PREFIX + statement, "utf8"),
           );
+          if (s.signature.length === 0) {
+            throw new Error("device key returned an empty signature");
+          }
           res.write(
             JSON.stringify({
-              ...sealBase,
+              ...sealLine,
               algorithm: s.algorithm,
               signature: Buffer.from(s.signature).toString("base64"),
             }) + "\n",
@@ -491,7 +513,7 @@ export function createActivityRouter(
           // reject the file instead of trusting a truncated one.
           logger.error({ err }, "audit export: device-key seal failed");
           res.write(
-            JSON.stringify({ ...sealBase, error: "seal signing failed" }) + "\n",
+            JSON.stringify({ ...sealLine, error: "seal signing failed" }) + "\n",
           );
         }
         res.end();
