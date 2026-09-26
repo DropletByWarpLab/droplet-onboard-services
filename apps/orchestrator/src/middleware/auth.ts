@@ -235,6 +235,18 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
+  // WARP-3122 — a recordings segment URL signed for a still-active person
+  // (services/segment-url-signing.service.ts, the only writer of this
+  // field). It wins over any header/cookie so a native player whose bearer
+  // went stale mid-recording keeps playing; every gate after this one
+  // (password change, module + feature access, role, per-camera grant)
+  // still runs against the signer.
+  if (req.signedSegmentUser) {
+    req.user = req.signedSegmentUser;
+    next();
+    return;
+  }
+
   if (!token) {
     if (req.path.startsWith("/api/git/")) {
       // The challenge the git CLI needs before it will ask for credentials.
