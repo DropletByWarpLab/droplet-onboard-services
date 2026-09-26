@@ -352,13 +352,13 @@ _CHAT_PATH = _resolve_chat_path(os.getenv("OLLAMA_CHAT_PATH"))
 def _resolve_inference_runtime(runtime: str | None = None, url: str | None = None) -> str:
     """The selected runtime, shouting when the configuration is incoherent.
 
-    WARP-1870. `INFERENCE_RUNTIME` is read ONCE, at module import, by both
-    module constants below, and it defaults to "ollama". On a DMR box that
+    WARP-1870. `INFERENCE_RUNTIME` is read ONCE, at module import, by each of
+    the module constants below, and it defaults to "ollama". On a DMR box that
     default is a silent trap: lose the variable — a compose `${VAR:-}` that
     resolves against the wrong env file, or a `docker restart`, which re-reads
-    nothing at all (only `--force-recreate` does) — and both flags quietly flip
-    off. Every DMR model then reports `tools=false` with no error anywhere, and
-    the WARP-1839 grammar outage returns.
+    nothing at all (only `--force-recreate` does) — and every one of those
+    flags quietly flips off. Every DMR model then reports `tools=false` with no
+    error anywhere, and the WARP-1839 grammar outage returns.
 
     The contradiction is cheap to spot: the inference URL still points at DMR.
     Runtime "ollama" plus a DMR chat URL cannot both be true, and the only way
@@ -417,6 +417,21 @@ _STATIC_CAPABILITY_TABLE = _resolve_inference_runtime() == "dmr"
 # INVALID_ARGS), which is exactly where they were enforced under Ollama too —
 # the model never saw grammar-enforced bounds before the flip either.
 _GRAMMAR_SAFE_TOOL_SCHEMAS = _resolve_inference_runtime() == "dmr"
+
+# WARP-3123 — gpt-oss reasoning effort, delivered to DMR's chat template.
+#
+# llama.cpp (DMR's inference backend) renders gpt-oss's harmony prompt from the
+# model's jinja chat template, and that template reads `reasoning_effort` from
+# its template kwargs (default "medium"). Upstream only began forwarding a
+# TOP-LEVEL `reasoning_effort` into the template on 2026-08-15 (llama.cpp
+# 7e4c0a968, "chat : pass reasoning_effort to template"); the pinned
+# docker/model-runner:v1.2.6 very likely predates that, so on DMR the top-level
+# field alone is dropped and every gpt-oss turn reasons at "medium" — voice's
+# "low" included. llama-server has long accepted a `chat_template_kwargs`
+# object on the request body, so on DMR the effort rides there as well (see
+# `chat`). Same gate word as the flags above: with it off the Ollama wire shape
+# stays byte-identical.
+_DMR_TEMPLATE_REASONING_EFFORT = _resolve_inference_runtime() == "dmr"
 
 # JSON Schema keywords that generate bounded repetitions in llama.cpp's
 # json-schema→GBNF conversion. `format` is included because llama.cpp expands
@@ -773,11 +788,14 @@ def prettify_model_name(raw: str) -> str:
     return f"{base_pretty} {tag_pretty}".strip()
 
 
-# WARP-1442: the model families that honor a `reasoning_effort` control on
-# Ollama's OpenAI-compat endpoint. Today that's OpenAI's open-weights gpt-oss
-# family (the single-box default, gpt-oss:20b) — its harmony format maps a
-# top-level `reasoning_effort` to the "Reasoning: <level>" directive. Match on
-# a substring so registry-prefixed tags (e.g. "library/gpt-oss:20b") still
+# WARP-1442: the model families that honor a `reasoning_effort` control.
+# Today that's OpenAI's open-weights gpt-oss family (the single-box default:
+# `gpt-oss:20b` on Ollama, `docker.io/ai/gpt-oss:20B-F16` on DMR), whose
+# harmony prompt carries a "Reasoning: <level>" directive. Ollama maps a
+# top-level `reasoning_effort` onto it; DMR's llama.cpp renders it from the chat
+# template's `reasoning_effort` kwarg, so on DMR `chat` sends both (WARP-3123,
+# see _DMR_TEMPLATE_REASONING_EFFORT). Match on a substring so registry-prefixed
+# ids (e.g. "library/gpt-oss:20b", "docker.io/ai/gpt-oss:20B-F16") still
 # resolve. Kept as a tuple so a future reasoning family is a one-line add.
 _REASONING_MODEL_MARKERS = ("gpt-oss",)
 
@@ -999,17 +1017,31 @@ class OllamaLocalProvider(BaseProvider):
         for k in ("temperature", "max_tokens"):
             if kwargs.get(k) is not None:
                 body[k] = kwargs[k]
-        # WARP-1442 — reasoning-effort control. Set as a TOP-LEVEL field on the
-        # OpenAI-compat body (same shape/rationale as temperature/max_tokens in
-        # the GW-12 note above — we always POST to /v1/chat/completions). Ollama
-        # maps `reasoning_effort` to gpt-oss's harmony "Reasoning: <level>"
-        # directive, trimming the inaudible reasoning-token overhead on short
-        # replies (the voice principal defaults this to "low" server-side in the
-        # orchestrator). Guarded to the gpt-oss family so a non-reasoning model's
-        # request stays byte-for-byte unchanged; unset → the field is never added.
+        # WARP-1442 / WARP-3123 — reasoning-effort control for gpt-oss, trimming
+        # the inaudible reasoning-token overhead on short replies (the voice
+        # principal defaults this to "low" server-side in the orchestrator).
+        #
+        # Always a TOP-LEVEL field on the OpenAI-compat body (same shape/
+        # rationale as temperature/max_tokens in the GW-12 note above — we
+        # always POST to /v1/chat/completions). Ollama maps it to gpt-oss's
+        # harmony "Reasoning: <level>" directive; a llama.cpp that carries
+        # 7e4c0a968 forwards it to the chat template too. On DMR it ALSO rides
+        # in `chat_template_kwargs`, the only place an older llama-server's
+        # template sees it — and DMR v1.2.6 very likely is one (see
+        # _DMR_TEMPLATE_REASONING_EFFORT). Any
+        # caller-supplied template kwargs are merged, not clobbered, and the
+        # effort key wins so the two fields never disagree.
+        #
+        # Guarded to the gpt-oss family so a non-reasoning model's request stays
+        # byte-for-byte unchanged; unset → neither field is added.
         reasoning_effort = kwargs.get("reasoning_effort")
         if reasoning_effort is not None and model_supports_reasoning_effort(model):
             body["reasoning_effort"] = reasoning_effort
+            if _DMR_TEMPLATE_REASONING_EFFORT:
+                body["chat_template_kwargs"] = {
+                    **(kwargs.get("chat_template_kwargs") or {}),
+                    "reasoning_effort": reasoning_effort,
+                }
         if has_tools:
             tools_payload = [
                 t.model_dump() if hasattr(t, "model_dump") else t
