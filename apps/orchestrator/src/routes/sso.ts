@@ -29,7 +29,9 @@ import {
   buildAuthorizeRequest,
   exchangeCodeAndValidate,
   enabledSsoProviders,
+  isGoogleHostedDomainAllowed,
   type SsoProvider,
+  type ValidatedIdentity,
 } from "../services/sso-oidc.service.js";
 import {
   createLoginState,
@@ -155,6 +157,16 @@ class SsoEmailUnverifiedError extends Error {
   }
 }
 
+/** WARP-3193 SEC-AUTH-3 — a not-yet-linked Google account whose hosted
+ *  domain is not on DROPLET_SSO_GOOGLE_ALLOWED_HD. Mapped to a distinct 401. */
+class SsoDomainNotAllowedError extends Error {
+  readonly code = "SSO_DOMAIN_NOT_ALLOWED";
+  constructor() {
+    super("SSO sign-in refused: this Google account's domain is not allowed on this appliance.");
+    this.name = "SsoDomainNotAllowedError";
+  }
+}
+
 /**
  * Account-linking policy (the AC contract):
  *   1. Resolve by (provider, sub) via SsoIdentity → sign in that user
@@ -178,7 +190,7 @@ class SsoEmailUnverifiedError extends Error {
 async function ensureLinkedUser(
   prisma: PrismaClient,
   provider: SsoProvider,
-  identity: { sub: string; email?: string; emailVerified: boolean; name?: string },
+  identity: ValidatedIdentity,
 ): Promise<ResolvedUser | null> {
   // 1. Existing IdP identity → that user.
   const existing = await prisma.ssoIdentity.findUnique({
@@ -222,6 +234,14 @@ async function ensureLinkedUser(
   // address belongs to the bearer.
   if (!identity.emailVerified) {
     throw new SsoEmailUnverifiedError();
+  }
+
+  // WARP-3193 SEC-AUTH-3 — a Google account not yet linked by `sub` may link
+  // or be created only when its Workspace domain (`hd`) is on the explicit
+  // allowlist. An empty allowlist allows none (fail closed), and a consumer
+  // Google account has no `hd` at all. Already-linked users took branch 1.
+  if (provider === "google" && !isGoogleHostedDomainAllowed(identity.hostedDomain)) {
+    throw new SsoDomainNotAllowedError();
   }
 
   // 2a. Link to an existing local user with this email.
@@ -426,7 +446,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
 
       // Exchange + validate the ID token (signature/iss/aud/exp + nonce +
       // state + PKCE). Any failure throws → 401, no session.
-      let identity: { sub: string; email?: string; emailVerified: boolean; name?: string };
+      let identity: ValidatedIdentity;
       try {
         identity = await exchangeCodeAndValidate(provider, currentUrl, {
           expectedNonce: loginState.nonce,
@@ -452,6 +472,11 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
             { provider },
             "SSO sign-in refused: IdP did not assert email_verified for a linkable email",
           );
+          res.status(401).json({ error: "SSO sign-in failed", code: err.code });
+          return;
+        }
+        if (err instanceof SsoDomainNotAllowedError) {
+          logger.warn({ provider }, "SSO sign-in refused: Google hosted domain not on the allowlist");
           res.status(401).json({ error: "SSO sign-in failed", code: err.code });
           return;
         }

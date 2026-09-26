@@ -34,8 +34,13 @@ import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
 
+// WARP-3193 SEC-AUTH-3 — hoisted so a test can set the Google hosted-domain
+// allowlist (reset to empty, i.e. fail closed, before every test).
+const { mockConfig } = vi.hoisted(() => ({
+  mockConfig: { DROPLET_SSO_GOOGLE_ALLOWED_HD: "" } as Record<string, unknown>,
+}));
 vi.mock("../config.js", () => ({
-  config: {
+  config: Object.assign(mockConfig, {
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     REDIS_URL: "redis://localhost:6379",
     // PR #486 finding 2: the callback now reconstructs currentUrl via the
@@ -46,7 +51,7 @@ vi.mock("../config.js", () => ({
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],
     agentMaxIter: { defaultIter: 5, capIter: 10 },
-  },
+  }),
 }));
 
 // The openid-client + discovery boundary. Mocked so no IdP/JWKS is hit.
@@ -230,6 +235,7 @@ beforeEach(() => {
   // idiom); no single test comes near the budget.
   authRateLimit.resetKey("127.0.0.1");
   vi.clearAllMocks();
+  mockConfig.DROPLET_SSO_GOOGLE_ALLOWED_HD = "";
   getOidcProviderConfig.mockReturnValue({
     provider: "google",
     issuer: "https://accounts.google.com",
@@ -418,6 +424,12 @@ describe("GET /api/sso/oidc/callback — CSRF + single-use state", () => {
 });
 
 describe("GET /api/sso/oidc/callback — account linking", () => {
+  beforeEach(() => {
+    // The Google link/create tests below run with an allowlisted domain;
+    // the WARP-3193 describe at the end covers the refusals.
+    mockConfig.DROPLET_SSO_GOOGLE_ALLOWED_HD = "warp.test,corp.example";
+  });
+
   function primeValidState(provider = "google") {
     consumeLoginState.mockResolvedValue({
       id: "sls-1",
@@ -437,6 +449,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
       email: "stefan@warp.test",
       emailVerified: true,
       name: "Stefan Cruceru",
+      hostedDomain: "warp.test",
     });
     const prisma = createPrismaMock([stefan]);
     const res = await request(buildApp(prisma))
@@ -465,6 +478,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
       email: "newhire@warp.test",
       emailVerified: true,
       name: "New Hire",
+      hostedDomain: "warp.test",
     });
     const prisma = createPrismaMock([stefan]); // stefan exists, different email
     const res = await request(buildApp(prisma))
@@ -497,6 +511,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
       email: `${UUID}@corp.example`,
       emailVerified: true,
       name: "Service Account",
+      hostedDomain: "corp.example",
     });
     const prisma = createPrismaMock([stefan]);
     const res = await request(buildApp(prisma))
@@ -653,7 +668,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     primeValidState();
     // emailVerified:true so this exercises the DEACTIVATION gate specifically
     // (not the ORCH-01 unverified-email refusal, which is tested separately).
-    exchangeCodeAndValidate.mockResolvedValue({ sub: "fresh-sub", email: "stefan@warp.test", emailVerified: true, name: "S" });
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "fresh-sub", email: "stefan@warp.test", emailVerified: true, name: "S", hostedDomain: "warp.test" });
     const deactivated: UserRow = { ...stefan, directoryStatus: "DEACTIVATED" };
     const prisma = createPrismaMock([deactivated]);
     const res = await request(buildApp(prisma))
@@ -668,7 +683,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
 
   it("normalizes the IdP email (trim + lowercase) at the lookup boundary (#374)", async () => {
     primeValidState();
-    exchangeCodeAndValidate.mockResolvedValue({ sub: "g-sub-x", email: "  Stefan@Warp.TEST  ", emailVerified: true, name: "S" });
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "g-sub-x", email: "  Stefan@Warp.TEST  ", emailVerified: true, name: "S", hostedDomain: "warp.test" });
     const prisma = createPrismaMock([stefan]);
     const res = await request(buildApp(prisma))
       .get("/api/sso/oidc/callback?code=abc&state=st-123")
@@ -723,6 +738,100 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     const body = JSON.stringify(res.body) + (res.text ?? "");
     expect(body).not.toContain("super-secret-code");
     expect(body).not.toContain("ve-123"); // codeVerifier
+  });
+});
+
+// WARP-3193 SEC-AUTH-3 — Google SSO no longer provisions any Google account
+// that can reach the box. A Google identity not already linked by `sub` may
+// link or be created only when its `hd` is on DROPLET_SSO_GOOGLE_ALLOWED_HD;
+// an empty allowlist (the default) allows none.
+describe("GET /api/sso/oidc/callback — Google hosted-domain allowlist", () => {
+  function primeGoogleState() {
+    consumeLoginState.mockResolvedValue({
+      id: "sls-1", provider: "google", nonce: "no-123", codeVerifier: "ve-123", returnTo: "/",
+      consumedAt: new Date(), expiresAt: new Date(Date.now() + 600_000),
+    });
+  }
+  async function callback(prisma: any) {
+    return request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+  }
+
+  it("🔴 no allowlist set → a new Google account is NOT created (401 SSO_DOMAIN_NOT_ALLOWED)", async () => {
+    primeGoogleState();
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "g-new", email: "anyone@gmail.com", emailVerified: true, name: "Anyone",
+    });
+    const prisma = createPrismaMock([stefan]);
+    const res = await callback(prisma);
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SSO_DOMAIN_NOT_ALLOWED");
+    expect(prisma.user.create).not.toHaveBeenCalled();
+    expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
+    expectNoSessionIssued(res);
+  });
+
+  it("🔴 no allowlist set → an unlinked Google account does not link to an existing row by email", async () => {
+    primeGoogleState();
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "g-new", email: "stefan@warp.test", emailVerified: true, name: "S", hostedDomain: "warp.test",
+    });
+    const prisma = createPrismaMock([stefan]);
+    const res = await callback(prisma);
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SSO_DOMAIN_NOT_ALLOWED");
+    expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
+  });
+
+  it("🔴 allowlist set → a consumer account (no hd) or another domain is refused", async () => {
+    mockConfig.DROPLET_SSO_GOOGLE_ALLOWED_HD = "warp.test";
+    for (const hostedDomain of [undefined, "evil.test"]) {
+      primeGoogleState();
+      exchangeCodeAndValidate.mockResolvedValue({
+        sub: "g-new", email: "someone@evil.test", emailVerified: true, name: "X", hostedDomain,
+      });
+      const prisma = createPrismaMock([stefan]);
+      const res = await callback(prisma);
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("SSO_DOMAIN_NOT_ALLOWED");
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("allowlist set → an account in an allowed domain is created (case-insensitive hd)", async () => {
+    mockConfig.DROPLET_SSO_GOOGLE_ALLOWED_HD = "warp.test";
+    primeGoogleState();
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "g-new", email: "newhire@warp.test", emailVerified: true, name: "N", hostedDomain: "Warp.Test",
+    });
+    const prisma = createPrismaMock([stefan]);
+    const res = await callback(prisma);
+    expect(res.status).toBe(302);
+    expect(prisma.user.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("an ALREADY-LINKED Google user still signs in with no allowlist set", async () => {
+    primeGoogleState();
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "google-sub-1", email: "stefan@warp.test", emailVerified: true, name: "S" });
+    const prisma = createPrismaMock(
+      [stefan],
+      [{ id: "i-1", userId: "u-uuid-stefan-7777", provider: "google", subject: "google-sub-1", email: "stefan@warp.test" }],
+    );
+    const res = await callback(prisma);
+    expect(res.status).toBe(302);
+    expect(sessionFromRes(res)?.sub).toBe("u-uuid-stefan-7777");
+  });
+
+  it("the allowlist is Google-only: an okta account with no hd still links", async () => {
+    consumeLoginState.mockResolvedValue({
+      id: "sls-1", provider: "okta", nonce: "no-123", codeVerifier: "ve-123", returnTo: "/",
+      consumedAt: new Date(), expiresAt: new Date(Date.now() + 600_000),
+    });
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "okta-sub", email: "stefan@warp.test", emailVerified: true, name: "S" });
+    const prisma = createPrismaMock([stefan]);
+    const res = await callback(prisma);
+    expect(res.status).toBe(302);
   });
 });
 
