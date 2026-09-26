@@ -122,6 +122,7 @@ describe("<Sidebar> inside a department", () => {
   it("shows the department's home and pages, then Ask AI, Settings and Help — nothing else", () => {
     render(<Sidebar />);
     expect(asideHrefs()).toEqual([
+      "/d/security", // the brand mark leads to the department's home
       "/d/security",
       "/cameras",
       "/network",
@@ -132,6 +133,9 @@ describe("<Sidebar> inside a department", () => {
       "/help",
     ]);
     expect(within(aside()).getByText("Security home")).toBeInTheDocument();
+    expect(
+      within(aside()).getByRole("link", { name: "Droplet — Security home" }),
+    ).toHaveAttribute("href", "/d/security");
   });
 
   it("still hides a profile page whose module is off — the filter never replaces a gate", () => {

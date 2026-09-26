@@ -36,7 +36,7 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  *     rate-limited (429) → a distinct "too many attempts" message.
  *
  * Design tokens only (no hardcoded hex): the aurora badge composes the shipped
- * `aurora-bg` + `aurora-ring` utilities; card → `dp-card`; input → `dp-input`;
+ * `aurora-ring` utility; card → `dp-card`; input → `dp-input`;
  * status chip → `dp-status-chip`; success chip → the `system-green` family;
  * mono → Tailwind's `font-mono`; type → `type-*`; labels → `text-label-*`.
  */
@@ -284,7 +284,7 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
       {/* Detected-appliance card */}
       <div data-testid="claim-appliance-card" className="dp-card overflow-hidden mb-6">
         <div className="flex items-center gap-4 p-5 bg-surface-secondary border-b border-separator">
-          <span className="aurora-bg aurora-ring flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-2xl">
+          <span className="aurora-ring flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-2xl">
             <DropletMark size={26} className="text-accent" />
           </span>
           <div className="min-w-0 flex-1">
