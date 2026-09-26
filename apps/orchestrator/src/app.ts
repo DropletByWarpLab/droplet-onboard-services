@@ -396,7 +396,9 @@ export function createApp(
   mountModuleGates(app, moduleGate);
   // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
   // the CRM / PM routes are narrowed by the ACTING user's §3 tool scope
-  // (`business` needs CRM or Projects). Humans are untouched by this mount.
+  // (`business` needs CRM or Projects), and, since WARP-3145, tool calls
+  // reaching /api/email need `email`. Mounted before the email router below.
+  // Humans are untouched by this mount.
   mountMcpActingUserGates(app, actingUserAccessResolver(prisma));
 
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
@@ -774,6 +776,8 @@ export function createApp(
   // off-lan-gate.service.ts and FAILS CLOSED (no egress) on any DB
   // error or missing row — a sovereignty control must not default-open
   // on a transient hiccup (mirrors ai-gateway/middleware/off_lan_gating.py).
+  // WARP-3145: the email tools' `_service:mcp` calls reach this router only
+  // past `mountMcpActingUserGates` above (the acting person needs `email`).
   app.use(
     "/api",
     createEmailRouter(prisma, {
