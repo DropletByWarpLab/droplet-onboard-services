@@ -39,7 +39,9 @@ describe("resolveAssertedUser", () => {
     });
   });
 
-  it("resolves by nextcloudUsername when no username or id says otherwise", async () => {
+  it("resolves by nextcloudUsername when no username or id says otherwise — and names the person by their username", async () => {
+    // WARP-3101: the calendar and reminder tables key on the username, so
+    // whichever column the header matched, the caller gets the canonical one.
     const renamed: DirectoryUser = { ...SAM, username: "samuel" };
     expect(await resolveAssertedUser(prismaOf([MARIA, renamed]), "sam")).toEqual({
       ok: true,

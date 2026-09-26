@@ -1,4 +1,14 @@
+/**
+ * `list_reminders` — the reminders of the person the assistant acts for.
+ *
+ * WARP-3101 — READ THROUGH THE ORCHESTRATOR (`GET /api/reminders`), the list
+ * the dashboard shows. This handler used to query Reminder through
+ * `ctx.prisma` by `userId: ctx.userId`; the column holds a username and over
+ * the mcp-server's HTTP transport `ctx.userId` is a User.id, so every HTTP
+ * caller got an empty list.
+ */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { err, forbidden, refusalOf } from "../calendar/_route.js";
 
 const inputSchema = {
   type: "object",
@@ -10,12 +20,13 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
-interface ReminderRow {
+/** A Reminder as `GET /api/reminders` sends it (dates as ISO strings). */
+interface ReminderJson {
   id: string;
   title: string;
   body: string | null;
-  dueAt: Date;
-  completedAt: Date | null;
+  dueAt: string;
+  completedAt: string | null;
 }
 
 function parseDate(input: unknown): Date | null {
@@ -25,32 +36,29 @@ function parseDate(input: unknown): Date | null {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  if (!ctx.userId) {
-    return {
-      ok: false,
-      status: "error",
-      error: { code: "AUTH_REQUIRED", message: "auth_required" },
-    };
-  }
+  if (!ctx.userId) return err("AUTH_REQUIRED", "auth_required");
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
   const dueBefore = parseDate(args.due_before);
-  const where: Record<string, unknown> = { userId: ctx.userId };
-  if (args.include_completed !== true) where.completedAt = null;
-  if (dueBefore) where.dueAt = { lte: dueBefore };
-  const rows = (await ctx.prisma.reminder.findMany({
-    where,
-    orderBy: [{ completedAt: "asc" }, { dueAt: "asc" }],
-    take: limit,
-  })) as unknown as ReminderRow[];
+  // The route's `completed` is three-way (true / false / absent = all); this
+  // tool's default is the active ones.
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (args.include_completed !== true) qs.set("completed", "false");
+  if (dueBefore) qs.set("due_before", dueBefore.toISOString());
+  const res = await ctx.http.orchestrator.get(`/api/reminders?${qs}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (res.status === 403) return forbidden(await refusalOf(res));
+  if (!res.ok) return err("LIST_FAILED", `orchestrator returned ${res.status}`);
+  const { reminders } = (await res.json()) as { reminders: ReminderJson[] };
   return {
     ok: true,
     data: {
-      count: rows.length,
-      reminders: rows.map((r) => ({
+      count: reminders.length,
+      reminders: reminders.map((r) => ({
         id: r.id,
         title: r.title,
         body: r.body,
-        due_at: r.dueAt.toISOString(),
+        due_at: new Date(r.dueAt).toISOString(),
         completed: r.completedAt !== null,
       })),
     },

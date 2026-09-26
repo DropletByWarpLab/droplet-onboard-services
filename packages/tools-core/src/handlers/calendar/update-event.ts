@@ -1,6 +1,17 @@
+/**
+ * `update_event` — change an event on the calendar of the person the
+ * assistant acts for.
+ *
+ * WARP-3101 — WRITTEN BY THE ORCHESTRATOR (`PATCH /api/calendar/events/:id`).
+ * This handler used to check `existing.userId !== ctx.userId` itself and then
+ * update through `ctx.prisma`. The column holds a username and over the
+ * mcp-server's HTTP transport `ctx.userId` is a User.id, so the person's own
+ * event was refused as FORBIDDEN. The route knows whose event it is.
+ */
 import { parseMeetingLink } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { parseModelDate } from "./_dates.js";
+import { err, forbidden, invalid, refusalOf, switchedOff } from "./_route.js";
 
 const inputSchema = {
   type: "object",
@@ -22,10 +33,6 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
-function err(code: string, message: string): ToolResult {
-  return { ok: false, status: "error", error: { code, message } };
-}
-
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   if (!ctx.userId) return err("AUTH_REQUIRED", "auth_required");
   const id = typeof args.id === "string" ? args.id : null;
@@ -36,32 +43,6 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (args.starts_at !== undefined && !startsAt)
     return err("INVALID_ARGS", "invalid starts_at");
   if (args.ends_at !== undefined && !endsAt) return err("INVALID_ARGS", "invalid ends_at");
-
-  // Verify ownership before update so we can't be tricked into editing
-  // someone else's event by id.
-  const existing = (await ctx.prisma.calendarEvent.findUnique({
-    where: { id },
-  })) as unknown as
-    | { userId: string; source: string | null; startsAt: Date; endsAt: Date }
-    | null;
-  if (!existing) return err("NOT_FOUND", "event_not_found");
-  if (existing.userId !== ctx.userId) return err("FORBIDDEN", "forbidden");
-  if (existing.source && existing.source !== "local") {
-    return err(
-      "EXTERNAL_SOURCE",
-      "cannot edit events from an external sync source — make a local override instead",
-    );
-  }
-
-  // Range validation against the post-patch state. The legacy
-  // calendar.service patched both fields then checked endsAt > startsAt;
-  // we replicate that here so a partial update (e.g. only ends_at) can't
-  // create a backwards or zero-length range.
-  const effectiveStart = startsAt ?? existing.startsAt;
-  const effectiveEnd = endsAt ?? existing.endsAt;
-  if (effectiveEnd.getTime() <= effectiveStart.getTime()) {
-    return err("INVALID_RANGE", "ends_at must be after starts_at");
-  }
 
   const data: Record<string, unknown> = {};
   // WARP-1874 — https-only, same gate as every other write path. An empty
@@ -79,16 +60,36 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (typeof args.title === "string") data.title = args.title;
   if (typeof args.description === "string") data.description = args.description;
   if (typeof args.location === "string") data.location = args.location;
-  if (startsAt) data.startsAt = startsAt;
-  if (endsAt) data.endsAt = endsAt;
+  if (startsAt) data.startsAt = startsAt.toISOString();
+  if (endsAt) data.endsAt = endsAt.toISOString();
   if (typeof args.all_day === "boolean") data.allDay = args.all_day;
 
-  try {
-    const ev = (await ctx.prisma.calendarEvent.update({ where: { id }, data })) as unknown as { id: string };
-    return { ok: true, data: { id: ev.id, updated: true } };
-  } catch (e) {
-    return err("UPDATE_FAILED", e instanceof Error ? e.message : String(e));
+  // The route checks what this tool used to check itself: the event is the
+  // person's (403 otherwise), it is local (409), and the range AFTER the patch
+  // still ends after it starts (400).
+  const res = await ctx.http.orchestrator.patch(`/api/calendar/events/${encodeURIComponent(id)}`, data, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const refusal = await refusalOf(res);
+    const off = switchedOff(refusal);
+    if (off) return off;
+    if (res.status === 404) return err("NOT_FOUND", "event_not_found");
+    if (res.status === 403) return forbidden(refusal);
+    if (res.status === 409) {
+      return err(
+        "EXTERNAL_SOURCE",
+        "cannot edit events from an external sync source — make a local override instead",
+      );
+    }
+    if (res.status === 400 && refusal.error.includes("must be after")) {
+      return err("INVALID_RANGE", "ends_at must be after starts_at");
+    }
+    if (res.status === 400) return invalid(refusal);
+    return err("UPDATE_FAILED", `orchestrator returned ${res.status}`);
   }
+  const { event } = (await res.json()) as { event: { id: string } };
+  return { ok: true, data: { id: event.id, updated: true } };
 }
 
 const tool: Tool = {

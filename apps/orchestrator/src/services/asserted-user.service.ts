@@ -54,9 +54,10 @@ export interface AssertedUser {
   /** LOCAL `User.id` UUID — what every access decision is keyed on. */
   id: string;
   /**
-   * WARP-3098 — the canonical handle, whatever column the header matched.
-   * Agent runs and routines record the person by it (`triggeredBy`,
-   * activity refs, the tool context's `userId`).
+   * WARP-3101 / WARP-3098 — the canonical handle, whatever column the header
+   * matched. The calendar and reminder tables are keyed on it (`userId` holds
+   * the username there); agent runs and routines record the person by it
+   * (`triggeredBy`, activity refs, the tool context's `userId`).
    */
   username: string;
   role: string;
