@@ -131,6 +131,30 @@ describe("requestLogger credential redaction (WARP-1015)", () => {
     expect(completion.req.headers[header]).toBe("[Redacted]");
   });
 
+  // WARP-3193 SEC-DATA-4: the pre-auth calendar feed authenticates by
+  // `?token=`, and the default req serializer logs `url` verbatim — so every
+  // phone poll wrote a live feed credential into the log. Only the path is
+  // logged; the query string never is.
+  it("strips the query string from the logged req.url", () => {
+    const SECRET = "cm0rowid.SECRET-FEED-TOKEN-base64url";
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = Object.assign(mockReq("URL-ID"), {
+      url: `/api/calendar/publish/alice.ics?token=${SECRET}`,
+    });
+    const res = mockRes();
+    runWithRequestId("URL-ID", () => {
+      logger(req as never, res as never);
+    });
+    res.emit("finish");
+    expect(lines.join("")).not.toContain(SECRET);
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.url).toBe("/api/calendar/publish/alice.ics");
+  });
+
   it("replaces the redacted headers with the pino placeholder", () => {
     const lines = runLoggedRequest();
     const completion = JSON.parse(lines[lines.length - 1]);
