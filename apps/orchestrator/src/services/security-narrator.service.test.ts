@@ -335,6 +335,41 @@ describe("yielding to chat", () => {
   });
 });
 
+// #2423 review 5: the gateway answers a background request 429 while chat keeps its queue full. That is chat being
+// busy, not the summary failing — the agent-run worker's `gatewayBusy` rule: stand aside, count nothing.
+describe("a busy gateway (429) is standing aside, never a failure", () => {
+  it("🔴 the claim is released, no attempt and no error are counted, the batch stops, the yield noted", async () => {
+    const [a, b] = seed([incident(), incident({ lastActivityAt: new Date("2026-09-23T21:14:30Z") })]);
+    gw.chat.mockRejectedValue(new Error("AI Gateway error 429: too many queued requests"));
+    const r = await tickSecurityNarrator(prisma, deps());
+    expect(gw.chat).toHaveBeenCalledTimes(1);
+    for (const x of [a, b]) expect(byId(x!.id)).toMatchObject({ narrativeState: "pending", narrativeAttemptAt: null, narrativeAttempts: 0, narrativeError: null });
+    expect(r).toMatchObject({ failed: 0, yielded: true });
+    expect(narratorHealthState().lastYieldAt).toEqual(NOW);
+  });
+
+  it("…and it takes no place in the hour: a gateway busy for 40 minutes leaves the hour's calls for when it is not", async () => {
+    const [i] = seed([incident()]);
+    gw.chat.mockRejectedValue(new Error("AI Gateway error 429: too many queued requests"));
+    for (let t = 0; t < 40; t++) {
+      clock = at(t * MIN);
+      await tickSecurityNarrator(prisma, deps());
+    }
+    expect(gw.chat).toHaveBeenCalledTimes(40);
+    gw.chat.mockImplementation(async () => reply(GOOD));
+    clock = at(40 * MIN);
+    await tickSecurityNarrator(prisma, deps());
+    expect(byId(i!.id)).toMatchObject({ narrativeState: "written", narrativeAttempts: 0 });
+  });
+
+  it("any other gateway error is still a failed attempt", async () => {
+    const [i] = seed([incident()]);
+    gw.chat.mockRejectedValue(new Error("AI Gateway error 503: unavailable"));
+    await tickSecurityNarrator(prisma, deps());
+    expect(byId(i!.id)).toMatchObject({ narrativeAttempts: 1, narrativeError: "MODEL_ERROR" });
+  });
+});
+
 describe("rate limits", () => {
   it(`at most ${NARRATOR_MAX_CALLS_PER_HOUR} model calls in any rolling hour; the window moves on`, async () => {
     seed(Array.from({ length: 40 }, (_, n) => incident({ lastActivityAt: new Date(new Date("2026-09-23T21:15:00Z").getTime() + n * 1000) })));
