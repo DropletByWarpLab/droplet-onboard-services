@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { HELP_INDEX, searchHelp } from "@/lib/help-index";
 import { helpSlot } from "@/components/shell/dom-slots";
+import { menuItems as itemsOf, moveMenuFocus } from "@/components/ui/useMenuButton";
 // WARP-1091 — the launcher's popover menu + slide-in panel are the
 // component's only indigo-token consumers. HelpLauncher is mounted by
 // AuthGate as a sibling of the routed page (not inside any page's
@@ -56,6 +57,12 @@ import "@/components/shell/droplet-shell.css";
  * placed from the trigger's box; the menu and panel stay in this tree, out of
  * the header's stacking context. Without one, the floating button is
  * unchanged. Surfaces are separated by tone, not strokes.
+ *
+ * AuthGate mounts this tree AFTER the routed page, so a menu opened from a
+ * header trigger is a whole page away from it in tab order. In slot mode the
+ * menu follows the menu-button pattern instead: opening focuses its first
+ * item, arrows wrap and Home/End jump, and Escape or Tab hands focus back to
+ * the trigger (Tab then carries on from the header).
  */
 
 type View = "closed" | "menu" | "panel";
@@ -67,6 +74,7 @@ export function HelpLauncher() {
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const slot = helpSlot.useTarget();
   // Where the menu opens under a header trigger; null = the floating spot.
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null);
@@ -90,6 +98,11 @@ export function HelpLauncher() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // A menu opened from a header trigger takes focus (see the file note).
+  useEffect(() => {
+    if (view === "menu" && slot) itemsOf(menuRef.current)[0]?.focus();
+  }, [view, slot]);
 
   // Focus the search field when the panel opens.
   useEffect(() => {
@@ -136,6 +149,18 @@ export function HelpLauncher() {
   };
 
   const toggle = () => setView((v) => (v === "closed" ? "menu" : "closed"));
+
+  // Slot mode only: Escape and Tab close back onto the header trigger. Tab
+  // is not prevented, so the browser moves on from the trigger.
+  const onSlotMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape" || e.key === "Tab") {
+      if (e.key === "Escape") e.preventDefault();
+      setView("closed");
+      triggerRef.current?.focus();
+    } else if (moveMenuFocus(menuRef.current, e.key)) {
+      e.preventDefault();
+    }
+  };
   const triggerLabel = view === "closed" ? "Open help" : "Close help";
 
   const results = useMemo(() => searchHelp(query).slice(0, 6), [query]);
@@ -301,8 +326,10 @@ export function HelpLauncher() {
       {/* ── Launcher popover menu ── */}
       {view === "menu" && (
         <div
+          ref={menuRef}
           role="menu"
           aria-label="Help"
+          onKeyDown={slot ? onSlotMenuKeyDown : undefined}
           className={
             anchor
               ? "droplet-shell fixed z-[60] w-[308px] overflow-hidden rounded-2xl shadow-xl motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-top-2"
@@ -327,7 +354,7 @@ export function HelpLauncher() {
                 type="button"
                 role="menuitem"
                 onClick={onClick}
-                className="flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-left transition-colors hover:bg-[var(--hover)]"
+                className="flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-left transition-colors hover:bg-[var(--hover)] focus-visible:bg-[var(--hover)] focus-visible:outline-none"
               >
                 <span
                   className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"

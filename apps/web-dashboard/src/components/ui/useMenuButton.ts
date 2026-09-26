@@ -83,34 +83,14 @@ export function useMenuButton({ disabled, minWidth = DEFAULT_MIN_WIDTH }: UseMen
   };
 
   const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLElement>) => {
-    const items = menuItems(menuRef.current);
-    const i = items.indexOf(document.activeElement as HTMLElement);
-    let next = -1;
-    switch (e.key) {
-      case "ArrowDown":
-        next = i < 0 ? 0 : (i + 1) % items.length;
-        break;
-      case "ArrowUp":
-        next = i < 0 ? items.length - 1 : (i - 1 + items.length) % items.length;
-        break;
-      case "Home":
-        next = 0;
-        break;
-      case "End":
-        next = items.length - 1;
-        break;
-      case "Escape":
-        e.preventDefault();
-        close(true);
-        return;
-      case "Tab":
-        close(false);
-        return;
-      default:
-        return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      close(true);
+    } else if (e.key === "Tab") {
+      close(false);
+    } else if (moveMenuFocus(menuRef.current, e.key)) {
+      e.preventDefault();
     }
-    e.preventDefault();
-    items[next]?.focus();
   };
 
   return {
@@ -127,7 +107,37 @@ export function useMenuButton({ disabled, minWidth = DEFAULT_MIN_WIDTH }: UseMen
   };
 }
 
-function menuItems(menu: HTMLElement | null): HTMLElement[] {
+/**
+ * Arrow keys wrap, Home and End jump — focus among a menu's
+ * `[role^="menuitem"]` items. Returns whether `key` was one of those, so the
+ * caller can prevent its default. Shared with a menu that is not driven by
+ * this hook (HelpLauncher's, whose trigger lives in a page header).
+ */
+export function moveMenuFocus(menu: HTMLElement | null, key: string): boolean {
+  const items = menuItems(menu);
+  const i = items.indexOf(document.activeElement as HTMLElement);
+  let next: number;
+  switch (key) {
+    case "ArrowDown":
+      next = i < 0 ? 0 : (i + 1) % items.length;
+      break;
+    case "ArrowUp":
+      next = i < 0 ? items.length - 1 : (i - 1 + items.length) % items.length;
+      break;
+    case "Home":
+      next = 0;
+      break;
+    case "End":
+      next = items.length - 1;
+      break;
+    default:
+      return false;
+  }
+  items[next]?.focus();
+  return true;
+}
+
+export function menuItems(menu: HTMLElement | null): HTMLElement[] {
   if (!menu) return [];
   return Array.from(menu.querySelectorAll<HTMLElement>('[role^="menuitem"]'));
 }

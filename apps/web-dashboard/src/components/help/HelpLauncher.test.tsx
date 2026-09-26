@@ -156,4 +156,54 @@ describe("HelpLauncher — the header slot (WARP-3043)", () => {
     expect(screen.getByRole("dialog", { name: /help and support/i })).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/stays on your Droplet/i);
   });
+
+  // ── Keyboard, header-slot mode ──
+  //
+  // The menu lives in the launcher's tree, which AuthGate mounts AFTER the
+  // routed page — so from the header trigger, Tab would cross the whole page
+  // before reaching it. The menu-button pattern closes that gap: opening moves
+  // focus in, arrows move within, Escape and Tab hand focus back to the trigger.
+  function openFromSlot() {
+    render(<Page withSlot />);
+    const trigger = within(screen.getByTestId("slot")).getByRole("button", { name: "Open help" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    return { trigger, items: within(screen.getByRole("menu", { name: "Help" })).getAllByRole("menuitem") };
+  }
+
+  it("opening from the header trigger focuses the menu's first item", () => {
+    const { items } = openFromSlot();
+    expect(items).toHaveLength(3);
+    expect(document.activeElement).toBe(items[0]);
+  });
+
+  it("ArrowDown / ArrowUp wrap, Home and End jump", () => {
+    const { items } = openFromSlot();
+    const menu = screen.getByRole("menu", { name: "Help" });
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(document.activeElement).toBe(items[2]);
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[0]);
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(items[2]);
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(document.activeElement).toBe(items[0]);
+  });
+
+  it("Escape closes the menu and returns focus to the header trigger", () => {
+    const { trigger, items } = openFromSlot();
+    items[1].focus();
+    fireEvent.keyDown(items[1], { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "Help" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("Tab closes the menu from the trigger, so focus carries on from the header", () => {
+    const { trigger, items } = openFromSlot();
+    fireEvent.keyDown(items[0], { key: "Tab" });
+    expect(screen.queryByRole("menu", { name: "Help" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
 });
