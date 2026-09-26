@@ -637,9 +637,23 @@ async function appendNow(
  * it once into `actorId` — validating the original and then copying would
  * read it twice.
  */
+/** WARP-3193 PERF-5 — the in-process record() queue; see createActivityRecorder. */
+let recordTail: Promise<unknown> = Promise.resolve();
+
 export function createActivityRecorder(
   deps: ActivityRecorderDeps,
 ): ActivityRowRecorder {
+  // WARP-3193 PERF-5 — record() calls take their turn IN-PROCESS, in call
+  // order, before opening a transaction. Every append serialises on the one
+  // chain lock anyway, so running them side by side bought nothing: each
+  // waited on `pg_advisory_xact_lock` while holding a pooled connection, and a
+  // burst of audits drained the pool (P2024 for unrelated queries, dropped
+  // audit rows behind recordSafely). Now at most one connection per process
+  // waits on the lock; the lock still serialises across processes and the
+  // in-tx appenders, so chain semantics are unchanged. The stored tail never
+  // rejects, so one failed append cannot wedge the ones behind it. Module
+  // scope, not per recorder, so it holds per PROCESS however many recorders
+  // exist.
   return {
     async record(params) {
       const p = snapshotRecordParams(params, new Date());
@@ -650,10 +664,14 @@ export function createActivityRecorder(
       // or a database whose default is not READ COMMITTED, inheriting would
       // refuse EVERY record() — and behind recordSafely / recordActivity each
       // refusal is a silently dropped audit row. 61fa4aebe always wrote.
-      return deps.prisma.$transaction(
-        (tx) => appendActivityRowInTx(tx, deps.signer, p),
-        READ_COMMITTED_TX,
+      const run = recordTail.then(() =>
+        deps.prisma.$transaction(
+          (tx) => appendActivityRowInTx(tx, deps.signer, p),
+          READ_COMMITTED_TX,
+        ),
       );
+      recordTail = run.catch(() => undefined);
+      return run;
     },
   };
 }
