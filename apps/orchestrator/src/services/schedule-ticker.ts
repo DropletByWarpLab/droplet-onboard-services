@@ -113,7 +113,7 @@ export function createScheduleTicker(
       // dispatched). Any mismatch — including null !== true/false —
       // triggers a dispatch, which matches the "ticker hasn't touched
       // this yet" bootstrap semantics from the original in-memory cache.
-      const previous: boolean | null = (device as any).lastAppliedBlocked ?? null;
+      const previous: boolean | null = device.lastAppliedBlocked ?? null;
       if (previous === desired) continue;
 
       try {
