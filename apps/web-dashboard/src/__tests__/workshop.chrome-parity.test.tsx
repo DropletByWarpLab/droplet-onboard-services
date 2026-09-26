@@ -94,6 +94,8 @@ const STAGE: Record<string, string> = {
   "head-workspace background": "var(--surface)",
   "head-workspace color": "var(--text)",
   "active-title color": "var(--brand-soft)",
+  "composer cursor": "",
+  "workin background": "var(--surface-2)",
 };
 
 /**
@@ -115,6 +117,12 @@ const INTENDED_DELTAS: Record<string, string> = {
   // The selected rail row is marked by its --brand-subtle tone; its title
   // stays --text instead of turning brand.
   "active-title color": "var(--text)",
+  // A press anywhere on the pill lands in the textarea, so the whole pill
+  // shows the text cursor.
+  "composer cursor": "text",
+  // The Work in chip is a quiet pill item at rest (a tone on hover and while
+  // its menu is open), not a filled chip.
+  "workin background": "transparent",
 };
 
 /** What a property is when nothing authored sets it (after Tailwind's preflight). */
@@ -213,6 +221,7 @@ describe("Workshop chrome parity across the WARP-3043 move", () => {
       btn,
       "head-workspace": headWorkspace,
       "active-title": q(".conv-rail .conv-item.is-active .conv-it-t"),
+      workin: q(".chat-composer-inner .ws-workin"),
     };
 
     const actual: Record<string, string> = {};

@@ -230,6 +230,31 @@ describe("keyboard focus inside the pill (WCAG 2.4.7)", () => {
   });
 });
 
+// WARP-3043 — Help sits in the page head (a portaled trigger) on /chat and
+// the Workshop at 1024px and up, where the floating button would cover the
+// docked pill's send button; below that, the slot is hidden as the floating
+// button is. One rule pair owns the slot's display.
+describe("the Help slot in the head", () => {
+  it("is hidden below 1024px and a head item of its own from 1024px", () => {
+    expect(declValue(".droplet-shell .help-slot", "display")).toBe("none");
+    expect(declValue(".droplet-shell .help-slot", "display", "media (min-width: 1024px)")).toBe("contents");
+  });
+});
+
+describe("the rail and drawers", () => {
+  it("a rail row's hover is the --hover tone", () => {
+    expect(declValue(".droplet-shell .conv-item:hover", "background")).toBe("var(--hover)");
+  });
+
+  // Dialog's side panel draws a left stroke unless told `seamless`.
+  it("both of /chat's side drawers are seamless", () => {
+    const tags = [...read("app/chat/page.tsx").matchAll(/<Dialog\b[\s\S]*?\n\s*>\r?\n/g)].map((m) => m[0]);
+    const drawers = tags.filter((t) => /placement="right"/.test(t));
+    expect(drawers).toHaveLength(2);
+    for (const t of drawers) expect(t).toMatch(/\n\s*seamless\r?\n/);
+  });
+});
+
 describe("the Workshop overrides are gone", () => {
   it("workshop.css scopes nothing to .workshop-app", () => {
     expect(WORKSHOP_CSS).not.toMatch(/\.workshop-app\b/);
