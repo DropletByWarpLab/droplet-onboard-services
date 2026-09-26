@@ -124,6 +124,7 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
+import { purgeUsernameKeyedData } from "../services/username-data-purge.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -4019,8 +4020,23 @@ export function createProtectedAuthRouter(
       // No rails re-run here: a DEACTIVATED row holds no operator capacity
       // (rail 5 already excludes it), so removing it cannot strand the box.
       if (prisma && row) {
-        const removed = await prisma.user.deleteMany({
-          where: { id: row.id, directoryStatus: "DEACTIVATED" },
+        // WARP-3193 SEC-AUTH-6: the rows keyed by USERNAME (notes, calendar
+        // + CalDAV credentials, reminders, chats, push subscriptions) go in
+        // the SAME transaction as the row, and only when the row really goes
+        // — the username must never be free while data still answers to it,
+        // or the next account deriving it inherits that data.
+        const removed = await prisma.$transaction(async (tx) => {
+          const r = await tx.user.deleteMany({
+            where: { id: row.id, directoryStatus: "DEACTIVATED" },
+          });
+          if (r.count > 0) {
+            const purged = await purgeUsernameKeyedData(tx, row.username);
+            logger.info(
+              { username: req.params.username, userId: row.id, purged },
+              "Purged username-keyed private data with the deleted user row",
+            );
+          }
+          return r;
         });
         if (removed.count === 0) {
           logger.warn(
