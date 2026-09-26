@@ -13,6 +13,8 @@ interface Props {
   onNewGroup: () => void;
   onEditGroup: (group: CameraGroupInfo) => void;
   onDeleteGroup: (group: CameraGroupInfo) => void;
+  /** WARP-3104: groups are shared configuration; false hides new/edit/delete. */
+  canEdit?: boolean;
 }
 
 /**
@@ -37,6 +39,7 @@ export function CameraGroupNav({
   onNewGroup,
   onEditGroup,
   onDeleteGroup,
+  canEdit = true,
 }: Props) {
   const allCount = cameras.length;
 
@@ -57,8 +60,10 @@ export function CameraGroupNav({
           onSelect={() => onSelect(group.id)}
           onEdit={() => onEditGroup(group)}
           onDelete={() => onDeleteGroup(group)}
+          canEdit={canEdit}
         />
       ))}
+      {canEdit && (
       <button
         type="button"
         onClick={onNewGroup}
@@ -68,6 +73,7 @@ export function CameraGroupNav({
         <Plus size={14} />
         <span className="type-caption-1">New group</span>
       </button>
+      )}
     </div>
   );
 }
@@ -106,8 +112,10 @@ function GroupPill({
   onSelect,
   onEdit,
   onDelete,
+  canEdit,
 }: {
   group: CameraGroupInfo;
+  canEdit: boolean;
   active: boolean;
   onSelect: () => void;
   onEdit: () => void;
@@ -131,7 +139,7 @@ function GroupPill({
         onClick={onSelect}
         onContextMenu={(e) => {
           e.preventDefault();
-          onEdit();
+          if (canEdit) onEdit();
         }}
         className={`chip${active ? " on" : ""}`}
         style={active ? { paddingRight: 44 } : undefined}
@@ -151,7 +159,7 @@ function GroupPill({
 
       {/* Inline edit / delete only when the pill is active or hovered.
           Click events stop-propagation so they don't re-trigger select. */}
-      {(active || showActions) && (
+      {canEdit && (active || showActions) && (
         <div className="absolute top-1/2 right-1 -translate-y-1/2 flex items-center gap-0.5">
           <button
             type="button"

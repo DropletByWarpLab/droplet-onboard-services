@@ -31,6 +31,7 @@ function ctxWith(orchestratorPost: Mock): ToolContext {
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
+    role: "owner", // WARP-3104: camera write tools are owner/admin only
     userId: "alice",
     signal: new AbortController().signal,
   } as ToolContext;

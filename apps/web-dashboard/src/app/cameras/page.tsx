@@ -29,7 +29,7 @@ import { CameraSubnetCard } from "@/components/cameras/CameraSubnetCard";
 import { AddCameraModal } from "@/components/cameras/AddCameraModal";
 import { CameraGroupNav } from "@/components/cameras/CameraGroupNav";
 import { CameraGroupEditor } from "@/components/cameras/CameraGroupEditor";
-import { authFetch } from "@/lib/auth";
+import { authFetch, useAuth } from "@/lib/auth";
 import { triggerCameraScan } from "@/lib/api";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
@@ -77,6 +77,10 @@ export default function CamerasPage() {
   // cameras" pseudo-group. Editor modal opens with either the group being
   // edited or null when creating a new one.
   const groupsHook = useCameraGroups();
+  // WARP-3104: adding, adopting, scanning, groups and the camera subnet are
+  // owner/admin; the box refuses members, so they see the grid and events.
+  const { user } = useAuth();
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorGroup, setEditorGroup] = useState<CameraGroupInfo | null>(null);
@@ -278,10 +282,12 @@ export default function CamerasPage() {
   // System / Scan) live in the sub-nav chip row — they're navigation.
   const actions = (
     <>
+      {canManage && (
       <button onClick={() => setShowAddModal(true)} className="btn primary" type="button">
         <Plus size={15} />
         Add camera
       </button>
+      )}
       <button
         onClick={refresh}
         disabled={isRefreshing}
@@ -307,10 +313,10 @@ export default function CamerasPage() {
       {/* Secondary sub-nav (chip row) for the camera-related sub-routes —
           People / Plates / Notifications / System / Birdseye — plus the
           "Scan network" discovery action. */}
-      <CamerasSubNav scanning={scanning} onScan={handleScan} />
+      <CamerasSubNav scanning={scanning} onScan={canManage ? handleScan : undefined} />
 
       {/* Network isolation */}
-      <CameraSubnetCard config={subnetConfig} onRefresh={() => mutateSubnet()} />
+      {canManage && <CameraSubnetCard config={subnetConfig} onRefresh={() => mutateSubnet()} />}
 
       {/* Group navigation rail — sits above the grid so the operator can
           slice their cameras by location/role without losing the page
@@ -324,6 +330,7 @@ export default function CamerasPage() {
           onNewGroup={openNewGroup}
           onEditGroup={openEditGroup}
           onDeleteGroup={handleDeleteGroup}
+          canEdit={canManage}
         />
       )}
 
@@ -331,7 +338,7 @@ export default function CamerasPage() {
           and — when no cameras are set up at all — as the page's primary empty
           state, since "what can I add?" is the only question that matters then.
           It carries its own scanning / found-nothing / discovery-offline copy. */}
-      {(discovered.length > 0 || totalCameras === 0) && (
+      {canManage && (discovered.length > 0 || totalCameras === 0) && (
         <NetworkCameraList
           cameras={discovered}
           discoveryOnline={discoveryOnline}
@@ -346,7 +353,7 @@ export default function CamerasPage() {
 
       {/* No cameras AND nothing found — offer the manual path alongside the
           list's own scan affordance. */}
-      {totalCameras === 0 && discovered.length === 0 && (
+      {canManage && totalCameras === 0 && discovered.length === 0 && (
         <div className="card">
           <div className="empty" style={{ padding: "34px 20px" }}>
             <span className="ei"><Video size={24} /></span>
@@ -499,7 +506,8 @@ export default function CamerasPage() {
 
 interface CamerasSubNavProps {
   scanning: boolean;
-  onScan: () => void;
+  /** Absent for members: scanning leads to adopting a camera (owner/admin). */
+  onScan?: () => void;
 }
 
 function CamerasSubNav({ scanning, onScan }: CamerasSubNavProps) {
@@ -537,6 +545,7 @@ function CamerasSubNav({ scanning, onScan }: CamerasSubNavProps) {
       {/* The Scan action lives in the sub-nav because the camera-discovery
           surfaces are right next to it conceptually. Bumped to the right
           with margin-left:auto so it doesn't crowd the navigation pills. */}
+      {onScan && (
       <button
         onClick={onScan}
         disabled={scanning}
@@ -548,6 +557,7 @@ function CamerasSubNav({ scanning, onScan }: CamerasSubNavProps) {
         <Radar size={14} className={scanning ? "animate-pulse" : ""} />
         <span>{scanning ? "Scanning…" : "Scan network"}</span>
       </button>
+      )}
     </div>
   );
 }
