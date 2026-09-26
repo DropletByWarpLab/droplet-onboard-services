@@ -254,6 +254,55 @@ describe("agent-runs routes — the mcp principal acts on behalf of a person (WA
   });
 });
 
+// WARP-3098 — the header and `onBehalfOf` both carry the mcp-server's
+// `ctx.userId`: `User.username` on stdio, `User.id` over HTTP (the shipped
+// container). Resolved by resolveAssertedUser: one active person, or 403.
+describe("agent-runs routes — the acting person is named by username OR User.id (WARP-3098)", () => {
+  it("a caller named by User.id (the HTTP transport) starts a run as that person", async () => {
+    const { app, db } = buildApp(mcpPrincipal);
+    const res = await request(app).post("/api/agent-runs").set("X-Nextcloud-User", "u-admin").send({ goal: "g" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).userId).toBe("u-admin");
+  });
+
+  it("an onBehalfOf carrying a User.id lists that person's runs (agent_run_list sends ctx.userId)", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner, admin] });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "mine", model: "m" });
+    await enqueueAgentRun(db.prisma, { userId: "u-admin", goal: "theirs", model: "m" });
+    const { app } = buildApp(mcpPrincipal, db);
+    const res = await request(app).get("/api/agent-runs").query({ onBehalfOf: "u-owner" });
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((r: { goal: string }) => r.goal)).toEqual(["mine"]);
+  });
+
+  it("an SSO row (nextcloudUsername NULL) still resolves by username", async () => {
+    const maria = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "admin" };
+    const { app, db } = buildApp(mcpPrincipal, createAgentRunPrismaMock({ users: [owner, maria] }));
+    const res = await request(app).post("/api/agent-runs").set("X-Nextcloud-User", "maria").send({ goal: "g" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id).userId).toBe("u-maria");
+  });
+
+  it("a value naming two people is refused — 403, no run, never the look-alike", async () => {
+    // One person's username is another's id: the value cannot say which of
+    // them is asking, and the look-alike here is an OWNER.
+    const lookalike = { id: "u-other", username: "u-admin", role: "owner" };
+    const db = createAgentRunPrismaMock({ users: [owner, admin, lookalike] });
+    const { app } = buildApp(mcpPrincipal, db);
+    expect((await request(app).post("/api/agent-runs").set("X-Nextcloud-User", "u-admin").send({ goal: "g" })).status).toBe(403);
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g", onBehalfOf: "u-admin" })).status).toBe(403);
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("a deactivated person is refused — nothing acts AS them", async () => {
+    const gone = { ...admin, directoryStatus: "DEACTIVATED" as const };
+    const db = createAgentRunPrismaMock({ users: [owner, gone] });
+    const { app } = buildApp(mcpPrincipal, db);
+    expect((await request(app).post("/api/agent-runs").send({ goal: "g", onBehalfOf: "stefan" })).status).toBe(403);
+    expect(db.rows).toHaveLength(0);
+  });
+});
+
 describe("agent-runs routes — ownership, list, detail, cancel (WARP-2180)", () => {
   it("another person's run is a 404 on detail, cancel and confirm, and absent from the list", async () => {
     const db = createAgentRunPrismaMock({ users: [owner, admin] });

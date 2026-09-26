@@ -424,7 +424,7 @@ _INT16_FULL_SCALE = 32768.0
 # scores every frame; without a floor the feed would drown in noise).
 # Ratio-of-threshold rather than absolute because the two engines'
 # score semantics differ (openWakeWord sigmoid ~0.3 gate vs Vosk
-# min-word-confidence ~0.7 gate). Misses are debounced on the same
+# min-word-confidence ~0.85 gate). Misses are debounced on the same
 # `debounce_s` window as fires so one hesitant utterance = one row.
 WAKE_MISS_RATIO = 0.6
 

@@ -192,8 +192,8 @@ class TestOpenWakeWordDetector:
 # ────────────────────────────────────────────────────────────────────
 
 class TestBuildDetectorFromEnv:
-    def test_default_primary_is_droplet(self, monkeypatch):
-        # Default WAKE_WORD is "droplet,hey droplet" (WARP-1431). On the
+    def test_default_primary_is_hey_droplet(self, monkeypatch):
+        # Default WAKE_WORD is "hey droplet" (WARP-3128). On the
         # openWakeWord fallback path (no Vosk model on disk) the single-model
         # engine takes the FIRST configured phrase verbatim as its requested
         # word; the actual model load still falls back to a bundled model at
@@ -201,7 +201,7 @@ class TestBuildDetectorFromEnv:
         monkeypatch.delenv("WAKE_WORD", raising=False)
         det = build_detector_from_env()
         assert isinstance(det, OpenWakeWordDetector)
-        assert det.requested_wake_word == "droplet"
+        assert det.requested_wake_word == "hey droplet"
 
     def test_mock_when_wake_word_is_double_underscore_mock(self, monkeypatch):
         monkeypatch.setenv("WAKE_WORD", "__mock__")
@@ -764,6 +764,19 @@ class TestVoskWakeWordDetector:
         det.predict(_silence_frame())
         assert json.loads(det._rec.grammar) == ["droplet", "hey droplet", "[unk]"]
 
+    def test_default_grammar_excludes_bare_droplet(self, monkeypatch, tmp_path):
+        # WARP-3128: the grammar is what Vosk forces audio into. With the
+        # default config it must offer only the two-word phrase + [unk],
+        # never a lone "droplet" slot that ambient speech collapses into.
+        self._install_fake_vosk(monkeypatch, accept_seq=[False])
+        monkeypatch.delenv("WAKE_WORD", raising=False)
+        monkeypatch.delenv("WAKE_ENGINE", raising=False)
+        monkeypatch.setenv("VOSK_MODEL_PATH", str(tmp_path))
+        det = build_detector_from_env()
+        assert isinstance(det, VoskWakeWordDetector)
+        det.predict(_silence_frame())
+        assert json.loads(det._rec.grammar) == ["hey droplet", "[unk]"]
+
     def test_model_name_reflects_configured_phrase_list(self, monkeypatch, tmp_path):
         # Multi-phrase detectors report the comma-joined spoken phrases and
         # never fall back (Vosk matches the real phrases directly).
@@ -919,8 +932,8 @@ class TestBuildDetectorVoskEngine:
         monkeypatch.setenv("VOSK_MODEL_PATH", str(model_dir))
         det = build_detector_from_env()
         assert isinstance(det, VoskWakeWordDetector)
-        # Default is the comma-separated phrase list (WARP-1431).
-        assert det.requested_wake_word == "droplet,hey droplet"
+        # Default is the single two-word phrase (WARP-3128).
+        assert det.requested_wake_word == "hey droplet"
         assert det.using_fallback is False
 
     def test_vosk_engine_falls_back_to_openwakeword_when_model_absent(self, monkeypatch):
@@ -932,7 +945,7 @@ class TestBuildDetectorVoskEngine:
         monkeypatch.setenv("VOSK_MODEL_PATH", "/nonexistent-vosk-model-xyz")
         det = build_detector_from_env()
         assert isinstance(det, OpenWakeWordDetector)
-        assert det.requested_wake_word == "droplet"
+        assert det.requested_wake_word == "hey droplet"
 
     def test_openwakeword_engine_forced_even_with_vosk_model(self, monkeypatch, tmp_path):
         model_dir = tmp_path / "vosk-model-small-en-us"
@@ -970,13 +983,18 @@ class TestBuildDetectorMultiPhrase:
         monkeypatch.setenv("VOSK_MODEL_PATH", str(model_dir))
         monkeypatch.delenv("WAKE_ENGINE", raising=False)
 
-    def test_default_parses_to_droplet_and_hey_droplet(self, monkeypatch, tmp_path):
+    def test_default_parses_to_hey_droplet_only(self, monkeypatch, tmp_path):
+        # WARP-3128: the default must NOT include the bare one-word
+        # "droplet". Grammar-forced decoding squeezed ambient conversation
+        # into it at confidence up to 1.00 (~23 false wakes/hour on the
+        # bench), so no threshold can gate it. Opting back in stays an
+        # explicit operator choice (WAKE_WORD=droplet,hey droplet).
         self._with_vosk_model(monkeypatch, tmp_path)
         monkeypatch.delenv("WAKE_WORD", raising=False)
         det = build_detector_from_env()
         assert isinstance(det, VoskWakeWordDetector)
-        assert det._phrases == [["droplet"], ["hey", "droplet"]]
-        assert det.requested_wake_word == "droplet,hey droplet"
+        assert det._phrases == [["hey", "droplet"]]
+        assert det.requested_wake_word == "hey droplet"
 
     def test_comma_list_stripped_lowercased_underscored(self, monkeypatch, tmp_path):
         # Whitespace around commas, mixed case, and underscore spelling all

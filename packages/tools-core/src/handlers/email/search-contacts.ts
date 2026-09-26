@@ -2,17 +2,19 @@
  * WARP-1452 — `search_contacts` LLM tool.
  *
  * Derive-on-read contact search over indexed mail: there is no contacts
- * table — the handler samples the caller's most recent EmailMessage rows
- * whose sender matches the query and groups them by lowercased address,
- * returning address, most-recent non-empty display name, last-seen
- * timestamp, and message count, ranked by messageCount desc then
- * lastSeenAt desc.
+ * table — the orchestrator samples the most recent EmailMessage rows whose
+ * sender matches the query and groups them by lowercased address, returning
+ * address, most-recent non-empty display name, last-seen timestamp, and
+ * message count, ranked by messageCount desc then lastSeenAt desc
+ * (apps/orchestrator/src/services/email/contacts.service.ts).
  *
- * Escalation path (deliberately out of scope here): if contact lookup
- * ever needs to be exact over full mailbox history rather than a
- * 500-message sample, materialize an EmailContact table maintained by
- * the ingest pipeline and point this handler at it — the tool's input
- * and output contracts would not change.
+ * WARP-3102 — the handler asks `GET /api/email/contacts` and forwards the
+ * acting person as `X-Droplet-User` (`ctx.userId`), like the other five email
+ * tools. It used to read `EmailAccount` itself through `ctx.prisma` by
+ * `userId: ctx.userId`; that column holds a `User.id`, and `ctx.userId` is the
+ * username on the stdio transport chat uses, so every chat user was told no
+ * mailbox was connected. The route resolves either form, and decides which
+ * mailboxes the person may read (owner/admin every one, family their own).
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
@@ -40,13 +42,11 @@ function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
 }
 
-/** Most recent messages to sample when deriving contacts. */
-const SAMPLE_SIZE = 500;
-
-interface SenderRow {
-  fromAddr: string;
-  fromName: string | null;
-  receivedAt: Date;
+interface ContactsResponse {
+  query: string;
+  /** How many mailboxes the acting person may read. */
+  accountCount: number;
+  contacts: Array<{ address: string; name: string | null; lastSeenAt: string; messageCount: number }>;
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -66,11 +66,22 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     limit = args.limit;
   }
 
-  const accounts = (await ctx.prisma.emailAccount.findMany({
-    where: { userId: ctx.userId },
-    select: { id: true },
-  })) as Array<{ id: string }>;
-  if (accounts.length === 0) {
+  const params = new URLSearchParams({ query, limit: String(limit) });
+  const res = await ctx.http.orchestrator.get(
+    `/api/email/contacts?${params.toString()}`,
+    // X-Droplet-User carries the acting person — a username on stdio, a
+    // User.id over HTTP; the orchestrator honors it ONLY for the trusted mcp
+    // principal and resolves either.
+    { headers: { Accept: "application/json", "X-Droplet-User": ctx.userId } },
+  );
+  if (res.status === 403) {
+    return err("FORBIDDEN", "contact search is not available to this user");
+  }
+  if (!res.ok) {
+    return err("CONTACT_SEARCH_FAILED", `orchestrator returned ${res.status}`);
+  }
+  const data = (await res.json()) as ContactsResponse;
+  if (data.accountCount === 0) {
     return {
       ok: true,
       data: {
@@ -82,63 +93,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       },
     };
   }
-
-  // Sample the most recent matching senders; rows arrive receivedAt DESC,
-  // so the first row per address is its most recent sighting.
-  const rows = (await ctx.prisma.emailMessage.findMany({
-    where: {
-      accountId: { in: accounts.map((a) => a.id) },
-      OR: [
-        { fromAddr: { contains: query, mode: "insensitive" } },
-        { fromName: { contains: query, mode: "insensitive" } },
-      ],
-    },
-    select: { fromAddr: true, fromName: true, receivedAt: true },
-    orderBy: { receivedAt: "desc" },
-    take: SAMPLE_SIZE,
-  })) as unknown as SenderRow[];
-
-  const byAddress = new Map<
-    string,
-    { address: string; name: string | null; lastSeenAt: Date; messageCount: number }
-  >();
-  for (const row of rows) {
-    const address = row.fromAddr.toLowerCase();
-    const existing = byAddress.get(address);
-    if (!existing) {
-      byAddress.set(address, {
-        address,
-        name: row.fromName || null,
-        lastSeenAt: row.receivedAt,
-        messageCount: 1,
-      });
-    } else {
-      existing.messageCount += 1;
-      // Rows are newest-first: keep the first (= most recent) non-empty name.
-      if (!existing.name && row.fromName) existing.name = row.fromName;
-    }
-  }
-
-  const contacts = Array.from(byAddress.values())
-    .sort(
-      (a, b) =>
-        b.messageCount - a.messageCount ||
-        b.lastSeenAt.getTime() - a.lastSeenAt.getTime(),
-    )
-    .slice(0, limit)
-    .map((c) => ({
-      address: c.address,
-      name: c.name,
-      lastSeenAt: c.lastSeenAt.toISOString(),
-      messageCount: c.messageCount,
-    }));
-
   return {
     ok: true,
     data: {
       type: "search_contacts",
-      contacts,
-      count: contacts.length,
+      contacts: data.contacts,
+      count: data.contacts.length,
       query,
     },
   };

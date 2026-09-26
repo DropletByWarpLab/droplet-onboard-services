@@ -14,14 +14,15 @@
  * the pinned `_service:mcp` principal the way the scenes routes do — that is
  * how the `start_agent_run` / `list_agent_runs` tools reach here from chat.
  * The mcp principal never acts as ITSELF: it names the chat user it acts for
- * (`onBehalfOf`, a username — the same stdio-trusted identity `_meta.userId`
- * already carries, WARP-202), and that person's role is checked here exactly
- * as a browser caller's is. A run is attributed to that person, whose reach
- * the worker re-resolves at every claim (WARP-1580), so delegation through
- * the model cannot launder privilege: a `family` member cannot start a run
- * from chat, and an `admin` who could gets a run that reaches only what they
- * reach. A person sees only their own runs; another person's run is a 404,
- * a wrong role is a 403.
+ * (`onBehalfOf` or `X-Nextcloud-User`, both the mcp-server's `ctx.userId`:
+ * `User.username` on stdio, `User.id` over HTTP — WARP-202, WARP-3098),
+ * resolved to one active person or refused, and that person's role is
+ * checked here exactly as a browser caller's is. A run is attributed to that
+ * person, whose reach the worker re-resolves at every claim (WARP-1580), so
+ * delegation through the model cannot launder privilege: a `family` member
+ * cannot start a run from chat, and an `admin` who could gets a run that
+ * reaches only what they reach. A person sees only their own runs; another
+ * person's run is a 404, a wrong role is a 403.
  *
  * WHAT IT DOES NOT DO. The worker owns every state transition
  * (agent-run-worker.service.ts); this file only enqueues, reads, and hands
@@ -51,6 +52,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { summarizeToolArguments } from "../services/confirmation-summary.js";
 import { WORKSPACE_ID } from "../services/workspace.service.js";
 import { decideCloudTurn } from "../services/cloud-access.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   isSupportedRrule,
   isSupportedTimezone,
@@ -129,11 +131,12 @@ async function resolveActor(
     const header = req.header("x-nextcloud-user");
     const named = onBehalfOf ?? (header && header.trim().length > 0 ? header.trim() : undefined);
     if (!named) return null;
-    const row = (await prisma.user.findFirst({
-      where: { username: named },
-      select: { id: true, username: true, role: true },
-    })) as Actor | null;
-    return row;
+    // WARP-3098: either value is `User.username` (stdio) or `User.id` (HTTP).
+    // Nobody, more than one person, or a deactivated person is nobody.
+    const resolved = await resolveAssertedUser(prisma, named);
+    if (!resolved.ok) return null;
+    const { id, username, role } = resolved.user;
+    return { id, username, role };
   }
   return { id: user.id, username: user.username, role: user.role };
 }
