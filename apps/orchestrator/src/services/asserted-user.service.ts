@@ -58,6 +58,9 @@ export interface AssertedUser {
    * matched. The calendar and reminder tables are keyed on it (`userId` holds
    * the username there); agent runs and routines record the person by it
    * (`triggeredBy`, activity refs, the tool context's `userId`).
+   * Audit rows record the person by it too (WARP-3102: the email
+   * send's `refs.actor`), so a `User.id` asserted over HTTP is recorded
+   * the way a username over stdio is.
    */
   username: string;
   role: string;
