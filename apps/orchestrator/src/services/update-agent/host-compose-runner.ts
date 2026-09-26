@@ -561,3 +561,97 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
     },
   };
 }
+
+/**
+ * WARP-3169 — the Nextcloud user-id shape the host helper's
+ * `nc-transfer-ownership` accepts (mirrors `validate_nc_user` in
+ * apply-update.sh): a strict subset of Nextcloud's charset with no space or
+ * quote, never a leading `-`, at most 64 characters. Checked here too, so a
+ * bad id never even reaches the docker socket.
+ */
+export const NC_USER_ID_RE = /^[A-Za-z0-9_.@][A-Za-z0-9_.@-]{0,63}$/;
+
+/**
+ * A hand-over that failed. `mayBePartial` is false ONLY when the helper
+ * proves it refused before occ ran (a validation or unknown-user die, with no
+ * start marker); a timeout, an occ failure or an exec fault may have moved
+ * some files already. `reason` is short and names no file.
+ */
+export class NcTransferError extends Error {
+  constructor(
+    message: string,
+    readonly mayBePartial = false,
+    readonly reason = "",
+  ) {
+    super(message);
+    this.name = "NcTransferError";
+  }
+}
+
+/** The helper logs this line right before it runs occ (apply-update.sh). */
+const TRANSFER_STARTED_RE = /^\[apply-update\] nc-transfer-ownership /m;
+
+/**
+ * WARP-3169 — move every file `from` owns into a new folder in `to`'s home
+ * (`occ files:transfer-ownership`, run by the host helper inside the
+ * nextcloud container). Resolves with the folder Nextcloud created, parsed
+ * from occ's "Transferring files to <path> ..." line (null if occ did not
+ * print it). Throws NcTransferError on any failure.
+ *
+ * ponytail: synchronous, bounded by the helper's 600 s `timeout`. A home too
+ * big to move in that window fails cleanly; an async job would lift it.
+ */
+export async function ncTransferOwnership(args: {
+  exec: ExecFn;
+  scriptPath: string;
+  composeFile: string;
+  from: string;
+  to: string;
+  timeoutMs?: number;
+  logger?: pino.Logger;
+}): Promise<{ folder: string | null }> {
+  const log = args.logger ?? defaultLog;
+  if (!NC_USER_ID_RE.test(args.from) || !NC_USER_ID_RE.test(args.to)) {
+    throw new NcTransferError("A Nextcloud account name has characters the hand-over can't accept.");
+  }
+  if (args.from === args.to) {
+    throw new NcTransferError("The recipient can't be the person being deleted.");
+  }
+  let stdout: string;
+  try {
+    ({ stdout } = await args.exec(
+      args.scriptPath,
+      ["nc-transfer-ownership", "--compose-file", args.composeFile, "--from", args.from, "--to", args.to],
+      { timeoutMs: args.timeoutMs ?? 660_000 },
+    ));
+  } catch (err) {
+    // Never occ's stdout or its stderr body: both can name files. Only the
+    // helper's own ERROR line (pre-transfer refusals name user ids only) or
+    // the exit code / timeout.
+    const stderr = (err as { stderr?: unknown }).stderr;
+    const text = typeof stderr === "string" ? stderr : "";
+    const msg = err instanceof Error ? err.message : String(err);
+    const refusedBeforeStart =
+      !TRANSFER_STARTED_RE.test(text) && /^\[apply-update\] ERROR: /m.test(text);
+    const reason = refusedBeforeStart
+      ? (/^\[apply-update\] ERROR: (.*)$/m.exec(text)?.[1] ?? "").slice(0, 200)
+      : /exited 124\b|did not finish within|timed? ?out/i.test(msg)
+        ? "timed out"
+        : /exited (\d+)/.exec(msg)
+          ? `exited ${/exited (\d+)/.exec(msg)?.[1]}`
+          : "helper failed";
+    log.error(
+      { event: "people.handover_transfer_failed", reason, mayBePartial: !refusedBeforeStart },
+      "Nextcloud hand-over failed",
+    );
+    throw new NcTransferError(
+      refusedBeforeStart
+        ? "The files could not be handed over, so nothing was changed."
+        : `The hand-over didn't finish (${reason}). Some files may already be in the recipient's "Transferred from…" folder. Nothing was deleted.`,
+      !refusedBeforeStart,
+      reason,
+    );
+  }
+  const target = /^Transferring files to (.+?)(?: \.\.\.)?\s*$/m.exec(stdout)?.[1];
+  return { folder: target ? path.posix.basename(target) : null };
+}

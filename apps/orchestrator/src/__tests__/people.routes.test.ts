@@ -104,6 +104,12 @@ vi.mock("../services/nextcloud.client.js", () => ({
   ncDeleteUser: ncDeleteUserMock,
 }));
 
+// WARP-3169 — the hand-over's exec boundary (host helper).
+const { hostExecMock } = vi.hoisted(() => ({ hostExecMock: vi.fn() }));
+vi.mock("../services/update-agent/host-exec.js", () => ({
+  getOtaHost: () => ({ exec: hostExecMock, helperPath: "/h/apply-update.sh", composeFile: "/h/c.yml", runner: {} }),
+}));
+
 import { createPeopleRouter } from "../routes/people.js";
 import type { ScopeName } from "../middleware/scope.js";
 import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
@@ -202,10 +208,19 @@ function createPrismaMock(initialRows: MockUser[] = []) {
           where,
           select,
         }: {
-          where: { id: string };
+          where: { id?: string; nextcloudUsername?: string; username?: string };
           select?: any;
         }) => {
-          return project(rows.get(where.id) ?? null, select);
+          // WARP-3169: the hand-over resolves its recipient by handle.
+          const row =
+            where.id !== undefined
+              ? rows.get(where.id)
+              : [...rows.values()].find(
+                  (r: any) =>
+                    (where.nextcloudUsername !== undefined && r.nextcloudUsername === where.nextcloudUsername) ||
+                    (where.username !== undefined && r.username === where.username),
+                );
+          return project(row ?? null, select);
         },
       ),
       update: vi.fn(
@@ -218,11 +233,17 @@ function createPrismaMock(initialRows: MockUser[] = []) {
           data: Partial<MockUser>;
           select?: any;
         }) => {
-          const existing = rows.get(where.id);
+          const existing: any = rows.get(where.id);
           // WARP-1526 (pr-reviewer #1229 B2): honour the optimistic-
           // concurrency guard — a `where` that pins `role` must MISS (real
           // Prisma throws P2025) when the stored row no longer carries it.
-          if (!existing || (where.role !== undefined && existing.role !== where.role)) {
+          // WARP-3169: same for a pinned deletion state.
+          if (
+            !existing ||
+            (where.role !== undefined && existing.role !== where.role) ||
+            ((where as any).deletionStatus !== undefined &&
+              (existing.deletionStatus ?? "NONE") !== (where as any).deletionStatus)
+          ) {
             const err: any = new Error("not found");
             err.code = "P2025";
             throw err;
@@ -1049,7 +1070,7 @@ describe("DELETE /api/people/:id", () => {
     expect(ncSetUserEnabledMock).toHaveBeenCalledWith(expect.any(String), "alice-nc", false);
     expect(prisma.user.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "u1", role: "family" },
+        where: { id: "u1", role: "family", deletionStatus: "NONE" },
         data: expect.objectContaining({ directoryStatus: "DEACTIVATED", deletionStatus: "PENDING" }),
       }),
     );
@@ -1109,6 +1130,50 @@ describe("DELETE /api/people/:id", () => {
     const app = buildApp(prisma);
     const res = await request(app).delete("/api/people/nope");
     expect(res.status).toBe(404);
+  });
+
+  describe("WARP-3169 hand-over (shares the auth route's path)", () => {
+    const seed = () => [
+      { ...seedUser({ id: "u1", username: "alice", nextcloudUsername: "alice" }), deletionStatus: "NONE" },
+      { ...seedUser({ id: "u2", username: "bob", nextcloudUsername: "bob" }), deletionStatus: "NONE" },
+      { ...seedUser({ id: "u3", username: "gus", nextcloudUsername: "gus", role: "guest" }), deletionStatus: "NONE" },
+    ] as any[];
+
+    beforeEach(() => {
+      hostExecMock.mockReset();
+      ncSetUserEnabledMock.mockClear();
+      ncDeleteUserMock.mockClear();
+      revokeAllSessionsMock.mockClear();
+    });
+
+    it("refuses an external guest as recipient and changes nothing", async () => {
+      const prisma = createPrismaMock(seed());
+      const res = await request(buildApp(prisma))
+        .delete("/api/people/u1")
+        .send({ disposition: "handover", recipientId: "u3" });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("RECIPIENT_ROLE");
+      expect(hostExecMock).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(ncSetUserEnabledMock).not.toHaveBeenCalled();
+    });
+
+    it("a failed transfer returns an error and leaves the person as they were", async () => {
+      hostExecMock.mockRejectedValue(new Error("exited 1"));
+      const prisma = createPrismaMock(seed());
+      const res = await request(buildApp(prisma))
+        .delete("/api/people/u1")
+        .send({ disposition: "handover", recipientId: "u2" });
+      expect(res.status).toBe(502);
+      // No helper ERROR line proves occ never ran, so it may be partial.
+      expect(res.body.code).toBe("HANDOVER_INCOMPLETE");
+      expect(hostExecMock).toHaveBeenCalledTimes(1);
+      // The HANDING_OVER claim was taken and released: state as it was.
+      expect(prisma.rows.get("u1")).toMatchObject({ directoryStatus: "ACTIVE", deletionStatus: "NONE" });
+      expect(ncSetUserEnabledMock).not.toHaveBeenCalled();
+      expect(ncDeleteUserMock).not.toHaveBeenCalled();
+      expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    });
   });
 });
 

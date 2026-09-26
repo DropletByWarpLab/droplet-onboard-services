@@ -118,7 +118,13 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
 // before OCS is asked to provision an admin-tier account into it.
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
-import { deleteDispositionSchema, scheduleUserDeletion } from "../services/leaver-deletion.service.js";
+import {
+  deleteDispositionSchema,
+  handOverAndDeleteUser,
+  HandoverRefusedError,
+  scheduleUserDeletion,
+  UNKNOWN_DISPOSITION_BODY,
+} from "../services/leaver-deletion.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -3904,8 +3910,9 @@ export function createProtectedAuthRouter(
   // belong to the business, so the request must say what happens to them:
   // `{ disposition: "retention" }` keeps everything for RETENTION_DAYS, then the
   // nightly leaver-deletion job (leaver-deletion.service.ts) completes the
-  // removal. Until then an admin can cancel. Hand-over to a recipient is not
-  // available yet (see that service's header), so it is the only disposition.
+  // removal. Until then an admin can cancel. WARP-3169: or
+  // `{ disposition: "handover", recipientId }` moves the files to an active
+  // owner/admin/member first and completes the deletion at once.
   //
   // What happens NOW is the revocation: the same guarded, SERIALIZABLE write
   // Deactivate makes (WARP-1526 rails 1/2/4/5, directoryStatus=DEACTIVATED),
@@ -3920,10 +3927,7 @@ export function createProtectedAuthRouter(
     try {
       const parsed = deleteDispositionSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
-        res.status(400).json({
-          error: "Unknown disposition. The only one available is \"retention\" (keep the files 30 days, then delete).",
-          code: "UNKNOWN_DISPOSITION",
-        });
+        res.status(400).json(UNKNOWN_DISPOSITION_BODY);
         return;
       }
       // WARP-2858: via the shared resolver so SSO/SCIM rows are removable.
@@ -3936,6 +3940,23 @@ export function createProtectedAuthRouter(
         res.status(409).json({
           error: "This account has no directory entry, so its deletion can't be scheduled.",
           code: "NO_DIRECTORY_ROW",
+        });
+        return;
+      }
+      if (parsed.data.disposition === "handover") {
+        // WARP-3169: transfer first, then delete at once. A failed transfer
+        // changes nothing (HandoverRefusedError below).
+        const handed = await handOverAndDeleteUser(prisma, row, {
+          guardActor: { id: req.user?.id, role: req.user?.role },
+          actorUsername: req.user?.username ?? null,
+          actor: actorFromRequest(req),
+          recipientId: parsed.data.recipientId,
+        });
+        res.json({
+          status: handed.removed ? "deleted" : "deletion_retrying",
+          username: req.params.username,
+          recipient: handed.recipient,
+          folder: handed.folder,
         });
         return;
       }
@@ -3953,6 +3974,10 @@ export function createProtectedAuthRouter(
         ...(scheduled.ncMirror ? { ncMirror: scheduled.ncMirror } : {}),
       });
     } catch (err) {
+      if (err instanceof HandoverRefusedError) {
+        res.status(err.status).json(err.toJSON());
+        return;
+      }
       if (err instanceof RoleMutationRefusedError) {
         res.status(err.status).json(err.toJSON());
         return;

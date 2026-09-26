@@ -128,6 +128,18 @@ vi.mock("../services/auth-denylist.service.js", () => ({
   isUserDenied: vi.fn().mockResolvedValue(false),
 }));
 
+// WARP-3169 — the hand-over transfer runs through the host helper; the exec
+// boundary is the seam, so the argv ncTransferOwnership builds is asserted.
+const { hostExecMock } = vi.hoisted(() => ({ hostExecMock: vi.fn() }));
+vi.mock("../services/update-agent/host-exec.js", () => ({
+  getOtaHost: () => ({
+    exec: hostExecMock,
+    helperPath: "/opt/droplet/docker/ota/apply-update.sh",
+    composeFile: "/opt/droplet/docker/docker-compose.yml",
+    runner: {},
+  }),
+}));
+
 import { createProtectedAuthRouter } from "./auth.js";
 import { purgeDueDeletions } from "../services/leaver-deletion.service.js";
 import * as nc from "../services/nextcloud.client.js";
@@ -168,7 +180,11 @@ function createPrismaMock(seed: any[] = []) {
     }),
     update: vi.fn(async ({ where, data }: any) => {
       const idx = users.findIndex(
-        (u) => u.id === where.id && (where.role === undefined || u.role === where.role),
+        (u) =>
+          u.id === where.id &&
+          (where.role === undefined || u.role === where.role) &&
+          // WARP-3169: the claim / release / revoke pin the deletion state.
+          (where.deletionStatus === undefined || u.deletionStatus === where.deletionStatus),
       );
       if (idx < 0) {
         const err: any = new Error("not found");
@@ -419,7 +435,7 @@ describe("DELETE /api/auth/users/:username — WARP-3113 schedules, never purges
     await del(buildApp(prisma), "alice");
     expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
     expect(prisma.user.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: "u-alice", role: "family" } }),
+      expect.objectContaining({ where: { id: "u-alice", role: "family", deletionStatus: "NONE" } }),
     );
   });
 
@@ -616,5 +632,187 @@ describe("WARP-3113 review follow-ups", () => {
     expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
     expect(nc.ncDeleteUser).not.toHaveBeenCalled();
     expect(prisma._users[0].deletionStatus).toBe("PENDING");
+  });
+});
+
+
+describe("DELETE /api/auth/users/:username — WARP-3169 hand-over", () => {
+  const BOB = {
+    id: "u-bob",
+    username: "bob",
+    nextcloudUsername: "bob",
+    role: "family",
+    directoryStatus: "ACTIVE",
+    deletionStatus: "NONE",
+  };
+  const OCC_OUT =
+    "Analysing files of alice ...\nTransferring files to bob/files/transferred from alice on 2026-09-25 22-40-00 ...\nRestoring shares ...\n";
+
+  function handover(app: any, recipientId?: string) {
+    return request(app)
+      .delete("/api/auth/users/alice")
+      .send({ disposition: "handover", ...(recipientId !== undefined ? { recipientId } : {}) });
+  }
+
+  function expectAliceUntouched(prisma: any) {
+    const alice = prisma._users.find((u: any) => u.id === "u-alice");
+    expect(alice).toMatchObject({ directoryStatus: "ACTIVE", deletionStatus: "NONE" });
+    expect(nc.ncSetUserEnabled).not.toHaveBeenCalled();
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+  }
+
+  beforeEach(() => {
+    hostExecMock.mockReset();
+    hostExecMock.mockResolvedValue({ stdout: OCC_OUT, stderr: "" });
+  });
+
+  it("transfers the files, then deletes at once, and audits who handed what to whom", async () => {
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: "deleted",
+      recipient: "bob",
+      folder: "transferred from alice on 2026-09-25 22-40-00",
+    });
+    expect(hostExecMock).toHaveBeenCalledTimes(1);
+    expect(hostExecMock.mock.calls[0][0]).toBe("/opt/droplet/docker/ota/apply-update.sh");
+    expect(hostExecMock.mock.calls[0][1]).toEqual([
+      "nc-transfer-ownership",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--from",
+      "alice",
+      "--to",
+      "bob",
+    ]);
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toBeUndefined();
+    const handed = (recordActivity as any).mock.calls.find(
+      (c: any[]) => c[0].what === "Files handed over",
+    );
+    expect(handed?.[0].refs).toMatchObject({
+      actor: "user-owner",
+      targetUsername: "alice",
+      recipientUsername: "bob",
+      folder: "transferred from alice on 2026-09-25 22-40-00",
+    });
+    // The transfer is recorded before the account is removed.
+    const order = (recordActivity as any).mock.calls.map((c: any[]) => c[0].what);
+    expect(order.indexOf("Files handed over")).toBeLessThan(order.length - 1);
+  });
+
+  it.each([
+    ["an external guest", { ...BOB, role: "guest" }, "u-bob", "RECIPIENT_ROLE"],
+    ["a deactivated person", { ...BOB, directoryStatus: "DEACTIVATED" }, "u-bob", "RECIPIENT_NOT_ACTIVE"],
+    ["a person already pending deletion", { ...BOB, deletionStatus: "PENDING" }, "u-bob", "RECIPIENT_NOT_ACTIVE"],
+    ["the leaver", BOB, "u-alice", "RECIPIENT_IS_LEAVER"],
+    ["someone unknown", BOB, "u-nobody", "RECIPIENT_UNKNOWN"],
+    // By id only: a username or Nextcloud handle is not a recipient id.
+    ["a username instead of an id", BOB, "bob", "RECIPIENT_UNKNOWN"],
+  ])("refuses %s as recipient and changes nothing", async (_label, recipientRow, handle, code) => {
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), recipientRow]);
+    const res = await handover(buildApp(prisma, "owner"), handle);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe(code);
+    expect(hostExecMock).not.toHaveBeenCalled();
+    expectAliceUntouched(prisma);
+  });
+
+  it("refuses a hand-over with no recipient", async () => {
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("RECIPIENT_REQUIRED");
+    expect(hostExecMock).not.toHaveBeenCalled();
+    expectAliceUntouched(prisma);
+  });
+
+  it("a timeout after occ started says the result may be partial, audits it, and deletes nothing", async () => {
+    const err: any = new Error("OTA host helper nc-transfer-ownership exited 124: ");
+    err.stderr = "[apply-update] nc-transfer-ownership alice -> bob\n";
+    hostExecMock.mockRejectedValue(err);
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("HANDOVER_INCOMPLETE");
+    expect(res.body.error).toMatch(/may already be in bob's "Transferred from/);
+    expect(res.body.error).toMatch(/Nothing was deleted/);
+    expectAliceUntouched(prisma);
+    const failed = (recordActivity as any).mock.calls.find(
+      (c: any[]) => c[0].what === "File hand-over failed, may be partial",
+    );
+    expect(failed?.[0].refs).toMatchObject({
+      actor: "user-owner",
+      targetUsername: "alice",
+      recipientUsername: "bob",
+      reason: "timed out",
+      mayBePartial: true,
+    });
+  });
+
+  it("a second hand-over of the same leaver while one runs is refused with 409 and never transfers", async () => {
+    let finish: (v: any) => void = () => undefined;
+    hostExecMock.mockImplementation(() => new Promise((r) => (finish = r)));
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const app = buildApp(prisma, "owner");
+
+    const first = handover(app, "u-bob").then((r) => r);
+    await vi.waitFor(() => expect(hostExecMock).toHaveBeenCalledTimes(1));
+    expect(prisma._users.find((u: any) => u.id === "u-alice").deletionStatus).toBe("HANDING_OVER");
+
+    const second = await handover(app, "u-bob");
+    expect(second.status).toBe(409);
+    // A retention delete can't overwrite the claim either.
+    const retain = await del(app, "alice");
+    expect(retain.status).toBe(409);
+    expect(hostExecMock).toHaveBeenCalledTimes(1);
+
+    finish({ stdout: OCC_OUT, stderr: "" });
+    expect((await first).status).toBe(200);
+  });
+
+  it("a failed transfer releases the claim back to PENDING for a person on retention", async () => {
+    hostExecMock.mockRejectedValue(new Error("exited 1"));
+    const pending = { ...seededAlice(), directoryStatus: "DEACTIVATED", deletionStatus: "PENDING", deletionDueAt: new Date(Date.now() + 5 * DAY) };
+    const prisma = createPrismaMock([OWNER_ROW, pending, BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+    expect(res.status).toBe(502);
+    expect(prisma._users.find((u: any) => u.id === "u-alice").deletionStatus).toBe("PENDING");
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+  });
+
+  it("a failed transfer returns an error and changes nothing — no deactivation, no delete", async () => {
+    const err: any = new Error("OTA host helper nc-transfer-ownership exited 1");
+    err.stderr = "[apply-update] ERROR: unknown Nextcloud user: bob\n";
+    hostExecMock.mockRejectedValue(err);
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+
+    expect(res.status).toBe(502);
+    // The helper refused before occ ran (no start marker), so nothing moved.
+    expect(res.body.code).toBe("HANDOVER_FAILED");
+    expect(res.body.error).toMatch(/nothing was changed/);
+    expectAliceUntouched(prisma);
+    expect(
+      (recordActivity as any).mock.calls.some((c: any[]) => c[0].what === "Files handed over"),
+    ).toBe(false);
+  });
+
+  it("still refuses the owner as the leaver before any transfer", async () => {
+    const prisma = createPrismaMock([
+      { ...OWNER_ROW, id: "own2", username: "o2", nextcloudUsername: "o2" },
+      OWNER_ROW,
+      BOB,
+    ]);
+    const res = await request(buildApp(prisma, "admin"))
+      .delete("/api/auth/users/o2")
+      .send({ disposition: "handover", recipientId: "u-bob" });
+    expect(res.status).toBe(403);
+    expect(hostExecMock).not.toHaveBeenCalled();
   });
 });

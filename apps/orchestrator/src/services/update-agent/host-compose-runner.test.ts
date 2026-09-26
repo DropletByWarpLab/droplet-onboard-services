@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "nod
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ncTransferOwnership, NcTransferError } from "./host-compose-runner.js";
 import {
   createHostComposeRunner,
   parseEnvReconcileReport,
@@ -500,5 +501,72 @@ describe("WARP-3007 — the helper runs on the host", () => {
       DROPLET_OTA_GITHUB_TOKEN: "ghp_secret",
     });
     expect(seen.filter((c) => c.sub !== "pull-images").every((c) => c.env === undefined)).toBe(true);
+  });
+});
+
+
+describe("ncTransferOwnership (WARP-3169 leaver hand-over)", () => {
+  const base = { scriptPath: "/h/apply-update.sh", composeFile: "/h/compose.yml" };
+
+  it("passes both ids as separate argv entries and parses the folder", async () => {
+    const exec = vi.fn().mockResolvedValue({
+      stdout: "Transferring files to anna@corp.example/files/transferred from tomas.w on 2026-09-25 10-00-00 ...\n",
+      stderr: "",
+    });
+    const out = await ncTransferOwnership({ ...base, exec, from: "tomas.w", to: "anna@corp.example" });
+    expect(exec).toHaveBeenCalledWith(
+      "/h/apply-update.sh",
+      ["nc-transfer-ownership", "--compose-file", "/h/compose.yml", "--from", "tomas.w", "--to", "anna@corp.example"],
+      { timeoutMs: 660_000 },
+    );
+    expect(out.folder).toBe("transferred from tomas.w on 2026-09-25 10-00-00");
+  });
+
+  it.each(["--", "-rf", "--help", "a;rm -rf /", "a b", "a'b", "a$(id)", "a/../b", "a\nb", "", "x".repeat(65)])(
+    "refuses %j before touching the exec boundary",
+    async (bad) => {
+      const exec = vi.fn();
+      await expect(ncTransferOwnership({ ...base, exec, from: bad, to: "anna" })).rejects.toBeInstanceOf(NcTransferError);
+      await expect(ncTransferOwnership({ ...base, exec, from: "tomas", to: bad })).rejects.toBeInstanceOf(NcTransferError);
+      expect(exec).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses a transfer to the same user", async () => {
+    const exec = vi.fn();
+    await expect(ncTransferOwnership({ ...base, exec, from: "anna", to: "anna" })).rejects.toBeInstanceOf(NcTransferError);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it("a helper failure becomes an NcTransferError and never logs occ's stdout", async () => {
+    const err: any = new Error("exited 1");
+    err.stdout = "secret-looking/file/name.pdf";
+    err.stderr = "noise\n[apply-update] ERROR: unknown Nextcloud user: anna";
+    const logger: any = { error: vi.fn() };
+    await expect(
+      ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(err), from: "tomas", to: "anna", logger }),
+    ).rejects.toBeInstanceOf(NcTransferError);
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).toContain("unknown Nextcloud user: anna");
+    expect(logged).not.toContain("name.pdf");
+  });
+
+  it("a timeout after occ started is flagged as possibly partial; a pre-start refusal is not", async () => {
+    const timedOut = new Error("OTA host exec: nc-transfer-ownership did not finish within 660000 ms");
+    const e1 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(timedOut), from: "tomas", to: "anna", logger: { error: vi.fn() } as any }).catch((e) => e);
+    expect(e1).toMatchObject({ mayBePartial: true, reason: "timed out" });
+    expect(e1.message).toMatch(/may already be in/);
+
+    const refused: any = new Error("exited 1");
+    refused.stderr = "[apply-update] ERROR: unknown Nextcloud user: anna\n";
+    const e2 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(refused), from: "tomas", to: "anna", logger: { error: vi.fn() } as any }).catch((e) => e);
+    expect(e2).toMatchObject({ mayBePartial: false, reason: "unknown Nextcloud user: anna" });
+
+    const occFailed: any = new Error("OTA host helper nc-transfer-ownership exited 1: boom");
+    occFailed.stderr = "[apply-update] nc-transfer-ownership tomas -> anna\nboom /files/secret.pdf\n";
+    const logger: any = { error: vi.fn() };
+    const e3 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(occFailed), from: "tomas", to: "anna", logger }).catch((e) => e);
+    expect(e3).toMatchObject({ mayBePartial: true, reason: "exited 1" });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret.pdf");
   });
 });
