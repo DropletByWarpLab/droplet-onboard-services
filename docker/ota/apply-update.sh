@@ -138,6 +138,14 @@
 #   rm-self-swap-helper --update-id ID
 #       `docker rm` (deliberately never -f) the self-swap helper container
 #       for ID; the daemon itself refuses a still-running helper.
+#   rotate-audit-key
+#       WARP-3165: retire the audit chain's HMAC key. Archives
+#       <root>/data/secrets/audit.key to data/secrets/audit-retired/
+#       <UTC stamp>-<keyId>.key FIRST, then writes 32 fresh random bytes
+#       over audit.key IN PLACE (same inode: the orchestrator's single-file
+#       read-only bind mount sees the new bytes). Prints one JSON line
+#       {"previousKeyId","newKeyId"} (ids only, never key bytes). Used by
+#       POST /api/activity/rotate-key and scripts/rotate-audit-key.sh.
 #
 # ── TEST / DRY-RUN HOOK ──
 #   DROPLET_OTA_APPLY_DRY_RUN=1  — print each `docker`/`docker compose` command
@@ -830,6 +838,46 @@ cmd_rm_self_swap_helper() {
   run docker rm "$name"
 }
 
+cmd_rotate_audit_key() {
+  local secrets key retired id new_id stamp archived fresh
+  secrets="$(config_root)/data/secrets"
+  key="$secrets/audit.key"
+  retired="$secrets/audit-retired"
+  fresh="$secrets/audit.key.new"
+  [ -f "$key" ] && [ -s "$key" ] || die "no audit key at $key"
+  id="$(sha256sum "$key" | cut -c1-16)"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archived="$retired/$stamp-$id.key"
+  log "rotate-audit-key: retiring $id"
+  if [ -n "$DRY_RUN" ]; then
+    printf 'DRY-RUN: archive %q -> %q, then rewrite it in place\n' "$key" "$archived"
+    return 0
+  fi
+  [ ! -e "$archived" ] || die "$archived already exists"
+  mkdir -p "$retired"
+  chmod 700 "$retired"
+  # 1. Archive, durably, and prove the copy before the original changes: a
+  #    lost old key means every row it signed stops verifying.
+  cp -p "$key" "$archived.tmp"
+  sync
+  mv "$archived.tmp" "$archived"
+  cmp -s "$key" "$archived" || die "archived copy of $id does not match; audit.key left unchanged"
+  # 2. The new key: staged next to it, then copied over IN PLACE (never
+  #    mv: a rename swaps the inode and the container's file bind keeps the
+  #    old one). If this step is interrupted, audit.key.new holds the new
+  #    key and the archive holds the old one.
+  head -c 32 /dev/urandom > "$fresh"
+  chmod 600 "$fresh"
+  [ "$(wc -c < "$fresh" | tr -d ' ')" = "32" ] || die "could not generate a new key; audit.key left unchanged"
+  cat "$fresh" > "$key"
+  sync
+  cmp -s "$fresh" "$key" || die "audit.key was not fully rewritten; the new key is in $fresh, the old one in $archived"
+  rm -f "$fresh"
+  new_id="$(sha256sum "$key" | cut -c1-16)"
+  log "rotate-audit-key: $id -> $new_id"
+  printf '{"previousKeyId":"%s","newKeyId":"%s"}\n' "$id" "$new_id"
+}
+
 # =============================================================================
 # Arg parsing + dispatch
 # =============================================================================
@@ -870,5 +918,6 @@ case "$SUBCOMMAND" in
   list-self-swap-helpers) cmd_list_self_swap_helpers ;;
   capture-self-swap-logs) cmd_capture_self_swap_logs ;;
   rm-self-swap-helper) cmd_rm_self_swap_helper ;;
+  rotate-audit-key) cmd_rotate_audit_key ;;
   *) die "unknown subcommand: $SUBCOMMAND" ;;
 esac
