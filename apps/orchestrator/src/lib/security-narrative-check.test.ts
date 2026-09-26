@@ -190,6 +190,18 @@ describe("checkNarrative", () => {
       "break-in",
       "stole",
       "stolen",
+      // #2423 review 7: the accusations the list missed.
+      "burglary",
+      "burglaries",
+      "theft",
+      "thefts",
+      "steal",
+      "steals",
+      "stealing",
+      "robbery",
+      "robberies",
+      "break in",
+      "break-ins",
     ])("refuses %s", (word) => {
       expect(checkNarrative(`Someone was seen at 2:14 AM, ${word.toUpperCase()} it seems.`, input(), NAMES)).toEqual({ ok: false, rule: "WORDS" });
     });

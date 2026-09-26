@@ -24,8 +24,10 @@
  *          when that is an input time; an hour is its `:00`, so "around 2 AM"
  *          is not 2:14 AM). No times in, none out;
  *   WORDS  monitor(ed), alarm, armed, secure(d), protected, guard(ed),
- *          zone(s), intruder(s), burglar(s), thief, thieves, break-in,
- *          stole(n) — the page never promises protection or accuses anyone.
+ *          zone(s), intruder(s), burglar(s), burglary/burglaries, thief,
+ *          thieves, theft(s), steal(s)/stealing, stole(n), robbery/robberies,
+ *          break-in(s) and "break in(s)" — the page never promises protection
+ *          or accuses anyone.
  *          Read with the input's own name phrases set aside (#2423 review 4):
  *          "Secure storage" or "Loading zone camera" is what someone typed.
  */
@@ -40,7 +42,8 @@ export type NarrativeCheckResult = { ok: true; text: string } | { ok: false; rul
 
 /** Words the prompt itself tells the model to write: never a name, whoever is called that. */
 const PROMPT_WORDS: ReadonlySet<string> = new Set(["someone", "person", "people", "droplet"]);
-const WORDS = /\b(?:monitor(?:ed)?|alarm|armed|secured?|protected|guard(?:ed)?|zones?|intruders?|burglars?|thief|thieves|break-in|stolen?|stole)\b/i;
+const WORDS =
+  /\b(?:monitor(?:ed)?|alarm|armed|secured?|protected|guard(?:ed)?|zones?|intruders?|burglar(?:s|y|ies)?|thief|thieves|thefts?|steal(?:s|ing)?|stolen?|stole|robber(?:y|ies)|break[- ]ins?)\b/i;
 /** `2:14`, `2:14 AM`, `2:14am`, `2:14 p.m.`: the clock, then the meridiem's letter if any. */
 const CLOCK = /(?<![\d:.])\b(\d{1,2}:\d{2})(?!\d)(?:\s?([ap])\.?\s?m\b\.?)?/gi;
 /** `3 AM`, `3am`, `3 a.m.`: an hour with a meridiem and no minutes (#2423 review 6). */
