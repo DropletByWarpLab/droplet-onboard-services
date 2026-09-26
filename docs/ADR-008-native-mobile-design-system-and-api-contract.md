@@ -325,3 +325,5 @@ iOS realigned in `droplet-ios` PR #1; Android + Windows to follow.
 **Scope note:** TOTP/MFA and SCIM directory sync are LIVE on `main` (this
 ADR predated them) — native clients MUST handle the `TOTP_REQUIRED`
 login challenge. WebAuthn is not part of the app login path.
+
+> **Amended by [ADR-060](ADR-060-native-windows-hello-relying-party.md) (2026-09-25, conditional on its spike S2; until S2 passes, the sentence above stands as written):** the Windows app is the one exception. Its shell runs a native WebAuthn (Windows Hello) ceremony against a per-box native relying party over its pinned channel, and the WebView redeems a single-use code for the ordinary cookie session. The shell still never holds a password or a session token.

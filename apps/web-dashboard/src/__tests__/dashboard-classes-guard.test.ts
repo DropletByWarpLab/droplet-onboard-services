@@ -26,7 +26,7 @@
  *     things to drift, for zero extra signal, since the shell guard
  *     already runs in the same CI leg as this suite and locally via
  *     `npm run lint:dashboard-classes`.
- *   - Guard 1 is a fixed nine-name list that genuinely benefits from
+ *   - Guard 1 is a fixed ten-name list that genuinely benefits from
  *     being asserted twice. A 130-entry ratchet does not.
  *
  * Guard 6 (WARP-1356, dead focus styling: a `focus:` utility defeated by
@@ -56,6 +56,11 @@ const BAD_CLASSES: ReadonlyArray<string> = [
   "text-positive",
   "text-warning",
   "bg-warning",
+  // The on-accent ink token is wired as `accent.foreground` in
+  // tailwind.config.ts, so the utility is `text-accent-foreground`. This
+  // spelling generates nothing: the label falls through to body text, which
+  // is #000 in light — 3.34:1 on the #4f46e5 primary fill.
+  "text-on-accent",
 ];
 
 const SRC_ROOT = resolve(__dirname, "..");

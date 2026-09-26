@@ -21,6 +21,7 @@ import { Router, Request, Response } from "express";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { recordAccessDenied } from "../middleware/auth.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 const logger = createLogger("admin-rag-eval");
 
@@ -29,11 +30,6 @@ const logger = createLogger("admin-rag-eval");
 // are file reads — so a short timeout is plenty. On timeout we surface
 // 503 the same as a connection refusal.
 const PROXY_TIMEOUT_MS = 10_000;
-
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
 
 function ragEvalBaseUrl(): string | null {
   const url = process.env.RAG_EVAL_URL;
@@ -111,7 +107,7 @@ export function createAdminRagEvalRouter(): Router {
 
   // Single admin gate for the whole sub-tree.
   router.use("/admin/rag-eval", (req: Request, res: Response, next) => {
-    if (!isAdmin(req)) {
+    if (!isOwnerOrAdmin(req)) {
       // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
       // local isAdmin() denials must not be silent (requireRole parity).
       recordAccessDenied(req, "role-not-permitted");
