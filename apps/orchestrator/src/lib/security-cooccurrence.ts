@@ -26,11 +26,20 @@
  *     (anchor source, candidate, direction) scored.
  *   · Confidence = the Wilson 95 % lower bound of k / n.
  *
- * Camera ↔ camera (PR-1's only arm; the lock arm is PR-4) must pass BOTH
- * directions: A's visits → B, and B's visits → A. The pair takes the lower
- * gate and the lower confidence. For each candidate camera B the whole view
- * and every part seen in B's sightings are scored; the best part F* is taken
- * when it keeps ≥ 90 % of the whole camera's hits.
+ * Camera ↔ camera (PR-1's arm) must pass BOTH directions: A's visits → B,
+ * and B's visits → A. The pair takes the lower gate and the lower confidence.
+ * For each candidate camera B the whole view and every part seen in B's
+ * sightings are scored; the best part F* is taken when it keeps ≥ 90 % of the
+ * whole camera's hits.
+ *
+ * Lock ↔ camera (P4 PR-4, D31) is ONE direction, the same statistic whichever
+ * side a person placed in the area: the anchors are the lock's CHANGES
+ * (`isLockChange`, lib/security-lock-changes.ts — 🔴 live only, never a
+ * `polled` row, never the baseline, only locked / unlocked / unlatched), the
+ * coverage a camera view's people. A lock anchor pairs with every camera (and
+ * part, chosen as above); a camera anchor pairs with every lock that changed
+ * live in W. Gated by `lockCamera`. Both arms of a run share ONE m
+ * (`scoreLinkPairs`), and per area and candidate the best gate wins.
  *
  * Names (§6.2.4) are a tiebreak and a supporting line, NEVER evidence: they
  * only decide between parts that tie on hits, gate and lift, so flipping every
@@ -43,6 +52,7 @@
 import { poissonUpperTail } from "./security-stats.js";
 import type { DirectionStatsV1, LinkEvidenceV1 } from "./security-link-evidence.js";
 import { LINK_EVIDENCE_MAX_SAMPLES } from "./security-link-evidence.js";
+import { isLockChange } from "./security-lock-changes.js";
 
 export const LINK_RULES_VERSION = 1;
 
@@ -386,19 +396,23 @@ export function blindSpells(marks: readonly StatusMark[], cameras: Iterable<stri
 
 // ── camera ↔ camera: anchors × candidates (§6.2.2, §6.2.3) ─────────────────
 
-/** A person-set active camera / camera_zone link in an active area (§6.2.1). */
+/**
+ * A person-set active link in an active area (§6.2.1): a camera, a part of a
+ * view, or (PR-4) a door lock.
+ */
 export interface LinkAnchor {
   linkId: string;
   zoneId: string;
   zoneName: string;
-  sourceKind: "camera" | "camera_zone";
+  sourceKind: "camera" | "camera_zone" | "lock";
   sourceRef: string;
-  /** The anchor camera's display name. */
+  /** The anchor camera's (or lock's) display name. */
   label: string;
 }
 
 /** One (area, candidate camera) after scoring: the best anchor in that area, and the chosen view. */
 export interface PairCandidateResult {
+  kind: "camera_camera";
   anchor: LinkAnchor;
   camera: string;
   /** The chosen part, or null for the whole camera. */
@@ -425,6 +439,7 @@ export interface PairCandidateResult {
 }
 
 export interface CameraPairsInput {
+  /** Camera and camera_zone anchors pair here; lock anchors belong to the lock arm and are ignored. */
   anchors: readonly LinkAnchor[];
   series: ReadonlyMap<string, CameraSeries>;
   blind: ReadonlyMap<string, readonly Interval[]>;
@@ -461,13 +476,82 @@ function splitRef(sourceKind: "camera" | "camera_zone", ref: string): { camera: 
 }
 
 /**
- * Score every (anchor, candidate) of the run and pick, per area and candidate
- * camera, the best anchor (gate, then confidence, then link id) and the view
- * (whole or part). `hypotheses` is m — every (anchor source, candidate view,
- * direction) scored, each counted once even when two areas share an anchor
- * source. Gates are applied only after every scoring, with the final m.
+ * One arm of a run, scored but not yet gated: `hypotheses` is what the arm
+ * adds to m, and `judge(m)` gates every candidate with the RUN's m (§6.1:
+ * "m = the number of (anchor source, candidate, direction) hypotheses scored
+ * in this run") and keeps the best anchor per (area, candidate).
  */
-export function scoreCameraPairs(input: CameraPairsInput): { results: PairCandidateResult[]; hypotheses: number } {
+interface ScoredArm<R> {
+  hypotheses: number;
+  judge: (m: number) => R[];
+}
+
+/** The views a candidate camera is scored on: pinned → the whole (for `wholeK`) and the pinned view; else the whole and every part seen in W. */
+function candidateViews(
+  cs: CameraSeries,
+  pin: { sourceKind: "camera" | "camera_zone"; sourceRef: string } | null,
+): { views: Array<string | null>; pinned: boolean } {
+  const pinnedPart = pin ? splitRef(pin.sourceKind, pin.sourceRef).part : undefined;
+  if (pinnedPart !== undefined) return { views: pinnedPart === null ? [null] : [null, pinnedPart], pinned: true };
+  return { views: [null, ...[...cs.parts.entries()].filter(([, ps]) => ps.instants.length > 0).map(([z]) => z)], pinned: false };
+}
+
+/**
+ * Part or whole (§6.1), for one candidate camera's judged views (the whole
+ * first): the best part when it keeps ≥ partShare of the whole camera's hits
+ * AND passes a gate at least as high as the whole camera's (review #2418);
+ * between parts, most hits, then the better gate, then lift, a name only on a
+ * full tie, then the part's name. Pinned: the pinned view.
+ */
+function chooseView<O extends { part: string | null; k: number; lift: number; gate: LinkGate | null; names: { match: boolean } }>(
+  judged: readonly O[],
+  pinned: boolean,
+  rules: LinkRules,
+): { chosen: O; wholeK: number | null } {
+  const whole = judged[0]!;
+  if (pinned) {
+    const chosen = judged[judged.length - 1]!;
+    return { chosen, wholeK: chosen.part !== null ? whole.k : null };
+  }
+  const parts = judged.slice(1).filter((x) => x.k >= rules.partShare * whole.k && rank(x.gate) >= rank(whole.gate));
+  parts.sort(
+    (x, y) =>
+      y.k - x.k ||
+      rank(y.gate) - rank(x.gate) ||
+      y.lift - x.lift ||
+      Number(y.names.match) - Number(x.names.match) ||
+      (x.part! < y.part! ? -1 : x.part! > y.part! ? 1 : 0),
+  );
+  const top = parts[0];
+  return top ? { chosen: top, wholeK: whole.k } : { chosen: whole, wholeK: null };
+}
+
+/** What makes two results the same candidate in an area: the camera (any view of it), or the lock. */
+function candidateKey(r: { anchor: LinkAnchor; camera: string | null; sourceRef: string }): string {
+  return `${r.anchor.zoneId}\u0000${r.camera ?? r.sourceRef}`;
+}
+
+/** Per (area, candidate): the best gate, then the higher confidence, then the lower anchor link id. Sorted by area, then candidate. */
+function bestPerCandidate<R extends { anchor: LinkAnchor; camera: string | null; sourceRef: string; gate: LinkGate | null; confidence: number }>(
+  results: Iterable<R>,
+): R[] {
+  const best = new Map<string, R>();
+  for (const result of results) {
+    const key = candidateKey(result);
+    const prev = best.get(key);
+    if (
+      !prev ||
+      rank(result.gate) > rank(prev.gate) ||
+      (rank(result.gate) === rank(prev.gate) &&
+        (result.confidence > prev.confidence || (result.confidence === prev.confidence && result.anchor.linkId < prev.anchor.linkId)))
+    ) {
+      best.set(key, result);
+    }
+  }
+  return [...best.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, r]) => r);
+}
+
+function prepareCameraPairs(input: CameraPairsInput): ScoredArm<PairCandidateResult> {
   const rules = input.rules ?? LINK_RULES;
   const debounced = new Map<string, number[]>();
   const anchorsOf = (camera: string, part: string | null): number[] => {
@@ -513,112 +597,282 @@ export function scoreCameraPairs(input: CameraPairsInput): { results: PairCandid
   };
 
   // Pass 1 — score. Candidates: every camera with a person sighting in W, not the anchor's own.
-  interface Option {
-    part: string | null;
-    s: { forward: DirectionStats; reverse: DirectionStats };
-  }
   interface Pending {
     anchor: LinkAnchor;
     camera: string;
-    options: Option[];
+    options: Array<{ part: string | null; s: { forward: DirectionStats; reverse: DirectionStats } }>;
     pinned: boolean;
   }
   const pending: Pending[] = [];
   for (const anchor of input.anchors) {
+    if (anchor.sourceKind === "lock") continue;
     const a = splitRef(anchor.sourceKind, anchor.sourceRef);
     for (const [camera, cs] of input.series) {
       if (camera === a.camera || cs.whole.instants.length === 0) continue;
       if (input.skipCamera(anchor.zoneId, camera)) continue;
-      const pin = input.pinnedRef(anchor.zoneId, camera);
-      const pinnedPart = pin ? splitRef(pin.sourceKind, pin.sourceRef).part : undefined;
-      // Pinned: the whole camera (for `wholeK`) and the pinned view only. Else the whole and every part seen in W.
-      const parts: Array<string | null> =
-        pinnedPart !== undefined
-          ? pinnedPart === null
-            ? [null]
-            : [null, pinnedPart]
-          : [null, ...[...cs.parts.entries()].filter(([, ps]) => ps.instants.length > 0).map(([z]) => z)];
-      pending.push({
-        anchor,
-        camera,
-        pinned: pinnedPart !== undefined,
-        options: parts.map((part) => ({ part, s: score(a.camera, a.part, camera, part) })),
-      });
+      const { views, pinned } = candidateViews(cs, input.pinnedRef(anchor.zoneId, camera));
+      pending.push({ anchor, camera, pinned, options: views.map((part) => ({ part, s: score(a.camera, a.part, camera, part) })) });
     }
   }
-  const hypotheses = 2 * scored.size;
 
-  // Pass 2 — gate with the final m, choose the view, keep the best anchor per (area, camera).
-  const pAdj = (p: number) => Math.min(1, hypotheses * p);
-  const best = new Map<string, PairCandidateResult>();
-  for (const p of pending) {
-    const label = input.candidateLabel(p.camera);
-    const judged = p.options.map((o) => {
-      const forwardPAdj = pAdj(o.s.forward.pChance);
-      const reversePAdj = pAdj(o.s.reverse.pChance);
-      const gate = lowerGate(gateFor("cameraCamera", o.s.forward, forwardPAdj, rules), gateFor("cameraCamera", o.s.reverse, reversePAdj, rules));
-      const names = namesMatch(p.anchor.zoneName, o.part === null ? `${label} ${p.camera}` : `${label} ${o.part}`);
-      return { ...o, forwardPAdj, reversePAdj, gate, names };
-    });
-    const whole = judged[0]!;
-    let chosen = whole;
-    let wholeK: number | null = null;
-    if (p.pinned) {
-      chosen = judged[judged.length - 1]!;
-      if (chosen.part !== null) wholeK = whole.s.forward.k;
-    } else {
-      // A part is eligible only when it keeps ≥ partShare of the whole camera's hits AND passes a gate at least
-      // as high as the whole camera's (review #2418): back, a part counts only its OWN visits — always fewer
-      // than the whole camera's — so a part can keep the hits and still fall below a bar the whole camera cleared.
-      const parts = judged
-        .slice(1)
-        .filter((x) => x.s.forward.k >= rules.partShare * whole.s.forward.k && rank(x.gate) >= rank(whole.gate));
-      // Most hits; then the better gate; then lift; a name only breaks a full tie; then the part's name.
-      parts.sort(
-        (x, y) =>
-          y.s.forward.k - x.s.forward.k ||
-          rank(y.gate) - rank(x.gate) ||
-          y.s.forward.lift - x.s.forward.lift ||
-          Number(y.names.match) - Number(x.names.match) ||
-          (x.part! < y.part! ? -1 : x.part! > y.part! ? 1 : 0),
+  return {
+    hypotheses: 2 * scored.size,
+    // Pass 2 — gate with the run's m, choose the view, keep the best anchor per (area, camera).
+    judge: (m) => {
+      const pAdj = (p: number) => Math.min(1, m * p);
+      const out: PairCandidateResult[] = [];
+      for (const p of pending) {
+        const label = input.candidateLabel(p.camera);
+        const judged = p.options.map((o) => {
+          const forwardPAdj = pAdj(o.s.forward.pChance);
+          const reversePAdj = pAdj(o.s.reverse.pChance);
+          const gate = lowerGate(gateFor("cameraCamera", o.s.forward, forwardPAdj, rules), gateFor("cameraCamera", o.s.reverse, reversePAdj, rules));
+          const names = namesMatch(p.anchor.zoneName, o.part === null ? `${label} ${p.camera}` : `${label} ${o.part}`);
+          return { ...o, k: o.s.forward.k, lift: o.s.forward.lift, forwardPAdj, reversePAdj, gate, names };
+        });
+        const { chosen, wholeK } = chooseView(judged, p.pinned, rules);
+        out.push({
+          kind: "camera_camera",
+          anchor: p.anchor,
+          camera: p.camera,
+          part: chosen.part,
+          sourceKind: chosen.part === null ? "camera" : "camera_zone",
+          sourceRef: chosen.part === null ? p.camera : `${p.camera}/${chosen.part}`,
+          label,
+          forward: chosen.s.forward,
+          reverse: chosen.s.reverse,
+          forwardPAdj: chosen.forwardPAdj,
+          reversePAdj: chosen.reversePAdj,
+          gate: chosen.gate,
+          confidence: Math.min(chosen.s.forward.confidence, chosen.s.reverse.confidence),
+          wholeK,
+          names: chosen.names,
+        });
+      }
+      return bestPerCandidate(out);
+    },
+  };
+}
+
+/**
+ * Score every (anchor, candidate) of the camera ↔ camera arm and pick, per
+ * area and candidate camera, the best anchor (gate, then confidence, then
+ * link id) and the view (whole or part). `hypotheses` is this arm's m — every
+ * (anchor source, candidate view, direction) scored, each counted once even
+ * when two areas share an anchor source. Gates are applied only after every
+ * scoring, with the final m. A run with locks uses `scoreLinkPairs`, whose m
+ * counts both arms.
+ */
+export function scoreCameraPairs(input: CameraPairsInput): { results: PairCandidateResult[]; hypotheses: number } {
+  const arm = prepareCameraPairs(input);
+  return { results: arm.judge(arm.hypotheses), hypotheses: arm.hypotheses };
+}
+
+// ── lock ↔ camera (P4 PR-4, §6.2.1–§6.2.3) ────────────────────────────────
+
+/** A `lock_state` row as the job loads it (P2b-2's lock adapter wrote it; epoch ms). */
+export interface LockStateRow {
+  /** `matter:<nodeId>/<endpointId>` — the lock; its lock links carry the same ref. */
+  sourceRef: string;
+  /** `labels[0]`: the reading. */
+  reading: string | undefined;
+  observed: "live" | "polled";
+  dedupeKey: string;
+  startedAt: number;
+}
+
+/**
+ * Per lock: its CHANGES inside W (`isLockChange`: live, a turn, never the
+ * baseline — lib/security-lock-changes.ts), sorted, not yet debounced. A lock
+ * with none is absent: it is neither an anchor's statistic nor a candidate
+ * (§6.2.2: "every lock endpoint with at least one live transition in W").
+ */
+export function buildLockSeries(rows: readonly LockStateRow[], window: LinkWindow): Map<string, number[]> {
+  const raw = new Map<string, number[]>();
+  for (const r of rows) {
+    if (!isLockChange(r)) continue;
+    if (r.startedAt < window.from || r.startedAt > window.observedEnd) continue;
+    let t = raw.get(r.sourceRef);
+    if (!t) raw.set(r.sourceRef, (t = []));
+    t.push(r.startedAt);
+  }
+  const out = new Map<string, number[]>();
+  for (const ref of [...raw.keys()].sort()) out.set(ref, raw.get(ref)!.sort((a, b) => a - b));
+  return out;
+}
+
+export interface LockPairsInput extends CameraPairsInput {
+  /** `buildLockSeries`: every lock with a live change in W. */
+  locks: ReadonlyMap<string, readonly number[]>;
+  /** Skip this lock for this area: the area already holds a row on it that Droplet must never touch. */
+  skipLock: (zoneId: string, ref: string) => boolean;
+  /** The lock's name (its device-list name). */
+  lockLabel: (ref: string) => string;
+}
+
+/**
+ * One (area, candidate) of the lock arm. ONE direction (§6.2.3): the anchors
+ * are always the lock's changes and the coverage always a camera view's
+ * people, whichever of the two a person placed in the area.
+ */
+export interface LockPairResult {
+  kind: "lock_camera";
+  anchor: LinkAnchor;
+  /** The candidate camera; null when the candidate is the lock (a camera anchor). */
+  camera: string | null;
+  /** The chosen part of the candidate camera, or null (the whole camera, or a lock candidate). */
+  part: string | null;
+  sourceKind: "camera" | "camera_zone" | "lock";
+  sourceRef: string;
+  /** The candidate's display name: the camera's (never the part), or the lock's. */
+  label: string;
+  /** The lock's changes → the camera view's people. */
+  forward: DirectionStats;
+  forwardPAdj: number;
+  gate: LinkGate | null;
+  /** The forward confidence (one direction). */
+  confidence: number;
+  /** The whole camera's hits when a part was chosen; null otherwise. */
+  wholeK: number | null;
+  names: { match: boolean; shared: string[] };
+}
+
+function prepareLockPairs(input: LockPairsInput): ScoredArm<LockPairResult> {
+  const rules = input.rules ?? LINK_RULES;
+  const debounced = new Map<string, number[]>();
+  const anchorsOf = (lock: string): number[] => {
+    let a = debounced.get(lock);
+    if (!a) {
+      a = debounceAnchors(input.locks.get(lock) ?? [], rules.debounceMs, rules.maxAnchors);
+      debounced.set(lock, a);
+    }
+    return a;
+  };
+  // (lock, camera view) → the one statistic, scored once however many anchors ask for it.
+  const scored = new Map<string, DirectionStats>();
+  const score = (lock: string, camera: string, part: string | null): DirectionStats => {
+    const key = `${lock}\u0000${camera}/${part ?? ""}`;
+    let s = scored.get(key);
+    if (!s) {
+      s = scoreDirection(
+        {
+          anchors: anchorsOf(lock),
+          coverage: viewSeries(input.series, camera, part).coverage,
+          blind: input.blind.get(camera) ?? [],
+          observedEnd: input.observedEnd,
+        },
+        rules,
       );
-      const top = parts[0];
-      if (top) {
-        chosen = top;
-        wholeK = whole.s.forward.k;
+      scored.set(key, s);
+    }
+    return s;
+  };
+
+  interface PendingCamera {
+    anchor: LinkAnchor;
+    camera: string;
+    pinned: boolean;
+    options: Array<{ part: string | null; s: DirectionStats }>;
+  }
+  interface PendingLock {
+    anchor: LinkAnchor;
+    lock: string;
+    s: DirectionStats;
+  }
+  const cameras: PendingCamera[] = [];
+  const locks: PendingLock[] = [];
+  for (const anchor of input.anchors) {
+    if (anchor.sourceKind === "lock") {
+      // lock L → camera or part B. A lock with no live change in W has no statistic to offer.
+      if (!input.locks.has(anchor.sourceRef)) continue;
+      for (const [camera, cs] of input.series) {
+        if (cs.whole.instants.length === 0 || input.skipCamera(anchor.zoneId, camera)) continue;
+        const { views, pinned } = candidateViews(cs, input.pinnedRef(anchor.zoneId, camera));
+        cameras.push({ anchor, camera, pinned, options: views.map((part) => ({ part, s: score(anchor.sourceRef, camera, part) })) });
+      }
+    } else {
+      // camera or part C → lock L: anchors = L's changes, coverage = C's people (the same statistic, the other way round).
+      const a = splitRef(anchor.sourceKind, anchor.sourceRef);
+      for (const lock of input.locks.keys()) {
+        if (input.skipLock(anchor.zoneId, lock)) continue;
+        locks.push({ anchor, lock, s: score(lock, a.camera, a.part) });
       }
     }
-    const result: PairCandidateResult = {
-      anchor: p.anchor,
-      camera: p.camera,
-      part: chosen.part,
-      sourceKind: chosen.part === null ? "camera" : "camera_zone",
-      sourceRef: chosen.part === null ? p.camera : `${p.camera}/${chosen.part}`,
-      label,
-      forward: chosen.s.forward,
-      reverse: chosen.s.reverse,
-      forwardPAdj: chosen.forwardPAdj,
-      reversePAdj: chosen.reversePAdj,
-      gate: chosen.gate,
-      confidence: Math.min(chosen.s.forward.confidence, chosen.s.reverse.confidence),
-      wholeK,
-      names: chosen.names,
-    };
-    const key = `${p.anchor.zoneId}\u0000${p.camera}`;
-    const prev = best.get(key);
-    if (
-      !prev ||
-      rank(result.gate) > rank(prev.gate) ||
-      (rank(result.gate) === rank(prev.gate) &&
-        (result.confidence > prev.confidence || (result.confidence === prev.confidence && result.anchor.linkId < prev.anchor.linkId)))
-    ) {
-      best.set(key, result);
-    }
   }
-  const results = [...best.values()].sort(
-    (a, b) => (a.anchor.zoneId < b.anchor.zoneId ? -1 : a.anchor.zoneId > b.anchor.zoneId ? 1 : 0) || (a.camera < b.camera ? -1 : a.camera > b.camera ? 1 : 0),
-  );
-  return { results, hypotheses };
+
+  return {
+    hypotheses: scored.size,
+    judge: (m) => {
+      const pAdj = (p: number) => Math.min(1, m * p);
+      const out: LockPairResult[] = [];
+      for (const p of cameras) {
+        const label = input.candidateLabel(p.camera);
+        const judged = p.options.map((o) => {
+          const forwardPAdj = pAdj(o.s.pChance);
+          const names = namesMatch(p.anchor.zoneName, o.part === null ? `${label} ${p.camera}` : `${label} ${o.part}`);
+          return { ...o, k: o.s.k, lift: o.s.lift, forwardPAdj, gate: gateFor("lockCamera", o.s, forwardPAdj, rules), names };
+        });
+        const { chosen, wholeK } = chooseView(judged, p.pinned, rules);
+        out.push({
+          kind: "lock_camera",
+          anchor: p.anchor,
+          camera: p.camera,
+          part: chosen.part,
+          sourceKind: chosen.part === null ? "camera" : "camera_zone",
+          sourceRef: chosen.part === null ? p.camera : `${p.camera}/${chosen.part}`,
+          label,
+          forward: chosen.s,
+          forwardPAdj: chosen.forwardPAdj,
+          gate: chosen.gate,
+          confidence: chosen.s.confidence,
+          wholeK,
+          names: chosen.names,
+        });
+      }
+      for (const p of locks) {
+        const label = input.lockLabel(p.lock);
+        const forwardPAdj = pAdj(p.s.pChance);
+        out.push({
+          kind: "lock_camera",
+          anchor: p.anchor,
+          camera: null,
+          part: null,
+          sourceKind: "lock",
+          sourceRef: p.lock,
+          label,
+          forward: p.s,
+          forwardPAdj,
+          gate: gateFor("lockCamera", p.s, forwardPAdj, rules),
+          confidence: p.s.confidence,
+          wholeK: null,
+          names: namesMatch(p.anchor.zoneName, label),
+        });
+      }
+      return bestPerCandidate(out);
+    },
+  };
+}
+
+/** The lock arm alone, its m its own (a run with cameras too uses `scoreLinkPairs`). */
+export function scoreLockPairs(input: LockPairsInput): { results: LockPairResult[]; hypotheses: number } {
+  const arm = prepareLockPairs(input);
+  return { results: arm.judge(arm.hypotheses), hypotheses: arm.hypotheses };
+}
+
+/** A scored candidate of either arm. */
+export type LinkCandidateResult = PairCandidateResult | LockPairResult;
+
+/**
+ * The run (§6.3 step 5): both arms scored, then gated with ONE m — the camera
+ * arm's hypotheses plus the lock arm's — and, per (area, candidate), the best
+ * gate over both arms (then confidence, then link id), naming its anchor
+ * (§6.2.3: "the best gate wins, and the evidence names that anchor").
+ */
+export function scoreLinkPairs(input: LockPairsInput): { results: LinkCandidateResult[]; hypotheses: number } {
+  const cameraArm = prepareCameraPairs(input);
+  const lockArm = prepareLockPairs(input);
+  const m = cameraArm.hypotheses + lockArm.hypotheses;
+  return { results: bestPerCandidate<LinkCandidateResult>([...cameraArm.judge(m), ...lockArm.judge(m)]), hypotheses: m };
 }
 
 // ── evidence (§6.4) ───────────────────────────────────────────────────────
@@ -661,4 +915,38 @@ export function cameraPairEvidence(r: PairCandidateResult, ctx: { window: LinkWi
     samples: r.forward.hits.slice(0, LINK_EVIDENCE_MAX_SAMPLES).map((h) => ({ anchorAt: iso(h.anchorAt), hitAt: iso(h.hitAt) })),
     samplesTrimmedBefore: null,
   };
+}
+
+/**
+ * What a lock ↔ camera link stores (LinkEvidenceV1, `kind: lock_camera`): one
+ * direction (`reverse` null), `chosen` the camera view — or `lock` when the
+ * lock is the candidate (a camera anchor) — its pAdj as a 2-significant-digit
+ * string, and up to five newest hits as samples (lock change → the moment the
+ * camera had someone in view; presence data: trimmed at 30 days).
+ */
+export function lockPairEvidence(r: LockPairResult, ctx: { window: LinkWindow; hypotheses: number }): LinkEvidenceV1 {
+  if (r.gate === null) throw new Error("lockPairEvidence: an ungated candidate has no evidence to store");
+  const chosen = r.sourceKind === "lock" ? "lock" : r.part === null ? "whole" : "part";
+  return {
+    v: 1,
+    kind: "lock_camera",
+    window: { from: iso(ctx.window.from), to: iso(ctx.window.observedEnd) },
+    anchor: { linkId: r.anchor.linkId, sourceKind: r.anchor.sourceKind, sourceRef: r.anchor.sourceRef, label: r.anchor.label },
+    candidate: { sourceKind: r.sourceKind, sourceRef: r.sourceRef, label: r.label },
+    forward: toStatsV1(r.forward),
+    reverse: null,
+    chosen,
+    wholeK: chosen === "part" ? (r.wholeK ?? r.forward.k) : null,
+    names: { match: r.names.match, shared: [...r.names.shared] },
+    hypotheses: Math.max(1, ctx.hypotheses),
+    pAdj: r.forwardPAdj.toPrecision(2),
+    gate: r.gate,
+    samples: r.forward.hits.slice(0, LINK_EVIDENCE_MAX_SAMPLES).map((h) => ({ anchorAt: iso(h.anchorAt), hitAt: iso(h.hitAt) })),
+    samplesTrimmedBefore: null,
+  };
+}
+
+/** The evidence either arm's candidate stores. */
+export function linkPairEvidence(r: LinkCandidateResult, ctx: { window: LinkWindow; hypotheses: number }): LinkEvidenceV1 {
+  return r.kind === "lock_camera" ? lockPairEvidence(r, ctx) : cameraPairEvidence(r, ctx);
 }

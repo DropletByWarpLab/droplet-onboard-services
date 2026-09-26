@@ -1159,8 +1159,11 @@ async function main() {
   // placed in an area with every other camera, and suggests (or, above a
   // higher bar, makes) links — never an alert by itself. Unconditional, like
   // the jobs above; `SecurityAiSettings.linking = off` is honoured inside the
-  // tick. Registration is the `links` health row's boot assertion.
-  registerSecurityLinkJobs(cronRuntime, prisma);
+  // tick. Registration is the `links` health row's boot assertion. P4 PR-4:
+  // a person-linked lock's LIVE changes anchor too, and the lock adapter's
+  // list names a lock Droplet suggests (read at each tick; the job itself
+  // never reaches the adapter).
+  registerSecurityLinkJobs(cronRuntime, prisma, { knownLocks: () => securityLocks.knownLocks() });
   // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
   // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
   // later), keeps the learning state, and rebuilds what normal looks like

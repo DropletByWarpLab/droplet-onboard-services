@@ -4,8 +4,14 @@
  * and every other camera or part of a view, suggests links above a floor and
  * activates links above a higher bar ("Linked by Droplet", one-tap Undo).
  *
- * PR-1 scores the camera ↔ camera arm only (both directions must pass); the
- * lock arm is P4 PR-4, once P2b PR-2's lock rows exist.
+ * Two arms, one run and one m (lib/security-cooccurrence's `scoreLinkPairs`):
+ * camera ↔ camera (PR-1; both directions must pass) and lock ↔ camera (P4
+ * PR-4, D31; one direction). A lock anchors only through its LIVE changes —
+ * 🔴 never a `polled` row, never its baseline row (lib/security-lock-changes).
+ * A lock candidate is snapshotted under its device-list name: the running
+ * lock adapter's list (`knownLocks`, injected by index.ts — this job imports
+ * nothing that can reach a device), else a person's link of it, else
+ * `Lock …<last 4>` (the adapter's own name for a nameless lock).
  *
  * What it may write, and nothing else (security-link-proposals.imports.test.ts):
  * `SecurityZoneLink` rows it created (`origin = droplet`), the area version it
@@ -20,9 +26,10 @@
  *
  * The tick (§6.3):
  *   1. settings — `off` → done (existing suggestions stay decidable);
- *   2. anchors — active person-set camera / camera_zone links of active areas;
+ *   2. anchors — active person-set camera / camera_zone / lock links of active areas;
  *   3. ONE load of the window: person `detection` rows (the `(kind,
- *      startedAt)` index), camera and Frigate-wide status rows, Camera rows;
+ *      startedAt)` index), camera and Frigate-wide status rows, Camera rows,
+ *      and (PR-4) the `lock_state` rows;
  *   4–5. coverage, blind spells and every score (lib/security-cooccurrence);
  *   6. plan per area against its existing rows (`planLinkChanges`);
  *   7. apply per area in ONE READ_COMMITTED transaction: CAS the area version
@@ -58,11 +65,13 @@ import {
   LINK_RULES_VERSION,
   blindSpells,
   buildCameraSeries,
-  cameraPairEvidence,
+  buildLockSeries,
+  linkPairEvidence,
   linkWindow,
-  scoreCameraPairs,
+  scoreLinkPairs,
   type LinkAnchor,
-  type PairCandidateResult,
+  type LinkCandidateResult,
+  type LockStateRow,
   type PersonSighting,
   type StatusMark,
 } from "../lib/security-cooccurrence.js";
@@ -235,9 +244,9 @@ export interface AreaSnapshot {
 }
 
 export type PlannedLinkChange =
-  | { op: "create"; state: "active" | "proposed"; result: PairCandidateResult }
-  | { op: "activate"; row: ExistingLinkRow; result: PairCandidateResult }
-  | { op: "refresh"; row: ExistingLinkRow; result: PairCandidateResult };
+  | { op: "create"; state: "active" | "proposed"; result: LinkCandidateResult }
+  | { op: "activate"; row: ExistingLinkRow; result: LinkCandidateResult }
+  | { op: "refresh"; row: ExistingLinkRow; result: LinkCandidateResult };
 
 /** The camera a stored ref points at (`camera` or `camera/part`); null for any other kind. */
 function refCamera(sourceKind: string, sourceRef: string): string | null {
@@ -248,6 +257,16 @@ function refCamera(sourceKind: string, sourceRef: string): string | null {
   }
   return null;
 }
+
+/**
+ * The SOURCE a row or a candidate is about: a camera (any view of it — one
+ * row per camera per area), or (PR-4) a lock, by its ref. A lock ref holds a
+ * `:`, which no Frigate camera name can, so the two never collide.
+ */
+function rowSource(sourceKind: string, sourceRef: string): string | null {
+  return sourceKind === "lock" ? sourceRef : refCamera(sourceKind, sourceRef);
+}
+const candidateSource = (r: Pick<LinkCandidateResult, "sourceKind" | "sourceRef" | "camera">): string => (r.sourceKind === "lock" ? r.sourceRef : r.camera!);
 
 /** Droplet's own open suggestion (the CHECK makes every `proposed` row droplet/droplet; the guard says so anyway). */
 const isOpenSuggestion = (r: ExistingLinkRow): boolean => r.state === "proposed" && r.origin === "droplet" && r.stateSetBy === "droplet";
@@ -273,7 +292,7 @@ const isOpenSuggestion = (r: ExistingLinkRow): boolean => r.state === "proposed"
  */
 export function planLinkChanges(
   areas: readonly AreaSnapshot[],
-  results: readonly PairCandidateResult[],
+  results: readonly LinkCandidateResult[],
   linking: Exclude<SecurityAiLinking, "off">,
 ): Map<string, PlannedLinkChange[]> {
   const plans = new Map<string, PlannedLinkChange[]>();
@@ -298,9 +317,9 @@ export function planLinkChanges(
   for (const r of ordered) {
     const c = counters.get(r.anchor.zoneId)!;
     const plan = plans.get(r.anchor.zoneId)!;
-    const cam = r.camera;
-    const onCamera = c.area.rows.filter((row) => refCamera(row.sourceKind, row.sourceRef) === cam);
-    // Never touch a camera a person (or Droplet's active link) already has a row for.
+    const cam = candidateSource(r);
+    const onCamera = c.area.rows.filter((row) => rowSource(row.sourceKind, row.sourceRef) === cam);
+    // Never touch a camera (or lock) a person (or Droplet's active link) already has a row for.
     if (onCamera.some((row) => !isOpenSuggestion(row))) continue;
     const existing = onCamera.find((row) => row.sourceKind === r.sourceKind && row.sourceRef === r.sourceRef);
     const mayActivate = r.gate === "auto" && linking === "link_and_suggest" && c.active < MAX_ACTIVE_LINKS_PER_AREA;
@@ -338,15 +357,33 @@ function labelSnapshot(label: string): string {
   return cps.length <= 120 ? cps.join("") : cps.slice(0, 120).join("");
 }
 
-/** How the audit line names a view: `Back camera`, or `the "till" part of Back camera`. */
-function viewPhrase(r: PairCandidateResult): string {
+/** How the audit line names a view: `Back camera`, `the "till" part of Back camera`, or a lock's name. */
+function viewPhrase(r: LinkCandidateResult): string {
   return r.part === null ? r.label : `the "${r.part}" part of ${r.label}`;
 }
 
-export interface LinkRunOptions {
+/** A lock the running lock adapter knows: its ref and its device-list name (alias, else the device's own). */
+export interface KnownLockName {
+  ref: string;
+  name: string;
+}
+
+/** What the job reads besides the database (P4 PR-4). */
+export interface LinkJobDeps {
+  /** The running lock adapter's list (`SecurityLockReader.knownLocks`), for a lock candidate's name. Absent = none running. */
+  knownLocks?: () => ReadonlyArray<KnownLockName>;
+}
+
+export interface LinkRunOptions extends LinkJobDeps {
   /** Monotonic-enough ms clock for the budget. */
   clock?: () => number;
   budgetMs?: number;
+}
+
+/** `Lock …<last 4 of the node id>` — the lock adapter's own name for a lock with none (`fallbackLockName`). */
+function unnamedLock(ref: string): string {
+  const node = ref.slice("matter:".length, ref.lastIndexOf("/"));
+  return `Lock …${node.slice(-4)}`;
 }
 
 /**
@@ -368,7 +405,7 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
 
   // 2. Anchors: links a PERSON made or kept, in active areas. Never Droplet's own (§6.2.1).
   const anchorRows = await prisma.securityZoneLink.findMany({
-    where: { state: "active", stateSetBy: "person", sourceKind: { in: ["camera", "camera_zone"] }, zone: { state: "active" } },
+    where: { state: "active", stateSetBy: "person", sourceKind: { in: ["camera", "camera_zone", "lock"] }, zone: { state: "active" } },
     select: { id: true, zoneId: true, sourceKind: true, sourceRef: true, sourceLabel: true, zone: { select: { name: true, version: true } } },
     orderBy: [{ zoneId: "asc" }, { sourceKind: "asc" }, { sourceRef: "asc" }],
   });
@@ -379,7 +416,7 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
   const window = linkWindow(now.getTime());
   const loadFrom = new Date(window.from - LINK_RULES.localChanceMs);
   const loadTo = new Date(window.observedEnd);
-  const [rows, detections, statuses, cameras] = await Promise.all([
+  const [rows, detections, statuses, cameras, lockRows] = await Promise.all([
     prisma.securityZoneLink.findMany({
       where: { zoneId: { in: areaIds } },
       select: { id: true, zoneId: true, sourceKind: true, sourceRef: true, state: true, origin: true, stateSetBy: true },
@@ -393,6 +430,12 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
       select: { kind: true, camera: true, startedAt: true },
     }),
     prisma.camera.findMany({ select: { name: true, displayName: true, enabled: true } }),
+    // PR-4: every lock_state row of the window. Which of them are a lock TURNING (live, a turn, never the
+    // baseline) is ONE pure rule — `isLockChange`, applied by `buildLockSeries` — not a second copy here.
+    prisma.securityEvent.findMany({
+      where: { source: "matter_lock", kind: "lock_state", startedAt: { gte: loadFrom, lte: loadTo } },
+      select: { sourceRef: true, labels: true, observed: true, dedupeKey: true, startedAt: true },
+    }),
   ]);
   const labels = new Map(cameras.map((c) => [c.name, c.displayName]));
   const disabled = new Set(cameras.filter((c) => !c.enabled).map((c) => c.name));
@@ -411,20 +454,34 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
   }));
   const series = buildCameraSeries(sightings, window);
   const blind = blindSpells(marks, series.keys(), window);
+  const lockStates: LockStateRow[] = lockRows.map((r) => ({
+    sourceRef: r.sourceRef,
+    reading: r.labels[0],
+    observed: r.observed,
+    dedupeKey: r.dedupeKey,
+    startedAt: r.startedAt.getTime(),
+  }));
+  const locks = buildLockSeries(lockStates, window);
   const areaRows = new Map<string, ExistingLinkRow[]>(areaIds.map((id) => [id, []]));
   for (const r of rows) areaRows.get(r.zoneId)?.push(r);
   const labelOf = (camera: string) => labels.get(camera) ?? camera;
+  // A lock's name: the device list's (the running adapter's), else what a person's link of it was snapshotted as.
+  const lockNames = new Map<string, string>();
+  for (const a of anchorRows) if (a.sourceKind === "lock" && !lockNames.has(a.sourceRef)) lockNames.set(a.sourceRef, a.sourceLabel);
+  for (const l of opts.knownLocks?.() ?? []) if (l.name.trim()) lockNames.set(l.ref, l.name);
+  const lockLabel = (ref: string) => lockNames.get(ref) ?? unnamedLock(ref);
   const anchors: LinkAnchor[] = anchorRows.map((a) => ({
     linkId: a.id,
     zoneId: a.zoneId,
     zoneName: a.zone.name,
-    sourceKind: a.sourceKind as "camera" | "camera_zone",
+    sourceKind: a.sourceKind as LinkAnchor["sourceKind"],
     sourceRef: a.sourceRef,
-    label: labelOf(refCamera(a.sourceKind, a.sourceRef) ?? a.sourceRef),
+    label: a.sourceKind === "lock" ? lockLabel(a.sourceRef) : labelOf(refCamera(a.sourceKind, a.sourceRef) ?? a.sourceRef),
   }));
-  const { results, hypotheses } = scoreCameraPairs({
+  const { results, hypotheses } = scoreLinkPairs({
     anchors,
     series,
+    locks,
     blind,
     observedEnd: window.observedEnd,
     skipCamera: (zoneId, camera) =>
@@ -436,7 +493,10 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
         .sort((a, b) => (a.sourceRef < b.sourceRef ? -1 : 1))[0];
       return open ? { sourceKind: open.sourceKind as "camera" | "camera_zone", sourceRef: open.sourceRef } : null;
     },
+    // A lock the area holds any row on but Droplet's own open suggestion (re-scored in place) is never a candidate.
+    skipLock: (zoneId, ref) => (areaRows.get(zoneId) ?? []).some((r) => r.sourceKind === "lock" && r.sourceRef === ref && !isOpenSuggestion(r)),
     candidateLabel: labelOf,
+    lockLabel,
   });
   summary.scored = hypotheses;
 
@@ -469,9 +529,9 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
 }
 
 /** The link-row fields Droplet's evidence sets (create, activation and refresh alike). */
-function evidenceFields(r: PairCandidateResult, ctx: { now: Date; window: ReturnType<typeof linkWindow>; hypotheses: number }) {
+function evidenceFields(r: LinkCandidateResult, ctx: { now: Date; window: ReturnType<typeof linkWindow>; hypotheses: number }) {
   return {
-    evidence: cameraPairEvidence(r, { window: ctx.window, hypotheses: ctx.hypotheses }) as unknown as Prisma.InputJsonValue,
+    evidence: linkPairEvidence(r, { window: ctx.window, hypotheses: ctx.hypotheses }) as unknown as Prisma.InputJsonValue,
     confidence: r.confidence,
     rulesVersion: LINK_RULES_VERSION,
     evidenceAt: ctx.now,
@@ -482,13 +542,13 @@ function evidenceFields(r: PairCandidateResult, ctx: { now: Date; window: Return
 const dropletGuard = (id: string, state: "proposed") => ({ id, state, origin: "droplet" as const, stateSetBy: "droplet" as const });
 
 /** The audit refs of a Droplet state change (integers only: confidence in basis points). */
-function auditRefs(zoneId: string, linkId: string, r: PairCandidateResult) {
+function auditRefs(zoneId: string, linkId: string, r: LinkCandidateResult) {
   return {
     zoneId,
     linkId,
     sourceKind: r.sourceKind,
     sourceRef: r.sourceRef,
-    kind: "camera_camera",
+    kind: r.kind,
     gate: r.gate!,
     confidenceBp: Math.round(r.confidence * 10_000),
     rulesVersion: LINK_RULES_VERSION,
@@ -590,9 +650,9 @@ async function applyAreaPlan(
 }
 
 /** The tick the cron runtime runs: the run, then health. A throw is recorded and rethrown into `safeRun`. */
-export async function tickSecurityLinkProposals(prisma: PrismaClient, now: Date = new Date()): Promise<LinkRunSummary> {
+export async function tickSecurityLinkProposals(prisma: PrismaClient, now: Date = new Date(), deps: LinkJobDeps = {}): Promise<LinkRunSummary> {
   try {
-    const run = await runSecurityLinkProposals(prisma, now);
+    const run = await runSecurityLinkProposals(prisma, now, deps);
     linkHealth.lastOkAt = now;
     linkHealth.lastRun = run;
     if (run.proposed + run.activated + run.refreshed > 0) logger.info(run, "security link proposals");
@@ -606,13 +666,17 @@ export async function tickSecurityLinkProposals(prisma: PrismaClient, now: Date 
 /**
  * Wire the hourly job (index.ts, right after `registerSecurityIncidentJobs`)
  * on its own advisory lock, and set `registeredAt` — the `links` health row's
- * boot assertion.
+ * boot assertion. `deps.knownLocks` (PR-4) names lock candidates.
  */
-export function registerSecurityLinkJobs(cronRuntime: Pick<CronRuntime, "scheduleInterval">, prisma: PrismaClient): void {
+export function registerSecurityLinkJobs(
+  cronRuntime: Pick<CronRuntime, "scheduleInterval">,
+  prisma: PrismaClient,
+  deps: LinkJobDeps = {},
+): void {
   cronRuntime.scheduleInterval(
     SECURITY_LINK_INTERVAL_MS,
     async () => {
-      await tickSecurityLinkProposals(prisma, new Date());
+      await tickSecurityLinkProposals(prisma, new Date(), deps);
     },
     { lockKey: SECURITY_LINK_LOCK_KEY },
   );
