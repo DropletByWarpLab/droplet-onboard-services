@@ -71,7 +71,10 @@ scripts/image/.build/
 # Backlog-driver loop runtime scratch (queue, run-cap counter, audit log)
 .claude/loop-state/
 # WARP-236 — internal CA + per-service TLS bundles (setup-generated, never tracked)
-data/secrets/
+# WARP-3190: no trailing slash. On single-box `data/secrets` is a symlink to
+# /data/droplet/secrets, and git treats a symlink as a file, so `data/secrets/`
+# (directory-only) left it listed as untracked in every box's `git status`.
+data/secrets
 # ADR-039 — `npm run finetune-export` output. Its default --out is a relative
 # path, so a run from the repo root lands here; with --include-user-content
 # that directory holds curated CUSTOMER CONVERSATIONS. Never tracked.
