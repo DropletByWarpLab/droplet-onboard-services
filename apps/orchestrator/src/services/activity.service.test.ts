@@ -1386,3 +1386,74 @@ describe("actorFromRequest (WARP-181)", () => {
     });
   });
 });
+
+describe("WARP-3193 PERF-5 — record() holds at most one pooled connection per process", () => {
+  const params = (what: string) => ({
+    kind: "system" as const,
+    severity: "info" as const,
+    sourceIcon: "info",
+    what,
+    actor: { type: "system" as const },
+  });
+
+  it("serialises record() in call order: one open transaction at a time, however many callers burst", async () => {
+    let open = 0;
+    let maxOpen = 0;
+    const started: string[] = [];
+    const $transaction = vi.fn(async (_fn: unknown, _opts: unknown) => {
+      const n = $transaction.mock.calls.length;
+      started.push(`tx${n}`);
+      open += 1;
+      maxOpen = Math.max(maxOpen, open);
+      // Each one waits on the chain lock for a while, holding its connection.
+      await new Promise((r) => setTimeout(r, 5));
+      open -= 1;
+      return { id: BigInt(n) };
+    });
+    const rec = createActivityRecorder({
+      prisma: { $transaction } as never,
+      signer: createHmacSigner(KEY),
+    });
+
+    const out = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => rec.record(params(`burst ${i}`))),
+    );
+
+    expect(maxOpen).toBe(1);
+    expect(started).toEqual(["tx1", "tx2", "tx3", "tx4", "tx5", "tx6", "tx7", "tx8"]);
+    expect(out.map((r) => (r as unknown as { id: bigint }).id)).toEqual(
+      [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n],
+    );
+  });
+
+  it("a failed record() rejects its own caller and does not block the next", async () => {
+    let calls = 0;
+    const $transaction = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("P2024 pool timeout");
+      return { id: BigInt(calls) };
+    });
+    const rec = createActivityRecorder({
+      prisma: { $transaction } as never,
+      signer: createHmacSigner(KEY),
+    });
+
+    const [a, b] = await Promise.allSettled([rec.record(params("a")), rec.record(params("b"))]);
+    expect(a.status).toBe("rejected");
+    expect(b).toEqual({ status: "fulfilled", value: { id: 2n } });
+  });
+
+  it("validation still fails fast, without waiting for the queue", async () => {
+    let release!: () => void;
+    const $transaction = vi.fn(() => new Promise((r) => (release = () => r({ id: 1n }))));
+    const rec = createActivityRecorder({
+      prisma: { $transaction } as never,
+      signer: createHmacSigner(KEY),
+    });
+    const first = rec.record(params("slow"));
+    await expect(rec.record({ ...params("bad"), kind: "nope" as never })).rejects.toThrow();
+    release();
+    await first;
+    expect($transaction).toHaveBeenCalledTimes(1);
+  });
+});

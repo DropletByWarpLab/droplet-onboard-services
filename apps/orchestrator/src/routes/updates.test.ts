@@ -62,6 +62,8 @@ interface RowSeed {
   builtAt?: Date;
   failureReason?: string | null;
   outcome?: string;
+  applyClaim?: string;
+  applyClaimId?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -74,6 +76,8 @@ function seedRow(seed: RowSeed) {
     builtAt: new Date("2026-07-01T00:00:00Z"),
     failureReason: null,
     outcome: "not_applied",
+    applyClaim: "unclaimed",
+    applyClaimId: null as string | null,
     createdAt: new Date("2026-07-01T01:00:00Z"),
     updatedAt: new Date("2026-07-01T01:00:00Z"),
     // manifestJson deliberately present in the store so a leak through
@@ -101,6 +105,8 @@ function createPrismaMock(rows: ReturnType<typeof seedRow>[] = []) {
         if (!where.status.in.includes(row.status)) return false;
       }
     }
+    if (where?.applyClaim !== undefined && row.applyClaim !== where.applyClaim) return false;
+    if (where?.applyClaimId !== undefined && row.applyClaimId !== where.applyClaimId) return false;
     return true;
   };
   const sortBy = (list: typeof updates, orderBy: any) => {
@@ -481,12 +487,57 @@ describe("POST /api/updates/apply-now", () => {
     expect(second.status).toBe(409);
     expect(second.body.error).toBe("apply_in_progress");
 
-    // Once the dispatched apply settles the flag clears.
+    // Once the dispatched apply settles the flag clears. The real apply also
+    // hands its row claim back (WARP-3193); this double stands in for it.
+    Object.assign(prisma._updates[0]!, { applyClaim: "unclaimed", applyClaimId: null });
     resolveApply({ outcome: "rolled_back", deviceUpdateId: "du-pending" });
     await vi.waitFor(async () => {
       const third = await request(app).post("/api/updates/apply-now").send({});
       expect(third.status).toBe(202);
     });
+  });
+
+  it("WARP-3193 PERF-3: claims the row before auditing, and hands the claim to the dispatched apply", async () => {
+    const prisma = createPrismaMock([
+      seedRow({ id: "du-pending", status: "pending", applyClaim: "unclaimed", applyClaimId: null }),
+    ]);
+    const applyPendingUpdateMock = vi.fn(async () => ({
+      outcome: "self_swap_started" as const,
+      deviceUpdateId: "du-pending",
+    }));
+    const deps = createDepsMock({
+      getApplyRunner: () => ({} as any),
+      applyPendingUpdate: applyPendingUpdateMock as any,
+    });
+    const res = await request(buildApp(prisma, deps)).post("/api/updates/apply-now").send({});
+    expect(res.status).toBe(202);
+
+    const row = prisma._updates[0]!;
+    expect(row.applyClaim).toBe("claimed");
+    expect(typeof row.applyClaimId).toBe("string");
+    expect(applyPendingUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claimed: { deviceUpdateId: "du-pending", claimId: row.applyClaimId },
+      }),
+    );
+  });
+
+  it("WARP-3193 PERF-3: 409s without auditing or dispatching when the apply window holds the row", async () => {
+    const prisma = createPrismaMock([
+      seedRow({
+        id: "du-verifying",
+        status: "verifying",
+        applyClaim: "claimed",
+        applyClaimId: "window-run",
+      }),
+    ]);
+    const deps = createDepsMock({ getApplyRunner: () => ({} as any) });
+    const res = await request(buildApp(prisma, deps)).post("/api/updates/apply-now").send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("apply_in_progress");
+    expect(deps.applyPendingUpdate).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+    expect(prisma._updates[0]!.applyClaimId).toBe("window-run");
   });
 
   it("picks up a resumable verifying row (retry cursor)", async () => {
