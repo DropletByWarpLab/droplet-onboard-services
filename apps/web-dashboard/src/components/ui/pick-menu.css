@@ -29,6 +29,14 @@
 }
 :is(.droplet-shell, .fam-top) .pick-menu[data-placement="below"] { top: calc(100% + 8px); bottom: auto; }
 :is(.droplet-shell, .fam-top) .pick-menu[data-align="end"] { right: 0; left: auto; }
+/* MenuSelect places its own list (inside scrolling popovers an absolute one
+   would be clipped): fixed, with top/left set from the trigger's box. */
+:is(.droplet-shell, .fam-top) .pick-menu[data-placement="fixed"] {
+  position: fixed;
+  bottom: auto;
+  right: auto;
+  min-width: 180px;
+}
 
 :is(.droplet-shell, .fam-top) .pick-item {
   display: flex;
@@ -59,5 +67,28 @@
 }
 :is(.droplet-shell, .fam-top) .pick-item-caption { font-size: 11.5px; color: var(--text-muted); }
 :is(.droplet-shell, .fam-top) .pick-check { flex: none; color: var(--brand); }
+:is(.droplet-shell, .fam-top) .pick-item[aria-disabled="true"] { color: var(--text-muted); cursor: default; }
+
+/* MenuSelect's trigger — a native select's closed box in the surface's tone:
+   a tonal fill, no stroke, the brand ring on keyboard focus. Callers size it. */
+:is(.droplet-shell, .fam-top) .pick-select-wrap { display: inline-flex; flex: none; min-width: 0; }
+:is(.droplet-shell, .fam-top) .pick-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-input);
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+:is(.droplet-shell, .fam-top) .pick-select:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--brand); }
+:is(.droplet-shell, .fam-top) .pick-select:disabled { opacity: 0.5; cursor: default; }
+:is(.droplet-shell, .fam-top) .pick-select > svg { flex: none; color: var(--text-muted); }
+:is(.droplet-shell, .fam-top) .pick-select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A gap in tone, not a rule: the separator is space. */
 :is(.droplet-shell, .fam-top) .pick-sep { height: 6px; }

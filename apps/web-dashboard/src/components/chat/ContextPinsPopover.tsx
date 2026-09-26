@@ -30,6 +30,7 @@ import {
   listContextPins,
   type ContextPin,
 } from "@/lib/api";
+import { MenuSelect, type MenuSelectOption } from "@/components/ui/MenuSelect";
 
 const KIND_ICON: Record<ContextPin["kind"], typeof Folder> = {
   folder: Folder,
@@ -55,6 +56,10 @@ const KIND_ICON: Record<ContextPin["kind"], typeof Folder> = {
  *  arrive from the record surfaces (the CRM record drawer, the project header)
  *  where the id is already in hand. */
 const ADDABLE_KINDS: ContextPin["kind"][] = ["folder", "file", "camera"];
+const KIND_OPTIONS: MenuSelectOption<ContextPin["kind"]>[] = ADDABLE_KINDS.map((k) => ({
+  value: k,
+  label: k,
+}));
 
 /**
  * WARP-2582 — what a row says. The `ref` fallback is what keeps a folder pin
@@ -226,21 +231,14 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
           <div
             className="flex items-center gap-1.5 pt-2"
           >
-            <label className="sr-only" htmlFor="pin-kind">
-              Kind
-            </label>
-            <select
+            <MenuSelect
               id="pin-kind"
+              label="Kind"
               value={kind}
-              onChange={(e) => setKind(e.target.value as ContextPin["kind"])}
-              className="type-footnote h-8 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] focus:ring-2 focus:ring-[var(--brand)]"
-            >
-              {ADDABLE_KINDS.map((k) => (
-                <option key={k} value={k}>
-                  {k}
-                </option>
-              ))}
-            </select>
+              options={KIND_OPTIONS}
+              onChange={setKind}
+              className="type-footnote h-8 w-24"
+            />
             <label className="sr-only" htmlFor="pin-ref">
               Path or reference
             </label>

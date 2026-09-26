@@ -17,6 +17,12 @@ import {
   PROFILE_ROWS,
   type Proposal,
 } from "@/lib/interview";
+import { MenuSelect, type MenuSelectOption } from "@/components/ui/MenuSelect";
+
+const FACT_AUDIENCES: MenuSelectOption<Proposal["facts"][number]["audience"]>[] = [
+  { value: "family", label: "Everyone here" },
+  { value: "admin", label: "Admins only" },
+];
 
 export interface ReviewCardCommit {
   profile: Partial<Record<(typeof PROFILE_ROWS)[number]["field"], string>>;
@@ -208,24 +214,16 @@ export function ReviewCard({
                   )
                 }
               />
-              <select
-                aria-label={`Who can see fact ${i + 1}`}
-                className="dp-input !w-auto type-caption-1"
+              <MenuSelect
+                label={`Who can see fact ${i + 1}`}
                 value={f.audience}
+                options={FACT_AUDIENCES}
                 disabled={disabled}
-                onChange={(e) =>
-                  setFacts((all) =>
-                    all.map((x, j) =>
-                      j === i
-                        ? { ...x, audience: e.target.value as "family" | "admin" }
-                        : x,
-                    ),
-                  )
+                onChange={(audience) =>
+                  setFacts((all) => all.map((x, j) => (j === i ? { ...x, audience } : x)))
                 }
-              >
-                <option value="family">Everyone here</option>
-                <option value="admin">Admins only</option>
-              </select>
+                className="type-caption-1 h-8"
+              />
             </div>
           ))}
         </div>

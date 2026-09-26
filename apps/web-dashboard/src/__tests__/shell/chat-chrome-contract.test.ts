@@ -317,26 +317,20 @@ describe("/chat's menus and secondary surfaces take tone, not strokes (WARP-3043
   });
 
   it("no native <select> in the model picker, the menu primitive or /chat's page", () => {
-    for (const rel of ["components/ModelSelector.tsx", "components/ui/useMenuButton.ts", "app/chat/page.tsx", "components/ChatInput.tsx"]) {
+    for (const rel of ["components/ModelSelector.tsx", "components/ui/useMenuButton.ts", "components/ui/MenuSelect.tsx", "app/chat/page.tsx", "components/ChatInput.tsx"]) {
       expect(read(rel), rel).not.toMatch(/<select\s/);
     }
   });
 
-  // Known native selects left on /chat's popovers — out of this slice's
-  // scope (flagged). The list may only shrink.
-  it("the native selects left in components/chat are only the known ones", () => {
+  // /chat's popovers and cards (Memory, Context pins, the review card) pick
+  // through components/ui/MenuSelect, not the OS-painted list.
+  it("no native select is left in components/chat", () => {
     const dir = path.join(SRC, "components/chat");
     const found = readdirSync(dir)
       .filter((f) => /\.tsx$/.test(f) && !/\.test\.tsx$/.test(f))
       .flatMap((f) => (read(`components/chat/${f}`).match(/<select\s/g) ?? []).map(() => f))
       .sort();
-    expect(found).toEqual([
-      "ContextPinsPopover.tsx",
-      "MemoryPanel.tsx",
-      "MemoryPanel.tsx",
-      "MemoryPanel.tsx",
-      "ReviewCard.tsx",
-    ]);
+    expect(found).toEqual([]);
   });
 
   it("the reply's secondary surfaces are toned only under .droplet-shell.chat-app", () => {
