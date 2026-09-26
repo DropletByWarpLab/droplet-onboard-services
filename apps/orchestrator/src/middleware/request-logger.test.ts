@@ -169,3 +169,52 @@ describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
     expect(line.req.query.token).toBe("[Redacted]");
   });
 });
+
+describe("requestLogger Nextcloud credential redaction (WARP-3158)", () => {
+  // The MCP file tools and clip export call /api/files and
+  // /api/cameras/.../clips/export with the person's Nextcloud app-password in
+  // X-Nextcloud-Token (WARP-861 `_service:mcp` path). The default req
+  // serializer emits it verbatim unless the header is on the redact list.
+  const NC_TOKEN = "NCAPP-SECRET-aBcDe-FgHiJ-kLmNo-PqRsT";
+
+  function runLoggedRequest() {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = mockReq("NC-REDACT-ID", {
+      "x-nextcloud-token": NC_TOKEN,
+      "x-nextcloud-user": "alice",
+    }) as ReturnType<typeof mockReq> & {
+      log: { info: (msg: string) => void };
+    };
+    // writableEnded makes pino-http label the finish line "request completed"
+    // (the shared mock otherwise yields "request aborted").
+    const res = Object.assign(mockRes(), { writableEnded: true });
+    runWithRequestId("NC-REDACT-ID", () => {
+      logger(req as never, res as never);
+      req.log.info("in-handler line");
+    });
+    res.emit("finish");
+    return lines;
+  }
+
+  it("never logs the X-Nextcloud-Token value on any line", () => {
+    const output = runLoggedRequest().join("");
+    expect(output).not.toContain(NC_TOKEN);
+  });
+
+  it("replaces X-Nextcloud-Token with the pino placeholder on the completion line", () => {
+    const lines = runLoggedRequest();
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.msg).toBe("request completed");
+    expect(completion.req.headers["x-nextcloud-token"]).toBe("[Redacted]");
+  });
+
+  it("keeps the non-secret X-Nextcloud-User header debuggable", () => {
+    const lines = runLoggedRequest();
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.headers["x-nextcloud-user"]).toBe("alice");
+  });
+});

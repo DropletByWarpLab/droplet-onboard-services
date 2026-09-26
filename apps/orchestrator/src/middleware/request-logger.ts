@@ -33,6 +33,10 @@ export function createRequestLogger(opts: {
       paths: [
         "req.headers.authorization",
         "req.headers.cookie",
+        // WARP-3158: the person's Nextcloud app-password, sent by the MCP file
+        // tools / clip export on the WARP-861 `_service:mcp` path (see
+        // `routes/files.ts getToken()`); plaintext in the request log otherwise.
+        'req.headers["x-nextcloud-token"]',
         'res.headers["set-cookie"]',
         // WARP-1474: the overlay QR link token is a bearer-equivalent secret —
         // it's returned to the owner ONCE and only its sha256 hash is persisted.
