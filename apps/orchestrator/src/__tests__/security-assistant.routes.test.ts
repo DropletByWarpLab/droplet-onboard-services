@@ -278,6 +278,19 @@ describe("refusals: only the MCP principal, only for a person who may view Secur
     expect(resolve).not.toHaveBeenCalled();
   });
 
+  // #2420 review 12: a header naming TWO rows (one person's username is another's id) is neither of them —
+  // here the other row is an owner, so picking either would scope the call with a stranger's reach.
+  it("a header that names two people → 404 module_disabled on every route, and neither is asked about", async () => {
+    f.world.user.push({ id: "66666666-6666-4666-8666-666666666666", username: MARIA, nextcloudUsername: null, displayName: "Twin", role: "owner", directoryStatus: "ACTIVE" });
+    const { server, resolve } = app(f);
+    for (const path of ROUTES) {
+      const res = await get(server, path, MARIA);
+      expect(res.status, path).toBe(404);
+      expect(res.body, path).toEqual(MODULE_DISABLED);
+    }
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it("family without the Security feature → 404 module_disabled, asked about Maria", async () => {
     const { server, resolve } = app(f, { level: null });
     for (const path of ROUTES) {
@@ -565,7 +578,8 @@ describe("periods", () => {
   });
 
   it("a period keeps only incidents whose VISIBLE span meets it", async () => {
-    // INC_FRONT's stored span reaches into last night only through `back`; Maria sees front at 2 days ago.
+    // Incident …0005's stored span reaches into last night only through `back`; Maria sees only `front`,
+    // whose activity ended the night before (21 Sep, 23:00–23:05).
     f = world();
     f.world.securityIncident.push(
       incident("1b1b1b1b-0000-4000-8000-000000000005", {
@@ -652,17 +666,36 @@ describe("failure and size", () => {
     expect(res.body).toEqual({ error: { code: "SECURITY_UNAVAILABLE", message: "Security can't be read right now." } });
   });
 
-  it("every answer at its largest stays under the 8,000-char tool cap, with a cursor to resume", async () => {
+  /**
+   * The largest answers: 40 areas, 80 events, 40 incidents. `mixed` adds `back` to every area and incident
+   * (40 more events, its activity 30 s after front's) — a camera Maria, granted only `front`, can't see.
+   */
+  function bigWorld(mixed = false) {
     const long = "A camera with a very long display name that goes on".padEnd(60, "x");
     const areaName = (i: number) => `Area number ${i} with a long name that fills it`.padEnd(60, "y");
-    const areas = Array.from({ length: 40 }, (_, i) => areaRows(`0b0b0b0b-0000-4000-8000-${String(i).padStart(12, "0")}`, areaName(i), "interior", ["front", "front/driveway_left_side"]));
-    const events = Array.from({ length: 80 }, (_, i) =>
-      eventRow({ id: BigInt(100 + i), camera: "front", cameraZones: ["driveway_left_side", "porch_steps_area"], startedAt: new Date(T.getTime() - i * 60_000), sourceRef: `front/${100 + i}.5-a`, dedupeKey: `big${i}` }),
+    const areas = Array.from({ length: 40 }, (_, i) =>
+      areaRows(`0b0b0b0b-0000-4000-8000-${String(i).padStart(12, "0")}`, areaName(i), "interior", mixed ? ["front", "front/driveway_left_side", "back"] : ["front", "front/driveway_left_side"]),
     );
+    const at = (i: number) => new Date(T.getTime() - i * 60_000);
+    const events = [
+      ...Array.from({ length: 80 }, (_, i) =>
+        eventRow({ id: BigInt(100 + i), camera: "front", cameraZones: ["driveway_left_side", "porch_steps_area"], startedAt: at(i), sourceRef: `front/${100 + i}.5-a`, dedupeKey: `big${i}` }),
+      ),
+      ...(mixed
+        ? Array.from({ length: 40 }, (_, i) =>
+            eventRow({ id: BigInt(300 + i), camera: "back", startedAt: new Date(at(i).getTime() + 30_000), sourceRef: `back/${300 + i}.5-a`, dedupeKey: `bigb${i}` }),
+          )
+        : []),
+    ];
     const incidents = Array.from({ length: 40 }, (_, i) =>
       incident(`2c2c2c2c-0000-4000-8000-${String(i).padStart(12, "0")}`, {
-        zoneId: areas[0]!.zone.id, zoneName: areaName(0), zoneKind: "interior", cameras: ["front"], reasonCodes: ["after_hours_presence"],
-        countsByCamera: { front: { person: 3 } }, lastActivityAt: new Date(T.getTime() - i * 60_000), firstActivityAt: new Date(T.getTime() - i * 60_000),
+        zoneId: areas[0]!.zone.id, zoneName: areaName(0), zoneKind: "interior", cameras: mixed ? ["front", "back"] : ["front"], reasonCodes: ["after_hours_presence"],
+        countsByCamera: mixed ? { front: { person: 3 }, back: { person: 2 } } : { front: { person: 3 } },
+        firstActivityAt: at(i),
+        lastActivityAt: mixed ? new Date(at(i).getTime() + 30_000) : at(i),
+        ...(mixed
+          ? { spanByCamera: { front: { first: at(i).toISOString(), last: at(i).toISOString() }, back: { first: new Date(at(i).getTime() + 30_000).toISOString(), last: new Date(at(i).getTime() + 30_000).toISOString() } } }
+          : {}),
       }),
     );
     f = world({
@@ -672,9 +705,17 @@ describe("failure and size", () => {
       securityEvent: events,
       securityEventTriage: events.map((e) => ({ eventId: e.id, outcome: "grouped", incidentId: incidents[0]!.id, alsoZoneIds: [] })),
       securityIncident: incidents,
-      securityIncidentReason: incidents.map((i, n) => reason(i.id, "after_hours_presence", "front", "alert", BigInt(100 + n))),
+      securityIncidentReason: incidents.flatMap((i, n) => [
+        reason(i.id, "after_hours_presence", "front", "alert", BigInt(100 + n)),
+        ...(mixed ? [reason(i.id, "after_hours_presence", "back", "alert", BigInt(300 + n))] : []),
+      ]),
       securityIncidentAck: [],
     });
+    return { incidents };
+  }
+
+  it("every answer at its largest stays under the 8,000-char tool cap, with a cursor to resume", async () => {
+    const { incidents } = bigWorld();
     const { server } = app(f);
     const cap = 8_000 - '{"type":"security_incidents",}'.length;
     const a1 = await get(server, "/api/security/assistant/incidents?limit=25", "stefan");
@@ -696,5 +737,36 @@ describe("failure and size", () => {
     const a3next = await get(server, `/api/security/assistant/events?limit=40&cursor=${a3.body.nextCursor}`, "stefan");
     const seen = a3.body.events.length;
     expect(a3next.body.events[0].at.at).toBe(new Date(T.getTime() - seen * 60_000).toISOString());
+  });
+
+  // #2420 review 12: the camera-limited viewer takes a different path (her own SQL page, the partial view),
+  // and her answers are sized and resumed the same way — without `back` in any of them.
+  it("…and for a camera-limited viewer too: under the cap, a cursor that resumes after her last item, nothing of `back`", async () => {
+    const { incidents } = bigWorld(true);
+    const { server } = app(f);
+    const cap = 8_000 - '{"type":"security_incidents",}'.length;
+    const a1 = await get(server, "/api/security/assistant/incidents?limit=25", "maria");
+    const a2 = await get(server, `/api/security/assistant/incidents/${incidents[0]!.id}`, "maria");
+    const a3 = await get(server, "/api/security/assistant/events?limit=40", "maria");
+    const a4 = await get(server, "/api/security/assistant/areas", "maria");
+    for (const [name, res] of [["A1", a1], ["A2", a2], ["A3", a3], ["A4", a4]] as const) {
+      expect(res.status, name).toBe(200);
+      expect(JSON.stringify(res.body).length, name).toBeLessThan(cap);
+      expect(JSON.stringify(res.body), name).not.toContain("Back camera");
+    }
+    expect(a1.body.incidents.length).toBeGreaterThan(5);
+    expect(a1.body.nextCursor).not.toBeNull();
+    expect(a2.body.incident.moreEvents).toBe(true);
+    expect(a3.body.events.length).toBeGreaterThan(5);
+    expect(a3.body.nextCursor).not.toBeNull();
+    // Her times are front's: the first incident's last activity is T, not back's T + 30 s.
+    expect(a1.body.incidents[0].last.at).toBe(T.toISOString());
+    // A1 resumes exactly after her last incident, and A3 after her last event.
+    const shown = a1.body.incidents.length;
+    const a1next = await get(server, `/api/security/assistant/incidents?limit=25&cursor=${a1.body.nextCursor}`, "maria");
+    expect(a1next.status).toBe(200);
+    expect(a1next.body.incidents[0].id).toBe(incidents[shown]!.id);
+    const a3next = await get(server, `/api/security/assistant/events?limit=40&cursor=${a3.body.nextCursor}`, "maria");
+    expect(a3next.body.events[0].at.at).toBe(new Date(T.getTime() - a3.body.events.length * 60_000).toISOString());
   });
 });
