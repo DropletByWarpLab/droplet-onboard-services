@@ -9,6 +9,9 @@
  *   10  POST   /api/security/zones/:id/archive      manage
  *   11  POST   /api/security/zones/:id/unarchive    manage
  *   12  PUT    /api/security/zones/:id/links        manage
+ *   23  GET    /api/security/link-proposals         view    (WARP-2979; the list is filled only at manage — a filter, not a gate)
+ *   24  POST   /api/security/links/:linkId/accept   manage  (WARP-2979: Add it / Keep)
+ *   25  POST   /api/security/links/:linkId/reject   manage  (WARP-2979: Not this / Undo)
  *
  * All under the `security` module gate that mountModuleGates mounts off
  * /api/security (the box toggle + per-person view).
@@ -40,12 +43,15 @@ import {
   type SecurityRouteDeps,
   type SecurityViewerScope,
 } from "../services/security-access.js";
+import { readSecurityAiSettings } from "../services/security-ai-settings.js";
 import {
   SECURITY_ZONE_KINDS,
   SECURITY_ZONE_LINK_LIMIT,
   ZoneWriteError,
   buildSourcesView,
   createZone,
+  decideDropletLink,
+  listLinkProposals,
   frigatePartsFromConfig,
   loadActiveLinks,
   loadCameraLabels,
@@ -93,10 +99,12 @@ const linksBody = z
   })
   .strict();
 const zoneIdParam = z.string().uuid();
+/** WARP-2979 — routes 24/25 are intents with no fields; anything sent is refused, never read. */
+const emptyBody = z.object({}).strict();
 
 const NAME_RULE = "1–60 characters, at least one visible; no control, bidi override or zero-width characters";
 
-type ErrorCode = ZoneWriteError["code"] | "ZONES_UNAVAILABLE" | "AUDIT_UNAVAILABLE";
+type ErrorCode = ZoneWriteError["code"] | "ZONES_UNAVAILABLE" | "AUDIT_UNAVAILABLE" | "LINKS_UNAVAILABLE";
 
 function fail(
   res: Response,
@@ -151,7 +159,7 @@ function writeContext(req: Request, deps: SecurityRouteDeps): ZoneWriteContext {
 
 /** The written area as its writer sees it: only the links visible to them (DS-005, even for a write). */
 function writtenView(zone: ZoneRecord, scope: SecurityViewerScope, labels: ReadonlyMap<string, string>) {
-  return toZoneView(zone, visibleLinks(zone.links, scope), labels);
+  return toZoneView(zone, visibleLinks(zone.links, scope), labels, scope);
 }
 
 export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRouteDeps = {}): Router {
@@ -371,6 +379,52 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
       answerWriteError(res, err, "security zone links");
     }
   });
+
+  // ── 23. Droplet's open suggestions (WARP-2979) ──────────────────────────
+  // View-gated like every GET; the LIST is a manage-level filter (P2b's
+  // `mayListArchivedZones` rule: owner/admin at manage, or unresolved) —
+  // below it the answer is an empty list, never a denial.
+  router.get("/security/link-proposals", view, async (req: Request, res: Response) => {
+    try {
+      const level = await securityLevelFor(req, deps.resolve);
+      const settings = await readSecurityAiSettings(prisma);
+      if (!mayListArchivedZones(req, level)) {
+        res.json({ level: level === "none" ? null : level, linking: settings.linking, proposals: [] });
+        return;
+      }
+      const [scope, labels] = await Promise.all([securityViewerScope(prisma, req, deps.resolve), loadCameraLabels(prisma)]);
+      res.json({ level: "manage", linking: settings.linking, proposals: await listLinkProposals(prisma, scope, labels) });
+    } catch (err) {
+      logger.error({ err }, "security link proposals read failed");
+      fail(res, 503, "LINKS_UNAVAILABLE", "Droplet's suggestions are unavailable right now");
+    }
+  });
+
+  // ── 24 / 25. a person decides on Droplet's link (WARP-2979) ─────────────
+  for (const [path, decision] of [
+    ["/security/links/:linkId/accept", "accept"],
+    ["/security/links/:linkId/reject", "reject"],
+  ] as const) {
+    router.post(path, ...manage(), async (req: Request, res: Response) => {
+      const id = zoneIdParam.safeParse(req.params.linkId);
+      if (!id.success) {
+        fail(res, 404, "LINK_NOT_FOUND", "No such link");
+        return;
+      }
+      const body = emptyBody.safeParse(req.body ?? {});
+      if (!body.success) {
+        invalid(res, body.error.issues);
+        return;
+      }
+      try {
+        const { scope, labels } = await beforeWrite(req);
+        const out = await decideDropletLink(prisma, writeContext(req, deps), id.data, decision, { scope, cameraLabels: labels });
+        res.json({ zone: writtenView(out.zone, scope, labels), changed: out.changed });
+      } catch (err) {
+        answerWriteError(res, err, `security link ${decision}`);
+      }
+    });
+  }
 
   return router;
 }

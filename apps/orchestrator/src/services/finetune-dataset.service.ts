@@ -187,7 +187,9 @@ export type DropReason =
    * because none of it looks like a secret. Excluded from every corpus this
    * module produces, flag or no flag.
    */
-  | "connector_records";
+  | "connector_records"
+  /** WARP-2979 — read a Security tool: presence data about people, never exported (ADR-059 §6.13). */
+  | "security_records";
 
 export interface TrainingMessage {
   readonly role: "user" | "assistant" | "tool";
@@ -242,6 +244,19 @@ export type CurationOutcome =
  */
 export const CONNECTOR_RECORD_TOOLS: ReadonlySet<string> = new Set(
   TOOL_CATALOG.filter((t) => t.domain === "cloud" || t.domain === "erp").map((t) => t.name),
+);
+
+/**
+ * WARP-2979 (#2420 review 3; ADR-059 P4 §6.13) — the Security tools: their
+ * results are presence data about people (who was seen where, and when), and
+ * the LoRA export is a file meant to leave the box. A turn that read one is
+ * DROPPED, never redacted — the WARP-2425 precedent, and for the same reason:
+ * a redaction rule would have to know every shape a result can take. Derived
+ * from the catalog's `domain` axis, so a Security tool added later is inside
+ * the firewall the moment it is catalogued.
+ */
+export const SECURITY_RECORD_TOOLS: ReadonlySet<string> = new Set(
+  TOOL_CATALOG.filter((t) => t.domain === "security").map((t) => t.name),
 );
 
 export interface CurationOptions {
@@ -357,6 +372,10 @@ export function curateTurn(
   if (calls.some((c) => CONNECTOR_RECORD_TOOLS.has(c.name))) {
     return { kept: false, reason: "connector_records" };
   }
+  // WARP-2979 — the same boundary for Security, before anything is rendered.
+  if (calls.some((c) => SECURITY_RECORD_TOOLS.has(c.name))) {
+    return { kept: false, reason: "security_records" };
+  }
   if (calls.length === 0 && !opts.includeNoToolTurns) {
     return { kept: false, reason: "no_tool_calls" };
   }
@@ -428,6 +447,7 @@ const EMPTY_DROPS: Record<DropReason, number> = {
   no_tool_calls: 0,
   incomplete_exchange: 0,
   connector_records: 0,
+  security_records: 0,
 };
 
 /** Curate a whole session's worth of messages, keeping the drop histogram. */

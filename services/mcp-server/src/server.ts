@@ -13,7 +13,7 @@ import {
   type ToolResult,
 } from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
-import { canCallTool, filterToolsForRole } from "./rbac.js";
+import { canCallTool, isWithheldOffBox, filterToolsForRole } from "./rbac.js";
 import { describeThrown } from "./thrown-cause.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
@@ -104,6 +104,27 @@ export function createServer(
       return {
         content: [
           { type: "text", text: JSON.stringify({ error: `Unknown tool: ${req.params.name}` }) },
+        ],
+        isError: true,
+      };
+    }
+
+    // WARP-2979 (§6.13) — a withheld domain is refused off the box before any
+    // role check or handler: a client that calls it by name without listing
+    // it first gets nothing from it.
+    if (!trustedPrincipal && isWithheldOffBox(tool)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              error: {
+                code: "withheld_off_box",
+                message: "This tool is only available to Droplet's own chat on this box.",
+              },
+            }),
+          },
         ],
         isError: true,
       };

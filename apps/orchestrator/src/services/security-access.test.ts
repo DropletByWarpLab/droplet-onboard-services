@@ -18,7 +18,13 @@ vi.mock("./camera-access.service.js", () => ({
   visibleCameraNames: h.visible,
 }));
 
-import { mayListArchivedZones, mayReadThreats, securityLevelFor, securityViewerScope } from "./security-access.js";
+import {
+  mayListArchivedZones,
+  mayReadThreats,
+  securityLevelFor,
+  securityScopeForPerson,
+  securityViewerScope,
+} from "./security-access.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import type { EffectiveAccessResult } from "./effective-access.service.js";
 
@@ -61,6 +67,45 @@ describe("securityViewerScope", () => {
   it("a grant lookup failure propagates (the route answers 503, never an unfiltered page)", async () => {
     h.visible.mockRejectedValue(new Error("db down"));
     await expect(securityViewerScope({} as never, req("family"))).rejects.toThrow("db down");
+  });
+});
+
+describe("securityScopeForPerson (WARP-2979 — the one scope computation; the chat tools pass the resolved person)", () => {
+  it("scopes a family person to their grants, read by user id with a PLAIN principal (no asserted-user hop)", async () => {
+    const granted = new Set(["front"]);
+    h.visible.mockResolvedValue(granted);
+    const scope = await securityScopeForPerson({} as never, { id: "u-maria", role: "family" });
+    expect(scope).toEqual({ visibleCameras: granted, mayReadThreats: false });
+    expect(h.visible).toHaveBeenCalledTimes(1);
+    expect(h.visible.mock.calls[0]![1]).toEqual({ id: "u-maria", role: "family" });
+  });
+
+  it("owner and admin see every camera and the threats; nobody else reads threats", async () => {
+    h.visible.mockResolvedValue("all");
+    for (const role of ["owner", "admin"]) {
+      expect(await securityScopeForPerson({} as never, { id: `u-${role}`, role })).toEqual({
+        visibleCameras: "all",
+        mayReadThreats: true,
+      });
+    }
+    h.visible.mockResolvedValue(new Set());
+    for (const role of ["family", "guest", "service", undefined]) {
+      expect((await securityScopeForPerson({} as never, { id: "u-x", role })).mayReadThreats, String(role)).toBe(false);
+    }
+  });
+
+  it("securityViewerScope is exactly the person scope of req.user", async () => {
+    const granted = new Set(["yard"]);
+    h.visible.mockResolvedValue(granted);
+    const viaReq = await securityViewerScope({} as never, req("family"));
+    const viaPerson = await securityScopeForPerson({} as never, { id: "u-family", role: "family" });
+    expect(viaReq).toEqual(viaPerson);
+    expect(h.visible.mock.calls[0]![1]).toEqual(h.visible.mock.calls[1]![1]);
+  });
+
+  it("a grant lookup failure propagates", async () => {
+    h.visible.mockRejectedValue(new Error("db down"));
+    await expect(securityScopeForPerson({} as never, { id: "u-maria", role: "family" })).rejects.toThrow("db down");
   });
 });
 

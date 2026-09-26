@@ -234,6 +234,16 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // camera by display name alone, so without the verb the turn would never
   // advertise rename_camera.
   { pattern: /\b(cameras?|clips?|recordings?|footage|motion|doorbell|snapshots?|surveillance|nvr|frigate|live view|people|person|someone|somebody|anybody|anyone|intruders?|visitors?|packages?|parcels?|deliver(y|ies)|driveway|porch|doorstep|front door|back door|garage|yard|gate|who (was|were|came|is|has been)|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["cameras"] },
+  // WARP-2979 (ADR-059 P4 §6.12.6) — Security questions. The camera words
+  // (person, someone, back door, who was…) already pull `cameras`; this rule is
+  // what brings in incidents, areas and the site mode for "anything odd last
+  // night?". A word in two rules brings in both domains, and a false-positive
+  // domain is cheap (see the rule comment above). Never core: four schemas on
+  // every turn would pay for a question most turns never ask.
+  // Review #2420: `alerts?`, `offline` and "(anyone|anybody|someone) in/at the …" — the tools' own examples
+  // ("any alerts this week?", "is any camera offline?", "was anyone in the stock room after 9?"), pinned by a
+  // test that reads every quoted example out of the security descriptions.
+  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the)\b/i, domains: ["security"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
   //

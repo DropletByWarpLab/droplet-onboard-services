@@ -134,6 +134,12 @@ function reason(incidentId: string, code: Code, camera: string | null, id: bigin
     evidenceAt: T,
     evidenceSummary: "x",
     detail: {},
+    // WARP-2979 (P4) — every real row carries these: the migration adds them NOT NULL DEFAULT false / NULL
+    // (20260926000100_warp_2979_security_ai). A row pushed straight into the fake's world skips its column
+    // defaults, and the list's SQL twin (`visibleReasonWhere`: `relatedLock = false`) would then read a row
+    // Postgres can never hold — the T-O2 "documented disagreement" case pushes two. The pin's numbers are unchanged.
+    relatedCamera: null,
+    relatedLock: false,
   };
 }
 

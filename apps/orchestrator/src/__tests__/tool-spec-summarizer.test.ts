@@ -237,3 +237,47 @@ describe("createToolSpecSummarizer — follows the active model (WARP-3047)", ()
     expect(completeOnceMock).not.toHaveBeenCalled();
   });
 });
+
+// WARP-2979 (#2420 review 2b; ADR-059 P4 §6.13) — a routine's `summarize` step writes up the results of the
+// steps before it. When any of those came from a domain that never goes to a cloud model
+// (OFF_LAN_WITHHELD_DOMAINS: files, memory, business, security), the prose is written on the box's LOCAL model
+// — never the active model, which may be a cloud one — or not at all.
+describe("summarize after a withheld domain's step: the local model only", () => {
+  const localModel = vi.fn(async (): Promise<string | null> => "gpt-oss:20b");
+
+  beforeEach(() => {
+    localModel.mockReset().mockResolvedValue("gpt-oss:20b");
+    activeModel.mockResolvedValue("claude-sonnet-4");
+  });
+
+  it.each([
+    ["security", "security_list_incidents"],
+    ["files", "search_files"],
+  ])("a %s step before it → the LOCAL model writes the summary, whatever the active model", async (_d, tool) => {
+    const summarizer = createToolSpecSummarizer(activeModel, localModel);
+    await summarizer.summarize("Write it up.", [ok(tool, { incidents: [] }), ok("get_system_health", { status: "ok" })]);
+    expect(localModel).toHaveBeenCalled();
+    expect(completeOnceMock).toHaveBeenCalled();
+    for (const [args] of completeOnceMock.mock.calls) expect(args.model).toBe("gpt-oss:20b");
+  });
+
+  it("a FAILED security step counts too: its error text still reaches the prompt", async () => {
+    const summarizer = createToolSpecSummarizer(activeModel, localModel);
+    await summarizer.summarize("Write it up.", [failed("security_get_incident", "INCIDENT_NOT_FOUND")]);
+    expect(completeOnceMock.mock.calls[0]![0].model).toBe("gpt-oss:20b");
+  });
+
+  it("no local model → the step fails plainly; nothing is sent to any model", async () => {
+    localModel.mockResolvedValue(null);
+    const summarizer = createToolSpecSummarizer(activeModel, localModel);
+    await expect(summarizer.summarize("Write it up.", [ok("security_search_events", { events: [] })])).rejects.toThrow(/on this Droplet/);
+    expect(completeOnceMock).not.toHaveBeenCalled();
+  });
+
+  it("no withheld domain → the active model, as before; the local resolver is not even asked", async () => {
+    const summarizer = createToolSpecSummarizer(activeModel, localModel);
+    await summarizer.summarize("Write it up.", [ok("get_system_health", { status: "ok" }), ok("list_cameras", { cameras: [] })]);
+    expect(completeOnceMock.mock.calls[0]![0].model).toBe("claude-sonnet-4");
+    expect(localModel).not.toHaveBeenCalled();
+  });
+});

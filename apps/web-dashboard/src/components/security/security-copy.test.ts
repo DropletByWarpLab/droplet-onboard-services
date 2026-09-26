@@ -28,14 +28,15 @@
  *     nodes and the aria-label / title / placeholder / alt / label string
  *     attributes of every file in both folders.
  *
- * NEGATION: an explicit ALLOW-LIST, not a negation-aware matcher. There are
- * exactly two exceptions, each pinned to the one place it lives and checked
- * to still exist, so a stale entry fails instead of silently widening:
+ * NEGATION: an explicit ALLOW-LIST, not a negation-aware matcher. There is
+ * exactly one exception, pinned to the one place it lives and checked to
+ * still exist, so a stale entry fails instead of silently widening:
  *   · MODE_DISCLAIMER's sentence "It doesn't lock doors, arm anything, or call
  *     anyone." — it has to name "arm" to deny it. Only that exact sentence is
  *     cut out; the rest of the disclaimer is scanned like everything else.
- *   · P2a's COPY KEY `notAlarm` in SecurityFeed (a key name, never shown; its
- *     value is scanned).
+ * (WARP-2978 removed the second one, P2a's COPY key `notAlarm`, with the key:
+ * its line became `alertsLine` / `alertsNotReady`. No key is exempt now.)
+ *
  * WARP-2981 (ADR-059 P6) adds the Security wall's modules and two banned
  * phrases: "all clear" and "all locked" — the wall faces a room, and nothing on
  * it may read as a verdict on the site ("All reporting" is about the sources).
@@ -57,6 +58,19 @@ import * as ExpectedActivityCard from "./ExpectedActivityCard";
 import * as ExpectedActivityDialog from "./ExpectedActivityDialog";
 import * as HoursEditor from "./HoursEditor";
 import * as LearningList from "./LearningList";
+import * as AckHistory from "./AckHistory";
+import * as AlertRoutingPanel from "./AlertRoutingPanel";
+import * as AiSettingsPanel from "./AiSettingsPanel";
+import * as LinkSuggestions from "./LinkSuggestions";
+import * as LinkWhyPopover from "./LinkWhyPopover";
+import * as linkEvidenceCopy from "./link-evidence-copy";
+import * as IncidentCard from "./IncidentCard";
+import * as IncidentList from "./IncidentList";
+import * as IncidentView from "./IncidentView";
+import * as NoticeList from "./NoticeList";
+import * as ReasonList from "./ReasonList";
+import * as ResolveDialog from "./ResolveDialog";
+import * as incidentCopy from "./incident-copy";
 import * as ModeCard from "./ModeCard";
 import * as PrecisionCard from "./PrecisionCard";
 import * as SecurityFeed from "./SecurityFeed";
@@ -72,6 +86,7 @@ import * as SecurityZonesPage from "@/app/security/zones/page";
 import * as SecuritySettingsPage from "@/app/security/settings/page";
 import * as SecurityWallPage from "@/app/security/wall/page";
 import * as SecurityPatternsPage from "@/app/security/patterns/page";
+import * as SecurityIncidentPage from "@/app/security/incidents/[id]/page";
 
 const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/AreaDialog.tsx": AreaDialog,
@@ -85,6 +100,21 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/HoursEditor.tsx": HoursEditor,
   // WARP-2980 (P5 PR-A) — the patterns page.
   "src/components/security/LearningList.tsx": LearningList,
+  // WARP-2978 (ADR-059 P3 §8).
+  "src/components/security/IncidentCard.tsx": IncidentCard,
+  "src/components/security/IncidentList.tsx": IncidentList,
+  "src/components/security/incident-copy.ts": incidentCopy,
+  "src/components/security/IncidentView.tsx": IncidentView,
+  "src/components/security/ReasonList.tsx": ReasonList,
+  "src/components/security/NoticeList.tsx": NoticeList,
+  "src/components/security/AckHistory.tsx": AckHistory,
+  "src/components/security/ResolveDialog.tsx": ResolveDialog,
+  "src/components/security/AlertRoutingPanel.tsx": AlertRoutingPanel,
+  "src/components/security/AiSettingsPanel.tsx": AiSettingsPanel,
+  // WARP-2979 (P4) — Droplet's links.
+  "src/components/security/LinkSuggestions.tsx": LinkSuggestions,
+  "src/components/security/LinkWhyPopover.tsx": LinkWhyPopover,
+  "src/components/security/link-evidence-copy.ts": linkEvidenceCopy,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
   // WARP-2981 (P6) — the Security wall.
@@ -99,6 +129,7 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/app/security/zones/page.tsx": SecurityZonesPage,
   "src/app/security/settings/page.tsx": SecuritySettingsPage,
   "src/app/security/patterns/page.tsx": SecurityPatternsPage,
+  "src/app/security/incidents/[id]/page.tsx": SecurityIncidentPage,
   "src/app/security/wall/page.tsx": SecurityWallPage,
 };
 
@@ -127,8 +158,8 @@ const ALLOWED_SENTENCES: ReadonlyArray<{ where: string; sentence: string }> = [
     sentence: "It doesn't lock doors, arm anything, or call anyone.",
   },
 ];
-/** Keys of exported COPY objects that are allowed to hold a banned word (never shown). */
-const ALLOWED_KEYS: ReadonlyArray<string> = ["src/components/security/SecurityFeed.tsx COPY.notAlarm"];
+/** Keys of exported COPY objects that are allowed to hold a banned word (never shown). None since WARP-2978. */
+const ALLOWED_KEYS: ReadonlyArray<string> = [];
 
 interface Found {
   where: string;
@@ -225,14 +256,15 @@ describe("Security copy lint (spec §8)", () => {
     expect(values).toContainEqual({ where: "src/components/security/ModeCard.tsx MODE_DISCLAIMER", text: ModeCard.MODE_DISCLAIMER });
     expect(values.some((v) => v.where.startsWith("src/components/security/AreasPanel.tsx COPY."))).toBe(true);
     expect(values.some((v) => v.where.startsWith("src/components/security/HoursEditor.tsx COPY."))).toBe(true);
-    expect(keys.some((k) => k.where === "src/components/security/SecurityFeed.tsx COPY.notAlarm")).toBe(true);
+    expect(keys.some((k) => k.where === "src/components/security/SecurityFeed.tsx COPY.alertsLine")).toBe(true);
+    expect(keys.some((k) => k.where.endsWith("COPY.notAlarm"))).toBe(false);
   });
 
   it("no exported string says monitor, armed, arm, alarm, secure, protected, guard, space or zone", () => {
     expect(violations(collect().values)).toEqual([]);
   });
 
-  it("no COPY key says them either (apart from the allow-listed notAlarm)", () => {
+  it("no COPY key says them either", () => {
     expect(violations(collect().keys, ALLOWED_KEYS)).toEqual([]);
   });
 

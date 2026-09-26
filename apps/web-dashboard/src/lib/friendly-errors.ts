@@ -757,6 +757,29 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     SUPPRESSION_TARGET_NOT_FOUND: "That area or camera isn't there any more. Refresh the page.",
     SUPPRESSION_LIMIT: "There can be up to 100 expected activities at a time. Remove one first. Nothing was changed.",
     VALIDATION_ERROR: "Some of that isn't quite right. Check what you entered and try again.",
+    // WARP-2978 (ADR-059 P3 §7 routes 16–22) — incidents and who is told about
+    // alerts. A missing incident and a hidden one get ONE answer from the box
+    // (DS-005), so the copy never says which it was.
+    INCIDENT_NOT_FOUND: "That incident isn't there any more, or you can't see it. Refresh the page.",
+    INCIDENT_CONFLICT: "Someone else changed this incident at the same moment. Check it and try again.",
+    // Also what a view that went partial (an alert on a camera this person
+    // can't see) answers: the same words as the incident page's, never why.
+    NOT_ACTIONABLE: "You can't acknowledge or resolve this incident. Refresh the page to see where it stands.",
+    INCIDENTS_UNAVAILABLE: "Droplet can't read the incidents right now. Try again in a moment.",
+    NO_RECIPIENT:
+      "Someone who can open Security has to be told about alerts. Turn someone else on first, then try again.",
+    NOT_ELIGIBLE: "This person can't open Security, so they can't be told about alerts.",
+    ROUTING_UNAVAILABLE: "Droplet couldn't read who is told about alerts right now. Try again in a moment.",
+    USER_NOT_FOUND: "That person isn't on this Droplet any more. Refresh the page.",
+    // WARP-2979 (ADR-059 P4 §7 routes 23–27) — Droplet's links and what its AI
+    // may do. A missing link and one on a camera this person can't see get ONE
+    // answer from the box (DS-005), so the copy never says which.
+    LINK_NOT_FOUND: "That link isn't there any more, or you can't see it. Refresh the page.",
+    LINK_NOT_DECIDABLE: "Someone already decided on that link. Refresh the page to see where it stands.",
+    LINK_CONFLICT: "Someone else changed this area at the same moment. Refresh the page and try again.",
+    LINK_LIMIT: "This area already has 32 cameras and parts linked. Remove one before adding another.",
+    LINKS_UNAVAILABLE: "Droplet couldn't load its suggestions right now. Try again in a moment.",
+    AI_SETTINGS_UNAVAILABLE: "Droplet couldn't load these settings right now. Try again in a moment.",
     // A route-level feature gate answers 404 module_disabled (a flat body, so
     // apiFetch carries no typed code — the status entry catches it): this
     // person's level changed under the page, or Security was switched off.

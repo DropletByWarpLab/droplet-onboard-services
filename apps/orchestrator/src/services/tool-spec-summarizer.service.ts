@@ -11,7 +11,9 @@
  * the operator having configured one as the default.
  */
 
+import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
 import { completeOnce } from "./llm-complete.service.js";
+import { OFF_LAN_WITHHELD_DOMAINS } from "./stored-content-egress.service.js";
 import type { RunStepTrace, Summarizer } from "./tool-spec-runner.service.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -128,22 +130,49 @@ const SYSTEM = [
   "- If there is nothing of note, say that briefly rather than padding.",
 ].join("\n");
 
+const DOMAIN_OF: ReadonlyMap<string, ToolDomain> = new Map(TOOL_CATALOG.map((e) => [e.name, e.domain]));
+
+/**
+ * WARP-2979 (#2420 review 2b; ADR-059 P4 §6.13) — whether the facts include a
+ * step from a domain that never goes to a cloud model (files, memory,
+ * business, security: OFF_LAN_WITHHELD_DOMAINS, the chat rule). A failed
+ * step counts too: its error text reaches the prompt as well.
+ */
+export function factsNeedLocalModel(facts: readonly RunStepTrace[]): boolean {
+  return facts.some((f) => {
+    const domain = DOMAIN_OF.get(f.tool);
+    return domain !== undefined && OFF_LAN_WITHHELD_DOMAINS.has(domain);
+  });
+}
+
 /**
  * @param resolveModel WARP-3047 — the box's ACTIVE model, asked per summary
  *   (routes/tools.ts passes `resolveActiveModel`). A routine run started from
  *   a chat turn (`routine_run`) summarises on the model that turn already
  *   has resident, instead of loading env DEFAULT_MODEL/LLM_MODEL next to it.
+ * @param resolveLocalModel WARP-2979 — the box's LOCAL model only (routes/tools.ts
+ *   passes the filing worker's local-only resolver). Used instead of the
+ *   active model — which may be a cloud one — whenever the facts include a
+ *   withheld domain's step; with none, the step fails: the summary is written
+ *   on this Droplet or not at all.
  */
 export function createToolSpecSummarizer(
   resolveModel: () => Promise<string | null>,
+  resolveLocalModel: () => Promise<string | null> = async () => null,
 ): Summarizer {
   return {
     async summarize(prompt: string, facts: RunStepTrace[]): Promise<string> {
-      const model = await resolveModel();
+      const local = factsNeedLocalModel(facts);
+      const model = local ? await resolveLocalModel() : await resolveModel();
       if (!model) {
         // A failed step, said plainly — never a hardcoded tag the box does
-        // not host (the historic mistral fallback 404'd upstream).
-        throw new Error("no local model is available to write the summary");
+        // not host (the historic mistral fallback 404'd upstream), and never
+        // a cloud model for a withheld domain's results.
+        throw new Error(
+          local
+            ? "no AI model on this Droplet is available to write a summary of these results"
+            : "no local model is available to write the summary",
+        );
       }
 
       const text = `${prompt}\n\nResults:\n${renderFacts(facts)}`;

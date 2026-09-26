@@ -1,4 +1,4 @@
-import type { Tool, Role } from "@droplet/tools-core";
+import { TOOL_CATALOG, type Tool, type Role, type ToolDomain } from "@droplet/tools-core";
 
 /**
  * Roles that may call tools flagged `requiresWrite`. Per spec §6.3
@@ -23,6 +23,31 @@ export interface RbacOpts {
 }
 
 /**
+ * WARP-2979 (ADR-059 P4 §6.13; #2420 review 2a) — tool domains that never
+ * leave the box: withheld on every transport that is not the orchestrator's
+ * own stdio child (`local-trusted`), whatever the caller's role — an owner's
+ * JWT over HTTP (Claude Desktop pointed at a published :9090) included,
+ * because that client hands results to its own cloud model. Security events
+ * are location and presence data about people.
+ *
+ * On-box chat keeps every tool: the dashboard's chat, voice and agent runs
+ * all go through the orchestrator's agent loop, which spawns this server over
+ * stdio (apps/orchestrator/src/services/mcp-client.service.ts). Nothing else
+ * on the box is an MCP client (droplet-local-LLM runs no agent: its ADR-003).
+ * The orchestrator's own cloud rule for chat turns is OFF_LAN_WITHHELD_DOMAINS
+ * (stored-content-egress.service.ts), which lists `security` too.
+ */
+export const OFF_BOX_WITHHELD_DOMAINS: ReadonlySet<ToolDomain> = new Set<ToolDomain>(["security"]);
+
+const DOMAIN_OF: ReadonlyMap<string, ToolDomain> = new Map(TOOL_CATALOG.map((e) => [e.name, e.domain]));
+
+/** Whether a tool is one of ours in a domain that never leaves the box. A remote server's tool has no domain here. */
+export function isWithheldOffBox(tool: Pick<Tool, "name">): boolean {
+  const domain = DOMAIN_OF.get(tool.name);
+  return domain !== undefined && OFF_BOX_WITHHELD_DOMAINS.has(domain);
+}
+
+/**
  * Filter the tool registry by the caller's role.
  *
  * Semantics:
@@ -40,8 +65,10 @@ export function filterToolsForRole(
   opts: RbacOpts = {},
 ): Tool[] {
   if (opts.trustedPrincipal) return [...tools];
-  if (role !== undefined && PRIVILEGED.has(role)) return [...tools];
-  return [...tools].filter((t) => !t.requiresWrite);
+  // Off the box: never a withheld domain, whatever the role (§6.13).
+  const offBox = [...tools].filter((t) => !isWithheldOffBox(t));
+  if (role !== undefined && PRIVILEGED.has(role)) return offBox;
+  return offBox.filter((t) => !t.requiresWrite);
 }
 
 /**

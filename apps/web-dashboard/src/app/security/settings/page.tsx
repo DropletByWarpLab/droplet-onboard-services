@@ -3,6 +3,13 @@
 /**
  * WARP-2977 P2b (ADR-059 §3.6, spec §8) — /security/settings, "Opening hours".
  *
+ * WARP-2978 (ADR-059 P3 §8, D33) — now "Security settings" (the nav label is
+ * Settings): the opening hours keep their section, and "Who's told about
+ * alerts" (AlertRoutingPanel) follows it.
+ *
+ * WARP-2979 (ADR-059 P4 §8) — then "Droplet's AI" (AiSettingsPanel): what
+ * Droplet may do with links on its own, and incident summaries.
+ *
  * When the site is normally open: the usual week, special days, the site's
  * timezone, and the server's own 7-day preview of what it will do with them.
  * Droplet reads this to tell ordinary activity from after-hours activity; it
@@ -21,8 +28,10 @@
  * the Security module's route guard).
  */
 import { useMemo } from "react";
-import { Clock, Loader2, RefreshCw } from "lucide-react";
+import { Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { AlertRoutingPanel, ROUTING_COPY, SETTINGS_COPY } from "@/components/security/AlertRoutingPanel";
+import { AI_COPY, AiSettingsPanel } from "@/components/security/AiSettingsPanel";
 import {
   BusinessProfileHint,
   COPY,
@@ -121,7 +130,11 @@ export default function SecuritySettingsPage() {
   const today = siteZone ? siteDateOf(new Date(), siteZone) : null;
 
   return (
-    <ShellPage icon={<Clock size={15} />} label="Security" title={COPY.pageTitle} sub={COPY.pageSub} rhythm>
+    <ShellPage icon={<SlidersHorizontal size={15} />} label="Security" title={SETTINGS_COPY.pageTitle} sub={SETTINGS_COPY.pageSub} rhythm>
+      <div className="sect">
+        <h2>{COPY.pageTitle}</h2>
+      </div>
+      <p style={{ margin: 0, fontSize: 13.5, color: "var(--text-muted)", maxWidth: "72ch" }}>{COPY.pageSub}</p>
       {hours === null && loadError ? (
         <section className="card" role="alert" data-testid="hours-error">
           <div className="empty">
@@ -162,6 +175,14 @@ export default function SecuritySettingsPage() {
           {canManage && <BusinessProfileHint typicalDay={hours.hint.typicalDay} />}
         </>
       )}
+      <div className="sect">
+        <h2>{ROUTING_COPY.title}</h2>
+      </div>
+      <AlertRoutingPanel />
+      <div className="sect">
+        <h2>{AI_COPY.title}</h2>
+      </div>
+      <AiSettingsPanel />
     </ShellPage>
   );
 }

@@ -23,6 +23,14 @@
  * refresh through the hooks' own `mutate`, so a version conflict shows the
  * other person's change before the next try.
  *
+ * WARP-2979 (ADR-059 P4 §8) — Droplet's links. A link Droplet made on its own
+ * carries a "Linked by Droplet" chip after its phrase; the chip opens
+ * LinkWhyPopover (the evidence, and at manage Keep / Undo). A suggestion a
+ * person added or kept reads "Suggested by Droplet" in a muted line, with no
+ * button. Droplet's open suggestions sit above the cards (LinkSuggestions,
+ * manage only); with linking off, manage sees a line saying so instead.
+ * Clock times are the site's zone (the opening hours'), else the device's.
+ *
  * Keyboard: Restore is aria-disabled, never `disabled`, while a restore is in
  * flight — the pressed button keeps focus (a ref refuses the second press, as
  * in ModeCard). A restored area leaves the Removed list, so its button goes
@@ -35,8 +43,10 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { archivedZoneIdOf, translateError } from "@/lib/friendly-errors";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
-import { useSecuritySources, useSecurityZones } from "@/lib/hooks/useSecurity";
+import { useLinkProposals, useSecurityHours, useSecuritySources, useSecurityZones } from "@/lib/hooks/useSecurity";
+import { deviceTimeZone } from "@/lib/security-time";
 import type {
+  SecurityZoneLinkView,
   SecurityLinkStatus,
   SecuritySourcesView,
   SecurityZonePatchBody,
@@ -46,6 +56,9 @@ import type {
 } from "@/lib/types";
 import { AreaDialog, KIND_LABEL } from "./AreaDialog";
 import { AreaLinksDialog, cameraOf, fillCopy, linkPhrase, partOf } from "./AreaLinksDialog";
+import { LinkSuggestions } from "./LinkSuggestions";
+import { LinkWhyPopover } from "./LinkWhyPopover";
+import { sourcePhrase } from "./link-evidence-copy";
 
 export const COPY = {
   title: "Areas",
@@ -75,7 +88,23 @@ export const COPY = {
   retry: "Retry",
   // A lost race on an area: the panel has already re-read it, so the form or card shows their version.
   conflict: "Someone else changed this area while you were editing. What's shown now is their version, so make your change again.",
+  // WARP-2979 — Droplet's links.
+  linkedByDroplet: "Linked by Droplet",
+  // WCAG 2.5.3: the chip's name starts with its visible text ("Linked by Droplet").
+  whyLinked: "Linked by Droplet: why Droplet linked {link}",
+  suggestedByDroplet: "Suggested by Droplet: {links}",
+  linkingOff: "Droplet isn't looking for links. You can turn this on in Security settings.",
+  kept: "Kept. {camera} now counts for alerts in {area}.",
+  keptPlain: "Kept. {camera} now counts for {area}.",
+  undone: "Undone. Droplet won't suggest {camera} for {area} again.",
 } as const;
+
+/** "Linked by Droplet": a link Droplet made AND still set on its own (Keep turns it into a person's). */
+export const isDropletSet = (l: Pick<SecurityZoneLinkView, "origin" | "setBy">): boolean => l.origin === "droplet" && l.setBy === "droplet";
+/** A suggestion (or a link Droplet made) a person added or kept. */
+export const isDropletKept = (l: Pick<SecurityZoneLinkView, "origin" | "setBy">): boolean => l.origin === "droplet" && l.setBy === "person";
+
+const upperFirst = (s: string): string => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 
 type Editor = { mode: "create" } | { mode: "edit"; id: string } | null;
 
@@ -130,6 +159,14 @@ export function AreasPanel() {
   // Fetched at every level: it is view-gated and filtered, and it is what
   // tells a viewer that a link points at a camera that is gone.
   const sourcesQ = useSecuritySources();
+  // WARP-2979 — Droplet's suggestions (filled only at manage) and the site's clock zone for its times.
+  const proposalsQ = useLinkProposals();
+  const hoursQ = useSecurityHours();
+  const tz = (hoursQ.hours?.state === "set" ? hoursQ.hours.timezone : null) ?? deviceTimeZone() ?? "UTC";
+  const [why, setWhy] = useState<{ zoneId: string; linkId: string } | null>(null);
+  // Where focus returns when the evidence panel closes: the chip that opened it — or, once a Keep / Undo has
+  // taken the chip away, the area's What covers it? (review #2418).
+  const whyReturnRef = useRef<HTMLElement | null>(null);
   const { toast } = useToast();
 
   const [editor, setEditor] = useState<Editor>(null);
@@ -145,6 +182,12 @@ export function AreasPanel() {
   const [focusAreaId, setFocusAreaId] = useState<string | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
 
+  /** An area card's first action — What covers it? — else its first button; null when the card isn't on screen. */
+  const areaAction = (zoneId: string): HTMLButtonElement | null => {
+    const card = Array.from(listRef.current?.children ?? []).find((el) => (el as HTMLElement).dataset.zoneId === zoneId);
+    return card?.querySelector<HTMLButtonElement>("[data-area-links]") ?? card?.querySelector<HTMLButtonElement>("button") ?? null;
+  };
+
   const all = useMemo(() => zonesQ.zones ?? [], [zonesQ.zones]);
   const active = useMemo(() => all.filter((z) => z.state === "active"), [all]);
 
@@ -152,10 +195,7 @@ export function AreasPanel() {
   // refresh lands after the unarchive resolves, so wait until the card exists.
   useEffect(() => {
     if (!focusAreaId) return;
-    const card = Array.from(listRef.current?.children ?? []).find(
-      (el) => (el as HTMLElement).dataset.zoneId === focusAreaId,
-    );
-    const target = card?.querySelector<HTMLButtonElement>("button");
+    const target = areaAction(focusAreaId);
     if (target) {
       target.focus();
       setFocusAreaId(null);
@@ -265,6 +305,32 @@ export function AreasPanel() {
     () => (zonesQ.error ? translateError(zonesQ.error, "security") : null),
     [zonesQ.error],
   );
+  // WARP-2979 — Keep and Undo (routes 24/25). A refusal is the panel's report(); the popover stays open.
+  // Done: the chip goes with the Droplet-set link, so the popover hands focus to the area's card instead.
+  const onKeep = async (zone: SecurityZoneView, link: SecurityZoneLinkView) => {
+    try {
+      await proposalsQ.accept(link.id);
+      whyReturnRef.current = areaAction(zone.id) ?? whyReturnRef.current;
+      const alerting = zone.kind === "interior" || zone.kind === "restricted";
+      toast(fillCopy(alerting ? COPY.kept : COPY.keptPlain, { camera: upperFirst(sourcePhrase(link)), area: zone.name }), "success");
+    } catch (err) {
+      report(err);
+      throw err;
+    }
+  };
+  const onUndo = async (zone: SecurityZoneView, link: SecurityZoneLinkView) => {
+    try {
+      await proposalsQ.reject(link.id);
+      whyReturnRef.current = areaAction(zone.id) ?? whyReturnRef.current;
+      toast(fillCopy(COPY.undone, { camera: sourcePhrase(link), area: zone.name }), "success");
+    } catch (err) {
+      report(err);
+      throw err;
+    }
+  };
+  const whyZone = why ? byId(why.zoneId) : null;
+  const whyLink = whyZone?.links.find((l) => l.id === why?.linkId) ?? null;
+
   const removingZone = byId(removing);
   const editingZone = editor?.mode === "edit" ? byId(editor.id) : null;
 
@@ -327,8 +393,45 @@ export function AreasPanel() {
                 data-covered-by
                 style={{ margin: 0, fontSize: 13.5, color: "var(--text)", overflowWrap: "anywhere" }}
               >
-                {coveredByLine(zone)}
+                {zone.links.some(isDropletSet) ? (
+                  // WARP-2979 — the chip follows its own link's phrase.
+                  <>
+                    {COPY.coveredBy.split("{links}")[0]}
+                    {zone.links.map((l, n) => (
+                      <span key={l.id}>
+                        {n > 0 ? ", " : ""}
+                        {linkPhrase(l)}
+                        {isDropletSet(l) && (
+                          <>
+                            {" "}
+                            <button
+                              type="button"
+                              className="badge muted"
+                              data-linked-by-droplet={l.id}
+                              aria-label={fillCopy(COPY.whyLinked, { link: linkPhrase(l) })}
+                              aria-haspopup="dialog"
+                              onClick={(e) => {
+                                whyReturnRef.current = e.currentTarget;
+                                setWhy({ zoneId: zone.id, linkId: l.id });
+                              }}
+                              style={{ cursor: "pointer", verticalAlign: "baseline" }}
+                            >
+                              {COPY.linkedByDroplet}
+                            </button>
+                          </>
+                        )}
+                      </span>
+                    ))}
+                  </>
+                ) : (
+                  coveredByLine(zone)
+                )}
               </p>
+              {zone.links.some(isDropletKept) && (
+                <p data-suggested-by-droplet style={{ margin: "6px 0 0", fontSize: 12, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
+                  {fillCopy(COPY.suggestedByDroplet, { links: zone.links.filter(isDropletKept).map(linkPhrase).join(", ") })}
+                </p>
+              )}
               {(problems.missing.length > 0 || problems.unknown) && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
                   {problems.missing.map((m) => (
@@ -354,6 +457,7 @@ export function AreasPanel() {
                     type="button"
                     className="btn sm"
                     aria-describedby={titleId}
+                    data-area-links
                     onClick={() => setLinksFor(zone.id)}
                   >
                     {COPY.whatCovers}
@@ -394,7 +498,37 @@ export function AreasPanel() {
         </div>
       )}
 
+      {canManage && proposalsQ.linking === "off" && (
+        <p data-linking-off style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>
+          {COPY.linkingOff}
+        </p>
+      )}
+      {proposalsQ.linking !== "off" && (
+        <LinkSuggestions
+          proposals={proposalsQ.proposals}
+          canManage={canManage}
+          tz={tz}
+          now={new Date()}
+          accept={proposalsQ.accept}
+          reject={proposalsQ.reject}
+          onDecided={(zoneId) => setFocusAreaId(zoneId)}
+        />
+      )}
+
       {body}
+
+      <LinkWhyPopover
+        open={whyLink !== null}
+        link={whyLink}
+        zoneKind={whyZone?.kind ?? null}
+        canManage={canManage}
+        tz={tz}
+        now={new Date()}
+        onClose={() => setWhy(null)}
+        onKeep={(l) => onKeep(whyZone!, l)}
+        onUndo={(l) => onUndo(whyZone!, l)}
+        returnFocusRef={whyReturnRef}
+      />
 
       {archived.length > 0 && (
         <details className="card" data-removed-areas>
@@ -441,6 +575,7 @@ export function AreasPanel() {
             zone={byId(linksFor)}
             sources={sourcesQ.sources}
             sourcesError={sourcesQ.error}
+            suggested={(proposalsQ.proposals ?? []).filter((p) => p.zone.id === linksFor).map((p) => ({ sourceKind: p.sourceKind, sourceRef: p.sourceRef }))}
             onRetrySources={() => void refreshSources()}
             onClose={() => setLinksFor(null)}
             onSave={onSaveLinks}

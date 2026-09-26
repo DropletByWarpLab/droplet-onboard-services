@@ -60,6 +60,8 @@ export const DEPARTMENT_WIDGET_IDS = [
   "work",
   "cameras",
   "files",
+  // WARP-2978 (ADR-059 P3 §8) — open Security incidents (GET /api/security/incidents/summary).
+  "security-incidents",
 ] as const;
 export type DepartmentWidgetId = (typeof DEPARTMENT_WIDGET_IDS)[number];
 
@@ -74,6 +76,7 @@ export function isDepartmentWidgetId(id: string): id is DepartmentWidgetId {
  */
 export type HeadlineFigureId =
   | "cameras_online"
+  | "open_incidents"
   | "open_deals"
   | "overdue_invoices"
   | "open_work"
@@ -99,19 +102,21 @@ export const DEPARTMENT_TEMPLATES: readonly DepartmentTemplateDef[] = [
     label: "Security",
     description: "The Security feed, cameras and their events, the network and the devices on it.",
     icon: "shield-check",
-    // WARP-2977 — /security (the command center: the feed, the site mode, and
-    // its Areas and Opening hours children) leads, as it does in the sidebar.
+    // WARP-2977 — /security (the command center: incidents, the feed, the
+    // site mode, and its Areas and Settings children) leads, as it does in
+    // the sidebar.
     navHrefs: ["/security", "/cameras", "/events", "/network", "/devices", "/integrations"],
+    // WARP-2978 (ADR-059 P3 §8, D38) — the home leads with what needs
+    // attention. New profiles only: a saved profile keeps its own list
+    // (DS-001 — the owner adds the card).
     homeWidgets: [
+      { widget: "security-incidents", size: "m" },
       { widget: "cameras", size: "m" },
       { widget: "quick-links", size: "m" },
       { widget: "members", size: "s" },
-      { widget: "files", size: "s" },
     ],
-    // ADR-059 §2.4 wants detections in the last 24 h. P2a's SecurityEvent
-    // store now holds them, but no headline figure reads it yet; until one
-    // does, the tile shows the camera fleet: how many cameras are online.
-    headline: "cameras_online",
+    // WARP-2978 — the tile counts the open alerts (P3 route 17).
+    headline: "open_incidents",
   },
   {
     id: "sales",

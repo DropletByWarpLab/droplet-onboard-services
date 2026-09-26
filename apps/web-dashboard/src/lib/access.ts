@@ -308,7 +308,9 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
       {
         value: "manage",
         label: "Manage",
-        grants: "Areas, opening hours and what counts as expected",
+        // WARP-2978 — choosing who is told about alerts is manage (P3 route 22).
+        // WARP-2979 — so is deciding on Droplet's links and what its AI may do.
+        grants: "Areas, opening hours, who's told about alerts, Droplet's links and what counts as expected",
         minTier: ADMIN,
         dropNoun: "Manage security",
         dropVerb: "manage security",
@@ -598,6 +600,11 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "files", label: "Files", domains: ["files"], feature: "files" },
   { id: "smart-home", label: "Device control", domains: ["smart-home"], feature: "smart_home", locks: true },
   { id: "cameras", label: "Cameras", domains: ["cameras"], feature: "cameras" },
+  // WARP-2979 (ADR-059 P4 §6.12.7) — the read-only Security tools, so a custom
+  // role can be granted them (effective access counts only granted domains).
+  // Gated by the Security feature: switching Security off for a role takes
+  // the tools with it.
+  { id: "security", label: "Security", domains: ["security"], feature: "security" },
   { id: "switch", label: "Switch", domains: ["switch"], feature: "managed_switch" },
   {
     id: "calendar",

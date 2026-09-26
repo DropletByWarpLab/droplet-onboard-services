@@ -33,6 +33,7 @@ import { describe, it, expect } from "vitest";
 import { TOOL_CATALOG } from "@droplet/tools-core";
 import {
   CONNECTOR_RECORD_TOOLS,
+  SECURITY_RECORD_TOOLS,
   curateMessages,
   curateTurn,
   type CurationOptions,
@@ -207,5 +208,34 @@ describe("the erp-sync landing seam has nothing to firewall", () => {
       .split("\n")
       .filter((line) => /erpEntityCache\s*\.\s*(create|createMany|upsert|update|updateMany)/.test(line));
     expect(writes).toEqual([]);
+  });
+});
+
+// WARP-2979 (#2420 review 3; ADR-059 P4 §6.13) — a Security tool's result is presence data about people: where
+// someone was, and when. The LoRA export is a file meant to leave the box, so a turn that read Security is
+// DROPPED — never redacted, the WARP-2425 precedent — before any message is rendered.
+describe("a turn that read Security never enters the corpus", () => {
+  it("the set is every tool in the security domain, derived from the catalog", () => {
+    const expected = TOOL_CATALOG.filter((t) => t.domain === "security").map((t) => t.name);
+    expect(expected.length).toBeGreaterThanOrEqual(4);
+    expect([...SECURITY_RECORD_TOOLS].sort()).toEqual([...expected].sort());
+  });
+
+  it.each(["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"])(
+    "%s → the turn is dropped with its own reason, and nothing of its result is in the run",
+    (tool) => {
+      const run = curateMessages(ledgerTurn(tool), OPTS);
+      expect(run.records).toHaveLength(0);
+      expect(run.summary.dropped.security_records).toBe(1);
+      expect(run.summary.dropped.connector_records).toBe(0);
+      const encoded = JSON.stringify(run);
+      expect(encoded).not.toContain("Fictional Widgets Ltd");
+      expect(encoded).not.toContain("INV-0042");
+    },
+  );
+
+  it("a camera tool is not swept in (the boundary is the Security domain, not every camera read)", () => {
+    expect(SECURITY_RECORD_TOOLS.has("list_cameras")).toBe(false);
+    expect(curateTurn({ turnId: "t1", messages: ledgerTurn("list_cameras") }, OPTS)).toMatchObject({ kept: true });
   });
 });

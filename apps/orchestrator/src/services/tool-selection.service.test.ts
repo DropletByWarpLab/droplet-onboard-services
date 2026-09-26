@@ -12,6 +12,7 @@ import {
   toolNamesForDomain,
 } from "./tool-selection.service.js";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 
 const POOL = [
   "search_content",
@@ -1054,5 +1055,64 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
     expect(advertised.has("control_device")).toBe(true);
     expect(advertised.has("workspace_write")).toBe(true);
     expect(advertised.has("list_network_devices")).toBe(false);
+  });
+});
+
+describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4 §6.12.6)", () => {
+  const SECURITY = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"];
+  const SECURITY_POOL = [...POOL, ...SECURITY];
+  const select = (sentence: string) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: SECURITY_POOL, conversationToolNames: [] });
+
+  it.each([
+    "anything odd at the back door last night?",
+    "did anything happen while we were away",
+    "any security incidents this week?",
+    "is the stock room covered?",
+    "which areas had people after hours?",
+  ])("routes to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).toContain(name);
+  });
+
+  it.each(["add a dentist appointment tomorrow", "block my son's tablet"])("does not route to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains).not.toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).not.toContain(name);
+  });
+
+  it("is never in the core pool: pulled in by the turn, or not at all", () => {
+    for (const name of SECURITY) expect(CORE_TOOL_NAMES.has(name), name).toBe(false);
+    for (const name of SECURITY) expect(domainOfTool(name), name).toBe("security");
+  });
+
+  it("a follow-up keeps the domain by continuity", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the one before that?",
+      pool: SECURITY_POOL,
+      conversationToolNames: ["security_get_incident"],
+    });
+    expect(r.advertised).toContain("security_list_incidents");
+  });
+
+  // Review #2420 (item 4): the tools' OWN examples — the questions each description tells the model it answers —
+  // must reach them. Read from the catalog, so an example added to a description is checked the day it lands.
+  const EXAMPLE = /(?:^|[\s(])'([^']+\?)'/g;
+  const examples = TOOL_CATALOG.filter((t) => t.domain === "security").flatMap((t) =>
+    [...t.description.matchAll(EXAMPLE)].map((m) => [t.name, m[1]!] as const),
+  );
+
+  it("the descriptions carry examples to check (not vacuous)", () => {
+    expect(examples.length).toBeGreaterThanOrEqual(5);
+    expect(examples.map(([, q]) => q)).toEqual(
+      expect.arrayContaining(["any alerts this week?", "is any camera offline?", "was anyone in the stock room after 9?"]),
+    );
+  });
+
+  it.each(examples)("%s's own example routes to security: %s", (_tool, question) => {
+    const r = select(question);
+    expect(r.matchedDomains, `"${question}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
   });
 });

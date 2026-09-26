@@ -54,6 +54,12 @@ import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
  *    decides who may reach the domain at all; this one only ever subtracts
  *    from what it already allowed, so a business tool reaches a turn only if
  *    both say yes — on a cloud turn, never.
+ *  - `security` — WARP-2979 (ADR-059 P4 §6.13, D27): presence and location
+ *    data about identifiable people (ADR-059 DS-007) — when someone was at a
+ *    door, which camera saw them, when the site was closed. Security never
+ *    leaves the box: its read-only tools are withheld from every off-LAN turn
+ *    (chat and agent runs alike), and cloud-history-consent.service.ts never
+ *    replays an on-box answer that used one, whatever the consent says.
  *
  * DELIBERATELY NOT WIDENED HERE: `erp`, `email`, `calendar`, and `team_chat`
  * also carry customer content — `erp` most acutely, since it is literally the
@@ -74,6 +80,7 @@ export const OFF_LAN_WITHHELD_DOMAINS: ReadonlySet<ToolDomain> = new Set<ToolDom
   "files",
   "memory",
   "business",
+  "security",
 ]);
 
 /**
@@ -115,14 +122,15 @@ export function withholdStoredContentTools(allowed: readonly string[]): string[]
 export const OFF_LAN_WITHHELD_NOTICE =
   "You are running on a cloud model, off this appliance. The user's stored " +
   "files, their contents, their filenames, and any attachments are NOT " +
-  "available to you on this turn, and no file, memory or business-record " +
-  "tools are offered. " +
+  "available to you on this turn, and no file, memory, business-record or " +
+  "Security tools are offered. " +
   "Stored content was also left out of these instructions: the facts the " +
   "user asked you to remember, the business profile, what the Droplet has " +
   "learned about the business, and any pinned items. This is a deliberate " +
   "privacy boundary, not a malfunction or a permissions error. If the user " +
-  "asks about their documents or anything you would normally remember, say " +
-  "plainly that it stays on the Droplet and is not sent to cloud models, " +
+  "asks about their documents, Security events or anything you would " +
+  "normally remember, say plainly that it stays on the Droplet and is not " +
+  "sent to cloud models, " +
   "and that switching to the on-box model in the model picker gives you " +
   "full access to it.";
 

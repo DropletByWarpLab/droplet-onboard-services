@@ -160,9 +160,9 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
     office = b.id;
     await prisma.securityZoneLink.createMany({
       data: [
-        { zoneId: stockRoom, sourceKind: "camera", sourceRef: FRONT, sourceLabel: "Front", state: "active" },
-        { zoneId: stockRoom, sourceKind: "camera", sourceRef: BACK, sourceLabel: "Back", state: "active" },
-        { zoneId: office, sourceKind: "camera", sourceRef: SIDE, sourceLabel: "Side", state: "active" },
+        { zoneId: stockRoom, sourceKind: "camera", sourceRef: FRONT, sourceLabel: "Front", state: "active", origin: "person", stateSetBy: "person" },
+        { zoneId: stockRoom, sourceKind: "camera", sourceRef: BACK, sourceLabel: "Back", state: "active", origin: "person", stateSetBy: "person" },
+        { zoneId: office, sourceKind: "camera", sourceRef: SIDE, sourceLabel: "Side", state: "active", origin: "person", stateSetBy: "person" },
       ],
     });
   });
@@ -288,7 +288,13 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       };
     }
 
-    type Code = { code: "after_hours_presence" | "camera_offline" | "threat_signal"; severity: "alert" | "notice"; camera: string | null };
+    type Code = {
+      code: "after_hours_presence" | "camera_offline" | "threat_signal" | "camera_offline_during_activity";
+      severity: "alert" | "notice";
+      camera: string | null;
+      /** WARP-2979 — where the person was seen (camera_offline_during_activity only); may be a camera outside the incident. */
+      related?: string;
+    };
     /** One incident to insert: the CHECKs are derived from it (severity, reason codes, notify state, closedAt). */
     interface Spec {
       scope: (typeof SCOPES)[number];
@@ -300,7 +306,7 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       closed: boolean;
       zoneId: string | null;
     }
-    const ORDER = ["after_hours_presence", "camera_offline", "threat_signal"];
+    const ORDER = ["after_hours_presence", "camera_offline", "threat_signal", "camera_offline_during_activity"];
 
     async function insert(s: Spec, k: number): Promise<string> {
       const times = Object.values(s.spans);
@@ -350,11 +356,13 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
             evidenceEventId: BigInt(1_000_000 + k * 10 + j),
             evidenceCamera: c.camera,
             evidenceSource: c.code === "threat_signal" ? "activity_mirror" : "frigate",
-            evidenceKind: c.code === "camera_offline" ? "camera_offline" : c.code === "threat_signal" ? "threat" : "detection",
+            evidenceKind:
+              c.code === "camera_offline" || c.code === "camera_offline_during_activity" ? "camera_offline" : c.code === "threat_signal" ? "threat" : "detection",
             evidenceLabel: c.code === "after_hours_presence" ? "person" : null,
             evidenceAt: T0,
             evidenceSummary: "x",
             detail: {},
+            relatedCamera: c.related ?? null,
           },
         });
       }
@@ -386,6 +394,8 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
           for (const cam of cams) {
             if (r() < 0.5) codes.push({ code: "after_hours_presence", severity: "alert", camera: cam });
             if (r() < 0.3) codes.push({ code: "camera_offline", severity: "notice", camera: cam });
+            // WARP-2979 — the new alert, naming a second camera the viewer may not see (reasonVisibleTo's related clause).
+            if (r() < 0.25) codes.push({ code: "camera_offline_during_activity", severity: "alert", camera: cam, related: pick(CAMS3) });
           }
         }
         const state = codes.length ? pick(["open", "acknowledged", "resolved"] as const) : "open";
@@ -472,6 +482,42 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       }
       expect(compared).toBeGreaterThan(300); // not vacuous
       expect(partials).toBeGreaterThan(10); // partial views were exercised
+    });
+
+    // WARP-2979 (P4 §6.12.3; review #2420) — the chat tools' period is judged on HER span, in the SQL itself.
+    it("WARP-2979: a period window — SQL equals the reference, and holds exactly the incidents whose VISIBLE span meets it", async () => {
+      const mine = new Set(await seed(40, 2979));
+      const WINDOWS = [
+        { from: plus(T0, 2 * 60_000), to: plus(T0, 4 * 60_000) },
+        { from: plus(T0, -3_600_000), to: plus(T0, 60_000) },
+        { from: plus(T0, 8 * 60_000), to: plus(T0, 20 * 60_000) },
+      ];
+      let kept = 0;
+      let narrowed = 0;
+      for (const v of VIEWERS) {
+        const projected = await projections(mine, v);
+        for (const activeBetween of WINDOWS) {
+          const f: IncidentListFilters = { state: "all", activeBetween };
+          const label = JSON.stringify({ v: [...(v.visibleCameras as ReadonlySet<string>)], activeBetween });
+          const sql = (await projectedIncidentPage(prisma, v as CameraLimitedViewer, f, 1000)).filter((k) => mine.has(k.id));
+          const ref = (await referenceProjectedIncidentPage(prisma as never, v, f, 1000)).filter((k) => mine.has(k.id));
+          expect(sql.map((k) => [k.id, k.projectedLast.toISOString()]), label).toEqual(ref.map((k) => [k.id, k.projectedLast.toISOString()]));
+          const ids = new Set(sql.map((k) => k.id));
+          // HER span meets the window ⇔ in the page (for an incident she may know exists) — a hidden camera's
+          // activity in the window never pulls one in (review #2420: the cursor must not say it was there).
+          for (const { row, p } of projected) {
+            if (!p) continue;
+            const hers = p.lastActivityAt >= activeBetween.from && p.firstActivityAt <= activeBetween.to;
+            expect(ids.has(row.id), `${label} ${row.id}`).toBe(hers);
+            // Her span lies inside the stored one, so the stored-span prefilter never drops one of hers.
+            if (hers) expect(row.lastActivityAt >= activeBetween.from && row.firstActivityAt <= activeBetween.to, `${label} ${row.id}`).toBe(true);
+            if (!hers && row.lastActivityAt >= activeBetween.from && row.firstActivityAt <= activeBetween.to) narrowed++;
+          }
+          kept += ids.size;
+        }
+      }
+      expect(kept).toBeGreaterThan(20); // not vacuous
+      expect(narrowed).toBeGreaterThan(0); // a hidden camera DID pull an incident into the stored window, and it stayed out
     });
 
     // Review b7e1 (blocking): the same code on two cameras.

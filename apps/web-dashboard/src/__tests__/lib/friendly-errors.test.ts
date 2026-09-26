@@ -797,6 +797,22 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "SUPPRESSION_NOT_FOUND",
     "SUPPRESSION_TARGET_NOT_FOUND",
     "SUPPRESSION_LIMIT",
+    // WARP-2978 (ADR-059 P3 §7 routes 16–22).
+    "INCIDENT_NOT_FOUND",
+    "INCIDENT_CONFLICT",
+    "NOT_ACTIONABLE",
+    "INCIDENTS_UNAVAILABLE",
+    "NO_RECIPIENT",
+    "NOT_ELIGIBLE",
+    "ROUTING_UNAVAILABLE",
+    "USER_NOT_FOUND",
+    // WARP-2979 (ADR-059 P4 §7 routes 23–27) — Droplet's links and the AI settings.
+    "LINK_NOT_FOUND",
+    "LINK_NOT_DECIDABLE",
+    "LINK_CONFLICT",
+    "LINK_LIMIT",
+    "LINKS_UNAVAILABLE",
+    "AI_SETTINGS_UNAVAILABLE",
   ] as const satisfies readonly SecurityErrorCode[];
   // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
   // code added to SecurityErrorCode without copy here fails the build.
@@ -892,5 +908,48 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     expect(archivedZoneIdOf({ code: "ZONE_NAME_TAKEN", body: null })).toBeNull();
     expect(archivedZoneIdOf(null)).toBeNull();
     expect(archivedZoneIdOf("ZONE_NAME_TAKEN")).toBeNull();
+  });
+});
+
+describe("translateError — security incidents and alert routing (WARP-2978)", () => {
+  const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "security");
+  const copy = (code: string, status: number) => translateError({ code, status, message: SECRET }, "security");
+
+  it("each incident and routing code has its own copy, never the server's message", () => {
+    for (const [code, status] of [
+      ["INCIDENT_NOT_FOUND", 404],
+      ["INCIDENT_CONFLICT", 409],
+      ["NOT_ACTIONABLE", 409],
+      ["INCIDENTS_UNAVAILABLE", 503],
+      ["NO_RECIPIENT", 409],
+      ["NOT_ELIGIBLE", 422],
+      ["ROUTING_UNAVAILABLE", 503],
+      ["USER_NOT_FOUND", 404],
+    ] as const) {
+      expect(copy(code, status), code).not.toBe(fallback);
+      expect(copy(code, status), code).not.toContain(SECRET);
+    }
+  });
+
+  it("a missing incident and a hidden one read the same (the box answers both with one body)", () => {
+    expect(copy("INCIDENT_NOT_FOUND", 404)).toBe("That incident isn't there any more, or you can't see it. Refresh the page.");
+  });
+
+  it("a lost acknowledge race says someone else moved it; a refused act says so — and never why (a partial view's hidden camera, DS-005)", () => {
+    expect(copy("INCIDENT_CONFLICT", 409)).toMatch(/someone else/i);
+    expect(copy("NOT_ACTIONABLE", 409)).toBe("You can't acknowledge or resolve this incident. Refresh the page to see where it stands.");
+    expect(copy("NOT_ACTIONABLE", 409)).not.toMatch(/camera|alert|can.t see/i);
+  });
+
+  it("the last person told can't be switched off: someone who can open Security has to be told", () => {
+    expect(copy("NO_RECIPIENT", 409)).toMatch(/someone who can open Security has to be told about alerts/i);
+    expect(copy("NOT_ELIGIBLE", 422)).toMatch(/can't open Security/i);
+  });
+
+  it("an unavailable read never reads as a quiet site", () => {
+    for (const code of ["INCIDENTS_UNAVAILABLE", "ROUTING_UNAVAILABLE"]) {
+      expect(copy(code, 503), code).toMatch(/can't|couldn't/i);
+      expect(copy(code, 503), code).not.toMatch(/nothing (happened|to show)|quiet/i);
+    }
   });
 });

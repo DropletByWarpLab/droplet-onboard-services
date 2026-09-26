@@ -34,6 +34,11 @@ const h = vi.hoisted(() => ({
   zonesMutate: vi.fn(),
   sourcesMutate: vi.fn(),
   toast: vi.fn(),
+  // WARP-2979 — Droplet's suggestions and decisions.
+  proposals: [] as unknown[],
+  linking: "link_and_suggest" as string,
+  accept: vi.fn(),
+  reject: vi.fn(),
 }));
 
 vi.mock("@/lib/hooks/useSecurity", () => ({
@@ -55,6 +60,17 @@ vi.mock("@/lib/hooks/useSecurity", () => ({
     h.sourcesCalls += 1;
     return { sources: h.sources, error: h.sourcesError, isLoading: false, mutate: h.sourcesMutate };
   },
+  useLinkProposals: () => ({
+    proposals: h.proposals,
+    linking: h.linking,
+    level: h.level,
+    error: undefined,
+    isLoading: false,
+    refresh: vi.fn(),
+    accept: h.accept,
+    reject: h.reject,
+  }),
+  useSecurityHours: () => ({ hours: { state: "set", timezone: "Europe/London" }, error: undefined, isLoading: false }),
 }));
 
 vi.mock("@/lib/hooks/useModuleGate", async (importOriginal) => {
@@ -83,7 +99,7 @@ const AT = "2026-09-23T10:00:00.000Z";
 const RAW_SERVER_MESSAGE = "prisma P2034 write conflict on SecurityZone row";
 
 function link(id: string, sourceKind: SecurityZoneLinkView["sourceKind"], sourceRef: string, label: string): SecurityZoneLinkView {
-  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT };
+  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT, origin: "person", setBy: "person", evidence: null };
 }
 
 const FRONT: SecurityZoneView = {
@@ -145,6 +161,10 @@ const card = (name: string) => {
 };
 
 beforeEach(() => {
+  h.proposals = [];
+  h.linking = "link_and_suggest";
+  h.accept.mockReset();
+  h.reject.mockReset();
   h.level = "manage";
   h.zones = [FRONT, STOCK, BARE, OLD];
   h.zonesError = undefined;
@@ -548,5 +568,134 @@ describe("the Areas copy", () => {
   ])("%s COPY uses none of the banned words", (_name, copy) => {
     const text = Object.values(copy).join(" \n ");
     for (const re of BANNED) expect(text).not.toMatch(re);
+  });
+});
+
+// ── WARP-2979 (ADR-059 P4 §8): Droplet's links ─────────────────────────────
+
+describe("Droplet's links on the Areas page", () => {
+  const EVIDENCE = {
+    v: 1 as const,
+    kind: "camera_camera" as const,
+    window: { from: "2026-09-06T09:45:00.000Z", to: "2026-09-20T09:45:00.000Z" },
+    anchor: { linkId: "l1", sourceKind: "camera" as const, sourceRef: "front_cam", label: "Front camera" },
+    candidate: { sourceKind: "camera" as const, sourceRef: "back_cam", label: "Back camera" },
+    forward: { n: 40, k: 34, excluded: 0, lambdaMilli: 2000, liftTenths: 170, confidenceBp: 7090 },
+    reverse: { n: 45, k: 36, excluded: 1, lambdaMilli: 2700, liftTenths: 133, confidenceBp: 6620 },
+    chosen: "whole" as const,
+    wholeK: null,
+    names: { match: false, shared: [] },
+    hypotheses: 12,
+    pAdj: "1.1e-27",
+    gate: "auto" as const,
+    samples: [],
+    samplesTrimmedBefore: null,
+  };
+  const dropletLink = (over: Partial<SecurityZoneLinkView> = {}): SecurityZoneLinkView => ({
+    ...link("l-auto", "camera", "back_cam", "Back camera"),
+    origin: "droplet",
+    setBy: "droplet",
+    evidence: EVIDENCE,
+    ...over,
+  });
+  const stock = (links: SecurityZoneLinkView[]): SecurityZoneView => ({
+    id: "z-stock",
+    name: "Stock room",
+    kind: "interior",
+    state: "active",
+    version: 2,
+    links: [link("l1", "camera", "front_cam", "Front camera"), ...links],
+  });
+
+  it("the chip only on a link Droplet set; a kept suggestion reads 'Suggested by Droplet' with no button", () => {
+    h.zones = [stock([dropletLink(), dropletLink({ id: "l-kept", sourceRef: "side_cam", label: "Side camera", setBy: "person" })])];
+    render(<AreasPanel />);
+    const chips = screen.getAllByRole("button", { name: /^Linked by Droplet/ });
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent(COPY.linkedByDroplet);
+    expect(screen.getByText("Suggested by Droplet: Side camera (whole view)")).toBeInTheDocument();
+  });
+
+  it("the chip opens the evidence: the numbers, the provenance, the Inside line — and Keep / Undo at manage", async () => {
+    h.zones = [stock([dropletLink()])];
+    h.accept.mockResolvedValue({});
+    render(<AreasPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/When Front camera saw someone \(40 times in 14 days\), Back camera also did within 10 seconds 34 times/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Droplet linked this on Sep 23 at 11:00 AM/)).toBeInTheDocument();
+    expect(within(dialog).getByText("Alerts from this camera start once you keep it.")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Keep" }));
+    await waitFor(() => expect(h.accept).toHaveBeenCalledWith("l-auto"));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith("Kept. Back camera now counts for alerts in Stock room.", "success"));
+  });
+
+  it("Undo: one tap, and the toast says Droplet won't suggest it again", async () => {
+    h.zones = [stock([dropletLink()])];
+    h.reject.mockResolvedValue({});
+    render(<AreasPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(h.reject).toHaveBeenCalledWith("l-auto"));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith("Undone. Droplet won't suggest Back camera for Stock room again.", "success"));
+  });
+
+  it.each(["view", "act"])("below manage (%s): the chip and its evidence, but no Keep or Undo, and no suggestions", async (level) => {
+    h.level = level;
+    h.zones = [stock([dropletLink({ evidence: null })])];
+    h.proposals = [
+      { linkId: "p1", zone: { id: "z-stock", name: "Stock room", kind: "interior" }, sourceKind: "camera", sourceRef: "yard_cam", label: "Yard camera", confidence: 0.5, evidence: null, suggestedAt: AT },
+    ];
+    render(<AreasPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Droplet linked this from what its cameras saw.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Keep" })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "Undo" })).toBeNull();
+    expect(screen.queryByTestId("link-suggestions")).toBeNull();
+  });
+
+  it("the chip's accessible name starts with its visible text (WCAG 2.5.3), then says which link", () => {
+    h.zones = [stock([dropletLink()])];
+    render(<AreasPanel />);
+    const chip = screen.getByRole("button", { name: /^Linked by Droplet/ });
+    expect(chip).toHaveTextContent(COPY.linkedByDroplet);
+    expect(chip.getAttribute("aria-label")!.startsWith(COPY.linkedByDroplet)).toBe(true);
+    expect(chip.getAttribute("aria-label")).toContain("Back camera");
+  });
+
+  // Review #2418 — the chip that opened the panel goes once the link is kept or undone: focus lands on the area.
+  it.each([
+    ["Keep", "accept"],
+    ["Undo", "reject"],
+  ] as const)("after %s, focus moves to the area's What covers it? — never to a chip that is gone", async (label, fn) => {
+    h.zones = [stock([dropletLink()])];
+    h[fn].mockResolvedValue({});
+    render(<AreasPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: label }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const card = document.querySelector('[data-zone-id="z-stock"]') as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(within(card).getByRole("button", { name: COPY.whatCovers })));
+  });
+
+  it("after Add it, the suggestion's card goes and focus moves to its area's What covers it?", async () => {
+    h.zones = [stock([])];
+    h.proposals = [
+      { linkId: "p1", zone: { id: "z-stock", name: "Stock room", kind: "interior" }, sourceKind: "camera", sourceRef: "yard_cam", label: "Yard camera", confidence: 0.5, evidence: null, suggestedAt: AT },
+    ];
+    h.accept.mockResolvedValue({});
+    render(<AreasPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "Add it" }));
+    const card = document.querySelector('[data-zone-id="z-stock"]') as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(within(card).getByRole("button", { name: COPY.whatCovers })));
+  });
+
+  it("linking off: manage sees why there are no suggestions; the chips stay", () => {
+    h.linking = "off";
+    h.zones = [stock([dropletLink()])];
+    render(<AreasPanel />);
+    expect(screen.getByText(COPY.linkingOff)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Linked by Droplet/ })).toBeInTheDocument();
   });
 });
