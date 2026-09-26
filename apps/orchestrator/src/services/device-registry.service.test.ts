@@ -387,4 +387,29 @@ describe("device-registry.service", () => {
     expect(presence.has("MAC2|2026-04-15")).toBe(true);
     expect(presence.has("MAC1|2026-01-01")).toBe(false);
   });
+
+  // WARP-3193 PERF-13: randomised MACs add a NetworkDevice row per rotation
+  // and nothing ever removed one, while the schedule ticker and egress
+  // reconciler load the whole table every 30 s.
+  it("purgeStaleDevices(90) deletes only unseen, unblocked, unscheduled, ungrouped devices", async () => {
+    const deleteMany = vi.fn(async () => ({ count: 3 }));
+    (prisma.networkDevice as any).deleteMany = deleteMany;
+    const before = Date.now();
+    const result = await reg.purgeStaleDevices(90);
+    expect(result.count).toBe(3);
+    const where = (deleteMany.mock.calls[0] as any)[0].where;
+    // Schedules and overrides CASCADE from NetworkDevice, and group
+    // membership is an implicit join: deleting any of those would destroy
+    // something the owner authored. A manual block is owner intent too.
+    expect(where).toEqual({
+      lastSeen: { lt: expect.any(Date) },
+      manualBlock: false,
+      schedules: { none: {} },
+      overrides: { none: {} },
+      groups: { none: {} },
+    });
+    const cutoff = where.lastSeen.lt.getTime();
+    expect(cutoff).toBeGreaterThanOrEqual(before - 90 * 86_400_000);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - 90 * 86_400_000);
+  });
 });

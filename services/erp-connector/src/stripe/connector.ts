@@ -114,6 +114,7 @@ import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
 import { sortByKey } from "../api-dto.js";
+import { SafeRestTransport } from "../rest/safe-transport.js";
 import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
 
 /** Provider key for this track. */
@@ -1146,12 +1147,11 @@ export class StripeConnector implements Connector {
 
   private readonly now: () => number;
   private readonly resolveApiKey: StripeKeyResolver;
-  private readonly fetchImpl?: FetchLike;
-  private readonly timeoutMs: number;
   private readonly baseUrl: string;
   private readonly filesBaseUrl: string;
   private readonly meter: ReadAllocationMeter;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly transport: SafeRestTransport;
 
   private apiKey: string | null = null;
   private fingerprint: string | null = null;
@@ -1162,9 +1162,14 @@ export class StripeConnector implements Connector {
   ) {
     this.now = deps.now ?? (() => Date.now());
     this.resolveApiKey = deps.resolveApiKey ?? blockedStripeKeyResolver;
-    this.fetchImpl = deps.fetchImpl;
-    this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    // WARP-3193 QUAL-6 — no-redirect, timeout and the bounded 429 loop live in
+    // the shared transport; the status classification below stays Stripe's.
+    this.transport = new SafeRestTransport({
+      fetchImpl: deps.fetchImpl,
+      timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      sleep: this.sleep,
+    });
     // Validated at CONSTRUCTION: a connection naming a destination we will not
     // dial should fail to build, loudly, rather than look fine until the first
     // read ships a key.
@@ -1261,76 +1266,66 @@ export class StripeConnector implements Connector {
     // egress registry has not screened.
     const url = `${opts.origin ?? this.baseUrl}${path}${qs.toString() ? `?${qs}` : ""}`;
 
-    const doFetch = this.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
-    if (!doFetch) throw this.blocked(op, "no fetch implementation available");
-
     const body = opts.form
       ? new URLSearchParams(
           Object.entries(opts.form).map(([k, v]) => [k, String(v)]),
         ).toString()
       : undefined;
 
-    for (let attempt = 0; ; attempt += 1) {
-      let res: Response;
-      try {
-        res = await doFetch(url, {
-          method: opts.method ?? "GET",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            // NON-NEGOTIABLE, on every request kind. Without it the response is
-            // served at the merchant's Workbench-changeable account default.
-            "Stripe-Version": STRIPE_API_VERSION,
-            Accept: opts.accept ?? "application/json",
-            ...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
-          },
-          ...(body ? { body } : {}),
-          // Never follow a 3xx: the fetch spec strips Authorization on
-          // cross-origin redirects, but the key's safety must not rest on every
-          // runtime implementing that correctly. This API has no legitimate
-          // redirect, so one is a fault, not a hop.
-          redirect: "error",
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
-      } catch (err) {
-        throw this.blocked(op, `Stripe API unreachable: ${(err as Error).message}`);
-      }
+    const res = await this.transport.send(
+      {
+        url,
+        method: opts.method ?? "GET",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          // NON-NEGOTIABLE, on every request kind. Without it the response is
+          // served at the merchant's Workbench-changeable account default.
+          "Stripe-Version": STRIPE_API_VERSION,
+          Accept: opts.accept ?? "application/json",
+          ...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+        },
+        ...(body ? { body } : {}),
+      },
+      {
+        maxAttempts: STRIPE_MAX_RATE_LIMIT_RETRIES,
+        noFetch: () => this.blocked(op, "no fetch implementation available"),
+        unreachable: (err) => this.blocked(op, `Stripe API unreachable: ${err.message}`),
+        rateLimited: (_res, attempt, final) => {
+          // Stripe sends `Stripe-Rate-Limited-Reason` but documents NO
+          // `Retry-After`, so the backoff is self-derived. Without it this is a
+          // hot loop against an endpoint already telling us to slow down.
+          if (final) {
+            throw this.blocked(
+              op,
+              `Stripe rate limit (429) persisted across ${attempt + 1} attempts — back off and retry later`,
+            );
+          }
+          return STRIPE_BACKOFF_BASE_MS * 2 ** attempt;
+        },
+      },
+    );
 
-      if (res.status === 429) {
-        // Stripe sends `Stripe-Rate-Limited-Reason` but documents NO
-        // `Retry-After`, so the backoff is self-derived. Without it this is a
-        // hot loop against an endpoint already telling us to slow down.
-        if (attempt >= STRIPE_MAX_RATE_LIMIT_RETRIES - 1) {
-          throw this.blocked(
-            op,
-            `Stripe rate limit (429) persisted across ${attempt + 1} attempts — back off and retry later`,
-          );
-        }
-        await this.sleep(STRIPE_BACKOFF_BASE_MS * 2 ** attempt);
-        continue;
-      }
-
-      if (res.status === 401) {
-        throw new StripeReauthorizationRequiredError("Stripe returned 401");
-      }
-      if (res.status === 403) {
-        // A 403 here is far more often the key's IP/ASN access policy than a
-        // permissions problem, because Stripe RECOMMENDS merchants set one and
-        // this box's WAN address is not stable. Classified from the response
-        // body so a genuine permissions 403 still routes to re-authorization.
-        const detail = await StripeConnector.errorMessage(res);
-        if (STRIPE_IP_POLICY_SIGNALS.test(detail)) {
-          throw new StripeAccessPolicyError(detail);
-        }
-        throw new StripeReauthorizationRequiredError(`Stripe returned 403: ${detail}`);
-      }
-      if (!res.ok) {
-        throw this.blocked(op, `Stripe API returned ${res.status}`);
-      }
-
-      // Recorded only on a 2xx, and only for allocation-counted paths.
-      if (opts.metered) this.meter.record();
-      return res;
+    if (res.status === 401) {
+      throw new StripeReauthorizationRequiredError("Stripe returned 401");
     }
+    if (res.status === 403) {
+      // A 403 here is far more often the key's IP/ASN access policy than a
+      // permissions problem, because Stripe RECOMMENDS merchants set one and
+      // this box's WAN address is not stable. Classified from the response
+      // body so a genuine permissions 403 still routes to re-authorization.
+      const detail = await StripeConnector.errorMessage(res);
+      if (STRIPE_IP_POLICY_SIGNALS.test(detail)) {
+        throw new StripeAccessPolicyError(detail);
+      }
+      throw new StripeReauthorizationRequiredError(`Stripe returned 403: ${detail}`);
+    }
+    if (!res.ok) {
+      throw this.blocked(op, `Stripe API returned ${res.status}`);
+    }
+
+    // Recorded only on a 2xx, and only for allocation-counted paths.
+    if (opts.metered) this.meter.record();
+    return res;
   }
 
   /** Pull the human-readable message out of a Stripe error envelope. */

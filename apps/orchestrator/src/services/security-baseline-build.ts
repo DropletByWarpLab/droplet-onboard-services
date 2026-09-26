@@ -37,6 +37,7 @@ import { BASELINE } from "../lib/security-baseline-math.js";
 import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import { windowBounds, windowFor, windowSlots, type BaselineSlot, type BaselineWindow } from "../lib/security-baseline-slots.js";
 import { createLogger } from "../lib/logger.js";
+import { isUniqueViolation } from "../lib/prisma-errors.js";
 
 const logger = createLogger("security-baseline-build");
 
@@ -233,9 +234,6 @@ export type FullBuildOutcome =
   | { status: "built"; buildId: string; cellCount: number; eventCount: number }
   | { status: "claimed_elsewhere" }
   | { status: "failed"; buildId: string; error: string };
-
-const isUniqueViolation = (err: unknown): boolean =>
-  typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
 
 /**
  * What a failed build stores (≤ 500 chars, one line): Postgres's own message
