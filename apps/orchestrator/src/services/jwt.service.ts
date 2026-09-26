@@ -10,7 +10,6 @@ import {
   cacheSetRemove,
   cacheSetMembers,
 } from "./cache.service.js";
-import { HttpError } from "../types/http-error.js";
 
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
@@ -313,16 +312,24 @@ export async function denyRefreshToken(token: string): Promise<void> {
 
 /**
  * WARP-3193 QUAL-1 — the one error every revocation write throws when Redis
- * refuses it. An `HttpError` with status 503, so a route that forwards it to
- * `next(err)` answers "Service unavailable" with a stable code instead of
- * reporting a revocation that never landed.
+ * refuses it. It carries a numeric `statusCode` (the `http-errors` shape the
+ * global error handler trusts), so a route that forwards it to `next(err)`
+ * answers 503 with a stable `code` instead of reporting a revocation that
+ * never landed.
  */
-export function revocationUnavailable(): HttpError {
-  return new HttpError(
-    "Session revocation could not be recorded. Try again in a moment.",
-    503,
-    "REVOCATION_UNAVAILABLE",
-  );
+export class RevocationUnavailableError extends Error {
+  readonly status = 503;
+  readonly statusCode = 503;
+  readonly code = "REVOCATION_UNAVAILABLE";
+
+  constructor() {
+    super("Session revocation could not be recorded. Try again in a moment.");
+    this.name = "RevocationUnavailableError";
+  }
+}
+
+export function revocationUnavailable(): RevocationUnavailableError {
+  return new RevocationUnavailableError();
 }
 
 /**

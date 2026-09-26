@@ -99,8 +99,8 @@ import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
+import { revocationUnavailable } from "../services/jwt.service.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
-import { HttpError } from "../types/http-error.js";
 import { errorHandler } from "../middleware/error-handler.js";
 // WARP-2993: the /auth/users routes call Nextcloud as the box service
 // account, never with the caller's own NC credential ("caller-nc-token").
@@ -236,7 +236,7 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
   // take, and emits no "Sessions revoked" row for sessions still alive.
   it("answers 503 REVOCATION_UNAVAILABLE when the revoke could not be recorded", async () => {
     revokeAllSessions.mockRejectedValueOnce(
-      new HttpError("Session revocation could not be recorded.", 503, "REVOCATION_UNAVAILABLE"),
+      revocationUnavailable(),
     );
     const app = buildApp(createPrismaMock([seededAlice()]), "owner");
     app.use(errorHandler);
