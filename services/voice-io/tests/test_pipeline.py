@@ -2635,11 +2635,72 @@ class TestUpstreamReprobing:
         )
         pipe.start()
         time.sleep(0.1)  # let bg loop run a tick
-        assert pipe._probe_thread is not None
-        assert pipe._probe_thread.is_alive()
+        assert pipe._probe_scheduler is not None
+        assert pipe._probe_scheduler.running
+        sched = pipe._probe_scheduler
         pipe.stop()
-        # stop() joins the thread.
-        assert pipe._probe_thread is None
+        # stop() shuts the scheduler down and forgets it.
+        assert pipe._probe_scheduler is None
+        assert not sched.running
+
+    def test_reprobe_is_an_apscheduler_interval_job(self):
+        # WARP-3193 QUAL-12: the periodic re-probe is a scheduler job,
+        # not a hand-rolled `while not event.wait(interval)` loop.
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.interval import IntervalTrigger
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=_FlippableSTT(initial=True),
+            upstream_probe_interval_s=7.5,
+        )
+        pipe.start()
+        try:
+            assert isinstance(pipe._probe_scheduler, BackgroundScheduler)
+            jobs = pipe._probe_scheduler.get_jobs()
+            assert len(jobs) == 1
+            assert isinstance(jobs[0].trigger, IntervalTrigger)
+            assert jobs[0].trigger.interval.total_seconds() == 7.5
+        finally:
+            pipe.stop()
+
+    def test_stop_reports_a_probe_tick_that_outlives_the_join_budget(self):
+        # Same contract the probe thread had: stop() returns False while a
+        # tick is still running past `timeout`, and no tick starts after
+        # stop() has returned True.
+        import threading as _threading
+        release = _threading.Event()
+        entered = _threading.Event()
+
+        class _SlowSTT(_FlippableSTT):
+            @property
+            def available(self) -> bool:
+                # The initial synchronous probe in start() passes through;
+                # every background tick blocks until released.
+                if self.probe_count >= 1:
+                    entered.set()
+                    release.wait(2.0)
+                self.probe_count += 1
+                return self._available
+
+        stt = _SlowSTT(initial=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+            upstream_probe_interval_s=0.02,
+        )
+        pipe.start()
+        assert entered.wait(1.0)
+        assert pipe.stop(timeout=0.05) is False
+        assert pipe._probe_scheduler is not None
+        release.set()
+        time.sleep(0.05)
+        assert pipe.stop(timeout=1.0) is True
+        assert pipe._probe_scheduler is None
+        count = stt.probe_count
+        time.sleep(0.1)
+        assert stt.probe_count == count
 
     def test_stable_state_doesnt_log_every_tick(self, caplog):
         # An always-down upstream shouldn't spam the log every interval.
