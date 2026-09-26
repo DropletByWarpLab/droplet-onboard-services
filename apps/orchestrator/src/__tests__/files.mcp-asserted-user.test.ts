@@ -8,6 +8,17 @@
  * (HTTP transport), never `nextcloudUsername`: that column is NULL on every
  * SSO- and SCIM-created row, and resolving by it dropped those people to
  * their personal corpus alone.
+ *
+ * WARP-3117 — the route's own corpus key and its name arm (a WebDAV SEARCH)
+ * are the person's Nextcloud LOGIN: nextcloud-watcher chunks are keyed by it.
+ * The header used to be that key verbatim. So a UUID over HTTP searched
+ * nothing, and a value naming two people "degraded" to the corpus of
+ * whoever's login it was. A person the route cannot act as in Nextcloud is
+ * now refused with 403, as on every other /api/files route: nobody, two
+ * people, a deactivated person, or an SSO / SCIM person with no Nextcloud
+ * account. No MCP tool calls this route. The assistant's own content search
+ * (the mcp-server's `search_content`, WARP-2821) still reaches an SSO
+ * person's departments.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -61,7 +72,10 @@ vi.mock("../config.js", () => ({
 import { createFilesRouter } from "../routes/files.js";
 
 const FINANCE = { id: "dept-finance", kind: "DEPARTMENT", aclVersion: 3 };
+// SSO / SCIM-provisioned: no Nextcloud account.
 const MARIA: DirectoryUser = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "family" };
+// A Nextcloud-backed member whose login differs from her handle (ADR-013).
+const LENA: DirectoryUser = { id: "u-lena", username: "lena", nextcloudUsername: "lena.nc", role: "family" };
 
 function appWith(users: DirectoryUser[], memberOf: Record<string, (typeof FINANCE)[]>) {
   const prisma = {
@@ -82,14 +96,26 @@ function appWith(users: DirectoryUser[], memberOf: Record<string, (typeof FINANC
   return app;
 }
 
-async function searchAs(app: express.Express, asserted: string) {
-  const res = await request(app)
+function searchRequest(app: express.Express, asserted: string) {
+  return request(app)
     .get("/api/files/search/content?q=budget&mode=keyword")
     .set("X-Nextcloud-User", asserted)
     .set("X-Nextcloud-Token", "nc-app-password");
+}
+
+async function searchAs(app: express.Express, asserted: string) {
+  const res = await searchRequest(app, asserted);
   expect(res.status).toBe(200);
   expect(searchByLexicalSpy).toHaveBeenCalledTimes(1);
   return searchByLexicalSpy.mock.calls[0][1] as { userId: string; additionalUserIds: string[] };
+}
+
+/** A refused person gets a 403 that says why, and nothing is searched. */
+async function refusedAs(app: express.Express, asserted: string) {
+  const res = await searchRequest(app, asserted);
+  expect(res.status).toBe(403);
+  expect(searchByLexicalSpy).not.toHaveBeenCalled();
+  return res.body as { error: string; reason?: string };
 }
 
 beforeEach(() => {
@@ -97,55 +123,64 @@ beforeEach(() => {
   filesRouteWarn.mockReset();
 });
 
-/** The fallback to the personal corpus is logged with why the person did not resolve. */
-const warnedPersonalOnly = (reason: string) =>
+/** A refusal is logged with why the person could not be acted as. */
+const warnedRefused = (reason: string) =>
   expect(filesRouteWarn).toHaveBeenCalledWith(
     expect.objectContaining({ reason }),
-    expect.stringContaining("personal corpus only"),
+    expect.stringContaining("asserted user refused"),
   );
 
-describe("WARP-3061 — the assistant searches an SSO person's departments", () => {
-  it("adds the department corpus of an SSO member named by username", async () => {
-    const params = await searchAs(appWith([MARIA], { "u-maria": [FINANCE] }), "maria");
+describe("WARP-3061 — the assistant searches the acting person's departments", () => {
+  it("adds the department corpus of a member named by username, keyed by their Nextcloud login", async () => {
+    const params = await searchAs(appWith([LENA], { "u-lena": [FINANCE] }), "lena");
+    expect(params.userId).toBe("lena.nc");
     expect(params.additionalUserIds).toEqual(["__dept_dept-finance__"]);
   });
 
-  it("adds it when the HTTP transport names them by User.id", async () => {
-    const params = await searchAs(appWith([MARIA], { "u-maria": [FINANCE] }), "u-maria");
+  it("does the same when the HTTP transport names them by User.id", async () => {
+    const params = await searchAs(appWith([LENA], { "u-lena": [FINANCE] }), "u-lena");
+    expect(params.userId).toBe("lena.nc");
     expect(params.additionalUserIds).toEqual(["__dept_dept-finance__"]);
   });
 
-  it("searches personal files only when the value is two different people", async () => {
+  it("refuses an SSO person: no Nextcloud login to key the corpus or the name search", async () => {
+    const body = await refusedAs(appWith([MARIA], { "u-maria": [FINANCE] }), "u-maria");
+    expect(body.error).toBe("no_nextcloud_account");
+    warnedRefused("no_nextcloud_account");
+  });
+
+  it("refuses a value naming two different people", async () => {
     // maria's username is marianne's nextcloudUsername. Before WARP-3061 this
-    // searched MARIANNE's departments on maria's behalf.
+    // searched MARIANNE's departments on maria's behalf; before WARP-3117 it
+    // still searched marianne's personal corpus, keyed by her login "maria".
     const marianne: DirectoryUser = {
       id: "u-marianne",
       username: "marianne",
       nextcloudUsername: "maria",
       role: "family",
     };
-    const params = await searchAs(appWith([MARIA, marianne], { "u-marianne": [FINANCE] }), "maria");
-    expect(params.additionalUserIds).toEqual([]);
-    warnedPersonalOnly("ambiguous");
+    const body = await refusedAs(appWith([MARIA, marianne], { "u-marianne": [FINANCE] }), "maria");
+    expect(body).toMatchObject({ error: "asserted_user_unresolved", reason: "ambiguous" });
+    warnedRefused("ambiguous");
   });
 
-  it("searches personal files only, and says why, when the person is DEACTIVATED", async () => {
-    // A run in flight when SCIM deactivates maria must not keep reading her
-    // department.
-    const gone: DirectoryUser = { ...MARIA, directoryStatus: "DEACTIVATED" };
-    const params = await searchAs(appWith([gone], { "u-maria": [FINANCE] }), "maria");
-    expect(params.additionalUserIds).toEqual([]);
-    warnedPersonalOnly("deactivated");
+  it("refuses a DEACTIVATED person, and says why", async () => {
+    // A run in flight when SCIM deactivates lena must not keep reading her
+    // files or her department.
+    const gone: DirectoryUser = { ...LENA, directoryStatus: "DEACTIVATED" };
+    const body = await refusedAs(appWith([gone], { "u-lena": [FINANCE] }), "lena");
+    expect(body).toMatchObject({ error: "asserted_user_unresolved", reason: "deactivated" });
+    warnedRefused("deactivated");
   });
 
-  it("logs a value that names nobody before falling back to personal files", async () => {
-    const params = await searchAs(appWith([MARIA], { "u-maria": [FINANCE] }), "nobody");
-    expect(params.additionalUserIds).toEqual([]);
-    warnedPersonalOnly("not_found");
+  it("refuses a value that names nobody, and says why", async () => {
+    const body = await refusedAs(appWith([LENA], { "u-lena": [FINANCE] }), "nobody");
+    expect(body).toMatchObject({ error: "asserted_user_unresolved", reason: "not_found" });
+    warnedRefused("not_found");
   });
 
   it("does not warn when the person resolves", async () => {
-    await searchAs(appWith([MARIA], { "u-maria": [FINANCE] }), "maria");
+    await searchAs(appWith([LENA], { "u-lena": [FINANCE] }), "lena");
     expect(filesRouteWarn).not.toHaveBeenCalled();
   });
 });
