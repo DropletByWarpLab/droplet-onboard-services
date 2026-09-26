@@ -9,6 +9,20 @@
  *   POST /api/sso/oidc/authorize  { provider, returnTo? } → 302 to the IdP
  *   GET  /api/sso/oidc/callback   ?code&state              → 302 to returnTo
  *
+ * Native handoff (RFC 8252 loopback / private-use scheme + PKCE) for the
+ * native Windows client, which has no WebView to carry the state cookie. The
+ * box stays the confidential OIDC client and the IdP still redirects to the
+ * box's own callback, so the IdP-registered redirect URI is unchanged
+ * (ADR-016); the handoff is a second, box-local leg:
+ *
+ *   POST /api/sso/oidc/native/begin
+ *        { provider, redirectUri, codeChallenge, codeChallengeMethod:"S256" }
+ *        → 200 { authorizeUrl }  (no cookie, no 302)
+ *   GET  /api/sso/oidc/callback   NATIVE row → no cookie check, no session
+ *        cookies; 302 to redirectUri?code=<one-time handoff>&state=<state>
+ *   POST /api/sso/oidc/native/token { code, codeVerifier }
+ *        → the /auth/login?return=body JSON body
+ *
  * Security (see also sso-oidc.service / sso-login-state.service):
  *   - `state` is CSRF protection: minted at /authorize, persisted server-side
  *     (single-use, time-bound) AND mirrored into an httpOnly cookie. The
@@ -18,8 +32,14 @@
  *     callback reads them from the consumed state row, never from the client.
  *   - ID-token validation (signature via JWKS, iss, aud, exp, nonce) is
  *     delegated to openid-client inside exchangeCodeAndValidate.
+ *   - Native leg: the explicit `flowKind` column on the state row decides the
+ *     branch, so a browser flow can never be turned into a handoff. State
+ *     stays single-use and server-side; the handoff code is 32 random bytes,
+ *     stored as sha256 only, lives 60 s, is redeemable once, and is useless
+ *     without the app's PKCE verifier.
  *   - We NEVER log the code, tokens, secrets, or claims.
  */
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Router, type Request } from "express";
 import { z } from "zod";
 
@@ -36,14 +56,23 @@ import {
 import {
   createLoginState,
   consumeLoginState,
+  peekLoginState,
+  setHandoff,
+  consumeHandoff,
   SSO_LOGIN_STATE_TTL_SECONDS,
+  SSO_NATIVE_HANDOFF_TTL_SECONDS,
 } from "../services/sso-login-state.service.js";
 import type { Role } from "../services/jwt.service.js";
-import { issueSessionTokens, setSessionCookies } from "../services/session-mint.js";
+import {
+  issueSessionTokens,
+  sessionTokenBody,
+  setSessionCookies,
+} from "../services/session-mint.js";
 import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
 import { findUserByEmail, emailWriteData } from "../services/user-directory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
+import { browserMarkerHeader } from "../lib/browser-context.js";
 import { createLogger } from "../lib/logger.js";
 import { authRateLimit } from "../middleware/rate-limit.js";
 import { isUserIdShaped, normalizeEmail } from "@droplet/auth-policy";
@@ -60,6 +89,131 @@ const authorizeSchema = z.object({
   // path below so it can't become an open redirect.
   returnTo: z.string().optional(),
 });
+
+/**
+ * The native app's own redirect for the handoff, in canonical form only:
+ *   - `http://127.0.0.1:<port>/<path>` or `http://[::1]:<port>/<path>`
+ *     (RFC 8252 §7.3 loopback; the name `localhost` is refused per §8.3),
+ *     port 1024–65535 without leading zeros, a path of unreserved characters
+ *     and `/`, and no user info, query or fragment;
+ *   - exactly `droplet://sso/callback` (RFC 8252 §7.1 private-use scheme).
+ * The box appends `?code=…&state=…`, so a query is never accepted here.
+ */
+const LOOPBACK_REDIRECT_RE = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9]\d{3,4})\/[A-Za-z0-9\-._~/]*$/;
+const APP_SCHEME_REDIRECT = "droplet://sso/callback";
+
+const nativeRedirectUriSchema = z
+  .string()
+  .max(512)
+  .refine((uri) => {
+    if (uri === APP_SCHEME_REDIRECT) return true;
+    const m = LOOPBACK_REDIRECT_RE.exec(uri);
+    if (!m) return false;
+    const port = Number(m[1]);
+    return port >= 1024 && port <= 65535;
+  });
+
+/** RFC 7636: an S256 challenge is BASE64URL(SHA256(verifier)), 43 chars. */
+const pkceChallengeSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+
+const nativeBeginSchema = z.object({
+  provider: z.string(),
+  redirectUri: z.string(),
+  codeChallenge: z.string(),
+  codeChallengeMethod: z.string(),
+});
+
+const nativeTokenSchema = z.object({
+  // 32 random bytes, base64url.
+  code: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  // RFC 7636 §4.1: 43–128 characters of [A-Z a-z 0-9 - . _ ~].
+  codeVerifier: z.string().regex(/^[A-Za-z0-9\-._~]{43,128}$/),
+});
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+/** Constant-time check of BASE64URL(SHA256(verifier)) against the stored challenge. */
+function pkceS256Matches(codeVerifier: string, codeChallenge: string): boolean {
+  const computed = Buffer.from(createHash("sha256").update(codeVerifier).digest("base64url"));
+  const stored = Buffer.from(codeChallenge);
+  return computed.length === stored.length && timingSafeEqual(computed, stored);
+}
+
+/**
+ * OAuth 2.0 / OIDC authorization-error codes (RFC 6749 §4.1.2.1, OIDC Core
+ * §3.1.2.6) the IdP may send back on the callback. Only these are relayed to
+ * the native app, verbatim; anything else (and never `error_description`, which
+ * is IdP-controlled free text) collapses to `server_error`.
+ */
+const RELAYED_IDP_ERRORS: ReadonlySet<string> = new Set([
+  "access_denied",
+  "invalid_request",
+  "unauthorized_client",
+  "unsupported_response_type",
+  "invalid_scope",
+  "server_error",
+  "temporarily_unavailable",
+  "interaction_required",
+  "login_required",
+  "account_selection_required",
+  "consent_required",
+]);
+
+/**
+ * Besides the relayed IdP codes, the box sends `sso_failed`, `totp_required`,
+ * `sso_email_unverified` and `sso_domain_not_allowed` (documented in
+ * docs/mobile-api-contract.md).
+ */
+/** RFC 6749 §4.1.2.1 shape: the app's redirect with `error` and the state it sent. */
+function nativeErrorRedirectUrl(redirectUri: string, state: string, error: string): string {
+  return `${redirectUri}?error=${encodeURIComponent(error)}&state=${encodeURIComponent(state)}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * RFC 8252 §8.6 consent page for a NATIVE flow. The IdP leg has just finished
+ * in the system browser; before the browser hands a sign-in code to whatever is
+ * registered for the app's redirect (a loopback listener, or the `droplet://`
+ * scheme any local app can claim), the person confirms it. Continue is the
+ * handoff redirect, Cancel is the same redirect with `error=access_denied`. No
+ * script and no form: both are plain links. The code stays useless without the
+ * app's PKCE verifier and lives 60 s, so an abandoned page grants nothing.
+ */
+function renderNativeConsentPage(input: {
+  provider: string;
+  displayName: string;
+  redirectUri: string;
+  continueUrl: string;
+  cancelUrl: string;
+}): string {
+  const target =
+    input.redirectUri === APP_SCHEME_REDIRECT
+      ? "the Droplet app on this computer"
+      : "an app running on this computer";
+  const e = escapeHtml;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Sign in to Droplet</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:12vh auto;padding:0 1rem;color:#1a1a1a}
+h1{font-size:1.25rem}a.btn{display:inline-block;padding:.6rem 1.1rem;border-radius:.4rem;text-decoration:none;margin-right:.6rem;border:1px solid #444;color:#1a1a1a}
+a.primary{background:#1a1a1a;color:#fff}small{color:#555}</style></head>
+<body><h1>Sign in to Droplet?</h1>
+<p>You signed in with ${e(input.provider)} as <strong>${e(input.displayName)}</strong>.
+Continue to give ${e(target)} access to this Droplet account.</p>
+<p><a class="btn primary" href="${e(input.continueUrl)}">Continue</a><a class="btn" href="${e(input.cancelUrl)}">Cancel</a></p>
+<p><small>Only continue if you started this sign-in from the Droplet app just now. This page expires in one minute.</small></p>
+</body></html>`;
+}
 
 /**
  * Resolve `returnTo` to a SAFE same-origin path for the post-login redirect.
@@ -397,6 +551,77 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
     }
   });
 
+  // ── Begin SSO for a native app (RFC 8252 handoff) ──
+  // Same IdP authorize request as the browser flow (so the IdP-registered
+  // redirect URI, the box callback, is unchanged — ADR-016), but the state row
+  // is NATIVE and carries the app's redirect + PKCE challenge. JSON answer: no
+  // state cookie (the system browser that finishes the flow is not this
+  // client) and no 302 (the app opens the URL itself).
+  router.post("/sso/oidc/native/begin", authRateLimit, async (req, res, next) => {
+    try {
+      const parsed = nativeBeginSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
+        return;
+      }
+      const { provider, redirectUri, codeChallenge, codeChallengeMethod } = parsed.data;
+      if (!isSsoProvider(provider)) {
+        res.status(400).json({
+          error: "Unknown or unsupported SSO provider",
+          code: "SSO_PROVIDER_UNSUPPORTED",
+        });
+        return;
+      }
+      if (!nativeRedirectUriSchema.safeParse(redirectUri).success) {
+        res.status(400).json({
+          error:
+            "redirectUri must be http://127.0.0.1:<port>/<path>, http://[::1]:<port>/<path> or droplet://sso/callback",
+          code: "INVALID_REDIRECT_URI",
+        });
+        return;
+      }
+      if (codeChallengeMethod !== "S256" || !pkceChallengeSchema.safeParse(codeChallenge).success) {
+        res.status(400).json({
+          error: "codeChallenge must be a 43-character base64url S256 challenge",
+          code: "INVALID_CODE_CHALLENGE",
+        });
+        return;
+      }
+      if (!prisma) {
+        logger.error("SSO native begin: prisma not wired; cannot persist login state");
+        res.status(500).json({ error: "SSO is not available", code: "SSO_NO_PRISMA" });
+        return;
+      }
+      if (!getOidcProviderConfig(provider)) {
+        res.status(400).json({
+          error: `SSO for "${provider}" is not configured on this appliance`,
+          code: "SSO_PROVIDER_NOT_CONFIGURED",
+        });
+        return;
+      }
+
+      const { authorizeUrl, state, nonce, codeVerifier } = await buildAuthorizeRequest(provider);
+      await createLoginState(prisma, {
+        provider,
+        state,
+        nonce,
+        codeVerifier,
+        // Unused on the native leg (the handoff goes to nativeRedirectUri);
+        // the column is required.
+        returnTo: "/",
+        ttlSeconds: SSO_LOGIN_STATE_TTL_SECONDS,
+        flowKind: "NATIVE",
+        nativeRedirectUri: redirectUri,
+        nativeCodeChallenge: codeChallenge,
+      });
+
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ authorizeUrl });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ── Finish SSO: validate, link/create the local user, issue session ──
   router.get("/sso/oidc/callback", authRateLimit, async (req, res, next) => {
     try {
@@ -411,9 +636,23 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
       // Clear the CSRF cookie regardless of outcome — it's single-use.
       res.clearCookie(SSO_STATE_COOKIE, { path: "/api/sso" });
 
+      if (!queryState) {
+        res.status(401).json({ error: "Invalid SSO state" });
+        return;
+      }
+
+      // Read (not claim) the row first: only its explicit flowKind says
+      // whether this callback finishes a NATIVE flow, which has no browser
+      // cookie by design (begin answered a native HTTP client, not this
+      // browser). The native leg stays bound to its initiator by the
+      // single-use server-side state + the app's PKCE verifier at /token.
+      // An unknown state falls through to the cookie check.
+      const peeked = await peekLoginState(prisma, queryState);
+      const cookieExempt = peeked?.flowKind === "NATIVE";
+
       // CSRF: the cookie-side state must match the query state. A callback
       // that didn't originate from THIS browser's /authorize fails here.
-      if (!queryState || !cookieState || queryState !== cookieState) {
+      if (!cookieExempt && (!cookieState || queryState !== cookieState)) {
         res.status(401).json({ error: "Invalid SSO state" });
         return;
       }
@@ -425,8 +664,44 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         return;
       }
 
+      // NATIVE flow: the system browser is not the app, so a failure has
+      // nowhere useful to render. Relay it to the app's own redirect as
+      // `error=` (RFC 6749 §4.1.2.1, so the app can stop waiting) and audit it.
+      // Returns false for a BROWSER flow, which keeps answering in place.
+      const relayNativeError = async (
+        error: string,
+        reason: string,
+        alreadyAudited = false,
+      ): Promise<boolean> => {
+        if (loginState.flowKind !== "NATIVE" || !loginState.nativeRedirectUri) return false;
+        if (!alreadyAudited) {
+          await recordActivity({
+            kind: "auth",
+            severity: "warn",
+            sourceIcon: "shield-alert",
+            what: "Native SSO sign-in did not complete",
+            sub: `${loginState.provider} • ${reason}`,
+            refs: { outcome: reason, method: "sso-native", provider: loginState.provider, error },
+            actor: { type: "anonymous" },
+          });
+        }
+        res.setHeader("Cache-Control", "no-store");
+        res.redirect(302, nativeErrorRedirectUrl(loginState.nativeRedirectUri, loginState.state, error));
+        return true;
+      };
+
+      // The IdP refused or the person cancelled at the IdP: `error=` instead
+      // of `code=`. Only the standard codes are relayed, never the free text.
+      const idpError = typeof req.query.error === "string" ? req.query.error : null;
+      if (idpError) {
+        const relayed = RELAYED_IDP_ERRORS.has(idpError) ? idpError : "server_error";
+        const reason = idpError === "access_denied" ? "idp_access_denied" : "idp_error";
+        if (await relayNativeError(relayed, reason)) return;
+      }
+
       const code = typeof req.query.code === "string" ? req.query.code : null;
       if (!code) {
+        if (await relayNativeError("invalid_request", "missing_code")) return;
         res.status(400).json({ error: "Missing authorization code" });
         return;
       }
@@ -456,6 +731,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
       } catch (err) {
         // Log the failure WITHOUT the code/tokens/claims.
         logger.warn({ provider, err: (err as Error).message }, "SSO ID-token validation failed");
+        if (await relayNativeError("sso_failed", "validation_failed")) return;
         res.status(401).json({ error: "SSO sign-in failed" });
         return;
       }
@@ -472,11 +748,17 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
             { provider },
             "SSO sign-in refused: IdP did not assert email_verified for a linkable email",
           );
+          if (await relayNativeError("sso_email_unverified", "email_unverified")) {
+            return;
+          }
           res.status(401).json({ error: "SSO sign-in failed", code: err.code });
           return;
         }
         if (err instanceof SsoDomainNotAllowedError) {
           logger.warn({ provider }, "SSO sign-in refused: Google hosted domain not on the allowlist");
+          if (await relayNativeError("sso_domain_not_allowed", "domain_not_allowed")) {
+            return;
+          }
           res.status(401).json({ error: "SSO sign-in failed", code: err.code });
           return;
         }
@@ -485,6 +767,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
       if (!user) {
         // No usable email in a valid token → we won't mint a login-unable row.
         logger.warn({ provider }, "SSO sign-in rejected: ID token had no usable email");
+        if (await relayNativeError("sso_failed", "no_usable_account")) return;
         res.status(401).json({ error: "SSO sign-in failed" });
         return;
       }
@@ -510,9 +793,57 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
             refs: { outcome: "totp_required", method: "sso", provider, userId: user.id, username: user.username },
             actor: { type: "anonymous" },
           });
+          // Already audited above; a native app gets `error=totp_required` and
+          // signs in through the password + code form instead.
+          if (await relayNativeError("totp_required", "totp_required", true)) {
+            return;
+          }
           res.status(401).json({ error: "Two-factor authentication required", code: "TOTP_REQUIRED" });
           return;
         }
+      }
+
+
+      if (loginState.flowKind === "NATIVE") {
+        // RFC 8252 handoff: NO session and NO cookies here (this is the
+        // system browser, not the app). Park a one-time code on the row —
+        // sha256 only, 60 s — and ask the person to confirm (RFC 8252 §8.6)
+        // before the browser hands it to the app's redirect. The app redeems
+        // it at POST /sso/oidc/native/token with its verifier, and THAT is
+        // where the sign-in is audited (a parked code is not a sign-in).
+        const redirectUri = loginState.nativeRedirectUri;
+        if (!redirectUri) {
+          // The migration CHECK makes a NATIVE row without it unwritable.
+          throw new Error("SSO native callback: NATIVE login state has no redirect URI");
+        }
+        const handoffCode = randomBytes(32).toString("base64url");
+        await setHandoff(prisma, loginState.id, {
+          codeHash: sha256Hex(handoffCode),
+          userId: user.id,
+          expiresAt: new Date(Date.now() + SSO_NATIVE_HANDOFF_TTL_SECONDS * 1000),
+        });
+
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Referrer-Policy", "no-referrer");
+        res.setHeader("X-Frame-Options", "DENY");
+        res.setHeader(
+          "Content-Security-Policy",
+          "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        );
+        // nativeRedirectUri was validated at begin to carry no query.
+        res
+          .status(200)
+          .type("html")
+          .send(
+            renderNativeConsentPage({
+              provider,
+              displayName: user.displayName,
+              redirectUri,
+              continueUrl: `${redirectUri}?code=${handoffCode}&state=${encodeURIComponent(loginState.state)}`,
+              cancelUrl: nativeErrorRedirectUrl(redirectUri, loginState.state, "access_denied"),
+            }),
+          );
+        return;
       }
 
       // Issue the SAME session cookies as /auth/login. WARP-247: record
@@ -536,6 +867,135 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
       });
 
       res.redirect(safeReturnTo(loginState.returnTo));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── Redeem a native handoff for a Bearer session ──
+  // Answers EXACTLY the /auth/login?return=body body. Bearer-only: no
+  // cookies, not cacheable. The code is claimed atomically BEFORE the PKCE
+  // check, so any redemption attempt burns it (a wrong verifier cannot be
+  // retried against the same code).
+  router.post("/sso/oidc/native/token", authRateLimit, async (req, res, next) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      const parsed = nativeTokenSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
+        return;
+      }
+      // WARP-582 posture: tokens in a response body are for native clients
+      // only (lib/browser-context.ts). Refused before the claim, so a
+      // browser-context call does not burn the code.
+      const marker = browserMarkerHeader(req.headers);
+      if (marker !== null) {
+        logger.warn({ marker }, "SSO native token: refused for a browser context (WARP-582)");
+        res.status(403).json({
+          error: "This endpoint is for native clients only",
+          code: "NATIVE_CLIENT_REQUIRED",
+        });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "SSO is not available", code: "SSO_NO_PRISMA" });
+        return;
+      }
+
+      const { code, codeVerifier } = parsed.data;
+      // Every redemption outcome is audited (the box's activity log, not just
+      // logger.warn): a redeemed code IS the sign-in, and a failed one is the
+      // signal of a stolen or guessed code. Never the code, verifier or tokens.
+      const auditNativeFailure = (
+        reason: string,
+        row?: { provider: string; handoffUserId: string | null },
+      ) =>
+        recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-alert",
+          what: "Native SSO sign-in failed",
+          sub: `${row?.provider ?? "unknown provider"} • ${reason}`,
+          refs: {
+            outcome: reason,
+            method: "sso-native",
+            ip: req.ip ?? null,
+            ...(row ? { provider: row.provider } : {}),
+            ...(row?.handoffUserId ? { userId: row.handoffUserId } : {}),
+          },
+          actor: { type: "anonymous" },
+        });
+      // Single-use claim: unknown, replayed and expired codes all miss.
+      const row = await consumeHandoff(prisma, sha256Hex(code));
+      if (
+        !row ||
+        !row.handoffUserId ||
+        !row.nativeCodeChallenge ||
+        !pkceS256Matches(codeVerifier, row.nativeCodeChallenge)
+      ) {
+        if (row) logger.warn({ provider: row.provider }, "SSO native token: PKCE verifier mismatch");
+        await auditNativeFailure(row ? "pkce_mismatch" : "invalid_or_expired_code", row ?? undefined);
+        res.status(401).json({ error: "Invalid or expired handoff code", code: "SSO_HANDOFF_INVALID" });
+        return;
+      }
+
+      // Re-read the user: a deactivation (or removal) between the callback
+      // and this redemption must not yield a session.
+      const dbUser = await prisma.user.findUnique({ where: { id: row.handoffUserId } });
+      if (!dbUser || dbUser.directoryStatus === "DEACTIVATED") {
+        logger.warn({ userId: row.handoffUserId }, "SSO native token: account unavailable");
+        await auditNativeFailure("account_unavailable", row);
+        res.status(401).json({ error: "SSO sign-in failed", code: "SSO_ACCOUNT_UNAVAILABLE" });
+        return;
+      }
+
+      // WARP-3193 SEC-AUTH-2 (#2436): the callback refused a local-password
+      // account with an enrolled TOTP factor before parking this code. Ask
+      // again at redemption so a factor enrolled in the meantime, or a code
+      // parked by an older box, cannot skip it.
+      if (canPasswordLogin(dbUser)) {
+        const secondFactor = await checkLoginSecondFactor(prisma, dbUser.id, {});
+        if (secondFactor !== "not_enrolled") {
+          await auditNativeFailure("totp_required", row);
+          res.status(401).json({ error: "Two-factor authentication required", code: "TOTP_REQUIRED" });
+          return;
+        }
+      }
+
+      const role = dbUser.role as Role;
+      const minted = await issueSessionTokens({
+        id: dbUser.id,
+        username: dbUser.username,
+        displayName: dbUser.displayName,
+        role,
+        accessRoleId: dbUser.accessRoleId ?? null,
+      });
+      res.json({
+        user: {
+          id: dbUser.id,
+          username: dbUser.username,
+          displayName: dbUser.displayName,
+          role,
+          mustChangePassword: dbUser.mustChangePassword,
+        },
+        ...sessionTokenBody(minted),
+      });
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "log-in",
+        what: `${dbUser.displayName} signed in via ${row.provider} SSO (native app)`,
+        sub: `${role} • ${row.provider}`,
+        refs: {
+          outcome: "success",
+          method: "sso-native",
+          userId: dbUser.id,
+          username: dbUser.username,
+          role,
+          provider: row.provider,
+        },
+        actor: { type: "user", id: dbUser.id },
+      });
     } catch (err) {
       next(err);
     }
