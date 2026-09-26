@@ -43,7 +43,7 @@ import {
   _resetIncidentHealthForTests,
   type SecurityIncidentDeps,
 } from "./security-incidents.service.js";
-import { loadActiveLinks, matchAreasForEvent, zoneEventWhere } from "./security-zones.service.js";
+import { buildZoneIndex, loadActiveLinks, matchAreasForEvent, zoneEventWhere, zonesForEvent } from "./security-zones.service.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -337,11 +337,20 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
     // Constraints a LATER migration adds to these tables — not this folder's to create.
     const LATER = new Set([
       "SecurityIncident_verdict_shape", // WARP-2980 PR-B, 20260925060100_warp_2980_security_patterns_verdicts
+      "SecurityIncident_narrative_shape", // WARP-2979, 20260926000100_warp_2979_security_ai
+      "SecurityIncidentReason_related", // WARP-2979, 20260926000100_warp_2979_security_ai
     ]);
+    // Constraints a LATER migration REDEFINES (drop + add): this folder must still create each one
+    // exactly once, but its text is the later folder's to pin (security-ai-schema.pg.test.ts).
+    const REDEFINED = new Set([
+      "SecurityIncidentReason_code_severity", // WARP-2979 adds the camera_offline_during_activity arm
+    ]);
+    const nameOnly = (rows: Array<{ name: string; def: string }>) =>
+      rows.map((r) => (REDEFINED.has(r.name) ? { name: r.name, def: "(redefined by a later migration)" } : r));
     const outcome = await prisma
       .$transaction(
         async (tx) => {
-          const expected = unqualified(await constraintsIn(tx, "public")).filter((c) => !LATER.has(c.name));
+          const expected = nameOnly(unqualified(await constraintsIn(tx, "public")).filter((c) => !LATER.has(c.name)));
           await tx.$executeRawUnsafe(`CREATE SCHEMA ${SCRATCH}`);
           await tx.$executeRawUnsafe(`SET LOCAL search_path TO ${SCRATCH}, public`);
           // The pre-review shape: the notice outcome without `outcome_unknown` …
@@ -384,7 +393,7 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
           const triggers = await tx.$queryRawUnsafe<Array<{ n: bigint }>>(
             `SELECT count(*) AS n FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = 'public."SecurityEvent"'::regclass AND tgname = 'SecurityEvent_append_only'`,
           );
-          const got = unqualified(await constraintsIn(tx, SCRATCH));
+          const got = nameOnly(unqualified(await constraintsIn(tx, SCRATCH)));
           throw new Rollback(JSON.stringify({ rows, column, labels: labels.map((x) => x.l), triggers: Number(triggers[0]!.n), got, expected }));
         },
         { timeout: 60_000 },
@@ -471,7 +480,7 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       const zone = await prisma.securityZone.create({ data: { name: `${TAG} Stock room`, nameKey: `${TAG} stock room`, kind: "interior" } });
       zoneId = zone.id;
       await prisma.securityZoneLink.create({
-        data: { zoneId, sourceKind: "camera", sourceRef: CAM, sourceLabel: "Back", state: "active" },
+        data: { zoneId, sourceKind: "camera", sourceRef: CAM, sourceLabel: "Back", state: "active", origin: "person", stateSetBy: "person" },
       });
     });
 
@@ -498,6 +507,36 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
         countsByCamera: { [CAM]: { person: 1 } },
       });
       expect(t.incident!.reasons).toEqual([expect.objectContaining({ code: "after_hours_presence", evidenceEventId: e.id, evidenceCamera: CAM })]);
+    });
+
+    it("WARP-2979: a person-linked camera drops soon after someone was seen, after closing → camera_offline_during_activity, CHECK-valid", async () => {
+      await engineAtHead();
+      const seen = await prisma.securityEvent.create({ data: person(plus(T0, 3_600_000)) });
+      const drop = plus(T0, 3_600_000 + 60_000);
+      const off = await prisma.securityEvent.create({
+        data: {
+          source: "frigate_status",
+          kind: "camera_offline",
+          severity: "notice",
+          camera: CAM,
+          sourceRef: `${CAM}/status/detect`,
+          dedupeKey: `${TAG}:off-${Date.now()}`,
+          labels: [],
+          cameraZones: [],
+          score: null,
+          startedAt: drop,
+          summary: "Camera back stopped reporting",
+        },
+      });
+      await tickSecurityIncidents(prisma, deps(plus(drop, 61_000)));
+      const reasons = await prisma.securityIncidentReason.findMany({ where: { evidenceEventId: off.id } });
+      expect(reasons.map((r) => r.code).sort()).toEqual(["camera_offline", "camera_offline_during_activity"]);
+      const r = reasons.find((x) => x.code === "camera_offline_during_activity")!;
+      expect(r).toMatchObject({ severity: "alert", evidenceCamera: CAM, relatedCamera: CAM, relatedLock: false, rulesetVersion: 4 });
+      expect(r.detail).toMatchObject({ mode: "closed", activity: { eventId: seen.id.toString(), zoneId } });
+      const incident = await prisma.securityIncident.findUniqueOrThrow({ where: { id: r.incidentId } });
+      expect(incident.reasonCodes).toContain("camera_offline_during_activity");
+      expect(incident.severity).toBe("alert");
     });
 
     it("the floor: a row whose transaction is still open when a later row is triaged is triaged after it commits — never skipped", async () => {
@@ -570,8 +609,19 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
           links.add(r() < 0.4 ? cam : `${cam}/${parts[Math.floor(r() * parts.length)]}`);
         }
         for (const ref of links) {
+          // WARP-2979 — a third of the links are Droplet's own (not person-set), with the evidence the CHECK asks for.
+          const droplet = r() < 0.33;
           await prisma.securityZoneLink.create({
-            data: { zoneId: zone.id, sourceKind: ref.includes("/") ? "camera_zone" : "camera", sourceRef: ref, sourceLabel: "x", state: "active" },
+            data: {
+              zoneId: zone.id,
+              sourceKind: ref.includes("/") ? "camera_zone" : "camera",
+              sourceRef: ref,
+              sourceLabel: "x",
+              state: "active",
+              origin: droplet ? "droplet" : "person",
+              stateSetBy: droplet ? "droplet" : "person",
+              ...(droplet ? { evidence: { v: 1 }, confidence: 0.7, rulesVersion: 1, evidenceAt: T0 } : {}),
+            },
           });
         }
       }
@@ -599,6 +649,18 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
         const sql = clause === "none" ? [] : await prisma.securityEvent.findMany({ where: { AND: [{ dedupeKey: { startsWith: `${TAG}:m-` } }, clause] }, select: { id: true } });
         const memory = stored.filter((e) => matchAreasForEvent(e, all).some((m) => m.zoneId === zone));
         expect(memory.map((e) => e.id).sort(), zone).toEqual(sql.map((e) => e.id).sort());
+        // WARP-2979 (§6.7.1, §9 pg lane) — the PERSON-ONLY matcher camera_offline_during_activity uses agrees with a SQL
+        // filter over the person-set links alone, and `personLinked` says exactly that.
+        const personClause = zoneEventWhere(all.filter((l) => l.zoneId === zone && l.setBy === "person"));
+        const personSql =
+          personClause === "none"
+            ? []
+            : await prisma.securityEvent.findMany({ where: { AND: [{ dedupeKey: { startsWith: `${TAG}:m-` } }, personClause] }, select: { id: true } });
+        const personIndex = buildZoneIndex(all, { personOnly: true });
+        const personMemory = stored.filter((e) => zonesForEvent(e, personIndex).includes(zone));
+        expect(personMemory.map((e) => e.id).sort(), `${zone} person-only`).toEqual(personSql.map((e) => e.id).sort());
+        const flagged = stored.filter((e) => matchAreasForEvent(e, all).some((m) => m.zoneId === zone && m.personLinked));
+        expect(flagged.map((e) => e.id).sort(), `${zone} personLinked`).toEqual(personSql.map((e) => e.id).sort());
       }
     });
   });

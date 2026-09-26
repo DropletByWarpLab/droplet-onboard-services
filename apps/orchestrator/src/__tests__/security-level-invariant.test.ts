@@ -89,6 +89,10 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["POST /security/zones/:id/archive", "manage", MANAGE_ROLES],
   ["POST /security/zones/:id/unarchive", "manage", MANAGE_ROLES],
   ["PUT /security/zones/:id/links", "manage", MANAGE_ROLES],
+  // WARP-2979 P4 — routes 23–25: Droplet's suggestions (a manage FILTER on a view GET) and a person's decisions.
+  ["GET /security/link-proposals", "view", VIEW_ROLES],
+  ["POST /security/links/:linkId/accept", "manage", MANAGE_ROLES],
+  ["POST /security/links/:linkId/reject", "manage", MANAGE_ROLES],
   // createSecuritySiteRouter (routes 5, 6, 7, 13–15)
   ["GET /security/mode", "view", VIEW_ROLES],
   ["GET /security/hours", "view", VIEW_ROLES],
@@ -96,6 +100,9 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["PUT /security/hours", "manage", MANAGE_ROLES],
   ["PUT /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
   ["DELETE /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
+  // WARP-2979 P4 — routes 26, 27: what Droplet's AI may do.
+  ["GET /security/ai-settings", "view", VIEW_ROLES],
+  ["PUT /security/ai-settings", "manage", MANAGE_ROLES],
   // createSecurityIncidentsRouter (WARP-2978, routes 16–22)
   ["GET /security/incidents", "view", VIEW_ROLES],
   ["GET /security/incidents/summary", "view", VIEW_ROLES],
@@ -104,6 +111,8 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["POST /security/incidents/:id/resolve", "act", ACT_ROLES],
   // WARP-2980 P5 PR-B — route 35: act, floored at owner/admin.
   ["POST /security/incidents/:id/verdict", "act", MANAGE_ROLES],
+  // WARP-2979 P4 PR-2 — route 28: "Summarise now" / "Regenerate" (no audit, D23).
+  ["POST /security/incidents/:id/narrative", "act", ACT_ROLES],
   ["GET /security/alert-routing", "view", VIEW_ROLES],
   ["PUT /security/alert-routing/:userId", "manage", MANAGE_ROLES],
   // createSecurityPatternsRouter (WARP-2980, routes 29–31): read-only; all literal paths
@@ -119,10 +128,11 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
 /**
  * P2b spec §9's 9 write routes and 6 GETs; WARP-2978 adds 3 writes (19, 20, 22)
  * and 4 GETs (16, 17, 18, 21); WARP-2980 PR-A adds 3 GETs (29–31) and no
- * write; PR-B adds 3 writes (33, 34, 35) and 1 GET (32).
+ * write; PR-B adds 3 writes (33, 34, 35) and 1 GET (32); WARP-2979 P4 PR-1
+ * adds 3 writes (24, 25, 27) and 2 GETs (23, 26); P4 PR-2's route 28 makes it 19.
  */
-const WRITE_ROUTES = 15;
-const GET_ROUTES = 14;
+const WRITE_ROUTES = 19;
+const GET_ROUTES = 16;
 
 type Handle = (req: unknown, res: unknown, next: () => void) => unknown;
 interface Layer {

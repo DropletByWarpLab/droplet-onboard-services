@@ -20,7 +20,9 @@ import {
   RULESET,
   afterHoursPresence,
   buildPause,
+  cameraOfflineDuringActivity,
   cameraOfflineVerdict,
+  rankPick,
   capEvidence,
   hourInWindow,
   keyPause,
@@ -34,6 +36,8 @@ import {
   type PatternCells,
   type ReasonDraft,
   type ReasonState,
+  type ActivitySighting,
+  type AreaMatch,
   type SuppressionMatchRow,
   type TriageEvent,
 } from "./security-rules.js";
@@ -101,7 +105,7 @@ describe("after_hours_presence (alert) — a person inside while the site is not
     ["interior", "set to away", awayTl, "away"],
   ] as const)("fires for a person in an %s area while %s", (zoneKind, _what, tl, mode) => {
     const e = ev();
-    const r = afterHoursPresence({ scope: "area", zoneKind, event: e, timeline: tl });
+    const r = afterHoursPresence({ personLinked: true, scope: "area", zoneKind, event: e, timeline: tl });
     expect(r).toMatchObject({
       code: "after_hours_presence",
       severity: "alert",
@@ -116,7 +120,7 @@ describe("after_hours_presence (alert) — a person inside while the site is not
   it("fires at a straddle: open when the person arrived, closed before they left", () => {
     const e = ev({ startedAt: plus(WED_17, -120_000), endedAt: plus(WED_17, 60_000) });
     const tl = scheduleTl([{ at: WED_17, mode: "closed", source: "schedule", fromMode: "open" }]);
-    expect(afterHoursPresence({ scope: "area", zoneKind: "interior", event: e, timeline: tl })?.detail).toMatchObject({
+    expect(afterHoursPresence({ personLinked: true, scope: "area", zoneKind: "interior", event: e, timeline: tl })?.detail).toMatchObject({
       mode: "closed",
       modeSource: "schedule",
       nonOpenAt: WED_17.toISOString(),
@@ -133,7 +137,7 @@ describe("after_hours_presence (alert) — a person inside while the site is not
     ["open throughout", { startedAt: WED_NOON, endedAt: plus(WED_NOON, 60_000) }, "area", "interior", scheduleTl()],
     ["hours not set and no manual mode", {}, "area", "interior", scheduleTl([], { state: "not_set" })],
   ] as const)("does not fire for %s", (_n, over, scope, zoneKind, tl) => {
-    expect(afterHoursPresence({ scope, zoneKind, event: ev(over as Partial<TriageEvent>), timeline: tl })).toBeNull();
+    expect(afterHoursPresence({ personLinked: true, scope, zoneKind, event: ev(over as Partial<TriageEvent>), timeline: tl })).toBeNull();
   });
 
   // WARP-2978 PR-D (ruleset v2) — a person still in view 30 s in.
@@ -150,7 +154,7 @@ describe("after_hours_presence (alert) — a person inside while the site is not
 
   it("fires for a person STILL in view (detection_ongoing) — the alert need not wait for their end", () => {
     const e = ongoing();
-    expect(afterHoursPresence({ scope: "area", zoneKind: "interior", event: e, timeline: scheduleTl() })).toMatchObject({
+    expect(afterHoursPresence({ personLinked: true, scope: "area", zoneKind: "interior", event: e, timeline: scheduleTl() })).toMatchObject({
       code: "after_hours_presence",
       severity: "alert",
       evidenceEventId: e.id,
@@ -164,7 +168,7 @@ describe("after_hours_presence (alert) — a person inside while the site is not
   it("an ongoing row covers [startedAt, when it was written]: arrived before closing, still there after it", () => {
     const e = ongoing({ startedAt: plus(WED_17, -10_000), createdAt: plus(WED_17, 20_000) });
     const tl = scheduleTl([{ at: WED_17, mode: "closed", source: "schedule", fromMode: "open" }]);
-    expect(afterHoursPresence({ scope: "area", zoneKind: "interior", event: e, timeline: tl })?.detail).toMatchObject({
+    expect(afterHoursPresence({ personLinked: true, scope: "area", zoneKind: "interior", event: e, timeline: tl })?.detail).toMatchObject({
       nonOpenAt: WED_17.toISOString(),
     });
   });
@@ -174,7 +178,7 @@ describe("after_hours_presence (alert) — a person inside while the site is not
     ["in an entry area", {}, "entry"],
     ["for a car", { labels: ["car"] }, "interior"],
   ] as const)("an ongoing row does not fire %s", (_n, over, zoneKind) => {
-    expect(afterHoursPresence({ scope: "area", zoneKind, event: ongoing(over as Partial<TriageEvent>), timeline: scheduleTl() })).toBeNull();
+    expect(afterHoursPresence({ personLinked: true, scope: "area", zoneKind, event: ongoing(over as Partial<TriageEvent>), timeline: scheduleTl() })).toBeNull();
   });
 });
 
@@ -282,12 +286,15 @@ describe("threat_signal (notice) — a mirrored network or sign-in warning", () 
   });
 });
 
+/**
+ * The folder that defines SecurityIncidentReason_code_severity LAST — the CHECK as a box holds it after every migration.
+ * WARP-2979 (P4) re-adds it with camera_offline_during_activity's arm; P5 PR-D will move this again.
+ */
+const CODE_SEVERITY_FOLDER = "20260926000100_warp_2979_security_ai";
+
 describe("the database pins D18: the CHECK's code/severity pairs are exactly the RULESET's", () => {
-  it("SecurityIncidentReason_code_severity matches RULESET — the three P3 codes only (WARP-2980: no pattern code is a key of RULESET)", () => {
-    const sql = readFileSync(
-      path.join(PACKAGE_ROOT, "prisma", "migrations", "20260925030000_warp_2978_security_incidents", "migration.sql"),
-      "utf8",
-    );
+  it("SecurityIncidentReason_code_severity matches RULESET — P3's three codes and P4's (WARP-2980: no pattern code is a key of RULESET)", () => {
+    const sql = readFileSync(path.join(PACKAGE_ROOT, "prisma", "migrations", CODE_SEVERITY_FOLDER, "migration.sql"), "utf8");
     const check = /"SecurityIncidentReason_code_severity" CHECK \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? "";
     const pairs = new Map<string, string>();
     for (const m of check.matchAll(/"code" (?:= '(\w+)'|IN \(([^)]*)\)) AND "severity" = '(\w+)'/g)) {
@@ -297,14 +304,11 @@ describe("the database pins D18: the CHECK's code/severity pairs are exactly the
     expect(Object.fromEntries(pairs)).toEqual(
       Object.fromEntries(Object.entries(RULESET).map(([code, rule]) => [code, rule.severity])),
     );
-    expect(Object.keys(RULESET).sort()).toEqual(["after_hours_presence", "camera_offline", "threat_signal"]);
+    expect(Object.keys(RULESET).sort()).toEqual(["after_hours_presence", "camera_offline", "camera_offline_during_activity", "threat_signal"]);
   });
 
   it("WARP-2980 D3 — trial is a database fact: no P5 code appears in that CHECK (PR-D widens it with its first writer)", () => {
-    const sql = readFileSync(
-      path.join(PACKAGE_ROOT, "prisma", "migrations", "20260925030000_warp_2978_security_incidents", "migration.sql"),
-      "utf8",
-    );
+    const sql = readFileSync(path.join(PACKAGE_ROOT, "prisma", "migrations", CODE_SEVERITY_FOLDER, "migration.sql"), "utf8");
     const check = /"SecurityIncidentReason_code_severity" CHECK \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? "";
     expect(check).toContain("after_hours_presence");
     for (const code of PATTERN_CODES) expect(check, code).not.toContain(code);
@@ -695,5 +699,146 @@ describe("tripwires (D2, D21)", () => {
     const drafts = [1n, 2n, 3n, 4n, 5n, 6n, 7n].map((id) => flag(id));
     expect(capEvidence([], drafts).map((d) => d.evidenceEventId)).toEqual([1n, 2n, 3n, 4n, 5n]);
     expect(capEvidence([{ code: "out_of_place", evidenceCamera: "back", evidenceEventId: 1n }], [flag(1n), flag(8n, "front")]).map((d) => d.evidenceEventId)).toEqual([8n]);
+  });
+});
+
+// ── WARP-2979 (P4 §6.7): alerts only through links a person made or kept ────
+
+describe("rankPick — an area a PERSON linked first (§6.7.1)", () => {
+  const m = (zoneId: string, zoneKind: AreaMatch["zoneKind"], personLinked: boolean, specificity: AreaMatch["specificity"] = "whole"): AreaMatch => ({
+    zoneId,
+    zoneName: zoneId,
+    zoneKind,
+    linkIds: [`${zoneId}-l`],
+    specificity,
+    personLinked,
+  });
+
+  it("a person-linked entry beats a Droplet-only restricted area; among the person-linked, the kind rank still decides", () => {
+    expect(rankPick([m("z-restricted", "restricted", false), m("z-entry", "entry", true)]).zoneId).toBe("z-entry");
+    expect(rankPick([m("z-entry", "entry", true), m("z-interior", "interior", true)]).zoneId).toBe("z-interior");
+    expect(rankPick([m("z-a", "interior", false), m("z-b", "interior", false, "part")]).zoneId).toBe("z-b");
+  });
+});
+
+describe("after_hours_presence needs a person-linked primary area (§6.7.1)", () => {
+  it("an event matched only through Droplet's own link groups, but never alerts", () => {
+    expect(afterHoursPresence({ personLinked: false, scope: "area", zoneKind: "interior", event: ev(), timeline: scheduleTl() })).toBeNull();
+    expect(afterHoursPresence({ personLinked: true, scope: "area", zoneKind: "interior", event: ev(), timeline: scheduleTl() })).not.toBeNull();
+  });
+});
+
+describe("camera_offline_during_activity (alert, §6.7.2)", () => {
+  const DROP = WED_2214;
+  const STOCK = "z-stock";
+  const areas = new Map([[STOCK, "Stock room"]]);
+  const offline = (over: Partial<TriageEvent> = {}): TriageEvent =>
+    ev({
+      kind: "camera_offline",
+      source: "frigate_status",
+      camera: "back",
+      sourceRef: "back/status/detect",
+      labels: [],
+      startedAt: DROP,
+      endedAt: null,
+      createdAt: DROP,
+      summary: "Camera back stopped reporting",
+      ...over,
+    });
+  /** A person seen on `camera` starting `startOffsetMs` from the drop, `durMs` long, in the person-linked areas given. */
+  const seen = (startOffsetMs: number, over: Partial<ActivitySighting> = {}, durMs = 5_000): ActivitySighting => {
+    const startedAt = plus(DROP, startOffsetMs);
+    return { ...ev({ camera: "stock_cam", startedAt, endedAt: plus(startedAt, durMs), createdAt: plus(startedAt, durMs) }), personZoneIds: [STOCK], ...over };
+  };
+  const NOW = plus(DROP, 90_000);
+  const judge = (input: Partial<Parameters<typeof cameraOfflineDuringActivity>[0]> = {}) =>
+    cameraOfflineDuringActivity({
+      offline: offline(),
+      onlines: [],
+      now: NOW,
+      personAreas: areas,
+      activity: [seen(-60_000)],
+      timeline: scheduleTl(),
+      ...input,
+    });
+
+  it.each([
+    ["closed", scheduleTl(), "closed"],
+    ["away", awayTl, "away"],
+  ] as const)("fires while %s: an alert on the dropped camera, naming where the person was seen", (_n, tl, mode) => {
+    const a = seen(-60_000);
+    const r = judge({ timeline: tl, activity: [a] });
+    expect(r).toMatchObject({
+      code: "camera_offline_during_activity",
+      severity: "alert",
+      evidenceCamera: "back",
+      evidenceKind: "camera_offline",
+      evidenceAt: DROP,
+      relatedCamera: "stock_cam",
+      detail: {
+        offlineForSec: null,
+        backAt: null,
+        mode,
+        activity: { eventId: a.id.toString(), kind: "detection", label: "person", at: a.startedAt.toISOString(), zoneId: STOCK, zoneName: "Stock room" },
+      },
+    });
+  });
+
+  it("the window's edges: a sighting ENDING at −120 s fires, at −120.001 s it does not; one STARTING at +60 s fires, at +60.001 s it does not", () => {
+    expect(judge({ activity: [seen(-125_000, {}, 5_000)] })).not.toBeNull();
+    expect(judge({ activity: [seen(-125_001, {}, 5_000)] })).toBeNull();
+    expect(judge({ activity: [seen(60_000)] })).not.toBeNull();
+    expect(judge({ activity: [seen(60_001)] })).toBeNull();
+    // Whole seconds, as the spec states them: −120 s fires, −121 s does not; +60 s fires, +61 s does not.
+    expect(judge({ activity: [seen(-120_000, {}, 0)] })).not.toBeNull();
+    expect(judge({ activity: [seen(-121_000, {}, 0)] })).toBeNull();
+    expect(judge({ activity: [seen(61_000)] })).toBeNull();
+  });
+
+  it("does not fire in opening hours (P3's camera_offline notice covers it)", () => {
+    expect(judge({ offline: offline({ startedAt: WED_NOON, createdAt: WED_NOON }), activity: [], now: plus(WED_NOON, 90_000) })).toBeNull();
+    const noon = seen(0);
+    expect(
+      judge({
+        offline: offline({ startedAt: WED_NOON, createdAt: WED_NOON }),
+        now: plus(WED_NOON, 90_000),
+        activity: [{ ...noon, startedAt: plus(WED_NOON, -10_000), endedAt: WED_NOON }],
+      }),
+    ).toBeNull();
+  });
+
+  it("only through PERSON links: no person-linked area for the camera, or a sighting matched only through Droplet's links → nothing", () => {
+    expect(judge({ personAreas: new Map() })).toBeNull();
+    expect(judge({ activity: [seen(-60_000, { personZoneIds: [] })] })).toBeNull();
+    // A person-linked area of ANOTHER camera does not count for this one.
+    expect(judge({ activity: [seen(-60_000, { personZoneIds: ["z-yard"] })] })).toBeNull();
+  });
+
+  it("a person, never a car or a low-confidence row; never Frigate-wide (source_offline)", () => {
+    expect(judge({ activity: [seen(-60_000, { labels: ["car"] })] })).toBeNull();
+    expect(judge({ activity: [seen(-60_000, { kind: "detection_low" })] })).toBeNull();
+    expect(judge({ offline: offline({ kind: "source_offline", camera: null, sourceRef: "frigate/available" }) })).toBeNull();
+  });
+
+  it("the camera back within a minute is a blip (camera_offline's own condition, reused); still waiting before 60 s", () => {
+    expect(judge({ onlines: [{ startedAt: plus(DROP, 59_000) }] })).toBeNull();
+    expect(judge({ now: plus(DROP, 59_999) })).toBeNull();
+    // Back after 90 s: it still fires, with the outage's length.
+    expect(judge({ onlines: [{ startedAt: plus(DROP, 90_000) }], now: plus(DROP, 120_000) })?.detail).toMatchObject({
+      offlineForSec: 90,
+      backAt: plus(DROP, 90_000).toISOString(),
+    });
+  });
+
+  it("the dropped camera's OWN sighting counts (someone walked up, then it died); the latest sighting is the evidence", () => {
+    const own = seen(-100_000, { camera: "back" });
+    const later = seen(-10_000, { camera: "stock_cam" });
+    expect(judge({ activity: [own] })).toMatchObject({ relatedCamera: "back" });
+    expect(judge({ activity: [own, later] })).toMatchObject({ relatedCamera: "stock_cam", detail: { activity: { eventId: later.id.toString() } } });
+  });
+
+  it("a person still in view (PR-D's ongoing row) counts over [startedAt, written]", () => {
+    const ongoing = seen(-300_000, { kind: "detection_ongoing", endedAt: null, createdAt: plus(DROP, -30_000) });
+    expect(judge({ activity: [ongoing] })).toMatchObject({ detail: { activity: { kind: "detection_ongoing" } } });
   });
 });

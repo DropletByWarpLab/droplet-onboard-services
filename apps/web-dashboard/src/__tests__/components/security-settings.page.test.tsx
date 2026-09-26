@@ -1,5 +1,7 @@
 /**
  * WARP-2977 P2b (spec §8 "/security/settings") — the Opening hours page.
+ * WARP-2978 (ADR-059 P3 §8, D33) — now "Security settings": the opening
+ * hours keep their section, and "Who's told about alerts" joins below.
  *
  * The page wires the hours hook, the caller's Security level and the toasts
  * to the editors. What it must hold: the title and the sub that says what the
@@ -42,6 +44,10 @@ vi.mock("@/lib/hooks/useModuleGate", async (orig) => ({
 }));
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: h.toast }) }));
 vi.mock("@/lib/hooks/useSecurity", () => ({
+  // WARP-2978 — the routing panel's own read; its behaviour is AlertRoutingPanel.test.tsx's.
+  useAlertRouting: () => ({ routing: null, error: undefined, isLoading: true, refresh: vi.fn(), set: vi.fn() }),
+  // WARP-2979 — the AI panel's own read; its behaviour is AiSettingsPanel.test.tsx's.
+  useAiSettings: () => ({ settings: null, error: undefined, isLoading: true, refresh: vi.fn(), save: vi.fn() }),
   useSecurityHours: () => ({
     hours: h.hours,
     error: h.error,
@@ -95,13 +101,23 @@ beforeEach(() => {
 });
 
 describe("/security/settings", () => {
-  it("is titled Opening hours and says what the hours are not", () => {
+  it("is titled Security settings; the hours keep their section and say what they are not (WARP-2978)", () => {
     render(<SecuritySettingsPage />);
-    expect(screen.getByRole("heading", { level: 1, name: "Opening hours" })).toBeInTheDocument();
-    expect(screen.getByTestId("page-sub")).toHaveTextContent(
-      "When the site is normally open. Droplet uses this to tell ordinary activity from after-hours activity. " +
-        "It is set here, not read from your calendar. Nothing here locks doors or sends alerts.",
-    );
+    expect(screen.getByRole("heading", { level: 1, name: "Security settings" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-sub")).toHaveTextContent("When the site is normally open, and who's told about alerts.");
+    expect(screen.getByRole("heading", { level: 2, name: "Opening hours" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "When the site is normally open. Droplet uses this to tell ordinary activity from after-hours activity. " +
+          "It is set here, not read from your calendar. Nothing here locks doors.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("who's told about alerts is its own section, after the hours", () => {
+    render(<SecuritySettingsPage />);
+    const h2 = screen.getAllByRole("heading", { level: 2 }).map((x) => x.textContent);
+    expect(h2.indexOf("Who's told about alerts")).toBeGreaterThan(h2.indexOf("Opening hours"));
   });
 
   it("at manage: saves the week through the hook with exactly seven days and the read version", async () => {

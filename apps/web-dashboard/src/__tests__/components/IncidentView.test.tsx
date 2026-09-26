@@ -1,0 +1,684 @@
+/**
+ * WARP-2978 (ADR-059 P3 §8, P6 §6.7) — /security/incidents/:id.
+ *
+ * What the page must hold:
+ *   · reasons first ("Why Droplet flagged this"), then the events, who was
+ *     told and the acknowledgement history — each exactly as the box sent it
+ *     for this viewer (DS-005): a section with nothing in it is absent;
+ *   · Acknowledge and Resolve… render only at act — the module level (which
+ *     fails closed) AND the box's own `viewer.level` — and only while the
+ *     incident is open or acknowledged; Acknowledge also only while this
+ *     person hasn't (D23);
+ *   · an in-flight button is aria-disabled, never `disabled`: it keeps focus,
+ *     a second press is refused, and when it goes away focus lands somewhere
+ *     sensible;
+ *   · a failure is `translateError(err, "security")`, never the server's
+ *     message, then a re-read;
+ *   · Acknowledge carries the notification the page was opened from;
+ *   · an open incident the box says isn't actionable says so in ONE sentence,
+ *     the same for a view-only level and a partial view (DS-005), and a
+ *     partial view shows this person's own acknowledgement as the box sends it;
+ *   · a person still in view (PR-D) is a "Still in view" row: a picture while
+ *     their finished row isn't listed, never a Clip.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { act as rtlAct, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { SWRConfig } from "swr";
+import { IncidentView, COPY } from "@/components/security/IncidentView";
+import { INCIDENT_COPY } from "@/components/security/incident-copy";
+import { NARRATIVE_COPY } from "@/components/security/NarrativeSection";
+import type { IncidentDetail, IncidentMemberView, SecurityModeView } from "@/lib/types";
+
+const h = vi.hoisted(() => ({
+  level: "act" as "none" | "view" | "act" | "manage",
+  toast: vi.fn(),
+  getSecurityIncident: vi.fn(),
+  acknowledgeSecurityIncident: vi.fn(),
+  resolveSecurityIncident: vi.fn(),
+  getSecurityMode: vi.fn(),
+  fetchCameras: vi.fn(),
+  getSecurityHealth: vi.fn(),
+  requestSecurityIncidentNarrative: vi.fn(),
+}));
+
+vi.mock("framer-motion", async () => {
+  const actual = await vi.importActual<typeof import("framer-motion")>("framer-motion");
+  return { ...actual, useReducedMotion: () => true };
+});
+vi.mock("@/lib/hooks/useModuleGate", async (orig) => ({
+  ...(await orig<typeof import("@/lib/hooks/useModuleGate")>()),
+  useModuleLevel: (moduleId: string) => (moduleId === "security" ? h.level : "none"),
+}));
+vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: h.toast }) }));
+vi.mock("@/lib/security-time", async (orig) => ({
+  ...(await orig<typeof import("@/lib/security-time")>()),
+  deviceTimeZone: () => "Europe/London",
+}));
+vi.mock("@/lib/api", async (orig) => ({
+  ...(await orig<typeof import("@/lib/api")>()),
+  getSecurityIncident: h.getSecurityIncident,
+  acknowledgeSecurityIncident: h.acknowledgeSecurityIncident,
+  resolveSecurityIncident: h.resolveSecurityIncident,
+  getSecurityMode: h.getSecurityMode,
+  fetchCameras: h.fetchCameras,
+  getSecurityHealth: h.getSecurityHealth,
+  requestSecurityIncidentNarrative: h.requestSecurityIncidentNarrative,
+}));
+
+const ID = "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f";
+const NOW = new Date("2026-09-23T01:31:00Z");
+const at = (hhmm: string) => `2026-09-23T${hhmm}:00.000Z`;
+
+function member(over: Partial<IncidentMemberView> = {}): IncidentMemberView {
+  return {
+    id: "901",
+    source: "frigate",
+    kind: "detection",
+    severity: "info",
+    camera: "back_cam",
+    labels: ["person"],
+    cameraZones: ["aisle"],
+    score: 0.91,
+    startedAt: at("01:14"),
+    endedAt: at("01:15"),
+    summary: "Person in aisle",
+    frigateEventId: "1727140000.1-person",
+    zones: [{ id: "z1", name: "Stock room" }],
+    alsoIn: [],
+    ...over,
+  };
+}
+
+function detail(over: Partial<IncidentDetail> = {}): IncidentDetail {
+  return {
+    id: ID,
+    scope: "area",
+    zone: { id: "z1", name: "Stock room", kind: "restricted" },
+    camera: null,
+    state: "open",
+    severity: "alert",
+    reasonCodes: ["after_hours_presence"],
+    grouping: "closed",
+    openedInMode: "closed",
+    firstActivityAt: at("01:14"),
+    lastActivityAt: at("01:20"),
+    eventCount: 1,
+    labels: { person: 1 },
+    lastAck: null,
+    reasons: [
+      {
+        code: "after_hours_presence",
+        severity: "alert",
+        evidence: { eventId: "901", camera: "back_cam", source: "frigate", kind: "detection", label: "person", at: at("01:14"), summary: "Person in aisle" },
+        detail: { mode: "closed", modeSource: "schedule", nonOpenAt: at("01:14"), zoneKind: "restricted" },
+      },
+    ],
+    events: [member()],
+    moreEvents: false,
+    acks: [],
+    notices: [],
+    eventsKept: "kept",
+    actionable: true,
+    viewer: { level: "act", acknowledged: false },
+    ...over,
+  };
+}
+
+const MODE = { displayTimezone: "Europe/London" } as SecurityModeView;
+
+function typedError(code: string, status: number): Error {
+  return Object.assign(new Error(`raw server text for ${code}`), { code, status });
+}
+
+function Wrap({ children }: { children: ReactNode }) {
+  return <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig>;
+}
+
+function renderView(props: { notificationId?: string | null } = {}) {
+  return render(<IncidentView id={ID} notificationId={props.notificationId ?? null} now={NOW} />, { wrapper: Wrap });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  h.level = "act";
+  h.getSecurityIncident.mockResolvedValue(detail());
+  h.getSecurityMode.mockResolvedValue(MODE);
+  h.fetchCameras.mockResolvedValue([{ name: "back_cam", displayName: "Back camera" }]);
+  h.getSecurityHealth.mockResolvedValue({ sources: [] });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+describe("WARP-2979 PR-2 — Summary by Droplet on the incident page", () => {
+  const SUMMARY = "Someone was seen in the Stock room at 2:14 AM while the site was closed.";
+  const written = { state: "written" as const, text: SUMMARY, writtenAt: at("01:31"), model: "gpt-oss:20b", promptVersion: 1 };
+
+  it("🔴 codes before the summary, in DOM order — then What happened", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ narrative: written }));
+    renderView();
+    const summary = await screen.findByText(SUMMARY);
+    const reason = screen.getByText("Someone was seen inside while the site was closed");
+    expect(reason.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((x) => x.textContent);
+    expect(headings).toEqual([COPY.whyTitle, NARRATIVE_COPY.title, COPY.whatTitle]);
+  });
+
+  it("narrative null (the box's DS-005 answer) → no section, no heading, no hint", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ narrative: null }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByTestId("incident-narrative")).toBeNull();
+    expect(screen.queryByText(NARRATIVE_COPY.title)).toBeNull();
+  });
+
+  it("pending while the summaries row is Paused → the on-box model line", async () => {
+    h.getSecurityHealth.mockResolvedValue({ sources: [{ id: "summaries", state: "down", detail: "Paused: the AI model on this Droplet isn't available", lastSeenAt: null }] });
+    h.getSecurityIncident.mockResolvedValue(detail({ narrative: { ...written, state: "pending", text: null, writtenAt: null } }));
+    renderView();
+    expect(await screen.findByText(NARRATIVE_COPY.paused)).toBeInTheDocument();
+  });
+
+  it("Regenerate at act posts route 28 and re-reads — also on a resolved incident; not at view", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", actionable: false, narrative: written }));
+    h.requestSecurityIncidentNarrative.mockResolvedValue({ narrative: { ...written, state: "pending" } });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: NARRATIVE_COPY.regenerate }));
+    await waitFor(() => expect(h.requestSecurityIncidentNarrative).toHaveBeenCalledWith(ID));
+    await waitFor(() => expect(h.getSecurityIncident.mock.calls.length).toBeGreaterThanOrEqual(2));
+
+    h.level = "view";
+    const view = renderView();
+    await within(view.container).findByText(SUMMARY);
+    expect(within(view.container).queryByRole("button", { name: NARRATIVE_COPY.regenerate })).toBeNull();
+  });
+});
+
+describe("the page's order and content", () => {
+  it("title, span, the mode it opened in and the state; reasons come before events", async () => {
+    renderView();
+    expect(await screen.findByRole("heading", { level: 1, name: "Stock room" })).toBeInTheDocument();
+    expect(screen.getByText("2:14 AM – 2:20 AM · The site was closed")).toBeInTheDocument();
+    expect(screen.getByText("Needs attention")).toHaveClass("badge", "danger");
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((x) => x.textContent);
+    expect(headings.indexOf(COPY.whyTitle)).toBeGreaterThanOrEqual(0);
+    expect(headings.indexOf(COPY.whyTitle)).toBeLessThan(headings.indexOf(COPY.whatTitle));
+    expect(screen.getByText("Someone was seen inside while the site was closed")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Person · Back camera · 2:14 AM · Closed (opening hours)")).toBeInTheDocument());
+  });
+
+  it("a person still in view (PR-D): a `Still in view` row with their picture — and no Clip, which Frigate finishes once they've left", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        grouping: "collecting",
+        eventCount: 1,
+        labels: { _ongoing: 1 },
+        events: [member({ id: "902", kind: "detection_ongoing", endedAt: null, score: 0.88, summary: "Person still in view after 30 s" })],
+      }),
+    );
+    renderView();
+    const row = await screen.findByTestId("incident-event-902");
+    expect(row).toHaveAttribute("data-kind", "detection_ongoing");
+    expect(row.querySelector("[data-ongoing]")).toHaveTextContent("Still in view");
+    expect(row).toHaveTextContent("Person still in view after 30 s");
+    expect(within(row).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
+    expect(within(row).queryByRole("link", { name: "Clip" })).toBeNull();
+    expect(row).not.toHaveTextContent(COPY.clipExpired);
+    // `_ongoing` is the box's bookkeeping, never a label on the page.
+    expect(document.body).not.toHaveTextContent("_ongoing");
+    expect(screen.getByTestId("incident-state")).toHaveTextContent(INCIDENT_COPY.stillHappening);
+  });
+
+  it("once their finished row is listed, it carries the picture and the Clip; the early row keeps its mark and no second picture", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        eventCount: 2,
+        labels: { person: 1, _ongoing: 1 },
+        events: [member({ id: "903", endedAt: at("01:15") }), member({ id: "902", kind: "detection_ongoing", endedAt: null, summary: "Person still in view after 30 s" })],
+      }),
+    );
+    renderView();
+    const early = await screen.findByTestId("incident-event-902");
+    const done = screen.getByTestId("incident-event-903");
+    expect(early.querySelector("[data-ongoing]")).toHaveTextContent("Still in view");
+    expect(within(early).queryByRole("img")).toBeNull();
+    expect(within(early).queryByRole("link", { name: "Clip" })).toBeNull();
+    expect(done.querySelector("[data-ongoing]")).toBeNull();
+    expect(within(done).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
+    expect(within(done).getByRole("link", { name: "Clip" })).toHaveAttribute("href", "/api/cameras/clips/event/1727140000.1-person");
+  });
+
+  it("another person's finished row doesn't take a still-in-view person's picture", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        events: [
+          member({ id: "903", frigateEventId: "1727140100.2-person" }),
+          member({ id: "902", kind: "detection_ongoing", endedAt: null, summary: "Person still in view after 30 s" }),
+        ],
+      }),
+    );
+    renderView();
+    const early = await screen.findByTestId("incident-event-902");
+    expect(within(early).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
+  });
+
+  it("each event: thumbnail, Clip, and the other areas it was also in", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ events: [member({ alsoIn: [{ id: "z2", name: "Till" }] })] }));
+    renderView();
+    const row = await screen.findByTestId("incident-event-901");
+    expect(within(row).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/1727140000.1-person/thumbnail");
+    expect(within(row).getByRole("link", { name: "Clip" })).toHaveAttribute("href", "/api/cameras/clips/event/1727140000.1-person");
+    expect(row).toHaveTextContent("Also in Till");
+    // With a thumbnail under it, the row's icon and time line up with its title, not its middle.
+    expect(row).toHaveStyle({ alignItems: "flex-start" });
+  });
+
+  it("each event names its visible areas like the feed does; `Also in` never repeats one already shown (PR-B final wire)", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        events: [
+          member({
+            zones: [
+              { id: "z1", name: "Stock room" },
+              { id: "z2", name: "Till" },
+            ],
+            alsoIn: [
+              { id: "z2", name: "Till" },
+              { id: "z3", name: "Back office" },
+            ],
+          }),
+        ],
+      }),
+    );
+    renderView();
+    const row = await screen.findByTestId("incident-event-901");
+    expect([...row.querySelectorAll("[data-area]")].map((b) => b.textContent)).toEqual(["Stock room", "Till"]);
+    expect(row).toHaveTextContent("Also in Back office");
+    expect(row).not.toHaveTextContent("Also in Till");
+  });
+
+  it("an event with no visible area has no area badge", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ events: [member({ zones: [] })] }));
+    renderView();
+    const row = await screen.findByTestId("incident-event-901");
+    expect(row.querySelector("[data-area]")).toBeNull();
+  });
+
+  it("after Frigate's 14 days: Clip expired, no dead link or thumbnail", async () => {
+    const old = new Date(NOW.getTime() - 20 * 86_400_000).toISOString();
+    h.getSecurityIncident.mockResolvedValue(detail({ events: [member({ startedAt: old })] }));
+    renderView();
+    const row = await screen.findByTestId("incident-event-901");
+    expect(within(row).queryByRole("link", { name: "Clip" })).toBeNull();
+    expect(within(row).queryByRole("img")).toBeNull();
+    expect(row).toHaveTextContent(COPY.clipExpired);
+  });
+
+  it("events trimmed after 30 days: the §6.10 sentence, and no event rows", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ events: [], eventsKept: "removed" }));
+    renderView();
+    expect(await screen.findByText(COPY.trimmed)).toBeInTheDocument();
+    expect(COPY.trimmed).toBe(
+      "The events behind this were removed after 30 days. Droplet keeps incidents for a year: when and where it happened, why it was flagged, who was told and who acknowledged it.",
+    );
+    expect(screen.queryByTestId("incident-event-901")).toBeNull();
+  });
+
+  it("DS-005: who was told renders exactly the notices the box sent — and is absent when it sent none", async () => {
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("heading", { name: COPY.toldTitle })).toBeNull();
+  });
+
+  it("owner/admin get every notice from the box; each renders as its own line", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        notices: [
+          { userId: "u1", name: "Stefan", outcome: "sent", reason: "routed", channels: "toast,push", pushOutcome: "sent", createdAt: at("01:15"), settledAt: at("01:15") },
+          { userId: "u2", name: "Maria", outcome: "skipped_not_visible", reason: "routed", channels: "", pushOutcome: null, createdAt: at("01:15"), settledAt: null },
+        ],
+      }),
+    );
+    renderView();
+    const list = await screen.findByRole("list", { name: COPY.toldTitle });
+    await waitFor(() =>
+      expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+        "Stefan · sent to their phone at 2:15 AM",
+        "Maria · not told: can't see Back camera",
+      ]),
+    );
+  });
+
+  it("a family viewer gets their own notice only from the box — and sees just that", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({ notices: [{ userId: "u3", name: "Jordan", outcome: "sent", reason: "routed", channels: "toast", pushOutcome: "no_subscribers", createdAt: at("01:15"), settledAt: at("01:15") }] }),
+    );
+    renderView();
+    const list = await screen.findByRole("list", { name: COPY.toldTitle });
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Jordan · shown in Droplet at 2:15 AM"]);
+  });
+
+  it("the acknowledgement history, with a resolve's note", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        state: "resolved",
+        lastAck: { action: "resolve", byName: "Stefan", at: at("01:30") },
+        acks: [
+          { action: "acknowledge", byName: "Maria", at: at("01:17"), client: "Droplet for iPhone 1.4", viaNotification: true, note: "", signIn: { recorded: true, confirmedLive: true } },
+          { action: "resolve", byName: "Stefan", at: at("01:30"), client: null, viaNotification: false, note: "It was the cleaner.", signIn: null },
+        ],
+        viewer: { level: "act", acknowledged: true },
+      }),
+    );
+    renderView();
+    const list = await screen.findByRole("list", { name: COPY.acksTitle });
+    const items = within(list).getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent(
+      "Maria acknowledged · 2:17 AM · Droplet for iPhone 1.4 (as the device reported it) · from the alert notification · Sign-in confirmed",
+    );
+    expect(items[1]).toHaveTextContent("Stefan resolved · 2:30 AM");
+    expect(items[1]).toHaveTextContent("It was the cleaner.");
+  });
+
+  it("plain activity (no visible code): no state chip, no buttons, no notices", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "no_action", severity: "info", reasonCodes: [], reasons: [] }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByText("Needs attention")).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.queryByRole("heading", { name: COPY.whyTitle })).toBeNull();
+  });
+
+  it("a missing incident and a hidden one read the same: not found, with the way back", async () => {
+    h.getSecurityIncident.mockRejectedValue(typedError("INCIDENT_NOT_FOUND", 404));
+    renderView();
+    expect(await screen.findByText(COPY.notFound)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: COPY.backToSecurity })).toHaveAttribute("href", "/security");
+    expect(document.body).not.toHaveTextContent("raw server text");
+  });
+
+  it("a read that fails otherwise says so, with Retry — never not-found", async () => {
+    h.getSecurityIncident.mockRejectedValue(typedError("INCIDENTS_UNAVAILABLE", 503));
+    renderView();
+    expect(await screen.findByRole("alert")).toHaveTextContent(COPY.loadError);
+    expect(screen.queryByText(COPY.notFound)).toBeNull();
+    h.getSecurityIncident.mockResolvedValue(detail());
+    fireEvent.click(screen.getByRole("button", { name: COPY.retry }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Stock room" })).toBeInTheDocument();
+  });
+});
+
+describe("who may act (rendered only at act, never rendered-then-refused)", () => {
+  it("at act, open: Acknowledge (primary) and Resolve…", async () => {
+    renderView();
+    expect(await screen.findByRole("button", { name: COPY.acknowledge })).toHaveClass("btn", "primary");
+    expect(screen.getByRole("button", { name: COPY.resolve })).toBeInTheDocument();
+  });
+
+  it("below act on the module level: neither button — and no can't-act sentence while the box says it's actionable (the level may still be loading)", async () => {
+    h.level = "view";
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.queryByTestId("incident-cant-act")).toBeNull();
+  });
+
+  it("view-only on the box (as it sends it: viewer.level view, actionable false): neither button, and the one can't-act sentence", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ actionable: false, viewer: { level: "view", acknowledged: false } }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
+  });
+
+  it("defence in depth: a box that says actionable at view level (never sent) still gets no buttons", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ viewer: { level: "view", acknowledged: false } }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+  });
+
+  it("acknowledged by someone else: this person can still acknowledge (D23), as a secondary button", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({ state: "acknowledged", lastAck: { action: "acknowledge", byName: "Maria", at: at("01:17") }, viewer: { level: "act", acknowledged: false } }),
+    );
+    renderView();
+    const ack = await screen.findByRole("button", { name: COPY.acknowledge });
+    expect(ack).not.toHaveClass("primary");
+  });
+
+  it("not actionable for this viewer at act and open: neither button, and the sentence says so", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ actionable: false }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
+  });
+
+  it("a partial view (a lower-severity code visible, an alert on a hidden camera): open, no buttons, no acks or notices — as the box sends it", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({ severity: "notice", reasonCodes: ["camera_offline"], state: "open", actionable: false, acks: [], notices: [], lastAck: null }),
+    );
+    renderView();
+    expect(await screen.findByText("Needs attention")).toHaveClass("badge", "warn");
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.queryByRole("heading", { name: COPY.toldTitle })).toBeNull();
+    expect(screen.queryByRole("heading", { name: COPY.acksTitle })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
+  });
+
+  it("a partial view keeps this person's OWN acknowledgement (the box sends only theirs), still with no buttons", async () => {
+    h.getSecurityIncident.mockResolvedValue(
+      detail({
+        state: "open",
+        actionable: false,
+        lastAck: null,
+        notices: [],
+        acks: [{ action: "acknowledge", byName: "Jordan", at: at("01:17"), client: null, viaNotification: true, note: "", signIn: null }],
+        viewer: { level: "act", acknowledged: true },
+      }),
+    );
+    renderView();
+    const list = await screen.findByRole("list", { name: COPY.acksTitle });
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Jordan acknowledged · 2:17 AM · from the alert notification"]);
+    expect(screen.getByText("Needs attention")).toHaveClass("badge", "danger");
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
+  });
+
+  it("DS-005: the can't-act words are the same whatever the cause — a view-only level reads exactly like a hidden camera", async () => {
+    const texts: string[] = [];
+    for (const over of [
+      { actionable: false, viewer: { level: "view" as const, acknowledged: false } },
+      { actionable: false, severity: "notice" as const, reasonCodes: ["camera_offline" as const] },
+      { actionable: false, state: "acknowledged" as const },
+    ]) {
+      h.getSecurityIncident.mockResolvedValue(detail(over));
+      const { unmount } = renderView();
+      texts.push((await screen.findByTestId("incident-cant-act")).textContent ?? "");
+      unmount();
+    }
+    expect(new Set(texts)).toEqual(new Set([COPY.cantAct]));
+    expect(COPY.cantAct).toBe("You can't acknowledge or resolve this incident. An owner or admin can.");
+  });
+
+  it("no can't-act sentence where there's nothing to act on: resolved, or plain activity", async () => {
+    for (const over of [
+      { state: "resolved" as const, actionable: false },
+      { state: "no_action" as const, severity: "info" as const, reasonCodes: [], reasons: [], actionable: false },
+    ]) {
+      h.getSecurityIncident.mockResolvedValue(detail(over));
+      const { unmount } = renderView();
+      await screen.findByRole("heading", { level: 1, name: "Stock room" });
+      expect(screen.queryByTestId("incident-cant-act")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("actionable: the buttons, and no can't-act sentence", async () => {
+    renderView();
+    await screen.findByRole("button", { name: COPY.acknowledge });
+    expect(screen.queryByTestId("incident-cant-act")).toBeNull();
+  });
+
+  it("a box that doesn't say it's actionable gets no buttons (fails closed), and says so", async () => {
+    const { actionable: _drop, ...rest } = detail();
+    void _drop;
+    h.getSecurityIncident.mockResolvedValue(rest);
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+    expect(screen.getByTestId("incident-cant-act")).toHaveTextContent(COPY.cantAct);
+  });
+
+  it("already acknowledged by this person: only Resolve…", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true } }));
+    renderView();
+    expect(await screen.findByRole("button", { name: COPY.resolve })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
+  });
+
+  it("resolved: nothing to act on", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", viewer: { level: "act", acknowledged: true } }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
+  });
+});
+
+describe("Acknowledge", () => {
+  it("sends the notification the page was opened from, and shows the box's answer", async () => {
+    const after = detail({ state: "acknowledged", lastAck: { action: "acknowledge", byName: "Alex", at: at("01:31") }, viewer: { level: "act", acknowledged: true } });
+    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: after, changed: true });
+    renderView({ notificationId: "clx9abc" });
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    await waitFor(() => expect(h.acknowledgeSecurityIncident).toHaveBeenCalledWith(ID, { notificationId: "clx9abc" }));
+    expect(await screen.findByText("Acknowledged", { selector: ".badge" })).toBeInTheDocument();
+    expect(h.toast).toHaveBeenCalledWith(COPY.acknowledgedToast, "success");
+  });
+
+  it("without one, sends none", async () => {
+    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: detail(), changed: true });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    await waitFor(() => expect(h.acknowledgeSecurityIncident).toHaveBeenCalledWith(ID, { notificationId: null }));
+  });
+
+  it("already done (changed:false) is silent", async () => {
+    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: detail({ viewer: { level: "act", acknowledged: true } }), changed: false });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    await waitFor(() => expect(h.acknowledgeSecurityIncident).toHaveBeenCalled());
+    await rtlAct(async () => {});
+    expect(h.toast).not.toHaveBeenCalled();
+  });
+
+  it("in flight: aria-disabled, never disabled, keeps focus, and a second press is refused", async () => {
+    let finish!: (v: unknown) => void;
+    h.acknowledgeSecurityIncident.mockReturnValue(new Promise((r) => (finish = r)));
+    renderView();
+    const ack = await screen.findByRole("button", { name: COPY.acknowledge });
+    ack.focus();
+    fireEvent.click(ack);
+    await waitFor(() => expect(ack).toHaveAttribute("aria-disabled", "true"));
+    expect(ack).not.toBeDisabled();
+    expect(ack).toHaveFocus();
+    fireEvent.click(ack);
+    expect(h.acknowledgeSecurityIncident).toHaveBeenCalledTimes(1);
+    // Resolve… is inert too while the acknowledge is in flight: it doesn't open.
+    const resolve = screen.getByRole("button", { name: COPY.resolve });
+    expect(resolve).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(resolve);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await rtlAct(async () => finish({ incident: detail(), changed: true }));
+  });
+
+  it("when Acknowledge goes away, focus moves to Resolve… instead of dropping to the page", async () => {
+    h.acknowledgeSecurityIncident.mockResolvedValue({
+      incident: detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true } }),
+      changed: true,
+    });
+    renderView();
+    const ack = await screen.findByRole("button", { name: COPY.acknowledge });
+    ack.focus();
+    fireEvent.click(ack);
+    await waitFor(() => expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull());
+    await waitFor(() => expect(screen.getByRole("button", { name: COPY.resolve })).toHaveFocus());
+  });
+
+  it("a lost race: the friendly copy (never the server's message), then a re-read", async () => {
+    h.acknowledgeSecurityIncident.mockRejectedValue(typedError("INCIDENT_CONFLICT", 409));
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledTimes(1));
+    const [message, type] = h.toast.mock.calls[0]!;
+    expect(type).toBe("error");
+    expect(message).toBe("Someone else changed this incident at the same moment. Check it and try again.");
+    expect(message).not.toContain("raw server text");
+    await waitFor(() => expect(h.getSecurityIncident.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it("an audit failure: nothing was changed, and the button is usable again", async () => {
+    h.acknowledgeSecurityIncident.mockRejectedValue(typedError("AUDIT_UNAVAILABLE", 503));
+    renderView();
+    const ack = await screen.findByRole("button", { name: COPY.acknowledge });
+    fireEvent.click(ack);
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.stringMatching(/nothing was changed/), "error"));
+    await waitFor(() => expect(ack).not.toHaveAttribute("aria-disabled"));
+  });
+});
+
+describe("Resolve…", () => {
+  it("opens a dialog with the optional note; Resolve sends it, and focus lands on the state once both buttons are gone", async () => {
+    const after = detail({ state: "resolved", lastAck: { action: "resolve", byName: "Alex", at: at("01:31") }, viewer: { level: "act", acknowledged: true } });
+    h.resolveSecurityIncident.mockResolvedValue({ incident: after, changed: true });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));
+    const dialog = await screen.findByRole("dialog");
+    const note = within(dialog).getByLabelText(COPY.noteLabel);
+    expect(note).toHaveAttribute("maxLength", "280");
+    fireEvent.change(note, { target: { value: "It was the cleaner." } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.resolveConfirm }));
+    await waitFor(() => expect(h.resolveSecurityIncident).toHaveBeenCalledWith(ID, { note: "It was the cleaner." }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(screen.getByTestId("incident-state")).toHaveFocus());
+    expect(h.toast).toHaveBeenCalledWith(COPY.resolvedToast, "success");
+  });
+
+  it("a note the box refuses keeps the dialog (and the note) open, with the friendly copy", async () => {
+    h.resolveSecurityIncident.mockRejectedValue(typedError("VALIDATION_ERROR", 400));
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(COPY.noteLabel), { target: { value: "x" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.resolveConfirm }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.not.stringContaining("raw server text"), "error"));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByLabelText(COPY.noteLabel)).toHaveValue("x");
+  });
+
+  it("in flight: the dialog's Resolve is aria-disabled and refuses a second press", async () => {
+    let finish!: (v: unknown) => void;
+    h.resolveSecurityIncident.mockReturnValue(new Promise((r) => (finish = r)));
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));
+    const confirm = within(await screen.findByRole("dialog")).getByRole("button", { name: COPY.resolveConfirm });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(confirm).toHaveAttribute("aria-disabled", "true"));
+    expect(confirm).not.toBeDisabled();
+    fireEvent.click(confirm);
+    expect(h.resolveSecurityIncident).toHaveBeenCalledTimes(1);
+    await rtlAct(async () => finish({ incident: detail(), changed: true }));
+  });
+
+  it("the note field labels itself the way the spec words it", () => {
+    expect(COPY.noteLabel).toBe("What happened? Optional.");
+    expect(INCIDENT_COPY.needsAttention).toBe("Needs attention");
+  });
+});

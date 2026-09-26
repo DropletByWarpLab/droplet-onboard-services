@@ -12,6 +12,8 @@ import {
   buildSourcesView,
   buildZoneIndex,
   diffZoneLinks,
+  evidenceFor,
+  trimLinkEvidence,
   formatLinkRef,
   frigatePartsFromConfig,
   isZoneNameCheckViolation,
@@ -39,8 +41,14 @@ import {
 const onlyFront = { visibleCameras: new Set(["front"]) as ReadonlySet<string> };
 const everyone = { visibleCameras: "all" as const };
 
-function link(zoneId: string, sourceKind: "camera" | "camera_zone", sourceRef: string, name = zoneId): ActiveZoneLink {
-  return { linkId: `${zoneId}:${sourceRef}`, zoneId, zoneName: name, zoneKind: "interior", sourceKind, sourceRef };
+function link(
+  zoneId: string,
+  sourceKind: "camera" | "camera_zone",
+  sourceRef: string,
+  name = zoneId,
+  setBy: "person" | "droplet" = "person",
+): ActiveZoneLink {
+  return { linkId: `${zoneId}:${sourceRef}`, zoneId, zoneName: name, zoneKind: "interior", sourceKind, sourceRef, setBy };
 }
 
 function row(over: Partial<ZoneMatchableEvent> = {}): ZoneMatchableEvent {
@@ -208,10 +216,10 @@ describe("viewerAreas / zoneFilterFor — what one viewer's feed resolves", () =
 
 describe("diffZoneLinks — route 12's plan", () => {
   const stored: ExistingZoneLink[] = [
-    { id: "1", sourceKind: "camera", sourceRef: "front", state: "active" },
-    { id: "2", sourceKind: "camera_zone", sourceRef: "back/till", state: "removed" },
-    { id: "3", sourceKind: "camera", sourceRef: "side", state: "active" },
-    { id: "4", sourceKind: "camera", sourceRef: "old", state: "removed" },
+    { id: "1", sourceKind: "camera", sourceRef: "front", state: "active", origin: "person", stateSetBy: "person" },
+    { id: "2", sourceKind: "camera_zone", sourceRef: "back/till", state: "removed", origin: "person", stateSetBy: "person" },
+    { id: "3", sourceKind: "camera", sourceRef: "side", state: "active", origin: "person", stateSetBy: "person" },
+    { id: "4", sourceKind: "camera", sourceRef: "old", state: "removed", origin: "person", stateSetBy: "person" },
   ];
 
   it("new → added, removed-and-asked-again → reactivated, active-and-dropped → removed", () => {
@@ -225,6 +233,7 @@ describe("diffZoneLinks — route 12's plan", () => {
     ).toEqual({
       added: [{ sourceKind: "camera_zone", sourceRef: "back/door" }],
       reactivated: [stored[1]],
+      accepted: [],
       removed: [stored[2]],
     });
   });
@@ -235,7 +244,7 @@ describe("diffZoneLinks — route 12's plan", () => {
         { sourceKind: "camera", sourceRef: "front" },
         { sourceKind: "camera", sourceRef: "side" },
       ]),
-    ).toEqual({ added: [], reactivated: [], removed: [] });
+    ).toEqual({ added: [], reactivated: [], accepted: [], removed: [] });
   });
 
   it("the same name as a different kind is a different link", () => {
@@ -248,12 +257,16 @@ describe("diffZoneLinks — route 12's plan", () => {
 describe("loadActiveLinks", () => {
   it("asks for active links of ACTIVE areas only, and flattens the area onto each link", async () => {
     const findMany = vi.fn().mockResolvedValue([
-      { id: "l1", zoneId: "z1", sourceKind: "camera", sourceRef: "front", zone: { name: "Shop", kind: "entry" } },
+      { id: "l1", zoneId: "z1", sourceKind: "camera", sourceRef: "front", stateSetBy: "person", zone: { name: "Shop", kind: "entry" } },
+      { id: "l2", zoneId: "z1", sourceKind: "camera", sourceRef: "back", stateSetBy: "droplet", zone: { name: "Shop", kind: "entry" } },
     ]);
     const out = await loadActiveLinks({ securityZoneLink: { findMany } } as never);
     expect(findMany.mock.calls[0][0].where).toEqual({ state: "active", zone: { state: "active" } });
+    // WARP-2979 — who set the link is read, never inferred (a NULL decidedById says nothing).
+    expect(findMany.mock.calls[0][0].select).toMatchObject({ stateSetBy: true });
     expect(out).toEqual([
-      { linkId: "l1", zoneId: "z1", zoneName: "Shop", zoneKind: "entry", sourceKind: "camera", sourceRef: "front" },
+      { linkId: "l1", zoneId: "z1", zoneName: "Shop", zoneKind: "entry", sourceKind: "camera", sourceRef: "front", setBy: "person" },
+      { linkId: "l2", zoneId: "z1", zoneName: "Shop", zoneKind: "entry", sourceKind: "camera", sourceRef: "back", setBy: "droplet" },
     ]);
   });
 });
@@ -340,6 +353,9 @@ describe("the areas list (route 3)", () => {
       sourceLabel: `snapshot of ${sourceRef}`,
       state: "active",
       stateChangedAt: at,
+      origin: "person",
+      stateSetBy: "person",
+      evidence: null,
     })),
   });
 
@@ -519,6 +535,7 @@ describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank in
             zoneKind: "interior",
             sourceKind: whole ? "camera" : "camera_zone",
             sourceRef: whole ? camera : `${camera}/${pick(r, PARTS)}`,
+            setBy: "person",
           });
         }
       }
@@ -540,18 +557,214 @@ describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank in
 
   it("carries the matched link ids and 'part' when a part-of-view link matched", () => {
     const links: ActiveZoneLink[] = [
-      { linkId: "a1", zoneId: "za", zoneName: "Shop", zoneKind: "interior", sourceKind: "camera", sourceRef: "front" },
-      { linkId: "b1", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/till" },
-      { linkId: "b2", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/porch" },
+      { linkId: "a1", zoneId: "za", zoneName: "Shop", zoneKind: "interior", sourceKind: "camera", sourceRef: "front", setBy: "person" },
+      { linkId: "b1", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/till", setBy: "person" },
+      { linkId: "b2", zoneId: "zb", zoneName: "Till", zoneKind: "restricted", sourceKind: "camera_zone", sourceRef: "front/porch", setBy: "person" },
     ];
     expect(matchAreasForEvent({ source: "frigate", kind: "detection", camera: "front", cameraZones: ["till"] }, links)).toEqual([
-      { zoneId: "za", zoneName: "Shop", zoneKind: "interior", linkIds: ["a1"], specificity: "whole" },
-      { zoneId: "zb", zoneName: "Till", zoneKind: "restricted", linkIds: ["b1"], specificity: "part" },
+      { zoneId: "za", zoneName: "Shop", zoneKind: "interior", linkIds: ["a1"], specificity: "whole", personLinked: true },
+      { zoneId: "zb", zoneName: "Till", zoneKind: "restricted", linkIds: ["b1"], specificity: "part", personLinked: true },
     ]);
     // A camera's own offline row reaches every part of its view.
     expect(
       matchAreasForEvent({ source: "frigate_status", kind: "camera_offline", camera: "front", cameraZones: [] }, links).find((m) => m.zoneId === "zb"),
     ).toMatchObject({ linkIds: ["b1", "b2"], specificity: "part" });
     expect(matchAreasForEvent({ source: "activity_mirror", kind: "threat", camera: null, cameraZones: [] }, links)).toEqual([]);
+  });
+
+  // WARP-2979 (§6.7.1) — an area matched only through links Droplet activated on its own is context:
+  // it still matches (so the event still groups there), but it is not person-linked.
+  it("personLinked: true when ANY matching link was set by a person; false when only Droplet's links matched", () => {
+    const links: ActiveZoneLink[] = [
+      link("za", "camera", "front", "Shop", "droplet"),
+      link("zb", "camera", "front", "Till", "droplet"),
+      link("zb", "camera_zone", "front/till", "Till", "person"),
+    ];
+    const at = (cameraZones: string[]) =>
+      matchAreasForEvent({ source: "frigate", kind: "detection", camera: "front", cameraZones }, links).map((m) => [m.zoneId, m.personLinked]);
+    // za matches through Droplet's link only; zb through Droplet's whole-camera link AND a person's part.
+    expect(at(["till"])).toEqual([
+      ["za", false],
+      ["zb", true],
+    ]);
+    // Away from the till only Droplet's links match zb: still grouped there, not person-linked.
+    expect(at([])).toEqual([
+      ["za", false],
+      ["zb", false],
+    ]);
+  });
+});
+
+describe("buildZoneIndex — personOnly (WARP-2979: the index camera_offline_during_activity matches against)", () => {
+  const links = [
+    link("za", "camera", "front", "Shop", "person"),
+    link("zb", "camera", "front", "Yard", "droplet"),
+    link("zc", "camera_zone", "back/door", "Door", "droplet"),
+    link("zd", "camera_zone", "back/door", "Stock", "person"),
+  ];
+
+  it("leaves out every link Droplet set; the default index keeps them all", () => {
+    const person = buildZoneIndex(links, { personOnly: true });
+    const all = buildZoneIndex(links);
+    expect(zonesForEvent(row({ camera: "front" }), person)).toEqual(["za"]);
+    expect(zonesForEvent(row({ camera: "front" }), all)).toEqual(["za", "zb"]);
+    expect(zonesForEvent(row({ camera: "back", cameraZones: ["door"] }), person)).toEqual(["zd"]);
+    expect(zonesForEvent(row({ camera: "back", cameraZones: ["door"] }), all)).toEqual(["zc", "zd"]);
+  });
+
+  it("fails closed: a link with no setBy is not a person's", () => {
+    const bare = [{ zoneId: "za", sourceKind: "camera" as const, sourceRef: "front" }];
+    expect(zonesForEvent(row({ camera: "front" }), buildZoneIndex(bare, { personOnly: true }))).toEqual([]);
+    expect(zonesForEvent(row({ camera: "front" }), buildZoneIndex(bare))).toEqual(["za"]);
+  });
+});
+
+// ── WARP-2979 (P4 §6.5, §7 route 3, §6.16) ────────────────────────────────
+
+describe("diffZoneLinks — every cell of §6.5's table (route 12, a person's save)", () => {
+  const row = (id: string, sourceRef: string, state: ExistingZoneLink["state"], origin: "person" | "droplet" = "person", stateSetBy: "person" | "droplet" = "person"): ExistingZoneLink => ({
+    id,
+    sourceKind: "camera",
+    sourceRef,
+    state,
+    origin,
+    stateSetBy,
+  });
+  const stored: ExistingZoneLink[] = [
+    row("a", "active_person", "active"),
+    row("b", "active_droplet", "active", "droplet", "droplet"),
+    row("c", "active_kept", "active", "droplet", "person"),
+    row("d", "removed", "removed"),
+    row("e", "proposed", "proposed", "droplet", "droplet"),
+    row("f", "rejected", "rejected", "droplet", "person"),
+  ];
+  const want = (...refs: string[]) => refs.map((sourceRef) => ({ sourceKind: "camera" as const, sourceRef }));
+
+  it("in the desired set: none → added; active (any setter) → unchanged; removed → reactivated; PROPOSED → ACCEPTED; rejected → reactivated", () => {
+    expect(diffZoneLinks(stored, want("new", "active_person", "active_droplet", "active_kept", "removed", "proposed", "rejected"))).toEqual({
+      added: [{ sourceKind: "camera", sourceRef: "new" }],
+      reactivated: [stored[3], stored[5]],
+      accepted: [stored[4]],
+      removed: [],
+    });
+  });
+
+  it("not in the desired set: every active row → removed (Droplet's too); removed, PROPOSED and rejected → unchanged", () => {
+    expect(diffZoneLinks(stored, [])).toEqual({ added: [], reactivated: [], accepted: [], removed: [stored[0], stored[1], stored[2]] });
+  });
+});
+
+describe("evidenceFor — Droplet's evidence only for a viewer who can see every source it names (route 3, D13)", () => {
+  const evidence = {
+    v: 1,
+    kind: "camera_camera",
+    window: { from: "2026-09-06T09:45:00.000Z", to: "2026-09-20T09:45:00.000Z" },
+    anchor: { linkId: "l-anchor", sourceKind: "camera", sourceRef: "back", label: "Back camera" },
+    candidate: { sourceKind: "camera_zone", sourceRef: "front/porch", label: "Front camera" },
+    forward: { n: 40, k: 34, excluded: 0, lambdaMilli: 2000, liftTenths: 170, confidenceBp: 7090 },
+    reverse: { n: 45, k: 36, excluded: 1, lambdaMilli: 2700, liftTenths: 133, confidenceBp: 6620 },
+    chosen: "part",
+    wholeK: 35,
+    names: { match: false, shared: [] },
+    hypotheses: 12,
+    pAdj: "1.1e-27",
+    gate: "auto",
+    samples: [],
+    samplesTrimmedBefore: null,
+  };
+
+  it("everyone who sees both cameras gets it; a viewer missing either gets null", () => {
+    expect(evidenceFor({ origin: "droplet", evidence }, everyone)).toEqual(evidence);
+    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["front", "back"]) })).toEqual(evidence);
+    expect(evidenceFor({ origin: "droplet", evidence }, onlyFront)).toBeNull();
+    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["back"]) })).toBeNull();
+  });
+
+  it("null for a person's link, without a scope, for evidence that does not parse, and for a lock it names (PR-4)", () => {
+    expect(evidenceFor({ origin: "person", evidence }, everyone)).toBeNull();
+    expect(evidenceFor({ origin: "droplet", evidence }, null)).toBeNull();
+    expect(evidenceFor({ origin: "droplet", evidence: { ...evidence, v: 2 } }, everyone)).toBeNull();
+    const lock = { ...evidence, kind: "lock_camera", reverse: null, chosen: "lock", wholeK: null, anchor: { ...evidence.anchor, sourceKind: "lock", sourceRef: "matter:4/1" } };
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, everyone)).toBeNull();
+  });
+});
+
+describe("trimLinkEvidence — samples are presence data (§6.16)", () => {
+  const BEFORE = new Date("2026-08-25T03:50:00.000Z");
+  const base = {
+    v: 1,
+    kind: "camera_camera",
+    window: { from: "2026-08-01T00:00:00.000Z", to: "2026-08-15T00:00:00.000Z" },
+    anchor: { linkId: "l-anchor", sourceKind: "camera", sourceRef: "back", label: "Back camera" },
+    candidate: { sourceKind: "camera", sourceRef: "front", label: "Front camera" },
+    forward: { n: 40, k: 34, excluded: 0, lambdaMilli: 2000, liftTenths: 170, confidenceBp: 7090 },
+    reverse: { n: 45, k: 36, excluded: 1, lambdaMilli: 2700, liftTenths: 133, confidenceBp: 6620 },
+    chosen: "whole",
+    wholeK: null,
+    names: { match: false, shared: [] },
+    hypotheses: 12,
+    pAdj: "1.1e-27",
+    gate: "auto",
+    samplesTrimmedBefore: null,
+  };
+  const OLD = { anchorAt: "2026-08-10T10:00:00.000Z", hitAt: "2026-08-10T10:00:03.000Z" };
+  const NEW = { anchorAt: "2026-08-30T10:00:00.000Z", hitAt: "2026-08-30T10:00:03.000Z" };
+  const EDGE = { anchorAt: "2026-08-25T03:49:59.999Z", hitAt: "2026-08-25T03:50:02.000Z" };
+
+  function db(rows: Array<{ id: string; evidence: unknown; evidenceAt: Date | null }>) {
+    return {
+      rows,
+      securityZoneLink: {
+        findMany: vi.fn(async (args: { where: { id?: { gt: string } }; take: number }) =>
+          rows.filter((r) => !args.where.id || r.id > args.where.id.gt).sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, args.take),
+        ),
+        updateMany: vi.fn(async (args: { where: { id: string; evidenceAt: Date | null }; data: { evidence: unknown } }) => {
+          const r = rows.find((x) => x.id === args.where.id && x.evidenceAt === args.where.evidenceAt);
+          if (!r) return { count: 0 };
+          r.evidence = args.data.evidence;
+          return { count: 1 };
+        }),
+      },
+    };
+  }
+
+  it("drops only the samples before `before` (either instant), keeps every aggregate, stamps samplesTrimmedBefore; a rerun is a no-op", async () => {
+    const at = new Date("2026-08-15T00:00:00.000Z");
+    const p = db([
+      { id: "a", evidence: { ...base, samples: [NEW, EDGE, OLD] }, evidenceAt: at },
+      { id: "b", evidence: { ...base, samples: [NEW] }, evidenceAt: at },
+      { id: "c", evidence: { ...base, samples: [] }, evidenceAt: at },
+    ]);
+    expect(await trimLinkEvidence(p as never, BEFORE)).toEqual({ trimmed: 1 });
+    expect(p.rows[0]!.evidence).toEqual({ ...base, samples: [NEW], samplesTrimmedBefore: BEFORE.toISOString() });
+    expect(p.rows[1]!.evidence).toEqual({ ...base, samples: [NEW] });
+    expect(p.securityZoneLink.findMany.mock.calls[0]![0]).toMatchObject({ where: { origin: "droplet" } });
+    expect(await trimLinkEvidence(p as never, BEFORE)).toEqual({ trimmed: 0 });
+  });
+
+  it("evidence this build cannot read loses ALL its samples (fail closed on presence data), nothing else", async () => {
+    const p = db([{ id: "a", evidence: { v: 9, samples: [NEW], mystery: 1 }, evidenceAt: null }]);
+    expect(await trimLinkEvidence(p as never, BEFORE)).toEqual({ trimmed: 1 });
+    expect(p.rows[0]!.evidence).toEqual({ v: 9, samples: [], mystery: 1, samplesTrimmedBefore: BEFORE.toISOString() });
+  });
+
+  it("never clobbers a refresh the hourly job made in between (the write is guarded on the evidenceAt it read)", async () => {
+    const p = db([{ id: "a", evidence: { ...base, samples: [OLD] }, evidenceAt: new Date("2026-08-15T00:00:00.000Z") }]);
+    const read = p.securityZoneLink.findMany.getMockImplementation()!;
+    p.securityZoneLink.findMany.mockImplementationOnce(async (args) => {
+      const out = await read(args);
+      p.rows[0] = { ...p.rows[0]!, evidence: { ...base, samples: [NEW] }, evidenceAt: new Date("2026-09-01T00:00:00.000Z") };
+      return out;
+    });
+    expect(await trimLinkEvidence(p as never, BEFORE)).toEqual({ trimmed: 0 });
+    expect(p.rows[0]!.evidence).toEqual({ ...base, samples: [NEW] });
+  });
+
+  it("pages through every row, 200 at a time", async () => {
+    const at = new Date("2026-08-15T00:00:00.000Z");
+    const rows = Array.from({ length: 450 }, (_, i) => ({ id: `r${String(i).padStart(4, "0")}`, evidence: { ...base, samples: [OLD] }, evidenceAt: at }));
+    const p = db(rows);
+    expect(await trimLinkEvidence(p as never, BEFORE)).toEqual({ trimmed: 450 });
+    expect(p.securityZoneLink.findMany).toHaveBeenCalledTimes(3);
   });
 });

@@ -245,7 +245,8 @@ describe("GET /api/security/health", () => {
     expect(res.status).toBe(200);
     // WARP-2977 P2b: `site_mode` joins the pinned order — deliberately red against P2a's list.
     // WARP-2978: `incidents` and `alerts` join it after site_mode; WARP-2980's `patterns` follows
-    // them, before retention (whichever merged second moved this pin).
+    // them, before retention (whichever merged second moved this pin). WARP-2979: `links` (Droplet's
+    // link proposals) sits between alerts and patterns; PR-2's `summaries` (the incident narrator) right after links.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
@@ -253,9 +254,35 @@ describe("GET /api/security/health", () => {
       "site_mode",
       "incidents",
       "alerts",
+      "links",
+      "summaries",
       "patterns",
       "retention",
     ]);
+  });
+
+  it("WARP-2979 PR-2: the summaries row says DOWN 'Not running' while the narrator is not registered — for every viewer, naming nothing", async () => {
+    for (const role of ["owner", "family"] as const) {
+      const res = await request(app(role)).get("/api/security/health");
+      expect(res.body.sources.find((s: { id: string }) => s.id === "summaries"), role).toEqual({
+        id: "summaries",
+        state: "down",
+        detail: "Not running",
+        lastSeenAt: null,
+      });
+    }
+  });
+
+  it("WARP-2979: the links row says DOWN 'Not running' while the job is not registered — for every viewer, naming nothing", async () => {
+    for (const role of ["owner", "family"] as const) {
+      const res = await request(app(role)).get("/api/security/health");
+      expect(res.body.sources.find((s: { id: string }) => s.id === "links"), role).toEqual({
+        id: "links",
+        state: "down",
+        detail: "Not running",
+        lastSeenAt: null,
+      });
+    }
   });
 
   it("WARP-2978: the incidents row says DOWN 'Not running' while the engine is not registered (§7's boot assertion)", async () => {
@@ -296,11 +323,14 @@ describe("GET /api/security/health", () => {
   it("family does not get a threat row for a feed they cannot see, but does get the site mode and patterns", async () => {
     const res = await request(app("family")).get("/api/security/health");
     // WARP-2978: nor the alerts row (it names who is told); the incidents row is everyone's.
+    // WARP-2979: so is the links row, and PR-2's summaries row.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "site_mode",
       "incidents",
+      "links",
+      "summaries",
       "patterns",
       "retention",
     ]);
@@ -331,7 +361,7 @@ const GONE = "0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6"; // no such area
 
 /** loadActiveLinks rows as Prisma returns them for its select. */
 function linkRow(zoneId: string, name: string, sourceKind: "camera" | "camera_zone", sourceRef: string) {
-  return { id: `l-${zoneId.slice(0, 4)}-${sourceRef}`, zoneId, sourceKind, sourceRef, zone: { name, kind: "interior" } };
+  return { id: `l-${zoneId.slice(0, 4)}-${sourceRef}`, zoneId, sourceKind, sourceRef, stateSetBy: "person", zone: { name, kind: "interior" } };
 }
 const AREA_LINKS = [
   linkRow(SHOP, "Shop floor", "camera", "front"),

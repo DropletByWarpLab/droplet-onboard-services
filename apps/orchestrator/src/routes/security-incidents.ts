@@ -12,6 +12,16 @@
  *   21  GET  /api/security/alert-routing                 view   (a filter by level, not a gate)
  *   22  PUT  /api/security/alert-routing/:userId         manage
  *   35  POST /api/security/incidents/:id/verdict         act, floored at owner/admin (WARP-2980 P5 PR-B)
+ *   28  POST /api/security/incidents/:id/narrative       act (WARP-2979 P4 PR-2: Summarise now / Regenerate)
+ *
+ * Route 28 answers 202 `{narrative}` in state `pending`; 403 — the role
+ * floor's own body and denial row — for a viewer who may never read a summary
+ * (`mayReadSummaries`: sees every camera and may read threats), decided before
+ * any incident is read, so it is the same for every id and says nothing about
+ * any summary; 404 INCIDENT_NOT_FOUND (missing or hidden, one body); 409
+ * NOT_ACTIONABLE (plain activity, or a view the incident-level checks refuse —
+ * one body); 409 NARRATIVE_COOLDOWN (under 10 min since the last attempt or
+ * text); 409 SUMMARIES_OFF; 503. No audit (D23).
  *
  * Route 35 (brief §4.4: "the owner or a Security manager can mark Expected /
  * Not expected"): `sensitiveRateLimit, requireRole('owner','admin'),
@@ -41,7 +51,7 @@
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
-import { requireRole } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 import { mayListArchivedZones, securityLevelFor, securityViewerScope, type SecurityRouteDeps } from "../services/security-access.js";
@@ -55,7 +65,8 @@ import {
   parseIncidentCursor,
   type IncidentViewer,
 } from "../services/security-incident-view.js";
-import { actOnIncident, setIncidentVerdict } from "../services/security-incident-actions.js";
+import { actOnIncident, requestIncidentNarrative, setIncidentVerdict } from "../services/security-incident-actions.js";
+import { mayReadSummaries } from "../services/security-narrative-view.js";
 import { securityOngoingSource } from "../services/camera.service.js";
 import { alertsReady, readAlertRouting, setAlertRouting } from "../services/security-alerts.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
@@ -83,7 +94,10 @@ type ErrorCode =
   | "NOT_ELIGIBLE"
   | "INTERNAL_ERROR"
   // WARP-2980 P5 PR-B — route 35.
-  | "NOT_JUDGEABLE";
+  | "NOT_JUDGEABLE"
+  // WARP-2979 P4 PR-2 — route 28.
+  | "NARRATIVE_COOLDOWN"
+  | "SUMMARIES_OFF";
 
 function fail(res: Response, status: number, code: ErrorCode, message: string, issues?: unknown[]): void {
   res.status(status).json({ error: issues ? { code, message, issues } : { code, message } });
@@ -105,6 +119,8 @@ const listQuerySchema = z
 const NOTIFICATION_ID = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const ackBodySchema = z.object({ notificationId: NOTIFICATION_ID.optional() }).strict();
 const resolveBodySchema = z.object({ note: z.string().max(280).optional() }).strict();
+/** Route 28: nothing to send — what is asked for is the URL's. */
+const narrativeBodySchema = z.object({}).strict();
 /** Route 35: a verdict can change, never go back to unreviewed. */
 const verdictBodySchema = z.object({ verdict: z.enum(["expected", "not_expected"]) }).strict();
 const routingBodySchema = z
@@ -331,6 +347,52 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
       res.json({ incident: detail, changed: r.changed });
     } catch (err) {
       writeFailed(res, err, "incident verdict", "INCIDENTS_UNAVAILABLE");
+    }
+  });
+
+  // 28 (act) — WARP-2979 P4 PR-2: "Summarise now" / "Regenerate". No audit (D23).
+  router.post("/security/incidents/:id/narrative", ...actGate, async (req: Request, res: Response) => {
+    if (!UUID.safeParse(req.params.id).success) {
+      fail(res, 400, "VALIDATION_ERROR", "That isn't an incident id.");
+      return;
+    }
+    const body = narrativeBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      fail(res, 400, "VALIDATION_ERROR", "That request isn't in a shape Droplet understands.", body.error.issues);
+      return;
+    }
+    try {
+      const viewer = await viewerOf(prisma, req, deps);
+      // The viewer rule, before any incident is read: the role floor's own 403, whatever the id.
+      if (!mayReadSummaries(viewer)) {
+        recordAccessDenied(req, "summary-audience");
+        res.status(403).json({ error: "Forbidden: role not permitted" });
+        return;
+      }
+      const r = await requestIncidentNarrative(prisma, { incidentId: req.params.id!, viewer, now: clock() });
+      switch (r.status) {
+        case "ok":
+          res.status(202).json({ narrative: r.narrative });
+          return;
+        case "not_found":
+          fail(res, 404, "INCIDENT_NOT_FOUND", "There is no such incident.");
+          return;
+        case "not_actionable":
+          fail(res, 409, "NOT_ACTIONABLE", "There's nothing here for Droplet to summarise.");
+          return;
+        case "summaries_off":
+          fail(res, 409, "SUMMARIES_OFF", "Summaries are turned off in Security settings.");
+          return;
+        case "cooldown":
+          fail(res, 409, "NARRATIVE_COOLDOWN", "Droplet wrote this in the last 10 minutes. Try again later.");
+          return;
+        case "conflict":
+          fail(res, 409, "INCIDENT_CONFLICT", "Someone else changed this incident at the same moment. Try again.");
+          return;
+      }
+    } catch (err) {
+      logger.error({ err }, "incident summary request failed");
+      fail(res, 503, "INCIDENTS_UNAVAILABLE", "Incidents can't be read right now.");
     }
   });
 

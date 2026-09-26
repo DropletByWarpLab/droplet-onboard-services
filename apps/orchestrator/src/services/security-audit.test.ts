@@ -28,6 +28,7 @@ import {
   SecurityAuditUnavailableError,
   auditSecurityInTx,
   auditSecuritySystem,
+  auditSecuritySystemInTx,
   chainSafeText,
   isSecurityAuditUnavailable,
   securityRefs,
@@ -287,6 +288,57 @@ describe("auditSecurityInTx", () => {
     const p = auditSecurityInTx(TX, REQ, { action: "hours.set", what: "Security: opening hours changed" });
     await expect(p).rejects.toBe(pre);
     await expect(p).rejects.not.toBeInstanceOf(SecurityAuditUnavailableError);
+  });
+});
+
+describe("auditSecuritySystemInTx (WARP-2979 — Droplet's own link changes, DS-018)", () => {
+  it("writes a system/info/shield row in the caller's transaction as the SYSTEM actor — never `ai`", async () => {
+    h.inTx.mockResolvedValue({ id: 3n });
+    await auditSecuritySystemInTx(TX, {
+      action: "link.activated",
+      what: 'Security: Droplet linked Back camera to the area "Stock room"',
+      refs: { zoneId: "z1", linkId: "l1", confidenceBp: 6010, rulesVersion: 1, from: "none" },
+    });
+    expect(h.inTx).toHaveBeenCalledTimes(1);
+    const [tx, params] = h.inTx.mock.calls[0]!;
+    expect(tx).toBe(TX);
+    expect(params).toEqual({
+      kind: "system",
+      severity: "info",
+      sourceIcon: "shield",
+      what: 'Security: Droplet linked Back camera to the area "Stock room"',
+      sub: null,
+      refs: {
+        zoneId: "z1",
+        linkId: "l1",
+        confidenceBp: 6010,
+        rulesVersion: 1,
+        from: "none",
+        surface: "security",
+        action: "link.activated",
+      },
+      actor: { type: "system", id: null },
+    });
+  });
+
+  it("an append failure becomes SecurityAuditUnavailableError, so the job's change rolls back", async () => {
+    h.inTx.mockRejectedValue(new Error("activity recorder not initialised"));
+    const p = auditSecuritySystemInTx(TX, { action: "link.proposed", what: "Security: Droplet suggested a link" });
+    await expect(p).rejects.toBeInstanceOf(SecurityAuditUnavailableError);
+    await expect(p).rejects.toMatchObject({ code: "AUDIT_UNAVAILABLE" });
+  });
+
+  it("a fraction in refs (a raw confidence) throws BEFORE the append — confidence goes as basis points", async () => {
+    const p = auditSecuritySystemInTx(TX, { action: "link.proposed", what: "x", refs: { confidence: 0.601 } });
+    await expect(p).rejects.toThrow(/not a safe integer/);
+    await expect(p).rejects.not.toBeInstanceOf(SecurityAuditUnavailableError);
+    expect(h.inTx).not.toHaveBeenCalled();
+  });
+
+  it("a broken append precondition propagates as is (a programming error)", async () => {
+    const pre = new ActivityChainPreconditionError("activity chain append needs a READ COMMITTED transaction");
+    h.inTx.mockRejectedValue(pre);
+    await expect(auditSecuritySystemInTx(TX, { action: "link.proposed", what: "x" })).rejects.toBe(pre);
   });
 });
 
