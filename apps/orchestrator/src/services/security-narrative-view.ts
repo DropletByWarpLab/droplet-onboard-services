@@ -46,7 +46,14 @@ import type {
 } from "@prisma/client";
 import type { NarrativeAudience } from "../lib/security-narrative-prompt.js";
 import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
-import { seesEverything, type IncidentProjection, type IncidentViewer } from "./security-incident-view.js";
+// The leaf, never security-incident-view.ts: that module imports this one (WARP-3193 ARCH-1).
+import { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
+
+/** What the summary's rules read of the viewer's projection (security-incident-view.ts `IncidentProjection`). */
+export interface NarrativeProjection {
+  codes: readonly SecurityReasonCode[];
+  partial: boolean;
+}
 
 /**
  * What a seal, a resolve that seals, and route 28 write to ask for the
@@ -155,7 +162,7 @@ export function mayReadSummaries(viewer: Pick<IncidentViewer, "visibleCameras" |
 export function narrativeVisibleTo(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
+  projection: NarrativeProjection | null,
   viewer: IncidentViewer,
 ): boolean {
   return mayReadSummaries(viewer) && narrativeIncidentVisible(row, reasons, projection, viewer);
@@ -165,7 +172,7 @@ export function narrativeVisibleTo(
 export function narrativeIncidentVisible(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
+  projection: NarrativeProjection | null,
   viewer: IncidentViewer,
 ): boolean {
   if (!projection || projection.partial) return false;
@@ -192,7 +199,7 @@ export function narrativeIncidentVisible(
 export function narrativeView(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
+  projection: NarrativeProjection | null,
   viewer: IncidentViewer,
   summariesOn: boolean,
 ): NarrativeView | null {
