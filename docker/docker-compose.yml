@@ -2561,17 +2561,20 @@ services:
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_VOICE:-${ORCHESTRATOR_TOKEN:-}}
       # Wake-word backend. `vosk` (default) recognizes the WAKE_WORD
       # phrases out of the box — no per-phrase training, no licensing fee
-      # — so "droplet" and "hey droplet" both work on every box.
+      # — so "hey droplet" works on every box.
       # Automatically falls back to openWakeWord (hey_jarvis) if the
       # bundled Vosk model is absent. WAKE_WORD is a comma-separated list
-      # of phrases; the box wakes on ANY of them (WARP-1431).
+      # of phrases; the box wakes on ANY of them (WARP-1431). The default
+      # leaves out the bare one-word "droplet": Vosk forces ambient speech
+      # into it at confidence up to 1.00 (~23 false wakes/hour on the
+      # bench, WARP-3128). Opt back in with WAKE_WORD=droplet,hey droplet.
       - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
-      - WAKE_WORD=${WAKE_WORD:-droplet,hey droplet}
+      - WAKE_WORD=${WAKE_WORD:-hey droplet}
       # Threshold semantics are engine-aware (resolve_wake_threshold in
       # voice-io main.py). Under vosk every fire carries real acoustic
       # evidence — the MINIMUM per-word confidence of the finalized
       # phrase match (evidence-free matches never fire) — and a genuine
-      # spoken wake scores ~0.9+, so unset means the vosk default (0.7).
+      # spoken wake scores ~0.9+, so unset means the vosk default (0.85).
       # That gates the living-room-TV false accepts the old fixed-0.5
       # partial-fire scoring let through. Lower toward 0.5 if real wakes
       # get missed at distance; tune per docs/voice-assistant-plan.md.
