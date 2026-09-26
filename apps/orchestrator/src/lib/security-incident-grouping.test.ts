@@ -60,7 +60,8 @@ function incident(over: Partial<GroupableIncident> = {}): GroupableIncident {
 }
 
 function area(zoneId: string, zoneKind: AreaMatch["zoneKind"], specificity: AreaMatch["specificity"] = "whole"): AreaMatch {
-  return { zoneId, zoneName: `Area ${zoneId}`, zoneKind, linkIds: [`l-${zoneId}`], specificity };
+  // WARP-2979 — person-linked, as every P3 link was.
+  return { zoneId, zoneName: `Area ${zoneId}`, zoneKind, linkIds: [`l-${zoneId}`], specificity, personLinked: true };
 }
 
 describe("scopeFor — which scope an event groups under (D14)", () => {
