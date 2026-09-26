@@ -1,19 +1,30 @@
 /**
- * `.dp-btn-primary`'s label must clear WCAG 2.1 AA (1.4.3) in BOTH themes.
+ * `.dp-btn-primary`'s label must clear WCAG 2.1 AA (1.4.3) in BOTH themes,
+ * at rest AND while hovered / pressed.
  *
- * The canonical primary button shipped `bg-accent` + `text-accent-foreground`.
+ * The tokenised primary button shipped `bg-accent` + `text-accent-foreground`.
  * In light mode that is white on the vivid accent (indigo-500 #6366f1), which
- * measures 4.47:1 — under the 4.5:1 floor for normal text. It is the button
- * the whole dashboard renders, and the Windows shell deliberately mirrors the
- * same pair (`--brand` / `--on-brand`, see shell.on-brand-ink.test.ts, which
- * records the identical 4.47:1 and pins it at the non-text floor).
+ * measures 4.47:1 — under the 4.5:1 floor for normal text. `.dp-btn-primary`
+ * itself ships in ~22 files; the sign-in, setup-retry and tour call sites
+ * repeat its pair. (The dashboard's most-used primary is the page shell's
+ * `.btn.primary`, droplet-shell.css — it carried the same 4.47:1 through
+ * `--brand` / `--on-brand` and is guarded by shell.on-brand-ink.test.ts.)
  *
  *   light  #ffffff on #6366f1  → 4.47:1   ← the shipped defect
- *   light  #ffffff on #4f46e5  → 6.29:1   ← the fix (--color-accent-fill)
- *   dark   #1d1d1f on #818cf8  → 5.64:1   ← already passing, untouched
+ *   light  #ffffff on #4f46e5  → 6.29:1   ← rest   (--color-accent-fill)
+ *   light  #ffffff on #4338ca  → 7.90:1   ← hover/pressed (--color-accent-fill-hover)
+ *   dark   #1d1d1f on #818cf8  → 5.64:1   ← rest, the dark accent unchanged
+ *   dark   #1d1d1f on #a5b4fc  → 8.44:1   ← hover/pressed
  *
- * Dark is deliberately NOT changed: that ramp flips (light accent, near-black
- * ink), so stepping the fill down would move it the wrong way.
+ * Dark rest is deliberately NOT changed: that ramp flips (light accent,
+ * near-black ink), so stepping the fill down would move it the wrong way.
+ * Hover/press used to fade the button (`hover:opacity-85`,
+ * `active:opacity-70`), which blends ink and fill toward the page and took
+ * the label under AA while pressed; it now steps to its own fill token.
+ *
+ * The dark values are declared on `html.dark, html .dark` so the fill flips
+ * wherever its ink (`--color-on-accent`, flipped by any `.dark` ancestor)
+ * does — including forced-dark subtrees inside a light page.
  *
  * There is no open ticket for this pair — the contrast tickets in WARP
  * (608, 610, 633, 652, 1374) are all closed and all about different pairs.
@@ -66,20 +77,29 @@ function contrastRatio(a: Rgb, b: Rgb): number {
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** `html.dark,\n html .dark` → `html.dark, html .dark`, for exact comparison. */
+const normalizeSelectorList = (s: string): string =>
+  s
+    .split(",")
+    .map((part) => part.trim().replace(/\s+/g, " "))
+    .join(", ");
+
 /**
- * Value of `prop` in the LAST block whose selector is exactly `selector`.
- * Last-wins mirrors the cascade, and matters here because `html` is declared
- * twice in this sheet (`--sidebar-w`, then the accent-fill token).
+ * Value of `prop` in the LAST flat block whose selector list is exactly
+ * `selector` (whitespace-insensitive, so the sheet may wrap a list across
+ * lines). Last-wins mirrors the cascade, and matters here because `html` is
+ * declared twice in this sheet (`--sidebar-w`, then the accent-fill tokens).
+ * `.dark` never matches `html.dark, html .dark` — exact list, not a subset.
  */
 function tokenIn(selector: string, prop: string): string | null {
-  const blocks = new RegExp(
-    `(?:^|[};])\\s*${escapeRe(selector)}\\s*\\{([^}]*)\\}`,
-    "gm",
-  );
+  const want = normalizeSelectorList(selector);
+  const blocks = /(?:^|[};])\s*([^{};]+?)\s*\{([^{}]*)\}/gm;
+  const decl = new RegExp(`(?<![\\w-])${escapeRe(prop)}\\s*:\\s*([^;]+);`);
   let value: string | null = null;
   for (let m = blocks.exec(css); m !== null; m = blocks.exec(css)) {
-    const decl = new RegExp(`${escapeRe(prop)}\\s*:\\s*([^;]+);`).exec(m[1]);
-    if (decl) value = decl[1].trim();
+    if (normalizeSelectorList(m[1]) !== want) continue;
+    const d = decl.exec(m[2]);
+    if (d) value = d[1].trim();
   }
   return value;
 }
@@ -90,21 +110,44 @@ const must = (selector: string, prop: string): string => {
   return v;
 };
 
+const primaryRule = (): string => {
+  const rule = /\.dp-btn-primary\s*\{([^}]*)\}/.exec(css);
+  expect(rule, ".dp-btn-primary rule must exist").not.toBeNull();
+  return rule![1];
+};
+
 const AA_NORMAL_TEXT = 4.5;
 
+/** Where the fill tokens live (not the contract blocks — see the last test). */
+const FILL_LIGHT = "html";
+const FILL_DARK = "html.dark, html .dark";
+
 const THEMES = [
-  { name: "light", fillSel: "html", inkSel: ":root", accentSel: ":root" },
-  { name: "dark", fillSel: "html.dark", inkSel: ".dark", accentSel: ".dark" },
+  { name: "light", fillSel: FILL_LIGHT, inkSel: ":root" },
+  { name: "dark", fillSel: FILL_DARK, inkSel: ".dark" },
+] as const;
+
+const STATES = [
+  { state: "rest", prop: "--color-accent-fill" },
+  { state: "hover/pressed", prop: "--color-accent-fill-hover" },
 ] as const;
 
 describe("dp-btn-primary clears WCAG AA 1.4.3 in both themes", () => {
   for (const theme of THEMES) {
-    it(`${theme.name}: on-accent ink on the primary fill is at least ${AA_NORMAL_TEXT}:1`, () => {
-      const fill = parseHex(must(theme.fillSel, "--color-accent-fill"));
-      const ink = parseHex(must(theme.inkSel, "--color-on-accent"));
-      const ratio = contrastRatio(ink, fill);
-      expect(ratio, `${theme.name}: measured ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(
-        AA_NORMAL_TEXT,
+    for (const { state, prop } of STATES) {
+      it(`${theme.name} ${state}: on-accent ink on ${prop} is at least ${AA_NORMAL_TEXT}:1`, () => {
+        const fill = parseHex(must(theme.fillSel, prop));
+        const ink = parseHex(must(theme.inkSel, "--color-on-accent"));
+        const ratio = contrastRatio(ink, fill);
+        expect(ratio, `${theme.name} ${state}: measured ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(
+          AA_NORMAL_TEXT,
+        );
+      });
+    }
+
+    it(`${theme.name}: hover is a visibly different fill from rest`, () => {
+      expect(must(theme.fillSel, "--color-accent-fill-hover")).not.toBe(
+        must(theme.fillSel, "--color-accent-fill"),
       );
     });
   }
@@ -127,21 +170,23 @@ describe("dp-btn-primary clears WCAG AA 1.4.3 in both themes", () => {
     expect(must(".dark", "--color-accent")).toBe("#818cf8");
   });
 
-  it("dark keeps the accent as its fill — the dark ramp already passes", () => {
-    expect(must("html.dark", "--color-accent-fill")).toBe(must(".dark", "--color-accent"));
+  it("dark keeps the accent as its rest fill — the dark ramp already passes", () => {
+    expect(must(FILL_DARK, "--color-accent-fill")).toBe(must(".dark", "--color-accent"));
   });
 
-  it("light steps a rung of the existing indigo ramp, not a new brand colour", () => {
-    // Same argument as WARP-1581: #4f46e5 is indigo-600, already carried by
-    // the sheet as --color-accent-hover.
-    expect(must("html", "--color-accent-fill")).toBe(must(":root", "--color-accent-hover"));
+  it("every fill is a rung of the existing indigo ramp, not a new brand colour", () => {
+    // Same argument as WARP-1581. Light rest #4f46e5 is indigo-600, already
+    // the sheet's --color-accent-hover; dark hover #a5b4fc is indigo-300,
+    // already the dark --color-accent-hover. Light hover #4338ca is
+    // indigo-700 (droplet-700 in tailwind.config.ts).
+    expect(must(FILL_LIGHT, "--color-accent-fill")).toBe(must(":root", "--color-accent-hover"));
+    expect(must(FILL_DARK, "--color-accent-fill-hover")).toBe(must(".dark", "--color-accent-hover"));
+    expect(must(FILL_LIGHT, "--color-accent-fill-hover")).toBe("#4338ca");
   });
 
   it("the primary button paints the fill token, not the raw accent", () => {
-    const rule = /\.dp-btn-primary\s*\{([^}]*)\}/.exec(css);
-    expect(rule).not.toBeNull();
-    const body = rule![1];
-    expect(body).toMatch(/bg-accent-fill/);
+    const body = primaryRule();
+    expect(body).toMatch(/(?<![\w:-])bg-accent-fill(?![\w-])/);
     expect(body).not.toMatch(/bg-accent(?![\w-])/);
     expect(body).toMatch(/text-accent-foreground/);
     // The states every call site relies on are untouched.
@@ -151,21 +196,43 @@ describe("dp-btn-primary clears WCAG AA 1.4.3 in both themes", () => {
     expect(body).toMatch(/disabled:opacity-60/);
   });
 
-  it("hover stays opacity-based, so the new fill cannot kill press feedback", () => {
-    // In light the new fill IS --color-accent-hover, so a colour-swap hover
-    // would be invisible. This is why the rule uses hover:opacity-85.
-    const rule = /\.dp-btn-primary\s*\{([^}]*)\}/.exec(css);
-    expect(rule![1]).toMatch(/hover:opacity-85/);
-    expect(must("html", "--color-accent-fill")).toBe(must(":root", "--color-accent-hover"));
+  it("hover and press step to the hover fill instead of fading the button", () => {
+    // An opacity fade blends ink AND fill toward the page: the old
+    // hover:opacity-85 / active:opacity-70 measured 4.39:1 (dark, over #000)
+    // and 3.41:1 (light, over a white card). The hover token is measured
+    // above; this pins that both states actually use it.
+    const body = primaryRule();
+    expect(body).toMatch(/(?<![\w-])hover:bg-accent-fill-hover(?![\w-])/);
+    expect(body).toMatch(/(?<![\w-])active:bg-accent-fill-hover(?![\w-])/);
+    expect(body).not.toMatch(/hover:opacity-/);
+    expect(body).not.toMatch(/active:opacity-/);
   });
 
-  it("keeps the new token out of the design-and-style contract blocks", () => {
+  it("the dark fills follow the ink into nested .dark subtrees", () => {
+    // --color-on-accent flips under ANY `.dark` ancestor (the `.dark`
+    // contract block), and forced-dark subtrees render inside a light page
+    // (SecurityWall, WallNotice). Declared on `html.dark` alone, a primary
+    // button there would pair #1d1d1f ink with the light #4f46e5 fill:
+    // 2.68:1.
+    const ink = parseHex(must(".dark", "--color-on-accent"));
+    const lightFill = parseHex(must(FILL_LIGHT, "--color-accent-fill"));
+    expect(contrastRatio(ink, lightFill)).toBeLessThan(AA_NORMAL_TEXT);
+    expect(FILL_DARK.split(", ")).toContain("html .dark");
+    expect(tokenIn(FILL_DARK, "--color-accent-fill")).not.toBeNull();
+    expect(tokenIn(FILL_DARK, "--color-accent-fill-hover")).not.toBeNull();
+  });
+
+  it("keeps the new tokens out of the design-and-style contract blocks", () => {
     // :root / .dark are locked byte-for-byte to the canon (WARP-1277) and the
-    // gate fails on an EXTRA property as well as a drifted one, so the token
-    // is scoped to html/html.dark until it lands upstream.
-    expect(tokenIn(":root", "--color-accent-fill")).toBeNull();
-    expect(tokenIn(".dark", "--color-accent-fill")).toBeNull();
-    expect(tokenIn("html", "--color-accent-fill")).not.toBeNull();
-    expect(tokenIn("html.dark", "--color-accent-fill")).not.toBeNull();
+    // gate fails on an EXTRA property as well as a drifted one, so the tokens
+    // are scoped to `html` / `html.dark, html .dark` until they land
+    // upstream. The drift gate matches each selector in a list EXACTLY
+    // against `.dark`, so `html .dark` is not read as a contract block.
+    for (const prop of ["--color-accent-fill", "--color-accent-fill-hover"]) {
+      expect(tokenIn(":root", prop)).toBeNull();
+      expect(tokenIn(".dark", prop)).toBeNull();
+      expect(tokenIn(FILL_LIGHT, prop)).not.toBeNull();
+      expect(tokenIn(FILL_DARK, prop)).not.toBeNull();
+    }
   });
 });
