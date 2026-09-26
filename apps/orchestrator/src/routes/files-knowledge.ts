@@ -43,7 +43,8 @@ import { PrismaClient, type Prisma, type FileContentChunk } from "@prisma/client
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
-import { decryptChunkRows } from "../services/file-search.service.js";
+import { decryptChunkRows, searchHybrid } from "../services/file-search.service.js";
+import { EmbeddingClient } from "../services/embedding.client.js";
 
 const logger = createLogger("files-knowledge-route");
 
@@ -141,46 +142,6 @@ function serializeChunk(row: any) {
     // row is from before the WARP-214 migration / extractor backfill.
     metadata: row.metadata ?? null,
   };
-}
-
-/**
- * Best-effort dynamic import of the shared file-search service. Returns
- * `null` when the module is missing (e.g. WARP-202 hasn't merged yet) so
- * the route can return 503 instead of throwing through to a 500.
- *
- * The cache prevents repeated `import()` round-trips on hot paths.
- */
-let searchServiceCache: { mod: any | null; loaded: boolean } | null = null;
-async function loadSearchService(): Promise<any | null> {
-  if (searchServiceCache?.loaded) return searchServiceCache.mod;
-  try {
-    // @ts-ignore — module resolves at runtime once WARP-202 lands.
-    const mod = await import("../services/file-search.service.js");
-    searchServiceCache = { mod, loaded: true };
-    return mod;
-  } catch (err) {
-    logger.info(
-      { err: (err as Error)?.message },
-      "file-search.service not available — search route will return 503"
-    );
-    searchServiceCache = { mod: null, loaded: true };
-    return null;
-  }
-}
-
-/**
- * Same idea for the embedding client. Different module so a future
- * WARP-202 split (where embeddings live in a separate file) doesn't
- * force me to rewrite this.
- */
-async function loadEmbeddingClient(): Promise<any | null> {
-  try {
-    // @ts-ignore — module resolves at runtime once WARP-202 lands.
-    const mod = await import("../services/embedding.client.js");
-    return mod;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -355,27 +316,12 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
         since && !Number.isNaN(since.getTime()) ? since : undefined;
       const source = parseSource(req.query.source);
 
-      // WARP-202 dependency. Until both `embedding.client` and
-      // `file-search.service` are in tree, we surface a deterministic
-      // 503 so the dashboard can show "search will be online soon"
-      // without falling into a generic 500.
-      const [embedding, search] = await Promise.all([
-        loadEmbeddingClient(),
-        loadSearchService(),
-      ]);
-      if (!embedding || !search) {
-        res
-          .status(503)
-          .json({ error: "search-not-yet-available", retryAfterSeconds: 30 });
-        return;
-      }
-
       // WARP-202 exports an `EmbeddingClient` class (not a top-level
       // `embed()`); instantiate per request — the gRPC channel inside is
       // lazy so this is effectively free, and it keeps the route
       // stateless.
       const aiGatewayGrpcUrl = config.AI_GATEWAY_GRPC_URL;
-      const client = new embedding.EmbeddingClient({ url: aiGatewayGrpcUrl });
+      const client = new EmbeddingClient({ url: aiGatewayGrpcUrl });
       let vector: number[] | undefined;
       try {
         vector = (await client.embed([q]))[0];
@@ -402,7 +348,7 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
       // index owner (WARP-1140 predicate) so brain-sourced chunks stay
       // visible next to the username-keyed watcher chunks.
       const [primaryOwnerKey, ...additionalOwnerKeys] = chunkOwnerKeys(user);
-      const hits = await search.searchHybrid(prisma, {
+      const hits = await searchHybrid(prisma, {
         userId: primaryOwnerKey,
         additionalUserIds:
           additionalOwnerKeys.length > 0 ? additionalOwnerKeys : undefined,
@@ -425,8 +371,8 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
       // anchors fall back to `null` with a single warn-level log; the hit
       // is never dropped (one bad chunk shouldn't suppress a result).
       res.json({
-        hits: (hits as Array<Record<string, unknown>>).map((h) => {
-          const metadata = (h.metadata as Record<string, unknown> | null) ?? null;
+        hits: hits.map((h) => {
+          const metadata = h.metadata ?? null;
           const rawAnchor = metadata?.anchor;
           let anchor: Anchor | null = null;
           if (rawAnchor !== undefined && rawAnchor !== null) {
@@ -436,7 +382,7 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
             } else {
               logger.warn(
                 {
-                  chunkId: `${(h as { path?: string }).path ?? ""}:${(h as { chunkIdx?: number }).chunkIdx ?? -1}`,
+                  chunkId: `${h.path}:${h.chunkIdx}`,
                   rawAnchor,
                   error: parsed.error.issues,
                 },
