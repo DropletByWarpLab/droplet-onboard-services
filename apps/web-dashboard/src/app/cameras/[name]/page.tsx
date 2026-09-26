@@ -20,7 +20,7 @@ import useSWR from "swr";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { fetchPtzCapabilities, getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
-import { authFetch } from "@/lib/auth";
+import { authFetch, useAuth } from "@/lib/auth";
 import { PtzOverlay } from "@/components/ptz/PtzOverlay";
 import type { CameraInfo, DetectionEvent, PtzCapabilities } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -72,6 +72,9 @@ export default function CameraFullscreenPage() {
   const { cameras, isLoading, enableCam, disableCam, removeCam } = useCameras();
   const [removeOpen, setRemoveOpen] = useState(false);
   const { toast } = useToast();
+  const { user } = useAuth();
+  // WARP-3104: turning detection on or off is owner/admin; the box refuses members.
+  const canToggleDetection = user?.role === "owner" || user?.role === "admin";
   const camera = cameras.find((c) => c.name === name);
 
   // PTZ capabilities — fetched once per camera, cheap. Drives whether
@@ -218,7 +221,7 @@ export default function CameraFullscreenPage() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {camera.enabled ? (
+          {!canToggleDetection ? null : camera.enabled ? (
             <button
               onClick={() => disableCam(camera.name)}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"

@@ -15,6 +15,7 @@ import {
 import { regenerateEventDescription, tagEventAsFace } from "@/lib/api";
 import type { EventDetail } from "@/lib/types";
 import { useToast } from "@/components/Toast";
+import { useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
 
@@ -35,9 +36,9 @@ interface Props {
  * the camera's fullscreen page so the operator can keep watching the
  * live feed without losing the events backdrop.
  *
- * `Download` is a direct link to the proxied clip URL — the browser
- * handles the save dialog. We don't add an explicit "Save" toggle
- * here yet; that's Phase 2.2 (retain_indefinitely).
+ * `Download` asks the box for the clip as an attachment (`?download=1`).
+ * WARP-3103: Download and Save (retain) are owner/admin custody acts and
+ * the box refuses them for anyone else, so members only see the player.
  *
  * WARP-291: rebuilt on top of the shared <Dialog> primitive so ARIA
  * + focus trap + Escape + scroll-lock all come from there. The
@@ -51,6 +52,8 @@ interface Props {
 export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
   const headingId = useId();
   const { toast } = useToast();
+  const { user } = useAuth();
+  const canKeep = user?.role === "owner" || user?.role === "admin";
 
   // Local optimistic state for the Save toggle so the button flips
   // immediately on click. Reset whenever the modal switches to a new
@@ -250,7 +253,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                 <span className="hidden sm:inline">Tag person</span>
               </button>
             )}
-            {onToggleRetain && (
+            {onToggleRetain && canKeep && (
               <button
                 onClick={handleToggleRetain}
                 disabled={retainBusy}
@@ -279,9 +282,9 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
               <ExternalLink size={14} />
               <span className="hidden sm:inline">Open camera</span>
             </Link>
-            {event.clipUrl && (
+            {event.clipUrl && canKeep && (
               <a
-                href={event.clipUrl}
+                href={`${event.clipUrl}?download=1`}
                 download={`${event.camera}-${event.label}-${event.id}.mp4`}
                 className="btn"
               >

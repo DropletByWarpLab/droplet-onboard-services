@@ -96,6 +96,29 @@ const CAMERA_VIEW_ROLES = ["owner", "admin", "family"] as const;
  * recordings or editing the recordings."
  */
 const CAMERA_CUSTODY_ROLES = ["owner", "admin"] as const;
+
+/**
+ * WARP-3104 (ruling R-C1) — who may turn a camera's detection and recording
+ * on or off. Owner and admin: pausing a company camera is administering it,
+ * not watching it, and a member switching off the camera that covers their
+ * own desk is exactly the act the business needs to control.
+ */
+const CAMERA_ADMIN_ROLES = ["owner", "admin"] as const;
+
+/**
+ * WARP-3103 (ruling R-C2) — `?download=1` asks for footage as a file to keep.
+ * Without it the same bytes stream inline for playback, which every viewer
+ * may do; with it the answer is an attachment, and only custody roles get
+ * one. The route cannot stop a viewer's own client from keeping what it
+ * played; this gates the box's save path, and every play is audited.
+ */
+function wantsDownload(req: { query: Record<string, unknown> }): boolean {
+  return req.query.download === "1" || req.query.download === "true";
+}
+
+function isCustodyRole(role: string | undefined): boolean {
+  return (CAMERA_CUSTODY_ROLES as readonly string[]).includes(role ?? "");
+}
 import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
 import {
   discoveryAuthHeaders,
@@ -154,6 +177,7 @@ import {
 } from "../services/camera-settings.service.js";
 import { z } from "zod";
 import { createLogger } from "../lib/logger.js";
+import { auditCameraWatch } from "../services/camera-watch-audit.js";
 
 const logger = createLogger("cameras-routes");
 
@@ -536,12 +560,26 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidEventId(req.params.eventId)) {
         return res.status(400).json({ error: "Invalid event id" });
       }
-      const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(req.params.eventId)}/clip.mp4`;
+      const download = wantsDownload(req);
+      if (download && !isCustodyRole(req.user?.role)) {
+        return res.status(403).json({ error: "Saving footage is limited to owners and admins", code: "CAMERA_CUSTODY_REQUIRED" });
+      }
+      const eventId = req.params.eventId;
+      const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/clip.mp4`;
       const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
+      // WARP-3103: audit who fetched (or saved) it. The camera lookup is one
+      // Frigate call and never delays the footage.
+      void fetchEventCamera(eventId)
+        .catch(() => null)
+        .then((camera) => auditCameraWatch(req, camera ?? "unknown", "clip", { saved: download, eventId }));
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+      res.setHeader("Cache-Control", "private, no-store");
+      if (download) {
+        res.setHeader("Content-Disposition", `attachment; filename="clip-${eventId.replace(/[^a-zA-Z0-9._-]/g, "_")}.mp4"`);
+      }
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       if (upstream.body) {
@@ -879,6 +917,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const ctrl = new AbortController();
       req.on("close", () => ctrl.abort());
       const upstream = await openBirdseyeStream(ctrl.signal);
+      void auditCameraWatch(req, "birdseye", "live"); // WARP-3103
       const contentType =
         upstream.headers.get("content-type") ||
         "multipart/x-mixed-replace;boundary=frame";
@@ -1720,13 +1759,26 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidEventId(req.params.eventId)) {
         return res.status(400).json({ error: "Invalid event ID format" });
       }
-      const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(req.params.eventId)}/snapshot.jpg`;
+      const download = wantsDownload(req);
+      if (download && !isCustodyRole(req.user?.role)) {
+        return res.status(403).json({ error: "Saving footage is limited to owners and admins", code: "CAMERA_CUSTODY_REQUIRED" });
+      }
+      const eventId = req.params.eventId;
+      const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/snapshot.jpg`;
       const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
+      if (download) {
+        // Viewing a still is not audited (grid tiles poll every few seconds);
+        // saving one is custody, and every save is its own row.
+        void fetchEventCamera(eventId)
+          .catch(() => null)
+          .then((camera) => auditCameraWatch(req, camera ?? "unknown", "snapshot", { saved: true, eventId }));
+        res.setHeader("Content-Disposition", `attachment; filename="snapshot-${eventId.replace(/[^a-zA-Z0-9._-]/g, "_")}.jpg"`);
+      }
       const buffer = Buffer.from(await upstream.arrayBuffer());
       res.send(buffer);
     } catch (err) {
@@ -2127,6 +2179,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           break;
         }
         case "disable_camera": {
+          // WARP-3104: /disable no longer mints for a member; refuse one
+          // minted before the gate (the token outlives a deploy by 60 s).
+          if (req.user?.role !== "service" && !(CAMERA_ADMIN_ROLES as readonly string[]).includes(req.user?.role ?? "")) {
+            return res.status(403).json({ error: "Forbidden" });
+          }
           const name = p.name as string;
           if (!isValidCameraName(name)) {
             return res.status(400).json({ error: "Invalid camera name in confirmed command" });
@@ -2301,6 +2358,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const ctrl = new AbortController();
       req.on("close", () => ctrl.abort());
       const frigateResp = await openMjpegStream(req.params.name, ctrl.signal);
+      void auditCameraWatch(req, req.params.name, "live"); // WARP-3103
       const contentType =
         frigateResp.headers.get("content-type") ||
         "multipart/x-mixed-replace;boundary=frame";
@@ -2353,8 +2411,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   // --- Enable camera ---
   // WARP-1440: requireRoleOrMcpService so the set_camera_detection LLM tool
-  // (dispatching as `_service:mcp`) can toggle; human roles unchanged.
-  router.post("/cameras/:name/enable", requireRoleOrMcpService("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
+  // (dispatching as `_service:mcp`) can toggle. WARP-3104: owner/admin only;
+  // a member's chat never reaches the tool (narrowAllowedToolsForRole strips
+  // every requiresWrite tool from family), so the MCP admission stays.
+  router.post("/cameras/:name/enable", requireRoleOrMcpService(...CAMERA_ADMIN_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2376,7 +2436,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- Disable camera (Tier 2 — requires confirmation) ---
   // WARP-1440: requireRoleOrMcpService (see /enable). The Tier-2 202 +
   // confirm handshake below applies to the MCP principal exactly as to humans.
-  router.post("/cameras/:name/disable", requireRoleOrMcpService("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
+  router.post("/cameras/:name/disable", requireRoleOrMcpService(...CAMERA_ADMIN_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2628,6 +2688,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
+      void auditCameraWatch(req, req.params.name, "recording"); // WARP-3103
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
@@ -2702,6 +2763,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         })
         .join("\n");
 
+      // WARP-3103: one audit per playlist, never per segment.
+      void auditCameraWatch(req, req.params.name, "recording");
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       res.setHeader("Cache-Control", "no-store");
       res.send(rewritten);

@@ -64,6 +64,9 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchSnapshot: okAsync(),
   fetchEventThumbnail: okAsync(),
   fetchEventSnapshot: okAsync(),
+  // WARP-3103: resolves an event to its camera for the per-camera guard and
+  // the watch audit; "front" is granted to family below.
+  fetchEventCamera: vi.fn().mockResolvedValue("front"),
   fetchKnownFaces: okAsync(),
   fetchKnownPlates: okAsync(),
   fetchFaceImage: okAsync(),
@@ -195,6 +198,8 @@ const IMAGERY_AND_FOOTAGE: Array<[string, string]> = [
   ["get", "/api/cameras/events/recent"],
   ["get", "/api/cameras/events/abc/thumbnail"],
   ["get", "/api/cameras/events/abc/snapshot"],
+  // WARP-3103: playing an event clip inline stays open to members.
+  ["get", "/api/cameras/clips/event/abc"],
   ["get", "/api/cameras/system"],
   ["get", "/api/cameras/storage"],
 ];
@@ -253,6 +258,39 @@ describe("taking footage off the box is owner/admin only", () => {
       verb
     ](path);
     expect(res.status).not.toBe(403);
+  });
+});
+
+/** WARP-3103 (R-C2): saving footage as a file, the attachment path. */
+const SAVE_FOOTAGE: Array<[string, string]> = [
+  ["get", "/api/cameras/clips/event/abc?download=1"],
+  ["get", "/api/cameras/events/abc/snapshot?download=1"],
+];
+
+/** WARP-3104 (R-C1): turning a camera's detection on or off. */
+const DETECTION: Array<[string, string]> = [
+  ["post", "/api/cameras/front/enable"],
+  ["post", "/api/cameras/front/disable"],
+];
+
+describe("saving footage and switching detection are owner/admin only (WARP-3103, WARP-3104)", () => {
+  const call = (role: Role, verb: string, path: string) =>
+    (request(appAs(role)) as never as Record<string, (p: string) => Promise<{ status: number }>>)[verb](path);
+
+  it.each([...SAVE_FOOTAGE, ...DETECTION])("%s %s → 403 for family", async (verb, path) => {
+    expect((await call("family", verb, path)).status).toBe(403);
+  });
+
+  it.each([...SAVE_FOOTAGE, ...DETECTION])("%s %s → 403 for guest", async (verb, path) => {
+    expect((await call("guest", verb, path)).status).toBe(403);
+  });
+
+  it.each([...SAVE_FOOTAGE, ...DETECTION])("%s %s is reachable for owner", async (verb, path) => {
+    expect((await call("owner", verb, path)).status).not.toBe(403);
+  });
+
+  it.each([...SAVE_FOOTAGE, ...DETECTION])("%s %s is reachable for admin", async (verb, path) => {
+    expect((await call("admin", verb, path)).status).not.toBe(403);
   });
 });
 
