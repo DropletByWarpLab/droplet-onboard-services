@@ -270,8 +270,16 @@ async function callNarratorModel(model: string, input: NarrativeInputV1, signal:
   );
 }
 
+/** What the calls of one summary cost: the box proof's numbers (§12), logged with each write — never the text. */
+interface CallCost {
+  /** The sum of `usage.total_tokens` over the calls, or null when no call reported it. */
+  totalTokens: number | null;
+  callMs: number;
+  calls: number;
+}
+
 type Attempt =
-  | { kind: "written"; text: string; model: string }
+  | { kind: "written"; text: string; model: string; cost: CallCost }
   | { kind: "failed"; error: NarrativeError }
   | { kind: "yield" }
   | { kind: "rate" };
@@ -300,6 +308,7 @@ function modelName(response: unknown, requested: string): string {
 /** One summary: the call, the check, one retry. Yields when a chat starts. */
 async function narrateOnce(model: string, input: NarrativeInputV1, forbidden: readonly string[], now: () => Date): Promise<Attempt> {
   let retry: NarrativeCheckRule | null = null;
+  const cost: CallCost = { totalTokens: null, callMs: 0, calls: 0 };
   for (let call = 0; call < 2; call++) {
     const nowMs = now().getTime();
     if (!interactiveInferenceIdle(nowMs)) return { kind: "yield" };
@@ -329,10 +338,13 @@ async function narrateOnce(model: string, input: NarrativeInputV1, forbidden: re
     }
     if (yielded.signal.aborted) return { kind: "yield" };
     narratorHealth.lastCallMs = Date.now() - started;
+    cost.callMs += narratorHealth.lastCallMs;
+    cost.calls++;
     const tokens = body?.usage?.total_tokens;
     if (typeof tokens === "number" && Number.isFinite(tokens)) {
       narratorHealth.lastTotalTokens = tokens;
       narratorHealth.tokenSamples = [...narratorHealth.tokenSamples, tokens].slice(-TOKEN_SAMPLES);
+      cost.totalTokens = (cost.totalTokens ?? 0) + tokens;
     }
 
     const choice = body?.choices?.[0];
@@ -340,7 +352,7 @@ async function narrateOnce(model: string, input: NarrativeInputV1, forbidden: re
     if (choice?.finish_reason === "length") return { kind: "failed", error: "LENGTH" };
     if (text.trim().length === 0) return { kind: "failed", error: "EMPTY" };
     const checked = checkNarrative(text, input, forbidden);
-    if (checked.ok) return { kind: "written", text: checked.text, model: modelName(body?.model, model) };
+    if (checked.ok) return { kind: "written", text: checked.text, model: modelName(body?.model, model), cost };
     if (call === 1) return { kind: "failed", error: `CHECK_FAILED:${checked.rule}` };
     retry = checked.rule;
   }
@@ -615,6 +627,11 @@ async function runTick(prisma: PrismaClient, clock: () => Date, now: Date, resul
       result.written++;
       narratorHealth.lastWrittenAt = clock();
       narratorHealth.pending = Math.max(0, narratorHealth.pending - 1);
+      // The box proof's line (#2423 review 9): numbers only — never the text, a place, a camera or a name.
+      logger.info(
+        { incidentId: p.id, totalTokens: attempt.cost.totalTokens, callMs: attempt.cost.callMs, calls: attempt.cost.calls },
+        "security narrator: a summary was written",
+      );
     } else {
       logger.info({ incidentId: p.id }, "security narrator: the incident moved while it was written; the text is discarded");
     }

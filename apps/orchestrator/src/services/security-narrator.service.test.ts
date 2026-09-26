@@ -23,6 +23,13 @@ vi.mock("./ai-gateway.client.js", () => ({
   listModels: gw.listModels,
   getModelProvider: async (model: string) => gw.models.find((m) => m.id === model)?.provider,
 }));
+/** Every structured log line, for the box-proof line (#2423 review 9). */
+const logged = vi.hoisted(() => [] as Array<{ level: string; obj: Record<string, unknown>; msg: string }>);
+vi.mock("../lib/logger.js", () => {
+  const push = (level: string) => (obj: Record<string, unknown>, msg: string) => void logged.push({ level, obj, msg });
+  const stub = { error: push("error"), warn: push("warn"), info: push("info"), debug: push("debug") };
+  return { createLogger: () => stub };
+});
 
 import {
   NARRATOR_MAX_CALLS_PER_HOUR,
@@ -174,6 +181,7 @@ function reply(content: string, over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  logged.length = 0;
   _resetNarratorForTests();
   _resetInteractiveInferenceForTests();
   clock = NOW;
@@ -246,6 +254,37 @@ describe("tickSecurityNarrator — writing one summary", () => {
     gw.chat.mockImplementation(async () => reply(GOOD, { model: "" }));
     await tickSecurityNarrator(prisma, deps());
     expect(byId(i!.id).narrativeModel).toBe("gpt-oss:20b");
+  });
+});
+
+// #2423 review 9: the box proof reads each summary's tokens and time from the log — numbers only.
+describe("each write logs its tokens and its time, never its text or a name", () => {
+  const writes = () => logged.filter((l) => l.msg === "security narrator: a summary was written");
+
+  it("one call: its total_tokens and its duration, at info", async () => {
+    const [i] = seed([incident()]);
+    await tickSecurityNarrator(prisma, deps());
+    expect(writes()).toHaveLength(1);
+    const [w] = writes();
+    expect(w!.level).toBe("info");
+    expect(w!.obj).toEqual({ incidentId: i!.id, totalTokens: 820, callMs: expect.any(Number), calls: 1 });
+    expect(w!.obj.callMs as number).toBeGreaterThanOrEqual(0);
+    const line = JSON.stringify(logged);
+    for (const s of [GOOD, "Stock room", "Back camera", "Stefan", "Maria", "stefan", "maria"]) expect(line).not.toContain(s);
+  });
+
+  it("a check retry: both calls' tokens, and the two calls counted", async () => {
+    seed([incident()]);
+    gw.chat.mockImplementationOnce(async () => reply("An intruder was seen at 10:14 PM.")).mockImplementationOnce(async () => reply(GOOD));
+    await tickSecurityNarrator(prisma, deps());
+    expect(writes()[0]!.obj).toMatchObject({ totalTokens: 1640, calls: 2 });
+  });
+
+  it("a gateway that reports no usage logs null tokens, never a guess", async () => {
+    seed([incident()]);
+    gw.chat.mockImplementation(async () => reply(GOOD, { usage: undefined }));
+    await tickSecurityNarrator(prisma, deps());
+    expect(writes()[0]!.obj).toMatchObject({ totalTokens: null, calls: 1 });
   });
 });
 
