@@ -41,6 +41,7 @@ import { Router } from "express";
 import { PrismaClient, type Prisma, type FileContentChunk } from "@prisma/client";
 
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
+import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { decryptChunkRows } from "../services/file-search.service.js";
 
@@ -218,8 +219,7 @@ async function buildRerankPipe(): Promise<
       import("../services/cache.service.js"),
       import("../services/reranker.client.js"),
     ]);
-    const aiGatewayGrpcUrl =
-      process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+    const aiGatewayGrpcUrl = config.AI_GATEWAY_GRPC_URL;
     rerankPipeSingleton = {
       redis: getRedis() as unknown as {
         get(k: string): Promise<string | null>;
@@ -373,10 +373,8 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
       // WARP-202 exports an `EmbeddingClient` class (not a top-level
       // `embed()`); instantiate per request — the gRPC channel inside is
       // lazy so this is effectively free, and it keeps the route
-      // stateless. URL falls back to the same default the MCP server
-      // uses (`ai-gateway:50051`) so dev + Compose stay in sync.
-      const aiGatewayGrpcUrl =
-        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      // stateless.
+      const aiGatewayGrpcUrl = config.AI_GATEWAY_GRPC_URL;
       const client = new embedding.EmbeddingClient({ url: aiGatewayGrpcUrl });
       let vector: number[] | undefined;
       try {
