@@ -314,7 +314,6 @@ function InlineChat({
 
   return (
     <div className="w-chat w-chat--conv">
-      <div className="w-chat-aurora" aria-hidden />
       <div className="w-chat-conv-head">
         <span className="w-chat-conv-title">
           <Sparkles size={14} />
@@ -463,7 +462,6 @@ function ChatWidget({ w, h }: WidgetProps) {
 
   return (
     <div className="w-chat">
-      <div className="w-chat-aurora" aria-hidden />
       <div className="w-chat-display" style={{ fontSize: fs }}>
         {greeting}. What can I <em>help you</em> with today?
       </div>
@@ -928,12 +926,7 @@ function ScenesWidget() {
 }
 
 /* ─────────────────────────── Cameras live peek ─────────────────────────── */
-const CAM_TINTS = [
-  "linear-gradient(135deg,#171922,#222633)",
-  "linear-gradient(135deg,#191c26,#262b3a)",
-  "linear-gradient(135deg,#15171f,#1f2937)",
-  "linear-gradient(135deg,#1a1d27,#242a38)",
-];
+const CAM_TINT = "#0f1117";
 // The home peek polls slower than the cameras grid. `/api/cameras/:name/
 // snapshot` answers with `Cache-Control: max-age=5`, so busting the URL any
 // faster than that only spends requests the browser would have served from
@@ -956,19 +949,17 @@ const aspectOf = (img: { naturalWidth?: number; naturalHeight?: number }): numbe
 };
 
 /**
- * One live tile. The gradient tint is the *fallback*, not the content — it
+ * One live tile. The flat tint is the *fallback*, not the content — it
  * shows while the first frame decodes, and again if the feed drops. Frames
  * are preloaded offscreen and only swapped in once decoded, so the tile
  * never blinks through a blank state (same rationale as CameraCard).
  */
 function CamTile({
   camera,
-  tint,
   motion,
   more,
 }: {
   camera: CameraInfo;
-  tint: string;
   motion: boolean;
   more: number;
 }) {
@@ -1030,7 +1021,7 @@ function CamTile({
       type="button"
       // The tile takes the frame's shape so the feed is shown whole and
       // undistorted; the CSS default (16/9) covers the pre-first-frame tint.
-      style={{ background: tint, ...(ratio ? { aspectRatio: String(ratio) } : {}) }}
+      style={{ background: CAM_TINT, ...(ratio ? { aspectRatio: String(ratio) } : {}) }}
       onClick={() => router.push("/cameras")}
       aria-label={`Open ${label} in Cameras`}
     >
@@ -1066,7 +1057,6 @@ export function CamerasWidget({ w, h }: WidgetProps) {
         <CamTile
           key={cam.name}
           camera={cam}
-          tint={CAM_TINTS[i % CAM_TINTS.length]}
           motion={cam.status === "detecting" || Boolean(cam.lastDetection)}
           more={tiny && cameras.length > 1 && i === 0 ? cameras.length - 1 : 0}
         />

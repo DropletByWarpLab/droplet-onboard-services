@@ -88,13 +88,6 @@
   --nav-link: #565a66;
   --scrim: rgba(28, 30, 40, 0.32);
 
-  /* ambient blob opacities (AmbientLayer reuse) */
-  --hero-aurora-opacity: 0.4;
-  --blob-a: 0.05;
-  --blob-b: 0.045;
-  --blob-c: 0.035;
-  --blob-d: 0.03;
-
   color-scheme: light;
   color: var(--text);
   font-family: var(--font-ui);
@@ -137,12 +130,6 @@
   --text-faint: #3f3f46;
   --nav-link: #a1a1aa;
   --scrim: rgba(8, 9, 13, 0.6);
-
-  --hero-aurora-opacity: 0.5;
-  --blob-a: 0.1;
-  --blob-b: 0.085;
-  --blob-c: 0.065;
-  --blob-d: 0.05;
 
   color-scheme: dark;
 }

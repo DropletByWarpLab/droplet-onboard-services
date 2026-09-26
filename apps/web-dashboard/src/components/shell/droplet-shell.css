@@ -268,7 +268,7 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 
 /* ── Camera feed tile (dark imagery placeholder) ───────── */
 .droplet-shell .feed { position: relative; border-radius: 12px; overflow: hidden; background:
-  linear-gradient(135deg, #161922, #0d0f15); border: 1px solid var(--card-bd); }
+  #0f1117; border: 1px solid var(--card-bd); }
 .droplet-shell .feed::after { content: ""; position: absolute; inset: 0;
   background-image: repeating-linear-gradient(0deg, rgba(255,255,255,0.02) 0 1px, transparent 1px 3px); pointer-events: none; }
 .droplet-shell .feed .rec { position: absolute; top: 9px; left: 9px; width: 7px; height: 7px; border-radius: 50%; background: #ef4444;

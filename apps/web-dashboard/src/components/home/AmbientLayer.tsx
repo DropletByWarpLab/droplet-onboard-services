@@ -2,9 +2,11 @@
 
 /**
  * Ambient decorative layer for the Home surface:
- *  · slowly drifting indigo background blobs (+ one faint amber complement)
  *  · a faceted droplet pinned bottom-right that animates while the page
  *    settles, then fades out — a calm "load" indicator.
+ *
+ * The page background itself is flat: the drifting blob wash that used to
+ * sit behind it was removed so the desk reads as one solid dark grey.
  *
  * Purely decorative (pointer-events: none, aria-hidden) and fully scoped
  * under `.droplet-home`, so it never interferes with the rest of the app.
@@ -25,12 +27,6 @@ export function AmbientLayer() {
 
   return (
     <>
-      <div className="dh-ambient" aria-hidden>
-        <span className="blob b1" />
-        <span className="blob b2" />
-        <span className="blob b3" />
-        <span className="blob b4" />
-      </div>
       <div className={"dh-drop" + (loaded ? " dh-drop--done" : "")} aria-hidden>
         <span className="ripple" />
         <span className="ripple ripple2" />
