@@ -9,7 +9,7 @@
  * Only `recordActivity` — the append-lock singleton at the very bottom of that
  * call — is replaced, so the row can be observed.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 
@@ -74,6 +74,20 @@ function buildApp(user: { id?: string; role?: string } | undefined, prisma = pri
 
 beforeEach(() => {
   recordActivityMock.mockReset();
+  // WARP-3191 — the route calls `driftForConnection` WITHOUT a `now`, so its
+  // window is measured from the real clock, and that is correct product
+  // behaviour. The fixtures above are pinned to NOW, so the file pins the
+  // clock to NOW too; otherwise every row ages out of the 30-day window a
+  // month after NOW and the payload cases silently receive `entries: []`.
+  //
+  // `Date` ONLY. Faking timers or microtasks would stall supertest's socket
+  // round-trip and hang every request in this file.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("GET /api/integrations/:connectionId/drift — the guard", () => {
@@ -170,6 +184,35 @@ describe("GET /api/integrations/:connectionId/drift — the payload", () => {
       driftedRows: 0,
       totalMissed: 0,
     });
+  });
+
+  it("leaves out a sweep older than the window, measured from the system clock", async () => {
+    // WARP-3191. The route passes no `now`, so the window runs back from the
+    // system clock (pinned to NOW above). Every other fixture row is one day
+    // old, so without this case nothing in this file exercises the window at
+    // all — only the clock drifting past NOW ever did, and it did so by
+    // failing the cases that were not about the window.
+    //
+    // MUTATION: drop the `sweepAt: { gte: since }` filter from
+    // `driftForConnection` → the 31-day-old row comes back → red.
+    const prisma = prismaStub([
+      driftRow(),
+      driftRow({
+        id: "d-old",
+        sweepAt: new Date(NOW.getTime() - 31 * DAY),
+        classification: "MISSED_NEWER",
+        missedCount: 4,
+      }),
+    ]);
+    const res = await request(buildApp({ id: "u-1", role: "admin" }, prisma)).get(
+      "/api/integrations/conn-1/drift",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.windowDays).toBe(30);
+    expect(res.body.entries).toHaveLength(1);
+    expect(res.body.entries[0].sweepAt).toBe(new Date(NOW.getTime() - DAY).toISOString());
+    expect(res.body.summary).toMatchObject({ rowsRecorded: 1, driftedRows: 0, totalMissed: 0 });
   });
 
   it("distinguishes 'never measured' from 'measured and clean'", async () => {
