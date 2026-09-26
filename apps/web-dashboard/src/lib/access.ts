@@ -61,8 +61,9 @@ export function isAdminRole(role?: string | null): boolean {
   return role === "owner" || role === "admin";
 }
 
-/** Display label — the ONE place the `family` → "Staff" relabel lives
- *  (§0.1 / O-1). The enum value never changes. */
+/** Display label — the ONE place the `family` → "Member" / `guest` →
+ *  "External guest" relabel lives (Romain, 2026-09-25; supersedes the
+ *  §0.1 / O-1 "Staff" label). The enum value never changes. */
 export function tierLabel(tier: AccessTier): string {
   switch (tier) {
     case "owner":
@@ -70,16 +71,15 @@ export function tierLabel(tier: AccessTier): string {
     case "admin":
       return "Admin";
     case "family":
-      return "Staff";
+      return "Member";
     case "guest":
-      return "Guest";
+      return "External guest";
     case "service":
       return "Service";
   }
 }
 
-/** Lower-case plural for sentence positions ("…are for admins."). "Staff"
- *  is its own plural — never "staffs". */
+/** Lower-case plural for sentence positions ("…are for admins."). */
 export function tierPlural(tier: AccessTier): string {
   switch (tier) {
     case "owner":
@@ -87,9 +87,9 @@ export function tierPlural(tier: AccessTier): string {
     case "admin":
       return "admins";
     case "family":
-      return "staff";
+      return "members";
     case "guest":
-      return "guests";
+      return "external guests";
     case "service":
       return "service identities";
   }

@@ -99,6 +99,7 @@ import {
 import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
 import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { isLocalProvider } from "@/lib/provider";
 import {
   createVpnPeer,
@@ -208,7 +209,7 @@ function WEmpty({ children }: { children: React.ReactNode }) {
 
 /**
  * WARP-1803 — the model the hero (and its inline conversation) answers with.
- * Same preference order as the chat page (WARP-1112): the household's chosen
+ * Same preference order as the chat page (WARP-1112): the Workspace's chosen
  * default → first local (on-box) → first available. Null while the list is
  * loading or when no model is configured.
  */
@@ -698,12 +699,19 @@ type StatRow = {
 };
 function StatusWidget({ w, h }: WidgetProps) {
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = isAdminRole(user?.role);
+  const isGuest = user?.role === "guest";
   const { items: recents } = useRecents(50);
   const { models } = useModels();
   const { totalCameras } = useCameras();
   const { totalDevices } = useSmartHome();
   // WARP-1055 — the Home surface's Voice status line lives inside this
   // existing system-health tile (design brief §2), not a new tile.
+  // WARP-3157 — GET /api/voice/status is owner/admin only; a member or
+  // guest polling it forever gets a 403 and the row read "— · checking…"
+  // with no way to resolve. The hook still runs (rules of hooks), but the
+  // row below is dropped from `stats` for non-admins.
   const { state: voiceState, unavailable: voiceUnavailable } =
     useVoiceHealthSummary();
 
@@ -734,11 +742,17 @@ function StatusWidget({ w, h }: WidgetProps) {
                 : voice("—", "not calibrated yet", "var(--color-label-quaternary)");
 
   const stats: StatRow[] = [
-    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recently indexed", dot: "var(--success)", href: "/files" },
-    { icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" },
+    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recent files", dot: "var(--success)", href: "/files" },
+    // WARP-3157 — every camera route refuses role `guest`; showing this stat
+    // to a guest would report "none yet" as if the box had no cameras.
+    ...(isGuest
+      ? []
+      : [{ icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" } satisfies StatRow]),
     { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" },
     { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
-    voiceRow,
+    // WARP-3157 — GET /api/voice/status is owner/admin only; hide the row
+    // for everyone else rather than a permanent "— · checking…".
+    ...(isAdmin ? [voiceRow] : []),
   ];
 
   if (w <= 2 || h <= 2) {
@@ -1680,6 +1694,12 @@ const CONF_CLIPBOARD_TTL_MS = 30_000;
  */
 export function RemoteAccessWidget(_: WidgetProps) {
   const { user } = useAuth();
+  // WARP-3157 — POST/DELETE /api/vpn/peers are owner/admin only ("family
+  // users should ask an admin to add their device", routes/vpn.ts); a
+  // member flipping this switch always 403s. GET /vpn/status + /vpn/peers
+  // stay readable by anyone, so the status text below is still honest —
+  // only the switch itself is admin-gated.
+  const isAdmin = isAdminRole(user?.role);
   const [status, setStatus] = useState<VpnStatusInfo | null>(null);
   const [peers, setPeers] = useState<VpnPeerInfo[]>([]);
   // WARP-1763: did the orchestrator actually read the router's peer list? When
@@ -1780,9 +1800,11 @@ export function RemoteAccessWidget(_: WidgetProps) {
     }
   };
 
-  // The switch is inert while loading/blocked/minting, and while on with no
-  // devices of your own to revoke (others manage theirs in Remote Access).
-  const inert = !loaded || blocked || submitting || (on && mine.length === 0);
+  // The switch is inert while loading/blocked/minting, while on with no
+  // devices of your own to revoke (others manage theirs in Remote Access),
+  // and always for a non-admin (WARP-3157 — mint/revoke are owner/admin
+  // only; a member's tap always 403s).
+  const inert = !isAdmin || !loaded || blocked || submitting || (on && mine.length === 0);
 
   const flip = () => {
     if (inert) return;
@@ -1814,7 +1836,9 @@ export function RemoteAccessWidget(_: WidgetProps) {
                   ? ` · ${connectedNow} connected now`
                   : ""
               }`
-            : "Off · tap to connect this device";
+            : isAdmin
+              ? "Off · tap to connect this device"
+              : "Off · ask an admin to turn this on";
 
   const copyConf = () => {
     if (!created) return;
@@ -1843,33 +1867,48 @@ export function RemoteAccessWidget(_: WidgetProps) {
 
   return (
     <div className="w-remote">
-      <div
-        className={"w-dev" + (on || submitting ? " on" : "")}
-        role="switch"
-        aria-checked={on || submitting}
-        aria-disabled={inert || undefined}
-        aria-label="Remote access"
-        aria-describedby="w-remote-sub"
-        tabIndex={0}
-        onClick={flip}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            flip();
-          }
-        }}
-      >
-        <span className="di">
-          <Globe size={14} />
-        </span>
-        <span className="dn">
-          <div className="nm">Droplet VPN</div>
-          <div className="sb" id="w-remote-sub">{sub}</div>
-        </span>
-        <span className="w-toggle">
-          <span className="ball" />
-        </span>
-      </div>
+      {/* WARP-3157 — mint/revoke are owner/admin only, so a member or guest
+          gets a status line, never an actionable switch (the tap would
+          always 403). */}
+      {isAdmin ? (
+        <div
+          className={"w-dev" + (on || submitting ? " on" : "")}
+          role="switch"
+          aria-checked={on || submitting}
+          aria-disabled={inert || undefined}
+          aria-label="Remote access"
+          aria-describedby="w-remote-sub"
+          tabIndex={0}
+          onClick={flip}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              flip();
+            }
+          }}
+        >
+          <span className="di">
+            <Globe size={14} />
+          </span>
+          <span className="dn">
+            <div className="nm">Droplet VPN</div>
+            <div className="sb" id="w-remote-sub">{sub}</div>
+          </span>
+          <span className="w-toggle">
+            <span className="ball" />
+          </span>
+        </div>
+      ) : (
+        <div className={"w-dev" + (on ? " on" : "")} aria-label="Remote access">
+          <span className="di">
+            <Globe size={14} />
+          </span>
+          <span className="dn">
+            <div className="nm">Droplet VPN</div>
+            <div className="sb" id="w-remote-sub">{sub}</div>
+          </span>
+        </div>
+      )}
 
       <div className="w-remote-addr">
         {fqdn ? (

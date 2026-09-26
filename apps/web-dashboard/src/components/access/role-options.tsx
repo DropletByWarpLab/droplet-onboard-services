@@ -10,7 +10,7 @@
  *
  *   - the `role:<id>` / `tier:<tier>` option-value scheme;
  *   - the grouping — `Your roles` (custom, when any) ABOVE `Built-in`
- *     (Admin / Staff / Guest — NEVER Owner or Service);
+ *     (Admin / Member / External guest — NEVER Owner or Service);
  *   - the WARP-623 rank gate: options above the acting admin's tier render
  *     disabled with the §12 rank-cap reason, never hidden.
  *

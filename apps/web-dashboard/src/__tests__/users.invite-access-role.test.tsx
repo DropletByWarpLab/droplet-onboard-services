@@ -3,10 +3,10 @@
  * (design brief §7, Surface D).
  *
  *   - Options group as `Your roles` ABOVE `Built-in`; the built-in group
- *     offers Admin / Staff / Guest only — NEVER Owner or Service.
+ *     offers Admin / Member / External guest only — NEVER Owner or Service.
  *   - Picking a custom role sends `accessRoleId` + the role's startingPoint
  *     as the tier (the identical value scheme the person editor uses).
- *   - Default = the most-restrictive sensible role (built-in Guest), sent
+ *   - Default = the most-restrictive sensible role (built-in External guest), sent
  *     as the CANONICAL enum value (retiring the legacy "user" alias).
  *   - Degraded mode: roles that can't load ⇒ built-in tiers only, with an
  *     honest caption — never a silently absent group.
@@ -129,7 +129,7 @@ beforeEach(() => {
 });
 
 describe("Users page — invite modal access-role picker (WARP-1533)", () => {
-  it("groups custom roles under 'Your roles' above 'Built-in' (Admin / Staff / Guest — never Owner or Service)", async () => {
+  it("groups custom roles under 'Your roles' above 'Built-in' (Admin / Member / External guest — never Owner or Service)", async () => {
     const select = await openInviteModal();
 
     await waitFor(() => {
@@ -143,10 +143,10 @@ describe("Users page — invite modal access-role picker (WARP-1533)", () => {
     expect(within(groups[0]!).getByRole("option", { name: "Finance" })).toBeInTheDocument();
     expect(within(groups[0]!).getByRole("option", { name: "Ops lead" })).toBeInTheDocument();
 
-    // Built-in group: Admin / Staff (the family relabel, §0.1) / Guest.
+    // Built-in group: Admin / Member (the family relabel) / External guest.
     expect(within(groups[1]!).getByRole("option", { name: "Admin" })).toBeInTheDocument();
-    expect(within(groups[1]!).getByRole("option", { name: "Staff" })).toBeInTheDocument();
-    expect(within(groups[1]!).getByRole("option", { name: "Guest" })).toBeInTheDocument();
+    expect(within(groups[1]!).getByRole("option", { name: "Member" })).toBeInTheDocument();
+    expect(within(groups[1]!).getByRole("option", { name: "External guest" })).toBeInTheDocument();
 
     // NEVER Owner or Service — anywhere in the picker.
     expect(within(select).queryByRole("option", { name: /owner/i })).toBeNull();
@@ -210,7 +210,7 @@ describe("Users page — invite modal access-role picker (WARP-1533)", () => {
     // Built-in group only — no fabricated "Your roles" group.
     expect(within(select).getAllByRole("group")).toHaveLength(1);
     expect(within(select).getAllByRole("group")[0]).toHaveAttribute("label", "Built-in");
-    expect(within(select).getByRole("option", { name: "Staff" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "Member" })).toBeInTheDocument();
 
     // The honest caption names the degradation — the admin is told, not
     // left to wonder where their roles went. The roles read is its own
@@ -416,7 +416,7 @@ describe("Users page — invite modal access-role picker (WARP-1533)", () => {
  * — a ternary written against the legacy `InviteRole = "user" | "admin"`
  * type, which was never what the server sent: `UserInvite.role` is the
  * Prisma `Role` enum. So every non-admin invite read "user" regardless of
- * whether it was Staff, Guest, or a custom Finance role, and the one screen
+ * whether it was Member, External guest, or a custom Finance role, and the one screen
  * that exists to review pending grants could not review them.
  *
  * The row now resolves the same way the roster does (`roleLabelFor`):
@@ -466,7 +466,7 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       invites: [pendingInvite({ role: "family", accessRoleId: FINANCE.id })],
     });
 
-    // The chip reads "Staff" (the tier label) until the roles list — its own
+    // The chip reads "Member" (the tier label) until the roles list — its own
     // fetch chain, independent of the invites fetch inviteRow awaits — has
     // loaded and resolved the id to "Finance". Await that on the SAME row
     // rather than mounting a second page to re-read it.
@@ -480,17 +480,17 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       invites: [pendingInvite({ role: "family", accessRoleId: null })],
     });
 
-    // `family` displays as "Staff" (§0.1) — the same relabel the roster uses.
-    expect(await inviteRoleChip()).toBe("Staff");
+    // `family` displays as "Member" — the same relabel the roster uses.
+    expect(await inviteRoleChip()).toBe("Member");
     expect((await inviteRow()).textContent).not.toMatch(/\buser\b/);
   });
 
-  it("distinguishes guest from staff — the legacy ternary collapsed both to 'user'", async () => {
+  it("distinguishes external guest from member — the legacy ternary collapsed both to 'user'", async () => {
     listInvitesMock.mockResolvedValue({
       invites: [pendingInvite({ role: "guest", accessRoleId: null })],
     });
 
-    expect(await inviteRoleChip()).toBe("Guest");
+    expect(await inviteRoleChip()).toBe("External guest");
   });
 
   it("falls back to the tier label when the role catalog does not have the id", async () => {

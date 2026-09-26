@@ -24,7 +24,7 @@ export const WALL_COPY = {
   // Plain words: "wall" is our name for it, not the person's.
   link: "TV view",
   // D6: the tier is tierLabel("family"), pinned in wall-status.test.
-  linkTitle: "A full-screen view for a TV signed in with a Staff account. It shows that account's cameras.",
+  linkTitle: "A full-screen view for a TV signed in with a Member account. It shows that account's cameras.",
   heading: "Security TV view",
   leave: "Back to Security",
   fullScreen: "Full screen",
@@ -77,15 +77,15 @@ export const WALL_COPY = {
   offlineBody: "What you see is from {time}.",
   signOutSoon: "This screen will be signed out by {time} at the latest. Someone will need to sign in again to keep it on.",
 
-  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Staff account only. {tier} is tierLabel("family").
+  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Member account only. {tier} is tierLabel("family").
   // The device is named "this screen", as on the wall's banners: the refusal is as often a laptop's as a TV's.
   refusedTitle: "This TV view doesn't run on an owner or admin account",
   refusedWhy: "An owner or admin account can reach nearly everything in Droplet, and a TV stays signed in, in a room, for hours.",
-  refusedGuestTitle: "This TV view doesn't run on a guest account",
-  refusedGuestWhy: "A guest account can't see Security or its cameras, so there is nothing to show here.",
+  refusedGuestTitle: "This TV view doesn't run on an external guest account",
+  refusedGuestWhy: "An external guest account can't see Security or its cameras, so there is nothing to show here.",
   refusedWhat: "Sign in here with a {tier} account instead. This screen then shows only the cameras that account has been given.",
-  // Non-blocking 1 (rjouffret, round 3): a Staff account holds Security at Respond by default (the mode, acknowledging);
-  // a role based on Staff with Security at View has the server refuse those. Words as the role builder shows them.
+  // Non-blocking 1 (rjouffret, round 3): a Member account holds Security at Respond by default (the mode, acknowledging);
+  // a role based on Member with Security at View has the server refuse those. Words as the role builder shows them.
   refusedManage:
     "It's best to make an account just for this screen. On the Users page, add it and choose its cameras. Then in Roles & access, give it a role based on {tier} with Cameras on and Security set to View, so it can't change the site mode or acknowledge alerts.",
   refusedManageLink: "Open Users",
@@ -100,7 +100,7 @@ export const WALL_COPY = {
 } as const;
 
 /**
- * D6 — the one role a wall runs for: Staff (`family`). An owner or admin
+ * D6 — the one role a wall runs for: Member (`family`). An owner or admin
  * session is refused (Stefan: "Member wall, own cameras"): a TV stays signed
  * in, unattended, in a room, one click from everything that account can do.
  * A guest is refused too: every read the wall makes (route 17's counts,

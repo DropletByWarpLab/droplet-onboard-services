@@ -59,7 +59,7 @@ async function handler(
       status: "error",
       error: {
         code: "FORBIDDEN",
-        message: "email search is available to owner, admin, and family roles only",
+        message: "email search is available to owner, admin, and member roles only",
       },
     };
   }

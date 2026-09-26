@@ -1450,7 +1450,7 @@ export interface InviteCreateResponse {
 // inferred. The backend routes (T3+) build in parallel — these shapes are
 // the fixed contract both sides code against.
 
-/** The full Role pgEnum (display label for `family` is "Staff", §0.1). */
+/** The full Role pgEnum (display label for `family` is "Member", `guest` is "External guest"). */
 export type AccessTier = "owner" | "admin" | "family" | "guest" | "service";
 
 /** Custom-role starting point — never owner/service (ADR-032 §2 CHECK). */
@@ -1560,7 +1560,7 @@ export interface AccessToolDomainsResponse {
     sources: string[];
     tools: number;
     populated: boolean;
-    /** Holds a tool classified read — reachable for Staff/Guest-based roles. */
+    /** Holds a tool classified read — reachable for Member/external-guest-based roles. */
     readable: boolean;
   }>;
 }
@@ -1730,7 +1730,7 @@ export interface InviteListItem {
    *  pgEnum, so this was NEVER the legacy `InviteRole` ("user" | "admin").
    *  The mistyping was load-bearing: the pending-invites row rendered
    *  `role === "admin" ? "admin" : "user"`, which is only exhaustive under
-   *  the wrong type, and it silently collapsed Staff, Guest and every
+   *  the wrong type, and it silently collapsed Member, External guest and every
    *  custom-role invite into the single word "user". Typed as the full
    *  tier enum, that ternary no longer type-checks as a complete mapping
    *  and the label has to be resolved properly. */

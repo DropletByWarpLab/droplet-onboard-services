@@ -276,7 +276,7 @@ export function RoleBuilderSheet({
 
   // WARP-1578 — §5.2 for the connectors axis: every level RENDERS, the ones
   // this starting point can't hold render disabled with the reason. Hiding
-  // them taught an operator nothing about the ceiling and let a Guest-based
+  // them taught an operator nothing about the ceiling and let an external-guest-based
   // role save a grant that can never take effect.
   const connectorAllowed = new Set(connectorLevelsFor(draft.startingPoint));
   const connectorsBlocked = connectorAxisBlocked(draft.startingPoint);

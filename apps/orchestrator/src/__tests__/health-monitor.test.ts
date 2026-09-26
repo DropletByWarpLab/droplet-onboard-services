@@ -68,6 +68,7 @@ import {
   getAggregateHealth,
   onHealthSnapshot,
   stopHealthMonitor,
+  refreshCurrentVersion,
   type ComponentHealth,
 } from "../services/health-monitor.service.js";
 import { AnalyticsAgent } from "../services/analytics/agent.js";
@@ -578,7 +579,10 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body).toHaveProperty("components");
     expect(Array.isArray(res.body.components)).toBe(true);
     expect(res.body.components.length).toBe(ALL_COMPONENTS.length);
-    expect(res.body.version).toBe("0.1.0");
+    // WARP-3154 — no `startHealthMonitor` call in this test, so the version
+    // never resolved off its default: null, same honest state as a factory-
+    // image box. No hardcoded "0.1.0" literal any more.
+    expect(res.body.version).toBeNull();
     expect(typeof res.body.uptime).toBe("number");
   });
 
@@ -612,5 +616,80 @@ describe("GET /api/orchestrator/health", () => {
     const snapshot = getAggregateHealth();
     expect(snapshot.components).toEqual([]);
     expect(snapshot.status).toBe("ok");
+  });
+
+  it("WARP-3154: never leaks a down probe's raw error text — the route is unauthenticated", async () => {
+    // The storage probe's error names an actual device — exactly the class
+    // of internal-topology leak the ticket calls out (a refused connection
+    // would name a container IP:port the same way).
+    stubBridgePools([{ device: "md127", status: "degraded" }]);
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+    await runAllProbes(prisma);
+
+    // getAggregateHealth() (used internally, e.g. by other services) still
+    // carries the reason — only the public route response is sanitized.
+    expect(getAggregateHealth().components.find((c) => c.name === "storage")?.error).toMatch(
+      /md127/,
+    );
+
+    const res = await request(app).get("/api/orchestrator/health");
+    for (const component of res.body.components) {
+      expect(component).not.toHaveProperty("error");
+    }
+    expect(JSON.stringify(res.body)).not.toMatch(/md127/);
+    // The rest of the shape is untouched.
+    const storage = res.body.components.find((c: { name: string }) => c.name === "storage");
+    expect(storage).toMatchObject({ name: "storage", status: "down" });
+    expect(typeof storage.latencyMs).toBe("number");
+  });
+});
+
+describe("refreshCurrentVersion + getAggregateHealth().version (WARP-3154)", () => {
+  afterEach(() => {
+    stopHealthMonitor();
+  });
+
+  it("is null when the box has never taken an OTA update", async () => {
+    const prisma = {
+      deviceUpdate: { findFirst: vi.fn().mockResolvedValue(null) },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth().version).toBeNull();
+  });
+
+  it("is the newest committed release's tag", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ releaseTag: "ota-stage-42-gabc1234", gitSha: "abc1234" });
+    const prisma = { deviceUpdate: { findFirst } } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth().version).toBe("ota-stage-42-gabc1234");
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { status: "committed" } }),
+    );
+  });
+
+  it("falls back to the git sha when a committed row was never tagged", async () => {
+    const prisma = {
+      deviceUpdate: {
+        findFirst: vi.fn().mockResolvedValue({ releaseTag: null, gitSha: "abc1234567890" }),
+      },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth().version).toBe("git-abc1234567");
+  });
+
+  it("keeps the last known version when the DB read fails, rather than resetting to null", async () => {
+    const prisma = {
+      deviceUpdate: { findFirst: vi.fn().mockResolvedValue({ releaseTag: "ota-stage-9-gdeadbee", gitSha: "deadbee" }) },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth().version).toBe("ota-stage-9-gdeadbee");
+
+    const brokenPrisma = {
+      deviceUpdate: { findFirst: vi.fn().mockRejectedValue(new Error("connection lost")) },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(brokenPrisma);
+    expect(getAggregateHealth().version).toBe("ota-stage-9-gdeadbee");
   });
 });

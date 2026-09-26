@@ -333,7 +333,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // (and mirroring into the guard's key) while the guard's card is up, so the
   // TV comes back by itself once Security is on again.
   //
-  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Staff
+  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Member
   // session only. An owner or admin session would sit signed in, unattended,
   // in a room, one click from everything that account can do; a guest's reads
   // would all be refused by the server, each an audited denial. The refusal

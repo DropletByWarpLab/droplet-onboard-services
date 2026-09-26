@@ -210,9 +210,9 @@ describe("§10 state trio — roles list", () => {
     await waitFor(() => {
       expect(screen.getByText(ACCESS_COPY.emptyRoles)).toBeInTheDocument();
     });
-    // Built-in five remain listed beneath (Staff display label, never Family).
+    // Built-in five remain listed beneath (Member display label, never Family).
     expect(screen.getByText("Owner")).toBeInTheDocument();
-    expect(screen.getByText("Staff")).toBeInTheDocument();
+    expect(screen.getByText("Member")).toBeInTheDocument();
     expect(screen.getByText("Service")).toBeInTheDocument();
     expect(screen.queryByText("Family")).not.toBeInTheDocument();
   });
@@ -224,7 +224,7 @@ describe("§4.1 roles list", () => {
     await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
     // Slug renders on the card and again in the auto-selected detail head.
     expect(screen.getAllByText("finance").length).toBeGreaterThan(0);
-    expect(screen.getByText(/1 person · based on Staff/)).toBeInTheDocument();
+    expect(screen.getByText(/1 person · based on Member/)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.yourRoles)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.builtinRoles)).toBeInTheDocument();
     // §4.1 (UX-10): the pane's primary action is filled accent.
@@ -257,7 +257,7 @@ describe("§4.2 role detail", () => {
     await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
     const detail = screen.getByTestId("access-role-detail");
-    expect(within(detail).getByText(/Based on Staff/)).toBeInTheDocument();
+    expect(within(detail).getByText(/Based on Member/)).toBeInTheDocument();
     expect(within(detail).getByText(/Files · edit/i)).toBeInTheDocument();
     expect(within(detail).getByText(/25 GB storage/)).toBeInTheDocument();
     expect(within(detail).getByText(/Cloud models off/)).toBeInTheDocument();
@@ -334,8 +334,8 @@ describe("§4.2 role detail", () => {
     expect(within(detail).getByText("Files · share & manage")).toBeInTheDocument();
     expect(within(detail).getByText("No limit storage")).toBeInTheDocument();
     expect(within(detail).getByText(ACCESS_COPY.builtinFixed)).toBeInTheDocument();
-    // Guest ceilings clamp to view.
-    const guestDetail = await selectRole(/Guest/);
+    // External guest ceilings clamp to view.
+    const guestDetail = await selectRole(/External guest/);
     expect(within(guestDetail).getByText("Network · view")).toBeInTheDocument();
     // Service is a system principal — notes only, no feature chips.
     const serviceDetail = await selectRole(/Service/);
@@ -1113,7 +1113,7 @@ describe("WARP-2738 — the detail pane names the tool grants", () => {
     expect(within(detail).queryByText(ACCESS_COPY.toolsReadOnlyBelowAdmin)).not.toBeInTheDocument();
   });
 
-  it("says a Staff-based role's tools are read-only whatever the level claims", async () => {
+  it("says a Member-based role's tools are read-only whatever the level claims", async () => {
     // `tierKeepsWriteTools` admits owner and admin only — below that, a `use`
     // grant IS a `view` grant, and the chip alone would imply otherwise.
     listAccessRolesMock.mockResolvedValue({

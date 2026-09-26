@@ -1,7 +1,7 @@
 /**
  * WARP-2981 (ADR-059 P6, D6) — what /security/wall shows an account it does
  * not run on (Stefan: "Member wall, own cameras"): why, what to do — sign in
- * here with a Staff account that has the cameras to show — and a way to sign
+ * here with a Member account that has the cameras to show — and a way to sign
  * out straight into that sign-in, first. An owner or admin also gets Users,
  * where such an account is made and given cameras. A guest can't see Security
  * at all, so it is told that and gets no Users link and no way into Security.
@@ -31,7 +31,7 @@ describe("WallRefused (D6)", () => {
     render(<WallRefused role={role} />);
     expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedTitle })).toBeInTheDocument();
     expect(screen.getByText(WALL_COPY.refusedWhy)).toBeInTheDocument();
-    // `family` is shown as "Staff" everywhere (lib/access tierLabel); never the enum value.
+    // `family` is shown as "Member" everywhere (lib/access tierLabel); never the enum value.
     const what = screen.getByText(/Sign in here with a/);
     expect(what.textContent).toContain(`with a ${tierLabel("family")} account`);
     expect(what.textContent).not.toMatch(/\{|family/);
@@ -54,7 +54,7 @@ describe("WallRefused (D6)", () => {
     expect(document.querySelector(".sec-wall-notice-actions > :first-child")).toBe(signOut);
   });
 
-  it("a guest: told the account can't see Security, sent to a Staff sign-in — no Users link, no way into Security", () => {
+  it("a guest: told the account can't see Security, sent to a Member sign-in — no Users link, no way into Security", () => {
     render(<WallRefused role="guest" />);
     expect(screen.getByRole("heading", { level: 1, name: WALL_COPY.refusedGuestTitle })).toBeInTheDocument();
     expect(screen.getByText(WALL_COPY.refusedGuestWhy)).toBeInTheDocument();
@@ -70,9 +70,9 @@ describe("WallRefused (D6)", () => {
     expect(h.authFetch).not.toHaveBeenCalled();
   });
 
-  it("the dedicated-account advice uses the role builder's own words, and View is a level a Staff role can hold below Respond", () => {
-    // A Staff account holds Security at Respond by default (setting the mode, acknowledging). A role based on
-    // Staff with Security at View has the server refuse those (requireFeatureAccess("security", "act")).
+  it("the dedicated-account advice uses the role builder's own words, and View is a level a Member role can hold below Respond", () => {
+    // A Member account holds Security at Respond by default (setting the mode, acknowledging). A role based on
+    // Member with Security at View has the server refuse those (requireFeatureAccess("security", "act")).
     const security = ACCESS_FEATURES.find((f) => f.moduleId === "security")!;
     const cameras = ACCESS_FEATURES.find((f) => f.moduleId === "cameras")!;
     const [view, respond] = security.levels;

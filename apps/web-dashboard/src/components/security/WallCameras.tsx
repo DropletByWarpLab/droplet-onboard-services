@@ -4,7 +4,7 @@
  * WARP-2981 (ADR-059 P6, §3.8) — the wall's cameras: one tile for each camera
  * the signed-in person may see, and for nothing else.
  *
- * D6 (Stefan: "Member wall, own cameras"). The wall runs on a Staff account,
+ * D6 (Stefan: "Member wall, own cameras"). The wall runs on a Member account,
  * never an owner's or admin's, so it cannot use Frigate's birdseye composite:
  * that is all-or-nothing (WARP-2982), only a viewer who sees every camera gets
  * it. Instead the tiles are exactly the list GET /api/cameras returns for this

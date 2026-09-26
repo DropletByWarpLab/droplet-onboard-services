@@ -94,7 +94,7 @@ describe("identity & starting point (axis 1)", () => {
     expect(screen.getByDisplayValue("front-desk")).toBeInTheDocument();
   });
 
-  it("renders the three starting points with §12 captions (Staff label)", () => {
+  it("renders the three starting points with §12 captions (Member label)", () => {
     renderSheet();
     expect(screen.getByText(ACCESS_COPY.startAdmin)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.startStaff)).toBeInTheDocument();
@@ -117,10 +117,10 @@ describe("identity & starting point (axis 1)", () => {
   it("re-floors on a starting-point drop and names the dropped grant (never silent)", () => {
     const base = roleToDraft(makeRole()); // admin SP with network=manage
     renderSheet({ mode: "edit", base });
-    fireEvent.click(screen.getByRole("button", { name: "Guest" }));
+    fireEvent.click(screen.getByRole("button", { name: "External guest" }));
     expect(
       screen.getByText(
-        "Switching to Guest turns off Configure network — guests can't change the network.",
+        "Switching to External guest turns off Configure network — external guests can't change the network.",
       ),
     ).toBeInTheDocument();
     // The over-floor level fell back to View inside the network row.
@@ -154,7 +154,7 @@ describe("features & what they can do (axis 2)", () => {
     expect(onOpenDepartments).toHaveBeenCalled();
   });
 
-  it("shows floor-blocked levels disabled with the §12 reason on a Staff-based role", () => {
+  it("shows floor-blocked levels disabled with the §12 reason on a Member-based role", () => {
     const base = blankRoleDraft("family");
     base.features.network = { on: true, level: "view" };
     renderSheet({ base });
@@ -357,7 +357,7 @@ describe("AI tools & connectors (axis 4)", () => {
     renderSheet({ mode: "edit", base });
     const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
     expect(select.value).toBe("read_write");
-    fireEvent.click(screen.getByRole("button", { name: "Staff" }));
+    fireEvent.click(screen.getByRole("button", { name: "Member" }));
     // The select keeps a real value (never silently blank)…
     expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("read");
     // …and the §5.1 notice names the downgrade.
@@ -411,7 +411,7 @@ describe("AI tools & connectors (axis 4)", () => {
     expect(screen.queryByText("Read & write is for admins.")).not.toBeInTheDocument();
   });
 
-  it("blocks the whole connectors axis on Guest-based roles, with the honest reason (WARP-1578)", () => {
+  it("blocks the whole connectors axis on External-guest-based roles, with the honest reason (WARP-1578)", () => {
     // A guest sits below O-2's family-and-up read floor, so any grant saved
     // here is inert. Shown-and-disabled, never hidden and never silently
     // accepted — the two halves of the design-brief doctrine.
@@ -421,21 +421,21 @@ describe("AI tools & connectors (axis 4)", () => {
     const options = Array.from(select.options);
     expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
     expect(options.map((o) => o.disabled)).toEqual([false, true, true]);
-    expect(screen.getByText("Connectors are for staff and admins.")).toBeInTheDocument();
+    expect(screen.getByText("Connectors are for members and admins.")).toBeInTheDocument();
   });
 
-  it("switching TO Guest clears connector grants and says so — never a silent drop", () => {
+  it("switching TO External guest clears connector grants and says so — never a silent drop", () => {
     const base = blankRoleDraft("admin");
     base.connectors.eaglesoft = "read_write";
     renderSheet({ mode: "edit", base });
-    fireEvent.click(screen.getByRole("button", { name: "Guest" }));
+    fireEvent.click(screen.getByRole("button", { name: "External guest" }));
     expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("none");
     expect(
-      screen.getByText(/Switching to Guest turns off Eaglesoft — guests can't reach connectors\./),
+      screen.getByText(/Switching to External guest turns off Eaglesoft — external guests can't reach connectors\./),
     ).toBeInTheDocument();
   });
 
-  it("a Guest role that already HOLDS a grant shows it, and discloses that saving removes it", () => {
+  it("an External-guest role that already HOLDS a grant shows it, and discloses that saving removes it", () => {
     // Reachable from rows written before this floor existed. The value stays
     // visible (hiding it would be the same dishonesty in reverse) and the
     // consequence of pressing Save is stated up front.
@@ -448,7 +448,7 @@ describe("AI tools & connectors (axis 4)", () => {
     const { onSave } = renderSheet({ mode: "edit", base });
     expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("read");
     expect(
-      screen.getByText("Connectors are for staff and admins — saving removes this."),
+      screen.getByText("Connectors are for members and admins — saving removes this."),
     ).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Description"), { target: { value: "front desk" } });

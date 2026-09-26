@@ -42,20 +42,21 @@ import {
 import type { AccessRole, RoleTemplate } from "./types";
 import { ACCESS_COPY } from "@/components/access/copy";
 
-describe("tier ladder + display labels (§0.1 — family displays as Staff)", () => {
+describe("tier ladder + display labels (family displays as Member, guest as External guest)", () => {
   it("ranks guest < family < admin < owner", () => {
     expect(TIER_RANK.guest).toBeLessThan(TIER_RANK.family);
     expect(TIER_RANK.family).toBeLessThan(TIER_RANK.admin);
     expect(TIER_RANK.admin).toBeLessThan(TIER_RANK.owner);
   });
 
-  it("displays the family tier as Staff (enum value unchanged)", () => {
-    expect(tierLabel("family")).toBe("Staff");
+  it("displays the family tier as Member and guest as External guest (enum values unchanged)", () => {
+    expect(tierLabel("family")).toBe("Member");
     expect(tierLabel("admin")).toBe("Admin");
-    expect(tierLabel("guest")).toBe("Guest");
+    expect(tierLabel("guest")).toBe("External guest");
     expect(tierLabel("owner")).toBe("Owner");
     expect(tierLabel("service")).toBe("Service");
-    expect(tierPlural("family")).toBe("staff");
+    expect(tierPlural("family")).toBe("members");
+    expect(tierPlural("guest")).toBe("external guests");
     expect(tierPlural("admin")).toBe("admins");
   });
 });
@@ -199,7 +200,7 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
 });
 
 describe("floor clamping (§5.2 — blocked levels shown, never hidden)", () => {
-  it("blocks network act/manage on a family (Staff) starting point", () => {
+  it("blocks network act/manage on a family (Member) starting point", () => {
     expect(isLevelBlocked("family", "network", "act")).toBe(true);
     expect(isLevelBlocked("family", "network", "manage")).toBe(true);
     expect(isLevelBlocked("family", "network", "view")).toBe(false);
@@ -232,16 +233,16 @@ describe("re-flooring a draft (§5.1 — never a silent change)", () => {
     const { features, notice } = refloorFeatures(draft, "guest");
     expect(features.network.level).toBe("view");
     expect(notice).toBe(
-      "Switching to Guest turns off Configure network — guests can't change the network.",
+      "Switching to External guest turns off Configure network — external guests can't change the network.",
     );
   });
 
-  it("uses the Staff display label in notices about the family tier", () => {
+  it("uses the Member display label in notices about the family tier", () => {
     const draft = defaultFeatureDraft("admin");
     draft.network = { on: true, level: "manage" };
     const { notice } = refloorFeatures(draft, "family");
     expect(notice).toBe(
-      "Switching to Staff turns off Configure network — staff can't change the network.",
+      "Switching to Member turns off Configure network — members can't change the network.",
     );
   });
 });
@@ -288,7 +289,7 @@ describe("connector levels (O-2 — Read & write only on Admin-based roles)", ()
     // Every level stays RENDERABLE; `connectorLevelsFor` says which are
     // SELECTABLE, and the builder disables the rest with this reason.
     expect(CONNECTOR_LEVELS).toEqual(["none", "read", "read_write"]);
-    expect(connectorFloorReason("guest")).toBe("Connectors are for staff and admins.");
+    expect(connectorFloorReason("guest")).toBe("Connectors are for members and admins.");
     expect(connectorFloorReason("family")).toBe("Read & write is for admins.");
     expect(connectorFloorReason("admin")).toBeNull();
   });

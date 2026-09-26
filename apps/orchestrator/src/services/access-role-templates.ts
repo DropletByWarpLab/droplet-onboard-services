@@ -377,7 +377,7 @@ export const ROLE_TEMPLATES = [
     id: "read-only-auditor",
     name: "Read-only Auditor",
     description:
-      "An outside accountant, compliance reviewer or consultant. Guest-based, which makes read-only STRUCTURAL rather than a setting: the tier cannot hold act or manage on anything except Voice and Messages, so no later edit widens this into a writing role by accident. Carries no Money grant on purpose — /api/money admits family and up, so a Money card here would advertise reach the API refuses.",
+      "An outside accountant, compliance reviewer or consultant. External-guest-based, which makes read-only STRUCTURAL rather than a setting: the tier cannot hold act or manage on anything except Voice and Messages, so no later edit widens this into a writing role by accident. Carries no Money grant on purpose — /api/money admits member and up, so a Money card here would advertise reach the API refuses.",
     startingPoint: "guest",
     featureGrants: [
       { moduleId: "files", level: "view" },
@@ -408,7 +408,7 @@ export const ROLE_TEMPLATES = [
     id: "contractor-temp",
     name: "Contractor / Temp",
     description:
-      "A locum, a relief hire or a vendor on site for the week — the smallest surface that is still useful. The shared drive and the calendar at view, plus Messages and Voice so they can be reached and can ask the assistant. Guest-based: view is the ceiling everywhere else, because those two are the only levels the guest tier leaves un-floored.",
+      "A locum, a relief hire or a vendor on site for the week — the smallest surface that is still useful. The shared drive and the calendar at view, plus Messages and Voice so they can be reached and can ask the assistant. External-guest-based: view is the ceiling everywhere else, because those two are the only levels the external-guest tier leaves un-floored.",
     startingPoint: "guest",
     featureGrants: [
       { moduleId: "files", level: "view" },
