@@ -13,6 +13,7 @@ import {
 import { config } from "../config.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 // Rescan / eject are owner+admin device-control actions. Family users can
 // still see drives via the existing GET routes; they just can't poke the
@@ -20,11 +21,6 @@ import { createLogger } from "../lib/logger.js";
 // requireRole("owner", "admin") middleware instead of this ad-hoc check, so
 // denials there get the WARP-237 mandatory-emit ACL audit row — an on-box
 // blocked rename is diagnosable from the activity log instead of vanishing.)
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
-
 const logger = createLogger("storage-route");
 
 /**
@@ -917,7 +913,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * mounts or unmounts. Admin-only because it's a device-control action.
    */
   router.post("/storage/drives/rescan", sensitiveRateLimit, async (req, res) => {
-    if (!isAdmin(req)) {
+    if (!isOwnerOrAdmin(req)) {
       // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
       // local isAdmin() denials must not be silent (requireRole parity).
       // (The two label PATCHes move to requireRole outright in PR #929 /
@@ -971,7 +967,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * message and are logged server-side.
    */
   router.post("/storage/drives/:uuid/eject", sensitiveRateLimit, async (req, res) => {
-    if (!isAdmin(req)) {
+    if (!isOwnerOrAdmin(req)) {
       // WARP-1062 (audit item B): requireRole-parity policy-violation row.
       recordAccessDenied(req, "role-not-permitted");
       return res.status(403).json({ error: "Admin access required" });

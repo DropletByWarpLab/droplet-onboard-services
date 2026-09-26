@@ -56,11 +56,11 @@
  */
 import { createLogger } from "../lib/logger.js";
 import type {
+  McpCallContext,
   McpClientPort,
   McpToolCallOutcome,
   McpToolDescriptor,
 } from "./mcp-client.port.js";
-import type { McpCallContext } from "./mcp-client.service.js";
 import { withRemoteCallAttribution } from "./remote-call-attribution.js";
 
 const logger = createLogger("mcp-multiplexer");

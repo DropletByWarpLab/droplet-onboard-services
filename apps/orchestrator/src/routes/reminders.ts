@@ -39,6 +39,18 @@ const reminderCreateSchema = z.object({
   calendarEventId: z.string().uuid().optional(),
 });
 
+// WARP-3193 QUAL-14 — `due_before` used to reach Prisma as `new Date(garbage)`
+// (Invalid Date → 500). Any Date-parseable string is accepted, as before;
+// `completed` / `limit` keep their lenient handling below.
+const reminderListQuerySchema = z.object({
+  completed: z.string().optional(),
+  due_before: z
+    .string()
+    .refine((s) => !Number.isNaN(new Date(s).getTime()), "invalid date")
+    .optional(),
+  limit: z.string().optional(),
+});
+
 const reminderPatchSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   body: z.string().max(2000).optional(),
@@ -62,11 +74,16 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
 
   router.get("/reminders", async (req, res, next) => {
     try {
+      const query = reminderListQuerySchema.safeParse(req.query);
+      if (!query.success) {
+        res.status(400).json({ error: "invalid_request", details: query.error.flatten() });
+        return;
+      }
       const person = await toolActingUser(prisma, req, REMINDER_TOOL_ROUTES["get /api/reminders"]);
       if (!person.ok) return void sendToolActingUserDenial(res, person);
-      const completed = req.query.completed as string | undefined;
-      const dueBefore = req.query.due_before as string | undefined;
-      const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+      const completed = query.data.completed;
+      const dueBefore = query.data.due_before;
+      const limit = Math.max(1, Math.min(500, Number(query.data.limit) || 100));
 
       const reminders = await prisma.reminder.findMany({
         where: {

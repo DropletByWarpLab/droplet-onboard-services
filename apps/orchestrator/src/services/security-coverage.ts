@@ -58,6 +58,7 @@ import type { PrismaClient, SecurityBaselineState } from "@prisma/client";
 import { FRIGATE_NAME, type SourceHealth } from "./security-event-ingest.js";
 import { BASELINE } from "../lib/security-baseline-math.js";
 import { dayBounds, windowDates, windowFor, type BaselineWindow } from "../lib/security-baseline-slots.js";
+import { isUniqueViolation } from "../lib/prisma-errors.js";
 
 /** Coverage spans are kept this long (the window plus a week); sources without a span this recent are dropped. */
 export const COVERAGE_KEEP_MS = 35 * 86_400_000;
@@ -241,9 +242,6 @@ export interface CoverageTickResult {
 }
 
 type SpanDb = Pick<PrismaClient, "securityCoverageSpan">;
-
-const isUniqueViolation = (err: unknown): boolean =>
-  typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
 
 /** Each camera's latest closed span end (for cameras about to open a span only — rare). */
 async function lastClosedUntil(prisma: SpanDb, cameras: readonly string[]): Promise<Map<string, Date>> {

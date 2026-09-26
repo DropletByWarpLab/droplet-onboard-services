@@ -616,7 +616,11 @@ const envSchema = z.object({
   DROPLET_SCIM_BEARER_TOKEN: z.string().default(""),
 
   // --- gRPC ---
-  AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),
+  // ai-gateway's gRPC endpoint (EmbedText / rerank / classify). The ONE
+  // default every caller shares (WARP-3193 ARCH-6): the compose service name,
+  // since compose does not set this for the orchestrator. Read it from
+  // `config`, never `process.env` directly.
+  AI_GATEWAY_GRPC_URL: z.string().default("ai-gateway:50051"),
 
   // --- OpenWrt Routing ---
   // Default uses `host.docker.internal` so the bridged orchestrator can

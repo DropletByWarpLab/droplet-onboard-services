@@ -36,6 +36,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { kickReconcile } from "../services/department-reconciler.service.js";
 import { bumpAclVersion } from "../services/department-tx.js";
+import { validateDepartmentHierarchy } from "../services/department-validation.js";
 import {
   departmentManagerOrAdmin,
   addMembership,
@@ -645,8 +646,8 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           });
         }
 
-        // Validate parent is a DEPARTMENT and is active
-        if (parent.kind !== "DEPARTMENT") {
+        // Validate parent is a DEPARTMENT (WARP-1255 hierarchy rules) and is active
+        if (validateDepartmentHierarchy("TEAM", parentId, parent.kind).length > 0) {
           return res.status(400).json({
             error: `Parent must be kind DEPARTMENT, not ${parent.kind}`,
             code: "INVALID_PARENT_KIND",
