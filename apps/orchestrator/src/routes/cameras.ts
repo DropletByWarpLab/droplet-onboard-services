@@ -2685,20 +2685,57 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         playlistText = await fetchHlsPlaylist(subUrl);
       }
 
-      // Rewrite each segment line to point at our proxy. We pass the
-      // range params back through so the segment route knows which VOD
-      // window to fetch from. URL-encoding handles segment names with
-      // weird characters even though Frigate's emit boring "0.ts".
+      // Rewrite each segment line — and any URI="…" attribute (e.g. the
+      // fMP4 init segment on #EXT-X-MAP, or a #EXT-X-KEY) — to point at our
+      // proxy. We pass the range params back through so the segment route
+      // knows which VOD window to fetch from. URL-encoding handles segment
+      // names with weird characters even though Frigate's emit boring "0.ts".
+      //
+      // WARP-3122: an absolute or protocol-relative URL is REFUSED, not
+      // passed through. Native clients (AVPlayer) attach the bearer token
+      // as an HTTP header on every request the playlist causes, including
+      // one to a third-party host, so letting one through would leak the
+      // token. Frigate never emits one in practice, so treat it the same
+      // as any other malformed upstream playlist (502 below).
       const segPrefix = `/api/cameras/${encodeURIComponent(req.params.name)}/playback.segment?after=${range.after}&before=${range.before}&seg=`;
+      const isRemoteUri = (uri: string) => /^https?:\/\//i.test(uri) || uri.startsWith("//");
+      const toProxyUri = (uri: string) => `${segPrefix}${encodeURIComponent(uri)}`;
       const rewritten = playlistText
         .split(/\r?\n/)
         .map((line) => {
-          if (line.startsWith("#") || line.trim() === "") return line;
-          // It's a URL line. Leave absolute URLs alone (defense — Frigate
-          // doesn't usually emit them, but a future version might). Otherwise
-          // route through our segment proxy.
-          if (/^https?:\/\//i.test(line)) return line;
-          return `${segPrefix}${encodeURIComponent(line.trim())}`;
+          if (line.trim() === "") return line;
+          if (line.startsWith("#")) {
+            // Attribute-list tags (#EXT-X-MAP, #EXT-X-KEY, …) carry their
+            // own URI="…" that the segment-line branch below never sees.
+            //
+            // Fail CLOSED: `/URI="([^"]*)"/i` only ever matched the strict
+            // double-quoted form, so a single-quoted (URI='...'), unquoted
+            // (URI=...) or otherwise-cased attribute fell through as
+            // "no match" and the ORIGINAL line — absolute URL included —
+            // was forwarded unchanged. Count every case-insensitive `URI=`
+            // occurrence and require each one to be in the strict form; any
+            // mismatch refuses the whole playlist rather than guessing.
+            const uriOccurrences = line.match(/URI\s*=/gi) ?? [];
+            if (uriOccurrences.length === 0) return line;
+            const strictMatches = [...line.matchAll(/URI\s*=\s*"([^"]*)"/gi)];
+            if (strictMatches.length !== uriOccurrences.length) {
+              throw new Error("HLS playlist: refused malformed URI attribute");
+            }
+            // Rewrite every strict match on the line (there can be more
+            // than one attribute-list tag's worth of URI= on one line).
+            return line.replace(/URI\s*=\s*"([^"]*)"/gi, (_full, uri: string) => {
+              if (isRemoteUri(uri)) {
+                throw new Error("HLS playlist: refused absolute URI attribute");
+              }
+              return `URI="${toProxyUri(uri)}"`;
+            });
+          }
+          // It's a segment URL line.
+          const uri = line.trim();
+          if (isRemoteUri(uri)) {
+            throw new Error("HLS playlist: refused absolute segment URL");
+          }
+          return toProxyUri(uri);
         })
         .join("\n");
 
