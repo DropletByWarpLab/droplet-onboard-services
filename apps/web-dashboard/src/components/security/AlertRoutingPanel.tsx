@@ -28,10 +28,11 @@
 import { useRef, useState } from "react";
 import { Loader2, RefreshCw, TriangleAlert } from "lucide-react";
 import { useToast } from "@/components/Toast";
+import { TIER_RANK, tierLabel } from "@/lib/access";
 import { translateError } from "@/lib/friendly-errors";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
 import { useAlertRouting } from "@/lib/hooks/useSecurity";
-import type { AlertRoutingPerson } from "@/lib/types";
+import type { AccessTier, AlertRoutingPerson } from "@/lib/types";
 import { fill } from "./TimezoneSelect";
 
 export const ROUTING_COPY = {
@@ -56,7 +57,6 @@ export const ROUTING_COPY = {
   loadErrorBody: "This doesn't mean nobody is told. Try again in a moment.",
   retry: "Retry",
   loading: "Loading who is told about alerts",
-  roles: { owner: "Owner", admin: "Admin", family: "Family", guest: "Guest" },
 } as const;
 
 /** The page around the panel (a page file may not export its copy). */
@@ -65,8 +65,9 @@ export const SETTINGS_COPY = {
   pageSub: "When the site is normally open, and who's told about alerts.",
 } as const;
 
+/** tierLabel (lib/access.ts) is the ONE place a tier's word lives; a role this client doesn't know reads as the box sent it. */
 function roleLabel(role: string): string {
-  return (ROUTING_COPY.roles as Record<string, string>)[role] ?? role;
+  return Object.hasOwn(TIER_RANK, role) ? tierLabel(role as AccessTier) : role;
 }
 
 function cantBeTold(p: AlertRoutingPerson): string {

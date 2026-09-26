@@ -41,6 +41,10 @@
  * phrases: "all clear" and "all locked" — the wall faces a room, and nothing on
  * it may read as a verdict on the site ("All reporting" is about the sources).
  *
+ * WARP-2978 (review) adds "family", the code's word for a tier: a role is named
+ * through tierLabel() (lib/access.ts), never a map of a page's own. Whole-word,
+ * so a key such as emptyNoCamerasFamilyBody never trips it.
+ *
  * A negation-aware rule was rejected: "doesn't … arm" and "isn't armed" read
  * the same to a regex as "arm it" after a clause break, so it would let
  * positive claims through whenever a "not" appears earlier in the sentence.
@@ -140,6 +144,8 @@ const BANNED: ReadonlyArray<readonly [name: string, re: RegExp]> = [
   // A verdict on the site, which Droplet never gives (P5 PR-B; WARP-2981 widens the gap to any whitespace).
   ["all clear", /\ball\s+clear\b/i],
   ["all locked", /\ball\s+locked\b/i],
+  // WARP-2978 (review) — the tier's code word; tierLabel() names a role.
+  ["family", /\bfamil(?:y|ies)\b/i],
 ];
 
 /** Sentences cut out of ONE value before the scan. Each must still be there. */
@@ -305,6 +311,8 @@ describe("Security copy lint (spec §8)", () => {
     ["Everything is all clear tonight"],
     ["All locked"],
     ["Doors: all  locked up"],
+    // WARP-2978 (review)
+    ["Family"],
   ])("the matcher catches %j", (text) => {
     expect(violations([{ where: "probe", text }])).not.toEqual([]);
   });
@@ -322,6 +330,8 @@ describe("Security copy lint (spec §8)", () => {
     // WARP-2981
     ["All reporting"],
     ["Clear all filters"],
+    // WARP-2978 (review) — a live SecurityFeed COPY key.
+    ["emptyNoCamerasFamilyBody"],
   ])(
     "the matcher lets %j through",
     (text) => {
