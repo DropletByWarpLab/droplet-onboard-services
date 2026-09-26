@@ -72,6 +72,10 @@ import { setSshAccess, setSshLogin } from "../services/ssh-access.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { createDevicePoller } from "../services/network-device-poller.js";
+
+/** Shared by every /network/devices/events stream in this process. */
+const devicePoller = createDevicePoller(() => getConnectedDevices());
 
 /**
  * WARP-3193 SEC-INJ-4 — static-lease and upstream-DNS values land on lines of
@@ -168,27 +172,18 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
     res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
 
-    let lastDeviceJson = "";
-
-    const pollInterval = setInterval(async () => {
-      try {
-        const devices = await getConnectedDevices();
-        const currentJson = JSON.stringify(devices);
-        if (currentJson !== lastDeviceJson) {
-          lastDeviceJson = currentJson;
-          res.write(`data: ${JSON.stringify({ type: "devices_changed", devices })}\n\n`);
-        }
-      } catch {
-        // Non-fatal
-      }
-    }, 10_000);
+    // WARP-3193 PERF-15: one shared poller per process, not a routing call
+    // per connected client per tick.
+    const unsubscribe = devicePoller.subscribe((devices) => {
+      res.write(`data: ${JSON.stringify({ type: "devices_changed", devices })}\n\n`);
+    });
 
     const heartbeat = setInterval(() => {
       res.write(`: heartbeat\n\n`);
     }, 30_000);
 
     req.on("close", () => {
-      clearInterval(pollInterval);
+      unsubscribe();
       clearInterval(heartbeat);
     });
   });
