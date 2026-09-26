@@ -22,10 +22,13 @@ function res(status: number, body: unknown): FakeResponse {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
+// `me` is the person the orchestrator resolved from X-Droplet-User (WARP-3196).
 const CONTACTS = {
+  me: { id: "uuid-alice" },
   contacts: [
     { id: "uuid-alice", displayName: "Alice A", username: "alice", role: "family" },
     { id: "uuid-bob", displayName: "Bob B", username: "bob", role: "family" },
+    { id: "uuid-carol", displayName: "Carol C", username: "carol", role: "guest" },
   ],
 };
 
@@ -302,5 +305,119 @@ describe("team_chat_send_meeting_invite", () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
+  });
+});
+
+// WARP-3196 — the organizer is dropped from `recipients` by the User.id the
+// roster names as `me`, on both MCP transports. ctx.userId is User.username
+// on stdio and User.id over HTTP (services/mcp-server/src/context.ts
+// `claims.sub`), so a recipient username compared with it only ever matched
+// on stdio. The fixture's User.id differs from the username, as on a real box.
+const ORGANIZER_NAMINGS = [
+  { transport: "stdio", userId: "alice" },
+  { transport: "HTTP", userId: "uuid-alice" },
+] as const;
+
+describe.each(ORGANIZER_NAMINGS)(
+  "team_chat_send_meeting_invite — the organizer named $userId ($transport)",
+  ({ userId }) => {
+    const created = (threadId: string) =>
+      vi
+        .fn()
+        .mockResolvedValueOnce(res(201, { thread: { id: threadId } }))
+        .mockResolvedValueOnce(
+          res(201, { meeting: { id: "meeting-s", threadId, title: "Sync" }, message: { id: "msg-s" } }),
+        );
+
+    it("[bob, me] invites Bob in a DIRECT thread", async () => {
+      const post = created("thread-dm");
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["bob", "alice"], title: "Sync", starts_at: futureIso(), confirmed: true },
+        ctx,
+      );
+      if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+      expect(post).toHaveBeenNthCalledWith(
+        1,
+        "/api/team-chat/threads",
+        { kind: "direct", participantIds: ["uuid-bob"] },
+        expect.anything(),
+      );
+      expect(r.data).toMatchObject({ recipients: ["bob"] });
+    });
+
+    it("[bob, carol, me] invites Bob and Carol in a group", async () => {
+      const post = created("thread-g");
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["alice", "bob", "carol"], title: "Sync", starts_at: futureIso(), confirmed: true },
+        ctx,
+      );
+      expect(r.ok).toBe(true);
+      expect(post).toHaveBeenNthCalledWith(
+        1,
+        "/api/team-chat/threads",
+        { kind: "group", participantIds: ["uuid-bob", "uuid-carol"] },
+        expect.anything(),
+      );
+    });
+
+    it("[me] alone is refused with no write — phase 2", async () => {
+      const post = vi.fn();
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["alice"], title: "Focus time", starts_at: futureIso(), confirmed: true },
+        ctx,
+      );
+      if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+      expect(r.error?.code).toBe("INVALID_ARGS");
+      expect(r.error?.message).toContain("someone other than yourself");
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("[me] alone is refused before the user is asked to approve — phase 1", async () => {
+      const post = vi.fn();
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["alice"], title: "Focus time", starts_at: futureIso() },
+        ctx,
+      );
+      if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+      expect(r.status).not.toBe("confirmation_required");
+      expect(r.error?.code).toBe("INVALID_ARGS");
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("the approval preview does not name the organizer", async () => {
+      const { ctx, post } = ctxWith({ userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["bob", "alice"], title: "Sync", starts_at: futureIso() },
+        ctx,
+      );
+      if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+      expect(r.status).toBe("confirmation_required");
+      expect(r.error?.message).toContain("Bob B");
+      expect(r.error?.message).not.toContain("Alice A");
+      expect(r.error?.details).toMatchObject({ recipients: ["bob"] });
+      expect(post).not.toHaveBeenCalled();
+    });
+  },
+);
+
+describe("team_chat_send_meeting_invite — a roster that does not say who is asking", () => {
+  it.each([
+    ["no me", { contacts: CONTACTS.contacts }],
+    ["me without an id", { me: {}, contacts: CONTACTS.contacts }],
+    ["an empty id", { me: { id: "" }, contacts: CONTACTS.contacts }],
+  ])("%s: phase 2 fails closed with no write", async (_label, roster) => {
+    const post = vi.fn();
+    const { ctx } = ctxWith({ get: vi.fn(async () => res(200, roster)), post });
+    const r = await sendMeetingInvite.handler(
+      { recipients: ["bob"], title: "Sync", starts_at: futureIso(), confirmed: true },
+      ctx,
+    );
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+    expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
+    expect(post).not.toHaveBeenCalled();
   });
 });
