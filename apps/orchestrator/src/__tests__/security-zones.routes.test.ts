@@ -1178,6 +1178,21 @@ describe("GET /api/security/zones — who made each link, and Droplet's evidence
     expect(yard.links).toEqual([expect.objectContaining({ id: AUTO, origin: "droplet", setBy: "droplet", evidence: null })]);
   });
 
+  it("P4 PR-4 (DS-019): a camera Droplet linked from a LOCK's changes — its evidence only for who may read locks", async () => {
+    // Droplet's link on `front` for Yard, anchored on the Back door lock (a person's lock link there).
+    db.links.find((l) => l.id === AUTO)!.evidence = {
+      ...evidence({ linkId: "l-yard-lock", ref: "back", label: "Back camera" }, { ref: "front", label: "Front camera" }),
+      kind: "lock_camera",
+      anchor: { linkId: "l-yard-lock", sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" },
+      reverse: null,
+    };
+    const shown = async (user: keyof typeof USERS) =>
+      (await request(app(user)).get("/api/security/zones")).body.zones.find((z: { id: string }) => z.id === YARD).links.find((l: { id: string }) => l.id === AUTO);
+    expect((await shown("u-owner")).evidence).toMatchObject({ kind: "lock_camera", anchor: { sourceKind: "lock", label: "Back door lock" } });
+    // Every camera, narrowed off Devices: the link, never its numbers.
+    expect(await shown("u-admin-nodev")).toMatchObject({ origin: "droplet", evidence: null });
+  });
+
   it("evidence that does not parse is never sent (fail closed), even to the owner", async () => {
     db.links.find((l) => l.id === AUTO)!.evidence = { v: 2, anything: "else" };
     const res = await request(app("u-owner")).get("/api/security/zones");
@@ -1231,6 +1246,29 @@ describe("GET /api/security/link-proposals (route 23) — a manage filter, never
     const res = await request(app(user)).get("/api/security/link-proposals");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ level, linking: "link_and_suggest", proposals: [] });
+  });
+
+  it("P4 PR-4: a LOCK Droplet suggests — named by the lock's current name, and only for who may read locks (DS-019)", async () => {
+    db.links.push({
+      ...droplet("1c5b6a7f-8d9e-4f0a-9b1c-2d3e4f5a6b7c", SHOP, LOCK_A, "proposed", {
+        ...evidence({ linkId: "l-shop-front", ref: "front", label: "Front camera" }, { ref: LOCK_A, label: "Smart Lock" }),
+        kind: "lock_camera",
+        reverse: null,
+        chosen: "lock",
+        candidate: { sourceKind: "lock", sourceRef: LOCK_A, label: "Smart Lock" },
+      }),
+      sourceKind: "lock",
+      sourceLabel: "Smart Lock",
+    });
+    const owner = await request(app("u-owner")).get("/api/security/link-proposals");
+    expect(owner.body.proposals.find((p: { sourceRef: string }) => p.sourceRef === LOCK_A)).toMatchObject({
+      sourceKind: "lock",
+      label: "Back door lock",
+      evidence: { kind: "lock_camera", candidate: { sourceKind: "lock" } },
+    });
+    const noDevices = await request(app("u-admin-nodev")).get("/api/security/link-proposals");
+    expect(noDevices.body.level).toBe("manage");
+    expect(noDevices.body.proposals.map((p: { sourceRef: string }) => p.sourceRef)).toEqual(["side"]);
   });
 
   it("a suggestion in a removed area is not listed", async () => {

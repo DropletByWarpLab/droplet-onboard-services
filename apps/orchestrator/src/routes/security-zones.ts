@@ -68,6 +68,7 @@ import {
   linkableLocks,
   loadActiveLinks,
   loadCameraLabels,
+  lockLabelsFor,
   loadZoneRecords,
   normaliseZoneName,
   parseLinkRef,
@@ -169,12 +170,6 @@ function answerWriteError(res: Response, err: unknown, what: string): void {
 
 function writeContext(req: Request, deps: SecurityRouteDeps): ZoneWriteContext {
   return { req, now: deps.now?.() ?? new Date() };
-}
-
-/** The labels a page load can put on lock links without asking the smart-home service: the last sweep's names. */
-function lockLabelsFor(scope: SecurityViewerScope, reader: SecurityLockReader | null): Map<string, string> {
-  if (!scope.mayReadLocks || !reader) return new Map();
-  return new Map(reader.knownLocks().map((l) => [l.ref, l.name]));
 }
 
 interface WriteLabels {
@@ -433,7 +428,11 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
         return;
       }
       const [scope, labels] = await Promise.all([securityViewerScope(prisma, req, deps.resolve), loadCameraLabels(prisma)]);
-      res.json({ level: "manage", linking: settings.linking, proposals: await listLinkProposals(prisma, scope, labels) });
+      res.json({
+        level: "manage",
+        linking: settings.linking,
+        proposals: await listLinkProposals(prisma, scope, labels, lockLabelsFor(scope, lockReader())),
+      });
     } catch (err) {
       logger.error({ err }, "security link proposals read failed");
       fail(res, 503, "LINKS_UNAVAILABLE", "Droplet's suggestions are unavailable right now");
