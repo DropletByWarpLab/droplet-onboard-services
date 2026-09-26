@@ -52,9 +52,9 @@ export const VERDICT_COPY = {
   someone: "Someone",
   savedExpected: "Marked as expected",
   savedNotExpected: "Marked as not expected",
-  addExpected: "To stop Droplet flagging this at this place and time, add it as expected activity.",
+  addExpected: "To stop Droplet flagging this as unusual at this place and time, add it as expected activity.",
   addExpectedLink: "Add expected activity",
-  askManager: "To stop Droplet flagging this at this place and time, someone who manages Security can add it as expected activity.",
+  askManager: "To stop Droplet flagging this as unusual at this place and time, someone who manages Security can add it as expected activity.",
   ruleCodesClosed:
     "Droplet will still flag this, because the opening hours say the site is closed then. If people are often here at this time, change the opening hours or use Open up.",
   ruleCodesAway: "Droplet will still flag someone inside while the site is set to away.",
@@ -176,6 +176,7 @@ export function VerdictBar({
             })}
           </div>
         )}
+        {ruleLine && <p style={LINE}>{ruleLine}</p>}
         {offerExpected &&
           (canManage ? (
             <p style={LINE}>
@@ -187,7 +188,6 @@ export function VerdictBar({
           ) : (
             <p style={LINE}>{VERDICT_COPY.askManager}</p>
           ))}
-        {ruleLine && <p style={LINE}>{ruleLine}</p>}
         {stillQuiet &&
           (canManage ? (
             <p style={LINE}>
