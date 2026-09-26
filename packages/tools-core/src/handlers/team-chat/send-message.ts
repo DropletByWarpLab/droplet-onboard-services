@@ -11,8 +11,9 @@
  * `confirmation_required` (ZERO HTTP) previewing who gets what; only a
  * re-issue with `confirmed: true` — after the user explicitly approves —
  * dispatches. Identity: every orchestrator call carries X-Droplet-User =
- * ctx.userId (WARP-202 username), so the message is attributed to the
- * acting human and flows through the exact participant/module checks a
+ * ctx.userId (username on stdio, User.id over HTTP), so the message is
+ * attributed to the acting human and flows through the exact
+ * participant/module checks a
  * direct dashboard call gets (handlers/email/send.ts posture).
  */
 import { confirmationRequired } from "../../confirmation.js";

@@ -23,8 +23,9 @@
  *     with ONE pinned exception (WARP-1685): the routes the two team-chat
  *     LLM tools dispatch through (contacts roster, thread create, message
  *     send, meeting create) ALSO admit the trusted `_service:mcp`
- *     principal via requireRoleOrMcpService, acting AS the X-Droplet-User
- *     username exactly like routes/email.ts effectiveUser(): the header is
+ *     principal via requireRoleOrMcpService, acting AS the person the
+ *     X-Droplet-User header names (username on stdio, User.id over HTTP —
+ *     WARP-3187) like routes/email.ts: the header is
  *     honored ONLY for that principal (a human session's header is
  *     IGNORED — no impersonation path), the forwarded identity must
  *     resolve to an ACTIVE human (fail closed → 401), and the resolved
@@ -68,6 +69,7 @@ import type { PrismaClient, Prisma } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { checkSpaceAccess, departmentSpaceToken } from "../middleware/space.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { createLogger } from "../lib/logger.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
 import { meetingUrlSchema } from "../lib/meeting-url.js";
@@ -100,7 +102,11 @@ class MeetingAlreadyCancelledError extends Error {
 interface Caller {
   /** LOCAL User.id UUID — the scoping key for every team-chat column. */
   id: string;
-  /** Login handle — used ONLY for the ChatSession ownership comparison. */
+  /**
+   * Login handle — the key of the two username-keyed columns this router
+   * touches: the ChatSession ownership comparison and the meeting's
+   * CalendarEvent mirror. Always the resolved row's `User.username`.
+   */
   username: string;
   role: string;
 }
@@ -317,28 +323,27 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
    * folded into one resolver because every team-chat decision needs the
    * full id/username/role triple).
    *
-   * For the trusted mcp service principal ONLY, the identity is the
-   * X-Droplet-User USERNAME the tool handlers forward (`ctx.userId`,
-   * threaded from the chat session via MCP `_meta.userId` — WARP-202
-   * username semantics). It must resolve to an ACTIVE human in the
-   * directory; missing header, unknown user, deactivated user, or a
-   * service row all yield null → 401, never a fallback identity. For
-   * every other caller the header is IGNORED and the session's own
-   * req.user rules — a human session cannot impersonate this way.
+   * For the trusted mcp service principal ONLY, the identity is the person
+   * the tool handlers name in X-Droplet-User (`ctx.userId`). WARP-3187: that
+   * is `User.username` on the stdio transport and `User.id` over HTTP
+   * (`claims.sub`), so it is resolved by `resolveAssertedUser` — username,
+   * nextcloudUsername or id — never by one column. It must then be an
+   * ACTIVE human: missing header, nobody, ambiguous, deactivated (the only
+   * other DirectoryUserStatus), or a non-human role all yield null → 401,
+   * never a fallback identity. The returned username is the resolved row's,
+   * never the header value. For every other caller the header is IGNORED
+   * and the session's own req.user rules — a human session cannot
+   * impersonate this way.
    */
   async function resolveCaller(req: Request): Promise<Caller | null> {
     if (!isMcpService(req)) return callerOf(req);
     const forwarded = (req.header("x-droplet-user") ?? "").trim();
     if (!forwarded) return null;
-    const row = await prisma.user.findFirst({
-      where: {
-        username: forwarded,
-        directoryStatus: "ACTIVE",
-        role: { in: [...HUMAN_ROLES] },
-      },
-      select: { id: true, username: true, role: true },
-    });
-    return row ?? null;
+    const resolved = await resolveAssertedUser(prisma, forwarded);
+    if (!resolved.ok) return null;
+    const { id, username, role } = resolved.user;
+    if (!(HUMAN_ROLES as readonly string[]).includes(role)) return null;
+    return { id, username, role };
   }
 
   /** Contact projection for roster + name resolution. */
@@ -878,9 +883,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         });
 
         // Best-effort local calendar mirror on the ORGANIZER's calendar.
-        // CalendarEvent.userId holds the Nextcloud USERNAME (the
-        // create_event tool's semantics) and endsAt is required — an
-        // unspecified duration mirrors as the calendar's standard hour.
+        // CalendarEvent.userId holds the USERNAME (the create_event tool's
+        // semantics): `me.username`, the resolved row's, never the
+        // X-Droplet-User value, which is a User.id over HTTP (WARP-3187).
+        // endsAt is required — an unspecified duration mirrors as the
+        // calendar's standard hour.
         let finalMeeting = meeting;
         try {
           const endsAt = new Date(
