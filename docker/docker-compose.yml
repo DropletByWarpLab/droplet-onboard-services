@@ -483,6 +483,11 @@ services:
       # would let this container mint arbitrary service identities.
       # (Single-file bind: setup.sh materializes audit.key before compose up.)
       - ../data/secrets/audit.key:/data/secrets/audit.key:ro
+      # WARP-3165: keys retired by an audit-key rotation, read-only, so rows
+      # signed before a rotation keep verifying. Only retired audit keys live
+      # in this directory (decision-4 still holds: no data/secrets root).
+      # rotate-audit-key (docker/ota/apply-update.sh) writes it on the host.
+      - ../data/secrets/audit-retired:/data/secrets/audit-retired:ro
       # WARP-242: doc-KEK master keyfile — wraps the per-document DEKs that
       # encrypt brain chunks (decrypt-on-read lives in file-search.service /
       # the chat attachment-context builder). Deliberately a keyfile and NOT

@@ -1688,15 +1688,20 @@ materialize_artifacts() {
 #    historical events.
 #
 # Idempotent: the existing key is preserved on every re-run so the chain
-# stays verifiable across upgrades. Rotation is a future ticket — when
-# it lands it'll write a new file with a versioned suffix and the
-# verifier will accept the union of (current, prior) keys.
+# stays verifiable across upgrades. Rotation (WARP-3165) is
+# scripts/rotate-audit-key.sh / POST /api/activity/rotate-key: the old key
+# moves to data/secrets/audit-retired/, which the orchestrator mounts
+# read-only to keep verifying the rows it signed.
 sync_audit_signing_key() {
   local secret_dir="$REPO_ROOT/data/secrets"
   local key_file="$secret_dir/audit.key"
 
   mkdir -p "$secret_dir"
   chmod 700 "$secret_dir"
+  # WARP-3165: the retired-key directory is a compose bind source; create it
+  # so Docker never makes it for us.
+  mkdir -p "$secret_dir/audit-retired"
+  chmod 700 "$secret_dir/audit-retired"
 
   # WARP-235 decision-4: compose bind-mounts this key as a single FILE. A bare
   # `docker compose up` run before any setup.sh leaves a Docker-created

@@ -14,14 +14,16 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import {
+  createEpochVerifier,
   hashSignature,
+  type AuditKeyEpoch,
   type ActivityActorTypeName,
   type ActivityKindName,
   type ActivityRowContent,
   type ActivityRowSigner,
   type ActivitySeverityName,
 } from "./audit-signing.service.js";
-import { getActivitySigner, recordActivity } from "./activity.singleton.js";
+import { getAuditKeyring, recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -31,6 +33,38 @@ export interface ChainVerifyResult {
   ok: boolean;
   rowsChecked: number;
   brokenAtId: string | null;
+}
+
+/** A bare signer (tests, the pg lane) is a one-key ring. */
+function asKeyring(keys: ActivityRowSigner | AuditKeyEpoch[]): AuditKeyEpoch[] {
+  return Array.isArray(keys) ? keys : [{ keyId: "current", signer: keys }];
+}
+
+/** A stored row's signature-covered content. */
+export function activityRowContent(r: {
+  at: Date;
+  severity: string;
+  sourceIcon: string;
+  what: string;
+  sub: string | null;
+  kind: string;
+  refs: unknown;
+  actorType: string | null;
+  actorId: string | null;
+  schemaVersion: number;
+}): ActivityRowContent {
+  return {
+    at: r.at,
+    severity: r.severity as ActivitySeverityName,
+    sourceIcon: r.sourceIcon,
+    what: r.what,
+    sub: r.sub,
+    kind: r.kind as ActivityKindName,
+    refs: r.refs === null ? null : (r.refs as Record<string, unknown>),
+    actorType: r.actorType as ActivityActorTypeName | null,
+    actorId: r.actorId,
+    schemaVersion: r.schemaVersion,
+  };
 }
 
 /**
@@ -43,10 +77,12 @@ export interface ChainVerifyResult {
  */
 export async function verifyActivityChain(
   prisma: PrismaClient,
-  signer: ActivityRowSigner,
+  keys: ActivityRowSigner | AuditKeyEpoch[],
   from?: { id: bigint; signature: string } | null,
 ): Promise<ChainVerifyResult> {
   const PAGE = 200;
+  // WARP-3165: every row checks against the keyring under the epoch rule.
+  const epoch = createEpochVerifier(asKeyring(keys));
   let cursor: bigint | undefined = from ? from.id : undefined;
   let prevSignature: string | null = from ? from.signature : null;
   let rowsChecked = 0;
@@ -66,21 +102,9 @@ export async function verifyActivityChain(
         prevSignature === null
           ? r.prevSignatureHash
           : hashSignature(prevSignature);
-      const content: ActivityRowContent = {
-        at: r.at,
-        severity: r.severity as ActivitySeverityName,
-        sourceIcon: r.sourceIcon,
-        what: r.what,
-        sub: r.sub,
-        kind: r.kind as ActivityKindName,
-        refs: r.refs === null ? null : (r.refs as Record<string, unknown>),
-        actorType: r.actorType as ActivityActorTypeName | null,
-        actorId: r.actorId,
-        schemaVersion: r.schemaVersion,
-      };
       if (
         r.prevSignatureHash !== expectedPrevHash ||
-        !signer.verify(content, expectedPrevHash, r.signature)
+        epoch.verify(activityRowContent(r), expectedPrevHash, r.signature) === null
       ) {
         brokenAtId = r.id.toString();
         break outer;
@@ -120,10 +144,10 @@ let inFlightVerify: Promise<ChainVerifyResult> | null = null;
 
 export function verifyActivityChainCoalesced(
   prisma: PrismaClient,
-  signer: ActivityRowSigner,
+  keys: ActivityRowSigner | AuditKeyEpoch[],
 ): Promise<ChainVerifyResult> {
   if (inFlightVerify) return inFlightVerify;
-  inFlightVerify = verifyActivityChain(prisma, signer).finally(() => {
+  inFlightVerify = verifyActivityChain(prisma, keys).finally(() => {
     inFlightVerify = null;
   });
   return inFlightVerify;
@@ -132,14 +156,14 @@ export function verifyActivityChainCoalesced(
 export async function runNightlyChainVerification(
   prisma: PrismaClient,
 ): Promise<ChainVerifyResult | null> {
-  const signer = getActivitySigner();
-  if (!signer) {
+  const keyring = getAuditKeyring();
+  if (keyring.length === 0) {
     logger.warn("nightly chain verification skipped — signer not initialised");
     return null;
   }
   // WARP-1027: coalesce with any in-flight /activity/verify walk so the cron
   // and a concurrent manual re-verify don't double-walk the whole chain.
-  const result = await verifyActivityChainCoalesced(prisma, signer);
+  const result = await verifyActivityChainCoalesced(prisma, keyring);
   if (result.ok) {
     logger.info(
       { rowsChecked: result.rowsChecked },

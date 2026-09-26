@@ -1131,7 +1131,7 @@ for bad in install-extension recreate-extension "recreate-services;id" "docker" 
   fi
 done
 
-EXPECTED_SUBCOMMANDS=" current-image-refs snapshot pull-images stage-configs migrate-deploy recreate-services enabled-services reconcile-env restore-configs recreate-self-detached self-swap-supervise list-self-swap-helpers capture-self-swap-logs rm-self-swap-helper *"
+EXPECTED_SUBCOMMANDS=" current-image-refs snapshot pull-images stage-configs migrate-deploy recreate-services enabled-services reconcile-env restore-configs recreate-self-detached self-swap-supervise list-self-swap-helpers capture-self-swap-logs rm-self-swap-helper rotate-audit-key *"
 DISPATCH_LABELS=""
 DISPATCH_SHAPE_OK=1
 in_case=0
@@ -1161,6 +1161,48 @@ if grep -q '^  \*) die "unknown subcommand: \$SUBCOMMAND" ;;$' "$APPLY_SH"; then
   pass "the dispatcher's fallback arm dies on an unknown subcommand"
 else
   fail "the dispatcher's fallback arm no longer dies"
+fi
+
+# =============================================================================
+# rotate-audit-key (WARP-3165)
+# =============================================================================
+echo ""
+echo "rotate-audit-key"
+ROT_ROOT="$TMP/rot-root"
+mkdir -p "$ROT_ROOT/data/secrets"
+head -c 32 /dev/urandom > "$ROT_ROOT/data/secrets/audit.key"
+cp "$ROT_ROOT/data/secrets/audit.key" "$TMP/rot-old.key"
+ROT_INODE_BEFORE="$(ls -i "$ROT_ROOT/data/secrets/audit.key" | awk '{print $1}')"
+ROT_OLD_ID="$(sha256sum "$TMP/rot-old.key" 2>/dev/null | cut -c1-16 || shasum -a 256 "$TMP/rot-old.key" | cut -c1-16)"
+ROT_OUT="$(DROPLET_OTA_CONFIG_ROOT="$ROT_ROOT" bash "$APPLY_SH" rotate-audit-key 2>/dev/null)"
+ROT_RC=$?
+ROT_ARCHIVED="$(ls "$ROT_ROOT/data/secrets/audit-retired/" 2>/dev/null | head -1)"
+if [ "$ROT_RC" = "0" ] \
+   && cmp -s "$TMP/rot-old.key" "$ROT_ROOT/data/secrets/audit-retired/$ROT_ARCHIVED" \
+   && printf '%s' "$ROT_ARCHIVED" | grep -Eq "^[0-9]{8}T[0-9]{6}Z-$ROT_OLD_ID\.key$"; then
+  pass "archives the old key under audit-retired/<stamp>-<keyId>.key, byte-identical"
+else
+  fail "old key not archived correctly (rc=$ROT_RC, archived=$ROT_ARCHIVED)"
+fi
+if ! cmp -s "$TMP/rot-old.key" "$ROT_ROOT/data/secrets/audit.key" \
+   && [ "$(wc -c < "$ROT_ROOT/data/secrets/audit.key" | tr -d ' ')" = "32" ] \
+   && [ "$(ls -i "$ROT_ROOT/data/secrets/audit.key" | awk '{print $1}')" = "$ROT_INODE_BEFORE" ] \
+   && [ ! -e "$ROT_ROOT/data/secrets/audit.key.new" ]; then
+  pass "writes a new 32-byte key in place (same inode, so the file bind mount sees it)"
+else
+  fail "audit.key was not rewritten in place with a new 32-byte key"
+fi
+if printf '%s' "$ROT_OUT" | grep -q "\"previousKeyId\":\"$ROT_OLD_ID\"" \
+   && ! printf '%s' "$ROT_OUT" | grep -q "$(base64 < "$TMP/rot-old.key")"; then
+  pass "prints key ids only, never key bytes"
+else
+  fail "unexpected rotate output: $ROT_OUT"
+fi
+rm -f "$ROT_ROOT/data/secrets/audit.key"
+if ! DROPLET_OTA_CONFIG_ROOT="$ROT_ROOT" bash "$APPLY_SH" rotate-audit-key >/dev/null 2>&1; then
+  pass "refuses when there is no key to rotate"
+else
+  fail "rotated with no audit.key present"
 fi
 
 # =============================================================================

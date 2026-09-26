@@ -46,6 +46,7 @@ import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
   createAgentRunWorker,
@@ -268,6 +269,12 @@ async function main() {
   // WARP-456: initialize the signed activity recorder. Boot-fatal —
   // an orchestrator that can't sign audit rows must NOT start.
   initActivityRecorder(prisma);
+  // WARP-3165: a key rotated while the orchestrator was down
+  // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
+  // first new-key row, before the start-up row below.
+  await recordRotationFoundAtBoot(prisma).catch((err) =>
+    logger.error({ err }, "audit key rotation check at boot failed"),
+  );
   // Genesis-or-restart event so the first row of every container's
   // lifetime is always a `system` start-up. Makes the chain easier to
   // segment in the dashboard's activity feed.
