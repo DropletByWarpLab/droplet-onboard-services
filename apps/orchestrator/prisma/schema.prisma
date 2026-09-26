@@ -3486,6 +3486,12 @@ model ActivityRow {
   @@index([at])
   // WARP-181: "what did this user do" queries (actorId filter + at sort).
   @@index([actorId, at])
+  // WARP-3193 PERF-7: GET /api/activity pages `ORDER BY id DESC LIMIT n`.
+  // (kind, id DESC) serves the ?kind= filter; the trigram GIN indexes serve
+  // the ?q= ILIKE '%…%' on what/sub (pg_trgm, enabled by the migration).
+  @@index([kind, id(sort: Desc)])
+  @@index([what(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([sub(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 // ── WARP-237: device-key-signed daily roots over the activity chain ──
