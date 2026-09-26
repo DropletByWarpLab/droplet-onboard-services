@@ -47,6 +47,7 @@ import {
   type Role,
 } from "../services/jwt.service.js";
 import { createSession } from "../services/session.service.js";
+import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
 import { findUserByEmail, emailWriteData } from "../services/user-directory.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -139,6 +140,14 @@ interface ResolvedUser {
    *  costs no extra read; it rides into the access token so the chat path
    *  can skip its per-turn lookup. */
   accessRoleId: string | null;
+  /** WARP-3193 SEC-AUTH-2 — whether this account can complete
+   *  POST /auth/login (a local password on a row the IdP did not
+   *  provision — the same rule auth.ts's isIdpProvisioned gate applies). */
+  canPasswordLogin: boolean;
+}
+
+function canPasswordLogin(row: { passwordHash: string | null; provisionSource?: string | null }): boolean {
+  return Boolean(row.passwordHash) && row.provisionSource !== "SSO" && row.provisionSource !== "SCIM";
 }
 
 /**
@@ -212,6 +221,7 @@ async function ensureLinkedUser(
       displayName: existing.user.displayName,
       role: existing.user.role as Role,
       accessRoleId: existing.user.accessRoleId ?? null,
+      canPasswordLogin: canPasswordLogin(existing.user),
     };
   }
 
@@ -263,6 +273,7 @@ async function ensureLinkedUser(
       displayName: byEmail.displayName,
       role: byEmail.role as Role,
       accessRoleId: byEmail.accessRoleId ?? null,
+      canPasswordLogin: canPasswordLogin(byEmail),
     };
   }
 
@@ -291,6 +302,7 @@ async function ensureLinkedUser(
     displayName: created.displayName,
     role: created.role as Role,
     accessRoleId: created.accessRoleId ?? null,
+    canPasswordLogin: false, // SSO-only row, no passwordHash
   };
 }
 
@@ -487,6 +499,32 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         logger.warn({ provider }, "SSO sign-in rejected: ID token had no usable email");
         res.status(401).json({ error: "SSO sign-in failed" });
         return;
+      }
+
+      // WARP-3193 SEC-AUTH-2 — SSO must not bypass an enrolled local TOTP
+      // factor (an IdP compromise would otherwise skip it). The redirect
+      // flow cannot carry a code, and the codebase does not parse `amr`, so
+      // the account is refused here with the password path's TOTP_REQUIRED
+      // and signs in through POST /auth/login (password + code) instead.
+      // Scoped to accounts that CAN do that: refusing an IdP-provisioned
+      // account (no local password) would lock it out with no remedy,
+      // since there is no MFA-reset route. That residual needs a pending-
+      // second-factor step on the SSO callback (not built here).
+      if (user.canPasswordLogin) {
+        const secondFactor = await checkLoginSecondFactor(prisma, user.id, {});
+        if (secondFactor !== "not_enrolled") {
+          await recordActivity({
+            kind: "auth",
+            severity: "warn",
+            sourceIcon: "shield-alert",
+            what: "Two-factor challenge failed",
+            sub: `${user.username} • ${provider}`,
+            refs: { outcome: "totp_required", method: "sso", provider, userId: user.id, username: user.username },
+            actor: { type: "anonymous" },
+          });
+          res.status(401).json({ error: "Two-factor authentication required", code: "TOTP_REQUIRED" });
+          return;
+        }
       }
 
       // Issue the SAME session cookies as /auth/login. WARP-247: record

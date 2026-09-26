@@ -113,6 +113,7 @@ import {
   generateRecoveryCodes,
   consumeRecoveryCode,
 } from "../services/recovery.service.js";
+import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
 import { warmActiveModel } from "../services/active-model.service.js";
@@ -1237,31 +1238,14 @@ export function createPublicAuthRouter(
       // On a successful challenge we stamp `mfaStampIso` into the access
       // token (signAccessToken) so require-recent-mfa (WARP-230) can gate
       // sensitive routes for this session.
+      //
+      // WARP-3193 SEC-AUTH-2 — the check itself lives in
+      // services/login-second-factor.service.ts, shared with the passkey and
+      // SSO sign-ins so neither can skip an enrolled factor.
       let mfaStampIso: string | undefined;
-      const totpCred = await prisma.totpCredential.findUnique({
-        where: { userId },
-      });
-      if (totpCred && totpCred.confirmedAt) {
-        const totpCode =
-          typeof parsed.data.totp === "string" ? parsed.data.totp.trim() : "";
-        const recoveryCode =
-          typeof parsed.data.recoveryCode === "string"
-            ? parsed.data.recoveryCode
-            : "";
-
-        let secondFactorOk = false;
-
-        if (totpCode) {
-          // WARP-3193 SEC-AUTH-10 — single-use: the code's time step is
-          // claimed atomically, so a replayed code fails the factor.
-          secondFactorOk = await acceptTotpCode(prisma, totpCred, totpCode);
-        } else if (recoveryCode) {
-          // WARP-3193 ARCH-3 — the shared single-use consume (atomic on
-          // `usedAt: null`; a replay or a concurrent loser is not consumed).
-          secondFactorOk = (await consumeRecoveryCode(prisma, userId, recoveryCode)).consumed;
-        }
-
-        if (!secondFactorOk) {
+      const secondFactor = await checkLoginSecondFactor(prisma, userId, parsed.data);
+      if (secondFactor !== "not_enrolled") {
+        if (secondFactor === "failed") {
           // WARP-579 finding 1: a wrong second factor IS a failed login attempt
           // for throttling purposes. Without this, an attacker holding a valid
           // password could spin through ~10^6 TOTP codes with no lockout. Bump

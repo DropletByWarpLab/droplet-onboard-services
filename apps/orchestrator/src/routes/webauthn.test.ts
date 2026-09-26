@@ -80,6 +80,13 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: (...a: unknown[]) => recordActivity(...a),
 }));
 
+// WARP-3193 SEC-AUTH-2 — the shared sign-in second-factor check (its own
+// suite covers TOTP / recovery). Default: the user has no TOTP enrolled.
+const checkLoginSecondFactor = vi.fn();
+vi.mock("../services/login-second-factor.service.js", () => ({
+  checkLoginSecondFactor: (...a: unknown[]) => checkLoginSecondFactor(...a),
+}));
+
 import {
   createPublicWebAuthnRouter,
   createProtectedWebAuthnRouter,
@@ -239,6 +246,7 @@ function sessionFromCookie(res: request.Response) {
 beforeEach(() => {
   vi.clearAllMocks();
   createChallenge.mockResolvedValue("mock-challenge-aaaaaaaaaaaaaaaaaaaaaa");
+  checkLoginSecondFactor.mockResolvedValue("not_enrolled");
 });
 
 describe("WebAuthn registration (protected) — POST /auth/webauthn/register/*", () => {
@@ -824,5 +832,102 @@ describe("WARP-1157 — the signed-in user's passkey list", () => {
     const res = await request(buildProtectedApp(prisma, stefan)).delete("/api/auth/webauthn/credentials/row-theirs");
     expect(res.status).toBe(404);
     expect(credentials).toHaveLength(2);
+  });
+});
+
+// WARP-3193 SEC-AUTH-2 — a PIN-less stolen key must not sign in (user
+// verification is REQUIRED on both ceremonies), and a passkey sign-in must
+// not skip an enrolled TOTP factor.
+describe("WARP-3193 — passkeys require user verification and an enrolled TOTP", () => {
+  const credential: CredentialRow = {
+    id: "cred-1",
+    userId: "u-uuid-stefan-7777",
+    credentialId: "cred-id-b64url",
+    publicKey: Buffer.from([1, 2, 3, 4]),
+    counter: 5,
+    transports: "internal",
+    createdAt: new Date(),
+    lastUsedAt: null,
+  };
+  function primeAssertion() {
+    consumeChallenge.mockResolvedValue({
+      id: "c-1", challenge: CHALLENGE, type: "AUTHENTICATION", userId: null,
+      expiresAt: new Date(Date.now() + 60000), createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({ verified: true, authenticationInfo: { newCounter: 6 } });
+  }
+
+  it("🔴 both option endpoints ask the authenticator for REQUIRED user verification", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan] });
+    generateRegistrationOptions.mockResolvedValue({ challenge: CHALLENGE });
+    generateAuthenticationOptions.mockResolvedValue({ challenge: CHALLENGE });
+    await request(buildProtectedApp(prisma, stefan)).post("/api/auth/webauthn/register/options");
+    await request(buildPublicApp(prisma)).post("/api/auth/webauthn/authenticate/options");
+    expect(generateRegistrationOptions.mock.calls[0]![0].authenticatorSelection.userVerification).toBe("required");
+    expect(generateAuthenticationOptions.mock.calls[0]![0].userVerification).toBe("required");
+  });
+
+  it("🔴 both verify endpoints reject a response without user verification", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1", challenge: CHALLENGE, type: "REGISTRATION", userId: stefan.id,
+      expiresAt: new Date(Date.now() + 60000), createdAt: new Date(),
+    });
+    verifyRegistrationResponse.mockResolvedValue({ verified: false });
+    await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("new-cred") });
+    expect(verifyRegistrationResponse.mock.calls[0]![0].requireUserVerification).toBe(true);
+
+    primeAssertion();
+    await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(verifyAuthenticationResponse.mock.calls[0]![0].requireUserVerification).toBe(true);
+  });
+
+  it("🔴 TOTP enrolled, no/wrong code → 401 TOTP_REQUIRED, no session, counter NOT advanced", async () => {
+    const { prisma, credentials } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    primeAssertion();
+    checkLoginSecondFactor.mockResolvedValue("failed");
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url"), totp: "000000" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("TOTP_REQUIRED");
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(credentials[0]!.counter).toBe(5);
+    expect(checkLoginSecondFactor).toHaveBeenCalledWith(
+      prisma,
+      "u-uuid-stefan-7777",
+      expect.objectContaining({ totp: "000000" }),
+    );
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Two-factor challenge failed" }),
+    );
+  });
+
+  it("TOTP enrolled + valid code → session issued with the lastMfaAt stamp", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    primeAssertion();
+    checkLoginSecondFactor.mockResolvedValue("passed");
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url"), totp: "123456" });
+
+    expect(res.status).toBe(200);
+    const decoded = sessionFromCookie(res);
+    expect(typeof decoded.lastMfaAt).toBe("string");
+  });
+
+  it("no TOTP enrolled → session issued without an MFA stamp (unchanged)", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    primeAssertion();
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(res.status).toBe(200);
+    expect(sessionFromCookie(res).lastMfaAt).toBeUndefined();
   });
 });

@@ -87,6 +87,13 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
+// WARP-3193 SEC-AUTH-2 — the shared sign-in second-factor check (its own
+// suite covers TOTP / recovery). Default: no TOTP enrolled.
+const checkLoginSecondFactor = vi.fn();
+vi.mock("../services/login-second-factor.service.js", () => ({
+  checkLoginSecondFactor: (...a: unknown[]) => checkLoginSecondFactor(...a),
+}));
+
 import { createSsoRouter, safeReturnTo } from "./sso.js";
 import { isUserIdShaped } from "@droplet/auth-policy";
 import { authRateLimit } from "../middleware/rate-limit.js";
@@ -236,6 +243,7 @@ beforeEach(() => {
   authRateLimit.resetKey("127.0.0.1");
   vi.clearAllMocks();
   mockConfig.DROPLET_SSO_GOOGLE_ALLOWED_HD = "";
+  checkLoginSecondFactor.mockResolvedValue("not_enrolled");
   getOidcProviderConfig.mockReturnValue({
     provider: "google",
     issuer: "https://accounts.google.com",
@@ -832,6 +840,53 @@ describe("GET /api/sso/oidc/callback — Google hosted-domain allowlist", () => 
     const prisma = createPrismaMock([stefan]);
     const res = await callback(prisma);
     expect(res.status).toBe(302);
+  });
+});
+
+// WARP-3193 SEC-AUTH-2 — SSO must not skip an enrolled local TOTP factor.
+describe("GET /api/sso/oidc/callback — enrolled TOTP", () => {
+  const linked = [{ id: "i-1", userId: "u-uuid-stefan-7777", provider: "google", subject: "google-sub-1", email: "stefan@warp.test" }];
+  function primeLinkedGoogle() {
+    consumeLoginState.mockResolvedValue({
+      id: "sls-1", provider: "google", nonce: "no-123", codeVerifier: "ve-123", returnTo: "/",
+      consumedAt: new Date(), expiresAt: new Date(Date.now() + 600_000),
+    });
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "google-sub-1", email: "stefan@warp.test", emailVerified: true, name: "S" });
+  }
+
+  it("🔴 a password account with TOTP enrolled is refused (401 TOTP_REQUIRED, no session)", async () => {
+    primeLinkedGoogle();
+    checkLoginSecondFactor.mockResolvedValue("failed");
+    const prisma = createPrismaMock([stefan], linked);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("TOTP_REQUIRED");
+    expect(checkLoginSecondFactor).toHaveBeenCalledWith(prisma, "u-uuid-stefan-7777", {});
+    expectNoSessionIssued(res);
+  });
+
+  it("an IdP-provisioned account (no local password) is not refused — it has no other way in", async () => {
+    primeLinkedGoogle();
+    checkLoginSecondFactor.mockResolvedValue("failed");
+    const ssoOnly = { ...stefan, passwordHash: null, provisionSource: "SSO" } as UserRow;
+    const prisma = createPrismaMock([ssoOnly], linked);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+    expect(res.status).toBe(302);
+    expect(checkLoginSecondFactor).not.toHaveBeenCalled();
+  });
+
+  it("no TOTP enrolled → signs in as before", async () => {
+    primeLinkedGoogle();
+    const prisma = createPrismaMock([stefan], linked);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+    expect(res.status).toBe(302);
+    expect(sessionFromRes(res)?.sub).toBe("u-uuid-stefan-7777");
   });
 });
 
