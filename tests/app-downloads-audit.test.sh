@@ -332,7 +332,7 @@ fi
 # Flipping macos to `installer` asserts every release carries the DMG, and
 # only the lock makes a release carry it. So the flip can never land ahead of
 # a lock entry (the flip's other precondition, build-iso staging from the
-# lock, is WARP-3120's follow-up; see EXPECTED).
+# lock, is WARP-3174; see EXPECTED).
 lock_pins_macos="$(python3 -c 'import json,sys; print(any(c.get("platform")=="macos" for c in json.load(open(sys.argv[1]))["clients"]))' "$LOCK" 2>/dev/null)"
 if grep -Eq '^macos[[:space:]]+installer' "$REAL_EXPECTED" && [ "$lock_pins_macos" != "True" ]; then
   fail "EXPECTED says macos installer but clients.lock.json pins no macos build"
