@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import { useState } from "react";
 
 import { NavLayoutToggle } from "@/components/NavLayoutToggle";
 import {
@@ -197,5 +198,74 @@ describe("NavLayoutToggle — focus follows the choice (WARP-3139)", () => {
     fireEvent.click(elsewhere);
     expect(radio("Workspace tabs navigation")).toHaveAttribute("aria-checked", "true");
     expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it("re-choosing the checked radio leaves no request behind to steal focus later", () => {
+    // Space on the already-checked radio changes nothing, so no effect runs to
+    // consume a request. Had it recorded one, the layout coming back to that
+    // value from elsewhere would pull focus into the toggle.
+    function Elsewhere() {
+      const { setLayout } = useNavLayout();
+      return (
+        <>
+          <button type="button" onClick={() => setLayout("workspace")}>
+            to workspace
+          </button>
+          <button type="button" onClick={() => setLayout("sidebar")}>
+            to sidebar
+          </button>
+        </>
+      );
+    }
+    render(
+      <NavLayoutProvider>
+        <NavLayoutToggle />
+        <Elsewhere />
+      </NavLayoutProvider>,
+    );
+    focusOn(radio("Sidebar navigation"));
+    fireEvent.keyDown(radio("Sidebar navigation"), { key: " " });
+    expectCheckedAndFocused(radio("Sidebar navigation"));
+
+    const away = screen.getByRole("button", { name: "to workspace" });
+    const back = screen.getByRole("button", { name: "to sidebar" });
+    focusOn(away);
+    fireEvent.click(away);
+    focusOn(back);
+    fireEvent.click(back);
+    expect(radio("Sidebar navigation")).toHaveAttribute("aria-checked", "true");
+    expect(document.activeElement).toBe(back);
+  });
+
+  it("drops a request no toggle took, so a later visit to Settings doesn't grab focus", () => {
+    // Stands in for a shell that doesn't render the page the choice was made
+    // on: the toggle only exists under the sidebar layout until reopened.
+    function Page() {
+      const { layout } = useNavLayout();
+      const [reopened, setReopened] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setReopened(true)}>
+            reopen settings
+          </button>
+          {(layout === "sidebar" || reopened) && <NavLayoutToggle />}
+        </>
+      );
+    }
+    render(
+      <NavLayoutProvider>
+        <Page />
+      </NavLayoutProvider>,
+    );
+    const sidebar = radio("Sidebar navigation");
+    focusOn(sidebar);
+    fireEvent.keyDown(sidebar, { key: "ArrowRight" });
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+
+    const reopen = screen.getByRole("button", { name: "reopen settings" });
+    focusOn(reopen);
+    fireEvent.click(reopen);
+    expect(radio("Workspace tabs navigation")).toHaveAttribute("aria-checked", "true");
+    expect(document.activeElement).toBe(reopen);
   });
 });

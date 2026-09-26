@@ -87,6 +87,15 @@ export function NavLayoutProvider({ children }: { children: React.ReactNode }) {
   // Lives here, above AuthGate, so it outlives the shell swap (WARP-3139).
   const focusRequest = useRef<NavLayout | null>(null);
 
+  // …but only for the commit the choice caused. Effects run children first,
+  // so a toggle that renders the new layout has already taken the request by
+  // the time this runs. One nothing took (the new shell didn't render the
+  // page it was made on) is dropped, not left to pull focus into a later,
+  // ordinary visit to Settings.
+  useEffect(() => {
+    focusRequest.current = null;
+  }, [layout]);
+
   const value = useMemo(
     () => ({ layout, setLayout, focusRequest }),
     [layout, setLayout],

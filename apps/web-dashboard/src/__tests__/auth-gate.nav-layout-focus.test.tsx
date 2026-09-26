@@ -47,9 +47,14 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
+import { StrictMode } from "react";
 import { AuthGate } from "@/components/AuthGate";
 import { NavLayoutToggle } from "@/components/NavLayoutToggle";
-import { NAV_LAYOUT_STORAGE_KEY, NavLayoutProvider } from "@/lib/nav-layout";
+import {
+  NAV_LAYOUT_STORAGE_KEY,
+  NavLayoutProvider,
+  useNavLayout,
+} from "@/lib/nav-layout";
 
 beforeEach(() => {
   localStorage.clear();
@@ -141,5 +146,57 @@ describe("AuthGate + NavLayoutToggle — focus across the shell swap (WARP-3139)
     expect(screen.getByTestId("workspace-shell")).toBeInTheDocument();
     expect(radio("Workspace tabs navigation")).toHaveAttribute("aria-checked", "true");
     expect(document.activeElement).toBe(document.body);
+  });
+
+  it("a layout change made outside the toggle remounts it without pulling focus in", () => {
+    // Sits outside AuthGate, so it survives the swap and keeps its own focus.
+    function Elsewhere() {
+      const { setLayout } = useNavLayout();
+      return (
+        <button type="button" onClick={() => setLayout("workspace")}>
+          elsewhere
+        </button>
+      );
+    }
+    render(
+      <NavLayoutProvider>
+        <Elsewhere />
+        <AuthGate>
+          <NavLayoutToggle />
+        </AuthGate>
+      </NavLayoutProvider>,
+    );
+    const before = radio("Sidebar navigation");
+    const elsewhere = screen.getByRole("button", { name: "elsewhere" });
+    focusOn(elsewhere);
+
+    fireEvent.click(elsewhere);
+    expect(screen.getByTestId("workspace-shell")).toBeInTheDocument();
+    expect(before.isConnected).toBe(false);
+    expect(radio("Workspace tabs navigation")).toHaveAttribute("aria-checked", "true");
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it("holds under StrictMode's doubled effects (the App Router's dev default)", () => {
+    render(
+      <StrictMode>
+        <NavLayoutProvider>
+          <AuthGate>
+            <NavLayoutToggle />
+          </AuthGate>
+        </NavLayoutProvider>
+      </StrictMode>,
+    );
+    const sidebar = radio("Sidebar navigation");
+    focusOn(sidebar);
+
+    fireEvent.keyDown(sidebar, { key: "ArrowRight" });
+    expect(sidebar.isConnected).toBe(false);
+    const workspace = radio("Workspace tabs navigation");
+    expectCheckedAndFocused(workspace);
+
+    fireEvent.keyDown(workspace, { key: "ArrowLeft" });
+    expect(workspace.isConnected).toBe(false);
+    expectCheckedAndFocused(radio("Sidebar navigation"));
   });
 });
