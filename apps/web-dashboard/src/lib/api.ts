@@ -1349,12 +1349,25 @@ export interface SystemHealth {
 
 export async function fetchSystemHealth(): Promise<SystemHealth> {
   // Public endpoint (no auth) — used by Docker healthcheck + dashboard pill.
+  // WARP-3154 — never carries a down component's `error` (internal-topology
+  // leak on an unauthenticated route); use fetchSystemHealthDetails() for that.
   const res = await fetch(`${BASE}/api/orchestrator/health`, {
     credentials: "include",
   });
   // 503 is a valid "down" response; we still want to read the body.
   if (!res.ok && res.status !== 503) {
     throw new Error(`Failed to fetch system health: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-3154 — the owner/admin counterpart of fetchSystemHealth(): same
+ *  shape, but each component's `error` reason is present. 403s for anyone
+ *  else; callers gate on isAdminRole(user?.role) before calling this. */
+export async function fetchSystemHealthDetails(): Promise<SystemHealth> {
+  const res = await authFetch(`${BASE}/api/orchestrator/health/details`);
+  if (!res.ok && res.status !== 503) {
+    throw new Error(`Failed to fetch system health details: ${res.status}`);
   }
   return res.json();
 }

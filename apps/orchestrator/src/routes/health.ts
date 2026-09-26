@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
+import { requireRole } from "../middleware/auth.js";
 import { isRedisHealthy } from "../services/cache.service.js";
 import { healthCheck as aiGatewayHealth } from "../services/ai-gateway.client.js";
 import { isMatterInitialized } from "../services/matter.service.js";
@@ -108,6 +109,18 @@ export function createHealthRouter(prisma: PrismaClient): Router {
       ...snapshot,
       components: snapshot.components.map(({ error: _error, ...rest }) => rest),
     });
+  });
+
+  // WARP-3154 — the authenticated counterpart of the route above: same
+  // snapshot, but WITH each component's `error` reason. Owner/admin only —
+  // the same set of internal-topology facts the public route now withholds
+  // from everyone else. The web Health page's owner/admin view reads this
+  // one instead; the DropletAgent Mac client still reads only the public
+  // route today (WARP-3177 tracks moving it here).
+  router.get("/orchestrator/health/details", requireRole("owner", "admin"), (_req, res) => {
+    const snapshot = getAggregateHealth();
+    const httpStatus = snapshot.status === "down" ? 503 : 200;
+    res.status(httpStatus).json(snapshot);
   });
 
   return router;

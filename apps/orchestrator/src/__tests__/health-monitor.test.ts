@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
+import express from "express";
 import { PrismaClient } from "@prisma/client";
 
 vi.mock("../services/ai-gateway.client.js", () => ({
@@ -74,6 +75,7 @@ import {
 import { AnalyticsAgent } from "../services/analytics/agent.js";
 import type { AnalyticsClient } from "../services/analytics/client.js";
 import { forwardHealthSnapshot } from "../services/analytics/service-health.js";
+import { createHealthRouter } from "../routes/health.js";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 import { isRedisHealthy } from "../services/cache.service.js";
@@ -643,6 +645,60 @@ describe("GET /api/orchestrator/health", () => {
     const storage = res.body.components.find((c: { name: string }) => c.name === "storage");
     expect(storage).toMatchObject({ name: "storage", status: "down" });
     expect(typeof storage.latencyMs).toBe("number");
+  });
+});
+
+describe("GET /api/orchestrator/health/details (WARP-3154 — owner/admin only)", () => {
+  // A minimal app around just this router, with a synthetic req.user —
+  // the same pattern as routes/access.routes.test.ts's buildApp. This
+  // exercises the real `requireRole` guard on the route without needing a
+  // live session/JWT through the full authMiddleware stack that
+  // createApp() wires up (irrelevant here: the thing under test is the
+  // route-level guard, not session resolution).
+  function detailsApp(prisma: PrismaClient, role: string) {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as unknown as { user: { id: string; username: string; role: string } }).user = {
+        id: "u1",
+        username: "u1",
+        role,
+      };
+      next();
+    });
+    app.use("/api", createHealthRouter(prisma));
+    return app;
+  }
+
+  beforeEach(() => {
+    stopHealthMonitor();
+    stubBridgePools([{ device: "md127", status: "degraded" }]);
+  });
+
+  afterEach(() => {
+    stopHealthMonitor();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(["family", "guest", "service"])(
+    "403s a %s session — same set the public route now withholds error from",
+    async (role) => {
+      const prisma = { $queryRaw: vi.fn().mockResolvedValue([]) } as unknown as PrismaClient;
+      await runAllProbes(prisma);
+
+      const res = await request(detailsApp(prisma, role)).get("/api/orchestrator/health/details");
+      expect(res.status).toBe(403);
+    },
+  );
+
+  it.each(["owner", "admin"])("gives a %s session the down component's error text", async (role) => {
+    const prisma = { $queryRaw: vi.fn().mockResolvedValue([]) } as unknown as PrismaClient;
+    await runAllProbes(prisma);
+
+    const res = await request(detailsApp(prisma, role)).get("/api/orchestrator/health/details");
+    expect(res.status).toBe(200);
+    const storage = res.body.components.find((c: { name: string }) => c.name === "storage");
+    expect(storage.error).toMatch(/md127/);
   });
 });
 
