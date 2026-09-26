@@ -12,6 +12,9 @@ been built and pushed by digest. Inputs:
   --git-sha   the commit the release was built from
   --channel   release channel — `stable` (main) or `stage` (WARP-1670)
   --registry  image registry/namespace prefix (lowercase; GHCR requires it)
+  --clients   optional clients.json from fetch-client-apps.py (WARP-3120):
+              the client installers this release carries, each re-hashed
+              here from the file beside it
   --out       where to write release.json
 
 Every image reference is pinned BY DIGEST (`@sha256:...`), never by tag
@@ -56,6 +59,7 @@ MIN_ORCHESTRATOR_SCHEMA = 1
 ALLOWED_CHANNELS = {"stable", "stage"}
 
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+CLIENT_KEYS = ("platform", "version", "file", "size", "sha256")
 
 
 def die(msg: str) -> None:
@@ -79,6 +83,7 @@ def main() -> None:
     ap.add_argument("--git-sha", required=True)
     ap.add_argument("--channel", default="stable")
     ap.add_argument("--registry", default="ghcr.io/dropletbywarplab")
+    ap.add_argument("--clients", type=Path)
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
@@ -105,6 +110,19 @@ def main() -> None:
     if bad:
         die(f"malformed digest(s) (want sha256:<64 hex>): {bad}")
 
+    # WARP-3120: fetch-client-apps.py already checked each file against the
+    # tracked lock; re-hash here so the signed manifest can only ever name
+    # the bytes that sit next to it and get attached to the release.
+    clients = []
+    if args.clients is not None:
+        for c in json.loads(args.clients.read_text(encoding="utf-8")):
+            if sorted(c) != sorted(CLIENT_KEYS):
+                die(f"client entry has keys {sorted(c)}, want {sorted(CLIENT_KEYS)}")
+            f = args.clients.parent / c["file"]
+            if not f.is_file() or f.stat().st_size != c["size"] or sha256_file(f) != c["sha256"]:
+                die(f"client {c['file']} is missing or does not match its entry")
+            clients.append({k: c[k] for k in CLIENT_KEYS})
+
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
         "release": {
@@ -128,6 +146,12 @@ def main() -> None:
             "sha256": sha256_file(args.configs),
         },
     }
+    # Optional and additive (still schemaVersion 1): an orchestrator that
+    # predates it strips the key (manifest.ts is a non-strict zod object)
+    # and fleet-agent's release_verify.py ignores unknown keys. Omitted when
+    # empty so a release without client apps is byte-for-byte today's shape.
+    if clients:
+        manifest["clients"] = clients
 
     args.out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"gen-release-manifest: wrote {args.out} "

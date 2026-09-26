@@ -1107,6 +1107,43 @@ else
 fi
 
 # =============================================================================
+# WARP-3120 — stage-client-apps: a release's client installer into /downloads
+# =============================================================================
+# The orchestrator has already sha256-checked the file against the signed
+# manifest; the helper's job is to hand ONLY that file, from ONLY this
+# update's clients/ dir, to the box's own stage.sh.
+CA_FILE="$UDIR/clients/Droplet-0.2.0.dmg"
+mkdir -p "$UDIR/clients" && printf 'dmg' > "$CA_FILE"
+stub_reset
+CA_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 run_apply stage-client-apps --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --platform macos --version 0.2.0 --file "$CA_FILE" 2>&1)"; CA_RC=$?
+CA_ROOT="$(dirname "$(dirname "$COMPOSE_FILE")")"
+if [ "$CA_RC" -eq 0 ] \
+  && printf '%s' "$CA_OUT" | grep -qF -- "DRY-RUN: bash $CA_ROOT/scripts/app-downloads/stage.sh --no-restart --platform macos --version 0.2.0 $CA_FILE" \
+  && printf '%s' "$CA_OUT" | grep -qF -- "DRY-RUN: chown -R --reference=$CA_ROOT/data/app-downloads $CA_ROOT/data/app-downloads"; then
+  pass "stage-client-apps runs the box's stage.sh --no-restart on the verified file"
+else
+  fail "stage-client-apps invocation wrong (rc=$CA_RC out=$CA_OUT)"
+fi
+for bad in \
+  "--platform ios --version 0.2.0 --file $CA_FILE" \
+  "--platform macos --version 0.2 --file $CA_FILE" \
+  "--platform macos --version 0.2.0;id --file $CA_FILE" \
+  "--platform macos --version 0.2.0 --file $UDIR/Droplet-0.2.0.dmg" \
+  "--platform macos --version 0.2.0 --file $UDIR/clients/../clients/Droplet-0.2.0.dmg" \
+  "--platform macos --version 0.2.0 --file $UPDATES_DIR/other/clients/Droplet-0.2.0.dmg" \
+  "--platform macos --version 0.2.0 --file $UDIR/clients/.hidden"; do
+  stub_reset
+  # shellcheck disable=SC2086 # word-split on purpose: one case per line
+  if DROPLET_OTA_APPLY_DRY_RUN=1 run_apply stage-client-apps --compose-file "$COMPOSE_FILE" \
+      --update-id "$UPDATE_ID" $bad >/dev/null 2>&1; then
+    fail "stage-client-apps must refuse: $bad"
+  else
+    pass "stage-client-apps refuses: ${bad#--platform }"
+  fi
+done
+
+# =============================================================================
 # Phase 8 — WARP-2898 (ADR-056 slice K1): the helper's subcommand surface is
 # CLOSED. The orchestrator's socket reach is exactly this dispatcher, so an
 # unknown subcommand must die before any docker (or cosign) call, and the
@@ -1131,7 +1168,7 @@ for bad in install-extension recreate-extension "recreate-services;id" "docker" 
   fi
 done
 
-EXPECTED_SUBCOMMANDS=" current-image-refs snapshot pull-images stage-configs migrate-deploy recreate-services enabled-services reconcile-env restore-configs recreate-self-detached self-swap-supervise list-self-swap-helpers capture-self-swap-logs rm-self-swap-helper *"
+EXPECTED_SUBCOMMANDS=" current-image-refs snapshot pull-images stage-configs stage-client-apps migrate-deploy recreate-services enabled-services reconcile-env restore-configs recreate-self-detached self-swap-supervise list-self-swap-helpers capture-self-swap-logs rm-self-swap-helper *"
 DISPATCH_LABELS=""
 DISPATCH_SHAPE_OK=1
 in_case=0

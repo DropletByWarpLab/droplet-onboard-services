@@ -103,6 +103,24 @@ const serviceSchema = z
     path: ["image"],
   });
 
+/**
+ * WARP-3120 — a client installer the release carries (the Droplet for Mac
+ * DMG today). Optional and additive: the generator omits the key when the
+ * lock is empty, and an orchestrator that predates it strips it. Inside the
+ * cosign-signed bytes, so the installer's sha256 is covered by the OTA trust
+ * anchor. A malformed entry refuses the whole manifest: the generator wrote
+ * it, so it means the release itself is wrong. Shapes mirror
+ * scripts/release/fetch-client-apps.py and the catalog's ASSET_NAME_RE.
+ */
+export const CLIENT_PLATFORMS = ["windows", "macos", "linux", "android"] as const;
+const clientSchema = z.object({
+  platform: z.enum(CLIENT_PLATFORMS),
+  version: z.string().regex(/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/, "version must be x.y.z"),
+  file: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/, "file must be a plain asset name"),
+  size: z.number().int().positive(),
+  sha256: z.string().regex(SHA256_HEX_RE, "sha256 must be 64 hex chars"),
+});
+
 const manifestSchema = z.object({
   schemaVersion: z.literal(SUPPORTED_SCHEMA_VERSION),
   release: z.object({
@@ -126,6 +144,13 @@ const manifestSchema = z.object({
     file: z.string().min(1),
     sha256: z.string().regex(SHA256_HEX_RE, "configs.sha256 must be 64 hex chars"),
   }),
+  clients: z
+    .array(clientSchema)
+    .refine(
+      (cs) => new Set(cs.map((c) => c.platform)).size === cs.length,
+      "clients must have one entry per platform",
+    )
+    .optional(),
 });
 
 /**
@@ -164,6 +189,7 @@ function nonReleaseKindDetail(doc: Record<string, unknown>): string | null {
 export type ReleaseManifest = z.infer<typeof manifestSchema>;
 export type ReleaseService = ReleaseManifest["services"][number];
 export type ReleaseServiceHealthcheck = ReleaseService["healthcheck"];
+export type ReleaseClient = z.infer<typeof clientSchema>;
 
 export type ManifestParseResult =
   | { ok: true; manifest: ReleaseManifest }

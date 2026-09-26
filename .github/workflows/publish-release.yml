@@ -278,6 +278,25 @@ jobs:
           python3 -m pip install --upgrade pip pytest pyyaml
           python3 -m pytest scripts/release/ -q
 
+      # WARP-3120 — the client installers this release carries (today the
+      # Droplet for Mac DMG), pinned in the tracked
+      # data/app-downloads/clients.lock.json. Runs BEFORE the image builds so
+      # a bad lock or a missing token fails in seconds, not after two hours.
+      # The token is DROPLET_CLIENT_APPS_TOKEN, a fine-grained PAT with
+      # contents:read on DropletAgent only (GITHUB_TOKEN cannot read another
+      # private repo). An empty lock needs no token and only warns, so
+      # releases keep publishing before the secret exists; a lock that pins
+      # an entry fails closed without it, and on any size/sha256 mismatch.
+      # Escape class closed: a Mac build reaching boxes only by hand (and
+      # vanishing on reimage). One download per publish: no spend change.
+      - name: Fetch client apps
+        env:
+          GH_TOKEN: ${{ secrets.DROPLET_CLIENT_APPS_TOKEN }}
+        run: |
+          python3 scripts/release/fetch-client-apps.py \
+            --lock data/app-downloads/clients.lock.json \
+            --out-dir dist/clients
+
       # ubuntu-latest has ~14GB free. Building every appliance image
       # fills that before BuildKit finishes (same fix as docker-build.yml
       # / setup-e2e.yml). Strip the preinstalled toolchains we don't use
@@ -491,6 +510,7 @@ jobs:
             --git-sha "${GITHUB_SHA}" \
             --channel "${CHANNEL}" \
             --registry "ghcr.io/${owner_lc}" \
+            --clients dist/clients/clients.json \
             --out dist/release.json
           cat dist/release.json
 
@@ -536,12 +556,15 @@ jobs:
           # Split the resolved flag string into an argv array rather than
           # letting it word-split at the call site.
           read -r -a release_flags <<< "${RELEASE_FLAGS}"
+          # WARP-3120: the client installers release.json names (may be none).
+          mapfile -t client_files < <(jq -r '.[].file | "dist/clients/" + .' dist/clients/clients.json)
           gh release create "${tag}" \
             --target "${GITHUB_SHA}" \
             --title "OTA release ${tag}" \
-            --notes "Automated OTA release for ${GITHUB_SHA} (channel: ${CHANNEL}). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against cosign.pub, attached), configs.tar.gz (tracked docker/ runtime configs), image-signatures.json (per-image keyless-signature + Rekor transparency-log index, WARP-244 — see docs/SECURITY.md for verification), cosign.pub (OTA manifest trust anchor). Plus CycloneDX 1.5 SBOMs: droplet-<service>.cdx.json per image and droplet-device.cdx.json aggregated (WARP-245)." \
+            --notes "Automated OTA release for ${GITHUB_SHA} (channel: ${CHANNEL}). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against cosign.pub, attached), configs.tar.gz (tracked docker/ runtime configs), image-signatures.json (per-image keyless-signature + Rekor transparency-log index, WARP-244 — see docs/SECURITY.md for verification), cosign.pub (OTA manifest trust anchor). Client installers named in release.json's clients array, if any (WARP-3120). Plus CycloneDX 1.5 SBOMs: droplet-<service>.cdx.json per image and droplet-device.cdx.json aggregated (WARP-245)." \
             "${release_flags[@]}" \
             dist/release.json dist/release.json.sig dist/configs.tar.gz \
             dist/image-signatures.json \
             apps/orchestrator/src/services/update-agent/cosign.pub \
-            dist/sbom/*.cdx.json
+            dist/sbom/*.cdx.json \
+            ${client_files[@]+"${client_files[@]}"}

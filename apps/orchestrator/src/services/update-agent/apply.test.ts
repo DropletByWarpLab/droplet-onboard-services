@@ -32,10 +32,10 @@
  *   - every status transition is committed BEFORE the action it guards
  *     (resumability contract).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import http from "node:http";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
@@ -53,7 +53,7 @@ import {
   type RecreateTarget,
 } from "./apply.js";
 import { createHostComposeRunner } from "./host-compose-runner.js";
-import type { ReleaseManifest, ReleaseService } from "./manifest.js";
+import type { ReleaseClient, ReleaseManifest, ReleaseService } from "./manifest.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
 
 const fx = (name: string): Buffer =>
@@ -123,6 +123,16 @@ let releaseServer: http.Server;
 let releaseBaseUrl = "";
 let servedTag = "ota-9-gapply";
 let servedConfigs: Buffer = CONFIGS_TAR;
+// WARP-3120 — the client installer a release may carry.
+const DMG = Buffer.from("a Developer ID signed, notarized DMG (fake bytes)");
+let servedDmg: Buffer = DMG;
+const DMG_CLIENT = {
+  platform: "macos" as const,
+  version: "0.2.0",
+  file: "Droplet-0.2.0.dmg",
+  size: DMG.length,
+  sha256: createHash("sha256").update(DMG).digest("hex"),
+};
 
 // ---------------------------------------------------------------------------
 // Fake per-service health endpoints — ONE real HTTP server; the production
@@ -148,9 +158,15 @@ beforeAll(async () => {
             { name: "release.json", url: `${releaseBaseUrl}/assets/manifest` },
             { name: "release.json.sig", url: `${releaseBaseUrl}/assets/signature` },
             { name: "configs.tar.gz", url: `${releaseBaseUrl}/assets/configs` },
+            { name: "Droplet-0.2.0.dmg", url: `${releaseBaseUrl}/assets/dmg` },
           ],
         }),
       );
+      return;
+    }
+    if (req.url === "/assets/dmg") {
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(servedDmg);
       return;
     }
     if (req.url === "/assets/configs") {
@@ -413,6 +429,23 @@ class FakeRunner implements ApplyRunner {
     this.calls.push(`stageConfigs(${opts.updateId},${opts.configsTar.length}b)`);
   }
 
+  /** WARP-3120 — where the fake "helper" finds staged installers; a failure knob. */
+  clientDir = "";
+  staged: Record<string, Buffer> = {};
+  stageClientFails = false;
+
+  async stageClientApp(opts: {
+    updateId: string;
+    client: ReleaseClient;
+    write: (dest: string) => Promise<void>;
+  }) {
+    this.calls.push(`stageClientApp(${opts.updateId},${opts.client.platform},${opts.client.version})`);
+    const dest = path.join(this.clientDir, opts.client.file);
+    await opts.write(dest);
+    if (this.stageClientFails) throw new Error("stub: stage.sh failed on the host");
+    this.staged[opts.client.platform] = readFileSync(dest);
+  }
+
   async migrateDeploy() {
     this.calls.push("migrateDeploy()");
   }
@@ -470,6 +503,7 @@ function baseOpts(prisma: PrismaStub, runner: FakeRunner, logger = createLoggerS
 beforeEach(() => {
   servedTag = "ota-9-gapply";
   servedConfigs = CONFIGS_TAR;
+  servedDmg = DMG;
   healthy.orchestrator = true;
   healthy["web-dashboard"] = true;
   healthy["device-identity-svc"] = true; // type "none" — never actually probed
@@ -1249,5 +1283,89 @@ describe("WARP-3017 — the resume gates wait for this orchestrator to listen", 
 
     expect((await verdict).outcome).toBe("rolled_back");
     expect(g.probedBeforeListen).toEqual([]);
+  });
+});
+
+
+describe("client installers the release carries (WARP-3120)", () => {
+  let clientDir: string;
+  beforeEach(() => {
+    clientDir = mkdtempSync(path.join(tmpdir(), "warp3120-clients-"));
+  });
+  afterEach(() => rmSync(clientDir, { recursive: true, force: true }));
+
+  const withDmg = (): ReleaseManifest => ({ ...buildManifest(), clients: [DMG_CLIENT] });
+  const runnerFor = () => {
+    const r = new FakeRunner();
+    r.clientDir = clientDir;
+    return r;
+  };
+
+  it("stages the verified DMG after the .env reconcile and before migrations", async () => {
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, withDmg());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    const i = runner.calls.indexOf("stageClientApp(du-1,macos,0.2.0)");
+    expect(i).toBeGreaterThan(runner.calls.findIndex((c) => c.startsWith("reconcileEnv(")));
+    expect(i).toBeLessThan(runner.calls.indexOf("migrateDeploy()"));
+    expect(runner.staged.macos).toEqual(DMG);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.client_app_staged", platform: "macos", version: "0.2.0" }),
+      expect.any(String),
+    );
+  });
+
+  it.each([
+    ["same size, different bytes", () => Buffer.from(DMG.map((b, i) => (i === 3 ? b ^ 0xff : b)))],
+    ["truncated", () => DMG.subarray(0, DMG.length - 1)],
+    ["too long", () => Buffer.concat([DMG, Buffer.from("!")])],
+  ])("a %s DMG is skipped, deleted, and the box update still goes ahead", async (_l, bytes) => {
+    servedDmg = bytes();
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, withDmg());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    expect(runner.staged.macos).toBeUndefined();
+    expect(existsSync(path.join(clientDir, DMG_CLIENT.file))).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.client_apps_skipped", platform: "macos" }),
+      expect.any(String),
+    );
+  });
+
+  it("a host staging failure is a skip, not a failed update", async () => {
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    runner.stageClientFails = true;
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, withDmg());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.client_apps_skipped",
+        reason: "stub: stage.sh failed on the host",
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("a manifest without clients stages nothing", async () => {
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner));
+    expect(runner.calls.some((c) => c.startsWith("stageClientApp("))).toBe(false);
   });
 });

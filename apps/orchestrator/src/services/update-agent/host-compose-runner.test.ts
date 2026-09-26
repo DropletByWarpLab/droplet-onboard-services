@@ -242,6 +242,67 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(calls[0]!.args).toContain(tarPath);
   });
 
+  it("stageClientApp lets the caller write into clients/ then hands the helper that HOST path (WARP-3120)", async () => {
+    const calls: Array<{ args: string[]; timeoutMs?: number }> = [];
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      helperUpdatesDir: "/host/updates",
+      exec: async (_file, args, opts) => {
+        calls.push({ args, timeoutMs: opts?.timeoutMs });
+        return { stdout: "", stderr: "" };
+      },
+    });
+    const client = {
+      platform: "macos" as const,
+      version: "0.2.0",
+      file: "Droplet-0.2.0.dmg",
+      size: 3,
+      sha256: "e".repeat(64),
+    };
+    let written = "";
+    await runner.stageClientApp({
+      updateId: "du-1",
+      client,
+      write: async (dest) => {
+        written = dest;
+        writeFileSync(dest, "dmg");
+      },
+    });
+    expect(written).toBe(path.join(workDir, "du-1", "clients", "Droplet-0.2.0.dmg"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args).toEqual([
+      "stage-client-apps",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-1",
+      "--platform",
+      "macos",
+      "--version",
+      "0.2.0",
+      "--file",
+      "/host/updates/du-1/clients/Droplet-0.2.0.dmg",
+    ]);
+    expect(calls[0]!.timeoutMs).toBeGreaterThan(60_000);
+  });
+
+  it("stageClientApp never calls the helper when the download fails", async () => {
+    const { fn, calls } = fakeExec();
+    const runner = makeRunner(fn);
+    await expect(
+      runner.stageClientApp({
+        updateId: "du-1",
+        client: { platform: "macos", version: "0.2.0", file: "D.dmg", size: 1, sha256: "e".repeat(64) },
+        write: async () => {
+          throw new Error("sha256 mismatch");
+        },
+      }),
+    ).rejects.toThrow("sha256 mismatch");
+    expect(calls).toHaveLength(0);
+  });
+
   it("recreateServices passes the service list + target and NOT the orchestrator implicitly", async () => {
     const { fn, calls } = fakeExec();
     const runner = makeRunner(fn);

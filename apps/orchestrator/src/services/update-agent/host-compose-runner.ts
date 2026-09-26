@@ -79,7 +79,7 @@ import {
   type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
-import type { ReleaseManifest, ReleaseService } from "./manifest.js";
+import type { ReleaseClient, ReleaseManifest, ReleaseService } from "./manifest.js";
 
 const defaultLog = createLogger("update-agent");
 
@@ -428,6 +428,34 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
           path.join(helperUpdateDir(args.updateId), "configs.tar.gz"),
         ],
         timeouts.quickMs,
+      );
+    },
+
+    async stageClientApp(args: {
+      updateId: string;
+      client: ReleaseClient;
+      write: (dest: string) => Promise<void>;
+    }): Promise<void> {
+      // `client.file` is a plain asset name (manifest schema), so it cannot
+      // leave clients/; the helper re-checks that on the host anyway.
+      const dir = path.join(updateDir(args.updateId), "clients");
+      await mkdir(dir, { recursive: true });
+      await args.write(path.join(dir, args.client.file));
+      await run(
+        "stage-client-apps",
+        [
+          "--update-id",
+          args.updateId,
+          "--platform",
+          args.client.platform,
+          "--version",
+          args.client.version,
+          "--file",
+          path.join(helperUpdateDir(args.updateId), "clients", args.client.file),
+        ],
+        // Copies and re-hashes an installer (tens of MB), maybe inside a
+        // borrowed orchestrator container: not a quick call.
+        timeouts.recreateMs,
       );
     },
 
