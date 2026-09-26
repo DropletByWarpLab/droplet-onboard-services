@@ -68,6 +68,11 @@ import {
 import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
+  assertedNextcloudLoginRefusal,
+  resolveAssertedNextcloudLogin,
+  type AssertedNextcloudLoginFailure,
+} from "../services/asserted-nextcloud-login.service.js";
+import {
   ncMintEditorSession,
   docServerHealthy,
   DocServerUnavailableError,
@@ -219,11 +224,26 @@ class MissingAuthUserError extends Error {
 }
 
 /**
+ * WARP-3117 — `_service:mcp` asserted a person these routes cannot act as in
+ * Nextcloud: nobody, more than one person, a deactivated person, or a person
+ * with no Nextcloud account (every SSO / SCIM row). handleFileError answers
+ * 403; there is no fallback identity.
+ */
+class AssertedNcLoginError extends Error {
+  constructor(readonly reason: AssertedNextcloudLoginFailure) {
+    super(`asserted user refused: ${reason}`);
+    this.name = "AssertedNcLoginError";
+  }
+}
+
+/**
  * WARP-861 — the MCP file tools call these routes with the service
  * bearer (SERVICE_TOKEN_MCP → `_service:mcp`) plus the per-user
  * Nextcloud credential the agent loop threads via `_meta.ncToken`:
  *   X-Nextcloud-Token: the user's NC app-password / session token
- *   X-Nextcloud-User:  the username the call acts as
+ *   X-Nextcloud-User:  the person the call acts for — `User.username` on
+ *                      stdio, `User.id` over HTTP (WARP-3117: resolved to
+ *                      their Nextcloud login by getUser)
  * Only the trusted mcp service principal may assert another user this
  * way (same trust posture as the stdio `_meta` channel); for every
  * other caller the headers are ignored and the session cookie rules.
@@ -243,14 +263,27 @@ async function getToken(req: Request): Promise<string> {
   return token;
 }
 
-/** Get the username from the authenticated request. */
-function getUser(req: Request): string {
+/**
+ * The Nextcloud user this request's WebDAV / OCS calls act as.
+ *
+ * WARP-3117: for the MCP service principal the header names a PERSON, not a
+ * Nextcloud account — used verbatim, every call over the HTTP transport went
+ * to `/remote.php/dav/files/<User.id>/…`, and a header naming nobody, two
+ * people or a deactivated person was never checked. It is resolved to one
+ * active person and mapped to their `nextcloudUsername`.
+ */
+async function getUser(req: Request, prisma: PrismaClient): Promise<string> {
   if (isMcpService(req)) {
     const headerUser = (req.header("x-nextcloud-user") ?? "").trim();
     // No fallback for the service principal: acting as "admin" by
     // default would be a privilege escalation, not a convenience.
     if (!headerUser) throw new MissingNcTokenError();
-    return headerUser;
+    const resolved = await resolveAssertedNextcloudLogin(prisma, headerUser);
+    if (!resolved.ok) {
+      logger.warn({ asserted: headerUser, reason: resolved.reason }, "files: MCP asserted user refused");
+      throw new AssertedNcLoginError(resolved.reason);
+    }
+    return resolved.login;
   }
   const username = req.user?.username;
   // authMiddleware guarantees req.user on these routes; an absent username is
@@ -878,6 +911,12 @@ function handleFileError(
     res.status(401).json({ error: err.message });
     return;
   }
+  // WARP-3117 — same ordering reason: a refused asserted person must never
+  // degrade into an empty listing.
+  if (err instanceof AssertedNcLoginError) {
+    res.status(403).json(assertedNextcloudLoginRefusal(err.reason));
+    return;
+  }
   // WARP-882: the document-server engine is an upstream dependency. When it is
   // disabled or unreachable the correct status is 503, with the typed error's
   // wire shape so the dashboard renders a calm "editing unavailable" state.
@@ -1239,7 +1278,7 @@ export function createFilesRouter(
           return;
         }
         const token = await getToken(req);
-        const user = getUser(req);
+        const user = await getUser(req, prisma);
 
         // WARP-1260 (T8): department metadata gate — resolve BEFORE minting
         // the doc-server session so a non-member never reaches the WOPI
@@ -1403,7 +1442,7 @@ export function createFilesRouter(
         let gateDepartmentId: string | null = null;
         try {
           const gateToken = await getToken(req);
-          const gateNcUser = getUser(req);
+          const gateNcUser = await getUser(req, prisma);
           const gateFileId = await ncGetFileId(gateToken, gateNcUser, filePath);
           if (gateFileId !== null) {
             gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
@@ -1551,7 +1590,7 @@ export function createFilesRouter(
       return null;
     }
     const token = await getToken(req);
-    const ncUser = getUser(req);
+    const ncUser = await getUser(req, prisma);
     const fileId = await ncGetFileId(token, ncUser, normalizedPath);
     if (fileId === null) {
       res.status(404).json({ error: "File not found" });
@@ -1626,7 +1665,7 @@ export function createFilesRouter(
         // Topic carries the {user} segment so the WS bridge forwards it
         // (it subscribes to `droplet/files/{user}/#`); useFileRealtime then
         // does its blanket `/api/files`-prefix SWR invalidation.
-        safePublish(`droplet/files/${getUser(req)}/comment-deleted`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/comment-deleted`, {
           id,
           ncFileId: row.ncFileId,
         });
@@ -1686,7 +1725,7 @@ export function createFilesRouter(
         });
         // {user} segment so the WS bridge (droplet/files/{user}/#) forwards
         // it → useFileRealtime invalidates the file SWR caches.
-        safePublish(`droplet/files/${getUser(req)}/comment-added`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/comment-added`, {
           id: comment.id,
           ncFileId: fileId,
           authorUserId: comment.authorUserId,
@@ -1748,7 +1787,7 @@ export function createFilesRouter(
           // provenance (addedByUserId/createdAt) must NOT be overwritten.
           update: {},
         });
-        safePublish(`droplet/files/${getUser(req)}/tag-added`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/tag-added`, {
           ncFileId: fileId,
           label: tag.label,
         });
@@ -1770,7 +1809,7 @@ export function createFilesRouter(
         if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const label = req.params.label;
         await prisma.fileTag.deleteMany({ where: { ncFileId: fileId, label } });
-        safePublish(`droplet/files/${getUser(req)}/tag-removed`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/tag-removed`, {
           ncFileId: fileId,
           label,
         });
@@ -1818,7 +1857,7 @@ export function createFilesRouter(
       // Nextcloud; the route resolves it again for the commit.
       await rootForSpace(prisma, resolveSpace(req.query.space), (req.query.path as string) || "/");
       limitMb = await resolveUploadLimitMb(prisma, userId);
-      storage = nextcloudUploadStorage(await getToken(req), getUser(req));
+      storage = nextcloudUploadStorage(await getToken(req), await getUser(req, prisma));
     } catch (err) {
       handleFileError(err, res, next);
       return;
@@ -1900,10 +1939,15 @@ export function createFilesRouter(
   /**
    * WARP-2096 — the registry owner. A human session owns what it uploads.
    * The mcp-server principal (`_service:mcp`) writes AS the asserted
-   * Nextcloud user, so the row belongs to that person — keyed by
-   * `User.username`, which mirrors the NC user id — not to the service
-   * account, where every user's agent-written files would collapse into one
-   * bucket and never match the person's own duplicate lookups.
+   * person's Nextcloud login, so the row belongs to that person — not to
+   * the service account, where every user's agent-written files would
+   * collapse into one bucket and never match the person's own duplicate
+   * lookups.
+   *
+   * WARP-3117: `ncUser` is the login getUser resolved the asserted person
+   * to, so it is looked up by `nextcloudUsername` (unique), not `username`:
+   * the two are decoupled (ADR-013), and the old `username` lookup matched
+   * nothing for a login that differs from the handle.
    */
   async function resolveRegistryOwner(req: Request, ncUser: string): Promise<string | null> {
     const id = (req as { user?: { id?: string } }).user?.id;
@@ -1912,7 +1956,7 @@ export function createFilesRouter(
     // Best-effort like every registry write: a lookup failure skips the
     // row, never the upload.
     const row = await prisma.user
-      .findUnique({ where: { username: ncUser }, select: { id: true } })
+      .findUnique({ where: { nextcloudUsername: ncUser }, select: { id: true } })
       .catch(() => null);
     return row?.id ?? null;
   }
@@ -1949,7 +1993,7 @@ export function createFilesRouter(
         const requestedPath = (req.query.path as string) || "/";
         const space = resolveSpace(req.query.space);
         const filePath = await rootForSpace(prisma, space, requestedPath);
-        const user = getUser(req);
+        const user = await getUser(req, prisma);
         const isPersonalRoot = space === "personal" && filePath === "/";
 
       // The cache identity is the (space, resolvedPath) PAIR, built by the one
@@ -2016,7 +2060,7 @@ export function createFilesRouter(
   // on Nextcloud outage (never 500).
   router.get("/files/spaces", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const userId = req.user?.id;
       if (!userId) {
         res.status(401).json({ error: "Unauthorized" });
@@ -2172,7 +2216,7 @@ export function createFilesRouter(
         req.query.disposition === "inline" ? inlinePreviewContentType(filename) : null;
       const serveInline = inlineType !== null;
 
-      const stream = await ncDownloadFile(await getToken(req), getUser(req), filePath);
+      const stream = await ncDownloadFile(await getToken(req), await getUser(req, prisma), filePath);
       if (!stream) {
         res.status(404).json({ error: "File not found" });
         return;
@@ -2368,7 +2412,7 @@ export function createFilesRouter(
         uploads.flatMap((u) => ("uploadId" in u ? [u.uploadId] : [])),
       );
       const token = await getToken(req);
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       try {
         const targetPath = await rootForSpace(prisma, space, rawTargetPath);
         // WARP-2096: replacing an existing file is an explicit opt-in on the
@@ -2539,7 +2583,7 @@ export function createFilesRouter(
         const dir = path.posix.dirname(rawPath) || "/";
         const targetPath = await rootForSpace(prisma, space, dir);
         const token = await getToken(req);
-        const user = getUser(req);
+        const user = await getUser(req, prisma);
         const uploadedPath =
           targetPath === "/" ? `/${filename}` : `${targetPath}/${filename}`;
 
@@ -2688,7 +2732,7 @@ export function createFilesRouter(
       const space = resolveSpace(req.query.space);
       const filePath = await rootForSpace(prisma, space, rawPath);
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const parentPath = path.posix.dirname(filePath) || "/";
 
       // WARP-1682: invalidate the parent listing whether or not the WebDAV
@@ -2744,7 +2788,7 @@ export function createFilesRouter(
       const space = resolveSpace(spaceQueryOrBody(req));
       const targetPath = await rootForSpace(prisma, space, parsed.data.path);
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncCreateDirectory(await getToken(req), user, targetPath);
 
       const parentPath = path.posix.dirname(targetPath) || "/";
@@ -3025,7 +3069,7 @@ export function createFilesRouter(
       const parentDir = path.posix.dirname(filePath) || "/";
       const newPath = parentDir === "/" ? `/${newName}` : `${parentDir}/${newName}`;
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncMoveFile(await getToken(req), user, filePath, newPath, false);
 
       await invalidateParents(req, user, { space, path: filePath });
@@ -3084,7 +3128,7 @@ export function createFilesRouter(
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncMoveFile(await getToken(req), user, from, to, overwrite);
 
       // WARP-1610: the cross-space case. `from` and `to` can be in
@@ -3149,7 +3193,7 @@ export function createFilesRouter(
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
 
       await invalidateParents(req, user, { space: toSpaceValue, path: to });
@@ -3180,7 +3224,7 @@ export function createFilesRouter(
       const paths = await Promise.all(
         parsed.data.paths.map((p) => rootForSpace(prisma, space, p)),
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
@@ -3230,7 +3274,7 @@ export function createFilesRouter(
       );
       const toDirResolved = await rootForSpace(prisma, space, parsed.data.toDir);
       const { overwrite } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
       const normalizedDir = toDirResolved.replace(/\/+$/, "") || "/";
 
@@ -3289,7 +3333,7 @@ export function createFilesRouter(
       );
       const toDirResolved = await rootForSpace(prisma, space, parsed.data.toDir);
       const { overwrite } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
       const normalizedDir = toDirResolved.replace(/\/+$/, "") || "/";
 
@@ -3322,7 +3366,7 @@ export function createFilesRouter(
   // ── Trash: list (GET /api/files/trash) ──
   router.get("/files/trash", async (req, res, next) => {
     try {
-      const items = await ncListTrash(await getToken(req), getUser(req));
+      const items = await ncListTrash(await getToken(req), await getUser(req, prisma));
       res.json({ items });
     } catch (err) {
       handleFileError(err, res, next, { items: [] });
@@ -3351,7 +3395,7 @@ export function createFilesRouter(
         res.status(400).json({ error: "name is required" });
         return;
       }
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncRestoreTrashItem(await getToken(req), user, parsed.data.name);
       // WARP-1652: restore is the one mutating route that used to leave every
       // listing cache entry alone, so a restored file stayed invisible for the
@@ -3388,7 +3432,7 @@ export function createFilesRouter(
         res.status(400).json({ error: "name query parameter is required" });
         return;
       }
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncDeleteTrashItem(await getToken(req), user, name);
       safePublish(`droplet/files/${user}/trash-purged`, { name });
       res.json({ deleted: name });
@@ -3405,7 +3449,7 @@ export function createFilesRouter(
     requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
     async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncEmptyTrash(await getToken(req), user);
       safePublish(`droplet/files/${user}/trash-emptied`, {});
       res.json({ emptied: true });
@@ -3422,7 +3466,7 @@ export function createFilesRouter(
         res.status(400).json({ error: "path query parameter is required" });
         return;
       }
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
       const fileId = await ncGetFileId(token, user, filePath);
       if (fileId === null) {
@@ -3462,7 +3506,7 @@ export function createFilesRouter(
       const space = resolveSpace(spaceQueryOrBody(req));
       const filePath = await rootForSpace(prisma, space, parsed.data.path);
       const { versionId } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
 
       const fileId = await ncGetFileId(token, user, filePath);
@@ -3534,7 +3578,7 @@ export function createFilesRouter(
       const space = resolveSpace(spaceQueryOrBody(req));
       const filePath = await rootForSpace(prisma, space, parsed.data.path);
       const { favorite } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncSetFavorite(await getToken(req), user, filePath, favorite);
       // WARP-1556: the read key is ACL-scoped, so the invalidation must be
       // too. An unresolved tag means we can't name the entry — skip the del
@@ -3552,7 +3596,7 @@ export function createFilesRouter(
   // ── Favorites list (GET /api/files/favorites) ──
   router.get("/files/favorites", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const cacheKey = await aclScopedKey(req, FAVORITES_CACHE_PREFIX, user);
       if (cacheKey) {
         const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
@@ -3576,7 +3620,7 @@ export function createFilesRouter(
         1,
         Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const cacheKey = await aclScopedKey(
         req,
         RECENTS_CACHE_PREFIX,
@@ -3615,7 +3659,7 @@ export function createFilesRouter(
         1,
         Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const cacheKey = await aclScopedKey(
         req,
         SEARCH_CACHE_PREFIX,
@@ -3666,7 +3710,7 @@ export function createFilesRouter(
         16,
         Math.min(1024, parseInt((req.query.y as string) || "256", 10) || 256)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
 
       const fileId = await ncGetFileId(token, user, filePath);
@@ -3993,7 +4037,7 @@ export function createFilesRouter(
         1,
         Math.min(100, parseInt((req.query.limit as string) || "20", 10) || 20)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
 
       // WARP-880 / WS-2 — three content-search modes:
       //   semantic (default) → existing inline pgvector SQL (unchanged)
@@ -4260,7 +4304,7 @@ export function createFilesRouter(
   // other users' counts here.
   router.get("/files/search/status", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       // WARP-1264: same corpus rule as content search — own chunks plus one
       // sentinel per ACTIVE department the caller is visible into
       // (owner/admin see all, an audited see-all consistent with
@@ -4459,7 +4503,7 @@ export function createFilesRouter(
 
       const upstream = await ncFetchFileResponse(
         await getToken(req),
-        getUser(req),
+        await getUser(req, prisma),
         ncPath,
         req.header("range"),
       );
