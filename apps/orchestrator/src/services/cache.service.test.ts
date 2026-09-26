@@ -15,8 +15,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   __setRedisForTesting,
   cacheIncr,
+  cacheDelStrict,
   cacheSetAdd,
   cacheSetNx,
+  cacheSetStrict,
   invalidatePrefix,
   withSwrCache,
 } from "./cache.service.js";
@@ -264,6 +266,25 @@ describe("cache.service (WARP-90)", () => {
 
       const won = await cacheSetNx("jwt:rotate:err", true, 30);
       expect(won).toBe(false);
+    });
+  });
+
+  describe("cacheSetStrict / cacheDelStrict (WARP-3193 QUAL-1)", () => {
+    it("writes with the TTL like cacheSet", async () => {
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as never);
+      await cacheSetStrict("jwt:deny:h", true, 60);
+      expect(fake.store.get("jwt:deny:h")!.value).toBe("true");
+      await cacheDelStrict("jwt:deny:h");
+      expect(fake.store.has("jwt:deny:h")).toBe(false);
+    });
+
+    it("THROWS on a Redis error instead of swallowing it", async () => {
+      const fake = makeFakeRedis({ errorOn: "set" });
+      __setRedisForTesting(fake as never);
+      await expect(cacheSetStrict("jwt:deny:h", true, 60)).rejects.toThrow("boom-set");
+      fake.del.mockRejectedValueOnce(new Error("boom-del"));
+      await expect(cacheDelStrict("jwt:deny:h")).rejects.toThrow("boom-del");
     });
   });
 

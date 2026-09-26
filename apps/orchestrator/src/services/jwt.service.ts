@@ -3,13 +3,14 @@ import jwt from "jsonwebtoken";
 import { config } from "../config.js";
 import {
   cacheGet,
-  cacheSet,
+  cacheSetStrict,
   cacheSetNx,
-  cacheDel,
+  cacheDelStrict,
   cacheSetAdd,
   cacheSetRemove,
   cacheSetMembers,
 } from "./cache.service.js";
+import { HttpError } from "../types/http-error.js";
 
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
@@ -285,19 +286,43 @@ export async function verifyRefreshToken(
  * Uses jwt.verify (not jwt.decode) to reject unsigned or forged tokens,
  * preventing an attacker from crafting tokens with large exp values to
  * flood Redis with long-lived denylist entries.
+ *
+ * WARP-3193 QUAL-1: a denylist write that Redis refuses REJECTS with
+ * `revocationUnavailable()` (503) rather than being swallowed — the caller
+ * must not report the token revoked when it is still live.
  */
 export async function denyRefreshToken(token: string): Promise<void> {
+  let decoded: jwt.JwtPayload;
   try {
-    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload;
-    if (!decoded?.exp) return;
-
-    const ttl = decoded.exp - Math.floor(Date.now() / 1000);
-    if (ttl <= 0) return; // Already expired — no need to denylist
-
-    await cacheSet(REFRESH_DENYLIST_PREFIX + tokenHash(token), true, ttl);
+    decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload;
   } catch {
     // Invalid signature or expired — safe to ignore; forged tokens need no denylist entry
+    return;
   }
+  if (!decoded?.exp) return;
+
+  const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+  if (ttl <= 0) return; // Already expired — no need to denylist
+
+  try {
+    await cacheSetStrict(REFRESH_DENYLIST_PREFIX + tokenHash(token), true, ttl);
+  } catch {
+    throw revocationUnavailable();
+  }
+}
+
+/**
+ * WARP-3193 QUAL-1 — the one error every revocation write throws when Redis
+ * refuses it. An `HttpError` with status 503, so a route that forwards it to
+ * `next(err)` answers "Service unavailable" with a stable code instead of
+ * reporting a revocation that never landed.
+ */
+export function revocationUnavailable(): HttpError {
+  return new HttpError(
+    "Session revocation could not be recorded. Try again in a moment.",
+    503,
+    "REVOCATION_UNAVAILABLE",
+  );
 }
 
 /**
@@ -421,13 +446,25 @@ export async function revokeUserSessions(userId: string): Promise<number> {
     if (!Number.isFinite(exp)) continue;
     const ttl = exp - now;
     if (ttl <= 0) continue; // Already expired — denylist entry would be a no-op.
-    await cacheSet(REFRESH_DENYLIST_PREFIX + hash, true, ttl);
+    // WARP-3193 QUAL-1: strict — a failed write rejects instead of being
+    // counted, so the returned number is what actually landed.
+    try {
+      await cacheSetStrict(REFRESH_DENYLIST_PREFIX + hash, true, ttl);
+    } catch {
+      throw revocationUnavailable();
+    }
     revoked += 1;
   }
   // Clear the index whether or not anything was denylisted: leaving stale
   // (now-denylisted or expired) members would let a later revoke re-walk dead
-  // hashes and would leak the index unbounded.
-  await cacheDel(setKey);
+  // hashes and would leak the index unbounded. Strict too: SMEMBERS reads
+  // fail open to [], so this delete is what reveals an outage when the read
+  // came back empty.
+  try {
+    await cacheDelStrict(setKey);
+  } catch {
+    throw revocationUnavailable();
+  }
   return revoked;
 }
 

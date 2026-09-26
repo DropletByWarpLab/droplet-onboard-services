@@ -39,7 +39,11 @@
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { getRedis } from "./cache.service.js";
-import { revokeUserSessions, type Role } from "./jwt.service.js";
+import {
+  revokeUserSessions,
+  revocationUnavailable,
+  type Role,
+} from "./jwt.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -448,6 +452,11 @@ export async function revokeAllSessions(
   opts: { exceptSid?: string } = {},
 ): Promise<number> {
   let revoked = 0;
+  // WARP-3193 QUAL-1: a sweep Redis refused is a FAILED revocation, not a
+  // smaller count — both halves still run (defense in depth), then the
+  // failure is thrown as revocationUnavailable() (503) so no caller reports
+  // sessions revoked that are still alive.
+  let failed = false;
   try {
     const redis = getRedis();
     const idxKey = SESSION_INDEX_PREFIX + userId;
@@ -459,6 +468,7 @@ export async function revokeAllSessions(
       if (removed > 0) revoked += 1;
     }
   } catch (err) {
+    failed = true;
     logger.warn(
       { err, userId },
       "session record sweep failed — refresh denylist below still applies",
@@ -468,8 +478,10 @@ export async function revokeAllSessions(
     try {
       await revokeUserSessions(userId);
     } catch (err) {
-      logger.warn({ err, userId }, "refresh-token denylist sweep failed (non-fatal)");
+      failed = true;
+      logger.warn({ err, userId }, "refresh-token denylist sweep failed");
     }
   }
+  if (failed) throw revocationUnavailable();
   return revoked;
 }

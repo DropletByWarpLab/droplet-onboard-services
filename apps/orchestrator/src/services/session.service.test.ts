@@ -425,6 +425,28 @@ describe("deleteSession / revokeAllSessions", () => {
     expect(revokeUserSessions).toHaveBeenCalledWith("u-alice");
   });
 
+  // WARP-3193 QUAL-1 — a sweep that Redis refused used to return a count and
+  // log; callers reported "revoked" for sessions that were still alive.
+  it("revokeAllSessions REJECTS (503) when the record sweep fails — after still running the denylist sweep", async () => {
+    await createSession(alice);
+    fake.zrange.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+
+    await expect(revokeAllSessions("u-alice")).rejects.toMatchObject({
+      status: 503,
+      code: "REVOCATION_UNAVAILABLE",
+    });
+    // Defense in depth is kept: the refresh denylist sweep still ran.
+    expect(revokeUserSessions).toHaveBeenCalledWith("u-alice");
+  });
+
+  it("revokeAllSessions REJECTS when the refresh denylist sweep fails", async () => {
+    await createSession(alice);
+    revokeUserSessions.mockRejectedValueOnce(
+      Object.assign(new Error("down"), { status: 503, code: "REVOCATION_UNAVAILABLE" }),
+    );
+    await expect(revokeAllSessions("u-alice")).rejects.toMatchObject({ status: 503 });
+  });
+
   it("revokeAllSessions with exceptSid keeps the current session and SKIPS the refresh denylist", async () => {
     const s1 = await createSession(alice);
     advanceSeconds(1);

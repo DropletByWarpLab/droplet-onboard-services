@@ -7,10 +7,17 @@ process.env.JWT_SECRET = "test-jwt-secret-for-unit-tests-only-not-production";
 
 // ── Cache mock — backed by an in-memory Map so denylist tests work ──
 const cacheStore = new Map<string, unknown>();
+// QUAL-1: flip to make the strict (revocation) write fail like a Redis outage.
+let strictWriteFails = false;
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn(async (key: string) => cacheStore.get(key) ?? null),
   cacheSet: vi.fn(async (key: string, value: unknown) => { cacheStore.set(key, value); }),
   cacheDel: vi.fn(async (key: string) => { cacheStore.delete(key); }),
+  cacheSetStrict: vi.fn(async (key: string, value: unknown) => {
+    if (strictWriteFails) throw new Error("ECONNREFUSED");
+    cacheStore.set(key, value);
+  }),
+  cacheDelStrict: vi.fn(async (key: string) => { cacheStore.delete(key); }),
   // NX semantics: set only if absent. Mirrors the real Redis `SET … NX EX`
   // (true when the key was claimed, false when it already existed).
   cacheSetNx: vi.fn(async (key: string, value: unknown) => {
@@ -185,6 +192,22 @@ describe("JWT Service", () => {
 
     it("should not throw for an already-expired token", async () => {
       await expect(denyRefreshToken("expired.token.here")).resolves.not.toThrow();
+    });
+
+    // WARP-3193 QUAL-1 — a denylist write lost to a Redis outage used to be
+    // swallowed, so logout/rotation reported success while the token stayed
+    // live for up to 7 days. It now surfaces as a 503 the routes answer with.
+    it("REJECTS with a 503 REVOCATION_UNAVAILABLE when the denylist write fails", async () => {
+      const token = signRefreshToken({ id: "u-9", username: "d", displayName: "D", role: "family" });
+      strictWriteFails = true;
+      try {
+        await expect(denyRefreshToken(token)).rejects.toMatchObject({
+          status: 503,
+          code: "REVOCATION_UNAVAILABLE",
+        });
+      } finally {
+        strictWriteFails = false;
+      }
     });
   });
 
