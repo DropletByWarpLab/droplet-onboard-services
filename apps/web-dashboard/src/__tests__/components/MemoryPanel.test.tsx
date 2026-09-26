@@ -58,8 +58,8 @@ describe("MemoryPanel", () => {
         screen.getByText("Prefers recaps under 200 words"),
       ).toBeInTheDocument();
     });
-    // Scope to the fact list — the add-row <select> also contains the
-    // category names as options.
+    // Scope to the fact list — the add row's Category trigger names a
+    // category too.
     expect(within(screen.getByRole("list")).getByText("Workflow")).toBeInTheDocument();
   });
 
@@ -102,12 +102,13 @@ describe("MemoryPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /memory/i }));
     await waitFor(() => screen.getByText("Prefers recaps under 200 words"));
 
-    // Two "Audience" labels exist (per-fact + add row) — target the
-    // per-fact select by its id.
-    fireEvent.change(
-      screen.getByLabelText("Audience", { selector: "#audience-f1" }),
-      { target: { value: "guest" } },
+    // Two Audience controls exist (per-fact + add row) — pick from the
+    // per-fact one, inside the fact list. WARP-3043: a themed menu, not a
+    // native select.
+    fireEvent.click(
+      within(screen.getByRole("list")).getByRole("button", { name: "Audience: Team" }),
     );
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Everyone" }));
     await waitFor(() => {
       expect(mockUpdateMemoryFact).toHaveBeenCalledWith("f1", {
         audience: "guest",
@@ -123,9 +124,8 @@ describe("MemoryPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /memory/i }));
     await waitFor(() => screen.getByText("Prefers recaps under 200 words"));
 
-    fireEvent.change(screen.getByLabelText(/category/i), {
-      target: { value: "Tone" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /^Category:/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Tone" }));
     fireEvent.change(screen.getByLabelText(/new fact/i), {
       target: { value: "Be concise" },
     });
@@ -154,14 +154,9 @@ describe("MemoryPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /memory/i }));
     await waitFor(() => screen.getByText("Prefers recaps under 200 words"));
 
-    const categorySelect = screen.getByLabelText(/category/i);
-    expect(
-      within(categorySelect as HTMLElement).getByRole("option", {
-        name: "Business",
-      }),
-    ).toBeInTheDocument();
-
-    fireEvent.change(categorySelect, { target: { value: "Business" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Category:/ }));
+    const categories = screen.getByRole("menu", { name: "Category" });
+    fireEvent.click(within(categories).getByRole("menuitemradio", { name: "Business" }));
     fireEvent.change(screen.getByLabelText(/new fact/i), {
       target: { value: "Invoices go out on the 1st" },
     });

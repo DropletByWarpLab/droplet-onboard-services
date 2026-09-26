@@ -10,6 +10,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 // Mock the chat-side hooks so the page renders without an actual
 // orchestrator behind it. The pill is the only assertion target — we
@@ -63,24 +65,41 @@ vi.mock("@/lib/auth", () => ({
 
 import ChatPage from "@/app/chat/page";
 
+// WARP-3043 — the pill takes the Mac chrome: a glass pill with `--text`
+// (the accent fill with white ink read 2.98:1 in dark). Its size and look
+// live in chat-indigo.css's `.chat-jump`, so the ≥ 36 px floor is pinned
+// there.
+const CHAT_CSS = readFileSync(
+  path.resolve(__dirname, "../../components/chat/chat-indigo.css"),
+  "utf8",
+);
+function jumpRule(): string {
+  const m = /\.droplet-shell \.chat-jump \{([^}]*)\}/.exec(CHAT_CSS);
+  expect(m, "no `.droplet-shell .chat-jump` rule").not.toBeNull();
+  return m![1];
+}
+
 describe("Jump-to-latest pill (WARP-301)", () => {
-  it("uses ≥ 36 px tall touch target via px-4 py-2.5", () => {
+  it("keeps a ≥ 36 px tall touch target", () => {
     cleanup();
     render(<ChatPage />);
     const pill = screen.getByTestId("jump-to-latest");
-    expect(pill.className).toMatch(/(^|\s)px-4(\s|$)/);
-    expect(pill.className).toMatch(/(^|\s)py-2\.5(\s|$)/);
-    // Regression guard against the pre-WARP-301 sub-WCAG sizing.
-    expect(pill.className).not.toMatch(/(^|\s)py-1\.5(\s|$)/);
+    expect(pill.classList.contains("chat-jump")).toBe(true);
+    const h = /min-height:\s*(\d+)px/.exec(jumpRule());
+    expect(h, "`.chat-jump` sets no min-height").not.toBeNull();
+    expect(Number(h![1])).toBeGreaterThanOrEqual(36);
   });
 
-  it("preserves the floating accent-pill visual language", () => {
+  it("is the glass pill in --text, not the accent fill", () => {
     cleanup();
     render(<ChatPage />);
     const pill = screen.getByTestId("jump-to-latest");
-    expect(pill.className).toMatch(/rounded-full/);
-    expect(pill.className).toMatch(/bg-accent/);
-    expect(pill.className).toMatch(/shadow-md/);
+    expect(pill.className).not.toMatch(/bg-accent|text-white|shadow-md/);
+    const rule = jumpRule();
+    expect(rule).toMatch(/background:\s*var\(--glass\)/);
+    expect(rule).toMatch(/color:\s*var\(--text\)/);
+    expect(rule).toMatch(/border-radius:\s*999px/);
+    expect(rule).not.toMatch(/--lift/);
   });
 
   it("remains keyboard reachable when detached (tabIndex=0)", () => {

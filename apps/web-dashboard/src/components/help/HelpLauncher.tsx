@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
   BookOpen,
@@ -12,6 +13,8 @@ import {
   X,
 } from "lucide-react";
 import { HELP_INDEX, searchHelp } from "@/lib/help-index";
+import { helpSlot } from "@/components/shell/dom-slots";
+import { menuItems as itemsOf, moveMenuFocus } from "@/components/ui/useMenuButton";
 // WARP-1091 — the launcher's popover menu + slide-in panel are the
 // component's only indigo-token consumers. HelpLauncher is mounted by
 // AuthGate as a sibling of the routed page (not inside any page's
@@ -46,6 +49,20 @@ import "@/components/shell/droplet-shell.css";
  *
  * Mounted by AuthGate's authenticated branch only, so it never appears on the
  * wizard, login, the full-screen tour, or the change-password takeover.
+ *
+ * WARP-3043 — a page can offer a header slot (`helpSlot`, components/shell/
+ * dom-slots). /chat and the Workshop do: there the floating button would sit
+ * over the docked composer's send button. With a slot registered, the trigger
+ * is portaled into it as a header icon button and the menu opens under it,
+ * placed from the trigger's box; the menu and panel stay in this tree, out of
+ * the header's stacking context. Without one, the floating button is
+ * unchanged. Surfaces are separated by tone, not strokes.
+ *
+ * AuthGate mounts this tree AFTER the routed page, so a menu opened from a
+ * header trigger is a whole page away from it in tab order. In slot mode the
+ * menu follows the menu-button pattern instead: opening focuses its first
+ * item, arrows wrap and Home/End jump, and Escape or Tab hands focus back to
+ * the trigger (Tab then carries on from the header).
  */
 
 type View = "closed" | "menu" | "panel";
@@ -56,6 +73,11 @@ export function HelpLauncher() {
   const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const slot = helpSlot.useTarget();
+  // Where the menu opens under a header trigger; null = the floating spot.
+  const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null);
 
   // "?" toggles the launcher (unless the customer is typing); Esc closes.
   useEffect(() => {
@@ -77,18 +99,45 @@ export function HelpLauncher() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // A menu opened from a header trigger takes focus (see the file note).
+  useEffect(() => {
+    if (view === "menu" && slot) itemsOf(menuRef.current)[0]?.focus();
+  }, [view, slot]);
+
   // Focus the search field when the panel opens.
   useEffect(() => {
     if (view === "panel") searchRef.current?.focus();
   }, [view]);
 
+  // Under a header trigger the menu is placed from the trigger's box. A slot
+  // that is not laid out (hidden below 1024px) has no box, so the menu keeps
+  // its floating spot there.
+  useLayoutEffect(() => {
+    if (view !== "menu" || !slot) {
+      setAnchor(null);
+      return;
+    }
+    function place() {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      setAnchor(
+        rect && (rect.width > 0 || rect.height > 0)
+          ? { top: rect.bottom + 8, right: window.innerWidth - rect.right }
+          : null,
+      );
+    }
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [view, slot]);
+
   // Click outside the launcher closes the popover menu (the panel owns a scrim).
+  // A header trigger is portaled out of this tree, so it counts as inside.
   useEffect(() => {
     if (view !== "menu") return;
     function onDown(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setView("closed");
-      }
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || triggerRef.current?.contains(t)) return;
+      setView("closed");
     }
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
@@ -98,6 +147,21 @@ export function HelpLauncher() {
     setView("closed");
     router.push(href);
   };
+
+  const toggle = () => setView((v) => (v === "closed" ? "menu" : "closed"));
+
+  // Slot mode only: Escape and Tab close back onto the header trigger. Tab
+  // is not prevented, so the browser moves on from the trigger.
+  const onSlotMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape" || e.key === "Tab") {
+      if (e.key === "Escape") e.preventDefault();
+      setView("closed");
+      triggerRef.current?.focus();
+    } else if (moveMenuFocus(menuRef.current, e.key)) {
+      e.preventDefault();
+    }
+  };
+  const triggerLabel = view === "closed" ? "Open help" : "Close help";
 
   const results = useMemo(() => searchHelp(query).slice(0, 6), [query]);
   const hasQuery = query.trim().length > 0;
@@ -142,10 +206,10 @@ export function HelpLauncher() {
           />
           <div
             className="absolute inset-y-0 right-0 flex w-full max-w-[404px] flex-col shadow-xl motion-safe:animate-in motion-safe:slide-in-from-right"
-            style={{ borderLeft: "1px solid var(--border)", background: "var(--surface)" }}
+            style={{ background: "var(--surface)" }}
           >
             {/* Header */}
-            <div className="p-5" style={{ borderBottom: "1px solid var(--border)" }}>
+            <div className="p-5">
               <div className="mb-3.5 flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
                   <span
@@ -169,7 +233,7 @@ export function HelpLauncher() {
               </div>
               <div
                 className="flex items-center gap-2 rounded-[10px] px-3 py-2"
-                style={{ border: "1px solid var(--border)", background: "var(--surface)" }}
+                style={{ background: "var(--surface-2)" }}
               >
                 <Search
                   size={15}
@@ -196,7 +260,7 @@ export function HelpLauncher() {
                 <button
                   type="button"
                   onClick={() => go("/chat")}
-                  className="flex flex-col items-center gap-1.5 rounded-xl px-2 py-3.5 transition-colors border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--hover)]"
+                  className="flex flex-col items-center gap-1.5 rounded-xl px-2 py-3.5 transition-colors bg-[var(--inset)] hover:bg-[var(--surface-2)]"
                 >
                   <Sparkles size={18} className="text-[var(--brand)]" aria-hidden="true" />
                   <span className="type-caption-1 font-semibold text-[var(--text-muted)]">
@@ -206,7 +270,7 @@ export function HelpLauncher() {
                 <button
                   type="button"
                   onClick={() => go("/help")}
-                  className="flex flex-col items-center gap-1.5 rounded-xl px-2 py-3.5 transition-colors border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--hover)]"
+                  className="flex flex-col items-center gap-1.5 rounded-xl px-2 py-3.5 transition-colors bg-[var(--inset)] hover:bg-[var(--surface-2)]"
                 >
                   <BookOpen size={18} className="text-[var(--brand)]" aria-hidden="true" />
                   <span className="type-caption-1 font-semibold text-[var(--text-muted)]">
@@ -220,7 +284,7 @@ export function HelpLauncher() {
               </p>
 
               {hasQuery && results.length === 0 ? (
-                <p className="rounded-xl px-3.5 py-3 type-footnote border border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]">
+                <p className="rounded-xl px-3.5 py-3 type-footnote bg-[var(--surface-2)] text-[var(--text-muted)]">
                   No matching articles. Try a different word, or{" "}
                   <button
                     type="button"
@@ -232,16 +296,14 @@ export function HelpLauncher() {
                   .
                 </p>
               ) : (
-                <div className="overflow-hidden rounded-xl border border-[var(--border)]">
+                <div className="overflow-hidden rounded-xl bg-[var(--inset)]">
                   {(hasQuery ? results : HELP_INDEX.slice(0, 6)).map(
-                    (entry, i) => (
+                    (entry) => (
                       <button
                         key={entry.id}
                         type="button"
                         onClick={() => go(`/help#${entry.id}`)}
-                        className={`flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-[var(--hover)] ${
-                          i ? "border-t border-[var(--border)]" : ""
-                        }`}
+                        className="flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-[var(--surface-2)]"
                       >
                         <span className="flex-1 type-footnote font-medium text-[var(--text)]">
                           {entry.title}
@@ -257,20 +319,6 @@ export function HelpLauncher() {
                 </div>
               )}
             </div>
-
-            {/* Status footer */}
-            <div
-              className="flex items-center gap-2 px-5 py-3"
-              style={{ borderTop: "1px solid var(--border)", background: "var(--surface-2)" }}
-            >
-              <span
-                className="h-1.5 w-1.5 flex-none rounded-full bg-system-green"
-                aria-hidden="true"
-              />
-              <span className="type-caption-1 text-[var(--text-muted)]">
-                Everything here stays on your Droplet.
-              </span>
-            </div>
           </div>
         </div>
       )}
@@ -278,18 +326,25 @@ export function HelpLauncher() {
       {/* ── Launcher popover menu ── */}
       {view === "menu" && (
         <div
+          ref={menuRef}
           role="menu"
           aria-label="Help"
-          className="droplet-shell fixed bottom-[calc(140px+env(safe-area-inset-bottom))] right-5 z-[60] w-[308px] overflow-hidden rounded-2xl shadow-xl motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 lg:bottom-[88px] lg:right-7"
-          style={{ border: "1px solid var(--border)", background: "var(--surface)" }}
+          onKeyDown={slot ? onSlotMenuKeyDown : undefined}
+          className={
+            anchor
+              ? "droplet-shell fixed z-[60] w-[308px] overflow-hidden rounded-2xl shadow-xl motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-top-2"
+              : "droplet-shell fixed bottom-[calc(140px+env(safe-area-inset-bottom))] right-5 z-[60] w-[308px] overflow-hidden rounded-2xl shadow-xl motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 lg:bottom-[88px] lg:right-7"
+          }
+          style={
+            anchor
+              ? { top: anchor.top, right: anchor.right, background: "var(--surface)" }
+              : { background: "var(--surface)" }
+          }
         >
           {/* WARP-1153: py-3 on the spacing scale (was py-3.5 = 14px). */}
-          <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
+          <div className="px-4 py-3">
             <p className="type-subheadline font-semibold" style={{ color: "var(--text)" }}>
               How can we help?
-            </p>
-            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-              Everything stays on your Droplet.
             </p>
           </div>
           <div className="p-2">
@@ -299,7 +354,7 @@ export function HelpLauncher() {
                 type="button"
                 role="menuitem"
                 onClick={onClick}
-                className="flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-left transition-colors hover:bg-[var(--hover)]"
+                className="flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-left transition-colors hover:bg-[var(--hover)] focus-visible:bg-[var(--hover)] focus-visible:outline-none"
               >
                 <span
                   className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"
@@ -327,12 +382,12 @@ export function HelpLauncher() {
           </div>
           <div
             className="flex items-center gap-1.5 px-4 py-2.5 type-caption-1"
-            style={{ borderTop: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text-muted)" }}
+            style={{ background: "var(--surface-2)", color: "var(--text-muted)" }}
           >
             Press
             <kbd
               className="rounded px-1.5 py-0.5 type-caption-2 font-mono"
-              style={{ border: "1px solid var(--border)", background: "var(--surface)" }}
+              style={{ background: "var(--surface)" }}
             >
               ?
             </kbd>
@@ -350,16 +405,35 @@ export function HelpLauncher() {
           phone the FAB sat on top of the chat composer's send button and
           covered the bottom card on every scrolling page. Help stays one tap
           away in the More tab, and `?` still opens it on a keyboard. */}
-      <button
-        type="button"
-        onClick={() => setView((v) => (v === "closed" ? "menu" : "closed"))}
-        aria-label={view === "closed" ? "Open help" : "Close help"}
-        aria-expanded={view !== "closed"}
-        aria-haspopup="menu"
-        className="aurora-brand fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-5 z-[55] hidden h-[52px] w-[52px] items-center justify-center rounded-full text-white shadow-lg transition-transform duration-200 ease-smooth hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 motion-reduce:hover:scale-100 lg:bottom-7 lg:right-7 lg:flex"
-      >
-        {view === "menu" ? <X size={22} /> : <HelpCircle size={22} />}
-      </button>
+      {slot ? (
+        createPortal(
+          <button
+            ref={triggerRef}
+            type="button"
+            onClick={toggle}
+            aria-label={triggerLabel}
+            aria-expanded={view !== "closed"}
+            aria-haspopup="menu"
+            className="chat-iconbtn"
+            title="Help"
+          >
+            {view === "menu" ? <X size={16} aria-hidden="true" /> : <HelpCircle size={16} aria-hidden="true" />}
+          </button>,
+          slot,
+        )
+      ) : (
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={toggle}
+          aria-label={triggerLabel}
+          aria-expanded={view !== "closed"}
+          aria-haspopup="menu"
+          className="aurora-brand fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-5 z-[55] hidden h-[52px] w-[52px] items-center justify-center rounded-full text-white shadow-lg transition-transform duration-200 ease-smooth hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 motion-reduce:hover:scale-100 lg:bottom-7 lg:right-7 lg:flex"
+        >
+          {view === "menu" ? <X size={22} /> : <HelpCircle size={22} />}
+        </button>
+      )}
     </div>
   );
 }

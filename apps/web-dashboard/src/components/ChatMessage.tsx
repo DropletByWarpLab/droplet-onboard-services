@@ -290,7 +290,7 @@ export const ChatMessage = memo(function ChatMessage({
       {/* Bubble + meta. group/message lets the action toolbar surface on
           hover OR keyboard focus (focus-within) without prop-drilling
           state up. */}
-      <div className={`msg-col group/message ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`msg-col group/message ${isUser ? "items-end" : "is-assistant items-start"}`}>
       <div
         className={`msg-bubble ${isUser ? "is-user" : "is-assistant"}`}
         // role="status" + aria-live="polite" on the streaming assistant
@@ -711,7 +711,7 @@ function FailureChip({
     missing: {
       Icon: Ghost,
       copy: "No reply was saved for this turn.",
-      tone: "bg-surface-tertiary/40 text-label-tertiary border border-dashed border-separator",
+      tone: "msg-missing-chip bg-surface-tertiary/40 text-label-tertiary border border-dashed border-separator",
       role: "status" as const,
     },
   } satisfies Record<NonNullable<ChatMessageType["failureKind"]>, {
@@ -796,7 +796,7 @@ function ToolCallChip({ call }: { call: ChatToolCall }) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full type-caption-1 ${tone}`}
+      className={`msg-tool-chip${pending ? " is-pending" : ""} inline-flex items-center gap-1.5 px-2 py-1 rounded-full type-caption-1 ${tone}`}
       data-tool-call-id={call.id}
       data-tool-name={call.name}
       data-tool-status={call.status ?? (pending ? "pending" : ok ? "ok" : "error")}

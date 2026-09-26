@@ -114,7 +114,6 @@ legacy-token components/home/widgets.tsx
 legacy-token components/integrations/ConnectorCard.tsx
 legacy-token components/integrations/ConnectWizard.tsx
 legacy-token components/integrations/SafetyChip.tsx
-legacy-token components/ModelSelector.tsx
 legacy-token components/ModuleRouteGuard.tsx
 legacy-token components/settings/BusinessProfileCard.tsx
 legacy-token components/shell/droplet-shell.css
@@ -151,7 +150,6 @@ accent-alpha components/Toast.tsx
 
 # ── white-on-accent ──
 white-on-accent app/cameras/[name]/page.tsx
-white-on-accent app/chat/page.tsx
 white-on-accent app/devices/pair/page.tsx
 white-on-accent components/cameras/CameraCard.tsx
 white-on-accent components/chat/InterviewSurfaces.tsx

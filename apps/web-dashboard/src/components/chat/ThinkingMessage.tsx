@@ -55,11 +55,12 @@ export function ThinkingMessage({
       <div className="msg-ava is-assistant" aria-hidden="true">
         <Brain size={15} />
       </div>
-      <div className="msg-col items-start">
+      <div className="msg-col is-assistant items-start">
         <div
           role="group"
           aria-label="How the assistant worked on this"
           className="
+            ds-process-card
             w-full rounded-2xl border border-dashed border-separator
             bg-surface-secondary/40 px-3 py-2
           "

@@ -17,6 +17,11 @@
  *      was deep-linked (a customer's name and id, pinned). Either one crossed
  *      the sign-out and acted as the next person. sessionStorage survives a
  *      full reload, so a hard navigation to /login would not have cleared it.
+ *      WARP-3062 adds two more of the same kind: the /chat composer's unsent
+ *      draft (`CHAT_DRAFT_KEY`), and the assistant layout's last place on
+ *      each side (`SIDE_STORAGE_KEYS` — a conversation id, a customer page),
+ *      which would otherwise hand the next person the last one's text and
+ *      links.
  *
  * The third holder, the toast stack, is cleared by `NotificationToaster`: the
  * one layout-level component that sees both the session and the toasts.
@@ -36,11 +41,19 @@
  * deletes every key, `$inf$` and `$sub$` included; and drops the data
  * `keepPreviousData` holds on screen.
  */
-import { PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "./types";
+import { CHAT_DRAFT_KEY, PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "./types";
+import { SIDE_STORAGE_KEYS } from "./assistant-side";
 
-/** Drop the one-shot chat hand-offs (see the module note). */
+/** Drop the chat hand-offs, the unsent draft and the assistant layout's
+ *  remembered places (see the module note). */
 export function clearChatHandoffs(): void {
-  for (const key of [PENDING_PROMPT_KEY, PENDING_COMPOSER_KEY]) {
+  for (const key of [
+    PENDING_PROMPT_KEY,
+    PENDING_COMPOSER_KEY,
+    CHAT_DRAFT_KEY,
+    SIDE_STORAGE_KEYS.ask,
+    SIDE_STORAGE_KEYS.business,
+  ]) {
     try {
       window.sessionStorage.removeItem(key);
     } catch {

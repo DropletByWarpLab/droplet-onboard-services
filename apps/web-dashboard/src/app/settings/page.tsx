@@ -202,12 +202,13 @@ export default function SettingsPage() {
             </div>
             {/* WARP-2971 — which navigation shell this person sees. A display
                 preference like Theme (same storage, same radiogroup), never a
-                permission: both layouts resolve the same nav-config gates. */}
+                permission: every layout resolves the same nav-config gates.
+                WARP-3062 added the third, Assistant. */}
             <div className="lrow" style={{ padding: "12px 16px" }}>
               <span className="rt">
                 <span className="nm">Navigation</span>
                 <span className="sub">
-                  Sidebar, or the Workspace tabs across the top
+                  Sidebar, Workspace tabs, or Assistant, which opens on Ask AI
                 </span>
               </span>
               <NavLayoutToggle />

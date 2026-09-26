@@ -49,6 +49,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { WorkshopSpace } from "@/components/workshop/WorkshopSpace";
+import { HelpLauncher } from "@/components/help/HelpLauncher";
 import { orderRuns } from "@/components/workshop/WorkshopRail";
 import type { AgentRunSchedule, AgentRunSummary, TraceEntry } from "@/components/workshop/agent-runs/api";
 
@@ -521,5 +522,25 @@ describe("Workshop — the drawers close from their own header (WARP-1787)", () 
     const drawer = await screen.findByRole("dialog");
     fireEvent.click(within(drawer).getByRole("button", { name: "Close the workspace pane" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
+
+// WARP-3043 — the floating Help button sat over the docked pill's send
+// button. The Workshop's head offers `helpSlot`; HelpLauncher (mounted once,
+// beside the page, by AuthGate) portals its trigger there.
+describe("Workshop — Help in the header (WARP-3043)", () => {
+  it("shows exactly one Help button, and it sits in .chat-head's slot", async () => {
+    mockSearchParamsString = "";
+    wire();
+    render(
+      <>
+        <WorkshopSpace />
+        <HelpLauncher />
+      </>,
+    );
+    await screen.findByLabelText("What should your Droplet do?");
+    const help = screen.getAllByRole("button", { name: "Open help" });
+    expect(help).toHaveLength(1);
+    expect(help[0].closest(".chat-head .help-slot")).not.toBeNull();
   });
 });

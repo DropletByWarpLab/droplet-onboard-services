@@ -128,6 +128,13 @@ export interface DialogProps {
    * opt-out: horizontal clipping and the centered scroll region stay on.
    */
   flush?: boolean;
+  /**
+   * WARP-3043 — a `placement="right"` side panel with no stroke: no left
+   * border and a shadow-only lift (`--lift` carries a 1px brand ring). For
+   * surfaces that wear the Mac chrome (/chat's drawers). Default `false`;
+   * ignored for centered dialogs.
+   */
+  seamless?: boolean;
   /** Dialog body. The heading element referenced by `labelledBy` must be inside. */
   children: ReactNode;
 }
@@ -171,6 +178,7 @@ export function Dialog({
   closeOnBackdrop = true,
   initialFocusRef,
   flush = false,
+  seamless = false,
   children,
 }: DialogProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -389,11 +397,16 @@ export function Dialog({
   // + card radius + `--lift` shadow). Side panels swap the full border for
   // a left edge against `var(--border)`.
   const containerStyle: React.CSSProperties = isSide
-    ? {
-        background: "var(--card-bg)",
-        borderLeft: "1px solid var(--border)",
-        boxShadow: "var(--lift)",
-      }
+    ? seamless
+      ? {
+          background: "var(--card-bg)",
+          boxShadow: "0 16px 40px -12px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.08)",
+        }
+      : {
+          background: "var(--card-bg)",
+          borderLeft: "1px solid var(--border)",
+          boxShadow: "var(--lift)",
+        }
     : {
         background: "var(--card-bg)",
         border: "1px solid var(--card-bd)",

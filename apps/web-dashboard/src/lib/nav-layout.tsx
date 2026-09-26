@@ -7,11 +7,15 @@
  *              the default and the shape every shipped box renders today
  *   workspace  the handoff's three-level top-tab shell
  *              (`components/workspace/WorkspaceShell.tsx`)
+ *   assistant  WARP-3062 — opens on Ask AI, with an "Ask AI | Overview"
+ *              switch at the top that crosses to the business side, which
+ *              is the sidebar layout's own nav, unchanged
+ *              (`components/assistant/AssistantShell.tsx`)
  *
  * A per-person DISPLAY preference, persisted exactly like the theme
  * (`lib/theme.tsx`): localStorage on this browser, no server round-trip,
  * because it changes how the same routes are presented and nothing about
- * what the person may reach. Both layouts resolve the same `nav-config.ts`
+ * what the person may reach. Every layout resolves the same `nav-config.ts`
  * gates, so switching can never widen access.
  *
  * Unlike `useTheme`, the hook does NOT throw outside its provider — it
@@ -28,13 +32,15 @@ import {
   useState,
 } from "react";
 
-export type NavLayout = "sidebar" | "workspace";
+export type NavLayout = "sidebar" | "workspace" | "assistant";
 
 export const NAV_LAYOUT_STORAGE_KEY = "droplet-nav-layout";
+// WARP-3062 leaves this alone: the assistant layout is opt-in first, so
+// nobody's screen changes until they pick it in Settings → Appearance.
 export const DEFAULT_NAV_LAYOUT: NavLayout = "sidebar";
 
 export function isNavLayout(value: unknown): value is NavLayout {
-  return value === "sidebar" || value === "workspace";
+  return value === "sidebar" || value === "workspace" || value === "assistant";
 }
 
 interface NavLayoutContextValue {
