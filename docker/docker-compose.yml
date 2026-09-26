@@ -2871,7 +2871,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # Operator pastes this token into the UI. setup.sh writes a 32-byte
       # hex string to .env; if missing the container generates an
-      # ephemeral one and logs it loudly (NOT for production).
+      # ephemeral one and logs only its sha256 fingerprint (NOT for production).
       - OPS_TOKEN=${OPS_TOKEN:-}
       # Per-service probe URLs. Defaults verified live on the single-box 2026-05-15.
       # Empty default = container exists but exposes no HTTP /health
