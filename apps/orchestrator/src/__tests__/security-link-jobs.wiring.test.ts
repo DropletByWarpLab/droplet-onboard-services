@@ -11,7 +11,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const index = readFileSync(resolve(__dirname, "../index.ts"), "utf8");
+// Normalised: a Windows checkout (core.autocrlf) has CRLF line ends.
+const index = readFileSync(resolve(__dirname, "../index.ts"), "utf8").replace(/\r\n/g, "\n");
 
 describe("index.ts wires Droplet's link proposals (WARP-2979)", () => {
   it("imports registerSecurityLinkJobs from the proposal service and calls it once, with the cron runtime and prisma", () => {
