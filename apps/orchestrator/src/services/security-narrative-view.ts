@@ -3,8 +3,23 @@
  * Droplet". THE one rule route 18, route 28 and the assistant's A2 (PR-3)
  * call.
  *
- * A summary is written once, for everyone, from the whole incident — so it is
- * shown only to a viewer who can see everything it could name:
+ * THE VIEWER FIRST (WARP-2979 review of #2423; narrows spec D21, §6.11.3):
+ * only a viewer who sees every camera AND may read threats ever gets a
+ * summary — `mayReadSummaries`, P5's verdict rule (`seesEverything`),
+ * independent of the incident. A summary is written once, from the whole
+ * incident, so any rule that looked at the incident's hidden evidence would
+ * answer differently for an incident with hidden evidence than for the same
+ * incident built from her own cameras alone — and that difference is the
+ * hint DS-005 forbids (the R1 pg pin: a camera-limited viewer's page must be
+ * the same either way). A viewer-only rule answers `null` in both. The cost:
+ * a camera-limited viewer never gets a summary, even of an incident entirely
+ * on her own cameras — the spec's per-incident audience, narrowed to viewers
+ * who see everything. It never widens what anyone sees.
+ *
+ * Then the incident-level checks (`narrativeIncidentVisible`), unreachable
+ * for today's admitted viewers — who see every camera and every reason — and
+ * kept as the second fence for when the viewer rule or reasonVisibleTo's lock
+ * clause widens (P4 PR-4's mayReadLocks):
  *   · the view is not PARTIAL (P3's rule: no top-severity reason hidden);
  *   · EVERY reason passes THE reason-visibility rule (`reasonVisibleTo`,
  *     lib/security-reason-visibility.ts: its evidence camera, its related
@@ -31,7 +46,7 @@ import type {
 } from "@prisma/client";
 import type { NarrativeAudience } from "../lib/security-narrative-prompt.js";
 import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
-import type { IncidentProjection, IncidentViewer } from "./security-incident-view.js";
+import { seesEverything, type IncidentProjection, type IncidentViewer } from "./security-incident-view.js";
 
 /**
  * What a seal, a resolve that seals, and route 28 write to ask for the
@@ -115,8 +130,31 @@ function requiredAudience(row: NarrativeRow, reasons: readonly NarrativeReasonRe
   };
 }
 
-/** DS-005 for the summary (see the header). `projection` null = the viewer may not know the incident exists. */
+/**
+ * The viewer rule (see the header): sees every camera and may read threats —
+ * `seesEverything`, the verdict's rule. Route 28 asks it before it reads an
+ * incident, so its refusal is the same for every id.
+ */
+export function mayReadSummaries(viewer: IncidentViewer): boolean {
+  return seesEverything(viewer);
+}
+
+/**
+ * DS-005 for the summary — THE rule route 18, route 28 and A2 call: the viewer
+ * first, then the incident. `projection` null = the viewer may not know the
+ * incident exists.
+ */
 export function narrativeVisibleTo(
+  row: NarrativeRow,
+  reasons: readonly NarrativeReasonRef[],
+  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
+  viewer: IncidentViewer,
+): boolean {
+  return mayReadSummaries(viewer) && narrativeIncidentVisible(row, reasons, projection, viewer);
+}
+
+/** The incident-level checks, after the viewer rule. Exported for its tests; callers use `narrativeVisibleTo`. */
+export function narrativeIncidentVisible(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
   projection: Pick<IncidentProjection, "codes" | "partial"> | null,

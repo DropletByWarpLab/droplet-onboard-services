@@ -14,10 +14,13 @@
  *   35  POST /api/security/incidents/:id/verdict         act, floored at owner/admin (WARP-2980 P5 PR-B)
  *   28  POST /api/security/incidents/:id/narrative       act (WARP-2979 P4 PR-2: Summarise now / Regenerate)
  *
- * Route 28 answers 202 `{narrative}` in state `pending`; 404
- * INCIDENT_NOT_FOUND (missing or hidden, one body); 409 NOT_ACTIONABLE (plain
- * activity, or a viewer who cannot see all of the incident — one body for
- * both); 409 NARRATIVE_COOLDOWN (under 10 min since the last attempt or
+ * Route 28 answers 202 `{narrative}` in state `pending`; 403 — the role
+ * floor's own body and denial row — for a viewer who may never read a summary
+ * (`mayReadSummaries`: sees every camera and may read threats), decided before
+ * any incident is read, so it is the same for every id and says nothing about
+ * any summary; 404 INCIDENT_NOT_FOUND (missing or hidden, one body); 409
+ * NOT_ACTIONABLE (plain activity, or a view the incident-level checks refuse —
+ * one body); 409 NARRATIVE_COOLDOWN (under 10 min since the last attempt or
  * text); 409 SUMMARIES_OFF; 503. No audit (D23).
  *
  * Route 35 (brief §4.4: "the owner or a Security manager can mark Expected /
@@ -48,7 +51,7 @@
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
-import { requireRole } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 import { mayListArchivedZones, securityLevelFor, securityViewerScope, type SecurityRouteDeps } from "../services/security-access.js";
@@ -63,6 +66,7 @@ import {
   type IncidentViewer,
 } from "../services/security-incident-view.js";
 import { actOnIncident, requestIncidentNarrative, setIncidentVerdict } from "../services/security-incident-actions.js";
+import { mayReadSummaries } from "../services/security-narrative-view.js";
 import { securityOngoingSource } from "../services/camera.service.js";
 import { alertsReady, readAlertRouting, setAlertRouting } from "../services/security-alerts.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
@@ -359,6 +363,12 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
     }
     try {
       const viewer = await viewerOf(prisma, req, deps);
+      // The viewer rule, before any incident is read: the role floor's own 403, whatever the id.
+      if (!mayReadSummaries(viewer)) {
+        recordAccessDenied(req, "summary-audience");
+        res.status(403).json({ error: "Forbidden: role not permitted" });
+        return;
+      }
       const r = await requestIncidentNarrative(prisma, { incidentId: req.params.id!, viewer, now: clock() });
       switch (r.status) {
         case "ok":

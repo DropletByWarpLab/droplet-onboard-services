@@ -1049,28 +1049,42 @@ const row28 = (f: FakeSecurityPrisma, id: string) => f.world.securityIncident.fi
 const summarise = (s: express.Express, id: string) => request(s).post(`/api/security/incidents/${id}/narrative`).send({});
 
 describe("route 28 — POST /security/incidents/:id/narrative (act): Summarise now / Regenerate", () => {
-  it("(a) family at act → 202 {narrative} in state pending; the lease cleared; no audit; the incident's version untouched", async () => {
+  it("(a) an admin at act (sees everything) → 202 {narrative} in state pending; the lease cleared; no audit; the incident's version untouched", async () => {
     const f = world();
     withFrontOnly(f, { narrativeAttempts: 2, narrativeState: "failed", narrativeError: "MODEL_ERROR", narrativeAttemptAt: new Date(NOW.getTime() - 11 * 60_000) });
-    const { server, resolve } = app(f, "family", "act");
+    const { server, resolve } = app(f, "admin", "act");
     const res = await summarise(server, FRONT_ONLY);
     expect(res.status, JSON.stringify(res.body)).toBe(202);
     expect(res.body).toEqual({ narrative: { state: "pending", text: null, writtenAt: null, model: null, promptVersion: null } });
-    expect(resolve).toHaveBeenCalledWith(MARIA);
+    expect(resolve).toHaveBeenCalledWith(JORDAN);
     expect(row28(f, FRONT_ONLY)).toMatchObject({ narrativeState: "pending", narrativeAttemptAt: null, narrativeAttempts: 0, version: 4 });
     expect(h.inTx).not.toHaveBeenCalled();
-    expect(h.record).not.toHaveBeenCalled();
+  });
+
+  it("🔴 a family member at act (some cameras) → the role floor's own 403, the same for every id: her own incident, a hidden one, a missing one — nothing written", async () => {
+    const f = world();
+    withFrontOnly(f, { narrativeState: "failed", narrativeError: "MODEL_ERROR", narrativeAttempts: 3 });
+    const before = JSON.stringify(f.world.securityIncident, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+    const { server } = app(f, "family", "act");
+    const bodies = [];
+    for (const id of [FRONT_ONLY, SHARED, BACK_ONLY, MISSING]) {
+      const res = await summarise(server, id);
+      expect(res.status, id).toBe(403);
+      bodies.push(res.body);
+    }
+    expect(bodies.every((b) => JSON.stringify(b) === JSON.stringify({ error: "Forbidden: role not permitted" }))).toBe(true);
+    expect(JSON.stringify(f.world.securityIncident, (_k, v) => (typeof v === "bigint" ? v.toString() : v))).toBe(before);
   });
 
   it("(b) one level below (view) → 404 module_disabled, nothing written", async () => {
     const f = world();
     withFrontOnly(f);
     const before = JSON.stringify(f.world, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
-    const { server, resolve } = app(f, "family", "view");
+    const { server, resolve } = app(f, "admin", "view");
     const res = await summarise(server, FRONT_ONLY);
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: "module_disabled", module: "security" });
-    expect(resolve).toHaveBeenCalledWith(MARIA);
+    expect(resolve).toHaveBeenCalledWith(JORDAN);
     expect(JSON.stringify(f.world, (_k, v) => (typeof v === "bigint" ? v.toString() : v))).toBe(before);
   });
 
@@ -1091,20 +1105,10 @@ describe("route 28 — POST /security/incidents/:id/narrative (act): Summarise n
     expect(row28(f, SHARED).narrativeState).toBe("pending");
   });
 
-  it("🔴 a PARTIAL viewer and plain activity get ONE body (409 NOT_ACTIONABLE); a hidden incident is a missing one (404)", async () => {
-    const f = world();
-    const { server } = app(f, "family", "act");
-    const partial = await summarise(server, SHARED); // an alert she sees on front, a notice on back she cannot
-    const plain = await summarise(server, HIDDEN_CODE); // its only code is on back
-    expect(partial.status).toBe(409);
-    expect(partial.body).toEqual(plain.body);
-    expect(partial.body.error.code).toBe("NOT_ACTIONABLE");
-    const hidden = await summarise(server, BACK_ONLY);
-    const missing = await summarise(server, MISSING);
-    expect(hidden.status).toBe(404);
-    expect(hidden.body).toEqual(missing.body);
-    expect(hidden.body.error.code).toBe("INCIDENT_NOT_FOUND");
-    for (const id of [SHARED, HIDDEN_CODE, BACK_ONLY]) expect(row28(f, id).narrativeState).toBe("none");
+  it("a missing incident → 404 INCIDENT_NOT_FOUND for a viewer who sees everything", async () => {
+    const res = await summarise(app(world(), "owner", "manage").server, MISSING);
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("INCIDENT_NOT_FOUND");
   });
 
   it("plain activity for everyone (severity info) → 409 NOT_ACTIONABLE, even for the owner", async () => {
@@ -1119,7 +1123,7 @@ describe("route 28 — POST /security/incidents/:id/narrative (act): Summarise n
   it("cooldown: under 10 minutes since the last attempt or the text → 409 NARRATIVE_COOLDOWN; at 10 minutes → 202", async () => {
     const f = world();
     withFrontOnly(f, { narrativeState: "pending", narrativeAttemptAt: new Date(NOW.getTime() - 9 * 60_000) });
-    const { server } = app(f, "family", "act");
+    const { server } = app(f, "admin", "act");
     const res = await summarise(server, FRONT_ONLY);
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe("NARRATIVE_COOLDOWN");
@@ -1132,7 +1136,7 @@ describe("route 28 — POST /security/incidents/:id/narrative (act): Summarise n
   it("summaries off → 409 SUMMARIES_OFF, nothing written", async () => {
     const f = world({ securityAiSettings: [{ id: "singleton", summaries: "off" }] });
     withFrontOnly(f);
-    const res = await summarise(app(f, "family", "act").server, FRONT_ONLY);
+    const res = await summarise(app(f, "admin", "act").server, FRONT_ONLY);
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe("SUMMARIES_OFF");
     expect(row28(f, FRONT_ONLY).narrativeState).toBe("none");
@@ -1141,7 +1145,7 @@ describe("route 28 — POST /security/incidents/:id/narrative (act): Summarise n
   it("a Regenerate keeps the old text visible while the new one is written", async () => {
     const f = world();
     withFrontOnly(f, writtenCols);
-    const { server } = app(f, "family", "act");
+    const { server } = app(f, "admin", "act");
     const res = await summarise(server, FRONT_ONLY);
     expect(res.status).toBe(202);
     expect(res.body.narrative).toMatchObject({ state: "pending", text: WRITTEN });
@@ -1152,7 +1156,7 @@ describe("route 28 — POST /security/incidents/:id/narrative (act): Summarise n
   it("a strict body, and a bad id → 400", async () => {
     const f = world();
     withFrontOnly(f);
-    const { server } = app(f, "family", "act");
+    const { server } = app(f, "admin", "act");
     expect((await request(server).post(`/api/security/incidents/${FRONT_ONLY}/narrative`).send({ state: "written" })).status).toBe(400);
     expect((await summarise(server, "not-a-uuid")).status).toBe(400);
   });
@@ -1173,11 +1177,27 @@ describe("route 18 — `narrative`, shown only to a viewer who can see all of it
   it("still collecting, none asked for: `none` (the page offers Summarise now); summaries off: null", async () => {
     const f = world();
     withFrontOnly(f);
-    const res = await request(app(f, "family", "act").server).get(`/api/security/incidents/${FRONT_ONLY}`);
+    const res = await request(app(f, "admin", "act").server).get(`/api/security/incidents/${FRONT_ONLY}`);
     expect(res.body.narrative).toEqual({ state: "none", text: null, writtenAt: null, model: null, promptVersion: null });
     f.world.securityAiSettings.push({ id: "singleton", linking: "link_and_suggest", summaries: "off", version: 1, updatedById: null, updatedAt: NOW });
-    const off = await request(app(f, "family", "act").server).get(`/api/security/incidents/${FRONT_ONLY}`);
+    const off = await request(app(f, "admin", "act").server).get(`/api/security/incidents/${FRONT_ONLY}`);
     expect(off.body.narrative).toBeNull();
+  });
+
+  it.each([
+    ["collecting, none asked for", {}],
+    ["pending", { narrativeState: "pending" }],
+    ["written", { grouping: "closed", closedAt: NOW }],
+    ["failed", { narrativeState: "failed", narrativeError: "MODEL_ERROR", narrativeAttempts: 3 }],
+  ])("🔴 %s, entirely on her own camera: a family member reads `narrative: null` — the owner reads the state", async (_l, over) => {
+    const f = world();
+    const cols = (over as { grouping?: string }).grouping ? { ...writtenCols, ...over } : over;
+    withFrontOnly(f, cols);
+    const maria = await request(app(f, "family", "act").server).get(`/api/security/incidents/${FRONT_ONLY}`);
+    expect(maria.status).toBe(200);
+    expect(maria.body.narrative).toBeNull();
+    const owner = await request(app(f, "owner", "manage").server).get(`/api/security/incidents/${FRONT_ONLY}`);
+    expect(owner.body.narrative).not.toBeNull();
   });
 });
 

@@ -4333,9 +4333,11 @@ export interface IncidentDetail extends IncidentSummary {
   viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
   /**
    * WARP-2979 P4 PR-2 — "Summary by Droplet" (§6.11.3, DS-005): null unless this
-   * viewer can see everything the summary could name — no state and no hint
-   * that one exists otherwise — and null with summaries off, for plain
-   * activity, and when there is nothing to say. Absent on a box before PR-2.
+   * viewer sees every camera and may read threats (owner/admin) AND can see
+   * everything the summary names — every other viewer gets null on every
+   * incident, so the section and its buttons never render for them — and null
+   * with summaries off, for plain activity, and when there is nothing to say.
+   * Absent on a box before PR-2.
    */
   narrative?: IncidentNarrativeView | null;
 }
