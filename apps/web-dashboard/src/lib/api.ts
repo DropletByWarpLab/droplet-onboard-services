@@ -9094,6 +9094,8 @@ export interface CloudHistorySummary {
   unaskedOnBoxAnswers: number;
   userMessages: number;
   drewOn: string[];
+  /** WARP-2979 — sources whose answers are never sent to a cloud model, whatever is chosen (e.g. "Security"). */
+  neverSent?: string[];
 }
 
 export async function fetchCloudHistory(conversationId: string): Promise<CloudHistorySummary> {

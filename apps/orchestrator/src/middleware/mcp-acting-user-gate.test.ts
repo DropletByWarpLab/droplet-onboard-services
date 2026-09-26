@@ -285,6 +285,16 @@ const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   security: [],
 };
 
+describe("mcp acting-user gate — which domains it narrows", () => {
+  // Pinned by name: the suite below iterates the list, so a domain dropped
+  // from it would take its own checks with it and nothing would go red.
+  // WARP-2979: `security` — its tools' routes resolve the person too, but the
+  // mcp-server's HTTP transport runs only write-tier RBAC (ADR-059 P4 §6.12.2).
+  it("narrows exactly business and security", () => {
+    expect([...MCP_ACTING_USER_GATED_DOMAINS].sort()).toEqual(["business", "security"]);
+  });
+});
+
 describe("mcp acting-user gate — the route manifest agrees with it", () => {
   const catalog = new Map(TOOL_CATALOG.map((t) => [t.name, t]));
   for (const domain of MCP_ACTING_USER_GATED_DOMAINS) {

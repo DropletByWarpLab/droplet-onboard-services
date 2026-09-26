@@ -358,6 +358,30 @@ describe("POST /api/llm/chat — history replay on a cloud turn (WARP-2991)", ()
     expect(JSON.stringify(runOpts().messages)).not.toContain(EARLIER_LOCAL_ANSWER);
   });
 
+  // WARP-2979 (ADR-059 P4 §6.13, D27) — Security never leaves the box, not even with consent.
+  it("GRANTED, but an on-box answer used a Security tool: only the user's own messages go", async () => {
+    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
+    messageRows = [{ role: "assistant", provider: "local", createdAt: T0, toolCalls: [{ name: "security_list_incidents" }] }];
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    expect((await sendCloudTurn(app)).status).toBe(200);
+    expect(sentConversation().map((m) => m.role)).toEqual(["user", "user"]);
+    expect(JSON.stringify(runOpts().messages)).not.toContain(EARLIER_LOCAL_ANSWER);
+    expect(historyAuditRefs().historyReplay).toBe("user_only");
+  });
+
+  it("GRANTED, and the Security answer is the OLDEST of several covered ones: still only the user's messages", async () => {
+    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T2 };
+    messageRows = [
+      { role: "assistant", provider: null, createdAt: T0, toolCalls: [{ name: "security_search_events" }] },
+      onBoxAnswerAt(T1),
+    ];
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    expect((await sendCloudTurn(app)).status).toBe(200);
+    expect(sentConversation().map((m) => m.role)).toEqual(["user", "user"]);
+  });
+
   it("a consent does not cover an on-box answer produced AFTER it", async () => {
     sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
     messageRows = [onBoxAnswerAt(T0), onBoxAnswerAt(T2)];
@@ -446,6 +470,28 @@ describe("/api/llm/conversations/:id/cloud-history (WARP-2991)", () => {
       userMessages: 1,
       drewOn: ["documents", "memory"],
     });
+  });
+
+  it("WARP-2979: GET says Security answers are never sent — even when the consent covers them", async () => {
+    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
+    messageRows = [
+      { role: "user", provider: null, createdAt: T0, toolCalls: null },
+      { role: "assistant", provider: "local", createdAt: T0, toolCalls: [{ name: "security_zone_status" }] },
+    ];
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    const res = await request(app).get(`/api/llm/conversations/${CONV_ID}/cloud-history`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ consent: "granted", uncoveredOnBoxAnswers: 0, neverSent: ["Security"], drewOn: [] });
+  });
+
+  it("WARP-2979: GET's neverSent is empty when no answer used Security", async () => {
+    sessionRow = { cloudHistoryConsent: "not_asked", cloudHistoryConsentAt: null };
+    messageRows = [onBoxAnswerAt(T0)];
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    const res = await request(app).get(`/api/llm/conversations/${CONV_ID}/cloud-history`);
+    expect(res.body.neverSent).toEqual([]);
   });
 
   it("GET 404s a conversation that is not the caller's", async () => {
