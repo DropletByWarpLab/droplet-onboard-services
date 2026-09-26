@@ -649,6 +649,38 @@ describe("WARP-2978 — incidents on the feed", () => {
   });
 });
 
+describe("WARP-3185 B — Show older", () => {
+  it("aria-disabled while it loads, never disabled; a second press before the load starts is refused", () => {
+    const onLoadMore = vi.fn();
+    const first = event({ id: "1" });
+    const { rerender } = render(<SecurityFeed {...props({ events: [first], hasMore: true, onLoadMore })} />);
+    const older = screen.getByRole("button", { name: COPY.loadMore });
+    older.focus();
+    fireEvent.click(older);
+    fireEvent.click(older);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    rerender(<SecurityFeed {...props({ events: [first], hasMore: true, isLoadingMore: true, onLoadMore })} />);
+    expect(older).toHaveAttribute("aria-disabled", "true");
+    expect(older).not.toBeDisabled();
+    expect(older).toHaveFocus();
+  });
+
+  it("when the last page lands, focus moves to the first row it added — a row with no link takes focus itself", () => {
+    const onLoadMore = vi.fn();
+    const first = event({ id: "1" });
+    const threat = event({ id: "2", source: "activity_mirror", kind: "threat", camera: null, labels: ["auth"], score: null, summary: "5 failed sign-ins", frigateEventId: null });
+    const { rerender, container } = render(<SecurityFeed {...props({ events: [first], hasMore: true, onLoadMore })} />);
+    const older = screen.getByRole("button", { name: COPY.loadMore });
+    older.focus();
+    fireEvent.click(older);
+    rerender(<SecurityFeed {...props({ events: [first], hasMore: true, isLoadingMore: true, onLoadMore })} />);
+    rerender(<SecurityFeed {...props({ events: [first, threat], hasMore: false, onLoadMore })} />);
+    const row = container.querySelector('[data-kind="threat"]') as HTMLElement;
+    expect(row).toHaveFocus();
+    expect(row).toHaveAttribute("tabindex", "-1");
+  });
+});
+
 describe("WARP-2978 — the alerts line", () => {
   it("alerts can fire → says who is alerted, and that Droplet calls nobody", () => {
     render(<AlertsLine alertsReady />);

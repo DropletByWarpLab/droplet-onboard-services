@@ -206,9 +206,16 @@ function IncidentBody({
         return null;
       } catch (err) {
         // Typed copy only (409 INCIDENT_CONFLICT / NOT_ACTIONABLE, 503
-        // AUDIT_UNAVAILABLE, …) — never err.message. Then re-read.
+        // AUDIT_UNAVAILABLE, …) — never err.message. Then re-read, and WAIT
+        // for it (WARP-3185 A): a refusal can take the buttons away, and focus
+        // is placed only once the page shows the incident as it now stands —
+        // placed earlier, it lands on a button about to vanish, then <body>.
         toast(translateError(err, "security"), "error");
-        void refresh();
+        try {
+          await refresh();
+        } catch {
+          // A failed re-read is the page's own "couldn't refresh" line.
+        }
         return errorCode(err) ?? "UNKNOWN";
       } finally {
         busyRef.current = false;

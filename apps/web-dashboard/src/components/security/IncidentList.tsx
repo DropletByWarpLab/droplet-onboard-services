@@ -18,6 +18,7 @@ import type { IncidentSummary, SecurityHealthRow, SecurityZoneRef } from "@/lib/
 import { IncidentCard } from "./IncidentCard";
 import { INCIDENT_COPY, incidentsEmpty } from "./incident-copy";
 import { AreaSelect } from "./SecurityFeed";
+import { useShowOlder } from "./show-older";
 
 export type IncidentFilter = "attention" | "all";
 
@@ -102,6 +103,13 @@ function Busy() {
 }
 
 function ListBody(props: IncidentListProps & { now: Date }) {
+  // Before any early return: a hook runs on every render.
+  const older = useShowOlder({
+    count: props.incidents?.length ?? 0,
+    hasMore: props.hasMore,
+    isLoadingMore: props.isLoadingMore,
+    onLoadMore: props.onLoadMore,
+  });
   if (props.error && !props.incidents?.length) {
     return (
       <div className="empty" role="alert">
@@ -148,14 +156,15 @@ function ListBody(props: IncidentListProps & { now: Date }) {
 
   return (
     <>
-      <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+      <ul ref={older.listRef} className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
         {props.incidents.map((i) => (
           <IncidentCard key={i.id} incident={i} cameraLabel={props.cameraLabel} timezone={props.timezone} now={props.now} />
         ))}
       </ul>
       {props.hasMore && (
         <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-          <button type="button" className="btn" onClick={props.onLoadMore} disabled={props.isLoadingMore}>
+          {/* aria-disabled, never disabled: the pressed button keeps focus (WARP-3185 B). */}
+          <button type="button" className="btn" onClick={older.onClick} aria-disabled={props.isLoadingMore || undefined}>
             {props.isLoadingMore ? <Loader2 size={16} className="animate-spin" aria-hidden /> : null}
             {COPY.loadMore}
           </button>

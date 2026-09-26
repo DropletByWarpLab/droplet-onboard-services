@@ -59,6 +59,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { useShowOlder } from "./show-older";
 import type { SecurityEvent, SecurityEventKind, SecurityHealthRow, SecurityZoneRef } from "@/lib/types";
 
 export type SecurityView = "all" | "detections" | "health" | "network";
@@ -428,6 +429,13 @@ function SourcesCard({ sources, error, now }: { sources: SecurityHealthRow[] | n
 
 function FeedBody(props: SecurityFeedProps & { now: Date }) {
   const cameraLabel = props.cameraLabel ?? ((name: string) => name);
+  // Before any early return: a hook runs on every render.
+  const older = useShowOlder({
+    count: props.events.length,
+    hasMore: props.hasMore,
+    isLoadingMore: props.isLoadingMore,
+    onLoadMore: props.onLoadMore,
+  });
   if (props.error) {
     return (
       <div className="empty" role="alert">
@@ -481,14 +489,15 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
 
   return (
     <>
-      <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+      <ul ref={older.listRef} className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
         {props.events.map((e) => (
           <SecurityEventRow key={e.id} event={e} cameraLabel={cameraLabel} now={props.now} />
         ))}
       </ul>
       {props.hasMore && (
         <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-          <button type="button" className="btn" onClick={props.onLoadMore} disabled={props.isLoadingMore}>
+          {/* aria-disabled, never disabled: the pressed button keeps focus (WARP-3185 B). */}
+          <button type="button" className="btn" onClick={older.onClick} aria-disabled={props.isLoadingMore || undefined}>
             {props.isLoadingMore ? <Loader2 size={16} className="animate-spin" aria-hidden /> : null}
             {COPY.loadMore}
           </button>

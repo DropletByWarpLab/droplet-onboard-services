@@ -574,6 +574,26 @@ describe("Acknowledge", () => {
     await waitFor(() => expect(h.getSecurityIncident.mock.calls.length).toBeGreaterThan(1));
   });
 
+  it("a refusal that takes the buttons away (409 NOT_ACTIONABLE): the re-read lands first, then focus goes to the state line — never <body> (WARP-3185 A)", async () => {
+    // The re-read answers only after the refusal has been handled, as a real network would.
+    let releaseRead: (v: IncidentDetail) => void = () => {};
+    h.getSecurityIncident.mockReset();
+    h.getSecurityIncident.mockResolvedValueOnce(detail()).mockImplementation(() => new Promise((r) => (releaseRead = r)));
+    h.acknowledgeSecurityIncident.mockRejectedValue(typedError("NOT_ACTIONABLE", 409));
+    renderView();
+    const ack = await screen.findByRole("button", { name: COPY.acknowledge });
+    ack.focus();
+    fireEvent.click(ack);
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.any(String), "error"));
+    await rtlAct(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await rtlAct(async () => releaseRead(detail({ actionable: false })));
+    await waitFor(() => expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull());
+    await waitFor(() => expect(screen.getByTestId("incident-state")).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
   it("an audit failure: nothing was changed, and the button is usable again", async () => {
     h.acknowledgeSecurityIncident.mockRejectedValue(typedError("AUDIT_UNAVAILABLE", 503));
     renderView();

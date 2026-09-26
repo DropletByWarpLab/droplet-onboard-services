@@ -200,6 +200,51 @@ describe("IncidentList", () => {
     expect(onRetry).toHaveBeenCalled();
   });
 
+  it("Show older is aria-disabled while it loads — never disabled — and a second press before the load starts is refused (WARP-3185 B)", () => {
+    const onLoadMore = vi.fn();
+    const first = incident({ id: "a" });
+    const { rerender } = render(<IncidentList {...props({ incidents: [first], hasMore: true, onLoadMore })} />);
+    const older = screen.getByRole("button", { name: "Show older" });
+    older.focus();
+    fireEvent.click(older);
+    fireEvent.click(older);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    rerender(<IncidentList {...props({ incidents: [first], hasMore: true, isLoadingMore: true, onLoadMore })} />);
+    expect(older).toHaveAttribute("aria-disabled", "true");
+    expect(older).not.toBeDisabled();
+    expect(older).toHaveFocus();
+    fireEvent.click(older);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("when the last page lands, Show older goes and focus moves to the first card it added — never <body> (WARP-3185 B)", () => {
+    const onLoadMore = vi.fn();
+    const first = incident({ id: "a" });
+    const added = incident({ id: "b", zone: { id: "z2", name: "Shop floor", kind: "interior" } });
+    const { rerender } = render(<IncidentList {...props({ incidents: [first], hasMore: true, onLoadMore })} />);
+    const older = screen.getByRole("button", { name: "Show older" });
+    older.focus();
+    fireEvent.click(older);
+    rerender(<IncidentList {...props({ incidents: [first], hasMore: true, isLoadingMore: true, onLoadMore })} />);
+    rerender(<IncidentList {...props({ incidents: [first, added], hasMore: false, onLoadMore })} />);
+    expect(screen.queryByRole("button", { name: "Show older" })).toBeNull();
+    expect(screen.getByRole("link", { name: /Shop floor/ })).toHaveFocus();
+  });
+
+  it("a page that lands with more still to come leaves focus on Show older, which works again", () => {
+    const onLoadMore = vi.fn();
+    const first = incident({ id: "a" });
+    const { rerender } = render(<IncidentList {...props({ incidents: [first], hasMore: true, onLoadMore })} />);
+    const older = screen.getByRole("button", { name: "Show older" });
+    older.focus();
+    fireEvent.click(older);
+    rerender(<IncidentList {...props({ incidents: [first], hasMore: true, isLoadingMore: true, onLoadMore })} />);
+    rerender(<IncidentList {...props({ incidents: [first, incident({ id: "b" })], hasMore: true, onLoadMore })} />);
+    expect(screen.getByRole("button", { name: "Show older" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Show older" }));
+    expect(onLoadMore).toHaveBeenCalledTimes(2);
+  });
+
   it("Show older loads the next page", () => {
     const onLoadMore = vi.fn();
     render(<IncidentList {...props({ incidents: [incident()], hasMore: true, onLoadMore })} />);
