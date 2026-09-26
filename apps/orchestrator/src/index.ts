@@ -843,7 +843,9 @@ async function main() {
     // 🔴 NEITHER PASS TAKES cron-runtime's `lockKey`, and neither may be given
     // one. That lock runs the handler inside a 60 s `$transaction` (WARP-2837);
     // exclusion is the lease, which holds across replicas without keeping a
-    // transaction open. Both passes now share it, so there is exactly one
+    // transaction open. (WARP-3193 PERF-1 has since removed the 60 s ceiling —
+    // the lock now lasts the whole run — but a lease is still the right tool
+    // for a run that must outlive a restart and not pin a connection.) Both passes now share it, so there is exactly one
     // answer to "is this pass already running" for every caller.
     for (const [passKey, tickMs] of [
       [DETECTOR_PASS_KEY, config.brain.detectorTickMs],
@@ -1555,7 +1557,8 @@ async function main() {
   // 23 short DB sweeps that use it; wrong for this one, because a CPU-inference
   // extraction can legitimately outlive 60 s (`completeOnce` allows 120 s per
   // call for exactly that reason) and a handler that outlives its transaction
-  // has every write rolled back while the model keeps running.
+  // has every write rolled back while the model keeps running. (WARP-3193
+  // PERF-1 has since removed the 60 s ceiling; the reasons below still hold.)
   //
   // The exclusion is the durable CLAIM instead — `FOR UPDATE SKIP LOCKED` plus
   // a guarded `updateMany` — which is strictly stronger here: it is atomic
