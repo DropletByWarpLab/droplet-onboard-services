@@ -91,15 +91,10 @@ export interface ActivityRowSigner {
     prevSignatureHash: string,
     signature: string,
   ): boolean;
-  /**
-   * Public verification bytes the export bundle should ship alongside
-   * the rows so an offline tool can re-derive every row's signature.
-   * For the HMAC implementation this IS the key itself — symmetric, so
-   * holders of these bytes can also forge. That's documented in the
-   * spec; the TPM implementation will return the device's
-   * attestation-rooted public key here instead.
-   */
-  exportPublicBytes(): Buffer;
+  // WARP-3153: no accessor for the key bytes on purpose. They are the
+  // secret (HMAC is symmetric); the old `exportPublicBytes()` shipped them in
+  // every audit export. Offline verification uses the device-key seal
+  // instead (routes/activity.ts, POST /api/activity/export).
 }
 
 /**
@@ -235,13 +230,6 @@ export function createHmacSigner(keyBytes: Buffer): ActivityRowSigner {
       const b = Buffer.from(signature, "utf8");
       if (a.length !== b.length) return false;
       return timingSafeEqual(a, b);
-    },
-    exportPublicBytes() {
-      // Symmetric: today the "public" bytes ARE the HMAC key. The export
-      // bundle is meant for the device owner — they already trust the
-      // box. A TPM-backed implementation will return an attestation key
-      // here that's verifiable without leaking signing capability.
-      return Buffer.from(keyBytes);
     },
   };
 }

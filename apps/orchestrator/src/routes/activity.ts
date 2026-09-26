@@ -28,6 +28,33 @@ import {
   type ActivitySeverityName,
 } from "../services/audit-signing.service.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { createHash } from "node:crypto";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("activity-export");
+
+/**
+ * WARP-3153: what the export needs from device-identity-svc. Structural
+ * subset of DeviceIdentityClient so tests pass a stub. The device key is
+ * TPM-held (non-extractable on a real backend); only its cert (public)
+ * goes into the bundle.
+ */
+export interface ActivityBundleSealer {
+  getDeviceCert(): Promise<string>;
+  signWithDeviceKey(
+    payload: Uint8Array,
+  ): Promise<{ signature: Uint8Array; algorithm: string }>;
+}
+
+/** Bundle format identifier. v3 = no signing key inside, device-key seal
+ * as the last line (WARP-3153). */
+export const ACTIVITY_BUNDLE_TYPE = "droplet.activity-bundle.v3";
+/** Domain-separation prefix for the seal signature, so a bundle seal can
+ * never be replayed as any other device-key statement (daily roots sign
+ * bare JSON starting with `{`, TLS/registration use their own prefixes). */
+export const ACTIVITY_BUNDLE_SEAL_PREFIX = "droplet-activity-bundle:v3:";
+/** Cap on row ids listed in the seal when the box's own HMAC check fails. */
+const MAX_LISTED_HMAC_FAILURES = 100;
 
 /**
  * WARP-456: owner/admin gate for the activity surface. Same shape as
@@ -113,7 +140,11 @@ const listQuerySchema = z.object({
   cursor: z.coerce.number().int().positive().optional(),
 });
 
-export function createActivityRouter(prisma: PrismaClient): Router {
+export function createActivityRouter(
+  prisma: PrismaClient,
+  /** WARP-3153: seals the export. Null → the export answers 503. */
+  bundleSealer: ActivityBundleSealer | null = null,
+): Router {
   const router = Router();
 
   // ── GET /api/activity ──
@@ -267,12 +298,19 @@ export function createActivityRouter(prisma: PrismaClient): Router {
 
   // ── POST /api/activity/export ──
   //
-  // Returns a sealed JSON-Lines bundle of every row in scope plus the
-  // public verification bytes. The client (or an offline verifier
-  // tool) re-derives every row's signature using the bundled bytes
-  // and the canonical-content shape from `audit-signing.service.ts`,
-  // walking the chain forward. Tamper anywhere = chain breaks at
-  // that row.
+  // Returns a sealed JSON-Lines bundle of every row in scope. Layout:
+  //   line 1      manifest (format, the device CERT — public only — filter)
+  //   lines 2..n  rows, ascending id (the chain's own direction)
+  //   last line   seal: SHA-256 over every byte before it, signed with the
+  //               device identity key, plus the box's own HMAC check of
+  //               every row at export time.
+  //
+  // WARP-3153: the bundle used to ship the HMAC key that signs the chain,
+  // so anyone holding an export could forge entries. The HMAC key now
+  // never leaves the box. An offline verifier checks the seal against the
+  // device cert and the chain links (which need no key); see
+  // docs/security/audit-bundle-verification.md and
+  // scripts/verify-activity-bundle.mjs.
   //
   // The same filter shape as the list route is accepted in the body
   // so the operator can export a subset (e.g. "last 30 days of
@@ -315,40 +353,52 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         }
 
         const signer = getActivitySigner();
-        const publicKey = signer
-          ? signer.exportPublicBytes().toString("base64")
-          : null;
+        if (!signer) {
+          res.status(503).json({ error: "audit signer unavailable" });
+          return;
+        }
+        // Fetch the cert BEFORE streaming: an unsealable bundle is refused
+        // up front rather than half-written.
+        let deviceCertPem: string;
+        try {
+          if (!bundleSealer) throw new Error("no device identity client wired");
+          deviceCertPem = await bundleSealer.getDeviceCert();
+        } catch (err) {
+          logger.warn({ err }, "audit export refused: device identity unavailable");
+          res.status(503).json({
+            error: "device identity unavailable: the bundle cannot be sealed",
+          });
+          return;
+        }
 
-        // Streaming JSON-Lines: the bundle is one row per line so a
-        // verifier can process it incrementally without loading the
-        // whole file into memory. First line is the manifest (algo,
-        // device id, public key). Subsequent lines are rows ordered
-        // by `id` ascending — same direction the chain was built —
-        // so the verifier walks forward.
         res.setHeader("Content-Type", "application/x-ndjson");
         res.setHeader(
           "Content-Disposition",
           'attachment; filename="droplet-activity-bundle.jsonl"',
         );
 
-        // WARP-181: bundle format v2 — rows are version-tagged
-        // (`schemaVersion`) and carry signature-covered actor fields;
-        // the offline verifier picks the canonical form PER ROW from
-        // `schemaVersion` (v1 legacy 7-key, v2 actor-bearing 9-key).
-        // The identifier is bumped so a v1-only verifier fails fast at
-        // the manifest instead of reporting false tampering on v2 rows.
-        const manifest = {
-          type: "droplet.activity-bundle.v2",
-          algorithm: "HMAC-SHA256",
-          // The HMAC key bytes shipped here ARE symmetric — anyone
-          // holding them can also forge. Documented in the spec
-          // ("today: the HMAC key bytes; tomorrow: a TPM-attested
-          // key"). The bundle is meant for the device owner.
-          publicKey,
+        // Every byte written before the seal feeds the digest the seal signs.
+        const digest = createHash("sha256");
+        const writeLine = (obj: unknown) => {
+          const line = JSON.stringify(obj) + "\n";
+          digest.update(line, "utf8");
+          res.write(line);
+        };
+
+        // WARP-181 bumped the format to v2 (version-tagged rows with
+        // signature-covered actor fields); WARP-3153 bumps it to v3 (no key,
+        // sealed) so an older verifier fails fast at the manifest.
+        writeLine({
+          type: ACTIVITY_BUNDLE_TYPE,
+          // Row signatures stay HMAC-SHA256 on the box; they are NOT
+          // re-checkable offline (that would need the secret). The seal's
+          // `rowHmac` carries the box's own check instead.
+          rowAlgorithm: "HMAC-SHA256",
+          deviceCertPem,
+          deviceCertFingerprint: `sha256:${createHash("sha256").update(deviceCertPem, "utf8").digest("hex")}`,
           exportedAt: new Date().toISOString(),
           filter: { kind, actorType, actorId, from, to, q },
-        };
-        res.write(JSON.stringify(manifest) + "\n");
+        });
 
         // Chunked read to keep memory bounded. Page size matches the
         // GET route's max so the verifier's per-batch cost is
@@ -356,6 +406,8 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         const PAGE = 200;
         let cursor: bigint | undefined;
         let exported = 0;
+        let hmacFailed = 0;
+        const hmacFailedRowIds: string[] = [];
         for (;;) {
           const page = await prisma.activityRow.findMany({
             where: cursor
@@ -382,12 +434,66 @@ export function createActivityRouter(prisma: PrismaClient): Router {
               actorId: r.actorId,
               schemaVersion: r.schemaVersion,
             };
-            res.write(JSON.stringify(out) + "\n");
+            writeLine(out);
+            const content: ActivityRowContent = {
+              at: r.at,
+              severity: r.severity as ActivitySeverityName,
+              sourceIcon: r.sourceIcon,
+              what: r.what,
+              sub: r.sub,
+              kind: r.kind as ActivityKindName,
+              refs: r.refs === null ? null : (r.refs as Record<string, unknown>),
+              actorType: r.actorType as ActivityActorTypeName | null,
+              actorId: r.actorId,
+              schemaVersion: r.schemaVersion,
+            };
+            let valid: boolean;
+            try {
+              valid = signer.verify(content, r.prevSignatureHash, r.signature);
+            } catch {
+              valid = false; // unknown schemaVersion → never vouch for it
+            }
+            if (!valid) {
+              hmacFailed += 1;
+              if (hmacFailedRowIds.length < MAX_LISTED_HMAC_FAILURES) {
+                hmacFailedRowIds.push(r.id.toString());
+              }
+            }
           }
           cursor = page[page.length - 1]!.id;
           if (page.length < PAGE) break;
         }
 
+        const digestB64 = digest.digest("base64url");
+        const sealBase = {
+          type: `${ACTIVITY_BUNDLE_TYPE}.seal`,
+          rowCount: exported,
+          // The box's HMAC check of each row's signature over its content
+          // and stored prev link, at export time.
+          rowHmac: { checked: exported, failed: hmacFailed, failedRowIds: hmacFailedRowIds },
+          digest: digestB64,
+        };
+        let sealed = false;
+        try {
+          const s = await bundleSealer!.signWithDeviceKey(
+            Buffer.from(ACTIVITY_BUNDLE_SEAL_PREFIX + digestB64, "utf8"),
+          );
+          res.write(
+            JSON.stringify({
+              ...sealBase,
+              algorithm: s.algorithm,
+              signature: Buffer.from(s.signature).toString("base64"),
+            }) + "\n",
+          );
+          sealed = true;
+        } catch (err) {
+          // Headers are gone; an unsigned seal line makes every verifier
+          // reject the file instead of trusting a truncated one.
+          logger.error({ err }, "audit export: device-key seal failed");
+          res.write(
+            JSON.stringify({ ...sealBase, error: "seal signing failed" }) + "\n",
+          );
+        }
         res.end();
 
         // Taking the whole signed chain off the box left no trace in it.
@@ -406,7 +512,7 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           refs: {
             rowCount: exported,
             filter: { kind, actorType, actorId, from, to, q },
-            includedSigningKey: publicKey !== null,
+            sealed,
           },
         }).catch(() => {
           // recordActivity already logs and swallows; this only stops a
