@@ -62,6 +62,7 @@ import {
 } from "../services/jwt.service.js";
 import { createSession } from "../services/session.service.js";
 import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
+import { createRequireCredentialStepUp } from "../middleware/require-credential-step-up.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { createChallenge, consumeChallenge } from "../services/webauthn-challenge.service.js";
 import { deriveWebAuthnRp, isIpRpId } from "../services/webauthn-config.js";
@@ -249,7 +250,12 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   // WebAuthn handlers: attestation / assertion verification is CPU-bound and
   // the authenticate pair is a session-issuing path (same posture as
   // /auth/login).
-  router.post("/auth/webauthn/register/options", authRateLimit, async (req, res, next) => {
+  // WARP-3193 SEC-AUTH-9 — step-up before registering a passkey (both
+  // halves), so a hijacked session cannot plant one: recent MFA when TOTP
+  // is enrolled, else the current password.
+  const requireCredentialStepUp = createRequireCredentialStepUp(prisma);
+
+  router.post("/auth/webauthn/register/options", authRateLimit, requireCredentialStepUp, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string; username: string; displayName: string } }).user;
       if (!user) {
@@ -299,7 +305,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Registration: verify attestation + store the credential ──
-  router.post("/auth/webauthn/register/verify", authRateLimit, async (req, res, next) => {
+  router.post("/auth/webauthn/register/verify", authRateLimit, requireCredentialStepUp, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string } }).user;
       if (!user) {

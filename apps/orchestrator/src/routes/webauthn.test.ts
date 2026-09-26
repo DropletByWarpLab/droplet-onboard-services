@@ -87,6 +87,14 @@ vi.mock("../services/login-second-factor.service.js", () => ({
   checkLoginSecondFactor: (...a: unknown[]) => checkLoginSecondFactor(...a),
 }));
 
+// WARP-3193 SEC-AUTH-9 — the credential step-up gate (its own suite covers
+// the rules). Default: the caller has stepped up.
+const stepUp = vi.fn();
+vi.mock("../middleware/require-credential-step-up.js", () => ({
+  createRequireCredentialStepUp:
+    () => (req: unknown, res: unknown, next: () => void) => stepUp(req, res, next),
+}));
+
 import {
   createPublicWebAuthnRouter,
   createProtectedWebAuthnRouter,
@@ -247,6 +255,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   createChallenge.mockResolvedValue("mock-challenge-aaaaaaaaaaaaaaaaaaaaaa");
   checkLoginSecondFactor.mockResolvedValue("not_enrolled");
+  stepUp.mockImplementation((_req: unknown, _res: unknown, next: () => void) => next());
 });
 
 describe("WebAuthn registration (protected) — POST /auth/webauthn/register/*", () => {
@@ -919,6 +928,22 @@ describe("WARP-3193 — passkeys require user verification and an enrolled TOTP"
     expect(res.status).toBe(200);
     const decoded = sessionFromCookie(res);
     expect(typeof decoded.lastMfaAt).toBe("string");
+  });
+
+  it("🔴 SEC-AUTH-9: registration (options AND verify) is refused until the caller steps up", async () => {
+    stepUp.mockImplementation((_req: unknown, res: any) =>
+      res.status(403).json({ error: "Enter your current password to continue.", code: "STEP_UP_PASSWORD_REQUIRED" }),
+    );
+    const { prisma, credentials } = createPrismaMock({ users: [stefan] });
+    const opts = await request(buildProtectedApp(prisma, stefan)).post("/api/auth/webauthn/register/options");
+    const verify = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("new-cred") });
+    expect([opts.status, verify.status]).toEqual([403, 403]);
+    expect(opts.body.code).toBe("STEP_UP_PASSWORD_REQUIRED");
+    expect(createChallenge).not.toHaveBeenCalled();
+    expect(consumeChallenge).not.toHaveBeenCalled();
+    expect(credentials).toHaveLength(0);
   });
 
   it("no TOTP enrolled → session issued without an MFA stamp (unchanged)", async () => {

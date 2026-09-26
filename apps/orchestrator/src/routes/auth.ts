@@ -114,6 +114,16 @@ import {
   consumeRecoveryCode,
 } from "../services/recovery.service.js";
 import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
+import {
+  passwordChangeBackoffSeconds,
+  checkPasswordChangeLock,
+  recordPasswordChangeFailure,
+  clearPasswordChangeRateState,
+} from "../services/password-change-throttle.service.js";
+import {
+  createRequireCredentialStepUp,
+  passCredentialStepUp,
+} from "../middleware/require-credential-step-up.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
 import { warmActiveModel } from "../services/active-model.service.js";
@@ -356,82 +366,10 @@ function getRequestIp(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
 
-/**
- * Progressive backoff for failed current-password checks on
- * POST /auth/change-password (PR #549 reviewer follow-up: without a lockout
- * the endpoint is a current-password brute-force oracle for whoever holds a
- * session cookie). Mirrors the WARP-631 claim-code model: a small free tier,
- * then FIXED escalating locks that always elapse on their own; the failure
- * counter resets after an hour without failures and on a successful verify.
- * Keyed by user id — the gate protects the ACCOUNT's password, and a NATed
- * household shares one IP. Fails OPEN on cache errors so a flaky Redis can
- * never lock a legitimate user out of rotating their password.
- */
-const PW_CHANGE_FREE_TIER = 5;
-/** Lock seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
-const PW_CHANGE_BACKOFF_SCHEDULE = [30, 60, 120, 300, 900] as const;
-/** Failure counter resets after an hour of no failures (rolling window). */
-const PW_CHANGE_FAILS_TTL_SEC = 60 * 60;
-
-function pwChangeFailsKey(userId: string): string {
-  return `ratelimit:change-password:fails:${userId}`;
-}
-function pwChangeLockKey(userId: string): string {
-  return `ratelimit:change-password:lock:${userId}`;
-}
-
-/** PURE schedule map (failure count → lock seconds). Exported for tests. */
-export function passwordChangeBackoffSeconds(failureCount: number): number {
-  const idx = failureCount - PW_CHANGE_FREE_TIER - 1;
-  if (idx < 0) return 0;
-  return PW_CHANGE_BACKOFF_SCHEDULE[
-    Math.min(idx, PW_CHANGE_BACKOFF_SCHEDULE.length - 1)
-  ];
-}
-
-async function checkPasswordChangeLock(
-  userId: string,
-): Promise<{ locked: boolean; retryAfterSeconds: number }> {
-  try {
-    const until = (await cacheGet<number>(pwChangeLockKey(userId))) ?? 0;
-    const now = Date.now();
-    if (until > now) {
-      return { locked: true, retryAfterSeconds: Math.ceil((until - now) / 1000) };
-    }
-    return { locked: false, retryAfterSeconds: 0 };
-  } catch {
-    return { locked: false, retryAfterSeconds: 0 };
-  }
-}
-
-async function recordPasswordChangeFailure(userId: string): Promise<void> {
-  try {
-    // cacheIncr is atomic (Redis INCR) — avoids the read-modify-write race
-    // where two concurrent wrong-password requests both read N and both write
-    // N+1, keeping the counter artificially low.
-    const next = await cacheIncr(pwChangeFailsKey(userId), PW_CHANGE_FAILS_TTL_SEC);
-    if (next === null) return; // Redis error — fail open
-    const lockedSeconds = passwordChangeBackoffSeconds(next);
-    if (lockedSeconds > 0) {
-      await cacheSet(
-        pwChangeLockKey(userId),
-        Date.now() + lockedSeconds * 1000,
-        lockedSeconds,
-      );
-    }
-  } catch {
-    // fail open — see the model comment above.
-  }
-}
-
-async function clearPasswordChangeRateState(userId: string): Promise<void> {
-  try {
-    await cacheDel(pwChangeFailsKey(userId));
-    await cacheDel(pwChangeLockKey(userId));
-  } catch {
-    // fail open.
-  }
-}
+// WARP-3193 — the current-password throttle (PR #549) now lives in
+// services/password-change-throttle.service.ts, shared with the credential
+// step-up gate. Re-exported so existing imports keep working.
+export { passwordChangeBackoffSeconds };
 
 /**
  * WARP-579 — progressive backoff for failed /auth/login credential checks.
@@ -2551,6 +2489,11 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-3193 SEC-AUTH-9 — re-prove identity before minting a factor, so
+      // a hijacked session cannot plant its own authenticator. After the 409
+      // on purpose: the setup wizard reads it when the owner steps back.
+      if (!(await passCredentialStepUp(prisma, req, res))) return;
+
       // Label the authenticator entry with the user's email when present,
       // else the username — both are non-secret display identifiers.
       const label = req.user.username;
@@ -2618,7 +2561,9 @@ export function createProtectedAuthRouter(
   // recovery codes — returned ONCE in this response and never again. A
   // verify against an already-enabled factor is a re-challenge (e.g. a
   // step-up) and returns no new codes.
-  router.post("/auth/totp/verify", authRateLimit, async (req, res, next) => {
+  // WARP-3193 SEC-AUTH-9 — the same step-up as enroll (the confirming
+  // verify is what turns the factor on).
+  router.post("/auth/totp/verify", authRateLimit, createRequireCredentialStepUp(prisma), async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
