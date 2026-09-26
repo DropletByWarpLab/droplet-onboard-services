@@ -25,8 +25,15 @@ vi.mock("@/lib/api", () => ({
   deleteVpnPeer: (...a: unknown[]) => mockDeleteVpnPeer(...a),
 }));
 
+// WARP-3157 — mint/revoke are owner/admin only. Every existing test in this
+// file predates that gate and exercises the interactive switch, so it runs
+// as an owner by default; the member/guest read-only describe block below
+// overrides `authUser` to a non-admin role before rendering.
+const authUser = vi.hoisted(() => ({
+  current: { username: "stefan", role: "owner" as string | undefined },
+}));
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: { username: "stefan" } }),
+  useAuth: () => ({ user: authUser.current }),
 }));
 
 import { RemoteAccessWidget } from "@/components/home/widgets";
@@ -70,6 +77,7 @@ const CREATED: VpnPeerCreatedInfo = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authUser.current = { username: "stefan", role: "owner" };
 });
 
 describe("RemoteAccessWidget (WARP-1351)", () => {
@@ -297,5 +305,48 @@ describe("RemoteAccessWidget — home-mode gate (WARP-1391)", () => {
     expect(sw).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(sw);
     expect(mockCreateVpnPeer).not.toHaveBeenCalled();
+  });
+});
+
+describe("RemoteAccessWidget — member/guest read-only view (WARP-3157)", () => {
+  it("a member sees a status line and 'ask an admin', never an actionable switch, while off", async () => {
+    authUser.current = { username: "priya", role: "family" };
+    mockFetchVpnStatus.mockResolvedValue(READY);
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    // No switch role at all — POST /api/vpn/peers is owner/admin only and a
+    // member's tap would always 403.
+    expect(screen.queryByRole("switch", { name: /^remote access$/i })).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByText(/off · ask an admin to turn this on/i)).toBeInTheDocument(),
+    );
+
+    expect(mockCreateVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("a member sees the true on-state (an admin already set up a device) but still cannot toggle it", async () => {
+    authUser.current = { username: "priya", role: "family" };
+    mockFetchVpnStatus.mockResolvedValue({ ...READY, peerCount: 1 });
+    mockFetchVpnPeers.mockResolvedValue({ peers: [OTHERS_PEER] });
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    expect(screen.queryByRole("switch")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByText(/on · 1 device set up$/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("a guest gets the same read-only treatment as a member", async () => {
+    authUser.current = { username: "sam", role: "guest" };
+    mockFetchVpnStatus.mockResolvedValue(READY);
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    expect(screen.queryByRole("switch")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByText(/off · ask an admin to turn this on/i)).toBeInTheDocument(),
+    );
   });
 });

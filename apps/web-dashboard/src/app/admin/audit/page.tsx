@@ -162,8 +162,17 @@ function AuditPageInner() {
     fetchUsers()
       .then(({ users }) => {
         if (!alive) return;
+        // WARP-3155 — `id` is the Nextcloud/login handle; `actorId` on an
+        // activity row is the canonical local user id (`actorFromRequest`,
+        // `services/activity.service.ts`), which is `userId` here. Keying
+        // on `id` meant the lookup always missed and every row rendered "by
+        // user 1a2b3c4d…" instead of the person's name.
         setUserNames(
-          new Map(users.map((u) => [u.id, u.displayName || u.username])),
+          new Map(
+            users
+              .filter((u): u is typeof u & { userId: string } => u.userId != null)
+              .map((u) => [u.userId, u.displayName || u.username]),
+          ),
         );
       })
       .catch(() => {

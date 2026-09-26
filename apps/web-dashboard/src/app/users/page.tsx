@@ -530,7 +530,7 @@ export default function UsersPage() {
   type RoleBearing = { role?: AccessTier | null; accessRoleId?: string | null };
 
   /** Role-bearing record → its display label: the custom role's name when
-   *  assigned, else the built-in tier label (family displays as Staff —
+   *  assigned, else the built-in tier label (family displays as Member —
    *  §0.1). Null when the record carries no role data at all.
    *
    *  WARP-1566 widened this from RosterUser to any role-bearing shape so
@@ -1139,7 +1139,7 @@ export default function UsersPage() {
         </span>
       </span>
       {/* WARP-1532 (T8): assigned-role chip — custom role name or built-in
-          tier label (family displays as Staff). Absent role data renders
+          tier label (family displays as Member). Absent role data renders
           no chip rather than a fabricated one. */}
       {roleLabel && (
         <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>

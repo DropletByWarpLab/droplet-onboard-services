@@ -40,6 +40,16 @@ vi.mock("@/lib/hooks/useSmartHome", () => ({
 vi.mock("@/lib/hooks/useVoice", () => ({
   useVoiceHealthSummary: () => ({ state: { kind: "off" }, unavailable: false }),
 }));
+// WARP-3157 — the Voice row (owner/admin only) and the Cameras row (hidden
+// for guests) both now read the signed-in role; these link tests exercise
+// every stat, so they default to an owner. The role-gating describe block
+// below overrides this per test.
+const authUser = vi.hoisted(() => ({
+  current: { username: "stefan", role: "owner" as string | undefined },
+}));
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: authUser.current }),
+}));
 
 import { WIDGETS } from "@/components/home/widgets";
 
@@ -58,6 +68,7 @@ const DESTINATIONS: Array<[string, string]> = [
 beforeEach(() => {
   cleanup();
   pushMock.mockReset();
+  authUser.current = { username: "stefan", role: "owner" };
 });
 
 describe("System status stats are links", () => {
@@ -72,6 +83,40 @@ describe("System status stats are links", () => {
     render(<StatusTile w={2} h={4} />);
     fireEvent.click(screen.getByRole("button", { name: `Open ${label}` }));
     expect(pushMock).toHaveBeenCalledWith(href);
+  });
+});
+
+describe("System status row gating (WARP-3157)", () => {
+  it("hides the Voice row for a member — GET /api/voice/status is owner/admin only", () => {
+    authUser.current = { username: "priya", role: "family" };
+    render(<StatusTile w={4} h={4} />);
+    expect(screen.queryByRole("button", { name: "Open Voice" })).toBeNull();
+    // The other four stats are unaffected.
+    expect(screen.getByRole("button", { name: "Open Files" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Cameras" })).toBeInTheDocument();
+  });
+
+  it("hides the Voice row for a guest too", () => {
+    authUser.current = { username: "sam", role: "guest" };
+    render(<StatusTile w={4} h={4} />);
+    expect(screen.queryByRole("button", { name: "Open Voice" })).toBeNull();
+  });
+
+  it("hides the Cameras row for a guest — every camera route refuses that role", () => {
+    authUser.current = { username: "sam", role: "guest" };
+    render(<StatusTile w={4} h={4} />);
+    expect(screen.queryByRole("button", { name: "Open Cameras" })).toBeNull();
+    // A member still sees it.
+    authUser.current = { username: "priya", role: "family" };
+    cleanup();
+    render(<StatusTile w={4} h={4} />);
+    expect(screen.getByRole("button", { name: "Open Cameras" })).toBeInTheDocument();
+  });
+
+  it("labels the Files stat 'recent files', not 'recently indexed' (the stat counts recently modified files)", () => {
+    render(<StatusTile w={4} h={4} />);
+    expect(screen.getByText("recent files")).toBeInTheDocument();
+    expect(screen.queryByText("recently indexed")).toBeNull();
   });
 });
 

@@ -81,7 +81,7 @@ describe("profile rows (§3.3)", () => {
     // Guest line + privacy caption stay (§9 verbatim).
     expect(
       screen.getByText(
-        "Unrecognized voices are treated as guests — read-only answers, no personal data.",
+        "Unrecognized voices are treated as external guests — read-only answers, no personal data.",
       ),
     ).toBeInTheDocument();
   });
@@ -124,7 +124,7 @@ describe("profile rows (§3.3)", () => {
     renderSection({ profiles: [] });
     expect(
       screen.getByText(
-        "No voices enrolled. Droplet answers everyone as a guest until it knows who's who.",
+        "No voices enrolled. Droplet answers everyone as an external guest until it knows who's who.",
       ),
     ).toBeInTheDocument();
   });

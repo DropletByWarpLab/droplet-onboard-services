@@ -3,9 +3,11 @@
  *
  * Ships VERBATIM from the design brief §12 (shared_brain content/brand/
  * handoffs/access/DESIGN-BRIEF.md), plus the handful of §4/§5-quoted strings
- * the surfaces render. One resolved substitution only: the `family` tier
- * displays as "Staff" (founder decision O-1 / brief §0.1) — the enforced
- * enum value stays `family` everywhere; only the label swaps.
+ * the surfaces render. Two resolved substitutions: the `family` tier
+ * displays as "Member" and the `guest` tier as "External guest" (Romain,
+ * 2026-09-25 — supersedes founder decision O-1 / brief §0.1's "Staff") —
+ * the enforced enum values stay `family` / `guest` everywhere; only the
+ * labels swap.
  *
  * Do not edit these strings without a design-packet update — copy.test.ts
  * pins every one character-for-character.
@@ -22,10 +24,10 @@ export const ACCESS_COPY = {
   emptyPeopleInRole: "No one has this role yet — assign people to put it to work.",
   emptyConnectors: "No connectors set up yet — add one in Integrations.",
 
-  // ── Starting points (Staff label per §0.1 / O-1) ──
+  // ── Starting points (Member / External guest labels, Romain 2026-09-25) ──
   startAdmin: "Admin — can manage the box",
-  startStaff: "Staff — everyday staff access",
-  startGuest: "Guest — view-mostly, limited",
+  startStaff: "Member — everyday member access",
+  startGuest: "External guest — view-mostly, limited",
 
   // ── Builder helpers ──
   usageDefaults:
@@ -141,7 +143,7 @@ export const ACCESS_COPY = {
   builtinFixed: "Built-in roles are fixed. Create a custom role to change what a group can do.",
   serviceMeta: "System identities — not assignable",
   adminMeta: "Manages the box and its people",
-  staffMeta: "Everyday staff access",
+  staffMeta: "Everyday member access",
   guestMeta: "View-mostly, limited",
 
   // ── Invite modal (§7 / WARP-1533 T9) ──
@@ -194,10 +196,10 @@ export const ACCESS_COPY = {
     "Levels are recorded, but the per-person checks nearly all run at view — so edit and manage shape this builder more than they shape what the box holds back. Cameras is the exception: three of its routes check for manage.",
   templatesNoExtras:
     "No template carries connector access or a usage cap. Add connector access in the builder after you create the role; the storage, upload and daily-message limits are left unset on purpose.",
-  // `tierKeepsWriteTools` admits owner and admin only, so a Staff- or
-  // Guest-based role's tool grants are read-only whatever level they carry.
+  // `tierKeepsWriteTools` admits owner and admin only, so a Member- or
+  // external-guest-based role's tool grants are read-only whatever level they carry.
   toolsReadOnlyBelowAdmin:
-    "Staff- and Guest-based roles get read-only assistant tools, whatever the tool level says.",
+    "Member- and external guest-based roles get read-only assistant tools, whatever the tool level says.",
   toolsAxis: "Assistant tools",
   noToolsGranted: "No tools on",
   templatesNoneGranted: "None",

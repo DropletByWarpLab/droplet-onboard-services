@@ -128,7 +128,7 @@ describe("the wall behind the module guard (D11)", () => {
   });
 });
 
-describe("D6: only a Staff session runs the wall (Stefan: \"Member wall, own cameras\")", () => {
+describe("D6: only a Member session runs the wall (Stefan: \"Member wall, own cameras\")", () => {
   it.each([
     ["owner", WALL_COPY.refusedTitle],
     ["admin", WALL_COPY.refusedTitle],

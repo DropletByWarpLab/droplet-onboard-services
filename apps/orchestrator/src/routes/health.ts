@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
+import { requireRole } from "../middleware/auth.js";
 import { isRedisHealthy } from "../services/cache.service.js";
 import { healthCheck as aiGatewayHealth } from "../services/ai-gateway.client.js";
 import { isMatterInitialized } from "../services/matter.service.js";
@@ -59,7 +60,10 @@ export function createHealthRouter(prisma: PrismaClient): Router {
     const response: HealthResponse = {
       status: allOk ? "ok" : "degraded",
       uptime: Math.floor((Date.now() - startTime) / 1000),
-      version: "0.1.0",
+      // WARP-3154 — the real committed OTA release tag (from the same
+      // cached snapshot as `displayOk`/`nextcloudOk` above), not a
+      // hardcoded literal. Null on a box that has never taken an update.
+      version: snapshot.version,
       // WARP-1926 — which inference runtime this box actually serves from.
       // The dashboard had NO way to know: Settings hardcoded the string
       // "Ollama (on-device)", so every DMR box (the shipped default since
@@ -87,10 +91,34 @@ export function createHealthRouter(prisma: PrismaClient): Router {
   // WARP-43: rolled-up health for Docker healthcheck + dashboard pill.
   // Returns the cached snapshot from the background poller — this endpoint
   // is cheap even under heavy polling load.
+  //
+  // WARP-3154 — this route is UNAUTHENTICATED (middleware/auth.ts
+  // `publicPaths`; there is no `req.user` here, for anyone, ever). A down
+  // component's `error` is the probe's raw exception text — a refused
+  // connection names the container IP and port, a fetch failure names the
+  // internal service URL, the storage probe names the RAID device — the
+  // same class of leak as WARP-2111. Strip it from this response; the
+  // Docker healthcheck only needs the status code and nothing here reads
+  // `error` off this route.
   router.get("/orchestrator/health", (_req, res) => {
     const snapshot = getAggregateHealth();
     // Return HTTP 200 for `ok`/`degraded`, 503 for `down` so Docker's
     // healthcheck restarts the container when a HARD dependency fails.
+    const httpStatus = snapshot.status === "down" ? 503 : 200;
+    res.status(httpStatus).json({
+      ...snapshot,
+      components: snapshot.components.map(({ error: _error, ...rest }) => rest),
+    });
+  });
+
+  // WARP-3154 — the authenticated counterpart of the route above: same
+  // snapshot, but WITH each component's `error` reason. Owner/admin only —
+  // the same set of internal-topology facts the public route now withholds
+  // from everyone else. The web Health page's owner/admin view reads this
+  // one instead; the DropletAgent Mac client still reads only the public
+  // route today (WARP-3177 tracks moving it here).
+  router.get("/orchestrator/health/details", requireRole("owner", "admin"), (_req, res) => {
+    const snapshot = getAggregateHealth();
     const httpStatus = snapshot.status === "down" ? 503 : 200;
     res.status(httpStatus).json(snapshot);
   });

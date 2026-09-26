@@ -47,9 +47,12 @@ describe("GET /api/health", () => {
     expect(res.body.status).toBe("ok");
   });
 
-  it("includes version string", async () => {
+  it("includes a version field — null when this test process never OTA'd (WARP-3154)", async () => {
+    // No `startHealthMonitor(prisma)` runs in this suite, so `currentVersion`
+    // never resolves off its default — same honest state as a fresh box on
+    // its factory image. No hardcoded "0.1.0" literal any more.
     const res = await request(app).get("/api/health");
-    expect(res.body.version).toBe("0.1.0");
+    expect(res.body.version).toBeNull();
   });
 
   it("includes service health fields", async () => {

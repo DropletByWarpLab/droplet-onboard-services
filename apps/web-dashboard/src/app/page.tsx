@@ -325,7 +325,11 @@ export default function DashboardPage() {
     }
   }, [dir]);
 
-  const items = layouts[dir];
+  // WARP-3157 — every camera route refuses role `guest`; never render or
+  // offer the tile to one. Filtered at render time (not out of the WIDGETS
+  // registry) so an owner/admin/member's saved layout is unaffected.
+  const isGuest = user?.role === "guest";
+  const items = isGuest ? layouts[dir].filter((it) => it.id !== "cameras") : layouts[dir];
   const cfg = DIRECTIONS[dir];
 
   const persist = (next: LayoutItem[]) => {
@@ -349,7 +353,9 @@ export default function DashboardPage() {
   };
   const onReset = () => persist(defaultsFor(dir));
 
-  const hidden = CATALOG.filter((c) => !items.some((it) => it.id === c.id));
+  const hidden = CATALOG.filter(
+    (c) => !items.some((it) => it.id === c.id) && !(isGuest && c.id === "cameras"),
+  );
 
   const firstName = useMemo(() => {
     const raw = user?.displayName || user?.username || "";

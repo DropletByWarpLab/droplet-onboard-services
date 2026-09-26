@@ -122,7 +122,7 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
   });
 });
 
-describe("AuthGate — D6: the wall runs on a Staff session only (WARP-2981)", () => {
+describe("AuthGate — D6: the wall runs on a Member session only (WARP-2981)", () => {
   it.each([
     ["owner", "/security/wall", WALL_COPY.refusedTitle],
     ["admin", "/security/wall", WALL_COPY.refusedTitle],
@@ -145,7 +145,7 @@ describe("AuthGate — D6: the wall runs on a Staff session only (WARP-2981)", (
     expect(screen.queryByTestId("help-launcher")).toBeNull();
   });
 
-  it("a family (Staff) session runs the wall", () => {
+  it("a family (Member) session runs the wall", () => {
     userRef.current = { ...userRef.current, role: "family" };
     pathnameValue = "/security/wall";
     render(<AuthGate>wall page</AuthGate>);

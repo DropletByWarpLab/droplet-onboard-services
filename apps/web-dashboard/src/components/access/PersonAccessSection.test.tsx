@@ -1,7 +1,7 @@
 /**
  * WARP-1532 (RBAC v2 T8) — Surface C: the person editor's access sections.
  *
- * Covers the Role select (custom roles + built-in Admin/Staff/Guest — never
+ * Covers the Role select (custom roles + built-in Admin/Member/External guest — never
  * Owner or Service, rank-capped per WARP-623), the three §8 guardrails with
  * their verbatim §12 copy (owner untouchable / self-lockout / last admin +
  * Manage roles →), the read-only effective-access drawer (fetches on expand,
@@ -118,8 +118,8 @@ describe("role select (§6.2)", () => {
     const labels = Array.from(select.options).map((o) => o.textContent);
     expect(labels).toContain("Finance");
     expect(labels).toContain("Admin");
-    expect(labels).toContain("Staff");
-    expect(labels).toContain("Guest");
+    expect(labels).toContain("Member");
+    expect(labels).toContain("External guest");
     expect(labels).not.toContain("Owner");
     expect(labels).not.toContain("Service");
   });
@@ -128,13 +128,13 @@ describe("role select (§6.2)", () => {
     renderSection({ actingTier: "guest" });
     const select = screen.getByLabelText("Assigned role") as HTMLSelectElement;
     const admin = Array.from(select.options).find((o) => o.textContent === "Admin")!;
-    const staff = Array.from(select.options).find((o) => o.textContent === "Staff")!;
-    const guest = Array.from(select.options).find((o) => o.textContent === "Guest")!;
+    const staff = Array.from(select.options).find((o) => o.textContent === "Member")!;
+    const guest = Array.from(select.options).find((o) => o.textContent === "External guest")!;
     expect(admin.disabled).toBe(true);
     expect(admin.title).toBe(ACCESS_COPY.rankCap);
     expect(staff.disabled).toBe(true);
     expect(guest.disabled).toBe(false);
-    // A Staff-based custom role is above a guest actor too.
+    // A Member-based custom role is above a guest actor too.
     const finance = Array.from(select.options).find((o) => o.textContent === "Finance")!;
     expect(finance.disabled).toBe(true);
   });
@@ -145,9 +145,9 @@ describe("role select (§6.2)", () => {
     expect(onChange).toHaveBeenCalledWith("tier:admin");
   });
 
-  it("renders the identity tier chip with the §6.1 hint (Staff label)", () => {
+  it("renders the identity tier chip with the §6.1 hint (Member label)", () => {
     renderSection();
-    expect(screen.getByText("Staff tier")).toBeInTheDocument();
+    expect(screen.getByText("Member tier")).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.identityHint)).toBeInTheDocument();
   });
 });

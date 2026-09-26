@@ -5,17 +5,17 @@
  * of the wall. AuthGate renders them; neither asks Droplet for anything.
  *
  *   · `WallRefused` — D6 (Stefan: "Member wall, own cameras"): the wall runs
- *     on a Staff account only. It says why, and what to do: sign in here
- *     with a Staff account whose cameras are the ones to show. Signing out
+ *     on a Member account only. It says why, and what to do: sign in here
+ *     with a Member account whose cameras are the ones to show. Signing out
  *     is its first action: an owner or admin reaches it as often from a
  *     laptop's "TV view" button as from a TV, so it names "this screen",
  *     never "this TV". An owner or admin manages people, so it also links to
  *     Users, where accounts are added and their cameras chosen, and advises
  *     an account just for the screen whose role (Roles & access, based on
- *     Staff) sets Security to View: Staff holds Security at Respond by
+ *     Member) sets Security to View: Member holds Security at Respond by
  *     default, and at View the server refuses the mode and acknowledging
  *     from the room's session. A guest
- *     can't see Security at all (every wall read is floored at Staff on the
+ *     can't see Security at all (every wall read is floored at Member on the
  *     server), so a guest is told that, and led back to the Overview.
  *   · `WallSignedOut` — the TV's sign-in ended (the 12 h limit, 30 min with
  *     no request, a fifth sign-in elsewhere, a revocation), or it never had

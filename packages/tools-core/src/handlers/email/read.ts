@@ -48,7 +48,7 @@ async function handler(
       status: "error",
       error: {
         code: "FORBIDDEN",
-        message: "email threads are readable by owner, admin, and family roles only",
+        message: "email threads are readable by owner, admin, and member roles only",
       },
     };
   }

@@ -4,8 +4,9 @@
  * Every string below is copied character-for-character from the design
  * brief (shared_brain content/brand/handoffs/access/DESIGN-BRIEF.md §12),
  * with exactly one resolved substitution: the `family` tier's display label
- * is "Staff" (founder decision O-1 / brief §0.1 — the enum value stays
- * `family`; only the label swaps). If one of these assertions fails, the
+ * is "Member" and the `guest` tier's is "External guest" (Romain,
+ * 2026-09-25 — supersedes founder decision O-1 / brief §0.1's "Staff"; the
+ * enum values stay `family` / `guest`; only the labels swap). If one of these assertions fails, the
  * UI has drifted from the shipped copy — fix the component, not the test.
  */
 import { describe, it, expect } from "vitest";
@@ -36,11 +37,11 @@ describe("§12 Chrome", () => {
   });
 });
 
-describe("§12 Starting points (Staff label per §0.1)", () => {
+describe("§12 Starting points (Member / External guest labels)", () => {
   it("segment captions", () => {
     expect(ACCESS_COPY.startAdmin).toBe("Admin — can manage the box");
-    expect(ACCESS_COPY.startStaff).toBe("Staff — everyday staff access");
-    expect(ACCESS_COPY.startGuest).toBe("Guest — view-mostly, limited");
+    expect(ACCESS_COPY.startStaff).toBe("Member — everyday member access");
+    expect(ACCESS_COPY.startGuest).toBe("External guest — view-mostly, limited");
   });
 });
 
@@ -265,11 +266,11 @@ describe("§12 Role templates (WARP-2738 — authored, pending packet ratificati
     );
   });
 
-  it("says a Staff- or Guest-based role's assistant tools are read-only", () => {
+  it("says a Member- or external-guest-based role's assistant tools are read-only", () => {
     // `tierKeepsWriteTools` admits owner and admin only — `use` and `view` are
     // the same grant below admin, so the card must not imply otherwise.
     expect(ACCESS_COPY.toolsReadOnlyBelowAdmin).toBe(
-      "Staff- and Guest-based roles get read-only assistant tools, whatever the tool level says.",
+      "Member- and external guest-based roles get read-only assistant tools, whatever the tool level says.",
     );
     expect(ACCESS_COPY.toolsAxis).toBe("Assistant tools");
     expect(ACCESS_COPY.noToolsGranted).toBe("No tools on");

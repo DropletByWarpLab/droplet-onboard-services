@@ -157,7 +157,7 @@ function TemplateCard({
           <KeyRound size={15} aria-hidden="true" />
         </span>
         <span className="nm">{template.name}</span>
-        {/* `family` displays as "Staff" — the O-1 relabel lives in
+        {/* `family` displays as "Member" — the relabel lives in
             tierLabel() and nowhere else. */}
         <AccessChip>Based on {tierLabel(template.startingPoint)}</AccessChip>
       </div>
