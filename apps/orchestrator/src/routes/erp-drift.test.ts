@@ -226,6 +226,31 @@ describe("GET /api/integrations/:connectionId/drift — the payload", () => {
     );
     expect(res.body.windowDays).toBe(30);
   });
+
+  it("leaves out a sweep older than the window, measured from the system clock", async () => {
+    // The route passes no `now`, so the window runs back from the system clock
+    // (pinned to NOW). Every other fixture row is one day old, so without this
+    // case nothing here exercises the window.
+    // MUTATION: drop `sweepAt: { gte: since }` from `driftForConnection` → red.
+    const prisma = prismaStub([
+      driftRow(),
+      driftRow({
+        id: "d-old",
+        sweepAt: new Date(NOW.getTime() - 31 * DAY),
+        classification: "MISSED_NEWER",
+        missedCount: 4,
+      }),
+    ]);
+    const res = await request(buildApp({ id: "u-1", role: "admin" }, prisma)).get(
+      "/api/integrations/conn-1/drift",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.windowDays).toBe(30);
+    expect(res.body.entries).toHaveLength(1);
+    expect(res.body.entries[0].sweepAt).toBe(new Date(NOW.getTime() - DAY).toISOString());
+    expect(res.body.summary).toMatchObject({ rowsRecorded: 1, driftedRows: 0, totalMissed: 0 });
+  });
 });
 
 // ---------------------------------------------------------------------------
