@@ -176,11 +176,20 @@ let messageRows: Array<{
   provider: string | null;
   createdAt: Date;
   toolCalls: unknown;
+  status?: string | null;
 }> = [];
 
 function createPrismaMock() {
   return {
-    chatMessage: { findMany: vi.fn(async () => messageRows) },
+    // Honours `select` like Prisma does: a column the service forgets to read is absent here too.
+    chatMessage: {
+      findMany: vi.fn(async (args?: { select?: Record<string, boolean> }) => {
+        const keys = args?.select ? Object.keys(args.select).filter((k) => args.select?.[k]) : null;
+        return keys
+          ? messageRows.map((r) => Object.fromEntries(keys.map((k) => [k, (r as Record<string, unknown>)[k]])))
+          : messageRows;
+      }),
+    },
     // WARP-2652 — persona + business + workspace, absent here until now.
     ...promptBlockPrismaDelegates(),
     // WARP-2746 — NON-EMPTY on purpose. This stub was `[]`, which is why the
@@ -368,6 +377,40 @@ describe("POST /api/llm/chat — history replay on a cloud turn (WARP-2991)", ()
     expect(sentConversation().map((m) => m.role)).toEqual(["user", "user"]);
     expect(JSON.stringify(runOpts().messages)).not.toContain(EARLIER_LOCAL_ANSWER);
     expect(historyAuditRefs().historyReplay).toBe("user_only");
+  });
+
+  // Review #2420 (item 8): the Security rule reads each answer's toolCalls, written when the turn FINALIZES — and a
+  // finalize failure is only logged. An on-box answer left pending or streaming may have used Security unrecorded,
+  // so it is never sent: the conversation replays the user's own messages, whatever the consent.
+  it.each(["pending", "streaming"])("GRANTED, but an on-box answer never finalized (%s): only the user's own messages go", async (status) => {
+    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
+    messageRows = [{ role: "assistant", provider: "local", createdAt: T0, toolCalls: null, status }];
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    expect((await sendCloudTurn(app)).status).toBe(200);
+    expect(sentConversation().map((m) => m.role)).toEqual(["user", "user"]);
+    expect(JSON.stringify(runOpts().messages)).not.toContain(EARLIER_LOCAL_ANSWER);
+    expect(historyAuditRefs().historyReplay).toBe("user_only");
+  });
+
+  it("…a finished one (completed, failed, aborted, or a row from before the status existed) is judged by its tools as before", async () => {
+    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
+    for (const status of ["completed", "failed", "aborted", null]) {
+      messageRows = [{ ...onBoxAnswerAt(T0), status }];
+      const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+      expect((await sendCloudTurn(app)).status).toBe(200);
+      expect(historyAuditRefs().historyReplay, String(status)).toBe("full");
+      mockRecordActivity.mockClear();
+    }
+  });
+
+  // A cloud-only unfinished answer is not on-box: nothing of it is the box's to withhold.
+  it("an unfinished answer from a CLOUD model does not hold the history back", async () => {
+    sessionRow = { cloudHistoryConsent: "not_asked", cloudHistoryConsentAt: null };
+    messageRows = [{ role: "assistant", provider: "anthropic", createdAt: T0, toolCalls: null, status: "streaming" }];
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+    expect((await sendCloudTurn(app)).status).toBe(200);
+    expect(historyAuditRefs().historyReplay).toBe("full");
   });
 
   it("GRANTED, and the Security answer is the OLDEST of several covered ones: still only the user's messages", async () => {
