@@ -674,6 +674,66 @@ describe("periods", () => {
     expect(res.body.error.code).toBe("NO_SITE_TIMEZONE");
   });
 
+  // WARP-3194 item 3: hours that cannot be evaluated used to cost the tools their zone altogether.
+  describe("opening hours that can't be read (WARP-3194)", () => {
+    const office = officeHours("Europe/London");
+    /** An unknown site zone, or one weekday row gone: either way `loadSiteHours` answers ok:false. */
+    const unreadable = (how: "unknown zone" | "a weekday missing", siteZone: string, workspaceTz: string | null) =>
+      world({
+        securitySiteHours: [{ ...office.header, timezone: how === "unknown zone" ? "Mars/Olympus" : siteZone }],
+        securitySchedule: how === "a weekday missing" ? office.days.slice(1) : office.days,
+        workspace: workspaceTz ? [{ id: 1, tz: workspaceTz }] : [],
+      });
+
+    it("an unknown site zone falls back to the workspace's: today answers, in that zone, on A1 and A3", async () => {
+      f = unreadable("unknown zone", "", "Europe/London");
+      const { server } = app(f);
+      for (const path of ["/api/security/assistant/incidents?period=today", "/api/security/assistant/events?period=today"]) {
+        const res = await get(server, path, "stefan");
+        expect(res.status, path).toBe(200);
+        expect(res.body.timezone, path).toBe("Europe/London");
+        expect(res.body.period.from, path).toEqual({ at: "2026-09-22T23:00:00.000Z", local: "12:00 AM" });
+      }
+    });
+
+    it("a site zone the runtime knows is kept when only the rows are broken — the workspace's never replaces it", async () => {
+      f = unreadable("a weekday missing", "America/New_York", "Europe/London");
+      const res = await get(app(f).server, "/api/security/assistant/incidents?period=today", "stefan");
+      expect(res.status).toBe(200);
+      expect(res.body.timezone).toBe("America/New_York");
+      expect(res.body.period.from.at).toBe("2026-09-23T04:00:00.000Z");
+    });
+
+    it("last_night reads as if no hours were set: 6 PM yesterday to 8 AM today, in the fallback zone", async () => {
+      f = unreadable("unknown zone", "", "Europe/London");
+      const res = await get(app(f).server, "/api/security/assistant/incidents?period=last_night", "stefan");
+      expect(res.status).toBe(200);
+      expect(res.body.period.from.at).toBe("2026-09-22T17:00:00.000Z");
+      expect(res.body.period.to.at).toBe("2026-09-23T07:00:00.000Z");
+    });
+
+    it("no zone known at all: today is still 400 NO_SITE_TIMEZONE, never a guessed zone", async () => {
+      f = unreadable("unknown zone", "", null);
+      const res = await get(app(f).server, "/api/security/assistant/incidents?period=today", "stefan");
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("NO_SITE_TIMEZONE");
+    });
+
+    it("A4 answers instead of 503: the mode is unknown and says why, the areas are what they were, times in the fallback zone", async () => {
+      const readable = await get(app(world()).server, "/api/security/assistant/areas", "stefan");
+      f = unreadable("unknown zone", "", "Europe/London");
+      const res = await get(app(f).server, "/api/security/assistant/areas", "stefan");
+      expect(res.status).toBe(200);
+      expect(res.body.site).toEqual({ mode: "unknown", why: "opening hours can't be read", until: null, hoursSet: true, timezone: "Europe/London" });
+      expect(res.body.areas).toEqual(readable.body.areas);
+      // And with no zone known either: still an answer, its times without a zone.
+      f = unreadable("unknown zone", "", null);
+      const bare = await get(app(f).server, "/api/security/assistant/areas", "stefan");
+      expect(bare.status).toBe(200);
+      expect(bare.body.site).toMatchObject({ mode: "unknown", timezone: null });
+    });
+  });
+
   it("a period keeps only incidents whose VISIBLE span meets it", async () => {
     // Incident …0005's stored span reaches into last night only through `back`; Maria sees only `front`,
     // whose activity ended the night before (21 Sep, 23:00–23:05).

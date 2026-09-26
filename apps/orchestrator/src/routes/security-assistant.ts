@@ -76,7 +76,7 @@ import {
 } from "../services/security-incident-view.js";
 import { SECURITY_EVENT_RETENTION_DAYS, feedVisibilityWhere, listSecurityEvents, parseFeedCursor } from "../services/security-events.service.js";
 import { SECURITY_INCIDENT_RETENTION_DAYS } from "../services/security-incidents.service.js";
-import { HoursUnreadableError, readModeView, readSiteClock } from "../services/security-mode.service.js";
+import { HoursUnreadableError, readModeView, readSiteClock, resolveSecurityTimezone, type ModeView } from "../services/security-mode.service.js";
 import {
   listLinkProposals,
   loadActiveLinks,
@@ -218,14 +218,47 @@ function viewerOf(actor: SecurityActor, scope: SecurityViewerScope): IncidentVie
 
 // ── shared pieces ─────────────────────────────────────────────────────────
 
-/** The site clock; stored hours that cannot be evaluated read as "no zone known" (the site_mode health row says why). */
+/**
+ * WARP-3194 — the zone when the stored opening hours cannot be evaluated (the
+ * site_mode health row says why). The site's own zone when the runtime knows
+ * it — the rows are broken, not the zone, and THE display rule
+ * (`resolveSecurityTimezone`) keeps it — else the workspace's: the rule
+ * answers null for a site zone it cannot read, which cost `today`,
+ * `last_night` and A4 their answers altogether. Nothing is swapped silently:
+ * every answer names the zone it used (`timezone`). Null only when neither is
+ * known.
+ */
+async function unreadableHoursZone(prisma: PrismaClient): Promise<string | null> {
+  return (await resolveSecurityTimezone(prisma)) ?? resolveSecurityTimezone(prisma, { state: "not_set" });
+}
+
+/** The site clock; stored hours that cannot be evaluated read as not set, in `unreadableHoursZone`. */
 async function siteClockOf(prisma: PrismaClient, now: Date): Promise<AssistantSite> {
   try {
     return await readSiteClock(prisma, now);
   } catch (err) {
-    if (err instanceof HoursUnreadableError) return { hours: { state: "not_set" } satisfies SiteHours, timezone: null };
+    if (err instanceof HoursUnreadableError) return { hours: { state: "not_set" } satisfies SiteHours, timezone: await unreadableHoursZone(prisma) };
     throw err;
   }
+}
+
+/**
+ * A4's `site`: the effective mode and why (never who). `mode` null = the
+ * stored hours cannot be evaluated (WARP-3194): the mode is then "unknown" —
+ * route 5 answers 503 rather than a fake "open", and so does this field —
+ * while the areas still answer.
+ */
+function siteOut(mode: ModeView | null, tz: string | null, now: Date) {
+  if (!mode) return { mode: "unknown", why: "opening hours can't be read", until: null, hoursSet: true, timezone: tz };
+  const upcoming = mode.hours.state === "set" ? mode.hours.upcoming : null;
+  const until = mode.until ?? upcoming?.at ?? null;
+  return {
+    mode: mode.mode,
+    why: mode.source === "manual" ? "set by hand" : "opening hours",
+    until: until ? assistantInstant(new Date(until), tz, now) : null,
+    hoursSet: mode.hours.state === "set",
+    timezone: tz,
+  };
 }
 
 function periodOut(p: ResolvedAssistantPeriod | null, tz: string | null, now: Date) {
@@ -514,12 +547,16 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const scope = await securityScopeForPerson(prisma, who, resolver);
       const viewer = viewerOf(who, scope);
       const [mode, records, links, labels] = await Promise.all([
-        readModeView(prisma, now),
+        // WARP-3194: hours that cannot be evaluated leave the mode unknown, not the whole answer a 503.
+        readModeView(prisma, now).catch((err: unknown) => {
+          if (err instanceof HoursUnreadableError) return null;
+          throw err;
+        }),
         loadZoneRecords(prisma, false),
         loadActiveLinks(prisma),
         loadCameraLabels(prisma),
       ]);
-      const tz = mode.displayTimezone;
+      const tz = mode ? mode.displayTimezone : await unreadableHoursZone(prisma);
       let zones = visibleZoneViews(records, scope, labels);
       if (q.data.area !== undefined) {
         const key = nameKey(q.data.area);
@@ -563,15 +600,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
           };
         }),
       );
-      const upcoming = mode.hours.state === "set" ? mode.hours.upcoming : null;
-      const until = mode.until ?? upcoming?.at ?? null;
-      const site = {
-        mode: mode.mode,
-        why: mode.source === "manual" ? "set by hand" : "opening hours",
-        until: until ? assistantInstant(new Date(until), tz, now) : null,
-        hoursSet: mode.hours.state === "set",
-        timezone: tz,
-      };
+      const site = siteOut(mode, tz, now);
       // Suggestions are a manage-level surface (route 23): below it, not even a count.
       const shown = new Set(zones.map((z) => z.id));
       const suggestionsWaiting =
