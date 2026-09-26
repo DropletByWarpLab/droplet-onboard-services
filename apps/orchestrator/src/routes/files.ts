@@ -4125,7 +4125,7 @@ export function createFilesRouter(
       const user = await getUser(req, prisma);
 
       // WARP-880 / WS-2 — three content-search modes:
-      //   semantic (default) → existing inline pgvector SQL (unchanged)
+      //   semantic (default) → embed + searchByVector (WARP-3193 ARCH-2)
       //   keyword            → lexical (websearch_to_tsquery + ts_rank_cd),
       //                        works with the AI gateway down
       //   hybrid             → embed + RRF fusion of lexical + vector
@@ -4311,44 +4311,35 @@ export function createFilesRouter(
         return;
       }
 
-      // pgvector cosine similarity — Prisma can't express <=> so we use raw SQL.
-      // Two-step query: inner DISTINCT ON deduplicates per file (keeping the
-      // best chunk), outer query sorts by score and applies the limit.
+      // Semantic: the service's vector arm, then one hit per file.
       //
-      // WARP-1140: pin the corpus to source='nextcloud' so semantic searches
-      // the SAME corpus as keyword/hybrid. The unfiltered query also matched
-      // brain-memory chunks (chat attachments), whose paths aren't navigable
-      // from the Files page AND which all share ncFileId=0 — so DISTINCT ON
-      // ("ncFileId") collapsed every brain chunk into one bogus result row.
-      // The userId list mirrors the other modes (own + Household corpus).
-      const vecLiteral = `[${embedVec.join(",")}]`;
-      const userIdPlaceholders = searchUserIds
-        .map((_, i) => `$${i + 2}`)
-        .join(", ");
-      const limitParam = searchUserIds.length + 2;
-      const rows: Array<{ path: string; score: number; text: string }> =
-        await prisma.$queryRawUnsafe(
-          `
-          SELECT path, score, text FROM (
-            SELECT DISTINCT ON ("ncFileId")
-              "path",
-              1 - ("embedding" <=> $1::vector) AS score,
-              "text"
-            FROM "FileContentChunk"
-            WHERE "userId" IN (${userIdPlaceholders})
-              AND "source" = 'nextcloud'
-            ORDER BY "ncFileId", "embedding" <=> $1::vector
-          ) ranked
-          ORDER BY score DESC
-          LIMIT $${limitParam}
-          `,
-          vecLiteral,
-          ...searchUserIds,
-          limit
-        );
+      // WARP-3193 ARCH-2: this used to be an inline copy of the vector query
+      // that had drifted from `searchByVector`. Its DISTINCT ON ordering
+      // (`"ncFileId", embedding <=> $1`) cannot use the HNSW index, so every
+      // search was a sequential scan; it also skipped WARP-2193's
+      // `SET LOCAL hnsw.ef_search` and WARP-242's decrypt-on-read. The
+      // response shape is unchanged; `text` is now the service's snippet
+      // (the dashboard renders its first 200 characters).
+      //
+      // WARP-1140: the corpus stays pinned to source='nextcloud', the same as
+      // keyword/hybrid (brain-memory chunks are not navigable from Files).
+      // minSimilarity -1 (the cosine floor) keeps the inline query's
+      // no-threshold behaviour.
+      const { searchByVector } = await import(
+        "../services/file-search.service.js"
+      );
+      const hits = await searchByVector(prisma, {
+        userId: user,
+        additionalUserIds,
+        vector: embedVec,
+        limit: limit * CHUNKS_PER_FILE_FACTOR,
+        minSimilarity: -1,
+        source: "nextcloud",
+      });
+      const results = dedupeHitsPerFile(hits, limit);
 
-      await cacheSet(cacheKey, rows, 60);
-      res.json({ results: rows });
+      await cacheSet(cacheKey, results, 60);
+      res.json({ results });
     } catch (err: any) {
       // Catch Prisma/pgvector-specific errors (e.g. vector extension missing,
       // invalid vector cast) and return 503 instead of leaking raw SQL in a 500.

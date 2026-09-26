@@ -6,10 +6,13 @@
  * over the database lookup; equal-length is checked first because
  * `timingSafeEqual` throws on length mismatch.
  *
- * State machine (Pending is the only non-terminal):
- *   Pending  → Accepted    (acceptedAt set)
- *   Pending  → Expired     (expiresAt < now)
- *   Pending  → Revoked     (revokedAt set)
+ * State machine (Pending is the only non-terminal), held in the explicit
+ * `UserInvite.status` column (WARP-3193 QUAL-3 — never derived from the
+ * timestamps, which are stamped alongside it as audit detail):
+ *   pending  → accepted    (accept route; acceptedAt stamped with it)
+ *   pending  → expired     (daily sweep, expireOverdueInvites; readers also
+ *                           reject a pending row past expiresAt in real time)
+ *   pending  → revoked     (revoke route / owner-invite sweep; revokedAt)
  *
  * `findInviteByToken` is the only DB-touching helper here; the route layer
  * still owns transaction semantics on accept (so we can update + create the
@@ -57,14 +60,35 @@ export async function findInviteByToken(
   return compareTokensConstantTime(row.token, token) ? row : null;
 }
 
-export function isExpired(invite: Pick<UserInvite, "expiresAt">): boolean {
-  return invite.expiresAt.getTime() < Date.now();
+/**
+ * `expiresAt` stays authoritative for the deadline between sweeps: a pending
+ * row past it is expired now, before the 03:00 sweep stamps the status
+ * (PairingCodeStatus precedent).
+ */
+export function isExpired(invite: Pick<UserInvite, "status" | "expiresAt">): boolean {
+  return invite.status === "expired" || invite.expiresAt.getTime() < Date.now();
 }
 
-export function isUsed(invite: Pick<UserInvite, "acceptedAt">): boolean {
-  return invite.acceptedAt !== null;
+export function isUsed(invite: Pick<UserInvite, "status">): boolean {
+  return invite.status === "accepted";
 }
 
-export function isRevoked(invite: Pick<UserInvite, "revokedAt">): boolean {
-  return invite.revokedAt !== null;
+export function isRevoked(invite: Pick<UserInvite, "status">): boolean {
+  return invite.status === "revoked";
+}
+
+/**
+ * WARP-3193 QUAL-3 — the pending→expired transition write, run from the
+ * 03:00 daily purge. Bookkeeping, not enforcement: readers already reject an
+ * overdue pending row via `isExpired`. Idempotent (a re-run matches nothing).
+ */
+export async function expireOverdueInvites(
+  prisma: PrismaClient,
+  now: Date = new Date(),
+): Promise<number> {
+  const { count } = await prisma.userInvite.updateMany({
+    where: { status: "pending", expiresAt: { lt: now } },
+    data: { status: "expired" },
+  });
+  return count;
 }
