@@ -42,6 +42,7 @@ import { countSlotDetections, _resetPatternRulesForTests } from "./security-patt
 import { explainSecurityPattern } from "./security-patterns-read.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
 import { windowFor } from "../lib/security-baseline-slots.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -603,7 +604,7 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     expect(incident).toMatchObject({ scope: "area", zoneId, severity: "info", state: "no_action", reasonCodes: [] });
     const flags = await prisma.securityPatternFlag.findMany({ where: { incidentId: incident.id } });
     expect(flags).toHaveLength(1);
-    expect(flags[0]).toMatchObject({ code: "out_of_place", effect: "trial", severity: "alert", zoneKey: `area:${zoneId}`, keyCameras: [PCAM], rulesetVersion: 3 });
+    expect(flags[0]).toMatchObject({ code: "out_of_place", effect: "trial", severity: "alert", zoneKey: `area:${zoneId}`, keyCameras: [PCAM], rulesetVersion: SECURITY_RULESET_VERSION });
     const detail = flags[0]!.detail as Record<string, unknown>;
 
     const explained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true }, { zoneId, label: "person", at: AT_0310 }, NOW);
