@@ -4,6 +4,47 @@ import { getRequestId } from "../lib/request-context.js";
 
 const isTest = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
+/**
+ * Query parameters that carry a bearer-equivalent secret. They are scrubbed
+ * from the logged URL AND from `req.query` on every route, so a log bundle
+ * never carries a replayable credential. Add a name here when a route takes
+ * one in the query string.
+ *   - `token` — overlay link token (WARP-1474), calendar feed token.
+ *   - `sig`   — signed recordings-segment URL (WARP-3122); `u`/`exp` alone
+ *               are harmless without it.
+ *   - `t`     — signed clip-share token (clips.service `signShareUrl`).
+ */
+export const SECRET_QUERY_PARAMS: readonly string[] = ["token", "sig", "t"];
+
+const REDACTED = "[Redacted]";
+
+/** PURE — `url` with every SECRET_QUERY_PARAMS value replaced by the placeholder. */
+export function scrubSecretQueryParams(url: string): string {
+  const q = url.indexOf("?");
+  if (q === -1) return url;
+  const params = new URLSearchParams(url.slice(q + 1));
+  let hit = false;
+  for (const name of SECRET_QUERY_PARAMS) {
+    if (params.has(name)) {
+      params.set(name, REDACTED);
+      hit = true;
+    }
+  }
+  return hit ? `${url.slice(0, q)}?${params.toString()}` : url;
+}
+
+/** pino-http req serializer (receives the std-serialized req). */
+function scrubReq(req: { url?: string; query?: Record<string, unknown> } & Record<string, unknown>) {
+  const out = { ...req };
+  if (typeof out.url === "string") out.url = scrubSecretQueryParams(out.url);
+  if (out.query && typeof out.query === "object") {
+    const query = { ...out.query };
+    for (const name of SECRET_QUERY_PARAMS) if (name in query) query[name] = REDACTED;
+    out.query = query;
+  }
+  return out;
+}
+
 // Dedicated pino-http base logger. Its `mixin` emits `requestId` ONLY while a
 // request context is live — covering in-handler `req.log.*` lines. It must NOT
 // emit the `no-request-context` marker: pino serialises a child logger's
@@ -47,6 +88,9 @@ export function createRequestLogger(opts: {
         // is unaffected; the routes take the token in the JSON body, not the
         // query string.)
         "req.query.token",
+        // WARP-3122: the signed-segment signature (see SECRET_QUERY_PARAMS,
+        // which also scrubs it from the logged URL).
+        "req.query.sig",
         "req.body.sign_public_key_pem",
         'req.headers["x-overlay-pop"]',
         "res.body.token",
@@ -62,6 +106,10 @@ export function createRequestLogger(opts: {
     : pino(httpBaseOpts);
   return pinoHttp({
     logger: httpBaseLogger,
+    // WARP-3122: `redact` cannot reach inside the `url` string, so a custom
+    // req serializer scrubs SECRET_QUERY_PARAMS from it (pino-http wraps it
+    // around the standard serializer).
+    serializers: { req: scrubReq },
     level: opts.level ?? (isTest ? "silent" : "info"),
     customProps: (req) => ({
       requestId:

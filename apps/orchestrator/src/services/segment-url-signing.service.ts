@@ -60,6 +60,8 @@ const SEGMENT_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family"])
 export const SEGMENT_SIG_MIN_TTL_SEC = 10 * 60;
 export const SEGMENT_SIG_SLACK_SEC = 5 * 60;
 export const SEGMENT_SIG_MAX_TTL_SEC = 2 * 60 * 60;
+/** Clock skew allowed on the `exp` upper bound. */
+export const SEGMENT_SIG_SKEW_SEC = 60;
 
 export function segmentSignatureTtlSec(after: number, before: number): number {
   const duration = Math.max(0, before - after);
@@ -105,7 +107,11 @@ export function signSegmentQuery(f: Omit<SegmentSigFields, "exp">, expUnix: numb
 export function verifySegmentSignature(f: SegmentSigFields, sig: string, nowSec = Date.now() / 1000): boolean {
   const key = segmentKey();
   if (!key) return false;
-  if (!/^\d{1,12}$/.test(f.exp) || Number(f.exp) <= nowSec) return false;
+  // Upper bound too: the box never signs past the TTL cap, so an `exp` beyond
+  // it (plus clock skew) is not one this box issued at the current rules.
+  if (!/^\d{1,12}$/.test(f.exp)) return false;
+  const exp = Number(f.exp);
+  if (exp <= nowSec || exp > nowSec + SEGMENT_SIG_MAX_TTL_SEC + SEGMENT_SIG_SKEW_SEC) return false;
   const expected = mac(key, [f.camera, f.after, f.before, f.seg, f.exp, f.userId]);
   const provided = Buffer.from(sig, "base64url");
   return provided.length === expected.length && timingSafeEqual(provided, expected);
