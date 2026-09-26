@@ -78,3 +78,57 @@ describe("WARP-3193 PERF-15 — FileIndexStatus.ncFileId index", () => {
   });
 });
 
+
+describe("WARP-3193 QUAL-3 — UserInvite.status", () => {
+  const sql = migration("_warp_3193_user_invite_status");
+
+  it("declares the four lifecycle states", () => {
+    expect(enumValues("InviteStatus")).toEqual(["pending", "accepted", "revoked", "expired"]);
+  });
+
+  it("adds an indexed status column defaulting to pending", () => {
+    const block = modelBlock("UserInvite");
+    expect(block).toMatch(/\bstatus\s+InviteStatus\s+@default\(pending\)/);
+    expect(block).toMatch(/@@index\(\[status\]\)/);
+    expect(has(sql, `ADD COLUMN IF NOT EXISTS "status" "InviteStatus" NOT NULL DEFAULT 'pending'`)).toBe(true);
+  });
+
+  it("backfills from the timestamps, revoked first, as the old readers ranked them", () => {
+    // Revoke never checked acceptedAt, so a row can carry both stamps. Every
+    // old reader (accept route, dashboard pill) tested revokedAt first.
+    const revoked = sql.search(/SET "status" = 'revoked'/);
+    const accepted = sql.search(/SET "status" = 'accepted'/);
+    const expired = sql.search(/SET "status" = 'expired'/);
+    expect(revoked).toBeGreaterThan(-1);
+    expect(accepted).toBeGreaterThan(revoked);
+    expect(expired).toBeGreaterThan(accepted);
+    expect(has(sql, `WHERE "revokedAt" IS NOT NULL`)).toBe(true);
+    expect(has(sql, `WHERE "acceptedAt" IS NOT NULL AND "status" = 'pending'`)).toBe(true);
+    expect(has(sql, `WHERE "expiresAt" < now() AND "status" = 'pending'`)).toBe(true);
+  });
+});
+
+describe("WARP-3193 QUAL-3 / PERF-14 — Reminder.status", () => {
+  const sql = migration("_warp_3193_reminder_status");
+
+  it("declares the three lifecycle states", () => {
+    expect(enumValues("ReminderStatus")).toEqual(["scheduled", "notified", "completed"]);
+  });
+
+  it("adds a status column defaulting to scheduled, indexed with dueAt for the poller", () => {
+    const block = modelBlock("Reminder");
+    expect(block).toMatch(/\bstatus\s+ReminderStatus\s+@default\(scheduled\)/);
+    expect(block).toMatch(/@@index\(\[status, dueAt\]\)/);
+    expect(has(sql, `ADD COLUMN IF NOT EXISTS "status" "ReminderStatus" NOT NULL DEFAULT 'scheduled'`)).toBe(true);
+    expect(has(sql, `ON "Reminder"("status", "dueAt")`)).toBe(true);
+  });
+
+  it("backfills completed before notified, matching the poller's old predicate", () => {
+    const completed = sql.search(/SET "status" = 'completed'/);
+    const notified = sql.search(/SET "status" = 'notified'/);
+    expect(completed).toBeGreaterThan(-1);
+    expect(notified).toBeGreaterThan(completed);
+    expect(has(sql, `WHERE "completedAt" IS NOT NULL`)).toBe(true);
+    expect(has(sql, `WHERE "notifiedAt" IS NOT NULL AND "status" = 'scheduled'`)).toBe(true);
+  });
+});

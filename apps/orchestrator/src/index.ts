@@ -136,6 +136,7 @@ import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { pruneExpiredChallenges } from "./services/webauthn-challenge.service.js";
 import { pruneExpiredLoginStates } from "./services/sso-login-state.service.js";
 import { sweepPairingCodes } from "./services/pairing-code-purge.service.js";
+import { expireOverdueInvites } from "./services/invite.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { tickSceneSchedules } from "./services/scene-schedule-ticker.service.js";
 import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-tz-backfill.service.js";
@@ -1208,6 +1209,9 @@ async function main() {
       // /devices/pair stays as the last-resort absorber). Batched + capped
       // like the two prunes above.
       const pairingSweep = await sweepPairingCodes(prisma);
+      // WARP-3193 QUAL-3: stamp overdue pending invites with the explicit
+      // `expired` status (readers already reject them in real time).
+      const invitesExpired = await expireOverdueInvites(prisma);
       logger.info(
         {
           eventsDeleted,
@@ -1227,6 +1231,7 @@ async function main() {
           loginStatesDeleted,
           pairingCodesExpired: pairingSweep.expired,
           pairingCodesPurged: pairingSweep.purged,
+          invitesExpired,
         },
         "daily purges complete",
       );

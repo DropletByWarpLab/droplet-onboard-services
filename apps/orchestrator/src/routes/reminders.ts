@@ -17,7 +17,7 @@
 
 import { Router, type Request } from "express";
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient, ReminderStatus } from "@prisma/client";
 import {
   sendToolActingUserDenial,
   toolActingUser,
@@ -57,6 +57,38 @@ export const REMINDER_TOOL_ROUTES = {
   "patch /api/reminders/:id": ["complete_reminder"],
 } as const satisfies Record<string, RouteTools>;
 
+/**
+ * WARP-3193 QUAL-3 — the status transitions a PATCH makes, as conditional
+ * writes tried in order (see enum ReminderStatus):
+ *   - completed: true            → completed
+ *   - completed: false + dueAt   → scheduled (re-armed)
+ *   - completed: false           → notified if it had already fired, else
+ *                                  scheduled; an open reminder is unchanged
+ *   - dueAt only                 → scheduled, unless completed (stays)
+ *   - neither                    → unchanged
+ */
+function reminderStatusSteps(patch: z.infer<typeof reminderPatchSchema>): Array<{
+  where: Prisma.ReminderWhereInput;
+  data: { status?: ReminderStatus };
+}> {
+  if (patch.completed === true) return [{ where: {}, data: { status: "completed" } }];
+  if (patch.completed === false) {
+    if (patch.dueAt !== undefined) return [{ where: {}, data: { status: "scheduled" } }];
+    return [
+      { where: { status: "completed", notifiedAt: { not: null } }, data: { status: "notified" } },
+      { where: { status: "completed", notifiedAt: null }, data: { status: "scheduled" } },
+      { where: { status: { not: "completed" } }, data: {} },
+    ];
+  }
+  if (patch.dueAt !== undefined) {
+    return [
+      { where: { status: { not: "completed" } }, data: { status: "scheduled" } },
+      { where: { status: "completed" }, data: {} },
+    ];
+  }
+  return [{ where: {}, data: {} }];
+}
+
 export function createRemindersRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -71,10 +103,11 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
       const reminders = await prisma.reminder.findMany({
         where: {
           userId: person.username,
+          // WARP-3193 QUAL-3: the explicit status, not completedAt absence.
           ...(completed === "true"
-            ? { completedAt: { not: null } }
+            ? { status: "completed" as const }
             : completed === "false"
-            ? { completedAt: null }
+            ? { status: { not: "completed" as const } }
             : {}),
           ...(dueBefore ? { dueAt: { lte: new Date(dueBefore) } } : {}),
         },
@@ -123,25 +156,35 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
       // ORCH-008: ownership-scoped conditional write — 404 (not 403) on a
       // foreign/unknown id so an authed user can't enumerate which reminder
       // ids exist, and no findUnique→update TOCTOU.
-      const upd = await prisma.reminder.updateMany({
-        where: { id: req.params.id, userId: person.username },
-        data: {
-          ...(parsed.data.title !== undefined ? { title: parsed.data.title } : {}),
-          ...(parsed.data.body !== undefined ? { body: parsed.data.body } : {}),
-          ...(parsed.data.dueAt !== undefined
-            ? {
-                dueAt: new Date(parsed.data.dueAt),
-                // Re-arming a reminder (changing dueAt to a future time)
-                // should re-enable the notification dispatcher.
-                notifiedAt: null,
-              }
-            : {}),
-          ...(parsed.data.completed !== undefined
-            ? { completedAt: parsed.data.completed ? new Date() : null }
-            : {}),
-        },
-      });
-      if (upd.count === 0) return void res.status(404).json({ error: "reminder_not_found" });
+      const data = {
+        ...(parsed.data.title !== undefined ? { title: parsed.data.title } : {}),
+        ...(parsed.data.body !== undefined ? { body: parsed.data.body } : {}),
+        ...(parsed.data.dueAt !== undefined
+          ? {
+              dueAt: new Date(parsed.data.dueAt),
+              // Re-arming a reminder (changing dueAt to a future time)
+              // should re-enable the notification dispatcher.
+              notifiedAt: null,
+            }
+          : {}),
+        ...(parsed.data.completed !== undefined
+          ? { completedAt: parsed.data.completed ? new Date() : null }
+          : {}),
+      };
+      // WARP-3193 QUAL-3: the status moves in the same write as its
+      // timestamp. Where the next status depends on the current one, each
+      // starting status gets its own conditional write; the first that
+      // matches the (owned) row wins, so it stays one write per request.
+      let count = 0;
+      for (const step of reminderStatusSteps(parsed.data)) {
+        const upd = await prisma.reminder.updateMany({
+          where: { id: req.params.id, userId: person.username, ...step.where },
+          data: { ...data, ...step.data },
+        });
+        count = upd.count;
+        if (count > 0) break;
+      }
+      if (count === 0) return void res.status(404).json({ error: "reminder_not_found" });
       const reminder = await prisma.reminder.findUniqueOrThrow({ where: { id: req.params.id } });
       res.json({ reminder });
     } catch (err) {
