@@ -19,7 +19,10 @@
  * WARP-2988), then `createTeamChatRouter`. The acting-user resolver is the real
  * one (`actingUserAccessResolver` → `resolveAttributedToolAccess`) over an
  * in-memory User table. Only `resolveEffectiveAccess`, a bound singleton, is
- * stubbed with the tool domains each person's role resolves to.
+ * stubbed with the tool domains each person's role resolves to — except in the
+ * last block, where the real resolver composes them from the same role rows.
+ * The double's `$transaction` is the shared seam (WARP-1570), so that block can
+ * also pin the REPEATABLE READ snapshot the resolver reads in (WARP-1583).
  *
  * Every tool call carries the acting person twice, exactly as the mcp-server
  * sends it: `X-Nextcloud-User` (stamped on every orchestrator call by
@@ -28,7 +31,7 @@
  * routes/team-chat.ts acts on). Both carry `ctx.userId`: `User.username` on
  * stdio, `User.id` over HTTP.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import request from "supertest";
@@ -39,23 +42,60 @@ vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: true, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
-const { effectiveAccessMock } = vi.hoisted(() => ({ effectiveAccessMock: vi.fn() }));
-vi.mock("../services/effective-access.service.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../services/effective-access.service.js")>()),
-  resolveEffectiveAccess: effectiveAccessMock,
+type EffectiveAccessModule = typeof import("../services/effective-access.service.js");
+
+const { effectiveAccessMock, realEffectiveAccess } = vi.hoisted(() => ({
+  effectiveAccessMock: vi.fn(),
+  // The real `resolveEffectiveAccess`, kept by the factory below for the last
+  // block. It comes off the same module instance as the
+  // `_setEffectiveAccessForTests` the factory re-exports, so binding the one
+  // binds the other.
+  realEffectiveAccess: { resolve: null as EffectiveAccessModule["resolveEffectiveAccess"] | null },
 }));
+vi.mock("../services/effective-access.service.js", async (importOriginal) => {
+  const actual = await importOriginal<EffectiveAccessModule>();
+  realEffectiveAccess.resolve = actual.resolveEffectiveAccess;
+  return { ...actual, resolveEffectiveAccess: effectiveAccessMock };
+});
 
 import { createTeamChatRouter } from "../routes/team-chat.js";
 import { mountMcpActingUserGates } from "../modules/module-mounts.js";
 import { actingUserAccessResolver, MCP_PRINCIPAL_ID } from "../middleware/mcp-acting-user-gate.js";
 import type { AuthUser } from "../middleware/auth.js";
+import {
+  _setEffectiveAccessForTests,
+  type AccessRoleGrantRows,
+} from "../services/effective-access.service.js";
+import type { AvailabilityConfig } from "../modules/module-registry.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
 type Person = DirectoryUser & {
   displayName: string;
   accessRoleId: string | null;
-  accessRole: { toolGrants: Array<{ domain: string; level: "view" | "use" }> } | null;
+  accessRole: AccessRoleGrantRows | null;
 };
+
+/**
+ * A custom role's row as `resolveEffectiveAccess` selects it: the feature and
+ * tool grants under test, and nothing else granted.
+ */
+function customRole(
+  featureGrants: AccessRoleGrantRows["featureGrants"],
+  toolGrants: AccessRoleGrantRows["toolGrants"],
+): AccessRoleGrantRows {
+  return {
+    mayOperateLocks: false,
+    cloudModelsAllowed: false,
+    storageQuotaBytes: null,
+    maxUploadSizeMb: null,
+    llmDailyMessageCap: null,
+    featureGrants,
+    toolGrants,
+    connectorGrants: [],
+  };
+}
 
 // `User.id` is a UUID distinct from the username, as on a real box: the HTTP
 // transport names the person by the first, stdio by the second.
@@ -76,7 +116,7 @@ const FRAN: Person = {
   displayName: "Fran",
   role: "admin",
   accessRoleId: "role-files-only",
-  accessRole: { toolGrants: [{ domain: "files", level: "use" }] },
+  accessRole: customRole([{ moduleId: "files", level: "act" }], [{ domain: "files", level: "use" }]),
 };
 /** An admin whose custom role grants the Messages tools with `use`. */
 const TESS: Person = {
@@ -86,9 +126,9 @@ const TESS: Person = {
   displayName: "Tess",
   role: "admin",
   accessRoleId: "role-team-chat",
-  accessRole: { toolGrants: [{ domain: "team_chat", level: "use" }] },
+  accessRole: customRole([{ moduleId: "team_chat", level: "act" }], [{ domain: "team_chat", level: "use" }]),
 };
-/** An admin whose custom role grants the Messages tools with `view` only. */
+/** An admin whose custom role grants the Messages tools with `view` only (Tess's role, one level down). */
 const VERA: Person = {
   id: "0a8e5f4c-0000-4000-8000-0000000000b4",
   username: "vera",
@@ -96,7 +136,7 @@ const VERA: Person = {
   displayName: "Vera",
   role: "admin",
   accessRoleId: "role-team-chat-view",
-  accessRole: { toolGrants: [{ domain: "team_chat", level: "view" }] },
+  accessRole: customRole([{ moduleId: "team_chat", level: "act" }], [{ domain: "team_chat", level: "view" }]),
 };
 /** The member the tools message. No custom role; never the acting person here. */
 const BOB: Person = {
@@ -110,7 +150,10 @@ const BOB: Person = {
 };
 const PEOPLE: Person[] = [OWEN, FRAN, TESS, VERA, BOB];
 
-/** What `resolveEffectiveAccess` derives from each custom role (the owner never asks). */
+/**
+ * What `resolveEffectiveAccess` derives from each custom role (the owner never
+ * asks). The last block holds the real resolver to this table.
+ */
 const TOOL_DOMAINS: Record<string, string[]> = {
   [FRAN.id]: ["files"],
   [TESS.id]: ["team_chat"],
@@ -188,12 +231,7 @@ function prismaDouble() {
     })),
     update: vi.fn(async () => ({})),
   };
-  const $transaction = vi.fn(async (arg: unknown) =>
-    typeof arg === "function"
-      ? (arg as (tx: unknown) => unknown)({ teamChatMeeting, teamChatMessage, teamChatThread })
-      : Promise.all(arg as unknown[]),
-  );
-  return {
+  const self = {
     user: {
       // The acting-user resolver's lookups (by username, then id; or the
       // WARP-3061 `findMany({ OR })`) run against the shared directory helper.
@@ -220,8 +258,22 @@ function prismaDouble() {
     teamChatMessage,
     teamChatMeeting,
     calendarEvent: { create: vi.fn(async () => ({ id: "cal-new" })) },
-    $transaction,
+    // The rest of what `resolveEffectiveAccess` reads, all empty: no access
+    // exceptions, no module overrides (every module at its default), no cloud
+    // escape, no connections, no usage policy, no departments.
+    userAccessException: { findMany: vi.fn(async () => []) },
+    moduleSetting: { findMany: vi.fn(async () => []) },
+    offLanAllowlistChannel: { findUnique: vi.fn(async () => null) },
+    integrationConnection: { findMany: vi.fn(async () => []) },
+    userUsagePolicy: { findUnique: vi.fn(async () => null) },
+    departmentMembership: { findMany: vi.fn(async () => []) },
   };
+  // WARP-1570: the shared transaction seam, not a hand-rolled `$transaction`.
+  // It hands the callback this double and records every call's options, which
+  // a hand-rolled stub drops. That record is how the last block pins the
+  // isolation level `resolveEffectiveAccess` reads at.
+  const seam = createTransactionSeam({ client: () => self });
+  return Object.assign(self, { $transaction: seam.$transaction, _seam: () => seam });
 }
 type PrismaDouble = ReturnType<typeof prismaDouble>;
 
@@ -277,7 +329,7 @@ const NAMINGS = [
 const DISABLED = { error: "module_disabled", module: "team_chat" };
 
 /** The route never ran: no roster read, no membership probe, nothing written. */
-function expectNothingTouched(prisma: PrismaDouble): void {
+function expectRouteNeverRan(prisma: PrismaDouble): void {
   expect(prisma.user.findFirst).not.toHaveBeenCalled();
   const rosterReads = prisma.user.findMany.mock.calls.filter(([args]) => !args.where.OR);
   expect(rosterReads).toEqual([]);
@@ -286,6 +338,11 @@ function expectNothingTouched(prisma: PrismaDouble): void {
   expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
   expect(prisma.teamChatMessage.create).not.toHaveBeenCalled();
   expect(prisma.teamChatMeeting.create).not.toHaveBeenCalled();
+}
+
+/** The route never ran, and with the resolver stubbed nothing opened a transaction either. */
+function expectNothingTouched(prisma: PrismaDouble): void {
+  expectRouteNeverRan(prisma);
   expect(prisma.$transaction).not.toHaveBeenCalled();
 }
 
@@ -408,5 +465,87 @@ describe("team-chat routes: app.ts wiring", () => {
     expect(moduleGates).toBeGreaterThan(-1);
     expect(acting).toBeGreaterThan(moduleGates);
     expect(router).toBeGreaterThan(acting);
+  });
+});
+
+/** A provisioned box: every optional service configured, so every module the roles above grant is available. */
+const CFG: AvailabilityConfig = {
+  AI_GATEWAY_URL: "http://ai-gateway:8000",
+  FILE_INDEXER_URL: "http://file-indexer:8001",
+  NEXTCLOUD_URL: "http://nextcloud",
+  DOCS_ENABLED: "1",
+  DOCS_INTERNAL_URL: "http://onlyoffice",
+  SERVICE_TOKEN_EMAIL: "tok-email",
+  SERVICE_TOKEN_VOICE: "tok-voice",
+  FRIGATE_URL: "http://frigate:5000",
+  DROPLET_MATTER_SERVICE_URL: "http://matter:8003",
+  ROUTING_SERVICE_URL: "http://routing:8004",
+  SWITCH_SERVICE_URL: "http://switch:8005",
+};
+
+/** The two narrowed roles, each refused for its own reason. */
+const REFUSED: ReadonlyArray<readonly [who: string, person: Person]> = [
+  ["Fran, whose role leaves Messages out,", FRAN],
+  ["Vera, whose role grants Messages `view`,", VERA],
+];
+
+// The blocks above stub `resolveEffectiveAccess` with TOOL_DOMAINS. Here the
+// real resolver composes each person's tool domains from their role rows, on
+// the same double, which pins two things the stub cannot show. The resolver
+// reads in ONE snapshot at REPEATABLE READ (WARP-1583), and the seam records
+// it: drop REPEATABLE_READ_TX from `resolveEffectiveAccess` and every test
+// here fails. And the role rows resolve to exactly TOOL_DOMAINS, so the table
+// the stubbed blocks rely on cannot drift from what the roles grant.
+describe("team-chat tools: the real resolver answers the gate, from one REPEATABLE READ snapshot", () => {
+  /** What the real resolver answered, per person asked about, in call order. */
+  let answered: Array<{ userId: string; toolDomains: string[] | null }> = [];
+
+  beforeEach(() => {
+    answered = [];
+    effectiveAccessMock.mockImplementation(async (userId: string) => {
+      const access = await realEffectiveAccess.resolve?.(userId);
+      answered.push({ userId, toolDomains: access?.toolDomains ?? null });
+      return access;
+    });
+  });
+
+  afterEach(() => {
+    _setEffectiveAccessForTests(null, null);
+  });
+
+  /** A fresh double, bound as the resolver's client (app.ts binds the real one with `initEffectiveAccess`). */
+  function boundDouble(): PrismaDouble {
+    const prisma = prismaDouble();
+    _setEffectiveAccessForTests(prisma as unknown as PrismaClient, CFG);
+    return prisma;
+  }
+
+  it.each(REFUSED)("%s named by User.id → 404 module_disabled, on the resolver's own answer", async (_who, person) => {
+    const prisma = boundDouble();
+    const res = await call(
+      appAs(MCP, prisma),
+      "post",
+      `/api/team-chat/threads/${THREAD_ID}/messages`,
+      { kind: "text", body: "Lunch?" },
+      actingFor(person.id),
+    );
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual(DISABLED);
+    // The resolver answered. A read that threw would be refused too (the scope
+    // fails closed to deny-all), and would prove nothing here.
+    expect(answered).toEqual([{ userId: person.id, toolDomains: TOOL_DOMAINS[person.id] }]);
+    // Its one snapshot, at REPEATABLE READ, is the only transaction: the route never ran.
+    expect(prisma._seam().calls()).toEqual([REPEATABLE_READ_TX]);
+    expectRouteNeverRan(prisma);
+  });
+
+  it.each(TOOL_CALLS)("%s (%s %s) — Tess, granted Messages `use`, gets the route's answer", async (_hop, method, path, body, ok) => {
+    const prisma = boundDouble();
+    // Named by username, for the route's reason given above the `team_chat` in reach block.
+    const res = await call(appAs(MCP, prisma), method, path, body, actingFor(TESS.username));
+    expect(res.status).toBe(ok);
+    expect(answered).toEqual([{ userId: TESS.id, toolDomains: TOOL_DOMAINS[TESS.id] }]);
+    // The gate's read opens the first transaction; any after it is the route's own write.
+    expect(prisma._seam().calls()[0]).toEqual(REPEATABLE_READ_TX);
   });
 });
