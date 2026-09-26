@@ -29,7 +29,7 @@ import type { PrismaClient } from "@prisma/client";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
 import { executeScene } from "./scene-runner.service.js";
-import type { MatterDispatcher } from "../routes/scenes.js";
+import type { MatterDispatcher } from "./scene-runner.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("scene-schedule-ticker");

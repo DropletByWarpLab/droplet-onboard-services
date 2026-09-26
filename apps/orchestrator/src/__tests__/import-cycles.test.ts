@@ -16,6 +16,7 @@
  * one that no longer exists, so the list can only shrink.
  */
 import path from "node:path";
+import { describe, expect, it } from "vitest";
 import { parseCircular, parseDependencyTree, shortenTree } from "dpdm";
 
 const ROOT = path.resolve(__dirname, "..", "..");
@@ -34,10 +35,6 @@ const TYPE_ALLOWLIST = [
   "src/services/security-incident-page.ts -> src/services/security-incident-view.ts",
   "src/services/security-alerts.service.ts -> src/services/security-events.service.ts -> src/services/security-incidents.service.ts",
   "src/services/security-events.service.ts -> src/services/security-incidents.service.ts -> src/services/security-mode.service.ts",
-  "src/routes/scenes.ts -> src/services/scene-runner.service.ts",
-  "src/services/extension-token.ts -> src/services/mcp-multiplexer.service.ts -> src/services/mcp-client.port.ts -> src/services/mcp-client.service.ts",
-  "src/services/llm-agent.service.ts -> src/services/tool-use-validation.ts",
-  "src/services/mcp-client.port.ts -> src/services/mcp-client.service.ts",
 ];
 
 /** Rotate a ring so it starts at its smallest member: one spelling per cycle. */
