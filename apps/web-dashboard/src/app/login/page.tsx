@@ -17,6 +17,7 @@ import { safeNext } from "@/lib/safe-next";
 // WARP-629: runtime SSO discovery — the login shows only the IdPs this box has
 // actually configured (local-first, SSO optional).
 import { getEnabledSsoProviders } from "@/lib/api";
+import { useRemaskOnLeave } from "@/lib/hooks/useRemaskOnLeave";
 
 /**
  * PR #375 — the orchestrator's two-factor gate answers a correct password with
@@ -65,6 +66,10 @@ function LoginPageInner() {
   // first paint is password-only; SSO is purely additive once discovered.
   const [ssoProviders, setSsoProviders] = useState<string[]>([]);
 
+  // WARP-3135: a revealed password masks again when the window loses focus or
+  // the page is hidden (Mac parity, WARP-3086). Submit re-masks in handleLogin.
+  useRemaskOnLeave(setShowPassword);
+
   useEffect(() => {
     setPasskeyReady(isPasskeySupported());
   }, []);
@@ -90,6 +95,9 @@ function LoginPageInner() {
     // fires concurrent login() calls (e.g. two POSTs of the same single-use
     // recovery code, the loser flashing a false "didn't match").
     if (isSubmitting) return;
+    // WARP-3135: every attempt re-masks, so a failed one never leaves the
+    // password readable beside the error (Mac parity, WARP-3086).
+    setShowPassword(false);
     setError(null);
 
     // Two-factor challenge in progress: validate the code, not the credentials

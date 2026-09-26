@@ -35,6 +35,7 @@ import type { ToolAccessScope } from "../services/tool-access.service.js";
 import type { EffectiveAccessResolver } from "./feature-gate.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 import type { ModuleId } from "@prisma/client";
+import { userDirectory, type DirectoryUser } from "../__tests__/helpers/user-directory.js";
 
 const scope = (domains: string[], writeDomains: string[] = []): ToolAccessScope => ({
   domains: new Set(domains),
@@ -216,13 +217,18 @@ describe("actingUserAccessResolver — fail closed on identity", () => {
     accessRoleId: null,
     accessRole: null,
   };
-  const prismaWithUsers = () =>
+  type Row = typeof SSO_USER;
+  // `findUnique` serves the tool-access read by id; `findMany` is
+  // resolveAssertedUser's `OR [username, nextcloudUsername, id] take 2`
+  // (WARP-3098), with Prisma's semantics.
+  const prismaWithUsers = (rows: Row[] = [SSO_USER]) =>
     ({
       user: {
-        findUnique: vi.fn(async ({ where }: { where: Record<string, unknown> }) => {
-          const [[col, val]] = Object.entries(where);
-          return (SSO_USER as Record<string, unknown>)[col] === val ? SSO_USER : null;
-        }),
+        findUnique: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
+          rows.find((r) => Object.entries(where).every(([col, val]) => (r as Record<string, unknown>)[col] === val)) ??
+          null,
+        ),
+        findMany: userDirectory(rows as DirectoryUser[]).findMany,
       },
     }) as never;
 
@@ -241,16 +247,43 @@ describe("actingUserAccessResolver — fail closed on identity", () => {
     expect(access).toMatchObject({ unresolved: "user_missing", userId: null });
   });
 
+  it("a value that is one person's User.id AND another's username is `user_ambiguous` — never the first match (WARP-3098)", async () => {
+    // The old lookup tried username first, so this value resolved to the
+    // look-alike and scoped the call with the look-alike's reach.
+    const lookalike: Row = { ...SSO_USER, id: "3f1c2a9e-0000-4000-8000-000000000002", username: SSO_USER.id, role: "family" };
+    const access = await actingUserAccessResolver(prismaWithUsers([SSO_USER, lookalike]))(SSO_USER.id);
+    expect(access).toMatchObject({ unresolved: "user_ambiguous", userId: null });
+  });
+
+  it("a deactivated person is `user_deactivated`", async () => {
+    const access = await actingUserAccessResolver(prismaWithUsers([{ ...SSO_USER, directoryStatus: "DEACTIVATED" }]))("sam");
+    expect(access).toMatchObject({ unresolved: "user_deactivated", userId: null });
+  });
+
   it("an unknown Nextcloud username resolves to unresolved `user_missing`", async () => {
-    const prisma = { user: { findUnique: vi.fn(async () => null) } } as never;
+    const prisma = { user: { findUnique: vi.fn(async () => null), findMany: vi.fn(async () => []) } } as never;
     const access = await actingUserAccessResolver(prisma)("ghost");
     expect(access.unresolved).toBe("user_missing");
   });
 
   it("a lookup error resolves to unresolved `read_failed`", async () => {
-    const prisma = { user: { findUnique: vi.fn(async () => { throw new Error("db"); }) } } as never;
+    const fail = async () => {
+      throw new Error("db");
+    };
+    const prisma = { user: { findUnique: fail, findMany: fail } } as never;
     const access = await actingUserAccessResolver(prisma)("sam");
     expect(access.unresolved).toBe("read_failed");
+  });
+
+  it("the gate answers an ambiguous acting user 404 module_disabled, and the route never runs (WARP-3098)", async () => {
+    const lookalike: Row = { ...SSO_USER, id: "3f1c2a9e-0000-4000-8000-000000000002", username: SSO_USER.id };
+    const app = appAs(MCP, actingUserAccessResolver(prismaWithUsers([SSO_USER, lookalike])));
+    const res = await request(app).get("/api/crm/companies").set("X-Nextcloud-User", SSO_USER.id);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "crm" });
+    // ...while the same person named unambiguously passes.
+    const clean = appAs(MCP, actingUserAccessResolver(prismaWithUsers()));
+    expect((await request(clean).get("/api/crm/companies").set("X-Nextcloud-User", SSO_USER.id)).status).toBe(200);
   });
 });
 

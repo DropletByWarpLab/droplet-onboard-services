@@ -248,6 +248,58 @@ describe("run owns workspace (WARP-2896)", () => {
   });
 });
 
+// WARP-3098 — the header carries the mcp-server's `ctx.userId`:
+// `User.username` on stdio, `User.id` over HTTP (the shipped container).
+// Resolved by resolveAssertedUser: one active person, or 403.
+describe("the acting person is named by username OR User.id (WARP-3098)", () => {
+  async function commitAs(users: Parameters<typeof createAgentRunPrismaMock>[0], asserted: string, personId: string) {
+    const { app, db, sandbox } = buildApp(mcp, createAgentRunPrismaMock(users));
+    await seed(db, "ws-a", personId);
+    const runId = await seedRun(db, "ws-a", personId);
+    const res = await request(app)
+      .post("/api/workspace/ws-a/commit")
+      .set("X-Nextcloud-User", asserted)
+      .set(AGENT_RUN_HEADER, runId)
+      .send({ message: "m" });
+    return { res, sandbox };
+  }
+
+  it("a caller named by User.id (the HTTP transport) commits as that person", async () => {
+    const { res, sandbox } = await commitAs({ users: [owner, admin] }, "u-owner", "u-owner");
+    expect(res.status).toBe(200);
+    expect(sandbox.calls).toEqual([
+      { op: "commit", args: ["ws-a", { message: "m", author: { name: "Romain", email: "romain@droplet.local" } }] },
+    ]);
+  });
+
+  it("an SSO row (nextcloudUsername NULL) resolves by username, and the author is read off that row", async () => {
+    const maria = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "admin", displayName: "Maria", email: "maria@acme.test" };
+    const { res, sandbox } = await commitAs({ users: [owner, maria] }, "maria", "u-maria");
+    expect(res.status).toBe(200);
+    expect(sandbox.calls).toEqual([
+      { op: "commit", args: ["ws-a", { message: "m", author: { name: "Maria", email: "maria@acme.test" } }] },
+    ]);
+  });
+
+  it("a value naming two people is refused — 403, the sandbox is never dialled", async () => {
+    // One person's username is another's id; the look-alike is an owner.
+    // The workspace and run are the look-alike's, and the look-alike's row
+    // comes first, so neither run ownership nor "take the first match" can
+    // refuse this — only the identity check can.
+    const lookalike = { id: "u-other", username: "u-owner", role: "owner" };
+    const { res, sandbox } = await commitAs({ users: [lookalike, owner] }, "u-owner", "u-other");
+    expect(res.status).toBe(403);
+    expect(sandbox.calls).toEqual([]);
+  });
+
+  it("a deactivated person is refused", async () => {
+    const gone = { ...owner, directoryStatus: "DEACTIVATED" as const };
+    const { res, sandbox } = await commitAs({ users: [gone] }, "romain", "u-owner");
+    expect(res.status).toBe(403);
+    expect(sandbox.calls).toEqual([]);
+  });
+});
+
 describe("the run op refuses the allow-list BEFORE the sandbox", () => {
   it("bash never reaches the sandbox; pytest does", async () => {
     // MUTATION: drop the refuseRunArgv call in opHandler("run") and the
