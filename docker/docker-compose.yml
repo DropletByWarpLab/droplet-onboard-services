@@ -2561,17 +2561,20 @@ services:
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_VOICE:-${ORCHESTRATOR_TOKEN:-}}
       # Wake-word backend. `vosk` (default) recognizes the WAKE_WORD
       # phrases out of the box — no per-phrase training, no licensing fee
-      # — so "droplet" and "hey droplet" both work on every box.
+      # — so "hey droplet" works on every box.
       # Automatically falls back to openWakeWord (hey_jarvis) if the
       # bundled Vosk model is absent. WAKE_WORD is a comma-separated list
-      # of phrases; the box wakes on ANY of them (WARP-1431).
+      # of phrases; the box wakes on ANY of them (WARP-1431). The default
+      # leaves out the bare one-word "droplet": Vosk forces ambient speech
+      # into it at confidence up to 1.00 (~23 false wakes/hour on the
+      # bench, WARP-3128). Opt back in with WAKE_WORD=droplet,hey droplet.
       - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
-      - WAKE_WORD=${WAKE_WORD:-droplet,hey droplet}
+      - WAKE_WORD=${WAKE_WORD:-hey droplet}
       # Threshold semantics are engine-aware (resolve_wake_threshold in
       # voice-io main.py). Under vosk every fire carries real acoustic
       # evidence — the MINIMUM per-word confidence of the finalized
       # phrase match (evidence-free matches never fire) — and a genuine
-      # spoken wake scores ~0.9+, so unset means the vosk default (0.7).
+      # spoken wake scores ~0.9+, so unset means the vosk default (0.85).
       # That gates the living-room-TV false accepts the old fixed-0.5
       # partial-fire scoring let through. Lower toward 0.5 if real wakes
       # get missed at distance; tune per docs/voice-assistant-plan.md.
@@ -2694,18 +2697,24 @@ services:
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
-    # WARP-1434 — the CTranslate2 thread count MUST track the CPU quota
-    # (cpus: ${WHISPER_CPUS:-2.0} below). The old --cpu-threads 4 inside a
-    # 2.0-core cap oversubscribed: 4 compute threads contending for 2 cores
-    # adds context-switch churn without speeding transcription. Default 2 =
-    # the quota; if you raise WHISPER_CPUS, raise WHISPER_CPU_THREADS to match.
+    # WARP-1434 — the CTranslate2 thread count MUST equal the CPU quota
+    # (cpus: ${WHISPER_CPUS:-4.0} below). More threads than cores (the old
+    # --cpu-threads 4 inside a 2.0-core cap) only adds context-switch churn;
+    # fewer leaves part of the quota idle. WHISPER_CPUS and
+    # WHISPER_CPU_THREADS move together: change one, change the other.
+    # WARP-3126 — default 4 threads = a 4.0-core quota (was 2/2).
+    # Transcription starts only when the speaker stops, so this decode sits
+    # directly in front of the LLM call on every voice turn; 4 cores roughly
+    # halves it. Trade-off: the host lends STT two more cores of burst for
+    # about a second per turn, shared with Frigate, the inference runtime and
+    # the rest of the stack. On a CPU-tight host lower both knobs together.
     command: >
       --model ${WHISPER_MODEL:-small.en}
       --language ${WHISPER_LANGUAGE:-en}
       --uri tcp://0.0.0.0:10300
       --beam-size 1
       --compute-type ${WHISPER_COMPUTE:-int8}
-      --cpu-threads ${WHISPER_CPU_THREADS:-2}
+      --cpu-threads ${WHISPER_CPU_THREADS:-4}
     volumes:
       # Whisper model cache (~470 MB for small.en). Named volume so a
       # `docker compose down` doesn't redownload; mounted read-write so
@@ -2715,7 +2724,7 @@ services:
     <<: *default-logging
     # Whisper loads the full model into RAM at startup: small.en ~470 MB.
     mem_limit: ${WHISPER_MEM_LIMIT:-1g}
-    cpus: ${WHISPER_CPUS:-2.0}
+    cpus: ${WHISPER_CPUS:-4.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Piper TTS sidecar (WARP-154) ---

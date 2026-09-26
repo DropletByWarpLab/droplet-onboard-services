@@ -289,17 +289,22 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "setup_camera_ports", client: "orchestrator", hops: [admit("post", "/api/switch/setup/cameras")] },
 
   // ── calendar ────────────────────────────────────────────────────────────
-  none("create_event"), // ctx.prisma
-  none("list_events"), // ctx.prisma
-  none("update_event"), // ctx.prisma
-  none("delete_event"), // ctx.prisma
-  none("search_calendar_events"), // ctx.prisma
+  // WARP-3101 — through the orchestrator's calendar routes, which key the rows
+  // on the acting person's username. Through ctx.prisma the key was
+  // ctx.userId, a User.id on the HTTP transport, matching no row.
+  { tool: "create_event", client: "orchestrator", hops: [admit("post", "/api/calendar/events")] },
+  { tool: "list_events", client: "orchestrator", hops: [admit("get", "/api/calendar/events")] },
+  { tool: "update_event", client: "orchestrator", hops: [admit("patch", "/api/calendar/events/:id")] },
+  { tool: "delete_event", client: "orchestrator", hops: [admit("delete", "/api/calendar/events/:id")] },
+  { tool: "search_calendar_events", client: "orchestrator", hops: [admit("get", "/api/calendar/events")] },
 
   // ── reminders ───────────────────────────────────────────────────────────
-  none("create_reminder"), // ctx.prisma
-  none("list_reminders"), // ctx.prisma
-  none("complete_reminder"), // ctx.prisma
-  none("set_timer"), // ctx.prisma
+  // WARP-3101 — same reason; a reminder written with a User.id was never
+  // delivered (the poller notifies Reminder.userId as a username).
+  { tool: "create_reminder", client: "orchestrator", hops: [admit("post", "/api/reminders")] },
+  { tool: "list_reminders", client: "orchestrator", hops: [admit("get", "/api/reminders")] },
+  { tool: "complete_reminder", client: "orchestrator", hops: [admit("patch", "/api/reminders/:id")] },
+  { tool: "set_timer", client: "orchestrator", hops: [admit("post", "/api/reminders")] },
 
   // ── notifications ───────────────────────────────────────────────────────
   // WARP-3060 — through the orchestrator's sendNotification (toast + push); a
@@ -328,7 +333,9 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "email_summarize_thread", client: "orchestrator", hops: [admit("get", "/api/email/:accountId/threads/:threadId/analysis")] },
   { tool: "email_draft_reply", client: "orchestrator", hops: [admit("post", "/api/email/:accountId/drafts")] },
   { tool: "email_send", client: "orchestrator", hops: [admit("post", "/api/email/drafts/:id/send")] },
-  none("search_contacts"), // ctx.prisma (derived from indexed senders)
+  // WARP-3102: through the orchestrator, which resolves the acting person —
+  // it read EmailAccount via ctx.prisma by ctx.userId, a username in chat.
+  { tool: "search_contacts", client: "orchestrator", hops: [admit("get", "/api/email/contacts")] },
 
   // ── memory ──────────────────────────────────────────────────────────────
   none("memory_recall"), // ctx.prisma

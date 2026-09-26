@@ -1,184 +1,138 @@
+/**
+ * WARP-1452 / WARP-3102 — `search_contacts` LLM tool.
+ *
+ * Until WARP-3102 the handler read `EmailAccount` through `ctx.prisma` by
+ * `userId: ctx.userId`. The column holds a `User.id`, while `ctx.userId` is the
+ * username on the stdio transport chat uses, so every chat user was told no
+ * mailbox was connected. The handler now asks the orchestrator
+ * (`GET /api/email/contacts`), which resolves the acting person and derives the
+ * contacts from the mailboxes they may read; the derivation itself is tested in
+ * apps/orchestrator/src/services/email/contacts.service.test.ts, and the handler
+ * against the real router in apps/orchestrator/src/__tests__/
+ * email-tools-acting-user.test.ts.
+ */
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import searchContacts from "../../../src/handlers/email/search-contacts.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(
-  mocks: {
-    accountFindMany?: Mock;
-    messageFindMany?: Mock;
-  },
-  userId?: string,
-): ToolContext {
+function ctxWith(opts: { get?: Mock; userId?: string; prisma?: unknown } = {}): ToolContext {
   return {
-    prisma: {
-      emailAccount: { findMany: mocks.accountFindMany ?? vi.fn() },
-      emailMessage: { findMany: mocks.messageFindMany ?? vi.fn() },
-    } as unknown as ToolContext["prisma"],
-    http: {} as ToolContext["http"],
+    http: {
+      routing: {} as ToolContext["http"]["routing"],
+      cameras: {} as ToolContext["http"]["cameras"],
+      switchSvc: {} as ToolContext["http"]["switchSvc"],
+      fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      nextcloud: {} as ToolContext["http"]["nextcloud"],
+      orchestrator: { get: opts.get ?? vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+    },
+    prisma: (opts.prisma ?? {}) as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
-    userId: userId === undefined ? "alice" : userId,
+    userId: opts.userId === undefined ? "alice" : opts.userId,
     signal: new AbortController().signal,
   };
 }
 
+const CONTACTS = [
+  { address: "bob@example.com", name: "Bob Lee", lastSeenAt: "2026-07-04T00:00:00.000Z", messageCount: 3 },
+  { address: "bobbi@vendor.test", name: null, lastSeenAt: "2026-07-03T00:00:00.000Z", messageCount: 1 },
+];
+
+function answer(status: number, body: unknown): Mock {
+  return vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status }));
+}
+
 describe("search_contacts", () => {
-  it("requires auth", async () => {
-    const accountFindMany = vi.fn();
-    const r = await searchContacts.handler({ query: "bob" }, ctxWith({ accountFindMany }, ""));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("AUTH_REQUIRED");
-    expect(accountFindMany).not.toHaveBeenCalled();
+  it("requires an acting user, and sends nothing without one", async () => {
+    const get = vi.fn();
+    const r = await searchContacts.handler({ query: "bob" }, ctxWith({ get, userId: "" }));
+    expect(r).toMatchObject({ ok: false, error: { code: "AUTH_REQUIRED" } });
+    expect(get).not.toHaveBeenCalled();
   });
 
-  it("returns an empty success with a note when the user has no email accounts", async () => {
-    const accountFindMany = vi.fn().mockResolvedValue([]);
-    const messageFindMany = vi.fn();
-    const r = await searchContacts.handler(
-      { query: "bob" },
-      ctxWith({ accountFindMany, messageFindMany }),
-    );
+  it("asks the orchestrator, forwarding the acting user and the query", async () => {
+    const get = answer(200, { query: "bob", accountCount: 2, contacts: CONTACTS });
+    await searchContacts.handler({ query: "  bob ", limit: 5 }, ctxWith({ get, userId: "u-1234" }));
+
+    expect(get).toHaveBeenCalledTimes(1);
+    const [path, opts] = get.mock.calls[0] as [string, { headers: Record<string, string> }];
+    const url = new URL(path, "http://orchestrator");
+    expect(url.pathname).toBe("/api/email/contacts");
+    expect(url.searchParams.get("query")).toBe("bob");
+    expect(url.searchParams.get("limit")).toBe("5");
+    // Whatever the transport put in ctx.userId — a username or a User.id — is
+    // forwarded as is; the orchestrator resolves it.
+    expect(opts.headers["X-Droplet-User"]).toBe("u-1234");
+  });
+
+  it("defaults the limit to 10", async () => {
+    const get = answer(200, { query: "bob", accountCount: 1, contacts: [] });
+    await searchContacts.handler({ query: "bob" }, ctxWith({ get }));
+    const [path] = get.mock.calls[0] as [string];
+    expect(new URL(path, "http://orchestrator").searchParams.get("limit")).toBe("10");
+  });
+
+  it("returns the orchestrator's contacts in the tool's shape", async () => {
+    const get = answer(200, { query: "bob", accountCount: 2, contacts: CONTACTS });
+    const r = await searchContacts.handler({ query: "bob" }, ctxWith({ get }));
+    expect(r).toEqual({
+      ok: true,
+      data: { type: "search_contacts", contacts: CONTACTS, count: 2, query: "bob" },
+    });
+  });
+
+  it("says so when the person has no mailbox connected", async () => {
+    const get = answer(200, { query: "bob", accountCount: 0, contacts: [] });
+    const r = await searchContacts.handler({ query: "bob" }, ctxWith({ get }));
     expect(r.ok).toBe(true);
     if (r.ok) {
-      const data = r.data as {
-        type: string;
-        contacts: unknown[];
-        count: number;
-        query: string;
-        note?: string;
-      };
-      expect(data.type).toBe("search_contacts");
+      const data = r.data as { contacts: unknown[]; count: number; note?: string };
       expect(data.contacts).toEqual([]);
       expect(data.count).toBe(0);
-      expect(data.query).toBe("bob");
-      expect(typeof data.note).toBe("string");
-      expect(data.note?.length).toBeGreaterThan(0);
+      expect(data.note).toMatch(/No email accounts are connected/);
     }
-    expect(accountFindMany).toHaveBeenCalledWith({
-      where: { userId: "alice" },
-      select: { id: true },
+  });
+
+  it("a 403 (nobody, or a person outside the route's roles) is a FORBIDDEN refusal", async () => {
+    const r = await searchContacts.handler({ query: "bob" }, ctxWith({ get: answer(403, { error: "forbidden" }) }));
+    expect(r).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+  });
+
+  it("any other failure is an error the model can report, never an empty list", async () => {
+    for (const status of [401, 404, 500, 503]) {
+      const r = await searchContacts.handler({ query: "bob" }, ctxWith({ get: answer(status, {}) }));
+      expect(r, String(status)).toMatchObject({ ok: false, error: { code: "CONTACT_SEARCH_FAILED" } });
+    }
+  });
+
+  it("never reads the email tables itself", async () => {
+    const refuse = vi.fn(async () => {
+      throw new Error("read through ctx.prisma");
     });
-    expect(messageFindMany).not.toHaveBeenCalled();
-  });
-
-  it("scopes the message query to the caller's accountIds with a case-insensitive OR", async () => {
-    const accountFindMany = vi.fn().mockResolvedValue([{ id: "a1" }, { id: "a2" }]);
-    const messageFindMany = vi.fn().mockResolvedValue([]);
-    const r = await searchContacts.handler(
+    const get = answer(200, { query: "bob", accountCount: 1, contacts: CONTACTS });
+    await searchContacts.handler(
       { query: "bob" },
-      ctxWith({ accountFindMany, messageFindMany }),
+      ctxWith({ get, prisma: { emailAccount: { findMany: refuse }, emailMessage: { findMany: refuse } } }),
     );
-    expect(r.ok).toBe(true);
-    expect(messageFindMany).toHaveBeenCalledWith({
-      where: {
-        accountId: { in: ["a1", "a2"] },
-        OR: [
-          { fromAddr: { contains: "bob", mode: "insensitive" } },
-          { fromName: { contains: "bob", mode: "insensitive" } },
-        ],
-      },
-      select: { fromAddr: true, fromName: true, receivedAt: true },
-      orderBy: { receivedAt: "desc" },
-      take: 500,
-    });
+    expect(refuse).not.toHaveBeenCalled();
   });
 
-  it("groups by lowercased address, keeps the most recent non-empty name, counts and ranks", async () => {
-    const accountFindMany = vi.fn().mockResolvedValue([{ id: "a1" }]);
-    // Rows arrive receivedAt DESC, exactly as the prisma query orders them.
-    const messageFindMany = vi.fn().mockResolvedValue([
-      { fromAddr: "Bob@Example.com", fromName: null, receivedAt: new Date("2026-07-04T00:00:00Z") },
-      { fromAddr: "alice.b@example.com", fromName: "Alice Bobson", receivedAt: new Date("2026-07-03T00:00:00Z") },
-      { fromAddr: "bob@example.com", fromName: "Bobby", receivedAt: new Date("2026-07-02T00:00:00Z") },
-      { fromAddr: "BOB@EXAMPLE.COM", fromName: "Bob Old", receivedAt: new Date("2026-07-01T00:00:00Z") },
-    ]);
-    const r = await searchContacts.handler(
-      { query: "bob" },
-      ctxWith({ accountFindMany, messageFindMany }),
-    );
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      const data = r.data as {
-        count: number;
-        contacts: Array<{
-          address: string;
-          name: string | null;
-          lastSeenAt: string;
-          messageCount: number;
-        }>;
-      };
-      expect(data.count).toBe(2);
-      // bob@ has 3 messages (casing folded) → ranks first.
-      expect(data.contacts[0]).toEqual({
-        address: "bob@example.com",
-        // Most recent row has no name; most recent NON-EMPTY name wins.
-        name: "Bobby",
-        lastSeenAt: "2026-07-04T00:00:00.000Z",
-        messageCount: 3,
-      });
-      expect(data.contacts[1]).toEqual({
-        address: "alice.b@example.com",
-        name: "Alice Bobson",
-        lastSeenAt: "2026-07-03T00:00:00.000Z",
-        messageCount: 1,
-      });
+  it("rejects a missing/empty/over-long query before any HTTP", async () => {
+    const get = vi.fn();
+    for (const args of [{}, { query: "" }, { query: "   " }, { query: "x".repeat(121) }, { query: 42 }]) {
+      const r = await searchContacts.handler(args as Record<string, unknown>, ctxWith({ get }));
+      expect(r, JSON.stringify(args)).toMatchObject({ ok: false, error: { code: "INVALID_ARGS" } });
     }
+    expect(get).not.toHaveBeenCalled();
   });
 
-  it("breaks messageCount ties by lastSeenAt desc and honors limit", async () => {
-    const accountFindMany = vi.fn().mockResolvedValue([{ id: "a1" }]);
-    const messageFindMany = vi.fn().mockResolvedValue([
-      { fromAddr: "new@example.com", fromName: "New", receivedAt: new Date("2026-07-10T00:00:00Z") },
-      { fromAddr: "old@example.com", fromName: "Old", receivedAt: new Date("2026-07-01T00:00:00Z") },
-    ]);
-    const both = await searchContacts.handler(
-      { query: "example" },
-      ctxWith({ accountFindMany, messageFindMany }),
-    );
-    expect(both.ok).toBe(true);
-    if (both.ok) {
-      const data = both.data as { contacts: Array<{ address: string }> };
-      expect(data.contacts.map((c) => c.address)).toEqual([
-        "new@example.com",
-        "old@example.com",
-      ]);
-    }
-    const limited = await searchContacts.handler(
-      { query: "example", limit: 1 },
-      ctxWith({ accountFindMany, messageFindMany }),
-    );
-    expect(limited.ok).toBe(true);
-    if (limited.ok) {
-      const data = limited.data as { count: number; contacts: Array<{ address: string }> };
-      expect(data.count).toBe(1);
-      expect(data.contacts.map((c) => c.address)).toEqual(["new@example.com"]);
-    }
-  });
-
-  it("rejects a missing/empty/over-long query before touching Prisma", async () => {
-    const accountFindMany = vi.fn();
-    for (const args of [{}, { query: "" }, { query: "x".repeat(121) }, { query: 42 }]) {
-      const r = await searchContacts.handler(
-        args as Record<string, unknown>,
-        ctxWith({ accountFindMany }),
-      );
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
-    }
-    expect(accountFindMany).not.toHaveBeenCalled();
-  });
-
-  it("rejects an out-of-range or non-integer limit before touching Prisma", async () => {
-    const accountFindMany = vi.fn();
+  it("rejects an out-of-range or non-integer limit before any HTTP", async () => {
+    const get = vi.fn();
     for (const limit of [0, 26, 1.5, "five"]) {
-      const r = await searchContacts.handler(
-        { query: "bob", limit },
-        ctxWith({ accountFindMany }),
-      );
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
+      const r = await searchContacts.handler({ query: "bob", limit }, ctxWith({ get }));
+      expect(r, String(limit)).toMatchObject({ ok: false, error: { code: "INVALID_ARGS" } });
     }
-    expect(accountFindMany).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("metadata: Tier-1 read-only, query required, no extra args", () => {

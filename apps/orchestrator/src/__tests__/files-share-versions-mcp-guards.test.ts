@@ -93,6 +93,7 @@ vi.mock("../config.js", () => ({
 
 import { createFilesRouter } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
+import { userDirectory } from "./helpers/user-directory.js";
 
 const ncCreateShareV2 = nc.ncCreateShareV2 as unknown as ReturnType<typeof vi.fn>;
 const ncGetFileId = nc.ncGetFileId as unknown as ReturnType<typeof vi.fn>;
@@ -129,7 +130,9 @@ function buildApp(asUser: { id: string; username: string; role: string }) {
     department: { findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn().mockResolvedValue(null) },
     departmentMembership: { findUnique: vi.fn().mockResolvedValue(null) },
     departmentShare: { create: vi.fn() },
-    user: { findUnique: vi.fn().mockResolvedValue(null) },
+    // WARP-3117: the MCP principal's X-Nextcloud-User resolves to a person
+    // and acts as their Nextcloud login.
+    user: userDirectory([{ id: "u-alice", username: "alice", nextcloudUsername: "alice", role: "family" }]),
   };
   app.use("/api", createFilesRouter(prismaStub as never));
   return app;

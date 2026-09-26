@@ -361,4 +361,35 @@ describe("TOOL_ROUTES manifest (WARP-1455)", () => {
       });
     }
   });
+
+  // ── WARP-3101: tools over a username-keyed table go through the orchestrator ──
+  //
+  // `ctx.userId` is User.username on the mcp-server's stdio transport and
+  // User.id on its HTTP one. CalendarEvent.userId and Reminder.userId hold the
+  // USERNAME, so a handler that keys them on ctx.userId through ctx.prisma is
+  // right on one transport and silently wrong on the other (over HTTP: empty
+  // lists, the person's own rows FORBIDDEN, reminders never delivered). These
+  // tools reach the rows through the orchestrator's routes, which resolve the
+  // acting person and key on their username. `none` for any of them — or a
+  // ctx.prisma call in its handler — is that bug coming back.
+  describe("WARP-3101 the calendar and reminder tools dispatch through the orchestrator", () => {
+    const USERNAME_KEYED = [
+      "create_event",
+      "list_events",
+      "search_calendar_events",
+      "update_event",
+      "delete_event",
+      "create_reminder",
+      "set_timer",
+      "list_reminders",
+      "complete_reminder",
+    ];
+
+    it.each(USERNAME_KEYED)("%s", (tool) => {
+      const entry = ENTRY_BY_TOOL.get(tool);
+      expect(entry?.client, `${tool} must call the orchestrator, not read its table itself`).toBe("orchestrator");
+      expect(entry?.hops.every((h) => h.kind === "admit" && /^\/api\/(calendar|reminders)\//.test(h.pathPattern + "/"))).toBe(true);
+      expect(stripComments(SOURCE_BY_TOOL.get(tool)!), `${tool}'s handler touches ctx.prisma`).not.toMatch(/\bctx\.prisma\b/);
+    });
+  });
 });
