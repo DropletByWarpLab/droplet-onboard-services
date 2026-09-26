@@ -186,6 +186,7 @@ the device rather than opening a second stream on it.
 | `VOICE_INPUT_DOWNMIX` | `first` or `mean` channel downmix |
 | `VOICE_INPUT_GAIN` | software input gain |
 | `STT_URL` / `STT_LANGUAGE` / `STT_MAX_RECORD_S` | Whisper sidecar (5.0 s cap via compose) |
+| `WHISPER_CPUS` / `WHISPER_CPU_THREADS` | Whisper sidecar CPU quota and decode threads, default 4 / 4 (WARP-3126, was 2 / 2). Keep them equal (WARP-1434). STT is CPU-only |
 | `TTS_URL` / `TTS_VOICE` | Piper sidecar; `en_US-ryan-medium` default, other voices download on demand |
 | `LLM_MODEL` | model the reply call requests |
 | `DROPLET_LOCATION` / `TZ` | pin geo/timezone; removes the ipapi.co startup lookup |
