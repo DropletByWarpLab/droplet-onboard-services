@@ -20,14 +20,25 @@
  *
  * SIZE. The mcp-server bounds a tool result at 8,000 chars
  * (tool-result-bounding.ts); a list cut there loses its cursor. So every
- * list is fitted HERE under `ASSISTANT_BODY_BUDGET` by `fitList`, which
+ * list is fitted HERE under `assistantBodyBudget()` by `fitList`, which
  * drops whole items from the end and hands back where to resume.
  */
 import type { SecurityEventKind, SecurityIncidentScope, SecurityIncidentState, SecurityReasonCode, SecuritySeverity, SecurityZoneKind } from "@prisma/client";
 import { assistantInstant } from "../lib/security-assistant-period.js";
+import { config } from "../config.js";
 
-/** Leaves the tool's `type` and the transport's framing room under the 8,000-char tool cap. */
-export const ASSISTANT_BODY_BUDGET = 7_400;
+/** Room left for the tool's `type` and the transport's framing under the tool-result cap. */
+export const ASSISTANT_FRAMING_CHARS = 600;
+
+/**
+ * Review #2420 (item 9) — the size every list is fitted under: the agent's
+ * tool-result cap (`config.AGENT_TOOL_RESULT_CAP_CHARS`, the generic bounder's
+ * threshold) less the framing. Derived, not fixed: with a lower cap a fixed
+ * 7,400 would let the bounder cut the list itself and strip its `nextCursor`.
+ */
+export function assistantBodyBudget(cap: number = config.AGENT_TOOL_RESULT_CAP_CHARS): number {
+  return Math.max(1_000, cap - ASSISTANT_FRAMING_CHARS);
+}
 
 /**
  * Review #2420 (item 6) — the words a detection's label may reach the model as.
@@ -192,7 +203,7 @@ export function nameKey(raw: string): string {
  * bounded by its own field limits, and an answer of nothing with a cursor
  * would read as "nothing happened".
  */
-export function fitList<T>(items: readonly T[], wrap: (kept: readonly T[]) => unknown, budget = ASSISTANT_BODY_BUDGET): number {
+export function fitList<T>(items: readonly T[], wrap: (kept: readonly T[]) => unknown, budget = assistantBodyBudget()): number {
   let n = items.length;
   while (n > 1 && JSON.stringify(wrap(items.slice(0, n))).length > budget) n--;
   return n;

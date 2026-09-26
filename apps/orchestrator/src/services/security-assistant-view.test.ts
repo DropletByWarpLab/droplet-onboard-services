@@ -7,8 +7,9 @@
  *     lower cap can't make the generic bounder cut a list and strip its
  *     `nextCursor`.
  */
-import { describe, expect, it } from "vitest";
-import { OBJECT_WORDS, eventWhat } from "./security-assistant-view.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { config } from "../config.js";
+import { ASSISTANT_FRAMING_CHARS, OBJECT_WORDS, assistantBodyBudget, eventWhat, fitList } from "./security-assistant-view.js";
 
 describe("eventWhat — a detection's label is a word from a fixed list", () => {
   it.each(["person", "car", "dog", "cat", "truck", "bicycle"])("%s → '%s seen'", (label) => {
@@ -28,5 +29,27 @@ describe("eventWhat — a detection's label is a word from a fixed list", () => 
   it("the list is words, not free text", () => {
     for (const w of OBJECT_WORDS) expect(w).toMatch(/^[a-z]+( [a-z]+)?$/);
     expect(OBJECT_WORDS.has("person")).toBe(true);
+  });
+});
+
+describe("assistantBodyBudget — follows the tool-result cap", () => {
+  const original = config.AGENT_TOOL_RESULT_CAP_CHARS;
+  afterEach(() => {
+    config.AGENT_TOOL_RESULT_CAP_CHARS = original;
+  });
+
+  it("the cap less the framing margin: 8,000 → 7,400, as it always was", () => {
+    config.AGENT_TOOL_RESULT_CAP_CHARS = 8_000;
+    expect(assistantBodyBudget()).toBe(8_000 - ASSISTANT_FRAMING_CHARS);
+    expect(assistantBodyBudget()).toBe(7_400);
+  });
+
+  it("a lower cap lowers the budget, and fitList fits under it", () => {
+    config.AGENT_TOOL_RESULT_CAP_CHARS = 3_000;
+    expect(assistantBodyBudget()).toBe(2_400);
+    const items = Array.from({ length: 100 }, (_, i) => ({ i, text: "x".repeat(80) }));
+    const n = fitList(items, (kept) => ({ items: kept, nextCursor: "0000000000000.00000000-0000-0000-0000-000000000000" }));
+    expect(n).toBeLessThan(100);
+    expect(JSON.stringify({ items: items.slice(0, n), nextCursor: "0000000000000.00000000-0000-0000-0000-000000000000" }).length).toBeLessThanOrEqual(2_400);
   });
 });
