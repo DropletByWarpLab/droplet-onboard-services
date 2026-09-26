@@ -13,7 +13,9 @@ import type { CloudHistorySummary } from "@/lib/api";
  * to a cloud model, whatever is chosen here: the server replays only the
  * user's own messages. So when the summary says so (`neverSent`), the dialog
  * says it too and offers only that — a "send everything" button would promise
- * what the server will not do.
+ * what the server will not do. That lone button is an ACKNOWLEDGEMENT, not a
+ * choice (#2420 review 7): it records nothing, so an earlier "send the whole
+ * conversation" is never overwritten by a decline the person did not make.
  */
 export function CloudHistoryConsentDialog({
   open,
@@ -72,7 +74,12 @@ export function CloudHistoryConsentDialog({
           )}
         </div>
         <div className="flex justify-end gap-2">
-          <button type="button" className={onlyMine ? "btn primary" : "btn"} disabled={pending} onClick={() => decide("declined")}>
+          <button
+            type="button"
+            className={onlyMine ? "btn primary" : "btn"}
+            disabled={pending}
+            onClick={() => (onlyMine ? onClose() : void decide("declined"))}
+          >
             Only my messages
           </button>
           {!onlyMine && (
