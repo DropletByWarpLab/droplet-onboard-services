@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   __setRedisForTesting,
   cacheIncr,
+  cacheSetAdd,
   cacheSetNx,
   invalidatePrefix,
   withSwrCache,
@@ -74,7 +75,17 @@ function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" | "eval" } = {})
       if (!e) return 0;
       // EXPIRE … NX only sets a TTL when the key currently has none.
       if (mode === "NX" && e.expiresAt) return 0;
-      e.expiresAt = Date.now() + ttl * 1000;
+      // EXPIRE … GT: a key with NO TTL counts as an infinite TTL, so GT is a
+      // no-op on it (PERF-12) and otherwise only ever extends.
+      const next = Date.now() + ttl * 1000;
+      if (mode === "GT" && (!e.expiresAt || next <= e.expiresAt)) return 0;
+      e.expiresAt = next;
+      return 1;
+    }),
+    // SADD: members are irrelevant to these tests, only that the key exists
+    // TTL-less, as real Redis creates it.
+    sadd: vi.fn(async (k: string, _member: string) => {
+      if (!store.has(k)) store.set(k, { value: "set", expiresAt: 0 });
       return 1;
     }),
     // Fake EVAL just enough to run the cacheIncr Lua script: INCR the key, and
@@ -253,6 +264,29 @@ describe("cache.service (WARP-90)", () => {
 
       const won = await cacheSetNx("jwt:rotate:err", true, 30);
       expect(won).toBe(false);
+    });
+  });
+
+  describe("cacheSetAdd index TTL (WARP-3193 PERF-12)", () => {
+    it("gives a freshly created index set a TTL (EXPIRE GT alone is a no-op on a TTL-less key)", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as never);
+
+      await cacheSetAdd("jwt:sessions:u1", "hash:1", 600);
+
+      expect(fake.store.get("jwt:sessions:u1")!.expiresAt).toBeGreaterThan(0);
+    });
+
+    it("only ever extends the TTL — a shorter-lived member never shrinks it", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as never);
+
+      await cacheSetAdd("jwt:sessions:u1", "hash:1", 600);
+      const long = fake.store.get("jwt:sessions:u1")!.expiresAt;
+      await cacheSetAdd("jwt:sessions:u1", "hash:2", 60);
+      expect(fake.store.get("jwt:sessions:u1")!.expiresAt).toBe(long);
     });
   });
 

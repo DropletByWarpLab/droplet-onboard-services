@@ -163,7 +163,10 @@ export async function cacheSetAdd(
     const client = getRedis();
     await client.sadd(key, member);
     if (ttlSeconds && ttlSeconds > 0) {
-      // GT: only extend, never shrink, the set's TTL.
+      // NX stamps the first TTL (WARP-3193 PERF-12: GT treats a key with no
+      // TTL as infinite, so GT alone never set one); GT then only extends,
+      // never shrinks, the set's TTL.
+      await client.expire(key, ttlSeconds, "NX");
       await client.expire(key, ttlSeconds, "GT");
     }
   } catch {

@@ -66,6 +66,9 @@ type Entry = { value: string; expiresAt: number };
 function makeFakeRedis() {
   const kv = new Map<string, Entry>();
   const zsets = new Map<string, Map<string, number>>();
+  // Index-key TTLs with real EXPIRE NX/GT semantics: a key with no TTL is
+  // "infinite" to GT, so GT alone never stamps one (PERF-12).
+  const ttls = new Map<string, number>();
   const live = (e?: Entry) => !!e && (!e.expiresAt || Date.now() <= e.expiresAt);
   return {
     kv,
@@ -119,7 +122,15 @@ function makeFakeRedis() {
       if (!z) return 0;
       return z.delete(member) ? 1 : 0;
     }),
-    expire: vi.fn(async () => 1),
+    ttls,
+    expire: vi.fn(async (k: string, ttl: number, mode?: string) => {
+      const cur = ttls.get(k);
+      const next = Date.now() + Number(ttl) * 1000;
+      if (mode === "NX" && cur !== undefined) return 0;
+      if (mode === "GT" && (cur === undefined || next <= cur)) return 0;
+      ttls.set(k, next);
+      return 1;
+    }),
   };
 }
 
@@ -380,6 +391,17 @@ describe("checkSession — idle + absolute enforcement", () => {
     expect(result.kind).toBe("ok");
     const after = JSON.parse(fake.kv.get(SESSION_KEY_PREFIX + sid)!.value);
     expect(after.lastSeenAt).toBe(before.lastSeenAt);
+  });
+});
+
+describe("session index TTL (WARP-3193 PERF-12)", () => {
+  it("stamps a TTL on a freshly created index ZSET, and later logins only extend it", async () => {
+    await createSession(alice);
+    const first = fake.ttls.get(SESSION_INDEX_PREFIX + "u-alice");
+    expect(first).toBeDefined();
+    advanceSeconds(10);
+    await createSession(alice);
+    expect(fake.ttls.get(SESSION_INDEX_PREFIX + "u-alice")!).toBeGreaterThan(first!);
   });
 });
 

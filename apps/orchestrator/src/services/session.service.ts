@@ -171,7 +171,9 @@ export async function createSession(user: {
     const redis = getRedis();
     await redis.set(SESSION_KEY_PREFIX + sid, JSON.stringify(record), "EX", gcTtl);
     await redis.zadd(idxKey, now, sid);
-    // GT: only ever extend the index TTL (mirrors cacheSetAdd's posture).
+    // NX stamps the first TTL, GT only ever extends it (mirrors cacheSetAdd;
+    // WARP-3193 PERF-12: GT alone is a no-op on a key with no TTL).
+    await redis.expire(idxKey, gcTtl, "NX");
     await redis.expire(idxKey, gcTtl, "GT");
 
     // Concurrent cap: walk oldest-first, GC index members whose record
