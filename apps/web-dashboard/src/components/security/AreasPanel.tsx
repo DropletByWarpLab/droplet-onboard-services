@@ -90,7 +90,8 @@ export const COPY = {
   conflict: "Someone else changed this area while you were editing. What's shown now is their version, so make your change again.",
   // WARP-2979 — Droplet's links.
   linkedByDroplet: "Linked by Droplet",
-  whyLinked: "Why Droplet linked {link}",
+  // WCAG 2.5.3: the chip's name starts with its visible text ("Linked by Droplet").
+  whyLinked: "Linked by Droplet: why Droplet linked {link}",
   suggestedByDroplet: "Suggested by Droplet: {links}",
   linkingOff: "Droplet isn't looking for links. You can turn this on in Security settings.",
   kept: "Kept. {camera} now counts for alerts in {area}.",
@@ -163,6 +164,9 @@ export function AreasPanel() {
   const hoursQ = useSecurityHours();
   const tz = (hoursQ.hours?.state === "set" ? hoursQ.hours.timezone : null) ?? deviceTimeZone() ?? "UTC";
   const [why, setWhy] = useState<{ zoneId: string; linkId: string } | null>(null);
+  // Where focus returns when the evidence panel closes: the chip that opened it — or, once a Keep / Undo has
+  // taken the chip away, the area's What covers it? (review #2418).
+  const whyReturnRef = useRef<HTMLElement | null>(null);
   const { toast } = useToast();
 
   const [editor, setEditor] = useState<Editor>(null);
@@ -178,6 +182,12 @@ export function AreasPanel() {
   const [focusAreaId, setFocusAreaId] = useState<string | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
 
+  /** An area card's first action — What covers it? — else its first button; null when the card isn't on screen. */
+  const areaAction = (zoneId: string): HTMLButtonElement | null => {
+    const card = Array.from(listRef.current?.children ?? []).find((el) => (el as HTMLElement).dataset.zoneId === zoneId);
+    return card?.querySelector<HTMLButtonElement>("[data-area-links]") ?? card?.querySelector<HTMLButtonElement>("button") ?? null;
+  };
+
   const all = useMemo(() => zonesQ.zones ?? [], [zonesQ.zones]);
   const active = useMemo(() => all.filter((z) => z.state === "active"), [all]);
 
@@ -185,10 +195,7 @@ export function AreasPanel() {
   // refresh lands after the unarchive resolves, so wait until the card exists.
   useEffect(() => {
     if (!focusAreaId) return;
-    const card = Array.from(listRef.current?.children ?? []).find(
-      (el) => (el as HTMLElement).dataset.zoneId === focusAreaId,
-    );
-    const target = card?.querySelector<HTMLButtonElement>("button");
+    const target = areaAction(focusAreaId);
     if (target) {
       target.focus();
       setFocusAreaId(null);
@@ -299,9 +306,11 @@ export function AreasPanel() {
     [zonesQ.error],
   );
   // WARP-2979 — Keep and Undo (routes 24/25). A refusal is the panel's report(); the popover stays open.
+  // Done: the chip goes with the Droplet-set link, so the popover hands focus to the area's card instead.
   const onKeep = async (zone: SecurityZoneView, link: SecurityZoneLinkView) => {
     try {
       await proposalsQ.accept(link.id);
+      whyReturnRef.current = areaAction(zone.id) ?? whyReturnRef.current;
       const alerting = zone.kind === "interior" || zone.kind === "restricted";
       toast(fillCopy(alerting ? COPY.kept : COPY.keptPlain, { camera: upperFirst(sourcePhrase(link)), area: zone.name }), "success");
     } catch (err) {
@@ -312,6 +321,7 @@ export function AreasPanel() {
   const onUndo = async (zone: SecurityZoneView, link: SecurityZoneLinkView) => {
     try {
       await proposalsQ.reject(link.id);
+      whyReturnRef.current = areaAction(zone.id) ?? whyReturnRef.current;
       toast(fillCopy(COPY.undone, { camera: sourcePhrase(link), area: zone.name }), "success");
     } catch (err) {
       report(err);
@@ -400,7 +410,10 @@ export function AreasPanel() {
                               data-linked-by-droplet={l.id}
                               aria-label={fillCopy(COPY.whyLinked, { link: linkPhrase(l) })}
                               aria-haspopup="dialog"
-                              onClick={() => setWhy({ zoneId: zone.id, linkId: l.id })}
+                              onClick={(e) => {
+                                whyReturnRef.current = e.currentTarget;
+                                setWhy({ zoneId: zone.id, linkId: l.id });
+                              }}
                               style={{ cursor: "pointer", verticalAlign: "baseline" }}
                             >
                               {COPY.linkedByDroplet}
@@ -444,6 +457,7 @@ export function AreasPanel() {
                     type="button"
                     className="btn sm"
                     aria-describedby={titleId}
+                    data-area-links
                     onClick={() => setLinksFor(zone.id)}
                   >
                     {COPY.whatCovers}
@@ -497,6 +511,7 @@ export function AreasPanel() {
           now={new Date()}
           accept={proposalsQ.accept}
           reject={proposalsQ.reject}
+          onDecided={(zoneId) => setFocusAreaId(zoneId)}
         />
       )}
 
@@ -512,6 +527,7 @@ export function AreasPanel() {
         onClose={() => setWhy(null)}
         onKeep={(l) => onKeep(whyZone!, l)}
         onUndo={(l) => onUndo(whyZone!, l)}
+        returnFocusRef={whyReturnRef}
       />
 
       {archived.length > 0 && (

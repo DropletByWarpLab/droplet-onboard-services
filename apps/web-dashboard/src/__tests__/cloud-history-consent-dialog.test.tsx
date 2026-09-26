@@ -52,11 +52,14 @@ describe("CloudHistoryConsentDialog", () => {
 
   // WARP-2979 (ADR-059 P4 §6.13) — the server never replays an answer that used Security, whatever is chosen.
   it("with a Security answer: says it stays on the Droplet, and offers only what will happen", async () => {
-    const { onDecide } = renderDialog(undefined, undefined, { neverSent: ["Security"] });
+    const { onDecide, onClose } = renderDialog(undefined, undefined, { neverSent: ["Security"] });
     expect(screen.getByText(/Answers that used Security stay on this Droplet/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Send the whole conversation" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Only my messages" }));
-    await waitFor(() => expect(onDecide).toHaveBeenCalledWith("declined"));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    // Review #2420 (item 7): the lone button is an acknowledgement, not a choice. It records NOTHING, so an
+    // earlier "send the whole conversation" is not overwritten (it still covers the answers that may be sent).
+    expect(onDecide).not.toHaveBeenCalled();
   });
 
   it("without one, both choices stay and Security is not mentioned", () => {

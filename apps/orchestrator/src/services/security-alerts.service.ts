@@ -208,6 +208,8 @@ function alertEvidenceOf(
       ? {
           seenAt: typeof activity?.at === "string" ? new Date(activity.at) : null,
           seenCameraLabel: r.relatedCamera ? (labels.get(r.relatedCamera) ?? r.relatedCamera) : null,
+          // Where the person was seen (review #2418) — not always the incident's area.
+          seenAreaName: typeof activity?.zoneName === "string" ? activity.zoneName : null,
         }
       : {}),
   };

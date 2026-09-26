@@ -15,8 +15,14 @@
  *
  * Presentational: the panel does the writes and the toasts; a rejection keeps
  * this open.
+ *
+ * Review #2418: in flight, Keep and Undo are aria-disabled — never `disabled`,
+ * which would drop focus out of the dialog on a refused Keep — and a ref
+ * refuses a second press. After a Keep or Undo the chip that opened this is
+ * gone; `returnFocusRef` (the Dialog's triggerRef) is where the panel wants
+ * focus to land instead.
  */
-import { useId, useState } from "react";
+import { useId, useRef, useState, type RefObject } from "react";
 import { Loader2, X } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import type { SecurityZoneKind, SecurityZoneLinkView } from "@/lib/types";
@@ -45,15 +51,19 @@ export interface LinkWhyPopoverProps {
   /** Reject to keep it open (the caller shows why). */
   onKeep: (link: SecurityZoneLinkView) => Promise<unknown>;
   onUndo: (link: SecurityZoneLinkView) => Promise<unknown>;
+  /** Where focus returns when the panel closes (the chip, or the area card after a Keep / Undo). */
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
-export function LinkWhyPopover({ open, link, zoneKind, canManage, tz, now, onClose, onKeep, onUndo }: LinkWhyPopoverProps) {
+export function LinkWhyPopover({ open, link, zoneKind, canManage, tz, now, onClose, onKeep, onUndo, returnFocusRef }: LinkWhyPopoverProps) {
   const uid = useId();
   const titleId = `${uid}-title`;
   const [pending, setPending] = useState<"keep" | "undo" | null>(null);
+  const pendingRef = useRef(false);
 
   const act = async (which: "keep" | "undo") => {
-    if (!link || pending) return;
+    if (!link || pendingRef.current) return;
+    pendingRef.current = true;
     setPending(which);
     try {
       await (which === "keep" ? onKeep(link) : onUndo(link));
@@ -61,6 +71,7 @@ export function LinkWhyPopover({ open, link, zoneKind, canManage, tz, now, onClo
     } catch {
       // The panel has shown why; stay open to retry.
     } finally {
+      pendingRef.current = false;
       setPending(null);
     }
   };
@@ -68,7 +79,7 @@ export function LinkWhyPopover({ open, link, zoneKind, canManage, tz, now, onClo
   const sentences = link?.evidence ? evidenceSentences(link.evidence, tz, now) : [LINK_COPY.noEvidence];
 
   return (
-    <Dialog open={open} onClose={onClose} placement="right" labelledBy={titleId} flush>
+    <Dialog open={open} onClose={onClose} placement="right" labelledBy={titleId} flush triggerRef={returnFocusRef}>
       <div style={{ display: "flex", flexDirection: "column", minHeight: "100%" }}>
         <div
           style={{
@@ -115,11 +126,11 @@ export function LinkWhyPopover({ open, link, zoneKind, canManage, tz, now, onClo
               borderTop: "1px solid var(--border)",
             }}
           >
-            <button type="button" className="btn ghost" onClick={() => void act("undo")} disabled={pending !== null}>
+            <button type="button" className="btn ghost" onClick={() => void act("undo")} aria-disabled={pending !== null || undefined}>
               {pending === "undo" ? <Loader2 size={16} className="animate-spin" aria-hidden /> : null}
               {WHY_COPY.undo}
             </button>
-            <button type="button" className="btn primary" onClick={() => void act("keep")} disabled={pending !== null}>
+            <button type="button" className="btn primary" onClick={() => void act("keep")} aria-disabled={pending !== null || undefined}>
               {pending === "keep" ? <Loader2 size={16} className="animate-spin" aria-hidden /> : null}
               {WHY_COPY.keep}
             </button>

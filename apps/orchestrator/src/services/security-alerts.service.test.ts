@@ -354,7 +354,7 @@ describe("the notifier (§6.7)", () => {
     expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_not_visible" });
     const owner = f.world.notificationLog.find((r) => r.username === "stefan")!;
     expect(owner.title).toBe("A camera in Stock room stopped reporting after hours");
-    expect(owner.body).toBe("Front door stopped reporting at 10:19 PM, soon after someone was seen in Stock room. The site was closed.");
+    expect(owner.body).toBe("Front door stopped reporting at 10:19 PM, soon after someone was seen by Back camera in Stock room at 10:18 PM. The site was closed.");
   });
 
   it("WARP-2979: …and when she can see both, she is told in the new words", async () => {
@@ -366,8 +366,18 @@ describe("the notifier (§6.7)", () => {
     LEVELS[MARIA] = "act";
     await notifyPendingIncidents(client(f), deps(), NOW);
     expect(f.world.notificationLog.find((r) => r.username === "maria")!.body).toBe(
-      "Front door stopped reporting at 10:19 PM, soon after someone was seen in Stock room. The site was closed.",
+      "Front door stopped reporting at 10:19 PM, soon after someone was seen in Stock room at 10:18 PM. The site was closed.",
     );
+  });
+
+  it("review #2418: the push names the area where the person was SEEN (detail.activity.zoneName), not the incident's", async () => {
+    const r = dropped("front", "back", plus(NOW, -30_000));
+    (r.detail as unknown as { activity: { zoneName: string } }).activity.zoneName = "Back door";
+    const f = world({ securityIncidentReason: [r], securityIncident: [incident({ cameras: ["back", "front"], reasonCodes: ["camera_offline_during_activity"] })] });
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    const owner = f.world.notificationLog.find((x) => x.username === "stefan")!;
+    expect(owner.title).toBe("A camera in Stock room stopped reporting after hours");
+    expect(owner.body).toBe("Front door stopped reporting at 10:19 PM, soon after someone was seen by Back camera in Back door at 10:18 PM. The site was closed.");
   });
 
   it("the owner fallback: the only routed person lost access → the owner is told (fallback_owner), the routed one skipped_no_access", async () => {

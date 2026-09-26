@@ -42,6 +42,11 @@ export interface ProjectedIncidentKey {
   projectedLast: Date;
 }
 
+// Review #2420 — the chat tools' period is judged on the viewer's PROJECTED span, computed here beside
+// `projectedLast` by the same rule (`projectedFirstActivity`): the earliest `first` among the seen entries,
+// else the stored `firstActivityAt`. The stored-span clause stays as a prefilter the index can use (her span
+// lies inside the stored one); the projected clause decides.
+
 /** A viewer with a camera list (not `"all"`). */
 export type CameraLimitedViewer = IncidentViewer & { visibleCameras: ReadonlySet<string> };
 
@@ -99,7 +104,7 @@ export async function projectedIncidentPage(
   if (f.severity === "alert") where.push(visibleAlert);
   if (f.severity === "notice") where.push(Prisma.sql`(${visibleNotice} AND NOT ${visibleAlert})`);
   if (f.zoneId) where.push(Prisma.sql`i."zoneId" = ${f.zoneId}`);
-  // WARP-2979 — the chat tools' period, on the STORED span (incidentListWhere's twin; a prefilter, see IncidentListFilters).
+  // WARP-2979 — the chat tools' period, on the STORED span: the index-friendly prefilter; the projected span decides below.
   if (f.activeBetween) {
     where.push(
       Prisma.sql`(i."lastActivityAt" >= ${f.activeBetween.from.toISOString()}::timestamp AND i."firstActivityAt" <= ${f.activeBetween.to.toISOString()}::timestamp)`,
@@ -110,21 +115,26 @@ export async function projectedIncidentPage(
   const after = f.cursor
     ? Prisma.sql`WHERE (p."projectedLast", p."id") < (${f.cursor.at.toISOString()}::timestamp, ${f.cursor.id})`
     : Prisma.empty;
+  const projectedPeriod = f.activeBetween
+    ? Prisma.sql` ${f.cursor ? Prisma.sql`AND` : Prisma.sql`WHERE`} p."projectedLast" >= ${f.activeBetween.from.toISOString()}::timestamp AND p."projectedFirst" <= ${f.activeBetween.to.toISOString()}::timestamp`
+    : Prisma.empty;
 
   return prisma.$queryRaw<ProjectedIncidentKey[]>`
     SELECT p."id", p."projectedLast" FROM (
       SELECT i."id",
-             CASE WHEN s."shown" = 0 OR s."shown" = s."total" THEN i."lastActivityAt" ELSE s."shownLast" END AS "projectedLast"
+             CASE WHEN s."shown" = 0 OR s."shown" = s."total" THEN i."lastActivityAt" ELSE s."shownLast" END AS "projectedLast",
+             CASE WHEN s."shown" = 0 OR s."shown" = s."total" THEN i."firstActivityAt" ELSE s."shownFirst" END AS "projectedFirst"
       FROM "SecurityIncident" i
       CROSS JOIN LATERAL (
         SELECT count(*)::int AS "total",
                (count(*) FILTER (WHERE ${seen}))::int AS "shown",
-               max((e.value ->> 'last')::timestamp) FILTER (WHERE ${seen}) AS "shownLast"
+               max((e.value ->> 'last')::timestamp) FILTER (WHERE ${seen}) AS "shownLast",
+               min((e.value ->> 'first')::timestamp) FILTER (WHERE ${seen}) AS "shownFirst"
         FROM jsonb_each(i."spanByCamera") AS e
       ) s
       WHERE ${Prisma.join(where, " AND ")}
     ) p
-    ${after}
+    ${after}${projectedPeriod}
     ORDER BY p."projectedLast" DESC, p."id" DESC
     LIMIT ${take}::int`;
 }

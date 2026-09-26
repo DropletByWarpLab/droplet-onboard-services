@@ -567,7 +567,12 @@ export function scoreCameraPairs(input: CameraPairsInput): { results: PairCandid
       chosen = judged[judged.length - 1]!;
       if (chosen.part !== null) wholeK = whole.s.forward.k;
     } else {
-      const parts = judged.slice(1);
+      // A part is eligible only when it keeps ≥ partShare of the whole camera's hits AND passes a gate at least
+      // as high as the whole camera's (review #2418): back, a part counts only its OWN visits — always fewer
+      // than the whole camera's — so a part can keep the hits and still fall below a bar the whole camera cleared.
+      const parts = judged
+        .slice(1)
+        .filter((x) => x.s.forward.k >= rules.partShare * whole.s.forward.k && rank(x.gate) >= rank(whole.gate));
       // Most hits; then the better gate; then lift; a name only breaks a full tie; then the part's name.
       parts.sort(
         (x, y) =>
@@ -578,7 +583,7 @@ export function scoreCameraPairs(input: CameraPairsInput): { results: PairCandid
           (x.part! < y.part! ? -1 : x.part! > y.part! ? 1 : 0),
       );
       const top = parts[0];
-      if (top && top.s.forward.k >= rules.partShare * whole.s.forward.k) {
+      if (top) {
         chosen = top;
         wholeK = whole.s.forward.k;
       }

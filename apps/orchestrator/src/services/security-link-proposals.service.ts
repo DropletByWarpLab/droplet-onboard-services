@@ -253,9 +253,12 @@ function refCamera(sourceKind: string, sourceRef: string): string | null {
 const isOpenSuggestion = (r: ExistingLinkRow): boolean => r.state === "proposed" && r.origin === "droplet" && r.stateSetBy === "droplet";
 
 /**
- * §6.3's decision table, pure, per area (results sorted by confidence, the
- * highest first), then the run's 20-new-rows cap over every area (again the
- * highest confidence first).
+ * §6.3's decision table, pure: every area's results in ONE pass, the highest
+ * confidence first across the whole run, each against its own area's
+ * counters — and the run's 20-new-rows cap is checked BEFORE a create takes an
+ * area's slot (review #2418): a create the cap refuses never uses up the
+ * area's 32nd active link or 8th suggestion, so an existing suggestion behind
+ * it can still be promoted.
  *
  * | existing row      | gate                                          | action                    |
  * | none              | auto, link_and_suggest, < 32 active           | create active             |
@@ -274,54 +277,56 @@ export function planLinkChanges(
   linking: Exclude<SecurityAiLinking, "off">,
 ): Map<string, PlannedLinkChange[]> {
   const plans = new Map<string, PlannedLinkChange[]>();
-  const creates: Array<{ zoneId: string; change: PlannedLinkChange }> = [];
+  const counters = new Map<string, { area: AreaSnapshot; active: number; open: number }>();
   for (const area of areas) {
-    const mine = results
-      .filter((r) => r.anchor.zoneId === area.zoneId && r.gate !== null)
-      .sort((a, b) => b.confidence - a.confidence || (a.sourceRef < b.sourceRef ? -1 : a.sourceRef > b.sourceRef ? 1 : 0));
-    let active = area.rows.filter((r) => r.state === "active").length;
-    let open = area.rows.filter(isOpenSuggestion).length;
-    const plan: PlannedLinkChange[] = [];
-    for (const r of mine) {
-      const cam = r.camera;
-      const onCamera = area.rows.filter((row) => refCamera(row.sourceKind, row.sourceRef) === cam);
-      // Never touch a camera a person (or Droplet's active link) already has a row for.
-      if (onCamera.some((row) => !isOpenSuggestion(row))) continue;
-      const existing = onCamera.find((row) => row.sourceKind === r.sourceKind && row.sourceRef === r.sourceRef);
-      const mayActivate = r.gate === "auto" && linking === "link_and_suggest" && active < MAX_ACTIVE_LINKS_PER_AREA;
-      if (existing) {
-        if (mayActivate) {
-          plan.push({ op: "activate", row: existing, result: r });
-          active += 1;
-          open -= 1;
-        } else {
-          plan.push({ op: "refresh", row: existing, result: r });
-        }
-        continue;
-      }
-      if (onCamera.length > 0) continue; // a suggestion on another view of this camera stands
-      if (mayActivate) {
-        const change: PlannedLinkChange = { op: "create", state: "active", result: r };
-        plan.push(change);
-        creates.push({ zoneId: area.zoneId, change });
-        active += 1;
-      } else if (open < MAX_OPEN_SUGGESTIONS_PER_AREA) {
-        const change: PlannedLinkChange = { op: "create", state: "proposed", result: r };
-        plan.push(change);
-        creates.push({ zoneId: area.zoneId, change });
-        open += 1;
-      }
-    }
-    plans.set(area.zoneId, plan);
+    plans.set(area.zoneId, []);
+    counters.set(area.zoneId, {
+      area,
+      active: area.rows.filter((r) => r.state === "active").length,
+      open: area.rows.filter(isOpenSuggestion).length,
+    });
   }
-  // The run's cap on new rows: the highest confidence keeps its place.
-  const dropped = new Set(
-    creates
-      .sort((a, b) => b.change.result.confidence - a.change.result.confidence)
-      .slice(MAX_NEW_LINK_ROWS_PER_RUN)
-      .map((c) => c.change),
-  );
-  if (dropped.size > 0) for (const [zoneId, plan] of plans) plans.set(zoneId, plan.filter((c) => !dropped.has(c)));
+  const ordered = results
+    .filter((r) => r.gate !== null && counters.has(r.anchor.zoneId))
+    .sort(
+      (a, b) =>
+        b.confidence - a.confidence ||
+        (a.anchor.zoneId < b.anchor.zoneId ? -1 : a.anchor.zoneId > b.anchor.zoneId ? 1 : 0) ||
+        (a.sourceRef < b.sourceRef ? -1 : a.sourceRef > b.sourceRef ? 1 : 0),
+    );
+  let created = 0;
+  for (const r of ordered) {
+    const c = counters.get(r.anchor.zoneId)!;
+    const plan = plans.get(r.anchor.zoneId)!;
+    const cam = r.camera;
+    const onCamera = c.area.rows.filter((row) => refCamera(row.sourceKind, row.sourceRef) === cam);
+    // Never touch a camera a person (or Droplet's active link) already has a row for.
+    if (onCamera.some((row) => !isOpenSuggestion(row))) continue;
+    const existing = onCamera.find((row) => row.sourceKind === r.sourceKind && row.sourceRef === r.sourceRef);
+    const mayActivate = r.gate === "auto" && linking === "link_and_suggest" && c.active < MAX_ACTIVE_LINKS_PER_AREA;
+    if (existing) {
+      if (mayActivate) {
+        plan.push({ op: "activate", row: existing, result: r });
+        c.active += 1;
+        c.open -= 1;
+      } else {
+        plan.push({ op: "refresh", row: existing, result: r });
+      }
+      continue;
+    }
+    if (onCamera.length > 0) continue; // a suggestion on another view of this camera stands
+    // The run's cap first: a create it refuses takes no slot.
+    if (created >= MAX_NEW_LINK_ROWS_PER_RUN) continue;
+    if (mayActivate) {
+      plan.push({ op: "create", state: "active", result: r });
+      c.active += 1;
+      created += 1;
+    } else if (c.open < MAX_OPEN_SUGGESTIONS_PER_AREA) {
+      plan.push({ op: "create", state: "proposed", result: r });
+      c.open += 1;
+      created += 1;
+    }
+  }
   return plans;
 }
 

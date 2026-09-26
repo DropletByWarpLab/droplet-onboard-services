@@ -610,7 +610,7 @@ describe("Droplet's links on the Areas page", () => {
   it("the chip only on a link Droplet set; a kept suggestion reads 'Suggested by Droplet' with no button", () => {
     h.zones = [stock([dropletLink(), dropletLink({ id: "l-kept", sourceRef: "side_cam", label: "Side camera", setBy: "person" })])];
     render(<AreasPanel />);
-    const chips = screen.getAllByRole("button", { name: /Why Droplet linked/ });
+    const chips = screen.getAllByRole("button", { name: /^Linked by Droplet/ });
     expect(chips).toHaveLength(1);
     expect(chips[0]).toHaveTextContent(COPY.linkedByDroplet);
     expect(screen.getByText("Suggested by Droplet: Side camera (whole view)")).toBeInTheDocument();
@@ -620,7 +620,7 @@ describe("Droplet's links on the Areas page", () => {
     h.zones = [stock([dropletLink()])];
     h.accept.mockResolvedValue({});
     render(<AreasPanel />);
-    fireEvent.click(screen.getByRole("button", { name: /Why Droplet linked/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(/When Front camera saw someone \(40 times in 14 days\), Back camera also did within 10 seconds 34 times/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Droplet linked this on Sep 23 at 11:00 AM/)).toBeInTheDocument();
@@ -634,7 +634,7 @@ describe("Droplet's links on the Areas page", () => {
     h.zones = [stock([dropletLink()])];
     h.reject.mockResolvedValue({});
     render(<AreasPanel />);
-    fireEvent.click(screen.getByRole("button", { name: /Why Droplet linked/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(h.reject).toHaveBeenCalledWith("l-auto"));
     await waitFor(() => expect(h.toast).toHaveBeenCalledWith("Undone. Droplet won't suggest Back camera for Stock room again.", "success"));
@@ -647,7 +647,7 @@ describe("Droplet's links on the Areas page", () => {
       { linkId: "p1", zone: { id: "z-stock", name: "Stock room", kind: "interior" }, sourceKind: "camera", sourceRef: "yard_cam", label: "Yard camera", confidence: 0.5, evidence: null, suggestedAt: AT },
     ];
     render(<AreasPanel />);
-    fireEvent.click(screen.getByRole("button", { name: /Why Droplet linked/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Droplet linked this from what its cameras saw.")).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "Keep" })).toBeNull();
@@ -655,11 +655,47 @@ describe("Droplet's links on the Areas page", () => {
     expect(screen.queryByTestId("link-suggestions")).toBeNull();
   });
 
+  it("the chip's accessible name starts with its visible text (WCAG 2.5.3), then says which link", () => {
+    h.zones = [stock([dropletLink()])];
+    render(<AreasPanel />);
+    const chip = screen.getByRole("button", { name: /^Linked by Droplet/ });
+    expect(chip).toHaveTextContent(COPY.linkedByDroplet);
+    expect(chip.getAttribute("aria-label")!.startsWith(COPY.linkedByDroplet)).toBe(true);
+    expect(chip.getAttribute("aria-label")).toContain("Back camera");
+  });
+
+  // Review #2418 — the chip that opened the panel goes once the link is kept or undone: focus lands on the area.
+  it.each([
+    ["Keep", "accept"],
+    ["Undo", "reject"],
+  ] as const)("after %s, focus moves to the area's What covers it? — never to a chip that is gone", async (label, fn) => {
+    h.zones = [stock([dropletLink()])];
+    h[fn].mockResolvedValue({});
+    render(<AreasPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /^Linked by Droplet/ }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: label }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const card = document.querySelector('[data-zone-id="z-stock"]') as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(within(card).getByRole("button", { name: COPY.whatCovers })));
+  });
+
+  it("after Add it, the suggestion's card goes and focus moves to its area's What covers it?", async () => {
+    h.zones = [stock([])];
+    h.proposals = [
+      { linkId: "p1", zone: { id: "z-stock", name: "Stock room", kind: "interior" }, sourceKind: "camera", sourceRef: "yard_cam", label: "Yard camera", confidence: 0.5, evidence: null, suggestedAt: AT },
+    ];
+    h.accept.mockResolvedValue({});
+    render(<AreasPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "Add it" }));
+    const card = document.querySelector('[data-zone-id="z-stock"]') as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(within(card).getByRole("button", { name: COPY.whatCovers })));
+  });
+
   it("linking off: manage sees why there are no suggestions; the chips stay", () => {
     h.linking = "off";
     h.zones = [stock([dropletLink()])];
     render(<AreasPanel />);
     expect(screen.getByText(COPY.linkingOff)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Why Droplet linked/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Linked by Droplet/ })).toBeInTheDocument();
   });
 });

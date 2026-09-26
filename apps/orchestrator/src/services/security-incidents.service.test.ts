@@ -553,6 +553,81 @@ describe("camera_offline_during_activity at the tick (§6.7.2)", () => {
     expect(f.world.securityIncidentReason.filter((x) => x.code === "camera_offline_during_activity")).toHaveLength(1);
   });
 
+  // Review #2418 (finding 2): the timer path adds alert reasons too, so it must re-open the notifier for a
+  // person skipped as not visible (P3 review R4) exactly as triage does.
+  describe("late alert evidence from the TIMER re-opens the notifier for a person skipped as not visible (R4)", () => {
+    const ENTRY = "5d6e7f80-9a1b-4c2d-8e3f-4a5b6c7d8e9f";
+    const MARIA_ID = "22222222-2222-4222-8222-222222222222";
+    /** An Entry area, person-linked to c1 and c2 (no after-hours alert in an Entry area: only this code can alert). */
+    function entryWorld(): FakeSecurityPrisma {
+      const f = world();
+      const entry = areaRows(ENTRY, "Back door", "entry", ["c1", "c2"]);
+      f.world.securityZone = [entry.zone];
+      f.world.securityZoneLink = entry.links;
+      return f;
+    }
+    /** The first alert (c1 dropped after someone on c1) was notified; Maria (c2 only) was skipped as not visible. */
+    async function firstAlertNotified(f: FakeSecurityPrisma): Promise<Record<string, unknown>> {
+      f.world.securityEvent.push(person(1n, plus(T0, -90_000), "c1"), offline(2n, T0, "c1"));
+      await tick(f, plus(T0, 61_000));
+      const i = incidents(f)[0]!;
+      expect(i).toMatchObject({ severity: "alert", reasonCodes: ["camera_offline", "camera_offline_during_activity"] });
+      Object.assign(i, { notifyState: "done" });
+      f.world.securityIncidentNotice.push({
+        id: "n-maria",
+        incidentId: i.id,
+        userId: MARIA_ID,
+        username: "maria",
+        reason: "routed",
+        outcome: "skipped_not_visible",
+        notificationLogId: null,
+        channels: "",
+        pushOutcome: null,
+        createdAt: T0,
+        settledAt: T0,
+      });
+      return i;
+    }
+
+    it("a new camera's alert evidence (c2 drops after someone on c2) → pending again, so she is told", async () => {
+      const f = entryWorld();
+      const i = await firstAlertNotified(f);
+      f.world.securityEvent.push(person(3n, plus(T0, 100_000), "c2"), offline(4n, plus(T0, 160_000), "c2"));
+      await tick(f, plus(T0, 221_000));
+      const added = f.world.securityIncidentReason.filter((r) => r.code === "camera_offline_during_activity" && r.evidenceCamera === "c2");
+      expect(added).toHaveLength(1);
+      expect(incidents(f)[0]).toMatchObject({ id: i.id, severity: "alert", notifyState: "pending" });
+    });
+
+    it("a new RELATED camera counts too: c1 drops again, this time after someone on c2 → pending again", async () => {
+      const f = entryWorld();
+      await firstAlertNotified(f);
+      const online = eventRow({ id: 5n, kind: "camera_online", source: "frigate_status", camera: "c1", sourceRef: "c1/status/detect", labels: [], endedAt: null, startedAt: plus(T0, 90_000), createdAt: plus(T0, 90_000), summary: "Camera c1 is back" });
+      f.world.securityEvent.push(online, person(6n, plus(T0, 140_000), "c2"), offline(7n, plus(T0, 200_000), "c1"));
+      await tick(f, plus(T0, 261_000));
+      const second = f.world.securityIncidentReason.find((r) => r.code === "camera_offline_during_activity" && r.evidenceEventId === 7n)!;
+      expect(second).toMatchObject({ evidenceCamera: "c1", relatedCamera: "c2" });
+      expect(incidents(f)[0]!.notifyState).toBe("pending");
+    });
+
+    it("no one skipped as not visible → it stays done; evidence on a camera the alert already had → it stays done", async () => {
+      const f = entryWorld();
+      await firstAlertNotified(f);
+      f.world.securityIncidentNotice = [];
+      f.world.securityEvent.push(person(3n, plus(T0, 100_000), "c2"), offline(4n, plus(T0, 160_000), "c2"));
+      await tick(f, plus(T0, 221_000));
+      expect(incidents(f)[0]!.notifyState).toBe("done");
+
+      const g = entryWorld();
+      await firstAlertNotified(g);
+      const online = eventRow({ id: 5n, kind: "camera_online", source: "frigate_status", camera: "c1", sourceRef: "c1/status/detect", labels: [], endedAt: null, startedAt: plus(T0, 90_000), createdAt: plus(T0, 90_000), summary: "Camera c1 is back" });
+      g.world.securityEvent.push(online, person(6n, plus(T0, 140_000), "c1"), offline(7n, plus(T0, 200_000), "c1"));
+      await tick(g, plus(T0, 261_000));
+      expect(g.world.securityIncidentReason.filter((r) => r.code === "camera_offline_during_activity")).toHaveLength(2);
+      expect(incidents(g)[0]!.notifyState).toBe("done");
+    });
+  });
+
   it("the activity may be on ANOTHER camera person-linked to the area, and in another incident", async () => {
     const f = world();
     const stock = areaRows(STOCK, "Stock room", "interior", ["back", "stock_cam"]);
@@ -600,6 +675,33 @@ describe("camera_offline_during_activity at the tick (§6.7.2)", () => {
     const f = world({ securityEvent: [person(1n, plus(NOON, -60_000)), offline(2n, NOON)] }, NOON);
     await tick(f, plus(NOON, 61_000));
     expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
+  });
+
+  // Review #2418 (follow-up 5): the cheap checks first — a daytime drop, or a blip, never reads sightings.
+  const sightingReads = (f: FakeSecurityPrisma) => {
+    const spy = vi.spyOn(f.client.securityEvent as { findMany: (a: unknown) => Promise<unknown[]> }, "findMany");
+    return () => spy.mock.calls.filter(([a]) => (a as { where?: { labels?: { has?: string }; camera?: { in?: unknown } } }).where?.labels?.has === "person" && (a as { where: { camera?: { in?: unknown } } }).where.camera?.in !== undefined).length;
+  };
+
+  it("a drop in opening hours costs no sighting read; a drop after closing does (the check is ordered, not dropped)", async () => {
+    const day = world({ securityEvent: [person(1n, plus(NOON, -60_000)), offline(2n, NOON)] }, NOON);
+    const dayReads = sightingReads(day);
+    await tick(day, plus(NOON, 61_000));
+    expect(dayReads()).toBe(0);
+
+    const night = world({ securityEvent: [person(1n, plus(T0, -60_000)), offline(2n, T0)] });
+    const nightReads = sightingReads(night);
+    await tick(night, plus(T0, 61_000));
+    expect(nightReads()).toBe(1);
+    expect(night.world.securityIncidentReason.some((r) => r.code === "camera_offline_during_activity")).toBe(true);
+  });
+
+  it("a blip (back within the minute) costs no sighting read", async () => {
+    const online = eventRow({ id: 3n, kind: "camera_online", source: "frigate_status", camera: "back", sourceRef: "back/status/detect", labels: [], endedAt: null, startedAt: plus(T0, 30_000), createdAt: plus(T0, 30_000), summary: "Camera back is back" });
+    const f = world({ securityEvent: [person(1n, plus(T0, -60_000)), offline(2n, T0), online] });
+    const reads = sightingReads(f);
+    await tick(f, plus(T0, 61_000));
+    expect(reads()).toBe(0);
   });
 });
 

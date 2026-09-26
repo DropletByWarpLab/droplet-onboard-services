@@ -453,15 +453,15 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
       ingest: ingest(),
       state: { threatMirrorRanAt: NOW, retentionRanAt: NOW, retentionDeleted: 3, retentionIncidentsDeleted: 1 },
     });
-    expect(row(ran, "retention").detail).toBe("Keeps events 30 days and incidents a year; last removed 3 events and 1 incident");
+    expect(row(ran, "retention").detail).toBe("Keeps events 30 days and incidents a year, and trims Droplet's link examples after 30 days; last removed 3 events and 1 incident");
     const one = buildSecurityHealth({
       ...base,
       ingest: ingest(),
       state: { threatMirrorRanAt: NOW, retentionRanAt: NOW, retentionDeleted: 1, retentionIncidentsDeleted: 0 },
     });
-    expect(row(one, "retention").detail).toBe("Keeps events 30 days and incidents a year; last removed 1 event and 0 incidents");
+    expect(row(one, "retention").detail).toBe("Keeps events 30 days and incidents a year, and trims Droplet's link examples after 30 days; last removed 1 event and 0 incidents");
     const never = buildSecurityHealth({ ...base, ingest: ingest(), state: null });
-    expect(row(never, "retention").detail).toBe("Keeps events 30 days and incidents a year; not run yet");
+    expect(row(never, "retention").detail).toBe("Keeps events 30 days and incidents a year, and trims Droplet's link examples after 30 days; not run yet");
   });
 
   it("WARP-2977 P2b: a site_mode row is placed after threat_mirror and before retention, verbatim", () => {

@@ -546,7 +546,8 @@ export function buildSecurityHealth(input: {
       : retentionRan && now.getTime() - retentionRan.getTime() <= 36 * 3_600_000
         ? "ok"
         : "quiet",
-    detail: `Keeps events ${SECURITY_EVENT_RETENTION_DAYS} days and incidents a year${retentionRan ? `; last removed ${count(input.state?.retentionDeleted ?? 0, "event")} and ${count(input.state?.retentionIncidentsDeleted ?? 0, "incident")}` : "; not run yet"}`,
+    // WARP-2979 (p4-spec §6.16): the same 03:50 leg trims Droplet's link evidence samples with the events' `before`.
+    detail: `Keeps events ${SECURITY_EVENT_RETENTION_DAYS} days and incidents a year, and trims Droplet's link examples after ${SECURITY_EVENT_RETENTION_DAYS} days${retentionRan ? `; last removed ${count(input.state?.retentionDeleted ?? 0, "event")} and ${count(input.state?.retentionIncidentsDeleted ?? 0, "incident")}` : "; not run yet"}`,
     lastSeenAt: iso(retentionRan),
   });
 
