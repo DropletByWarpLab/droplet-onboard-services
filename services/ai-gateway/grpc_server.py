@@ -10,10 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from pathlib import Path
 
 import grpc
+import httpx
 from grpc import aio as grpc_aio
 
 # Proto-generated modules (generated from proto/inference.proto)
@@ -27,6 +30,12 @@ from scheduler import InferenceScheduler, QueueFullError
 logger = logging.getLogger(__name__)
 
 GRPC_PORT = 50051
+
+# WARP-3070: Kev decision model (droplet-local-LLM `decision-model` sidecar,
+# ADR-006). Off unless DECISION_MODEL_URL is set.
+DECIDE_DEFAULT_TIMEOUT_MS = 2000
+DECIDE_DEFAULT_MODEL = "kev-latest"
+_DECIDE_DETAIL_MAX = 300
 
 
 def _provider_error_detail(exc: Exception, context: str) -> str:
@@ -76,6 +85,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     def __init__(self, provider_router: ProviderRouter, scheduler: InferenceScheduler):
         self._router = provider_router
         self._scheduler = scheduler
+        self._decide_client: httpx.AsyncClient | None = None  # lazy, reused across calls
 
     async def Chat(self, request, context):
         """Unary chat completion."""
@@ -349,6 +359,129 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(_provider_error_detail(e, "gRPC ClassifyQuery error"))
             return inference_pb2.ClassifyQueryResponse(**{"class": "unknown", "confidence": 0.0})
+
+    async def Decide(self, request, context):
+        """Calibrated decision model (Kev, WARP-3070) via the decision-model sidecar.
+
+        Fails soft AS DATA: not configured, timeout, connection error, 5xx or
+        401 -> DECIDE_STATUS_UNAVAILABLE; 422 -> DECIDE_STATUS_INVALID. Never
+        sets a gRPC error code, so a caller's only branch is the status enum.
+        Logs question ids, status and latency; never the key or the state.
+        """
+        set_request_id(new_request_id())
+        started = time.monotonic()
+        qids = sorted(request.questions.keys())
+
+        def done(status, detail="", answers=None, model="", latency_ms=None):
+            if latency_ms is None:
+                latency_ms = (time.monotonic() - started) * 1000
+            logger.info(
+                "Decide questions=%s status=%s latency_ms=%.1f",
+                qids, inference_pb2.DecideStatus.Name(status), latency_ms,
+            )
+            return inference_pb2.DecideResponse(
+                status=status, answers=answers or {}, latency_ms=latency_ms,
+                model=model, detail=detail[:_DECIDE_DETAIL_MAX],
+            )
+
+        base_url = os.environ.get("DECISION_MODEL_URL", "").strip()
+        if not base_url:
+            return done(inference_pb2.DECIDE_STATUS_UNAVAILABLE, "decision-model not configured")
+
+        try:
+            questions = {qid: _decide_question_json(q) for qid, q in request.questions.items()}
+        except ValueError as e:
+            return done(inference_pb2.DECIDE_STATUS_INVALID, str(e))
+
+        body = {
+            "state": request.state,
+            "model": request.model or DECIDE_DEFAULT_MODEL,
+            "questions": questions,
+        }
+        timeout_s = (request.timeout_ms or DECIDE_DEFAULT_TIMEOUT_MS) / 1000
+        headers = {"Authorization": f"Bearer {os.environ.get('DECISION_MODEL_API_KEY', '')}"}
+        if self._decide_client is None:
+            self._decide_client = httpx.AsyncClient()
+        try:
+            resp = await self._decide_client.post(
+                base_url.rstrip("/") + "/v1/systemone",
+                json=body, headers=headers, timeout=timeout_s,
+            )
+        except httpx.TimeoutException:
+            return done(inference_pb2.DECIDE_STATUS_UNAVAILABLE, f"timeout after {timeout_s * 1000:.0f} ms")
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
+            # InvalidURL is not an HTTPError: a mistyped DECISION_MODEL_URL still fails soft.
+            return done(inference_pb2.DECIDE_STATUS_UNAVAILABLE, f"connection error: {type(e).__name__}")
+
+        if resp.status_code == 422:
+            return done(inference_pb2.DECIDE_STATUS_INVALID, _decide_422_detail(resp))
+        if resp.status_code == 401:
+            return done(inference_pb2.DECIDE_STATUS_UNAVAILABLE, "decision-model rejected the API key (401)")
+        if resp.status_code != 200:
+            return done(inference_pb2.DECIDE_STATUS_UNAVAILABLE, f"decision-model returned HTTP {resp.status_code}")
+
+        try:
+            data = resp.json()
+            answers = {qid: _decide_answer_pb(a) for qid, a in data["answers"].items()}
+            latency = data.get("latency_ms")
+            return done(
+                inference_pb2.DECIDE_STATUS_OK, answers=answers, model=str(data.get("model", "")),
+                latency_ms=float(latency) if latency is not None else None,
+            )
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            return done(inference_pb2.DECIDE_STATUS_UNAVAILABLE, f"malformed decision-model response: {type(e).__name__}")
+
+
+def _decide_question_json(q) -> dict:
+    """DecideQuestion proto -> one System One question. ValueError on an unset type."""
+    if q.type == inference_pb2.DECIDE_QUESTION_TYPE_NOUL:
+        out = {"type": "noul", "instructions": q.instructions}
+        criteria = {k: v for k, v in (("true", q.true_description), ("false", q.false_description)) if v}
+        if criteria:
+            out["criteria"] = criteria
+        return out
+    if q.type == inference_pb2.DECIDE_QUESTION_TYPE_CHOICE:
+        # dict keeps insertion order and Kev reads option order: keep the caller's.
+        return {"type": "choice", "instructions": q.instructions,
+                "criteria": {o.name: (o.description or None) for o in q.options}}
+    if q.type == inference_pb2.DECIDE_QUESTION_TYPE_SCORE:
+        return {"type": "score", "instructions": q.instructions, "criteria": list(q.levels)}
+    raise ValueError("question type is unspecified")
+
+
+def _decide_answer_pb(a: dict):
+    """One System One answer -> DecideAnswer proto."""
+    kind = a["type"]
+    if kind == "noul":
+        return inference_pb2.DecideAnswer(type=inference_pb2.DECIDE_QUESTION_TYPE_NOUL, noul=float(a["noul"]))
+    probs = {str(k): float(v) for k, v in a.get("probabilities", {}).items()}
+    if kind == "choice":
+        return inference_pb2.DecideAnswer(
+            type=inference_pb2.DECIDE_QUESTION_TYPE_CHOICE, choice=str(a["choice"]),
+            confidence=float(a.get("confidence", 0.0)), probabilities=probs,
+        )
+    if kind == "score":
+        return inference_pb2.DecideAnswer(
+            type=inference_pb2.DECIDE_QUESTION_TYPE_SCORE, score=float(a["score"]),
+            confidence=float(a.get("confidence", 0.0)), probabilities=probs,
+            legend={str(k): str(v) for k, v in a.get("legend", {}).items()},
+        )
+    raise ValueError(f"unknown answer type {kind!r}")
+
+
+def _decide_422_detail(resp) -> str:
+    """The sidecar's 422 reason WITHOUT echoing input: FastAPI validation items
+    carry an `input` field that can hold the state text, so keep loc + msg only."""
+    try:
+        detail = resp.json().get("detail")
+    except (ValueError, AttributeError):
+        return "invalid request (422)"
+    if isinstance(detail, list):
+        return "; ".join(
+            f"{'.'.join(str(p) for p in d.get('loc', []))}: {d.get('msg', '')}"
+            for d in detail if isinstance(d, dict)
+        ) or "invalid request (422)"
+    return str(detail) if detail else "invalid request (422)"
 
 
 async def start_grpc_server(

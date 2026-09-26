@@ -1357,6 +1357,16 @@ services:
       # DROPLET_FIPS_REQUIRED=true.
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+      # WARP-3070: the `Decide` RPC's target, the Kev decision-model sidecar
+      # (droplet-local-LLM docs/ADR-006-decision-model-kev.md; profile
+      # `decision`, off by default), e.g. http://host.docker.internal:8009.
+      # Unset/empty = Decide answers UNAVAILABLE with no network call. The key
+      # must equal that repo's DECISION_MODEL_API_KEY. BARE NAMES on purpose:
+      # `${VAR:-}` here would inject an empty string that OVERRIDES a value set
+      # in the ../.env env_file above; bare, compose passes each through only
+      # when set in the shell, and otherwise leaves the env_file value alone.
+      - DECISION_MODEL_URL
+      - DECISION_MODEL_API_KEY
     volumes:
       - aikeys:/data/keys
       # WARP-234/236: internal-TLS bundle — the rediss:// URL above points
