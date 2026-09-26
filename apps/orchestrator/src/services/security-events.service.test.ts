@@ -542,6 +542,20 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     expect(family.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "incidents", "links", "retention"]);
   });
 
+  // WARP-2979 PR-2 (P4 §6.15) — the summaries row sits right after links, before patterns.
+  it("WARP-2979 PR-2: the summaries row sits right after links and before patterns, verbatim — and on its own", () => {
+    const incidents = { id: "incidents" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const alerts = { id: "alerts" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const links = { id: "links" as const, state: "ok" as const, detail: "x", lastSeenAt: null };
+    const summaries = { id: "summaries" as const, state: "down" as const, detail: "Not running", lastSeenAt: null };
+    const patterns = { id: "patterns" as const, state: "quiet" as const, detail: "x", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), incidents, alerts, links, summaries, patterns });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "camera_system", "threat_mirror", "incidents", "alerts", "links", "summaries", "patterns", "retention"]);
+    expect(row(rows, "summaries")).toBe(summaries);
+    const alone = buildSecurityHealth({ ...base, frigateConfigured: false, ingest: ingest(), summaries });
+    expect(alone.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "summaries", "retention"]);
+  });
+
   // P3 merged after P5 PR-A, so P3 moves the pin (security-events.service.ts's header).
   it("WARP-2978 × WARP-2980: all three together — incidents, alerts, then patterns, then retention", () => {
     const siteMode = { id: "site_mode" as const, state: "ok" as const, detail: "x", lastSeenAt: null };

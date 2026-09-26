@@ -2,15 +2,13 @@
 
 /**
  * WARP-2979 (ADR-059 P4 §8) — "Droplet's AI", on /security/settings: what
- * Droplet may do with links on its own.
+ * Droplet may do with links on its own, and whether it writes incident
+ * summaries (on this Droplet only: the incident narrator,
+ * orchestrator security-narrator.service.ts, reads this switch every tick).
  *
- * The summaries switch is not shown here yet (review #2418, spec §11: no
- * half-built feature): nothing reads that setting until P4 PR-2 builds the
- * writer, which brings the switch back. Every save sends the stored value
- * back untouched — the route's body names both.
- *
- * At manage (`useModuleLevel`, which fails closed): three radios for linking,
- * saved with the version they were read at (PUT /api/security/ai-settings). A 409 re-reads and says so in a banner
+ * At manage (`useModuleLevel`, which fails closed): three radios for linking
+ * and a switch for summaries, saved together with the version they were read
+ * at (PUT /api/security/ai-settings). A 409 re-reads and says so in a banner
  * — the other person's choice is what's shown now (the P2b conflict pattern).
  * Below manage: the current choices as text, and who can change them. The
  * controls are never rendered and then refused.
@@ -24,7 +22,7 @@ import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
 import { useAiSettings } from "@/lib/hooks/useSecurity";
-import type { SecurityAiLinking } from "@/lib/types";
+import type { SecurityAiLinking, SecurityAiSummaries } from "@/lib/types";
 
 export const AI_COPY = {
   title: "Droplet's AI",
@@ -36,6 +34,11 @@ export const AI_COPY = {
     off: "Don't look for links",
   },
   linkingHelp: "A link Droplet makes on its own never sends an alert until someone keeps it.",
+  summaries: "Write a short summary of each incident",
+  summariesHelp:
+    "Summaries are written by the AI model on this Droplet. Security events are never sent to a cloud AI model, even when cloud models are turned on for chat.",
+  summariesOn: "Droplet writes a short summary of each incident.",
+  summariesOff: "Droplet doesn't write incident summaries.",
   readOnly: "People who manage Security can change this.",
   save: "Save",
   saved: "Saved.",
@@ -56,6 +59,7 @@ export function AiSettingsPanel() {
   const settings = api.settings;
 
   const [linking, setLinking] = useState<SecurityAiLinking | null>(null);
+  const [summaries, setSummaries] = useState<SecurityAiSummaries | null>(null);
   const [pending, setPending] = useState(false);
   // Review #2418: the in-flight guard itself — Save stays focusable (aria-disabled), so a second press is refused here.
   const pendingRef = useRef(false);
@@ -65,17 +69,18 @@ export function AiSettingsPanel() {
   useEffect(() => {
     if (!settings) return;
     setLinking(settings.linking);
+    setSummaries(settings.summaries);
   }, [settings]);
 
-  const dirty = settings !== null && linking !== settings.linking;
+  const dirty = settings !== null && (linking !== settings.linking || summaries !== settings.summaries);
 
   const save = async () => {
-    if (!settings || !linking || pendingRef.current || !dirty) return;
+    if (!settings || !linking || !summaries || pendingRef.current || !dirty) return;
     pendingRef.current = true;
     setPending(true);
     setConflict(false);
     try {
-      await api.save({ linking, summaries: settings.summaries, expectedVersion: settings.version });
+      await api.save({ linking, summaries, expectedVersion: settings.version });
       toast(AI_COPY.saved, "success");
     } catch (err) {
       if ((err as { code?: unknown } | null)?.code === "VERSION_CONFLICT") {
@@ -102,7 +107,7 @@ export function AiSettingsPanel() {
         </button>
       </div>
     );
-  } else if (!settings || !linking) {
+  } else if (!settings || !linking || !summaries) {
     body = (
       <div className="empty" aria-busy="true">
         <Loader2 size={20} className="animate-spin" aria-hidden />
@@ -113,6 +118,9 @@ export function AiSettingsPanel() {
     body = (
       <div style={{ display: "grid", gap: 6 }} data-readonly>
         <p style={{ margin: 0, fontSize: 14, color: "var(--text)" }}>{AI_COPY.linking[settings.linking]}</p>
+        <p style={{ margin: 0, fontSize: 14, color: "var(--text)" }}>
+          {settings.summaries === "on" ? AI_COPY.summariesOn : AI_COPY.summariesOff}
+        </p>
         <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-muted)" }}>{AI_COPY.readOnly}</p>
       </div>
     );
@@ -143,6 +151,27 @@ export function AiSettingsPanel() {
           ))}
           <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-muted)" }}>{AI_COPY.linkingHelp}</p>
         </fieldset>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <span style={{ display: "grid", gap: 4, minWidth: 0 }}>
+            <span id={`${uid}-summaries`} style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>
+              {AI_COPY.summaries}
+            </span>
+            <span id={`${uid}-summaries-help`} style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
+              {AI_COPY.summariesHelp}
+            </span>
+          </span>
+          <button
+            type="button"
+            role="switch"
+            className={`sw${summaries === "on" ? " on" : ""}`}
+            aria-checked={summaries === "on"}
+            aria-labelledby={`${uid}-summaries`}
+            aria-describedby={`${uid}-summaries-help`}
+            onClick={() => setSummaries(summaries === "on" ? "off" : "on")}
+          >
+            <span className="ball" aria-hidden />
+          </button>
+        </div>
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <button type="button" className="btn primary" onClick={() => void save()} aria-disabled={!dirty || pending || undefined}>
             {pending ? <Loader2 size={16} className="animate-spin" aria-hidden /> : null}

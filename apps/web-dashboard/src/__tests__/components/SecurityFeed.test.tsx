@@ -623,6 +623,7 @@ describe("WARP-2978 — incidents on the feed", () => {
       site_mode: true,
       incidents: true,
       alerts: true,
+      summaries: true,
       patterns: true,
       retention: true,
     };

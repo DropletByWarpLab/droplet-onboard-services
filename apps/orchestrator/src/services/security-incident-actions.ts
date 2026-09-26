@@ -38,6 +38,16 @@
  * person has already handled it, so nobody is woken for it. An acknowledge
  * leaves it pending: someone is on it, and the others are still told.
  *
+ * WARP-2979 (ADR-059 P4 §6.9.1) — a resolve that SEALS a notice/alert
+ * incident also asks for its "Summary by Droplet" (`pending`, lease and
+ * attempts cleared) in the same CAS'd update, when summaries are on — the
+ * engine's seal does the same. Settings that cannot be read never stop a
+ * resolve: it seals without a summary.
+ *
+ * WARP-2979 route 28 — "Summarise now" / "Regenerate" (act), below: sets
+ * `pending` at any time, collecting or sealed. No audit (D23: a summary
+ * changes no security state) and never the incident's version.
+ *
  * WARP-2980 (ADR-059 P5 PR-B, brief §4.4, spec D15) — a VERDICT: Expected /
  * Not expected, by owner/admin at act level (route 35; review item 2). It
  * feeds precision and nothing else: it never touches state, severity, codes
@@ -68,6 +78,15 @@ import {
   type IncidentViewer,
 } from "./security-incident-view.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
+import { readSummariesSetting } from "./security-ai-settings.js";
+import {
+  NARRATIVE_COOLDOWN_MS,
+  NARRATIVE_ON_SEAL,
+  NARRATIVE_SELECT,
+  narrativeView,
+  narrativeVisibleTo,
+  type NarrativeView,
+} from "./security-narrative-view.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("security-incident-actions");
@@ -125,9 +144,21 @@ function placeOf(i: { scope: string; zoneName: string | null; scopeCamera: strin
   return "about the camera system";
 }
 
+/** Whether summaries are on. Never throws: unreadable settings ask for no summary (a resolve is never stopped by one). */
+async function summariesOn(prisma: PrismaClient): Promise<boolean> {
+  try {
+    return (await readSummariesSetting(prisma)) === "on";
+  } catch (err) {
+    logger.warn({ err }, "incident action: the AI settings could not be read — no summary is asked for");
+    return false;
+  }
+}
+
 /** Acknowledge or resolve (spec §6.6). */
 export async function actOnIncident(prisma: PrismaClient, input: IncidentActionInput): Promise<IncidentActionResult> {
   const { actor, now } = input;
+  // WARP-2979: read once, and only when a resolve is about to seal a notice/alert incident.
+  let narrate: boolean | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     const row = await prisma.securityIncident.findUnique({
       where: { id: input.incidentId },
@@ -143,6 +174,7 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
     let plan: Plan;
     if (row.state === "resolved") plan = { kind: "noop" };
     else if (input.action === "resolve") {
+      if (row.grouping === "collecting" && row.severity !== "info") narrate ??= await summariesOn(prisma);
       plan = {
         kind: "write",
         state: "resolved",
@@ -153,6 +185,7 @@ export async function actOnIncident(prisma: PrismaClient, input: IncidentActionI
           resolvedAt: now,
           resolvedById: actor.id,
           ...(row.grouping === "collecting" ? { grouping: "closed", closedAt: now } : {}),
+          ...(row.grouping === "collecting" && narrate === true && row.severity !== "info" ? NARRATIVE_ON_SEAL : {}),
           ...(row.notifyState === "pending" ? { notifyState: "done" } : {}),
         },
       };
@@ -301,6 +334,63 @@ export async function setIncidentVerdict(
       return true;
     }, READ_COMMITTED_TX);
     if (done) return { status: "ok", changed: true };
+  }
+  return { status: "conflict" };
+}
+
+// ── WARP-2979 P4 PR-2: route 28 — Summarise now / Regenerate ─────────────────
+
+export type NarrativeRequestResult =
+  | { status: "ok"; narrative: NarrativeView }
+  | { status: "not_found" }
+  | { status: "not_actionable" }
+  | { status: "summaries_off" }
+  | { status: "cooldown" }
+  | { status: "conflict" };
+
+/**
+ * Route 28 (act). Judged on the viewer's projection, like routes 19–20:
+ *   missing or hidden                                    → not_found (one 404)
+ *   plain activity, or a viewer who cannot see ALL of it  → not_actionable (one 409 body:
+ *     the summary would name what they cannot see — narrativeVisibleTo, DS-005)
+ *   summaries off                                        → summaries_off
+ *   under 10 min since the last attempt or the text      → cooldown
+ *   otherwise → `pending`, the lease and attempts cleared (a narration in flight
+ *   loses its write), compare-and-set on the summary's own columns as read. The
+ *   previous text stays visible until the new one is written. Never the
+ *   incident's version, never an audit (D23).
+ */
+export async function requestIncidentNarrative(
+  prisma: PrismaClient,
+  input: { incidentId: string; viewer: IncidentViewer; now: Date },
+): Promise<NarrativeRequestResult> {
+  const { viewer, now } = input;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const row = await prisma.securityIncident.findUnique({
+      where: { id: input.incidentId },
+      select: { ...INCIDENT_VIEW_SELECT, ...NARRATIVE_SELECT, narrativeAttemptAt: true },
+    });
+    if (!row) return { status: "not_found" };
+    const reasons = await prisma.securityIncidentReason.findMany({ where: { incidentId: row.id }, select: REASON_VIEW_SELECT });
+    const view = projectIncident(row, reasons, viewer, now);
+    if (!view) return { status: "not_found" };
+    if (row.severity === "info" || view.codes.length === 0 || !narrativeVisibleTo(row, reasons, view, viewer)) return { status: "not_actionable" };
+    if ((await readSummariesSetting(prisma)) !== "on") return { status: "summaries_off" };
+    const recent = (d: Date | null) => d !== null && now.getTime() - d.getTime() < NARRATIVE_COOLDOWN_MS;
+    if (recent(row.narrativeAttemptAt) || recent(row.narratedAt)) return { status: "cooldown" };
+
+    const { count } = await prisma.securityIncident.updateMany({
+      where: {
+        id: row.id,
+        narrativeState: row.narrativeState,
+        narrativeAttemptAt: row.narrativeAttemptAt,
+        narratedAt: row.narratedAt,
+      },
+      data: { ...NARRATIVE_ON_SEAL },
+    });
+    if (count !== 1) continue;
+    const narrative = narrativeView({ ...row, narrativeState: "pending" }, reasons, view, viewer, true);
+    return narrative ? { status: "ok", narrative } : { status: "not_actionable" };
   }
   return { status: "conflict" };
 }

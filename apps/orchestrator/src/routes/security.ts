@@ -62,6 +62,7 @@ import { securityIncidentsHealth } from "../services/security-incidents.service.
 import { securityAlertsHealth } from "../services/security-alerts.service.js";
 import { securityPatternsHealth } from "../services/security-baselines.service.js";
 import { securityLinksHealth } from "../services/security-link-proposals.service.js";
+import { securitySummariesHealth } from "../services/security-narrator.service.js";
 import { loadActiveLinks, viewerAreas, zoneChipsFor, zoneFilterFor } from "../services/security-zones.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -201,7 +202,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
     try {
       const now = deps.now?.() ?? new Date();
       const ownerOrAdmin = mayReadThreats(req);
-      const [state, siteMode, patterns, incidents, alerts, links] = await Promise.all([
+      const [state, siteMode, patterns, incidents, alerts, links, summaries] = await Promise.all([
         prisma.securityIngestState.findUnique({
           where: { id: "singleton" },
           select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true, retentionIncidentsDeleted: true },
@@ -224,6 +225,8 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         ownerOrAdmin ? securityAlertsHealth(prisma, deps.resolve, now) : Promise.resolve(undefined),
         // WARP-2979 — never throws either; every viewer's.
         securityLinksHealth(prisma, now),
+        // WARP-2979 PR-2 — never throws either; every viewer's.
+        securitySummariesHealth(prisma, now),
       ]);
       const sources = buildSecurityHealth({
         frigateConfigured: Boolean(config.FRIGATE_URL && config.FRIGATE_URL.trim()),
@@ -235,6 +238,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         incidents,
         alerts,
         links,
+        summaries,
         now,
       });
       // The threat source is only a row for the people who can see threats.

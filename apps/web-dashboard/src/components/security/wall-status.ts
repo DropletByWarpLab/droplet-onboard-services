@@ -152,6 +152,7 @@ export const WALL_ROW_ROLE: Record<SecurityHealthRow["id"], WallRowRole> = {
   site_mode: "mode",
   incidents: "engine",
   alerts: "other",
+  summaries: "other",
   patterns: "other",
   retention: "other",
 };
