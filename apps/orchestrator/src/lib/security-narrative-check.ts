@@ -24,6 +24,8 @@
  *   WORDS  monitor(ed), alarm, armed, secure(d), protected, guard(ed),
  *          zone(s), intruder(s), burglar(s), thief, thieves, break-in,
  *          stole(n) — the page never promises protection or accuses anyone.
+ *          Read with the input's own name phrases set aside (#2423 review 4):
+ *          "Secure storage" or "Loading zone camera" is what someone typed.
  */
 import { hasUnsafeDisplayChars } from "../services/security-audit.js";
 import type { NarrativeInputV1 } from "./security-narrative-prompt.js";
@@ -134,8 +136,8 @@ export function checkNarrative(raw: string, input: NarrativeInputV1, forbiddenNa
     if (m[2] ? !times.has(clock) : !bare.has(clock)) return { ok: false, rule: "TIMES" };
   }
 
-  // WORDS
-  if (WORDS.test(text)) return { ok: false, rule: "WORDS" };
+  // WORDS — on the same text less its input-name phrases: an area someone called "Secure storage" may be named.
+  if (WORDS.test(rest)) return { ok: false, rule: "WORDS" };
 
   return { ok: true, text };
 }

@@ -172,6 +172,19 @@ describe("checkNarrative", () => {
       expect(checkNarrative(`Someone was seen at 2:14 AM, ${word.toUpperCase()} it seems.`, input(), NAMES)).toEqual({ ok: false, rule: "WORDS" });
     });
 
+    // #2423 review 4: a banned word inside a name someone TYPED (an area "Secure storage", a camera "Loading zone
+    // camera") failed every summary of that place. The name's own phrase is set aside first, as for NAMES.
+    it("a banned word inside an input name may be written as part of that name, and nowhere else", () => {
+      const inp = input({
+        place: { name: "Secure storage", kind: "staff only" },
+        events: [{ at: "2:14 AM", until: null, what: "person", source: "Loading zone camera", part: null, found: "live" }],
+      });
+      const text = "Someone was seen in Secure storage on the Loading zone camera at 2:14 AM.";
+      expect(checkNarrative(text, inp, NAMES)).toEqual({ ok: true, text });
+      expect(checkNarrative("Someone was seen in Secure storage at 2:14 AM. It is secure.", inp, NAMES)).toEqual({ ok: false, rule: "WORDS" });
+      expect(checkNarrative("Someone was seen by the loading zone at 2:14 AM.", inp, NAMES)).toEqual({ ok: false, rule: "WORDS" });
+    });
+
     it("whole words only: 'timezone', 'armchair', 'secureness'-like substrings pass", () => {
       expect(checkNarrative("Someone sat in the armchair near the safeguarding sign at 2:14 AM, in the site timezone.", input(), NAMES).ok).toBe(true);
     });
