@@ -32,7 +32,8 @@ vi.mock("../services/security-incident-page.js", async () => ({
   projectedIncidentPage: (await import("./security-incidents.fake.js")).referenceProjectedIncidentPage,
 }));
 
-import { createSecurityAssistantRouter, type CameraStatusSource } from "../routes/security-assistant.js";
+import { AREA_READ_BATCH, createSecurityAssistantRouter, type CameraStatusSource } from "../routes/security-assistant.js";
+import { assistantBodyBudget } from "../services/security-assistant-view.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 import { areaRows as fakeAreaRows, createFakeSecurityPrisma, eventRow, officeHours, type FakeSecurityPrisma, type FakeWorld } from "./security-incidents.fake.js";
 
@@ -615,6 +616,148 @@ describe("A2 summaryByDroplet", () => {
     withSummary(f, INC_FRONT);
     f.failOn("securityAiSettings", "findUnique", undefined, { always: true });
     expect((await a2(f, "stefan")).incident.summaryByDroplet).toBeNull();
+  });
+});
+
+// WARP-3194 items 1 and 2: A4 could not resume past the areas it trimmed, and it queried every visible area
+// (two queries each, all at once) before trimming.
+describe("A4 pages through the areas, reading only what a page holds (WARP-3194)", () => {
+  const LABEL = "A camera with a very long display name that goes on".padEnd(60, "x");
+  const name = (i: number) => `Area ${String(i).padStart(3, "0")}`;
+  const cap = 8_000 - '{"type":"security_areas",}'.length;
+
+  /** `visible` areas on `front` (Maria's camera) and `hidden` ones on `back` alone, their names interleaved. */
+  function areaWorld(visible: number, hidden: number): FakeSecurityPrisma {
+    const rows = [
+      ...Array.from({ length: visible }, (_, i) => areaRows(`0c0c0c0c-0000-4000-8000-${String(i).padStart(12, "0")}`, name(2 * i), "interior", ["front"])),
+      ...Array.from({ length: hidden }, (_, i) => areaRows(`0d0d0d0d-0000-4000-8000-${String(i).padStart(12, "0")}`, name(2 * i + 1), "interior", ["back"])),
+    ];
+    return world({
+      camera: [{ id: "cam-front", name: "front", displayName: LABEL }, { id: "cam-back", name: "back", displayName: "Back camera" }],
+      securityZone: rows.map((r) => r.zone),
+      securityZoneLink: rows.flatMap((r) => r.links),
+    });
+  }
+
+  /** Every page from offset 0, following nextOffset. */
+  async function pages(w: FakeSecurityPrisma, who: string) {
+    const { server } = app(w, { level: "manage" });
+    const out: Array<Record<string, unknown> & { areas: Array<{ name: string }>; moreAreas: number; nextOffset: number | null }> = [];
+    let offset: number | null = 0;
+    for (let i = 0; offset !== null && i < 20; i++) {
+      const res = await get(server, `/api/security/assistant/areas?offset=${offset}`, who);
+      expect(res.status).toBe(200);
+      out.push(res.body);
+      offset = res.body.nextOffset;
+    }
+    expect(offset).toBeNull();
+    return out;
+  }
+
+  it("nextOffset resumes right after the last area shown: every area once, in order, each page under the cap", async () => {
+    const all = await pages(areaWorld(40, 0), "stefan");
+    expect(all.length).toBeGreaterThan(1);
+    expect(all.flatMap((b) => b.areas.map((a) => a.name))).toEqual(Array.from({ length: 40 }, (_, i) => name(2 * i)));
+    let seen = 0;
+    for (const b of all) {
+      seen += b.areas.length;
+      expect(b.moreAreas).toBe(40 - seen);
+      expect(b.nextOffset).toBe(seen < 40 ? seen : null);
+      expect(JSON.stringify(b).length).toBeLessThan(cap);
+    }
+  });
+
+  it("an offset past the end is an empty page with nothing more; outside 0–64 it is 400", async () => {
+    const { server } = app(areaWorld(40, 0));
+    for (const offset of [40, 64]) {
+      const res = await get(server, `/api/security/assistant/areas?offset=${offset}`, "stefan");
+      expect(res.status, String(offset)).toBe(200);
+      expect(res.body, String(offset)).toMatchObject({ areas: [], moreAreas: 0, nextOffset: null });
+    }
+    for (const offset of ["65", "-1", "1.5", "x"]) {
+      const res = await get(server, `/api/security/assistant/areas?offset=${offset}`, "stefan");
+      expect(res.status, offset).toBe(400);
+      expect(res.body.error.code, offset).toBe("BAD_REQUEST");
+    }
+  });
+
+  it("?area= and offset together: the one area, then nothing", async () => {
+    const { server } = app(areaWorld(40, 0));
+    const first = await get(server, `/api/security/assistant/areas?area=${encodeURIComponent(name(6))}&offset=0`, "stefan");
+    expect(first.body).toMatchObject({ areas: [{ name: name(6) }], moreAreas: 0, nextOffset: null });
+    const past = await get(server, `/api/security/assistant/areas?area=${encodeURIComponent(name(6))}&offset=1`, "stefan");
+    expect(past.body).toMatchObject({ areas: [], moreAreas: 0, nextOffset: null });
+  });
+
+  it("🔴 DS-005: hidden areas move no count, no offset and no page — Maria's pages are byte for byte a site's without them", async () => {
+    const withHidden = await pages(areaWorld(40, 20), "maria");
+    const without = await pages(areaWorld(40, 0), "maria");
+    expect(withHidden.length).toBeGreaterThan(1);
+    expect(withHidden).toEqual(without);
+    expect(JSON.stringify(withHidden)).not.toContain("Back camera");
+    // A forged offset reads her areas only: past them it is the same empty page as on a site without hidden ones.
+    const a = app(areaWorld(40, 20)).server;
+    const b = app(areaWorld(40, 0)).server;
+    for (const offset of [20, 39, 40, 45, 59, 60, 64]) {
+      const x = await get(a, `/api/security/assistant/areas?offset=${offset}`, "maria");
+      const y = await get(b, `/api/security/assistant/areas?offset=${offset}`, "maria");
+      expect(x.body, String(offset)).toEqual(y.body);
+    }
+    // The owner, who sees them, pages through all sixty.
+    const owner = await pages(areaWorld(40, 20), "stefan");
+    const everyName = [...Array.from({ length: 40 }, (_, i) => name(2 * i)), ...Array.from({ length: 20 }, (_, i) => name(2 * i + 1))].sort();
+    expect(owner.flatMap((p) => p.areas.map((x) => x.name))).toEqual(everyName);
+  });
+
+  /** Count the per-area reads A4 makes, and how many run at once. */
+  function probeReads(w: FakeSecurityPrisma) {
+    const probe = { counts: 0, events: 0, inFlight: 0, peak: 0 };
+    const wrap = (table: "securityIncident" | "securityEvent", method: "count" | "findMany", tally: "counts" | "events") => {
+      const delegate = w.client[table] as Record<string, (args: unknown) => Promise<unknown>>;
+      const real = delegate[method]!.bind(delegate);
+      delegate[method] = async (args: unknown) => {
+        probe[tally]++;
+        probe.inFlight++;
+        probe.peak = Math.max(probe.peak, probe.inFlight);
+        try {
+          await new Promise((r) => setImmediate(r));
+          return await real(args);
+        } finally {
+          probe.inFlight--;
+        }
+      };
+    };
+    wrap("securityIncident", "count", "counts");
+    wrap("securityEvent", "findMany", "events");
+    return probe;
+  }
+
+  it("reads only the areas the page can hold, a few at a time — not every visible area at once", async () => {
+    const w = areaWorld(40, 0);
+    const probe = probeReads(w);
+    const res = await get(app(w).server, "/api/security/assistant/areas", "stefan");
+    const n = res.body.areas.length;
+    expect(n).toBeGreaterThan(5);
+    expect(n).toBeLessThan(40);
+    // One count and one latest-event read per area read; at most one batch past the last area that fits.
+    expect(probe.counts).toBeLessThanOrEqual(n + AREA_READ_BATCH);
+    expect(probe.events).toBe(probe.counts);
+    // Two reads per area in flight, a batch at a time.
+    expect(probe.peak).toBeLessThanOrEqual(2 * AREA_READ_BATCH);
+    expect(probe.peak).toBeGreaterThan(1);
+  });
+
+  it("…and the page is exactly what fitting every area would give: each area's own answer, as many as fit", async () => {
+    const w = areaWorld(40, 0);
+    const { server } = app(w);
+    const res = await get(server, "/api/security/assistant/areas", "stefan");
+    const n = res.body.areas.length;
+    const own = async (i: number) => (await get(server, `/api/security/assistant/areas?area=${encodeURIComponent(name(2 * i))}`, "stefan")).body.areas[0];
+    for (let i = 0; i < n; i++) expect(res.body.areas[i], name(2 * i)).toEqual(await own(i));
+    expect(JSON.stringify(res.body).length).toBeLessThanOrEqual(assistantBodyBudget());
+    // One more area would not have fitted.
+    const more = { ...res.body, areas: [...res.body.areas, await own(n)], moreAreas: res.body.moreAreas - 1, nextOffset: n + 1 < 40 ? n + 1 : null };
+    expect(JSON.stringify(more).length).toBeGreaterThan(assistantBodyBudget());
   });
 });
 

@@ -78,6 +78,7 @@ import { SECURITY_EVENT_RETENTION_DAYS, feedVisibilityWhere, listSecurityEvents,
 import { SECURITY_INCIDENT_RETENTION_DAYS } from "../services/security-incidents.service.js";
 import { HoursUnreadableError, readModeView, readSiteClock, resolveSecurityTimezone, type ModeView } from "../services/security-mode.service.js";
 import {
+  SECURITY_ZONE_ACTIVE_LIMIT,
   listLinkProposals,
   loadActiveLinks,
   loadCameraLabels,
@@ -128,6 +129,11 @@ const INCIDENT_EVENTS_SHOWN = 30;
 const AREAS_PER_EVENT = 3;
 /** Evidence rows per code A2 carries. */
 const EVIDENCE_PER_CODE = 3;
+/**
+ * WARP-3194 — A4 reads this many areas at once (two reads each), and only as
+ * many batches as its page can hold: never every visible area at once.
+ */
+export const AREA_READ_BATCH = 8;
 
 const HUMAN_ROLES = new Set(["owner", "admin", "family"]);
 
@@ -376,7 +382,13 @@ const eventsQuery = z
   })
   .strict();
 
-const areasQuery = z.object({ area: z.string().max(60).optional() }).strict();
+const areasQuery = z
+  .object({
+    area: z.string().max(60).optional(),
+    // WARP-3194 — A4's `nextOffset`: where the next page starts among this viewer's visible areas.
+    offset: z.coerce.number().int().min(0).max(SECURITY_ZONE_ACTIVE_LIMIT).default(0),
+  })
+  .strict();
 
 const UUID = z.string().uuid();
 
@@ -573,40 +585,57 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
         return r.health === "online" ? "yes" : r.health === "disabled" ? "detection off" : "offline";
       };
       const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats);
-      const areas = await Promise.all(
-        zones.map(async (z) => {
-          const clause = zoneFilterFor(links, z.id, scope);
-          const latest =
-            clause === "none"
-              ? null
-              : (await listSecurityEvents(prisma, visibility, { limit: 1, kinds: { in: ["detection"] }, includeLow: false }, [clause])).events[0] ?? null;
-          const openIncidents = await prisma.securityIncident.count({ where: incidentListWhere(viewer, { state: "open", zoneId: z.id }) });
-          return {
-            name: z.name,
-            kind: ZONE_KIND_WORD[z.kind],
-            lastActivity: latest
-              ? { at: assistantInstant(new Date(latest.startedAt), tz, now), what: eventWhat(latest.kind, latest.labels, latest.camera), source: eventSource(latest.kind, latest.camera, labels) }
-              : null,
-            openIncidents,
-            coveredBy: z.links.map((l) => {
-              const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-              return {
-                source: l.label,
-                part: parsed?.frigateZone ?? null,
-                reporting: reporting(parsed?.camera),
-                linkedBy: l.setBy === "droplet" ? "Droplet" : "a person",
-              };
-            }),
-          };
-        }),
-      );
+      // One area's answer: its last visible activity and its open incidents (two reads), and what covers it.
+      const readArea = async (z: (typeof zones)[number]) => {
+        const clause = zoneFilterFor(links, z.id, scope);
+        const latest =
+          clause === "none"
+            ? null
+            : (await listSecurityEvents(prisma, visibility, { limit: 1, kinds: { in: ["detection"] }, includeLow: false }, [clause])).events[0] ?? null;
+        const openIncidents = await prisma.securityIncident.count({ where: incidentListWhere(viewer, { state: "open", zoneId: z.id }) });
+        return {
+          name: z.name,
+          kind: ZONE_KIND_WORD[z.kind],
+          lastActivity: latest
+            ? { at: assistantInstant(new Date(latest.startedAt), tz, now), what: eventWhat(latest.kind, latest.labels, latest.camera), source: eventSource(latest.kind, latest.camera, labels) }
+            : null,
+          openIncidents,
+          coveredBy: z.links.map((l) => {
+            const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+            return {
+              source: l.label,
+              part: parsed?.frigateZone ?? null,
+              reporting: reporting(parsed?.camera),
+              linkedBy: l.setBy === "droplet" ? "Droplet" : "a person",
+            };
+          }),
+        };
+      };
       const site = siteOut(mode, tz, now);
-      // Suggestions are a manage-level surface (route 23): below it, not even a count.
+      // Suggestions are a manage-level surface (route 23): below it, not even a count. Over every area shown, not the page.
       const shown = new Set(zones.map((z) => z.id));
       const suggestionsWaiting =
         who.level === "manage" ? (await listLinkProposals(prisma, scope, labels)).filter((s) => shown.has(s.zone.id)).length : null;
-      const n = fitList(areas, (kept) => ({ site, areas: kept, moreAreas: areas.length, suggestionsWaiting }));
-      res.json({ site, areas: areas.slice(0, n), moreAreas: areas.length - n, suggestionsWaiting });
+      // WARP-3194 — the page: `offset` counts THIS viewer's visible areas only (DS-005), so no offset, count or
+      // page says anything about an area she cannot see. `wrap` is the exact body for a page of `kept`.
+      const offset = q.data.offset;
+      const page = zones.slice(offset);
+      const wrap = (kept: readonly unknown[]) => ({
+        site,
+        areas: kept,
+        moreAreas: page.length - kept.length,
+        nextOffset: kept.length < page.length ? offset + kept.length : null,
+        suggestionsWaiting,
+      });
+      // WARP-3194 — read the page's areas only, AREA_READ_BATCH at a time, and stop at the first batch the body
+      // overflows: a longer prefix never fits once a shorter one does not, so the page is exactly what fitting
+      // every area would give.
+      const items: Array<Awaited<ReturnType<typeof readArea>>> = [];
+      for (let i = 0; i < page.length; i += AREA_READ_BATCH) {
+        items.push(...(await Promise.all(page.slice(i, i + AREA_READ_BATCH).map(readArea))));
+        if (fitList(items, wrap) < items.length) break;
+      }
+      res.json(wrap(items.slice(0, fitList(items, wrap))));
     } catch (err) {
       unavailable(res, err, "assistant area status");
     }
