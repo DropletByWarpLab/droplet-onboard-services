@@ -174,10 +174,11 @@ const stefan: UserRow = {
 };
 
 /** supertest sends `Host: 127.0.0.1:<port>` — an IP, which the routes refuse
- *  as an RP ID (WARP-1157). Stand in the box's LAN name unless a test sets
- *  x-forwarded-host itself to exercise that refusal. */
+ *  as an RP ID (WARP-1157). Stand in the box's LAN name for that default, and
+ *  leave a Host a test set itself (to exercise the IP refusal) untouched. The
+ *  RP is derived from Host only; X-Forwarded-Host is ignored (W4). */
 const lanHost: express.RequestHandler = (req, _res, next) => {
-  req.headers.host = "droplet-ai.local";
+  if (req.headers.host?.startsWith("127.0.0.1:")) req.headers.host = "droplet-ai.local";
   next();
 };
 
@@ -621,6 +622,48 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     expect(activity.refs.ip).toBe("::ffff:127.0.0.1");
     expect(activity.sub).not.toContain("6.6.6.6");
   });
+
+  // W1 — an assertion made WITH user verification (Windows Hello PIN or
+  // biometric, a platform authenticator's UV) is multi-factor on its own, so
+  // the session carries the same lastMfaAt stamp a TOTP login gets and can
+  // reach require-recent-mfa routes. Without UV there is no stamp.
+  it.each([
+    [true, "stamps lastMfaAt"],
+    [false, "does not stamp lastMfaAt"],
+  ])("verify: userVerified=%s %s on the issued access token", async (userVerified) => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1",
+      challenge: CHALLENGE,
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + 60000),
+      createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({
+      verified: true,
+      authenticationInfo: { newCounter: 6, userVerified },
+    });
+
+    const before = Date.now();
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify?return=body")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+
+    expect(res.status).toBe(200);
+    const fromCookie = sessionFromCookie(res);
+    const fromBody = verifyAccessToken(res.body.accessToken);
+    if (userVerified) {
+      expect(typeof fromCookie.lastMfaAt).toBe("string");
+      const stamped = Date.parse(fromCookie.lastMfaAt!);
+      expect(stamped).toBeGreaterThanOrEqual(before - 1000);
+      expect(stamped).toBeLessThanOrEqual(Date.now());
+      expect(fromBody?.lastMfaAt).toBe(fromCookie.lastMfaAt);
+    } else {
+      expect(fromCookie.lastMfaAt).toBeUndefined();
+      expect(fromBody?.lastMfaAt).toBeUndefined();
+    }
+  });
 });
 
 // =====================================================================
@@ -646,7 +689,7 @@ describe("WARP-1157 — honest refusals and coded errors", () => {
     const { prisma } = createPrismaMock({ users: [stefan] });
     const res = await request(buildProtectedApp(prisma, stefan))
       .post("/api/auth/webauthn/register/options")
-      .set("X-Forwarded-Host", "192.168.9.195");
+      .set("Host", "192.168.9.195");
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("origin_unsupported");
     expect(createChallenge).not.toHaveBeenCalled();
@@ -656,10 +699,25 @@ describe("WARP-1157 — honest refusals and coded errors", () => {
     const { prisma } = createPrismaMock();
     const res = await request(buildPublicApp(prisma))
       .post("/api/auth/webauthn/authenticate/options")
-      .set("X-Forwarded-Host", "[fe80::1]:443");
+      .set("Host", "[fe80::1]:443");
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("origin_unsupported");
     expect(createChallenge).not.toHaveBeenCalled();
+  });
+
+  // W4 — nginx sets Host and never X-Forwarded-Host, so a client-supplied
+  // X-Forwarded-Host must not steer the RP: neither to force a refusal nor to
+  // pick the rpID/origin the server will expect.
+  it("ignores a client-supplied X-Forwarded-Host when deriving the RP", async () => {
+    const { prisma } = createPrismaMock();
+    generateAuthenticationOptions.mockResolvedValue({ challenge: CHALLENGE, rpId: "droplet-ai.local" });
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/options")
+      .set("X-Forwarded-Host", "192.168.9.195");
+    expect(res.status).toBe(200);
+    expect(generateAuthenticationOptions).toHaveBeenCalledWith(
+      expect.objectContaining({ rpID: "droplet-ai.local" }),
+    );
   });
 
   it("register/verify records the RP ID the passkey was made on", async () => {

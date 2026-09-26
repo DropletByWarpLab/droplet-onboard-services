@@ -14,7 +14,9 @@
  *   - rpID   = the hostname ONLY (no scheme, no port) — WebAuthn requires the
  *     RP ID to be a registrable domain suffix of the origin's host.
  *   - proto prefers `x-forwarded-proto` (nginx gateway), then `req.secure`.
- *   - host prefers `x-forwarded-host`, then `host`.
+ *   - host is the `Host` header ONLY. nginx forwards `Host $host` and never
+ *     sets `X-Forwarded-Host`, so that header can only have come from the
+ *     client and must not choose the RP (W4).
  */
 import { describe, it, expect } from "vitest";
 import type { Request } from "express";
@@ -57,12 +59,22 @@ describe("deriveWebAuthnRp — rpID/origin from the request (LAN + air-gap safe)
     expect(rp.rpID).toBe("droplet-ai.local");
   });
 
-  it("prefers x-forwarded-host over host", () => {
+  it("ignores a client-supplied x-forwarded-host (nginx never sets it)", () => {
     const rp = deriveWebAuthnRp(
-      fakeReq({ host: "internal:3000", xfHost: "droplet.local", xfProto: "https" }),
+      fakeReq({ host: "droplet-ai.local", xfHost: "evil.example", xfProto: "https" }),
     );
-    expect(rp.rpID).toBe("droplet.local");
-    expect(rp.origin).toBe("https://droplet.local");
+    expect(rp.rpID).toBe("droplet-ai.local");
+    expect(rp.origin).toBe("https://droplet-ai.local");
+  });
+
+  it("cannot be steered onto an IP by x-forwarded-host, nor off one", async () => {
+    const { isIpRpId } = await import("./webauthn-config.js");
+    const named = deriveWebAuthnRp(fakeReq({ host: "droplet-ai.local", xfHost: "192.168.9.195" }));
+    expect(isIpRpId(named.rpID)).toBe(false);
+    // The IP refusal still keys on the real Host.
+    const ip = deriveWebAuthnRp(fakeReq({ host: "192.168.9.195", xfHost: "droplet-ai.local" }));
+    expect(ip.rpID).toBe("192.168.9.195");
+    expect(isIpRpId(ip.rpID)).toBe(true);
   });
 
   it("works for a bare LAN IP (no domain) — air-gap path", () => {

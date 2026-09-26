@@ -14,9 +14,12 @@
  *   - WebAuthn with user-verification is itself multi-factor (possession of
  *     the authenticator + the PIN/biometric that unlocks it), so a single
  *     passkey assertion is a strong primary credential for a home appliance.
- *   - The same assertion is the natural place to later stamp `lastMfaAt` for
- *     step-up flows; that JWT-claim plumbing is owned by WARP-238 and is
- *     deliberately NOT expanded here (see the matching note in the PR body).
+ *   - An assertion the authenticator made WITH user verification stamps
+ *     `lastMfaAt` into the access token, the same stamp a TOTP login sets, so
+ *     `require-recent-mfa` routes accept a Windows Hello (PIN / biometric)
+ *     session. Without UV there is no stamp. UV is still not REQUIRED
+ *     (`requireUserVerification: false`), so PIN-less security keys keep
+ *     working as a primary credential.
  *
  * Four routes, split to match the auth.ts public/protected mounting:
  *   PROTECTED (require a signed-in user — you enrol a passkey for yourself):
@@ -50,16 +53,13 @@ import type {
   AuthenticationResponseJSON,
 } from "@simplewebauthn/server";
 import type { PrismaClient, WebAuthnCredential } from "@prisma/client";
+import type { Role } from "../services/jwt.service.js";
 import {
-  signAccessToken,
-  signRefreshToken,
-  registerRefreshSession,
-  ACCESS_TOKEN_TTL_SECONDS,
-  REFRESH_TOKEN_TTL_SECONDS,
-  type Role,
-} from "../services/jwt.service.js";
-import { createSession } from "../services/session.service.js";
-import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
+  issueSessionTokens,
+  sessionTokenBody,
+  setSessionCookies,
+  type IssueSessionOptions,
+} from "../services/session-mint.js";
 import { createChallenge, consumeChallenge } from "../services/webauthn-challenge.service.js";
 import { deriveWebAuthnRp, isIpRpId } from "../services/webauthn-config.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -170,36 +170,19 @@ async function issueSession(
     username: string;
     displayName: string;
     role: Role;
-    /** WARP-1582 — assigned custom access role, `null` for none. Spread
-     *  straight into signAccessToken below, so a caller that omits it
-     *  mints a claim-less token and consumers fall back to the database. */
+    /** WARP-1582 — assigned custom access role, `null` for none. A caller
+     *  that omits it mints a claim-less token and consumers fall back to
+     *  the database. */
     accessRoleId?: string | null;
   },
+  opts: IssueSessionOptions = {},
 ): Promise<void> {
   // WARP-247 — record first so the sid rides inside both tokens; also
   // index the refresh token (WARP-116) — the passkey path previously
   // skipped registerRefreshSession, leaving these sessions invisible to
-  // the admin revoke sweep.
-  const { sid } = await createSession({ id: user.id, role: user.role });
-  const accessToken = signAccessToken({ ...user, sid });
-  const refreshToken = signRefreshToken({ ...user, sid });
-  await registerRefreshSession(user.id, refreshToken);
-  const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-
-  res.cookie(SESSION_COOKIE_NAME, accessToken, {
-    httpOnly: true,
-    secure: isHttps,
-    sameSite: "lax",
-    path: "/",
-    maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-  });
-  res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
-    httpOnly: true,
-    secure: isHttps,
-    sameSite: "lax",
-    path: "/api/auth",
-    maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-  });
+  // the admin revoke sweep. Both live in the shared mint.
+  const minted = await issueSessionTokens(user, opts);
+  setSessionCookies(req, res, minted);
 
   // WARP-582 — same NATIVE-client-only gate as POST /auth/login: a browser
   // context (any Sec-Fetch-* / Origin / Referer marker present) never gets
@@ -216,14 +199,7 @@ async function issueSession(
   const wantBody = wantBodyParam && browserMarker === null;
   res.json({
     user: { id: user.id, username: user.username, displayName: user.displayName, role: user.role },
-    ...(wantBody
-      ? {
-          accessToken,
-          refreshToken,
-          accessTokenExpiresAt: Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-          refreshTokenExpiresAt: Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
-        }
-      : {}),
+    ...(wantBody ? sessionTokenBody(minted) : {}),
   });
 }
 
@@ -680,16 +656,26 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
         actor: { type: "user", id: dbUser.id },
       });
 
-      await issueSession(req, res, {
-        id: dbUser.id,
-        username: dbUser.username,
-        displayName: dbUser.displayName,
-        role: dbUser.role as Role,
-        // WARP-1582 — a passkey session is a session like any other; it
-        // must carry the same claim or every passkey user silently keeps
-        // paying the per-turn read.
-        accessRoleId: dbUser.accessRoleId ?? null,
-      });
+      await issueSession(
+        req,
+        res,
+        {
+          id: dbUser.id,
+          username: dbUser.username,
+          displayName: dbUser.displayName,
+          role: dbUser.role as Role,
+          // WARP-1582 — a passkey session is a session like any other; it
+          // must carry the same claim or every passkey user silently keeps
+          // paying the per-turn read.
+          accessRoleId: dbUser.accessRoleId ?? null,
+        },
+        // User verification (the authenticator's PIN / biometric) makes the
+        // assertion multi-factor on its own: possession + knowledge/inherence.
+        // Only an explicit `true` from the verified assertion stamps it.
+        verification.authenticationInfo.userVerified === true
+          ? { lastMfaAt: new Date().toISOString() }
+          : {},
+      );
     } catch (err) {
       next(err);
     }

@@ -47,12 +47,13 @@ function resolveProtocol(req: Request): "http" | "https" {
   return req.secure ? "https" : "http";
 }
 
-/** Resolve the request host (incl. port), preferring x-forwarded-host. */
+/**
+ * Resolve the request host (incl. port) from the `Host` header ONLY. The nginx
+ * gateway forwards `Host $host` and never sets `X-Forwarded-Host`, so that
+ * header can only have come from the client; honouring it let any caller pick
+ * the rpID/origin the server expects (and dodge or trip the IP refusal).
+ */
 function resolveHost(req: Request): string {
-  const xfHost = req.headers["x-forwarded-host"];
-  if (typeof xfHost === "string" && xfHost.length > 0) {
-    return xfHost.split(",")[0]!.trim();
-  }
   const host = req.headers.host;
   if (typeof host === "string" && host.length > 0) return host;
   // No Host header at all is pathological for a browser request; fail safe to
