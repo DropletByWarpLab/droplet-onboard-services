@@ -107,8 +107,7 @@ import {
   TOTP_ISSUER,
   generateTotpEnrollment,
   encryptTotpSecret,
-  decryptTotpSecret,
-  verifyTotpCode,
+  acceptTotpCode,
 } from "../services/totp.service.js";
 import {
   generateRecoveryCodes,
@@ -1253,8 +1252,9 @@ export function createPublicAuthRouter(
         let secondFactorOk = false;
 
         if (totpCode) {
-          const secret = decryptTotpSecret(totpCred.secretEnc);
-          secondFactorOk = await verifyTotpCode(secret, totpCode);
+          // WARP-3193 SEC-AUTH-10 — single-use: the code's time step is
+          // claimed atomically, so a replayed code fails the factor.
+          secondFactorOk = await acceptTotpCode(prisma, totpCred, totpCode);
         } else if (recoveryCode) {
           // WARP-3193 ARCH-3 — the shared single-use consume (atomic on
           // `usedAt: null`; a replay or a concurrent loser is not consumed).
@@ -2660,8 +2660,9 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const secret = decryptTotpSecret(cred.secretEnc);
-      const codeOk = await verifyTotpCode(secret, parsed.data.code);
+      // WARP-3193 SEC-AUTH-10 — the same single-use accept as login, so the
+      // code that confirms enrollment cannot be replayed at sign-in.
+      const codeOk = await acceptTotpCode(prisma, cred, parsed.data.code);
       if (!codeOk) {
         res.status(401).json({ error: "Invalid code", code: "TOTP_INVALID" });
         return;

@@ -68,12 +68,12 @@ vi.mock("../services/password.service.js", () => ({
 
 const generateTotpEnrollment = vi.fn();
 const encryptTotpSecret = vi.fn();
-const verifyTotpCode = vi.fn();
+const acceptTotpCode = vi.fn();
 vi.mock("../services/totp.service.js", () => ({
   generateTotpEnrollment: (...a: unknown[]) => generateTotpEnrollment(...a),
   encryptTotpSecret: (...a: unknown[]) => encryptTotpSecret(...a),
   decryptTotpSecret: (...a: unknown[]) => `decrypted:${a[0]}`,
-  verifyTotpCode: (...a: unknown[]) => verifyTotpCode(...a),
+  acceptTotpCode: (...a: unknown[]) => acceptTotpCode(...a),
   TOTP_ISSUER: "Droplet",
 }));
 
@@ -348,7 +348,7 @@ describe("POST /auth/totp/enroll", () => {
 
 describe("POST /auth/totp/verify", () => {
   it("first valid code → enables the factor (confirmedAt set) + returns one-time recovery codes", async () => {
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: null }],
     });
@@ -360,7 +360,7 @@ describe("POST /auth/totp/verify", () => {
     expect(res.body.enabled).toBe(true);
     expect(res.body.recoveryCodes).toHaveLength(10);
     // Verified against the decrypted secret.
-    expect(verifyTotpCode).toHaveBeenCalledWith("decrypted:enc", "123456");
+    expect(acceptTotpCode).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ secretEnc: "enc" }), "123456");
     // Factor now enabled.
     expect(prisma._totp[0].confirmedAt).toBeInstanceOf(Date);
     // Fresh codes minted + persisted (old ones cleared first).
@@ -370,9 +370,9 @@ describe("POST /auth/totp/verify", () => {
 
   it("WARP-247 — first confirmation revokes every OTHER session", async () => {
     // Arrange exactly as the first-confirmation test above (pending
-    // credential row + verifyTotpCode → true), with the synthetic user
+    // credential row + acceptTotpCode → true), with the synthetic user
     // carrying sid "sid-totp-device".
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: null }],
     });
@@ -392,7 +392,7 @@ describe("POST /auth/totp/verify", () => {
   });
 
   it("invalid code on a pending enrollment → 401, factor stays disabled, no codes", async () => {
-    verifyTotpCode.mockResolvedValueOnce(false);
+    acceptTotpCode.mockResolvedValueOnce(false);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: null }],
     });
@@ -414,7 +414,7 @@ describe("POST /auth/totp/verify", () => {
   });
 
   it("valid code when ALREADY enabled → re-challenge 200, no NEW recovery codes", async () => {
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: new Date("2026-01-01") }],
     });
@@ -448,7 +448,7 @@ describe("POST /auth/totp/verify", () => {
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "ENC(A)", confirmedAt: null }],
     });
-    verifyTotpCode.mockImplementationOnce(async () => {
+    acceptTotpCode.mockImplementationOnce(async () => {
       // The re-enroll wins between our read and our confirm write.
       prisma._totp[0].secretEnc = "ENC(B)";
       return true;
@@ -473,7 +473,7 @@ describe("POST /auth/totp/verify", () => {
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "ENC(A)", confirmedAt: null }],
     });
-    verifyTotpCode.mockImplementationOnce(async () => {
+    acceptTotpCode.mockImplementationOnce(async () => {
       // The other verify wins the confirm between our read and our write.
       prisma._totp[0].confirmedAt = new Date("2026-07-01T00:00:00Z");
       return true;
