@@ -36,10 +36,12 @@ import type { SecurityDayKind, SecurityHoursBody, SecurityHoursDay, SecurityHour
 import { TimezoneSelect, fill } from "./TimezoneSelect";
 
 export const COPY = {
+  // WARP-2978 — the section's heading and intro on /security/settings ("Security settings").
+  // "…or sends alerts" is gone: the same page now chooses who is told about alerts.
   pageTitle: "Opening hours",
   pageSub:
     "When the site is normally open. Droplet uses this to tell ordinary activity from after-hours activity. " +
-    "It is set here, not read from your calendar. Nothing here locks doors or sends alerts.",
+    "It is set here, not read from your calendar. Nothing here locks doors.",
   usualTitle: "Usual hours",
   notSet: "No opening hours are set yet, so Droplet counts the site as open all the time.",
   presetsIntro: "Start from a common week, then adjust any day. Nothing changes until you save.",
