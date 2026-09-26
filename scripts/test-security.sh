@@ -910,6 +910,30 @@ else
 fi
 
 # =============================================================================
+# Test 23: WARP-3193 SEC-DATA-12 — secrets stay off process command lines
+# =============================================================================
+# /proc/<pid>/cmdline is world-readable, container processes included when
+# viewed from the host. Where the tool can take the secret another way, it
+# must: `docker exec -e NAME` (value from the caller's env) instead of
+# `-e NAME="$VALUE"`, and `occ config:import <0600 file>` instead of
+# `occ config:app:set … --value="$SECRET"`.
+# MUTATION: restore `-e OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW"` and this goes red.
+_argv_secret_bad=""
+_ATTACH="$REPO_ROOT/scripts/host/usr-local-sbin/droplet-openwrt-attach"
+_NC_INIT="$REPO_ROOT/docker/nextcloud-init.sh"
+if grep -nE -- '-e (OPENWRT_ROOT_PW|AP_PSK|GUEST_PSK)=' "$_ATTACH" >/dev/null; then
+  _argv_secret_bad+="droplet-openwrt-attach: docker exec -e NAME=\$SECRET "
+fi
+if grep -nE -- '--value="?\$\{?[A-Z_]*(SECRET|PASSWORD|_PSK|TOKEN)' "$_NC_INIT" >/dev/null; then
+  _argv_secret_bad+="nextcloud-init.sh: occ --value=\$SECRET "
+fi
+if [ -z "$_argv_secret_bad" ]; then
+  pass "no secret passed as a command-line argument at the SEC-DATA-12 sites"
+else
+  fail "secret on a command line (SEC-DATA-12): $_argv_secret_bad"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
