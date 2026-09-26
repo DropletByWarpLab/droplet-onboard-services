@@ -2140,9 +2140,6 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // minted above (delete_camera / disable_camera / camera_subnet_*) could
   // never be consumed — every camera "Remove" 202'd and silently did
   // nothing. The executors live in this module, so the consumer does too.
-  // Role: family stays admitted because the delete/disable mint routes admit
-  // family; confirmNetworkCommand pins each token to its minting user, so a
-  // family member can never confirm an owner/admin-minted subnet token.
   // WARP-1440: the MCP service principal is admitted so set_camera_detection
   // can complete the WARP-41 disable handshake it starts on /disable — the
   // token-pinned-to-minting-user rule means `_service:mcp` can only ever

@@ -5,6 +5,8 @@
  * write tools (a new one has to be added here, and so gated).
  */
 import { describe, it, expect, vi } from "vitest";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Tool, ToolContext } from "../../../src/types.js";
 import acceptDiscoveredCamera from "../../../src/handlers/cameras/accept-discovered-camera.js";
 import deleteClip from "../../../src/handlers/cameras/delete-clip.js";
@@ -52,6 +54,19 @@ describe("camera write tools are owner/admin only in their own RBAC", () => {
   it.each(GATED.map((t) => [t.name, t] as const))("%s lets an admin through to its own logic", async (_n, tool) => {
     const res = await tool.handler({}, ctx("admin"));
     expect(res).not.toMatchObject({ error: { code: "FORBIDDEN" } });
+  });
+
+  it("every write tool defined under src/handlers/cameras calls the guard", () => {
+    // By file, not by name: a future `move_ptz` or `set_retention` in this
+    // folder is caught whatever it is called.
+    const dir = join(__dirname, "..", "..", "..", "src", "handlers", "cameras");
+    const unguarded = readdirSync(dir)
+      .filter((f) => f.endsWith(".ts") && f !== "owner-admin-only.ts")
+      .filter((f) => {
+        const src = readFileSync(join(dir, f), "utf8");
+        return /requiresWrite:\s*true/.test(src) && !/refuseUnlessOwnerOrAdmin\(ctx\)/.test(src);
+      });
+    expect(unguarded).toEqual([]);
   });
 
   it("the list covers every camera write tool in the registry", () => {
