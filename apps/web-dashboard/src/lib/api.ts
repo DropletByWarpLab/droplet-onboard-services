@@ -710,16 +710,27 @@ export async function changePassword(
  * WARP-3113 — schedule a person's deletion. They are cut off now; their files
  * are kept for 30 days (lib/leaver-deletion.ts), then the box deletes the account.
  * Resolves with the date the deletion runs.
+ *
+ * WARP-3169 — with a `recipient`, the box first hands the files to that
+ * person (a new folder in their home) and then deletes the account at once.
+ * A failed hand-over rejects and changes nothing.
  */
-export async function deleteUser(username: string): Promise<{ deletionDueAt: string }> {
+export async function deleteUser(
+  username: string,
+  opts: { recipient?: string } = {},
+): Promise<{ deletionDueAt?: string; folder?: string | null; status?: string }> {
   const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ disposition: "retention" }),
+    body: JSON.stringify(
+      opts.recipient
+        ? { disposition: "handover", recipient: opts.recipient }
+        : { disposition: "retention" },
+    ),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || `Failed to delete user: ${res.status}`);
-  return { deletionDueAt: body.deletionDueAt };
+  return { deletionDueAt: body.deletionDueAt, folder: body.folder, status: body.status };
 }
 
 /** WARP-3113 — cancel a scheduled deletion. The person stays deactivated. */

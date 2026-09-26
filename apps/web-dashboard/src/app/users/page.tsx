@@ -43,7 +43,11 @@ import {
   putAccessExceptions,
   fetchEffectiveAccess,
 } from "@/lib/api";
-import { DELETE_USER_COPY, DELETION_RETENTION_DAYS } from "@/lib/leaver-deletion";
+import {
+  DELETE_USER_COPY,
+  DELETION_RETENTION_DAYS,
+  HANDOVER_RECIPIENT_ROLES,
+} from "@/lib/leaver-deletion";
 import { fetchIntegrations } from "@/lib/api.erp";
 import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-policy";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -301,6 +305,8 @@ export default function UsersPage() {
   // boolean) lets the dialog body render the username/displayName.
   const [revokeInvite, setRevokeInvite] = useState<InviteListItem | null>(null);
   const [deleteUserTarget, setDeleteUserTarget] = useState<AuthUser | null>(null);
+  // WARP-3169 — "" = keep for 30 days; otherwise the recipient's username.
+  const [handoverRecipient, setHandoverRecipient] = useState("");
   const [disableUserTarget, setDisableUserTarget] = useState<AuthUser | null>(
     null,
   );
@@ -781,6 +787,7 @@ export default function UsersPage() {
       setError("You can't delete your own account.");
       return;
     }
+    setHandoverRecipient("");
     setDeleteUserTarget(u);
   };
 
@@ -788,10 +795,16 @@ export default function UsersPage() {
     const u = deleteUserTarget;
     if (!u) return;
     try {
-      const { deletionDueAt } = await apiDeleteUser(u.id);
+      const recipient = handoverRecipient || undefined;
+      const { deletionDueAt, folder } = await apiDeleteUser(u.id, { recipient });
       if (!mountedRef.current) return;
       setDeleteUserTarget(null);
-      toast(`${u.id} will be deleted on ${formatDeletionDate(deletionDueAt)}.`, "success");
+      toast(
+        recipient
+          ? `${u.id} was deleted. Their files are now with ${recipient}${folder ? `, in "${folder}"` : ""}.`
+          : `${u.id} will be deleted on ${formatDeletionDate(deletionDueAt ?? null)}.`,
+        "success",
+      );
       await reload();
     } catch (err: any) {
       if (mountedRef.current) setError(err?.message || "Failed to delete user");
@@ -2473,8 +2486,44 @@ export default function UsersPage() {
             : "Delete user?"
         }
         description={DELETE_USER_COPY}
-        confirmLabel={`Keep for ${DELETION_RETENTION_DAYS} days, then delete`}
+        confirmLabel={
+          handoverRecipient
+            ? "Hand over files, then delete"
+            : `Keep for ${DELETION_RETENTION_DAYS} days, then delete`
+        }
         variant="destructive"
+        accessory={
+          <label className="flex flex-col gap-1 text-sm">
+            <span>Or hand their files to someone now</span>
+            <select
+              aria-label="Hand files to"
+              value={handoverRecipient}
+              onChange={(e) => setHandoverRecipient(e.target.value)}
+              className="rounded-sm border px-2 py-1.5 bg-transparent"
+            >
+              <option value="">No one: keep for {DELETION_RETENTION_DAYS} days</option>
+              {users
+                .filter(
+                  (r) =>
+                    r.id !== deleteUserTarget?.id &&
+                    r.enabled !== false &&
+                    (r.deletionStatus ?? "NONE") === "NONE" &&
+                    HANDOVER_RECIPIENT_ROLES.has(r.role ?? ""),
+                )
+                .map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.displayName || r.id}
+                  </option>
+                ))}
+            </select>
+            {handoverRecipient && (
+              <span className="text-label-tertiary">
+                Their files move to a new folder in {handoverRecipient}&apos;s files, then the
+                account is deleted right away. If the move fails, nothing changes.
+              </span>
+            )}
+          </label>
+        }
       />
 
       <ConfirmDialog

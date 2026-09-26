@@ -138,6 +138,14 @@
 #   rm-self-swap-helper --update-id ID
 #       `docker rm` (deliberately never -f) the self-swap helper container
 #       for ID; the daemon itself refuses a still-running helper.
+#   nc-transfer-ownership --from UID --to UID
+#       WARP-3169 leaver hand-over: `occ files:transfer-ownership` inside the
+#       nextcloud container, as www-data, bounded by `timeout`. Both ids are
+#       checked against a strict subset of the Nextcloud user-id charset
+#       ([A-Za-z0-9_.@-], never a leading `-`, at most 64) and confirmed to
+#       exist (`occ user:info`) first; `--` ends occ's options so an id can
+#       never be read as a flag. The only caller is the orchestrator's
+#       Delete-with-hand-over path, after its own recipient checks.
 #
 # ── TEST / DRY-RUN HOOK ──
 #   DROPLET_OTA_APPLY_DRY_RUN=1  — print each `docker`/`docker compose` command
@@ -282,6 +290,8 @@ IMAGES=()
 IMAGE=""
 PROFILES=""
 PROFILES_SET=
+NC_FROM=""
+NC_TO=""
 
 # --- Validators -------------------------------------------------------------
 
@@ -321,6 +331,16 @@ validate_image_ref() {
   case "$1" in
     *[!A-Za-z0-9._:@/-]*) die "invalid --image: $1" ;;
   esac
+}
+
+validate_nc_user() {
+  # $1 = flag name (for the error), $2 = value. A strict subset of the
+  # Nextcloud user-id charset: no space or quote (both legal in Nextcloud),
+  # never a leading `-` (it would read as an occ option), at most 64 chars.
+  case "$2" in
+    '' | -* | *[!A-Za-z0-9_.@-]*) die "invalid $1: $2" ;;
+  esac
+  [ "${#2}" -le 64 ] || die "invalid $1: too long"
 }
 
 validate_positive_int() {
@@ -830,6 +850,34 @@ cmd_rm_self_swap_helper() {
   run docker rm "$name"
 }
 
+# --- WARP-3169: leaver hand-over --------------------------------------------
+
+# Seconds the transfer may run inside the container. The orchestrator's own
+# exec timeout sits a little above this, so the in-container `timeout` is what
+# normally fires.
+NC_TRANSFER_TIMEOUT_SECONDS="${DROPLET_NC_TRANSFER_TIMEOUT_SECONDS:-600}"
+
+occ() {
+  dc exec -T -u www-data nextcloud "$@"
+}
+
+nc_user_exists() {
+  [ -n "$DRY_RUN" ] && return 0
+  occ php occ user:info --output=json -- "$1" >/dev/null 2>&1
+}
+
+cmd_nc_transfer_ownership() {
+  validate_nc_user --from "$NC_FROM"
+  validate_nc_user --to "$NC_TO"
+  validate_positive_int DROPLET_NC_TRANSFER_TIMEOUT_SECONDS "$NC_TRANSFER_TIMEOUT_SECONDS"
+  [ "$NC_FROM" != "$NC_TO" ] || die "--from and --to are the same user"
+  nc_user_exists "$NC_FROM" || die "unknown Nextcloud user: $NC_FROM"
+  nc_user_exists "$NC_TO" || die "unknown Nextcloud user: $NC_TO"
+  log "nc-transfer-ownership $NC_FROM -> $NC_TO"
+  occ timeout "$NC_TRANSFER_TIMEOUT_SECONDS" \
+    php occ files:transfer-ownership -- "$NC_FROM" "$NC_TO"
+}
+
 # =============================================================================
 # Arg parsing + dispatch
 # =============================================================================
@@ -848,6 +896,8 @@ while [ "$#" -gt 0 ]; do
     --configs-tar) CONFIGS_TAR="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
     --profiles) PROFILES="$2"; PROFILES_SET=1; shift 2 ;;
+    --from) NC_FROM="${2-}"; shift 2 || die "--from needs a value" ;;
+    --to) NC_TO="${2-}"; shift 2 || die "--to needs a value" ;;
     --images) shift; while [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; do IMAGES+=("$1"); shift; done ;;
     # A bare positional (restore-configs ID).
     --*) die "unknown flag: $1" ;;
@@ -870,5 +920,6 @@ case "$SUBCOMMAND" in
   list-self-swap-helpers) cmd_list_self_swap_helpers ;;
   capture-self-swap-logs) cmd_capture_self_swap_logs ;;
   rm-self-swap-helper) cmd_rm_self_swap_helper ;;
+  nc-transfer-ownership) cmd_nc_transfer_ownership ;;
   *) die "unknown subcommand: $SUBCOMMAND" ;;
 esac

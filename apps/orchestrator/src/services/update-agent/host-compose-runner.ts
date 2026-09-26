@@ -561,3 +561,69 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
     },
   };
 }
+
+/**
+ * WARP-3169 — the Nextcloud user-id shape the host helper's
+ * `nc-transfer-ownership` accepts (mirrors `validate_nc_user` in
+ * apply-update.sh): a strict subset of Nextcloud's charset with no space or
+ * quote, never a leading `-`, at most 64 characters. Checked here too, so a
+ * bad id never even reaches the docker socket.
+ */
+export const NC_USER_ID_RE = /^[A-Za-z0-9_.@][A-Za-z0-9_.@-]{0,63}$/;
+
+/** A hand-over that did not happen. `message` is safe to show an admin. */
+export class NcTransferError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NcTransferError";
+  }
+}
+
+/**
+ * WARP-3169 — move every file `from` owns into a new folder in `to`'s home
+ * (`occ files:transfer-ownership`, run by the host helper inside the
+ * nextcloud container). Resolves with the folder Nextcloud created, parsed
+ * from occ's "Transferring files to <path> ..." line (null if occ did not
+ * print it). Throws NcTransferError on any failure.
+ *
+ * ponytail: synchronous, bounded by the helper's 600 s `timeout`. A home too
+ * big to move in that window fails cleanly; an async job would lift it.
+ */
+export async function ncTransferOwnership(args: {
+  exec: ExecFn;
+  scriptPath: string;
+  composeFile: string;
+  from: string;
+  to: string;
+  timeoutMs?: number;
+  logger?: pino.Logger;
+}): Promise<{ folder: string | null }> {
+  const log = args.logger ?? defaultLog;
+  if (!NC_USER_ID_RE.test(args.from) || !NC_USER_ID_RE.test(args.to)) {
+    throw new NcTransferError("A Nextcloud account name has characters the hand-over can't accept.");
+  }
+  if (args.from === args.to) {
+    throw new NcTransferError("The recipient can't be the person being deleted.");
+  }
+  let stdout: string;
+  try {
+    ({ stdout } = await args.exec(
+      args.scriptPath,
+      ["nc-transfer-ownership", "--compose-file", args.composeFile, "--from", args.from, "--to", args.to],
+      { timeoutMs: args.timeoutMs ?? 660_000 },
+    ));
+  } catch (err) {
+    // Only the helper's last stderr line: occ's progress output lists file
+    // names, which have no place in the orchestrator log.
+    const stderr = (err as { stderr?: unknown }).stderr;
+    const last =
+      typeof stderr === "string" ? (stderr.trim().split("\n").at(-1) ?? "").slice(0, 300) : "";
+    log.error(
+      { event: "people.handover_transfer_failed", err: last || (err instanceof Error ? err.message : String(err)) },
+      "Nextcloud hand-over failed",
+    );
+    throw new NcTransferError("The files could not be handed over, so nothing was changed.");
+  }
+  const target = /^Transferring files to (.+?)(?: \.\.\.)?\s*$/m.exec(stdout)?.[1];
+  return { folder: target ? path.posix.basename(target) : null };
+}

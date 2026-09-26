@@ -9,9 +9,10 @@
  * files are untouched. This module's nightly job completes the removal once
  * the date passes.
  *
- * Hand-over to a recipient (the other option Romain accepted on 2026-09-25)
- * needs a server-side move between two Nextcloud homes, which the box cannot
- * do today without a design choice; tracked as WARP-3169.
+ * WARP-3169 — the other option Romain accepted on 2026-09-25: hand the files
+ * to a recipient (`handOverAndDeleteUser`). The move runs through the host
+ * helper's fixed `nc-transfer-ownership` subcommand (host-compose-runner.ts);
+ * once it succeeds the deletion completes at once, with no retention.
  */
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
@@ -35,6 +36,8 @@ import { ACCESS_TOKEN_TTL_SECONDS, type Role } from "./jwt.service.js";
 import { denylistUser } from "./auth-denylist.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
+import { getOtaHost } from "./update-agent/host-exec.js";
+import { ncTransferOwnership, NcTransferError } from "./update-agent/host-compose-runner.js";
 
 const logger = createLogger("leaver-deletion");
 
@@ -52,15 +55,24 @@ interface RemovableRow {
   role: Role;
 }
 
-/** The one disposition that exists until hand-over lands (WARP-3169). */
-export type DeletionDisposition = "retention";
+/** What happens to a leaver's files: kept RETENTION_DAYS, or handed over
+ *  to a recipient now (WARP-3169). */
+export type DeletionDisposition = "retention" | "handover";
 
 /** A delete request's body. `disposition` is optional: a client that sends
  *  none (iOS and the Mac on main) gets "retention", recorded as defaulted. An
- *  unknown value is refused by the routes (400 UNKNOWN_DISPOSITION). */
+ *  unknown value is refused by the routes (400 UNKNOWN_DISPOSITION).
+ *  `recipient` (a username) is read for "handover" only. */
 export const deleteDispositionSchema = z.object({
-  disposition: z.enum(["retention"]).optional(),
+  disposition: z.enum(["retention", "handover"]).optional(),
+  recipient: z.string().min(1).max(256).optional(),
 });
+
+export const UNKNOWN_DISPOSITION_BODY = {
+  error:
+    "Unknown disposition. Use \"retention\" (keep the files 30 days, then delete) or \"handover\" with a recipient.",
+  code: "UNKNOWN_DISPOSITION",
+} as const;
 
 /**
  * Schedule a person's deletion — THE path for every delete surface
@@ -289,4 +301,204 @@ export async function purgeDueDeletions(
     }
   }
   return { completed, failed };
+}
+
+// ── WARP-3169: hand-over ─────────────────────────────────────────────────
+
+/** A hand-over refused or failed before the leaver's state changed. */
+export class HandoverRefusedError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HandoverRefusedError";
+  }
+  toJSON(): { error: string; code: string } {
+    return { error: this.message, code: this.code };
+  }
+}
+
+/** Who may receive a leaver's files: an owner, admin or member (wire role
+ *  `family`). Never an external guest or a service account. */
+const HANDOVER_RECIPIENT_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family"]);
+
+/** Moves `from`'s Nextcloud files to `to`. Injectable for tests. */
+export type NcTransferFn = (from: string, to: string) => Promise<{ folder: string | null }>;
+
+/** Production transfer: the host helper, when this box has it provisioned. */
+const hostTransfer: NcTransferFn = async (from, to) => {
+  const host = getOtaHost();
+  if (!host) {
+    throw new HandoverRefusedError(
+      503,
+      "HANDOVER_UNAVAILABLE",
+      "Handing files over needs the box's host helper, which is off on this box. Use \"Keep for 30 days, then delete\" instead.",
+    );
+  }
+  return ncTransferOwnership({
+    exec: host.exec,
+    scriptPath: host.helperPath,
+    composeFile: host.composeFile,
+    from,
+    to,
+  });
+};
+
+const refuse = (status: number, code: string, message: string) =>
+  new HandoverRefusedError(status, code, message);
+
+/**
+ * Delete a person and hand their files to `recipient` (a username) —
+ * `{ disposition: "handover", recipient }` on either delete route.
+ *
+ * Order is the contract:
+ *   1. every check that can refuse (the WARP-1526 removal rails, the
+ *      recipient, the in-transaction last-owner/last-operator invariants) —
+ *      nothing has changed yet;
+ *   2. the transfer. If it fails, NOTHING changes: no deactivation, no
+ *      deletion, and the files stay where they were;
+ *   3. only then revoke + claim (DEACTIVATED + PURGING) and complete the
+ *      deletion right away, with no retention.
+ * If step 3's claim loses a race (someone changed the person in between),
+ * the files have already moved; the audit row from step 2 says so and the
+ * error is returned. If the Nextcloud account delete fails, the row stays
+ * PURGING and the nightly job retries it, as for any deletion.
+ */
+export async function handOverAndDeleteUser(
+  prisma: PrismaClient,
+  target: RemovableRow & { deletionStatus?: string | null },
+  req: {
+    guardActor: GuardActor;
+    actorUsername: string | null;
+    actor: ActivityActor;
+    recipient: string | undefined;
+    transfer?: NcTransferFn;
+  },
+): Promise<{ recipient: string; folder: string | null; removed: boolean }> {
+  if (!req.recipient) {
+    throw refuse(400, "RECIPIENT_REQUIRED", "Choose who receives the files.");
+  }
+  if (target.deletionStatus === "PURGING") {
+    throw refuse(409, "DELETION_IN_PROGRESS", "This person is already being deleted.");
+  }
+  assertRemovalAllowed({ actor: req.guardActor, target });
+
+  const select = {
+    id: true,
+    username: true,
+    nextcloudUsername: true,
+    role: true,
+    directoryStatus: true,
+    deletionStatus: true,
+  } as const;
+  const recipient =
+    (await prisma.user.findUnique({ where: { nextcloudUsername: req.recipient }, select })) ??
+    (await prisma.user.findUnique({ where: { username: req.recipient }, select }));
+  if (!recipient) {
+    throw refuse(400, "RECIPIENT_UNKNOWN", "The recipient isn't a person on this box.");
+  }
+  if (recipient.id === target.id) {
+    throw refuse(400, "RECIPIENT_IS_LEAVER", "The recipient can't be the person being deleted.");
+  }
+  if (recipient.directoryStatus !== "ACTIVE" || recipient.deletionStatus !== "NONE") {
+    throw refuse(400, "RECIPIENT_NOT_ACTIVE", "The recipient must be an active person.");
+  }
+  if (!HANDOVER_RECIPIENT_ROLES.has(recipient.role)) {
+    throw refuse(
+      400,
+      "RECIPIENT_ROLE",
+      "Files can only go to an owner, admin or member, never an external guest.",
+    );
+  }
+  if (target.nextcloudUsername === null) {
+    throw refuse(
+      409,
+      "NO_FILES_ACCOUNT",
+      "This person has no files account, so there is nothing to hand over. Use \"Keep for 30 days, then delete\".",
+    );
+  }
+  if (recipient.nextcloudUsername === null) {
+    throw refuse(409, "RECIPIENT_NO_FILES_ACCOUNT", "The recipient has no files account to receive them.");
+  }
+
+  // The invariants the claim re-checks, checked BEFORE the files move, so a
+  // last-operator refusal never lands after a transfer.
+  await prisma.$transaction(async (tx) => {
+    const fresh = await readGuardTargetTx(tx, target.id);
+    if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+    await assertRemovalInvariantsTx(tx, { target: fresh });
+  }, SERIALIZABLE_TX);
+
+  let folder: string | null;
+  try {
+    ({ folder } = await (req.transfer ?? hostTransfer)(
+      target.nextcloudUsername,
+      recipient.nextcloudUsername,
+    ));
+  } catch (err) {
+    if (err instanceof HandoverRefusedError) throw err;
+    throw refuse(
+      502,
+      "HANDOVER_FAILED",
+      err instanceof NcTransferError
+        ? err.message
+        : "The files could not be handed over, so nothing was changed.",
+    );
+  }
+
+  await recordActivity({
+    kind: "auth",
+    severity: "warn",
+    sourceIcon: "user-x",
+    what: "Files handed over",
+    sub: `${target.username} → ${recipient.username}${folder ? ` · ${folder}` : ""}`,
+    refs: {
+      actor: req.actorUsername,
+      targetUserId: target.id,
+      targetUsername: target.username,
+      recipientUserId: recipient.id,
+      recipientUsername: recipient.username,
+      folder,
+      disposition: "handover",
+    },
+    actor: req.actor,
+  });
+
+  await prisma.$transaction(async (tx) => {
+    const fresh = await readGuardTargetTx(tx, target.id);
+    if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+    await assertRemovalInvariantsTx(tx, { target: fresh });
+    await tx.user.update({
+      where: { id: fresh.id, role: fresh.role },
+      data: {
+        directoryStatus: "DEACTIVATED",
+        deletionStatus: "PURGING",
+        deletionRequestedBy: req.actorUsername,
+      },
+    });
+  }, SERIALIZABLE_TX);
+
+  try {
+    await completeUserDeletion(prisma, target, {
+      actor: req.actor,
+      actorUsername: req.actorUsername,
+    });
+    return { recipient: recipient.username, folder, removed: true };
+  } catch (err) {
+    logger.error(
+      { err, username: target.username },
+      "hand-over done, account removal failed; the row stays PURGING and the nightly job retries it",
+    );
+    // Still cut them off now, as a scheduled deletion does.
+    await runDisablePostEffects({
+      targetUserId: target.id,
+      username: target.username,
+      actor: req.actor,
+      ncMirror: "failed",
+    }).catch(() => undefined);
+    await denylistUser(target.id, ACCESS_TOKEN_TTL_SECONDS).catch(() => undefined);
+    return { recipient: recipient.username, folder, removed: false };
+  }
 }

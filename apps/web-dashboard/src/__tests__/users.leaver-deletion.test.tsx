@@ -90,7 +90,9 @@ describe("Users roster — Delete keeps files for 30 days (WARP-3113)", () => {
     expect(await screen.findByText(/files are kept for 30 days/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /keep for 30 days, then delete/i }));
 
-    await waitFor(() => expect(deleteUserMock).toHaveBeenCalledWith("tomas.w"));
+    await waitFor(() =>
+      expect(deleteUserMock).toHaveBeenCalledWith("tomas.w", { recipient: undefined }),
+    );
   });
 
   it("a pending deletion shows its state and offers Cancel, not Delete or Enable", async () => {
@@ -108,5 +110,31 @@ describe("Users roster — Delete keeps files for 30 days (WARP-3113)", () => {
 
     fireEvent.click(cancel);
     await waitFor(() => expect(cancelUserDeletionMock).toHaveBeenCalledWith("tomas.w"));
+  });
+
+  it("WARP-3169: the picker offers only active owners, admins and members, and hands over", async () => {
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        { ...LEAVER, role: "family" },
+        { id: "anna", username: "anna", displayName: "Anna Berg", role: "family", enabled: true },
+        { id: "gus", username: "gus", displayName: "Gus Guest", role: "guest", enabled: true },
+        { id: "dan", username: "dan", displayName: "Dan Gone", role: "family", enabled: false },
+        { id: "pat", username: "pat", displayName: "Pat Pending", role: "admin", enabled: false, deletionStatus: "PENDING" },
+      ],
+    });
+    deleteUserMock.mockResolvedValue({ status: "deleted", folder: "transferred from tomas.w on 2026-09-25" });
+    render(<UsersPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /delete user Tomas Weber/i }));
+    const picker = (await screen.findByRole("combobox", { name: /hand files to/i })) as HTMLSelectElement;
+    const offered = Array.from(picker.options).map((o) => o.value);
+    expect(offered).toEqual(["", "anna"]);
+
+    fireEvent.change(picker, { target: { value: "anna" } });
+    fireEvent.click(screen.getByRole("button", { name: /hand over files, then delete/i }));
+
+    await waitFor(() =>
+      expect(deleteUserMock).toHaveBeenCalledWith("tomas.w", { recipient: "anna" }),
+    );
   });
 });
