@@ -279,6 +279,25 @@ describe("cron-runtime.service", () => {
     rt.stop();
   });
 
+  it("scheduleInterval { immediate: true } runs once at registration, under the same overlap guard", async () => {
+    const rt = createCronRuntime();
+    let release!: () => void;
+    const handler = vi.fn(() => new Promise<void>((r) => (release = r)));
+    rt.scheduleInterval(1000, handler, { immediate: true });
+
+    // Ran at once, without waiting a full interval...
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handler).toHaveBeenCalledTimes(1);
+    // ...and the interval ticks while that first run is still going are skipped.
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    release();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(handler).toHaveBeenCalledTimes(2);
+    rt.stop();
+  });
+
   it("a locked handler that outlives 60 s keeps the advisory lock for its whole run", async () => {
     // Model Prisma's interactive-transaction timeout: when it expires the
     // transaction is rolled back and Postgres releases the xact lock, while

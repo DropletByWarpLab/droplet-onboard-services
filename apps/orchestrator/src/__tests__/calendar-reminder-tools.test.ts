@@ -67,7 +67,8 @@ vi.mock("../services/encryption.service.js", () => ({
 
 import { createCalendarRouter } from "../routes/calendar.js";
 import { createRemindersRouter } from "../routes/reminders.js";
-import { startRemindersPoller, stopRemindersPoller } from "../services/reminders-poller.js";
+import { startRemindersPoller } from "../services/reminders-poller.js";
+import { createCronRuntime } from "../services/cron-runtime.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { makeFakeTable, type FakeTable, type Row } from "./helpers/fake-table.js";
 import { makeFakeNotificationLog, type FakeNotificationLog } from "./helpers/fake-notification-log.js";
@@ -353,12 +354,13 @@ describe.each([
     const w = world();
     await run("create_reminder", { title: "Take the bins out", due_at: at(-1).toISOString() }, toolCtx(w, acting));
 
-    startRemindersPoller(w.prisma);
+    const cron = createCronRuntime();
+    startRemindersPoller(w.prisma, cron);
     try {
       await vi.waitFor(() => expect(w.reminders.rows[0]!.notifiedAt).toBeInstanceOf(Date));
       await vi.waitFor(() => expect(mqttPublish).toHaveBeenCalled());
     } finally {
-      stopRemindersPoller();
+      cron.stop();
     }
 
     expect(mqttPublish.mock.calls.map(([topic]) => topic)).toEqual(["droplet/notifications/alice"]);

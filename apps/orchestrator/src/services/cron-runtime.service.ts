@@ -137,6 +137,13 @@ export interface CronScheduleOpts {
    * if `createCronRuntime` was called without a prisma handle.
    */
   lockKey?: string;
+  /**
+   * WARP-3193 QUAL-7 — `scheduleInterval` only: also run once right away,
+   * instead of first waiting a full interval (a poller that seeds a cache or
+   * catches the screen up on boot). That first run goes through the same
+   * overlap guard, so an interval tick cannot start beside it.
+   */
+  immediate?: boolean;
 }
 
 export interface CronRuntime {
@@ -277,7 +284,9 @@ export function createCronRuntime(
 
   return {
     scheduleInterval(ms, handler, opts) {
-      intervals.push(setInterval(guarded(handler, opts), ms));
+      const run = guarded(handler, opts);
+      intervals.push(setInterval(run, ms));
+      if (opts?.immediate) run();
     },
     scheduleCron(spec, handler, opts) {
       const task = cron.schedule(spec, guarded(handler, opts));

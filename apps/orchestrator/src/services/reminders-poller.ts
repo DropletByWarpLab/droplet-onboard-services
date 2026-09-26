@@ -1,7 +1,10 @@
 /**
  * Reminder + calendar-source poller.
  *
- * Wakes every REMINDER_POLL_INTERVAL_SEC and does two things:
+ * Every REMINDER_POLL_INTERVAL_SEC it does two things, as two separate
+ * cron-runtime registrations (WARP-3193 PERF-10 / QUAL-7): a slow or huge
+ * calendar feed must never delay a due reminder, and each job gets
+ * cron-runtime's own no-overlap guard.
  *
  *  1. Find Reminders where dueAt <= now AND completedAt IS NULL AND
  *     notifiedAt IS NULL — for each, dispatch a notification and stamp
@@ -9,40 +12,20 @@
  *  2. Find CalendarSources whose syncIntervalSec has elapsed and run their
  *     ingest. Errors are persisted on the source row, not raised.
  *
- * This is a single in-process interval — fine for a single-orchestrator
- * deployment. If we ever scale horizontally we'd move it to a leader-elected
- * cron; for now the appliance has exactly one orchestrator.
+ * No lockKey, as before: fine for a single-orchestrator deployment. If we
+ * ever scale horizontally both jobs take a lockKey; for now the appliance has
+ * exactly one orchestrator.
  */
 
 import type { PrismaClient } from "@prisma/client";
 import { sendNotification } from "./notifications.service.js";
 import { syncSource, findStaleSources } from "./calendar.service.js";
+import type { CronRuntime } from "./cron-runtime.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("reminders-poller");
 
 const POLL_INTERVAL_SEC = Number(process.env.REMINDER_POLL_INTERVAL_SEC) || 30;
-
-let timer: NodeJS.Timeout | null = null;
-let running = false;
-
-async function tick(prisma: PrismaClient): Promise<void> {
-  if (running) {
-    // Skip overlapping ticks if the previous one is still in flight (e.g.
-    // a slow CalDAV server). Better than queueing — we'll just sync next
-    // tick.
-    return;
-  }
-  running = true;
-  try {
-    await dispatchDueReminders(prisma);
-    await syncStaleSources(prisma);
-  } catch (err) {
-    logger.error({ err }, "poller tick failed");
-  } finally {
-    running = false;
-  }
-}
 
 async function dispatchDueReminders(prisma: PrismaClient): Promise<void> {
   const due = await prisma.reminder.findMany({
@@ -93,18 +76,22 @@ async function syncStaleSources(prisma: PrismaClient): Promise<void> {
   }
 }
 
-export function startRemindersPoller(prisma: PrismaClient): void {
-  if (timer) return;
-  // Kick a tick immediately so newly-added sources sync without waiting a
-  // full interval, then settle into the steady cadence.
-  void tick(prisma);
-  timer = setInterval(() => void tick(prisma), POLL_INTERVAL_SEC * 1000);
+/**
+ * Register both jobs on `cron` (index.ts main(); cron.stop() tears them down).
+ * Each runs once immediately so newly-added sources sync without waiting a
+ * full interval, then settles into the steady cadence. A tick that finds its
+ * previous run still in flight (e.g. a slow CalDAV server) is skipped by
+ * cron-runtime rather than queued — we'll just sync next tick.
+ */
+export function startRemindersPoller(
+  prisma: PrismaClient,
+  cron: Pick<CronRuntime, "scheduleInterval">,
+): void {
+  cron.scheduleInterval(POLL_INTERVAL_SEC * 1000, () => dispatchDueReminders(prisma), {
+    immediate: true,
+  });
+  cron.scheduleInterval(POLL_INTERVAL_SEC * 1000, () => syncStaleSources(prisma), {
+    immediate: true,
+  });
   logger.info({ intervalSec: POLL_INTERVAL_SEC }, "reminders poller started");
-}
-
-export function stopRemindersPoller(): void {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-  }
 }
