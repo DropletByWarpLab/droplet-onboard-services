@@ -898,8 +898,10 @@ model DnsBlockSample {
 /// rehydrated thread can render the same chips the user saw live;
 /// `toolCallId` ties a role=tool message back to the call it answered.
 /// `turnId` is a client-supplied UUID that lets us drop duplicate writes
-/// when a network retry resubmits the same turn — checked in code, not
-/// enforced at the DB level.
+/// when a network retry resubmits the same turn. WARP-3193 PERF-9: enforced
+/// by the partial unique index `ChatMessage_sessionId_turnId_role_key`
+/// (`("sessionId","turnId","role") WHERE "turnId" IS NOT NULL`), SQL-only
+/// because Prisma cannot express a partial index — see that migration.
 ///
 /// WARP-329: `status` + `completedAt` enable save-on-send. A user message
 /// is created with `status=completed` immediately on receipt; the matching
