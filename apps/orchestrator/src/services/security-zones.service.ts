@@ -45,10 +45,10 @@ import type {
   SecurityZoneSourceKind,
   SecurityZoneState,
 } from "@prisma/client";
-import type { SecurityViewerScope } from "./security-access.js";
+import type { SecurityViewerScope } from "./security-viewer-scope.js";
 import { FRIGATE_NAME, type SecurityEventKind, type SecurityEventSource } from "./security-event-ingest.js";
 import { auditSecurityInTx, chainSafeText } from "./security-audit.js";
-import { lockRef, parseLockRef } from "./security-lock-adapter.js";
+import { lockRef, parseLockRef } from "./security-lock-ref.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 
 /** Route 8/11 refuse a 65th ACTIVE area (409 ZONE_LIMIT). */
