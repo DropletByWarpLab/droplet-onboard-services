@@ -1437,6 +1437,19 @@ export interface AdminFilesUsageResponse {
   departments: AdminUsageDepartmentRow[];
 }
 
+/** WARP-3168: a link on company data, made by someone who is not owner/admin. */
+export interface CompanyPublicLink {
+  shareId: number;
+  /** OCS share type: 3 public link, 4 email link, 0/1 with the re-share bit, … */
+  shareType: number;
+  permissions: number;
+  library: string;
+  path: string;
+  createdBy: { userId: string | null; name: string; role: AccessTier | null };
+  createdAt: string;
+  expiresAt: string | null;
+}
+
 export interface InviteCreateResponse {
   token: string;
   url: string;
