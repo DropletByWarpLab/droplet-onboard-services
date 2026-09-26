@@ -17,8 +17,10 @@ try:
 except ImportError:
     pass
 
+import functools
 import hmac
 import os
+import threading
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, Optional
@@ -358,6 +360,29 @@ def get_router() -> DropletRouter:
             raise HTTPException(status_code=502, detail=_ROUTER_AUTH_DETAIL)
         raise HTTPException(status_code=503, detail="Router not connected")
     return router_instance
+
+
+# WARP-3193 PERF-2: this service holds ONE rpcd session to the router, and UCI
+# staging is per session and shared by every config — `uci.commit(cfg)`
+# publishes everything staged for that config and `uci.apply` publishes all of
+# it. Sync handlers run concurrently in FastAPI's threadpool, so without this a
+# handler's commit/apply could publish another handler's half-staged change
+# (the orchestrator's two firewall cron jobs collide exactly this way). Every
+# mutating route therefore runs its stage -> commit -> reload sequence under
+# one process-wide lock; tests/test_uci_write_lock.py fails if a new write
+# route is added without it. Re-entrant so a handler that calls another
+# handler cannot deadlock itself.
+_UCI_WRITE_LOCK = threading.RLock()
+
+
+def _uci_serialised(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _UCI_WRITE_LOCK:
+            return fn(*args, **kwargs)
+
+    wrapper.__uci_serialised__ = True
+    return wrapper
 
 
 def handle_router_error(exc: Exception):
@@ -814,6 +839,7 @@ _PORT_MAP_UNSUPPORTED = {
 
 
 @app.post("/network/ports/{port}/enable")
+@_uci_serialised
 def set_network_port_enabled(port: str, req: SetPortEnabledRequest, request: Request):
     """Administratively bring a physical jack up or down (WARP-1907).
 
@@ -954,6 +980,7 @@ def network_interface_status(name: str):
 
 
 @app.post("/network/interfaces/{name}/up")
+@_uci_serialised
 def network_interface_up(name: str):
     try:
         get_router().network.interface_up(name)
@@ -963,6 +990,7 @@ def network_interface_up(name: str):
 
 
 @app.post("/network/interfaces/{name}/down")
+@_uci_serialised
 def network_interface_down(name: str):
     try:
         get_router().network.interface_down(name)
@@ -997,6 +1025,7 @@ _MANAGEMENT_REFUSAL = {
 
 
 @app.post("/network/interfaces")
+@_uci_serialised
 def create_network_interface(req: CreateInterfaceRequest, request: Request):
     """Create (or overwrite) a `config interface` section under `safe_apply`."""
     if _is_management_interface(req.name) and not req.force:
@@ -1031,6 +1060,7 @@ def create_network_interface(req: CreateInterfaceRequest, request: Request):
 
 
 @app.put("/network/interfaces/{name}")
+@_uci_serialised
 def edit_network_interface(name: str, req: EditInterfaceRequest, request: Request):
     """Update only the supplied options on an existing interface, under `safe_apply`."""
     if _is_management_interface(name) and not req.force:
@@ -1064,6 +1094,7 @@ def edit_network_interface(name: str, req: EditInterfaceRequest, request: Reques
 
 
 @app.post("/network/restart")
+@_uci_serialised
 def restart_network(request: Request):
     """Restart the whole networking stack (ifdown/ifup of every interface).
 
@@ -1143,6 +1174,7 @@ def wireless_radio_info(device: str = "wlan0"):
 
 
 @app.post("/wireless/ssid")
+@_uci_serialised
 def set_ssid(req: SetSsidRequest):
     try:
         r = get_router()
@@ -1154,6 +1186,7 @@ def set_ssid(req: SetSsidRequest):
 
 
 @app.post("/wireless/password")
+@_uci_serialised
 def set_password(req: SetPasswordRequest):
     try:
         r = get_router()
@@ -1165,6 +1198,7 @@ def set_password(req: SetPasswordRequest):
 
 
 @app.post("/wireless/channel")
+@_uci_serialised
 def set_channel(req: SetChannelRequest):
     try:
         r = get_router()
@@ -1184,6 +1218,7 @@ def guest_status():
 
 
 @app.post("/wireless/guest")
+@_uci_serialised
 def create_guest_network(req: CreateGuestNetworkRequest):
     try:
         r = get_router()
@@ -1195,6 +1230,7 @@ def create_guest_network(req: CreateGuestNetworkRequest):
 
 
 @app.delete("/wireless/guest")
+@_uci_serialised
 def remove_guest_network():
     try:
         r = get_router()
@@ -1220,6 +1256,7 @@ def upnp_status():
 
 
 @app.post("/upnp")
+@_uci_serialised
 def set_upnp(req: SetUpnpRequest):
     try:
         r = get_router()
@@ -1258,6 +1295,7 @@ def dhcp_leases_v6():
 
 
 @app.post("/dhcp/static-lease")
+@_uci_serialised
 def add_static_lease(req: StaticLeaseRequest):
     try:
         r = get_router()
@@ -1277,6 +1315,7 @@ def get_dhcp_pool():
 
 
 @app.post("/dhcp/pool")
+@_uci_serialised
 def set_dhcp_pool(req: DhcpPoolRequest):
     try:
         r = get_router()
@@ -1297,6 +1336,7 @@ def set_dhcp_pool(req: DhcpPoolRequest):
 
 
 @app.post("/dhcp/dns")
+@_uci_serialised
 def set_dns(req: SetDnsRequest):
     try:
         r = get_router()
@@ -1360,6 +1400,7 @@ def _commit_and_reload_dhcp(router) -> None:
 
 
 @app.post("/dhcp/hostnames")
+@_uci_serialised
 def upsert_dns_hostname(req: DnsHostnameRequest):
     try:
         r = get_router()
@@ -1371,6 +1412,7 @@ def upsert_dns_hostname(req: DnsHostnameRequest):
 
 
 @app.delete("/dhcp/hostnames/{hostname}")
+@_uci_serialised
 def delete_dns_hostname(hostname: str):
     if not _HOSTNAME_PATH_RE.fullmatch(hostname):
         raise HTTPException(status_code=400, detail="Invalid hostname")
@@ -1416,6 +1458,7 @@ def firewall_redirects() -> FirewallRedirectCollection:
 
 
 @app.post("/firewall/block-device")
+@_uci_serialised
 def block_device(req: BlockDeviceRequest):
     try:
         get_router().firewall.block_device(req.mac, req.name)
@@ -1425,6 +1468,7 @@ def block_device(req: BlockDeviceRequest):
 
 
 @app.post("/firewall/unblock-device")
+@_uci_serialised
 def unblock_device(req: UnblockDeviceRequest):
     try:
         get_router().firewall.unblock_device(req.mac)
@@ -1434,6 +1478,7 @@ def unblock_device(req: UnblockDeviceRequest):
 
 
 @app.post("/firewall/port-forward")
+@_uci_serialised
 def add_port_forward(req: PortForwardRequest):
     try:
         get_router().firewall.add_port_forward(
@@ -1445,6 +1490,7 @@ def add_port_forward(req: PortForwardRequest):
 
 
 @app.post("/firewall/rule")
+@_uci_serialised
 def add_firewall_rule(req: AddFirewallRuleRequest):
     try:
         get_router().firewall.add_rule(
@@ -1457,6 +1503,7 @@ def add_firewall_rule(req: AddFirewallRuleRequest):
 
 
 @app.post("/firewall/zone-policy")
+@_uci_serialised
 def set_zone_policy(req: SetZonePolicyRequest):
     try:
         get_router().firewall.set_zone_policy(
@@ -1469,6 +1516,7 @@ def set_zone_policy(req: SetZonePolicyRequest):
 
 # WARP-613: phone-home egress control (see ADR-012).
 @app.post("/firewall/phone-home/device")
+@_uci_serialised
 def set_device_phone_home(req: PhoneHomeDeviceRequest):
     try:
         fw = get_router().firewall
@@ -1482,6 +1530,7 @@ def set_device_phone_home(req: PhoneHomeDeviceRequest):
 
 
 @app.post("/firewall/phone-home/cameras")
+@_uci_serialised
 def set_cameras_phone_home(req: PhoneHomeCamerasRequest):
     # The camera zone toggle only affects the camera VLAN's WAN egress — it
     # cannot sever the orchestrator's (LAN/mgmt-side) management path, so it
@@ -1523,6 +1572,7 @@ def list_vlans():
 
 
 @app.post("/network/vlans")
+@_uci_serialised
 def create_vlan(req: CreateVlanRequest):
     """Create a new VLAN interface."""
     try:
@@ -1621,6 +1671,7 @@ def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
 
 
 @app.post("/network/subnets/cameras/setup")
+@_uci_serialised
 def setup_camera_subnet(req: CameraSubnetSetupRequest):
     """One-click camera subnet setup: VLAN + firewall zone + DHCP + isolation rules.
 
@@ -1723,6 +1774,7 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
 
 
 @app.delete("/network/subnets/cameras")
+@_uci_serialised
 def teardown_camera_subnet():
     """Remove the camera subnet (VLAN, firewall zone, DHCP pool).
 
@@ -1825,6 +1877,7 @@ def teardown_camera_subnet():
 
 
 @app.post("/vpn/setup")
+@_uci_serialised
 def vpn_setup(req: VpnSetupRequest):
     """Idempotently bring up the WireGuard server interface + firewall.
 
@@ -1981,6 +2034,7 @@ def vpn_list_peers(interface: str = "wg0"):
 
 
 @app.post("/vpn/peers")
+@_uci_serialised
 def vpn_create_peer(req: VpnPeerCreateRequest):
     """Mint a peer: generate a keypair, install the pubkey on the router,
     return the priv key + pubkey to the caller.
@@ -2054,6 +2108,7 @@ def vpn_create_peer(req: VpnPeerCreateRequest):
 
 
 @app.post("/vpn/peers/overlay")
+@_uci_serialised
 def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
     """WARP-1385 (ADR-030) — install/refresh a direct-punch overlay peer.
 
@@ -2127,6 +2182,7 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
 
 
 @app.delete("/vpn/peers")
+@_uci_serialised
 def vpn_delete_peer(req: VpnPeerDeleteRequest):
     """Remove every peer matching `public_key` from `interface`.
 
@@ -2202,6 +2258,7 @@ def system_info():
 
 
 @app.post("/system/reboot")
+@_uci_serialised
 def system_reboot():
     try:
         get_router().system.reboot()
@@ -2226,6 +2283,7 @@ def system_controls():
 
 
 @app.post("/system/hostname")
+@_uci_serialised
 def set_system_hostname(req: HostnameRequest):
     try:
         r = get_router()
@@ -2238,6 +2296,7 @@ def set_system_hostname(req: HostnameRequest):
 
 
 @app.post("/system/ntp")
+@_uci_serialised
 def set_system_ntp(req: NtpRequest):
     try:
         r = get_router()
@@ -2275,6 +2334,7 @@ def system_firmware_check(
 
 
 @app.post("/system/sysupgrade")
+@_uci_serialised
 def system_sysupgrade(req: SysupgradeRequest):
     """Flash a staged OpenWrt sysupgrade image. ⚠️ BRICK RISK — gated upstream."""
     try:
@@ -2284,6 +2344,7 @@ def system_sysupgrade(req: SysupgradeRequest):
 
 
 @app.post("/system/factory-reset")
+@_uci_serialised
 def system_factory_reset():
     """Wipe the OpenWrt overlay + reboot to defaults. ⚠️ BRICK RISK — gated upstream."""
     try:
@@ -2413,6 +2474,7 @@ def ai_access():
 # Config apply (safe-apply with rollback)
 # ---------------------------------------------------------------------------
 @app.post("/config/apply")
+@_uci_serialised
 def apply_config(req: ApplyConfigRequest):
     try:
         r = get_router()
@@ -3148,6 +3210,7 @@ def aps_get(mac: str):
 
 
 @app.post("/aps/_test_seed", include_in_schema=False)
+@_uci_serialised
 def aps_test_seed(req: ApTestSeedRequest):
     """Inject a discovered AP into the mock router. Test-only.
 
@@ -3253,6 +3316,7 @@ def aps_band_steering_get(mac: str):
 
 
 @app.put("/aps/{mac}/band-steering")
+@_uci_serialised
 def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request):
     """Toggle the AP's band-steering master switch (WARP-1703).
 
@@ -3433,6 +3497,7 @@ def aps_wireless_get(mac: str):
 
 
 @app.put("/aps/{mac}/wireless")
+@_uci_serialised
 def aps_wireless_put(mac: str, req: ApWirelessRequest, request: Request):
     """Set the AP's network name / passphrase (WARP-1712).
 
@@ -3497,6 +3562,7 @@ def aps_wireless_put(mac: str, req: ApWirelessRequest, request: Request):
 
 
 @app.post("/aps/{mac}/approve")
+@_uci_serialised
 def aps_approve(mac: str, req: ApApproveRequest, request: Request):
     """Approve a discovered AP and push wireless config.
 
@@ -3616,6 +3682,7 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
 
 
 @app.delete("/aps/{mac}")
+@_uci_serialised
 def aps_decommission(mac: str, request: Request):
     """Remove the wireless config off the AP and transition state.
 
@@ -3836,6 +3903,7 @@ def discovery_mdns(service: str):
 
 
 @app.post("/discovery/_test_seed", include_in_schema=False)
+@_uci_serialised
 def discovery_test_seed(req: DiscoveryTestSeedRequest):
     """Inject an mDNS record into the mock router. Test-only.
 
