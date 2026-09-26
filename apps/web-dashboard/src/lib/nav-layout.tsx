@@ -25,6 +25,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -40,11 +41,18 @@ export function isNavLayout(value: unknown): value is NavLayout {
 interface NavLayoutContextValue {
   layout: NavLayout;
   setLayout: (layout: NavLayout) => void;
+  // WARP-3139 — the layout the Settings toggle just chose, waiting for the
+  // toggle instance that renders it (the same one, or the one remounted by
+  // AuthGate's shell swap) to take focus back. A ref, not state: a hand-off
+  // between two instances, never rendered from.
+  focusRequest: { current: NavLayout | null };
 }
 
 const NavLayoutContext = createContext<NavLayoutContextValue>({
   layout: DEFAULT_NAV_LAYOUT,
   setLayout: () => {},
+  // Without a provider the layout never changes, so no request is ever honoured.
+  focusRequest: { current: null },
 });
 
 export function NavLayoutProvider({ children }: { children: React.ReactNode }) {
@@ -76,7 +84,13 @@ export function NavLayoutProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const value = useMemo(() => ({ layout, setLayout }), [layout, setLayout]);
+  // Lives here, above AuthGate, so it outlives the shell swap (WARP-3139).
+  const focusRequest = useRef<NavLayout | null>(null);
+
+  const value = useMemo(
+    () => ({ layout, setLayout, focusRequest }),
+    [layout, setLayout],
+  );
   return (
     <NavLayoutContext.Provider value={value}>{children}</NavLayoutContext.Provider>
   );
