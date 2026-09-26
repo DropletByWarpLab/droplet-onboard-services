@@ -48,7 +48,12 @@ export interface RevocablePeer {
 
 /** `revoked` also covers "already gone on the router" and "someone else
  *  revoked it first" — the same terminal state. */
-export type PeerRevokeOutcome = "revoked" | "HQ_REVOKE_FAILED" | "REVOKE_STAGED";
+export type PeerRevokeOutcome =
+  | "revoked"
+  /** WARP-3172: router + row revoked, HQ unreachable; `hqRevokePending` set. */
+  | "REVOKED_HQ_PENDING"
+  | "HQ_REVOKE_FAILED"
+  | "REVOKE_STAGED";
 
 export interface PeerRevokePrisma {
   vpnPeer: {
@@ -59,20 +64,37 @@ export interface PeerRevokePrisma {
   };
 }
 
-/** Revoke one peer. Throws only on an unexpected router fault. */
+/**
+ * Revoke one peer. Throws only on an unexpected router fault.
+ *
+ * `continueOnHqFailure` (WARP-3172) is for a leaver: their account is already
+ * gone, so a still-live router peer is the worse outcome. The router peer is
+ * removed anyway and the row flagged `hqRevokePending`; the connect tick
+ * refuses the device (inactive owner) and retries the HQ revoke. The manual
+ * revoke route keeps the strict WARP-2061 behaviour (nothing changes, retry).
+ */
 export async function revokeVpnPeer(
   deps: { prisma: PeerRevokePrisma; overlayRevoke: OverlayRevokeFn },
   peer: RevocablePeer,
+  opts: { continueOnHqFailure?: boolean } = {},
 ): Promise<PeerRevokeOutcome> {
+  let hqPending = false;
   if (peer.kind === "overlay") {
     try {
       await deps.overlayRevoke(peer.publicKey);
     } catch (err) {
+      if (!opts.continueOnHqFailure) {
+        logger.error(
+          { err, peerId: peer.id },
+          "vpn: HQ overlay revoke failed — device left enrolled; nothing revoked locally either",
+        );
+        return "HQ_REVOKE_FAILED";
+      }
       logger.error(
         { err, peerId: peer.id },
-        "vpn: HQ overlay revoke failed — device left enrolled; nothing revoked locally either",
+        "vpn: HQ overlay revoke failed — removing the router peer anyway and flagging the row for an HQ retry",
       );
-      return "HQ_REVOKE_FAILED";
+      hqPending = true;
     }
   }
   try {
@@ -94,9 +116,13 @@ export async function revokeVpnPeer(
   // `revokedAt` is not re-stamped.
   await deps.prisma.vpnPeer.updateMany({
     where: { id: peer.id, status: "active" },
-    data: { status: "revoked", revokedAt: new Date() },
+    data: {
+      status: "revoked",
+      revokedAt: new Date(),
+      ...(hqPending ? { hqRevokePending: true } : {}),
+    },
   });
-  return "revoked";
+  return hqPending ? "REVOKED_HQ_PENDING" : "revoked";
 }
 
 export interface UserDeviceRevokePrisma extends PeerRevokePrisma {
@@ -112,10 +138,16 @@ export interface UserDeviceRevokePrisma extends PeerRevokePrisma {
 }
 
 export interface UserDeviceRevokeSummary {
+  /** Cut off on the box (includes REVOKED_HQ_PENDING). */
   revoked: number;
+  /** Still live on the router — the admin must retry from the device list. */
   failed: number;
+  /** Cut off on the box, HQ revoke owed (retried by the connect tick). */
+  hqPending: number;
   pendingDenied: number;
 }
+
+export type DeviceRevokeReason = "deactivation" | "removal" | "role_change";
 
 /**
  * WARP-3160 — a person who is deactivated or deleted loses every VPN device
@@ -131,11 +163,11 @@ export async function revokeUserVpnDevices(
   args: {
     username: string;
     actor: ActivityActor;
-    reason: "deactivation" | "removal";
+    reason: DeviceRevokeReason;
     overlayRevoke?: OverlayRevokeFn;
   },
 ): Promise<UserDeviceRevokeSummary> {
-  const summary: UserDeviceRevokeSummary = { revoked: 0, failed: 0, pendingDenied: 0 };
+  const summary: UserDeviceRevokeSummary = { revoked: 0, failed: 0, hqPending: 0, pendingDenied: 0 };
   // The synthetic owner of QR-linked devices is not a person; never sweep it.
   if (!args.username || args.username === OVERLAY_PEER_USER_ID) return summary;
   const overlayRevoke = args.overlayRevoke ?? defaultOverlayRevoke;
@@ -163,19 +195,22 @@ export async function revokeUserVpnDevices(
   for (const peer of peers) {
     let outcome: PeerRevokeOutcome | "ERROR";
     try {
-      outcome = await revokeVpnPeer({ prisma, overlayRevoke }, peer);
+      outcome = await revokeVpnPeer({ prisma, overlayRevoke }, peer, {
+        continueOnHqFailure: true,
+      });
     } catch (err) {
       logger.error({ err, peerId: peer.id }, "WARP-3160: device revoke failed");
       outcome = "ERROR";
     }
-    if (outcome === "revoked") summary.revoked += 1;
+    if (outcome === "revoked" || outcome === "REVOKED_HQ_PENDING") summary.revoked += 1;
     else summary.failed += 1;
+    if (outcome === "REVOKED_HQ_PENDING") summary.hqPending += 1;
     void recordActivity({
       kind: "network",
       severity: "warn",
       sourceIcon: "shield",
       what:
-        outcome === "revoked"
+        outcome === "revoked" || outcome === "REVOKED_HQ_PENDING"
           ? `${peer.deviceLabel ?? "Device"} lost remote access`
           : `${peer.deviceLabel ?? "Device"} could not be revoked — revoke it from the device list`,
       sub: `${args.username}: ${args.reason}`,
@@ -192,4 +227,36 @@ export async function revokeUserVpnDevices(
     });
   }
   return summary;
+}
+
+// --- Process-wide entry point (WARP-3160) ---------------------------------
+//
+// The lifecycle post-effects (disable, delete, role change, SCIM, the leaver
+// hand-over flow) carry no Prisma client, so the box wires one here at boot,
+// next to initActivityRecorder. Same pattern as activity.singleton.
+
+let boundPrisma: UserDeviceRevokePrisma | null = null;
+
+export function initVpnDeviceRevoke(prisma: UserDeviceRevokePrisma): void {
+  boundPrisma = prisma;
+}
+
+/**
+ * Revoke every VPN device `username` owns and deny their pending enrollments,
+ * auditing each with `actor` and `reason`. Best-effort; never throws. Returns
+ * null when the box has not wired a client (unit tests), logged loudly.
+ */
+export async function revokeOverlayDevicesForUser(
+  username: string,
+  actor: ActivityActor,
+  reason: DeviceRevokeReason,
+): Promise<UserDeviceRevokeSummary | null> {
+  if (!boundPrisma) {
+    logger.error(
+      { username, reason },
+      "WARP-3160: device revoke not wired (initVpnDeviceRevoke) — the person's VPN devices were NOT revoked",
+    );
+    return null;
+  }
+  return revokeUserVpnDevices(boundPrisma, { username, actor, reason });
 }

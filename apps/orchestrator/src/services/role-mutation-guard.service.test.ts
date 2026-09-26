@@ -61,8 +61,12 @@ vi.mock("./nextcloud-groups.client.js", () => ({
 const revokeUserVpnDevicesMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ revoked: 2, failed: 1, pendingDenied: 0 }),
 );
+const revokeOverlayDevicesForUserMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ revoked: 1, failed: 0, hqPending: 0, pendingDenied: 0 }),
+);
 vi.mock("./vpn-peer-revoke.service.js", () => ({
   revokeUserVpnDevices: revokeUserVpnDevicesMock,
+  revokeOverlayDevicesForUser: revokeOverlayDevicesForUserMock,
 }));
 vi.mock("./department-provisioner.service.js", () => ({
   adminBasicToken: vi.fn(() => "basic:dGVzdDp0ZXN0"),
@@ -1068,5 +1072,56 @@ describe("rail 6 — leaver VPN devices (WARP-3160)", () => {
       devices: null,
     });
     expect(revokeUserVpnDevicesMock).not.toHaveBeenCalled();
+  });
+
+  // Cross-PR safety (#2404): a caller that predates `devices` still revokes.
+  it("an omitted `devices` falls back to revoking the post-effect's own username", async () => {
+    revokeOverlayDevicesForUserMock.mockClear();
+    await runRemovalPostEffects({
+      targetUserId: "u-bob",
+      targetUsername: "bob",
+      targetRole: "family",
+      actorUsername: "admin",
+      actor: { type: "user", id: "admin-1" },
+    });
+    expect(revokeOverlayDevicesForUserMock).toHaveBeenCalledWith(
+      "bob",
+      { type: "user", id: "admin-1" },
+      "removal",
+    );
+  });
+
+  it("a demotion to external guest revokes the person's devices (reason role_change)", async () => {
+    revokeOverlayDevicesForUserMock.mockClear();
+    await runRoleChangePostEffects({
+      target: { id: "u-bob", username: "bob", nextcloudUsername: null },
+      previousRole: "family",
+      nextRole: "guest",
+      actorUsername: "admin",
+      actor: { type: "user", id: "admin-1" },
+    });
+    expect(revokeOverlayDevicesForUserMock).toHaveBeenCalledWith(
+      "bob",
+      { type: "user", id: "admin-1" },
+      "role_change",
+    );
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Role changed",
+        refs: expect.objectContaining({ vpnDevicesRevoked: 1 }),
+      }),
+    );
+  });
+
+  it("any other role change leaves devices alone", async () => {
+    revokeOverlayDevicesForUserMock.mockClear();
+    await runRoleChangePostEffects({
+      target: { id: "u-bob", username: "bob", nextcloudUsername: null },
+      previousRole: "family",
+      nextRole: "admin",
+      actorUsername: "admin",
+      actor: { type: "user", id: "admin-1" },
+    });
+    expect(revokeOverlayDevicesForUserMock).not.toHaveBeenCalled();
   });
 });

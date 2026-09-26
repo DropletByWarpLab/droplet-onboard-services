@@ -79,7 +79,9 @@ import { ACCESS_TOKEN_TTL_SECONDS, ROLE_RANK } from "./jwt.service.js";
 import { revokeAllSessions } from "./session.service.js";
 import { denylistUser } from "./auth-denylist.service.js";
 import {
+  revokeOverlayDevicesForUser,
   revokeUserVpnDevices,
+  type DeviceRevokeReason,
   type UserDeviceRevokePrisma,
   type UserDeviceRevokeSummary,
 } from "./vpn-peer-revoke.service.js";
@@ -718,8 +720,16 @@ export async function runRoleChangePostEffects(args: {
   nextRole: Role;
   actorUsername: string | null;
   actor: ActivityActor;
+  /** WARP-3160: see {@link LeaverDevices}; only used on a demotion to guest. */
+  devices?: LeaverDevices;
 }): Promise<void> {
   await revokeAllSessions(args.target.id);
+  // An external guest has no remote access (WARP-3121), so a demotion to
+  // guest takes the person's VPN devices with it.
+  const vpn =
+    args.nextRole === "guest" && args.previousRole !== "guest"
+      ? await revokeLeaverDevices(args.devices, args.target.username, args.actor, "role_change")
+      : null;
   await syncAdminTierGroup({
     userId: args.target.id,
     nextcloudUsername: args.target.nextcloudUsername,
@@ -738,24 +748,34 @@ export async function runRoleChangePostEffects(args: {
       targetUsername: args.target.username,
       previousRole: args.previousRole,
       nextRole: args.nextRole,
+      ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
     },
     actor: args.actor,
   });
 }
 
 /**
- * WARP-3160 — whose VPN devices to revoke. Required on both lifecycle
- * post-effects so a new caller has to decide; `null` only where there is no
- * directory to read (the legacy NC-only rowless path with no Prisma).
+ * WARP-3160 — whose VPN devices to revoke on a lifecycle post-effect.
+ *
+ *   * omitted (the safe default) — revoke the post-effect's own username
+ *     through the boot-wired client ({@link revokeOverlayDevicesForUser}), so a
+ *     caller that predates this field still cuts the person off;
+ *   * `{ prisma, username }` — revoke that username with that client (used
+ *     where the URL handle is not the directory username);
+ *   * `null` — revoke nothing (only where there is no person to cut off).
  */
 export type LeaverDevices = { prisma: UserDeviceRevokePrisma; username: string } | null;
 
 async function revokeLeaverDevices(
-  devices: LeaverDevices,
+  devices: LeaverDevices | undefined,
+  defaultUsername: string,
   actor: ActivityActor,
-  reason: "deactivation" | "removal",
+  reason: DeviceRevokeReason,
 ): Promise<UserDeviceRevokeSummary | null> {
-  if (!devices) return null;
+  if (devices === null) return null;
+  if (devices === undefined) {
+    return revokeOverlayDevicesForUser(defaultUsername, actor, reason);
+  }
   return revokeUserVpnDevices(devices.prisma, {
     username: devices.username,
     actor,
@@ -784,13 +804,13 @@ export async function runRemovalPostEffects(args: {
   actorUsername: string | null;
   actor: ActivityActor;
   /** WARP-3160: the person's VPN devices are revoked with the account. */
-  devices: LeaverDevices;
+  devices?: LeaverDevices;
 }): Promise<void> {
   if (args.targetUserId) {
     await revokeAllSessions(args.targetUserId);
     await denylistUser(args.targetUserId, ACCESS_TOKEN_TTL_SECONDS);
   }
-  const vpn = await revokeLeaverDevices(args.devices, args.actor, "removal");
+  const vpn = await revokeLeaverDevices(args.devices, args.targetUsername, args.actor, "removal");
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -835,12 +855,12 @@ export async function runDisablePostEffects(args: {
    */
   ncMirror?: NcMirror;
   /** WARP-3160: a deactivated person loses their VPN devices too. */
-  devices: LeaverDevices;
+  devices?: LeaverDevices;
 }): Promise<void> {
   const sessionsRevoked = args.targetUserId
     ? await revokeAllSessions(args.targetUserId)
     : 0;
-  const vpn = await revokeLeaverDevices(args.devices, args.actor, "deactivation");
+  const vpn = await revokeLeaverDevices(args.devices, args.username, args.actor, "deactivation");
   await recordActivity({
     kind: "auth",
     severity: "warn",

@@ -2209,6 +2209,10 @@ model VpnPeer {
   lastSessionAt DateTime?
   createdAt     DateTime  @default(now())
   revokedAt     DateTime?
+  // WARP-3172: the peer was revoked locally (router + row) but HQ could not be
+  // reached, so HQ may still broker sessions for it. The connect tick refuses
+  // the device and retries the HQ revoke, clearing this on success.
+  hqRevokePending Boolean @default(false)
 
   // WARP-1474: provenance for a peer enrolled via the dashboard-QR link flow
   // (ADR-030). Nullable — a peer minted via POST /api/vpn/peers (kind='static')

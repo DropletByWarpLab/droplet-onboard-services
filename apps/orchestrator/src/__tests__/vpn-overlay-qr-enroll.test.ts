@@ -183,7 +183,12 @@ function createPrismaMock() {
       return { count: hits.length };
     }),
   });
+  // WARP-3152 review: the directory the approve route re-checks a requester
+  // against. `bob` is the member the sign-in-gate tests enroll as.
+  const users: any[] = [{ id: "u-bob-42", username: "bob", role: "family", directoryStatus: "ACTIVE" }];
   const client: any = {
+    user: table(users, "user"),
+    _users: users,
     overlayLinkToken: table(linkTokens, "tok"),
     pendingOverlayEnrollment: table(pendings, "pend", { conflict: false }),
     vpnPeer: table(vpnPeers, "vp"),
@@ -1806,6 +1811,39 @@ describe("POST /api/vpn/overlay/devices — approval gate (WARP-1882)", () => {
     expect(mine.status).toBe(200);
     const list = mine.body.peers ?? mine.body;
     expect(list.map((p: any) => p.publicKey)).toContain(VALID_WG_KEY);
+  });
+
+  it("refuses to approve, and denies, a request whose member has since been deactivated", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    prisma._users[0].directoryStatus = "DEACTIVATED";
+
+    const audit: AuditEntry[] = [];
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-1" }));
+    const { app: ownerApp } = buildApp({ prisma, audit, overlayEnroll });
+    const res = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("requester_not_active");
+    expect(prisma._pendings[0].state).toBe("denied");
+    expect(overlayEnroll).not.toHaveBeenCalled();
+    expect(prisma._vpnPeers).toHaveLength(0);
+    expect(audit.some((a) => a.event === "overlay_enroll_requester_ineligible")).toBe(true);
+  });
+
+  it("refuses a request whose member has since become an external guest", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    prisma._users[0].role = "guest";
+    const { app: ownerApp } = buildApp({ prisma });
+    const res = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(prisma._vpnPeers).toHaveLength(0);
   });
 
   it("leaves a row staged before the column existed admin-only (`overlay`)", async () => {

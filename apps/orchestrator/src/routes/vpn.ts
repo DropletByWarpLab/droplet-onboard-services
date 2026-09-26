@@ -602,6 +602,25 @@ export function createVpnRouter(
     }
   };
 
+  // WARP-3152 review — a sign-in enrollment waits in the review queue, and its
+  // requester may be deactivated, deleted or demoted to external guest before
+  // an owner gets to it. Approving then would hand a leaver a tunnel into the
+  // office LAN. `null` (QR / legacy row) has no requester to check.
+  const requesterStillEligible = async (
+    requestedBy: string | null | undefined,
+  ): Promise<boolean> => {
+    if (!requestedBy) return true;
+    const person = await prisma.user.findUnique({
+      where: { username: requestedBy },
+      select: { directoryStatus: true, role: true },
+    });
+    return (
+      !!person &&
+      person.directoryStatus === "ACTIVE" &&
+      OVERLAY_ENROLL_ROLES.has(person.role)
+    );
+  };
+
   // ── POST /api/vpn/overlay/devices ──
   // WARP-1385 (ADR-030) — enroll an owner device into the direct-punch overlay.
   // Owner/admin only: the box signs a grant over the client's key material and
@@ -1346,6 +1365,31 @@ export function createVpnRouter(
         });
         if (!pending) {
           return res.status(404).json({ error: "not_found" });
+        }
+        if (!(await requesterStillEligible(pending.requestedBy))) {
+          // Deny a still-pending row so the queue stops offering it; an
+          // already-approved row is left as is and simply not re-provisioned
+          // (the leaver sweep has revoked or will revoke its peer).
+          const denied =
+            pending.state === "pending"
+              ? await prisma.pendingOverlayEnrollment.updateMany({
+                  where: { id: pending.id, state: "pending" },
+                  data: { state: "denied" },
+                })
+              : { count: 0 };
+          audit({
+            event: "overlay_enroll_requester_ineligible",
+            method: req.method,
+            route: ROUTE_APPROVE,
+            status: 409,
+            clientId,
+            refs: { pending_id: pending.id, requested_by: pending.requestedBy, denied: denied.count > 0 },
+          });
+          return res.status(409).json({
+            error: "requester_not_active",
+            message:
+              "The person who asked for this device is no longer an active member of this company, so it can't be approved.",
+          });
         }
         if (pending.state === "approved") {
           // Idempotent re-approve — return the recorded HQ device ref.
