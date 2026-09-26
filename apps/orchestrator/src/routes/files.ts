@@ -84,6 +84,7 @@ import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { UnsafePathError } from "../lib/unsafe-path-error.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
@@ -418,19 +419,6 @@ function resolveSpaceGuardToken(req: Request): unknown {
   if (raw === "shared") return "household";
   if (raw.startsWith("dept:")) return raw;
   return undefined;
-}
-
-/**
- * WARP-1262 (security): thrown by `rootForSpace` when a caller-supplied path
- * contains a `..` traversal segment. Mapped to HTTP 400 by `handleFileError`
- * so every space-threaded write route rejects traversal with a clean client
- * error instead of handing the escaped path to the WebDAV client.
- */
-class UnsafePathError extends Error {
-  constructor(message = "path must not contain '..' segments") {
-    super(message);
-    this.name = "UnsafePathError";
-  }
 }
 
 /**
