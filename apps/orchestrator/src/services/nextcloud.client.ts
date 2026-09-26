@@ -1,5 +1,6 @@
 import pino from "pino";
 import { config } from "../config.js";
+import { UnsafePathError } from "../lib/unsafe-path-error.js";
 import type {
   FileEntryInfo,
   FileVersionInfo,
@@ -40,6 +41,13 @@ function encodePathSegments(path: string): string {
  */
 function webdavUrl(user: string, path: string): string {
   const cleanPath = path.replace(/^\/+/, "");
+  // WARP-3193 SEC-INJ-6: `.`/`..` survive segment encoding and fetch's URL
+  // normalizer resolves them, re-targeting the request at any Nextcloud
+  // endpoint (e.g. `/../../ocs/...`) with the caller's token. The single
+  // choke point for every WebDAV call, so no route can forget the check.
+  if (cleanPath.split("/").some((s) => s === ".." || s === ".")) {
+    throw new UnsafePathError();
+  }
   return `${config.NEXTCLOUD_URL}${WEBDAV_BASE}/${encodeURIComponent(user)}/${encodePathSegments(cleanPath)}`;
 }
 

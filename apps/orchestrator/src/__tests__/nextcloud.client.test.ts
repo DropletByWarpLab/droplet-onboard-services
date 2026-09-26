@@ -1613,3 +1613,31 @@ describe("nextcloud.client — ncListUsers", () => {
     expect(ana!.enabled).toBe(true);
   });
 });
+
+// WARP-3193 SEC-INJ-6 — webdavUrl() is the single choke point every WebDAV
+// call goes through. It percent-encodes each segment, but `..` and `.` survive
+// encoding and fetch's URL normalizer resolves them, so `?path=/../../ocs/...`
+// re-targeted a read at an arbitrary Nextcloud endpoint with the user's token.
+describe("nextcloud.client — webdavUrl rejects dot segments (SEC-INJ-6)", () => {
+  it.each([
+    "/../../ocs/v2.php/cloud/users",
+    "/Docs/../../other",
+    "/Docs/./a.txt",
+    "..",
+    "/Docs/..",
+  ])("refuses %s before any request", async (p) => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await expect(ncDownloadFile("t", "alice", p)).rejects.toThrow(/'\.\.' segments/);
+    await expect(ncGetFileId("t", "alice", p)).rejects.toThrow(/'\.\.' segments/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still allows dotted names and the root", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 404 })) as unknown as typeof fetch;
+    expect(await ncGetFileId("t", "alice", "/.hidden/report.v2..txt")).toBeNull();
+    expect(await ncGetFileId("t", "alice", "/")).toBeNull();
+  });
+});
