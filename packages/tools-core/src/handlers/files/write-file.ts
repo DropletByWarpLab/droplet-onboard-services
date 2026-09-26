@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { MAX_WRITE_BYTES, validateNcPath } from "./_paths.js";
+import { needsUserApproval } from "./_approval.js";
 
 const inputSchema = {
   type: "object",
@@ -67,9 +68,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       dir,
       filename,
       contentBase64: buffer.toString("base64"),
+      // WARP-3193 SEC-INJ-2: create-new only. The route PUTs with
+      // `If-None-Match: *` and answers 409 when the target exists, so an
+      // existing file is never replaced without the user.
+      createOnly: true,
     },
     { headers },
   );
+  if (res.status === 409) {
+    return needsUserApproval(`A file already exists at ${v.path}; replacing it`);
+  }
   if (!res.ok) {
     return err("WRITE_FAILED", `nextcloud returned ${res.status}`);
   }
@@ -79,7 +87,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "write_file",
   description:
-    "Create or overwrite a file in the user's Nextcloud. Pass `path` (full target including filename) and either `content` (UTF-8 text) or `content_base64` (binary). Max 10 MB per call.",
+    "Create a new file in the user's Nextcloud (never replaces an existing one). Pass `path` (full target including filename) and either `content` (UTF-8 text) or `content_base64` (binary). Max 10 MB per call.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

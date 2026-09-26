@@ -25,6 +25,39 @@ function createPrismaMock(initial: MockSample[] = []) {
   return {
     samples,
     offLanEgressSample: {
+      // WARP-3193 PERF-6: the totals roll up on the database. Evaluates the
+      // same where-clause findMany did and returns Prisma's groupBy shape.
+      groupBy: vi.fn(
+        async ({
+          by,
+          where,
+        }: {
+          by: string[];
+          where?: { ts?: { gte?: Date; lte?: Date }; channel?: string };
+          _sum?: unknown;
+          _count?: unknown;
+        }) => {
+          expect(by).toEqual(["channel"]);
+          const gte = where?.ts?.gte;
+          const lte = where?.ts?.lte;
+          const ch = where?.channel;
+          const groups = new Map<string, { sum: bigint; count: number }>();
+          for (const s of samples) {
+            if (gte && s.ts < gte) continue;
+            if (lte && s.ts > lte) continue;
+            if (ch && s.channel !== ch) continue;
+            const g = groups.get(s.channel) ?? { sum: 0n, count: 0 };
+            g.sum += s.bytes;
+            g.count += 1;
+            groups.set(s.channel, g);
+          }
+          return [...groups].map(([channel, g]) => ({
+            channel,
+            _sum: { bytes: g.sum },
+            _count: { _all: g.count },
+          }));
+        },
+      ),
       findMany: vi.fn(
         async ({
           where,
@@ -126,6 +159,25 @@ describe("WARP-468 — GET /api/network/off-lan", () => {
     expect(res.body.totalsByChannel.cloud_model_escape).toBe(1500);
     expect(res.body.totalsByChannel.outbound_email).toBe(200);
     expect(res.body.totalsByChannel.web_fetch).toBe(0);
+    expect(res.body.sampleCount).toBe(3);
+  });
+
+  it("WARP-3193 PERF-6: sums on the database and never loads sample rows", async () => {
+    const ts = new Date("2026-05-27T10:00:00Z");
+    const prisma = createPrismaMock([
+      { ts, channel: "telemetry", bytes: 7n },
+      { ts, channel: "web_push", bytes: 9n },
+    ]);
+    const app = buildApp(prisma, mkUser("family"));
+    const res = await request(app).get(
+      `/api/network/off-lan?from=${encodeURIComponent("2026-05-27T00:00:00.000Z")}&to=${encodeURIComponent("2026-05-27T23:59:59.000Z")}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.totalsByChannel.telemetry).toBe(7);
+    expect(res.body.totalsByChannel.web_push).toBe(9);
+    expect(res.body.sampleCount).toBe(2);
+    expect(prisma.offLanEgressSample.groupBy).toHaveBeenCalledOnce();
+    expect(prisma.offLanEgressSample.findMany).not.toHaveBeenCalled();
   });
 
   it("supports ?channel= filtering", async () => {

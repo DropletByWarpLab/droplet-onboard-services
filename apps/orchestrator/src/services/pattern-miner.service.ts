@@ -37,8 +37,6 @@ const SAVINGS_PER_OCCURRENCE_MINUTES = 5;
 const MAX_SUGGESTIONS_PER_RUN = 10;
 
 interface ActivityRowMin {
-  id: bigint;
-  at: Date;
   refs: unknown;
 }
 
@@ -90,6 +88,11 @@ function fingerprintOf(toolNames: readonly string[]): string {
  */
 export function detectPatterns(sequence: readonly string[]): DetectedPattern[] {
   if (sequence.length < MIN_NGRAM) return [];
+  // WARP-3193 PERF-8: bucket by the fingerprint's own input string (the
+  // JSON of the window) and hash only the buckets that survive the
+  // threshold. Hashing every window was 4 SHA-256 per row on a ~70k-row
+  // week, a synchronous stall inside the cron's lock transaction; the
+  // fingerprints themselves are unchanged.
   const buckets = new Map<
     string,
     { toolNames: string[]; occurrences: number }
@@ -98,21 +101,21 @@ export function detectPatterns(sequence: readonly string[]): DetectedPattern[] {
     if (sequence.length < n) break;
     for (let i = 0; i + n <= sequence.length; i += 1) {
       const window = sequence.slice(i, i + n);
-      const fp = fingerprintOf(window);
-      const existing = buckets.get(fp);
+      const key = JSON.stringify(window);
+      const existing = buckets.get(key);
       if (existing) {
         existing.occurrences += 1;
       } else {
-        buckets.set(fp, { toolNames: window, occurrences: 1 });
+        buckets.set(key, { toolNames: window, occurrences: 1 });
       }
     }
   }
 
   const out: DetectedPattern[] = [];
-  for (const [fingerprint, b] of buckets) {
+  for (const b of buckets.values()) {
     if (b.occurrences >= MIN_OCCURRENCES) {
       out.push({
-        fingerprint,
+        fingerprint: fingerprintOf(b.toolNames),
         toolNames: b.toolNames,
         occurrences: b.occurrences,
       });
@@ -134,10 +137,12 @@ export async function mineToolCallPatterns(
   now: Date = new Date(),
 ): Promise<MineResult> {
   const since = new Date(now.getTime() - WINDOW_DAYS * 86400_000);
+  // WARP-3193 PERF-8: `refs` carries the tool name and is the only column
+  // the miner reads.
   const rows = (await prisma.activityRow.findMany({
     where: { kind: "tool_call", at: { gte: since } },
     orderBy: { at: "asc" },
-    select: { id: true, at: true, refs: true },
+    select: { refs: true },
   })) as unknown as ActivityRowMin[];
 
   const sequence: string[] = [];

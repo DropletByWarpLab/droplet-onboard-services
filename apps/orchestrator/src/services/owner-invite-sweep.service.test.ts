@@ -26,6 +26,8 @@ import { revokePendingOwnerInvites } from "./owner-invite-sweep.service.js";
 interface InviteRow {
   id: string;
   role: string;
+  // WARP-3193 QUAL-3: the lifecycle is an explicit column.
+  status: "pending" | "accepted" | "revoked" | "expired";
   acceptedAt: Date | null;
   revokedAt: Date | null;
 }
@@ -38,8 +40,8 @@ function createPrismaStub(rows: InviteRow[]) {
         let count = 0;
         for (const row of rows) {
           if (where.role !== undefined && row.role !== where.role) continue;
-          if (where.acceptedAt === null && row.acceptedAt !== null) continue;
-          if (where.revokedAt === null && row.revokedAt !== null) continue;
+          if (where.status?.in !== undefined && !where.status.in.includes(row.status)) continue;
+          if (typeof where.status === "string" && row.status !== where.status) continue;
           Object.assign(row, data);
           count += 1;
         }
@@ -52,6 +54,7 @@ function createPrismaStub(rows: InviteRow[]) {
 const pending = (id: string, role: string): InviteRow => ({
   id,
   role,
+  status: "pending",
   acceptedAt: null,
   revokedAt: null,
 });
@@ -61,7 +64,15 @@ describe("revokePendingOwnerInvites", () => {
     const prisma = createPrismaStub([pending("i-1", "owner")]);
 
     await expect(revokePendingOwnerInvites(prisma as never)).resolves.toBe(1);
+    expect(prisma._rows[0].status).toBe("revoked");
     expect(prisma._rows[0].revokedAt).toBeInstanceOf(Date);
+  });
+
+  it("revokes an owner invite the daily sweep already marked expired", async () => {
+    const prisma = createPrismaStub([{ ...pending("i-old", "owner"), status: "expired" }]);
+
+    await expect(revokePendingOwnerInvites(prisma as never)).resolves.toBe(1);
+    expect(prisma._rows[0].status).toBe("revoked");
   });
 
   it("leaves every assignable-tier invite alone", async () => {
@@ -82,12 +93,14 @@ describe("revokePendingOwnerInvites", () => {
     const accepted: InviteRow = {
       id: "i-done",
       role: "owner",
+      status: "accepted",
       acceptedAt: new Date("2026-01-01T00:00:00Z"),
       revokedAt: null,
     };
     const prisma = createPrismaStub([accepted]);
 
     await expect(revokePendingOwnerInvites(prisma as never)).resolves.toBe(0);
+    expect(accepted.status).toBe("accepted");
     expect(accepted.revokedAt).toBeNull();
   });
 
@@ -101,13 +114,13 @@ describe("revokePendingOwnerInvites", () => {
     expect(prisma._rows[0].revokedAt).toBe(stampedAt);
   });
 
-  it("selects on the explicit columns, never on absence-derived state", async () => {
+  it("selects on the explicit status column, never on absence-derived state", async () => {
     const prisma = createPrismaStub([pending("i-1", "owner")]);
     await revokePendingOwnerInvites(prisma as never);
 
     expect(prisma.userInvite.updateMany).toHaveBeenCalledWith({
-      where: { role: "owner", acceptedAt: null, revokedAt: null },
-      data: { revokedAt: expect.any(Date) },
+      where: { role: "owner", status: { in: ["pending", "expired"] } },
+      data: { status: "revoked", revokedAt: expect.any(Date) },
     });
   });
 });

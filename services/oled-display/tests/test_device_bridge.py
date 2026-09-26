@@ -490,7 +490,7 @@ def test_multibox_error_path_unchanged(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 # WARP-659 — credential-bearing GET reads (/openwrt/qr, /drives) require the
 # bridge shared secret now that BRIDGE_BIND=0.0.0.0 makes them LAN-reachable.
-# /wifi /health stay open (no credential material).
+# Only /health stays open (WARP-3193 SEC-DATA-6 gated the panel reads).
 # ---------------------------------------------------------------------------
 
 _AUTH = {"X-Droplet-Auth": "pytest-bridge-token"}
@@ -508,6 +508,11 @@ def _do_get(bridge, monkeypatch, path, headers):
     monkeypatch.setattr(bridge, "drives_snapshot",
                         lambda invalidate=False: {"drives": [], "count": 0})
     monkeypatch.setattr(bridge, "wifi_snapshot", lambda: {"networks": []})
+    monkeypatch.setattr(bridge, "files_snapshot", lambda: {"recent": []})
+    monkeypatch.setattr(bridge, "cameras_snapshot", lambda: {"events": []})
+    monkeypatch.setattr(bridge, "services_snapshot", lambda: {"up": None})
+    monkeypatch.setattr(bridge, "pools_snapshot",
+                        lambda invalidate=False: {"pools": [], "count": 0})
     h = bridge.Handler.__new__(bridge.Handler)
     h.headers = headers
     h.path = path
@@ -539,11 +544,23 @@ def test_drives_requires_token(monkeypatch: pytest.MonkeyPatch):
     assert _do_get(bridge, monkeypatch, "/drives", dict(_AUTH))[0] == 200
 
 
-def test_open_reads_stay_unauthenticated(monkeypatch: pytest.MonkeyPatch):
-    # Non-credential reads must remain reachable without a token: /wifi (a scan
-    # of nearby networks) and /health (docker healthcheck).
+@pytest.mark.parametrize("path", ["/files", "/cameras", "/wifi", "/pools", "/services"])
+def test_panel_reads_require_token(monkeypatch: pytest.MonkeyPatch, path):
+    # WARP-3193 SEC-DATA-6: with BRIDGE_BIND=0.0.0.0 these are LAN-reachable.
+    # /files lists recent file names, /cameras person detections with times
+    # (when people are home), /wifi the box's SSID + nearby networks, /pools
+    # the md array inventory, /services internal component errors. Every
+    # caller (display.py _bridge_get, the orchestrator's /pools reads) sends
+    # the shared secret.
     bridge = _load_bridge(monkeypatch)
-    assert _do_get(bridge, monkeypatch, "/wifi", {})[0] == 200
+    assert _do_get(bridge, monkeypatch, path, {})[0] == 401
+    assert _do_get(bridge, monkeypatch, path, {"X-Droplet-Auth": "wrong"})[0] == 401
+    assert _do_get(bridge, monkeypatch, path, dict(_AUTH))[0] == 200
+
+
+def test_health_stays_unauthenticated(monkeypatch: pytest.MonkeyPatch):
+    # /health (docker healthcheck) carries nothing and must stay open.
+    bridge = _load_bridge(monkeypatch)
     assert _do_get(bridge, monkeypatch, "/health", {})[0] == 200
 
 
