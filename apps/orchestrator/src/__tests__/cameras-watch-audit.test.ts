@@ -21,7 +21,7 @@ vi.mock("../config.js", () => ({
 }));
 
 vi.mock("../services/activity.singleton.js", () => ({
-  recordActivity: vi.fn().mockResolvedValue(null),
+  recordActivity: vi.fn().mockResolvedValue({ id: 1n }),
 }));
 
 vi.mock("../services/camera.service.js", () => ({
@@ -100,6 +100,7 @@ function rows() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockRecord.mockResolvedValue({ id: 1n } as never);
   resetCameraWatchDedupe();
   vi.mocked(fetchEventCamera).mockResolvedValue("front");
   vi.mocked(openMjpegStream).mockImplementation(async () =>
@@ -120,7 +121,8 @@ describe("watching writes one audit row per (actor, camera, kind) per window", (
       kind: "camera",
       severity: "info",
       sub: "front",
-      refs: { surface: "camera_watch", camera: "front", watch: "live", saved: false, actor: "sam" },
+      what: "Fetched a live view (inline)",
+      refs: { surface: "camera_watch", camera: "front", watch: "live", saved: false, delivery: "inline", actor: "sam" },
       actor: { type: "user", id: "u-member" },
     });
   });
@@ -169,6 +171,14 @@ describe("watching writes one audit row per (actor, camera, kind) per window", (
     await settle();
     expect(rows()).toHaveLength(1);
     expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, eventId: "ev1" });
+  });
+
+  it("a failed write does not arm the window: the next fetch writes again", async () => {
+    mockRecord.mockResolvedValueOnce(null);
+    await auditCameraWatch({ user: owner }, "front", "live", { now: 0 });
+    await auditCameraWatch({ user: owner }, "front", "live", { now: 1 });
+    await auditCameraWatch({ user: owner }, "front", "live", { now: 2 });
+    expect(rows()).toHaveLength(2);
   });
 
   it("the window expires: the same watch after 5 minutes is a new row", async () => {

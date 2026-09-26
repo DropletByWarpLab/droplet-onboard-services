@@ -570,7 +570,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
-      // WARP-3103: audit who played (or saved) it. The camera lookup is one
+      // WARP-3103: audit who fetched (or saved) it. The camera lookup is one
       // Frigate call and never delays the footage.
       void fetchEventCamera(eventId)
         .catch(() => null)
