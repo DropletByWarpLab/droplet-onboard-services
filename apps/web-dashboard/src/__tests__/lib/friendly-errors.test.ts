@@ -813,6 +813,9 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "LINK_LIMIT",
     "LINKS_UNAVAILABLE",
     "AI_SETTINGS_UNAVAILABLE",
+    // WARP-2979 P4 PR-2 — route 28.
+    "NARRATIVE_COOLDOWN",
+    "SUMMARIES_OFF",
   ] as const satisfies readonly SecurityErrorCode[];
   // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
   // code added to SecurityErrorCode without copy here fails the build.

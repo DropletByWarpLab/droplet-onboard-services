@@ -45,6 +45,7 @@ import {
   getSecurityIncidents,
   putAlertRouting,
   resolveSecurityIncident,
+  requestSecurityIncidentNarrative,
   type SecurityIncidentsQuery,
   archiveSecurityZone,
   createSecurityZone,
@@ -686,6 +687,12 @@ export function useSecurityIncident(id: string | null) {
     async (opts: { note?: string } = {}) => apply(await resolveSecurityIncident(id!, opts)),
     [apply, id],
   );
+  // WARP-2979 P4 PR-2 (route 28) — Summarise now / Regenerate, then a re-read (the answer carries only the summary).
+  const summarise = useCallback(async () => {
+    const r = await requestSecurityIncidentNarrative(id!);
+    await mutate();
+    return r;
+  }, [id, mutate]);
 
   return {
     incident: data ?? null,
@@ -694,6 +701,7 @@ export function useSecurityIncident(id: string | null) {
     refresh: () => mutate(),
     acknowledge,
     resolve,
+    summarise,
   };
 }
 
