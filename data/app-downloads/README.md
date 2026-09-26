@@ -30,17 +30,22 @@ the catalog will not be served.
 
 ## Nothing stages these for you
 
-Read this before believing any comment that says the artifacts arrive with
-the image. **They do not, and never have.** The box gets its code by
-`git clone` from GitHub (see `scripts/image/autoinstall/user-data`), the
-installers are git-ignored, and no build step, `setup.sh` path or CI job
-copies one in. Every box therefore boots with an empty staging root, and
-`/downloads` correctly reports that no apps are staged — which is the
-honest answer to a real absence, not a bug in the page.
+The box gets its code by `git clone` from GitHub (see
+`scripts/image/autoinstall/user-data`) and the installers are git-ignored,
+so git never delivers one. Exactly three things put an installer on a box:
 
-Until an artifact source exists that a box can reach on its own — a
-published `droplet-windows` release, or an OTA payload — staging is an
-operator action. `stage.sh` is that action.
+1. an operator running `stage.sh` on it;
+2. the box's OTA update, for what `clients.lock.json` pins (below);
+3. since WARP-3174, the ISO it was installed from: `build-iso.sh` builds a
+   staging root from this checkout's `data/app-downloads` plus every
+   installer the lock pins (fetched and size/sha256-verified by the same
+   `fetch-client-apps.py` the OTA release uses, via `stage-lock.sh`),
+   audits THAT root, maps it into the ISO at `/server/app-downloads`, and
+   the autoinstall copies it into the clone. An image built while the lock
+   is empty and nothing is staged carries nothing.
+
+A box with none of those has an empty staging root, and `/downloads`
+correctly reports that no apps are staged.
 
 ## Staging an artifact
 
@@ -107,8 +112,9 @@ reason. If you stage by hand, delete the old installer yourself.
 
 Installers are binaries built from other repos — they are **git-ignored**
 here, so git can never deliver one to a box. Only `.gitignore`, this
-README, and `platforms.example.json` are tracked. Every checkout and every
-freshly imaged box therefore mounts an effectively empty directory, and
+README, and `platforms.example.json` are tracked. Every checkout, and every
+freshly imaged box whose image carried nothing, therefore mounts an
+effectively empty directory, and
 `/downloads` honestly reports that no apps are staged rather than
 erroring. `catalog.json` and the staged binaries are local state, and it is worth
 being exact about what erases them, because "re-stage to be safe" is how
@@ -123,10 +129,11 @@ a box ends up serving last release's installer:
   and runs no `git clean`. It never touches this directory. (Verify
   before trusting this line: `grep -c app-downloads scripts/factory-reset.sh`
   → 0.)
-- **A reimage — does NOT survive.** The installer is not in the repo and
-  is not in the ISO, and first boot clones a fresh checkout. Re-stage
-  after a reimage; commissioning a reimaged box without re-staging is how
-  a customer gets the empty page.
+- **A reimage — replaced by what the ISO carries.** First boot clones a
+  fresh checkout, then copies the ISO's staging root in (WARP-3174), so a
+  reimaged box has exactly the installers its image was built with, and a
+  hand stage from before the reimage is gone. Re-stage anything the image
+  did not carry.
 
 ## `clients.lock.json`: installers the OTA release carries (WARP-3120)
 
@@ -164,6 +171,12 @@ DropletAgent's `scripts/release-dmg.sh --publish` prints the entry.
   build first and stable boxes on the promotion.
 - A box rollback keeps the newly staged installer (the platform directory
   was replaced). Harmless: it is a newer, Warp Lab-signed build.
+- **Image** (`scripts/image/build-iso.sh`, step 0, WARP-3174):
+  `scripts/app-downloads/stage-lock.sh` fetches the same entries through
+  `fetch-client-apps.py` (token: `GH_TOKEN`, else
+  `DROPLET_CLIENT_APPS_TOKEN`, else the builder's `gh auth token`) and
+  stages them before the pre-flight audit. A pinned entry it cannot fetch
+  or verify fails the build; `--allow-blank-downloads` does not waive it.
 
 ## What EXPECTED is for
 
@@ -188,9 +201,10 @@ Two gates, and it matters which one is load-bearing:
 
 - **Digest (always on, fail-closed).** Every byte is re-hashed against the
   catalog pin at serve time. This gate works today — but be precise about
-  what it proves. **The trust root is the operator's stage**, not the
-  image: the artifacts do not ship with the image, they are put here by a
-  human who downloaded them with their own credentials. The digest proves
+  what it proves. For a hand stage **the trust root is the operator's
+  stage**: the artifacts are put here by a human who downloaded them with
+  their own credentials (an image carries a builder's hand stage on the
+  same terms). The digest proves
   the bytes have not changed *since that stage*. It says nothing about
   whether they were the right bytes to begin with — that is what the
   operator's own verification of the release download is for, and why
