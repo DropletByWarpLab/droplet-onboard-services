@@ -8,6 +8,7 @@
  *   A2  GET /api/security/assistant/incidents/:id   security_get_incident
  *   A3  GET /api/security/assistant/events          security_search_events
  *   A4  GET /api/security/assistant/areas           security_zone_status
+ *   A5  GET /api/security/assistant/patterns        security_explain_pattern  (WARP-2980, P5 PR-E)
  *
  * WHY A ROUTER OF ITS OWN. Tools reach the orchestrator from the mcp-server
  * as `_service:mcp`, with `X-Nextcloud-User` naming the person the assistant
@@ -52,6 +53,16 @@
  * services/security-assistant-view.ts: no person's name, no stored summary.
  * A read that cannot be answered is 503, never an empty 200: an empty list
  * reads as a quiet site.
+ *
+ * A5 (WARP-2980, ADR-059 P5 PR-E, spec §6.18) calls PR-A's
+ * `explainSecurityPattern` — the function behind route 31 and the Patterns
+ * page — with the acting person's scope, so its numbers are the page's. An
+ * area the person sees through some of its cameras but not all of them is
+ * named with `usual: null` (DS-005 on derived numbers, D22); an area or
+ * camera they cannot see at all answers exactly like one that does not
+ * exist. A1/A2 read counted reasons only: a pattern flag, trial or quietened
+ * by expected activity, lives in SecurityPatternFlag and never reaches a
+ * tool (D30: the model must not narrate an untested flag as a reason).
  */
 import { Router, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -88,6 +99,7 @@ import {
   type ViewerAreas,
 } from "../services/security-zones.service.js";
 import { securityOngoingSource, securityStatusSnapshot } from "../services/camera.service.js";
+import { explainSecurityPattern } from "../services/security-patterns-read.js";
 import {
   ASSISTANT_EVENT_KINDS,
   ASSISTANT_STORED_KINDS,
@@ -97,19 +109,23 @@ import {
   eventSource,
   eventWhat,
   fitList,
+  hiddenPatternAnswer,
   incidentTitle,
   incidentUrl,
   nameKey,
+  patternAnswer,
   severityWord,
   stateWord,
 } from "../services/security-assistant-view.js";
 import {
   ASSISTANT_PERIODS,
   assistantInstant,
+  parseAssistantInstant,
   resolveAssistantPeriod,
   type AssistantSite,
   type ResolvedAssistantPeriod,
 } from "../lib/security-assistant-period.js";
+import { PATTERN_RELEASE } from "../lib/security-rules.js";
 import type { SiteHours } from "../lib/security-hours.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -127,6 +143,10 @@ const AREAS_PER_EVENT = 3;
 const EVIDENCE_PER_CODE = 3;
 /** Pages A1 reads to fill one answer when a period drops incidents whose VISIBLE span misses it. */
 const WINDOW_ROUNDS = 4;
+/** A5's `at`: how far back (the event retention; the numbers are the last 4 weeks either way)… */
+const PATTERN_AT_BACK_MS = 30 * DAY_MS;
+/** …and how far ahead (route 31's bound: a clock a little ahead of the box's). */
+const PATTERN_AT_AHEAD_MS = 3_600_000;
 
 const HUMAN_ROLES = new Set(["owner", "admin", "family"]);
 
@@ -145,7 +165,7 @@ interface SecurityActor {
   level: FeatureLevel;
 }
 
-type ErrorCode = "BAD_REQUEST" | "NO_SITE_TIMEZONE" | "INCIDENT_NOT_FOUND" | "SECURITY_UNAVAILABLE";
+type ErrorCode = "BAD_REQUEST" | "NO_SITE_TIMEZONE" | "INCIDENT_NOT_FOUND" | "SECURITY_UNAVAILABLE" | "PLACE_NOT_FOUND" | "PATTERNS_NOT_READY";
 
 function fail(res: Response, status: number, code: ErrorCode, message: string): void {
   res.status(status).json({ error: { code, message } });
@@ -236,6 +256,19 @@ function areaIdByName(areas: ViewerAreas, name: string): string | undefined {
   const key = nameKey(name);
   for (const [id, areaName] of areas.names) if (nameKey(areaName) === key) return id;
   return undefined;
+}
+
+/**
+ * The cameras a name means, among those the person may see: by display name
+ * or Frigate name (case-insensitive, trimmed); a name that matches neither is
+ * tried as a Frigate name as given. A camera outside the grant is dropped, so
+ * it answers exactly like one that does not exist. (A3's filter; A5's place.)
+ */
+function visibleCamerasNamed(labels: ReadonlyMap<string, string>, scope: SecurityViewerScope, raw: string): string[] {
+  const key = nameKey(raw);
+  const named = [...labels].filter(([name, label]) => nameKey(label) === key || nameKey(name) === key).map(([name]) => name);
+  const candidates = named.length > 0 ? named : [raw.trim()];
+  return candidates.filter((c) => scope.visibleCameras === "all" || scope.visibleCameras.has(c));
 }
 
 const periodFields = {
@@ -364,6 +397,17 @@ const eventsQuery = z
 
 const areasQuery = z.object({ area: z.string().max(60).optional() }).strict();
 
+const patternsQuery = z
+  .object({
+    area: z.string().max(60).optional(),
+    camera: z.string().max(64).optional(),
+    label: z.enum(["person", "car", "dog", "cat"]).optional(),
+    at: z.string().max(40).optional(),
+    // The slot is the period's first hour; the other periods are spans, not a time of day.
+    period: z.enum(["last_night", "today"]).optional(),
+  })
+  .strict();
+
 const UUID = z.string().uuid();
 
 export function createSecurityAssistantRouter(prisma: PrismaClient, deps: SecurityAssistantDeps = {}): Router {
@@ -484,10 +528,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const extraWhere: Prisma.SecurityEventWhereInput[] = [];
       if (q.data.camera !== undefined) {
         // By display name or Frigate name; a camera outside the grant is the same empty page as one that does not exist.
-        const key = nameKey(q.data.camera);
-        const named = [...labels].filter(([name, label]) => nameKey(label) === key || nameKey(name) === key).map(([name]) => name);
-        const candidates = named.length > 0 ? named : [q.data.camera.trim()];
-        const cams = candidates.filter((c) => scope.visibleCameras === "all" || scope.visibleCameras.has(c));
+        const cams = visibleCamerasNamed(labels, scope, q.data.camera);
         if (cams.length === 0) return empty();
         extraWhere.push({ camera: { in: cams } });
       }
@@ -596,6 +637,65 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       res.json({ site, areas: areas.slice(0, n), moreAreas: areas.length - n, suggestionsWaiting });
     } catch (err) {
       unavailable(res, err, "assistant area status");
+    }
+  });
+
+  // A5 (WARP-2980, P5 PR-E) — what normal looks like for one area or camera at one time.
+  router.get("/security/assistant/patterns", assistantOnly, actor, async (req: Request, res: Response) => {
+    const q = patternsQuery.safeParse(req.query);
+    if (!q.success) return badQuery(res, q.error.issues);
+    if ((q.data.area === undefined) === (q.data.camera === undefined)) return fail(res, 400, "BAD_REQUEST", "Name one area or one camera.");
+    if (q.data.at !== undefined && q.data.period !== undefined) return fail(res, 400, "BAD_REQUEST", "Give at or period, not both.");
+    const now = clock();
+    let at = now;
+    if (q.data.at !== undefined) {
+      const parsed = parseAssistantInstant(q.data.at);
+      if (!parsed) return fail(res, 400, "BAD_REQUEST", "at must be an ISO-8601 time with an offset, like 2026-09-22T02:00:00+01:00.");
+      if (parsed.getTime() > now.getTime() + PATTERN_AT_AHEAD_MS) return fail(res, 400, "BAD_REQUEST", "at can be at most an hour ahead.");
+      if (parsed.getTime() < now.getTime() - PATTERN_AT_BACK_MS) return fail(res, 400, "BAD_REQUEST", "at can be at most 30 days back.");
+      at = parsed;
+    }
+    try {
+      const who = actorOf(res);
+      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const site = await siteClockOf(prisma, now);
+      if (q.data.period !== undefined) {
+        const p = resolveAssistantPeriod({ period: q.data.period }, site, now, new Date(now.getTime() - PATTERN_AT_BACK_MS));
+        if (!p.ok) {
+          const message = p.code === "NO_SITE_TIMEZONE" ? "Droplet doesn't know this site's time zone. Pass at as an exact time with an offset." : p.message;
+          return fail(res, 400, "BAD_REQUEST", message);
+        }
+        at = p.period!.from;
+      }
+      const [links, labels] = await Promise.all([loadActiveLinks(prisma), loadCameraLabels(prisma)]);
+      const areas = viewerAreas(links, scope);
+      let zoneId: string | undefined;
+      let camera: string | undefined;
+      if (q.data.area !== undefined) {
+        zoneId = areaIdByName(areas, q.data.area);
+      } else {
+        const cams = visibleCamerasNamed(labels, scope, q.data.camera!);
+        const key = nameKey(q.data.camera!);
+        camera = cams.find((c) => nameKey(c) === key) ?? [...cams].sort()[0];
+      }
+      // Missing, archived, unlinked or hidden: one answer for all of them.
+      if (zoneId === undefined && camera === undefined) return fail(res, 404, "PLACE_NOT_FOUND", "There is no such area or camera.");
+      const r = await explainSecurityPattern(prisma, scope, { zoneId, camera, label: q.data.label, at }, now);
+      switch (r.status) {
+        case "ok":
+          return res.json(patternAnswer(r.view, now));
+        case "no_timezone":
+          return fail(res, 409, "PATTERNS_NOT_READY", "Droplet can't learn what's usual until it knows the site's time zone. Set the opening hours to choose it.");
+        case "not_built":
+          return fail(res, 409, "PATTERNS_NOT_READY", "Droplet hasn't worked out what's usual yet. It needs about two weeks per camera.");
+        case "not_found":
+          // An area they see (through at least one camera) that PR-A refuses them: some camera behind it is not
+          // theirs. Name the place, give no numbers (DS-005 on derived numbers, D22). A camera is theirs or absent.
+          if (zoneId !== undefined) return res.json(hiddenPatternAnswer(areas.names.get(zoneId)!, at, site.timezone, PATTERN_RELEASE, now));
+          return fail(res, 404, "PLACE_NOT_FOUND", "There is no such area or camera.");
+      }
+    } catch (err) {
+      unavailable(res, err, "assistant pattern read");
     }
   });
 

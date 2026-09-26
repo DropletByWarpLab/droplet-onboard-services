@@ -307,16 +307,18 @@ describe("Security level invariant — the four routers' real stacks (spec §7, 
   });
 });
 
-describe("WARP-2979 — the assistant router (A1–A4): GET only, the MCP principal only", () => {
+describe("WARP-2979 — the assistant router (A1–A5): GET only, the MCP principal only", () => {
   const ASSISTANT = routesOf("createSecurityAssistantRouter", createSecurityAssistantRouter(PRISMA, {}));
   const ASSISTANT_TABLE = [
     "GET /security/assistant/incidents",
     "GET /security/assistant/incidents/:id",
     "GET /security/assistant/events",
     "GET /security/assistant/areas",
+    // WARP-2980 (ADR-059 P5 PR-E, §6.18) — security_explain_pattern's hop.
+    "GET /security/assistant/patterns",
   ];
 
-  it("exactly the four A-routes, every one a GET — never a write", () => {
+  it("exactly the five A-routes, every one a GET — never a write", () => {
     expect(ASSISTANT.map((r) => r.key)).toEqual(ASSISTANT_TABLE);
     expect(ASSISTANT.filter((r) => r.method !== "GET")).toEqual([]);
   });
