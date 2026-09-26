@@ -148,10 +148,9 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           if (to) where.at.lt = new Date(to);
         }
         if (q) {
-          // Case-insensitive substring across `what` and `sub`. Both
-          // columns are TEXT — no full-text index, but the result set
-          // is bounded by `limit` so a sequential scan within the
-          // date+kind window is acceptable.
+          // Case-insensitive substring across `what` and `sub`. Served
+          // by the pg_trgm GIN indexes on both columns (WARP-3193
+          // PERF-7); a btree cannot serve a leading-wildcard ILIKE.
           where.OR = [
             { what: { contains: q, mode: "insensitive" } },
             { sub: { contains: q, mode: "insensitive" } },

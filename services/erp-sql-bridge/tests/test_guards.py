@@ -259,5 +259,31 @@ class TestRequestContract:
         with pytest.raises(ValueError):
             TargetSpec(host="10.0.0.5", port=port)
 
+    # WARP-3193 SEC-INJ-3 — the target lands in an ODBC connection string, so
+    # anything that could close a parameter and open another is refused here.
+    @pytest.mark.parametrize(
+        "host",
+        ["10.0.0.5;START=calc", "a b", "-lead", "trail-", "x\nHost=evil", "{x}", "a:1", ""],
+    )
+    def test_a_host_with_connection_string_syntax_is_rejected(self, host):
+        with pytest.raises(ValueError):
+            TargetSpec(host=host)
+
+    @pytest.mark.parametrize("host", ["10.0.0.5", "eaglesoft-srv", "srv.office.lan", "x"])
+    def test_ordinary_hosts_are_accepted(self, host):
+        assert TargetSpec(host=host).host == host
+
+    @pytest.mark.parametrize("field", ["serverName", "databaseName"])
+    @pytest.mark.parametrize(
+        "value", ["X;START=calc", "a b", "{x}", "x}", "a\nb", "", "a" * 129]
+    )
+    def test_a_name_with_connection_string_syntax_is_rejected(self, field, value):
+        with pytest.raises(ValueError):
+            TargetSpec(host="10.0.0.5", **{field: value})
+
+    def test_ordinary_names_are_accepted(self):
+        t = TargetSpec(host="10.0.0.5", serverName="EAGLESOFT_1", databaseName="Patterson.PM-2")
+        assert (t.serverName, t.databaseName) == ("EAGLESOFT_1", "Patterson.PM-2")
+
     def test_target_is_optional_so_a_single_practice_box_needs_no_per_request_config(self):
         assert ExecRequest(sql="SELECT 1").target is None

@@ -70,8 +70,8 @@ Environment=BRIDGE_PORT=9090
 # /drives/<uuid>/eject) AND every credential-bearing read (/openwrt/qr — the
 # Wi-Fi PSK — plus /drives) is gated on BRIDGE_AUTH_TOKEN (WARP-659), and the
 # bridge refuses to start without that token (see device-bridge.py
-# _boot_banner). The remaining open reads (/wifi scan, /files, /cameras,
-# /health) carry no credential material. The in-code default stays 127.0.0.1;
+# _boot_banner). WARP-3193 SEC-DATA-6 gated the panel reads too (/wifi,
+# /files, /cameras, /pools, /services); only /health is open. The in-code default stays 127.0.0.1;
 # an operator can re-pin the bind via the env file below (loaded last).
 Environment=BRIDGE_BIND=0.0.0.0
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json

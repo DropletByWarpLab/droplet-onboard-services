@@ -206,6 +206,7 @@ function createPrismaMock() {
           displayName: null,
           email: null,
           role: "user",
+          status: "pending", // the column's DB default (WARP-3193 QUAL-3)
           acceptedAt: null,
           acceptedFrom: null,
           revokedAt: null,
@@ -264,19 +265,21 @@ function createPrismaMock() {
         return rows[idx];
       }),
       // WARP-490: compare-and-swap claim used by the accept handler
-      // (`updateMany({ where: { id, acceptedAt: null }, data: { acceptedAt } })`).
-      // The body is fully synchronous (no internal await), so two racing
-      // claims serialize in the event loop: whichever reaches it first
-      // flips acceptedAt (count 1); the second is filtered by the
-      // `acceptedAt: null` guard and returns count 0 — exactly the DB-
-      // level atomicity the real Prisma updateMany provides.
+      // (`updateMany({ where: { id, status: "pending" }, data: { status:
+      // "accepted", acceptedAt } })` since WARP-3193 QUAL-3), and the
+      // conditional revoke. The body is fully synchronous (no internal
+      // await), so two racing claims serialize in the event loop: whichever
+      // reaches it first flips the status (count 1); the second is filtered
+      // by the status guard and returns count 0 — exactly the DB-level
+      // atomicity the real Prisma updateMany provides.
       updateMany: vi.fn(async ({ where, data }: any) => {
         let count = 0;
         for (let i = 0; i < rows.length; i += 1) {
           const r = rows[i];
           if (where?.id !== undefined && r.id !== where.id) continue;
           if (where?.token !== undefined && r.token !== where.token) continue;
-          if (where?.acceptedAt === null && r.acceptedAt !== null) continue;
+          if (typeof where?.status === "string" && r.status !== where.status) continue;
+          if (where?.status?.in !== undefined && !where.status.in.includes(r.status)) continue;
           rows[i] = { ...r, ...data };
           count += 1;
         }
@@ -493,6 +496,40 @@ describe("DELETE /api/auth/invites/:token — revoke", () => {
     expect(lookup.status).toBe(404);
   });
 
+  // WARP-3193 QUAL-3: the status and its timestamp are written together, and
+  // only a pending/expired invite can move to revoked.
+  it("revoke writes status=revoked with revokedAt, and leaves an accepted invite accepted", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const a = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
+    const b = await request(app).post("/api/auth/invites").send({ email: "bob@warp.test" });
+    prisma.rows[1].status = "accepted";
+    prisma.rows[1].acceptedAt = new Date();
+
+    expect((await request(app).delete(`/api/auth/invites/${a.body.token}`)).status).toBe(200);
+    expect((await request(app).delete(`/api/auth/invites/${b.body.token}`)).status).toBe(200);
+
+    expect(prisma.rows[0].status).toBe("revoked");
+    expect(prisma.rows[0].revokedAt).toBeInstanceOf(Date);
+    expect(prisma.rows[1].status).toBe("accepted");
+    expect(prisma.rows[1].revokedAt).toBeNull();
+  });
+
+  it("the admin list carries status, reading a pending invite past its deadline as expired", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
+    await request(app).post("/api/auth/invites").send({ email: "bob@warp.test" });
+    prisma.rows[1].expiresAt = new Date(Date.now() - 1000);
+
+    const res = await request(app).get("/api/auth/invites");
+    expect(res.status).toBe(200);
+    const byUser = Object.fromEntries(
+      res.body.invites.map((i: { username: string; status: string }) => [i.username, i.status]),
+    );
+    expect(byUser).toEqual({ alice: "pending", bob: "expired" });
+  });
+
   it("non-admin cannot revoke", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
@@ -566,6 +603,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
     const app = buildApp(prisma);
     const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
+    prisma.rows[0].status = "accepted";
     prisma.rows[0].acceptedAt = new Date();
 
     const publicApp = buildApp(prisma, null);
@@ -579,6 +617,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
     const app = buildApp(prisma);
     const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
+    prisma.rows[0].status = "revoked";
     prisma.rows[0].revokedAt = new Date();
 
     const publicApp = buildApp(prisma, null);
@@ -704,6 +743,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
       role: "user",
       createdBy: "someone",
       expiresAt: new Date(Date.now() + 60_000),
+      status: "pending",
       acceptedAt: null,
       acceptedFrom: null,
       revokedAt: null,
@@ -743,6 +783,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
       role: "user",
       createdBy: "someone",
       expiresAt: new Date(Date.now() + 60_000),
+      status: "pending",
       acceptedAt: null,
       acceptedFrom: null,
       revokedAt: null,

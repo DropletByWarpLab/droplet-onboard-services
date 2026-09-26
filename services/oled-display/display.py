@@ -3788,10 +3788,9 @@ class TFTDisplay:
     # ----- Wi-Fi helper -------------------------------------------------
 
     def _bridge_get(self, path: str, timeout: float = 6.0) -> Optional[dict]:
-        # WARP-659: the bridge now gates its credential-bearing reads
-        # (/openwrt/qr, /drives) on the shared secret, so send it on every GET
-        # (harmless on the still-open /wifi /files /cameras). Same env
-        # precedence as the rotate/connect POSTs above.
+        # WARP-659 / WARP-3193: the bridge gates every read except /health on
+        # the shared secret, so send it on every GET. Same env precedence as
+        # the rotate/connect POSTs above.
         token = (os.environ.get("BRIDGE_AUTH_TOKEN")
                  or os.environ.get("SERVICE_SECRET")
                  or os.environ.get("DEVICE_SECRET_KEY")
