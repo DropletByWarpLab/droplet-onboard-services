@@ -224,6 +224,9 @@ const EXPECTED_TOOL_NAMES = [
   "security_get_incident",
   "security_search_events",
   "security_zone_status",
+  // WARP-2980 (ADR-059 P5 PR-E, §6.18) — what normal looks like for one place;
+  // a Tier-1 read like the other four.
+  "security_explain_pattern",
 ];
 
 describe("TOOLS registry", () => {
@@ -517,9 +520,9 @@ describe("TOOLS registry", () => {
   // this pin fails it, and the assistant router has no route it could call.
   it("the security domain holds no write or confirming tool", () => {
     const security = TOOL_CATALOG.filter((e) => e.domain === "security");
-    // Non-vacuous: the four tools are there to be checked.
+    // Non-vacuous: the five tools are there to be checked (WARP-2980 added the fifth).
     expect(security.map((e) => e.name).sort()).toEqual(
-      ["security_get_incident", "security_list_incidents", "security_search_events", "security_zone_status"],
+      ["security_explain_pattern", "security_get_incident", "security_list_incidents", "security_search_events", "security_zone_status"],
     );
     const offenders = security.filter((e) => e.requiresWrite || e.requiresConfirmation).map((e) => e.name);
     expect(offenders).toEqual([]);

@@ -406,6 +406,12 @@ describe("worst-case fixed system-block budget", () => {
     // line again leaves about two ordinary tools before the next crossing is
     // somebody's conscious decision. The decision is Stefan's to reverse.
     //
+    // WARP-2980 (ADR-059 P5 PR-E) — `security_explain_pattern`, the fifth
+    // Security read, measured under this line without moving it: 112,942 over
+    // 156 before, 970 for the tool (under both the 2,000 per-tool and the
+    // 1,000 pool-mean lines), 113,913 over 157 after — 1,087 of headroom,
+    // about one ordinary tool. The line did not move.
+    //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
     // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added
     // to chat scope tripped it. WARP-2547 resolved that: it is now a function

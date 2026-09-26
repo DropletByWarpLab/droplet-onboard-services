@@ -240,7 +240,11 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // night?". A word in two rules brings in both domains, and a false-positive
   // domain is cheap (see the rule comment above). Never core: four schemas on
   // every turn would pay for a question most turns never ask.
-  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours)\b/i, domains: ["security"] },
+  // WARP-2980 (ADR-059 P5 PR-E) — "is it normal…?" / "what's usual…?": the
+  // question security_explain_pattern answers. The spec's own box-proof
+  // sentence, "is it normal for someone to be in the stock room at 2 AM?",
+  // matched none of the words above.
+  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|(is|was) (it|that|this) (normal|usual)|what(['’]?s| is) (normal|usual))\b/i, domains: ["security"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
   //

@@ -1058,7 +1058,7 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
 });
 
 describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4 §6.12.6)", () => {
-  const SECURITY = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"];
+  const SECURITY = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"];
   const SECURITY_POOL = [...POOL, ...SECURITY];
   const select = (sentence: string) =>
     selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: SECURITY_POOL, conversationToolNames: [] });
@@ -1069,6 +1069,10 @@ describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4
     "any security incidents this week?",
     "is the stock room covered?",
     "which areas had people after hours?",
+    // WARP-2980 (P5 PR-E) — what is usual for a place: the box-proof sentence, and the same question asked two ways.
+    "is it normal for someone to be in the stock room at 2 AM?",
+    "was that normal for a Sunday morning?",
+    "what's usual for the loading bay at night?",
   ])("routes to security: %s", (sentence) => {
     const r = select(sentence);
     expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("security");

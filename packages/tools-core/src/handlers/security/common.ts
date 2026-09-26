@@ -1,6 +1,6 @@
 /**
- * WARP-2979 (ADR-059 P4 §6.12) — what the four read-only `security` tools
- * share: argument checks, and turning the assistant routes' answers into a
+ * WARP-2979 (ADR-059 P4 §6.12) — what the read-only `security` tools (P4's
+ * four, and P5's `security_explain_pattern`) share: argument checks, and turning the assistant routes' answers into a
  * `ToolResult`. Declares no tool (the route manifest gate skips it); each
  * handler makes its own `ctx.http.orchestrator.get(…)` so that gate sees the
  * hop in the handler's source.
@@ -16,6 +16,9 @@
  * Refusals are honest and never an empty list:
  *   · 404 `module_disabled` → SECURITY_UNAVAILABLE ("switched off, or this
  *     person can't use it" — one answer for every refusal);
+ *   · (WARP-2980, the fifth tool) 404 PLACE_NOT_FOUND — a missing or hidden
+ *     area or camera, one answer for both — and 409 PATTERNS_NOT_READY
+ *     ("not learned yet", with the route's reason);
  *   · 400 → BAD_REQUEST with the route's message; NO_SITE_TIMEZONE asks for
  *     exact times;
  *   · 503, any other status, or no answer at all → SECURITY_UNREACHABLE.
@@ -158,6 +161,13 @@ export async function securityResult(res: Response, type: string, keys: readonly
   if (res.status === 404 && code === "module_disabled") return securityError("SECURITY_UNAVAILABLE", SECURITY_UNAVAILABLE_MESSAGE);
   if (res.status === 404 && code === "INCIDENT_NOT_FOUND") {
     return securityError("INCIDENT_NOT_FOUND", "No incident with that id that this person can see.");
+  }
+  // WARP-2980 (P5 PR-E) — security_explain_pattern's two answers that are not an outage.
+  if (res.status === 404 && code === "PLACE_NOT_FOUND") {
+    return securityError("PLACE_NOT_FOUND", "No area or camera by that name that this person can see.");
+  }
+  if (res.status === 409 && code === "PATTERNS_NOT_READY") {
+    return securityError("PATTERNS_NOT_READY", message ?? "Droplet hasn't worked out what's usual yet.");
   }
   if (res.status === 400 && code === "NO_SITE_TIMEZONE") {
     return securityError("NO_SITE_TIMEZONE", "Droplet doesn't know this site's time zone. Ask for exact times and pass them as from/to with an offset.");

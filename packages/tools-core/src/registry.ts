@@ -258,6 +258,8 @@ import securityListIncidents from "./handlers/security/security-list-incidents.j
 import securityGetIncident from "./handlers/security/security-get-incident.js";
 import securitySearchEvents from "./handlers/security/security-search-events.js";
 import securityZoneStatus from "./handlers/security/security-zone-status.js";
+// WARP-2980 (ADR-059 P5 PR-E): what normal looks like for one place — A5 on the same router.
+import securityExplainPattern from "./handlers/security/security-explain-pattern.js";
 
 const allTools: Tool[] = [
   // network
@@ -477,6 +479,7 @@ const allTools: Tool[] = [
   securityGetIncident,
   securitySearchEvents,
   securityZoneStatus,
+  securityExplainPattern,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
