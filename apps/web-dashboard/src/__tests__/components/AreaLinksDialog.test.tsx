@@ -318,3 +318,36 @@ describe("link wording", () => {
     );
   });
 });
+
+describe("WARP-2979 — Droplet's suggestion in the checklist", () => {
+  it("is an unticked row tagged 'Suggested by Droplet'; ticking it and saving sends it", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const zone: SecurityZoneView = { id: "z1", name: "Stock room", kind: "interior", state: "active", version: 3, links: [link("l1", "camera", "front_cam", "Front camera")] };
+    render(
+      <AreaLinksDialog
+        open
+        zone={zone}
+        sources={SOURCES}
+        suggested={[{ sourceKind: "camera", sourceRef: "yard_cam" }]}
+        onRetrySources={vi.fn()}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />,
+    );
+    const yard = screen.getByRole("group", { name: "Yard camera" });
+    expect(within(yard).getByText(COPY.suggested)).toBeInTheDocument();
+    const box = within(yard).getByRole("checkbox", { name: COPY.wholeView });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    fireEvent.click(screen.getByRole("button", { name: COPY.save }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("z1", {
+        links: [
+          { sourceKind: "camera", sourceRef: "front_cam" },
+          { sourceKind: "camera", sourceRef: "yard_cam" },
+        ],
+        expectedVersion: 3,
+      }),
+    );
+  });
+});

@@ -61,6 +61,9 @@ import * as LearningList from "./LearningList";
 import * as AckHistory from "./AckHistory";
 import * as AlertRoutingPanel from "./AlertRoutingPanel";
 import * as AiSettingsPanel from "./AiSettingsPanel";
+import * as LinkSuggestions from "./LinkSuggestions";
+import * as LinkWhyPopover from "./LinkWhyPopover";
+import * as linkEvidenceCopy from "./link-evidence-copy";
 import * as IncidentCard from "./IncidentCard";
 import * as IncidentList from "./IncidentList";
 import * as IncidentView from "./IncidentView";
@@ -108,6 +111,10 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/ResolveDialog.tsx": ResolveDialog,
   "src/components/security/AlertRoutingPanel.tsx": AlertRoutingPanel,
   "src/components/security/AiSettingsPanel.tsx": AiSettingsPanel,
+  // WARP-2979 (P4) — Droplet's links.
+  "src/components/security/LinkSuggestions.tsx": LinkSuggestions,
+  "src/components/security/LinkWhyPopover.tsx": LinkWhyPopover,
+  "src/components/security/link-evidence-copy.ts": linkEvidenceCopy,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
   // WARP-2981 (P6) — the Security wall.
