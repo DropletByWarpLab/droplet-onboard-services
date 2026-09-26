@@ -25,6 +25,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -40,11 +41,18 @@ export function isNavLayout(value: unknown): value is NavLayout {
 interface NavLayoutContextValue {
   layout: NavLayout;
   setLayout: (layout: NavLayout) => void;
+  // WARP-3139 — the layout the Settings toggle just chose, waiting for the
+  // toggle instance that renders it (the same one, or the one remounted by
+  // AuthGate's shell swap) to take focus back. A ref, not state: a hand-off
+  // between two instances, never rendered from.
+  focusRequest: { current: NavLayout | null };
 }
 
 const NavLayoutContext = createContext<NavLayoutContextValue>({
   layout: DEFAULT_NAV_LAYOUT,
   setLayout: () => {},
+  // Without a provider the layout never changes, so no request is ever honoured.
+  focusRequest: { current: null },
 });
 
 export function NavLayoutProvider({ children }: { children: React.ReactNode }) {
@@ -76,7 +84,24 @@ export function NavLayoutProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const value = useMemo(() => ({ layout, setLayout }), [layout, setLayout]);
+  // Lives here, above AuthGate, so it outlives the shell swap (WARP-3139).
+  const focusRequest = useRef<NavLayout | null>(null);
+
+  // …but only for the commit the choice caused. Effects run children first,
+  // so a toggle that renders the new layout has already taken the request by
+  // the time this runs. One nothing took (the new shell didn't render the
+  // page it was made on) is dropped, not left to pull focus into a later,
+  // ordinary visit to Settings. If the page ever mounted a commit late
+  // (Suspense, a lazy section), the request is dropped the same way: focus
+  // falls to <body> as it did before WARP-3139, and is never stolen.
+  useEffect(() => {
+    focusRequest.current = null;
+  }, [layout]);
+
+  const value = useMemo(
+    () => ({ layout, setLayout, focusRequest }),
+    [layout, setLayout],
+  );
   return (
     <NavLayoutContext.Provider value={value}>{children}</NavLayoutContext.Provider>
   );
