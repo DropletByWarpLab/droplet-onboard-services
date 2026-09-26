@@ -1059,6 +1059,11 @@ model UserInvite {
   role         Role      @default(family)
   createdBy    String // username of issuing admin
   expiresAt    DateTime
+  // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of the
+  // timestamps below (CLAUDE.md no-guessing rule; WARP-218
+  // BrainMemoryItemStatus is the precedent). Each writer sets it in the same
+  // statement that stamps acceptedAt / revokedAt. See enum InviteStatus.
+  status       InviteStatus @default(pending)
   acceptedAt   DateTime?
   acceptedFrom String? // ip address (optional, audit)
   revokedAt    DateTime?
@@ -1095,6 +1100,24 @@ model UserInvite {
   @@index([token])
   @@index([expiresAt])
   @@index([sendStatus])
+  @@index([status])
+}
+
+/// WARP-3193 QUAL-3 — invite lifecycle, replacing the derivation over
+/// acceptedAt / revokedAt / expiresAt that every reader used to repeat.
+///   - pending  — issued, acceptable. `expiresAt` stays authoritative for the
+///                deadline: readers reject an overdue pending row in real
+///                time; the daily 03:00 sweep writes pending→expired
+///                (PairingCodeStatus precedent).
+///   - accepted — consumed by the accept route (acceptedAt stamped with it).
+///   - revoked  — revoked by an admin or the owner-invite boot sweep
+///                (revokedAt stamped with it).
+///   - expired  — past `expiresAt`, stamped by the daily sweep.
+enum InviteStatus {
+  pending
+  accepted
+  revoked
+  expired
 }
 
 /// BUG-11 — invite-email delivery lifecycle. Mirrors the EmailDraftStatus
@@ -1630,6 +1653,9 @@ model FileIndexStatus {
   @@id([userId, path])
   @@index([userId, status])
   @@index([extractStatus, updatedAt])
+  // WARP-3193 PERF-15: the filing orphan sweep (filing/maintenance.ts) looks
+  // rows up by ncFileId alone, which led no index.
+  @@index([ncFileId])
 }
 
 /// ADR-048 — the filing claim state machine. Explicit enum, never derived from
@@ -2139,18 +2165,38 @@ model Reminder {
   title           String
   body            String?
   dueAt           DateTime
-  // null = not yet completed. When set, the dispatcher stops sending reminders.
+  // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of
+  // completedAt / notifiedAt. Each writer sets it in the same statement that
+  // stamps the timestamp. See enum ReminderStatus.
+  status          ReminderStatus @default(scheduled)
+  // When the reminder was completed (set with status = completed).
   completedAt     DateTime?
   // Optional link to the event this reminder is for.
   calendarEventId String?
-  // Tracks whether the dispatcher has fired the due-time notification for
-  // this reminder. Prevents double-fire when the poller re-runs.
+  // When the dispatcher fired the due-time notification (set with
+  // status = notified). Kept after completion, so un-completing knows
+  // whether the reminder had already fired.
   notifiedAt      DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
   @@index([userId, dueAt])
-  @@index([completedAt])
+  // WARP-3193 PERF-14: the poller's `status = 'scheduled' AND dueAt <= now
+  // ORDER BY dueAt LIMIT 100`.
+  @@index([status, dueAt])
+}
+
+/// WARP-3193 QUAL-3 — reminder lifecycle.
+///   - scheduled — waiting for dueAt; the poller's only input.
+///   - notified  — the poller fired the due-time notification.
+///   - completed — the person marked it done.
+/// Re-arming (a new dueAt) returns a scheduled/notified reminder to
+/// scheduled; un-completing returns to notified if it had already fired,
+/// else scheduled.
+enum ReminderStatus {
+  scheduled
+  notified
+  completed
 }
 
 // ── Remote Access (WireGuard VPN) ──
@@ -3491,6 +3537,12 @@ model ActivityRow {
   @@index([at])
   // WARP-181: "what did this user do" queries (actorId filter + at sort).
   @@index([actorId, at])
+  // WARP-3193 PERF-7: GET /api/activity pages `ORDER BY id DESC LIMIT n`.
+  // (kind, id DESC) serves the ?kind= filter; the trigram GIN indexes serve
+  // the ?q= ILIKE '%…%' on what/sub (pg_trgm, enabled by the migration).
+  @@index([kind, id(sort: Desc)])
+  @@index([what(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([sub(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 // ── WARP-237: device-key-signed daily roots over the activity chain ──

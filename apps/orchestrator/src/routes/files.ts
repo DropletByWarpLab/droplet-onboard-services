@@ -84,6 +84,7 @@ import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { UnsafePathError } from "../lib/unsafe-path-error.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
@@ -421,19 +422,6 @@ function resolveSpaceGuardToken(req: Request): unknown {
 }
 
 /**
- * WARP-1262 (security): thrown by `rootForSpace` when a caller-supplied path
- * contains a `..` traversal segment. Mapped to HTTP 400 by `handleFileError`
- * so every space-threaded write route rejects traversal with a clean client
- * error instead of handing the escaped path to the WebDAV client.
- */
-class UnsafePathError extends Error {
-  constructor(message = "path must not contain '..' segments") {
-    super(message);
-    this.name = "UnsafePathError";
-  }
-}
-
-/**
  * WARP-1261: generalized path routing for personal/shared/department spaces.
  *
  * Map a (space, requested path) pair to the real WebDAV home-relative path.
@@ -522,34 +510,47 @@ async function activeDeptMountNames(
   // "list my files" request — fail open (nothing extra hidden) rather than
   // 500, same posture as the sharedAvailable probe above.
   try {
-    const depts = await prisma.department.findMany({
-      where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
-      select: {
-        name: true,
-        kind: true,
-        parentId: true,
-        memberships: { where: { userId }, select: { id: true } },
-      },
-    });
-
-    const names: string[] = [];
-    for (const dept of depts) {
-      if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
-      if (dept.kind === "TEAM" && dept.parentId) {
-        const parent = await prisma.department.findUnique({
-          where: { id: dept.parentId },
-          select: { name: true },
-        });
-        names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
-      } else {
-        names.push(dept.name);
-      }
-    }
-    return names;
+    return await loadDeptMountNames(prisma, userId, isOwnerOrAdmin);
   } catch (err) {
     logger.warn({ err, userId }, "activeDeptMountNames: department lookup failed; not hiding any dept mounts");
     return [];
   }
+}
+
+/**
+ * The same lookup WITHOUT the fail-open catch: throws on a DB error. Security
+ * gates (refuseUnapprovedMcpWrite) must use this one — an unresolvable
+ * department list has to narrow what is allowed, never what is protected.
+ */
+async function loadDeptMountNames(
+  prisma: PrismaClient,
+  userId: string,
+  isOwnerOrAdmin: boolean
+): Promise<string[]> {
+  const depts = await prisma.department.findMany({
+    where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
+    select: {
+      name: true,
+      kind: true,
+      parentId: true,
+      memberships: { where: { userId }, select: { id: true } },
+    },
+  });
+
+  const names: string[] = [];
+  for (const dept of depts) {
+    if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
+    if (dept.kind === "TEAM" && dept.parentId) {
+      const parent = await prisma.department.findUnique({
+        where: { id: dept.parentId },
+        select: { name: true },
+      });
+      names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
+    } else {
+      names.push(dept.name);
+    }
+  }
+  return names;
 }
 
 /**
@@ -2330,6 +2331,7 @@ export function createFilesRouter(
         | { name: string; size: number; sha256: string; uploadId: string }
         | { name: string; size: number; sha256: string; buffer: Buffer };
       let uploads: PendingUpload[];
+      let jsonCreateOnly = false;
 
       if (files.length > 0) {
         rawTargetPath = (req.query.path as string) || "/";
@@ -2350,7 +2352,10 @@ export function createFilesRouter(
           dir?: unknown;
           filename?: unknown;
           contentBase64: string;
+          createOnly?: unknown;
         };
+        // WARP-3193 SEC-INJ-2: write_file asks for create-new only.
+        jsonCreateOnly = body.createOnly === true;
         rawTargetPath =
           typeof body.dir === "string" && body.dir.length > 0 ? body.dir : "/";
 
@@ -2445,7 +2450,26 @@ export function createFilesRouter(
             ));
             uncommitted.delete(file.uploadId);
           } else {
-            outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer);
+            if (jsonCreateOnly) {
+              // WARP-3193 SEC-INJ-2: `If-None-Match: *` — the server refuses
+              // atomically when the file exists; the tool asks the user.
+              try {
+                outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer, {
+                  ifNoneMatch: true,
+                });
+              } catch (uploadErr) {
+                if (uploadErr instanceof NcPreconditionFailedError) {
+                  res.status(409).json({
+                    error: "file already exists",
+                    path: joinDir(targetPath, file.name),
+                  });
+                  return;
+                }
+                throw uploadErr;
+              }
+            } else {
+              outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer);
+            }
           }
           const uploadedPath = joinDir(targetPath, finalName);
           const status: UploadEntryStatus =
@@ -2979,6 +3003,64 @@ export function createFilesRouter(
   }
 
   /**
+   * WARP-3193 SEC-INJ-2 — the move/copy writes the MODEL may not make alone.
+   *
+   * move_file / copy_file reach these routes as `_service:mcp`. Replacing a
+   * destination destroys it, and putting a private file into a shared folder
+   * (Household, or a department/team mount — each is a top-level folder in
+   * the caller's home) publishes it without share_file's gate. tools-core
+   * refuses both first; this is the mirror for the principal, answered as
+   * 403 USER_APPROVAL_REQUIRED so the tool can tell the model to ask the
+   * user. A move INSIDE one shared folder (rename, organize) is not a leak.
+   * A human session is never gated here: the dashboard click is the approval.
+   * `from`/`to` are the operational paths (after rootForSpace).
+   */
+  async function refuseUnapprovedMcpWrite(
+    req: Request,
+    res: Response,
+    overwrite: boolean,
+    from: string,
+    to: string,
+  ): Promise<boolean> {
+    if (!isMcpService(req)) return false;
+    let what: string | null = null;
+    if (overwrite) {
+      what = `Replacing the existing ${to}`;
+    } else {
+      const topOf = (p: string) => p.split("/")[1] ?? "";
+      let deptMounts: string[] | null;
+      try {
+        deptMounts = await loadDeptMountNames(prisma, req.user?.id ?? "", true);
+      } catch (err) {
+        // Fail CLOSED: without the department list we cannot tell a
+        // department mount from a private folder, so any move/copy into a
+        // different top-level folder needs the user.
+        logger.warn({ err }, "refuseUnapprovedMcpWrite: department lookup failed; refusing cross-folder write");
+        deptMounts = null;
+      }
+      if (deptMounts === null) {
+        if (topOf(to) !== topOf(from)) {
+          what = `Putting ${from} into /${topOf(to)} (shared folders could not be resolved)`;
+        }
+      } else {
+        const mounts = new Set([SHARED_FOLDER_NAME, ...deptMounts]);
+        const mountOf = (p: string) => {
+          const top = topOf(p);
+          return mounts.has(top) ? top : null;
+        };
+        const dest = mountOf(to);
+        if (dest !== null && dest !== mountOf(from)) {
+          what = `Putting ${from} into the shared folder /${dest}`;
+        }
+      }
+    }
+    if (what === null) return false;
+    recordAccessDenied(req, "mcp-write-needs-user");
+    res.status(403).json({ error: `${what} needs the user's approval`, code: "USER_APPROVAL_REQUIRED" });
+    return true;
+  }
+
+  /**
    * Invalidate listing caches for the parents of the given targets (source +
    * destination).
    *
@@ -3128,6 +3210,8 @@ export function createFilesRouter(
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
+      if (await refuseUnapprovedMcpWrite(req, res, overwrite, from, to)) return;
+
       const user = await getUser(req, prisma);
       await ncMoveFile(await getToken(req), user, from, to, overwrite);
 
@@ -3192,6 +3276,8 @@ export function createFilesRouter(
       const toSpaceValue = resolveSpace(rawToSpace);
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
+
+      if (await refuseUnapprovedMcpWrite(req, res, overwrite, from, to)) return;
 
       const user = await getUser(req, prisma);
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
@@ -4039,7 +4125,7 @@ export function createFilesRouter(
       const user = await getUser(req, prisma);
 
       // WARP-880 / WS-2 — three content-search modes:
-      //   semantic (default) → existing inline pgvector SQL (unchanged)
+      //   semantic (default) → embed + searchByVector (WARP-3193 ARCH-2)
       //   keyword            → lexical (websearch_to_tsquery + ts_rank_cd),
       //                        works with the AI gateway down
       //   hybrid             → embed + RRF fusion of lexical + vector
@@ -4225,44 +4311,35 @@ export function createFilesRouter(
         return;
       }
 
-      // pgvector cosine similarity — Prisma can't express <=> so we use raw SQL.
-      // Two-step query: inner DISTINCT ON deduplicates per file (keeping the
-      // best chunk), outer query sorts by score and applies the limit.
+      // Semantic: the service's vector arm, then one hit per file.
       //
-      // WARP-1140: pin the corpus to source='nextcloud' so semantic searches
-      // the SAME corpus as keyword/hybrid. The unfiltered query also matched
-      // brain-memory chunks (chat attachments), whose paths aren't navigable
-      // from the Files page AND which all share ncFileId=0 — so DISTINCT ON
-      // ("ncFileId") collapsed every brain chunk into one bogus result row.
-      // The userId list mirrors the other modes (own + Household corpus).
-      const vecLiteral = `[${embedVec.join(",")}]`;
-      const userIdPlaceholders = searchUserIds
-        .map((_, i) => `$${i + 2}`)
-        .join(", ");
-      const limitParam = searchUserIds.length + 2;
-      const rows: Array<{ path: string; score: number; text: string }> =
-        await prisma.$queryRawUnsafe(
-          `
-          SELECT path, score, text FROM (
-            SELECT DISTINCT ON ("ncFileId")
-              "path",
-              1 - ("embedding" <=> $1::vector) AS score,
-              "text"
-            FROM "FileContentChunk"
-            WHERE "userId" IN (${userIdPlaceholders})
-              AND "source" = 'nextcloud'
-            ORDER BY "ncFileId", "embedding" <=> $1::vector
-          ) ranked
-          ORDER BY score DESC
-          LIMIT $${limitParam}
-          `,
-          vecLiteral,
-          ...searchUserIds,
-          limit
-        );
+      // WARP-3193 ARCH-2: this used to be an inline copy of the vector query
+      // that had drifted from `searchByVector`. Its DISTINCT ON ordering
+      // (`"ncFileId", embedding <=> $1`) cannot use the HNSW index, so every
+      // search was a sequential scan; it also skipped WARP-2193's
+      // `SET LOCAL hnsw.ef_search` and WARP-242's decrypt-on-read. The
+      // response shape is unchanged; `text` is now the service's snippet
+      // (the dashboard renders its first 200 characters).
+      //
+      // WARP-1140: the corpus stays pinned to source='nextcloud', the same as
+      // keyword/hybrid (brain-memory chunks are not navigable from Files).
+      // minSimilarity -1 (the cosine floor) keeps the inline query's
+      // no-threshold behaviour.
+      const { searchByVector } = await import(
+        "../services/file-search.service.js"
+      );
+      const hits = await searchByVector(prisma, {
+        userId: user,
+        additionalUserIds,
+        vector: embedVec,
+        limit: limit * CHUNKS_PER_FILE_FACTOR,
+        minSimilarity: -1,
+        source: "nextcloud",
+      });
+      const results = dedupeHitsPerFile(hits, limit);
 
-      await cacheSet(cacheKey, rows, 60);
-      res.json({ results: rows });
+      await cacheSet(cacheKey, results, 60);
+      res.json({ results });
     } catch (err: any) {
       // Catch Prisma/pgvector-specific errors (e.g. vector extension missing,
       // invalid vector cast) and return 503 instead of leaking raw SQL in a 500.

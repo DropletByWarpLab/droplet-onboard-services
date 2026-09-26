@@ -97,6 +97,16 @@ describe("list_network_devices", () => {
     }
   });
 
+  // WARP-3193 PERF-13: randomised MACs grow the table without bound; the
+  // tool returned every row into the model's context.
+  it("returns at most the 200 most-recently-seen devices", async () => {
+    const { ctx, findMany } = ctxWith([]);
+    await listNetworkDevices.handler({}, ctx);
+    const args = findMany.mock.calls[0][0];
+    expect(args.take).toBe(200);
+    expect(args.orderBy).toEqual({ lastSeen: "desc" });
+  });
+
   it("metadata exposes name and write/confirmation flags", () => {
     expect(listNetworkDevices.name).toBe("list_network_devices");
     expect(listNetworkDevices.requiresWrite).toBe(false);
