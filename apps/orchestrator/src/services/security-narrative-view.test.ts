@@ -90,6 +90,22 @@ describe("narrativeVisibleTo", () => {
     expect(narrativeVisibleTo(row(), r, null, OWNER)).toBe(false);
   });
 
+  it("THE reason-visibility rule over every reason: a hidden evidence camera, a hidden related camera, a related lock", () => {
+    const one = row({ cameras: ["back_cam"], narrativeAudience: { cameras: ["back_cam"], threats: false, locks: false } });
+    expect(narrativeVisibleTo(one, [{ evidenceCamera: "till_cam", relatedCamera: null, relatedLock: false }], projected(["after_hours_presence"]), FAMILY_BACK)).toBe(false);
+    expect(narrativeVisibleTo(one, [{ evidenceCamera: "back_cam", relatedCamera: "till_cam", relatedLock: false }], projected(["after_hours_presence"]), FAMILY_BACK)).toBe(false);
+    expect(narrativeVisibleTo(one, [{ evidenceCamera: "back_cam", relatedCamera: null, relatedLock: true }], projected(["after_hours_presence"]), FAMILY_BACK)).toBe(false);
+    expect(narrativeVisibleTo(one, [{ evidenceCamera: "back_cam", relatedCamera: null, relatedLock: false }], projected(["after_hours_presence"]), FAMILY_BACK)).toBe(true);
+    // A camera-less reason follows the incident's scope: the camera system's own row is everyone's.
+    const system = row({ scope: "site_camera_system", cameras: [], reasonCodes: ["camera_offline"], narrativeAudience: { cameras: [], threats: false, locks: false } });
+    expect(narrativeVisibleTo(system, reasons(null), projected(["camera_offline"]), FAMILY_BACK)).toBe(true);
+  });
+
+  it("a PARTIAL view never gets it, whatever else it can see", () => {
+    const partial = { codes: ["after_hours_presence"], partial: true } as unknown as IncidentProjection;
+    expect(narrativeVisibleTo(row(), r, partial, OWNER)).toBe(false);
+  });
+
   it("a stored audience that is not the shape fails closed", () => {
     expect(narrativeVisibleTo(row({ narrativeAudience: { cameras: "back_cam" } }), r, projected(["after_hours_presence"]), OWNER)).toBe(false);
   });

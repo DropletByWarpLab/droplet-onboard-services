@@ -5,14 +5,18 @@
  *
  * A summary is written once, for everyone, from the whole incident — so it is
  * shown only to a viewer who can see everything it could name:
- *   · every camera of its audience (`narrativeAudience.cameras`), of the
- *     incident itself and of every reason (evidence and related camera) —
- *     the union, so a Regenerate in flight or a state with no text yet is
- *     judged against the incident as it is now;
+ *   · the view is not PARTIAL (P3's rule: no top-severity reason hidden);
+ *   · EVERY reason passes THE reason-visibility rule (`reasonVisibleTo`,
+ *     lib/security-reason-visibility.ts: its evidence camera, its related
+ *     camera, its related lock — P4 PR-4 swaps the lock clause there for
+ *     `mayReadLocks`, DS-019, and this follows), with the incident's scope
+ *     rule for a camera-less reason;
+ *   · every camera of its audience (`narrativeAudience.cameras`) and of the
+ *     incident — the union, so a Regenerate in flight or a state with no
+ *     text yet is judged against the incident as it is now — and a named
+ *     lock, read through the same rule;
  *   · threats ⇒ `mayReadThreats` (the audience says so, the incident is about
  *     network and sign-in warnings, or a reason's evidence is a threat row);
- *   · a lock named ⇒ a viewer who sees every camera (reasonVisibleTo's lock
- *     clause; P4 PR-4 swaps it for `mayReadLocks`, DS-019);
  *   · and the viewer's projected codes equal the stored codes.
  * Anyone else gets `narrative: null` — no state and no hint that a summary
  * exists. A stored audience that is not the validated shape fails closed.
@@ -26,6 +30,7 @@ import type {
   SecuritySeverity,
 } from "@prisma/client";
 import type { NarrativeAudience } from "../lib/security-narrative-prompt.js";
+import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
 import type { IncidentProjection, IncidentViewer } from "./security-incident-view.js";
 
 /** The incident columns this module reads. Route 18 selects these beside INCIDENT_VIEW_SELECT. */
@@ -102,16 +107,18 @@ function requiredAudience(row: NarrativeRow, reasons: readonly NarrativeReasonRe
 export function narrativeVisibleTo(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes"> | null,
+  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
   viewer: IncidentViewer,
 ): boolean {
-  if (!projection) return false;
+  if (!projection || projection.partial) return false;
   const audience = requiredAudience(row, reasons);
   if (!audience) return false;
-  const sees = (c: string) => viewer.visibleCameras === "all" || viewer.visibleCameras.has(c);
-  if (!audience.cameras.every(sees)) return false;
+  // A camera-less reason follows the incident's scope (security-incident-view's `reasonVisible`).
+  const siteEvidence = row.scope === "site_threat" ? viewer.mayReadThreats : row.scope === "site_camera_system";
+  if (!reasons.every((r) => reasonVisibleTo(r, viewer, siteEvidence))) return false;
+  if (!audience.cameras.every((camera) => reasonVisibleTo({ evidenceCamera: camera }, viewer, false))) return false;
+  if (audience.locks && !reasonVisibleTo({ evidenceCamera: null, relatedLock: true }, viewer, true)) return false;
   if (audience.threats && !viewer.mayReadThreats) return false;
-  if (audience.locks && viewer.visibleCameras !== "all") return false;
   const stored = new Set(row.reasonCodes);
   const seen = new Set(projection.codes);
   return stored.size === seen.size && [...stored].every((c) => seen.has(c));
@@ -127,7 +134,7 @@ export function narrativeVisibleTo(
 export function narrativeView(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes"> | null,
+  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
   viewer: IncidentViewer,
   summariesOn: boolean,
 ): NarrativeView | null {
