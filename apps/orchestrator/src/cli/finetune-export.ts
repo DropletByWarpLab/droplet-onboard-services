@@ -150,6 +150,7 @@ const DROP_LABELS: Record<DropReason, string> = {
   // other reason so an operator can SEE how much of their history was excluded
   // for reading a customer's books, rather than wondering where it went.
   connector_records: "read a connected system of record (excluded, WARP-2425)",
+  security_records: "read Security (presence data; excluded, WARP-2979)",
 };
 
 export async function runFinetuneExportCli(
@@ -188,6 +189,7 @@ export async function runFinetuneExportCli(
     no_tool_calls: 0,
     incomplete_exchange: 0,
     connector_records: 0,
+    security_records: 0,
   };
   for (const messages of sessions) {
     const run = curateMessages(messages, {
