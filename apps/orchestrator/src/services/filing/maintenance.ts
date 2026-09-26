@@ -67,6 +67,14 @@ export interface MaintenanceResult {
 
 const DAY_MS = 24 * 60 * 60_000;
 
+/** Last proposal id the orphan sweep examined; undefined = start from the
+ *  beginning. In-process only: a restart costs one pass from the start. */
+let orphanCursor: string | undefined;
+
+export function __resetOrphanCursorForTests(): void {
+  orphanCursor = undefined;
+}
+
 export async function runFilingMaintenance(
   prisma: PrismaClient,
   now: Date = new Date(),
@@ -92,11 +100,22 @@ export async function runFilingMaintenance(
  * steps costs one wrongly-expired proposal rather than a lost transaction.
  */
 async function expireOrphans(prisma: PrismaClient): Promise<number> {
+  // WARP-3193 PERF-15: walk the candidates by id, resuming where the last run
+  // stopped. An unordered `take` re-read the same rows every night, so once
+  // SWEEP_BATCH dead EXPIRED rows existed a PENDING orphan behind them was
+  // never reached. A short page means the end: the next run starts over.
   const candidates = await prisma.ingestProposal.findMany({
-    where: { status: { in: ["PENDING", "EXPIRED"] }, ncFileId: { not: null } },
+    where: {
+      status: { in: ["PENDING", "EXPIRED"] },
+      ncFileId: { not: null },
+      ...(orphanCursor !== undefined ? { id: { gt: orphanCursor } } : {}),
+    },
     select: { id: true, ncFileId: true },
+    orderBy: { id: "asc" },
     take: SWEEP_BATCH,
   });
+  orphanCursor =
+    candidates.length === SWEEP_BATCH ? candidates[candidates.length - 1]!.id : undefined;
   if (candidates.length === 0) return 0;
 
   const fileIds = [...new Set(candidates.map((c) => c.ncFileId as number))];

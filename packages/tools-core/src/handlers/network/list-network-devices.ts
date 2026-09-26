@@ -6,6 +6,8 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
+const MAX_DEVICES = 200;
+
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   // WARP-106: `isBlocked` is no longer a stored column. Select the two
   // authored block fields and expose a computed, always-boolean
@@ -26,6 +28,9 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
       lastSeen: true,
     },
     orderBy: { lastSeen: "desc" },
+    // WARP-3193 PERF-13: randomised MACs grow the table without bound, and
+    // every row landed in the model's context.
+    take: MAX_DEVICES,
   });
   const devices = rows.map(({ lastAppliedBlocked, manualBlock, ...rest }) => ({
     ...rest,
@@ -37,7 +42,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "list_network_devices",
   description:
-    "List every network device the registry knows about, ordered by most-recently-seen. Returns MAC, display name, blocked flag, vendor, hostname, last IP, first/last seen timestamps.",
+    "List the 200 most-recently-seen network devices the registry knows about, newest first. Returns MAC, display name, blocked flag, vendor, hostname, last IP, first/last seen timestamps.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
