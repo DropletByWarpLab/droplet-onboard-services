@@ -30,8 +30,8 @@
 | # | Decision | Answer | Taken by · date |
 |---|---|---|---|
 | D1 | Should pinned and IP pairings get Windows Hello at all? | **Yes**, through a native relying party in the Windows shell (§1-§7), **conditional on S2** (§Gate) | Stefan Cruceru (delegated) · 2026-09-25 |
-| D2 | Enforce user verification on the web passkey routes and require a password re-check before web `register/options` | Not decided here. The native routes below enforce both from day one, whatever D2 decides for the web routes | Romain Jouffret · pending |
-| D3 | Hide the in-WebView passkey button inside the Windows app when the page is not on its certified address | Not decided here | pending |
+| D2 | Enforce user verification on the web passkey routes and require a password re-check before web `register/options` | **Yes** — built in [WARP-3144](https://warp-lab.atlassian.net/browse/WARP-3144), where Romain reviews it. The native routes below enforce both from day one either way | Stefan Cruceru (delegated) · 2026-09-25 |
+| D3 | Hide the in-WebView passkey button inside the Windows app when the page is not on its certified address | **Yes** — built in WARP-3137 Stage 1; browsers unchanged | Stefan Cruceru (delegated) · 2026-09-25 |
 
 ### 1. A per-box native relying party
 
