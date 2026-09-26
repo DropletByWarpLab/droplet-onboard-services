@@ -60,6 +60,8 @@ import {
   fetchHlsPlaylist,
   openMjpegStream,
   disableDetection,
+  deleteCamera,
+  restartFrigate,
 } from "../services/frigate.client.js";
 import { confirmNetworkCommand } from "../services/network-safety.service.js";
 import {
@@ -77,7 +79,11 @@ const member: AuthUser = { id: "u-member", username: "sam", displayName: "Sam", 
 
 const prismaShim = {
   cameraAccessGrant: { findMany: vi.fn(async () => [{ camera: { name: "front" } }]) },
-  camera: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+  camera: {
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    findMany: vi.fn().mockResolvedValue([]),
+  },
 } as unknown as PrismaClient;
 
 function appAs(user: AuthUser): express.Express {
@@ -252,5 +258,29 @@ describe("a member cannot complete a detection-off handshake (WARP-3104)", () =>
       .send({ confirmationToken: "t", operation: "disable_camera" });
     expect(res.status).toBe(200);
     expect(vi.mocked(disableDetection)).toHaveBeenCalledWith("front");
+  });
+});
+
+describe("confirm handshakes for camera administration (WARP-3104)", () => {
+  const confirmAs = (user: AuthUser, operation: string, params: object = {}) => {
+    vi.mocked(confirmNetworkCommand).mockResolvedValue({ confirmed: true, operation, params } as never);
+    return request(appAs(user)).post("/api/cameras/command/confirm").send({ confirmationToken: "t", operation });
+  };
+
+  it("a member cannot complete delete_camera", async () => {
+    expect((await confirmAs(member, "delete_camera", { name: "front" })).status).toBe(403);
+    expect(vi.mocked(deleteCamera)).not.toHaveBeenCalled();
+  });
+
+  it("an admin completes delete_camera", async () => {
+    expect((await confirmAs(admin, "delete_camera", { name: "front" })).status).toBe(200);
+    expect(vi.mocked(deleteCamera)).toHaveBeenCalledWith("front");
+  });
+
+  it("restart_frigate executes on the confirm step, for the owner only", async () => {
+    expect((await confirmAs(admin, "restart_frigate")).status).toBe(403);
+    expect(vi.mocked(restartFrigate)).not.toHaveBeenCalled();
+    expect((await confirmAs(owner, "restart_frigate")).status).toBe(200);
+    expect(vi.mocked(restartFrigate)).toHaveBeenCalledTimes(1);
   });
 });

@@ -28,6 +28,7 @@
  */
 import { confirmationRequired } from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseUnlessOwnerOrAdmin } from "./owner-admin-only.js";
 
 /** Mirror of the orchestrator route's CAMERA_NAME_RE — reject junk
  *  client-side so the model gets a precise error, not a proxied 400. */
@@ -66,6 +67,8 @@ async function serverError(res: Response): Promise<string | null> {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseUnlessOwnerOrAdmin(ctx); // WARP-3104
+  if (denied) return denied;
   const camera = typeof args.camera === "string" ? args.camera.trim() : "";
   if (camera.length === 0) return invalidArgs("camera is required");
   if (!CAMERA_NAME_RE.test(camera)) {

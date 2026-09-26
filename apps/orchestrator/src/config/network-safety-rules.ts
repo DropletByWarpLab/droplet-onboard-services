@@ -87,6 +87,9 @@ const TIER_2_OPERATIONS = new Set([
   // Camera management
   "delete_camera",
   "disable_camera",
+  // WARP-3104: restarting the camera engine drops every stream and pauses
+  // recording on every camera; the route always claimed a confirm step.
+  "restart_frigate",
   // Sharing a clip mints a public "anyone with the link" signed URL to private
   // camera footage that stays unauthenticated for its whole TTL. Tier-2: the AI
   // must surface an approval chip before the orchestrator signs the URL.

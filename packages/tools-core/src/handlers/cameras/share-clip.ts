@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseUnlessOwnerOrAdmin } from "./owner-admin-only.js";
 import { isConfirmationResponse, passThroughConfirmation } from "../../confirmation.js";
 
 const inputSchema = {
@@ -15,6 +16,8 @@ const inputSchema = {
 } as const;
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseUnlessOwnerOrAdmin(ctx); // WARP-3104
+  if (denied) return denied;
   if (!ctx.userId) {
     return {
       ok: false,

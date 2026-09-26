@@ -104,6 +104,11 @@ const CAMERA_CUSTODY_ROLES = ["owner", "admin"] as const;
  * own desk is exactly the act the business needs to control.
  */
 const CAMERA_ADMIN_ROLES = ["owner", "admin"] as const;
+// The same set covers every camera CONFIG write (WARP-3104, "members don't
+// administer cameras", 2026-09-25): add, adopt, scan, rename, delete,
+// settings and zones, PTZ, groups, face and plate rosters. What stays open
+// to members is their own state (pins, notification prefs), marking a
+// review seen, and regenerating an event's description.
 
 /**
  * WARP-3103 (ruling R-C2) — `?download=1` asks for footage as a file to keep.
@@ -319,8 +324,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // WARP-171: per-route guard. owner + admin + family.
-  router.post("/cameras/groups", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-3104: groups are shared by the whole business; owner + admin.
+  router.post("/cameras/groups", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const { name, icon, cameraNames } = req.body ?? {};
       if (!isValidGroupName(name)) {
@@ -351,7 +356,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/cameras/groups/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.patch("/cameras/groups/:id", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const { name, icon, sortOrder } = req.body ?? {};
       if (name !== undefined && !isValidGroupName(name)) {
@@ -381,7 +386,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/groups/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.delete("/cameras/groups/:id", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const ok = await groupsSvc.deleteGroup(prisma, req.params.id);
       if (!ok) return res.status(404).json({ error: "Group not found" });
@@ -391,7 +396,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/groups/:id/members", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/cameras/groups/:id/members", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const { cameraNames } = req.body ?? {};
       if (
@@ -416,7 +421,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.delete(
     "/cameras/groups/:id/members/:cameraName",
-    requireRole("owner", "admin", "family"),
+    requireRole(...CAMERA_ADMIN_ROLES),
     async (req, res, next) => {
       try {
         if (!isValidCameraName(req.params.cameraName)) {
@@ -813,7 +818,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.delete(
     "/cameras/faces/:name/images/:image",
-    requireRole("owner", "admin", "family"),
+    requireRole(...CAMERA_ADMIN_ROLES),
     cameraAccess,
     faceFolderAccess,
     async (req, res, next) => {
@@ -834,7 +839,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.post(
     "/cameras/faces/:name/from-event/:eventId",
-    requireRole("owner", "admin", "family"),
+    requireRole(...CAMERA_ADMIN_ROLES),
     cameraAccess,
     faceFolderAccess,
     async (req, res, next) => {
@@ -867,7 +872,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.put("/cameras/plates/:plate", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.put("/cameras/plates/:plate", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       if (!PLATE_RE.test(req.params.plate)) {
         return res.status(400).json({ error: "Invalid plate format" });
@@ -1253,7 +1258,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Manually add a camera (name + RTSP URL) ---
-  router.post("/cameras", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/cameras", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const { name, rtspUrl, manufacturer, model } = req.body;
       if (!name || typeof name !== "string" || !isValidCameraName(name)) {
@@ -1317,7 +1322,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // the host (a 30 s discovery scan, modprobe, subnet setup/teardown, a
   // confirmation-token redemption); standard preset for the plain reads the
   // cameras page loads once (drivers, subnet).
-  router.post("/cameras/scan", sensitiveRateLimit, requireRoleOrMcpService("owner", "admin", "family"), async (_req, res) => {
+  router.post("/cameras/scan", sensitiveRateLimit, requireRoleOrMcpService(...CAMERA_ADMIN_ROLES), async (_req, res) => {
     try {
       // NET-05: camera-discovery now gates /scan behind DEVICE_SECRET.
       // Forward it like /drivers/fix below, else this proxied call 403s and
@@ -1898,7 +1903,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // requireRole would 403 it, shipping the tool registered but dead — the exact
   // class WARP-1462 fixed for /cameras/scan, and what tools-mcp-admission.test.ts
   // exists to catch. requiresWrite is enforced tool-side.
-  router.post("/cameras/discovered/:id/accept", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/cameras/discovered/:id/accept", requireRoleOrMcpService(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const mac = macFromCandidateId(req.params.id);
       if (mac) {
@@ -1936,7 +1941,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Reject a discovered camera (stop offering it) ---
-  router.post("/cameras/discovered/:id/reject", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/cameras/discovered/:id/reject", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const mac = macFromCandidateId(req.params.id);
       if (mac) {
@@ -2135,14 +2140,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // minted above (delete_camera / disable_camera / camera_subnet_*) could
   // never be consumed — every camera "Remove" 202'd and silently did
   // nothing. The executors live in this module, so the consumer does too.
-  // Role: family stays admitted because the delete/disable mint routes admit
-  // family; confirmNetworkCommand pins each token to its minting user, so a
-  // family member can never confirm an owner/admin-minted subnet token.
   // WARP-1440: the MCP service principal is admitted so set_camera_detection
   // can complete the WARP-41 disable handshake it starts on /disable — the
   // token-pinned-to-minting-user rule means `_service:mcp` can only ever
   // confirm tokens minted by its own 202.
-  router.post("/cameras/command/confirm", sensitiveRateLimit, requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/cameras/command/confirm", sensitiveRateLimit, requireRoleOrMcpService(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const { confirmationToken, operation } = req.body ?? {};
@@ -2195,6 +2197,15 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           // 202s and never runs inline). No reconcile here, so invalidate the
           // list cache explicitly or the `enabled` flag stays stale for CACHE_TTL.
           await invalidateCamerasCache();
+          break;
+        }
+        case "restart_frigate": {
+          // WARP-3104: restart now takes the confirm step it always claimed.
+          // The route that mints it is owner-only; so is completing it.
+          if (req.user?.role !== "owner") {
+            return res.status(403).json({ error: "Forbidden" });
+          }
+          await restartFrigate();
           break;
         }
         case "camera_subnet_setup": {
@@ -2280,7 +2291,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // registered and 403 on every call.
   router.patch(
     "/cameras/:name",
-    requireRoleOrMcpService("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
+    requireRoleOrMcpService(...CAMERA_ADMIN_ROLES), cameraAccess, async (req, res, next) => {
       try {
         if (!isValidCameraName(req.params.name)) {
           return res.status(400).json({ error: "Invalid camera name" });
@@ -2475,7 +2486,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Delete camera (Tier 2 — requires confirmation) ---
-  router.delete("/cameras/:name", requireRole("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
+  router.delete("/cameras/:name", requireRole(...CAMERA_ADMIN_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2873,7 +2884,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   // WARP-1440: requireRoleOrMcpService so the set_detection_zones LLM tool
   // (dispatching as `_service:mcp`) can write zones; human roles unchanged.
-  router.patch("/cameras/:name/settings", requireRoleOrMcpService("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
+  router.patch("/cameras/:name/settings", requireRoleOrMcpService(...CAMERA_ADMIN_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -3221,7 +3232,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/:name/ptz", requireRole("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
+  router.post("/cameras/:name/ptz", requireRole(...CAMERA_ADMIN_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -3248,7 +3259,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/:name/ptz/preset", requireRole("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
+  router.post("/cameras/:name/ptz/preset", requireRole(...CAMERA_ADMIN_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });

@@ -22,6 +22,7 @@ import type { KnownPlate } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { useAuth } from "@/lib/auth";
 
 /**
  * License plate management (Phase 7.6).
@@ -35,6 +36,9 @@ import { ShellPage } from "@/components/shell/ShellPage";
  * returns []; we surface that as a hint.
  */
 export default function PlatesPage() {
+  // WARP-3104: the face and plate rosters are owner/admin to change.
+  const { user } = useAuth();
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const router = useRouter();
   const [plates, setPlates] = useState<KnownPlate[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -224,7 +228,7 @@ export default function PlatesPage() {
                   </span>
                 )}
               </div>
-              {editing !== p.plate && (
+              {canManage && editing !== p.plate && (
                 <>
                   <button
                     onClick={() => startEdit(p)}

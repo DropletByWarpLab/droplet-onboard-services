@@ -238,7 +238,8 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
             )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
-            {event.label === "person" && (
+            {/* WARP-3104: training face recognition changes the roster; owner/admin. */}
+            {event.label === "person" && canKeep && (
               <button
                 onClick={() => setTagPanelOpen((o) => !o)}
                 disabled={tagging}
