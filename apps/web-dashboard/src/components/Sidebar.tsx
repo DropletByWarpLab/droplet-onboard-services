@@ -3,7 +3,15 @@
 import { Suspense, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowLeft, ChevronLeft, LogOut, MoreHorizontal, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  LogOut,
+  MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  X,
+} from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
@@ -134,6 +142,28 @@ export function Sidebar() {
     !!item.children &&
     (isActive(item.href) ||
       item.children.some((child) => isActive(child.href)));
+
+  // A section's chevron can open (or close) it without navigating there —
+  // before this, a section's pages were visible only once you were already
+  // on one of them. Keyed on the pathname for the same reason as
+  // `mainTreeAt` below: the moment you navigate, the route decides again, so
+  // the override needs no effect to reset it and cannot go stale.
+  const [sectionOverride, setSectionOverride] = useState<{
+    at: string;
+    open: Record<string, boolean>;
+  }>({ at: "", open: {} });
+  const sectionOpen = (item: NavItem) =>
+    (sectionOverride.at === pathname
+      ? sectionOverride.open[item.href]
+      : undefined) ?? isSectionOpen(item);
+  const toggleSection = (item: NavItem) =>
+    setSectionOverride((prev) => ({
+      at: pathname,
+      open: {
+        ...(prev.at === pathname ? prev.open : {}),
+        [item.href]: !sectionOpen(item),
+      },
+    }));
 
   async function handleLogout() {
     setMoreOpen(false);
@@ -268,60 +298,76 @@ export function Sidebar() {
         aria-label="Primary navigation"
         className="
           hidden lg:flex lg:flex-col lg:fixed lg:inset-y-0 lg:left-0 lg:w-[var(--sidebar-w)]
-          sidebar-w-transition
+          sidebar-w-transition whitespace-nowrap
           bg-[var(--color-sidebar-bg)] dp-material
           border-r border-separator z-40
         "
       >
-        {/* Logo + workspace badge + collapse control (WARP-2956). In the
-            rail the mark sits alone with the control centred beneath it. */}
-        <div
-          className={
-            collapsed
-              ? "flex flex-col items-center gap-1.5 pt-3 pb-1"
-              : "flex items-center gap-2.5 px-5 h-16"
-          }
-        >
-          <DropletMark size={22} className="text-accent" />
-          {!collapsed && (
-            <>
-              <span className="type-headline text-label-primary tracking-tight">
-                Droplet
-              </span>
-              {/* Tiny chip — names the workspace mode. WARP-1341: business-only
-                  build, so this is static. */}
-              <span
-                className="ml-auto type-caption-2 px-1.5 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle"
-                title="Business workspace — full admin surfaces"
-              >
-                Business
-              </span>
-            </>
-          )}
-          <button
-            type="button"
-            onClick={() => setCollapsed(!collapsed)}
-            aria-expanded={!collapsed}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className={`
-              inline-flex items-center justify-center h-7 w-7 rounded-lg
-              border border-separator bg-surface-primary
-              text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
-              transition-colors duration-200 ease-smooth
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-              ${collapsed ? "" : "ml-2"}
-            `}
-          >
-            <ChevronLeft
-              size={14}
-              aria-hidden="true"
-              className={`transition-transform duration-200 ease-smooth motion-reduce:transition-none ${
-                collapsed ? "rotate-180" : ""
-              }`}
-            />
-          </button>
-        </div>
+        {/* Logo + workspace badge + collapse control (WARP-2956). The row
+            keeps its 64px height in both states so nothing below it jumps.
+            In the rail the control takes the mark's own slot, centred on the
+            icon column like every nav row: the mark shows at rest and turns
+            into the expand glyph on hover or focus. It used to sit in a
+            bordered chip stacked under the mark, off the column and styled
+            like no other control in the aside. */}
+        {collapsed ? (
+          <div className="flex items-center justify-center h-16 shrink-0">
+            <button
+              type="button"
+              onClick={() => setCollapsed(false)}
+              aria-expanded={false}
+              aria-label="Expand sidebar"
+              title="Expand sidebar"
+              className="
+                group relative inline-flex items-center justify-center h-9 w-10 rounded-lg
+                text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+                transition-colors duration-200 ease-smooth
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+              "
+            >
+              <DropletMark
+                size={22}
+                className="text-accent transition-opacity duration-150 ease-smooth group-hover:opacity-0 group-focus-visible:opacity-0"
+              />
+              <PanelLeftOpen
+                size={17}
+                strokeWidth={1.5}
+                aria-hidden="true"
+                className="absolute opacity-0 transition-opacity duration-150 ease-smooth group-hover:opacity-100 group-focus-visible:opacity-100"
+              />
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2.5 pl-5 pr-3 h-16 shrink-0 overflow-hidden">
+            <DropletMark size={22} className="text-accent" />
+            <span className="type-headline text-label-primary tracking-tight sidebar-fade-in">
+              Droplet
+            </span>
+            {/* Tiny chip — names the workspace mode. WARP-1341: business-only
+                build, so this is static. */}
+            <span
+              className="ml-auto type-caption-2 px-1.5 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle sidebar-fade-in"
+              title="Business workspace — full admin surfaces"
+            >
+              Business
+            </span>
+            <button
+              type="button"
+              onClick={() => setCollapsed(true)}
+              aria-expanded={true}
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+              className="
+                inline-flex items-center justify-center h-8 w-8 shrink-0 rounded-lg
+                text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+                transition-colors duration-200 ease-smooth
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+              "
+            >
+              <PanelLeftClose size={17} strokeWidth={1.5} aria-hidden="true" />
+            </button>
+          </div>
+        )}
 
         {/* WARP-2976 — the department switcher, directly under the logo row.
             Renders nothing below two choices, so a box without departments
@@ -365,7 +411,7 @@ export function Sidebar() {
         {/* Navigation */}
         <nav
           aria-label={showSettingsPanel ? "Settings" : "Sections"}
-          className="flex-1 px-3 py-1 overflow-y-auto"
+          className="flex-1 px-3 py-1 overflow-y-auto overflow-x-hidden"
         >
           {/* WARP-2967 review — the panel's own index. Every tucked row leads
               away from /settings; without this the page that owns them was
@@ -418,9 +464,8 @@ export function Sidebar() {
                     key={item.href}
                     item={item}
                     active={isItemActive(item)}
-                    showChildren={
-                      !collapsed && !showSettingsPanel && isSectionOpen(item)
-                    }
+                    showChildren={!showSettingsPanel && sectionOpen(item)}
+                    onToggleChildren={() => toggleSection(item)}
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
                     collapsed={collapsed}
@@ -436,7 +481,7 @@ export function Sidebar() {
             three-segment ThemeToggle is ~90px wide and cannot fit 64px, so
             it (with the names, sign-out and version line) waits for expand. */}
         <div
-          className={`pb-4 pt-3 space-y-3 border-t border-separator ${
+          className={`pb-4 pt-3 space-y-3 border-t border-separator overflow-hidden ${
             collapsed ? "px-2" : "px-4"
           }`}
         >
@@ -899,98 +944,164 @@ export function NavBadge({ count }: { count: number }) {
 function NavLink({
   item,
   active,
-  showChildren,
+  showChildren = false,
+  onToggleChildren,
   pathname,
   badge = 0,
   collapsed = false,
 }: {
   item: NavItem;
   active: boolean;
-  /** Reveal the nested `item.children` sub-nav (we're inside this section). */
+  /** Reveal the nested `item.children` sub-nav (the section is open). */
   showChildren?: boolean;
+  /** Open/close the section without navigating — the row's chevron. */
+  onToggleChildren?: () => void;
   pathname: string;
   /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
   badge?: number;
   /** WARP-2956 — icon-rail mode: glyph only, label as title + aria-label so
-   *  the accessible name survives; children and the badge pill wait for
-   *  expand (the sr-only badge text would otherwise be lost under the
-   *  aria-label anyway). */
+   *  the accessible name survives; the badge pill waits for expand (the
+   *  sr-only badge text would otherwise be lost under the aria-label anyway).
+   *  An open section's pages stay reachable as a column of smaller glyphs. */
   collapsed?: boolean;
 }) {
   const Icon = item.icon;
+  const subId = useId();
+  const hasChildren = !!item.children?.length;
+  const toggleable = hasChildren && !collapsed && !!onToggleChildren;
   return (
     <div>
-      <Link
-        href={item.href}
-        aria-current={active ? "page" : undefined}
-        aria-label={collapsed ? item.label : undefined}
-        title={collapsed ? item.label : undefined}
-        className={`
-          flex items-center h-9 rounded-lg
-          type-subheadline transition-all duration-200 ease-smooth
-          ${collapsed ? "justify-center w-10 mx-auto" : "gap-3 px-3"}
-          ${
-            active
-              ? "bg-accent-subtle text-accent font-medium"
-              : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
-          }
-        `}
-      >
-        <Icon size={17} strokeWidth={active ? 2 : 1.5} />
-        {!collapsed && item.label}
-        {!collapsed && <NavBadge count={badge} />}
-      </Link>
-
-      {showChildren && item.children && (
-        <div className="ml-7 mt-1 space-y-0.5">
-          {/* WARP-1548 — the Files section's children are the places rail's
-              Quick group; the Libraries group is appended below them. Only
-              Files has one: it is the single surface where "which library"
-              is a question, and the component renders nothing on a Home
-              install (ADR-029 §5, Home mode pixel-identical).
-
-              This is the DESKTOP mount, inside a `hidden lg:flex` aside. The
-              mobile drawer's Files caption group carries the same rail (see
-              the `entry.captionOnly` branch above) — the addendum's §2.2 asks
-              for both, and only both.
-
-              Suspense, and scoped to just this: `useSearchParams` must be read
-              under a boundary (see `app/admin/audit/page.tsx`), and the Sidebar
-              renders on every route — putting the boundary here keeps that
-              requirement out of the global shell. `fallback={null}` because the
-              rail is additive: nothing renders until the space list resolves,
-              and a skeleton in a nav would be noise. */}
-          {item.children.map((sub) => {
-            const SubIcon = sub.icon;
-            const subActive = sub.exact
-              ? pathname === sub.href
-              : pathname.startsWith(sub.href);
-            return (
-              <Link
-                key={sub.href}
-                href={sub.href}
-                aria-current={subActive ? "page" : undefined}
-                aria-label={sub.ariaLabel}
-                className={`
-                  flex items-center gap-2 px-2 h-8 rounded-md
-                  type-footnote transition-all duration-200 ease-smooth
-                  ${
-                    subActive
-                      ? "text-accent font-medium"
-                      : "text-label-tertiary hover:text-label-primary"
-                  }
-                `}
-              >
-                <SubIcon size={14} strokeWidth={subActive ? 2 : 1.5} />
-                {sub.label}
-              </Link>
-            );
-          })}
-          {item.href === "/files" && (
-            <Suspense fallback={null}>
-              <FilesLibrariesNav pathname={pathname} />
-            </Suspense>
+      <div className="relative">
+        <Link
+          href={item.href}
+          aria-current={active ? "page" : undefined}
+          aria-label={collapsed ? item.label : undefined}
+          title={collapsed ? item.label : undefined}
+          className={`
+            flex items-center h-9 rounded-lg
+            type-subheadline transition-colors duration-200 ease-smooth
+            ${collapsed ? "justify-center w-10 mx-auto" : "gap-3 px-3"}
+            ${toggleable ? "pr-9" : ""}
+            ${
+              active
+                ? "bg-accent-subtle text-accent font-medium"
+                : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
+            }
+          `}
+        >
+          <Icon size={17} strokeWidth={active ? 2 : 1.5} className="shrink-0" />
+          {!collapsed && (
+            <span className="truncate sidebar-fade-in">{item.label}</span>
           )}
+          {!collapsed && <NavBadge count={badge} />}
+        </Link>
+        {/* A sibling of the link, not inside it: a button nested in an <a>
+            is invalid and would navigate on every toggle. */}
+        {toggleable && (
+          <button
+            type="button"
+            onClick={onToggleChildren}
+            aria-expanded={showChildren}
+            aria-controls={subId}
+            aria-label={`${showChildren ? "Hide" : "Show"} ${item.label} pages`}
+            className="
+              absolute right-1 top-1/2 -translate-y-1/2
+              inline-flex items-center justify-center h-7 w-7 rounded-md
+              text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+              transition-colors duration-200 ease-smooth
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+            "
+          >
+            <ChevronDown
+              size={14}
+              aria-hidden="true"
+              className={`transition-transform duration-200 ease-smooth ${
+                showChildren ? "" : "-rotate-90"
+              }`}
+            />
+          </button>
+        )}
+      </div>
+
+      {/* Always mounted, opened by `.sidebar-sub` (globals.css) sliding its
+          grid row from 0fr to 1fr. It used to be mounted only while the
+          section was open, so it snapped in and out and pushed every row
+          below it. Closed, it is `aria-hidden` and `inert` — out of the tab
+          order and the accessibility tree, exactly as when it was absent. */}
+      {hasChildren && (
+        <div
+          id={subId}
+          className="sidebar-sub"
+          data-open={showChildren}
+          aria-hidden={showChildren ? undefined : true}
+          inert={!showChildren}
+        >
+          <div>
+            <div
+              className={
+                collapsed
+                  ? "mt-0.5 space-y-0.5"
+                  : "ml-[1.3rem] mt-1 mb-1 pl-2.5 border-l border-separator space-y-0.5"
+              }
+            >
+              {/* WARP-1548 — the Files section's children are the places rail's
+                  Quick group; the Libraries group is appended below them. Only
+                  Files has one: it is the single surface where "which library"
+                  is a question, and the component renders nothing on a Home
+                  install (ADR-029 §5, Home mode pixel-identical).
+
+                  This is the DESKTOP mount, inside a `hidden lg:flex` aside. The
+                  mobile drawer's Files caption group carries the same rail (see
+                  the `entry.captionOnly` branch above) — the addendum's §2.2 asks
+                  for both, and only both.
+
+                  Suspense, and scoped to just this: `useSearchParams` must be read
+                  under a boundary (see `app/admin/audit/page.tsx`), and the Sidebar
+                  renders on every route — putting the boundary here keeps that
+                  requirement out of the global shell. `fallback={null}` because the
+                  rail is additive: nothing renders until the space list resolves,
+                  and a skeleton in a nav would be noise. */}
+              {item.children!.map((sub) => {
+                const SubIcon = sub.icon;
+                const subActive = sub.exact
+                  ? pathname === sub.href
+                  : pathname.startsWith(sub.href);
+                return (
+                  <Link
+                    key={sub.href}
+                    href={sub.href}
+                    aria-current={subActive ? "page" : undefined}
+                    // WARP-2978 — a child named for whose it is ("Security settings")
+                    // keeps that name; otherwise the collapsed rail names it by its label.
+                    aria-label={sub.ariaLabel ?? (collapsed ? sub.label : undefined)}
+                    title={collapsed ? sub.label : undefined}
+                    className={`
+                      flex items-center h-8 rounded-md
+                      type-footnote transition-colors duration-200 ease-smooth
+                      ${collapsed ? "justify-center w-10 mx-auto" : "gap-2 px-2"}
+                      ${
+                        subActive
+                          ? "text-accent font-medium bg-accent-subtle/60"
+                          : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
+                      }
+                    `}
+                  >
+                    <SubIcon
+                      size={collapsed ? 15 : 14}
+                      strokeWidth={subActive ? 2 : 1.5}
+                      className="shrink-0"
+                    />
+                    {!collapsed && <span className="truncate">{sub.label}</span>}
+                  </Link>
+                );
+              })}
+              {item.href === "/files" && !collapsed && (
+                <Suspense fallback={null}>
+                  <FilesLibrariesNav pathname={pathname} />
+                </Suspense>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -750,7 +750,7 @@ describe("GET /api/me/context-stats", () => {
     expect(res.body.files).toBe(2);
     expect(res.body.chunks).toBe(3);
     expect(res.body.recentlyIndexed).toHaveLength(2);
-    expect(res.headers["cache-control"]).toContain("max-age=30");
+    expect(res.headers["cache-control"]).toBeUndefined(); // WARP-3097: no override — the app-wide no-store stands
   });
 });
 

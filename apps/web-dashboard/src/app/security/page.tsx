@@ -19,10 +19,14 @@
  * links). The tab is in the URL (`?tab=everything`), so Back from an incident
  * returns to the tab it was opened from. Each tab's data is read only while
  * it is shown. The area picked is shared by both tabs.
+ *
+ * WARP-2981 (ADR-059 P6) — the header's one action opens the Security wall
+ * (/security/wall), the read-only TV view. It is not in the nav.
  */
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Shield } from "lucide-react";
+import { Shield, Tv } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ModeCard } from "@/components/security/ModeCard";
 import { AlertsLine, SecurityFeed, kindsForView, type SecurityView } from "@/components/security/SecurityFeed";
@@ -41,6 +45,8 @@ import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
 import { useAuth } from "@/lib/auth";
 import { deviceTimeZone } from "@/lib/security-time";
 import type { SecurityHealthRow, SecurityZoneRef } from "@/lib/types";
+import { SECURITY_WALL_PATH } from "@/lib/routing";
+import { WALL_COPY } from "@/components/security/wall-status";
 
 const PAGE_SUB = "What your cameras saw, whether they're reporting, and network warnings, in one place.";
 
@@ -118,7 +124,18 @@ function SecurityCenter() {
   const tabProps: TabProps = { zone, onZoneChange: setZone, areas, canSeeThreats, cameraLabel, health, refreshRef: refreshTab };
 
   return (
-    <ShellPage icon={<Shield size={15} />} label="Security" title="Security" sub={PAGE_SUB}>
+    <ShellPage
+      icon={<Shield size={15} />}
+      label="Security"
+      title="Security"
+      sub={PAGE_SUB}
+      actions={
+        <Link href={SECURITY_WALL_PATH} className="btn" title={WALL_COPY.linkTitle}>
+          <Tv size={15} aria-hidden="true" />
+          {WALL_COPY.link}
+        </Link>
+      }
+    >
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {/* After a mode write ModeCard has already put the server's answer in
             the mode cache. The lists' useSWRInfinite keys are out of reach of

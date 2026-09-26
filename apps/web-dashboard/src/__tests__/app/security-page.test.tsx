@@ -9,7 +9,7 @@
  * from an incident reached through "In an incident" returns to the feed.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act as rtlAct, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act as rtlAct, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { SWRConfig, useSWRConfig } from "swr";
 import { SECURITY_ZONES_PATH } from "@/lib/api";
@@ -17,6 +17,7 @@ import { ToastProvider } from "@/components/Toast";
 import SecurityPage from "@/app/security/page";
 import { COPY as FEED_COPY } from "@/components/security/SecurityFeed";
 import { COPY as MODE_COPY } from "@/components/security/ModeCard";
+import { WALL_COPY } from "@/components/security/wall-status";
 import type { SecurityModeView, SecurityZoneView } from "@/lib/types";
 
 const h = vi.hoisted(() => ({
@@ -34,9 +35,10 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/shell/ShellPage", () => ({
-  ShellPage: ({ title, children }: { title?: string; children: ReactNode }) => (
+  ShellPage: ({ title, actions, children }: { title?: string; actions?: ReactNode; children: ReactNode }) => (
     <div className="droplet-shell">
       {title ? <h1>{title}</h1> : null}
+      {actions ? <div data-testid="phead-actions">{actions}</div> : null}
       {children}
     </div>
   ),
@@ -108,6 +110,21 @@ beforeEach(() => {
   h.getSecurityZones.mockResolvedValue({ zones: [zone("z1", "Front door"), zone("z9", "Old shed", "archived")] });
   h.getSecurityMode.mockResolvedValue(MODE);
   h.fetchCameras.mockResolvedValue([]);
+});
+
+describe("/security — the Security wall link (WARP-2981)", () => {
+  // WARP-2981 (ADR-059 P6) — the header's one action: the Security wall.
+  it("offers the Security wall in the header, saying whose view it shows", async () => {
+    render(<SecurityPage />, { wrapper: Wrap });
+    const link = within(await screen.findByTestId("phead-actions")).getByRole("link", { name: WALL_COPY.link });
+    expect(link).toHaveAttribute("href", "/security/wall");
+    expect(link).toHaveAttribute("title", WALL_COPY.linkTitle);
+    // D6: a TV runs on a Staff account and shows that account's cameras.
+    expect(WALL_COPY.linkTitle).toMatch(/signed in with a Staff account\. It shows that account's cameras\./);
+    // Plain words on the button itself: a tooltip never reaches a phone, and "wall" is our name for it.
+    expect(link).toHaveTextContent("TV view");
+    expect(link.textContent).not.toMatch(/wall/i);
+  });
 });
 
 describe("/security — the Everything tab (the P2a feed)", () => {

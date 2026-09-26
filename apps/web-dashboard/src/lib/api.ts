@@ -1,3 +1,4 @@
+import { CamerasUnavailableError, FilesUnavailableError } from "./files-unavailable";
 import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
@@ -2710,6 +2711,8 @@ export async function fetchReviewsFiltered(
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
+  // WARP-3105: a Frigate outage is a degraded 200 + empty list, not "all clear".
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   return res.json();
 }
 
@@ -3234,6 +3237,8 @@ export async function fetchEventsFiltered(
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
+  // WARP-3105: a Frigate outage is a degraded 200 + empty list, not "no events".
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   return res.json();
 }
 
@@ -5090,6 +5095,10 @@ export async function patchPersona(update: PersonaUpdate): Promise<PersonaSettin
 
 // --- File operations ---
 
+function throwIfFilesDegraded(res: Response): void {
+  if (res.headers?.get("X-Droplet-Degraded")) throw new FilesUnavailableError();
+}
+
 export async function fetchFiles(
   path: string,
   space: FileSpaceId = "personal"
@@ -5105,6 +5114,7 @@ export async function fetchFiles(
   if (space !== "personal") qs.set("space", space);
   const res = await authFetch(`${BASE}/api/files?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
+  throwIfFilesDegraded(res);
   return res.json();
 }
 
@@ -5663,6 +5673,7 @@ export async function fetchTrash(): Promise<TrashItemInfo[]> {
     if (res.status === 501) throw new TrashUnsupportedError();
     throw new Error(`Failed to fetch trash: ${res.status}`);
   }
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.items ?? [];
 }
@@ -5844,6 +5855,7 @@ export async function toggleFavorite(
 export async function fetchFavorites(): Promise<FileEntryInfo[]> {
   const res = await authFetch(`${BASE}/api/files/favorites`);
   if (!res.ok) throw new Error(`Failed to fetch favorites: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.items ?? [];
 }
@@ -5851,6 +5863,7 @@ export async function fetchFavorites(): Promise<FileEntryInfo[]> {
 export async function fetchRecents(limit = 50): Promise<FileEntryInfo[]> {
   const res = await authFetch(`${BASE}/api/files/recents?limit=${limit}`);
   if (!res.ok) throw new Error(`Failed to fetch recents: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.items ?? [];
 }
@@ -5968,6 +5981,7 @@ export async function deleteShare(shareId: number): Promise<void> {
 export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   const res = await authFetch(`${BASE}/api/files/shared-with-me`);
   if (!res.ok) throw new Error(`Failed to fetch shared-with-me: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.shares ?? [];
 }
@@ -5980,6 +5994,7 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
 export async function fetchSharedByMe(): Promise<ShareDetail[]> {
   const res = await authFetch(`${BASE}/api/files/shares-by-me`);
   if (!res.ok) throw new Error(`Failed to fetch shares-by-me: ${res.status}`);
+  throwIfFilesDegraded(res);
   const data = await res.json();
   return data.shares ?? [];
 }
@@ -9596,4 +9611,139 @@ export async function discoverBuildingDevices(
       body: JSON.stringify({ protocol }),
     })
   ).found;
+}
+
+// ── WARP-2981 (ADR-059 P6, §3.8): the Security wall ──
+// /security/wall reads only what /security already shows this viewer — each
+// read their own DS-005 projection, view level, never a write — and every read
+// has a 20 s timeout and a typed `.status` (`securityFetch`; the camera
+// pictures, which are not JSON, the same by hand), so a request that never
+// answers fails and is retried instead of stalling its SWR key for the TV's
+// lifetime. The rack panel's box-wide count is for the panel's service
+// principal alone and is never read from here (pinned by the wall's page test).
+import type { SecurityIncidentCounts } from "./types";
+import type { ModulesView } from "./hooks/useModuleGate";
+
+/** Route 17. A local literal: PR-C defines its own constant, and the two fold together once both land. */
+const WALL_INCIDENT_SUMMARY_PATH = "/api/security/incidents/summary";
+
+/** A count the wall may draw: a non-negative safe integer — never a string, a negative or a missing 0. */
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+function unreadable(what: string): TypedError {
+  const e: TypedError = new Error(`${what} isn't in a shape Droplet understands.`);
+  e.code = "BAD_RESPONSE";
+  e.status = 200;
+  return e;
+}
+
+/**
+ * Route 17's two counts, validated: anything but two non-negative safe
+ * integers throws, so the wall never draws a number it was not given.
+ * `latest` is dropped here — the wall names no incident.
+ */
+export async function getSecurityIncidentCounts(): Promise<SecurityIncidentCounts> {
+  const body = await securityFetch<unknown>(`${BASE}${WALL_INCIDENT_SUMMARY_PATH}`);
+  const b = (body && typeof body === "object" ? body : {}) as { openAlerts?: unknown; openNotices?: unknown };
+  if (!isCount(b.openAlerts) || !isCount(b.openNotices)) throw unreadable("The incident counts");
+  return { openAlerts: b.openAlerts, openNotices: b.openNotices };
+}
+
+/** The P2a health read through `securityFetch` (the header's `getSecurityHealth` keeps its callers and its lack of a timeout). */
+export async function getSecurityWallHealth(): Promise<{ sources: SecurityHealthRow[] }> {
+  const body = await securityFetch<unknown>(`${BASE}/api/security/health`);
+  const sources = body && typeof body === "object" ? (body as { sources?: unknown }).sources : undefined;
+  if (!Array.isArray(sources)) throw unreadable("What Security listens to");
+  return { sources: sources as SecurityHealthRow[] };
+}
+
+/**
+ * `session.endsAt` of an /auth/me body when it is a string `Date.parse`
+ * accepts, else null. It is the LATEST the sign-in can last (P6-A), so it is
+ * shown as "by … at the latest"; absent, null or anything else shows nothing.
+ */
+export function signInEndsAtOf(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const session = (body as { session?: unknown }).session;
+  if (!session || typeof session !== "object") return null;
+  const endsAt = (session as { endsAt?: unknown }).endsAt;
+  return typeof endsAt === "string" && !Number.isNaN(Date.parse(endsAt)) ? endsAt : null;
+}
+
+/**
+ * /auth/me's `session.endsAt`, or null — read here, not from `useAuth().user`:
+ * a login response carries no `session`, and a cached profile can carry an
+ * old one.
+ */
+export async function getSignInEndsAt(): Promise<string | null> {
+  return signInEndsAtOf(await securityFetch<unknown>(`${BASE}/api/auth/me`));
+}
+
+/**
+ * The wall's own read of GET /api/modules (the nav gate's endpoint). The nav
+ * gate's shared read has no timeout and stops polling after one error, which a
+ * TV left for hours cannot afford; the wall mirrors each answer into that
+ * shared key (useSecurityWall).
+ */
+export async function getWallModules(): Promise<ModulesView> {
+  const body = await securityFetch<unknown>(`${BASE}/api/modules`);
+  if (!body || typeof body !== "object" || !Array.isArray((body as { modules?: unknown }).modules)) {
+    throw unreadable("Which features are on");
+  }
+  return body as ModulesView;
+}
+
+/**
+ * The cameras this viewer may see — GET /api/cameras, which the server
+ * already narrows to their grants (`filterVisibleCameras`, WARP-1962; owner
+ * and admin see all). The wall draws a tile for each and for nothing else
+ * (DS-005). Through `securityFetch` (20 s): a hung list fails and is retried.
+ * `_status: "disconnected"` (the camera system isn't reachable) comes with an
+ * empty list that does NOT mean "no cameras", so it throws instead.
+ */
+export async function getWallCameras(): Promise<CameraInfo[]> {
+  const body = await securityFetch<unknown>(`${BASE}/api/cameras`);
+  const b = (body && typeof body === "object" ? body : {}) as { cameras?: unknown; _status?: unknown };
+  if (b._status === "disconnected") {
+    const e: TypedError = new Error("Droplet can't reach the camera system right now.");
+    e.code = "CAMERAS_DISCONNECTED";
+    e.status = 200;
+    throw e;
+  }
+  if (!Array.isArray(b.cameras) || !b.cameras.every((c) => c && typeof c === "object" && typeof (c as { name?: unknown }).name === "string")) {
+    throw unreadable("The camera list");
+  }
+  return b.cameras as CameraInfo[];
+}
+
+/** The height the wall asks each camera's latest picture at: large enough for a quarter of a 1080p TV. */
+export const WALL_SNAPSHOT_HEIGHT = 720;
+
+/**
+ * One camera's latest picture (GET /api/cameras/:name/snapshot, which checks
+ * this viewer's grant), as a Blob for an object URL. Through `authFetch`, so
+ * an expiring access cookie is refreshed (an `<img src>` cannot), with a 20 s
+ * timeout, and `no-store`: the route allows 5 s of HTTP caching, and a
+ * cached picture must never be drawn as a new one. Rejects with the status on
+ * anything but 2xx.
+ */
+export async function getWallCameraSnapshot(name: string): Promise<Blob> {
+  const path = `${getCameraSnapshotUrl(name)}?h=${WALL_SNAPSHOT_HEIGHT}`;
+  const timeout = AbortSignal.timeout(DEFAULT_API_FETCH_TIMEOUT_MS);
+  try {
+    const r = await authFetch(path, { signal: timeout, cache: "no-store" });
+    if (!r.ok) {
+      const e: TypedError = new Error(`HTTP ${r.status}`);
+      e.code = "SNAPSHOT_FAILED";
+      e.status = r.status;
+      throw e;
+    }
+    return await r.blob();
+  } catch (err) {
+    if ((err as TypedError).code === "SNAPSHOT_FAILED") throw err;
+    const e: TypedError = new Error(timeout.aborted ? `Request timed out: ${path}` : err instanceof Error ? err.message : "Network error");
+    e.code = timeout.aborted ? "TIMEOUT" : "NETWORK_ERROR";
+    e.status = 0;
+    throw e;
+  }
 }

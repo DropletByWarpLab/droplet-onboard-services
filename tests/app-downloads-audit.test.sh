@@ -264,7 +264,7 @@ mutate_and_expect "a blocked row losing its reason" \
   'blocked-without-note'
 
 mutate_and_expect "a row naming a platform the generator does not know" \
-  's/^macos     absent/solaris   absent/' \
+  's/^linux     absent/solaris   absent/' \
   'unknown-platform'
 
 mutate_and_expect "a platform losing its row entirely" \

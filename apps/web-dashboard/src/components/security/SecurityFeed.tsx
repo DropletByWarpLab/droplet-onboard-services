@@ -121,7 +121,8 @@ export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
   retention: "Record keeping",
 };
 
-const STATE_BADGE: Record<SecurityHealthRow["state"], { cls: string; text: string }> = {
+/** Exported for the Security wall (WARP-2981), which lists the sources that are not reporting the same way. */
+export const STATE_BADGE: Record<SecurityHealthRow["state"], { cls: string; text: string }> = {
   ok: { cls: "badge ok", text: "Reporting" },
   quiet: { cls: "badge muted", text: "Quiet" },
   down: { cls: "badge danger", text: "Not reporting" },

@@ -153,6 +153,7 @@ describe("Camera read endpoints degrade to empty when Frigate is unreachable", (
       gpus: [],
       storage: [],
     });
+    expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
   });
 
   it("GET /api/cameras/events → 200 { events: [], nextCursor: null } on a 5xx upstream", async () => {
@@ -160,6 +161,7 @@ describe("Camera read endpoints degrade to empty when Frigate is unreachable", (
     const res = await request(makeApp()).get("/api/cameras/events");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ events: [], nextCursor: null });
+    expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
   });
 
   it("GET /api/cameras/reviews → 200 { reviews: [], nextCursor: null } when Frigate is unreachable", async () => {
@@ -167,6 +169,7 @@ describe("Camera read endpoints degrade to empty when Frigate is unreachable", (
     const res = await request(makeApp()).get("/api/cameras/reviews");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ reviews: [], nextCursor: null });
+    expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
   });
 
   it("GET /api/cameras/events/recent → 200 { events: [] } when Frigate is unreachable", async () => {
@@ -174,6 +177,7 @@ describe("Camera read endpoints degrade to empty when Frigate is unreachable", (
     const res = await request(makeApp()).get("/api/cameras/events/recent");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ events: [] });
+    expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
   });
 
   it("does NOT degrade a real Frigate error — a 403 still surfaces (500), not a 200 empty list", async () => {
@@ -181,5 +185,15 @@ describe("Camera read endpoints degrade to empty when Frigate is unreachable", (
     const res = await request(makeApp()).get("/api/cameras/events");
     expect(res.status).toBe(500);
     expect(res.body).not.toEqual({ events: [], nextCursor: null });
+    expect(res.headers["x-droplet-degraded"]).toBeUndefined();
+  });
+
+  // WARP-3105: a healthy empty result is "no events", not an outage — no header.
+  it("GET /api/cameras/events healthy + empty → 200 with NO X-Droplet-Degraded", async () => {
+    getEventsFiltered.mockResolvedValue({ events: [], nextCursor: null });
+    const res = await request(makeApp()).get("/api/cameras/events");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ events: [], nextCursor: null });
+    expect(res.headers["x-droplet-degraded"]).toBeUndefined();
   });
 });

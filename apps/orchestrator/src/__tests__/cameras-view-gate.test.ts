@@ -488,3 +488,37 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
     expect(Object.keys(EXEMPT).filter((k) => !unguarded.has(k))).toEqual([]);
   });
 });
+
+/**
+ * WARP-3103 (part 1) / WARP-3097 — footage never lands in a cache. These
+ * routes used to answer `public, max-age=…` (snapshots 5 s, event
+ * thumbnails an hour), so a browser or HTTP cache could keep surveillance
+ * footage on disk after sign-out and hand it to the next account. The
+ * app-wide `/api` default is `no-store`; these handlers set it explicitly
+ * because they are the ones that used to override it.
+ */
+describe("camera footage is private, no-store", () => {
+  const jpeg = () =>
+    new Response(new Uint8Array([0xff, 0xd8, 0xff]), { headers: { "content-type": "image/jpeg" } });
+
+  it.each([
+    "/api/cameras/front/snapshot",
+    "/api/cameras/events/abc/thumbnail",
+    "/api/cameras/events/abc/snapshot",
+    "/api/cameras/reviews/abc/thumbnail",
+    "/api/cameras/front/playback?after=1&before=2",
+    "/api/cameras/front/playback.segment?after=1&before=2&seg=0.ts",
+  ])("GET %s → private, no-store", async (path) => {
+    const frigate = await import("../services/frigate.client.js");
+    vi.mocked(frigate.fetchSnapshot).mockResolvedValue(jpeg() as never);
+    vi.mocked(frigate.fetchEventThumbnail).mockResolvedValue(jpeg() as never);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => jpeg());
+    try {
+      const res = await request(appAs("owner")).get(path);
+      expect(res.status).toBe(200);
+      expect(res.headers["cache-control"]).toBe("private, no-store");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});

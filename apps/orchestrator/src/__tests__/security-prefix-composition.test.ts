@@ -13,6 +13,12 @@
  * Driven through the REAL `mountModuleGates`, the real module gate and the
  * real egress + security routers, in both orders, plus a pin on the order
  * `app.ts` actually uses.
+ *
+ * WARP-2981 (ADR-059 P6) — the rack panel's count, GET /api/panel/security,
+ * is the second piece of host plumbing that must not sit behind the toggle:
+ * it has to be able to answer `off`, which a gated route never can (the gate
+ * answers 404 for a switched-off module and for a toggle it could not read
+ * alike). Pinned the same way, at the bottom.
  */
 import { describe, it, expect, vi } from "vitest";
 import request from "supertest";
@@ -42,6 +48,7 @@ import { createModuleGate } from "../middleware/module-gate.js";
 import { MODULES, type AvailabilityConfig } from "../modules/module-registry.js";
 import { createEgressAuditRouter } from "../routes/egress-audit.js";
 import { createSecurityRouter } from "../routes/security.js";
+import { createPanelSecurityRouter } from "../routes/panel-security.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 const SRC = resolve(__dirname, "..");
@@ -164,6 +171,8 @@ describe("the egress-audit collector is not behind the Security toggle", () => {
     const routes = join(SRC, "routes");
     // WARP-2978 adds incidents, acknowledgement and alert routing (security-incidents.ts);
     // WARP-2980 adds "what normal looks like" (security-patterns.ts).
+    // WARP-2981's panel-security.ts is deliberately NOT here and needs no
+    // exemption: its path is /api/panel/security, outside the module prefix.
     const SECURITY_MODULE_ROUTERS = new Set(["security.ts", "security-zones.ts", "security-site.ts", "security-incidents.ts", "security-patterns.ts"]);
     const offenders = readdirSync(routes)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
@@ -190,5 +199,42 @@ describe("the egress-audit collector is not behind the Security toggle", () => {
     ]) {
       expect(src.indexOf(mount), mount).toBeGreaterThan(gates);
     }
+  });
+});
+
+describe("WARP-2981 — the rack panel's count is not behind the Security toggle", () => {
+  const DISPLAY: Principal = { id: "_service:display", username: "_service:display", displayName: "Rack Panel Bridge", role: "service" };
+
+  /** The REAL gates mounted FIRST, then the panel router — its default toggle read over the same moduleSetting rows. */
+  function panelBehindGates(user: Principal, disabled: ModuleId[]) {
+    const prisma = prismaWith(disabled);
+    const app = express();
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as Request & { user?: unknown }).user = user;
+      next();
+    });
+    mountModuleGates(app, createModuleGate(prisma, CFG, 0), async () => ({ tier: user.role, features: [] }) as never);
+    app.use("/api", createPanelSecurityRouter(prisma));
+    return app;
+  }
+
+  it("Security OFF → the panel still reaches its handler and hears `off`, never 404 module_disabled", async () => {
+    const res = await request(panelBehindGates(DISPLAY, ["security"])).get("/api/panel/security");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ security: "off" });
+  });
+
+  it("…and a person reaching it the same way is refused by its own guard (403), not by a module gate", async () => {
+    const res = await request(panelBehindGates(OWNER, ["security"])).get("/api/panel/security");
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "Forbidden: role not permitted" });
+  });
+
+  it("app.ts mounts the panel router BEFORE mountModuleGates", () => {
+    const src = readFileSync(join(SRC, "app.ts"), "utf8");
+    const panel = src.indexOf('app.use("/api", createPanelSecurityRouter(prisma))');
+    const gates = src.indexOf("mountModuleGates(app, moduleGate)");
+    expect(panel).toBeGreaterThan(-1);
+    expect(panel).toBeLessThan(gates);
   });
 });
