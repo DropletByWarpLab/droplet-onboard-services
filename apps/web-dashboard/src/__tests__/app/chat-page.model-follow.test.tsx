@@ -11,9 +11,10 @@
  * list falls back — but a started thread only ever to a LOCAL model, and a
  * degraded (incomplete) list moves nothing.
  *
- * NB: a <select> whose value matches no option DISPLAYS its first option,
- * so every expectation below names a model that is not first in the list
- * — or checks the model a send actually carries.
+ * The picker is a menu button (WARP-3043) named `Model: {name}`; `picker()`
+ * reads the model it names back as an id, and `choose()` picks one through
+ * the menu, as a user would. Expectations still name a model that is not
+ * first in the list — or check the model a send actually carries.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -123,8 +124,22 @@ const C: Model = { id: "model-c", provider: "local", name: "Model C" };
 const GPT4O: Model = { id: "gpt-4o", provider: "openai", name: "GPT-4o" };
 const GPT4O_MINI: Model = { id: "gpt-4o-mini", provider: "openai", name: "GPT-4o mini" };
 
-function picker(): HTMLSelectElement {
-  return screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement;
+const KNOWN = [A, B, C, GPT4O, GPT4O_MINI];
+
+/** The closed picker (a menu button named `Model: {name}[ · …]`). Its
+ *  `value` is the id of the model it names — a held model that is not in
+ *  the list is named by its id. */
+function picker(): { value: string } {
+  const trigger = screen.getByRole("button", { name: /^Model: / });
+  const name = (trigger.getAttribute("aria-label") ?? "").replace(/^Model: /, "").split(" · ")[0];
+  return { value: KNOWN.find((m) => m.name === name)?.id ?? name };
+}
+
+/** Pick a model through the menu, as a user would. */
+function choose(id: string) {
+  fireEvent.click(screen.getByRole("button", { name: /^Model: / }));
+  const name = KNOWN.find((m) => m.id === id)?.name ?? id;
+  fireEvent.click(screen.getByRole("menuitemradio", { name: new RegExp(`^${name} · `) }));
 }
 
 /** Type a turn into the composer and send it; returns the model it carried. */
@@ -166,7 +181,7 @@ describe("/chat model selection source (WARP-3048)", () => {
     const { rerender } = render(<ChatPage />);
     await waitFor(() => expect(picker().value).toBe("model-a"));
 
-    fireEvent.change(picker(), { target: { value: "model-c" } });
+    choose("model-c");
     await waitFor(() => expect(picker().value).toBe("model-c"));
 
     modelsRef.current = { models: [A, B, C], defaultModel: "model-b" };
@@ -193,7 +208,7 @@ describe("/chat model selection source (WARP-3048)", () => {
     openThread();
     const { rerender } = render(<ChatPage />);
     await waitFor(() => expect(picker().value).toBe("model-a"));
-    fireEvent.change(picker(), { target: { value: "model-c" } });
+    choose("model-c");
     await waitFor(() => expect(picker().value).toBe("model-c"));
 
     // Meanwhile the owner made B the active model.
@@ -232,7 +247,7 @@ describe("/chat model selection source (WARP-3048)", () => {
     modelsRef.current = { models: [A, B, C], defaultModel: "model-b" };
     const { rerender } = render(<ChatPage />);
     await waitFor(() => expect(picker().value).toBe("model-b"));
-    fireEvent.change(picker(), { target: { value: "model-c" } });
+    choose("model-c");
     await waitFor(() => expect(picker().value).toBe("model-c"));
 
     // Model C was removed (or its cloud key revoked).
@@ -398,7 +413,7 @@ describe("/chat single-model box and empty state (WARP-3048)", () => {
       name: "Model: Model A — manage on Models",
     });
     expect(chip).toHaveAttribute("href", "/models");
-    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Model: / })).toBeNull();
   });
 
   it("names the real state instead of pointing at a picker 'above'", async () => {

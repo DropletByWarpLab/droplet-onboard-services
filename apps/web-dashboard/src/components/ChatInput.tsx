@@ -14,6 +14,7 @@ import { transcribeAudio, SttUnavailable } from "@/lib/api";
 import { canCaptureAudio, PcmRecorder } from "@/lib/audio-capture";
 import type { ChatAttachment, ToolCatalogEntry } from "@/lib/types";
 import { AttachmentChip } from "./AttachmentChip";
+import "@/components/ui/pick-menu.css";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
@@ -391,8 +392,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           role="listbox"
           aria-label="Tools"
           data-testid="slash-tool-menu"
-          className="absolute bottom-full left-3 right-3 mb-2 max-h-64 overflow-y-auto
-            rounded-xl border border-separator bg-surface-primary dp-material shadow-lg z-50 py-1"
+          className="pick-surface absolute bottom-full left-3 right-3 mb-2 max-h-64 overflow-y-auto z-50 py-1"
         >
           {slashMatches.map((tool, idx) => (
             <li

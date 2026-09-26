@@ -1,25 +1,45 @@
 "use client";
 
+/**
+ * The composer's model picker (WARP-904, WARP-3048, WARP-3043).
+ *
+ * A themed menu button, not a native `<select>`: the browser paints a
+ * select's open list itself, outside every token (components/ui/useMenuButton
+ * + pick-menu.css, as the Workshop's Work in chip). The items are
+ * `menuitemradio` with exactly one `aria-checked`, captioned with where the
+ * model runs ("Local" or its provider) and "· vision" when it can see images.
+ *
+ * A cloud model's turns — and the drive content they carry — leave the box,
+ * so the CLOSED trigger says so: a Cloud icon and `· {Provider}` beside the
+ * name, outside the name's clamp so a long name cannot push it out of view.
+ */
 import Link from "next/link";
+import { Check, ChevronDown, Cloud } from "lucide-react";
 import { useModels } from "@/lib/hooks/useModels";
 import { isLocalProvider } from "@/lib/provider";
+import { useMenuButton } from "@/components/ui/useMenuButton";
+import "@/components/ui/pick-menu.css";
 
 interface ModelSelectorProps {
   value: string;
   onChange: (model: string) => void;
 }
 
-const providerBadge: Record<string, { className: string; label: string }> = {
-  // Keyed by BOTH names: `local` is what the gateway emits now, `ollama`
-  // is what pre-WARP-1926 persisted rows still carry.
-  local: { className: "bg-system-green/15 text-system-green", label: "Local" },
-  ollama: { className: "bg-system-green/15 text-system-green", label: "Local" },
-  anthropic: { className: "bg-system-orange/15 text-system-orange", label: "Anthropic" },
-  openai: { className: "bg-system-blue/15 text-system-blue", label: "OpenAI" },
+// Keyed by BOTH local names: `local` is what the gateway emits now, `ollama`
+// is what pre-WARP-1926 persisted rows still carry.
+const PROVIDER_LABEL: Record<string, string> = {
+  local: "Local",
+  ollama: "Local",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
 };
+
+const providerLabel = (provider: string) =>
+  isLocalProvider(provider) ? "Local" : (PROVIDER_LABEL[provider] ?? provider);
 
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const { models, isLoading } = useModels();
+  const menu = useMenuButton({ disabled: isLoading });
 
   // No model at all: the chat page's empty state says so and links to
   // /models. (Still render while loading, when we don't yet know the count.)
@@ -27,9 +47,8 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
 
   // WARP-3048 — /chat holds a thread's model while the list is degraded and
   // never falls a thread back to the cloud, so `value` can name a model that
-  // is not listed right now. A <select> whose value matches no option
-  // DISPLAYS its first one — the composer would name a model the thread is
-  // not on — so the held model gets an option of its own.
+  // is not listed right now. The picker names that model, marked
+  // unavailable — never another one.
   const held = Boolean(value) && !isLoading && !models.some((m) => m.id === value);
 
   // WARP-3048 — one model: there is nothing to choose here, but hiding the
@@ -52,52 +71,100 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   }
 
   const selected = models.find((m) => m.id === value);
-  const provider = selected?.provider ?? "";
+  const cloudProvider = selected && !isLocalProvider(selected.provider) ? selected.provider : null;
+  const name = isLoading ? "Loading models..." : (selected?.name ?? (value || "Choose a model"));
+  const suffix = held ? "· unavailable" : cloudProvider ? `· ${providerLabel(cloudProvider)}` : "";
+
+  const pick = (id: string) => {
+    onChange(id);
+    menu.close(true);
+  };
 
   return (
-    <div className="flex items-center gap-2">
-      {/* Design-handoff model pill: status dot + mono model name. The
-          native <select> supplies the chevron + picker for free. */}
-      <label className="chat-model" title="Model">
-        <span className="dot" aria-hidden="true" />
-        <select
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+    <div ref={menu.rootRef} className="chat-model-wrap">
+      <button
+        ref={menu.buttonRef}
+        type="button"
+        className="chat-model"
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        aria-controls={menu.open ? menu.menuId : undefined}
+        aria-label={`Model: ${name}${suffix ? ` ${suffix}` : ""}`}
+        title="Model"
+        disabled={isLoading}
+        onClick={menu.onButtonClick}
+        onKeyDown={menu.onButtonKeyDown}
+      >
+        {cloudProvider ? (
+          <Cloud size={13} className="chat-model-cloud" aria-hidden="true" />
+        ) : (
+          <span className="dot" aria-hidden="true" />
+        )}
+        <span className="chat-model-name">{name}</span>
+        {suffix && (
+          <>
+            {" "}
+            <span className="chat-model-provider">{suffix}</span>
+          </>
+        )}
+        <ChevronDown size={13} className="chat-model-chevron" aria-hidden="true" />
+      </button>
+
+      {menu.open && (
+        <div
+          ref={menu.menuRef}
+          id={menu.menuId}
+          role="menu"
           aria-label="Model"
+          className="pick-menu"
+          data-align={menu.align}
+          onKeyDown={menu.onMenuKeyDown}
         >
-          {isLoading && <option>Loading models...</option>}
-          {!isLoading && models.length === 0 && (
-            <option>No models available</option>
-          )}
-          {held && <option value={value}>{value} · unavailable</option>}
+          {held && <ModelItem id={value} name={value} caption="unavailable" checked onPick={pick} />}
           {models.map((m) => (
-            // Native <option> can't render a badge, so mark vision-capable
-            // models inline so they're distinguishable in the dropdown.
-            <option key={m.id} value={m.id}>
-              {m.name}
-              {m.capabilities?.vision ? " · vision" : ""}
-            </option>
+            <ModelItem
+              key={m.id}
+              id={m.id}
+              name={m.name}
+              caption={`${providerLabel(m.provider)}${m.capabilities?.vision ? " · vision" : ""}`}
+              checked={m.id === value}
+              onPick={pick}
+            />
           ))}
-        </select>
-      </label>
-
-      {provider && !isLocalProvider(provider) && (
-        <span
-          className={`px-2 py-0.5 rounded-full type-caption-2 font-medium ${
-            providerBadge[provider]?.className ?? "bg-surface-tertiary text-label-secondary"
-          }`}
-        >
-          {providerBadge[provider]?.label ?? provider}
-        </span>
-      )}
-
-      {/* Vision pill for the selected model — tells the user this model can
-          see attached images (indigo accent, distinct from provider badges). */}
-      {selected?.capabilities?.vision && (
-        <span className="px-2 py-0.5 rounded-full type-caption-2 font-medium bg-accent-subtle text-accent">
-          Vision
-        </span>
+        </div>
       )}
     </div>
+  );
+}
+
+function ModelItem({
+  id,
+  name,
+  caption,
+  checked,
+  onPick,
+}: {
+  id: string;
+  name: string;
+  caption: string;
+  checked: boolean;
+  onPick: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={checked}
+      aria-label={`${name} · ${caption}`}
+      tabIndex={-1}
+      className="pick-item"
+      onClick={() => onPick(id)}
+    >
+      <span className="pick-item-text">
+        <span className="pick-item-name">{name}</span>
+        <span className="pick-item-caption">{caption}</span>
+      </span>
+      {checked && <Check size={14} className="pick-check" aria-hidden="true" />}
+    </button>
   );
 }

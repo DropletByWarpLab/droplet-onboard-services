@@ -71,6 +71,7 @@ import { CloudHistoryConsentDialog } from "@/components/chat/CloudHistoryConsent
 import type { ChatProject } from "@/lib/api";
 // WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
 // shared shell set; chat-indigo.css carries the chat-specific surface.
+import { helpSlot } from "@/components/shell/dom-slots";
 import "@/components/shell/indigo-tokens.css";
 import "@/components/chat/chat-indigo.css";
 import { isLocalProvider } from "@/lib/provider";
@@ -81,6 +82,9 @@ export default function ChatPage() {
   const historyHandleRef = useRef<ChatHistoryPanelHandle | null>(null);
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
   const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // WARP-3043 — the header offers HelpLauncher a slot, so Help sits here
+  // instead of floating over the docked composer's send button.
+  const registerHelpSlot = helpSlot.useRegister();
   // WARP-2205 — the file rail's mobile counterpart, mirroring the history
   // drawer above it rather than inventing a second pattern.
   const [mobileFilesOpen, setMobileFilesOpen] = useState(false);
@@ -852,11 +856,6 @@ export default function ChatPage() {
     [models, conversationId],
   );
 
-  const isLocalModel = useMemo(
-    () => isLocalProvider(models.find((m) => m.id === selectedModel)?.provider),
-    [models, selectedModel],
-  );
-
   // WARP-3043 — ONE flag drives both the centred layout (`is-empty`) and the
   // greeting, so they never disagree. A `?c=` in the URL is a conversation
   // on its way (its load is in flight), never a fresh chat — that is what
@@ -923,6 +922,8 @@ export default function ChatPage() {
           {/* WARP-460: pins are per-session — the popover appears once
               the first turn has minted a conversationId. */}
           {conversationId && <ContextPinsPopover sessionId={conversationId} />}
+          {/* WARP-3043 — HelpLauncher portals its trigger in here (≥1024px). */}
+          <span ref={registerHelpSlot} className="help-slot" />
           <button
             onClick={() => setShowSystemPrompt(!showSystemPrompt)}
             className={`chat-iconbtn ${systemPrompt ? "is-on" : ""}`}
@@ -1316,13 +1317,9 @@ export default function ChatPage() {
           onToolCommand={handleToolCommand}
           // WARP-904 — per-turn quick-switch, compact + next to the
           // composer instead of up in the header where a long thread
-          // scrolls it out of reach.
-          modelSelector={
-            <>
-              <ModelSelector value={selectedModel} onChange={handleModelChange} />
-              {isLocalModel && <span className="chat-tag">local · on-device</span>}
-            </>
-          }
+          // scrolls it out of reach. A cloud model names its provider on the
+          // picker itself (WARP-3043); there is no separate tag.
+          modelSelector={<ModelSelector value={selectedModel} onChange={handleModelChange} />}
           // WARP-3043 — the empty chat's suggestions render inside the
           // composer, under the pill (one scrolling row above it on phones).
           suggestions={
@@ -1367,6 +1364,7 @@ export default function ChatPage() {
         labelledBy="mobile-files-heading"
         placement="right"
         flush
+        seamless
       >
         <div className="flex flex-col h-full w-full">
           <h2 id="mobile-files-heading" className="sr-only">
@@ -1395,6 +1393,7 @@ export default function ChatPage() {
         // Full-height panel — ChatHistoryPanel owns its own insets
         // (WARP-1153).
         flush
+        seamless
       >
         {/* Width is the Dialog's to own, not this drawer's. The `w-[320px]
             max-w-[85vw]` this used to carry never bought the nav-drawer

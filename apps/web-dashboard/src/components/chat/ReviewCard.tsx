@@ -82,7 +82,7 @@ export function ReviewCard({
     return (
       <div
         data-testid="review-card-saved"
-        className="rounded-2xl shadow-sm border border-separator px-5 py-4 flex items-center gap-3"
+        className="rounded-2xl bg-[var(--inset)] px-5 py-4 flex items-center gap-3"
       >
         <Check size={18} className="text-system-green shrink-0" aria-hidden="true" />
         <span className="type-subheadline text-label-primary">
@@ -106,7 +106,7 @@ export function ReviewCard({
       data-testid="review-card"
       role="region"
       aria-label={INTERVIEW_COPY.reviewTitle}
-      className="rounded-2xl shadow-sm border border-separator overflow-hidden"
+      className="rounded-2xl bg-[var(--inset)] overflow-hidden"
     >
       {/* Header */}
       <div className="flex items-center gap-2 px-5 pt-4">
@@ -198,7 +198,7 @@ export function ReviewCard({
               </span>
               <input
                 aria-label={`Fact ${i + 1}`}
-                className="type-body text-label-primary flex-1 bg-transparent border-b border-transparent focus:border-separator focus:outline-none"
+                className="type-body text-label-primary flex-1 bg-transparent rounded-md focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
                 value={f.fact}
                 maxLength={280}
                 disabled={disabled}
@@ -271,7 +271,7 @@ export function ReviewCard({
       )}
 
       {/* Footer */}
-      <div className="flex items-center gap-3 px-5 py-3 border-t border-separator">
+      <div className="flex items-center gap-3 px-5 py-3">
         <span className="type-caption-1 px-2.5 py-1 rounded-full bg-surface-secondary text-label-secondary">
           {INTERVIEW_COPY.safetyChip}
         </span>

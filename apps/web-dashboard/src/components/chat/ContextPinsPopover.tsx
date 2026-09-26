@@ -172,8 +172,8 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
           className="absolute right-0 mt-1 w-80 max-w-[85vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
           style={{
             background: "var(--glass)",
-            border: "1px solid var(--card-bd)",
-            boxShadow: "var(--lift)",
+            // Shadow only — `--lift` carries a 1px brand ring (WARP-3043).
+            boxShadow: "0 16px 40px -12px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.08)",
           }}
         >
           <div className="type-caption-1 mb-2" style={{ color: "var(--text-muted)" }}>
@@ -225,7 +225,6 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
 
           <div
             className="flex items-center gap-1.5 pt-2"
-            style={{ borderTop: "1px solid var(--card-bd)" }}
           >
             <label className="sr-only" htmlFor="pin-kind">
               Kind
@@ -234,7 +233,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
               id="pin-kind"
               value={kind}
               onChange={(e) => setKind(e.target.value as ContextPin["kind"])}
-              className="type-footnote h-8 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
+              className="type-footnote h-8 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] focus:ring-2 focus:ring-[var(--brand)]"
             >
               {ADDABLE_KINDS.map((k) => (
                 <option key={k} value={k}>
@@ -253,7 +252,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
                 if (e.key === "Enter") void handleAdd();
               }}
               placeholder="/share/projects/…"
-              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
+              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:ring-2 focus:ring-[var(--brand)]"
             />
             <button
               type="button"

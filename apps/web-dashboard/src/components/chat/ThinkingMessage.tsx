@@ -60,6 +60,7 @@ export function ThinkingMessage({
           role="group"
           aria-label="How the assistant worked on this"
           className="
+            ds-process-card
             w-full rounded-2xl border border-dashed border-separator
             bg-surface-secondary/40 px-3 py-2
           "

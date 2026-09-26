@@ -12,7 +12,7 @@
  * All chrome copy ships verbatim from INTERVIEW_COPY (§9). The aurora wash +
  * serif capsule follow the voice-packet capsule pattern.
  */
-import { Sparkles } from "lucide-react";
+import { History, Info, Sparkles } from "lucide-react";
 import {
   INTERVIEW_COPY,
   TOPIC_COUNT,
@@ -93,7 +93,7 @@ export function InterviewProgress({
   return (
     <div
       data-testid="interview-progress"
-      className="flex flex-col items-center gap-1.5 py-2 border-b border-separator"
+      className="flex flex-col items-center gap-1.5 py-2"
     >
       <div className="flex items-center gap-3">
         <span className="font-mono type-caption-2 tracking-widest text-label-secondary uppercase">
@@ -152,9 +152,10 @@ export function InterviewResumeBanner({
   return (
     <div
       data-testid="interview-resume-banner"
-      className="flex items-center justify-between gap-3 px-4 py-2.5 border-l-2 border-system-orange bg-surface-secondary rounded-sm"
+      className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-system-orange/10"
     >
-      <span className="type-footnote text-label-primary">
+      <span className="flex items-center gap-2 type-footnote text-label-primary">
+        <History size={14} className="flex-none text-system-orange" aria-hidden="true" />
         {INTERVIEW_COPY.resumeBanner}
       </span>
       <span className="flex items-center gap-3 shrink-0">
@@ -181,9 +182,10 @@ export function FinishedElsewhereBanner({ onView }: { onView: () => void }) {
   return (
     <div
       data-testid="interview-finished-elsewhere"
-      className="flex items-center justify-between gap-3 px-4 py-2.5 border-l-2 border-system-orange bg-surface-secondary rounded-sm"
+      className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-system-orange/10"
     >
-      <span className="type-footnote text-label-primary">
+      <span className="flex items-center gap-2 type-footnote text-label-primary">
+        <Info size={14} className="flex-none text-system-orange" aria-hidden="true" />
         {INTERVIEW_COPY.finishedElsewhere}
       </span>
       <button
@@ -211,9 +213,10 @@ export function ReviewNudgeChip({
   return (
     <div
       data-testid="review-nudge-chip"
-      className="flex items-center gap-3 px-4 py-2 rounded-full border border-system-orange/40 bg-surface-secondary max-w-fit mx-auto"
+      className="flex items-center gap-3 px-4 py-2 rounded-full bg-system-orange/10 max-w-fit mx-auto"
     >
-      <span className="type-footnote text-label-primary">
+      <span className="flex items-center gap-2 type-footnote text-label-primary">
+        <Sparkles size={14} className="flex-none text-system-orange" aria-hidden="true" />
         {INTERVIEW_COPY.nudgeLine}
       </span>
       <button

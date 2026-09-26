@@ -101,34 +101,50 @@
   text-overflow: ellipsis;
 }
 
-/* Model pill — a <select> with 2+ models, a read-only link with one
-   (ModelSelector returns null only when there is no model at all). */
+/* Model pill — a menu button with 2+ models (ModelSelector, the shared
+   themed menu), a read-only link with one (ModelSelector returns null only
+   when there is no model at all). */
+.droplet-shell .chat-model-wrap { position: relative; display: flex; min-width: 0; }
 .droplet-shell .chat-model {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   height: 30px;
-  padding: 0 11px;
+  min-width: 0;
+  padding: 0 9px 0 11px;
+  border: 0;
   border-radius: 8px;
   background: transparent;
   font-size: 12px;
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
   color: var(--text);
-}
-.droplet-shell .chat-model select {
-  background: transparent;
-  border: 0;
-  color: inherit;
-  font: inherit;
   cursor: pointer;
-  max-width: 180px;
+  transition: background 140ms var(--ease, ease);
 }
+.droplet-shell .chat-model:hover:not(:disabled),
+.droplet-shell .chat-model[aria-expanded="true"] { background: var(--surface-2); }
+.droplet-shell .chat-model:disabled { cursor: default; opacity: 0.6; }
 .droplet-shell .chat-model .dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--success);
   flex-shrink: 0;
+}
+/* A cloud model: the icon and `· {Provider}` stay visible on the closed
+   trigger — the only sign on screen that a turn leaves the box. The suffix
+   sits outside the name's clamp, so a long name cannot push it out. */
+.droplet-shell .chat-model-cloud { flex: none; color: var(--text-muted); }
+.droplet-shell .chat-model-provider { flex: none; color: var(--text-muted); white-space: nowrap; }
+.droplet-shell .chat-model-chevron {
+  flex: none;
+  color: var(--text-muted);
+  transition: transform 140ms var(--ease, ease);
+}
+.droplet-shell .chat-model[aria-expanded="true"] .chat-model-chevron { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  .droplet-shell .chat-model,
+  .droplet-shell .chat-model-chevron { transition: none; }
 }
 /* WARP-3048 — single-model box: the same pill, read-only, as a link to
    /models (models brief, WARP-1116). The name clamps like the select. */
@@ -144,12 +160,6 @@
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.droplet-shell .chat-tag {
-  font-size: 12px;
-  color: var(--text-muted);
   white-space: nowrap;
 }
 
@@ -223,6 +233,16 @@
   .droplet-shell .chat-new-head {
     display: none;
   }
+}
+
+/* WARP-3043 — HelpLauncher's header slot (components/shell/dom-slots): the
+   launcher portals its trigger in here instead of floating it over the
+   docked pill's send button. Below 1024px the floating button is hidden too
+   (`hidden lg:flex`), so phones are unchanged. `contents` makes the trigger
+   a head item of its own. The one owner of the slot's `display`. */
+.droplet-shell .help-slot { display: none; }
+@media (min-width: 1024px) {
+  .droplet-shell .help-slot { display: contents; }
 }
 
 /* The Mac app's QuietButtonStyle for the secondary buttons the chat and
@@ -593,6 +613,50 @@
   line-height: 1.6;
 }
 
+/* WARP-3043 — the reply's secondary surfaces take tone, not strokes: the
+   process card, the reasoning steps, the missing-reply note, attachment and
+   tool chips, the approval prompt. Hook classes only — ThinkingMessage,
+   ReasoningDisclosure, ChatMessage, AttachmentChip and ToolApprovalPrompt
+   keep their Tailwind, so the Home "Ask AI" tile and the setup AI step are
+   unchanged. At (0,3,0)+ these beat the utilities (0,1,0). */
+.droplet-shell.chat-app .ds-process-card {
+  background: var(--inset);
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+.droplet-shell.chat-app .ds-reasoning-step { border: 0; }
+.droplet-shell.chat-app .msg-missing-chip {
+  background: var(--inset);
+  border: 0;
+  color: var(--text-muted);
+}
+.droplet-shell.chat-app .att-chip {
+  background: var(--inset);
+  border: 0;
+}
+/* A failed upload lost its orange stroke: it shows as an amber tone. */
+.droplet-shell.chat-app .att-chip[data-status="failed"] {
+  background: color-mix(in srgb, #f97316 10%, var(--surface));
+}
+.dark .droplet-shell.chat-app .att-chip[data-status="failed"] {
+  background: color-mix(in srgb, #fb923c 12%, var(--surface));
+}
+.droplet-shell.chat-app .msg-tool-chip { border: 0; }
+.droplet-shell.chat-app .msg-tool-chip.is-pending {
+  background: var(--inset);
+  color: var(--text-muted);
+}
+.droplet-shell.chat-app .tool-approval {
+  background: color-mix(in srgb, #f97316 10%, var(--surface));
+  border: 0;
+}
+.dark .droplet-shell.chat-app .tool-approval {
+  background: color-mix(in srgb, #fb923c 12%, var(--surface));
+}
+.droplet-shell.chat-app .tool-approval-title { color: var(--text); }
+.droplet-shell.chat-app .tool-approval-detail { color: var(--nav-link); }
+
 /* Hover-revealed action row under assistant messages. Carries the real
    app's full action set (copy/quote/regenerate/edit/thumbs), not just the
    design's copy+retry. */
@@ -819,7 +883,6 @@
 
 @media (max-width: 760px) {
   .droplet-shell .chat-head { padding: 0 14px; gap: 10px; }
-  .droplet-shell .chat-tag { display: none; }
   .droplet-shell .chat-wrap { padding: 0 15px; }
   .droplet-shell .chat-scroll { padding: 20px 0 14px; }
   .droplet-shell .chat-composer {
@@ -850,10 +913,9 @@
     inset: -4px;
   }
 
-  /* The model picker's <select> rendered 21px tall — it is a real control, not
-     a label, so it owes the same 44px. The wrapper grows with it. */
+  /* The model picker is a real control, not a label, so it owes the same
+     44px target. */
   .droplet-shell .chat-model { height: 44px; }
-  .droplet-shell .chat-model select { min-height: 44px; }
   /* The composer textarea needs no 44px floor of its own any more: a press
      anywhere on the pill (52px tall) focuses it. */
 }

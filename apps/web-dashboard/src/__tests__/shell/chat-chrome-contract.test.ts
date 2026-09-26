@@ -13,7 +13,7 @@
  * `.droplet-shell.w-chat-thread` and keeps its bordered bubble.
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import postcss, { type Rule, type AtRule, type Declaration } from "postcss";
 import { classNameSites } from "../helpers/class-names";
@@ -48,6 +48,9 @@ const CHROME_CLASSES = [
   "chat-jump",
   "chat-empty",
   "chat-tone",
+  "chat-model-wrap",
+  "chat-model-provider",
+  "help-slot",
 ];
 
 interface Found {
@@ -254,5 +257,123 @@ describe("/chat's own markup draws no strokes", () => {
     expect(offending("focus-visible:ring-2")).toBe(false);
     expect(offending("border-separator")).toBe(false);
     expect(hits).toEqual([]);
+  });
+});
+
+// ── WARP-3043b: menus, secondary surfaces, help ─────────────────────────
+describe("/chat's menus and secondary surfaces take tone, not strokes (WARP-3043)", () => {
+  const PICK_CSS = read("components/ui/pick-menu.css");
+  const BORDER_WIDTH = /^border(-[xytrbl])?(-(2|4|8|\[[^\]]+\]))?$/;
+  const RING = /^ring(-|$)/;
+  function offending(token: string): boolean {
+    const parts = token.replace(/^!/, "").split(":");
+    const base = parts.pop()!.replace(/^!/, "");
+    const focus = parts.some((v) => v === "focus" || v === "focus-visible");
+    if (BORDER_WIDTH.test(base)) return true;
+    return RING.test(base) && !focus;
+  }
+  /** An inline `border…:` style with a width — `borderLeft: "1px solid …"`. */
+  const INLINE_STROKE = /\bborder(Top|Right|Bottom|Left)?\s*:\s*["'`]\s*[1-9]/;
+
+  it("no --lift ring on the themed menu or the surfaces that reuse it", () => {
+    for (const rel of ["components/ui/pick-menu.css", "components/chat/ChatHistoryRow.tsx", "components/ChatInput.tsx"]) {
+      expect(read(rel), rel).not.toMatch(/var\(\s*--lift\s*\)/);
+    }
+    // No stroke on the menu surface either.
+    const strokes = rules(PICK_CSS).flatMap((r) => r.decls.filter(isStroke).map((d) => `${r.selector} ${d.prop}`));
+    expect(strokes).toEqual([]);
+  });
+
+  it("the chat-only surfaces draw no stroke: no border utility, no inline border", () => {
+    const FILES = [
+      "components/chat/ChatHistoryRow.tsx",
+      "components/chat/SessionHeader.tsx",
+      "components/chat/InterviewSurfaces.tsx",
+      "components/chat/ReviewCard.tsx",
+      "components/chat/MemoryPanel.tsx",
+      "components/chat/ContextPinsPopover.tsx",
+      "components/help/HelpLauncher.tsx",
+    ];
+    const hits = FILES.flatMap((rel) => {
+      const src = read(rel);
+      const utilities = classNameSites(src).flatMap((site) =>
+        site.tokens.filter(offending).map((t) => `${rel}:${site.line} ${t}`),
+      );
+      const inline = src
+        .split("\n")
+        .flatMap((l, i) => (INLINE_STROKE.test(l) ? [`${rel}:${i + 1} ${l.trim()}`] : []));
+      return [...utilities, ...inline];
+    });
+    expect(INLINE_STROKE.test(`borderLeft: "1px solid var(--border)"`)).toBe(true);
+    expect(hits).toEqual([]);
+  });
+
+  it("the slash menu keeps no legacy card material", () => {
+    const slash = classNameSites(read("components/ChatInput.tsx")).find((site) =>
+      site.tokens.includes("max-h-64"),
+    )!;
+    expect(slash.tokens).toContain("pick-surface");
+    expect(slash.tokens.filter((t) => /^(border|shadow-lg|dp-material)/.test(t))).toEqual([]);
+  });
+
+  it("no native <select> in the model picker, the menu primitive or /chat's page", () => {
+    for (const rel of ["components/ModelSelector.tsx", "components/ui/useMenuButton.ts", "app/chat/page.tsx", "components/ChatInput.tsx"]) {
+      expect(read(rel), rel).not.toMatch(/<select\s/);
+    }
+  });
+
+  // Known native selects left on /chat's popovers — out of this slice's
+  // scope (flagged). The list may only shrink.
+  it("the native selects left in components/chat are only the known ones", () => {
+    const dir = path.join(SRC, "components/chat");
+    const found = readdirSync(dir)
+      .filter((f) => /\.tsx$/.test(f) && !/\.test\.tsx$/.test(f))
+      .flatMap((f) => (read(`components/chat/${f}`).match(/<select\s/g) ?? []).map(() => f))
+      .sort();
+    expect(found).toEqual([
+      "ContextPinsPopover.tsx",
+      "MemoryPanel.tsx",
+      "MemoryPanel.tsx",
+      "MemoryPanel.tsx",
+      "ReviewCard.tsx",
+    ]);
+  });
+
+  it("the reply's secondary surfaces are toned only under .droplet-shell.chat-app", () => {
+    for (const sel of [
+      ".droplet-shell.chat-app .ds-process-card",
+      ".droplet-shell.chat-app .ds-reasoning-step",
+      ".droplet-shell.chat-app .msg-missing-chip",
+      ".droplet-shell.chat-app .att-chip",
+      ".droplet-shell.chat-app .tool-approval",
+    ]) {
+      expect(declValue(sel, "border"), sel).toBe("0");
+    }
+    expect(declValue(".droplet-shell.chat-app .tool-approval", "background")).toMatch(/color-mix/);
+    expect(declValue(".droplet-shell.chat-app .tool-approval-title", "color")).toBe("var(--text)");
+    expect(declValue(".droplet-shell.chat-app .tool-approval-detail", "color")).toBe("var(--nav-link)");
+    // No unscoped rule restyles the shared hooks.
+    const hooks = ["ds-process-card", "ds-reasoning-step", "msg-missing-chip", "att-chip", "msg-tool-chip", "tool-approval"];
+    const unscoped = CHAT_RULES.filter(
+      (r) => hooks.some((h) => hasClass(r.selector, h)) && !r.selector.includes(".droplet-shell.chat-app "),
+    ).map((r) => r.selector);
+    expect(unscoped).toEqual([]);
+  });
+
+  it("the shared components keep their Tailwind (the Home tile and setup AI step are unchanged)", () => {
+    const thinking = read("components/chat/ThinkingMessage.tsx");
+    for (const t of ["rounded-2xl", "border", "border-dashed", "border-separator", "bg-surface-secondary/40", "px-3", "py-2"]) {
+      expect(thinking, t).toMatch(new RegExp(`(^|\\s)${t.replace(/[/.]/g, "\\$&")}(\\s|$)`, "m"));
+    }
+    expect(read("components/chat/ReasoningDisclosure.tsx")).toContain(
+      'className="ds-reasoning-step pl-3 border-l-2 border-separator"',
+    );
+  });
+
+  it("names no trust copy on /chat's surfaces", () => {
+    for (const rel of ["app/chat/page.tsx", "components/ModelSelector.tsx", "components/ChatInput.tsx", "components/help/HelpLauncher.tsx"]) {
+      expect(read(rel), rel).not.toMatch(/on-device|stays on your Droplet|nothing leaves/i);
+    }
+    expect(CHAT_CSS).not.toMatch(/\.chat-tag\b/);
   });
 });

@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Hammer, PanelLeft, PanelRight } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
+import { helpSlot } from "@/components/shell/dom-slots";
 import {
   LIVE_STATUSES,
   cancelAgentRun,
@@ -107,6 +108,8 @@ export function WorkshopSpace() {
   const railTrigger = useRef<HTMLButtonElement>(null);
   const contextTrigger = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  // WARP-3043 — the head offers HelpLauncher a slot (see app/chat/page.tsx).
+  const registerHelpSlot = helpSlot.useRegister();
   const [composerBusy, setComposerBusy] = useState(false);
   const [composerStatus, setComposerStatus] = useState<{ text: string; title?: string } | null>(null);
 
@@ -378,6 +381,7 @@ export function WorkshopSpace() {
               <PanelRight size={16} aria-hidden />
             </button>
           )}
+          <span ref={registerHelpSlot} className="help-slot" />
         </header>
 
         <div className="chat-scroll" aria-live="polite">

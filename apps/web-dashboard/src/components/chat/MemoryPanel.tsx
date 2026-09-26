@@ -193,8 +193,8 @@ export function MemoryPanel() {
           className="absolute right-0 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
           style={{
             background: "var(--glass)",
-            border: "1px solid var(--card-bd)",
-            boxShadow: "var(--lift)",
+            // Shadow only — `--lift` carries a 1px brand ring (WARP-3043).
+            boxShadow: "0 16px 40px -12px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.08)",
           }}
         >
           <div className="type-caption-1 mb-2" style={{ color: "var(--text-muted)" }}>
@@ -245,7 +245,7 @@ export function MemoryPanel() {
                       )
                     }
                     title="Who receives this fact"
-                    className="type-caption-2 h-6 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
+                    className="type-caption-2 h-6 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] focus:ring-2 focus:ring-[var(--brand)]"
                   >
                     {/* If the fact's current audience outranks the caller
                         (e.g. an admin viewing an owner-only fact), keep it
@@ -294,7 +294,6 @@ export function MemoryPanel() {
 
           <div
             className="flex items-center gap-1.5 pt-2"
-            style={{ borderTop: "1px solid var(--card-bd)" }}
           >
             <label className="sr-only" htmlFor="memory-category">
               Category
@@ -305,7 +304,7 @@ export function MemoryPanel() {
               onChange={(e) =>
                 setCategory(e.target.value as MemoryFact["category"])
               }
-              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
+              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] focus:ring-2 focus:ring-[var(--brand)]"
             >
               {CATEGORIES.map((c) => (
                 <option key={c} value={c}>
@@ -323,7 +322,7 @@ export function MemoryPanel() {
                 setAudience(e.target.value as MemoryFact["audience"])
               }
               title="Who receives this fact"
-              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
+              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] focus:ring-2 focus:ring-[var(--brand)]"
             >
               {audienceOptions.map((a) => (
                 <option key={a.value} value={a.value}>
@@ -342,7 +341,7 @@ export function MemoryPanel() {
                 if (e.key === "Enter") void handleAdd();
               }}
               placeholder="e.g. Prefers answers in French"
-              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
+              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:ring-2 focus:ring-[var(--brand)]"
             />
             <button
               type="button"
