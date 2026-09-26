@@ -689,11 +689,12 @@ describe("WARP-3193 Reminder.status is written with its timestamp and read inste
     // that still reads the timestamp would fire it again.
     seedReminder(w, { id: "rm-fired", userId: "alice", dueAt: at(-2), status: "notified" });
 
-    startRemindersPoller(w.prisma);
+    const cron = createCronRuntime();
+    startRemindersPoller(w.prisma, cron);
     try {
       await vi.waitFor(() => expect(w.log.rows).toHaveLength(1));
     } finally {
-      stopRemindersPoller();
+      cron.stop();
     }
 
     const where = (w.reminders.delegate.findMany.mock.calls[0] as unknown as [{ where: Record<string, unknown> }])[0].where;
@@ -716,11 +717,12 @@ describe("WARP-3193 Reminder.status is written with its timestamp and read inste
       return rows;
     });
 
-    startRemindersPoller(w.prisma);
+    const cron = createCronRuntime();
+    startRemindersPoller(w.prisma, cron);
     try {
       await vi.waitFor(() => expect(w.reminders.delegate.updateMany).toHaveBeenCalled());
     } finally {
-      stopRemindersPoller();
+      cron.stop();
     }
 
     expect(rm.status).toBe("completed");

@@ -21,6 +21,8 @@ function prismaWith(due: Array<{ id: string; userId: string; title: string; body
     reminder: {
       findMany: vi.fn(async () => due.splice(0)),
       update: vi.fn(async () => ({})),
+      // The claim is a conditional updateMany (WARP-3193 QUAL-3): count 1 = won.
+      updateMany: vi.fn(async () => ({ count: 1 })),
     },
   };
 }
