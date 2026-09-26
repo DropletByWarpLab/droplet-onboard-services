@@ -5632,6 +5632,13 @@ enum DeviceUpdateOutcome {
   rollback_failed
 }
 
+/// WARP-3193 PERF-3 — is an apply run holding this DeviceUpdate row? Explicit,
+/// never derived from `applyClaimId IS NULL` (CLAUDE.md "No guessing").
+enum DeviceUpdateApplyClaim {
+  unclaimed
+  claimed
+}
+
 /// One row per release the update agent decided to track (signature-verified
 /// at discovery time — a release that fails signature verification writes NO
 /// row, only an `update.signature_failed` log event, per WARP-538).
@@ -5666,6 +5673,17 @@ model DeviceUpdate {
   failureReason  String?
   /// WARP-3007 — explicit apply outcome (see DeviceUpdateOutcome).
   outcome        DeviceUpdateOutcome @default(not_applied)
+  /// WARP-3193 PERF-3 — whether an apply run owns this row right now. Taken
+  /// by a conditional `updateMany` (`applyClaim = unclaimed`) BEFORE any side
+  /// effect by every runner (POST /updates/apply-now, the cron apply window,
+  /// the boot resume), so two runners can never both snapshot and stage into
+  /// the same update directory. Handed back when the run ends; a claim left
+  /// by a process that died is cleared by `resumeInterruptedApply` at boot.
+  applyClaim     DeviceUpdateApplyClaim @default(unclaimed)
+  /// The run that holds the claim; the release is conditioned on it.
+  applyClaimId   String?
+  /// When the claim was taken (forensics only — nothing reads it as state).
+  applyClaimedAt DateTime?
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
 
