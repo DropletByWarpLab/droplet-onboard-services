@@ -39,6 +39,12 @@ export interface AlertEvidence {
   seenAt?: Date | null;
   /** camera_offline_during_activity: the camera that saw them (the related camera's display name). */
   seenCameraLabel?: string | null;
+  /**
+   * camera_offline_during_activity: the area where they were seen (`detail.activity.zoneName`) — which may not
+   * be the incident's: a camera person-linked to two areas files the incident under one, and the sighting can
+   * be on a camera only in the other (review #2418). Absent → the incident's area.
+   */
+  seenAreaName?: string | null;
 }
 
 const MODE_WORDS: Readonly<Record<string, string>> = { closed: "closed", away: "set to away" };
@@ -64,9 +70,14 @@ export function alertCopy(input: { zoneName: string; evidence: readonly AlertEvi
   const tail = more > 0 ? ` It happened ${more} more ${more === 1 ? "time" : "times"}.` : "";
   const site = `The site was ${MODE_WORDS[lead.mode] ?? "closed"}.`;
   if (sightings.length === 0) {
+    // Where and by what the person was seen: the sighting's own area and camera, and its time in the site clock.
+    const seenCamera = lead.seenCameraLabel ? safe(lead.seenCameraLabel, "") : "";
+    const by = seenCamera && seenCamera !== camera ? ` by ${seenCamera}` : "";
+    const seenIn = safe(lead.seenAreaName ?? "", area);
+    const seenAt = lead.seenAt && Number.isFinite(lead.seenAt.getTime()) && input.tz ? ` at ${siteClockCopy(lead.seenAt, input.tz)}` : "";
     return {
       title: `A camera in ${area} stopped reporting after hours`,
-      body: `${camera} stopped reporting${when}, soon after someone was seen in ${area}. ${site}${tail}`,
+      body: `${camera} stopped reporting${when}, soon after someone was seen${by} in ${seenIn}${seenAt}. ${site}${tail}`,
     };
   }
   return {

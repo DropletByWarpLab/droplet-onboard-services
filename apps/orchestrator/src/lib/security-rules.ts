@@ -719,6 +719,24 @@ export interface ActivitySighting extends TriageEvent {
  * restarts nightly). Late activity — a sighting written after the incident
  * sealed — is missed (p4-spec R11).
  */
+/**
+ * camera_offline_during_activity's two cheap conditions (review #2418): C stayed
+ * down long enough (P3's camera_offline verdict fires) AND the site was closed
+ * or away at the drop. Pure over rows the caller already has — so the engine
+ * asks it BEFORE reading any sighting, and a daytime drop or a blip costs no
+ * query. The rule below asks it too; there is one definition.
+ */
+export function dropCountsForActivity(
+  offline: TriageEvent,
+  onlines: ReadonlyArray<{ startedAt: Date }>,
+  now: Date,
+  timeline: ModeTimeline,
+): boolean {
+  if (offline.kind !== "camera_offline" || offline.camera === null) return false;
+  if (cameraOfflineVerdict(offline, onlines, now).verdict !== "fire") return false;
+  return (RULESET.camera_offline_during_activity.modes as readonly string[]).includes(modeAt(timeline, offline.startedAt).mode);
+}
+
 export function cameraOfflineDuringActivity(input: {
   offline: TriageEvent;
   /** C's recovery rows at or after the drop (`cameraOfflineVerdict`'s input). */
@@ -733,10 +751,10 @@ export function cameraOfflineDuringActivity(input: {
   const o = input.offline;
   if (o.kind !== "camera_offline" || o.camera === null) return null;
   if (input.personAreas.size === 0) return null;
+  if (!dropCountsForActivity(o, input.onlines, input.now, input.timeline)) return null;
   const verdict = cameraOfflineVerdict(o, input.onlines, input.now);
   if (verdict.verdict !== "fire") return null;
   const mode = modeAt(input.timeline, o.startedAt);
-  if (!(rule.modes as readonly string[]).includes(mode.mode)) return null;
   const from = o.startedAt.getTime() - rule.activityBeforeMs;
   const to = o.startedAt.getTime() + rule.activityAfterMs;
   let best: { a: ActivitySighting; zoneId: string } | null = null;

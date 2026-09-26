@@ -105,6 +105,7 @@ import {
   afterHoursPresence,
   cameraOfflineDuringActivity,
   cameraOfflineVerdict,
+  dropCountsForActivity,
   capEvidence,
   eventSpan,
   joinPatch,
@@ -459,16 +460,24 @@ const PLAIN: ReasonState = { severity: "info", reasonCodes: [], state: "no_actio
  * exists — and the notifier re-plans exactly those people
  * (security-alerts.service). `module_off` and `failed` are left alone; so is
  * an incident not yet notified (`pending` already plans everyone).
+ *
+ * WARP-2979 (#2418 review 2): both paths that add reasons apply it — triage
+ * AND the timers (`updateCollecting`), which add camera_offline_during_activity
+ * alerts — and a camera counts whether the reason names it as its evidence or
+ * as its related camera (where the person was seen): either can be the one a
+ * skipped person could not see before.
  */
 async function lateEvidencePatch(
   tx: Tx,
   i: Pick<Candidate, "id" | "severity" | "notifyState">,
-  existing: ReadonlyArray<{ severity: string; evidenceCamera: string | null }>,
+  existing: ReadonlyArray<{ severity: string; evidenceCamera: string | null; relatedCamera?: string | null }>,
   kept: readonly ReasonDraft[],
 ): Promise<{ notifyState?: "pending" }> {
   if (i.severity !== "alert" || i.notifyState !== "done") return {};
-  const had = new Set(existing.filter((r) => r.severity === "alert").map((r) => r.evidenceCamera));
-  if (!kept.some((d) => d.severity === "alert" && d.evidenceCamera !== null && !had.has(d.evidenceCamera))) return {};
+  const camerasOf = (r: { evidenceCamera: string | null; relatedCamera?: string | null }) =>
+    [r.evidenceCamera, r.relatedCamera ?? null].filter((c): c is string => c !== null);
+  const had = new Set(existing.filter((r) => r.severity === "alert").flatMap(camerasOf));
+  if (!kept.some((d) => d.severity === "alert" && camerasOf(d).some((c) => !had.has(c)))) return {};
   const skipped = await tx.securityIncidentNotice.count({ where: { incidentId: i.id, outcome: "skipped_not_visible" } });
   return skipped > 0 ? { notifyState: "pending" } : {};
 }
@@ -567,7 +576,7 @@ export async function triageOne(
       const i = plan.incident;
       const existing = await tx.securityIncidentReason.findMany({
         where: { incidentId: i.id },
-        select: { code: true, severity: true, evidenceCamera: true, evidenceEventId: true },
+        select: { code: true, severity: true, evidenceCamera: true, relatedCamera: true, evidenceEventId: true },
       });
       // The event's primary area IS the incident's (the candidate query is keyed on it).
       const drafts = await triageReasons(
@@ -690,6 +699,8 @@ async function activityReason(
   ctx: OfflineRuleContext,
 ): Promise<ReasonDraft | null> {
   if (event.kind !== "camera_offline" || event.camera === null) return null;
+  // Review #2418: offline long enough and closed/away at the drop, BEFORE any sighting is read.
+  if (!dropCountsForActivity(event, onlines, now, ctx.timeline)) return null;
   const personAreas = new Map<string, string>();
   for (const l of ctx.links) {
     if (l.setBy === "person" && parseLinkRef(l.sourceKind, l.sourceRef)?.camera === event.camera) personAreas.set(l.zoneId, l.zoneName);
@@ -789,10 +800,11 @@ async function updateCollecting(
       if (seal && !sealDue(i, now)) return false;
       const existing = await tx.securityIncidentReason.findMany({
         where: { incidentId },
-        select: { code: true, evidenceCamera: true, evidenceEventId: true },
+        select: { code: true, severity: true, evidenceCamera: true, relatedCamera: true, evidenceEventId: true },
       });
       const kept = capEvidence(existing, await offlineReasons(tx, incidentId, now, ctx));
-      const patch = reasonPatch(i, kept, now);
+      // Review #2418: the timers' alert evidence re-opens the notifier for a person skipped as not visible (R4).
+      const patch = { ...reasonPatch(i, kept, now), ...(await lateEvidencePatch(tx, i, existing, kept)) };
       if (!seal && Object.keys(patch).length === 0 && kept.length === 0) return false;
       const { count } = await tx.securityIncident.updateMany({
         where: { id: incidentId, version: i.version, grouping: "collecting" },

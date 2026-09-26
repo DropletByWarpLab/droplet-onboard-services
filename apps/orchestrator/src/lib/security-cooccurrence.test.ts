@@ -470,9 +470,30 @@ describe("scoreCameraPairs", () => {
     const doorMostly = run(world({ shared: 34, aOnly: 6, bOnly: 11, bZones: (i) => (i < 31 ? ["door"] : []) })).results[0]!;
     expect(doorMostly).toMatchObject({ part: "door", sourceKind: "camera_zone", sourceRef: "b/door", wholeK: 34 });
     expect(doorMostly.forward.k).toBe(31);
+    // The part passes the same gate as the whole camera (its own 31 visits clear the auto bar's n = 30).
+    expect(doorMostly.gate).toBe("auto");
     // 'door' sees 30 of 34 (< 30.6) → the whole camera.
     const doorLess = run(world({ shared: 34, aOnly: 6, bOnly: 11, bZones: (i) => (i < 30 ? ["door"] : []) })).results[0]!;
     expect(doorLess).toMatchObject({ part: null, sourceKind: "camera", sourceRef: "b", wholeK: null });
+  });
+
+  // Review #2418 (finding 1): the reverse direction counts the PART's own visits, always fewer than the whole
+  // camera's — so a part that keeps ≥ 90 % of the hits can still fail a gate the whole camera passed.
+  it("a part is never chosen over a whole camera whose gate ranks higher: auto stays auto", () => {
+    // Whole B: 32 of A's 35 visits forward, 32 of its own 32 back → auto. 'door' keeps 29 (≥ 28.8), but back it
+    // has only its own 29 visits: under the auto bar's n = 30 → it would be a suggestion only.
+    const sightings = world({ shared: 32, aOnly: 3, bOnly: 0, bZones: (i) => (i < 29 ? ["door"] : []) });
+    const r = run(sightings).results[0]!;
+    expect(r).toMatchObject({ camera: "b", part: null, sourceKind: "camera", sourceRef: "b", wholeK: null, gate: "auto" });
+    expect(r.forward).toMatchObject({ n: 35, k: 32 });
+    expect(r.reverse).toMatchObject({ n: 32, k: 32 });
+  });
+
+  it("a part is never chosen over a whole camera whose gate ranks higher: propose stays propose, never nothing", () => {
+    // Whole B: 20 of 25 forward, 20 of 30 back → propose. 'door' keeps 18 (≥ 18), back only its own 18 (< 20).
+    const sightings = world({ shared: 20, aOnly: 5, bOnly: 10, bZones: (i) => (i < 18 ? ["door"] : []) });
+    const r = run(sightings).results[0]!;
+    expect(r).toMatchObject({ part: null, sourceRef: "b", gate: "propose" });
   });
 
   it("between parts: most hits first, then the better gate, then lift — a name only breaks a full tie", () => {

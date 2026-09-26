@@ -9,8 +9,13 @@
  * (route 24) and Not this (route 25). A refusal is a
  * `translateError(err, "security")` toast — never the server's message — and
  * the lists re-read (the hook does).
+ *
+ * Review #2418: in flight, Add it and Not this are aria-disabled — never
+ * `disabled` — and a ref refuses a second press. A decided suggestion's card
+ * goes; `onDecided(zoneId)` tells the panel, which moves focus to that area's
+ * card. A refused one keeps its card, and focus stays on the pressed button.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Loader2, Sparkles } from "lucide-react";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
@@ -37,23 +42,29 @@ export interface LinkSuggestionsProps {
   now: Date;
   accept: (linkId: string) => Promise<unknown>;
   reject: (linkId: string) => Promise<unknown>;
+  /** After a suggestion is decided (its card goes): the area it was for, so focus can land there. */
+  onDecided?: (zoneId: string) => void;
 }
 
-export function LinkSuggestions({ proposals, canManage, tz, now, accept, reject }: LinkSuggestionsProps) {
+export function LinkSuggestions({ proposals, canManage, tz, now, accept, reject, onDecided }: LinkSuggestionsProps) {
   const { toast } = useToast();
   const [pending, setPending] = useState<string | null>(null);
+  const pendingRef = useRef(false);
   if (!canManage || !proposals || proposals.length === 0) return null;
 
   const decide = async (p: SecurityLinkProposal, which: "add" | "reject") => {
-    if (pending) return;
+    if (pendingRef.current) return;
+    pendingRef.current = true;
     setPending(p.linkId);
     const camera = sourcePhrase(p);
     try {
       await (which === "add" ? accept(p.linkId) : reject(p.linkId));
       toast(fill(which === "add" ? SUGGEST_COPY.added : SUGGEST_COPY.turnedDown, { camera, area: p.zone.name }), "success");
+      onDecided?.(p.zone.id);
     } catch (err) {
       toast(translateError(err, "security"), "error");
     } finally {
+      pendingRef.current = false;
       setPending(null);
     }
   };
@@ -95,7 +106,7 @@ export function LinkSuggestions({ proposals, canManage, tz, now, accept, reject 
                   type="button"
                   className="btn sm primary"
                   aria-describedby={titleId}
-                  disabled={pending !== null}
+                  aria-disabled={pending !== null || undefined}
                   onClick={() => void decide(p, "add")}
                 >
                   {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
@@ -105,7 +116,7 @@ export function LinkSuggestions({ proposals, canManage, tz, now, accept, reject 
                   type="button"
                   className="btn sm ghost"
                   aria-describedby={titleId}
-                  disabled={pending !== null}
+                  aria-disabled={pending !== null || undefined}
                   onClick={() => void decide(p, "reject")}
                 >
                   {SUGGEST_COPY.notThis}
