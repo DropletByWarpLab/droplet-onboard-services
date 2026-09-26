@@ -755,7 +755,8 @@ async function main() {
     const passRunners = {
       // Deterministic pass: no model call, so it never contends for the box's
       // single inference slot.
-      [DETECTOR_PASS_KEY]: async () => {
+      // `signal` aborts when the lease is lost mid-run (WARP-3193 QUAL-2).
+      [DETECTOR_PASS_KEY]: async (signal: AbortSignal) => {
         const outcome = await runDetectorPass(prisma);
         if (outcome.errors.length > 0) {
           // 🔴 ERROR, not warn (WARP-2825). `runDetectorPass` catches per
@@ -769,7 +770,10 @@ async function main() {
         }
         // Delivery runs INSIDE the same claim as the pass that produced the
         // findings. Two instances notifying concurrently would double-announce
-        // the window between one stamping `notifiedAt` and the other reading it.
+        // the window between one stamping `notifiedAt` and the other reading it
+        // — so a run whose claim was lost meanwhile leaves delivery to the
+        // worker that holds it now.
+        if (signal.aborted) return;
         const notified = await notifyFindings(prisma);
         if (notified.immediate > 0 || notified.digestSent) {
           logger.info({ notified }, "brain.findings.notified");
@@ -784,10 +788,10 @@ async function main() {
       // of the claim. By the time this body runs, `claimPass` has already
       // stamped `runState` and `lastRunAt`, so a bail-out here is a run the
       // box has already recorded and the route has already reported started.
-      [CORPUS_PASS_KEY]: async () => {
+      [CORPUS_PASS_KEY]: async (signal: AbortSignal) => {
         const outcome = await runCorpusPass(
           { prisma, chat: aiGateway.chat, model: await resolveBrainModel() },
-          { limit: config.brain.corpusUnitsPerRun },
+          { limit: config.brain.corpusUnitsPerRun, signal },
         );
         if (outcome.errors.length > 0) {
           logger.warn({ outcome }, "brain.corpus_pass.partial");
