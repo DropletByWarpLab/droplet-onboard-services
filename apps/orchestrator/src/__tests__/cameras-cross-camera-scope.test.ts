@@ -274,7 +274,8 @@ describe("routes addressed by event / review id check the owning camera", () => 
     ["get", "/api/cameras/events/ev-bed/snapshot", "/api/cameras/events/ev-front/snapshot"],
     ["get", "/api/cameras/clips/event/ev-bed", "/api/cameras/clips/event/ev-front"],
     ["post", "/api/cameras/events/ev-bed/regenerate-description", "/api/cameras/events/ev-front/regenerate-description"],
-    ["post", "/api/cameras/faces/sam/from-event/ev-bed", "/api/cameras/faces/sam/from-event/ev-front"],
+    // faces/:name/from-event left this list with WARP-3104: tagging a face is
+    // a roster write, owner/admin only, and owners and admins see every camera.
     ["get", "/api/cameras/reviews/rv-bed/preview", "/api/cameras/reviews/rv-front/preview"],
     ["get", "/api/cameras/reviews/rv-bed/thumbnail", "/api/cameras/reviews/rv-front/thumbnail"],
     ["post", "/api/cameras/reviews/rv-bed/viewed", "/api/cameras/reviews/rv-front/viewed"],
@@ -339,17 +340,19 @@ describe("WARP-3013: Frigate's `train` face crops are for all-camera viewers onl
     expect(vi.mocked(frigate.fetchFaceImage)).toHaveBeenLastCalledWith("train", CROP);
   });
 
+  // WARP-3104: face-roster writes are owner/admin, and only members are ever
+  // camera-scoped, so a scoped user is now refused at the role tier (403)
+  // before the `train`-folder check runs.
   it("a scoped user cannot delete a `train` crop", async () => {
     const res = await sam().delete(`/api/cameras/faces/train/images/${CROP}`);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
     expect(vi.mocked(frigate.deleteFaceImage)).not.toHaveBeenCalled();
   });
 
-  it("a scoped user still removes a roster image; an owner removes a `train` crop", async () => {
-    expect((await sam().delete("/api/cameras/faces/Alice/images/alice-1.webp")).status).toBe(204);
+  it("a scoped user cannot remove a roster image either; an owner removes a `train` crop", async () => {
+    expect((await sam().delete("/api/cameras/faces/Alice/images/alice-1.webp")).status).toBe(403);
     expect((await owner().delete(`/api/cameras/faces/train/images/${CROP}`)).status).toBe(204);
     expect(vi.mocked(frigate.deleteFaceImage).mock.calls).toEqual([
-      ["Alice", "alice-1.webp"],
       ["train", CROP],
     ]);
   });
@@ -358,7 +361,7 @@ describe("WARP-3013: Frigate's `train` face crops are for all-camera viewers onl
     // ev-front is Sam's camera, so the event guard passes; the folder is
     // still the all-camera one, and Sam may not write into what they cannot see.
     const res = await sam().post("/api/cameras/faces/train/from-event/ev-front");
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
     expect(vi.mocked(frigate.tagEventAsFace)).not.toHaveBeenCalled();
   });
 
