@@ -501,6 +501,54 @@ fi
 # Phase 5 above asserts that gate is still wired.
 
 echo ""
+echo "--- Phase 6: security headers survive every add_header (WARP-3193 SEC-DATA-8) ---"
+# nginx inherits add_header only into a location that declares NONE of its own,
+# so a location that adds any header must also include one of the two shared
+# sets, or it silently drops HSTS / anti-framing. The Nextcloud legs take the
+# upstream (HSTS-only) set: Nextcloud sends its own CSP and framing headers.
+
+if grep -qE '^[[:space:]]*server_tokens off;' "$CONF"; then
+  pass "server_tokens off"
+else
+  fail "server_tokens is not switched off"
+fi
+
+for f in security-headers.conf security-headers.upstream.conf; do
+  if [ -f "$NGINX_DIR/$f" ] && grep -qF "COPY docker/nginx/$f" "$DOCKERFILE"; then
+    pass "$f exists and is copied into the image"
+  else
+    fail "$f missing or not COPYed by the Dockerfile"
+  fi
+done
+
+UNGUARDED=$(awk '
+  /^[[:space:]]*location[[:space:]].*\{[[:space:]]*$/ { inloc = 1; name = $0; hdr = 0; inc = 0; next }
+  inloc && /^[[:space:]]*add_header[[:space:]]/ { hdr = 1 }
+  inloc && /include \/etc\/nginx\/security-headers(\.upstream)?\.conf;/ { inc = 1 }
+  inloc && /^[[:space:]]*}[[:space:]]*$/ { if (hdr && !inc) print name; inloc = 0 }
+' "$CONF" "$NGINX_DIR"/docs-engine.*.conf)
+if [ -z "$UNGUARDED" ]; then
+  pass "every location with its own add_header includes a security-headers set"
+else
+  fail "location(s) with add_header but no security-headers include: $UNGUARDED"
+fi
+
+for prefix in "${ASSET_PREFIXES[@]}"; do
+  if location_body "$prefix" | grep -qF 'include /etc/nginx/security-headers.upstream.conf;'; then
+    pass "$prefix keeps Nextcloud's own framing/CSP (upstream header set)"
+  else
+    fail "$prefix does not include security-headers.upstream.conf"
+  fi
+done
+for f in "$NGINX_DIR"/docs-engine.*.conf; do
+  if grep -qF 'include /etc/nginx/security-headers.upstream.conf;' "$f"; then
+    pass "$(basename "$f") keeps the engine's own framing/CSP (upstream header set)"
+  else
+    fail "$(basename "$f") does not include security-headers.upstream.conf"
+  fi
+done
+
+echo ""
 echo "  $((TESTS - FAILURES))/$TESTS passed"
 echo "FAILURES=$FAILURES"
 [ "$FAILURES" -eq 0 ] || exit 1

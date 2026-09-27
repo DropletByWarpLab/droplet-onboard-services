@@ -255,7 +255,11 @@ async function logStorageCommand(
   }
 }
 
-/** Periodically clean expired confirmation tokens. */
+/**
+ * Periodically clean expired confirmation tokens. Scheduled every 60 s by
+ * index.ts main() on cron-runtime (WARP-3193 QUAL-7 — no timer at module
+ * scope, so importing this module starts nothing).
+ */
 export function cleanupExpiredStorageTokens(): void {
   const now = Date.now();
   for (const [token, pending] of pendingConfirmations) {
@@ -264,5 +268,3 @@ export function cleanupExpiredStorageTokens(): void {
     }
   }
 }
-
-setInterval(cleanupExpiredStorageTokens, 60_000).unref?.();

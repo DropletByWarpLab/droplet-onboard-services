@@ -335,3 +335,43 @@ describe("the deprecated eaglesoft literal connect/test", () => {
     expect(testMock).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * WARP-3193 SEC-INJ-3 — host / serverName / databaseName reach an ODBC
+ * connection string in the SQL bridge, so the same patterns the bridge's
+ * pydantic TargetSpec enforces are enforced here, before anything is stored.
+ */
+describe("connect body: connection-string fields are pattern-checked", () => {
+  it.each([
+    ["host", "10.0.1.9;START=calc"],
+    ["host", "evil host"],
+    ["host", "a\nHost=evil"],
+    ["databaseName", "AcmeDB;START=calc"],
+    ["databaseName", "{x}"],
+    ["serverName", "SRV;Encryption=NONE"],
+  ])("refuses %s=%j and never reaches the service", async (field, value) => {
+    const res = await request(app())
+      .post("/api/integrations/acme-pms/connect")
+      .send({ ...BODY, [field]: value });
+
+    expect(res.status).toBe(400);
+    expect(connectMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses the same on the test route", async () => {
+    const res = await request(app())
+      .post("/api/integrations/acme-pms/test")
+      .send({ ...BODY, host: "10.0.1.9;x=y" });
+
+    expect(res.status).toBe(400);
+    expect(testMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts ordinary hostnames and names", async () => {
+    const res = await request(app())
+      .post("/api/integrations/acme-pms/connect")
+      .send({ host: "eaglesoft-srv.office.lan", serverName: "EAGLESOFT_1", databaseName: "Patterson.PM-2" });
+
+    expect(res.status).toBe(200);
+  });
+});

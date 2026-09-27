@@ -48,6 +48,16 @@ const config: Config = {
           hover: "var(--color-accent-hover)",
           subtle: "var(--color-accent-subtle)",
           foreground: "var(--color-on-accent)",
+          // The accent as a SOLID FILL under text. Light steps to indigo-600
+          // so `accent-foreground` clears AA on it (4.47:1 → 6.29:1); dark is
+          // the accent unchanged, where the ink flips to #1d1d1f at 5.64:1.
+          // `fill-hover` is its hover/pressed step: indigo-700 in light
+          // (white 7.90:1), indigo-300 in dark (#1d1d1f 8.44:1).
+          // Declared on `html` / `html.dark, html .dark` in globals.css rather
+          // than :root/.dark — those blocks are locked to the design-and-style
+          // canon (WARP-1277). Same shape as the tokens above it.
+          fill: "var(--color-accent-fill)",
+          "fill-hover": "var(--color-accent-fill-hover)",
         },
         system: {
           red: "var(--color-system-red)",

@@ -93,6 +93,11 @@ export function createRequestLogger(opts: {
         "req.query.sig",
         "req.body.sign_public_key_pem",
         'req.headers["x-overlay-pop"]',
+        // WARP-3193 SEC-DATA-2: the user's Nextcloud app-password rides on
+        // every file tool call; the other two carry service credentials.
+        'req.headers["x-nextcloud-token"]',
+        'req.headers["x-droplet-auth"]',
+        'req.headers["x-api-key"]',
         "res.body.token",
       ],
     },
@@ -111,6 +116,15 @@ export function createRequestLogger(opts: {
     // around the standard serializer).
     serializers: { req: scrubReq },
     level: opts.level ?? (isTest ? "silent" : "info"),
+    // WARP-3193 SEC-DATA-4: the pre-auth calendar ICS feed authenticates by
+    // `?token=`, and the default serializer logs `url` verbatim. Log the path
+    // only; the parsed `req.query` stays, with its token paths redacted above.
+    serializers: {
+      req: (req: { url?: string }) => {
+        if (typeof req.url === "string") req.url = req.url.split("?", 1)[0];
+        return req;
+      },
+    },
     customProps: (req) => ({
       requestId:
         (req as typeof req & { requestId?: string }).requestId ??

@@ -85,11 +85,25 @@ function handleErpError(res: Response, err: unknown): boolean {
 /** Connect / test body. The backend owns the credential (the wizard shows a
  *  generated password for the DBA to run the GRANT), so `secretRef` is optional
  *  and minted server-side; `scopes` / `enableWrites` carry the wizard choices. */
+/** WARP-3193 SEC-INJ-3 — host / serverName / databaseName are spliced into an
+ *  ODBC connection string by the SQL bridge, so they are held to characters
+ *  that cannot close a parameter (`;`), open a quoted value (`{`) or smuggle a
+ *  line. Mirrors `HOST_PATTERN` / `NAME_PATTERN` in
+ *  services/erp-sql-bridge/schemas.py — keep the two in step. */
+const CONN_HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
+const CONN_NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/;
+
 const connectSchema = z.object({
-  host: z.string().min(1),
-  databaseName: z.string().min(1).default("PattersonPM"),
+  host: z.string().trim().regex(CONN_HOST_RE, "host must be an IP address or hostname"),
+  databaseName: z
+    .string()
+    .regex(CONN_NAME_RE, "databaseName may contain only letters, digits, _ . -")
+    .default("PattersonPM"),
   secretRef: z.string().min(1).optional(),
-  serverName: z.string().optional(),
+  serverName: z
+    .string()
+    .regex(CONN_NAME_RE, "serverName may contain only letters, digits, _ . -")
+    .optional(),
   port: z.number().int().positive().optional(),
   scopes: z.array(z.string()).optional(),
   enableWrites: z.boolean().optional(),

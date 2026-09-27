@@ -22,12 +22,11 @@
  * honour it. Converging on every boot is what makes that unreachable, and
  * the sweep costs one indexed UPDATE against a table with tens of rows.
  *
- * Selection is on the EXPLICIT columns the invite state machine defines
- * (`acceptedAt` / `revokedAt`, per invite.service's Pending → Accepted /
- * Expired / Revoked). Expiry is deliberately NOT part of the predicate: an
- * expired-but-unrevoked row is still Pending in the column sense, and
- * `expiresAt < now()` is a clock comparison, not stored state — revoking it
- * too is both correct and cheaper than reasoning about clock skew.
+ * Selection is on the explicit `status` column (WARP-3193 QUAL-3; it used to
+ * be `acceptedAt` / `revokedAt` absence). Both non-accepted, non-revoked
+ * states match: `expired` as well as `pending`, and no `expiresAt` clock
+ * comparison — revoking an expired row too is both correct and cheaper than
+ * reasoning about clock skew, which is what the pre-status predicate did.
  */
 import type { PrismaClient } from "@prisma/client";
 import { createLogger } from "../lib/logger.js";
@@ -47,8 +46,8 @@ export async function revokePendingOwnerInvites(
   prisma: PrismaClient,
 ): Promise<number> {
   const { count } = await prisma.userInvite.updateMany({
-    where: { role: "owner", acceptedAt: null, revokedAt: null },
-    data: { revokedAt: new Date() },
+    where: { role: "owner", status: { in: ["pending", "expired"] } },
+    data: { status: "revoked", revokedAt: new Date() },
   });
 
   if (count > 0) {

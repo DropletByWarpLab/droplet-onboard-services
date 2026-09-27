@@ -130,15 +130,15 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
-// TOTP second-factor: verifyTotpCode is the gate the finding-1 brute-force
+// TOTP second-factor: acceptTotpCode is the gate the finding-1 brute-force
 // targets. Default to a wrong code (false) so each attempt is a 2FA failure.
-const verifyTotpCode = vi.fn().mockResolvedValue(false);
+const acceptTotpCode = vi.fn().mockResolvedValue(false);
 vi.mock("../services/totp.service.js", () => ({
   TOTP_ISSUER: "Droplet",
   generateTotpEnrollment: vi.fn(),
   encryptTotpSecret: vi.fn(),
   decryptTotpSecret: vi.fn(() => "JBSWY3DPEHPK3PXP"),
-  verifyTotpCode: (...a: unknown[]) => verifyTotpCode(...a),
+  acceptTotpCode: (...a: unknown[]) => acceptTotpCode(...a),
 }));
 
 vi.mock("../services/recovery.service.js", () => ({
@@ -332,7 +332,7 @@ describe("WARP-579 — POST /auth/login brute-force throttle", () => {
   it("repeated wrong-TOTP-after-correct-password attempts accrue toward lockout and eventually 429", async () => {
     // Password is ALWAYS correct; the user has TOTP enabled; every code is wrong.
     verifyPassword.mockResolvedValue(true);
-    verifyTotpCode.mockResolvedValue(false);
+    acceptTotpCode.mockResolvedValue(false);
     const prisma = createPrismaMock([stefan], {
       userId: stefan.id,
       confirmedAt: new Date(),
@@ -366,14 +366,14 @@ describe("WARP-579 — POST /auth/login brute-force throttle", () => {
     // fresh wrong-TOTP run after success starts from zero (would otherwise be
     // already-locked).
     cacheStore.clear();
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const ok = await request(app)
       .post("/api/auth/login")
       .send({ email: "stefan@warp.test", password: "correct-horse", totp: "123456" });
     expect(ok.status).toBe(200);
     // Account counter cleared on full success: 5 more wrong-TOTP attempts stay
     // inside the free tier (no lock yet).
-    verifyTotpCode.mockResolvedValue(false);
+    acceptTotpCode.mockResolvedValue(false);
     for (let i = 0; i < 5; i++) {
       const res = await request(app)
         .post("/api/auth/login")

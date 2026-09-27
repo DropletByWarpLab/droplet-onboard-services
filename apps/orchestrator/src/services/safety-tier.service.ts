@@ -64,6 +64,28 @@ const rateLimitMap = new Map<string, number[]>();
 const pendingConfirmations = new Map<string, PendingConfirmation>();
 
 /**
+ * WARP-3193 PERF-11 — hard ceilings on the two maps. `cleanupExpiredTokens`
+ * (every 60 s, scheduled by index.ts main()) keeps them small in normal use;
+ * the caps bound memory if something mints tokens or touches entities faster
+ * than that. Far above anything a household produces inside one 60 s window.
+ */
+export const MAX_PENDING_CONFIRMATIONS = 1_000;
+export const MAX_RATE_LIMIT_ENTITIES = 1_000;
+
+/**
+ * Make room for one more key: drop what has expired, and if the map is still
+ * full evict its oldest entries (a Map iterates in insertion order).
+ */
+function makeRoom<V>(map: Map<string, V>, max: number): void {
+  if (map.size < max) return;
+  cleanupExpiredTokens();
+  for (const key of map.keys()) {
+    if (map.size < max) break;
+    map.delete(key);
+  }
+}
+
+/**
  * Evaluate a smart home command through the safety tier system.
  *
  * Returns either { allowed: true } for Tier 1 auto-execute,
@@ -201,6 +223,7 @@ export async function evaluateCommand(
 
   // Tier 2: Requires confirmation — generate token
   const confirmationToken = randomBytes(32).toString("hex");
+  makeRoom(pendingConfirmations, MAX_PENDING_CONFIRMATIONS);
   pendingConfirmations.set(confirmationToken, {
     token: confirmationToken,
     entityId,
@@ -414,6 +437,7 @@ function recordRateLimitHit(entityId: string): void {
   // Prune old entries
   const recent = timestamps.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
   recent.push(now);
+  if (!rateLimitMap.has(entityId)) makeRoom(rateLimitMap, MAX_RATE_LIMIT_ENTITIES);
   rateLimitMap.set(entityId, recent);
 }
 
@@ -493,7 +517,11 @@ export async function getAuditLog(
 
 // ── Cleanup ──
 
-/** Periodically clean expired confirmation tokens (call from setInterval). */
+/**
+ * Clean expired confirmation tokens and stale rate-limit entries. Scheduled
+ * every 60 s by index.ts main() on cron-runtime (WARP-3193 PERF-11 — it had
+ * no caller, so both maps only ever grew).
+ */
 export function cleanupExpiredTokens(): void {
   const now = Date.now();
   for (const [token, pending] of pendingConfirmations) {
@@ -501,4 +529,20 @@ export function cleanupExpiredTokens(): void {
       pendingConfirmations.delete(token);
     }
   }
+  for (const [entityId, timestamps] of rateLimitMap) {
+    const recent = timestamps.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+    if (recent.length === 0) rateLimitMap.delete(entityId);
+    else rateLimitMap.set(entityId, recent);
+  }
+}
+
+/** Test-only view of the two maps. */
+export function _safetyTierStateForTests(): {
+  pendingConfirmations: number;
+  rateLimitEntities: string[];
+} {
+  return {
+    pendingConfirmations: pendingConfirmations.size,
+    rateLimitEntities: [...rateLimitMap.keys()],
+  };
 }
