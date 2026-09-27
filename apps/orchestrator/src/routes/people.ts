@@ -28,7 +28,13 @@
  * Nextcloud fallback continues to populate `req.user` for legacy
  * sessions that haven't yet been mirrored locally.
  */
-import { deleteDispositionSchema, scheduleUserDeletion } from "../services/leaver-deletion.service.js";
+import {
+  deleteDispositionSchema,
+  handOverAndDeleteUser,
+  HandoverRefusedError,
+  scheduleUserDeletion,
+  UNKNOWN_DISPOSITION_BODY,
+} from "../services/leaver-deletion.service.js";
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
@@ -838,9 +844,22 @@ export function createPeopleRouter(
         // kept 30 days, then the nightly job removes the account.
         const parsedDisposition = deleteDispositionSchema.safeParse(req.body ?? {});
         if (!parsedDisposition.success) {
-          return res.status(400).json({
-            error: "Unknown disposition. The only one available is \"retention\" (keep the files 30 days, then delete).",
-            code: "UNKNOWN_DISPOSITION",
+          return res.status(400).json(UNKNOWN_DISPOSITION_BODY);
+        }
+        if (parsedDisposition.data.disposition === "handover") {
+          // WARP-3169 — same path as DELETE /api/auth/users/:username.
+          const handed = await handOverAndDeleteUser(prisma, existing, {
+            guardActor: { id: req.user?.id, role: req.user?.role },
+            actorUsername: req.user?.username ?? null,
+            actor: actorFromRequest(req),
+            recipientId: parsedDisposition.data.recipientId,
+          });
+          return res.json({
+            ok: true,
+            status: handed.removed ? "deleted" : "deletion_retrying",
+            username: existing.username,
+            recipient: handed.recipient,
+            folder: handed.folder,
           });
         }
         const scheduled = await scheduleUserDeletion(prisma, existing, {
@@ -858,6 +877,9 @@ export function createPeopleRouter(
           deletionDueAt: scheduled.deletionDueAt,
         });
       } catch (err) {
+        if (err instanceof HandoverRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }

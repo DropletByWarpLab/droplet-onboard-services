@@ -1342,7 +1342,7 @@ export interface RosterUser extends AuthUser {
   /** WARP-3113 — explicit deletion state. PENDING: deactivated, files kept
    *  until `deletionDueAt`, cancellable. PURGING: the nightly job is removing
    *  the account now. Optional: an older orchestrator sends nothing. */
-  deletionStatus?: "NONE" | "PENDING" | "PURGING";
+  deletionStatus?: "NONE" | "PENDING" | "PURGING" | "HANDING_OVER";
   deletionDueAt?: string | null;
 }
 
