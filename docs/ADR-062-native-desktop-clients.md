@@ -16,15 +16,15 @@
 - **Tauri never shipped.** `droplet-windows` has 0 tags and 0 releases (checked 2026-09-26; `ADR-045:32-33` says the same). There is no installed base, so the switch needs no data migration: the native client starts from a clean slate.
 - **ADR-008 already points the other way.** Its 2026-06-01 reconciliation makes native clients sign in themselves (`?return=body`, `TOTP_REQUIRED`) and says "Android + Windows to follow" (`ADR-008:319-327`). The Tauri shell instead hosts the dashboard's cookie login in WebView2 and never holds a Bearer, so its own background calls (tunnel status, the push bridge) have no session.
 - **The Mac and Linux went native first.** DropletAgent (WARP-3030, 2026-09-23) is a native SwiftUI macOS app that replaces the dashboard on the Mac, not Mac Catalyst, which contradicts `ADR-009:107` and `:213-215` without an ADR. `droplet-linux` is a native GTK 4 client with no web view (ADR-061, WARP-3203). DropletAgent is the direct precedent for a native Windows client.
-- **The port is bounded.** The Tauri shell's logic worth keeping (trust, pairing, discovery, recovery, tray, the vpnd client, installer semantics) is about 5.5-6.5k lines of non-test C# plus 3.5-4k lines of tests, and its roughly 245 Rust tests become the spec. The skeleton and the first slices are already on `droplet-windows` (`feat/native-windows-client`, `feat/native-windows-signin`).
+- **The port is bounded.** The Tauri shell's logic worth keeping (trust, pairing, discovery, recovery, tray, the vpnd client, installer semantics) is estimated at 5.5-6.5k lines of non-test C# plus 3.5-4k lines of tests once ported, and its roughly 245 Rust tests become the spec. The skeleton and the first slices are already on `droplet-windows` (`feat/native-windows-client`, `feat/native-windows-signin`).
 
 ## Decision
 
-**Droplet's desktop clients are native per platform.** On Windows that is a C# / WinUI 3 client in `droplet-windows`, replacing the Tauri shell:
+**Droplet's desktop clients are native per platform.** On Windows that is a C# / WinUI 3 client in `droplet-windows`, replacing the Tauri shell (macOS: row 11; Linux: ADR-061):
 
 | # | Topic | Decision | Rests on (WARP-3223) |
 |---|---|---|---|
-| 1 | Stack | C# on .NET 10 LTS, WinUI 3 on Windows App SDK 2.x, unpackaged. .NET is self-contained. The Windows App SDK is self-contained, or framework-dependent if the toast spike (WindowsAppSDK#6774, roadmap spike S1) needs it. No trimming, Native AOT or single-file publish. `StartupHookSupport=false`. A per-machine MSI installs into `%ProgramFiles%\Droplet`. x64 only, on Windows 10 22H2+ and Windows 11; the installer refuses ARM64 | Stefan: S1, S7 |
+| 1 | Stack | C# on .NET 10 LTS, WinUI 3 on Windows App SDK 2.x, unpackaged. .NET is self-contained. The Windows App SDK is self-contained, or framework-dependent if the toast spike (WindowsAppSDK#6774, WARP-3242) needs it. No trimming, Native AOT or single-file publish. `StartupHookSupport=false`. A per-machine MSI installs into `%ProgramFiles%\Droplet`. x64 only, on Windows 10 22H2+ and Windows 11; the installer refuses ARM64 | Stefan: S1, S7 |
 | 2 | UI and API | Every screen is native and calls `/api/*` with a Bearer token, per ADR-008's 2026-06-01 reconciliation: `POST /api/auth/login?return=body`, the `TOTP_REQUIRED` challenge, rotating refresh with the token in the body. No cookies and no `Origin` header. When a friendly name 307-redirects to the box's FQDN, the client follows the redirect itself and then stores and uses the FQDN (.NET drops `Authorization` on a cross-host redirect) | Romain: R2 |
 | 3 | Embedded web | None in v1: no WebView2 anywhere. Help and every section that is not native yet hand off to the system browser, and only when the box presented a public certificate chain **and** its FQDN resolves locally to a live box. Otherwise the app says, in finished copy, that the section needs the web dashboard, which this PC cannot open yet | Romain: R7 |
 | 4 | Trust | Never trust-on-first-use. The pinned-pairing rules of WARP-2953 (`droplet-windows` `trust.rs`, ported to C# with its tests) plus bundled Mozilla roots. **Recorded divergence:** DropletAgent trusts LAN hosts on first use; Windows refuses a typed address that has neither a pin nor a public chain, and explains why. Windows keeps its model because it is implemented and tested, and because it vouches for the enrolment of a machine-wide SYSTEM tunnel | - |
@@ -45,13 +45,13 @@ Sign-in therefore arrives in this order: password + TOTP + recovery code, with a
 
 - **Positive**
   - One native model across platforms: every client renders its own screens against `/api` with a Bearer token.
-  - Background calls finally carry a Bearer, so tunnel status and live events work from the tray.
+  - Calls outside a web page finally carry a Bearer: `GET /api/vpn/status` and the live-events WebSocket work, which the Tauri shell's own calls could not.
   - No WebView2 runtime to ship or patch, and no web-view cookie state to leak.
 - **Negative**
   - C# is a sixth language for the team (after TypeScript, Swift, Kotlin, Rust and Python).
   - We own monthly patching of the self-contained .NET runtime.
   - Each update needs an admin UAC prompt in v1.
-  - Toasts are at risk from WindowsAppSDK#6774 in an unpackaged app until roadmap spike S1 clears it.
+  - Toasts are at risk from WindowsAppSDK#6774 in an unpackaged app until the toast spike (WARP-3242) clears it.
   - A Windows App SDK major version arrives roughly every 6 months.
   - Help and web editing are unavailable on self-signed boxes, because the browser hand-off needs a public chain (row 3).
   - WARP-2175's shared Rust desktop core goes away.
