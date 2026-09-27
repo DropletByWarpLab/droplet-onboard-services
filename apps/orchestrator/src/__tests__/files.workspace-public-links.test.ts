@@ -99,14 +99,14 @@ function makePrisma() {
   };
 }
 
-function app(asUser: { id: string; username: string; role: string }) {
+function app(asUser: { id: string; username: string; role: string }, db = makePrisma()) {
   const a = express();
   a.use(express.json());
   a.use((req, _res, next) => {
     (req as unknown as { user: typeof asUser }).user = asUser;
     next();
   });
-  a.use("/api", createFilesRouter(makePrisma() as never));
+  a.use("/api", createFilesRouter(db as never));
   return a;
 }
 
@@ -322,6 +322,19 @@ describe("WARP-3053 — PUT/DELETE /files/share/:id on company data", () => {
   it("member editing an internal Workspace share: 403 (WARP-3168)", async () => {
     ncMock.ncGetShare.mockResolvedValue({ ...created, shareType: 0, path: "/Household/Plan.pdf" });
     const res = await request(app(MEMBER)).put("/api/files/share/7").send({ permissions: 3 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("workspace_share_admin_only");
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("member (creator) editing a recorded space=shared share: 403 (WARP-3168)", async () => {
+    const db = makePrisma();
+    db.departmentShare.findUnique.mockResolvedValue({
+      departmentId: HOUSEHOLD.id,
+      createdById: MEMBER.id,
+      shareType: 0,
+    } as never);
+    const res = await request(app(MEMBER, db)).put("/api/files/share/7").send({ permissions: 1 });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe("workspace_share_admin_only");
     expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();

@@ -743,7 +743,8 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
 
     it("the install hook applies the same masks the reconciler asserts (a reinstall can't restore 31)", async () => {
       const { readFileSync } = await import("node:fs");
-      const hook = readFileSync(new URL("../../../../docker/nextcloud-init.sh", import.meta.url), "utf8");
+      const { join } = await import("node:path");
+      const hook = readFileSync(join(__dirname, "..", "..", "..", "..", "docker", "nextcloud-init.sh"), "utf8");
       const line = /for gm in (.+); do/.exec(hook)?.[1] ?? "";
       const hookMasks = Object.fromEntries(
         [...line.matchAll(/"([^":]+):(\d+)"/g)].map((m) => [m[1] === "${HOUSEHOLD_GROUP}" ? "household" : m[1], Number(m[2])]),

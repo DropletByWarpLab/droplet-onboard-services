@@ -1756,6 +1756,10 @@ export interface InviteListItem {
   createdBy: string;
   createdAt: string;
   expiresAt: string;
+  /** WARP-3193 QUAL-3 — the invite lifecycle. The server already reads a
+   *  pending invite past `expiresAt` as `expired`, so this is the only field
+   *  the UI consults; the timestamps are detail, not state. */
+  status: "pending" | "accepted" | "revoked" | "expired";
   acceptedAt: string | null;
   revokedAt: string | null;
 }

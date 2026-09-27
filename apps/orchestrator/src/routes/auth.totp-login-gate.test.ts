@@ -67,21 +67,25 @@ vi.mock("../services/password.service.js", () => ({
   hashPassword: vi.fn().mockResolvedValue("$argon2id$mock"),
 }));
 
-const verifyTotpCode = vi.fn();
+const acceptTotpCode = vi.fn();
 vi.mock("../services/totp.service.js", () => ({
-  verifyTotpCode: (...a: unknown[]) => verifyTotpCode(...a),
+  acceptTotpCode: (...a: unknown[]) => acceptTotpCode(...a),
   generateTotpEnrollment: vi.fn(),
   encryptTotpSecret: vi.fn(),
   decryptTotpSecret: (...a: unknown[]) => `decrypted:${a[0]}`,
   TOTP_ISSUER: "Droplet",
 }));
 
-const findMatchingRecoveryCodeHash = vi.fn();
-vi.mock("../services/recovery.service.js", () => ({
-  findMatchingRecoveryCodeHash: (...a: unknown[]) => findMatchingRecoveryCodeHash(...a),
+// WARP-3193 ARCH-3 — the REAL consumeRecoveryCode runs (the route no longer
+// consumes inline). Its argon2 matcher calls the mocked verifyPassword(hash,
+// code) per stored hash, so `matchRecoveryHash("hash-2")` picks the row.
+vi.mock("../services/recovery.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/recovery.service.js")>()),
   generateRecoveryCodes: vi.fn(),
-  RECOVERY_CODE_COUNT: 10,
 }));
+function matchRecoveryHash(hash: string | null): void {
+  verifyPassword.mockImplementation(async (h: unknown) => h === hash);
+}
 
 vi.mock("../services/jwt.service.js", async () => {
   const actual = await vi.importActual<typeof import("../services/jwt.service.js")>(
@@ -212,6 +216,7 @@ const stefan: UserRow = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  verifyPassword.mockReset();
   verifyDummyPassword.mockResolvedValue(false);
 });
 
@@ -225,7 +230,7 @@ describe("login TOTP gate — user WITHOUT TOTP enabled", () => {
 
     expect(res.status).toBe(200);
     expect(sessionCookie(res)).toBeDefined();
-    expect(verifyTotpCode).not.toHaveBeenCalled();
+    expect(acceptTotpCode).not.toHaveBeenCalled();
   });
 
   it("TOTP row exists but is UNCONFIRMED (enrollment pending) → not required", async () => {
@@ -240,7 +245,7 @@ describe("login TOTP gate — user WITHOUT TOTP enabled", () => {
 
     expect(res.status).toBe(200);
     expect(sessionCookie(res)).toBeDefined();
-    expect(verifyTotpCode).not.toHaveBeenCalled();
+    expect(acceptTotpCode).not.toHaveBeenCalled();
   });
 });
 
@@ -266,7 +271,7 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
   it("valid TOTP code → 200, session issued, secret decrypted before verify", async () => {
     verifyPassword.mockResolvedValueOnce(true);
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({ users: [stefan], totp: [enabledTotp] });
     const res = await request(buildApp(prisma))
       .post("/api/auth/login")
@@ -275,12 +280,12 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
     expect(res.status).toBe(200);
     expect(sessionCookie(res)).toBeDefined();
     // Verified against the DECRYPTED secret, not the stored ciphertext.
-    expect(verifyTotpCode).toHaveBeenCalledWith("decrypted:enc-secret", "123456");
+    expect(acceptTotpCode).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ secretEnc: "enc-secret" }), "123456");
   });
 
   it("invalid TOTP code → 401 TOTP_REQUIRED, no session", async () => {
     verifyPassword.mockResolvedValueOnce(true);
-    verifyTotpCode.mockResolvedValueOnce(false);
+    acceptTotpCode.mockResolvedValueOnce(false);
     const prisma = createPrismaMock({ users: [stefan], totp: [enabledTotp] });
     const res = await request(buildApp(prisma))
       .post("/api/auth/login")
@@ -293,7 +298,7 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
   it("valid recovery code → 200 AND the matched code row is marked used", async () => {
     verifyPassword.mockResolvedValueOnce(true);
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce("hash-2");
+    matchRecoveryHash("hash-2");
     const prisma = createPrismaMock({
       users: [stefan],
       totp: [enabledTotp],
@@ -318,7 +323,7 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
   it("wrong recovery code → 401 TOTP_REQUIRED, nothing consumed", async () => {
     verifyPassword.mockResolvedValueOnce(true);
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce(null);
+    matchRecoveryHash(null);
     const prisma = createPrismaMock({
       users: [stefan],
       totp: [enabledTotp],
@@ -339,9 +344,9 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
   // usedAt:null) so exactly ONE login authenticates and the loser is failed
   // back to the TOTP gate. A check-then-id-update lets both win → RED here.
   it("two concurrent logins with the SAME recovery code → exactly ONE succeeds", async () => {
-    verifyPassword.mockResolvedValue(true);
-    // Both racers match the same unused row (rc1 → hash-1).
-    findMatchingRecoveryCodeHash.mockResolvedValue("hash-1");
+    // Both racers' passwords verify, and both match the same unused row
+    // (rc1 → hash-1): the mocked verifyPassword answers true for both.
+    verifyPassword.mockImplementation(async (h: unknown) => h === "hash-1" || h === stefan.passwordHash);
     const prisma = createPrismaMock({
       users: [stefan],
       totp: [enabledTotp],
@@ -372,7 +377,7 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
   it("a valid second factor stamps lastMfaAt into the access token", async () => {
     verifyPassword.mockResolvedValueOnce(true);
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({ users: [stefan], totp: [enabledTotp] });
     const res = await request(buildApp(prisma))
       .post("/api/auth/login")
@@ -393,6 +398,6 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.error).toBe("Invalid credentials");
-    expect(verifyTotpCode).not.toHaveBeenCalled();
+    expect(acceptTotpCode).not.toHaveBeenCalled();
   });
 });
