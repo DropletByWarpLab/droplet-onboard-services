@@ -3506,6 +3506,43 @@ export interface ExtensionPromoteResult {
   installError: { code: string; message: string } | null;
 }
 
+/**
+ * WARP-3205 — one `ext-*` row of `GET /api/admin/remote-tools/classifications`,
+ * as the owner's tool review renders it.
+ *
+ * There is deliberately no `wireDescription`: the orchestrator still sends
+ * the row's recorded copy, and nothing here can render it.
+ * `declaredDescription` is the signed manifest's description, sent only when
+ * it and `inputSchema` hash to the row's `inputSchemaHash` (what the review
+ * binds), and is shown only as its author's words.
+ */
+export interface ExtensionToolClassification {
+  serverId: string;
+  toolName: string;
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  denied: boolean;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  /** The review hash (description + arguments) the decision is bound to; sent back with it. */
+  inputSchemaHash: string | null;
+  /** The schema that hash names, or null when the box cannot show it (no review then). */
+  inputSchema: Record<string, unknown> | null;
+  /** The signed description that hash names, beside a non-null `inputSchema`; else null. */
+  declaredDescription: string | null;
+  /** What dispatch does with a call, decided by the orchestrator. */
+  decision: RuntimeToolClassification;
+}
+
+/** The body of `PATCH …/classifications/:serverId/:toolName` for an extension tool. */
+export interface ExtensionToolDecision {
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  denied: boolean;
+  /** The review hash of what the owner was shown (409 STALE_REVIEW if it moved). */
+  inputSchemaHash: string;
+}
+
 // ── WARP-2977 (ADR-059 P2): the Security command center feed ──
 
 /** Mirrors the orchestrator's SecurityEventKind enum. */

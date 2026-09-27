@@ -15,6 +15,8 @@ import type {
   ExtensionProposal,
   ExtensionPromotePhase1,
   ExtensionPromoteResult,
+  ExtensionToolClassification,
+  ExtensionToolDecision,
   CameraInfo,
   CameraGroupInfo,
   CameraPinInfo,
@@ -9077,6 +9079,37 @@ export function setExtensionEnabled(
 
 export function uninstallExtension(slug: string): Promise<{ id: string; status: string }> {
   return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, { method: "DELETE" });
+}
+
+/**
+ * WARP-3205 — an extension's tools as the classification record has them,
+ * each with the arguments and signed description its review hash names
+ * (null when the box cannot show them) and what dispatch does with a call.
+ * Owner/admin.
+ */
+export function fetchExtensionToolClassifications(
+  serverId: string,
+): Promise<{ classifications: ExtensionToolClassification[] }> {
+  return extensionRequest(
+    `/api/admin/remote-tools/classifications?serverId=${encodeURIComponent(serverId)}`,
+  );
+}
+
+/**
+ * The owner's decision on one extension tool. Carries the review hash of
+ * what was shown, so a tool whose arguments or description changed in
+ * between is a 409 STALE_REVIEW, never a review of a tool nobody saw. The
+ * answer is the bare record row (no review fields): read the list again.
+ */
+export function classifyExtensionTool(
+  serverId: string,
+  toolName: string,
+  decision: ExtensionToolDecision,
+): Promise<{ classification: Omit<ExtensionToolClassification, "inputSchema" | "declaredDescription" | "decision"> }> {
+  return extensionRequest(
+    `/api/admin/remote-tools/classifications/${encodeURIComponent(serverId)}/${encodeURIComponent(toolName)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(decision) },
+  );
 }
 
 /** WARP-2991 — what a cloud turn on this conversation would carry. Mirrors
