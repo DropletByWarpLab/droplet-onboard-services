@@ -174,11 +174,26 @@ else
   echo "[droplet] group folder '${SHARED_FOLDER_NAME}' already exists (id ${FOLDER_ID}) — skipping create"
 fi
 
-# 4. Assign the household group with read/write/share permissions.
-#    `groupfolders:group <id> <group>` is idempotent (re-assigning the same
-#    group is a no-op). Permission bits: 31 = read+update+create+delete+share.
-$OCC groupfolders:group "$FOLDER_ID" "$HOUSEHOLD_GROUP" || true
-$OCC groupfolders:permissions "$FOLDER_ID" "$HOUSEHOLD_GROUP" 31 || true
+# 4. Group permissions on the Workspace folder. Bits: 1 read, 2 update,
+#    4 create, 8 delete, 16 share. `groupfolders:group` on an attached group
+#    errors harmlessly (|| true); `permissions` re-applies the same mask. The
+#    orchestrator's reconciler (workspaceMasks) re-asserts these every tick,
+#    so this hook re-running on boot can never restore an older mask.
+#    - Workspace group (members, owners, admins): 15, NO share bit
+#      (WARP-3168: members may not share Workspace items at all; every member
+#      already sees the whole Workspace. Same mask as a department's rw group.)
+#    - droplet-admins (owners/admins): 31, so they keep sharing.
+#    - admin (only the Nextcloud service account): 31; the box mints
+#      `space=shared` shares with that credential.
+#    - guest (external guests): 1, read only (WARP-3179), matching the box's
+#      `reader` grant. Guests are no longer put in the Workspace group.
+for grp in droplet-admins guest; do
+  $OCC group:list --output=json | grep -q "\"${grp}\"" || $OCC group:add "$grp" || true
+done
+for gm in "${HOUSEHOLD_GROUP}:15" "droplet-admins:31" "admin:31" "guest:1"; do
+  $OCC groupfolders:group "$FOLDER_ID" "${gm%%:*}" || true
+  $OCC groupfolders:permissions "$FOLDER_ID" "${gm%%:*}" "${gm##*:}" || true
+done
 
 # 5. Set the quota (idempotent — re-applying the same quota is a no-op).
 $OCC groupfolders:quota "$FOLDER_ID" "$SHARED_FOLDER_QUOTA" || true

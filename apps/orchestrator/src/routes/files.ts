@@ -69,9 +69,11 @@ import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   exposesOutside,
+  isWorkspacePath,
   libraryOfHomePath,
   mayCreatePublicLink,
   PUBLIC_LINK_REFUSAL,
+  WORKSPACE_SHARE_REFUSAL,
   type ShareLibrary,
 } from "../services/share-policy.js";
 import {
@@ -2858,6 +2860,12 @@ export function createFilesRouter(
     res.status(403).json(PUBLIC_LINK_REFUSAL);
   }
 
+  /** WARP-3168: a member sharing a Workspace item, of any kind. */
+  function refuseWorkspaceShare(req: Request, res: Response): void {
+    recordAccessDenied(req, "workspace-share-member");
+    res.status(403).json(WORKSPACE_SHARE_REFUSAL);
+  }
+
   // ── Create a share link ──
   //
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
@@ -2929,16 +2937,23 @@ export function createFilesRouter(
       const departmentId = req.spaceDepartmentId ?? null;
       const shareToken = departmentId ? adminBasicToken() : await getToken(req);
 
-      // WARP-3053: on company data, anything but an internal user/group share
-      // without the re-share bit (see exposesOutside) is owner/admin only,
-      // judged on the RESOLVED library so the home-path shape can't skip it.
-      // Owner/admin short-circuit the library lookup.
-      if (exposesOutside(parsed.data.shareType, parsed.data.permissions)) {
-        const role = await actingRole(req);
-        const allowed =
-          mayCreatePublicLink(role, "company") ||
-          mayCreatePublicLink(role, await shareLibrary(space, targetPath));
-        if (!allowed) {
+      // WARP-3168: a member may not share a Workspace item at all, internal
+      // shares included — the same rule Nextcloud now enforces with the
+      // Workspace group's mask 15 (see isWorkspacePath for why). Judged on
+      // the RESOLVED path, so `space=shared` and the home-path shape agree.
+      // WARP-3053: on department/team libraries, anything but an internal
+      // user/group share without the re-share bit (see exposesOutside) is
+      // owner/admin only. Owner/admin short-circuit both lookups.
+      const role = await actingRole(req);
+      if (!mayCreatePublicLink(role, "company")) {
+        if (isWorkspacePath(targetPath, SHARED_FOLDER_NAME)) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
+        if (
+          exposesOutside(parsed.data.shareType, parsed.data.permissions) &&
+          !mayCreatePublicLink(role, await shareLibrary(space, targetPath))
+        ) {
           refusePublicLink(req, res);
           return;
         }
@@ -3912,15 +3927,21 @@ export function createFilesRouter(
       // Revoking (DELETE) stays open to them.
       if (!mayCreatePublicLink(req.user?.role, "company")) {
         const existing = auth.deptRow
-          ? { shareType: auth.deptRow.shareType, library: "company" as const }
+          ? { shareType: auth.deptRow.shareType, library: "company" as const, workspace: false }
           : await ncGetShare(token, shareId).then(async (s) =>
               s
                 ? {
                     shareType: s.shareType,
                     library: libraryOfHomePath(s.path, await companyLibraryRoots()),
+                    workspace: isWorkspacePath(s.path, SHARED_FOLDER_NAME),
                   }
                 : null,
             );
+        // WARP-3168: no member edits of any Workspace share (revoke stays open).
+        if (existing?.workspace) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
         if (
           existing &&
           exposesOutside(existing.shareType, parsed.data.permissions ?? 0) &&

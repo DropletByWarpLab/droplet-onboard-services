@@ -47,8 +47,10 @@ describe("WARP-883 — buildNcGroups (household membership)", () => {
     ]);
   });
 
-  it("guest lands in guest + household", () => {
-    expect(buildNcGroups("guest", HOUSEHOLD)).toEqual(["guest", HOUSEHOLD]);
+  // WARP-3179: the Workspace group's write mask would union over the
+  // read-only one `guest` holds on the Workspace.
+  it("guest lands in guest only, never the Workspace group", () => {
+    expect(buildNcGroups("guest", HOUSEHOLD)).toEqual(["guest"]);
   });
 
   it("family lands in household only (no role group)", () => {

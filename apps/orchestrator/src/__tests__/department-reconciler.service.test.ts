@@ -90,6 +90,7 @@ import {
   reconcileDepartments,
   _resetReconcileKickForTests,
   NC_INSTANCE_ADMIN_GROUP,
+  workspaceMasks,
 } from "../services/department-reconciler.service.js";
 import {
   adminBasicToken as adminBasicTokenForTest,
@@ -326,6 +327,10 @@ function buildPrisma(
           // WARP-1526 N1 mirror pass: locally DEACTIVATED rows with an NC
           // mapping. No fixture here seeds deactivated users.
           if (where?.directoryStatus === "DEACTIVATED") return [];
+          // WARP-3179 Workspace membership sweep: active users with an NC mapping.
+          if (where?.directoryStatus === "ACTIVE" && where.nextcloudUsername) {
+            return [...userRows.values()].filter((u) => u.nextcloudUsername !== null);
+          }
           // WARP-1526 rail 6: operator-tier users with an NC mapping.
           if (where?.role?.in) {
             return [...userRows.values()].filter((u) => {
@@ -436,6 +441,11 @@ describe("reconcileDepartments — membership convergence", () => {
     const d = dept({ kind: "HOUSEHOLD", state: "active", ncGroupfolderId: 1 });
     const m = membership({ syncState: "pending" });
     const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    // alice already sits in the Workspace group, so the WARP-3179 role sweep
+    // has nothing to move; this spec is about the membership ROW sync.
+    ncListGroupMembersStrictMock.mockImplementation(async (_t: string, g: string) =>
+      g === "household" ? [{ id: "alice" }] : [],
+    );
     const prisma = buildPrisma([d], [m], [u]);
 
     await reconcileDepartments(prisma as any);
@@ -608,7 +618,13 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
     gfGetFolderMock.mockResolvedValue({
       id: 3,
       mountPoint: "Household",
-      groups: { household: 1, [DROPLET_ADMINS_GROUP]: MASK_ADMIN },
+      // Fully converged Workspace (WARP-3168/3179 masks included).
+      groups: {
+        household: MASK_RW,
+        [DROPLET_ADMINS_GROUP]: MASK_ADMIN,
+        [NC_INSTANCE_ADMIN_GROUP]: MASK_ADMIN,
+        guest: MASK_RO,
+      },
       quota: -3,
       size: 0,
       acl: false,
@@ -651,8 +667,9 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
     await reconcileDepartments(prisma as any);
 
     // Re-adding an attached group is a duplicate-key 500 on groupfolders
-    // ≥ 17 — the mask fix must go straight to set-permissions.
-    expect(gfAddGroupMock).not.toHaveBeenCalled();
+    // ≥ 17 — the mask fix must go straight to set-permissions. (The missing
+    // Workspace groups of WARP-3168/3179 are attached, which is correct.)
+    expect(gfAddGroupMock).not.toHaveBeenCalledWith(expect.any(String), 3, DROPLET_ADMINS_GROUP, expect.anything());
     expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
       expect.any(String),
       3,
@@ -660,6 +677,82 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
       MASK_ADMIN,
       expect.objectContaining({ confirmOnFailure: true }),
     );
+  });
+
+  describe("WARP-3168 / WARP-3179 — Workspace folder masks and group membership", () => {
+    const HH = () =>
+      dept({ id: "d-household", kind: "HOUSEHOLD", state: "active", ncGroupfolderId: 3 });
+    const folder = (groups: Record<string, number>) => ({
+      id: 3, mountPoint: "Household", groups, quota: -3, size: 0, acl: false, manage: [],
+    });
+
+    it("an old box's Workspace (group at 31, no guest/admin groups) converges: 15 / 1 / 31", async () => {
+      gfGetFolderMock.mockResolvedValue(folder({ household: 31, [DROPLET_ADMINS_GROUP]: MASK_ADMIN }));
+      await reconcileDepartments(buildPrisma([HH()]) as any);
+
+      // household is attached: mask only, never a re-add (duplicate-key 500).
+      expect(gfAddGroupMock).not.toHaveBeenCalledWith(expect.any(String), 3, "household", expect.anything());
+      expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(expect.any(String), 3, "household", MASK_RW, expect.anything());
+      // guest: ensured, attached, read-only.
+      expect(ncEnsureGroupMock).toHaveBeenCalledWith("guest");
+      expect(gfAddGroupMock).toHaveBeenCalledWith(expect.any(String), 3, "guest", expect.anything());
+      expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(expect.any(String), 3, "guest", MASK_RO, expect.anything());
+      // the service account's group keeps sharing (space=shared shares).
+      expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
+        expect.any(String), 3, NC_INSTANCE_ADMIN_GROUP, MASK_ADMIN, expect.anything(),
+      );
+      // The Workspace group never keeps the share bit.
+      for (const call of gfSetGroupPermissionsMock.mock.calls) {
+        if (call[2] === "household") expect(call[3] & 16).toBe(0);
+      }
+    });
+
+    it("guests leave the Workspace group for `guest`; members the reverse", async () => {
+      gfGetFolderMock.mockResolvedValue(
+        folder({ household: MASK_RW, [DROPLET_ADMINS_GROUP]: MASK_ADMIN, [NC_INSTANCE_ADMIN_GROUP]: MASK_ADMIN, guest: MASK_RO }),
+      );
+      ncListGroupMembersStrictMock.mockImplementation(async (_t: string, group: string) =>
+        group === "household" ? [{ id: "gus" }, { id: "olivia" }] : group === "guest" ? [{ id: "mia" }] : [],
+      );
+      const users = [
+        { id: "u-gus", nextcloudUsername: "gus", role: "guest" },
+        { id: "u-mia", nextcloudUsername: "mia", role: "family" },
+        { id: "u-olivia", nextcloudUsername: "olivia", role: "owner" },
+      ];
+      await reconcileDepartments(buildPrisma([HH()], [], users) as any);
+
+      expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(expect.any(String), "gus", "household");
+      expect(ncAddUserToGroupMock).toHaveBeenCalledWith(expect.any(String), "gus", "guest");
+      expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(expect.any(String), "mia", "guest");
+      expect(ncAddUserToGroupMock).toHaveBeenCalledWith(expect.any(String), "mia", "household");
+      // olivia is where she belongs: no Workspace move for her.
+      expect(ncAddUserToGroupMock).not.toHaveBeenCalledWith(expect.any(String), "olivia", "household");
+      expect(ncAddUserToGroupMock).not.toHaveBeenCalledWith(expect.any(String), "olivia", "guest");
+    });
+
+    it("a failed group listing moves nobody (unknown is not empty)", async () => {
+      gfGetFolderMock.mockResolvedValue(
+        folder({ household: MASK_RW, [DROPLET_ADMINS_GROUP]: MASK_ADMIN, [NC_INSTANCE_ADMIN_GROUP]: MASK_ADMIN, guest: MASK_RO }),
+      );
+      ncListGroupMembersStrictMock.mockRejectedValue(new Error("OCS 503"));
+      const users = [{ id: "u-gus", nextcloudUsername: "gus", role: "guest" }];
+      await reconcileDepartments(buildPrisma([HH()], [], users) as any);
+      expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalledWith(expect.any(String), "gus", "household");
+      expect(ncAddUserToGroupMock).not.toHaveBeenCalledWith(expect.any(String), "gus", "guest");
+    });
+
+    it("the install hook applies the same masks the reconciler asserts (a reinstall can't restore 31)", async () => {
+      const { readFileSync } = await import("node:fs");
+      const hook = readFileSync(new URL("../../../../docker/nextcloud-init.sh", import.meta.url), "utf8");
+      const line = /for gm in (.+); do/.exec(hook)?.[1] ?? "";
+      const hookMasks = Object.fromEntries(
+        [...line.matchAll(/"([^":]+):(\d+)"/g)].map((m) => [m[1] === "${HOUSEHOLD_GROUP}" ? "household" : m[1], Number(m[2])]),
+      );
+      expect(hookMasks).toEqual({
+        ...workspaceMasks(),
+        [DROPLET_ADMINS_GROUP]: MASK_ADMIN,
+      });
+    });
   });
 
   it("is a clean no-op for an active HOUSEHOLD row with no folder id yet", async () => {
