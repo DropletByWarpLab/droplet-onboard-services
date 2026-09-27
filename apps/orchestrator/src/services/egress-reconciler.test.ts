@@ -214,3 +214,21 @@ describe("egress-reconciler — per-device pass", () => {
     expect(egress.blockPhoneHome).toHaveBeenCalledTimes(2);
   });
 });
+
+// WARP-3193 PERF-13: the reconciler reads every NetworkDevice every 30 s.
+// It needs the mac, the two applied-state columns and each group's
+// blockPhoneHome flag — never the vendor/hostname/notes payload.
+describe("egress-reconciler — device read", () => {
+  it("selects only the columns the per-device pass uses", async () => {
+    const prisma = makePrisma({ [MASTER_SETTING_KEY]: true }) as any;
+    await createEgressReconciler(prisma, makeEgress()).tickOnce();
+    expect(prisma.networkDevice.findMany).toHaveBeenCalledWith({
+      select: {
+        mac: true,
+        lastAppliedBlocked: true,
+        lastAppliedEgress: true,
+        groups: { select: { blockPhoneHome: true } },
+      },
+    });
+  });
+});

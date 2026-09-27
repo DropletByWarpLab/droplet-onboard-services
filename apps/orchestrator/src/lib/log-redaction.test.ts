@@ -418,3 +418,63 @@ describe("redactSecrets — richdocuments direct-editing token (WARP-1688)", () 
     expect(redactSecrets(once)).toBe(once);
   });
 });
+
+describe("redactSecrets — JSON-shaped (pino) log lines (WARP-3193 SEC-DATA-2)", () => {
+  // A real pino-http "request completed" line as it lands in `docker logs`.
+  // The quoted JSON key puts a `"` between the key and the `:` separator, which
+  // the KEY[:=] shape used to miss — so the user's Nextcloud app-password in
+  // X-Nextcloud-Token rode straight through into the support bundle.
+  const NC_APP_PW = "ncAppPw-Q7wE9-rT2yU-8iOp3-aSdF6";
+  const API_KEY = "apikey-zXcV-1234-bNmL-5678";
+  const DROPLET_AUTH = "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9";
+  const PINO_LINE = JSON.stringify({
+    level: 30,
+    time: 1790000000000,
+    name: "http",
+    requestId: "rid-1",
+    req: {
+      id: 1,
+      method: "POST",
+      url: "/api/files/list",
+      headers: {
+        host: "droplet.local",
+        "x-nextcloud-token": NC_APP_PW,
+        "x-api-key": API_KEY,
+        "x-droplet-auth": DROPLET_AUTH,
+        "content-type": "application/json",
+      },
+    },
+    res: { statusCode: 200 },
+    responseTime: 12,
+    msg: "request completed",
+  });
+
+  it("redacts sensitive values under quoted JSON keys", () => {
+    const out = redactSecrets(PINO_LINE);
+    expect(out).not.toContain(NC_APP_PW);
+    expect(out).not.toContain(API_KEY);
+    expect(out).not.toContain(DROPLET_AUTH);
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+  });
+
+  it("keeps the non-secret JSON context readable", () => {
+    const out = redactSecrets(PINO_LINE);
+    expect(out).toContain('"x-nextcloud-token"');
+    expect(out).toContain('"url":"/api/files/list"');
+    expect(out).toContain('"msg":"request completed"');
+  });
+
+  it("is idempotent over a redacted JSON line", () => {
+    const once = redactSecrets(PINO_LINE);
+    expect(redactSecrets(once)).toBe(once);
+  });
+
+  it("redacts an X-Nextcloud-Token header carrying a short Basic credential", () => {
+    // `Basic` + a short base64 blob: the sensitive-assignment shape stops at
+    // the space after `Basic`, so only the auth-header rule catches the pair.
+    const input = "proxy: X-Nextcloud-Token: Basic YWxpY2U6cA==";
+    const out = redactSecrets(input);
+    expect(out).not.toContain("YWxpY2U6cA==");
+    expect(out).toContain("X-Nextcloud-Token");
+  });
+});

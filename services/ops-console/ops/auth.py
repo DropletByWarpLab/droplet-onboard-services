@@ -15,6 +15,7 @@ tokens MUST not be shared with the customer.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -31,9 +32,11 @@ logger = logging.getLogger("ops.auth")
 #
 # The ephemeral path stays as a developer escape hatch: running
 # `uvicorn main:app` against a bare repo without `.env` shouldn't 500
-# at every request. We log the value loudly so it's discoverable in
-# `docker logs` if support needs it during a misconfigured-deployment
-# fire drill, but the structured-log line carries an explicit "NOT
+# at every request. WARP-3193 SEC-DATA-11: the value itself is NEVER
+# logged — this token guards a docker.sock API and container logs leave
+# the box in support bundles. Only a sha256 fingerprint is, so an
+# operator can tell which token a process holds; a developer who needs
+# a usable bearer sets OPS_TOKEN. The line carries an explicit "NOT
 # suitable for production — run ./scripts/setup.sh" hint so operators
 # never assume the ephemeral mode is the intended one.
 _OPS_TOKEN = (os.environ.get("OPS_TOKEN") or "").strip()
@@ -44,8 +47,9 @@ if not _OPS_TOKEN:
         "process (regenerates on every container restart, invalidating "
         "any saved bearer). NOT suitable for production. Run "
         "`./scripts/setup.sh` once on the host to provision a stable "
-        "OPS_TOKEN in .env. Generated value (this run only): %s",
-        _OPS_TOKEN,
+        "OPS_TOKEN in .env, or set OPS_TOKEN yourself for local dev. "
+        "Ephemeral token sha256 fingerprint: %s",
+        hashlib.sha256(_OPS_TOKEN.encode()).hexdigest()[:8],
     )
 
 

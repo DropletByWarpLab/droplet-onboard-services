@@ -97,6 +97,7 @@ import {
   verifyStatusPop,
 } from "../services/overlay-link.service.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 const logger = createLogger("vpn-route");
 
@@ -349,11 +350,6 @@ function getUser(req: Request): { username: string; role: string } {
 /** WARP-3121 — who may enroll a device into the overlay (the office LAN).
  *  Owner, admin and member (wire role `family`); never an external `guest`. */
 const OVERLAY_ENROLL_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family"]);
-
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
 
 /** WARP-1385 — the box→HQ vouching call. Injected so the route unit-tests
  *  without the gRPC device-identity sidecar; production wires it to
@@ -1782,7 +1778,7 @@ export function createVpnRouter(
       // the moment WIREGUARD_ENDPOINT_HOST is configured.
       const endpointHost = await resolveEndpointHost();
       const endpointConfigured = endpointHost !== "";
-      const admin = isAdmin(req);
+      const admin = isOwnerOrAdmin(req);
       const exposeEndpointHost = admin;
       // ADR-023 (C4): the publicly-trusted per-device FQDN. Unlike endpointHost
       // (which can leak the box's public reachability), the FQDN is already
@@ -1903,7 +1899,7 @@ export function createVpnRouter(
       const isMcpService =
         req.user?.id === "_service:mcp" && req.user.role === "service";
       const where =
-        isAdmin(req) || isMcpService ? {} : { userId: user.username };
+        isOwnerOrAdmin(req) || isMcpService ? {} : { userId: user.username };
       const peers = await prisma.vpnPeer.findMany({
         where,
         orderBy: { createdAt: "desc" },

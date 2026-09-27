@@ -41,6 +41,7 @@ import type { DirectoryRole } from "./scim-role-mapping.service.js";
 import type { ParsedScimUser } from "./scim-resource.js";
 import type { Role } from "./jwt.service.js";
 import {
+  ADMIN_TIER_ROLES,
   assertDisableAllowed,
   assertDisableInvariantsTx,
   assertRoleChangeAllowed,
@@ -128,6 +129,17 @@ export async function provisionUser(
   // WARP-233: blind-index lookup (email at rest is a dcv1 ciphertext).
   const existing = await findUserByEmail(prisma, parsed.email);
   if (existing) {
+    // WARP-3193 SEC-AUTH-1 — refused BEFORE any write (same ordering contract
+    // as below): the Okta link is what routes/sso.ts signs in by, so binding
+    // a new subject to an operator row hands that account to whoever holds
+    // the Okta identity named in `externalId`. An operator already linked to
+    // this exact subject (an Okta retry) is not a new binding and converges.
+    if (isOperatorTier(existing.role)) {
+      const link = await prisma.ssoIdentity.findUnique({
+        where: { provider_subject: { provider: OKTA_PROVIDER, subject: parsed.externalId ?? existing.id } },
+      });
+      if (link?.userId !== existing.id) throw operatorAccountRefusal();
+    }
     // WARP-2550 — an email-matched POST is a full replace in everything but
     // the verb: it carries `active`, so it MUST flip active-state through the
     // one guarded funnel, exactly like `replaceUser` (PUT). Until this it did
@@ -272,13 +284,42 @@ export async function deactivateUser(prisma: PrismaClient, id: string): Promise<
 }
 
 /** Re-activate a soft-deactivated user (active:true on a DEACTIVATED row).
- *  Deliberately rail-free (WARP-2016): a reactivate removes no operator
- *  capacity, and the sole DEACTIVATED admin must always be able to come
- *  back — a rail here would be a second lockout, not a safeguard. */
+ *  An already-ACTIVE row is an idempotent no-op (Okta PUTs active:true on
+ *  every sync).
+ *
+ *  WARP-3193 SEC-AUTH-1 — a DEACTIVATED owner/admin is refused: that state
+ *  is a local operator decision, and SCIM must not undo it. This is no
+ *  lockout (the WARP-2016 worry): the owner is disable-immutable and rail 5
+ *  always leaves one ACTIVE operator, who re-enables from the dashboard.
+ *  The write pins role + status so a promotion landing in the window is a
+ *  0-row miss (CONCURRENT_MUTATION), not a stale decision. */
 export async function reactivateUser(prisma: PrismaClient, id: string): Promise<User | null> {
   const existing = await prisma.user.findUnique({ where: { id } });
   if (!existing) return null;
-  return prisma.user.update({ where: { id }, data: { directoryStatus: "ACTIVE" } });
+  if (existing.directoryStatus === "ACTIVE") return existing;
+  if (isOperatorTier(existing.role)) throw operatorAccountRefusal();
+  try {
+    return await prisma.user.update({
+      where: { id, role: existing.role, directoryStatus: existing.directoryStatus },
+      data: { directoryStatus: "ACTIVE" },
+    });
+  } catch (err) {
+    if (isConcurrencyConflict(err)) throw RoleMutationRefusedError.concurrentMutation();
+    throw err;
+  }
+}
+
+/** WARP-3193 SEC-AUTH-1 — operator rows are outside SCIM's reach for
+ *  identity binding and reactivation. Rail 3's code: the ceiling is admin,
+ *  and SCIM may not act on a row at or above it. */
+function isOperatorTier(role: string): boolean {
+  return (ADMIN_TIER_ROLES as readonly string[]).includes(role);
+}
+
+function operatorAccountRefusal(): RoleMutationRefusedError {
+  return RoleMutationRefusedError.rankExceeded(
+    "SCIM cannot bind identities to, or reactivate, operator accounts",
+  );
 }
 
 /** Apply a SCIM PATCH/PUT `active` change by id (true → ACTIVE, false →

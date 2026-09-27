@@ -4,6 +4,8 @@
  *   GET  /api/activity          — paginated, filterable list (AC5)
  *   POST /api/activity/export   — sealed JSON-Lines bundle (AC6)
  *   GET  /api/activity/verify   — server-side hash-chain walk (WARP-246)
+ *   POST /api/activity/rotate-key — owner + recent MFA: retire the audit
+ *                                   HMAC key (WARP-3165)
  *
  * All routes are gated via `requireOwnerOrAdmin`: owner/admin humans,
  * plus (WARP-1443) the MCP server's pinned `_service:mcp` principal so
@@ -17,10 +19,17 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import { getActivitySigner, recordActivity } from "../services/activity.singleton.js";
+import { getActivitySigner, getAuditKeyring, recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyActivityChainCoalesced } from "../services/audit-verify.service.js";
 import {
+  AuditKeyRotationError,
+  rotateAuditKey,
+} from "../services/audit-key-rotation.service.js";
+import { createRequireRecentMfa } from "../middleware/require-recent-mfa.js";
+import { getOtaHost } from "../services/update-agent/host-exec.js";
+import {
+  createEpochVerifier,
   hashSignature,
   type ActivityActorTypeName,
   type ActivityKindName,
@@ -28,6 +37,39 @@ import {
   type ActivitySeverityName,
 } from "../services/audit-signing.service.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { createHash } from "node:crypto";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("activity-export");
+
+/**
+ * WARP-3153: what the export needs from device-identity-svc. Structural
+ * subset of DeviceIdentityClient so tests pass a stub. Only the key's cert
+ * (public) goes into the bundle.
+ *
+ * Honesty note: on the mock backend (today's default, DROPLET_TPM_BACKEND=
+ * mock) the device key is a software key in a file on the box, so root on
+ * the box can forge seals. The real TPM backend's `_tpm_sign` is still a
+ * placeholder that returns an empty signature (WARP-1181), which the
+ * export refuses (below).
+ */
+export interface ActivityBundleSealer {
+  getDeviceCert(): Promise<string>;
+  signWithDeviceKey(
+    payload: Uint8Array,
+  ): Promise<{ signature: Uint8Array; algorithm: string }>;
+}
+
+/** Bundle format identifier. v3 = no signing key inside, device-key seal
+ * as the last line (WARP-3153). */
+export const ACTIVITY_BUNDLE_TYPE = "droplet.activity-bundle.v3";
+/** Domain-separation prefix for the seal signature, so a bundle seal can
+ * never be replayed as any other device-key statement (daily roots sign
+ * bare JSON starting with `{`, TLS/registration use their own prefixes).
+ * Signed bytes = prefix || the seal's `statement` string, verbatim. */
+export const ACTIVITY_BUNDLE_SEAL_PREFIX = "droplet-activity-bundle:v3:";
+/** Cap on row ids listed in the seal when the box's own HMAC check fails. */
+const MAX_LISTED_HMAC_FAILURES = 100;
 
 /**
  * WARP-456: owner/admin gate for the activity surface. Same shape as
@@ -113,7 +155,11 @@ const listQuerySchema = z.object({
   cursor: z.coerce.number().int().positive().optional(),
 });
 
-export function createActivityRouter(prisma: PrismaClient): Router {
+export function createActivityRouter(
+  prisma: PrismaClient,
+  /** WARP-3153: seals the export. Null → the export answers 503. */
+  bundleSealer: ActivityBundleSealer | null = null,
+): Router {
   const router = Router();
 
   // ── GET /api/activity ──
@@ -148,10 +194,9 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           if (to) where.at.lt = new Date(to);
         }
         if (q) {
-          // Case-insensitive substring across `what` and `sub`. Both
-          // columns are TEXT — no full-text index, but the result set
-          // is bounded by `limit` so a sequential scan within the
-          // date+kind window is acceptable.
+          // Case-insensitive substring across `what` and `sub`. Served
+          // by the pg_trgm GIN indexes on both columns (WARP-3193
+          // PERF-7); a btree cannot serve a leading-wildcard ILIKE.
           where.OR = [
             { what: { contains: q, mode: "insensitive" } },
             { sub: { contains: q, mode: "insensitive" } },
@@ -250,7 +295,7 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         // the nightly tamper-detection cron shares the exact same logic.
         // WARP-1027: coalesced so N concurrent admin tabs share one O(n) walk.
         // Response shape is byte-identical to the pre-extraction handler.
-        const result = await verifyActivityChainCoalesced(prisma, signer);
+        const result = await verifyActivityChainCoalesced(prisma, getAuditKeyring());
         res.json({
           ok: result.ok,
           rowsChecked: result.rowsChecked,
@@ -267,12 +312,19 @@ export function createActivityRouter(prisma: PrismaClient): Router {
 
   // ── POST /api/activity/export ──
   //
-  // Returns a sealed JSON-Lines bundle of every row in scope plus the
-  // public verification bytes. The client (or an offline verifier
-  // tool) re-derives every row's signature using the bundled bytes
-  // and the canonical-content shape from `audit-signing.service.ts`,
-  // walking the chain forward. Tamper anywhere = chain breaks at
-  // that row.
+  // Returns a sealed JSON-Lines bundle of every row in scope. Layout:
+  //   line 1      manifest (format, the device CERT — public only — filter)
+  //   lines 2..n  rows, ascending id (the chain's own direction)
+  //   last line   seal: SHA-256 over every byte before it, signed with the
+  //               device identity key, plus the box's own HMAC check of
+  //               every row at export time.
+  //
+  // WARP-3153: the bundle used to ship the HMAC key that signs the chain,
+  // so anyone holding an export could forge entries. The HMAC key now
+  // never leaves the box. An offline verifier checks the seal against the
+  // device cert and the chain links (which need no key); see
+  // docs/security/audit-bundle-verification.md and
+  // scripts/verify-activity-bundle.mjs.
   //
   // The same filter shape as the list route is accepted in the body
   // so the operator can export a subset (e.g. "last 30 days of
@@ -315,40 +367,61 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         }
 
         const signer = getActivitySigner();
-        const publicKey = signer
-          ? signer.exportPublicBytes().toString("base64")
-          : null;
+        if (!signer) {
+          res.status(503).json({ error: "audit signer unavailable" });
+          return;
+        }
+        // Fetch the cert BEFORE streaming: an unsealable bundle is refused
+        // up front rather than half-written.
+        let deviceCertPem: string;
+        try {
+          if (!bundleSealer) throw new Error("no device identity client wired");
+          deviceCertPem = await bundleSealer.getDeviceCert();
+          // Probe the key once: the real TPM backend's placeholder signs
+          // with an empty signature (WARP-1181). The probe bytes are not
+          // JSON, so a verifier can never accept them as a seal statement.
+          const probe = await bundleSealer.signWithDeviceKey(
+            Buffer.from(`${ACTIVITY_BUNDLE_SEAL_PREFIX}probe`, "utf8"),
+          );
+          if (probe.signature.length === 0) {
+            throw new Error("device key returned an empty signature");
+          }
+        } catch (err) {
+          logger.warn({ err }, "audit export refused: device identity unavailable");
+          res.status(503).json({
+            error: "device identity unavailable: the bundle cannot be sealed",
+          });
+          return;
+        }
 
-        // Streaming JSON-Lines: the bundle is one row per line so a
-        // verifier can process it incrementally without loading the
-        // whole file into memory. First line is the manifest (algo,
-        // device id, public key). Subsequent lines are rows ordered
-        // by `id` ascending — same direction the chain was built —
-        // so the verifier walks forward.
         res.setHeader("Content-Type", "application/x-ndjson");
         res.setHeader(
           "Content-Disposition",
           'attachment; filename="droplet-activity-bundle.jsonl"',
         );
 
-        // WARP-181: bundle format v2 — rows are version-tagged
-        // (`schemaVersion`) and carry signature-covered actor fields;
-        // the offline verifier picks the canonical form PER ROW from
-        // `schemaVersion` (v1 legacy 7-key, v2 actor-bearing 9-key).
-        // The identifier is bumped so a v1-only verifier fails fast at
-        // the manifest instead of reporting false tampering on v2 rows.
-        const manifest = {
-          type: "droplet.activity-bundle.v2",
-          algorithm: "HMAC-SHA256",
-          // The HMAC key bytes shipped here ARE symmetric — anyone
-          // holding them can also forge. Documented in the spec
-          // ("today: the HMAC key bytes; tomorrow: a TPM-attested
-          // key"). The bundle is meant for the device owner.
-          publicKey,
+        // Every byte written before the seal feeds the digest the seal signs.
+        const digest = createHash("sha256");
+        const writeLine = (obj: unknown) => {
+          const line = JSON.stringify(obj) + "\n";
+          digest.update(line, "utf8");
+          res.write(line);
+        };
+
+        // WARP-181 bumped the format to v2 (version-tagged rows with
+        // signature-covered actor fields); WARP-3153 bumps it to v3 (no key,
+        // sealed) so an older verifier fails fast at the manifest.
+        writeLine({
+          type: ACTIVITY_BUNDLE_TYPE,
+          // Row signatures stay HMAC-SHA256 on the box; they are NOT
+          // re-checkable offline (that would need the secret). The seal's
+          // `rowHmac` carries the box's own check instead.
+          rowAlgorithm: "HMAC-SHA256",
+          deviceCertPem,
+          deviceCertFingerprint: `sha256:${createHash("sha256").update(deviceCertPem, "utf8").digest("hex")}`,
           exportedAt: new Date().toISOString(),
           filter: { kind, actorType, actorId, from, to, q },
-        };
-        res.write(JSON.stringify(manifest) + "\n");
+        });
 
         // Chunked read to keep memory bounded. Page size matches the
         // GET route's max so the verifier's per-batch cost is
@@ -356,6 +429,11 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         const PAGE = 200;
         let cursor: bigint | undefined;
         let exported = 0;
+        let hmacFailed = 0;
+        const hmacFailedRowIds: string[] = [];
+        // WARP-3165: every key the chain was ever signed with, under the
+        // epoch rule (rows come out in id order, so a subset works too).
+        const epoch = createEpochVerifier(getAuditKeyring());
         for (;;) {
           const page = await prisma.activityRow.findMany({
             where: cursor
@@ -382,12 +460,70 @@ export function createActivityRouter(prisma: PrismaClient): Router {
               actorId: r.actorId,
               schemaVersion: r.schemaVersion,
             };
-            res.write(JSON.stringify(out) + "\n");
+            writeLine(out);
+            const content: ActivityRowContent = {
+              at: r.at,
+              severity: r.severity as ActivitySeverityName,
+              sourceIcon: r.sourceIcon,
+              what: r.what,
+              sub: r.sub,
+              kind: r.kind as ActivityKindName,
+              refs: r.refs === null ? null : (r.refs as Record<string, unknown>),
+              actorType: r.actorType as ActivityActorTypeName | null,
+              actorId: r.actorId,
+              schemaVersion: r.schemaVersion,
+            };
+            // An unknown schemaVersion verifies under no key (the epoch
+            // verifier catches the throw), so it is never vouched for.
+            const valid = epoch.verify(content, r.prevSignatureHash, r.signature) !== null;
+            if (!valid) {
+              hmacFailed += 1;
+              if (hmacFailedRowIds.length < MAX_LISTED_HMAC_FAILURES) {
+                hmacFailedRowIds.push(r.id.toString());
+              }
+            }
           }
           cursor = page[page.length - 1]!.id;
           if (page.length < PAGE) break;
         }
 
+        const digestB64 = digest.digest("base64url");
+        // Every seal field lives in `statement`, the exact string the device
+        // key signs, so none of them (the HMAC verdict included) can be
+        // edited without breaking the signature.
+        const statement = JSON.stringify({
+          type: `${ACTIVITY_BUNDLE_TYPE}.seal`,
+          digest: digestB64,
+          rowCount: exported,
+          // The box's HMAC check of each row's signature over its content
+          // and stored prev link, at export time.
+          rowHmac: { checked: exported, failed: hmacFailed, failedRowIds: hmacFailedRowIds },
+        });
+        const sealLine = { type: `${ACTIVITY_BUNDLE_TYPE}.seal`, statement };
+        let sealed = false;
+        try {
+          const s = await bundleSealer!.signWithDeviceKey(
+            Buffer.from(ACTIVITY_BUNDLE_SEAL_PREFIX + statement, "utf8"),
+          );
+          if (s.signature.length === 0) {
+            throw new Error("device key returned an empty signature");
+          }
+          res.write(
+            JSON.stringify({
+              ...sealLine,
+              algorithm: s.algorithm,
+              signature: Buffer.from(s.signature).toString("base64"),
+            }) + "\n",
+          );
+          sealed = true;
+        } catch (err) {
+          // Headers are gone; an unsigned seal line makes every verifier
+          // reject the file instead of trusting a truncated one.
+          logger.error({ err }, "audit export: device-key seal failed");
+          res.write(
+            JSON.stringify({ ...sealLine, error: "seal signing failed" }) + "\n",
+          );
+        }
         res.end();
 
         // Taking the whole signed chain off the box left no trace in it.
@@ -406,13 +542,54 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           refs: {
             rowCount: exported,
             filter: { kind, actorType, actorId, from, to, q },
-            includedSigningKey: publicKey !== null,
+            sealed,
           },
         }).catch(() => {
           // recordActivity already logs and swallows; this only stops a
           // detached rejection from becoming an unhandled one.
         });
       } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── POST /api/activity/rotate-key (WARP-3165) ──
+  //
+  // Retire the audit HMAC key: every export made before WARP-3153 carried
+  // it. Owner only (an admin can't re-key the log that records admins), with
+  // a fresh MFA re-auth, the same gate as the device-identity reseal. The
+  // old key is archived for verification only; see
+  // services/audit-key-rotation.service.ts for the design.
+  router.post(
+    "/activity/rotate-key",
+    sensitiveRateLimit,
+    (req, res, next) => {
+      if (req.user?.role !== "owner") {
+        res.status(403).json({ error: "owner role required" });
+        return;
+      }
+      next();
+    },
+    createRequireRecentMfa(),
+    async (req, res, next) => {
+      try {
+        const host = getOtaHost();
+        const result = await rotateAuditKey({
+          runOnHost: host
+            ? async () => {
+                await host.exec(host.helperPath, ["rotate-audit-key"], { timeoutMs: 60_000 });
+              }
+            : null,
+          actor: actorFromRequest(req),
+          actorUsername: req.user?.username ?? null,
+        });
+        res.json({ rotated: true, ...result });
+      } catch (err) {
+        if (err instanceof AuditKeyRotationError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
         next(err);
       }
     },

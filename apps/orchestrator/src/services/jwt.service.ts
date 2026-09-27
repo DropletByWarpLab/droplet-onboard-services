@@ -3,9 +3,9 @@ import jwt from "jsonwebtoken";
 import { config } from "../config.js";
 import {
   cacheGet,
-  cacheSet,
+  cacheSetStrict,
   cacheSetNx,
-  cacheDel,
+  cacheDelStrict,
   cacheSetAdd,
   cacheSetRemove,
   cacheSetMembers,
@@ -125,6 +125,13 @@ function getSecret(): string {
 }
 
 /**
+ * WARP-3193 SEC-DATA-15 — every verify pins the one algorithm the signers
+ * above use (jsonwebtoken's HS256 default). Without it, a string secret
+ * accepts any HS* variant; the mcp-server's verifyJwt already pins the same.
+ */
+const VERIFY_OPTIONS: jwt.VerifyOptions = { algorithms: ["HS256"] };
+
+/**
  * Sign a short-lived access token (15 min).
  * Access tokens carry `type: "access"` to prevent confusion with refresh tokens.
  */
@@ -206,7 +213,7 @@ export function signRefreshToken(user: {
  */
 export function verifyAccessToken(token: string): JwtPayload | null {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & Partial<JwtPayload> & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & Partial<JwtPayload> & {
       type?: string;
     };
     if (decoded.type !== "access") return null;
@@ -248,7 +255,7 @@ export async function verifyRefreshToken(
   token: string,
 ): Promise<JwtPayload | null> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & Partial<JwtPayload> & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & Partial<JwtPayload> & {
       type?: string;
     };
     if (decoded.type !== "refresh") return null;
@@ -278,19 +285,51 @@ export async function verifyRefreshToken(
  * Uses jwt.verify (not jwt.decode) to reject unsigned or forged tokens,
  * preventing an attacker from crafting tokens with large exp values to
  * flood Redis with long-lived denylist entries.
+ *
+ * WARP-3193 QUAL-1: a denylist write that Redis refuses REJECTS with
+ * `revocationUnavailable()` (503) rather than being swallowed — the caller
+ * must not report the token revoked when it is still live.
  */
 export async function denyRefreshToken(token: string): Promise<void> {
+  let decoded: jwt.JwtPayload;
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload;
-    if (!decoded?.exp) return;
-
-    const ttl = decoded.exp - Math.floor(Date.now() / 1000);
-    if (ttl <= 0) return; // Already expired — no need to denylist
-
-    await cacheSet(REFRESH_DENYLIST_PREFIX + tokenHash(token), true, ttl);
+    decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload;
   } catch {
     // Invalid signature or expired — safe to ignore; forged tokens need no denylist entry
+    return;
   }
+  if (!decoded?.exp) return;
+
+  const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+  if (ttl <= 0) return; // Already expired — no need to denylist
+
+  try {
+    await cacheSetStrict(REFRESH_DENYLIST_PREFIX + tokenHash(token), true, ttl);
+  } catch {
+    throw revocationUnavailable();
+  }
+}
+
+/**
+ * WARP-3193 QUAL-1 — the one error every revocation write throws when Redis
+ * refuses it. It carries a numeric `statusCode` (the `http-errors` shape the
+ * global error handler trusts), so a route that forwards it to `next(err)`
+ * answers 503 with a stable `code` instead of reporting a revocation that
+ * never landed.
+ */
+export class RevocationUnavailableError extends Error {
+  readonly status = 503;
+  readonly statusCode = 503;
+  readonly code = "REVOCATION_UNAVAILABLE";
+
+  constructor() {
+    super("Session revocation could not be recorded. Try again in a moment.");
+    this.name = "RevocationUnavailableError";
+  }
+}
+
+export function revocationUnavailable(): RevocationUnavailableError {
+  return new RevocationUnavailableError();
 }
 
 /**
@@ -338,7 +377,7 @@ export async function registerRefreshSession(
   token: string,
 ): Promise<void> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & {
       type?: string;
     };
     if (decoded.type !== "refresh" || !decoded.exp) return;
@@ -362,7 +401,7 @@ export async function unregisterRefreshSession(
   token: string,
 ): Promise<void> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & {
       type?: string;
     };
     if (decoded.type !== "refresh" || !decoded.exp) return;
@@ -414,13 +453,25 @@ export async function revokeUserSessions(userId: string): Promise<number> {
     if (!Number.isFinite(exp)) continue;
     const ttl = exp - now;
     if (ttl <= 0) continue; // Already expired — denylist entry would be a no-op.
-    await cacheSet(REFRESH_DENYLIST_PREFIX + hash, true, ttl);
+    // WARP-3193 QUAL-1: strict — a failed write rejects instead of being
+    // counted, so the returned number is what actually landed.
+    try {
+      await cacheSetStrict(REFRESH_DENYLIST_PREFIX + hash, true, ttl);
+    } catch {
+      throw revocationUnavailable();
+    }
     revoked += 1;
   }
   // Clear the index whether or not anything was denylisted: leaving stale
   // (now-denylisted or expired) members would let a later revoke re-walk dead
-  // hashes and would leak the index unbounded.
-  await cacheDel(setKey);
+  // hashes and would leak the index unbounded. Strict too: SMEMBERS reads
+  // fail open to [], so this delete is what reveals an outage when the read
+  // came back empty.
+  try {
+    await cacheDelStrict(setKey);
+  } catch {
+    throw revocationUnavailable();
+  }
   return revoked;
 }
 

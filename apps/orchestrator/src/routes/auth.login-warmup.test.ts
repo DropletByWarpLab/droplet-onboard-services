@@ -120,13 +120,13 @@ vi.mock("../services/activity.singleton.js", () => ({
 
 // TOTP second factor: default to a WRONG code so the wrong-TOTP case is a
 // completed-password / failed-second-factor login (must not warm).
-const verifyTotpCode = vi.fn().mockResolvedValue(false);
+const acceptTotpCode = vi.fn().mockResolvedValue(false);
 vi.mock("../services/totp.service.js", () => ({
   TOTP_ISSUER: "Droplet",
   generateTotpEnrollment: vi.fn(),
   encryptTotpSecret: vi.fn(),
   decryptTotpSecret: vi.fn(() => "JBSWY3DPEHPK3PXP"),
-  verifyTotpCode: (...a: unknown[]) => verifyTotpCode(...a),
+  acceptTotpCode: (...a: unknown[]) => acceptTotpCode(...a),
 }));
 
 vi.mock("../services/recovery.service.js", () => ({
@@ -276,7 +276,7 @@ describe("WARP-1954 — POST /auth/login model warm-up", () => {
 
   it("never warms when the second factor fails (password ok, TOTP wrong)", async () => {
     verifyPassword.mockResolvedValue(true);
-    verifyTotpCode.mockResolvedValue(false);
+    acceptTotpCode.mockResolvedValue(false);
     const app = buildApp(
       createPrismaMock([stefan], {
         userId: stefan.id,

@@ -186,6 +186,7 @@ describe("Users page — invite UX", () => {
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+          status: "pending",
           acceptedAt: null,
           revokedAt: null,
         },
@@ -232,6 +233,7 @@ describe("Users page — invite UX", () => {
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+          status: "pending",
           acceptedAt: null,
           revokedAt: null,
         },
@@ -421,6 +423,7 @@ describe("Users page — invite UX", () => {
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+          status: "pending",
           acceptedAt: null,
           revokedAt: null,
         },
@@ -458,6 +461,7 @@ describe("Users page — invite UX", () => {
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+          status: "pending",
           acceptedAt: null,
           revokedAt: null,
         },
@@ -470,6 +474,35 @@ describe("Users page — invite UX", () => {
         screen.getByRole("button", { name: /revoke invite for eve/i }),
       ).toBeInTheDocument();
     });
+  });
+
+  // WARP-3193 QUAL-3: the pill and the revoke action read the server's
+  // explicit `status`, not the timestamps or a client-side clock check.
+  it("renders the invite pill and revoke action from status alone", async () => {
+    const base = {
+      displayName: null,
+      email: null,
+      role: "family",
+      accessRoleId: null,
+      createdBy: "admin",
+      createdAt: new Date().toISOString(),
+      // Deadline in the future on every row: only `status` differs.
+      expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+      acceptedAt: null,
+      revokedAt: null,
+    };
+    listInvitesMock.mockResolvedValue({
+      invites: [
+        { ...base, token: "a".repeat(43), username: "ann", status: "expired" },
+        { ...base, token: "b".repeat(43), username: "ben", status: "accepted" },
+      ],
+    });
+
+    render(<UsersPage />);
+    await waitFor(() => expect(screen.getByText("Expired")).toBeInTheDocument());
+    expect(screen.getByText("Accepted")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /revoke invite for ann/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /revoke invite for ben/i })).toBeNull();
   });
 
   it("rejects an invalid email at form-submit time without calling createInvite", async () => {
