@@ -78,6 +78,13 @@ import type { Role } from "./jwt.service.js";
 import { ACCESS_TOKEN_TTL_SECONDS, ROLE_RANK } from "./jwt.service.js";
 import { revokeAllSessions } from "./session.service.js";
 import { denylistUser } from "./auth-denylist.service.js";
+import {
+  revokeOverlayDevicesForUser,
+  revokeUserVpnDevices,
+  type DeviceRevokeReason,
+  type UserDeviceRevokePrisma,
+  type UserDeviceRevokeSummary,
+} from "./vpn-peer-revoke.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import {
@@ -729,8 +736,16 @@ export async function runRoleChangePostEffects(args: {
   nextRole: Role;
   actorUsername: string | null;
   actor: ActivityActor;
+  /** WARP-3160: see {@link LeaverDevices}; only used on a demotion to guest. */
+  devices?: LeaverDevices;
 }): Promise<void> {
   const revokeError = await revokeCapturingFailure(args.target.id);
+  // An external guest has no remote access (WARP-3121), so a demotion to
+  // guest takes the person's VPN devices with it.
+  const vpn =
+    args.nextRole === "guest" && args.previousRole !== "guest"
+      ? await revokeLeaverDevices(args.devices, args.target.username, args.actor, "role_change")
+      : null;
   await syncAdminTierGroup({
     userId: args.target.id,
     nextcloudUsername: args.target.nextcloudUsername,
@@ -749,11 +764,41 @@ export async function runRoleChangePostEffects(args: {
       targetUsername: args.target.username,
       previousRole: args.previousRole,
       nextRole: args.nextRole,
+      ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
       ...(revokeError ? { sessionRevoke: "failed" } : {}),
     },
     actor: args.actor,
   });
   if (revokeError) throw revokeError.err;
+}
+
+/**
+ * WARP-3160 — whose VPN devices to revoke on a lifecycle post-effect.
+ *
+ *   * omitted (the safe default) — revoke the post-effect's own username
+ *     through the boot-wired client ({@link revokeOverlayDevicesForUser}), so a
+ *     caller that predates this field still cuts the person off;
+ *   * `{ prisma, username }` — revoke that username with that client (used
+ *     where the URL handle is not the directory username);
+ *   * `null` — revoke nothing (only where there is no person to cut off).
+ */
+export type LeaverDevices = { prisma: UserDeviceRevokePrisma; username: string } | null;
+
+async function revokeLeaverDevices(
+  devices: LeaverDevices | undefined,
+  defaultUsername: string,
+  actor: ActivityActor,
+  reason: DeviceRevokeReason,
+): Promise<UserDeviceRevokeSummary | null> {
+  if (devices === null) return null;
+  if (devices === undefined) {
+    return revokeOverlayDevicesForUser(defaultUsername, actor, reason);
+  }
+  return revokeUserVpnDevices(devices.prisma, {
+    username: devices.username,
+    actor,
+    reason,
+  });
 }
 
 /**
@@ -776,12 +821,15 @@ export async function runRemovalPostEffects(args: {
   targetRole: Role | null;
   actorUsername: string | null;
   actor: ActivityActor;
+  /** WARP-3160: the person's VPN devices are revoked with the account. */
+  devices?: LeaverDevices;
 }): Promise<void> {
   let revokeError: { err: unknown } | null = null;
   if (args.targetUserId) {
     revokeError = await revokeCapturingFailure(args.targetUserId);
     await denylistUser(args.targetUserId, ACCESS_TOKEN_TTL_SECONDS);
   }
+  const vpn = await revokeLeaverDevices(args.devices, args.targetUsername, args.actor, "removal");
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -793,6 +841,7 @@ export async function runRemovalPostEffects(args: {
       targetUserId: args.targetUserId,
       targetUsername: args.targetUsername,
       role: args.targetRole,
+      ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
       ...(revokeError ? { sessionRevoke: "failed" } : {}),
     },
     actor: args.actor,
@@ -826,6 +875,8 @@ export async function runDisablePostEffects(args: {
    * provisioned), so the local DEACTIVATED is the entire disable.
    */
   ncMirror?: NcMirror;
+  /** WARP-3160: a deactivated person loses their VPN devices too. */
+  devices?: LeaverDevices;
 }): Promise<void> {
   let sessionsRevoked: number | null = 0;
   let revokeError: { err: unknown } | null = null;
@@ -837,6 +888,7 @@ export async function runDisablePostEffects(args: {
       revokeError = { err };
     }
   }
+  const vpn = await revokeLeaverDevices(args.devices, args.username, args.actor, "deactivation");
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -849,6 +901,7 @@ export async function runDisablePostEffects(args: {
       sessionsRevoked,
       ...(revokeError ? { sessionRevoke: "failed" } : {}),
       ...(args.ncMirror ? { ncMirror: args.ncMirror } : {}),
+      ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
     },
     actor: args.actor,
   });
