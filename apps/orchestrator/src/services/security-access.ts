@@ -40,14 +40,8 @@ import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
 import type { SecurityLockReader } from "./security-lock-adapter.js";
 import type { OngoingSource } from "./security-inflight.js";
 
-export interface SecurityViewerScope {
-  /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
-  visibleCameras: "all" | ReadonlySet<string>;
-  /** Mirrored threats (and the threat_mirror health row) — owner/admin only. */
-  mayReadThreats: boolean;
-  /** Lock rows, lock links, the `locks` health row (WARP-2977 P2b-2, DS-019) — `mayReadLocksFor`. */
-  mayReadLocks: boolean;
-}
+export type { SecurityViewerScope } from "./security-viewer-scope.js";
+import type { SecurityViewerScope } from "./security-viewer-scope.js";
 
 /**
  * The deps every Security router takes (`createSecurityRouter`,

@@ -70,6 +70,9 @@ import type { PrismaClient } from "@prisma/client";
 import type { CronRuntime } from "./cron-runtime.service.js";
 import type { SecurityEventDraft } from "./security-event-ingest.js";
 import { writeSecurityEvent } from "./security-events.service.js";
+import { canonicalNodeId, endpointIdOf, LOCK_REF_RE, lockRef, parseLockRef } from "./security-lock-ref.js";
+
+export { lockRef, parseLockRef };
 import type { MatterCommissionedDevice, MatterGrouped } from "../types/smart-home.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -106,9 +109,6 @@ export const SECURITY_LOCK_LIST_TIMEOUT_MS = 5_000;
  */
 export const SECURITY_LOCK_GONE_AFTER_LISTS = 3;
 
-const NODE_ID = /^\d{1,20}$/;
-const UINT64_MAX = 18_446_744_073_709_551_615n;
-const REF = /^matter:(\d{1,20})\/(\d{1,5})$/;
 const NAME_MAX = 80;
 
 // ── local types (L0 maps these onto the shared unions) ──────────────────
@@ -202,37 +202,6 @@ const defaultLogger: LockLogger = createLogger("security-lock-adapter");
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/** A Matter node id: decimal uint64, canonicalised (no leading zeros) so one lock is one key. */
-function canonicalNodeId(v: unknown): string | null {
-  if (typeof v !== "string" || !NODE_ID.test(v)) return null;
-  const n = BigInt(v);
-  return n > UINT64_MAX ? null : n.toString();
-}
-
-/** Application endpoints only: 0 is the root node, 65535 the wildcard. */
-function endpointIdOf(v: unknown): number | null {
-  return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65534 ? v : null;
-}
-
-export function lockRef(nodeId: string, endpointId: number): string {
-  return `matter:${nodeId}/${endpointId}`;
-}
-
-/**
- * A lock link's `sourceRef` → its endpoint, or null. Only the CANONICAL form
- * `lockRef` writes is accepted (no leading zeros, a uint64 node, endpoint
- * 1..65534): a link is joined to lock rows by exact string equality, so a
- * ref in any other spelling could never match a row.
- */
-export function parseLockRef(ref: string): { nodeId: string; endpointId: number } | null {
-  const m = REF.exec(ref);
-  if (!m) return null;
-  const nodeId = canonicalNodeId(m[1]);
-  const endpointId = endpointIdOf(Number(m[2]));
-  if (nodeId === null || endpointId === null) return null;
-  return lockRef(nodeId, endpointId) === ref ? { nodeId, endpointId } : null;
 }
 
 /** RAW DoorLock.LockState → reading; `undefined` when the value is not one. */
@@ -521,7 +490,7 @@ export function createLockTracker(deps: {
       const refs = new Set<string>([...persisted.keys(), ...liveAt.keys(), ...heard.keys()]);
       const drops: Promise<void>[] = [];
       for (const ref of refs) {
-        const node = REF.exec(ref)?.[1];
+        const node = LOCK_REF_RE.exec(ref)?.[1];
         if (node !== undefined && present.has(node)) continue;
         liveAt.delete(ref);
         drops.push(
@@ -1059,7 +1028,7 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
     const polledRefs = new Set(polledReadings.map((o) => o.ref));
     const reoffered: LockObservation[] = [];
     for (const ref of tracker.unsavedRefs()) {
-      const m = REF.exec(ref);
+      const m = LOCK_REF_RE.exec(ref);
       const reading = tracker.lastHeard(ref);
       if (polledRefs.has(ref) || !m || reading === null) continue;
       reoffered.push({ nodeId: m[1]!, endpointId: Number(m[2]), ref, reading });
