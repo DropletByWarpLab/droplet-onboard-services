@@ -31,6 +31,8 @@ export interface StepUpDialogProps {
   onClose: () => void;
   /** Runs right after a successful step-up; the dialog closes when it settles. */
   onVerified: () => Promise<void> | void;
+  /** Gets `onVerified`'s error message after the dialog has closed. */
+  onError: (message: string) => void;
   /** Submit button label, e.g. "Rotate key". */
   actionLabel: string;
   /** Red submit for destructive actions. */
@@ -42,6 +44,7 @@ export function StepUpDialog({
   open,
   onClose,
   onVerified,
+  onError,
   actionLabel,
   destructive = false,
   triggerRef,
@@ -77,14 +80,24 @@ export function StepUpDialog({
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { code?: string };
         setError(stepUpErrorMessage(res.status, data.code));
+        setBusy(false);
         return;
       }
-      await onVerified();
-      close();
     } catch {
       setError("We couldn't reach your Droplet. Try again.");
+      setBusy(false);
+      return;
+    }
+    // The step-up succeeded; whatever the protected action does next is the
+    // caller's to report, so its failure closes the dialog and hands the
+    // real message over instead of reading as a network problem.
+    try {
+      await onVerified();
+    } catch (err) {
+      onError(err instanceof Error && err.message ? err.message : "That didn't work. Try again.");
     } finally {
       setBusy(false);
+      close();
     }
   }
 

@@ -115,6 +115,7 @@ export function RotateAuditKey({ onRotated }: { onRotated?: () => void }) {
         open={stepUpOpen}
         onClose={() => setStepUpOpen(false)}
         onVerified={rotate}
+        onError={(message) => setOutcome({ kind: "error", message })}
         actionLabel="Rotate key"
         destructive
         triggerRef={triggerRef}

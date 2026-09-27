@@ -48,8 +48,11 @@ export function createStepUpRouter(prisma: PrismaClient): Router {
   router.post("/auth/step-up", sensitiveRateLimit, async (req, res, next) => {
     try {
       const me = req.user;
-      if (!me || me.role === "service" || !me.sid) {
-        // A sid-less token (legacy/grace) has no session to stamp.
+      // Fail closed: the auth middleware lets a JWT through when the session
+      // store is unreachable (sessionChecked=false), so a revoked session
+      // could otherwise step up. Also refuses sid-less grace tokens and
+      // service / `dxt_` extension principals, which have no session.
+      if (!me || me.role === "service" || !me.sid || req.sessionChecked !== true) {
         res.status(401).json({ error: "Sign in again", code: "SESSION_REQUIRED" });
         return;
       }
@@ -59,8 +62,26 @@ export function createStepUpRouter(prisma: PrismaClient): Router {
         return;
       }
 
+      const audit = (outcome: "success" | "failed" | "locked") =>
+        recordActivity({
+          kind: "auth",
+          severity: outcome === "success" ? "ok" : "warn",
+          sourceIcon: outcome === "success" ? "shield-check" : "shield-alert",
+          what:
+            outcome === "success"
+              ? "Step-up confirmed"
+              : outcome === "locked"
+                ? "Step-up locked out"
+                : "Step-up failed",
+          sub: me.username,
+          // Never the password or the code.
+          refs: { outcome, userId: me.id, username: me.username },
+          actor: { type: "user", id: me.id },
+        });
+
       const lock = await checkPasswordChangeLock(me.id);
       if (lock.locked) {
+        await audit("locked");
         res.status(429).set("Retry-After", String(lock.retryAfterSeconds)).json({
           error: "Too many attempts. Try again shortly.",
           code: "TOO_MANY_ATTEMPTS",
@@ -93,20 +114,12 @@ export function createStepUpRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const audit = (outcome: "success" | "failed") =>
-        recordActivity({
-          kind: "auth",
-          severity: outcome === "success" ? "ok" : "warn",
-          sourceIcon: outcome === "success" ? "shield-check" : "shield-alert",
-          what: outcome === "success" ? "Step-up confirmed" : "Step-up failed",
-          sub: me.username,
-          refs: { outcome, userId: me.id, username: me.username },
-          actor: { type: "user", id: me.id },
-        });
-
       const passwordOk = await verifyPassword(row.passwordHash, parsed.data.password);
-      // Always run the code check too when the password is right; when it is
-      // wrong, don't spend the code (single-use time step).
+      // The code is checked only after the password matches. Checking it
+      // anyway would even out a ~1 ms timing difference, but it would also
+      // burn the user's one-time code (acceptTotpCode claims its time step)
+      // on every wrong password. Wrong guesses are counted and locked out by
+      // the shared throttle either way.
       const codeOk =
         passwordOk &&
         (await checkLoginSecondFactor(prisma, me.id, { totp: parsed.data.totp })) === "passed";

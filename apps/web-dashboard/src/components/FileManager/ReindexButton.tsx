@@ -110,6 +110,10 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
         open={stepUpOpen}
         onClose={() => setStepUpOpen(false)}
         onVerified={onClick}
+        onError={(m) => {
+          setStatus("error");
+          setMessage(m);
+        }}
         actionLabel="Re-index"
       />
     </div>
