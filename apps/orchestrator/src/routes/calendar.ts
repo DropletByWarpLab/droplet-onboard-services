@@ -109,11 +109,14 @@ const eventCreateSchema = z.object({
 
 const eventPatchSchema = z.object({
   title: z.string().min(1).max(500).optional(),
-  description: z.string().max(10000).optional(),
+  // WARP-3262 — `null` clears notes / place, as it does the video link: the
+  // web's EventForm sends null for an empty field. "" (the Mac, R-CAL4)
+  // still validates and stores "".
+  description: z.string().max(10000).nullable().optional(),
   // Nullable on PATCH so "remove video call link" is expressible. An
   // empty string would store a falsy href instead of clearing the column.
   meetingUrl: meetingUrlSchema.nullable().optional(),
-  location: z.string().max(500).optional(),
+  location: z.string().max(500).nullable().optional(),
   startsAt: z.string().datetime().optional(),
   endsAt: z.string().datetime().optional(),
   allDay: z.boolean().optional(),
