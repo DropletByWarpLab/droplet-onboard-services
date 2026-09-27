@@ -155,6 +155,7 @@ function createTeamChatPrisma(seed: {
   sessions?: SessionRow[];
   chatMessages?: ChatMessageRow[];
   departments?: DepartmentRow[];
+  invites?: Array<{ username: string; status: string; createdBy: string }>;
 }) {
   const users = [...(seed.users ?? [])];
   const threads = [...(seed.threads ?? [])];
@@ -196,15 +197,27 @@ function createTeamChatPrisma(seed: {
       findMany: vi.fn(
         async (args: {
           where: {
-            id?: { in: string[] };
+            id?: { in?: string[]; not?: string };
             directoryStatus?: string;
             role?: { in: string[] };
+            // WARP-3263 guest roster: shared-thread ids OR the inviter.
+            OR?: Array<{ id?: { in: string[] }; username?: string }>;
           };
           select?: Record<string, true>;
         }) => {
           const rows = users.filter((u) => {
             const w = args.where;
             if (w.id?.in !== undefined && !w.id.in.includes(u.id)) return false;
+            if (w.id?.not !== undefined && u.id === w.id.not) return false;
+            if (
+              w.OR !== undefined &&
+              !w.OR.some(
+                (o) =>
+                  (o.id?.in !== undefined && o.id.in.includes(u.id)) ||
+                  (o.username !== undefined && o.username === u.username),
+              )
+            )
+              return false;
             if (
               w.directoryStatus !== undefined &&
               u.directoryStatus !== w.directoryStatus
@@ -316,8 +329,24 @@ function createTeamChatPrisma(seed: {
               p.userId === args.where.threadId_userId.userId,
           ) ?? null,
       ),
-      findMany: vi.fn(async (args: { where: { userId: string } }) =>
-        participants.filter((p) => p.userId === args.where.userId),
+      findMany: vi.fn(
+        async (args: {
+          where: {
+            userId?: string | { not: string };
+            threadId?: { in: string[] };
+          };
+        }) =>
+          participants.filter((p) => {
+            const w = args.where;
+            if (typeof w.userId === "string" && p.userId !== w.userId) return false;
+            if (
+              typeof w.userId === "object" &&
+              p.userId === w.userId.not
+            )
+              return false;
+            if (w.threadId && !w.threadId.in.includes(p.threadId)) return false;
+            return true;
+          }),
       ),
       updateMany: vi.fn(
         async (args: {
@@ -404,6 +433,16 @@ function createTeamChatPrisma(seed: {
           messages.push(m);
           return m;
         },
+      ),
+    },
+    // WARP-3263 — the guest's accepted invite names who invited them.
+    userInvite: {
+      findFirst: vi.fn(
+        async (args: { where: { username: string; status: string } }) =>
+          (seed.invites ?? []).find(
+            (i) =>
+              i.username === args.where.username && i.status === args.where.status,
+          ) ?? null,
       ),
     },
     chatSession: {
@@ -569,6 +608,108 @@ describe("GET /api/team-chat/contacts", () => {
     expect(Object.keys(res.body.contacts[0]).sort()).toEqual(
       ["displayName", "id", "role", "username"].sort(),
     );
+  });
+});
+
+// ── WARP-3263: external guests ──────────────────────────────────────
+
+describe("team-chat — external guests (WARP-3263)", () => {
+  const owner: UserRow = {
+    id: "uuid-owner",
+    username: "olga",
+    displayName: "Olga Owner",
+    role: "owner",
+    directoryStatus: "ACTIVE",
+  };
+  const asCarol = { id: carol.id, username: carol.username, role: carol.role };
+
+  it("a guest's directory is shared-conversation people + the inviter, names only", async () => {
+    const t = seedThread({ id: "thread-bc" });
+    const prisma = createTeamChatPrisma({
+      users: [alice, bob, carol, owner, deactivated, service],
+      threads: [t],
+      participants: [seedParticipant(t.id, bob.id), seedParticipant(t.id, carol.id)],
+      invites: [{ username: carol.username, status: "accepted", createdBy: alice.username }],
+    });
+    const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
+    expect(res.status).toBe(200);
+    // bob (shared thread) + alice (inviter); never the owner, never self.
+    expect(res.body.contacts).toEqual([
+      { id: alice.id, displayName: alice.displayName },
+      { id: bob.id, displayName: bob.displayName },
+    ]);
+  });
+
+  it("a guest with no conversations and no invite row sees nobody", async () => {
+    const prisma = createTeamChatPrisma({ users: [alice, bob, carol, owner] });
+    const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
+    expect(res.status).toBe(200);
+    expect(res.body.contacts).toEqual([]);
+  });
+
+  it("a deactivated inviter is not listed", async () => {
+    const prisma = createTeamChatPrisma({
+      users: [carol, deactivated],
+      invites: [{ username: carol.username, status: "accepted", createdBy: deactivated.username }],
+    });
+    const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
+    expect(res.body.contacts).toEqual([]);
+  });
+
+  it("owners and admins keep the full directory with roles", async () => {
+    const prisma = createTeamChatPrisma({ users: [alice, bob, carol, owner] });
+    for (const role of ["owner", "admin"]) {
+      const res = await request(
+        buildApp(prisma, { id: owner.id, username: owner.username, role }),
+      ).get("/api/team-chat/contacts");
+      expect(res.body.contacts).toHaveLength(4);
+      expect(res.body.contacts[0]).toHaveProperty("role");
+      expect(res.body.contacts[0]).toHaveProperty("username");
+    }
+  });
+
+  it("a guest can't start a conversation — direct or group, even with their inviter", async () => {
+    const prisma = createTeamChatPrisma({
+      users: [alice, bob, carol],
+      invites: [{ username: carol.username, status: "accepted", createdBy: alice.username }],
+    });
+    const app = buildApp(prisma, asCarol);
+    for (const body of [
+      { kind: "direct", participantIds: [alice.id] },
+      { kind: "group", participantIds: [alice.id, bob.id] },
+    ]) {
+      const res = await request(app).post("/api/team-chat/threads").send(body);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe("guest_cannot_start_conversation");
+    }
+    expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
+  });
+
+  it("owners, admins and members can start a conversation with a guest", async () => {
+    for (const role of ["owner", "admin", "family"]) {
+      const prisma = createTeamChatPrisma({ users: [alice, carol] });
+      const res = await request(
+        buildApp(prisma, { id: alice.id, username: alice.username, role }),
+      )
+        .post("/api/team-chat/threads")
+        .send({ kind: "direct", participantIds: [carol.id] });
+      expect(res.status, role).toBe(201);
+    }
+  });
+
+  it("a guest's thread list carries names but no usernames", async () => {
+    const t = seedThread({ id: "thread-bc" });
+    const prisma = createTeamChatPrisma({
+      users: [bob, carol],
+      threads: [t],
+      participants: [seedParticipant(t.id, bob.id), seedParticipant(t.id, carol.id)],
+    });
+    const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/threads");
+    expect(res.status).toBe(200);
+    const bobRow = res.body.threads[0].participants.find(
+      (p: { userId: string }) => p.userId === bob.id,
+    );
+    expect(bobRow).toEqual({ userId: bob.id, displayName: bob.displayName, username: null });
   });
 });
 

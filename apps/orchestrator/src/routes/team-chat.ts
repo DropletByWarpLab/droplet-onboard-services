@@ -365,11 +365,61 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
     });
   }
 
+  /**
+   * WARP-3263 — an external guest's directory. A guest is someone outside
+   * the company: the staff list and org roles are company data, and an
+   * unsolicited guest DM to the owner is a phishing vector. So a guest sees
+   * only the people they already share a conversation with, plus the person
+   * who invited them — names only (no username, no role).
+   *
+   * The inviter is the `createdBy` USERNAME on the guest's accepted
+   * UserInvite (auth.ts mints the User with the invite's username).
+   */
+  async function guestContacts(
+    me: Caller,
+  ): Promise<Array<{ id: string; displayName: string }>> {
+    const myThreads = await prisma.teamChatParticipant.findMany({
+      where: { userId: me.id },
+      select: { threadId: true },
+    });
+    const shared =
+      myThreads.length === 0
+        ? []
+        : await prisma.teamChatParticipant.findMany({
+            where: {
+              threadId: { in: myThreads.map((p) => p.threadId) },
+              userId: { not: me.id },
+            },
+            select: { userId: true },
+          });
+    const invite = await prisma.userInvite.findFirst({
+      where: { username: me.username, status: "accepted" },
+      orderBy: { acceptedAt: "desc" },
+      select: { createdBy: true },
+    });
+    const rows = await prisma.user.findMany({
+      where: {
+        directoryStatus: "ACTIVE",
+        role: { in: [...HUMAN_ROLES] },
+        id: { not: me.id },
+        OR: [
+          { id: { in: [...new Set(shared.map((p) => p.userId))] } },
+          ...(invite ? [{ username: invite.createdBy }] : []),
+        ],
+      },
+      select: { id: true, displayName: true },
+      orderBy: { displayName: "asc" },
+    });
+    return rows;
+  }
+
   // ── Roster ──────────────────────────────────────────────────────
 
   // Exists because GET /api/auth/users is owner/admin-only; the picker
   // needs names for every human tier. Minimal projection, ACTIVE humans
-  // only — never service principals, never deactivated rows.
+  // only — never service principals, never deactivated rows. Owners,
+  // admins and members get the full roster; a guest gets guestContacts()
+  // (WARP-3263).
   // WARP-1685: guardOrMcp — the send tools resolve recipient usernames to
   // User.ids through this roster, acting as the forwarded human.
   router.get("/team-chat/contacts", guardOrMcp, async (req, res, next) => {
@@ -377,6 +427,10 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
       const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      if (me.role === "guest") {
+        res.json({ contacts: await guestContacts(me) });
         return;
       }
       const contacts = await prisma.user.findMany({
@@ -451,7 +505,9 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           participants: t.participants.map((p) => ({
             userId: p.userId,
             displayName: names.get(p.userId)?.displayName ?? null,
-            username: names.get(p.userId)?.username ?? null,
+            // WARP-3263 — a guest sees names only, never login handles.
+            username:
+              me.role === "guest" ? null : (names.get(p.userId)?.username ?? null),
           })),
           lastMessage: t.messages[0]
             ? toMessageDto(t.messages[0], names.get(t.messages[0].senderId)?.displayName)
@@ -474,6 +530,13 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
       const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      // WARP-3263 — an external guest can't start a conversation; staff
+      // (owner/admin/member) add a guest instead. Before validation so the
+      // answer never depends on who the guest named.
+      if (me.role === "guest") {
+        res.status(403).json({ error: "guest_cannot_start_conversation" });
         return;
       }
       const parsed = createThreadSchema.safeParse(req.body);
