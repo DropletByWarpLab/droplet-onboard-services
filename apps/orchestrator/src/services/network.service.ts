@@ -175,6 +175,30 @@ export function summariseRadios(
 }
 
 /**
+ * WARP-3091 — key names that carry a Wi-Fi secret in a router wireless status
+ * (`key`, `psk`, `psk2`, `password`, `sae_password`, `wpa_passphrase`, any
+ * `*key` / `*pass*`). Over-matching drops a harmless field; under-matching
+ * leaks the workspace passphrase, so the pattern is deliberately broad.
+ */
+const WIRELESS_SECRET_KEY_RE = /key|psk|pass|secret|token|credential/i;
+
+/**
+ * WARP-3091 — deep copy of a wireless status with every secret-named entry
+ * removed at any depth. The PSK has its own owner/admin reads
+ * (`/network/wifi/current`, `/wifi/ap`, `/wifi/guest`); nothing else should
+ * carry it.
+ */
+export function stripWirelessSecrets<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(stripWirelessSecrets) as T;
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([k]) => !WIRELESS_SECRET_KEY_RE.test(k))
+      .map(([k, v]) => [k, stripWirelessSecrets(v)]),
+  ) as T;
+}
+
+/**
  * WARP-39: returns a typed Result. Callers MUST handle both arms — no more
  * silent empty defaults masking real failures.
  */
@@ -216,7 +240,10 @@ export async function getNetworkOverview(
 
     const overview: NetworkOverview = {
       interfaces,
-      wireless,
+      // WARP-3091: /network/status is open to every authenticated role, and
+      // the router's raw wireless status carries the Wi-Fi passphrase. Radio
+      // counts below still read the unstripped copy.
+      wireless: stripWirelessSecrets(wireless),
       system: systemInfo,
       connectedDeviceCount: leases.length,
       routerConnected,
