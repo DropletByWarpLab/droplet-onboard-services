@@ -7,6 +7,10 @@
 **Supersedes (in part):** earlier ad-hoc native client work on
 `feat/native-mobile-clients` and `feat/android-app` — see "Predecessors"
 below.
+**Scope widened by:** [ADR-062](ADR-062-native-desktop-clients.md)
+(2026-09-26) — these rules also govern the native desktop clients:
+Windows (C# / WinUI 3, `droplet-windows`) and macOS (DropletAgent,
+WARP-3030). The title keeps its original name.
 
 ## Context
 
@@ -46,6 +50,11 @@ OpenAPI spec at `apps/orchestrator/openapi.yaml` and generate typed
 clients per platform (Swift OpenAPI Generator + OpenAPI Kotlin Codegen).
 The contract markdown below is structured so that migration is mechanical.
 
+> **Widened by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> the Windows client is pure C# / .NET / WinUI 3 and shares no code with the
+> other clients. Its API models are hand-written records; ADR-062 row 13
+> keeps OpenAPI deferred behind a named trigger.
+
 ### 2. Design tokens — explicit cross-platform mapping
 
 The dashboard's `apps/web-dashboard/src/app/globals.css` tokens are the
@@ -75,6 +84,11 @@ source of truth. Native apps mirror them as constants.
 | role member | `#475569` | slate | `Color(0xFF475569)` |
 | role viewer | `#94a3b8` | slate-400 | `Color(0xFF94A3B8)` |
 | role guest | `#f59e0b` | amber | `Color(0xFFF59E0B)` |
+
+> **Desktop (ADR-062, 2026-09-26):** the Windows client mirrors these tokens
+> in XAML. Generated per-platform token outputs are WARP-3023's; until they
+> land, Windows follows the dashboard shell's palette B with bundled Inter,
+> as DropletAgent does (the canon itself is WARP-3024's).
 
 Dark mode mirrors the dashboard's `.dark` block — accent goes to
 `#a78bfa`, surfaces invert, role colors get softer pastel variants.
@@ -146,6 +160,12 @@ accepts `Authorization: Bearer <jwt>` on every protected route. Bearer
 is checked BEFORE the `droplet_session` cookie. Native clients use
 Bearer; no new orchestrator path is needed.
 
+> **Flagged by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> the code does the opposite. `middleware/auth.ts:228` reads
+> `const token = cookieToken || headerToken`, so a cookie wins over the
+> Bearer. That is bug WARP-3038. Native clients send no cookie, so they are
+> unaffected.
+
 **One required orchestrator change** before mobile can ship: add
 `?return=body` to `POST /api/auth/login` so the JWT is returned in the
 response body in addition to the existing `Set-Cookie` header. Native
@@ -164,7 +184,9 @@ Token lifecycle:
    deviceId, displayName }`.
 3. **Store:** access token in iOS Keychain (`kSecAttrAccessible`
    `WhenUnlockedThisDeviceOnly`) / Android EncryptedSharedPreferences
-   (Tink AEAD). Refresh token same store, separate key.
+   (Tink AEAD). Refresh token same store, separate key. Windows
+   (ADR-062): DPAPI CurrentUser under `%LOCALAPPDATA%\ai.warp-lab.droplet`,
+   written atomically; only the primary instance refreshes.
 4. **Use:** add `Authorization: Bearer <accessToken>` to every request.
 5. **Refresh:** on 401, call `POST /api/auth/refresh` with refresh
    token, update access token, retry the original request once.
@@ -299,6 +321,11 @@ module.
 **Do not reintroduce WebView for the dashboard.** It was tried on
 `feat/android-app` and abandoned as a dead end. Native UI throughout.
 
+> **Widened by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> this applies to the native desktop clients too. The Windows client embeds
+> no web view in v1; sections that are not native yet hand off to the
+> system browser.
+
 **Do not rename the design tokens between platforms.** The color/type
 table above is the cross-platform truth; keep names in sync (accent =
 accent, type-headline = .headline = TextStyle.Headline).
@@ -327,3 +354,11 @@ ADR predated them) — native clients MUST handle the `TOTP_REQUIRED`
 login challenge. WebAuthn is not part of the app login path.
 
 > **Amended by [ADR-060](ADR-060-native-windows-hello-relying-party.md) (2026-09-25, conditional on its spike S2; until S2 passes, the sentence above stands as written):** the Windows app is the one exception. Its shell runs a native WebAuthn (Windows Hello) ceremony against a per-box native relying party over its pinned channel, and the WebView redeems a single-use code for the ordinary cookie session. The shell still never holds a password or a session token.
+
+> **Adopted for Windows by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> the native Windows client follows this reconciliation: `login?return=body`,
+> the `TOTP_REQUIRED` challenge, rotating refresh, and a Bearer on every call.
+> For the native desktop clients, the sentence "WebAuthn is not part of the
+> app login path" changes only through ADR-063 (WARP-3226). The ADR-060
+> exception above was for the Tauri shell, which ADR-062 retires; see
+> ADR-062's reconciliation with ADR-060.

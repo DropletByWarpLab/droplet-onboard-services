@@ -22,7 +22,9 @@ This ADR is **Phase 0** of WARP-350 and **blocks all downstream code** (WARP-352
 
 ## Decision
 
-**Adopt a default-deny, per-action-consent desktop tool-host.** A native desktop client (Tauri: Rust core owns WebSocket, ed25519 signing, and tool execution; webview reuses the dashboard build) pairs with one Droplet, advertises a capability list, and receives LLM-dispatched tool calls over the orchestrator's WS bridge.
+**Adopt a default-deny, per-action-consent desktop tool-host.** A native desktop client (the platform's own stack: C# / .NET on Windows, Swift on macOS; the client owns its connection to the box, ed25519 signing, and tool execution) pairs with one Droplet, advertises a capability list, and receives LLM-dispatched tool calls over the orchestrator's client-dispatch bridge.
+
+> **Wording made stack-neutral by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26).** This sentence named a Tauri shell with a Rust core and a web view reusing the dashboard build, and "the orchestrator's WS bridge". The box half that shipped is MQTT topics (`apps/orchestrator/src/services/client-dispatch.service.ts:1-23`), which no desktop client can reach today; the transport a desktop client uses gets its own ADR. The tool host is out of the native Windows client's v1 (ADR-062 row 14). The decisions below are unchanged.
 
 ### Core mechanism — the *target axis*
 
@@ -99,7 +101,7 @@ Design intent for the copy: name the **device**, name the **data/target**, make 
 - Default-off adds onboarding friction: a freshly paired desktop does nothing until the user enables tools. Mitigation: a one-screen "turn on what you want" step in the pairing flow (still explicit, still per-tool).
 - Per-call confirmation on Tier-2 tools is slower than batch consent; acceptable given the trust surface.
 - Two surfaces now describe consent (dashboard for `self`, native modal for `client`) — more UI to keep consistent. The shared `confirmationToken` contract is the single source of truth that keeps them aligned.
-- Tauri/native build + signing + notarization is real platform work (Phase 4 + Phase 7) with cert-procurement lead time.
+- Native desktop build + signing + notarization is real platform work (Phase 4 + Phase 7) with cert-procurement lead time. *(Stack-neutral wording, ADR-062; this line said "Tauri/native".)*
 
 ## Alternatives considered
 
