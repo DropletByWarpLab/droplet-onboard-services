@@ -2834,6 +2834,16 @@ model User {
   deletionStatus      UserDeletionStatus @default(NONE)
   deletionDueAt       DateTime?
   deletionRequestedBy String?
+  // WARP-3176 — when the current HANDING_OVER or PURGING claim was taken
+  // (null on NONE / PENDING). It is the claim's token: every later write by
+  // the request that took it is pinned to it, and the stale-claim sweep and
+  // the nightly retry age it (never inferred from updatedAt).
+  // `handoverPriorStatus` is the NONE|PENDING value a HANDING_OVER claim
+  // replaced, so a released claim never silently cancels a scheduled
+  // retention delete; `handoverRecipientId` names who was receiving.
+  deletionClaimedAt   DateTime?
+  handoverPriorStatus UserDeletionStatus?
+  handoverRecipientId String?
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was
