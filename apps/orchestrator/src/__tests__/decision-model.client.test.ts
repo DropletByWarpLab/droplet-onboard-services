@@ -94,4 +94,18 @@ describe("DecisionModelClient", () => {
     expect(deadline).toBeLessThanOrEqual(Date.now() + 300 + 1000);
     expect(res).toEqual({ status: "unavailable", detail: `gRPC ${GrpcStatus.DEADLINE_EXCEEDED}: Deadline exceeded` });
   });
+
+  it("treats timeoutMs 0 (and negative) as the default, matching the proto and the gateway", async () => {
+    for (const timeoutMs of [0, -5]) {
+      const before = Date.now();
+      const { stub, client } = clientWith((_req, _md, _opts, cb) =>
+        cb(null, { status: DecideStatus.DECIDE_STATUS_OK, answers: {}, latencyMs: 0, model: "", detail: "" }),
+      );
+      await client.decide({ state: "x", questions, timeoutMs });
+      const [req, , opts] = stub.decide.mock.calls[0];
+      expect(req.timeoutMs).toBe(DECIDE_DEFAULT_TIMEOUT_MS);
+      // The deadline must leave the gateway's own timeout room to fire first.
+      expect((opts.deadline as Date).getTime()).toBeGreaterThanOrEqual(before + DECIDE_DEFAULT_TIMEOUT_MS);
+    }
+  });
 });

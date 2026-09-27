@@ -442,6 +442,10 @@ def _decide_question_json(q) -> dict:
         return out
     if q.type == inference_pb2.DECIDE_QUESTION_TYPE_CHOICE:
         # dict keeps insertion order and Kev reads option order: keep the caller's.
+        # A dict also silently collapses duplicate names (last wins), so refuse them.
+        names = [o.name for o in q.options]
+        if len(set(names)) != len(names):
+            raise ValueError("choice question has duplicate option names")
         return {"type": "choice", "instructions": q.instructions,
                 "criteria": {o.name: (o.description or None) for o in q.options}}
     if q.type == inference_pb2.DECIDE_QUESTION_TYPE_SCORE:

@@ -148,7 +148,10 @@ export class DecisionModelClient {
     questions: Record<string, DecideQuestion>;
     timeoutMs?: number;
   }): Promise<DecideResult> {
-    const timeoutMs = args.timeoutMs ?? DECIDE_DEFAULT_TIMEOUT_MS;
+    // 0 means "use the default" (proto `timeout_ms` doc; the gateway does the
+    // same). `??` alone would send 0 and set a deadline 1.5 s before the
+    // gateway's own 2 s timeout could answer as data. Negative is nonsense: same.
+    const timeoutMs = args.timeoutMs && args.timeoutMs > 0 ? args.timeoutMs : DECIDE_DEFAULT_TIMEOUT_MS;
     const questions: Record<string, PbDecideQuestion> = {};
     for (const [id, q] of Object.entries(args.questions)) questions[id] = toPbQuestion(q);
     const req: DecideRequest = { state: args.state, questions, timeoutMs, model: "" };

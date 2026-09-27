@@ -163,3 +163,16 @@ async def test_unspecified_question_type_is_invalid_without_network(gw):
         resp = await _call(server, req)
     assert not route.called
     assert resp.status == pb2.DECIDE_STATUS_INVALID
+
+
+async def test_duplicate_choice_option_names_are_invalid_without_network(gw):
+    server, pb2 = gw
+    q = pb2.DecideQuestion(type=pb2.DECIDE_QUESTION_TYPE_CHOICE, instructions="?",
+                           options=[pb2.DecideOption(name="a"), pb2.DecideOption(name="a", description="dup")])
+    req = pb2.DecideRequest(state="x", questions={"q": q})
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.route()
+        resp = await _call(server, req)
+    assert not route.called
+    assert resp.status == pb2.DECIDE_STATUS_INVALID
+    assert "duplicate" in resp.detail
