@@ -38,7 +38,8 @@ export const SECURITY_STATE_ARGS = ["attention", "open", "acknowledged", "resolv
 export type SecurityIncidentStateName = "open" | "acknowledged" | "resolved";
 
 /** The event kinds a tool may filter on — a subset of Prisma's `SecurityEventKind` (the route maps each to the stored kinds it covers). */
-export const SECURITY_EVENT_KIND_ARGS = ["detection", "camera_offline", "camera_online", "threat", "mode_changed"] as const;
+/** P4 PR-4: `lock_state` — answered only for a person with Devices view (DS-019); anyone else gets the empty page of a kind with nothing in it. */
+export const SECURITY_EVENT_KIND_ARGS = ["detection", "camera_offline", "camera_online", "threat", "mode_changed", "lock_state"] as const;
 export type SecurityEventKindName = (typeof SECURITY_EVENT_KIND_ARGS)[number];
 
 export const SECURITY_LABEL_ARGS = ["person", "car", "dog", "cat"] as const;

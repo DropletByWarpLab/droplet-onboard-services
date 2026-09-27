@@ -35,7 +35,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "security_zone_status",
   description:
-    "Security right now: whether the site is open, closed or away and why, and for each area the cameras and parts of camera views that cover it, whether each is reporting, whether a person or Droplet linked it, and the last activity. Use for 'is the back door covered?' or 'is any camera offline?'.",
+    "Security right now: whether the site is open, closed or away and why, and for each area the cameras, parts of camera views and door locks that cover it, whether each is reporting, whether a person or Droplet linked it, and the last activity. Use for 'is the back door covered?' or 'is any camera offline?'.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

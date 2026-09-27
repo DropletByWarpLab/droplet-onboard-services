@@ -80,6 +80,7 @@ import {
   loadActiveLinks,
   loadCameraLabels,
   loadZoneRecords,
+  lockLabelsFor,
   parseCameraLinkRef,
   viewerAreas,
   visibleZoneViews,
@@ -88,6 +89,7 @@ import {
   type ViewerAreas,
 } from "../services/security-zones.service.js";
 import { securityOngoingSource, securityStatusSnapshot } from "../services/camera.service.js";
+import { securityLockAdapter } from "../services/security-lock-adapter.js";
 import {
   ASSISTANT_EVENT_KINDS,
   ASSISTANT_STORED_KINDS,
@@ -281,21 +283,36 @@ interface EventLike {
   endedAt: string | null;
 }
 
+/** P4 PR-4 — what a lock row needs beside itself: its ref (never on the wire) and the lock names this viewer may read. */
+interface LockContext {
+  sourceRef?: string;
+  lockLabels: ReadonlyMap<string, string>;
+}
+
 function areaNames(chips: ReadonlyArray<{ name: string }>): string[] {
   const names = chips.slice(0, AREAS_PER_EVENT).map((z) => z.name);
   return chips.length > AREAS_PER_EVENT ? [...names, `and ${chips.length - AREAS_PER_EVENT} more`] : names;
 }
 
-function eventItem(e: EventLike, areas: ViewerAreas, labels: ReadonlyMap<string, string>, tz: string | null, now: Date) {
+function eventItem(e: EventLike, areas: ViewerAreas, labels: ReadonlyMap<string, string>, tz: string | null, now: Date, lock?: LockContext) {
+  const lockName = lock?.sourceRef !== undefined ? lock.lockLabels.get(lock.sourceRef) : undefined;
   return {
     at: assistantInstant(new Date(e.startedAt), tz, now),
     until: e.endedAt ? assistantInstant(new Date(e.endedAt), tz, now) : null,
     kind: assistantKindOf(e.kind),
     what: eventWhat(e.kind, e.labels, e.camera),
-    source: eventSource(e.kind, e.camera, labels),
+    source: eventSource(e.kind, e.camera, labels, lockName),
     part: e.cameraZones.length > 0 ? e.cameraZones.join(", ") : null,
-    areas: areaNames(zoneChipsFor({ source: e.source as never, kind: e.kind as never, camera: e.camera, cameraZones: e.cameraZones }, areas)),
+    // A lock row joins its areas on its sourceRef (P2b-2), handed over beside the page.
+    areas: areaNames(
+      zoneChipsFor({ source: e.source as never, kind: e.kind as never, camera: e.camera, cameraZones: e.cameraZones, sourceRef: lock?.sourceRef }, areas),
+    ),
   };
+}
+
+/** A3's `found` (P4 PR-4): a polled row's time is when Droplet's 60 s check found it, not when it happened. */
+function foundWord(observed: string): "live" | "when Droplet checked" {
+  return observed === "polled" ? "when Droplet checked" : "live";
 }
 
 /**
@@ -350,6 +367,8 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
   const clock = (): Date => (deps.now ? deps.now() : new Date());
   const resolver = deps.resolve ?? resolveEffectiveAccess;
   const cameraStatus: CameraStatusSource = deps.cameraStatus ?? securityStatusSnapshot;
+  /** The lock adapter, read per request (it is started after the routers are built); null = none is running. */
+  const lockReader = () => (deps.locks ?? securityLockAdapter)();
   // Step 1: exactly the MCP principal, no human role (a person gets 403).
   const assistantOnly = requireRoleOrService(MCP_PRINCIPAL_ID);
   const actor = resolveSecurityActor(prisma, resolver);
@@ -486,7 +505,12 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
         extraWhere,
       );
       const areas = viewerAreas(links, scope);
-      const items = page.events.map((e) => eventItem(e, areas, labels, site.timezone, now));
+      // P4 PR-4 (DS-019): lock names only for a viewer who may read locks (their lock rows are already gone otherwise).
+      const lockLabels = lockLabelsFor(scope, lockReader());
+      const items = page.events.map((e) => ({
+        ...eventItem(e, areas, labels, site.timezone, now, { sourceRef: page.sourceRefs.get(e.id), lockLabels }),
+        found: foundWord(e.observed),
+      }));
       const n = fitList(items, (kept) => ({ ...head, events: kept, nextCursor: "0000000000000.9223372036854775807" }));
       const tail = page.events[n - 1];
       res.json({
@@ -515,7 +539,9 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
         loadCameraLabels(prisma),
       ]);
       const tz = mode.displayTimezone;
-      let zones = visibleZoneViews(records, scope, labels);
+      // P4 PR-4 (DS-019): lock links reach only a viewer who may read locks (`visibleLinks`), named from the adapter's list.
+      const reader = lockReader();
+      let zones = visibleZoneViews(records, scope, labels, lockLabelsFor(scope, reader));
       if (q.data.area !== undefined) {
         const key = nameKey(q.data.area);
         zones = zones.filter((z) => nameKey(z.name) === key);
@@ -523,7 +549,14 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const status = cameraStatus();
       const frigateDown = status.get(null)?.health === "offline";
       // "detection off": Frigate says the camera is there but not detecting — neither reporting nor offline.
-      const reporting = (camera: string | undefined): "yes" | "offline" | "detection off" | "not set up" | "unknown" => {
+      type Reporting = "yes" | "offline" | "detection off" | "not set up" | "unknown";
+      // A door lock: the adapter's last list — connected is reporting; not listed is not set up; no adapter, unknown.
+      const lockReporting = (ref: string): Reporting => {
+        if (!reader) return "unknown";
+        const lock = reader.knownLocks().find((l) => l.ref === ref);
+        return !lock ? "not set up" : lock.connected ? "yes" : "offline";
+      };
+      const reporting = (camera: string | undefined): Reporting => {
         if (!camera || !labels.has(camera)) return "not set up";
         if (frigateDown) return "offline";
         const r = status.get(camera);
@@ -551,7 +584,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
               return {
                 source: l.label,
                 part: parsed?.frigateZone ?? null,
-                reporting: reporting(parsed?.camera),
+                reporting: l.sourceKind === "lock" ? lockReporting(l.sourceRef) : reporting(parsed?.camera),
                 linkedBy: l.setBy === "droplet" ? "Droplet" : "a person",
               };
             }),
