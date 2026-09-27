@@ -337,7 +337,14 @@ describe("/admin/extensions — the owner's decision", () => {
     });
     renderPage();
     const group = await toolGroup();
-    expect(within(group).getByText(/can't show the arguments and description this tool was recorded with/)).toBeTruthy();
+    // The same null covers a newer version not yet run AND a tool the current
+    // version dropped (its row is never deleted), so the sentence promises a
+    // review only for the first: no attach ever re-hashes a dropped tool.
+    expect(
+      within(group).getByText(
+        "Droplet can't show the arguments and description this tool was recorded with — the extension's current version declares different ones, or does not provide this tool — so it can't be reviewed here. If that version provides it, it can be reviewed once that version has run.",
+      ),
+    ).toBeTruthy();
     expect(within(group).queryByRole("button")).toBeNull();
     expect(within(group).queryByLabelText("Arguments word_count takes")).toBeNull();
   });

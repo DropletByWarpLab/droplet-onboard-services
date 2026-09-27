@@ -34,8 +34,13 @@ export const AUTHOR_WORDS_SUMMARY = "What its author says about it";
 export const AUTHOR_WORDS_NOTE =
   "Its author wrote all of this: the description, and the full input schema with any notes inside it. Droplet checks only that the running tool declares exactly this, not that any of it is true, and decides nothing from it. The assistant is shown all of it when it is offered the tool, so a review covers it: if any of it changes, the tool is blocked again until an owner reviews it.";
 
+/**
+ * For a tool the orchestrator sends no schema for. That covers a newer
+ * version not yet run AND a tool the current version dropped (nothing deletes
+ * its row), so a review is promised only for the first.
+ */
 export const NO_ARGUMENTS_SHOWN =
-  "Droplet can't show the arguments and description this tool was recorded with — the extension's current version declares different ones, or none — so it can't be reviewed here. It can be once that version has run.";
+  "Droplet can't show the arguments and description this tool was recorded with — the extension's current version declares different ones, or does not provide this tool — so it can't be reviewed here. If that version provides it, it can be reviewed once that version has run.";
 
 export const NO_TOOLS_YET = "Its tools are listed here once it has run.";
 
