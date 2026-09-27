@@ -3585,10 +3585,12 @@ export interface SecurityEventsPage {
 /**
  * One line of the feed header: what the feed is listening to, and whether it
  * is reporting. Served in the order camera_ingest, camera_system, locks,
- * threat_mirror, site_mode, incidents, alerts, patterns, retention. `locks`
- * (WARP-2977 P2b-2) comes only to people with Devices view; `threat_mirror`
- * and `alerts` (WARP-2978) only to owners and admins. `incidents` (WARP-2978)
- * is the incident engine's row, `patterns` (WARP-2980) the baseline job's.
+ * threat_mirror, site_mode, incidents, alerts, links, patterns, retention.
+ * `locks` (WARP-2977 P2b-2) comes only to people with Devices view;
+ * `threat_mirror` and `alerts` (WARP-2978) only to owners and admins.
+ * `incidents` (WARP-2978) is the incident engine's row, `links` (WARP-2979)
+ * Droplet's link-finding job's, `patterns` (WARP-2980) the baseline job's.
+ * Mirrors the orchestrator's `SecurityHealthId`.
  */
 export interface SecurityHealthRow {
   id:
@@ -3599,6 +3601,7 @@ export interface SecurityHealthRow {
     | "site_mode"
     | "incidents"
     | "alerts"
+    | "links"
     | "patterns"
     | "retention";
   state: "ok" | "quiet" | "down" | "not_configured";

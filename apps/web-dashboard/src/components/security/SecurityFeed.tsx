@@ -148,6 +148,8 @@ export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
   // and who alerts go to (owners and admins only: it names people).
   incidents: "Incidents",
   alerts: "Alerts",
+  // WARP-2979 (P4) — the job that finds which cameras cover which areas (AreasPanel's "Droplet's links").
+  links: "Droplet's links",
   // WARP-2980 (P5) — the job that learns what normal looks like.
   patterns: "Patterns",
   retention: "Record keeping",
