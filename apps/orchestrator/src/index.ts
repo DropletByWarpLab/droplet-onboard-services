@@ -165,6 +165,7 @@ import {
   recordActivity,
   getActivityRecorder,
 } from "./services/activity.singleton.js";
+import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
@@ -271,6 +272,8 @@ async function main() {
   // WARP-456: initialize the signed activity recorder. Boot-fatal —
   // an orchestrator that can't sign audit rows must NOT start.
   initActivityRecorder(prisma);
+  // WARP-3160: lifecycle post-effects revoke a leaver's VPN devices through it.
+  initVpnDeviceRevoke(prisma);
   // WARP-3165: a key rotated while the orchestrator was down
   // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
   // first new-key row, before the start-up row below.
