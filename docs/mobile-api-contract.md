@@ -236,6 +236,14 @@ result answers, so anything you send is an orphan the ai-gateway rejects
 outright. Send `system` / `user` / `assistant` text only. When the server does
 discard something it says so, on the two headers below.
 
+**`dashboardPages` is web-only for now (WARP-3116).** The web dashboard sends
+the pages its viewer can open, so the assistant can link to them and move the
+viewer between them (`find_dashboard_page` / `open_dashboard_page`; see
+`docs/LLM_AGENT.md` § Dashboard navigation). A native client that omits it
+gets neither tool advertised and no `{ action: "navigate" }` result.
+Adopting it means sending the app's own screens as same-origin-shaped paths
+and routing on that result, which is a contract change of its own.
+
 Streaming uses SSE (`Content-Type: text/event-stream`). Native clients
 should use a streaming HTTP client (URLSession `bytes(for:)` on iOS,
 OkHttp streaming on Android) to render token-by-token.
