@@ -7,8 +7,10 @@
  *  3. The sync runner that periodically pulls each source, parses ICS/CalDAV,
  *     and upserts events keyed on (sourceId, externalUid).
  *
- * Routes call into this module; nothing here reads `req`. (LLM tooling
- * lives in `@droplet/tools-core` and uses Prisma directly per spec §6.)
+ * Routes call into this module; nothing here reads `req`. The assistant's
+ * calendar tools (`@droplet/tools-core`) reach it through the same routes
+ * (WARP-3101): they used to write CalendarEvent directly, keyed on a value
+ * that is a User.id on one mcp-server transport and a username on the other.
  */
 
 import type { PrismaClient } from "@prisma/client";
@@ -21,6 +23,9 @@ import { assertOutboundUrlAllowed } from "../lib/outbound-url-guard.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("calendar");
+
+/** WARP-3193 PERF-10 — changed rows per update transaction in a sync. */
+const SYNC_WRITE_CHUNK = 100;
 
 // ── Local events ──
 
@@ -63,7 +68,7 @@ export async function createEvent(
 export async function listEvents(
   prisma: PrismaClient,
   userId: string,
-  range: { from?: Date; to?: Date; limit?: number },
+  range: { from?: Date; to?: Date; limit?: number; query?: string },
 ) {
   const limit = Math.max(1, Math.min(500, range.limit ?? 200));
   return prisma.calendarEvent.findMany({
@@ -76,6 +81,17 @@ export async function listEvents(
             // events whose start sits before the window.
             ...(range.from ? { endsAt: { gte: range.from } } : {}),
             ...(range.to ? { startsAt: { lte: range.to } } : {}),
+          }
+        : {}),
+      // WARP-3101 — the search_calendar_events tool: the text, in any case,
+      // in the title, the notes or the place.
+      ...(range.query
+        ? {
+            OR: [
+              { title: { contains: range.query, mode: "insensitive" as const } },
+              { description: { contains: range.query, mode: "insensitive" as const } },
+              { location: { contains: range.query, mode: "insensitive" as const } },
+            ],
           }
         : {}),
     },
@@ -96,8 +112,14 @@ export async function updateEvent(
   if (existing.source !== "local") {
     throw new Error("cannot modify externally-synced event");
   }
-  if (patch.startsAt && patch.endsAt && patch.endsAt.getTime() <= patch.startsAt.getTime()) {
-    throw new Error("endsAt must be after startsAt");
+  // WARP-3101 — the range as it will be AFTER the patch. Checking only when
+  // both ends arrived let a one-sided patch (a later start alone) put the end
+  // before the start. The update_event tool checked this before it moved onto
+  // this route, so the route now does it for the dashboard too.
+  if (patch.startsAt !== undefined || patch.endsAt !== undefined) {
+    const startsAt = patch.startsAt ?? existing.startsAt;
+    const endsAt = patch.endsAt ?? existing.endsAt;
+    if (endsAt.getTime() <= startsAt.getTime()) throw new Error("endsAt must be after startsAt");
   }
   return prisma.calendarEvent.update({
     where: { id },
@@ -256,46 +278,92 @@ export async function syncSource(
     return { added: 0, updated: 0, total: 0, error: result.error };
   }
 
-  // Upsert each event keyed on (sourceId, externalUid). The unique index
-  // makes this idempotent — re-sync of the same feed never duplicates.
-  let added = 0;
-  let updated = 0;
+  // WARP-3193 PERF-10 — diff before writing. This used to be one upsert per
+  // event, serially, on feeds up to 50 MB: thousands of round trips per sync,
+  // most of them rewriting rows that had not changed. Now: one read of the
+  // source's rows, one batched insert of the new UIDs, and chunked
+  // transactions for only the rows whose fields actually changed. Still
+  // keyed on (sourceId, externalUid), whose unique index keeps a re-sync
+  // from ever duplicating (skipDuplicates covers a racing manual sync).
+  const incoming = new Map<string, (typeof result.events)[number]>();
   for (const ev of result.events) {
     if (!ev.uid) continue; // RFC 5545 requires UID; skip malformed
+    incoming.set(ev.uid, ev); // a repeated UID: the last one wins, as before
+  }
+  const fields = (ev: (typeof result.events)[number]) => ({
+    title: ev.summary,
+    description: ev.description ?? null,
+    location: ev.location ?? null,
+    startsAt: ev.startsAt,
+    endsAt: ev.endsAt,
+    allDay: ev.allDay,
+  });
+  const existing = await prisma.calendarEvent.findMany({
+    where: { sourceId: source.id },
+    select: {
+      id: true,
+      externalUid: true,
+      title: true,
+      description: true,
+      location: true,
+      startsAt: true,
+      endsAt: true,
+      allDay: true,
+    },
+  });
+  const byUid = new Map(existing.map((row) => [row.externalUid, row]));
+
+  const toCreate: Array<ReturnType<typeof fields> & { uid: string }> = [];
+  const toUpdate: Array<{ id: string; uid: string; data: ReturnType<typeof fields> }> = [];
+  for (const [uid, ev] of incoming) {
+    const data = fields(ev);
+    const row = byUid.get(uid);
+    if (!row) {
+      toCreate.push({ ...data, uid });
+    } else if (
+      row.title !== data.title ||
+      row.description !== data.description ||
+      row.location !== data.location ||
+      row.startsAt.getTime() !== data.startsAt.getTime() ||
+      row.endsAt.getTime() !== data.endsAt.getTime() ||
+      row.allDay !== data.allDay
+    ) {
+      toUpdate.push({ id: row.id, uid, data });
+    }
+  }
+
+  // Keep going on a failed batch — one bad chunk shouldn't sink the whole
+  // sync (the same posture the per-event upsert had).
+  // One createMany: Prisma splits it into statements under Postgres's bind
+  // parameter limit itself.
+  let added = 0;
+  if (toCreate.length > 0) {
     try {
-      const upserted = await prisma.calendarEvent.upsert({
-        where: {
-          sourceId_externalUid: { sourceId: source.id, externalUid: ev.uid },
-        },
-        create: {
+      const res = await prisma.calendarEvent.createMany({
+        data: toCreate.map(({ uid, ...data }) => ({
+          ...data,
           userId: source.userId,
-          title: ev.summary,
-          description: ev.description ?? null,
-          location: ev.location ?? null,
-          startsAt: ev.startsAt,
-          endsAt: ev.endsAt,
-          allDay: ev.allDay,
           source: "external",
           sourceId: source.id,
-          externalUid: ev.uid,
-        },
-        update: {
-          title: ev.summary,
-          description: ev.description ?? null,
-          location: ev.location ?? null,
-          startsAt: ev.startsAt,
-          endsAt: ev.endsAt,
-          allDay: ev.allDay,
-        },
+          externalUid: uid,
+        })),
+        skipDuplicates: true,
       });
-      // Heuristic: if updatedAt is within 100ms of createdAt, it's a fresh
-      // insert. Cheaper than a separate findUnique per event.
-      if (upserted.updatedAt.getTime() - upserted.createdAt.getTime() < 100) added++;
-      else updated++;
+      added = res.count;
     } catch (err) {
-      // Keep going on individual failures — one bad event shouldn't sink
-      // the whole sync.
-      logger.warn({ err, uid: ev.uid }, "calendar event upsert failed");
+      logger.warn({ err, sourceId: source.id, count: toCreate.length }, "calendar event insert failed");
+    }
+  }
+  let updated = 0;
+  for (let i = 0; i < toUpdate.length; i += SYNC_WRITE_CHUNK) {
+    const chunk = toUpdate.slice(i, i + SYNC_WRITE_CHUNK);
+    try {
+      await prisma.$transaction(
+        chunk.map((u) => prisma.calendarEvent.update({ where: { id: u.id }, data: u.data })),
+      );
+      updated += chunk.length;
+    } catch (err) {
+      logger.warn({ err, sourceId: source.id, count: chunk.length }, "calendar event update batch failed");
     }
   }
 

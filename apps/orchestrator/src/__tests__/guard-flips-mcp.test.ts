@@ -222,6 +222,23 @@ describe("GET /api/matter/audit (get_command_history) — matter.ts", () => {
     expect(famRes.status).toBe(403);
     expect((famPrisma.commandAuditLog.findMany as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
+
+  // WARP-3193 PERF-15: ?limit / ?offset went straight into Prisma. A huge
+  // limit read the whole table in one response; a non-numeric one became
+  // `take: NaN` (a 500); a negative one flipped Prisma's read direction.
+  it.each([
+    ["?limit=100000", 200, 0],
+    ["?limit=abc&offset=xyz", 50, 0],
+    ["?limit=-5&offset=-3", 1, 0],
+    ["?limit=0", 1, 0],
+    ["?limit=25&offset=40", 25, 40],
+  ])("clamps %s to take=%i skip=%i", async (qs, take, skip) => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(owner, { prisma })).get(`/api/matter/audit${qs}`);
+    expect(res.status).toBe(200);
+    const findMany = prisma.commandAuditLog.findMany as ReturnType<typeof vi.fn>;
+    expect(findMany.mock.calls[0][0]).toMatchObject({ take, skip });
+  });
 });
 
 // ── approve_ap → POST /api/aps/:mac/approve ──────────────────────────────

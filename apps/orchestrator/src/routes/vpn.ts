@@ -91,6 +91,7 @@ import {
   verifyStatusPop,
 } from "../services/overlay-link.service.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 const logger = createLogger("vpn-route");
 
@@ -338,11 +339,6 @@ function getUser(req: Request): { username: string; role: string } {
     username: req.user?.username ?? "dev",
     role: req.user?.role ?? "family",
   };
-}
-
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
 }
 
 /** WARP-1385 — the box→HQ vouching call. Injected so the route unit-tests
@@ -1701,7 +1697,7 @@ export function createVpnRouter(
       // the moment WIREGUARD_ENDPOINT_HOST is configured.
       const endpointHost = await resolveEndpointHost();
       const endpointConfigured = endpointHost !== "";
-      const exposeEndpointHost = isAdmin(req);
+      const exposeEndpointHost = isOwnerOrAdmin(req);
       // ADR-023 (C4): the publicly-trusted per-device FQDN. Unlike endpointHost
       // (which can leak the box's public reachability), the FQDN is already
       // published to Certificate Transparency for everyone — it carries no PII
@@ -1815,7 +1811,7 @@ export function createVpnRouter(
       const isMcpService =
         req.user?.id === "_service:mcp" && req.user.role === "service";
       const where =
-        isAdmin(req) || isMcpService ? {} : { userId: user.username };
+        isOwnerOrAdmin(req) || isMcpService ? {} : { userId: user.username };
       const peers = await prisma.vpnPeer.findMany({
         where,
         orderBy: { createdAt: "desc" },

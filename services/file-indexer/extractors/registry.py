@@ -23,6 +23,7 @@ Recursion contract (WARP-199, spec §7):
 """
 from __future__ import annotations
 
+import importlib
 import inspect
 import logging
 import os
@@ -72,6 +73,42 @@ MAX_INDEX_BYTES = DEFAULT_MAX_BYTES
 MAX_INDEX_CHARS = int(os.environ.get("MAX_INDEX_CHARS", 5_000_000))
 
 
+# WARP-3193 QUAL-11: every optional extractor import below used to sit in
+# `except ImportError: pass`, so a missing system dependency (libmagic for
+# email, `srt` for video, ...) silently skipped every file of that type with a
+# green /health. A failed import is now logged (once per module) and recorded
+# here; `extractor_import_failures()` feeds the /health verdict.
+_OPTIONAL_EXTRACTORS = ("doc", "spreadsheet", "odf", "pptx", "email", "audio", "video", "archive")
+_import_failures: dict[str, str] = {}
+
+
+def _optional_extractor(name: str):
+    """Import `extractors.<name>`, or return None (logged + recorded) when its
+    dependencies are missing. Lazy, so test runners can still monkeypatch."""
+    try:
+        module = importlib.import_module(f"extractors.{name}")
+        _import_failures.pop(name, None)
+        return module
+    except ImportError as e:
+        if name not in _import_failures:
+            logger.error(
+                "extractor %r cannot be imported — files it handles will be "
+                "skipped until the image is fixed: %s",
+                name,
+                e,
+            )
+        _import_failures[name] = str(e)
+        return None
+
+
+def extractor_import_failures() -> dict[str, str]:
+    """Probe every optional extractor and return {module: import error} for
+    the ones that cannot load. Empty means every file type is handled."""
+    for name in _OPTIONAL_EXTRACTORS:
+        _optional_extractor(name)
+    return dict(_import_failures)
+
+
 def _route(mime: str) -> Optional[Callable[..., ExtractedDoc]]:
     # Lazy import so test runners can monkeypatch individual extractors.
     if mime.startswith("text/") or mime in {"application/json", "application/xml"}:
@@ -88,63 +125,39 @@ def _route(mime: str) -> Optional[Callable[..., ExtractedDoc]]:
     # Legacy binary Word is a different format from OOXML, not a variant of
     # it. Routing application/msword at python-docx made every .doc fail with
     # "is not a Word file, content type is ...themeManager+xml".
-    try:
-        from extractors import doc as doc_ext  # type: ignore  # noqa: PLC0415
-        if mime in doc_ext.SUPPORTED_MIMES:
-            return doc_ext.extract
-    except ImportError:
-        pass
-    try:
-        from extractors import spreadsheet as sheet_ext  # type: ignore  # noqa: PLC0415
-        if mime in sheet_ext.SUPPORTED_MIMES:
-            return sheet_ext.extract
-    except ImportError:
-        pass
-    try:
-        from extractors import odf as odf_ext  # type: ignore  # noqa: PLC0415
-        if mime in odf_ext.SUPPORTED_MIMES:
-            return odf_ext.extract
-    except ImportError:
-        pass
+    doc_ext = _optional_extractor("doc")
+    if doc_ext is not None and mime in doc_ext.SUPPORTED_MIMES:
+        return doc_ext.extract
+    sheet_ext = _optional_extractor("spreadsheet")
+    if sheet_ext is not None and mime in sheet_ext.SUPPORTED_MIMES:
+        return sheet_ext.extract
+    odf_ext = _optional_extractor("odf")
+    if odf_ext is not None and mime in odf_ext.SUPPORTED_MIMES:
+        return odf_ext.extract
     # WARP-435 (ADR-003 Phase 1): PPTX. python-pptx is heavy (lxml at
     # import), so we lazy-import like the other extractors. Try/except
     # so the registry stays usable on branches that haven't shipped
     # python-pptx yet.
-    try:
-        from extractors import pptx as pptx_ext  # type: ignore  # noqa: PLC0415
-        if mime in pptx_ext.SUPPORTED_MIMES:
-            return pptx_ext.extract
-    except ImportError:
-        pass
+    pptx_ext = _optional_extractor("pptx")
+    if pptx_ext is not None and mime in pptx_ext.SUPPORTED_MIMES:
+        return pptx_ext.extract
     if mime.startswith("image/"):
         from extractors.image import extract as image_extract  # noqa: PLC0415
         return image_extract
     # Phase 2 extractors — try/except imports because each lands on its own
     # branch and may not be present in every checkout.
-    try:
-        from extractors import email as email_ext  # type: ignore  # noqa: PLC0415
-        if mime in email_ext.SUPPORTED_MIMES:
-            return email_ext.extract
-    except ImportError:
-        pass
-    try:
-        from extractors import audio as audio_ext  # type: ignore  # noqa: PLC0415
-        if mime in audio_ext.SUPPORTED_MIMES:
-            return audio_ext.extract
-    except ImportError:
-        pass
-    try:
-        from extractors import video as video_ext  # type: ignore  # noqa: PLC0415
-        if mime in video_ext.SUPPORTED_MIMES:
-            return video_ext.extract
-    except ImportError:
-        pass
-    try:
-        from extractors import archive as archive_ext  # type: ignore  # noqa: PLC0415
-        if mime in archive_ext.SUPPORTED_MIMES:
-            return archive_ext.extract
-    except ImportError:
-        pass
+    email_ext = _optional_extractor("email")
+    if email_ext is not None and mime in email_ext.SUPPORTED_MIMES:
+        return email_ext.extract
+    audio_ext = _optional_extractor("audio")
+    if audio_ext is not None and mime in audio_ext.SUPPORTED_MIMES:
+        return audio_ext.extract
+    video_ext = _optional_extractor("video")
+    if video_ext is not None and mime in video_ext.SUPPORTED_MIMES:
+        return video_ext.extract
+    archive_ext = _optional_extractor("archive")
+    if archive_ext is not None and mime in archive_ext.SUPPORTED_MIMES:
+        return archive_ext.extract
     return None
 
 
@@ -155,30 +168,18 @@ def _cap_for_mime(mime: str) -> int:
     them to decide which cap applies. Try/except imports keep the registry
     usable when a Phase 2 extractor module hasn't landed yet.
     """
-    try:
-        from extractors import audio as _audio  # type: ignore  # noqa: PLC0415
-        if mime in _audio.SUPPORTED_MIMES:
-            return AUDIO_MAX_BYTES
-    except ImportError:
-        pass
-    try:
-        from extractors import video as _video  # type: ignore  # noqa: PLC0415
-        if mime in _video.SUPPORTED_MIMES:
-            return VIDEO_MAX_BYTES
-    except ImportError:
-        pass
-    try:
-        from extractors import email as _email  # type: ignore  # noqa: PLC0415
-        if mime in _email.SUPPORTED_MIMES:
-            return EMAIL_MAX_BYTES
-    except ImportError:
-        pass
-    try:
-        from extractors import archive as _archive  # type: ignore  # noqa: PLC0415
-        if mime in _archive.SUPPORTED_MIMES:
-            return ARCHIVE_MAX_BYTES
-    except ImportError:
-        pass
+    _audio = _optional_extractor("audio")
+    if _audio is not None and mime in _audio.SUPPORTED_MIMES:
+        return AUDIO_MAX_BYTES
+    _video = _optional_extractor("video")
+    if _video is not None and mime in _video.SUPPORTED_MIMES:
+        return VIDEO_MAX_BYTES
+    _email = _optional_extractor("email")
+    if _email is not None and mime in _email.SUPPORTED_MIMES:
+        return EMAIL_MAX_BYTES
+    _archive = _optional_extractor("archive")
+    if _archive is not None and mime in _archive.SUPPORTED_MIMES:
+        return ARCHIVE_MAX_BYTES
     return DEFAULT_MAX_BYTES
 
 

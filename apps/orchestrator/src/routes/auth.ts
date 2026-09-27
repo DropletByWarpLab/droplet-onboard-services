@@ -124,6 +124,7 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
+import { purgeUsernameKeyedData } from "../services/username-data-purge.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -1805,18 +1806,33 @@ export function createPublicAuthRouter(
         });
 
         // Native clients want the new tokens in body since they can't
-        // read Set-Cookie. Always include them — browsers ignore the
-        // body's accessToken (they use the cookie that was just set
-        // above), so this is non-breaking.
+        // read Set-Cookie. WARP-3193 SEC-AUTH-7: ONLY native clients — the
+        // same WARP-582 rule as /auth/login?return=body. A browser rotates
+        // through the cookies set above; tokens in its body would be
+        // readable by any XSS on the dashboard origin. Native = presented
+        // its refresh token in the body (ADR-008) AND carries no browser
+        // marker header (lib/browser-context.ts).
+        const browserMarker = browserMarkerHeader(req.headers);
+        if (refreshTokenBody !== null && browserMarker !== null) {
+          logger.warn(
+            { marker: browserMarker, sub },
+            "refresh: body tokens refused for a browser context — cookie-only rotation (WARP-582)",
+          );
+        }
+        const wantBody = refreshTokenBody !== null && browserMarker === null;
         res.json({
           status: "ok",
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-          accessTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-          refreshTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+          ...(wantBody
+            ? {
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken,
+                accessTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+                refreshTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+              }
+            : {}),
         });
         return;
       }
@@ -2027,7 +2043,7 @@ export function createPublicAuthRouter(
       // ── WARP-490: single-use enforcement via compare-and-swap ──
       // Two near-simultaneous POSTs to the same token both clear the
       // isUsed() fast-path above before either write lands. The
-      // conditional updateMany (acceptedAt: null) is the atomic
+      // conditional updateMany (status: "pending") is the atomic
       // enforcement point: exactly one caller flips the row (count === 1)
       // and proceeds to create the account; the other sees count === 0
       // and 410s WITHOUT ever calling Nextcloud — so no duplicate NC
@@ -2042,9 +2058,13 @@ export function createPublicAuthRouter(
       // atomic single-use — a transient-failure auto-release would reopen
       // a (smaller) version of the same race.
       const acceptedFrom = getRequestIp(req);
+      // WARP-3193 QUAL-3: the guard is the explicit status, so a revoke or
+      // the expiry sweep landing between the fast-path read and this write
+      // also loses the race, not just a second accept.
       const claim = await prisma.userInvite.updateMany({
-        where: { id: invite.id, acceptedAt: null },
+        where: { id: invite.id, status: "pending" },
         data: {
+          status: "accepted",
           acceptedAt: new Date(),
           acceptedFrom: acceptedFrom ?? undefined,
         },
@@ -4004,9 +4024,24 @@ export function createProtectedAuthRouter(
       // No rails re-run here: a DEACTIVATED row holds no operator capacity
       // (rail 5 already excludes it), so removing it cannot strand the box.
       if (prisma && row) {
-        const removed = await prisma.user.deleteMany({
-          where: { id: row.id, directoryStatus: "DEACTIVATED" },
-        });
+        // WARP-3193 SEC-AUTH-6: the rows keyed by USERNAME (notes, calendar
+        // + CalDAV credentials, reminders, chats, push subscriptions) go in
+        // the SAME transaction as the row, and only when the row really goes
+        // — the username must never be free while data still answers to it,
+        // or the next account deriving it inherits that data.
+        const removed = await prisma.$transaction(async (tx) => {
+          const r = await tx.user.deleteMany({
+            where: { id: row.id, directoryStatus: "DEACTIVATED" },
+          });
+          if (r.count > 0) {
+            const purged = await purgeUsernameKeyedData(tx, row.username);
+            logger.info(
+              { username: req.params.username, userId: row.id, purged },
+              "Purged username-keyed private data with the deleted user row",
+            );
+          }
+          return r;
+        }, SERIALIZABLE_TX);
         if (removed.count === 0) {
           logger.warn(
             { username: req.params.username, userId: row.id },
@@ -4358,6 +4393,11 @@ export function createProtectedAuthRouter(
         createdBy: r.createdBy,
         createdAt: r.createdAt,
         expiresAt: r.expiresAt,
+        // WARP-3193 QUAL-3: the lifecycle, so the client reads one field
+        // instead of re-deriving it from the timestamps. A pending row past
+        // expiresAt reads as expired here, exactly as the accept route
+        // treats it, until the 03:00 sweep stamps the column.
+        status: r.status === "pending" && isExpired(r) ? "expired" : r.status,
         acceptedAt: r.acceptedAt,
         revokedAt: r.revokedAt,
       }));
@@ -4383,12 +4423,14 @@ export function createProtectedAuthRouter(
           return;
         }
         // Idempotent: revoking an already-revoked invite is a no-op success.
-        if (!invite.revokedAt) {
-          await prisma.userInvite.update({
-            where: { id: invite.id },
-            data: { revokedAt: new Date() },
-          });
-        }
+        // WARP-3193 QUAL-3: only a pending or expired invite moves to
+        // revoked, in one conditional write with its timestamp. An accepted
+        // invite stays accepted — that person already holds the account, and
+        // the old unconditional stamp made the record claim otherwise.
+        await prisma.userInvite.updateMany({
+          where: { id: invite.id, status: { in: ["pending", "expired"] } },
+          data: { status: "revoked", revokedAt: new Date() },
+        });
         res.json({ revoked: true });
       } catch (err) {
         next(err);

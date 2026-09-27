@@ -1,12 +1,13 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { needsUserApproval, routeApprovalRefusal } from "./_approval.js";
 
 const inputSchema = {
   type: "object",
   properties: {
     from_path: { type: "string", description: "Current full path." },
     to_path: { type: "string", description: "Destination full path." },
-    overwrite: { type: "boolean", description: "Replace destination if it exists. Default false." },
+    overwrite: { type: "boolean", description: "Refused if true: replacing needs the user." },
   },
   required: ["from_path", "to_path"],
   additionalProperties: false,
@@ -29,20 +30,25 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     "X-Nextcloud-Token": ctx.ncToken,
     "X-Nextcloud-User": ctx.userId,
   };
-  const overwrite = args.overwrite === true;
+  // WARP-3193 SEC-INJ-2: replacing the destination destroys it — refuse.
+  if (args.overwrite === true) {
+    return needsUserApproval(`Replacing the existing ${t.path}`);
+  }
   const res = await ctx.http.nextcloud.post(
     "/move",
-    { from: f.path, to: t.path, overwrite },
+    { from: f.path, to: t.path, overwrite: false },
     { headers },
   );
-  if (!res.ok) return err("MOVE_FAILED", `nextcloud returned ${res.status}`);
+  if (!res.ok) {
+    return (await routeApprovalRefusal(res)) ?? err("MOVE_FAILED", `nextcloud returned ${res.status}`);
+  }
   return { ok: true, data: { moved_from: f.path, moved_to: t.path } };
 }
 
 const tool: Tool = {
   name: "move_file",
   description:
-    "Move a file or directory to a new location. Pass `from_path` and `to_path`. Fails if the destination exists; pass overwrite=true to replace it.",
+    "Move a file or directory to a new location. Pass `from_path` and `to_path`. Fails if the destination exists; replacing it needs the user.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

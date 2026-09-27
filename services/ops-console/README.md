@@ -124,8 +124,9 @@ Authorization: Bearer xyz...
 ```
 
 If `OPS_TOKEN` is unset the service falls back to an ephemeral random
-token logged to stdout on startup — that's a dev-only escape hatch
-so `uvicorn main:app` works against a bare repo; on a real device
+token and logs only its sha256 fingerprint (never the value) — that's a
+dev-only escape hatch so `uvicorn main:app` starts against a bare repo
+(set `OPS_TOKEN` yourself to get a usable bearer); on a real device
 `./scripts/setup.sh` always provisions a stable value.
 
 ## Audit log

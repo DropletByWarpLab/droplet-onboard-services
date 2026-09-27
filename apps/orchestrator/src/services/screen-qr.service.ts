@@ -38,6 +38,7 @@ import { pushClaimCode, pushCustomImage, showSystem } from "./display.client.js"
 import type { ClaimWifi } from "./display.client.js";
 import { ensureClaimCode, isClaimed } from "./claim-code.service.js";
 import { renderQRToScreenPng } from "./qr-render.js";
+import type { CronRuntime } from "./cron-runtime.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("screen-qr");
@@ -125,9 +126,6 @@ const claimScreenDeps: ClaimScreenDeps = {
 
 /** The signature of whatever's currently on screen (avoids re-pushes). */
 let activeSignature = "";
-
-/** Poller handle so app.ts can call stop() on shutdown. */
-let pollerInterval: NodeJS.Timeout | null = null;
 
 /**
  * In-flight guard for `refreshNow()`. The poller interval keeps firing
@@ -552,36 +550,32 @@ export function kickScreenQRRefresh(): void {
 let started = false;
 
 /**
- * Boot the poller. Idempotent — calling twice replaces the handle.
- * `app.ts` calls this once during boot. `prisma` is used by the claim-screen
- * branch (WARP-632); the user-count leg still goes through Nextcloud's OCS API.
+ * Boot the poller on `cron` (WARP-3193 QUAL-7: index.ts main() calls this
+ * once; `cron.stop()` tears the schedule down). `prisma` is used by the
+ * claim-screen branch (WARP-632); the user-count leg still goes through
+ * Nextcloud's OCS API. The first refresh runs immediately so the screen
+ * catches up on boot without waiting POLL_INTERVAL_MS.
  */
-export function startScreenQRPoller(prisma: PrismaClient): void {
+export function startScreenQRPoller(
+  prisma: PrismaClient,
+  cron: Pick<CronRuntime, "scheduleInterval">,
+): void {
   prismaRef = prisma;
   started = true;
-  if (pollerInterval) {
-    clearInterval(pollerInterval);
-  }
-  // First refresh runs immediately so the screen catches up on boot
-  // without waiting POLL_INTERVAL_MS.
-  refreshNow().catch((err) =>
-    logger.warn({ err }, "screen-qr: initial refresh failed"),
+  cron.scheduleInterval(
+    POLL_INTERVAL_MS,
+    async () => {
+      await refreshNow().catch((err) =>
+        logger.warn({ err }, "screen-qr: scheduled refresh failed"),
+      );
+    },
+    { immediate: true },
   );
-  pollerInterval = setInterval(() => {
-    refreshNow().catch((err) =>
-      logger.warn({ err }, "screen-qr: scheduled refresh failed"),
-    );
-  }, POLL_INTERVAL_MS);
-  // Don't block process exit on this timer (it's a daemon).
-  pollerInterval.unref();
   logger.info("screen-qr: poller started");
 }
 
+/** Stop acting on refreshes (shutdown). The schedule itself is cron's. */
 export function stopScreenQRPoller(): void {
-  if (pollerInterval) {
-    clearInterval(pollerInterval);
-    pollerInterval = null;
-  }
   started = false;
   prismaRef = null;
 }
@@ -594,10 +588,6 @@ export function _resetForTests(): void {
   lastPeerEvent = null;
   activeSignature = "";
   prismaRef = null;
-  if (pollerInterval) {
-    clearInterval(pollerInterval);
-    pollerInterval = null;
-  }
   started = false;
 }
 
