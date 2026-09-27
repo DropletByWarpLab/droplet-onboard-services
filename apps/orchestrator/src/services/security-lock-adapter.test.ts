@@ -1254,7 +1254,7 @@ describe("startSecurityLockAdapter / registerSecurityLockJobs", () => {
     // header is not "Hasn't checked the locks yet" for the first minute of every boot.
     expect(scheduleInterval).toHaveBeenCalledWith(SECURITY_LOCK_SWEEP_INTERVAL_MS, expect.any(Function), {
       lockKey: SECURITY_LOCK_SWEEP_LOCK_KEY,
-      runImmediately: true,
+      immediate: true,
     });
     expect(SECURITY_LOCK_SWEEP_INTERVAL_MS).toBe(60_000);
     expect(SECURITY_LOCK_SWEEP_LOCK_KEY).toBe("droplet:security-lock-sweep");

@@ -1225,7 +1225,7 @@ export function registerSecurityLockJobs(
       // sweep() never throws and logs through the adapter's own logger.
       await adapter.sweep();
     },
-    { lockKey: SECURITY_LOCK_SWEEP_LOCK_KEY, runImmediately: true },
+    { lockKey: SECURITY_LOCK_SWEEP_LOCK_KEY, immediate: true },
   );
   adapter.noteSweepScheduled();
 }
