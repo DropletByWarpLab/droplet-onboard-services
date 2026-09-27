@@ -26,6 +26,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   createEvent,
   listEvents,
+  allDayDates,
   updateEvent,
   deleteEvent,
   createSource,
@@ -219,7 +220,7 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         limit,
         query: q?.data,
       });
-      res.json({ events });
+      res.json({ events: events.map((e) => ({ ...e, ...allDayDates(e) })) });
     } catch (err) {
       next(err);
     }
