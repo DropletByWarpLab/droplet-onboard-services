@@ -48,7 +48,7 @@ describe("explainExtensionError", () => {
     expect(explainExtensionError(MARKER)).not.toContain(MARKER);
   });
 
-  it.each(["install_failed", "attach_refused", "verify_failed", "wrong_state", "not_promoted", "statement_mismatch"])(
+  it.each(["install_failed", "attach_refused", "verify_failed", "wrong_state", "not_promoted", "statement_mismatch", "source_deleted"])(
     "says what %s means, in its own sentence",
     (code) => {
       const text = explainExtensionError(new ExtensionRequestError(MARKER, 409, code));

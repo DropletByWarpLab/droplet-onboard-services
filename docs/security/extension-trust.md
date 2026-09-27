@@ -103,6 +103,15 @@ statement alone.
   then ask the sandbox. If that call fails, the row already says `disabled`
   / `uninstalled`, and a retry of the same transition acts again while the
   sandbox still runs (holds) the extension, instead of answering `409`.
+- The source workspace outlives every extension that can still be
+  installed (WARP-3200). Every install re-exports the code from it, so
+  deleting a workshop workspace is `409` while its extension is anything
+  but `uninstalled`, and enabling an uninstalled extension whose workspace
+  is gone is `409 source_deleted`. The delete's check and write, a
+  promote's store and an enable's claim all take a lock on the workspace
+  row (`FOR UPDATE` against `FOR KEY SHARE`), so neither can land between
+  the delete's check and its write
+  (`services/workspace-source-guard.service.ts`).
 - A stop takes the whole process tree. Every extension leads its own
   process group (`start_new_session`), and a stop signals the group:
   `SIGTERM`, a grace period, then `SIGKILL` to what is left. When the
