@@ -891,6 +891,7 @@ function DrawerLink({
       href={item.href}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
+      aria-label={item.ariaLabel}
       className={`
         flex items-center gap-3 min-h-[44px] rounded-lg
         type-subheadline transition-all duration-200 ease-smooth
@@ -1070,7 +1071,9 @@ function NavLink({
                     key={sub.href}
                     href={sub.href}
                     aria-current={subActive ? "page" : undefined}
-                    aria-label={collapsed ? sub.label : undefined}
+                    // WARP-2978 — a child named for whose it is ("Security settings")
+                    // keeps that name; otherwise the collapsed rail names it by its label.
+                    aria-label={sub.ariaLabel ?? (collapsed ? sub.label : undefined)}
                     title={collapsed ? sub.label : undefined}
                     className={`
                       flex items-center h-8 rounded-md
