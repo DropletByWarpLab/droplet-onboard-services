@@ -3,12 +3,12 @@
  *
  * Both tools dispatch through the orchestrator's /api/team-chat routes as
  * the trusted `_service:mcp` principal, acting as the human named by
- * X-Droplet-User = ctx.userId (the WARP-202 USERNAME the chat session
- * threads through MCP `_meta.userId` — the exact email-tool posture from
- * handlers/email/send.ts). The orchestrator resolves that username
- * against the directory and runs the IDENTICAL participant/module checks
- * a direct human call gets — these helpers only carry the identity, they
- * never widen it.
+ * X-Droplet-User = ctx.userId (the exact email-tool posture from
+ * handlers/email/send.ts). That is `User.username` on stdio (MCP
+ * `_meta.userId`) and `User.id` over HTTP (`claims.sub`); the orchestrator
+ * resolves either against the directory (resolveAssertedUser, WARP-3187)
+ * and runs the IDENTICAL participant/module checks a direct human call
+ * gets — these helpers only carry the identity, they never widen it.
  *
  * DELIBERATELY NO `ctx.http` CALLS IN THIS FILE: the WARP-1455
  * TOOL_ROUTES drift gate discovers a tool's route hops by scanning the
