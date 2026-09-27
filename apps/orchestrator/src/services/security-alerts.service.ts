@@ -25,8 +25,10 @@
  *      again because alert evidence arrived on a new camera) plans only the
  *      people whose notice is `skipped_not_visible`, updating that notice in
  *      place — still one notice, one notification at most, per person;
- *   3. per recipient, DS-005 (D27): the alert evidence on cameras they can
- *      see (`visibleCameraNames`). None → `skipped_not_visible`. The copy is
+ *   3. per recipient, DS-005 (D27): the alert evidence they may see —
+ *      `reasonVisibleTo` over their own scope (`securityScopeForPerson`: the
+ *      cameras they can see and, P4 PR-4 / DS-019, whether they may read
+ *      locks). None → `skipped_not_visible`. The copy is
  *      built from that visible evidence only. ≥ 6 alert notifications to them
  *      in the last hour → `skipped_capped` (D28);
  *   4. ONE READ COMMITTED transaction: the incident CAS (pending → done), a
@@ -66,6 +68,7 @@ import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
 import { visibleCameraNames } from "./camera-access.service.js";
+import { securityScopeForPerson } from "./security-access.js";
 import { deliverNotification, recordNotification } from "./notifications.service.js";
 import { webPushGate } from "./off-lan-gate.service.js";
 import { auditSecurityInTx, auditSecuritySystem, chainSafeText, stripUnsafeDisplayChars } from "./security-audit.js";
@@ -210,6 +213,8 @@ function alertEvidenceOf(
           seenCameraLabel: r.relatedCamera ? (labels.get(r.relatedCamera) ?? r.relatedCamera) : null,
           // Where the person was seen (review #2418) — not always the incident's area.
           seenAreaName: typeof activity?.zoneName === "string" ? activity.zoneName : null,
+          // P4 PR-4: a door lock's change was the activity — its reading, never a person.
+          seenLockReading: activity?.kind === "lock_state" && typeof activity.label === "string" ? activity.label : null,
         }
       : {}),
   };
@@ -308,11 +313,12 @@ async function planNotices(
       return { user, reason, outcome: eligibility.reason === "no_address" ? "skipped_no_address" : "skipped_no_access", copy: null };
     }
     // DS-005, per recipient: only the alert evidence they may see — `reasonVisibleTo`, the one rule (WARP-2979: a
-    // reason that names where a person was seen needs that camera visible too).
-    const visible = await visibleCameraNames(prisma, { id: user.id, role: user.role });
+    // reason that names where a person was seen needs that camera visible too; P4 PR-4, DS-019: one that names a
+    // door lock needs `mayReadLocks`). The scope is the dashboard's own, for this person (`securityScopeForPerson`).
+    const scope = await securityScopeForPerson(prisma, { id: user.id, role: user.role }, deps.resolveAccess);
     const ownerOrAdmin = user.role === "owner" || user.role === "admin";
     const evidence: AlertEvidence[] = incident.reasons
-      .filter((r) => reasonVisibleTo(r, { visibleCameras: visible }, ownerOrAdmin))
+      .filter((r) => reasonVisibleTo(r, scope, ownerOrAdmin))
       .map((r) => alertEvidenceOf(r, labels));
     if (evidence.length === 0) return { user, reason, outcome: "skipped_not_visible", copy: null };
     const recent = await prisma.securityIncidentNotice.count({

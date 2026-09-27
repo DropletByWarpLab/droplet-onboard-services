@@ -446,6 +446,8 @@ function reasonRows(incidentId: string, drafts: readonly ReasonDraft[]): Prisma.
     detail: d.detail,
     // WARP-2979 — where the person was seen (camera_offline_during_activity); CHECK SecurityIncidentReason_related.
     relatedCamera: d.relatedCamera ?? null,
+    // WARP-2979 P4 PR-4 — the activity was a door lock changing (D12); shown only with mayReadLocks (DS-019).
+    relatedLock: d.relatedLock ?? false,
   }));
 }
 
@@ -690,6 +692,11 @@ const ACTIVITY_ROWS = 200;
  * camera person-linked to those areas — read from the store by (camera,
  * startedAt), not from the incident's members, so activity that went to
  * another incident still counts — each matched through the person-only index.
+ *
+ * P4 PR-4 (D12): and the `lock_state` rows of every lock person-linked to those
+ * areas inside [drop − 120 s, drop + 60 s], read by (sourceRef, startedAt).
+ * Which of them count (a LIVE turn, never polled, never the baseline) is the
+ * pure rule's (`isLockChange`, inside `cameraOfflineDuringActivity`).
  */
 async function activityReason(
   prisma: PrismaClient | Tx,
@@ -714,6 +721,9 @@ async function activityReason(
         .filter((c): c is string => c !== undefined),
     ),
   ].sort();
+  const locks = [
+    ...new Set(ctx.links.filter((l) => l.setBy === "person" && l.sourceKind === "lock" && personAreas.has(l.zoneId)).map((l) => l.sourceRef)),
+  ].sort();
   const rule = RULESET.camera_offline_during_activity;
   const drop = event.startedAt.getTime();
   const rows = await prisma.securityEvent.findMany({
@@ -726,12 +736,36 @@ async function activityReason(
     orderBy: [{ startedAt: "desc" }, { id: "desc" }],
     take: ACTIVITY_ROWS,
   });
+  // A lock change is an instant: the window itself, no look-back.
+  const lockRows =
+    locks.length === 0
+      ? []
+      : await prisma.securityEvent.findMany({
+          where: {
+            source: "matter_lock",
+            kind: "lock_state",
+            sourceRef: { in: locks },
+            startedAt: { gte: new Date(drop - rule.activityBeforeMs), lte: new Date(drop + rule.activityAfterMs) },
+          },
+          orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+          take: ACTIVITY_ROWS,
+          select: { id: true, source: true, kind: true, sourceRef: true, labels: true, observed: true, dedupeKey: true, startedAt: true },
+        });
   return cameraOfflineDuringActivity({
     offline: event,
     onlines,
     now,
     personAreas,
     activity: rows.map((r) => ({ ...r, personZoneIds: zonesForEvent(r, ctx.personIndex) })),
+    lockActivity: lockRows.map((r) => ({
+      id: r.id,
+      sourceRef: r.sourceRef,
+      reading: r.labels[0],
+      observed: r.observed,
+      dedupeKey: r.dedupeKey,
+      startedAt: r.startedAt,
+      personZoneIds: zonesForEvent({ source: r.source, kind: r.kind, camera: null, cameraZones: [], sourceRef: r.sourceRef }, ctx.personIndex),
+    })),
     timeline: ctx.timeline,
   });
 }

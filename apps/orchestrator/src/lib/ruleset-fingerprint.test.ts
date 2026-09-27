@@ -37,8 +37,9 @@ describe("the ruleset fingerprint", () => {
       // v3 — WARP-2980 P5 PR-B: the pattern codes (all `trial`), their severity modifiers and the baseline numbers.
       // v4 — WARP-2979 P4 PR-1: camera_offline_during_activity, and alerts only through person-set links (rankPick,
       //      after_hours_presence's personLinked — code, riding the same bump).
-      version: 4,
-      fingerprint: "bc7bca3747b1cdadfa36ea561b030833d67f43e9d4d5c91a96f047efd034fe15",
+      // v5 — WARP-2979 P4 PR-4: camera_offline_during_activity also counts a door lock's LIVE change (`locks`).
+      version: 5,
+      fingerprint: "bcd3d203732147fed83ea2780eb8684e04fe93b63d91fbabd243fbd5a6445cb6",
     });
   });
 
