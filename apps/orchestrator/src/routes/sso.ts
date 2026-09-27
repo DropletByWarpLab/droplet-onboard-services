@@ -38,18 +38,10 @@ import {
   consumeLoginState,
   SSO_LOGIN_STATE_TTL_SECONDS,
 } from "../services/sso-login-state.service.js";
-import {
-  signAccessToken,
-  signRefreshToken,
-  registerRefreshSession,
-  ACCESS_TOKEN_TTL_SECONDS,
-  REFRESH_TOKEN_TTL_SECONDS,
-  type Role,
-} from "../services/jwt.service.js";
-import { createSession } from "../services/session.service.js";
+import type { Role } from "../services/jwt.service.js";
+import { issueSessionTokens, setSessionCookies } from "../services/session-mint.js";
 import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
 import { findUserByEmail, emailWriteData } from "../services/user-directory.service.js";
-import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
 import { createLogger } from "../lib/logger.js";
@@ -526,40 +518,10 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
       // Issue the SAME session cookies as /auth/login. WARP-247: record
       // first (cap + idle/absolute clocks), sid into both tokens, and index
       // the refresh token (WARP-116 — the SSO path previously skipped
-      // registerRefreshSession).
-      const { sid } = await createSession({ id: user.id, role: user.role });
-      const accessToken = signAccessToken({
-        id: user.id,
-        username: user.username,
-        displayName: user.displayName,
-        role: user.role,
-        sid,
-        // WARP-1582 — the resolved row's custom access role (null = none).
-        accessRoleId: user.accessRoleId,
-      });
-      const refreshToken = signRefreshToken({
-        id: user.id,
-        username: user.username,
-        displayName: user.displayName,
-        role: user.role,
-        sid,
-      });
-      await registerRefreshSession(user.id, refreshToken);
-      const https = isHttps(req);
-      res.cookie(SESSION_COOKIE_NAME, accessToken, {
-        httpOnly: true,
-        secure: https,
-        sameSite: "lax",
-        path: "/",
-        maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-      });
-      res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
-        httpOnly: true,
-        secure: https,
-        sameSite: "lax",
-        path: "/api/auth",
-        maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-      });
+      // registerRefreshSession). WARP-1582 — the resolved row's custom
+      // access role (null = none) rides in the access token.
+      const minted = await issueSessionTokens(user);
+      setSessionCookies(req, res, minted);
 
       // Audit row — mirrors /auth/login's success shape. Never includes the
       // code or tokens; `provider` is the SSO source.
