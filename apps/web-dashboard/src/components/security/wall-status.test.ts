@@ -86,15 +86,25 @@ describe("the sources cell (T-D2)", () => {
   });
 
   it("rows that are not event sources never move it: learning patterns, record keeping, alerts, the mode, the engine", () => {
-    const others = [row("site_mode", "down"), row("incidents", "down"), row("alerts", "down"), row("patterns", "quiet"), row("retention", "quiet")];
+    const others = [row("site_mode", "down"), row("incidents", "down"), row("alerts", "down"), row("links", "not_configured"), row("patterns", "quiet"), row("retention", "quiet")];
     expect(sourcesHeadline([row("camera_ingest", "ok"), ...others])).toBe(WALL_COPY.sourcesAllReporting);
     expect(sourceRows(others)).toEqual([]);
   });
 
-  it("an id this build does not know counts as a source, in the server's order", () => {
+  // #2423 review 13: `links` reached the wall unclassified and, counted as a source, read "1 not set up" whenever
+  // linking was off. An id this build does not know is never a source: the sources cell claims only what it knows.
+  it("an id this build does not know is never a source; the known ones keep the server's order", () => {
     const rows = [row("camera_system", "ok"), row("locks", "down"), row("camera_ingest", "quiet")];
-    expect(sourceRows(rows).map((r) => r.id)).toEqual(["camera_system", "locks", "camera_ingest"]);
-    expect(sourcesHeadline(rows)).toBe("1 not reporting");
+    expect(sourceRows(rows).map((r) => r.id)).toEqual(["camera_system", "camera_ingest"]);
+    expect(sourcesHeadline(rows)).toBe("1 quiet");
+    expect(sourcesHeadline([row("camera_ingest", "ok"), row("summaries_v9", "not_configured")])).toBe(WALL_COPY.sourcesAllReporting);
+  });
+
+  it("Droplet's links are not a source: linking turned off (or down) never moves the sources cell", () => {
+    expect(WALL_ROW_ROLE.links).toBe("other");
+    for (const state of ["not_configured", "down", "quiet"] as const) {
+      expect(sourcesHeadline([row("camera_ingest", "ok"), row("threat_mirror", "ok"), row("links", state)]), state).toBe(WALL_COPY.sourcesAllReporting);
+    }
   });
 
   it("no source row at all is no claim", () => {
