@@ -36,7 +36,8 @@ import {
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
 import { resolveEffectiveAccess, type EffectiveAccessResult } from "./effective-access.service.js";
-import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
+import { locksReadableWith } from "./security-lock-access.js";
+import type { FeatureLevel } from "./access-catalog.js";
 import type { SecurityLockReader } from "./security-lock-adapter.js";
 import type { OngoingSource } from "./security-inflight.js";
 
@@ -80,21 +81,6 @@ function roleMayReadThreats(role: string | undefined): boolean {
 /** Moved from routes/security.ts (P2a) with the same semantics: role-based. */
 export function mayReadThreats(req: Pick<Request, "user">): boolean {
   return roleMayReadThreats(req.user?.role);
-}
-
-/**
- * WARP-2977 P2b-2 (DS-019) — may a person with this resolved §9 catalog see
- * door locks on the Security surfaces? Devices (smart_home) at view or above;
- * the owner's catalog always holds it (the resolver's §3 bypass).
- *
- *   · resolved → exactly that entry. An admin narrowed off Devices is out.
- *   · unresolved (null: no local User row, a service principal, no
- *     principal) → owner/admin only. Fail closed.
- */
-function locksReadableWith(access: EffectiveAccessResult | null, role: string | undefined): boolean {
-  if (!access) return role === "owner" || role === "admin";
-  const level = access.features.find((f) => f.moduleId === "smart_home")?.level;
-  return level !== undefined && FEATURE_LEVEL_RANK[level] >= FEATURE_LEVEL_RANK.view;
 }
 
 /**

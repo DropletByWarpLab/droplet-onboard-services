@@ -26,9 +26,9 @@
  *      people whose notice is `skipped_not_visible`, updating that notice in
  *      place — still one notice, one notification at most, per person;
  *   3. per recipient, DS-005 (D27): the alert evidence they may see —
- *      `reasonVisibleTo` over their own scope (`securityScopeForPerson`: the
- *      cameras they can see and, P4 PR-4 / DS-019, whether they may read
- *      locks). None → `skipped_not_visible`. The copy is
+ *      `reasonVisibleTo` over the cameras they can see (`visibleCameraNames`)
+ *      and, P4 PR-4 / DS-019, whether they may read locks
+ *      (`locksReadableWith`). None → `skipped_not_visible`. The copy is
  *      built from that visible evidence only. ≥ 6 alert notifications to them
  *      in the last hour → `skipped_capped` (D28);
  *   4. ONE READ COMMITTED transaction: the incident CAS (pending → done), a
@@ -68,7 +68,7 @@ import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
 import { visibleCameraNames } from "./camera-access.service.js";
-import { securityScopeForPerson } from "./security-access.js";
+import { locksReadableWith } from "./security-lock-access.js";
 import { deliverNotification, recordNotification } from "./notifications.service.js";
 import { webPushGate } from "./off-lan-gate.service.js";
 import { auditSecurityInTx, auditSecuritySystem, chainSafeText, stripUnsafeDisplayChars } from "./security-audit.js";
@@ -129,6 +129,11 @@ export type IneligibleReason = "inactive" | "role" | "no_address" | "no_access";
 export interface Eligibility {
   eligible: boolean;
   reason: IneligibleReason | null;
+  /**
+   * WARP-2979 P4 PR-4 (DS-019) — whether this person may read door locks, from
+   * the SAME resolver read (`locksReadableWith`, the one rule). Absent = no.
+   */
+  mayReadLocks?: boolean;
 }
 
 export interface EligibilityUser {
@@ -150,15 +155,18 @@ export async function eligibilityOf(user: EligibilityUser, resolve: EffectiveAcc
   if (!HOUSEHOLD_ROLES.includes(user.role)) return { eligible: false, reason: "role" };
   if (isUserIdShaped(user.username)) return { eligible: false, reason: "no_address" };
   let level: FeatureLevel | null = null;
+  let mayReadLocks = false;
   try {
     const access = await resolve(user.id);
     level = access?.features.find((f) => f.moduleId === "security")?.level ?? null;
+    // An owner is never narrowed (the resolver's §3 bypass) — as `securityScopeForPerson` reads it.
+    mayReadLocks = user.role === "owner" || locksReadableWith(access, user.role);
   } catch (err) {
     logger.warn({ err, userId: user.id }, "alert eligibility: the access resolver failed — not told this time");
     return { eligible: false, reason: "no_access" };
   }
   if (level === null || FEATURE_LEVEL_RANK[level] < FEATURE_LEVEL_RANK.act) return { eligible: false, reason: "no_access" };
-  return { eligible: true, reason: null };
+  return { eligible: true, reason: null, mayReadLocks };
 }
 
 /** Owners are recipients by default: their `receiving` rows, created lazily. */
@@ -314,9 +322,10 @@ async function planNotices(
     }
     // DS-005, per recipient: only the alert evidence they may see — `reasonVisibleTo`, the one rule (WARP-2979: a
     // reason that names where a person was seen needs that camera visible too; P4 PR-4, DS-019: one that names a
-    // door lock needs `mayReadLocks`). The scope is the dashboard's own, for this person (`securityScopeForPerson`).
-    const scope = await securityScopeForPerson(prisma, { id: user.id, role: user.role }, deps.resolveAccess);
+    // door lock needs `mayReadLocks` — `locksReadableWith` over the resolver read eligibility just made).
+    const visible = await visibleCameraNames(prisma, { id: user.id, role: user.role });
     const ownerOrAdmin = user.role === "owner" || user.role === "admin";
+    const scope = { visibleCameras: visible, mayReadLocks: eligibility.mayReadLocks === true };
     const evidence: AlertEvidence[] = incident.reasons
       .filter((r) => reasonVisibleTo(r, scope, ownerOrAdmin))
       .map((r) => alertEvidenceOf(r, labels));
