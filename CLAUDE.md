@@ -81,10 +81,10 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
     (`services/file-indexer`); copy that pattern.
   - **TypeScript orchestrator:** `apps/orchestrator/src/services/cron-runtime.service.ts`
     via `createCronRuntime(...).scheduleCron(...)` or `.scheduleInterval(...)`.
-    Already used by reminders-poller, schedule ticker, and the daily 03:00 purge.
-  - Existing `while True` violations are tracked in WARP-221 (camera-discovery's
-    ONVIF scan, switch driver's keepalive). Add new ones to that ticket if you
-    spot more — don't introduce them.
+    Already used by the schedule ticker and the daily 03:00 purge.
+  - The `while True` violations WARP-221 tracked (camera-discovery's ONVIF
+    scan, the switch driver's keepalive) are gone — the scan is an apscheduler
+    job. Don't introduce new ones.
   - Legitimate `while True` patterns DO exist and are NOT covered by this rule:
     event-driven dispatch loops (`await event.wait()`), bounded chunk-streaming
     reads, and microcontroller event loops on different runtimes (CircuitPython).

@@ -435,6 +435,7 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       createdBy: "admin",
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+      status: "pending",
       acceptedAt: null,
       revokedAt: null,
       ...over,

@@ -756,7 +756,9 @@ export default function UsersPage() {
     const before = invites;
     setInvites((prev) =>
       prev.map((i) =>
-        i.token === invite.token ? { ...i, revokedAt: new Date().toISOString() } : i,
+        i.token === invite.token
+          ? { ...i, status: "revoked", revokedAt: new Date().toISOString() }
+          : i,
       ),
     );
     try {
@@ -1056,12 +1058,18 @@ export default function UsersPage() {
   }
 
   // Status pill copy + badge kind for the pending-invites list.
+  // WARP-3193 QUAL-3: read the server's explicit status, never the timestamps.
   function inviteStatus(i: InviteListItem): { label: string; kind: BadgeKind } {
-    if (i.revokedAt) return { label: "Revoked", kind: "muted" };
-    if (i.acceptedAt) return { label: "Accepted", kind: "ok" };
-    if (new Date(i.expiresAt).getTime() < Date.now())
-      return { label: "Expired", kind: "warn" };
-    return { label: "Pending", kind: "info" };
+    switch (i.status) {
+      case "revoked":
+        return { label: "Revoked", kind: "muted" };
+      case "accepted":
+        return { label: "Accepted", kind: "ok" };
+      case "expired":
+        return { label: "Expired", kind: "warn" };
+      default:
+        return { label: "Pending", kind: "info" };
+    }
   }
 
   // WARP-1532 (T8): the roster grouped for the "By role" filter. Rows
@@ -1444,7 +1452,7 @@ export default function UsersPage() {
             <div className="rows">
             {invites.map((i) => {
               const status = inviteStatus(i);
-              const canRevoke = !i.revokedAt && !i.acceptedAt;
+              const canRevoke = i.status === "pending" || i.status === "expired";
               // Mirror the row's primary visible label (displayName falls
               // back to username) so the screen-reader announcement matches.
               const inviteLabel = i.displayName || i.username;

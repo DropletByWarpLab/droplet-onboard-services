@@ -28,11 +28,34 @@ vi.unmock("@prisma/client");
 // routes/pm.ts) to authorize the `appliance:"ready"` claim. Stub the JWT
 // verifier so a test can present an "authenticated" cookie deterministically
 // without minting a real signed token.
+// WARP-3193 SEC-AUTH-5 — plus signed tokens that must NOT write to a set-up
+// box: a lower role, a revoked session record, a hard-revoked user.
 vi.mock("../services/jwt.service.js", () => ({
-  verifyAccessToken: (token: string) =>
-    token === "valid-session"
-      ? { sub: "u1", username: "owner", displayName: "Owner", role: "owner" }
-      : null,
+  verifyAccessToken: (token: string) => {
+    const base = { username: "x", displayName: "X" };
+    switch (token) {
+      case "valid-session":
+        return { sub: "u1", username: "owner", displayName: "Owner", role: "owner" };
+      case "guest-session":
+        return { ...base, sub: "u-guest", role: "guest", sid: "sid-live" };
+      case "revoked-owner-session":
+        return { ...base, sub: "u1", role: "owner", sid: "sid-dead" };
+      case "denied-owner-session":
+        return { ...base, sub: "u-denied", role: "owner", sid: "sid-live" };
+      default:
+        return null;
+    }
+  },
+}));
+vi.mock("../services/session.service.js", () => ({
+  checkSession: vi.fn(async (sid: string) =>
+    sid === "sid-dead"
+      ? { kind: "missing" }
+      : { kind: "ok", record: { userId: "u1", role: "owner", createdAt: 0, lastSeenAt: 0 } },
+  ),
+}));
+vi.mock("../services/auth-denylist.service.js", () => ({
+  isUserDenied: vi.fn(async (userId: string) => userId === "u-denied"),
 }));
 
 // WARP-3047 — the DEFAULT warm (no injected spy) is the active-model warm.
@@ -220,8 +243,12 @@ describe("PATCH /api/setup/state", () => {
     expect(first.status).toBe(200);
     expect(first.body.appliance).toBe("ready");
 
+    // The re-fire rides the owner's session cookie (the wizard signed them in
+    // at the account step); on a set-up box an anonymous PATCH is refused
+    // (WARP-3193 SEC-AUTH-5 — see the write-gate suite below).
     const second = await request(app)
       .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ appliance: "ready" });
     expect(second.status).toBe(200);
     expect(second.body.appliance).toBe("ready");
@@ -333,6 +360,75 @@ describe("PATCH /api/setup/state — claim (appliance:ready) auth gate", () => {
 });
 
 // ── M5 — the public GET must be side-effect-free ──
+// WARP-3193 SEC-AUTH-5 — once the box is set up, PATCH is no longer an
+// anonymous resumability hint: every write needs a live, non-revoked session.
+// `setup_step` / `appliance` are owner-only; `user_tour_completed` is open to
+// any signed-in member, because AuthGate shows the tour to WHOEVER signs in
+// first while it is pending — owner-only would re-trap everyone else in it.
+describe("PATCH /api/setup/state — set-up (ready) box write gate (WARP-3193 SEC-AUTH-5)", () => {
+  let prisma: ReturnType<typeof createPrismaMock>;
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    prisma._seed({
+      id: "singleton",
+      state: "ready",
+      setupStep: "done",
+      userTourCompleted: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  });
+
+  function patch(body: Record<string, unknown>, cookie?: string) {
+    const r = request(buildApp(prisma)).patch("/api/setup/state");
+    return (cookie ? r.set("Cookie", `droplet_session=${cookie}`) : r).send(body);
+  }
+
+  it.each([
+    [{ setup_step: "cameras" }],
+    [{ appliance: "ready" }],
+    [{ user_tour_completed: true }],
+  ])("refuses an anonymous %j with 401 SETUP_AUTH_REQUIRED", async (body) => {
+    const res = await patch(body);
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SETUP_AUTH_REQUIRED");
+  });
+
+  it("refuses a guest moving the wizard step (403 SETUP_FORBIDDEN, no write)", async () => {
+    const res = await patch({ setup_step: "cameras" }, "guest-session");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("SETUP_FORBIDDEN");
+    const get = await request(buildApp(prisma)).get("/api/setup/state");
+    expect(get.body.setup_step).toBe("done");
+  });
+
+  it.each([["revoked-owner-session"], ["denied-owner-session"]])(
+    "refuses %s with 401 SESSION_EXPIRED",
+    async (cookie) => {
+      const res = await patch({ setup_step: "cameras" }, cookie);
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("SESSION_EXPIRED");
+    },
+  );
+
+  it("lets the owner write the step", async () => {
+    const res = await patch({ setup_step: "cameras" }, "valid-session");
+    expect(res.status).toBe(200);
+    expect(res.body.setup_step).toBe("cameras");
+  });
+
+  it("lets ANY signed-in member complete the tour (a guest included)", async () => {
+    const res = await patch({ user_tour_completed: true }, "guest-session");
+    expect(res.status).toBe(200);
+    expect(res.body.user_tour_completed).toBe(true);
+  });
+
+  it("a mixed body is gated by its most privileged field", async () => {
+    const res = await patch({ user_tour_completed: true, setup_step: "cameras" }, "guest-session");
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("GET /api/setup/state — read is side-effect-free (M5)", () => {
   it("does not upsert/create a row on read (findUnique only)", async () => {
     const prisma = createPrismaMock({ userCount: 0 });

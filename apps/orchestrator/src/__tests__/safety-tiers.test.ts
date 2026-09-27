@@ -6,6 +6,9 @@ import {
   confirmCommand,
   getAuditLog,
   cleanupExpiredTokens,
+  MAX_PENDING_CONFIRMATIONS,
+  MAX_RATE_LIMIT_ENTITIES,
+  _safetyTierStateForTests,
 } from "../services/safety-tier.service.js";
 
 // ── Prisma mock with commandAuditLog ──
@@ -633,6 +636,45 @@ describe("cleanupExpiredTokens", () => {
     } finally {
       Date.now = realDateNow;
     }
+  });
+
+  // ── WARP-3193 PERF-11 ──
+
+  it("also drops rate-limit entries whose hits have all left the window", async () => {
+    await evaluateCommand(prisma, "light.perf11_stale", "turn_on");
+    expect(_safetyTierStateForTests().rateLimitEntities).toContain("light.perf11_stale");
+
+    const realDateNow = Date.now;
+    Date.now = vi.fn(() => realDateNow() + 61_000);
+    try {
+      cleanupExpiredTokens();
+    } finally {
+      Date.now = realDateNow;
+    }
+    expect(_safetyTierStateForTests().rateLimitEntities).not.toContain("light.perf11_stale");
+  });
+
+  it("caps pending confirmations: the oldest is evicted, the newest still confirms", async () => {
+    const tokens: string[] = [];
+    for (let i = 0; i <= MAX_PENDING_CONFIRMATIONS; i += 1) {
+      const r = await evaluateCommand(prisma, `lock.perf11_${i}`, "lock", undefined, "user-1");
+      tokens.push((r as { confirmationToken: string }).confirmationToken);
+    }
+    expect(_safetyTierStateForTests().pendingConfirmations).toBe(MAX_PENDING_CONFIRMATIONS);
+
+    const oldest = await confirmCommand(prisma, tokens[0]!, "user-1");
+    expect(oldest.confirmed).toBe(false);
+    const newest = await confirmCommand(prisma, tokens.at(-1)!, "user-1");
+    expect(newest.confirmed).toBe(true);
+  });
+
+  it("caps the rate-limit map", async () => {
+    for (let i = 0; i <= MAX_RATE_LIMIT_ENTITIES; i += 1) {
+      await evaluateCommand(prisma, `light.perf11_rl_${i}`, "turn_on");
+    }
+    expect(_safetyTierStateForTests().rateLimitEntities.length).toBeLessThanOrEqual(
+      MAX_RATE_LIMIT_ENTITIES,
+    );
   });
 });
 

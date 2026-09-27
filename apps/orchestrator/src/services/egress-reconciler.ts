@@ -97,7 +97,16 @@ export function createEgressReconciler(
     }
 
     // --- Per-device pass ---
-    const devices = await prisma.networkDevice.findMany({ include: { groups: true } });
+    // WARP-3193 PERF-13: every 30 s over the whole table — read only what
+    // computeDesiredEgress and the dispatch below use.
+    const devices = await prisma.networkDevice.findMany({
+      select: {
+        mac: true,
+        lastAppliedBlocked: true,
+        lastAppliedEgress: true,
+        groups: { select: { blockPhoneHome: true } },
+      },
+    });
     for (const device of devices) {
       const fullBlocked = device.lastAppliedBlocked === true;
       const desired = computeDesiredEgress({ masterEnabled: enabled, device, fullBlocked });

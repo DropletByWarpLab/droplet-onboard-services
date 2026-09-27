@@ -9,6 +9,8 @@ export interface Reminder {
   title: string;
   body: string | null;
   dueAt: string;
+  /** WARP-3193 QUAL-3 — the lifecycle; read this, not the timestamps. */
+  status: "scheduled" | "notified" | "completed";
   completedAt: string | null;
   calendarEventId: string | null;
   notifiedAt: string | null;

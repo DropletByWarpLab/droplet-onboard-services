@@ -51,12 +51,15 @@ vi.mock("../services/effective-access.service.js", () => ({
 
 import { createNotificationsRouter } from "../routes/notifications.js";
 import type { AuthUser } from "../middleware/auth.js";
+import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
 const MCP: AuthUser = { id: "_service:mcp", username: "_service:mcp", displayName: "MCP Server", role: "service" };
 
 interface FakeUser {
   id: string;
   username: string;
+  /** Absent = NULL, as on every SSO / SCIM account. */
+  nextcloudUsername?: string | null;
   role: string;
   directoryStatus?: string;
   accessRoleId?: string | null;
@@ -73,6 +76,8 @@ function fakePrisma(users: FakeUser[]) {
         const u = users.find((x) => (where.id !== undefined ? x.id === where.id : x.username === where.username));
         return u ? { directoryStatus: "ACTIVE", accessRoleId: null, accessRole: null, ...u } : null;
       }),
+      // WARP-3098 — resolveAssertedUser's `findMany OR [...] take 2`.
+      findMany: userDirectory(() => users.map((u) => ({ nextcloudUsername: null, ...u }) as DirectoryUser)).findMany,
     },
     notificationLog: {
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
@@ -225,6 +230,24 @@ describe("POST /api/notifications/send as the MCP principal (WARP-3060)", () => 
   it("a deactivated account → 403", async () => {
     const { prisma, rows } = fakePrisma([{ ...ALICE, directoryStatus: "DEACTIVATED" }]);
     const res = await send(appAs(MCP, prisma), { kind: "ai", title: "x" }, "alice");
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "acting_user_required" });
+    expectNothingSent(rows);
+  });
+
+  it("WARP-3098: an SSO row (nextcloudUsername NULL) resolves by username", async () => {
+    const { prisma } = fakePrisma([{ ...ALICE, nextcloudUsername: null }]);
+    const res = await send(appAs(MCP, prisma), { kind: "ai", title: "x" }, "alice");
+    expect(res.status).toBe(202);
+    expect(mqttPublish.mock.calls.map((c) => c[0])).toEqual(["droplet/notifications/alice"]);
+  });
+
+  it("WARP-3098: a value that is one person's User.id AND another's username → 403, nobody is notified", async () => {
+    // The old lookup tried username first, so this value resolved to the
+    // look-alike (an owner) and made THEM the recipient.
+    const lookalike: FakeUser = { id: "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a", username: ALICE.id, role: "owner" };
+    const { prisma, rows } = fakePrisma([ALICE, lookalike]);
+    const res = await send(appAs(MCP, prisma), { kind: "ai", title: "x" }, ALICE.id);
     expect(res.status).toBe(403);
     expect(res.body).toEqual({ error: "acting_user_required" });
     expectNothingSent(rows);

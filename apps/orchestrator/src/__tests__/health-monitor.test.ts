@@ -249,6 +249,27 @@ describe("runAllProbes (WARP-43)", () => {
     expect(classifyAggregate(results)).toBe("ok");
   });
 
+  it("sends the bridge shared secret on the /pools read (WARP-3193 SEC-DATA-6: /pools is token-gated)", async () => {
+    process.env.BRIDGE_AUTH_TOKEN = "hm-bridge-token";
+    try {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ pools: [], count: 0 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const prisma = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
+      } as unknown as PrismaClient;
+
+      await runAllProbes(prisma);
+      const call = fetchMock.mock.calls.find((c) => String(c[0]).endsWith("/pools"));
+      expect(call?.[1]?.headers).toEqual({ "X-Droplet-Auth": "hm-bridge-token" });
+    } finally {
+      delete process.env.BRIDGE_AUTH_TOKEN;
+    }
+  });
+
   it("marks storage down when the bridge is REACHABLE but errors (present-but-broken is still a real fault, WARP-1146 review)", async () => {
     // A non-ok HTTP reply is a reachable-but-misbehaving bridge — unlike a
     // connection refusal it is not an expected deployment shape, so it stays
