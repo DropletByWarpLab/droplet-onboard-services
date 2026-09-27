@@ -159,6 +159,8 @@ function seedSigned(
       promotedByUserId: "u-owner",
       createdAt: new Date(),
     });
+    // WARP-3200 — its source workspace, which an enable holds while it claims.
+    db.workspaces.set(slug, { id: slug, name: slug, userId: "u-owner", proposedTag: "proposal/0.1.0", status: "proposed" });
     db.extensions.set(slug, {
       id: slug,
       workspaceId: slug,
@@ -684,6 +686,45 @@ describe("enable preflights like a promote", () => {
       body: { preflight: { ok: false, blocking: [{ code: "tool_name_collides_with_extension" }] } },
     });
     expect(k.db.extensions.get("wc")?.status).toBe("disabled");
+    expect(k.sandbox.installs).toEqual([]);
+  });
+});
+
+// WARP-3200 — an uninstalled extension lets its workspace be deleted, and
+// the install an enable starts re-exports the code from that workspace.
+describe("enable holds the workspace it is built from", () => {
+  it("claims in the same transaction as a KEY SHARE hold on the workspace, and then installs", async () => {
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "uninstalled" });
+    const row = await k.lifecycle.enable("wc", OWNER);
+    expect(row.status).toBe("live");
+    expect(k.db.workspaceLocks).toEqual([{ id: "wc", mode: "FOR KEY SHARE" }]);
+    const tx = k.db.raw.$transaction;
+    expect(tx).toHaveBeenCalledTimes(1);
+    expect(tx.mock.calls[0][1]).toEqual({ isolationLevel: "ReadCommitted" });
+    // The hold, then the claim, both before the transaction resolved.
+    const [lockAt] = k.db.raw.$queryRaw.mock.invocationCallOrder;
+    const [claimAt] = k.db.raw.extension.updateMany.mock.invocationCallOrder;
+    expect(lockAt).toBeLessThan(claimAt);
+  });
+
+  it("an uninstalled extension whose workspace was deleted is refused: nothing moves, nothing is installed", async () => {
+    // MUTATION: drop the hold from enable() and the row goes to `signed`,
+    // then `failed` when the sandbox cannot export from a workspace that is gone.
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "uninstalled" });
+    k.db.workspaces.delete("wc");
+    await expect(k.lifecycle.enable("wc", OWNER)).rejects.toMatchObject({ code: "source_deleted", httpStatus: 409 });
+    expect(k.db.extensions.get("wc")?.status).toBe("uninstalled");
+    expect(k.sandbox.installs).toEqual([]);
+  });
+
+  it("a delete that committed while the enable waited for the hold wins: nothing moves", async () => {
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "uninstalled" });
+    k.db.setOnWorkspaceLock((id) => k.db.workspaces.delete(id));
+    await expect(k.lifecycle.enable("wc", OWNER)).rejects.toMatchObject({ code: "source_deleted" });
+    expect(k.db.extensions.get("wc")?.status).toBe("uninstalled");
     expect(k.sandbox.installs).toEqual([]);
   });
 });
