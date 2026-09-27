@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pytest
@@ -3286,6 +3286,68 @@ class TestFailedTurnKeepsListening:
         )
         pipe._on_frame(_silence_frame())
         assert pipe.status().error_message is None
+
+    def _wire(self, monkeypatch, tts) -> WakePipeline:
+        _patch_play(monkeypatch)
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.0}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            tts=tts,
+            llm=_RecordingLLM(scripted_replies=["It is noon."]),
+        )
+        pipe._tts_available = True
+        pipe._llm_available = True
+        return pipe
+
+    def test_a_tts_dropped_mid_event_ends_the_reply_turn(self, monkeypatch):
+        # WyomingTTS reuses stt.py's wire helpers, so Piper closing the
+        # socket mid-event surfaces as STTUnavailable, not TTSUnavailable.
+        # It must still end the turn — not strand the pipeline in
+        # 'speaking', where every frame is dropped and /health says 200.
+        pipe = self._wire(monkeypatch, _DroppingTTS())
+        pipe._state = "transcript_ready"
+        pipe._default_on_transcript("what time is it")
+        s = pipe.status()
+        assert s.state == "listening"
+        assert "peer closed mid-line" in (s.error_message or "")
+
+    def test_a_tts_dropped_mid_event_ends_a_say(self, monkeypatch):
+        pipe = self._wire(monkeypatch, _DroppingTTS())
+        pipe._state = "listening"
+        result = pipe.speak("hello")
+        assert result["ok"] is False
+        assert pipe.status().state == "listening"
+        assert "peer closed mid-line" in (pipe.status().error_message or "")
+
+    def test_a_stuck_fault_mid_turn_keeps_its_state_and_message(self, monkeypatch):
+        # The capture loop can latch a real fault while a reply is being
+        # synthesized; the turn's own failure must not paper over it.
+        tts = _DroppingTTS()
+        pipe = self._wire(monkeypatch, tts)
+        tts.before_raise = lambda: pipe._set_error("wake loop crashed: boom")
+        pipe._state = "transcript_ready"
+        pipe._default_on_transcript("what time is it")
+        s = pipe.status()
+        assert s.state == "error"
+        assert s.error_message == "wake loop crashed: boom"
+
+
+class _DroppingTTS(TextToSpeech):
+    """Piper closing the socket mid-event, as WyomingTTS reports it."""
+
+    def __init__(self):
+        self.before_raise: Optional[Callable[[], None]] = None
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def synthesize(self, text: str, voice: Optional[str] = None) -> SynthesizedAudio:
+        if self.before_raise is not None:
+            self.before_raise()
+        raise STTUnavailable("peer closed mid-line (test)")
 
 
 class TestInputLevelTracking:

@@ -83,7 +83,7 @@ from voice.audio_io import (
 from voice.llm import LLMClient, LLMUnavailable, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.text_chunk import SentenceChunker
-from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
+from voice.tts import SynthesizedAudio, TextToSpeech
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
     WAKE_SAMPLE_RATE,
@@ -1121,7 +1121,10 @@ class WakePipeline:
 
             try:
                 audio = self._tts.synthesize(text, voice=voice)
-            except TTSUnavailable as exc:
+            except Exception as exc:  # noqa: BLE001 — any synth failure ends the turn
+                # Not just TTSUnavailable: WyomingTTS reuses stt.py's wire
+                # helpers, so Piper dropping mid-event raises STTUnavailable.
+                # Escaping here stranded the pipeline in 'speaking' (WARP-3199).
                 self._fail_turn(f"TTS synthesize failed: {exc}")
                 return {"ok": False, "error": str(exc), "duration_s": 0.0}
 
@@ -1133,16 +1136,13 @@ class WakePipeline:
             try:
                 self._play_pcm(audio)
             except Exception as exc:
-                self._fail_turn(f"playback failed: {exc}")
                 # Mid-playback failure still drove the speaker for some of
                 # the reply, so the same anti-feedback window applies: the
                 # partial Piper output can bleed into the mic and score
                 # above threshold. Arm the post-speak cooldown here too —
                 # _restore_state_after_speak (which normally sets it) does
-                # NOT run on this path; _fail_turn already moved us out of
-                # 'speaking'.
-                with self._lock:
-                    self._speak_ended_at = time.time()
+                # NOT run on this path.
+                self._fail_turn(f"playback failed: {exc}", drove_speaker=True)
                 return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
 
             self._restore_state_after_speak(prev_state)
@@ -1275,7 +1275,7 @@ class WakePipeline:
                             self._state = "speaking"
                     try:
                         audio = self._tts.synthesize(text, voice=voice)
-                    except TTSUnavailable as exc:
+                    except Exception as exc:  # noqa: BLE001 — surfaced below; see speak()
                         first_error, error_kind = exc, "tts"
                         break
                     spoken.append(text)
@@ -1306,10 +1306,10 @@ class WakePipeline:
             # Error path: surface it, and arm the cooldown if we drove the
             # speaker at all — even a partial reply can bleed into the shared
             # mic (same contract as speak()'s mid-playback failure).
-            self._fail_turn(f"voice reply failed ({error_kind}): {first_error}")
-            if drove_speaker:
-                with self._lock:
-                    self._speak_ended_at = time.time()
+            self._fail_turn(
+                f"voice reply failed ({error_kind}): {first_error}",
+                drove_speaker=drove_speaker,
+            )
             return {
                 "ok": False,
                 "error": str(first_error),
@@ -2361,15 +2361,21 @@ class WakePipeline:
             self._state = "error"
             self._error_message = msg
 
-    def _fail_turn(self, msg: str) -> None:
+    def _fail_turn(self, msg: str, *, drove_speaker: bool = False) -> None:
         """One voice turn failed — TTS, playback, or the LLM reply stream
         (WARP-3199). Report why on /voice/status, then keep listening: the
         next wake is a fresh try against a dependency that has usually come
         back (a TTS timeout, a dropped SSE). Latching 'error' here left the
         assistant deaf and /audio/measure refusing until voice-io restarted.
         Stuck faults (the detector, the capture loop) still use _set_error,
-        and one that landed mid-turn keeps its state and message."""
+        and one that landed mid-turn keeps its state and message.
+
+        `drove_speaker` arms the post-speak cooldown in the same lock hold
+        as the flip to 'listening', so no frame reaches the detector in
+        between (a partial reply can bleed into the mic)."""
         with self._lock:
+            if drove_speaker:
+                self._speak_ended_at = time.time()
             if self._state == "error":
                 return
             if self._state in ("speaking", "transcript_ready"):
@@ -2460,7 +2466,7 @@ class WakePipeline:
         # WARP-1058 — the §3.4 outcome row. "Answered" means the user
         # actually HEARD a reply; a failed / empty / rejected reply is
         # honestly just "Heard the wake word" (the fault itself surfaces via
-        # error_message / health, not the feed).
+        # error_message, not the feed).
         self._emit_activity(
             "wake_answered" if spoke else "wake_heard",
             score=wake_score, threshold=self._threshold, model=wake_model,
