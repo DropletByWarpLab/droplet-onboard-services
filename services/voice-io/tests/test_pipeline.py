@@ -3321,17 +3321,53 @@ class TestFailedTurnKeepsListening:
         assert pipe.status().state == "listening"
         assert "peer closed mid-line" in (pipe.status().error_message or "")
 
-    def test_a_stuck_fault_mid_turn_keeps_its_state_and_message(self, monkeypatch):
-        # The capture loop can latch a real fault while a reply is being
-        # synthesized; the turn's own failure must not paper over it.
+    def test_a_fault_latched_during_a_say_keeps_its_state_and_message(self, monkeypatch):
+        # /voice/say runs on the request thread, so the capture thread can
+        # latch a real fault while it synthesizes; the say's own failure
+        # must not paper over it.
         tts = _DroppingTTS()
         pipe = self._wire(monkeypatch, tts)
         tts.before_raise = lambda: pipe._set_error("wake loop crashed: boom")
-        pipe._state = "transcript_ready"
-        pipe._default_on_transcript("what time is it")
+        pipe._state = "listening"
+        pipe.speak("hello")
         s = pipe.status()
         assert s.state == "error"
         assert s.error_message == "wake loop crashed: boom"
+
+    @pytest.mark.parametrize("tts_factory", [_RecordingTTS, lambda: _DroppingTTS()])
+    def test_a_say_does_not_clear_an_existing_fault(self, monkeypatch, tts_factory):
+        # A fault latched BEFORE the say (the capture thread may be gone)
+        # must survive it, whether the say fails or plays — otherwise a
+        # deaf pipeline reads 'listening' and /health says 200.
+        pipe = self._wire(monkeypatch, tts_factory())
+        pipe._set_error("wake loop crashed: boom")
+        pipe.speak("hello")
+        s = pipe.status()
+        assert s.state == "error"
+        assert s.error_message == "wake loop crashed: boom"
+
+    def test_a_say_does_not_clear_no_mic(self, monkeypatch):
+        pipe = self._wire(monkeypatch, _RecordingTTS())
+        pipe._set_state("no_mic")
+        assert pipe.speak("hello")["ok"] is True
+        assert pipe.status().state == "no_mic"
+
+    def test_an_unexpected_synth_bug_keeps_its_traceback(self, monkeypatch, caplog):
+        # The broad catch must not swallow a programming error silently.
+        import logging as _logging
+
+        class _BuggyTTS(_DroppingTTS):
+            def synthesize(self, text, voice=None):
+                raise AttributeError("'NoneType' object has no attribute 'rate'")
+
+        pipe = self._wire(monkeypatch, _BuggyTTS())
+        pipe._state = "listening"
+        with caplog.at_level(_logging.WARNING, logger="voice.pipeline"):
+            pipe.speak("hello")
+        assert pipe.status().state == "listening"
+        assert any(
+            r.exc_info and r.exc_info[0] is AttributeError for r in caplog.records
+        )
 
 
 class _DroppingTTS(TextToSpeech):

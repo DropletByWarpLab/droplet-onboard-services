@@ -83,7 +83,7 @@ from voice.audio_io import (
 from voice.llm import LLMClient, LLMUnavailable, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.text_chunk import SentenceChunker
-from voice.tts import SynthesizedAudio, TextToSpeech
+from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
     WAKE_SAMPLE_RATE,
@@ -92,6 +92,11 @@ from voice.wake import (
 )
 
 logger = logging.getLogger("voice.pipeline")
+
+# What a TTS server fault looks like from WyomingTTS.synthesize — it reuses
+# stt.py's wire helpers, so a mid-event drop is STTUnavailable. Any other
+# exception out of synthesize is a bug and is logged with its traceback.
+_TTS_WIRE_FAULTS = (TTSUnavailable, STTUnavailable)
 
 
 class _DeviceError(Exception):
@@ -1115,7 +1120,12 @@ class WakePipeline:
             # for that state).
             with self._lock:
                 prev_state = self._state
-                self._state = "speaking"
+                # A latched fault already drops every frame, so anti-feedback
+                # holds without 'speaking' — and entering it would let the
+                # restore / _fail_turn below report a deaf pipeline as
+                # 'listening' with /health 200 (WARP-3199).
+                if prev_state not in ("error", "no_mic"):
+                    self._state = "speaking"
                 self._last_response = text
                 self._last_response_at = time.time()
 
@@ -1125,6 +1135,11 @@ class WakePipeline:
                 # Not just TTSUnavailable: WyomingTTS reuses stt.py's wire
                 # helpers, so Piper dropping mid-event raises STTUnavailable.
                 # Escaping here stranded the pipeline in 'speaking' (WARP-3199).
+                # Anything else is a bug — keep its traceback.
+                logger.warning(
+                    "TTS synthesize failed: %r", exc,
+                    exc_info=not isinstance(exc, _TTS_WIRE_FAULTS),
+                )
                 self._fail_turn(f"TTS synthesize failed: {exc}")
                 return {"ok": False, "error": str(exc), "duration_s": 0.0}
 
@@ -1276,6 +1291,8 @@ class WakePipeline:
                     try:
                         audio = self._tts.synthesize(text, voice=voice)
                     except Exception as exc:  # noqa: BLE001 — surfaced below; see speak()
+                        if not isinstance(exc, _TTS_WIRE_FAULTS):
+                            logger.warning("TTS synthesize raised a bug", exc_info=True)
                         first_error, error_kind = exc, "tts"
                         break
                     spoken.append(text)
