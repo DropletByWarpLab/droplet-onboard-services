@@ -966,6 +966,66 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         expect(res.body.uploaded[0]).toMatchObject({ name: "big.bin", status: "uploaded", size: bytes.length });
       });
     });
+
+    describe("file names (WARP-3057)", () => {
+      // A hand-built part, so the Content-Disposition bytes are exactly what
+      // a client sends (form-data would basename the name first).
+      function upload(disposition: string) {
+        const boundary = "b3057";
+        const body = Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="files"; `),
+          Buffer.from(disposition, "utf8"),
+          Buffer.from(`\r\nContent-Type: application/octet-stream\r\n\r\nx\r\n--${boundary}--\r\n`),
+        ]);
+        return request(app)
+          .post("/api/files/upload?path=/")
+          .set("Content-Type", `multipart/form-data; boundary=${boundary}`)
+          .send(body);
+      }
+
+      it.each([
+        ["a macOS screenshot (U+202F)", "Screenshot 2026-09-27 at 9.41.12\u202fAM.png"],
+        ["CJK", "会议纪要 第三季度.docx"],
+        ["emoji", "launch 🚀 plan.pdf"],
+        ["accents", "Café Ω.pdf"],
+      ])("a plain UTF-8 filename= keeps %s", async (_label, name) => {
+        const res = await upload(`filename="${name}"`);
+        expect(res.status).toBe(200);
+        expect(res.body.uploaded[0]).toMatchObject({ name, status: "uploaded" });
+        expect(ncMock.ncCommitUpload.mock.calls[0][3]).toBe(`/${name}`);
+      });
+
+      it("honours filename*= (RFC 5987) over filename=", async () => {
+        const res = await upload(
+          `filename="Cafe.pdf"; filename*=UTF-8''${encodeURIComponent("Café Ω.pdf")}`,
+        );
+        expect(res.body.uploaded[0]).toMatchObject({ name: "Café Ω.pdf", status: "uploaded" });
+      });
+
+      it("a backslash is part of the name, not a separator: stored as '_' and reported", async () => {
+        const res = await upload(`filename="Q3 report\\draft.txt"`);
+        expect(res.status).toBe(200);
+        expect(res.body.uploaded[0]).toMatchObject({
+          name: "Q3 report_draft.txt",
+          status: "renamed",
+          requestedName: "Q3 report\\draft.txt",
+        });
+        expect(ncMock.ncCommitUpload.mock.calls[0][3]).toBe("/Q3 report_draft.txt");
+      });
+
+      it.each([
+        "../../etc/passwd",
+        "..\\..\\secret.txt",
+        "sub/name.txt",
+        "..",
+      ])("refuses a traversal attempt (%s) before staging a byte", async (name) => {
+        const res = await upload(`filename="${name}"`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe("UPLOAD_BAD_NAME");
+        expect(ncMock.ncStageUpload).not.toHaveBeenCalled();
+        expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ── GET /api/files/download ──
