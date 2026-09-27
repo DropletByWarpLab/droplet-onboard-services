@@ -179,6 +179,27 @@ describe("runCorpusPass — what counts as read (WARP-2834)", () => {
     expect(digestedCount()).toBe(1);
   });
 
+  it("WARP-3193 QUAL-2: stops between units once the lease is lost, and writes no run summary", async () => {
+    const abort = new AbortController();
+    // The lease is lost while the first document is with the model.
+    okChat.mockImplementationOnce(async () => {
+      abort.abort();
+      return {
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: "[]" } }] }),
+      } as never;
+    });
+    const d = deps([file({ path: "/a.pdf" }), file({ path: "/b.pdf", ncFileId: 12 })]);
+
+    await runCorpusPass(d, { limit: 10, signal: abort.signal });
+
+    // The unit in flight finished; the next one never started.
+    expect(okChat).toHaveBeenCalledOnce();
+    expect(seenCount()).toBe(1);
+    // No lastRunAt / lastSucceededAt / rowsWritten over the successor's run.
+    expect(updates.some((u) => Object.prototype.hasOwnProperty.call(u, "lastRunAt"))).toBe(false);
+  });
+
   it("does nothing at all when the pass is disabled", async () => {
     const d = deps([file()]);
     (d.prisma as unknown as {

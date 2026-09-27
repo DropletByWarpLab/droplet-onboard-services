@@ -22,10 +22,28 @@
 import type { PrismaClient } from "@prisma/client";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
-import type { MatterDispatcher } from "../routes/scenes.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("scene-runner");
+
+/**
+ * Pluggable Matter dispatcher — tests inject a mock so the batch
+ * executor is exercisable without standing up the Matter.js controller.
+ * Production wiring imports the real `sendMatterCommand` (see app.ts /
+ * createScenesRouter caller). Lives here, not in routes/scenes.ts, so the
+ * service layer never imports from a route (WARP-3193 ARCH-10).
+ */
+export interface MatterDispatcher {
+  sendCommand(
+    nodeId: string,
+    command: string,
+    // WARP-1010: per-command activity rows carry the scene's actor
+    // (the authed runner, or ai for the schedule ticker) instead of a
+    // hardcoded {ai, null}. Position mirrors sendMatterCommand.
+    actor: ActivityActor,
+    args?: Record<string, unknown>,
+  ): Promise<{ status: string; result?: unknown }>;
+}
 
 /** Minimal Scene shape the runner needs — id, name, ordered actions. */
 export interface RunnableScene {

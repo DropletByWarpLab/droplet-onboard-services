@@ -29,7 +29,8 @@ import { healthCheck as fileIndexerHealth } from "./file-indexer.client.js";
 import { ncPing } from "./nextcloud.client.js";
 import { mqttHealth } from "./mqtt-status.js";
 import { config } from "../config.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import { bridgeAuthToken, isBridgeConnectionError } from "../lib/bridge-errors.js";
+import type { CronRuntime } from "./cron-runtime.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("health-monitor");
@@ -72,7 +73,7 @@ const PROBE_TIMEOUT_MS = 5_000; // keep probes snappy so the 15s cadence isn't s
 
 const startTime = Date.now();
 const cache: Map<ComponentName, ComponentHealth> = new Map();
-let intervalHandle: NodeJS.Timeout | null = null;
+let started = false;
 
 /**
  * WARP-618: per-poll snapshot observers. Every completed probe cycle hands
@@ -152,8 +153,11 @@ export async function storagePoolsHealth(): Promise<boolean> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
+    // WARP-3193 SEC-DATA-6: /pools is token-gated on the bridge.
+    const token = bridgeAuthToken();
     const r = await fetch(`${config.DEVICE_BRIDGE_URL}/pools`, {
       signal: ctrl.signal,
+      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
     });
     if (!r.ok) throw new Error(`bridge returned ${r.status}`);
     const snap = (await r.json()) as {
@@ -258,33 +262,33 @@ export function getAggregateHealth(): AggregateHealth {
 }
 
 /**
- * Kick off the background poller. Seeds the cache with one immediate run so
- * the first `/orchestrator/health` hit doesn't return an empty `components`.
+ * Kick off the background poller on `cron` (WARP-3193 QUAL-7: index.ts main();
+ * `cron.stop()` tears the schedule down). Seeds the cache with one immediate
+ * run so the first `/orchestrator/health` hit doesn't return an empty
+ * `components`.
  */
-export function startHealthMonitor(prisma: PrismaClient): void {
-  if (intervalHandle !== null) {
+export function startHealthMonitor(
+  prisma: PrismaClient,
+  cron: Pick<CronRuntime, "scheduleInterval">,
+): void {
+  if (started) {
     logger.warn("health monitor already running — ignoring start");
     return;
   }
-  // Seed immediately so the first request has a populated snapshot.
-  runAllProbes(prisma).catch((err) => {
-    logger.warn({ err }, "initial health probe failed");
-  });
-  intervalHandle = setInterval(() => {
-    runAllProbes(prisma).catch((err) => {
-      logger.warn({ err }, "health probe cycle failed");
-    });
-  }, POLL_INTERVAL_MS);
-  // Node doesn't exit while an interval is active; unref so tests and graceful
-  // shutdown don't hang on this.
-  intervalHandle.unref?.();
+  started = true;
+  cron.scheduleInterval(
+    POLL_INTERVAL_MS,
+    async () => {
+      await runAllProbes(prisma).catch((err) => {
+        logger.warn({ err }, "health probe cycle failed");
+      });
+    },
+    { immediate: true },
+  );
   logger.info({ intervalMs: POLL_INTERVAL_MS }, "health monitor started");
 }
 
 export function stopHealthMonitor(): void {
-  if (intervalHandle !== null) {
-    clearInterval(intervalHandle);
-    intervalHandle = null;
-  }
+  started = false;
   cache.clear();
 }

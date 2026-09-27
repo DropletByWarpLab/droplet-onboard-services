@@ -538,6 +538,9 @@ describe("WARP-2016 — SCIM active-state writes run the role-mutation rails", (
 
     it("POST active:false matching the sole owner → 403 OWNER_IMMUTABLE; nothing mutated", async () => {
       const prisma = createPrismaMock([owner(), family()]);
+      // Already Okta-linked (no externalId → subject is the User.id), so the
+      // WARP-3193 identity-binding refusal is not what trips here.
+      prisma._identities.push({ id: "i-seed", userId: "u-owner", provider: "okta", subject: "u-owner" });
       const res = await request(buildApp(prisma))
         .post("/scim/v2/Users").set(...AUTH).send(POST_DEACTIVATE);
       expectRefusalEnvelope(res, 403, "OWNER_IMMUTABLE");
@@ -553,6 +556,7 @@ describe("WARP-2016 — SCIM active-state writes run the role-mutation rails", (
 
     it("POST active:false matching the last ACTIVE admin → 409 LAST_OPERATOR_INVARIANT", async () => {
       const prisma = createPrismaMock([admin(), family()]);
+      prisma._identities.push({ id: "i-seed", userId: "u-adm", provider: "okta", subject: "u-adm" });
       const res = await request(buildApp(prisma))
         .post("/scim/v2/Users").set(...AUTH)
         .send({ ...POST_DEACTIVATE, userName: "adm@acme.test" });
@@ -631,11 +635,9 @@ describe("WARP-2016 — SCIM active-state writes run the role-mutation rails", (
     });
 
     it("PATCH active:true (reactivation) runs NO disable rails and no disable post-effects", async () => {
-      // The sole DEACTIVATED admin can always come back — a reactivate
-      // removes no operator capacity, so no rail may refuse it.
-      const prisma = createPrismaMock([{ ...admin(), directoryStatus: "DEACTIVATED" as const }, family()]);
+      const prisma = createPrismaMock([admin(), { ...family(), directoryStatus: "DEACTIVATED" as const }]);
       const res = await request(buildApp(prisma))
-        .patch("/scim/v2/Users/u-adm").set(...AUTH)
+        .patch("/scim/v2/Users/u-fam").set(...AUTH)
         .send({
           schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
           Operations: [{ op: "replace", path: "active", value: true }],
@@ -644,6 +646,20 @@ describe("WARP-2016 — SCIM active-state writes run the role-mutation rails", (
       expect(res.body.active).toBe(true);
       expect(revokeAllSessionsMock).not.toHaveBeenCalled();
       expect(recordedScim.some((p) => p.what === "User disabled")).toBe(false);
+    });
+
+    it("🔴 WARP-3193 PATCH active:true cannot undo the local deactivation of an admin → 403", async () => {
+      // A DEACTIVATED operator is a local decision. No lockout follows: the
+      // owner is disable-immutable, and rail 5 keeps one ACTIVE operator.
+      const prisma = createPrismaMock([{ ...admin(), directoryStatus: "DEACTIVATED" as const }, family()]);
+      const res = await request(buildApp(prisma))
+        .patch("/scim/v2/Users/u-adm").set(...AUTH)
+        .send({
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+          Operations: [{ op: "replace", path: "active", value: true }],
+        });
+      expectRefusalEnvelope(res, 403, "ROLE_RANK_EXCEEDED");
+      expect(prisma._users.find((u: UserRow) => u.id === "u-adm")!.directoryStatus).toBe("DEACTIVATED");
     });
   });
 

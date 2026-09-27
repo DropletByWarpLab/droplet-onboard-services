@@ -5,6 +5,8 @@
  *   GET    /api/email/accounts                       — list accounts
  *   GET    /api/email/:accountId/threads?filter=     — threads paged
  *   GET    /api/email/:accountId/threads/:threadId   — full thread
+ *   GET    /api/email/contacts?query=&limit=         — WARP-3102: senders
+ *                                                      of the mail you read
  *   POST   /api/email/:accountId/drafts              — create draft
  *   PATCH  /api/email/drafts/:id                     — edit draft
  *   POST   /api/email/drafts/:id/send                — queue send
@@ -22,6 +24,13 @@
  * routes here (accounts list, draft patch, ingest, claim/status)
  * keep their original guards.
  *
+ * WARP-3102 — the forwarded identity is `ctx.userId`, which is
+ * `User.username` on the mcp-server's stdio transport (chat) and `User.id`
+ * on its HTTP one. It is resolved by `resolveAssertedUser`
+ * (`resolveEmailActor()`), never by username alone: that lookup answered
+ * 404 to every HTTP-transport call. `search_contacts`, the sixth email
+ * tool, reads `GET /email/contacts` the same way.
+ *
  * Send-tier (POST .../drafts/:id/send) is gated by the WARP-467/468
  * `outbound_email` off-LAN channel. When the channel is disabled
  * (sovereignty default for off-LAN escape; outbound email is ON by
@@ -33,10 +42,12 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
+import { deriveContacts } from "../services/email/contacts.service.js";
 import {
   connectMailbox,
   disconnectMailbox,
@@ -76,13 +87,15 @@ class MissingDropletUserError extends Error {
 }
 
 /**
- * WARP-1453 — the effective human identity (Droplet username) a request
- * acts as. For the trusted mcp service principal ONLY, the username is
- * taken from the `X-Droplet-User` header the tool handlers forward
- * (`ctx.userId`, threaded from the chat session via MCP `_meta.userId`).
- * Missing/blank header → MissingDropletUserError → 401, never a fallback.
- * For every other caller the header is IGNORED and the session's own
- * username rules — a human session cannot spoof another user this way.
+ * WARP-1453 — the effective human identity a request acts as. For the
+ * trusted mcp service principal ONLY, it is taken from the `X-Droplet-User`
+ * header the tool handlers forward (`ctx.userId`): the username on the
+ * mcp-server's stdio transport, the `User.id` on its HTTP one (WARP-3102) —
+ * so it is only ever an assertion to resolve (`resolveEmailActor`), never a
+ * key in its own right. Missing/blank header → MissingDropletUserError → 401,
+ * never a fallback. For every other caller the header is IGNORED and the
+ * session's own username rules — a human session cannot spoof another user
+ * this way.
  */
 function effectiveUser(req: Request): string {
   if (isMcpService(req)) {
@@ -98,52 +111,70 @@ function effectiveUser(req: Request): string {
   return username;
 }
 
+/** The person an email route acts for, and whether they read every mailbox. */
+interface EmailActor {
+  /** `User.id` — what `EmailAccount.userId` holds. */
+  id: string | null;
+  /** The username, for audit rows. */
+  username: string;
+  /** Owner/admin read every mailbox; everyone else reads their own. */
+  privileged: boolean;
+}
+
+// WARP-1453 / WARP-3102: for the mcp service principal the route runs AS the
+// forwarded `X-Droplet-User`. It is resolved against the User directory by
+// `resolveAssertedUser` — username, nextcloudUsername or id, because the
+// header is a username over stdio and a `User.id` over HTTP — and fails
+// closed: nobody, more than one person, or a deactivated one → null; missing
+// header → 401. The resolved row's canonical role/id drive the exact same
+// privileged/ownership decision the human would get calling the route
+// directly. `forwardedRoles` is the route's HUMAN role set: a forwarded
+// identity whose canonical role falls outside it is refused so the service
+// path can never widen a route's human RBAC (e.g. a forwarded family user on
+// the owner/admin-only send route).
+async function resolveEmailActor(
+  prisma: PrismaClient,
+  req: Request,
+  forwardedRoles: readonly string[] = ["owner", "admin", "family"],
+): Promise<EmailActor | null> {
+  if (isMcpService(req)) {
+    const asserted = effectiveUser(req); // throws → 401 when the header is absent
+    const resolved = await resolveAssertedUser(prisma, asserted);
+    if (!resolved.ok) return null; // fail closed
+    const { id, username, role } = resolved.user;
+    if (!forwardedRoles.includes(role)) return null; // human set mirror
+    return { id, username, privileged: role === "owner" || role === "admin" };
+  }
+  return {
+    id: req.user?.id ?? null,
+    username: effectiveUser(req),
+    privileged: isPrivilegedRole(req),
+  };
+}
+
 // IDOR guard: confirm the requester is allowed to touch the named account.
-// Returns the account row (id-only) on success, or null on 404/403 — the
-// caller writes the response. Owner/admin pass regardless of ownership;
-// family-and-below must own the account. Returns 404 (not 403) on a foreign
-// account to avoid leaking the existence of other households' rows.
-//
-// WARP-1453: for the mcp service principal the check runs AS the forwarded
-// `X-Droplet-User` — that username is resolved against the User directory
-// (fail closed: unknown user → null → 404, missing header → 401) and the
-// resolved row's canonical role/id drive the exact same privileged/ownership
-// decision the human would get calling the route directly. `forwardedRoles`
-// is the route's HUMAN role set: a forwarded identity whose canonical role
-// falls outside it is refused (404) so the service path can never widen a
-// route's human RBAC (e.g. a forwarded family user on the owner/admin-only
-// send route). Identity is resolved BEFORE the account read so a header-less
-// service call 401s without leaking account existence.
+// Returns the account row (id-only) and the actor on success, or null on
+// 404/403 — the caller writes the response. Owner/admin pass regardless of
+// ownership; family-and-below must own the account. Returns 404 (not 403) on
+// a foreign account to avoid leaking the existence of other households' rows.
+// Identity is resolved BEFORE the account read so a header-less service call
+// 401s without leaking account existence.
 async function assertAccountAccessible(
   prisma: PrismaClient,
   req: Request,
   accountId: string,
   forwardedRoles: readonly string[] = ["owner", "admin", "family"],
-): Promise<{ id: string; userId: string | null } | null> {
-  let privileged: boolean;
-  let scopeUserId: string | null;
-  if (isMcpService(req)) {
-    const username = effectiveUser(req); // throws → 401 when the header is absent
-    const user = (await prisma.user.findUnique({
-      where: { username },
-      select: { id: true, role: true },
-    })) as { id: string; role: string } | null;
-    if (!user) return null; // unknown forwarded identity — fail closed
-    if (!forwardedRoles.includes(user.role)) return null; // human set mirror
-    privileged = user.role === "owner" || user.role === "admin";
-    scopeUserId = user.id;
-  } else {
-    privileged = isPrivilegedRole(req);
-    scopeUserId = req.user?.id ?? null;
-  }
+): Promise<{ id: string; userId: string | null; actor: EmailActor } | null> {
+  const actor = await resolveEmailActor(prisma, req, forwardedRoles);
+  if (!actor) return null;
   const account = (await prisma.emailAccount.findUnique({
     where: { id: accountId },
     select: { id: true, userId: true },
   })) as { id: string; userId: string | null } | null;
   if (!account) return null;
-  if (privileged) return account;
-  if (account.userId && scopeUserId && account.userId === scopeUserId)
-    return account;
+  if (actor.privileged) return { ...account, actor };
+  if (account.userId && actor.id && account.userId === actor.id)
+    return { ...account, actor };
   return null;
 }
 
@@ -168,6 +199,12 @@ const patchDraftSchema = z.object({
   bccAddrs: z.array(addressSchema).max(50).nullable().optional(),
   subject: z.string().min(1).max(998).optional(),
   body: z.string().max(64_000).optional(),
+});
+
+// WARP-3102 — `search_contacts`: the bounds its input schema declares.
+const contactsQuerySchema = z.object({
+  query: z.string().trim().min(1).max(120),
+  limit: z.coerce.number().int().min(1).max(25).default(10),
 });
 
 interface AccountRow {
@@ -572,6 +609,62 @@ export function createEmailRouter(
     },
   );
 
+  /**
+   * WARP-3102 — `search_contacts`: the people the acting person corresponds
+   * with, derived from the senders of the mail they may read
+   * (services/email/contacts.service.ts).
+   *
+   * The tool used to read `EmailAccount` itself through `ctx.prisma`, by
+   * `userId: ctx.userId`. That column holds a `User.id`, and in chat (the
+   * stdio transport) `ctx.userId` is the username, so every chat user was
+   * told no mailbox was connected. Here the person is resolved like every
+   * other email tool route (`resolveEmailActor`).
+   *
+   * Which mailboxes: the ones that person can already read here — every
+   * account for owner/admin, their own for family — the rule of
+   * `GET /email/accounts` and `assertAccountAccessible`. Only owner/admin can
+   * connect a mailbox (`POST /email/accounts`), so an own-only rule would hide
+   * from an owner the company mailbox an admin connected, which `email_search`
+   * shows them.
+   *
+   * A forwarded identity that resolves to nobody, to more than one person, to
+   * a deactivated one or to a role outside the human set is refused with 403
+   * and an access-denied row: there is no account here whose existence a 404
+   * would hide.
+   */
+  router.get(
+    "/email/contacts",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = contactsQuerySchema.safeParse(req.query);
+        if (!parsed.success) {
+          res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+          return;
+        }
+        const actor = await resolveEmailActor(prisma, req);
+        if (!actor) {
+          recordAccessDenied(req, "email-contacts-acting-user-unresolved");
+          res.status(403).json({ error: "Forbidden" });
+          return;
+        }
+        const accounts = (await prisma.emailAccount.findMany({
+          where: actor.privileged ? undefined : { userId: actor.id ?? "__none__" },
+          select: { id: true },
+        })) as Array<{ id: string }>;
+        const contacts = await deriveContacts(
+          prisma,
+          accounts.map((a) => a.id),
+          parsed.data.query,
+          parsed.data.limit,
+        );
+        res.json({ query: parsed.data.query, accountCount: accounts.length, contacts });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   router.post(
     "/email/:accountId/drafts",
     // WARP-1453: `email_draft_reply` dispatches here as `_service:mcp`.
@@ -779,9 +872,11 @@ export function createEmailRouter(
             draftId: queued.id,
             accountId: queued.accountId,
             // WARP-1453: attribute the EFFECTIVE human — for the mcp
-            // service principal this is the forwarded X-Droplet-User,
-            // not "_service:mcp".
-            actor: effectiveUser(req),
+            // service principal this is the person the forwarded
+            // X-Droplet-User resolved to, not "_service:mcp". WARP-3102: by
+            // their username, never the raw header, which is a User.id over
+            // the mcp-server's HTTP transport.
+            actor: account.actor.username,
           },
           actor: actorFromRequest(req),
         });

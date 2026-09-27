@@ -9,6 +9,8 @@
  */
 
 import type { Router } from "express";
+import { isIP } from "node:net";
+import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import {
   getNetworkOverview,
@@ -70,6 +72,29 @@ import { setSshAccess, setSshLogin } from "../services/ssh-access.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { createDevicePoller } from "../services/network-device-poller.js";
+
+/** Shared by every /network/devices/events stream in this process. */
+const devicePoller = createDevicePoller(() => getConnectedDevices());
+
+/**
+ * WARP-3193 SEC-INJ-4 — static-lease and upstream-DNS values land on lines of
+ * dnsmasq's generated config, so a newline or separator in any of them could
+ * become an extra directive (e.g. a LAN-wide `address=/bank.example/…`). They
+ * are typed here, before the safety evaluator or the router sees them, and
+ * again by services/routing/schemas.py (StaticLeaseRequest / SetDnsRequest).
+ */
+const staticLeaseSchema = z.object({
+  name: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/),
+  mac: z.string().regex(/^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/),
+  ip: z.string().refine((v) => isIP(v) === 4),
+});
+const dnsServersSchema = z.object({
+  servers: z
+    .array(z.string().refine((v) => isIP(v) !== 0))
+    .min(1)
+    .max(4),
+});
 
 export interface StatusDeps {
   prisma: PrismaClient;
@@ -84,6 +109,17 @@ export interface StatusDeps {
  * actually on the port map — this only bounds the shape.
  */
 const ROUTER_PORT_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,30}$/;
+
+/**
+ * WARP-3091 — the device roster (every workspace device's name, MAC, IP and
+ * presence) is for employees, not external guests. Enforced per route rather
+ * than by flooring `network` view in access-catalog.ts: that floor gates the
+ * whole /api/network prefix, the Network nav entry and the network tool
+ * domain, which would also take status/summary away from guests.
+ * The MCP principal is admitted so `list_network_devices` still dispatches;
+ * the acting-user tool-domain gate is what keeps guests off that path.
+ */
+export const requireNetworkMember = requireRoleOrMcpService("owner", "admin", "family");
 
 export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   const { prisma, networkDeviceService } = deps;
@@ -116,7 +152,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // view (displayName, icon, notes, groups, online flag, signal). Callers
   // that still want the raw connected-devices snapshot can opt in via
   // `?legacy=1` — kept for one release while clients migrate.
-  router.get("/network/devices", async (req, res, next) => {
+  router.get("/network/devices", requireNetworkMember, async (req, res, next) => {
     try {
       // WARP-3097: no caching header here — the app-wide `no-store` stands.
       // The WARP-111 `private, max-age=5` let a client write the company's
@@ -137,7 +173,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   });
 
   // --- SSE stream for device changes (poll-based) ---
-  router.get("/network/devices/events", async (req, res) => {
+  router.get("/network/devices/events", requireNetworkMember, async (req, res) => {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -147,27 +183,18 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
     res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
 
-    let lastDeviceJson = "";
-
-    const pollInterval = setInterval(async () => {
-      try {
-        const devices = await getConnectedDevices();
-        const currentJson = JSON.stringify(devices);
-        if (currentJson !== lastDeviceJson) {
-          lastDeviceJson = currentJson;
-          res.write(`data: ${JSON.stringify({ type: "devices_changed", devices })}\n\n`);
-        }
-      } catch {
-        // Non-fatal
-      }
-    }, 10_000);
+    // WARP-3193 PERF-15: one shared poller per process, not a routing call
+    // per connected client per tick.
+    const unsubscribe = devicePoller.subscribe((devices) => {
+      res.write(`data: ${JSON.stringify({ type: "devices_changed", devices })}\n\n`);
+    });
 
     const heartbeat = setInterval(() => {
       res.write(`: heartbeat\n\n`);
     }, 30_000);
 
     req.on("close", () => {
-      clearInterval(pollInterval);
+      unsubscribe();
       clearInterval(heartbeat);
     });
   });
@@ -276,7 +303,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   );
 
   // --- DHCP ---
-  router.get("/network/dhcp/leases", async (_req, res, next) => {
+  router.get("/network/dhcp/leases", requireNetworkMember, async (_req, res, next) => {
     try {
       const leases = await getDhcpLeases();
       res.json({ leases });
@@ -292,10 +319,15 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const { name, mac, ip } = req.body;
-        if (!name || !mac || !ip) {
-          return res.status(400).json({ error: "Missing 'name', 'mac', or 'ip'" });
+        const parsed = staticLeaseSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error:
+              "Provide 'name' (a hostname: letters, digits, '-'), 'mac' (AA:BB:CC:DD:EE:FF) and 'ip' (IPv4)",
+            details: parsed.error.flatten(),
+          });
         }
+        const { name, mac, ip } = parsed.data;
 
         const userId = req.user?.id;
         const result = await evaluateNetworkCommand(
@@ -317,22 +349,20 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // WARP-871: set the upstream/custom DNS resolvers dnsmasq forwards to (e.g.
   // Pi-hole, NextDNS, 1.1.1.1). owner/admin only — DNS shapes every device's
   // name resolution. set_dns is Tier 1 (low-risk, no partition), so it applies
-  // immediately; the routing /dhcp/dns validator only requires a non-empty list.
+  // immediately. The body is typed here and again by the routing /dhcp/dns
+  // validator (WARP-3193 SEC-INJ-4).
   router.post(
     "/network/dns",
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const { servers } = req.body;
-        if (
-          !Array.isArray(servers) ||
-          servers.length === 0 ||
-          !servers.every((s) => typeof s === "string" && s.trim().length > 0)
-        ) {
+        const parsed = dnsServersSchema.safeParse(req.body);
+        if (!parsed.success) {
           return res
             .status(400)
-            .json({ error: "Provide 'servers' as a non-empty list of IP strings" });
+            .json({ error: "Provide 'servers' as a list of 1-4 IP addresses" });
         }
+        const { servers } = parsed.data;
 
         const userId = req.user?.id;
         const result = await evaluateNetworkCommand(
@@ -1103,6 +1133,14 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     try {
       const { entityId, userId, limit, offset } = req.query;
       const effectiveUserId = (userId as string | undefined) || req.user?.id;
+      // WARP-3092: another person's network audit is owner/admin only.
+      if (
+        effectiveUserId !== req.user?.id &&
+        req.user?.role !== "owner" &&
+        req.user?.role !== "admin"
+      ) {
+        return res.status(403).json({ error: "Forbidden: role not permitted" });
+      }
       const effectiveLimit = Math.min(limit ? parseInt(limit as string, 10) : 50, 500);
       const logs = await getNetworkAuditLog(prisma, {
         entityId: entityId as string | undefined,

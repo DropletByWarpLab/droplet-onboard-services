@@ -55,6 +55,7 @@ import {
 } from "./nextcloud-groups.client.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
+import { config } from "../config.js";
 
 const logger = createLogger("department-provisioner");
 
@@ -79,7 +80,7 @@ function truncateError(err: unknown): string {
 /** Basic-auth admin token in the `basic:<base64>` form the NC clients expect. */
 export function adminBasicToken(): string {
   const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
-  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+  const adminPassword = config.NEXTCLOUD_ADMIN_PASSWORD;
   return `basic:${Buffer.from(`${adminUser}:${adminPassword}`).toString("base64")}`;
 }
 

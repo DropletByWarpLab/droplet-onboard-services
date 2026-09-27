@@ -36,8 +36,14 @@ const FIELD =
 
 const BTN_PRIMARY =
   "w-full h-12 inline-flex items-center justify-center gap-2 rounded-sm " +
-  "bg-accent text-accent-foreground text-[16px] font-semibold " +
-  "transition-all duration-200 ease-smooth hover:bg-accent-hover " +
+  // `bg-accent-fill`, not `bg-accent`: this is the same white-on-vivid-accent
+  // pair as `.dp-btn-primary`, which measures 4.47:1 in light mode (under AA).
+  // Hover takes `.dp-btn-primary`'s hover step, `bg-accent-fill-hover`
+  // (7.90:1 light, 8.44:1 dark). `hover:bg-accent-hover` no longer works: in
+  // light the new rest fill IS `--color-accent-hover` (both indigo-600), so
+  // it would leave this button with no visible hover feedback.
+  "bg-accent-fill text-accent-foreground text-[16px] font-semibold " +
+  "transition-all duration-200 ease-smooth hover:bg-accent-fill-hover " +
   "active:scale-[0.97] disabled:opacity-60 disabled:pointer-events-none";
 
 const BTN_SECONDARY =
@@ -420,6 +426,9 @@ export function SignInForm({
         </div>
         <div className="relative">
           <Lock size={16} aria-hidden="true" className={GLYPH} />
+          {/* WARP-3135: `[&::-ms-reveal]:hidden` turns off Edge's native eye
+              (also in the Windows app, which is WebView2), which otherwise
+              sits beside the toggle below: two eyes on one field. */}
           <input
             id="login-password"
             type={showPassword ? "text" : "password"}
@@ -428,7 +437,7 @@ export function SignInForm({
             placeholder="Password"
             autoComplete="current-password"
             onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-            className={`${FIELD} pl-11 pr-12`}
+            className={`${FIELD} pl-11 pr-12 [&::-ms-reveal]:hidden`}
           />
           <button
             type="button"

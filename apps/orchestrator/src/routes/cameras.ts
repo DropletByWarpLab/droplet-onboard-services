@@ -1258,6 +1258,12 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Manually add a camera (name + RTSP URL) ---
+  //
+  // WARP-3193 SEC-INJ-5: owner/admin only — this points Frigate (and the
+  // camera credentials it holds) at an arbitrary host. Frigate expands
+  // `{FRIGATE_*}` placeholders in the URL, so braces are refused, and the URL
+  // is fully parsed BEFORE the Frigate write so a bad one cannot leave Frigate
+  // configured with no DB row.
   router.post("/cameras", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const { name, rtspUrl, manufacturer, model } = req.body;
@@ -1267,8 +1273,22 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!rtspUrl || typeof rtspUrl !== "string") {
         return res.status(400).json({ error: "Missing rtspUrl" });
       }
-      if (!/^rtsps?:\/\/.+/.test(rtspUrl)) {
+      if (!/^rtsps?:\/\/[^/]/.test(rtspUrl)) {
         return res.status(400).json({ error: "rtspUrl must start with rtsp:// or rtsps://" });
+      }
+      if (/[{}\s]/.test(rtspUrl)) {
+        return res.status(400).json({ error: "rtspUrl must not contain braces or whitespace" });
+      }
+      // rtsp: is not a WHATWG "special" scheme, so its host is left opaque;
+      // parse it as http(s) to get a validated hostname.
+      let ipAddress: string;
+      try {
+        ipAddress = new URL(rtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
+      } catch {
+        return res.status(400).json({ error: "rtspUrl is not a valid URL" });
+      }
+      if (!ipAddress) {
+        return res.status(400).json({ error: "rtspUrl must name a host" });
       }
 
       // Add to Frigate
@@ -1286,7 +1306,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           displayName,
           manufacturer: manufacturer || null,
           model: model || null,
-          ipAddress: new URL(rtspUrl.replace("rtsp://", "http://").replace("rtsps://", "https://")).hostname || "",
+          ipAddress,
           enabled: true,
           autoDiscovered: false,
           lastSeen: new Date(),

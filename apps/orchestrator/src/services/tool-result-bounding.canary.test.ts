@@ -88,6 +88,10 @@ const NOT_A_CURSOR: Record<string, string> = {
     "saas-credential.service.ts — the sibling local to nextSecrets, same annotation-not-a-key " +
     "reason: `const nextConfig: Record<string, string | number>`, the non-secret providerConfig " +
     "being assembled beside it.",
+  orphanCursor:
+    "filing/maintenance.ts — a module-level `let` (annotation, not a payload key) holding the " +
+    "last IngestProposal id the nightly orphan sweep examined (WARP-3193 PERF-15). Only the " +
+    "03:40 cron reads it; no route or tool result carries it.",
   nextRole: "routes/access.ts + people.ts — the RBAC role being transitioned TO",
   nextValue: "routes/settings.ts — the setting value being written",
   nextParam: "file-search.service.ts — a parsed query-string parameter",

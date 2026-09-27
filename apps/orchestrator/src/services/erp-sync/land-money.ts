@@ -36,6 +36,7 @@
 import { isCloudErpProvider } from "../erp-provider.js";
 
 import type { LandOutcome, LandingConnection, LandingDb } from "./land.js";
+import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
 /** Datasets that become `ErpDocument` rows. */
 export const MONEY_ENTITIES = ["invoice", "bill"] as const;
@@ -108,12 +109,6 @@ function currency(row: Row): string | null {
   if (raw === null) return null;
   const code = raw.toUpperCase();
   return CURRENCY.test(code) ? code : null;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002"
-  );
 }
 
 export async function landMoneyDocuments(
