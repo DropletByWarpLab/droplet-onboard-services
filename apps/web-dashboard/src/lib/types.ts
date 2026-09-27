@@ -3575,8 +3575,9 @@ export interface SecurityEventsPage {
  * is reporting. Served in the order camera_ingest, camera_system,
  * threat_mirror, site_mode, incidents, alerts, patterns, retention (PR-2 adds
  * `locks` after camera_system). WARP-2978: `incidents` is every viewer's;
- * `alerts` (who alerts reach) is owner/admin only. `patterns` (WARP-2980) is
- * the baseline job's row.
+ * `alerts` (who alerts reach) is owner/admin only. `links` (WARP-2979) is
+ * Droplet's link-finding job's row, after `alerts`. `patterns` (WARP-2980) is
+ * the baseline job's row. Mirrors the orchestrator's `SecurityHealthId`.
  */
 export interface SecurityHealthRow {
   id:
@@ -3586,6 +3587,7 @@ export interface SecurityHealthRow {
     | "site_mode"
     | "incidents"
     | "alerts"
+    | "links"
     // WARP-2979 P4 PR-2 — Droplet's incident summaries (every viewer), right after `links`.
     | "summaries"
     | "patterns"
