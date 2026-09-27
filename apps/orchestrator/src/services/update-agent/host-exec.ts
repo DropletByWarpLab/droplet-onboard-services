@@ -231,6 +231,8 @@ export async function initOtaHost(opts: {
   composeFile: string;
   configRoot: string;
   updatesDir: string;
+  /** WARP-3120 — this process's read-only view of the staged /downloads. */
+  appDownloadsDir?: string;
   githubToken?: string;
   request?: DockerRequest;
   logger?: pino.Logger;
@@ -255,6 +257,7 @@ export async function initOtaHost(opts: {
       composeFile: opts.composeFile,
       updatesDir: opts.updatesDir,
       helperUpdatesDir: context.hostUpdatesDir,
+      appDownloadsDir: opts.appDownloadsDir,
       githubToken: opts.githubToken,
       exec,
       logger: log,

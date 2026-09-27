@@ -332,3 +332,14 @@ def test_shipped_anchor_is_the_real_key_and_matches_the_orchestrator():
         _FIXTURES.parent / "cosign.pub"
     )  # apps/orchestrator/src/services/update-agent/cosign.pub
     assert anchor.read_bytes() == orchestrator_anchor.read_bytes()
+
+
+def test_parse_tolerates_the_clients_array():
+    """WARP-3120: release.json may carry the client installers the release
+    ships. fleet-agent only reads the manifest, so it must accept the key
+    (a refusal here would break every release that carries a Mac app)."""
+    doc = _valid_doc()
+    doc["clients"] = [{"platform": "macos", "version": "0.2.0", "file": "Droplet-0.2.0.dmg",
+                       "size": 1, "sha256": "e" * 64}]
+    res = parse_release_manifest(json.dumps(doc))
+    assert res.ok, res.detail

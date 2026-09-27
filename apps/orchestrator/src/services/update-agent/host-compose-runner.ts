@@ -68,7 +68,7 @@
  * recreating them would grow the deployment, not update it (apply.ts).
  */
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
@@ -79,7 +79,7 @@ import {
   type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
-import type { ReleaseManifest, ReleaseService } from "./manifest.js";
+import type { ReleaseClient, ReleaseManifest, ReleaseService } from "./manifest.js";
 
 const defaultLog = createLogger("update-agent");
 
@@ -103,6 +103,12 @@ export interface HostComposeRunnerOptions {
   updatesDir: string;
   /** The same directory as the HELPER sees it (host path). Default: updatesDir. */
   helperUpdatesDir?: string;
+  /**
+   * WARP-3120 — this process's (read-only) view of the staged app-downloads
+   * directory. Lets stageClientApp skip a download the catalog already
+   * serves. Absent → never skip.
+   */
+  appDownloadsDir?: string;
   /** Private-GHCR token, handed to pull-images only (never another call). */
   githubToken?: string;
   exec?: ExecFn;
@@ -286,6 +292,26 @@ function isReconcileUnsupported(err: unknown): boolean {
   return typeof stderr === "string" && RECONCILE_UNSUPPORTED_RE.test(stderr);
 }
 
+/**
+ * WARP-3120 — does the staged catalog already serve exactly this installer
+ * (platform, version, file name and sha256)? Any read or parse problem is a
+ * "no": the worst case is one redundant download.
+ */
+async function catalogHas(dir: string, client: ReleaseClient): Promise<boolean> {
+  try {
+    const catalog = JSON.parse(await readFile(path.join(dir, "catalog.json"), "utf8")) as {
+      platforms?: Array<{ platform?: string; version?: string; assets?: Array<{ name?: string; sha256?: string }> }>;
+    };
+    const entry = catalog.platforms?.find((p) => p.platform === client.platform);
+    return (
+      entry?.version === client.version &&
+      (entry.assets ?? []).some((a) => a.name === client.file && a.sha256 === client.sha256)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRunner {
   const log = opts.logger ?? defaultLog;
   const exec = opts.exec ?? defaultExec();
@@ -429,6 +455,49 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
         ],
         timeouts.quickMs,
       );
+    },
+
+    async stageClientApp(args: {
+      updateId: string;
+      client: ReleaseClient;
+      write: (dest: string) => Promise<void>;
+    }): Promise<"staged" | "already_staged"> {
+      // Every OTA carries the pinned installer; most carry the SAME one. When
+      // the catalog already lists this version with this sha256 for this
+      // file, there is nothing to download or stage. The digest gate still
+      // re-hashes the staged bytes on every download (app-downloads/store.ts).
+      if (opts.appDownloadsDir && (await catalogHas(opts.appDownloadsDir, args.client))) {
+        return "already_staged";
+      }
+      // `client.file` is a plain asset name (manifest schema), so it cannot
+      // leave clients/; the helper re-checks that on the host anyway.
+      const dir = path.join(updateDir(args.updateId), "clients");
+      const dest = path.join(dir, args.client.file);
+      await mkdir(dir, { recursive: true });
+      try {
+        await args.write(dest);
+        await run(
+          "stage-client-apps",
+          [
+            "--update-id",
+            args.updateId,
+            "--platform",
+            args.client.platform,
+            "--version",
+            args.client.version,
+            "--file",
+            path.join(helperUpdateDir(args.updateId), "clients", args.client.file),
+          ],
+          // Copies and re-hashes an installer (tens of MB), maybe inside a
+          // borrowed orchestrator container: not a quick call.
+          timeouts.recreateMs,
+        );
+      } finally {
+        // stage.sh copied it into /downloads (or failed): the update dir's
+        // copy is never read again, and update dirs are kept for rollback.
+        await rm(dest, { force: true });
+      }
+      return "staged";
     },
 
     async migrateDeploy(): Promise<void> {
