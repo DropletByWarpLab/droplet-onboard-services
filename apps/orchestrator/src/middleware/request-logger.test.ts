@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
-import { createRequestLogger, scrubSecretQueryParams } from "./request-logger.js";
+import { createRequestLogger } from "./request-logger.js";
 import { runWithRequestId } from "../lib/request-context.js";
 
 // Minimal http-ish req/res doubles: pino-http only needs an EventEmitter res
@@ -245,13 +245,8 @@ describe("requestLogger secret query params (WARP-3122)", () => {
     expect(output).not.toContain(SIG);
     expect(output).not.toContain("SECRET-TOKEN-q");
     const completion = JSON.parse(lines[lines.length - 1]);
-    expect(completion.req.url).toContain("sig=%5BRedacted%5D");
-    expect(completion.req.url).toContain("seg=0.ts");
+    expect(completion.req.url).toBe("/api/cameras/front/playback.segment");
+    expect(completion.req.query.sig).toBe("[Redacted]");
   });
 
-  it("scrubSecretQueryParams leaves URLs without secrets untouched", () => {
-    expect(scrubSecretQueryParams("/api/x?a=1&b=2")).toBe("/api/x?a=1&b=2");
-    expect(scrubSecretQueryParams("/api/x")).toBe("/api/x");
-    expect(scrubSecretQueryParams("/s?t=abc")).toBe("/s?t=%5BRedacted%5D");
-  });
 });
