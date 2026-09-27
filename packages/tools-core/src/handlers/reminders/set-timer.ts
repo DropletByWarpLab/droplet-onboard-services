@@ -7,8 +7,15 @@
  * reminders dispatcher fires it; deliberately there are no dedicated
  * cancel/list timer tools — `complete_reminder` cancels a timer and
  * `list_reminders` shows running ones.
+ *
+ * WARP-3101 — the row is WRITTEN BY THE ORCHESTRATOR (`POST /api/reminders`,
+ * create_reminder's route), under the username of the person the tool acts
+ * for. It used to be inserted here with `userId: ctx.userId`, a User.id over
+ * the mcp-server's HTTP transport, which the poller could not notify: the
+ * timer went off in silence.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { err, forbidden, invalid, refusalOf } from "../calendar/_route.js";
 
 const MAX_LABEL_LENGTH = 200;
 const MAX_DURATION_SECONDS = 7 * 24 * 60 * 60; // 7 days
@@ -27,10 +34,6 @@ const inputSchema = {
   },
   additionalProperties: false,
 } as const;
-
-function err(code: string, message: string): ToolResult {
-  return { ok: false, status: "error", error: { code, message } };
-}
 
 /** Read an optional duration component: absent → 0, invalid → null. */
 function parseComponent(value: unknown): number | null {
@@ -69,22 +72,25 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const title = label || "Timer";
 
   const dueAt = new Date(Date.now() + totalSeconds * 1000);
-  const reminder = (await ctx.prisma.reminder.create({
-    data: {
-      userId: ctx.userId,
-      title,
-      body: null,
-      dueAt,
-      calendarEventId: null,
-    },
-  })) as unknown as { id: string; dueAt: Date };
+  const res = await ctx.http.orchestrator.post(
+    "/api/reminders",
+    { title, dueAt: dueAt.toISOString() },
+    { headers: { Accept: "application/json" } },
+  );
+  if (!res.ok) {
+    const refusal = await refusalOf(res);
+    if (res.status === 403) return forbidden(refusal);
+    if (res.status === 400) return invalid(refusal);
+    return err("CREATE_FAILED", `orchestrator returned ${res.status}`);
+  }
+  const { reminder } = (await res.json()) as { reminder: { id: string; dueAt: string } };
   return {
     ok: true,
     data: {
       type: "set_timer",
       id: reminder.id,
       title,
-      due_at: reminder.dueAt.toISOString(),
+      due_at: new Date(reminder.dueAt).toISOString(),
       duration_seconds: totalSeconds,
     },
   };

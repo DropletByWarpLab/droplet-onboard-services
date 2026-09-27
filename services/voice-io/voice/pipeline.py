@@ -73,6 +73,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable, Iterator, Optional, Union
 
 import numpy as np
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from voice.activity import ActivityReporter
 from voice.audio_io import (
@@ -458,7 +459,7 @@ _INT16_FULL_SCALE = 32768.0
 # scores every frame; without a floor the feed would drown in noise).
 # Ratio-of-threshold rather than absolute because the two engines'
 # score semantics differ (openWakeWord sigmoid ~0.3 gate vs Vosk
-# min-word-confidence ~0.7 gate). Misses are debounced on the same
+# min-word-confidence ~0.85 gate). Misses are debounced on the same
 # `debounce_s` window as fires so one hesitant utterance = one row.
 WAKE_MISS_RATIO = 0.6
 
@@ -840,7 +841,12 @@ class WakePipeline:
         self._measure_collector: Optional[list[tuple[float, int, float]]] = None
 
         self._thread: Optional[threading.Thread] = None
-        self._probe_thread: Optional[threading.Thread] = None
+        # WARP-3193 QUAL-12: the periodic upstream re-probe is an
+        # APScheduler interval job, not a `while not event.wait()` loop.
+        # `_probe_lock` is held for the whole of each tick so stop() can
+        # wait for an in-flight tick with a bounded budget.
+        self._probe_scheduler: Optional[BackgroundScheduler] = None
+        self._probe_lock = threading.Lock()
         self._shutdown = threading.Event()
         self._lock = threading.Lock()
         # Speak-path mutex — held across synthesize() + _play_pcm() so a
@@ -954,14 +960,21 @@ class WakePipeline:
         # (whisper / piper / ai-gateway slow to bind on boot) is
         # noticed within `upstream_probe_interval_s`. Without this,
         # `_*_available` stays False forever after a cold-boot race.
-        # Daemon thread — process exit doesn't wait on it.
+        # Daemon scheduler thread — process exit doesn't wait on it.
+        # max_instances=1 + coalesce: a slow tick never stacks up behind
+        # itself, matching the old sequential loop.
         if self._upstream_probe_interval_s > 0:
-            self._probe_thread = threading.Thread(
-                target=self._probe_loop,
-                name="upstream-probe",
-                daemon=True,
+            sched = BackgroundScheduler(daemon=True)
+            sched.add_job(
+                self._probe_tick,
+                "interval",
+                seconds=self._upstream_probe_interval_s,
+                id="upstream-probe",
+                max_instances=1,
+                coalesce=True,
             )
-            self._probe_thread.start()
+            sched.start()
+            self._probe_scheduler = sched
 
     def stop(self, timeout: float = 5.0) -> bool:
         """Signal shutdown and join the threads. Idempotent.
@@ -984,9 +997,17 @@ class WakePipeline:
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
-        pt = self._probe_thread
-        if pt is not None and pt.is_alive():
-            pt.join(timeout=timeout)
+        # No new ticks after this; then wait (bounded) for an in-flight
+        # one. Once the lock is ours, _shutdown is already set, so any
+        # tick the executor still starts returns without probing.
+        sched = self._probe_scheduler
+        probe_idle = True
+        if sched is not None:
+            if sched.running:
+                sched.shutdown(wait=False)
+            probe_idle = self._probe_lock.acquire(timeout=timeout)
+            if probe_idle:
+                self._probe_lock.release()
         # Forget only a thread that is genuinely gone. A live one still
         # holds something the next caller must not race.
         joined = True
@@ -994,10 +1015,10 @@ class WakePipeline:
             joined = False
         else:
             self._thread = None
-        if pt is not None and pt.is_alive():
+        if not probe_idle:
             joined = False
         else:
-            self._probe_thread = None
+            self._probe_scheduler = None
         self._set_state("idle")
         return joined
 
@@ -1017,7 +1038,7 @@ class WakePipeline:
     def _probe_upstreams(self, initial: bool = False) -> None:
         """Re-check whether STT, TTS, LLM are reachable + update the
         cached `_*_available` flags. Called once synchronously by
-        start(), then periodically by `_probe_loop` so the user-visible
+        start(), then periodically by `_probe_tick` so the user-visible
         /voice/status converges to truth after a boot race.
 
         On `initial=True` we log warnings for any upstream that's down
@@ -1060,20 +1081,23 @@ class WakePipeline:
                 )
             setattr(self, flag_attr, now_ok)
 
-    def _probe_loop(self) -> None:
-        """Background thread: re-probe upstreams every
-        `upstream_probe_interval_s`. Exits when shutdown is set.
+    def _probe_tick(self) -> None:
+        """Scheduler job: re-probe upstreams, run every
+        `upstream_probe_interval_s` while the pipeline is started. A tick
+        that starts after stop() set shutdown does nothing.
 
         Also the flatline edge-detector's clock (WARP-1058): the
         `input_flatlined` flag is computed on status() reads, so this is
         the one place inside voice-io that periodically observes it and
         can emit the dsp_wedge / dsp_recovered transition events.
         """
-        while not self._shutdown.wait(self._upstream_probe_interval_s):
+        with self._probe_lock:
+            if self._shutdown.is_set():
+                return
             try:
                 self._probe_upstreams()
             except Exception:  # pragma: no cover
-                logger.exception("upstream probe loop iteration crashed")
+                logger.exception("upstream probe tick crashed")
             try:
                 self._check_flatline_transition()
             except Exception:  # pragma: no cover
@@ -2693,7 +2717,11 @@ class WakePipeline:
             self._last_transcript_at = now
             self._state = "transcript_ready"
 
-        logger.info("transcript: %r", transcript)
+        # WARP-3193 SEC-DATA-9: the text is what the user said (PII, health
+        # details, spoken passwords) and INFO logs ship in support bundles.
+        # INFO carries the length; the text needs the LOG_LEVEL=DEBUG opt-in.
+        logger.info("transcript ready len=%d", len(transcript))
+        logger.debug("transcript: %r", transcript)
         try:
             self._on_transcript(transcript)
         except Exception:
@@ -2803,8 +2831,8 @@ class WakePipeline:
             # especially don't speak an answer to the television. The
             # transcript still lands in /voice/status for diagnosis.
             logger.info(
-                "transcript %r is a fragment, not a command — staying quiet",
-                transcript,
+                "transcript len=%d is a fragment, not a command — staying quiet",
+                len(transcript),
             )
             self._emit_activity(
                 "wake_ignored",
@@ -2813,8 +2841,8 @@ class WakePipeline:
             return "fragment", None
         if self._llm is None or not self._llm_available:
             logger.info(
-                "transcript ready (LLM unavailable, not speaking): %r",
-                transcript,
+                "transcript ready (LLM unavailable, not speaking): len=%d",
+                len(transcript),
             )
             self._emit_activity(
                 "wake_heard",
@@ -2829,7 +2857,8 @@ class WakePipeline:
         tool_choice = classify_tool_choice(transcript)
         if tool_choice == "none":
             logger.info(
-                "intent gate matched (no tools): transcript=%r", transcript,
+                "intent gate matched (no tools): transcript len=%d",
+                len(transcript),
             )
         # WARP-626 — stream the reply, sentence-chunk it, and speak each
         # chunk so first-audio starts after sentence 1 instead of after the
@@ -2842,8 +2871,8 @@ class WakePipeline:
         spoke = bool(result.get("ok") and result.get("spoke_any"))
         if not spoke and result.get("error"):
             logger.warning(
-                "voice reply for %r did not complete (%s): %s",
-                transcript, result.get("error_kind"), result.get("error"),
+                "voice reply for transcript len=%d did not complete (%s): %s",
+                len(transcript), result.get("error_kind"), result.get("error"),
             )
         # WARP-1058 — the §3.4 outcome row. "Answered" means the user
         # actually HEARD a reply; a failed / empty / rejected reply is

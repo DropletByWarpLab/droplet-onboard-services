@@ -505,8 +505,10 @@ def update_item_status(
         # non-autocommit connections too.
         try:
             conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            # WARP-3193 QUAL-15: a no-op on the autocommit conn, but a real
+            # failure on any other connection must leave a trace.
+            logger.warning("update_item_status(%s → %s): commit failed: %s", item_id, status, e)
 
 
 def claim_attempt(conn, *, item_id: str) -> bool:
@@ -550,8 +552,8 @@ def claim_attempt(conn, *, item_id: str) -> bool:
             )
             try:
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("claim_attempt(%s): commit failed: %s", item_id, e)
             return True
         # Window open + count < 3 → bump.
         if count < 3:
@@ -566,8 +568,8 @@ def claim_attempt(conn, *, item_id: str) -> bool:
             )
             try:
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("claim_attempt(%s): commit failed: %s", item_id, e)
             return True
         # Cap hit.
         return False
@@ -593,8 +595,8 @@ def reconcile_stuck_items(conn, *, stuck_after_hours: int = 6) -> int:
             n = cur.rowcount
         try:
             conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("reconcile_stuck_items: commit failed: %s", e)
     return n
 
 

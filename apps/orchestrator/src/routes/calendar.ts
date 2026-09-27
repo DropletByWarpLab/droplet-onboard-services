@@ -5,6 +5,13 @@
  * the auth middleware). Mutating endpoints rely on calendar.service.ts to
  * enforce ownership (`existing.userId !== userId → forbidden`).
  *
+ * WARP-3101 — the four event routes are also the assistant's calendar tools
+ * (CALENDAR_TOOL_ROUTES). Called as `_service:mcp`, they act for the person
+ * named in `X-Nextcloud-User` and key the rows on THAT person's username
+ * (services/tool-acting-user.service.ts). The tools used to read and write
+ * CalendarEvent themselves, by `ctx.userId` — a User.id on the mcp-server's
+ * HTTP transport, which matches no row here.
+ *
  * The publish endpoint is special: it serves an ICS feed at
  * `/api/calendar/publish/:user.ics?token=...` and is NOT behind auth so
  * phones can `webcal://` subscribe. Access is gated by a stored, per-user,
@@ -49,6 +56,26 @@ import { meetingUrlSchema } from "../lib/meeting-url.js";
 // WARP-2022 — tells a destination refusal apart from a transport failure
 // without string-matching the message.
 import { isOutboundUrlBlocked } from "../lib/outbound-url-guard.js";
+import {
+  sendToolActingUserDenial,
+  toolActingUser,
+  type RouteTools,
+} from "../services/tool-acting-user.service.js";
+
+/**
+ * WARP-3101 — the calendar routes the assistant's tools call (tools-core
+ * TOOL_ROUTES), and the tools each one serves. Only on these does
+ * `_service:mcp` act for the person it names; elsewhere it is only itself.
+ */
+export const CALENDAR_TOOL_ROUTES = {
+  "get /api/calendar/events": ["list_events", "search_calendar_events"],
+  "post /api/calendar/events": ["create_event"],
+  "patch /api/calendar/events/:id": ["update_event"],
+  "delete /api/calendar/events/:id": ["delete_event"],
+} as const satisfies Record<string, RouteTools>;
+
+/** WARP-3101 — `search_calendar_events`' text, as the tool bounds it. */
+const eventQuerySchema = z.string().trim().min(1).max(200);
 
 // WARP-1502: the place-suggestion shape + Nominatim fetch/formatting moved to
 // services/places.service.ts so the structured-formatting logic is unit-tested
@@ -174,14 +201,23 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
 
   router.get("/calendar/events", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      // WARP-3101 — `?q=` narrows the list to events whose title, notes or
+      // place mention it (the search_calendar_events tool).
+      const q = req.query.q === undefined ? undefined : eventQuerySchema.safeParse(req.query.q);
+      if (q && !q.success) {
+        res.status(400).json({ error: "invalid_request", details: q.error.flatten() });
+        return;
+      }
+      const person = await toolActingUser(prisma, req, CALENDAR_TOOL_ROUTES["get /api/calendar/events"]);
+      if (!person.ok) return void sendToolActingUserDenial(res, person);
       const fromStr = req.query.from as string | undefined;
       const toStr = req.query.to as string | undefined;
       const limit = req.query.limit ? Number(req.query.limit) : undefined;
-      const events = await listEvents(prisma, user, {
+      const events = await listEvents(prisma, person.username, {
         from: fromStr ? new Date(fromStr) : undefined,
         to: toStr ? new Date(toStr) : undefined,
         limit,
+        query: q?.data,
       });
       res.json({ events });
     } catch (err) {
@@ -196,7 +232,9 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
-      const ev = await createEvent(prisma, getUser(req), {
+      const person = await toolActingUser(prisma, req, CALENDAR_TOOL_ROUTES["post /api/calendar/events"]);
+      if (!person.ok) return void sendToolActingUserDenial(res, person);
+      const ev = await createEvent(prisma, person.username, {
         title: parsed.data.title,
         description: parsed.data.description,
         location: parsed.data.location,
@@ -223,7 +261,9 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
-      const ev = await updateEvent(prisma, getUser(req), req.params.id, {
+      const person = await toolActingUser(prisma, req, CALENDAR_TOOL_ROUTES["patch /api/calendar/events/:id"]);
+      if (!person.ok) return void sendToolActingUserDenial(res, person);
+      const ev = await updateEvent(prisma, person.username, req.params.id, {
         title: parsed.data.title,
         description: parsed.data.description,
         location: parsed.data.location,
@@ -245,7 +285,9 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
 
   router.delete("/calendar/events/:id", async (req, res, next) => {
     try {
-      await deleteEvent(prisma, getUser(req), req.params.id);
+      const person = await toolActingUser(prisma, req, CALENDAR_TOOL_ROUTES["delete /api/calendar/events/:id"]);
+      if (!person.ok) return void sendToolActingUserDenial(res, person);
+      await deleteEvent(prisma, person.username, req.params.id);
       res.json({ deleted: req.params.id });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
