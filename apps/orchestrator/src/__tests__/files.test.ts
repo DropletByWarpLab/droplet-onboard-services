@@ -1013,6 +1013,35 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         expect(ncMock.ncCommitUpload.mock.calls[0][3]).toBe("/Q3 report_draft.txt");
       });
 
+      it("?overwrite=true never replaces under a name we changed: a renamed name keeps both", async () => {
+        const boundary = "b3057";
+        const res = await request(app)
+          .post("/api/files/upload?path=/&overwrite=true")
+          .set("Content-Type", `multipart/form-data; boundary=${boundary}`)
+          .send(
+            Buffer.from(
+              `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="a\\b.txt"\r\n` +
+                `Content-Type: text/plain\r\n\r\nx\r\n--${boundary}--\r\n`,
+            ),
+          );
+        expect(res.status).toBe(200);
+        expect(ncMock.ncCommitUpload.mock.calls[0][3]).toBe("/a_b.txt");
+        expect(ncMock.ncCommitUpload.mock.calls[0][4]).toBe(false);
+      });
+
+      it.each([
+        ["C1 in a plain filename=", `filename="bad\u0085name.txt"`, "UPLOAD_BAD_NAME"],
+        ["C0 in filename*=", `filename*=UTF-8''bad%01name.txt`, "UPLOAD_BAD_NAME"],
+        ["DEL in filename*=", `filename*=UTF-8''bad%7Fname.txt`, "UPLOAD_BAD_NAME"],
+        // busboy itself refuses a raw C0 byte in the part header.
+        ["raw C0 in a plain filename=", `filename="bad\u0001name.txt"`, "UPLOAD_MALFORMED"],
+      ])("refuses a control character (%s) with a 400, before staging a byte", async (_l, disposition, code) => {
+        const res = await upload(disposition);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe(code);
+        expect(ncMock.ncStageUpload).not.toHaveBeenCalled();
+      });
+
       it.each([
         "../../etc/passwd",
         "..\\..\\secret.txt",

@@ -1855,7 +1855,7 @@ export function createFilesRouter(
   // (write_file / create_document) is not multipart and skips all of this.
   class BadUploadNameError extends Error {
     constructor() {
-      super("File name must not contain '/' or a '..' segment");
+      super("File name must not contain '/', a control character or a '..' segment");
     }
   }
 
@@ -1902,6 +1902,13 @@ export function createFilesRouter(
     scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
       if (err instanceof BadUploadNameError) {
         res.status(400).json({ error: err.message, code: "UPLOAD_BAD_NAME" });
+        return;
+      }
+      // busboy refuses a part header carrying a raw control character (and
+      // any other malformed header) before the fileFilter sees it: that is
+      // the client's bad request, not a 500.
+      if (err instanceof Error && err.message === "Malformed part header") {
+        res.status(400).json({ error: "Malformed upload", code: "UPLOAD_MALFORMED" });
         return;
       }
       if (err instanceof MulterError) {
@@ -2481,7 +2488,9 @@ export function createFilesRouter(
               targetPath,
               file.name,
               file.uploadId,
-              overwrite,
+              // WARP-3057: a name we changed (`\` → `_`) is not the name the
+              // caller asked to replace, so it always keeps both.
+              overwrite && file.name === file.requestedName,
             ));
             uncommitted.delete(file.uploadId);
           } else {

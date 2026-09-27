@@ -4,8 +4,9 @@
  * The multipart parser runs with `preservePath: true`, so the name arrives
  * exactly as the client sent it, and it is ours to check:
  *
- * - `/` or NUL anywhere, or a `..` segment (split on `/` or `\`), is a
- *   traversal attempt and the whole upload is refused;
+ * - `/` anywhere, or a `..` segment (split on `/` or `\`), is a traversal
+ *   attempt and the whole upload is refused; so is a C0/C1 control
+ *   character (NUL included), which no real file name carries;
  * - `\` is kept as part of the name, never read as a path separator, but
  *   Nextcloud refuses it in every file name (`OCP\Constants::FILENAME_INVALID_CHARS`
  *   is `\\/`), so it is stored as `_` and the upload reports the rename;
@@ -14,7 +15,7 @@
  * Returns the name to store, or null to refuse the upload.
  */
 export function storedUploadName(raw: string): string | null {
-  if (raw.includes("/") || raw.includes("\0")) return null;
+  if (raw.includes("/") || /[\u0000-\u001f\u007f-\u009f]/.test(raw)) return null;
   if (raw.split("\\").includes("..")) return null;
   const name = raw.replaceAll("\\", "_");
   if (name.trim() === "" || name === ".") return null;
@@ -47,15 +48,19 @@ export function repairLatin1Mojibake(name: string): string | null {
 }
 
 /**
- * The rename plan for a list of stored paths (`user/files/…/name`): each
- * path whose last segment repairs cleanly, unless the repaired path is
- * already taken — that one is skipped, never overwritten.
+ * The rename plan for a list of stored file paths (`user/files/…/name`):
+ * each path whose last segment repairs cleanly, unless the repaired path is
+ * already taken by a file or a directory (`dirs`) — that one is skipped,
+ * never overwritten and never moved INTO a directory of that name.
  */
-export function planMojibakeRenames(paths: string[]): {
+export function planMojibakeRenames(
+  paths: string[],
+  dirs: string[] = [],
+): {
   renames: { from: string; to: string }[];
   skipped: { from: string; to: string }[];
 } {
-  const taken = new Set(paths);
+  const taken = new Set([...paths, ...dirs]);
   const renames: { from: string; to: string }[] = [];
   const skipped: { from: string; to: string }[] = [];
   for (const from of paths) {

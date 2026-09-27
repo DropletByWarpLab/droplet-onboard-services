@@ -35,11 +35,20 @@ describe("planMojibakeRenames", () => {
   });
 });
 
+describe("planMojibakeRenames with directories", () => {
+  it("skips a repaired name that is an existing directory, never moving the file into it", () => {
+    const from = `alice/files/${garble("Café")}`;
+    const plan = planMojibakeRenames([from], ["alice/files", "alice/files/Café"]);
+    expect(plan.renames).toEqual([]);
+    expect(plan.skipped).toEqual([{ from, to: "alice/files/Café" }]);
+  });
+});
+
 describe("storedUploadName", () => {
   it("keeps a backslash as a character, stored as _", () => {
     expect(storedUploadName("a\\b.txt")).toBe("a_b.txt");
   });
-  it.each(["../x", "..\\x", "a/b", "..", ".", "", "a\0b"])("refuses %j", (name) => {
+  it.each(["../x", "..\\x", "a/b", "..", ".", "", "a\0b", "a\u0007b", "a\u009bb"])("refuses %j", (name) => {
     expect(storedUploadName(name)).toBeNull();
   });
 });
