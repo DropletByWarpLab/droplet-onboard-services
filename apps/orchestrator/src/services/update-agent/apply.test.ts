@@ -208,8 +208,32 @@ interface Row {
   manifestJson: unknown;
   failureReason: string | null;
   outcome: string;
+  /** WARP-3193 PERF-3 — the apply claim (mirrors schema.prisma). */
+  applyClaim: string;
+  applyClaimId: string | null;
+  applyClaimedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+type RowWhere = {
+  id?: string;
+  status?: string | { in: string[] };
+  gitSha?: string;
+  applyClaim?: string;
+  applyClaimId?: string;
+};
+
+/** Prisma `where` over the handful of DeviceUpdate fields apply.ts filters on. */
+function rowMatches(r: Row, where: RowWhere | undefined): boolean {
+  const s = where?.status;
+  if (typeof s === "string" && r.status !== s) return false;
+  if (s !== undefined && typeof s !== "string" && !s.in.includes(r.status)) return false;
+  if (where?.id !== undefined && r.id !== where.id) return false;
+  if (where?.gitSha !== undefined && r.gitSha !== where.gitSha) return false;
+  if (where?.applyClaim !== undefined && r.applyClaim !== where.applyClaim) return false;
+  if (where?.applyClaimId !== undefined && r.applyClaimId !== where.applyClaimId) return false;
+  return true;
 }
 
 function createPrismaStub(opts: {
@@ -225,22 +249,8 @@ function createPrismaStub(opts: {
   const deviceUpdate = {
     _rows: () => rows,
     _statusWrites: () => statusWrites,
-    findFirst: async (args: {
-      where?: { id?: string; status?: string | { in: string[] }; gitSha?: string };
-      orderBy?: unknown;
-    }) => {
-      const statusMatch = (r: Row) => {
-        const s = args.where?.status;
-        if (s === undefined) return true;
-        if (typeof s === "string") return r.status === s;
-        return s.in.includes(r.status);
-      };
-      const matches = rows.filter(
-        (r) =>
-          statusMatch(r) &&
-          (args.where?.id === undefined || r.id === args.where.id) &&
-          (args.where?.gitSha === undefined || r.gitSha === args.where.gitSha),
-      );
+    findFirst: async (args: { where?: RowWhere; orderBy?: unknown }) => {
+      const matches = rows.filter((r) => rowMatches(r, args.where));
       matches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       return matches[0] ? { ...matches[0] } : null;
     },
@@ -266,16 +276,25 @@ function createPrismaStub(opts: {
     // the same way `update` does, so the transition-ordering assertions
     // keep working.
     updateMany: async (args: {
-      where: { id?: string; status?: string };
-      data: { status?: string; failureReason?: string | null; outcome?: string };
+      where: RowWhere;
+      data: {
+        status?: string;
+        failureReason?: string | null;
+        outcome?: string;
+        applyClaim?: string;
+        applyClaimId?: string | null;
+        applyClaimedAt?: Date | null;
+      };
     }) => {
       let count = 0;
       for (const row of rows) {
-        if (args.where.id !== undefined && row.id !== args.where.id) continue;
-        if (args.where.status !== undefined && row.status !== args.where.status) continue;
+        if (!rowMatches(row, args.where)) continue;
         if (args.data.outcome !== undefined) row.outcome = args.data.outcome;
+        if (args.data.applyClaim !== undefined) row.applyClaim = args.data.applyClaim;
+        if ("applyClaimId" in args.data) row.applyClaimId = args.data.applyClaimId ?? null;
+        if ("applyClaimedAt" in args.data) row.applyClaimedAt = args.data.applyClaimedAt ?? null;
         count += 1;
-        if (args.data.status === undefined) continue; // an outcome-only write
+        if (args.data.status === undefined) continue; // an outcome- or claim-only write
         row.status = args.data.status;
         if ("failureReason" in args.data) row.failureReason = args.data.failureReason ?? null;
         row.updatedAt = new Date();
@@ -287,12 +306,15 @@ function createPrismaStub(opts: {
       }
       return { count };
     },
-    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason" | "outcome"> & { failureReason?: string | null } }) => {
+    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason" | "outcome" | "applyClaim" | "applyClaimId" | "applyClaimedAt"> & { failureReason?: string | null } }) => {
       seq += 1;
       const row: Row = {
         id: `du-${seq}`,
         failureReason: null,
         outcome: "not_applied",
+        applyClaim: "unclaimed",
+        applyClaimId: null,
+        applyClaimedAt: null,
         ...args.data,
         createdAt: new Date(Date.now() + seq),
         updatedAt: new Date(),
@@ -1154,6 +1176,134 @@ describe("applyWindowTick (WARP-539 window dispatch)", () => {
     const runner = new FakeRunner();
     const res = await applyWindowTick(baseOpts(prisma, runner));
     expect(res.outcome).toBe("nothing_pending");
+  });
+});
+
+describe("WARP-3193 PERF-3 — one apply per row, however many runners race", () => {
+  /** A runner whose snapshot parks until the test lets it go. */
+  class ParkedRunner extends FakeRunner {
+    private release!: () => void;
+    readonly parked = new Promise<void>((r) => (this.release = r));
+    entered = 0;
+    letGo() {
+      this.release();
+    }
+    override async snapshot(opts: { updateId: string; previousRefs: Record<string, string | null> }) {
+      this.entered += 1;
+      await super.snapshot(opts);
+      await this.parked;
+    }
+  }
+
+  it("apply-now and the window tick racing: exactly one snapshots, the other stops before any side effect", async () => {
+    const prisma = createPrismaStub();
+    const runner = new ParkedRunner();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    // Apply-now's detached dispatch starts first and parks inside step 1.
+    const first = applyPendingUpdate(baseOpts(prisma, runner, logger));
+    await vi.waitFor(() => expect(runner.entered).toBe(1));
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
+
+    // The 03:00 window fires while `verifying` takes its minutes.
+    const second = await applyWindowTick(baseOpts(prisma, runner, logger));
+    expect(second).toEqual({ outcome: "apply_claimed_elsewhere", deviceUpdateId: "du-1" });
+    expect(runner.entered).toBe(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.apply_claimed_elsewhere", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+
+    runner.letGo();
+    expect((await first).outcome).toBe("self_swap_started");
+    expect(runner.calls.filter((c) => c.startsWith("snapshot("))).toEqual(["snapshot(du-1)"]);
+    // Exactly one verifying + one applying write: the loser wrote nothing.
+    expect(prisma.deviceUpdate._statusWrites().map((w) => w.status)).toEqual([
+      "verifying",
+      "applying",
+    ]);
+  });
+
+  it("hands the claim back when the run ends, so the next window can retry a verifying row", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedPendingRow(prisma, buildManifest());
+    servedTag = "ota-10-gmoved"; // transient: the latest release moved on
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+    expect(res.outcome).toBe("retry_later");
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "verifying",
+      applyClaim: "unclaimed",
+      applyClaimId: null,
+      applyClaimedAt: null,
+    });
+  });
+
+  it("hands the claim back when the run throws", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.pullImages = async () => {
+      throw new Error("registry unreachable");
+    };
+    await seedPendingRow(prisma, buildManifest());
+
+    await expect(applyPendingUpdate(baseOpts(prisma, runner))).rejects.toThrow("registry unreachable");
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
+  });
+
+  it("runs a row the caller already claimed, and refuses one whose claim it does not hold", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const row = await seedPendingRow(prisma, buildManifest());
+    await prisma.deviceUpdate.updateMany({
+      where: { id: row.id },
+      data: { applyClaim: "claimed", applyClaimId: "route-claim", applyClaimedAt: new Date() },
+    });
+
+    const wrong = await applyPendingUpdate({
+      ...baseOpts(prisma, runner),
+      claimed: { deviceUpdateId: row.id, claimId: "someone-else" },
+    });
+    expect(wrong).toEqual({ outcome: "apply_claimed_elsewhere", deviceUpdateId: row.id });
+    expect(runner.calls).toEqual([]);
+    // Refusing never releases a claim that is not ours.
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaimId).toBe("route-claim");
+
+    const res = await applyPendingUpdate({
+      ...baseOpts(prisma, runner),
+      claimed: { deviceUpdateId: row.id, claimId: "route-claim" },
+    });
+    expect(res.outcome).toBe("self_swap_started");
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
+  });
+
+  it("resumeInterruptedApply clears the claim a dead process left behind, then resumes", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    const row = await seedPendingRow(prisma, buildManifest());
+    // The previous orchestrator claimed, reached verifying, and died.
+    await prisma.deviceUpdate.updateMany({
+      where: { id: row.id },
+      data: {
+        status: "verifying",
+        applyClaim: "claimed",
+        applyClaimId: "dead-process",
+        applyClaimedAt: new Date(),
+      },
+    });
+
+    const resume = await resumeInterruptedApply(baseOpts(prisma, runner, logger));
+
+    expect(resume.outcome).toBe("resumed_apply");
+    expect((resume as { result: { outcome: string } }).result.outcome).toBe("self_swap_started");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.stale_claims_cleared", count: 1 }),
+      expect.any(String),
+    );
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
   });
 });
 

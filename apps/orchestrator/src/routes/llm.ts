@@ -1369,6 +1369,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               });
               return;
             }
+            // WARP-3193 PERF-9 — the same turn is still streaming: the agent
+            // loop that created it is running. A second loop would run every
+            // tool side effect (email, unlock) twice, so refuse; the client
+            // follows the existing row instead.
+            if (turn.assistantInFlight) {
+              res.status(409).json({
+                error: "turn_in_progress",
+                conversationId,
+                assistantMessageId,
+              });
+              return;
+            }
           } else if (conversationId) {
             // Couldn't create rows but conversation exists — still expose
             // the id so the client can rehydrate later.
@@ -1381,8 +1393,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
       // default no-enhancement path runs (byte-for-byte WARP-286).
-      const aiGatewayGrpcUrl =
-        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const aiGatewayGrpcUrl = config.AI_GATEWAY_GRPC_URL;
       // WARP-3047 — HyDE / multi-query rewrites run on the model THIS turn
       // is using when that model is local (it is already resident; asking
       // for any other local model mid-turn is the DMR load collision — two
@@ -3238,7 +3249,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/llm/keys", async (_req, res, next) => {
+  // WARP-3082: which vendors the business holds a key for is operator
+  // material, same posture as the writes. Members and guests read the
+  // redacted view on GET /api/models instead.
+  router.get("/llm/keys", requireRole("owner", "admin"), async (_req, res, next) => {
     try {
       const providers = await aiGateway.listKeys();
       res.json({ providers });
@@ -3255,8 +3269,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "unknown_provider" });
         return;
       }
-      await aiGateway.deleteKey(provider);
+      const deleted = await aiGateway.deleteKey(provider);
       await Promise.all([cacheDel(MODELS_CACHE_KEY), cacheDel(MODELS_PAGE_CACHE_KEY)]);
+      // WARP-3083: no key stored (double-click, two admins) is the goal
+      // state already, not a server failure.
+      if (!deleted) {
+        res.status(204).end();
+        return;
+      }
       res.json({ status: "deleted" });
     } catch (err) {
       next(err);

@@ -25,6 +25,7 @@ import contextlib
 import logging
 import os
 import threading
+import time
 from typing import Any, List, Optional, Tuple
 
 from PIL import Image, ImageDraw
@@ -704,7 +705,11 @@ def _lockup_region(disp, name: str, action) -> None:
             d.TouchRegion(name, g.left, g.top, LOCKUP_W, LOCKUP_H, action))
 
 
-def _render_chrome(disp, draw, now, state: str) -> None:
+def _render_chrome(disp, draw, now, state: str) -> Tuple[int, int]:
+    """Band A. Returns `(pill_right, right_limit)`: the free span between the
+    state pill and whatever sits left of the clock (the alert badge, else the
+    date), less 12 px of air — the only room band A has for the Security chip
+    (WARP-2981)."""
     d = _d()
     g = geom()
     d.draw_droplet_mark(draw, g.left, g.top + 12, 22,
@@ -738,6 +743,7 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     d._rrect(draw, g.left + 312, g.top + 12, pw, 22, 11, fill=fill)
     d._v3_text(draw, label, g.left + 312 + pw // 2, g.top + 17, font=pf, fill=ink,
                anchor="ma", tracking=1.2)
+    pill_right = g.left + 312 + pw
 
     clk = disp._fmt_clock_parts(now)["str"]
     cf = d._get_font(20, weight="heavy")
@@ -749,11 +755,13 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     date_x = int(g.content_r - clk_w - 16)
     d._v3_text(draw, date, date_x, g.top + 18, font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL4, anchor="ra", tracking=1.4)
+    date_w = d._v3_text_width(draw, date, d._get_font(9, weight="bold"), 1.4)
+    right_limit = int(date_x - date_w) - 12
 
     open_count = disp._open_alerts_count()
     if open_count:
-        date_w = d._v3_text_width(draw, date, d._get_font(9, weight="bold"), 1.4)
         bx, by, br = int(date_x - date_w - 24), g.top + 23, 11
+        right_limit = bx - br - 12
         draw.ellipse([bx - br, by - br, bx + br, by + br], fill=d.V3_RED)
         d._v3_text(draw, "!", bx, by, font=d._get_font(15, weight="heavy"),
                    fill=d.V3_WHITE, anchor="mm")
@@ -763,6 +771,7 @@ def _render_chrome(disp, draw, now, state: str) -> None:
                 br * 2 + 12, disp._open_drawer))
 
     draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
+    return pill_right, right_limit
 
 
 # WARP-2944 — the screen's one-line certificate status. The ticket's rule:
@@ -789,6 +798,82 @@ def tls_warning_line(tls: dict) -> str:
         return "CERTIFICATE · renewal failing · {} day{} left · needs internet".format(
             n, "" if n == 1 else "s")
     return ""
+
+
+# WARP-2981 (ADR-059 P6, §3.8) — band A's Security chip: "a single count cell
+# at most … never images, never names". A chip beside the state pill, in the
+# pill's own type, because band B's four cells already use all 12 columns (the
+# rack brief's §2.4) and band A is the across-the-room band. The pill stays box
+# health only: open incidents never make it ALERT or DEGRADED.
+#
+# Stale after this many missed reads. The chip is fed on the storage cadence
+# (display.py's pump, STORAGE_REFRESH_SECONDS), so an answer older than three
+# of them means the orchestrator stopped answering, and the chip says it
+# doesn't know rather than keep a number nobody is refreshing.
+SECURITY_CHIP_STALE_READS = 3
+SECURITY_CHIP_UNKNOWN = "SECURITY: —"
+SECURITY_CHIP_BEHIND = " · MAY BE BEHIND"
+
+
+def security_chip(sec, now_ts: float, stale_after_s: float) -> Optional[Tuple[str, str]]:
+    """The chip for `_v3["security"]` (display.update_security's shapes), as
+    `(text, tone)` with tone "warn" or "muted", or None for no chip. Pure, so
+    every branch is a test without a render. One explicit case per state:
+
+      * `unasked` — the panel has not heard yet: no chip;
+      * `off` — the box does not use Security (it is off by default): no chip,
+        at any age. "SECURITY OFF" on a rack reads as "unprotected", and a
+        `—` whenever such a box's orchestrator blinks would be noise;
+      * `on` — `SECURITY: n OPEN` (`99+` above 99). Orange when an alert is
+        open or the number may be behind (`· MAY BE BEHIND`); muted for
+        notices alone and for 0, so a backlog of notices never keeps the
+        glance tier lit. Older than `stale_after_s`, or learned "in the
+        future" (a clock step), it is `—`: never a number nobody refreshes;
+      * `unknown`, and any state this was not written for — `SECURITY: —`.
+    """
+    state = sec.get("state") if isinstance(sec, dict) else None
+    if state == "unasked":
+        return None
+    if state == "off":
+        return None
+    if state == "on":
+        at, n, alerts, up = sec.get("at"), sec.get("open"), sec.get("alerts"), sec.get("upToDate")
+        fresh = isinstance(at, (int, float)) and 0 <= now_ts - at <= stale_after_s
+        if not (fresh and isinstance(n, int) and isinstance(alerts, int) and isinstance(up, bool)):
+            return SECURITY_CHIP_UNKNOWN, "muted"
+        text = "SECURITY: {} OPEN".format("99+" if n > 99 else n)
+        if not up:
+            return text + SECURITY_CHIP_BEHIND, "warn"
+        return text, ("warn" if alerts > 0 else "muted")
+    return SECURITY_CHIP_UNKNOWN, "muted"
+
+
+# Geometries already told there is no room, so a 1 s re-render logs once.
+_SECURITY_CHIP_WARNED: set = set()
+
+
+def _render_security_chip(disp, draw, span: Tuple[int, int], now_ts: float) -> None:
+    """Draw the chip 12 px right of the pill, only if it ends 12 px clear of
+    the badge (or the date). Below ~1280 px wide there is no such room: then
+    it is not drawn, and one warning says so per panel geometry."""
+    d = _d()
+    g = geom()
+    chip = security_chip(disp._v3.get("security"), now_ts,
+                         SECURITY_CHIP_STALE_READS * d.STORAGE_REFRESH_SECONDS)
+    if chip is None:
+        return
+    text, tone = chip
+    pill_right, right_limit = span
+    x = pill_right + 12
+    if x + _chip_width(draw, text) > right_limit:
+        key = (d.WIDTH, d.HEIGHT)
+        if key not in _SECURITY_CHIP_WARNED:
+            _SECURITY_CHIP_WARNED.add(key)
+            logger.warning("band A has no room for the Security chip at %dx%d; not drawn", *key)
+        return
+    # The pill's tokens: DEGRADED's orange, or an inactive chip. No new colours (brief §4).
+    ink, fill = (d.V3_ORANGE, d.V3_ORANGE_SUBTLE) if tone == "warn" else (d.V3_LABEL3, d.V3_SURFACE)
+    _chip(draw, x, g.top + 12, text, ink, fill)
 
 
 def _render_foot(disp, draw, v: dict) -> None:
@@ -866,10 +951,15 @@ def _cell_reach(disp, draw, v: dict) -> None:
                fill=d.V3_LABEL3)
 
 
+def _chip_width(draw, text: str) -> int:
+    d = _d()
+    return int(d._v3_text_width(draw, text, d._get_font(10, weight="bold"), 1.2)) + 22
+
+
 def _chip(draw, x: int, y: int, text: str, ink, fill) -> int:
     d = _d()
     f = d._get_font(10, weight="bold")
-    w = int(d._v3_text_width(draw, text, f, 1.2)) + 22
+    w = _chip_width(draw, text)
     d._rrect(draw, x, y, w, 22, 11, fill=fill)
     d._v3_text(draw, text, x + 11, y + 5, font=f, fill=ink, tracking=1.2)
     return w
@@ -1274,7 +1364,8 @@ def render_status(disp, now=None, state: str = "live") -> Image.Image:
         # out and it cannot fix that alone: DEGRADED, never ALERT.
         state = "degraded"
 
-    _render_chrome(disp, draw, now, state)
+    span = _render_chrome(disp, draw, now, state)
+    _render_security_chip(disp, draw, span, time.time())
 
     for dx in g.dividers:
         draw.rectangle([dx, g.band_b_top, dx, g.band_b_bot], fill=d.V3_SEP)

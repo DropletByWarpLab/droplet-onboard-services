@@ -236,6 +236,41 @@ describe("TwoFactorStep", () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
+  it("WARP-3193: asks for the current password when the box requires it, and sends it with enroll AND verify", async () => {
+    const stepUp = Object.assign(new Error("Enter your current password to continue."), {
+      code: "STEP_UP_PASSWORD_REQUIRED",
+      status: 403,
+    });
+    const wrong = Object.assign(new Error("Invalid current password"), { code: "INVALID_PASSWORD", status: 403 });
+    enrollTotp.mockReset();
+    enrollTotp
+      .mockRejectedValueOnce(stepUp)
+      .mockRejectedValueOnce(wrong)
+      .mockResolvedValueOnce({
+        otpauthUri: "otpauth://totp/Droplet:stefan?secret=ABC&issuer=Droplet",
+        qrDataUrl: "data:image/png;base64,QQ==",
+        issuer: "Droplet",
+      });
+    render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+
+    const field = await screen.findByLabelText(/current password/i);
+    // Asked, not failed: no error and no "Try again" loop.
+    expect(screen.queryByRole("button", { name: /try again/i })).not.toBeInTheDocument();
+
+    fireEvent.change(field, { target: { value: "wrong" } });
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(await screen.findByText(/that password didn't match/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/current password/i), { target: { value: "hunter2" } });
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    await screen.findByAltText(/qr code/i);
+    expect(enrollTotp).toHaveBeenLastCalledWith(undefined, "hunter2");
+
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+    await waitFor(() => expect(verifyTotp).toHaveBeenCalledWith("123456", "hunter2"));
+  });
+
   it("Skip for now calls onSkip (enrollment on mount is harmless — no factor enabled)", async () => {
     const onSkip = vi.fn();
     render(<TwoFactorStep onComplete={vi.fn()} onSkip={onSkip} />);

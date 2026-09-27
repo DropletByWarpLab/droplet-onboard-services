@@ -1,0 +1,577 @@
+/**
+ * WARP-2981 (ADR-059 P6, §3.8) — /security/wall, end to end in the browser
+ * half: the real page, the real hook, the real `@/lib/api` fetchers, with only
+ * `authFetch` answering (T-D7). So what is pinned is what the TV actually asks
+ * for and what it then says:
+ *
+ *   · the strip: the mode badge and reason (never a person's name), the
+ *     needs-attention number with its alerts, the sources not reporting;
+ *   · never a number before it was given one (no "0" while loading);
+ *   · "nothing is reporting" never reads like "nothing happened";
+ *   · stale after 45 s, offline when the browser says so (a warning mark, the
+ *     day when it is not today), the sign-out warning in the sign-in's last
+ *     half hour — and a remount over a warm cache keeps the values' own time;
+ *   · the cameras are this account's own: a tile for each camera the list
+ *     gives (a Staff account with 2 of 4 cameras shows those 2), a picture
+ *     asked for those alone (D6, Stefan: "Member wall, own cameras");
+ *   · the way out is always visible; Full screen only where the browser
+ *     offers it; the banners and the strip come before the tiles in the page
+ *     (a TV alone draws the tiles first);
+ *   · every request is a GET to one of the reads it is allowed (§4) — and no
+ *     dashboard source can even name the rack panel's route (T-D13);
+ *   · wall.css: tokens only, the strip at the bottom of a TV's screen, every
+ *     picture at least 72 px high (the page scrolls rather than squeeze one),
+ *     a tile's state on its picture and its name alone in the caption,
+ *     readable muted badges, and nothing 375 px wide scrolls sideways.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { SWRConfig } from "swr";
+import type { ReactNode } from "react";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, sep } from "node:path";
+import { PACKAGE_ROOT, packagePath } from "../helpers/test-paths";
+
+const h = vi.hoisted(() => ({ authFetch: vi.fn() }));
+vi.mock("@/lib/auth", () => ({ authFetch: h.authFetch, useAuth: () => ({ user: { id: "u1", role: "family" } }) }));
+
+import SecurityWallPage from "@/app/security/wall/page";
+import { SecurityWall } from "@/components/security/SecurityWall";
+import { WALL_COPY } from "@/components/security/wall-status";
+import { COPY as MODE_COPY } from "@/components/security/ModeCard";
+import { COPY as FEED_COPY } from "@/components/security/SecurityFeed";
+import type { CameraInfo, SecurityHealthRow, SecurityModeView } from "@/lib/types";
+
+// ── the box, as the wall's reads see it ────────────────────────────────────
+
+const MODULES_ON = { modules: [{ id: "security", effective: true }, { id: "cameras", effective: true }] };
+const MODE: SecurityModeView = {
+  mode: "closed",
+  source: "manual",
+  manualEnd: "none",
+  until: null,
+  setBy: { id: "u9", name: "Stefan Warp" },
+  setAt: "2026-09-25T20:00:00.000Z",
+  hours: { state: "not_set" },
+  displayTimezone: "Europe/London",
+  stale: false,
+  version: 3,
+};
+const row = (id: SecurityHealthRow["id"], state: SecurityHealthRow["state"]): SecurityHealthRow => ({ id, state, detail: "x", lastSeenAt: null });
+
+interface Box {
+  modules: unknown;
+  counts: unknown;
+  sources: SecurityHealthRow[];
+  mode: SecurityModeView;
+  me: unknown;
+  /** GET /api/cameras for this account — the server has already narrowed it to their grants. */
+  cameras: unknown;
+  /** Paths that answer 503 instead. */
+  down?: string[];
+}
+
+let box: Box;
+const ALLOWED = [
+  "/api/modules",
+  "/api/security/incidents/summary",
+  "/api/security/health",
+  "/api/security/mode",
+  "/api/auth/me",
+  "/api/cameras",
+];
+const snapshot = (name: string) => `/api/cameras/${name}/snapshot`;
+const cam = (name: string, displayName: string, over: Partial<CameraInfo> = {}): CameraInfo => ({
+  name,
+  displayName,
+  manufacturer: null,
+  model: null,
+  ipAddress: "10.0.0.2",
+  macAddress: null,
+  enabled: true,
+  autoDiscovered: false,
+  status: "recording",
+  lastSeen: "2026-09-25T20:00:00.000Z",
+  lastDetection: null,
+  ...over,
+});
+
+function respond(url: string): unknown {
+  const path = url.split("?")[0]!;
+  if (box.down?.includes(path)) return { status: 503, body: { error: { code: "INCIDENTS_UNAVAILABLE", message: "x" } } };
+  switch (path) {
+    case "/api/modules":
+      return { status: 200, body: box.modules };
+    case "/api/security/incidents/summary":
+      return { status: 200, body: box.counts };
+    case "/api/security/health":
+      return { status: 200, body: { sources: box.sources } };
+    case "/api/security/mode":
+      return { status: 200, body: box.mode };
+    case "/api/auth/me":
+      return { status: 200, body: box.me };
+    case "/api/cameras":
+      return { status: 200, body: box.cameras };
+    default:
+      if (/^\/api\/cameras\/[^/]+\/snapshot$/.test(path)) return { status: 200, body: null };
+      return { status: 404, body: {} };
+  }
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  box = {
+    modules: MODULES_ON,
+    counts: { openAlerts: 1, openNotices: 1, latest: [{ id: "i1", zone: { name: "Stock room" } }], alertsReady: true },
+    sources: [row("camera_ingest", "ok"), row("camera_system", "down"), row("threat_mirror", "ok"), row("site_mode", "ok"), row("incidents", "ok")],
+    mode: MODE,
+    me: { id: "u1", username: "tv", session: null },
+    cameras: { cameras: [cam("back_door", "Back door"), cam("till", "Till")] },
+  };
+  let objectUrls = 0;
+  URL.createObjectURL = vi.fn(() => `blob:picture-${++objectUrls}`);
+  URL.revokeObjectURL = vi.fn();
+  h.authFetch.mockImplementation(async (url: string) => {
+    const r = respond(url) as { status: number; body: unknown };
+    return {
+      ok: r.status >= 200 && r.status < 300,
+      status: r.status,
+      json: async () => r.body,
+      blob: async () => new Blob(["jpeg"], { type: "image/jpeg" }),
+      headers: new Headers(),
+    };
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => true });
+});
+
+function Wrap({ children }: { children: ReactNode }) {
+  return <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig>;
+}
+
+const strip = () => screen.getByRole("region", { name: WALL_COPY.stripLabel });
+const cell = (name: string) => strip().querySelector(`[data-cell="${name}"]`) as HTMLElement;
+
+describe("/security/wall — what the strip says (T-D7)", () => {
+  it("the mode, what needs attention, and which source is not reporting", async () => {
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    expect(within(cell("attention")).getByText("1 alert")).toBeInTheDocument();
+    expect(within(cell("mode")).getByText(MODE_COPY.badgeClosed)).toBeInTheDocument();
+    // The mode's icon scales with the badge's text on a TV (19.2 px at 1920), never a fixed 14 px.
+    const modeIcon = within(cell("mode")).getByText(MODE_COPY.badgeClosed).querySelector("svg");
+    expect(modeIcon).toHaveAttribute("width", "1em");
+    expect(modeIcon).toHaveAttribute("height", "1em");
+    expect(within(cell("sources")).getByText("1 not reporting")).toBeInTheDocument();
+    expect(within(cell("sources")).getByText("Camera system")).toBeInTheDocument();
+    // At the wall's badge size, not the shell's 11 px: the state is the point of the list.
+    expect(within(cell("sources")).getByText("Not reporting")).toHaveClass("badge", "danger", "sec-wall-badge");
+    // Route 17's `latest` never reaches the screen: the wall names no incident or area.
+    expect(document.body.textContent).not.toContain("Stock room");
+  });
+
+  it("a mode set by a named person names nobody", async () => {
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("mode")).getByText(MODE_COPY.badgeClosed)).toBeInTheDocument());
+    expect(cell("mode").textContent).toContain("Closed up");
+    expect(document.body.textContent).not.toMatch(/Stefan/);
+  });
+
+  it.each([
+    ["lagging", true],
+    ["keeping up", false],
+  ])("the opening-hours ticker %s: the mode cell says whether the mode may be out of date", async (_why, stale) => {
+    box.mode = { ...MODE, stale };
+    box.sources = [...box.sources.filter((r) => r.id !== "site_mode"), { ...row("site_mode", stale ? "down" : "ok"), lastSeenAt: "2026-09-25T19:00:00.000Z" }];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("sources")).getByText("1 not reporting")).toBeInTheDocument());
+    const line = /Droplet hasn't checked the opening hours since .+, so the mode may be out of date\./;
+    if (stale) expect(cell("mode").textContent).toMatch(line);
+    else expect(cell("mode").textContent).not.toMatch(/out of date/);
+  });
+
+  it("no camera system: says so — not 'can't see any cameras' — and never asks for a camera", async () => {
+    // No camera system means no FRIGATE_URL, so the Cameras module is not effective either.
+    box.modules = { modules: [{ id: "security", effective: true }, { id: "cameras", effective: false }] };
+    box.sources = [row("camera_ingest", "not_configured"), row("threat_mirror", "ok"), row("incidents", "ok")];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(FEED_COPY.emptyNoCameras)).toBeInTheDocument());
+    expect(screen.queryByText(WALL_COPY.camerasNone)).toBeNull();
+    expect((h.authFetch.mock.calls as Array<[string]>).some(([url]) => url.startsWith("/api/cameras"))).toBe(false);
+  });
+
+  it("before any answer: no number at all — dashes, 'Waiting for Droplet…', and no 0", async () => {
+    h.authFetch.mockImplementation(() => new Promise(() => {}));
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(strip().textContent).not.toMatch(/\d/);
+    expect(within(cell("attention")).getByText(WALL_COPY.unknownValue)).toBeInTheDocument();
+    expect(within(cell("updated")).getByText(WALL_COPY.waiting)).toBeInTheDocument();
+    expect(screen.getByText(WALL_COPY.camerasConnecting)).toBeInTheDocument();
+  });
+
+  it("every source down and nothing open: never reads as a quiet site", async () => {
+    box.counts = { openAlerts: 0, openNotices: 0 };
+    box.sources = [row("camera_ingest", "down"), row("camera_system", "down"), row("threat_mirror", "down"), row("incidents", "down")];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("attention")).getByText("0")).toBeInTheDocument());
+    const text = strip().textContent ?? "";
+    expect(text).not.toMatch(/all clear/i);
+    expect(text).not.toContain(WALL_COPY.sourcesAllReporting);
+    expect(text).toContain("3 not reporting");
+    expect(text).toMatch(/may be behind/);
+  });
+
+});
+
+describe("/security/wall — this account's own cameras (D6: \"Member wall, own cameras\")", () => {
+  const asked = () => (h.authFetch.mock.calls as Array<[string]>).map(([url]) => url.split("?")[0]!);
+
+  it("a Staff account with 2 of the box's 4 cameras: exactly those 2 tiles, by their household names — and pictures for those 2 alone", async () => {
+    // The box has four cameras; the list route has narrowed them to this account's grants.
+    box.cameras = { cameras: [cam("back_door", "Back door"), cam("till", "Till")] };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByAltText("Back door, latest picture")).toBeInTheDocument());
+    expect(screen.getByAltText("Till, latest picture")).toBeInTheDocument();
+    const tiles = [...document.querySelectorAll("figure[data-camera]")].map((f) => f.querySelector(".sec-wall-tile-name")!.textContent);
+    expect(tiles).toEqual(["Back door", "Till"]);
+    const pictures = new Set(asked().filter((p) => p.endsWith("/snapshot")));
+    expect(pictures).toEqual(new Set([snapshot("back_door"), snapshot("till")]));
+    expect(document.body.textContent).not.toMatch(/Stock room|Office/);
+  });
+
+  it("an account with no cameras granted: 'This account can't see any cameras yet' — and no picture asked", async () => {
+    box.cameras = { cameras: [] };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(WALL_COPY.camerasNone)).toBeInTheDocument());
+    expect(asked().some((p) => p.endsWith("/snapshot"))).toBe(false);
+  });
+
+  it("Cameras not open to this account: the same empty state, and not even the list is asked", async () => {
+    box.modules = { modules: [{ id: "security", effective: true }, { id: "cameras", effective: false }] };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(WALL_COPY.camerasNone)).toBeInTheDocument());
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    expect(asked().some((p) => p.startsWith("/api/cameras"))).toBe(false);
+  });
+
+  it("the camera system disconnected: the list's empty answer is not 'no cameras'", async () => {
+    box.cameras = { cameras: [], _status: "disconnected" };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByText(WALL_COPY.camerasLost)).toBeInTheDocument());
+    expect(screen.queryByText(WALL_COPY.camerasNone)).toBeNull();
+  });
+});
+
+describe("/security/wall — freshness and the sign-out warning (T-D7)", () => {
+  async function settled(now?: number) {
+    const view = render(<SecurityWall now={now} />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    return view;
+  }
+
+  it("more than 45 s since the stalest answer: the banner with its time, the values kept and dimmed", async () => {
+    const t0 = Date.now();
+    const { rerender } = await settled(t0);
+    expect(screen.queryByRole("status")).toBeNull();
+    rerender(<SecurityWall now={t0 + 46_000} />);
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent(WALL_COPY.staleTitle);
+    expect(banner.textContent).toMatch(/What you see is from \d{1,2}:\d{2}/);
+    expect(within(cell("attention")).getByText("2")).toBeInTheDocument();
+    expect(strip().className).toContain("is-stale");
+    // The warning mark /security's ModeCard uses — not the neutral look of the sign-out notice.
+    expect(banner.querySelector(".badge.warn svg")).not.toBeNull();
+    // It scales with the badge's text on a TV.
+    expect(banner.querySelector(".badge.warn svg")).toHaveAttribute("width", "1em");
+  });
+
+  it("an outage across midnight: the banner and 'Updated' name the day, not only the time", async () => {
+    const t0 = Date.now();
+    const { rerender } = await settled(t0);
+    rerender(<SecurityWall now={t0 + 30 * 3_600_000} />);
+    const day = /(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2}/;
+    expect(screen.getByRole("status").textContent).toMatch(new RegExp(`What you see is from ${day.source}`));
+    expect(cell("updated").textContent).toMatch(day);
+  });
+
+  it("remounted over a warm cache while Droplet is down: the old values keep THEIR time — never 'Waiting', never 'haven't loaded'", async () => {
+    const cache = new Map();
+    const Warm = ({ children }: { children: ReactNode }) => (
+      <SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}>{children}</SWRConfig>
+    );
+    const t0 = Date.now();
+    const first = render(<SecurityWall now={t0} />, { wrapper: Warm });
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    first.unmount();
+    box.down = ["/api/modules", "/api/security/incidents/summary", "/api/security/health", "/api/security/mode"];
+    render(<SecurityWall now={t0 + 3_600_000} />, { wrapper: Warm });
+    expect(within(cell("attention")).getByText("2")).toBeInTheDocument();
+    expect(cell("updated").textContent).not.toContain(WALL_COPY.waiting);
+    expect(cell("updated").textContent).toMatch(/\d{1,2}:\d{2}/);
+    // The remount asks again, and every one of those reads fails.
+    const asked = (path: string) => (h.authFetch.mock.calls as Array<[string]>).filter(([url]) => url === path).length;
+    await waitFor(() => expect(asked("/api/security/mode")).toBe(2));
+    await new Promise((r) => setTimeout(r, 20));
+    const banner = screen.getByRole("status");
+    expect(banner.textContent).toMatch(/What you see is from .*\d{1,2}:\d{2}/);
+    expect(banner.textContent).not.toContain(WALL_COPY.staleNeverBody);
+  });
+
+  it("offline: says so, whatever the age", async () => {
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => false });
+    await settled();
+    expect(screen.getByRole("status")).toHaveTextContent(WALL_COPY.offlineTitle);
+  });
+
+  it("a read that fails before it ever answers: the banner says parts haven't loaded — never 'Waiting' for ever", async () => {
+    box.down = ["/api/security/mode"];
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(WALL_COPY.staleNeverBody));
+    expect(within(cell("mode")).getByText(WALL_COPY.modeUnknown)).toBeInTheDocument();
+  });
+
+  it.each([
+    ["29 minutes out: warned", 29 * 60_000, true],
+    ["31 minutes out: not yet", 31 * 60_000, false],
+  ])("a sign-in ending %s", async (_why, ms, shown) => {
+    const t0 = Date.now();
+    box.me = { id: "u1", session: { endsAt: new Date(t0 + ms).toISOString() } };
+    render(<SecurityWall now={t0} />, { wrapper: Wrap });
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    await new Promise((r) => setTimeout(r, 20));
+    const warning = screen.queryByText(/will be signed out by .* at the latest/);
+    expect(Boolean(warning)).toBe(shown);
+  });
+
+  it("the sign-out notice is neutral: no warning mark", async () => {
+    const t0 = Date.now();
+    box.me = { id: "u1", session: { endsAt: new Date(t0 + 10 * 60_000).toISOString() } };
+    render(<SecurityWall now={t0} />, { wrapper: Wrap });
+    const notice = await screen.findByText(/will be signed out by .* at the latest/);
+    expect(notice.closest("[data-banner]")).toHaveAttribute("data-banner", "sign-out");
+    expect(notice.closest("[data-banner]")!.querySelector(".badge")).toBeNull();
+  });
+
+  it("no session on /auth/me (an older orchestrator) → no warning", async () => {
+    box.me = { id: "u1" };
+    await settled();
+    expect(screen.queryByText(/signed out/)).toBeNull();
+  });
+});
+
+describe("/security/wall — the way out, and Full screen", () => {
+  afterEach(() => {
+    for (const k of ["fullscreenEnabled", "fullscreenElement", "exitFullscreen"]) delete (document as unknown as Record<string, unknown>)[k];
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>).requestFullscreen;
+  });
+
+  it("'Back to Security' is always there — a visible control, first in the tab order, to /security", async () => {
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    const leave = await screen.findByRole("link", { name: WALL_COPY.leave });
+    expect(leave).toHaveAttribute("href", "/security");
+    expect(leave).toHaveClass("btn", "sm");
+    expect(leave.className).not.toMatch(/sr-only/);
+    await waitFor(() => expect(within(cell("attention")).getByText("2")).toBeInTheDocument());
+    const main = document.querySelector("main#main")!;
+    expect(main.querySelector("a[href], button, input, select, textarea, [tabindex]:not([tabindex='-1'])")).toBe(leave);
+  });
+
+  it("in the page the banners and the strip come before the tiles: a screen reader reaches the way out before any camera's name", async () => {
+    // Review round 4 (rjouffret): a phone drew them above the tiles with `order`, but read every tile's name first.
+    // wall.css draws the tiles first on a TV alone (pinned below); a phone shows this order.
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => false });
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await screen.findByText(WALL_COPY.offlineTitle);
+    await waitFor(() => expect(document.querySelectorAll("figure.sec-wall-tile")).toHaveLength(2));
+    const main = document.querySelector("main#main")!;
+    expect([...main.children].map((e) => e.classList[0])).toEqual(["sr-only", "sec-wall-banners", "sec-wall-strip", "sec-wall-cameras"]);
+    expect(main.querySelector(".sec-wall-banners > [role='status']")).not.toBeNull();
+    expect(main.querySelector(".sec-wall-cameras > .sec-wall-tiles")).not.toBeNull();
+  });
+
+  it("no Full screen button where the browser doesn't offer it (an iPhone)", async () => {
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await screen.findByRole("link", { name: WALL_COPY.leave });
+    expect(screen.queryByRole("button", { name: WALL_COPY.fullScreen })).toBeNull();
+  });
+
+  it("where it is offered: Full screen asks for the wall itself, and the label follows the browser", async () => {
+    let current: Element | null = null;
+    const request = vi.fn(function (this: Element) {
+      return Promise.resolve();
+    });
+    const exit = vi.fn(() => Promise.resolve());
+    Object.defineProperty(document, "fullscreenEnabled", { configurable: true, value: true });
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => current });
+    Object.defineProperty(document, "exitFullscreen", { configurable: true, value: exit });
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", { configurable: true, value: request });
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    const full = await screen.findByRole("button", { name: WALL_COPY.fullScreen });
+    // The way out still comes first in the tab order, before Full screen.
+    const controls = [...document.querySelectorAll("main#main a[href], main#main button")];
+    expect(controls).toEqual([screen.getByRole("link", { name: WALL_COPY.leave }), full]);
+    fireEvent.click(full);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.contexts[0]).toBe(document.querySelector("main#main"));
+    current = document.querySelector("main#main");
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    fireEvent.click(screen.getByRole("button", { name: WALL_COPY.exitFullScreen }));
+    expect(exit).toHaveBeenCalledTimes(1);
+    current = null;
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    expect(screen.getByRole("button", { name: WALL_COPY.fullScreen })).toBeInTheDocument();
+  });
+});
+
+describe("/security/wall — what it asks (T-D7)", () => {
+  it("every request is a GET to one of the reads it is allowed — the six, and a picture of each camera on the list", async () => {
+    box.me = { id: "u1", session: { endsAt: new Date(Date.now() + 60_000).toISOString() } };
+    render(<SecurityWallPage />, { wrapper: Wrap });
+    await waitFor(() => expect(screen.getByAltText("Till, latest picture")).toBeInTheDocument());
+    const calls = h.authFetch.mock.calls as Array<[string, RequestInit | undefined]>;
+    const paths = new Set(calls.map(([url]) => url.split("?")[0]));
+    expect([...paths].sort()).toEqual([...ALLOWED, snapshot("back_door"), snapshot("till")].sort());
+    for (const [url, init] of calls) expect(init?.method ?? "GET", url).toBe("GET");
+  });
+});
+
+// ── T-D13: the rack's box-wide number never reaches a browser ─────────────
+
+/** Built from parts, so this file does not match itself. */
+const PANEL_ROUTE = ["/api", "panel", ""].join("/");
+
+function sourcesUnder(rel: string): string[] {
+  const out: string[] = [];
+  const visit = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) visit(full);
+      else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)) out.push(relative(PACKAGE_ROOT, full).split(sep).join("/"));
+    }
+  };
+  visit(packagePath(rel));
+  return out;
+}
+
+describe("DS-005 source pin (T-D13)", () => {
+  it(`no dashboard source names the rack panel's route (${PANEL_ROUTE}…)`, () => {
+    const files = sourcesUnder("src");
+    expect(files.length).toBeGreaterThan(200);
+    expect(files.filter((f) => readFileSync(packagePath(f), "utf8").includes(PANEL_ROUTE))).toEqual([]);
+  });
+});
+
+// ── T-D12 (half): the stylesheet ───────────────────────────────────────────
+
+describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
+  const css = readFileSync(packagePath("src/components/security/wall.css"), "utf8");
+  const code = css.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  it("the page is at least the viewport's height, the tiles take what the strip leaves, and it grows (never squeezes) below that", () => {
+    expect(code).toMatch(/\.droplet-shell\.sec-wall \{[^}]*min-height: 100dvh;[^}]*grid-template-rows: minmax\(0, 1fr\) auto auto;/);
+    // Round 3 (UX): a fixed height squeezed 12 pictures to 0–23 px on a 960×540 TV browser. Now the page scrolls a little instead.
+    expect(code).not.toMatch(/\.droplet-shell\.sec-wall \{[^}]*(?<![-\w])height:/);
+  });
+
+  it("a picture is never less than 72 px high, and nothing in it spills onto the caption", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-frame \{\s*position: relative; min-height: 72px; overflow: hidden;/);
+  });
+
+  it("a tile's state sits on its picture, above the <img>, and wraps rather than lose its time; the caption is the name alone, on one line", () => {
+    // Internal review, round 4: beside the name, a state that kept its words squeezed a stale tile's name to 6–9 px
+    // on a 960×540 TV browser with 12 cameras. The caption holds only the name now (WallCameras.test pins the markup).
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-frame \{[^}]*display: flex; flex-direction: column;/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-state \{\s*position: relative;[^}]*max-width: 100%;/);
+    expect(code).not.toMatch(/\.sec-wall-tile-state \{[^}]*(white-space: nowrap|flex-shrink: 0)/);
+    expect(code).toMatch(/\.sec-wall-tile-name \{\s*display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
+    expect(code).not.toMatch(/\.sec-wall-tile > figcaption \{[^}]*(display: flex|flex-wrap)/);
+  });
+
+  it("the tiles line up with the banners and the strip (16 px sides)", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-tiles \{[^}]*padding: 8px 16px;/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-banners \{[^}]*padding: 0 16px;/);
+  });
+
+  it("≤ 640 px wide or ≤ 480 px tall (a phone either way up): the rows stack from the top — no empty bands between them", () => {
+    expect(code).toMatch(/@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*\.droplet-shell\.sec-wall \{[^}]*align-content: start;/);
+  });
+
+  it("a muted badge on the strip is readable (4.41:1 → --text), and a stale strip's badges lose their colour", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-strip \.badge\.muted \{ color: var\(--text\); \}/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-strip\.is-stale \.badge \{ filter: grayscale\(1\); \}/);
+  });
+
+  it("the way out is never visually hidden", () => {
+    expect(code).not.toMatch(/\.sec-wall-leave[^{,]*\{[^}]*(clip|width: 1px|position: absolute)/);
+  });
+
+  it("≤ 640 px wide or ≤ 480 px tall: one tile per row, each picture 16:9 but never taller than the screen, and the cells wrap at 150 px", () => {
+    const phone = /@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*/.exec(code)?.[0] ?? "";
+    expect(phone).toMatch(/\.sec-wall-tiles \{ grid-template-columns: minmax\(0, 1fr\); grid-template-rows: none; \}/);
+    // Full width: capped at 75dvh, a grid item with a ratio start-aligned and left 291 px of an 812 px tile empty at 844×390.
+    expect(phone).toMatch(/\.sec-wall-tile-frame \{ aspect-ratio: 16 \/ 9; max-height: 75dvh; justify-self: stretch; \}/);
+    expect(phone).toMatch(/\.sec-wall-strip > dl \{[^}]*repeat\(auto-fit, minmax\(150px, 1fr\)\)/);
+  });
+
+  it("≤ 640 px wide or ≤ 480 px tall: the banners, then the strip (and its way out), above the tiles, in the page's own order", () => {
+    // Internal review, round 4: under 12 stacked tiles the strip began at y = 4,082 on a phone on its side. Review round 4
+    // (rjouffret): `order: -2/-1` put them there on screen but not for a screen reader; the page has them first now (above).
+    const phone = /@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*/.exec(code)?.[0] ?? "";
+    expect(phone).toMatch(/\.droplet-shell \.sec-wall-strip \{ border-top: 0; border-bottom: 1px solid var\(--border\); \}/);
+    expect(phone).not.toMatch(/order:/);
+  });
+
+  it("above 640 px wide and 480 px tall the tiles are drawn first, above the banners and the strip, and nowhere else", () => {
+    // The phone query's exact complement, so no size has neither layout (a zoomed 640.5 px window included).
+    expect(code).toMatch(
+      /@media not all and \(max-width: 640px\) \{\s*@media not all and \(max-height: 480px\) \{\s*\.droplet-shell \.sec-wall-cameras \{ order: -1; \}\s*\}\s*\}/,
+    );
+    // Nothing else is moved.
+    expect(code.match(/\border:/g)).toHaveLength(1);
+  });
+
+  it("the strip's buttons grow with the screen like its badges, and keep the shell's 44 px touch target at 720 px and below", () => {
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-strip \.btn \{ font-size: clamp\(12\.5px, 1vw, 20px\); height: auto; min-height: 2\.4em; padding: 0 0\.9em; \}/);
+    expect(code).toMatch(/@media \(max-width: 720px\) \{\s*\.droplet-shell \.sec-wall-strip \.btn \{ min-height: 44px; \}/);
+  });
+
+  it("above 640 px the tiles are an equal --cols × --rows grid, so every camera fits the space the strip leaves", () => {
+    expect(code).toMatch(/\.sec-wall-tiles \{[^}]*grid-template-columns: repeat\(var\(--cols, 1\), minmax\(0, 1fr\)\);\s*grid-template-rows: repeat\(var\(--rows, 1\), minmax\(0, 1fr\)\);/);
+  });
+
+  it("the refusal and the signed-out notice fit the screen: border-box, so their padding never pushes past a phone's width or the TV's height", () => {
+    expect(code).toMatch(/\.droplet-shell\.sec-wall-notice \{\s*box-sizing: border-box; min-height: 100dvh;/);
+    expect(code).toMatch(/\.droplet-shell \.sec-wall-notice-card \{\s*box-sizing: border-box;[^}]*width: 100%;/);
+  });
+
+  it("the notices' buttons scale with their text on a TV, and keep the shell's 44 px touch target", () => {
+    expect(code).toMatch(
+      /\.droplet-shell \.sec-wall-notice-actions \.btn \{ font-size: inherit; height: auto; min-height: max\(2\.5em, 44px\); padding: 0\.5em 1em; \}/,
+    );
+  });
+
+  it("an old picture is dimmed and grey — never drawn as a current one", () => {
+    expect(code).toMatch(/\.sec-wall-tile\.is-stale \.sec-wall-tile-frame > img \{ opacity: 0\.4; filter: grayscale\(1\); \}/);
+  });
+
+  it("nothing is fixed wider than a 375 px phone's content box", () => {
+    for (const m of code.matchAll(/(?:^|[;{\s])(?:min-)?width:\s*(\d+)px/g)) expect(Number(m[1])).toBeLessThanOrEqual(343);
+  });
+
+  it("no hard-coded colours: every colour is a token", () => {
+    expect(code).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    expect(code).not.toMatch(/\brgba?\(/);
+  });
+
+  it("a visible focus ring on what a keyboard can reach", () => {
+    expect(code).toMatch(/\.sec-wall-leave:focus-visible,\s*\.droplet-shell \.sec-wall-full:focus-visible \{ outline: 2px solid var\(--brand\)/);
+  });
+});

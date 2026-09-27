@@ -21,10 +21,11 @@
  *
  * A cosign signature over the catalog is supported on top of that
  * (`store.ts`, `requireSignature`), but it is deliberately NOT the load-
- * bearing gate: the OTA trust anchor is still the WARP-535 placeholder
- * (`update-agent/verify.ts` → `trust_anchor_placeholder`), so making
- * signature verification mandatory today would fail-closed on every
- * download and ship a surface that can never serve a byte.
+ * bearing gate: `update-agent/cosign.pub` has been a real P-256 key
+ * since the 2026-07-30 key ceremony, but nothing signs an on-box-
+ * generated catalog.json today, so making signature verification
+ * mandatory would fail-closed on every download and ship a surface that
+ * can never serve a byte.
  *
  * The Windows bundle's own minisign `.sig` + `latest.json` (the Tauri
  * updater envelope, key `F5E6E366DCF9B85E`) ride along as opaque

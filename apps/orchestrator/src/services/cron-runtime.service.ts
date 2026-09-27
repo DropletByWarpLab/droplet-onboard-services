@@ -75,6 +75,35 @@ import { createLogger } from "../lib/logger.js";
 
 const defaultLog = createLogger("cron-runtime");
 
+/**
+ * WARP-3193 PERF-1 — the lock transaction lives exactly as long as the handler.
+ *
+ * It used to be `{ timeout: 60_000 }`. When a handler outlived that (a 40-60
+ * device bedtime flip in the schedule ticker, the OTA apply window pulling and
+ * recreating images), Prisma rolled the transaction back, Postgres released the
+ * xact lock, and the handler — which is not cancelled — ran on UNLOCKED while
+ * the next tick (or another replica) started a second copy. The eventual
+ * commit then threw P2028 into `safeRun` on a run that had partly succeeded.
+ *
+ * Two correct fixes were on the table: keep the lock for the whole run, or hand
+ * long jobs to a lease row with a heartbeat (the brain-pass / agent-run
+ * pattern). Keeping the lock is the simpler one and is chosen here:
+ *   - no schema, no heartbeat timer, no fencing, no TTL to tune;
+ *   - Postgres still ties the lock to the backend, so a crashed process frees
+ *     it at once instead of wedging the job for a lease window;
+ *   - the cost is one pooled connection sitting idle-in-transaction for the
+ *     length of a long run. It has no xid and, at READ COMMITTED, holds no
+ *     snapshot between statements, so it does not hold back vacuum.
+ * A lease is still the right tool when the work must SURVIVE a restart
+ * (brain passes, filing, agent runs) — that is a different requirement.
+ *
+ * The largest value `setTimeout` accepts (~24.8 days): effectively "no
+ * deadline" without tripping Node's overflow-to-1 ms behaviour anywhere a
+ * timer backs it. A handler that genuinely hangs holds its lock until the
+ * process restarts — the same as a lease whose heartbeat keeps beating.
+ */
+export const LOCK_TX_TIMEOUT_MS = 2_147_483_647;
+
 /** Minimal logger surface `safeRun` needs; pino-compatible. */
 export interface CronRuntimeLogger {
   warn(obj: unknown, msg?: string): void;
@@ -108,6 +137,13 @@ export interface CronScheduleOpts {
    * if `createCronRuntime` was called without a prisma handle.
    */
   lockKey?: string;
+  /**
+   * WARP-3193 QUAL-7 — `scheduleInterval` only: also run once right away,
+   * instead of first waiting a full interval (a poller that seeds a cache or
+   * catches the screen up on boot). That first run goes through the same
+   * overlap guard, so an interval tick cannot start beside it.
+   */
+  immediate?: boolean;
 }
 
 export interface CronRuntime {
@@ -186,8 +222,36 @@ export function createCronRuntime(
         // its full duration and released atomically at commit/rollback.
         await handler();
       },
-      { timeout: 60_000 },
+      { timeout: LOCK_TX_TIMEOUT_MS },
     );
+  }
+
+  /**
+   * WARP-3193 PERF-1 — at most one run of a registration at a time in this
+   * process. A tick that arrives while the previous run is still going is
+   * SKIPPED, never queued: every handler here is a sweep or a cursor, so the
+   * next tick picks up whatever this one would have done. Per registration
+   * (one flag per `schedule*` call), so a slow job never holds back another.
+   */
+  function guarded(
+    handler: () => void | Promise<void>,
+    opts?: CronScheduleOpts,
+  ): () => void {
+    let inFlight = false;
+    return () => {
+      if (inFlight) {
+        logger.debug?.(
+          { lockKey: opts?.lockKey },
+          "cron handler skipped — previous run still in flight",
+        );
+        return;
+      }
+      inFlight = true;
+      // safeRun never rejects.
+      void safeRun(handler, opts).finally(() => {
+        inFlight = false;
+      });
+    };
   }
 
   async function safeRun(
@@ -220,14 +284,12 @@ export function createCronRuntime(
 
   return {
     scheduleInterval(ms, handler, opts) {
-      intervals.push(setInterval(() => {
-        void safeRun(handler, opts);
-      }, ms));
+      const run = guarded(handler, opts);
+      intervals.push(setInterval(run, ms));
+      if (opts?.immediate) run();
     },
     scheduleCron(spec, handler, opts) {
-      const task = cron.schedule(spec, () => {
-        void safeRun(handler, opts);
-      });
+      const task = cron.schedule(spec, guarded(handler, opts));
       crons.push(task);
     },
     stop() {

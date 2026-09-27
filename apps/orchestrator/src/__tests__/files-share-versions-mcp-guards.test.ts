@@ -93,6 +93,7 @@ vi.mock("../config.js", () => ({
 
 import { createFilesRouter } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
+import { userDirectory } from "./helpers/user-directory.js";
 
 const ncCreateShareV2 = nc.ncCreateShareV2 as unknown as ReturnType<typeof vi.fn>;
 const ncGetFileId = nc.ncGetFileId as unknown as ReturnType<typeof vi.fn>;
@@ -126,10 +127,16 @@ function buildApp(asUser: { id: string; username: string; role: string }) {
   // Personal-space calls never touch these models; stubs exist so a
   // regression into the dept branch fails loudly instead of crashing.
   const prismaStub = {
-    department: { findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn().mockResolvedValue(null) },
+    department: {
+      findFirst: vi.fn().mockResolvedValue(null),
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]), // WARP-3053 company-library roots
+    },
     departmentMembership: { findUnique: vi.fn().mockResolvedValue(null) },
     departmentShare: { create: vi.fn() },
-    user: { findUnique: vi.fn().mockResolvedValue(null) },
+    // WARP-3117: the MCP principal's X-Nextcloud-User resolves to a person
+    // and acts as their Nextcloud login.
+    user: userDirectory([{ id: "u-alice", username: "alice", nextcloudUsername: "alice", role: "family" }]),
   };
   app.use("/api", createFilesRouter(prismaStub as never));
   return app;

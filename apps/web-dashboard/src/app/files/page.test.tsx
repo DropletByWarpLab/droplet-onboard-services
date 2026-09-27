@@ -235,6 +235,7 @@ vi.mock("@/components/FileManager/ShareDialog", () => ({
 }));
 
 import FilesPage from "./page";
+import { FilesUnavailableError } from "@/lib/files-unavailable";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -315,6 +316,18 @@ describe("<FilesPage /> — failed listing is distinct from empty (WARP-1338)", 
     render(<FilesPage />);
     expect(screen.getByText(/couldn't load your files/i)).toBeInTheDocument();
     expect(screen.queryByText(/this folder is empty/i)).not.toBeInTheDocument();
+  });
+
+  // WARP-3076 — the box marked the listing degraded (Nextcloud down).
+  it("renders 'Files are unavailable' with a retry (not 'empty', not 'not connected') when degraded", () => {
+    mockSearchParamsString = "path=%2Fpool-cafef00d";
+    mockFilesError = new FilesUnavailableError();
+    render(<FilesPage />);
+    expect(screen.getByText("Files are unavailable right now")).toBeInTheDocument();
+    expect(screen.getByText("Try again in a moment.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    expect(screen.queryByText(/this folder is empty/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/isn't connected to the file browser/i)).not.toBeInTheDocument();
   });
 
   it("keeps the honest empty state when the listing succeeds with zero entries", () => {

@@ -58,7 +58,10 @@
  * reason. The reason is not taken on trust: it is checked by following every
  * Reminder writer, and an entry that stops matching a site fails. (The second,
  * tools-core `send_notification`'s `ctx.userId`, went with WARP-3060: tools-core
- * writes no NotificationLog row at all now, and a case below keeps it so.)
+ * writes no NotificationLog row at all now, and a case below keeps it so. The
+ * Reminder writers once included tools-core's `ctx.userId` too — a User.id on
+ * the mcp-server's HTTP transport; WARP-3101 moved them onto the route, and a
+ * case below keeps tools-core out.)
  *
  * The run output enumerates every site it found (one case per site). The
  * scanner is itself tested (bottom of the file) on the shapes it must flag
@@ -687,8 +690,9 @@ const ALLOWED: ReadonlyArray<{ file: string; expr: string; reason: string }> = [
     file: "orchestrator:services/reminders-poller.ts",
     expr: "r.userId",
     reason:
-      "`Reminder.userId` is a username: every Reminder writer stores `getUser(req)` " +
-      "(= req.user.username) or tools-core's `ctx.userId` — followed below",
+      "`Reminder.userId` is a username: every Reminder writer stores the caller's " +
+      "req.user.username or, for the assistant's tools, the acting person's username " +
+      "(`toolActingUser`, WARP-3101) — followed below",
   },
 ];
 
@@ -809,8 +813,9 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
       new Set(["sendNotification", "listNotifications", "countUnread", "ackNotification", "ackAllNotifications"]),
     );
     for (const s of routes) {
-      // WARP-3060 — /send's recipient is `recipientFor(prisma, req)`'s: the
-      // caller, or for the send_notification tool the person it acts for.
+      // WARP-3060 / WARP-3099 — /send's and N1's recipient is
+      // `recipientFor(prisma, req, tool)`'s: the caller, or for the
+      // send_notification / list_notifications tool the person it acts for.
       for (const r of recipientsOf(s)) expect(r.expr, s.label).toMatch(/^(getUser\(req\)|username|recipient\.username)$/);
     }
     // Every direct NotificationLog update is either keyed by the recipient or by the row's own id.
@@ -859,26 +864,55 @@ describe("🔴 WARP-2911 every notification recipient is a username", () => {
     const due = bindingOf(poller.code, "due", site.offset);
     expect(due?.kind === "value" && due.expr).toMatch(/^await prisma\.reminder\.findMany\(/);
 
-    const writers = PRODUCTION.flatMap((file) =>
-      [...file.code.matchAll(/\breminder\.(?:createMany|create|upsert)\s*\(/g)].map((m) => {
-        const from = m.index! + m[0].length;
-        const args = file.code.slice(from, scanTo(file.code, from, ")"));
-        const values = [...args.matchAll(/\buserId\s*:\s*([^,}\n]+)/g)].map((v) => v[1]!.trim());
-        return { where: `${file.id}:${lineOf(file.code, m.index!)}`, file, values };
-      }),
-    );
-    expect(writers.length).toBeGreaterThanOrEqual(3);
+    const writers = reminderWriters();
+    expect(writers.length).toBeGreaterThanOrEqual(1);
     for (const w of writers) {
       expect(w.values.length, `${w.where}: a Reminder write with no visible userId`).toBeGreaterThan(0);
       for (const v of w.values) {
+        const acting = /^(\w+)\.username$/.exec(v);
+        const bound = acting ? bindingOf(w.file.code, acting[1]!, w.at) : null;
         const ok =
-          (w.file.id.startsWith("tools-core:") && v === "ctx.userId") ||
-          (v === "getUser(req)" && /function getUser\([^)]*\)[^{]*\{[^}]*req\.user\?\.username/.test(w.file.code));
+          (v === "getUser(req)" && /function getUser\([^)]*\)[^{]*\{[^}]*req\.user\?\.username/.test(w.file.code)) ||
+          // WARP-3101 — the acting person's username, which the case below pins.
+          (bound?.kind === "value" && /^await toolActingUser\(/.test(bound.expr));
         expect(ok, `${w.where}: Reminder.userId written from \`${v}\` — the poller sends on it as a username`).toBe(true);
       }
     }
   });
+
+  it("🔴 WARP-3101 tools-core writes no Reminder row — its ctx.userId is a User.id over the HTTP transport", () => {
+    // create_reminder and set_timer used to insert through ctx.prisma with
+    // `userId: ctx.userId`. Over the mcp-server's HTTP transport that is the
+    // User.id: the poller stamped the reminder notified, sendNotification threw
+    // NOTIFICATION_RECIPIENT_IS_ID, and the reminder was lost. Both post to
+    // POST /api/reminders now, which keys the row on the acting person.
+    expect(reminderWriters().filter((w) => w.file.id.startsWith("tools-core:")).map((w) => w.where)).toEqual([]);
+  });
+
+  it("WARP-3101 `toolActingUser` answers with a username only: the caller's, or the resolved person's", () => {
+    // What the `<x>.username` writer above relies on. Every `ok: true` answer
+    // is one of two, and the resolved one reads the row's `username` column.
+    const helper = PRODUCTION.find((f) => f.id === "orchestrator:services/tool-acting-user.service.ts")!;
+    const asserted = PRODUCTION.find((f) => f.id === "orchestrator:services/asserted-user.service.ts")!;
+    const answers = [...helper.code.matchAll(/return\s*\{\s*ok:\s*true\s*,([^}]*)\}/g)].map((m) => m[1]!.trim());
+    expect(answers.sort()).toEqual(["username", "username: resolved.user.username"]);
+    expect(helper.code).toMatch(/const username = req\.user\?\.username;/);
+    expect(helper.code).toMatch(/const resolved = await resolveAssertedUser\(prisma, asserted\);/);
+    expect(asserted.code).toMatch(/select:\s*\{[^}]*\busername:\s*true/);
+  });
 });
+
+/** Every `reminder.create/createMany/upsert` in production, with the `userId` values it writes. */
+function reminderWriters() {
+  return PRODUCTION.flatMap((file) =>
+    [...file.code.matchAll(/\breminder\.(?:createMany|create|upsert)\s*\(/g)].map((m) => {
+      const from = m.index! + m[0].length;
+      const args = file.code.slice(from, scanTo(file.code, from, ")"));
+      const values = [...args.matchAll(/\buserId\s*:\s*([^,}\n]+)/g)].map((v) => v[1]!.trim());
+      return { where: `${file.id}:${lineOf(file.code, m.index!)}`, at: m.index!, file, values };
+    }),
+  );
+}
 
 // ── The fixtures ───────────────────────────────────────────────────────────
 

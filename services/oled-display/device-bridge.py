@@ -4390,6 +4390,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             if path == "/wifi":
+                # WARP-3193 SEC-DATA-6: the box's own SSID + the networks around
+                # it is box-internal topology, LAN-reachable with
+                # BRIDGE_BIND=0.0.0.0 — gate like /host/topology. The panel
+                # sends the token on every GET.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, wifi_snapshot())
             if path == "/openwrt/qr":
                 # WARP-659: this read endpoint returns the LAN SSID + PSK
@@ -4431,14 +4437,22 @@ class Handler(BaseHTTPRequestHandler):
                 status["supported"] = guest_radio_supported()
                 return self._send(200, status)
             if path == "/files":
+                # WARP-3193 SEC-DATA-6: recent file NAMES are user data — gated.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, files_snapshot())
             if path == "/cameras":
+                # WARP-3193 SEC-DATA-6: person/object detections with times show
+                # when people are home — gated.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, cameras_snapshot())
             if path == "/services":
                 # WARP-1645: component health for the panel's SERVICES cell.
-                # Ungated like /wifi and /cameras — it carries no credential
-                # material, just component names and up/down, and the panel it
-                # feeds is already visible to anyone standing at the rack.
+                # WARP-3193 SEC-DATA-6: gated like the other panel reads — the
+                # degraded rows carry internal component error text.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, services_snapshot())
             if path == "/drives":
                 # WARP-659: drive inventory (labels, mount points, usage) is
@@ -4451,6 +4465,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/pools":
                 # BUG-3 / ADR-019: read-only mdadm array inventory. Returns []
                 # honestly when no array exists — never a fabricated pool.
+                # WARP-3193 SEC-DATA-6: gated like /drives; the orchestrator's
+                # /pools reads send the token.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, pools_snapshot())
             if path == "/host/uplink-ip":
                 # VPN home-mode P1.5: the host default-route egress source IP,

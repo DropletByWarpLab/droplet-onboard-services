@@ -14,10 +14,11 @@ channel 0 and the echo-cancellation residual on channel 1). Inside the
 voice-io container a single background thread consumes 80 ms frames and runs
 a state machine (`services/voice-io/voice/pipeline.py`). Every frame is fed
 to the wake-word detector — by default a grammar-constrained Vosk recognizer
-that only knows the phrases "droplet" and "hey droplet" plus an unknown-word
-bucket (`services/voice-io/voice/wake.py`; it fires on either, and threshold
-0.7 is the minimum per-word confidence, so TV and ambient speech rarely
-false-fire).
+that only knows the phrase "hey droplet" plus an unknown-word bucket
+(`services/voice-io/voice/wake.py`; threshold 0.85 is the minimum per-word
+confidence, so TV and ambient speech rarely false-fire). The bare one-word
+"droplet" is off by default: ambient speech gets forced into it at full
+confidence (WARP-3128).
 
 On wake, the next utterance streams to a local Whisper container
 (wyoming-faster-whisper, small.en, int8 CPU) with an energy-based
@@ -85,16 +86,18 @@ time and score, last transcript, last spoken reply, per-stage loaded flags.
 
 ## The wake word
 
-"Droplet" **or** "Hey Droplet" — both recognized out of the box by the
-grammar-constrained Vosk engine (no per-phrase model training, no licensing).
-`WAKE_WORD` is a comma-separated list of phrases (default `droplet,hey
-droplet`) and the box wakes on ANY of them; each fires scored on its own
-window, so the shorter "droplet" and the two-word "hey droplet" both carry
-real per-word confidence evidence (WARP-1431). "Hey Droplet" remains the
-primary spoken form in the UI copy. Engine fallback: if the Vosk model is
+"Hey Droplet", recognized out of the box by the grammar-constrained Vosk
+engine (no per-phrase model training, no licensing). `WAKE_WORD` is a
+comma-separated list of phrases (default `hey droplet`) and the box wakes on
+ANY of them, each scored on its own window (WARP-1431). The bare one-word
+"droplet" is off by default: grammar-forced decoding squeezes ambient speech
+into a lone "droplet" at confidence up to 1.00, so no threshold can filter it
+(~23 false wakes/hour on the bench, WARP-3128). Operators can opt back in with
+`WAKE_WORD=droplet,hey droplet`. "Hey Droplet" is also the spoken form in the
+UI copy. Engine fallback: if the Vosk model is
 missing, openWakeWord takes over (single-model) with "hey jarvis" as the
 closest bundled phonetic shape, and `/voice/status` exposes
-`using_wake_fallback` so a UI can say "configured: droplet/hey droplet
+`using_wake_fallback` so a UI can say "configured: hey droplet
 (currently answering to hey jarvis)".
 
 ## Latency character
@@ -176,13 +179,14 @@ the device rather than opening a second stream on it.
 | Setting | What it does |
 | --- | --- |
 | `WAKE_ENGINE` | `vosk` (default) or `openwakeword` |
-| `WAKE_WORD` | comma-separated wake phrases (default `droplet,hey droplet`); any English phrase(s) under vosk, wakes on any |
-| `WAKE_THRESHOLD` | default 0.7 (vosk) / 0.3 (openwakeword) |
+| `WAKE_WORD` | comma-separated wake phrases (default `hey droplet`; the bare one-word `droplet` is left out because it false-wakes on ambient speech, WARP-3128); any English phrase(s) under vosk, wakes on any |
+| `WAKE_THRESHOLD` | default 0.85 (vosk) / 0.3 (openwakeword) |
 | `WAKE_DEBOUNCE_S` | wake re-trigger suppression window |
 | `VOICE_INPUT_DEVICE` / `VOICE_OUTPUT_DEVICE` | pin specific hardware |
 | `VOICE_INPUT_DOWNMIX` | `first` or `mean` channel downmix |
 | `VOICE_INPUT_GAIN` | software input gain |
 | `STT_URL` / `STT_LANGUAGE` / `STT_MAX_RECORD_S` | Whisper sidecar (5.0 s cap via compose) |
+| `WHISPER_CPUS` / `WHISPER_CPU_THREADS` | Whisper sidecar CPU quota and decode threads, default 4 / 4 (WARP-3126, was 2 / 2). Keep them equal (WARP-1434). STT is CPU-only |
 | `TTS_URL` / `TTS_VOICE` | Piper sidecar; `en_US-ryan-medium` default, other voices download on demand |
 | `LLM_MODEL` | model the reply call requests |
 | `DROPLET_LOCATION` / `TZ` | pin geo/timezone; removes the ipapi.co startup lookup |

@@ -33,13 +33,9 @@ import {
 } from "../services/claude-activity/compliance-parser.js";
 import { createLogger } from "../lib/logger.js";
 import { recordAccessDenied } from "../middleware/auth.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 const logger = createLogger("admin-claude-activity");
-
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
 
 export interface ClaudeActivityResponse {
   now: Awaited<ReturnType<typeof readSessionState>>["now"];
@@ -60,7 +56,7 @@ export function createAdminClaudeActivityRouter(): Router {
   router.get(
     "/admin/claude-activity",
     async (req: Request, res: Response, next: NextFunction) => {
-      if (!isAdmin(req)) {
+      if (!isOwnerOrAdmin(req)) {
         // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
         // local isAdmin() denials must not be silent (requireRole parity).
         recordAccessDenied(req, "role-not-permitted");
@@ -105,9 +101,6 @@ export function createAdminClaudeActivityRouter(): Router {
         const lastModified =
           mostRecentTimestamp(session, github, jira, compliance) ?? generatedAt;
         res.setHeader("Last-Modified", lastModified.toUTCString());
-        // Strong cache-control: data is per-user-role and we don't want
-        // intermediaries serving a stale admin payload to a guest browser.
-        res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
 
         const ifModifiedSince = req.headers["if-modified-since"];
         if (typeof ifModifiedSince === "string") {

@@ -45,6 +45,7 @@
 import { posix as posixPath } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { filesUnavailable } from "./_unavailable.js";
 import { ncHeaders } from "./_render.js";
 import {
   DEGRADED_LISTING_CAVEAT,
@@ -132,6 +133,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (walk.cancelled && walk.listed === 0) {
     return err("CANCELLED", "the request was cancelled before the folder was read");
   }
+  if (walk.rootUnavailable) return filesUnavailable();
   if (walk.rootStatus === 404) return err("NOT_FOUND", `folder not found: ${v.path}`);
   if (walk.rootStatus < 200 || walk.rootStatus >= 300) {
     return err("LIST_FAILED", `nextcloud returned ${walk.rootStatus}`);

@@ -99,7 +99,9 @@ import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
+import { revocationUnavailable } from "../services/jwt.service.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
+import { errorHandler } from "../middleware/error-handler.js";
 // WARP-2993: the /auth/users routes call Nextcloud as the box service
 // account, never with the caller's own NC credential ("caller-nc-token").
 import { adminBasicToken } from "../services/department-provisioner.service.js";
@@ -229,6 +231,25 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
     );
   });
 
+  // WARP-3193 QUAL-1 — a revoke Redis refused used to answer 200 with a
+  // count; the route now surfaces it as 503 so the admin knows it did not
+  // take, and emits no "Sessions revoked" row for sessions still alive.
+  it("answers 503 REVOCATION_UNAVAILABLE when the revoke could not be recorded", async () => {
+    revokeAllSessions.mockRejectedValueOnce(
+      revocationUnavailable(),
+    );
+    const app = buildApp(createPrismaMock([seededAlice()]), "owner");
+    app.use(errorHandler);
+
+    const res = await request(app).post("/api/auth/users/alice/revoke-sessions");
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("REVOCATION_UNAVAILABLE");
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Sessions revoked" }),
+    );
+  });
+
   // WARP-2820 — the SCIM/SSO population. `provisionUser` and the SSO JIT
   // create both seed `username` from the email and never write
   // `nextcloudUsername` (schema: `String? @unique`, no default), so resolving
@@ -303,6 +324,70 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
     expect(res.status).toBe(500);
     expect(res.body.code).toBe("USERS_NO_PRISMA");
     expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-3111 — revoke-sessions ran requireRole alone, so any admin could sign
+// the owner out everywhere and a caller could revoke their own sessions.
+describe("POST /api/auth/users/:username/revoke-sessions — WARP-1526 rails", () => {
+  const owner = {
+    id: "owner-id",
+    username: "boss",
+    nextcloudUsername: "boss",
+    displayName: "Boss",
+    role: "owner",
+    directoryStatus: "ACTIVE",
+  };
+  const admin = {
+    id: "admin-id",
+    username: "ops",
+    nextcloudUsername: "ops",
+    displayName: "Ops",
+    role: "admin",
+    directoryStatus: "ACTIVE",
+  };
+  const otherAdmin = { ...admin, id: "u-admin2", username: "ops2", nextcloudUsername: "ops2" };
+
+  it("an admin signing out the OWNER → 403 OWNER_IMMUTABLE; nothing revoked, no audit row", async () => {
+    const app = buildApp(createPrismaMock([owner, admin]), "admin");
+    const res = await request(app).post("/api/auth/users/boss/revoke-sessions");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
+  });
+
+  it("the owner revoking their OWN sessions here → 409 SELF_ACTION_NOT_ALLOWED", async () => {
+    const app = buildApp(createPrismaMock([owner]), "owner");
+    const res = await request(app).post("/api/auth/users/boss/revoke-sessions");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+
+  it("an admin revoking their OWN sessions here → 409 SELF_ACTION_NOT_ALLOWED", async () => {
+    const app = buildApp(createPrismaMock([admin]), "admin");
+    const res = await request(app).post("/api/auth/users/ops/revoke-sessions");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+
+  it("an admin may sign out another admin (equal rank) and a member", async () => {
+    const app = buildApp(createPrismaMock([admin, otherAdmin, seededAlice()]), "admin");
+    const a = await request(app).post("/api/auth/users/ops2/revoke-sessions");
+    expect(a.status).toBe(200);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-admin2");
+    const m = await request(app).post("/api/auth/users/alice/revoke-sessions");
+    expect(m.status).toBe(200);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
+  });
+
+  it("the owner may sign out an admin", async () => {
+    const app = buildApp(createPrismaMock([owner, otherAdmin]), "owner");
+    const res = await request(app).post("/api/auth/users/ops2/revoke-sessions");
+    expect(res.status).toBe(200);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-admin2");
   });
 });
 

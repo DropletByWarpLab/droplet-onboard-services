@@ -68,7 +68,7 @@
  * where real work happened.
  */
 
-import type { AgentTraceEntry } from "./llm-agent.service.js";
+import type { AgentTraceEntry } from "../types/agent-trace.js";
 
 /** How a single dispatch turned out, from its wire payload. */
 export type ToolOutcome = "success" | "error" | "pending";

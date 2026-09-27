@@ -119,7 +119,8 @@ export const OPEN_FOR_OPTIONS: ReadonlyArray<{ value: OpenFor; hours: number; la
 ];
 export const DEFAULT_OPEN_FOR: OpenFor = "2h";
 
-const MODE_BADGE: Record<SecurityMode, { cls: string; text: string; icon: LucideIcon }> = {
+/** Exported for the Security wall (WARP-2981), which shows the same badge. */
+export const MODE_BADGE: Record<SecurityMode, { cls: string; text: string; icon: LucideIcon }> = {
   open: { cls: "badge ok", text: COPY.badgeOpen, icon: Store },
   closed: { cls: "badge muted", text: COPY.badgeClosed, icon: Moon },
   away: { cls: "badge info", text: COPY.badgeAway, icon: Plane },

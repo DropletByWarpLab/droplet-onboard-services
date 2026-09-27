@@ -98,12 +98,16 @@ export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
   threat_mirror: "Network and sign-in warnings",
   // WARP-2977 P2b — the ticker that follows the opening hours (the site mode).
   site_mode: "Opening hours",
+  // WARP-2978 — the engine that sorts events into incidents (every viewer), and who alerts reach (owner/admin).
+  incidents: "Incidents",
+  alerts: "Alerts",
   // WARP-2980 (P5) — the job that learns what normal looks like.
   patterns: "Patterns",
   retention: "Record keeping",
 };
 
-const STATE_BADGE: Record<SecurityHealthRow["state"], { cls: string; text: string }> = {
+/** Exported for the Security wall (WARP-2981), which lists the sources that are not reporting the same way. */
+export const STATE_BADGE: Record<SecurityHealthRow["state"], { cls: string; text: string }> = {
   ok: { cls: "badge ok", text: "Reporting" },
   quiet: { cls: "badge muted", text: "Quiet" },
   down: { cls: "badge danger", text: "Not reporting" },

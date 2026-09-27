@@ -123,6 +123,8 @@ export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
   "SERVICE_TOKEN_MCP",
   "SERVICE_TOKEN_EMAIL",
   "SERVICE_TOKEN_EGRESS_AUDIT",
+  // WARP-3193 SEC-DATA-10 — generated since the first secrets.sh heredoc.
+  "NEXTCLOUD_ADMIN_PASSWORD",
 ];
 
 // `.env.example` ships `change-me` for DEVICE_SECRET_KEY — a copy-pasted
@@ -392,6 +394,12 @@ const envSchema = z.object({
 
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
+  // WARP-3193 SEC-DATA-10 — the Nextcloud admin account the OCS provisioning
+  // calls authenticate as. Empty default for dev/test; a production boot
+  // refuses an empty/placeholder value (PRODUCTION_REQUIRED_SECRET_KEYS).
+  // There is deliberately no `admin` fallback: a torn .env must fail, not
+  // silently try admin:admin. secrets.sh generates it (an _ENV_CORE_KEYS key).
+  NEXTCLOUD_ADMIN_PASSWORD: z.string().default(""),
   // NEXTCLOUD_PUBLIC_PATH — browser-facing path the gateway fronts Nextcloud
   //   on (nginx `location /nextcloud/`). Used for URLs the dashboard's
   //   browser actually loads (the doc-editor iframe) — NEXTCLOUD_URL above is
@@ -580,6 +588,12 @@ const envSchema = z.object({
   DROPLET_SSO_GOOGLE_CLIENT_ID: z.string().default(""),
   DROPLET_SSO_GOOGLE_CLIENT_SECRET: z.string().default(""),
   DROPLET_SSO_GOOGLE_REDIRECT_URI: z.string().default(""),
+  // WARP-3193 SEC-AUTH-3 — comma-separated Google Workspace domains (the ID
+  // token's `hd` claim) allowed to link to or create a local account via
+  // Google SSO. Empty (default) = none: Google SSO then signs in only
+  // accounts already linked by `sub`, and never creates one. Without this,
+  // any Google account that could reach the box got a `family` account.
+  DROPLET_SSO_GOOGLE_ALLOWED_HD: z.string().default(""),
   DROPLET_SSO_ENTRA_ISSUER: z.string().default(""),
   DROPLET_SSO_ENTRA_CLIENT_ID: z.string().default(""),
   DROPLET_SSO_ENTRA_CLIENT_SECRET: z.string().default(""),
@@ -608,7 +622,11 @@ const envSchema = z.object({
   DROPLET_SCIM_BEARER_TOKEN: z.string().default(""),
 
   // --- gRPC ---
-  AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),
+  // ai-gateway's gRPC endpoint (EmbedText / rerank / classify). The ONE
+  // default every caller shares (WARP-3193 ARCH-6): the compose service name,
+  // since compose does not set this for the orchestrator. Read it from
+  // `config`, never `process.env` directly.
+  AI_GATEWAY_GRPC_URL: z.string().default("ai-gateway:50051"),
 
   // --- OpenWrt Routing ---
   // Default uses `host.docker.internal` so the bridged orchestrator can
@@ -976,18 +994,20 @@ const envSchema = z.object({
   //                        legitimate state (dev boxes stage nothing) and the
   //                        surface degrades to "no apps available", never a 500.
   //   REQUIRE_SIGNATURE  — enforce the cosign signature over catalog.json.
-  //                        OFF by default and that is deliberate: the OTA trust
-  //                        anchor is still the WARP-535 placeholder, so turning
-  //                        this on before the key ceremony makes every download
-  //                        a 503. The always-on gate is the per-asset sha256
-  //                        re-check in services/app-downloads/store.ts, which
-  //                        works today; this flag exists so the ceremony can
+  //                        OFF by default and that is deliberate: update-agent/
+  //                        cosign.pub has been a real P-256 key since the
+  //                        2026-07-30 key ceremony, but nothing signs an
+  //                        on-box-generated catalog.json today, so turning
+  //                        this on makes every download a 503. The always-on
+  //                        gate is the per-asset sha256 re-check in
+  //                        services/app-downloads/store.ts, which works today;
+  //                        this flag exists so signing catalog.json can
   //                        upgrade the posture without a code change.
   //
   // EXPLICIT string→bool, NOT z.coerce.boolean(): coerce runs Boolean(...), so
   // the non-empty strings "0"/"false" would BOTH coerce to true — here that
-  // would silently ENABLE the signature requirement against a placeholder
-  // anchor and take every download offline. Only "1"/"true" enable it.
+  // would silently ENABLE the signature requirement against a catalog nothing
+  // signs and take every download offline. Only "1"/"true" enable it.
   DROPLET_APP_DOWNLOADS_DIR: z.string().default("/opt/droplet/app-downloads"),
   DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE: z
     .string()

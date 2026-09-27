@@ -457,6 +457,33 @@ export function assertDisableAllowed(args: {
 }
 
 /**
+ * Session revocation (POST /auth/users/:username/revoke-sessions) — WARP-3111.
+ * Same rails as disable (it is the "cut this person off now" half of a
+ * disable), plus the rank cap applied to the TARGET's role: you can only sign
+ * out someone whose rank is at or below your own. Before this the route ran
+ * requireRole alone, so any admin could sign the owner out everywhere.
+ *
+ * Self is refused (rail 2), not treated as "log out everywhere": this route
+ * has no `exceptSid`, so a self-revoke would kill the caller's own session
+ * mid-request, and self-service already has its own doors (POST /auth/logout,
+ * and POST /auth/password, which revokes every other session). Because self
+ * is refused, "never the owner unless the caller is the owner" collapses to
+ * rail 1: the only actor who could be the owner is the owner themselves.
+ */
+export function assertSessionRevokeAllowed(args: {
+  actor: GuardActor;
+  target: GuardTarget;
+}): void {
+  assertNotSelf(args.actor.id, args.target.id);
+  assertTargetNotOwner(args.target.role);
+  assertRankCap(
+    args.actor.role,
+    args.target.role,
+    "You cannot sign out someone with a higher role than your own",
+  );
+}
+
+/**
  * Scope rewrite (PATCH /people/:id/scope) — same two rails as removal:
  * the shipped self-action guard plus rail 1 (an owner's bindings are inert
  * — requireScope short-circuits owners — but they are still the owner's
@@ -675,6 +702,22 @@ async function syncAdminTierGroup(args: {
 }
 
 /**
+ * WARP-3193 QUAL-1 — revokeAllSessions rejects (503) when Redis refused the
+ * sweep. The rail-6 runners follow an ALREADY-COMMITTED change, so a failed
+ * revoke must not skip the effects after it (the denylist, the NC cascade,
+ * the mandatory-emit audit row). Capture it, finish the effects with the
+ * failure recorded on the row, then rethrow so the route answers 503.
+ */
+async function revokeCapturingFailure(userId: string): Promise<{ err: unknown } | null> {
+  try {
+    await revokeAllSessions(userId);
+    return null;
+  } catch (err) {
+    return { err };
+  }
+}
+
+/**
  * Post-effects of a committed role change (WARP-247 revoke → WARP-1259 NC
  * cascade → Activity). Emit shape is byte-identical to the shipped
  * people.ts block (kind "system" — permission edits; lifecycle events use
@@ -687,7 +730,7 @@ export async function runRoleChangePostEffects(args: {
   actorUsername: string | null;
   actor: ActivityActor;
 }): Promise<void> {
-  await revokeAllSessions(args.target.id);
+  const revokeError = await revokeCapturingFailure(args.target.id);
   await syncAdminTierGroup({
     userId: args.target.id,
     nextcloudUsername: args.target.nextcloudUsername,
@@ -706,9 +749,11 @@ export async function runRoleChangePostEffects(args: {
       targetUsername: args.target.username,
       previousRole: args.previousRole,
       nextRole: args.nextRole,
+      ...(revokeError ? { sessionRevoke: "failed" } : {}),
     },
     actor: args.actor,
   });
+  if (revokeError) throw revokeError.err;
 }
 
 /**
@@ -732,8 +777,9 @@ export async function runRemovalPostEffects(args: {
   actorUsername: string | null;
   actor: ActivityActor;
 }): Promise<void> {
+  let revokeError: { err: unknown } | null = null;
   if (args.targetUserId) {
-    await revokeAllSessions(args.targetUserId);
+    revokeError = await revokeCapturingFailure(args.targetUserId);
     await denylistUser(args.targetUserId, ACCESS_TOKEN_TTL_SECONDS);
   }
   await recordActivity({
@@ -747,9 +793,11 @@ export async function runRemovalPostEffects(args: {
       targetUserId: args.targetUserId,
       targetUsername: args.targetUsername,
       role: args.targetRole,
+      ...(revokeError ? { sessionRevoke: "failed" } : {}),
     },
     actor: args.actor,
   });
+  if (revokeError) throw revokeError.err;
 }
 
 /**
@@ -779,9 +827,16 @@ export async function runDisablePostEffects(args: {
    */
   ncMirror?: NcMirror;
 }): Promise<void> {
-  const sessionsRevoked = args.targetUserId
-    ? await revokeAllSessions(args.targetUserId)
-    : 0;
+  let sessionsRevoked: number | null = 0;
+  let revokeError: { err: unknown } | null = null;
+  if (args.targetUserId) {
+    try {
+      sessionsRevoked = await revokeAllSessions(args.targetUserId);
+    } catch (err) {
+      sessionsRevoked = null;
+      revokeError = { err };
+    }
+  }
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -792,8 +847,10 @@ export async function runDisablePostEffects(args: {
       username: args.username,
       targetUserId: args.targetUserId,
       sessionsRevoked,
+      ...(revokeError ? { sessionRevoke: "failed" } : {}),
       ...(args.ncMirror ? { ncMirror: args.ncMirror } : {}),
     },
     actor: args.actor,
   });
+  if (revokeError) throw revokeError.err;
 }

@@ -74,6 +74,7 @@ import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
 import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
+import { createPanelSecurityRouter } from "./routes/panel-security.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSecurityRouter } from "./routes/security.js";
@@ -138,8 +139,6 @@ import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
 import { createTlsStatusPublicRouter } from "./routes/tls-status.public.route.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
-import { startRemindersPoller } from "./services/reminders-poller.js";
-import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch, ensurePushDispatch } from "./services/push-dispatch.service.js";
 import { outboundEmailGate } from "./services/off-lan-gate.service.js";
 import {
@@ -190,6 +189,9 @@ export function createApp(
   app.use(
     cors({
       credentials: true,
+      // WARP-3052 — browser clients on an allowed cross-origin must be able to
+      // read the Files degrade marker (it is not a CORS-safelisted header).
+      exposedHeaders: ["X-Droplet-Degraded"],
       origin: (origin, cb) => {
         if (!origin || config.corsAllowedOrigins.includes(origin)) {
           return cb(null, true);
@@ -199,6 +201,18 @@ export function createApp(
     }),
   );
   app.use(helmet());
+  // WARP-3097 — every /api response is `no-store` unless its route says
+  // otherwise. `private, max-age` still lets the CLIENT's own cache keep the
+  // body, and Apple's URLCache / a browser disk cache writes it to disk: Wi-Fi
+  // passwords, API keys, company data and camera footage at rest after
+  // sign-out. Routes may override only for code-resident catalogues with no
+  // per-box or per-person content (see the route-by-route audit in the PR);
+  // SSE handlers keep their `no-cache`. Mounted before every /api router,
+  // public ones included, so a 401/403/404 is covered too.
+  app.use("/api", (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
   app.use(cookieParser());
   app.use(requestIdMiddleware);
   app.use(requestLogger);
@@ -368,6 +382,13 @@ export function createApp(
   // never depend on a dashboard toggle. Pinned by
   // src/__tests__/security-prefix-composition.test.ts.
   app.use("/api", createEgressAuditRouter());
+  // WARP-2981 (ADR-059 P6) — the rack panel's Security count, GET
+  // /api/panel/security: host plumbing like the collector above, for the
+  // panel's own service principal only. Outside every module prefix and
+  // before the gates so it can answer `off` — behind the gate a switched-off
+  // Security and a toggle that could not be read are the same 404. Pinned by
+  // the same test file and security-level-invariant.test.ts.
+  app.use("/api", createPanelSecurityRouter(prisma));
 
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
@@ -672,7 +693,7 @@ export function createApp(
   // has a shell to arrange. Service principals are refused in the router.
   app.use("/api", createMeDepartmentRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
-  app.use("/api", createActivityRouter(prisma));
+  app.use("/api", createActivityRouter(prisma, createDeviceIdentityClient()));
   // WARP-237: device-key-signed daily-root read surface.
   app.use("/api", createAuditRootsRouter(prisma));
   // WARP-823: owner/admin downloadable, secret-redacted diagnostics log
@@ -793,18 +814,9 @@ export function createApp(
   app.use("/api", createBriefingsRouter(prisma));
 
 
-  // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
-  // to dispatch due-time notifications and re-sync calendar sources.
-  startRemindersPoller(prisma);
-
-  // Status display screen QR — context-switched display. WARP-632/ADR-017
-  // adds the highest-priority claim-screen branch (mint + render the claim
-  // code on the PyPortal while the box is unclaimed); once claimed it falls
-  // through to setup URL on first boot, last-generated WireGuard peer for
-  // ~60 s after creation, WiFi-hotspot QR otherwise. 30 s poller; calls into
-  // Prisma + Nextcloud + device-bridge. Failures in any leg leave the screen
-  // alone rather than blanking it.
-  startScreenQRPoller(prisma);
+  // Reminders poller and status-display screen-QR poller: started from
+  // index.ts main() on cron-runtime (WARP-3193 QUAL-7), not here — building
+  // an app (every route test does) must not start background timers.
 
   // Web Push — initialise VAPID at startup.
   //

@@ -98,10 +98,6 @@ export function createCapabilitiesRouter(
       logger.error({ err: e }, "capabilities_enablement_read_failed");
     }
     const body: AppCapabilities = { projects, crm, contacts };
-    // Module state changes only on reconfiguration; let the browser cache
-    // briefly so the nav doesn't re-probe on every client mount (same
-    // rationale as /admin/capabilities).
-    res.setHeader("Cache-Control", "private, max-age=30");
     res.json(body);
   });
 

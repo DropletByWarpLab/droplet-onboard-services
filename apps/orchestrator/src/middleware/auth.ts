@@ -553,6 +553,11 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
     // the panel's reach ever needs to be BOUNDED rather than described, that is
     // a per-route guard on the routes themselves, not an edit to this comment.
     //
+    // WARP-2981 (ADR-059 P6) adds a THIRD, display.py again: GET
+    // /api/panel/security, the Security count for band A. Pinned to this
+    // principal by id like join-code, and to it ALONE — no person may call it
+    // (routes/panel-security.ts says why).
+    //
     // Same token as the orchestrator → oled-display leg (WARP-165); compose
     // already gives both ends the value, so this adds a direction, not a
     // secret. The panel needs the household join code because its old source

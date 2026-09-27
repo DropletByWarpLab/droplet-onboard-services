@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { isFilesUnavailableError } from "../files-unavailable";
 import { fetchSharedWithMe, fetchSharedByMe } from "../api";
 import type { ShareDetail } from "../types";
 
@@ -12,7 +13,8 @@ export function useSharedWithMe() {
   );
 
   return {
-    items: data ?? [],
+    // WARP-3076 — drop stale rows during an outage (see useTrash).
+    items: isFilesUnavailableError(error) ? [] : data ?? [],
     error,
     isLoading,
     refresh: mutate,
@@ -31,7 +33,8 @@ export function useSharedByMe() {
   );
 
   return {
-    items: data ?? [],
+    // WARP-3076 — drop stale rows during an outage (see useTrash).
+    items: isFilesUnavailableError(error) ? [] : data ?? [],
     error,
     isLoading,
     refresh: mutate,

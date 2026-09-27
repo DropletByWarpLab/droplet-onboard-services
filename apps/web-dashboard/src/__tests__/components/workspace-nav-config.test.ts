@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   NAV_GROUPS,
+  moduleForPath,
   type AuthRole,
   type NavCapabilities,
 } from "@/components/nav-config";
@@ -241,6 +242,15 @@ describe("workspace-nav-config — Level 3 views", () => {
 
   it("a destination without children has no views", () => {
     expect(dest("/network")?.views).toEqual([]);
+  });
+
+  // WARP-2981 (ADR-059 P6) — the wall is reached from /security's header, never
+  // the nav, and is still gated by the security module (the prefix rule).
+  it("the Security wall is no chip and no view, but the security module still gates it", () => {
+    expect(spaceHrefs).not.toContain("/security/wall");
+    expect((dest("/security")?.views ?? []).map((v) => v.href)).not.toContain("/security/wall");
+    expect(NAV_GROUPS.flatMap((g) => g.items.flatMap((i) => [i.href, ...(i.children ?? []).map((c) => c.href)]))).not.toContain("/security/wall");
+    expect(moduleForPath("/security/wall")?.moduleId).toBe("security");
   });
 });
 

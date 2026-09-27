@@ -1,0 +1,168 @@
+/*
+ * WARP-2981 (ADR-059 P6, §3.8) — /security/wall, the Security wall for a TV.
+ *
+ * Tokens only: every colour is a shell variable (--bg, --surface, --border,
+ * --text, --text-muted, --brand), and the badges are the shell's own .badge
+ * classes. The page wraps its .droplet-shell root in a .dark element, so
+ * these resolve the shell's dark ramp whatever the dashboard's theme.
+ *
+ * Layout. In the page the banners and the strip come before the tiles, so a
+ * screen reader reaches them, and "Back to Security", first. Above 640 px wide
+ * and 480 px tall the tiles are drawn above them instead (`order: -1`), the
+ * page is at least the viewport's height, and the camera tiles take what the
+ * banners and the strip leave (grid rows `minmax(0, 1fr) auto auto`), so the
+ * strip is at the bottom of the screen. The tiles are a `--cols` × `--rows`
+ * grid of equal cells (tileGrid), each a picture over its name. A picture is
+ * never less than 72 px high: when the screen is too short for that (a 1080p
+ * TV browser at 960×540 with 12 cameras and a banner), the page grows and
+ * scrolls a little instead of squeezing the pictures away. At 640 px wide or
+ * 480 px tall and below (a phone, either way up) the page scrolls, in the
+ * page's own order: the banners, the strip, then the tiles, one per row, each
+ * picture 16:9, the rows from the top, and the strip's cells wrap two by two, so
+ * 375 px never scrolls sideways. Type
+ * scales with the screen (clamp) so a 55" TV reads from across the room. No
+ * animation.
+ */
+.droplet-shell.sec-wall {
+  position: relative; min-height: 100dvh; margin: 0;
+  display: grid; grid-template-rows: minmax(0, 1fr) auto auto;
+  background: var(--bg); color: var(--text);
+}
+.droplet-shell.sec-wall:focus { outline: none; }
+
+.droplet-shell .sec-wall-leave:focus-visible,
+.droplet-shell .sec-wall-full:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* ── The camera tiles ──────────────────────────────────────── */
+.droplet-shell .sec-wall-cameras {
+  position: relative; min-height: 0; min-width: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); overflow: hidden;
+}
+.droplet-shell .sec-wall-tiles {
+  align-self: stretch; flex: 1; min-width: 0; min-height: 0; display: grid; gap: 8px; padding: 8px 16px;
+  grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--rows, 1), minmax(0, 1fr));
+}
+.droplet-shell .sec-wall-tile {
+  margin: 0; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden;
+}
+.droplet-shell .sec-wall-tile-frame {
+  position: relative; min-height: 72px; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 4px 8px; background: var(--bg); color: var(--text-muted);
+}
+.droplet-shell .sec-wall-tile-frame > img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
+/* An old picture: dimmed and grey under its own time, never drawn as a current one. */
+.droplet-shell .sec-wall-tile.is-stale .sec-wall-tile-frame > img { opacity: 0.4; filter: grayscale(1); }
+/* What is wrong with the picture sits on the picture: over an old one (positioned, so above the <img>), under the
+   mark in an empty frame. The caption below is the camera's name alone, so no state can crowd a name out of it
+   on a narrow tile, and a state wraps rather than lose its time. */
+.droplet-shell .sec-wall-tile-state {
+  position: relative; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 8px;
+  border-radius: var(--radius-input); background: var(--surface); color: var(--text); text-align: center;
+  font-size: clamp(14px, 1.2vw, 24px);
+}
+/* The name, on one line: a name longer than the tile ends in "…". */
+.droplet-shell .sec-wall-tile > figcaption { min-width: 0; padding: 8px 12px; font-size: clamp(14px, 1.2vw, 24px); }
+.droplet-shell .sec-wall-tile-name {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text);
+}
+.droplet-shell .sec-wall-cameras-note {
+  display: grid; justify-items: center; gap: 10px; max-width: 36em; padding: 24px; text-align: center;
+  color: var(--text-muted); font-size: clamp(14px, 1.4vw, 28px);
+}
+.droplet-shell .sec-wall-cameras-note p { margin: 0; }
+
+/* ── Banners: stale / offline, and the sign-out warning ───── */
+.droplet-shell .sec-wall-banners { display: grid; gap: 8px; padding: 0 16px; }
+.droplet-shell .sec-wall-banners:empty { display: none; }
+.droplet-shell .sec-wall-banner {
+  display: flex; align-items: flex-start; gap: 10px; padding: 12px 16px; border-radius: var(--radius-card);
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  font-size: clamp(14px, 1.2vw, 24px); overflow-wrap: anywhere;
+}
+.droplet-shell .sec-wall-banner-text { display: grid; gap: 2px; min-width: 0; }
+
+/* ── The strip ─────────────────────────────────────────────── */
+.droplet-shell .sec-wall-strip { padding: 16px; border-top: 1px solid var(--border); background: var(--surface); }
+.droplet-shell .sec-wall-strip > dl {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 24px; margin: 0;
+}
+.droplet-shell .sec-wall-cell { display: grid; align-content: start; gap: 6px; min-width: 0; }
+.droplet-shell .sec-wall-cell > dt {
+  font-size: clamp(14px, 1.4vw, 28px); font-weight: 600; color: var(--text-muted);
+}
+.droplet-shell .sec-wall-cell > dd {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0; min-width: 0;
+}
+.droplet-shell .sec-wall-value {
+  font-size: clamp(20px, 2.6vw, 48px); font-weight: 700; line-height: 1.1;
+  color: var(--text); font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.droplet-shell .sec-wall-value.sm { font-size: clamp(16px, 1.8vw, 34px); }
+.droplet-shell .sec-wall-sub {
+  flex-basis: 100%; font-size: clamp(13px, 1.1vw, 22px); color: var(--text-muted); overflow-wrap: anywhere;
+}
+.droplet-shell .sec-wall-badge { font-size: clamp(12px, 1vw, 20px); }
+/* The strip's two buttons grow with the screen like its badges: the shell's .btn.sm (12.5 px, 30 px high) up to 20 px text on a
+   TV; at 720 px and below they keep the shell's 44 px touch target (below). */
+.droplet-shell .sec-wall-strip .btn { font-size: clamp(12.5px, 1vw, 20px); height: auto; min-height: 2.4em; padding: 0 0.9em; }
+/* The shell's muted badge (--text-muted on --inset) is 4.41:1 on the strip's --surface — under 4.5 for text this size. */
+.droplet-shell .sec-wall-strip .badge.muted { color: var(--text); }
+.droplet-shell .sec-wall-sources {
+  flex-basis: 100%; display: grid; gap: 4px; margin: 0; padding: 0; list-style: none;
+  font-size: clamp(13px, 1.1vw, 22px); color: var(--text);
+}
+.droplet-shell .sec-wall-sources > li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+
+/* Stale or offline: the last values stay, dimmed, under the banner that names their time.
+   The badges lose their colour too (grayscale keeps their text contrast): a red "1 alert" or a green
+   "Open" must not look live from across the room. */
+.droplet-shell .sec-wall-strip.is-stale .sec-wall-value,
+.droplet-shell .sec-wall-strip.is-stale .sec-wall-sources { color: var(--text-muted); }
+.droplet-shell .sec-wall-strip.is-stale .badge { filter: grayscale(1); }
+
+/* ── A TV or a desktop: the tiles drawn first ──────────────── */
+/* The page has the banners and the strip first (a screen reader reads them, and "Back to Security", before a dozen
+   camera names; nothing in a tile takes focus). Only here are the tiles drawn above them. This is the phone query's
+   exact complement (not ≤ 640 px wide, and not ≤ 480 px tall), so a phone keeps the page's order with nothing to undo. */
+@media not all and (max-width: 640px) {
+  @media not all and (max-height: 480px) {
+    .droplet-shell .sec-wall-cameras { order: -1; }
+  }
+}
+
+/* ── A phone, either way up ─────────────────────────────────── */
+@media (max-width: 640px), (max-height: 480px) {
+  .droplet-shell.sec-wall { grid-template-rows: auto auto auto; align-content: start; }
+  /* The page's order: the banners, then the strip, above the tiles (under a column of tiles they were thousands of
+     px down, and the strip's "Back to Security" is a phone's only way out). */
+  .droplet-shell .sec-wall-banners { padding: 8px 16px; }
+  .droplet-shell .sec-wall-strip { border-top: 0; border-bottom: 1px solid var(--border); }
+  .droplet-shell .sec-wall-cameras { min-height: 200px; }
+  .droplet-shell .sec-wall-tiles { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  /* Full width (a grid item with a ratio would otherwise start-align): capped at 75dvh, the picture is letterboxed on --bg as on a TV. */
+  .droplet-shell .sec-wall-tile-frame { aspect-ratio: 16 / 9; max-height: 75dvh; justify-self: stretch; }
+  .droplet-shell .sec-wall-strip > dl { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+@media (max-width: 720px) {
+  .droplet-shell .sec-wall-strip .btn { min-height: 44px; }
+}
+
+/* ── Instead of the wall: the D6 refusal (and the signed-out notice) ── */
+.droplet-shell.sec-wall-notice {
+  box-sizing: border-box; min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 24px 16px;
+  background: var(--bg); color: var(--text);
+}
+.droplet-shell.sec-wall-notice:focus { outline: none; }
+.droplet-shell .sec-wall-notice-card {
+  box-sizing: border-box; display: grid; gap: 12px; width: 100%; max-width: 40em; padding: 24px; border-radius: var(--radius-card);
+  background: var(--surface); border: 1px solid var(--border);
+  font-size: clamp(15px, 1.3vw, 24px); line-height: 1.5; overflow-wrap: anywhere;
+}
+.droplet-shell .sec-wall-notice-card h1 { margin: 0; font-size: clamp(20px, 2vw, 36px); font-weight: 700; line-height: 1.2; }
+.droplet-shell .sec-wall-notice-card p { margin: 0; color: var(--text-muted); }
+.droplet-shell .sec-wall-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.droplet-shell .sec-wall-notice-actions .btn { font-size: inherit; height: auto; min-height: max(2.5em, 44px); padding: 0.5em 1em; }
+.droplet-shell .sec-wall-notice-actions .btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }

@@ -63,6 +63,7 @@ import {
   assertDirectoryEditAllowed,
   assertRemovalAllowed,
   assertDisableAllowed,
+  assertSessionRevokeAllowed,
   assertAssignableForCreate,
   assertRemovalInvariantsTx,
   assertDisableInvariantsTx,
@@ -106,13 +107,23 @@ import {
   TOTP_ISSUER,
   generateTotpEnrollment,
   encryptTotpSecret,
-  decryptTotpSecret,
-  verifyTotpCode,
+  acceptTotpCode,
 } from "../services/totp.service.js";
 import {
   generateRecoveryCodes,
-  findMatchingRecoveryCodeHash,
+  consumeRecoveryCode,
 } from "../services/recovery.service.js";
+import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
+import {
+  passwordChangeBackoffSeconds,
+  checkPasswordChangeLock,
+  recordPasswordChangeFailure,
+  clearPasswordChangeRateState,
+} from "../services/password-change-throttle.service.js";
+import {
+  createRequireCredentialStepUp,
+  passCredentialStepUp,
+} from "../middleware/require-credential-step-up.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
 import { warmActiveModel } from "../services/active-model.service.js";
@@ -123,6 +134,7 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
+import { purgeUsernameKeyedData } from "../services/username-data-purge.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -355,82 +367,10 @@ function getRequestIp(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
 
-/**
- * Progressive backoff for failed current-password checks on
- * POST /auth/change-password (PR #549 reviewer follow-up: without a lockout
- * the endpoint is a current-password brute-force oracle for whoever holds a
- * session cookie). Mirrors the WARP-631 claim-code model: a small free tier,
- * then FIXED escalating locks that always elapse on their own; the failure
- * counter resets after an hour without failures and on a successful verify.
- * Keyed by user id — the gate protects the ACCOUNT's password, and a NATed
- * household shares one IP. Fails OPEN on cache errors so a flaky Redis can
- * never lock a legitimate user out of rotating their password.
- */
-const PW_CHANGE_FREE_TIER = 5;
-/** Lock seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
-const PW_CHANGE_BACKOFF_SCHEDULE = [30, 60, 120, 300, 900] as const;
-/** Failure counter resets after an hour of no failures (rolling window). */
-const PW_CHANGE_FAILS_TTL_SEC = 60 * 60;
-
-function pwChangeFailsKey(userId: string): string {
-  return `ratelimit:change-password:fails:${userId}`;
-}
-function pwChangeLockKey(userId: string): string {
-  return `ratelimit:change-password:lock:${userId}`;
-}
-
-/** PURE schedule map (failure count → lock seconds). Exported for tests. */
-export function passwordChangeBackoffSeconds(failureCount: number): number {
-  const idx = failureCount - PW_CHANGE_FREE_TIER - 1;
-  if (idx < 0) return 0;
-  return PW_CHANGE_BACKOFF_SCHEDULE[
-    Math.min(idx, PW_CHANGE_BACKOFF_SCHEDULE.length - 1)
-  ];
-}
-
-async function checkPasswordChangeLock(
-  userId: string,
-): Promise<{ locked: boolean; retryAfterSeconds: number }> {
-  try {
-    const until = (await cacheGet<number>(pwChangeLockKey(userId))) ?? 0;
-    const now = Date.now();
-    if (until > now) {
-      return { locked: true, retryAfterSeconds: Math.ceil((until - now) / 1000) };
-    }
-    return { locked: false, retryAfterSeconds: 0 };
-  } catch {
-    return { locked: false, retryAfterSeconds: 0 };
-  }
-}
-
-async function recordPasswordChangeFailure(userId: string): Promise<void> {
-  try {
-    // cacheIncr is atomic (Redis INCR) — avoids the read-modify-write race
-    // where two concurrent wrong-password requests both read N and both write
-    // N+1, keeping the counter artificially low.
-    const next = await cacheIncr(pwChangeFailsKey(userId), PW_CHANGE_FAILS_TTL_SEC);
-    if (next === null) return; // Redis error — fail open
-    const lockedSeconds = passwordChangeBackoffSeconds(next);
-    if (lockedSeconds > 0) {
-      await cacheSet(
-        pwChangeLockKey(userId),
-        Date.now() + lockedSeconds * 1000,
-        lockedSeconds,
-      );
-    }
-  } catch {
-    // fail open — see the model comment above.
-  }
-}
-
-async function clearPasswordChangeRateState(userId: string): Promise<void> {
-  try {
-    await cacheDel(pwChangeFailsKey(userId));
-    await cacheDel(pwChangeLockKey(userId));
-  } catch {
-    // fail open.
-  }
-}
+// WARP-3193 — the current-password throttle (PR #549) now lives in
+// services/password-change-throttle.service.ts, shared with the credential
+// step-up gate. Re-exported so existing imports keep working.
+export { passwordChangeBackoffSeconds };
 
 /**
  * WARP-579 — progressive backoff for failed /auth/login credential checks.
@@ -576,6 +516,10 @@ const updateUserSchema = z
     quota: z.union([z.string().min(1).max(32), z.number().int().min(0)]).optional(),
     // ADR-013: same shared policy the setup/add-user/invite paths enforce.
     password: passwordZod.optional(),
+    // WARP-3111: an admin password reset signs the person out everywhere by
+    // default. `true` keeps their live sessions (the forced change still
+    // applies). Only meaningful alongside `password`; not a field on its own.
+    keepSessions: z.boolean().optional(),
   })
   .refine(
     (d) =>
@@ -1233,51 +1177,14 @@ export function createPublicAuthRouter(
       // On a successful challenge we stamp `mfaStampIso` into the access
       // token (signAccessToken) so require-recent-mfa (WARP-230) can gate
       // sensitive routes for this session.
+      //
+      // WARP-3193 SEC-AUTH-2 — the check itself lives in
+      // services/login-second-factor.service.ts, shared with the passkey and
+      // SSO sign-ins so neither can skip an enrolled factor.
       let mfaStampIso: string | undefined;
-      const totpCred = await prisma.totpCredential.findUnique({
-        where: { userId },
-      });
-      if (totpCred && totpCred.confirmedAt) {
-        const totpCode =
-          typeof parsed.data.totp === "string" ? parsed.data.totp.trim() : "";
-        const recoveryCode =
-          typeof parsed.data.recoveryCode === "string"
-            ? parsed.data.recoveryCode
-            : "";
-
-        let secondFactorOk = false;
-
-        if (totpCode) {
-          const secret = decryptTotpSecret(totpCred.secretEnc);
-          secondFactorOk = await verifyTotpCode(secret, totpCode);
-        } else if (recoveryCode) {
-          // Match against the user's UNUSED codes only; consume exactly the
-          // matched row so a replay of the same code finds nothing.
-          const unused = await prisma.recoveryCode.findMany({
-            where: { userId, usedAt: null },
-          });
-          const matchHash = await findMatchingRecoveryCodeHash(
-            recoveryCode,
-            unused.map((r) => r.codeHash),
-          );
-          if (matchHash) {
-            const consumed = unused.find((r) => r.codeHash === matchHash);
-            if (consumed) {
-              // Atomic single-use: only flip the row if it is STILL unused.
-              // Two concurrent logins presenting the same code both read it
-              // unused above; the usedAt:null guard means exactly one update
-              // flips a row (count 1) and the loser sees count 0 → the factor
-              // fails. Mirrors claimRefreshRotation / invite single-use.
-              const claimed = await prisma.recoveryCode.updateMany({
-                where: { id: consumed.id, usedAt: null },
-                data: { usedAt: new Date() },
-              });
-              secondFactorOk = claimed.count > 0;
-            }
-          }
-        }
-
-        if (!secondFactorOk) {
+      const secondFactor = await checkLoginSecondFactor(prisma, userId, parsed.data);
+      if (secondFactor !== "not_enrolled") {
+        if (secondFactor === "failed") {
           // WARP-579 finding 1: a wrong second factor IS a failed login attempt
           // for throttling purposes. Without this, an attacker holding a valid
           // password could spin through ~10^6 TOTP codes with no lockout. Bump
@@ -1800,18 +1707,33 @@ export function createPublicAuthRouter(
         });
 
         // Native clients want the new tokens in body since they can't
-        // read Set-Cookie. Always include them — browsers ignore the
-        // body's accessToken (they use the cookie that was just set
-        // above), so this is non-breaking.
+        // read Set-Cookie. WARP-3193 SEC-AUTH-7: ONLY native clients — the
+        // same WARP-582 rule as /auth/login?return=body. A browser rotates
+        // through the cookies set above; tokens in its body would be
+        // readable by any XSS on the dashboard origin. Native = presented
+        // its refresh token in the body (ADR-008) AND carries no browser
+        // marker header (lib/browser-context.ts).
+        const browserMarker = browserMarkerHeader(req.headers);
+        if (refreshTokenBody !== null && browserMarker !== null) {
+          logger.warn(
+            { marker: browserMarker, sub },
+            "refresh: body tokens refused for a browser context — cookie-only rotation (WARP-582)",
+          );
+        }
+        const wantBody = refreshTokenBody !== null && browserMarker === null;
         res.json({
           status: "ok",
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-          accessTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-          refreshTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+          ...(wantBody
+            ? {
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken,
+                accessTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+                refreshTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+              }
+            : {}),
         });
         return;
       }
@@ -2022,7 +1944,7 @@ export function createPublicAuthRouter(
       // ── WARP-490: single-use enforcement via compare-and-swap ──
       // Two near-simultaneous POSTs to the same token both clear the
       // isUsed() fast-path above before either write lands. The
-      // conditional updateMany (acceptedAt: null) is the atomic
+      // conditional updateMany (status: "pending") is the atomic
       // enforcement point: exactly one caller flips the row (count === 1)
       // and proceeds to create the account; the other sees count === 0
       // and 410s WITHOUT ever calling Nextcloud — so no duplicate NC
@@ -2037,9 +1959,13 @@ export function createPublicAuthRouter(
       // atomic single-use — a transient-failure auto-release would reopen
       // a (smaller) version of the same race.
       const acceptedFrom = getRequestIp(req);
+      // WARP-3193 QUAL-3: the guard is the explicit status, so a revoke or
+      // the expiry sweep landing between the fast-path read and this write
+      // also loses the race, not just a second accept.
       const claim = await prisma.userInvite.updateMany({
-        where: { id: invite.id, acceptedAt: null },
+        where: { id: invite.id, status: "pending" },
         data: {
+          status: "accepted",
           acceptedAt: new Date(),
           acceptedFrom: acceptedFrom ?? undefined,
         },
@@ -2583,6 +2509,11 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-3193 SEC-AUTH-9 — re-prove identity before minting a factor, so
+      // a hijacked session cannot plant its own authenticator. After the 409
+      // on purpose: the setup wizard reads it when the owner steps back.
+      if (!(await passCredentialStepUp(prisma, req, res))) return;
+
       // Label the authenticator entry with the user's email when present,
       // else the username — both are non-secret display identifiers.
       const label = req.user.username;
@@ -2650,7 +2581,9 @@ export function createProtectedAuthRouter(
   // recovery codes — returned ONCE in this response and never again. A
   // verify against an already-enabled factor is a re-challenge (e.g. a
   // step-up) and returns no new codes.
-  router.post("/auth/totp/verify", authRateLimit, async (req, res, next) => {
+  // WARP-3193 SEC-AUTH-9 — the same step-up as enroll (the confirming
+  // verify is what turns the factor on).
+  router.post("/auth/totp/verify", authRateLimit, createRequireCredentialStepUp(prisma), async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
@@ -2676,8 +2609,9 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const secret = decryptTotpSecret(cred.secretEnc);
-      const codeOk = await verifyTotpCode(secret, parsed.data.code);
+      // WARP-3193 SEC-AUTH-10 — the same single-use accept as login, so the
+      // code that confirms enrollment cannot be replayed at sign-in.
+      const codeOk = await acceptTotpCode(prisma, cred, parsed.data.code);
       if (!codeOk) {
         res.status(401).json({ error: "Invalid code", code: "TOTP_INVALID" });
         return;
@@ -2789,37 +2723,14 @@ export function createProtectedAuthRouter(
       }
       const userId = req.user.id;
 
-      const unused = await prisma.recoveryCode.findMany({
-        where: { userId, usedAt: null },
-      });
-      const matchHash = await findMatchingRecoveryCodeHash(
-        parsed.data.code,
-        unused.map((r) => r.codeHash),
-      );
-      if (!matchHash) {
+      // WARP-3193 ARCH-3 — the same single-use consume /auth/login uses. A
+      // racer that spent the code first leaves this one unconsumed → 401.
+      const result = await consumeRecoveryCode(prisma, userId, parsed.data.code);
+      if (!result.consumed) {
         res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
         return;
       }
-      const consumed = unused.find((r) => r.codeHash === matchHash);
-      if (!consumed) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-      // Atomic single-use: the usedAt:null guard makes the consume safe
-      // against a concurrent step-up presenting the same code. If a racer
-      // already spent it between our read and here, count is 0 → reject as
-      // invalid rather than re-authenticating. Mirrors claimRefreshRotation.
-      const claimed = await prisma.recoveryCode.updateMany({
-        where: { id: consumed.id, usedAt: null },
-        data: { usedAt: new Date() },
-      });
-      if (claimed.count === 0) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-
-      const remaining = unused.length - 1;
-      res.json({ ok: true, remaining });
+      res.json({ ok: true, remaining: result.remaining });
     } catch (err) {
       next(err);
     }
@@ -3346,7 +3257,18 @@ export function createProtectedAuthRouter(
       }
 
       const { username } = req.params;
-      const { displayName, email, quota, password } = parsed.data;
+      const { displayName, email, quota, password, keepSessions } = parsed.data;
+      // WARP-3111: a password set by SOMEONE ELSE is a reset — the admin now
+      // knows it, and a reset is what an admin does when an account may be
+      // compromised or the person is leaving. So it is temporary (the WARP-824
+      // forced change) and, unless `keepSessions: true`, ends every live
+      // session. Your OWN password through this route is plain maintenance:
+      // forcing a change of a password you just chose is noise, and revoking
+      // your own sessions would sign you out mid-request (self-service
+      // changes go through POST /auth/password, which revokes the others).
+      // Rowless targets have no local flag or sessions to act on.
+      const isReset =
+        password !== undefined && target !== null && req.user?.id !== target.id;
 
       // WARP-2858: the Nextcloud user this row mirrors to. A row with no
       // mapping key (SSO/SCIM-provisioned) has NO Nextcloud account, so the
@@ -3401,6 +3323,7 @@ export function createProtectedAuthRouter(
         // WARP-233: an email change re-encrypts + re-indexes atomically.
         if (email !== undefined) Object.assign(data, emailWriteData(email));
         if (password !== undefined) data.passwordHash = await hashPassword(password);
+        if (isReset) data.mustChangePassword = true;
         if (Object.keys(data).length > 0) {
           const updated = await prisma.user.updateMany({
             // WARP-1564 (review L2): PIN `role` to the value rail 1b decided
@@ -3459,11 +3382,43 @@ export function createProtectedAuthRouter(
         }
       }
 
+      // WARP-3111: the local credential is committed, so the old holder is
+      // cut off now, not at their 12 h session limit. Before the Nextcloud
+      // mirror, so an NC failure below can't leave the sessions alive.
+      // `sessionsRevoked` is null when the admin opted out (distinct from 0 =
+      // nothing was signed in).
+      let sessionsRevoked: number | null = null;
+      if (isReset && target) {
+        if (keepSessions !== true) {
+          sessionsRevoked = await revokeAllSessions(target.id);
+        }
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "key-round",
+          what: "Password reset",
+          sub: `for user ${username}`,
+          refs: {
+            targetUserId: target.id,
+            username,
+            mustChangePassword: true,
+            sessionsRevoked,
+          },
+          actor: actorFromRequest(req),
+        });
+      }
+      const resetFields = isReset ? { mustChangePassword: true, sessionsRevoked } : {};
+
       // Mirror the changes to Nextcloud (the WebDAV account + NC-side
       // attributes). One OCS PUT per field; the plaintext password is sent
       // here so the user's Files/WebDAV login keeps working.
       if (ncUsername === null) {
-        res.json({ status: "ok", username, ncMirror: "no_account" satisfies NcMirror });
+        res.json({
+          status: "ok",
+          username,
+          ncMirror: "no_account" satisfies NcMirror,
+          ...resetFields,
+        });
         return;
       }
       if (displayName !== undefined) {
@@ -3478,7 +3433,7 @@ export function createProtectedAuthRouter(
       if (password !== undefined) {
         await ncUpdateUser(token, ncUsername, "password", password);
       }
-      res.json({ status: "ok", username, ncMirror: "synced" satisfies NcMirror });
+      res.json({ status: "ok", username, ncMirror: "synced" satisfies NcMirror, ...resetFields });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
         res.status(403).json({ error: "Admin access required" });
@@ -3782,6 +3737,20 @@ export function createProtectedAuthRouter(
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
         }
+        // WARP-3111: the WARP-1526 rails — never yourself, never the owner,
+        // never someone above your rank. See assertSessionRevokeAllowed.
+        try {
+          assertSessionRevokeAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: row,
+          });
+        } catch (err) {
+          if (err instanceof RoleMutationRefusedError) {
+            res.status(err.status).json(err.toJSON());
+            return;
+          }
+          throw err;
+        }
         // WARP-247 — kill session RECORDS (access tokens die at the next
         // middleware check) as well as the refresh denylist (swept internally
         // by revokeAllSessions).
@@ -3941,9 +3910,24 @@ export function createProtectedAuthRouter(
       // No rails re-run here: a DEACTIVATED row holds no operator capacity
       // (rail 5 already excludes it), so removing it cannot strand the box.
       if (prisma && row) {
-        const removed = await prisma.user.deleteMany({
-          where: { id: row.id, directoryStatus: "DEACTIVATED" },
-        });
+        // WARP-3193 SEC-AUTH-6: the rows keyed by USERNAME (notes, calendar
+        // + CalDAV credentials, reminders, chats, push subscriptions) go in
+        // the SAME transaction as the row, and only when the row really goes
+        // — the username must never be free while data still answers to it,
+        // or the next account deriving it inherits that data.
+        const removed = await prisma.$transaction(async (tx) => {
+          const r = await tx.user.deleteMany({
+            where: { id: row.id, directoryStatus: "DEACTIVATED" },
+          });
+          if (r.count > 0) {
+            const purged = await purgeUsernameKeyedData(tx, row.username);
+            logger.info(
+              { username: req.params.username, userId: row.id, purged },
+              "Purged username-keyed private data with the deleted user row",
+            );
+          }
+          return r;
+        }, SERIALIZABLE_TX);
         if (removed.count === 0) {
           logger.warn(
             { username: req.params.username, userId: row.id },
@@ -4295,6 +4279,11 @@ export function createProtectedAuthRouter(
         createdBy: r.createdBy,
         createdAt: r.createdAt,
         expiresAt: r.expiresAt,
+        // WARP-3193 QUAL-3: the lifecycle, so the client reads one field
+        // instead of re-deriving it from the timestamps. A pending row past
+        // expiresAt reads as expired here, exactly as the accept route
+        // treats it, until the 03:00 sweep stamps the column.
+        status: r.status === "pending" && isExpired(r) ? "expired" : r.status,
         acceptedAt: r.acceptedAt,
         revokedAt: r.revokedAt,
       }));
@@ -4320,12 +4309,14 @@ export function createProtectedAuthRouter(
           return;
         }
         // Idempotent: revoking an already-revoked invite is a no-op success.
-        if (!invite.revokedAt) {
-          await prisma.userInvite.update({
-            where: { id: invite.id },
-            data: { revokedAt: new Date() },
-          });
-        }
+        // WARP-3193 QUAL-3: only a pending or expired invite moves to
+        // revoked, in one conditional write with its timestamp. An accepted
+        // invite stays accepted — that person already holds the account, and
+        // the old unconditional stamp made the record claim otherwise.
+        await prisma.userInvite.updateMany({
+          where: { id: invite.id, status: { in: ["pending", "expired"] } },
+          data: { status: "revoked", revokedAt: new Date() },
+        });
         res.json({ revoked: true });
       } catch (err) {
         next(err);

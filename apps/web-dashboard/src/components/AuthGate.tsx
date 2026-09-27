@@ -9,15 +9,10 @@ import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
-import { HELP_PATH } from "@/lib/routing";
-
-// `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
-// person so they can set their password at `/invite/<token>`. Omitting it made
-// AuthGate treat the page as protected and bounce the invitee to `/login` on a
-// claimed box (appliance "ready"), so the link "just goes to the sign-in page"
-// and they can never set a password. `startsWith` is safe — `/invite` is the
-// only route under that prefix.
-const PUBLIC_PATHS = ["/setup", "/login", "/invite"];
+import { HELP_PATH, PUBLIC_PATHS, isSecurityWallPath } from "@/lib/routing";
+import { WallModulesKeeper } from "@/lib/hooks/useSecurity";
+import { WallRefused, WallSignedOut } from "@/components/security/WallNotice";
+import { wallRunsFor } from "@/components/security/wall-status";
 
 // WARP-1079 — AuthGate renders ABOVE every page scope (`.droplet-shell`,
 // `.droplet-home`, the auth pages), so its full-screen loading / probe-error
@@ -115,8 +110,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
-    // If not authenticated and not on a public page, redirect to login.
-    if (!user && !isPublicPage && !applianceUnclaimed) {
+    // If not authenticated and not on a public page, redirect to login —
+    // except on the Security wall (WARP-2981), which faces a room: it shows
+    // that the TV is signed out, and only a press opens the sign-in form.
+    if (!user && !isPublicPage && !applianceUnclaimed && !isSecurityWallPath(pathname)) {
       router.replace("/login");
       return;
     }
@@ -299,6 +296,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return <>{children}</>;
   }
 
+  // WARP-2981 — no sign-in on the Security wall: say so, in front of the room,
+  // instead of a sign-in form (the redirect above skips this path).
+  if (!user && isSecurityWallPath(pathname)) {
+    return <WallSignedOut />;
+  }
+
   // Not authenticated — show nothing while redirecting
   if (!user) {
     return null;
@@ -318,6 +321,33 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // public login page.
   if (pathname === "/change-password") {
     return <>{children}</>;
+  }
+
+  // WARP-2981 (ADR-059 §3.8) — the Security wall faces a room from a TV: no
+  // Sidebar, Workspace tabs, <main> or help launcher (the page draws its own
+  // <main id="main">). Unlike the tour and change-password it IS a module
+  // surface, so the module route guard stays: a person Security is not open
+  // to, or a box that switched it off, gets the guard's card and its way out.
+  // Both takeovers above still win — their redirects run earlier in the effect.
+  // The keeper sits OUTSIDE the guard: it keeps the wall's modules read polling
+  // (and mirroring into the guard's key) while the guard's card is up, so the
+  // TV comes back by itself once Security is on again.
+  //
+  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Staff
+  // session only. An owner or admin session would sit signed in, unattended,
+  // in a room, one click from everything that account can do; a guest's reads
+  // would all be refused by the server, each an audited denial. The refusal
+  // comes first and alone — no keeper, no guard, no page — so nothing under
+  // AuthGate asks Droplet anything (the layout's providers above it still
+  // make their one-time reads and open the notification socket).
+  if (isSecurityWallPath(pathname)) {
+    if (!wallRunsFor(user.role)) return <WallRefused role={user.role} />;
+    return (
+      <>
+        <WallModulesKeeper />
+        <ModuleRouteGuard>{children}</ModuleRouteGuard>
+      </>
+    );
   }
 
   // Authenticated — show sidebar + main content, plus the persistent help

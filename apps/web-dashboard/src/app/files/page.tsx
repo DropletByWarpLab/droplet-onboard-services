@@ -70,6 +70,11 @@ import {
   fetchShares,
   createShare,
 } from "@/lib/api";
+import {
+  isFilesUnavailableError,
+  FILES_UNAVAILABLE_TITLE,
+  FILES_UNAVAILABLE_HINT,
+} from "@/lib/files-unavailable";
 import { authFetch, useAuth } from "@/lib/auth";
 // WARP-1944 — display-only space naming for the breadcrumb root crumb, the
 // same mapping the SpaceSwitcher's tabs render with (WARP-1808).
@@ -116,6 +121,15 @@ const BULK_SHARE_LIMIT = 20;
  */
 const LIBRARY_SHARE_MANAGER_ONLY =
   "Only a manager can share from this library. Ask one to create the link.";
+
+/**
+ * WARP-3053: a public link to company files (the Workspace or any
+ * department/team library) is owner/admin only, enforced by the box. Members
+ * still share with people. Also the reason a member's multi-select Share is
+ * disabled here, since the bulk path only mints public links.
+ */
+const COMPANY_PUBLIC_LINK_ADMIN_ONLY =
+  "Only an owner or admin can create a public link to company files. You can still share with people in the company.";
 
 /**
  * The share posture of the bulk path, stated rather than inherited.
@@ -420,7 +434,11 @@ export default function FilesPage() {
   // status in the thrown message) — not merely to being below root, so a
   // transient failure deep inside a healthy, registered drive never claims
   // the drive "isn't connected".
+  // WARP-3076 — the box marked the listing degraded: the file service is
+  // down, so neither "empty" nor "drive not connected" is true.
+  const filesUnavailable = isFilesUnavailableError(listingError);
   const driveNotConnected =
+    !filesUnavailable &&
     !!listingError &&
     currentPath !== "/" &&
     /\b404\b/.test(
@@ -1029,9 +1047,12 @@ export default function FilesPage() {
   // Reader posture is the floor, not the whole rule. In a department/team
   // library the share bit is a `manager` right (ADR-029) and the member group
   // masks withhold it, so a contributor's loop would fail N times just as a
-  // reader's would. Personal / Household carry no `right` at all and are
-  // unrestricted. Whatever the cause, the button stays VISIBLE and disabled
-  // with the reason — never silently absent.
+  // reader's would. Personal / Workspace carry no `right` at all; a member
+  // shares them with people freely, but a PUBLIC link from any company
+  // library is owner/admin only (WARP-3053, box-enforced). Whatever the cause,
+  // the button stays VISIBLE and disabled with the reason — never silently absent.
+  const publicLinkBlockedReason =
+    space !== "personal" && !isOwnerOrAdmin ? COMPANY_PUBLIC_LINK_ADMIN_ONLY : undefined;
   const shareBlockedReason = useMemo(() => {
     const isLibrary =
       activeSpace?.kind === "department" || activeSpace?.kind === "team";
@@ -1039,11 +1060,12 @@ export default function FilesPage() {
       return isReaderSpace ? READER_TOOLBAR_TOOLTIP : LIBRARY_SHARE_MANAGER_ONLY;
     }
     if (isReaderSpace) return READER_TOOLBAR_TOOLTIP;
+    if (publicLinkBlockedReason && fm.selectedCount > 1) return publicLinkBlockedReason;
     if (fm.selectedCount > BULK_SHARE_LIMIT) {
       return `You can share up to ${BULK_SHARE_LIMIT} files at once — ${fm.selectedCount} are selected.`;
     }
     return undefined;
-  }, [activeSpace, isReaderSpace, fm.selectedCount]);
+  }, [activeSpace, isReaderSpace, publicLinkBlockedReason, fm.selectedCount]);
 
   // ── Preview (opens rich preview modal) ──
   const handlePreview = useCallback((file: FileEntryInfo) => {
@@ -1672,17 +1694,21 @@ export default function FilesPage() {
                   style={{ color: "var(--text-muted)" }}
                 >
                   <p className="type-subheadline mb-1">
-                    {driveNotConnected
-                      ? "This drive isn't connected to the file browser yet"
-                      : "We couldn't load your files"}
+                    {filesUnavailable
+                      ? FILES_UNAVAILABLE_TITLE
+                      : driveNotConnected
+                        ? "This drive isn't connected to the file browser yet"
+                        : "We couldn't load your files"}
                   </p>
                   <p
                     className="type-caption-1 mb-3"
                     style={{ color: "var(--text-faint)" }}
                   >
-                    {driveNotConnected
-                      ? "Its files will show up here once it finishes connecting. Try again in a moment."
-                      : "Something interrupted the connection. Try again in a moment."}
+                    {filesUnavailable
+                      ? FILES_UNAVAILABLE_HINT
+                      : driveNotConnected
+                        ? "Its files will show up here once it finishes connecting. Try again in a moment."
+                        : "Something interrupted the connection. Try again in a moment."}
                   </p>
                   <button
                     type="button"
@@ -1844,6 +1870,7 @@ export default function FilesPage() {
           fileName={shareFile.name}
           isDirectory={shareFile.isDirectory}
           existingShares={existingShares}
+          publicLinkBlockedReason={publicLinkBlockedReason}
           onChange={() => loadExistingShares(shareFile.path)}
           onClose={() => {
             setShareFile(null);

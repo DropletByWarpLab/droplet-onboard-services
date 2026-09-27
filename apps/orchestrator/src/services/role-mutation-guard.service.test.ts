@@ -76,6 +76,7 @@ import {
   assertRoleChangeAllowed,
   assertRemovalAllowed,
   assertDisableAllowed,
+  assertSessionRevokeAllowed,
   assertUsageWriteAllowed,
   assertAssignableForCreate,
   assertRoleChangeInvariantsTx,
@@ -503,6 +504,59 @@ describe("composites — assertRemovalAllowed / assertDisableAllowed / assertUsa
   });
 });
 
+describe("composite — assertSessionRevokeAllowed (WARP-3111: self → owner → rank)", () => {
+  it("refuses self, then the owner, then a target above the actor's rank", () => {
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "own-1", role: "owner" },
+          target: { id: "own-1", role: "owner" },
+        }),
+      ).code,
+    ).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "adm-1", role: "admin" },
+          target: { id: "own-1", role: "owner" },
+        }),
+      ).code,
+    ).toBe("OWNER_IMMUTABLE");
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "fam-1", role: "family" },
+          target: { id: "adm-1", role: "admin" },
+        }),
+      ).code,
+    ).toBe("ROLE_RANK_EXCEEDED");
+    // Fails closed on a missing role claim.
+    expect(
+      refusal(() =>
+        assertSessionRevokeAllowed({
+          actor: { id: "x", role: null },
+          target: { id: "u1", role: "guest" },
+        }),
+      ).code,
+    ).toBe("ROLE_RANK_EXCEEDED");
+  });
+
+  it("allows equal rank and below", () => {
+    expect(() =>
+      assertSessionRevokeAllowed({
+        actor: { id: "adm-1", role: "admin" },
+        target: { id: "adm-2", role: "admin" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertSessionRevokeAllowed({
+        actor: { id: "own-1", role: "owner" },
+        target: { id: "u1", role: "family" },
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe("composite — assertAssignableForCreate (create/invite sites: rank → assignable)", () => {
   it("admin minting an owner → ROLE_RANK_EXCEEDED with the site's own message (pins preserved)", () => {
     const err = refusal(() =>
@@ -826,6 +880,73 @@ describe("rail 6 — runDisablePostEffects (revoke + pinned 'User disabled' Acti
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         refs: { username: "legacy", targetUserId: null, sessionsRevoked: 0 },
+      }),
+    );
+  });
+});
+
+// WARP-3193 QUAL-1 — revokeAllSessions now REJECTS (503) when Redis refused
+// the sweep. The change these runners follow is already committed, so every
+// other post-effect — above all the mandatory-emit audit row — still lands,
+// the row says the revoke failed, and THEN the error reaches the route.
+describe("rail 6 — a failed revoke still lands the other post-effects, then rejects (WARP-3193 QUAL-1)", () => {
+  const unavailable = Object.assign(new Error("down"), {
+    status: 503,
+    code: "REVOCATION_UNAVAILABLE",
+  });
+
+  it("runRemovalPostEffects: denylist + audit still run, row records the failure, then rejects", async () => {
+    revokeAllSessionsMock.mockRejectedValueOnce(unavailable);
+    await expect(
+      runRemovalPostEffects({
+        targetUserId: "u1",
+        targetUsername: "alice",
+        targetRole: "family",
+        actorUsername: "stefan",
+        actor: { type: "user", id: "owner-id" },
+      }),
+    ).rejects.toBe(unavailable);
+    expect(denylistUserMock).toHaveBeenCalledWith("u1", expect.any(Number));
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User removed",
+        refs: expect.objectContaining({ sessionRevoke: "failed" }),
+      }),
+    );
+  });
+
+  it("runDisablePostEffects: audit still lands with sessionsRevoked null + sessionRevoke failed, then rejects", async () => {
+    revokeAllSessionsMock.mockRejectedValueOnce(unavailable);
+    await expect(
+      runDisablePostEffects({
+        targetUserId: "u-alice",
+        username: "alice",
+        actor: { type: "user", id: "owner-id" },
+      }),
+    ).rejects.toBe(unavailable);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User disabled",
+        refs: expect.objectContaining({ sessionsRevoked: null, sessionRevoke: "failed" }),
+      }),
+    );
+  });
+
+  it("runRoleChangePostEffects: audit still lands with the failure recorded, then rejects", async () => {
+    revokeAllSessionsMock.mockRejectedValueOnce(unavailable);
+    await expect(
+      runRoleChangePostEffects({
+        target: { id: "u1", username: "alice", nextcloudUsername: "alice" },
+        previousRole: "family",
+        nextRole: "guest",
+        actorUsername: "stefan",
+        actor: { type: "user", id: "owner-id" },
+      }),
+    ).rejects.toBe(unavailable);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Role changed",
+        refs: expect.objectContaining({ sessionRevoke: "failed" }),
       }),
     );
   });

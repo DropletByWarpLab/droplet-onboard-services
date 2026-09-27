@@ -115,7 +115,9 @@
  * and shared with the `role` claim this function already trusts:
  *   (a) sid-less legacy access tokens skip checkSession entirely (≤15 min);
  *   (b) checkSession fails OPEN when Redis is unreachable;
- *   (c) revokeAllSessions swallows a Redis error, so a sweep can be partial.
+ *   (c) a revokeAllSessions sweep cut short by a Redis error can be partial
+ *       (WARP-3193 QUAL-1: it now rejects 503 instead of reporting success,
+ *       but what it had not reached yet stays live until retried).
  * In every one of those conditions a stale `role: "owner"` claim already
  * grants the §3 owner bypass — total reach, no narrowing, no read. A stale
  * `accessRoleId: null` is strictly narrower than a hazard already accepted.

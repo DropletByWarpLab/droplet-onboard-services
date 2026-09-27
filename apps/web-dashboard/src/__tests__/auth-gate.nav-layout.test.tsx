@@ -24,10 +24,13 @@ vi.mock("@/components/workspace/WorkspaceShell", () => ({
   ),
 }));
 vi.mock("@/components/help/HelpLauncher", () => ({
-  HelpLauncher: () => null,
+  HelpLauncher: () => <div data-testid="help-launcher" />,
+}));
+vi.mock("@/lib/hooks/useSecurity", () => ({
+  WallModulesKeeper: () => <div data-testid="wall-modules-keeper" />,
 }));
 vi.mock("@/components/ModuleRouteGuard", () => ({
-  ModuleRouteGuard: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  ModuleRouteGuard: ({ children }: { children: React.ReactNode }) => <div data-testid="module-guard">{children}</div>,
 }));
 
 const layoutRef = { current: "sidebar" as "sidebar" | "workspace" };
@@ -35,9 +38,12 @@ vi.mock("@/lib/nav-layout", () => ({
   useNavLayout: () => ({ layout: layoutRef.current, setLayout: vi.fn() }),
 }));
 
+const userRef: { current: { id: string; username: string; displayName: string; role?: string } } = {
+  current: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+};
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({
-    user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+    user: userRef.current,
     isLoading: false,
     setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
     setupProbeError: null,
@@ -47,10 +53,12 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import { AuthGate } from "@/components/AuthGate";
+import { WALL_COPY } from "@/components/security/wall-status";
 
 beforeEach(() => {
   pathnameValue = "/";
   layoutRef.current = "sidebar";
+  userRef.current = { id: "u1", username: "ada", displayName: "Ada", role: "owner" };
 });
 
 describe("AuthGate — nav layout switch (WARP-2971)", () => {
@@ -80,5 +88,76 @@ describe("AuthGate — nav layout switch (WARP-2971)", () => {
     render(<AuthGate>page</AuthGate>);
     expect(screen.queryByTestId("workspace-shell")).toBeNull();
     expect(screen.queryByTestId("sidebar-shell")).toBeNull();
+  });
+});
+
+describe("AuthGate — the Security wall has no chrome, but keeps the module guard (WARP-2981)", () => {
+  it.each([
+    ["sidebar", "/security/wall"],
+    ["workspace", "/security/wall"],
+    // With Next's `trailingSlash` on, this is the path the wall is served at.
+    ["sidebar", "/security/wall/"],
+  ] as const)("with the %s layout on %s: no shell, no <main>, no help — the guard wraps the page", (layout, path) => {
+    layoutRef.current = layout;
+    pathnameValue = path;
+    userRef.current = { ...userRef.current, role: "family" };
+    render(<AuthGate>wall page</AuthGate>);
+    expect(screen.queryByTestId("sidebar-shell")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell")).toBeNull();
+    expect(screen.queryByTestId("help-launcher")).toBeNull();
+    expect(document.querySelector("main#main")).toBeNull();
+    expect(screen.getByTestId("module-guard")).toHaveTextContent("wall page");
+    // The wall's modules keeper sits BESIDE the guard, never inside it: when the guard
+    // blocks and unmounts the wall, the keeper's read is what lets the TV back in.
+    expect(screen.getByTestId("wall-modules-keeper").closest("[data-testid='module-guard']")).toBeNull();
+  });
+
+  it.each(["/security", "/security/wallpaper"])("…and %s still gets the shell and the help launcher", (path) => {
+    pathnameValue = path;
+    render(<AuthGate>security page</AuthGate>);
+    expect(screen.getByTestId("sidebar-shell")).toBeInTheDocument();
+    expect(screen.getByTestId("help-launcher")).toBeInTheDocument();
+    expect(document.querySelector("main#main")).toHaveTextContent("security page");
+    expect(screen.queryByTestId("wall-modules-keeper")).toBeNull();
+  });
+});
+
+describe("AuthGate — D6: the wall runs on a Staff session only (WARP-2981)", () => {
+  it.each([
+    ["owner", "/security/wall", WALL_COPY.refusedTitle],
+    ["admin", "/security/wall", WALL_COPY.refusedTitle],
+    ["admin", "/security/wall/", WALL_COPY.refusedTitle],
+    // Every read the wall makes is floored at owner/admin/family on the server: a guest wall would
+    // only collect 403s, each an audited denial that becomes a threat incident.
+    ["guest", "/security/wall", WALL_COPY.refusedGuestTitle],
+    // A role this build doesn't know (or none at all): the wall can't vouch it is not an admin's.
+    ["service", "/security/wall", WALL_COPY.refusedTitle],
+    [undefined, "/security/wall", WALL_COPY.refusedTitle],
+  ])("a %s session on %s: the refusal alone — no keeper, no guard, no page", (role, path, title) => {
+    userRef.current = { ...userRef.current, role };
+    pathnameValue = path;
+    render(<AuthGate>wall page</AuthGate>);
+    expect(screen.getByRole("heading", { level: 1, name: title })).toBeInTheDocument();
+    expect(screen.queryByText("wall page")).toBeNull();
+    expect(screen.queryByTestId("wall-modules-keeper")).toBeNull();
+    expect(screen.queryByTestId("module-guard")).toBeNull();
+    expect(screen.queryByTestId("sidebar-shell")).toBeNull();
+    expect(screen.queryByTestId("help-launcher")).toBeNull();
+  });
+
+  it("a family (Staff) session runs the wall", () => {
+    userRef.current = { ...userRef.current, role: "family" };
+    pathnameValue = "/security/wall";
+    render(<AuthGate>wall page</AuthGate>);
+    expect(screen.getByTestId("module-guard")).toHaveTextContent("wall page");
+    expect(screen.queryByText(WALL_COPY.refusedTitle)).toBeNull();
+    expect(screen.queryByText(WALL_COPY.refusedGuestTitle)).toBeNull();
+  });
+
+  it("an owner anywhere else is not refused", () => {
+    pathnameValue = "/security";
+    render(<AuthGate>security page</AuthGate>);
+    expect(document.querySelector("main#main")).toHaveTextContent("security page");
+    expect(screen.queryByText(WALL_COPY.refusedTitle)).toBeNull();
   });
 });

@@ -115,7 +115,7 @@ const RULES: readonly RedactionRule[] = [
     // explicitly captures scheme + credential together (fail closed).
     name: "auth-header",
     pattern:
-      /\b(X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)((?:Basic|Bearer|Token)\s+[^\s",;]+|[^\s",;]{6,})/gi,
+      /\b(X-Droplet-Auth|X-Nextcloud-Token|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)((?:Basic|Bearer|Token)\s+[^\s",;]+|[^\s",;]{6,})/gi,
     replace: (_m, header: string, sep: string) =>
       `${header}${sep}${REDACTION_PLACEHOLDER}`,
   },
@@ -147,10 +147,12 @@ const RULES: readonly RedactionRule[] = [
   {
     // Sensitive KEY=value or KEY: value (env dumps, structured logs). The value
     // may be bare, single- or double-quoted. We keep the key + the operator so
-    // the line stays legible; only the value is replaced.
+    // the line stays legible; only the value is replaced. The optional `"`
+    // before the operator covers a quoted JSON key (`"x-nextcloud-token":"…"`,
+    // the shape every pino line takes) — WARP-3193 SEC-DATA-2.
     name: "sensitive-assignment",
     pattern: new RegExp(
-      `\\b(${SENSITIVE_KEY_WORD})(\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s"',;]+)`,
+      `\\b(${SENSITIVE_KEY_WORD})("?\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s"',;]+)`,
       "gi",
     ),
     replace: (whole: string, key: string, sep: string) =>

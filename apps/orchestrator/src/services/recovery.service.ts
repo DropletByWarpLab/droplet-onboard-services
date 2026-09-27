@@ -100,3 +100,46 @@ export async function findMatchingRecoveryCodeHash(
   }
   return matched;
 }
+
+/** The slice of Prisma `consumeRecoveryCode` touches. */
+type RecoveryCodeStore = {
+  recoveryCode: Pick<import("@prisma/client").PrismaClient["recoveryCode"], "findMany" | "updateMany">;
+};
+
+export type ConsumeRecoveryCodeResult =
+  | { consumed: true; remaining: number }
+  | { consumed: false };
+
+/**
+ * WARP-3193 ARCH-3 — the ONE recovery-code consume path, shared by
+ * POST /auth/login (pre-session second factor) and POST /auth/recovery
+ * (live-session step-up), so a hardening fix cannot land on only one copy.
+ *
+ * Matches against the user's UNUSED codes only, then claims exactly the
+ * matched row. Atomic single-use: two concurrent requests presenting the
+ * same code both read it unused, but the `usedAt: null` guard means exactly
+ * one update flips it (count 1) and the loser sees count 0 → not consumed.
+ * Mirrors claimRefreshRotation / invite single-use.
+ */
+export async function consumeRecoveryCode(
+  prisma: RecoveryCodeStore,
+  userId: string,
+  candidate: string,
+): Promise<ConsumeRecoveryCodeResult> {
+  const unused = await prisma.recoveryCode.findMany({
+    where: { userId, usedAt: null },
+  });
+  const matchHash = await findMatchingRecoveryCodeHash(
+    candidate,
+    unused.map((r) => r.codeHash),
+  );
+  if (!matchHash) return { consumed: false };
+  const consumed = unused.find((r) => r.codeHash === matchHash);
+  if (!consumed) return { consumed: false };
+  const claimed = await prisma.recoveryCode.updateMany({
+    where: { id: consumed.id, usedAt: null },
+    data: { usedAt: new Date() },
+  });
+  if (claimed.count === 0) return { consumed: false };
+  return { consumed: true, remaining: unused.length - 1 };
+}

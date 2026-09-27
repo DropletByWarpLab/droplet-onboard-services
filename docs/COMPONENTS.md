@@ -55,7 +55,8 @@ is deliberately **no separate API gateway service** in front of the orchestrator
                                                    │
           ┌────────────────────────────────────── orchestrator (Node/Express/Prisma)
           │  agent loop ── stdio ──► mcp-server ──► @droplet/tools-core (≈78 tools)
-          │  inference  ── gRPC ───► ai-gateway ──► Ollama (sibling repo) / cloud LLMs
+          │  inference  ── HTTP ───► ai-gateway /ai/chat ──► Ollama/DMR (sibling repo) / cloud LLMs
+          │  embed/rerank ─ gRPC ──► ai-gateway :50051 (EmbedText / Rerank / ClassifyQuery)
           │  files      ── HTTP ───► nextcloud ;  index ◄─ MQTT ─ file-indexer
           │  network    ── HTTP ───► routing ──► OpenWrt router (ubus)
           │  switch     ── HTTP ───► switch service ──► managed switch
@@ -93,11 +94,18 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **device-identity-svc** | `services/device-identity-svc/` | Python + gRPC | TPM 2.0 identity sidecar |
 | **automount** | `services/automount/` | Bash + udev | USB/NVMe auto-mount → Nextcloud |
 | **_shared** | `services/_shared/` | Python | FIPS self-test helper (Python services) |
+| **doc-render** | `services/doc-render/` | Python + FastAPI | Document spec → `.pdf` / `.docx` / `.xlsx` bytes |
+| **egress-audit** | `services/egress-audit/` | Python (host systemd unit) | Runtime egress auditor (conntrack + DNS) |
+| **erp-connector** | `services/erp-connector/` | TypeScript | `@droplet/erp-connector` — ERP/SaaS connector framework (in-process library) |
+| **fleet-agent** | `services/fleet-agent/` | Python | Opt-in fleet telemetry to the analytics portal (profile `telemetry`) |
+| **inference-manager** | `services/inference-manager/` | Python + FastAPI | Model lifecycle + catalog (vendored from `droplet-local-LLM`; profiles `dmr`, `dmr-cuda`) |
+| **matter-controller** | `services/matter-controller/` | TypeScript + matter.js | Native Matter controller sidecar (host network, BLE + mDNS) |
+| **sandbox** | `services/sandbox/` | Python | Hardened execution service (routine steps, workshop runs, extensions) |
+| **web-fetch** | `services/web-fetch/` | Python + FastAPI | The only outbound-HTTP path for ambient-data tools (profile `web`) |
 | **openwrt** | `openwrt/` | Shell + OpenWrt ImageBuilder | Router firmware image + overlay |
 | **docker** | `docker/` | Compose + nginx | Stack definition + reverse proxy |
 | **scripts** | `scripts/` | Shell | Provisioning, reset, security/test gates |
 | **proto / schemas** | `proto/`, `schemas/` | protobuf + JSON Schema | gRPC + anchor contracts |
-| **clients/desktop** | `clients/desktop/` | — | Placeholder (Tauri planned, not started) |
 
 ---
 
@@ -112,7 +120,7 @@ network. Host-published ports and host-network services are called out.
 | orchestrator | 3000 | HTTP + WebSocket | internal (proxied at `/api/`) |
 | web-dashboard | 3001 | HTTP | internal (proxied at `/`) |
 | ai-gateway | 8000 | HTTP (REST/SSE) | internal (proxied at `/ai/`) |
-| ai-gateway | 50051 | gRPC | internal — `EmbedText` / `Rerank` / `Chat` |
+| ai-gateway | 50051 | gRPC | internal — `EmbedText` / `Rerank` / `ClassifyQuery` (chat is HTTP) |
 | mcp-server | 9090 (`MCP_PORT`) | streamable-HTTP | internal (+ stdio child of orchestrator) |
 | mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (profile `remote-mcp`) — holds the customer's vendor credential in memory |
 | routing | 8080 | HTTP | **host network mode** (direct router access) |
@@ -126,6 +134,11 @@ network. Host-published ports and host-network services are called out.
 | file-indexer | 8090 | HTTP (admin reindex) | internal |
 | rag-eval | 8090 | HTTP (trigger) | internal (profile `eval`) |
 | device-identity-svc | `unix:///var/run/droplet/device-identity.sock` | gRPC | unix socket |
+| matter-controller | 8083 | HTTP | host network (BLE commissioning + LAN mDNS) |
+| inference-manager | 8002 | HTTP | internal only, no `ports:` (profiles `dmr`, `dmr-cuda`) |
+| web-fetch | 8010 | HTTP | internal (profile `web`) |
+| doc-render | 8020 | HTTP | internal |
+| sandbox | 8030 | HTTP | internal-only network (`droplet-internal`), no egress |
 | frigate | 5000 | HTTP/RTSP | NVR (profile `linux`/`full`) |
 | db / cache / broker | 5432 / 6379 / 1883 | Postgres / Redis / MQTT | internal |
 
@@ -172,7 +185,7 @@ network. Host-published ports and host-network services are called out.
   `switch.client.ts`, `camera.service.ts`, `nextcloud.client.ts`, plus
   pollers/tickers (device-reconcile, AP discovery, schedule, reminders,
   tool-schedule, agent-run claim/heartbeat, agent-run-schedule, screen-QR).
-- **Talks to:** ai-gateway (gRPC + REST), mcp-server (stdio child), routing /
+- **Talks to:** ai-gateway (REST for chat, gRPC for embed/rerank), mcp-server (stdio child), routing /
   switch / display / camera-discovery / frigate / nextcloud (HTTP), Redis,
   MQTT, device-identity-svc (gRPC unix socket). PM is served natively from the
   orchestrator's own Postgres (ADR-026) — no external PM service.
@@ -315,7 +328,8 @@ network. Host-published ports and host-network services are called out.
 
 - **Purpose:** Provider router — **not** a tool dispatcher. FastAPI on 8000 for
   `/ai/chat` (+ models/sessions/health), gRPC on 50051 for `EmbedText` / `Rerank`
-  / `Chat`. Cloud providers (OpenAI, Anthropic) go through **LiteLLM**; local
+  / `ClassifyQuery`. The proto's `Chat` / `StreamChat` RPCs are still served but
+  have no caller in this repo — chat is HTTP. Cloud providers (OpenAI, Anthropic) go through **LiteLLM**; local
   Ollama goes through **direct httpx** to the OpenAI-compat endpoint.
 - **Ollama call path (critical):** chat goes **direct to Ollama `:11434`**, *not*
   through `inference-manager`'s `:8002/proxy` (whose 120 s read timeout blows up on
@@ -516,6 +530,75 @@ network. Host-published ports and host-network services are called out.
   `assert_fips_at_boot_or_exit("<service>")` before any crypto. Gated by
   `DROPLET_FIPS_REQUIRED`.
 
+## services/doc-render
+
+- **Purpose:** turns a document spec into `.pdf` / `.docx` / `.xlsx` bytes
+  (WARP-2211) — the model emits a spec, this renders it. `POST /render`, open
+  `GET /health`; everything else needs `DOC_RENDER_SERVICE_TOKEN` (fails closed).
+- **Talks to:** nothing. Stateless, no storage, no egress; the orchestrator's
+  `POST /api/files/render` owns auth, paths and the upload. Port 8020, internal.
+
+## services/egress-audit
+
+- **Purpose:** runtime egress auditor (WARP-268): traces every outbound flow
+  from any container (conntrack + port-53 capture), attributes it to a compose
+  service, and flags flows outside `docs/security/allowed-egress.yaml` into the
+  signed activity log.
+- **Gotchas:** **not a compose service** — it needs the host network namespace and
+  root, so it runs as the `droplet-egress-audit.service` systemd unit installed by
+  `scripts/lib/single-box.sh` (same precedent as `automount`).
+
+## services/erp-connector (`@droplet/erp-connector`)
+
+- **Purpose:** ERP / SaaS connector framework consumed **in-process** by the
+  orchestrator (a workspace library, not a container): Eaglesoft direct-SQL
+  (through `services/erp-sql-bridge`) plus the REST connectors (Stripe, Xero,
+  HubSpot, …). Builds to `dist/` — one of the `npm run bootstrap` leaves.
+- **Reference:** `services/erp-connector/README.md`, `docs/integrations/eaglesoft.md`.
+
+## services/fleet-agent
+
+- **Purpose:** box-side fleet telemetry to the Warp Lab analytics portal
+  (WARP-963). **Off by default:** profile `telemetry`, and it dials nothing
+  unless `DROPLET_TELEMETRY_ENABLED=1` and credentials are provisioned.
+  Fail-open: it observes the box and can never degrade it. Its full egress table
+  is in its README.
+
+## services/inference-manager
+
+- **Purpose:** model lifecycle + catalog (`/models/*`, `/health`) behind
+  `GET /api/models/catalog`. **Vendored** from `droplet-local-LLM` (WARP-2131) —
+  read `services/inference-manager/VENDORED.md` before editing; it is a fork kept
+  in sync by hand.
+- **Surface:** `http://inference-manager:8002`, compose network only (no `ports:`:
+  `POST /models/pull` is an arbitrary-registry-pull primitive). Profiles `dmr`,
+  `dmr-cuda`. Not on the chat path.
+
+## services/matter-controller
+
+- **Purpose:** native Matter controller (matter.js) as a host-network sidecar
+  (ADR-022 / WARP-850): raw HCI for BLE commissioning + LAN mDNS. HTTP on 8083.
+- **Talks to:** fronted by the orchestrator (`matter.service.ts` is its HTTP
+  client); the dashboard keeps calling `/api/matter/*`.
+- **Gotchas:** never add `MATTER_*` env vars (see CLAUDE.md § Environment
+  variables); use `DROPLET_MATTER_*`.
+
+## services/sandbox
+
+- **Purpose:** the one hardened execution service (WARP-2895, ADR-056): routine
+  `transform` / `when` steps, workshop runs (versioned workspaces) and extension
+  processes. A thin HTTP front over `subprocess`, port 8030.
+- **Gotchas:** sits only on the `internal: true` `droplet-internal` network — its
+  registered egress is **none**, which is what makes running customer-written code
+  there acceptable. Holds no credential but its own bearer.
+
+## services/web-fetch
+
+- **Purpose:** the **only** component allowed outbound HTTP for the ambient-data
+  tools (WARP-1436): `GET /weather`, `GET /rates` against fixed keyless
+  destinations registered in `docs/security/allowed-egress.yaml`. Port 8010,
+  profile `web`; `WEB_FETCH_SERVICE_TOKEN` required (fails closed).
+
 ---
 
 # Infrastructure & tooling
@@ -599,12 +682,6 @@ network. Host-published ports and host-network services are called out.
 - `schemas/anchor.schema.json` — JSON Schema 2020-12 for the `Anchor` union; the
   source of truth for `packages/shared-types/src/anchor.ts` (regenerate, don't
   hand-edit the `.ts`).
-
-## clients/desktop
-
-- **Placeholder only** — no code committed. Per ADR-009 the desktop targets are a
-  Tauri Windows `.exe` and macOS via Mac Catalyst on the iOS repo; neither lives
-  here yet.
 
 ---
 
