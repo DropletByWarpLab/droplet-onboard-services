@@ -49,7 +49,9 @@ Status:
   last_wake_at / last_wake_score / last_wake_model
   last_transcript / last_transcript_at
   stt_loaded — true iff the STT server was reachable at startup
-  error_message (only set in 'error' state)
+  error_message — the latched fault in 'error'; otherwise why the last
+    voice turn failed (TTS / playback / LLM stream — the pipeline keeps
+    listening, WARP-3199), cleared by the next wake
 
 `wake_detected` and `transcript_ready` are transient UI hints that
 auto-decay to `listening` after `WAKE_VISUAL_DECAY_S` seconds (2 s by
@@ -1120,7 +1122,7 @@ class WakePipeline:
             try:
                 audio = self._tts.synthesize(text, voice=voice)
             except TTSUnavailable as exc:
-                self._set_error(f"TTS synthesize failed: {exc}")
+                self._fail_turn(f"TTS synthesize failed: {exc}")
                 return {"ok": False, "error": str(exc), "duration_s": 0.0}
 
             # Play. Skip if the synthesized audio is empty (e.g. empty text).
@@ -1131,14 +1133,14 @@ class WakePipeline:
             try:
                 self._play_pcm(audio)
             except Exception as exc:
-                self._set_error(f"playback failed: {exc}")
+                self._fail_turn(f"playback failed: {exc}")
                 # Mid-playback failure still drove the speaker for some of
                 # the reply, so the same anti-feedback window applies: the
                 # partial Piper output can bleed into the mic and score
                 # above threshold. Arm the post-speak cooldown here too —
                 # _restore_state_after_speak (which normally sets it) does
-                # NOT run on this path because _set_error moved us out of
-                # 'speaking' into 'error'.
+                # NOT run on this path; _fail_turn already moved us out of
+                # 'speaking'.
                 with self._lock:
                     self._speak_ended_at = time.time()
                 return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
@@ -1304,7 +1306,7 @@ class WakePipeline:
             # Error path: surface it, and arm the cooldown if we drove the
             # speaker at all — even a partial reply can bleed into the shared
             # mic (same contract as speak()'s mid-playback failure).
-            self._set_error(f"voice reply failed ({error_kind}): {first_error}")
+            self._fail_turn(f"voice reply failed ({error_kind}): {first_error}")
             if drove_speaker:
                 with self._lock:
                     self._speak_ended_at = time.time()
@@ -2189,6 +2191,10 @@ class WakePipeline:
             self._last_wake_model = event.model_name
             if not calibrating:
                 self._state = "wake_detected"
+                # A new turn starts clean: drop the last failed turn's
+                # note (WARP-3199). A latched 'error' never reaches here —
+                # _on_frame drops its frames.
+                self._error_message = None
 
         if calibrating:
             logger.info(
@@ -2353,6 +2359,21 @@ class WakePipeline:
     def _set_error(self, msg: str) -> None:
         with self._lock:
             self._state = "error"
+            self._error_message = msg
+
+    def _fail_turn(self, msg: str) -> None:
+        """One voice turn failed — TTS, playback, or the LLM reply stream
+        (WARP-3199). Report why on /voice/status, then keep listening: the
+        next wake is a fresh try against a dependency that has usually come
+        back (a TTS timeout, a dropped SSE). Latching 'error' here left the
+        assistant deaf and /audio/measure refusing until voice-io restarted.
+        Stuck faults (the detector, the capture loop) still use _set_error,
+        and one that landed mid-turn keeps its state and message."""
+        with self._lock:
+            if self._state == "error":
+                return
+            if self._state in ("speaking", "transcript_ready"):
+                self._state = "listening"
             self._error_message = msg
 
     @staticmethod
