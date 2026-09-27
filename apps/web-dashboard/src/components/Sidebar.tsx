@@ -16,7 +16,7 @@ import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
-import { useNavGates } from "@/lib/hooks/useNavGates";
+import { useNavGates } from "@/components/Departments/useNavGates";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
 import { VERSION_LABEL } from "@/lib/brand";
 // WARP-2956 — collapse (64px icon rail) + drag-resize (200–360px) state for

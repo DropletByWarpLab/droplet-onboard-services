@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import type { DashboardPage } from "@droplet/shared-types";
 
 import { assistantPages } from "@/lib/assistant-pages";
-import { useNavGates } from "@/lib/hooks/useNavGates";
+import { useNavGates } from "@/components/Departments/useNavGates";
 
 /**
  * WARP-3116 — the pages the assistant may link to or open for the signed-in
