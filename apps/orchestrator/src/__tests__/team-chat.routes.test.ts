@@ -90,6 +90,8 @@ interface UserRow {
   displayName: string;
   role: string;
   directoryStatus: "ACTIVE" | "DEACTIVATED";
+  /** WARP-3263 — anchors the guest's own invite; defaults to 2026-08-01. */
+  createdAt?: Date;
 }
 interface ThreadRow {
   id: string;
@@ -144,6 +146,8 @@ interface ChatMessageRow {
   createdAt: Date;
 }
 
+const USER_CREATED_AT = new Date("2026-08-01T00:00:00Z");
+
 let seq = 0;
 const nextId = (prefix: string) => `${prefix}-${++seq}`;
 
@@ -155,7 +159,7 @@ function createTeamChatPrisma(seed: {
   sessions?: SessionRow[];
   chatMessages?: ChatMessageRow[];
   departments?: DepartmentRow[];
-  invites?: Array<{ username: string; status: string; createdBy: string }>;
+  invites?: Array<{ username: string; status: string; createdBy: string; acceptedAt?: Date }>;
 }) {
   const users = [...(seed.users ?? [])];
   const threads = [...(seed.threads ?? [])];
@@ -194,6 +198,24 @@ function createTeamChatPrisma(seed: {
     participants,
     messages,
     user: {
+      findUnique: vi.fn(async (args: { where: { id: string } }) => {
+        const u = users.find((x) => x.id === args.where.id);
+        return u ? { createdAt: u.createdAt ?? USER_CREATED_AT } : null;
+      }),
+      // resolveCaller's X-Droplet-User lookup (mcp service path).
+      findFirst: vi.fn(
+        async (args: {
+          where: { username: string; directoryStatus: string; role: { in: string[] } };
+        }) => {
+          const u = users.find(
+            (x) =>
+              x.username === args.where.username &&
+              x.directoryStatus === args.where.directoryStatus &&
+              args.where.role.in.includes(x.role),
+          );
+          return u ? { id: u.id, username: u.username, role: u.role } : null;
+        },
+      ),
       findMany: vi.fn(
         async (args: {
           where: {
@@ -436,13 +458,21 @@ function createTeamChatPrisma(seed: {
       ),
     },
     // WARP-3263 — the guest's accepted invite names who invited them.
+    // Honors the acceptedAt floor and newest-first like the real query.
     userInvite: {
       findFirst: vi.fn(
-        async (args: { where: { username: string; status: string } }) =>
-          (seed.invites ?? []).find(
-            (i) =>
-              i.username === args.where.username && i.status === args.where.status,
-          ) ?? null,
+        async (args: {
+          where: { username: string; status: string; acceptedAt?: { gte: Date } };
+        }) =>
+          (seed.invites ?? [])
+            .map((i) => ({ ...i, acceptedAt: i.acceptedAt ?? USER_CREATED_AT }))
+            .filter(
+              (i) =>
+                i.username === args.where.username &&
+                i.status === args.where.status &&
+                (!args.where.acceptedAt || i.acceptedAt >= args.where.acceptedAt.gte),
+            )
+            .sort((a, b) => b.acceptedAt.getTime() - a.acceptedAt.getTime())[0] ?? null,
       ),
     },
     chatSession: {
@@ -638,6 +668,64 @@ describe("team-chat — external guests (WARP-3263)", () => {
       { id: alice.id, displayName: alice.displayName },
       { id: bob.id, displayName: bob.displayName },
     ]);
+  });
+
+  it("a reused username never inherits a deleted person's old inviter", async () => {
+    // An old "carol" was invited by bob and accepted in March; today's carol
+    // (a different person, created 2026-08-01, not via an invite) must not
+    // see bob as her inviter.
+    const prisma = createTeamChatPrisma({
+      users: [alice, bob, carol],
+      invites: [
+        {
+          username: carol.username,
+          status: "accepted",
+          createdBy: bob.username,
+          acceptedAt: new Date("2026-03-01T00:00:00Z"),
+        },
+      ],
+    });
+    const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
+    expect(res.status).toBe(200);
+    expect(res.body.contacts).toEqual([]);
+  });
+
+  it("the guest's own invite counts even though it was accepted seconds before the row existed", async () => {
+    const prisma = createTeamChatPrisma({
+      users: [alice, carol],
+      invites: [
+        {
+          username: carol.username,
+          status: "accepted",
+          createdBy: alice.username,
+          acceptedAt: new Date(USER_CREATED_AT.getTime() - 3_000),
+        },
+      ],
+    });
+    const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
+    expect(res.body.contacts).toEqual([{ id: alice.id, displayName: alice.displayName }]);
+  });
+
+  it("a guest acting through the MCP service (X-Droplet-User) gets the guest directory only", async () => {
+    const t = seedThread({ id: "thread-bc" });
+    const owner2: UserRow = { ...alice, id: "uuid-o2", username: "o2", displayName: "O Two", role: "owner" };
+    const prisma = createTeamChatPrisma({
+      users: [alice, bob, carol, owner2],
+      threads: [t],
+      participants: [seedParticipant(t.id, bob.id), seedParticipant(t.id, carol.id)],
+    });
+    const app = buildApp(prisma, { id: "_service:mcp", username: "_service:mcp", role: "service" });
+    const res = await request(app)
+      .get("/api/team-chat/contacts")
+      .set("X-Droplet-User", carol.username);
+    expect(res.status).toBe(200);
+    expect(res.body.contacts).toEqual([{ id: bob.id, displayName: bob.displayName }]);
+    // And the same acting guest can't start a conversation.
+    const post = await request(app)
+      .post("/api/team-chat/threads")
+      .set("X-Droplet-User", carol.username)
+      .send({ kind: "direct", participantIds: [bob.id] });
+    expect(post.status).toBe(403);
   });
 
   it("a guest with no conversations and no invite row sees nobody", async () => {

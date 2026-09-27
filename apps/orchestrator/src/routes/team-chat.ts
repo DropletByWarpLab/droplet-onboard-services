@@ -78,6 +78,10 @@ type AuthedRequest = {
   user?: { id?: string; username?: string; role?: string };
 };
 
+/** WARP-3263 — how long before a User row its own invite's acceptedAt may
+ *  be (the accept route claims the invite, then provisions, then upserts). */
+const INVITE_ACCEPT_SLACK_MS = 10 * 60_000;
+
 /** The four human tiers — service principals never message. */
 const HUMAN_ROLES = ["owner", "admin", "family", "guest"] as const;
 
@@ -392,11 +396,29 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
             },
             select: { userId: true },
           });
-    const invite = await prisma.userInvite.findFirst({
-      where: { username: me.username, status: "accepted" },
-      orderBy: { acceptedAt: "desc" },
-      select: { createdBy: true },
+    // UserInvite.username is NOT unique: a guest who reuses a deleted
+    // person's username must not inherit that person's inviter. Only an
+    // invite accepted around or after THIS row's creation counts. Not a
+    // strict `>= createdAt`: auth.ts claims the invite (stamps acceptedAt)
+    // BEFORE the Nextcloud provisioning call and the User upsert, so the
+    // guest's own invite is accepted a few seconds before its row exists.
+    // ponytail: fixed 10-minute slack; a stored inviteId on User if an
+    // exact link is ever needed.
+    const self = await prisma.user.findUnique({
+      where: { id: me.id },
+      select: { createdAt: true },
     });
+    const invite = self
+      ? await prisma.userInvite.findFirst({
+          where: {
+            username: me.username,
+            status: "accepted",
+            acceptedAt: { gte: new Date(self.createdAt.getTime() - INVITE_ACCEPT_SLACK_MS) },
+          },
+          orderBy: { acceptedAt: "desc" },
+          select: { createdBy: true },
+        })
+      : null;
     const rows = await prisma.user.findMany({
       where: {
         directoryStatus: "ACTIVE",
