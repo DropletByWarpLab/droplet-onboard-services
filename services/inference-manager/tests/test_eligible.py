@@ -571,3 +571,31 @@ async def test_eligible_shipped_gpt_oss_is_not_satisfied_by_its_latest_build(
 
     pulled = {m["name"]: m["pulled"] for m in (await client.get("/models/eligible")).json()["models"]}
     assert pulled["gpt-oss:20b"] is False
+
+
+async def test_shipped_catalog_sends_clients_customer_copy_only(client, respx_mock, manifest_path):
+    """WARP-3270: the Models page showed "UNMEASURED: bench-gate on the box
+    before promoting it (WARP-1114 shape)". Serve the SHIPPED catalog through
+    both endpoints: no entry carries `notes`, and no description carries a
+    ticket key or engineering shorthand."""
+    from pathlib import Path
+
+    import vram
+    vram._cached_gb = 1000  # every entry eligible
+
+    shipped = Path(__file__).resolve().parents[1] / "models" / "model-manifest.json"
+    manifest_path.write_text(shipped.read_text())
+    assert any("notes" in m for m in json.loads(shipped.read_text())["models"])
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": []})
+    )
+
+    for path in ("/models/eligible", "/models/manifest"):
+        models = (await client.get(path)).json()["models"]
+        assert len(models) == len(json.loads(shipped.read_text())["models"])
+        for m in models:
+            assert "notes" not in m, f"{path}: {m['name']} leaks notes"
+            for banned in ("WARP-", "UNMEASURED", "bench-gate"):
+                assert banned.lower() not in (m.get("description") or "").lower(), (
+                    f"{path}: {m['name']} description carries {banned!r}"
+                )

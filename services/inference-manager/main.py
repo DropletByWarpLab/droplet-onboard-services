@@ -311,7 +311,12 @@ async def get_manifest():
     if not path.exists():
         return {"models": []}
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    # WARP-3270: `notes` is internal; it never leaves the box's sidecar.
+    for entry in data.get("models", []):
+        if isinstance(entry, dict):
+            entry.pop("notes", None)
+    return data
 
 
 @app.get("/models/eligible")

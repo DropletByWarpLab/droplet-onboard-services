@@ -43,7 +43,13 @@ class ManifestEntry(BaseModel):
     # LOCAL-LLM-MODEL-SWITCHING-ARCHITECTURE-BRIEF.md §6 in the handbook.
     display_name: str | None = None
     maker: str | None = None
+    # Shown to customers on the Models page: one plain sentence, no ticket
+    # keys or engineering shorthand (WARP-3270).
     description: str | None = None
+    # WARP-3270: internal engineering notes (quantization math, bench gates,
+    # ticket keys). NEVER returned by the API: /models/eligible lists its
+    # fields explicitly and /models/manifest strips this one.
+    notes: str | None = None
     capabilities: list[str] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
     disk_gb: float | None = Field(default=None, ge=0)
