@@ -62,8 +62,8 @@ ios       blocked   WARP-1955   no distribution pipeline at all; becomes `store`
 #   1. clients.lock.json pins a macos build (needs the DROPLET_CLIENT_APPS_TOKEN
 #      secret and a published DropletAgent release);
 #   2. scripts/image/build-iso.sh stages the lock's installers before its
-#      pre-flight audit (WARP-3174; an image is built from a checkout, which has none).
-# Flip this row in the PR that lands the second. tests/app-downloads-audit.test.sh
+#      pre-flight audit and carries them in the ISO (WARP-3174, landed).
+# Flip this row in the PR that pins the first macos build in the lock. tests/app-downloads-audit.test.sh
 # refuses `installer` while the lock pins no macos build.
 macos     blocked   WARP-3120   DropletAgent DMG exists (scripts/release-dmg.sh); staged by hand with stage.sh until the OTA release carries it
 

@@ -2,12 +2,13 @@
 # droplet-android — they are never committed here (they'd bloat every
 # clone, and this is not the repo that builds them).
 #
-# Two things put an installer here: an operator running
-# scripts/app-downloads/stage.sh on the box, and (WARP-3120) the box's own
-# OTA update, for the installers clients.lock.json pins. No image-build step
-# or setup.sh path does. If you are reading this because /downloads is
-# empty, see README.md; `bash scripts/app-downloads/audit.sh` will tell you
-# what this release is supposed to carry.
+# Three things put an installer here: an operator running
+# scripts/app-downloads/stage.sh on the box, (WARP-3120) the box's own OTA
+# update, for the installers clients.lock.json pins, and (WARP-3174) the ISO
+# the box was installed from, which carries the staging root build-iso.sh
+# audited. setup.sh never does. If you are reading this because /downloads
+# is empty, see README.md; `bash scripts/app-downloads/audit.sh` will tell
+# you what this release is supposed to carry.
 #
 # Tracked here: only the hand-authored side of the contract, the docs,
 # EXPECTED — the per-platform declaration the auditor reconciles against
