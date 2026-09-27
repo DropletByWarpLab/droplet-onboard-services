@@ -18,9 +18,12 @@
  * middleware/space.ts already rely on; for anyone else this gate is a no-op.
  * Despite its name the header carries `User.username` on the stdio transport
  * (routes/llm.ts, agent-run-worker) and `User.id` on the HTTP transport
- * (`claims.sub`), so it is resolved by username, then by id — the same
- * column routes/brain.ts, agent-runs.ts and tools.ts read. NOT by
- * `nextcloudUsername`: SSO- and SCIM-created users have it null.
+ * (`claims.sub`), so it is resolved by `resolveAssertedUser`
+ * (asserted-user.service.ts, WARP-3098), as routes/brain.ts, agent-runs.ts,
+ * tools.ts, workspace.ts and notifications.ts resolve it: all three columns
+ * at once, one active person or nobody. Never "username, then id, first
+ * match wins": a value that is one person's username and another's id is
+ * AMBIGUOUS, and picking either scopes the call with a stranger's reach.
  *
  * Two questions, both about the acting person:
  *   1. the tool scope — is `domain` in their §3 reach (a write needs `use`)?
@@ -37,7 +40,8 @@
  *   - owner / no custom role  → null scope passes question 1 (same as chat);
  *     question 2 still applies where it applies, and resolves to the full
  *     catalog for owners.
- *   - unknown / deactivated user, or a read error → DENY (fail closed).
+ *   - unknown / ambiguous / deactivated user, or a read error → DENY (fail
+ *     closed).
  *     This includes a VOICE turn: the voice service's principal
  *     (`_service:voice`) is what routes/llm.ts forwards as the acting user,
  *     and no User row carries it, so voice `business_*` calls get the same
@@ -59,8 +63,14 @@ import {
   DENY_ALL_TOOL_SCOPE,
   resolveAttributedToolAccess,
   type AttributedToolAccess,
+  type AttributionFailure,
 } from "../services/tool-access.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import {
+  resolveAssertedUser,
+  type AssertedUserFailure,
+  type AssertedUserResolution,
+} from "../services/asserted-user.service.js";
 import type { EffectiveAccessResolver } from "./feature-gate.js";
 import { recordAccessDenied } from "./auth.js";
 import { createLogger } from "../lib/logger.js";
@@ -69,25 +79,42 @@ const logger = createLogger("mcp-acting-user-gate");
 
 export const MCP_PRINCIPAL_ID = "_service:mcp";
 
+/** Why the acting person could not be established; `user_ambiguous` is the header naming two rows. */
+export type ActingUserFailure = AttributionFailure | "user_ambiguous";
+
 /** The acting person's tool reach, plus their `User.id` (null when unresolved). */
-export type ActingUserAccess = AttributedToolAccess & { userId: string | null };
+export type ActingUserAccess = Omit<AttributedToolAccess, "unresolved"> & {
+  unresolved: ActingUserFailure | null;
+  userId: string | null;
+};
 
 /** The asserted header (username on stdio, `User.id` over HTTP) → the acting person. */
 export type ActingUserAccessResolver = (asserted: string) => Promise<ActingUserAccess>;
 
+const ASSERTED_USER_FAILURE: Record<AssertedUserFailure, ActingUserFailure> = {
+  not_found: "user_missing",
+  ambiguous: "user_ambiguous",
+  deactivated: "user_deactivated",
+};
+
 export function actingUserAccessResolver(prisma: PrismaClient): ActingUserAccessResolver {
+  const deny = (unresolved: ActingUserFailure): ActingUserAccess => ({
+    scope: DENY_ALL_TOOL_SCOPE,
+    tier: null,
+    unresolved,
+    userId: null,
+  });
   return async (asserted) => {
-    let row: { id: string } | null;
+    let resolved: AssertedUserResolution;
     try {
-      row =
-        (await prisma.user.findUnique({ where: { username: asserted }, select: { id: true } })) ??
-        (await prisma.user.findUnique({ where: { id: asserted }, select: { id: true } }));
+      resolved = await resolveAssertedUser(prisma, asserted);
     } catch (err) {
       logger.error({ err }, "mcp_acting_user_lookup_failed");
-      return { scope: DENY_ALL_TOOL_SCOPE, tier: null, unresolved: "read_failed", userId: null };
+      return deny("read_failed");
     }
-    if (!row) return { scope: DENY_ALL_TOOL_SCOPE, tier: null, unresolved: "user_missing", userId: null };
-    return { ...(await resolveAttributedToolAccess(prisma, row.id)), userId: row.id };
+    if (!resolved.ok) return deny(ASSERTED_USER_FAILURE[resolved.reason]);
+    const { id } = resolved.user;
+    return { ...(await resolveAttributedToolAccess(prisma, id)), userId: id };
   };
 }
 

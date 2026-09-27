@@ -412,8 +412,7 @@ describe("POST /api/people/invites/:id/resend", () => {
       role: "family",
       sendStatus: "failed",
       sendAttempts: 1,
-      revokedAt: null,
-      acceptedAt: null,
+      status: "pending",
       expiresAt: new Date(Date.now() + 86_400_000),
     });
     const { app, sendMail } = buildApp(prisma);
@@ -437,8 +436,7 @@ describe("POST /api/people/invites/:id/resend", () => {
       role: "family",
       sendStatus: "failed",
       sendAttempts: 1,
-      revokedAt: null,
-      acceptedAt: null,
+      status: "pending",
       expiresAt: new Date(Date.now() + 86_400_000),
     });
     const { app, sendMail } = buildApp(prisma);
@@ -467,8 +465,7 @@ describe("POST /api/people/invites/:id/resend", () => {
       role: "family",
       sendStatus: "failed",
       sendAttempts: 1,
-      revokedAt: null,
-      acceptedAt: null,
+      status: "pending",
       expiresAt: new Date(Date.now() - 1_000), // already past
     });
     const { app, sendMail } = buildApp(prisma);
@@ -495,12 +492,29 @@ describe("POST /api/people/invites/:id/resend", () => {
       email: "a@acme.co",
       role: "family",
       sendStatus: "sent",
-      acceptedAt: new Date(),
-      revokedAt: null,
+      status: "accepted",
     });
     const { app } = buildApp(prisma);
     const res = await request(app).post("/api/people/invites/inv-acc/resend");
     expect(res.status).toBe(409);
+  });
+
+  // WARP-3193 QUAL-3: read from the explicit status, never revokedAt.
+  it("409s a resend on a revoked invite", async () => {
+    const prisma = createPrismaMock(seedConfig({ enabled: true, host: "h", fromAddress: "d@acme.co" }));
+    prisma._invites.set("inv-rev", {
+      id: "inv-rev",
+      token: "TR",
+      email: "r@acme.co",
+      role: "family",
+      sendStatus: "sent",
+      status: "revoked",
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    const { app } = buildApp(prisma);
+    const res = await request(app).post("/api/people/invites/inv-rev/resend");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("INVITE_REVOKED");
   });
 
   it("returns 200 with failed status (not 500) when the transport errors", async () => {
@@ -514,8 +528,7 @@ describe("POST /api/people/invites/:id/resend", () => {
       role: "guest",
       sendStatus: "failed",
       sendAttempts: 1,
-      acceptedAt: null,
-      revokedAt: null,
+      status: "pending",
       expiresAt: new Date(Date.now() + 86_400_000),
     });
     const failingSend = vi.fn().mockRejectedValue(new Error("ETIMEDOUT"));

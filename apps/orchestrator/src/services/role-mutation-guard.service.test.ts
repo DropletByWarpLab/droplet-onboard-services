@@ -885,6 +885,73 @@ describe("rail 6 — runDisablePostEffects (revoke + pinned 'User disabled' Acti
   });
 });
 
+// WARP-3193 QUAL-1 — revokeAllSessions now REJECTS (503) when Redis refused
+// the sweep. The change these runners follow is already committed, so every
+// other post-effect — above all the mandatory-emit audit row — still lands,
+// the row says the revoke failed, and THEN the error reaches the route.
+describe("rail 6 — a failed revoke still lands the other post-effects, then rejects (WARP-3193 QUAL-1)", () => {
+  const unavailable = Object.assign(new Error("down"), {
+    status: 503,
+    code: "REVOCATION_UNAVAILABLE",
+  });
+
+  it("runRemovalPostEffects: denylist + audit still run, row records the failure, then rejects", async () => {
+    revokeAllSessionsMock.mockRejectedValueOnce(unavailable);
+    await expect(
+      runRemovalPostEffects({
+        targetUserId: "u1",
+        targetUsername: "alice",
+        targetRole: "family",
+        actorUsername: "stefan",
+        actor: { type: "user", id: "owner-id" },
+      }),
+    ).rejects.toBe(unavailable);
+    expect(denylistUserMock).toHaveBeenCalledWith("u1", expect.any(Number));
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User removed",
+        refs: expect.objectContaining({ sessionRevoke: "failed" }),
+      }),
+    );
+  });
+
+  it("runDisablePostEffects: audit still lands with sessionsRevoked null + sessionRevoke failed, then rejects", async () => {
+    revokeAllSessionsMock.mockRejectedValueOnce(unavailable);
+    await expect(
+      runDisablePostEffects({
+        targetUserId: "u-alice",
+        username: "alice",
+        actor: { type: "user", id: "owner-id" },
+      }),
+    ).rejects.toBe(unavailable);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User disabled",
+        refs: expect.objectContaining({ sessionsRevoked: null, sessionRevoke: "failed" }),
+      }),
+    );
+  });
+
+  it("runRoleChangePostEffects: audit still lands with the failure recorded, then rejects", async () => {
+    revokeAllSessionsMock.mockRejectedValueOnce(unavailable);
+    await expect(
+      runRoleChangePostEffects({
+        target: { id: "u1", username: "alice", nextcloudUsername: "alice" },
+        previousRole: "family",
+        nextRole: "guest",
+        actorUsername: "stefan",
+        actor: { type: "user", id: "owner-id" },
+      }),
+    ).rejects.toBe(unavailable);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Role changed",
+        refs: expect.objectContaining({ sessionRevoke: "failed" }),
+      }),
+    );
+  });
+});
+
 // ── pr-reviewer #1229 review fixes ──────────────────────────────
 
 describe("B1 — SERIALIZABLE_TX + CONCURRENT_MUTATION (isolation is explicit, its loser is not a 500)", () => {

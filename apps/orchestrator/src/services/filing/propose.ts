@@ -39,6 +39,7 @@ import { classify as classifyPolicy, MENTIONS_CONFIDENCE_CAP } from "./policy.js
 import { createLogger } from "../../lib/logger.js";
 import { matchCompany, normalizeCompanyName, type MatchOutcome } from "./match.js";
 import { parsePayload, payloadRejectionReason } from "./payloads.js";
+import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
 const logger = createLogger("filing-propose");
 
@@ -624,13 +625,4 @@ async function parentIdFor(
     select: { id: true },
   });
   return existing?.id ?? null;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code?: unknown }).code === "P2002"
-  );
 }

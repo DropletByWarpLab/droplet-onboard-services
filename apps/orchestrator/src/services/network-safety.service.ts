@@ -480,7 +480,11 @@ export async function getNetworkAuditLog(
   });
 }
 
-/** Periodically clean expired confirmation tokens and stale rate-limit entries. */
+/**
+ * Periodically clean expired confirmation tokens and stale rate-limit entries.
+ * Scheduled every 60 s by index.ts main() on cron-runtime (WARP-3193 QUAL-7 —
+ * no timer at module scope, so importing this module starts nothing).
+ */
 export function cleanupExpiredNetworkTokens(): void {
   const now = Date.now();
   for (const [token, pending] of pendingConfirmations) {
@@ -494,6 +498,3 @@ export function cleanupExpiredNetworkTokens(): void {
     else rateLimitMap.set(key, recent);
   }
 }
-
-// Schedule periodic cleanup
-setInterval(cleanupExpiredNetworkTokens, 60_000);

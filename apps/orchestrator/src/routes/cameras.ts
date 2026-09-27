@@ -135,6 +135,10 @@ import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
 import type { ConfirmNetworkCommandError } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
+import {
+  assertedNextcloudLoginRefusal,
+  resolveAssertedNextcloudLogin,
+} from "../services/asserted-nextcloud-login.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { ncDownloadFile } from "../services/nextcloud.client.js";
 import * as groupsSvc from "../services/camera-groups.service.js";
@@ -578,12 +582,26 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       // Resolve the Nextcloud user the URL is signed for. Human sessions use
       // their own username; the MCP service principal (req.user.username ===
-      // "_service:mcp") forwards the real human's NC user in X-Nextcloud-User,
-      // honored ONLY for that trusted principal (mirrors the /api/files routes).
+      // "_service:mcp") names the real human in X-Nextcloud-User, honored ONLY
+      // for that trusted principal (mirrors the /api/files routes).
+      //
+      // WARP-3117: that header is the person's `User.username` (stdio) or
+      // `User.id` (HTTP), never their Nextcloud login, so it is resolved to
+      // one active person and signed for their `nextcloudUsername`. A person
+      // with none (SSO / SCIM) has no Nextcloud account to share from. Both
+      // are refused BEFORE the confirmation mint, so no pending token is
+      // parked for a person the URL could never be signed for.
       let userId: string | undefined;
       if (isMcp) {
         const hdr = req.header("X-Nextcloud-User");
-        userId = typeof hdr === "string" && hdr.length > 0 ? hdr : undefined;
+        if (typeof hdr === "string" && hdr.length > 0) {
+          const resolved = await resolveAssertedNextcloudLogin(prisma, hdr);
+          if (!resolved.ok) {
+            logger.warn({ asserted: hdr, reason: resolved.reason }, "share_clip: asserted user refused");
+            return res.status(403).json(assertedNextcloudLoginRefusal(resolved.reason));
+          }
+          userId = resolved.login;
+        }
       } else {
         userId = req.user?.username;
       }
@@ -1196,7 +1214,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Manually add a camera (name + RTSP URL) ---
-  router.post("/cameras", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  //
+  // WARP-3193 SEC-INJ-5: owner/admin only — this points Frigate (and the
+  // camera credentials it holds) at an arbitrary host. Frigate expands
+  // `{FRIGATE_*}` placeholders in the URL, so braces are refused, and the URL
+  // is fully parsed BEFORE the Frigate write so a bad one cannot leave Frigate
+  // configured with no DB row.
+  router.post("/cameras", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { name, rtspUrl, manufacturer, model } = req.body;
       if (!name || typeof name !== "string" || !isValidCameraName(name)) {
@@ -1205,8 +1229,22 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!rtspUrl || typeof rtspUrl !== "string") {
         return res.status(400).json({ error: "Missing rtspUrl" });
       }
-      if (!/^rtsps?:\/\/.+/.test(rtspUrl)) {
+      if (!/^rtsps?:\/\/[^/]/.test(rtspUrl)) {
         return res.status(400).json({ error: "rtspUrl must start with rtsp:// or rtsps://" });
+      }
+      if (/[{}\s]/.test(rtspUrl)) {
+        return res.status(400).json({ error: "rtspUrl must not contain braces or whitespace" });
+      }
+      // rtsp: is not a WHATWG "special" scheme, so its host is left opaque;
+      // parse it as http(s) to get a validated hostname.
+      let ipAddress: string;
+      try {
+        ipAddress = new URL(rtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
+      } catch {
+        return res.status(400).json({ error: "rtspUrl is not a valid URL" });
+      }
+      if (!ipAddress) {
+        return res.status(400).json({ error: "rtspUrl must name a host" });
       }
 
       // Add to Frigate
@@ -1224,7 +1262,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           displayName,
           manufacturer: manufacturer || null,
           model: model || null,
-          ipAddress: new URL(rtspUrl.replace("rtsp://", "http://").replace("rtsps://", "https://")).hostname || "",
+          ipAddress,
           enabled: true,
           autoDiscovered: false,
           lastSeen: new Date(),
@@ -3047,7 +3085,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
    * For that trusted principal ONLY, the per-user Nextcloud credential rides
    * in headers (same posture as the /api/files routes, WARP-861):
    *   X-Nextcloud-Token: the user's NC app-password / session token
-   *   X-Nextcloud-User:  the username the export acts as
+   *   X-Nextcloud-User:  the person the export acts for, resolved to their
+   *                      Nextcloud login (WARP-3117)
    * Human sessions keep the session-based resolution (resolveNcToken +
    * req.user.username) unchanged. Unlike share, export needs no confirmation
    * gate: it writes into the caller's own Nextcloud rather than minting a
@@ -3082,6 +3121,20 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
       if (!ncToken) return res.status(401).json({ error: "nextcloud_session_missing" });
       if (!userId) return res.status(401).json({ error: "unauthenticated" });
+      // WARP-3117: the header names the person (`User.username` on stdio,
+      // `User.id` over HTTP), never their Nextcloud login. Export writes into
+      // `/remote.php/dav/files/<login>/Clips/…`, so resolve the person and
+      // write as their `nextcloudUsername`; a person with none (SSO / SCIM)
+      // has no Nextcloud to write into. The camera guard above has already
+      // resolved the same header for the camera scope.
+      if (isMcp) {
+        const resolved = await resolveAssertedNextcloudLogin(prisma, userId);
+        if (!resolved.ok) {
+          logger.warn({ asserted: userId, reason: resolved.reason }, "export_clip: asserted user refused");
+          return res.status(403).json(assertedNextcloudLoginRefusal(resolved.reason));
+        }
+        userId = resolved.login;
+      }
 
       const result = await exportClip(ncToken, userId, {
         camera: req.params.name,

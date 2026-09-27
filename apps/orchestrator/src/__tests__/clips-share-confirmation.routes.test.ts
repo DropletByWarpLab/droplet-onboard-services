@@ -79,6 +79,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
 }));
 
 import { createCamerasRouter } from "../routes/cameras.js";
+import { userDirectory } from "./helpers/user-directory.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 const ORIGINAL_SECRET = process.env.DEVICE_SECRET;
@@ -89,6 +90,9 @@ function createPrismaMock(): PrismaClient {
       create: vi.fn().mockResolvedValue({ id: "audit-1" }),
       findMany: vi.fn().mockResolvedValue([]),
     },
+    // WARP-3117: the MCP principal's X-Nextcloud-User must name one active
+    // person with a Nextcloud account before a confirmation is parked.
+    user: userDirectory([{ id: "u-owner", username: "stefan", nextcloudUsername: "stefan", role: "owner" }]),
   } as unknown as PrismaClient;
 }
 
