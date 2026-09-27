@@ -51,10 +51,19 @@ export interface RosterContact {
 }
 
 export type RosterRead =
-  | { ok: true; contacts: RosterContact[] }
+  | { ok: true; contacts: RosterContact[]; meId: string }
   | { ok: false; result: ToolResult };
 
-/** Map the roster response. A 404 is the team_chat module gate. */
+/**
+ * Map the roster response. A 404 is the team_chat module gate.
+ *
+ * WARP-3196 — `meId` is the User.id of the person the orchestrator resolved
+ * from X-Droplet-User (the response's `me`). It is the only name for the
+ * sender that is the same on both MCP transports: ctx.userId is
+ * User.username on stdio and User.id over HTTP, so it is never compared
+ * with a recipient. A roster without it cannot say who is sending, so it
+ * fails closed.
+ */
 export async function readRosterResponse(
   res: TeamChatHttpResponse,
 ): Promise<RosterRead> {
@@ -72,24 +81,64 @@ export async function readRosterResponse(
   }
   const body = (await res.json().catch(() => null)) as {
     contacts?: RosterContact[];
+    me?: { id?: unknown };
   } | null;
-  return { ok: true, contacts: body?.contacts ?? [] };
+  const meId = body?.me?.id;
+  if (typeof meId !== "string" || meId.length === 0) {
+    return {
+      ok: false,
+      result: err("TEAM_CHAT_SEND_FAILED", "orchestrator did not say who is sending"),
+    };
+  }
+  return { ok: true, contacts: body?.contacts ?? [], meId };
 }
 
-export type RecipientResolution =
-  | { ok: true; participantIds: string[] }
+const SELF_ONLY_MESSAGE = "recipients must include someone other than yourself";
+
+export type RecipientPreview =
+  | { ok: true; usernames: string[]; names: string[] }
   | { ok: false; result: ToolResult };
 
 /**
- * Resolve recipient USERNAMES → local User.ids against the fetched
- * roster. Unknown names fail loudly BEFORE any thread exists. The caller
- * has already deduped and dropped the acting user from `usernames`.
+ * Phase 1 (the approval copy): drop the sender by id and show DISPLAY
+ * NAMES where the roster knows them. An unknown username stays as typed —
+ * phase 2 refuses it loudly. Naming only the sender is refused here, so
+ * the user is never asked to approve a send that cannot happen.
  */
-export function pickParticipantIds(
-  contacts: RosterContact[],
+export function previewRecipients(
+  roster: { contacts: RosterContact[]; meId: string },
+  usernames: string[],
+): RecipientPreview {
+  const byUsername = new Map(roster.contacts.map((c) => [c.username, c] as const));
+  const others = usernames.filter((u) => byUsername.get(u)?.id !== roster.meId);
+  if (others.length === 0) {
+    return { ok: false, result: err("INVALID_ARGS", SELF_ONLY_MESSAGE) };
+  }
+  return {
+    ok: true,
+    usernames: others,
+    names: others.map((u) => {
+      const display = byUsername.get(u)?.displayName;
+      return display && display.length > 0 ? display : u;
+    }),
+  };
+}
+
+export type RecipientResolution =
+  | { ok: true; others: RosterContact[] }
+  | { ok: false; result: ToolResult };
+
+/**
+ * Phase 2: resolve recipient USERNAMES to roster rows and drop the sender
+ * BY ID (`meId`). Unknown names fail loudly BEFORE any thread exists, and
+ * so does a list that names only the sender. `others` are the people the
+ * thread is with; their count decides direct vs group.
+ */
+export function resolveRecipients(
+  roster: { contacts: RosterContact[]; meId: string },
   usernames: string[],
 ): RecipientResolution {
-  const byUsername = new Map(contacts.map((c) => [c.username, c] as const));
+  const byUsername = new Map(roster.contacts.map((c) => [c.username, c] as const));
   const missing = usernames.filter((u) => !byUsername.has(u));
   if (missing.length > 0) {
     return {
@@ -100,10 +149,13 @@ export function pickParticipantIds(
       ),
     };
   }
-  return {
-    ok: true,
-    participantIds: usernames.map((u) => byUsername.get(u)!.id),
-  };
+  const others = usernames
+    .map((u) => byUsername.get(u)!)
+    .filter((c) => c.id !== roster.meId);
+  if (others.length === 0) {
+    return { ok: false, result: err("INVALID_ARGS", SELF_ONLY_MESSAGE) };
+  }
+  return { ok: true, others };
 }
 
 export type ThreadRead =

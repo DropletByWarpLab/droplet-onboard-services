@@ -377,6 +377,10 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
   // only — never service principals, never deactivated rows.
   // WARP-1685: guardOrMcp — the send tools resolve recipient usernames to
   // User.ids through this roster, acting as the forwarded human.
+  // WARP-3196: `me` is the resolved caller's User.id. The tools drop the
+  // sender from their recipients by it: their own ctx.userId is a username
+  // on stdio and a User.id over HTTP, so they cannot tell which roster row
+  // is theirs without it.
   router.get("/team-chat/contacts", guardOrMcp, async (req, res, next) => {
     try {
       const me = await resolveCaller(req);
@@ -392,7 +396,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         select: contactSelect,
         orderBy: { displayName: "asc" },
       });
-      res.json({ contacts });
+      res.json({ contacts, me: { id: me.id } });
     } catch (err) {
       next(err);
     }
