@@ -14,7 +14,9 @@
  *   - 🔴 a row whose hash the current manifest does not produce — new
  *     arguments, or the same arguments reworded — comes with
  *     `inputSchema: null`: the surface offers no review of it;
- *   - 🔴 the hash the GET returns is the one the PATCH accepts;
+ *   - 🔴 the hash the GET returns is the one the PATCH accepts, and the
+ *     activity row the accepted review writes names that hash, so the audit
+ *     trail says what content the decision was bound to;
  *   - a vendor row is unchanged.
  *
  * The helper itself is pinned in services/extension-tool-review.service.test.ts;
@@ -30,6 +32,7 @@ vi.mock("../config.js", () => ({
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: vi.fn().mockResolvedValue(null) }));
 
 import { createRemoteToolClassificationsRouter } from "../routes/remote-tool-classifications.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import {
   RemoteToolClassificationCache,
   recordDiscoveredRemoteTools,
@@ -153,6 +156,31 @@ describe("GET classifications — what an extension tool's review is shown", () 
     expect(res.status).toBe(200);
     const after = (await request(app).get(`${BASE}?serverId=ext-wc`)).body.classifications[0];
     expect(after).toMatchObject({ reviewedBy: "romain", decision: { decision: "allow", code: null } });
+  });
+
+  it("🔴 the activity row an accepted review writes names the review hash the decision is bound to", async () => {
+    const { prisma } = fakePrisma({ wc: manifestBytes({ id: "wc" }) });
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [
+      { wireName: "word_count", description: DECLARED, inputSchemaHash: extensionInputSchemaHash(TEXT_SCHEMA) },
+    ]);
+    const app = buildApp(prisma);
+    const shown = (await request(app).get(`${BASE}?serverId=ext-wc`)).body.classifications[0];
+    vi.mocked(recordActivity).mockClear();
+    const res = await request(app)
+      .patch(`${BASE}/ext-wc/word_count`)
+      .send({ requiresWrite: false, requiresConfirmation: false, denied: false, inputSchemaHash: shown.inputSchemaHash });
+    expect(res.status).toBe(200);
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordActivity).mock.calls[0]![0]).toMatchObject({
+      what: "Remote tool classified: read",
+      refs: {
+        serverId: "ext-wc",
+        toolName: "word_count",
+        requiresWrite: false,
+        denied: false,
+        inputSchemaHash: remoteToolReviewHash(DECLARED, extensionInputSchemaHash(TEXT_SCHEMA)),
+      },
+    });
   });
 
   it("a vendor row is listed as the record has it", async () => {

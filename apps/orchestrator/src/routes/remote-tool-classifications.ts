@@ -142,6 +142,11 @@ export function createRemoteToolClassificationsRouter(
             requiresWrite: result.row.requiresWrite,
             requiresConfirmation: result.row.requiresConfirmation,
             denied: result.row.denied,
+            // WARP-3205 — the review hash the decision is bound to (for an
+            // `ext-*` tool, its description + input schema), so the audit
+            // trail names what content was reviewed. Null for a vendor row
+            // recorded without one.
+            inputSchemaHash: result.row.inputSchemaHash,
           },
         });
         res.json({ classification: result.row });
