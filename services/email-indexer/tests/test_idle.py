@@ -95,3 +95,44 @@ async def test_ingest_error_on_one_uid_is_isolated(monkeypatch):
     deps = IdleDeps(ingest=ingest, publish_new_mail=lambda a, t, m: None)
     success = await _fetch_and_ingest(_FakeImap(), _account(), deps, ["1", "2", "3"])
     assert success == 2
+
+
+# WARP-3267 — a 413 holds the watermark so the message is fetched again.
+
+
+class _SearchResp:
+    result = "OK"
+
+    def __init__(self, uids):
+        self.lines = [" ".join(uids).encode()]
+
+
+class _FakeImapWithSearch(_FakeImap):
+    async def uid(self, cmd, *args):
+        if cmd == "search":
+            return _SearchResp(["5", "6", "7"])
+        return await super().uid(cmd, *args)
+
+
+@pytest.mark.asyncio
+async def test_413_holds_the_watermark_below_the_refused_uid(monkeypatch):
+    def fake_parse(raw, account_address=None):
+        mid = raw.split(b"Message-ID: ")[1].decode().strip().strip("<>")
+        return {"messageId": mid}
+
+    monkeypatch.setattr(idle, "parse_message", fake_parse)
+    ingested: list[str] = []
+
+    async def ingest(_account_id, payload):
+        if payload["messageId"] == "6@x.com":
+            raise idle.IngestTooLarge("413")
+        ingested.append(payload["messageId"])
+        return True
+
+    deps = IdleDeps(ingest=ingest, publish_new_mail=lambda a, t, m: None)
+    state = idle.SyncState(last_uid=4)
+    success = await idle._sync_new_mail(_FakeImapWithSearch(), _account(), deps, state, None)
+    assert success == 2
+    assert ingested == ["5@x.com", "7@x.com"]
+    # UID 6 is fetched again next cycle; the others move on.
+    assert state.last_uid == 5

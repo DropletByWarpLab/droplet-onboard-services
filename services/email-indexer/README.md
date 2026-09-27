@@ -41,6 +41,13 @@ orchestrator, and drains the outbound SMTP queue.
 - **Limits** (here and in `EMAIL_ATTACHMENT_LIMITS`): 10 MiB per part,
   20 MiB and 20 parts stored per message. A part over them is listed without
   bytes (`too_large` / `over_limit`); past 50 parts nothing more is listed.
+- **Payload budget.** The serialised ingest body stays under 30 MiB
+  (`MAX_INGEST_PAYLOAD_BYTES`); a part that would cross it is listed as
+  `too_large`. The orchestrator parses the route with a 48 MB limit.
+- **Ruling — a 413 holds the watermark.** It is the one ingest refusal that
+  does: with the budget, only a contract drift can cause it, and a deploy
+  fixes that, so the message must still be fetchable. Other refusals are
+  skipped (IDX-07) and logged with the UID.
 - Downloads: `GET /api/email/:accountId/messages/:messageId/attachments/:id`,
   gated like the thread read, served as `attachment`, `application/octet-stream`,
   `nosniff`, sanitised file name, one activity row per download.

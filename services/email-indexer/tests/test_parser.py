@@ -227,3 +227,38 @@ def test_attachments_over_the_count_limit_are_listed_as_over_limit(monkeypatch):
     monkeypatch.setattr(_parser, "MAX_STORED_ATTACHMENTS", 1)
     out = _parser.parse_message(_with_attachments(("a.pdf", b"1"), ("b.pdf", b"2")))
     assert [a["status"] for a in out["attachments"]] == ["stored", "over_limit"]
+
+
+def test_attachments_that_would_overflow_the_ingest_body_are_demoted(monkeypatch):
+    # Budget fits the message and one small part, not the second.
+    monkeypatch.setattr(_parser, "MAX_INGEST_PAYLOAD_BYTES", 1)
+    out = _parser.parse_message(_with_attachments(("a.pdf", b"1")))
+    [att] = out["attachments"]
+    assert att["status"] == "too_large" and "data" not in att
+
+
+def test_serialised_payload_never_exceeds_the_budget(monkeypatch):
+    import json
+
+    monkeypatch.setattr(_parser, "MAX_INGEST_PAYLOAD_BYTES", 2000)
+    out = _parser.parse_message(
+        _with_attachments(("a.pdf", b"x" * 600), ("b.pdf", b"y" * 600), ("c.pdf", b"z" * 600))
+    )
+    assert len(json.dumps(out)) <= 2000
+    assert [a["status"] for a in out["attachments"]][0] == "stored"
+    assert "too_large" in [a["status"] for a in out["attachments"]]
+
+
+def test_overlong_content_id_is_dropped_not_fatal():
+    m = _EM()
+    m["Message-ID"] = "<a@x>"
+    m["From"] = "a@x.com"
+    m["To"] = "b@x.com"
+    m["Subject"] = "cid"
+    m["Date"] = "Mon, 1 Jun 2026 10:00:00 +0000"
+    m.set_content("hi")
+    m.add_attachment(b"img", maintype="image", subtype="png", filename="i.png")
+    [part] = list(m.iter_attachments())
+    part["Content-ID"] = "<" + "c" * 2000 + "@x>"
+    [att] = _parser.parse_message(m.as_bytes())["attachments"]
+    assert att["contentId"] is None

@@ -69,6 +69,9 @@ class DraftToSend:
 #: or just junk) is left out rather than failing the whole send.
 _MSGID_RE = re.compile(r"[^\s<>]{1,900}")
 _CTYPE_RE = re.compile(r"([a-z0-9][a-z0-9.+-]*)/([a-z0-9][a-z0-9.+-]*)")
+_UNSAFE_NAME_RE = re.compile(
+    "[\x00-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069\"<>:|?*/\\\\]"
+)
 #: RFC 5322 lets References be trimmed; keep the root and the newest ones.
 MAX_REFERENCES = 20
 
@@ -115,7 +118,9 @@ def build_message(draft: DraftToSend) -> EmailMessage:
             maintype, subtype = "application", "octet-stream"
         # The name came from a stranger's mail: no line breaks into a header,
         # no directory part for the recipient's client to honour.
-        safe_name = re.sub(r"[\x00-\x1f\x7f/\\]", "_", filename) or "attachment"
+        # Same character class as the orchestrator's sanitizeAttachmentFilename,
+        # bidi overrides included (`invoice\u202Efdp.exe`).
+        safe_name = _UNSAFE_NAME_RE.sub("_", filename).lstrip(". ") or "attachment"
         msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=safe_name)
     return msg
 

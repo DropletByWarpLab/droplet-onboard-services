@@ -63,6 +63,12 @@ async def ingest_message(account_id: str, payload: dict[str, Any]) -> bool:
         return False
     if resp.status_code in (200, 201):
         return True
+    if resp.status_code == 413:
+        # Lazy import: idle imports aioimaplib, which this module otherwise
+        # doesn't need.
+        from idle import IngestTooLarge
+
+        raise IngestTooLarge(resp.text[:200])
     logger.warning(
         "messages-ingest non-2xx: status=%d body=%s",
         resp.status_code, resp.text[:200],

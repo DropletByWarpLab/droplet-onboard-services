@@ -162,6 +162,18 @@ class SyncState:
     cycles: int = field(default=0)
 
 
+class IngestTooLarge(Exception):
+    """The orchestrator refused a message with 413 (WARP-3267).
+
+    Ruling: this is the one ingest refusal that holds the watermark. The
+    parser's payload budget means a valid message never gets a 413, so one
+    that does is a contract drift a deploy fixes, and the message must still
+    be there to fetch when it does. Holding costs re-fetching the UIDs after
+    it each cycle (their ingest is an idempotent duplicate). Every other
+    refusal is still skipped, as IDX-07 decided, and logged with its UID.
+    """
+
+
 # Track scheduled per-account jobs so we can cancel + reschedule on
 # backoff cycles.
 _account_jobs: dict[str, str] = {}
@@ -172,9 +184,11 @@ async def _fetch_and_ingest(
     account: AccountConfig,
     deps: IdleDeps,
     uids: list[str],
+    too_large: Optional[list[int]] = None,
 ) -> int:
     """Fetch each UID, parse, POST. Returns the count of successful
-    ingests so the caller can log a summary."""
+    ingests so the caller can log a summary. A UID the orchestrator refused
+    with 413 is appended to `too_large` so the caller can hold the watermark."""
     success = 0
     for uid in uids:
         # One poison message (malformed MIME/headers, a parser edge case, a
@@ -198,7 +212,17 @@ async def _fetch_and_ingest(
             if parsed is None:
                 logger.debug("uid %s parse returned None — skipping", uid)
                 continue
-            ok = await deps.ingest(account.id, dict(parsed))
+            try:
+                ok = await deps.ingest(account.id, dict(parsed))
+            except IngestTooLarge:
+                logger.warning(
+                    "uid %s refused as too large (413); holding the watermark", uid,
+                )
+                if too_large is not None:
+                    too_large.append(int(uid))
+                continue
+            if not ok:
+                logger.warning("uid %s not ingested; skipped", uid)
             if ok:
                 success += 1
                 # The orchestrator's ingest response carries threadId but
@@ -299,7 +323,12 @@ async def _sync_new_mail(
 
     if not uids:
         return 0
-    success = await _fetch_and_ingest(imap, account, deps, [str(u) for u in uids])
+    held: list[int] = []
+    success = await _fetch_and_ingest(
+        imap, account, deps, [str(u) for u in uids], too_large=held,
+    )
+    if held:
+        state.last_uid = min(held) - 1
     logger.info("account %s: ingested %d/%d UIDs", account.address, success, len(uids))
     return success
 

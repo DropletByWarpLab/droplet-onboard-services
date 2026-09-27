@@ -34,6 +34,7 @@ import email
 import email.header
 import email.utils
 import hashlib
+import json
 from email.message import Message
 from typing import Optional, TypedDict
 
@@ -41,6 +42,26 @@ MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_STORED_ATTACHMENTS = 20
 MAX_LISTED_ATTACHMENTS = 50
+#: The whole ingest body, serialised, must stay under this. The orchestrator
+#: parses the route with a 48 MB limit, so any message this parser emits fits:
+#: a part that would push the payload over it is demoted to `too_large`
+#: before it is sent. Without the budget, a message with 20 MiB of
+#: attachments AND large bodies was refused with a 413 and lost.
+MAX_INGEST_PAYLOAD_BYTES = 30 * 1024 * 1024
+
+
+def _json_size(value: object) -> int:
+    """Serialised size, upper bound: ASCII-escaped JSON is never smaller than
+    the UTF-8 httpx sends."""
+    return len(json.dumps(value))
+
+
+def _fit_utf16(value: str, limit: int) -> str:
+    """Cut to `limit` UTF-16 code units — what the orchestrator's zod `max`
+    counts — so an astral-heavy name can't fail the whole ingest."""
+    while len(value.encode("utf-16-le")) // 2 > limit:
+        value = value[:-1]
+    return value
 
 
 class ParsedAttachment(TypedDict, total=False):
@@ -160,10 +181,12 @@ def _is_attachment(part: Message) -> bool:
     return ctype not in ("text/plain", "text/html")
 
 
-def _extract_attachments(msg: Message) -> list[ParsedAttachment]:
+def _extract_attachments(msg: Message, budget: int) -> list[ParsedAttachment]:
+    """`budget`: bytes of serialised payload the attachment list may use."""
     out: list[ParsedAttachment] = []
     stored = 0
     total = 0
+    used = 2  # the list's brackets
     for part in msg.walk():
         if not _is_attachment(part):
             continue
@@ -172,12 +195,15 @@ def _extract_attachments(msg: Message) -> list[ParsedAttachment]:
         payload = part.get_payload(decode=True)
         data = payload if isinstance(payload, bytes) else b""
         name = _decode_header(part.get_filename()) or f"attachment-{len(out) + 1}"
+        cid = _normalize_msgid(part.get("Content-ID"))
         att: ParsedAttachment = {
-            "filename": name[:255],
-            "contentType": part.get_content_type()[:255],
+            "filename": _fit_utf16(name, 255),
+            "contentType": _fit_utf16(part.get_content_type(), 255),
             "size": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
-            "contentId": _normalize_msgid(part.get("Content-ID")),
+            # An over-long Content-ID is junk; drop it rather than fail the
+            # message (the orchestrator caps it at 998).
+            "contentId": cid if cid and _fit_utf16(cid, 998) == cid else None,
         }
         if stored >= MAX_STORED_ATTACHMENTS:
             att["status"] = "over_limit"
@@ -188,6 +214,15 @@ def _extract_attachments(msg: Message) -> list[ParsedAttachment]:
             att["data"] = base64.b64encode(data).decode("ascii")
             stored += 1
             total += len(data)
+        cost = _json_size(att) + 2  # comma and slack
+        if att["status"] == "stored" and used + cost > budget:
+            # Would push the ingest body past its limit: list it, don't send it.
+            del att["data"]
+            att["status"] = "too_large"
+            stored -= 1
+            total -= len(data)
+            cost = _json_size(att) + 2
+        used += cost
         out.append(att)
     return out
 
@@ -280,7 +315,7 @@ def parse_message(
     text, html = _extract_bodies(msg)
     thread_key = derive_thread_key(message_id, in_reply_to, references)
 
-    return ParsedMessage(
+    out = ParsedMessage(
         messageId=message_id,
         inReplyTo=in_reply_to,
         fromAddr=from_addr,
@@ -292,5 +327,9 @@ def parse_message(
         bodyHtml=html,
         receivedAt=received_at.isoformat(),
         threadKey=thread_key,
-        attachments=_extract_attachments(msg),
+        attachments=[],
     )
+    out["attachments"] = _extract_attachments(
+        msg, MAX_INGEST_PAYLOAD_BYTES - _json_size(out)
+    )
+    return out

@@ -208,10 +208,15 @@ export const EMAIL_ATTACHMENT_LIMITS = {
  * WARP-3267 — the ingest route carries attachments as base64, far past the
  * global 100 kb JSON limit. app.ts skips its global parser for this path and
  * the route parses with a larger limit AFTER `requireRole("service")`, so an
- * unauthenticated caller can never make the box buffer 32 MB.
+ * unauthenticated caller can never make the box buffer a large body.
+ *
+ * 48 MB sits well above the indexer's 30 MiB payload budget
+ * (`MAX_INGEST_PAYLOAD_BYTES` in services/email-indexer/parser.py): the
+ * indexer demotes any part that would cross the budget to `too_large`, so no
+ * message it sends is refused here. A 413 would hold the indexer's watermark.
  */
 export const EMAIL_INGEST_PATH = /^\/api\/email\/[^/]+\/messages-ingest$/;
-const ingestJson = express.json({ limit: "32mb" });
+const ingestJson = express.json({ limit: "48mb" });
 
 /** What a list or thread read says about an attachment. Never `data`. */
 const ATTACHMENT_META = {

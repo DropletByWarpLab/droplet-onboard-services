@@ -159,3 +159,9 @@ def test_forwarded_filename_cannot_break_a_header():
     [part] = list(msg.iter_attachments())
     assert "\n" not in part.get_filename() and "/" not in part.get_filename()
     assert "Bcc: x@y" not in msg.as_string().split("\n\n", 1)[0]
+
+
+def test_forwarded_filename_loses_bidi_overrides():
+    msg = build_message(_draft(attachments=[("invoice‮fdp.exe", "application/pdf", b"1")]))
+    [part] = list(msg.iter_attachments())
+    assert part.get_filename() == "invoice_fdp.exe"
