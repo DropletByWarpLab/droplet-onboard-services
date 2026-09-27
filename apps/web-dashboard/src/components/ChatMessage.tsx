@@ -34,6 +34,23 @@ import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
 
+const SafeLink = SAFE_MARKDOWN_COMPONENTS.a;
+
+/**
+ * WARP-3116 — whether a model-written link is a dashboard page, to be routed
+ * client-side. Same-origin by `safeNext`, the hardened check (`/\evil`,
+ * `//evil`, `/..//evil`): only a path it returns unchanged counts. `/api/…` is
+ * a resource the orchestrator serves, not a page, so it is never one.
+ */
+function isDashboardPath(href: string | undefined): href is string {
+  return (
+    typeof href === "string" &&
+    href.startsWith("/") &&
+    !/^\/api(?:[/?#]|$)/.test(href) &&
+    safeNext(href) === href
+  );
+}
+
 // ReasoningDisclosure ("Thought process") moved to
 // @/components/chat/ReasoningDisclosure (WARP-934) so the in-app chat and the
 // first-run AI setup step render the model's reasoning identically.
@@ -445,17 +462,17 @@ export const ChatMessage = memo(function ChatMessage({
                   ),
                   // Per-block hover copy button (Claude-chat parity).
                   pre: ({ node, ...props }) => <CodeBlock {...props} />,
-                  // WARP-3116 — an in-app path ("[Voice](/voice)", as the
+                  // WARP-3116 — a dashboard page ("[Voice](/voice)", as the
                   // dashboard-page tools hand back) routes client-side instead
-                  // of reloading the whole app. `safeNext` is the hardened
-                  // same-origin check (`/\evil`, `//evil`, `/..//evil`); only a
-                  // path it returns unchanged counts. Everything else renders
-                  // exactly as before.
-                  a: ({ node, href, ...props }) =>
-                    typeof href === "string" && href.startsWith("/") && safeNext(href) === href ? (
-                      <Link href={href} {...props} />
+                  // of reloading the whole app. Every other link, including a
+                  // same-origin `/api/` resource such as a camera snapshot,
+                  // stays on SEC-INJ-1's SafeLink (new tab, no Referer, no
+                  // window.opener) — this key replaces the spread's `a`.
+                  a: ({ node, ...props }) =>
+                    isDashboardPath(props.href) ? (
+                      <Link {...props} href={props.href} />
                     ) : (
-                      <a href={href} {...props} />
+                      <SafeLink {...props} />
                     ),
                 }}
               >
