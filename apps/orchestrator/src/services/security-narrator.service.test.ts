@@ -23,6 +23,13 @@ vi.mock("./ai-gateway.client.js", () => ({
   listModels: gw.listModels,
   getModelProvider: async (model: string) => gw.models.find((m) => m.id === model)?.provider,
 }));
+/** Every structured log line, for the box-proof line (#2423 review 9). */
+const logged = vi.hoisted(() => [] as Array<{ level: string; obj: Record<string, unknown>; msg: string }>);
+vi.mock("../lib/logger.js", () => {
+  const push = (level: string) => (obj: Record<string, unknown>, msg: string) => void logged.push({ level, obj, msg });
+  const stub = { error: push("error"), warn: push("warn"), info: push("info"), debug: push("debug") };
+  return { createLogger: () => stub };
+});
 
 import {
   NARRATOR_MAX_CALLS_PER_HOUR,
@@ -174,6 +181,7 @@ function reply(content: string, over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  logged.length = 0;
   _resetNarratorForTests();
   _resetInteractiveInferenceForTests();
   clock = NOW;
@@ -246,6 +254,37 @@ describe("tickSecurityNarrator — writing one summary", () => {
     gw.chat.mockImplementation(async () => reply(GOOD, { model: "" }));
     await tickSecurityNarrator(prisma, deps());
     expect(byId(i!.id).narrativeModel).toBe("gpt-oss:20b");
+  });
+});
+
+// #2423 review 9: the box proof reads each summary's tokens and time from the log — numbers only.
+describe("each write logs its tokens and its time, never its text or a name", () => {
+  const writes = () => logged.filter((l) => l.msg === "security narrator: a summary was written");
+
+  it("one call: its total_tokens and its duration, at info", async () => {
+    const [i] = seed([incident()]);
+    await tickSecurityNarrator(prisma, deps());
+    expect(writes()).toHaveLength(1);
+    const [w] = writes();
+    expect(w!.level).toBe("info");
+    expect(w!.obj).toEqual({ incidentId: i!.id, totalTokens: 820, callMs: expect.any(Number), calls: 1 });
+    expect(w!.obj.callMs as number).toBeGreaterThanOrEqual(0);
+    const line = JSON.stringify(logged);
+    for (const s of [GOOD, "Stock room", "Back camera", "Stefan", "Maria", "stefan", "maria"]) expect(line).not.toContain(s);
+  });
+
+  it("a check retry: both calls' tokens, and the two calls counted", async () => {
+    seed([incident()]);
+    gw.chat.mockImplementationOnce(async () => reply("An intruder was seen at 10:14 PM.")).mockImplementationOnce(async () => reply(GOOD));
+    await tickSecurityNarrator(prisma, deps());
+    expect(writes()[0]!.obj).toMatchObject({ totalTokens: 1640, calls: 2 });
+  });
+
+  it("a gateway that reports no usage logs null tokens, never a guess", async () => {
+    seed([incident()]);
+    gw.chat.mockImplementation(async () => reply(GOOD, { usage: undefined }));
+    await tickSecurityNarrator(prisma, deps());
+    expect(writes()[0]!.obj).toMatchObject({ totalTokens: null, calls: 1 });
   });
 });
 
@@ -335,6 +374,41 @@ describe("yielding to chat", () => {
   });
 });
 
+// #2423 review 5: the gateway answers a background request 429 while chat keeps its queue full. That is chat being
+// busy, not the summary failing — the agent-run worker's `gatewayBusy` rule: stand aside, count nothing.
+describe("a busy gateway (429) is standing aside, never a failure", () => {
+  it("🔴 the claim is released, no attempt and no error are counted, the batch stops, the yield noted", async () => {
+    const [a, b] = seed([incident(), incident({ lastActivityAt: new Date("2026-09-23T21:14:30Z") })]);
+    gw.chat.mockRejectedValue(new Error("AI Gateway error 429: too many queued requests"));
+    const r = await tickSecurityNarrator(prisma, deps());
+    expect(gw.chat).toHaveBeenCalledTimes(1);
+    for (const x of [a, b]) expect(byId(x!.id)).toMatchObject({ narrativeState: "pending", narrativeAttemptAt: null, narrativeAttempts: 0, narrativeError: null });
+    expect(r).toMatchObject({ failed: 0, yielded: true });
+    expect(narratorHealthState().lastYieldAt).toEqual(NOW);
+  });
+
+  it("…and it takes no place in the hour: a gateway busy for 40 minutes leaves the hour's calls for when it is not", async () => {
+    const [i] = seed([incident()]);
+    gw.chat.mockRejectedValue(new Error("AI Gateway error 429: too many queued requests"));
+    for (let t = 0; t < 40; t++) {
+      clock = at(t * MIN);
+      await tickSecurityNarrator(prisma, deps());
+    }
+    expect(gw.chat).toHaveBeenCalledTimes(40);
+    gw.chat.mockImplementation(async () => reply(GOOD));
+    clock = at(40 * MIN);
+    await tickSecurityNarrator(prisma, deps());
+    expect(byId(i!.id)).toMatchObject({ narrativeState: "written", narrativeAttempts: 0 });
+  });
+
+  it("any other gateway error is still a failed attempt", async () => {
+    const [i] = seed([incident()]);
+    gw.chat.mockRejectedValue(new Error("AI Gateway error 503: unavailable"));
+    await tickSecurityNarrator(prisma, deps());
+    expect(byId(i!.id)).toMatchObject({ narrativeAttempts: 1, narrativeError: "MODEL_ERROR" });
+  });
+});
+
 describe("rate limits", () => {
   it(`at most ${NARRATOR_MAX_CALLS_PER_HOUR} model calls in any rolling hour; the window moves on`, async () => {
     seed(Array.from({ length: 40 }, (_, n) => incident({ lastActivityAt: new Date(new Date("2026-09-23T21:15:00Z").getTime() + n * 1000) })));
@@ -393,6 +467,17 @@ describe("failures, expiry and the model", () => {
     expect(byId(i!.id)).toMatchObject({ narrativeAttempts: 1, narrativeError: "CHECK_FAILED:NAMES", narrative: null });
   });
 
+  // #2423 review 7: the WORDS retry tells the model which words the check refuses — the new ones included.
+  it("a WORDS retry names every refused word, the review's additions too", async () => {
+    seed([incident()]);
+    gw.chat.mockImplementation(async () => reply("There was a theft in the Stock room at 10:14 PM."));
+    await tickSecurityNarrator(prisma, deps());
+    const line = gw.chat.mock.calls[1]![0].messages[0].content.slice(SECURITY_NARRATIVE_SYSTEM_PROMPT.length);
+    for (const w of ["burglar", "burglary", "thief", "theft", "steal", "stolen", "robbery", "break-in", "break in", "intruder", "secure", "zone"]) {
+      expect(line, w).toMatch(new RegExp(`\\b${w}\\b`, "i"));
+    }
+  });
+
   it("a retry that passes is written", async () => {
     const [i] = seed([incident()]);
     gw.chat.mockImplementationOnce(async () => reply("An intruder was seen at 10:14 PM.")).mockImplementationOnce(async () => reply(GOOD));
@@ -417,6 +502,22 @@ describe("failures, expiry and the model", () => {
     expect(byId(i!.id).narrativeState).toBe("expired");
     expect(byId(j!.id).narrativeState).toBe("written");
     expect(gw.chat).toHaveBeenCalledTimes(1);
+  });
+
+  // #2423 review 3: a Regenerate keeps the old text while the new one is written. If that `pending` reaches the
+  // expiry first (the model paused, or the request came near the 7-day mark), the text goes back to `written` —
+  // never `expired`, which the page hides.
+  it("🔴 an expiring pending that still has its text goes back to written, the text and its time kept; no call", async () => {
+    const old = new Date(NOW.getTime() - 7 * 86_400_000 - 1);
+    const kept = { narrative: GOOD, narrativeModel: "gpt-oss:20b", narrativePromptVersion: 1, narratedAt: old, narrativeAudience: { cameras: ["back"], threats: false, locks: false } };
+    const [i, j] = seed([
+      incident({ firstActivityAt: old, lastActivityAt: old, lastArrivalAt: old, alertedAt: old, ...kept }),
+      incident({ firstActivityAt: old, lastActivityAt: old, lastArrivalAt: old, alertedAt: old }),
+    ]);
+    await tickSecurityNarrator(prisma, deps());
+    expect(byId(i!.id)).toMatchObject({ narrativeState: "written", ...kept });
+    expect(byId(j!.id).narrativeState).toBe("expired");
+    expect(gw.chat).not.toHaveBeenCalled();
   });
 
   it("no local model → zero calls, zero attempts, still pending, health Paused", async () => {

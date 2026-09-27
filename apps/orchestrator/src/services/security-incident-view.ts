@@ -98,17 +98,13 @@ import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from 
 import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
 import type { PatternCode } from "../lib/security-baseline-math.js";
 import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
-export interface IncidentViewer {
-  userId: string;
-  /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
-  visibleCameras: "all" | ReadonlySet<string>;
-  mayReadThreats: boolean;
-  /** Owner/admin: every notice. Anyone else: their own (D34). */
-  ownerOrAdmin: boolean;
-}
+// The viewer and `seesEverything` live in a leaf (WARP-3193 ARCH-1): the summary's rules use them without
+// importing this module, which imports those rules. Re-exported so every importer of this module is unchanged.
+export { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
 
 /** The incident columns the projection reads. */
 export const INCIDENT_VIEW_SELECT = {
@@ -410,10 +406,6 @@ export function judgeableCodes(p: Pick<IncidentProjection, "codes">, flags: read
   return REASON_CODE_ORDER.filter((c) => codes.has(c));
 }
 
-/** Review item 2 — who may see (and give) a verdict: a viewer who sees every camera and may read threats (P4's rule). */
-export function seesEverything(v: IncidentViewer): boolean {
-  return v.visibleCameras === "all" && v.mayReadThreats;
-}
 
 // ── the list's SQL (routes 16–17) ──────────────────────────────────────────
 

@@ -3979,6 +3979,7 @@ export type SecurityErrorCode =
   | "AI_SETTINGS_UNAVAILABLE"
   // WARP-2979 P4 PR-2 (route 28): Summarise now / Regenerate.
   | "NARRATIVE_COOLDOWN"
+  | "NARRATIVE_TOO_OLD"
   | "SUMMARIES_OFF";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */

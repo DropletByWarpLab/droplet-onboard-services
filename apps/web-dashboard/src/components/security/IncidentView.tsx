@@ -60,7 +60,7 @@ import { useCameraDisplayNames, useSecurityHealth, useSecurityIncident, useSecur
 import { deviceTimeZone } from "@/lib/security-time";
 import type { IncidentActionResult, IncidentDetail, IncidentMemberView } from "@/lib/types";
 import { AckHistory } from "./AckHistory";
-import { NarrativeSection } from "./NarrativeSection";
+import { NarrativeSection, narrativeAskable } from "./NarrativeSection";
 import { NoticeList } from "./NoticeList";
 import { ReasonList } from "./ReasonList";
 import { RESOLVE_COPY, ResolveDialog } from "./ResolveDialog";
@@ -368,7 +368,7 @@ function IncidentBody({
       <NarrativeSection
         narrative={i.narrative}
         grouping={i.grouping}
-        canAct={canSummarise}
+        canAct={canSummarise && narrativeAskable(i.lastActivityAt, now)}
         paused={summariesPaused}
         timezone={timezone}
         now={now}

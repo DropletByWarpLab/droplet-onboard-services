@@ -35,8 +35,10 @@ export const AI_COPY = {
   },
   linkingHelp: "A link Droplet makes on its own never sends an alert until someone keeps it.",
   summaries: "Write a short summary of each incident",
+  // #2423 review 11: only what this switch governs. Camera events can reach a cloud chat through the camera tools,
+  // which are not withheld off the LAN; the summaries are never written by a cloud model.
   summariesHelp:
-    "Summaries are written by the AI model on this Droplet. Security events are never sent to a cloud AI model, even when cloud models are turned on for chat.",
+    "Summaries are written only by the AI model on this Droplet, never by a cloud AI model, even when cloud models are turned on for chat.",
   summariesOn: "Droplet writes a short summary of each incident.",
   summariesOff: "Droplet doesn't write incident summaries.",
   readOnly: "People who manage Security can change this.",

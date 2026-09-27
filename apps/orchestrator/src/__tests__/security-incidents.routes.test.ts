@@ -1153,6 +1153,32 @@ describe("route 28 — POST /security/incidents/:id/narrative (act): Summarise n
     expect(page.body.narrative).toMatchObject({ state: "pending", text: WRITTEN, model: "gpt-oss:20b", promptVersion: 1 });
   });
 
+  // #2423 review 3: a pending summary expires 7 days after the incident's last activity. A Regenerate on an older
+  // incident set it pending only for the next tick to expire it — and the page hides an expired summary, text and
+  // all. Route 28 now refuses those incidents, leaving the summary (or the failure) exactly as it was.
+  it.each([
+    ["the written summary", writtenCols],
+    ["the failure", { narrativeState: "failed", narrativeError: "MODEL_ERROR", narrativeAttempts: 3, narrativeAttemptAt: new Date(NOW.getTime() - 8 * 86_400_000) }],
+  ] as const)("last activity over 7 days ago → 409 NARRATIVE_TOO_OLD, %s left as it was", async (_l, cols) => {
+    const old = new Date(NOW.getTime() - 7 * 86_400_000 - 1);
+    const f = world();
+    withFrontOnly(f, { ...cols, firstActivityAt: old, lastActivityAt: old, lastArrivalAt: old, alertedAt: old });
+    const before = { ...row28(f, FRONT_ONLY) };
+    const { server } = app(f, "admin", "act");
+    const res = await summarise(server, FRONT_ONLY);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("NARRATIVE_TOO_OLD");
+    expect(row28(f, FRONT_ONLY)).toEqual(before);
+    expect((await request(server).get(`/api/security/incidents/${FRONT_ONLY}`)).body.narrative.state).toBe(cols.narrativeState);
+  });
+
+  it("…exactly 7 days after the last activity is still in time → 202", async () => {
+    const edge = new Date(NOW.getTime() - 7 * 86_400_000);
+    const f = world();
+    withFrontOnly(f, { ...writtenCols, firstActivityAt: edge, lastActivityAt: edge, lastArrivalAt: edge, alertedAt: edge });
+    expect((await summarise(app(f, "admin", "act").server, FRONT_ONLY)).status).toBe(202);
+  });
+
   it("a strict body, and a bad id → 400", async () => {
     const f = world();
     withFrontOnly(f);
