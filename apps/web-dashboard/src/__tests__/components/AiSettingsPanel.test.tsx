@@ -117,6 +117,16 @@ describe("AiSettingsPanel", () => {
     expect(screen.queryByRole("button", { name: AI_COPY.save })).toBeNull();
   });
 
+  // #2423 review 11: the help said "Security events are never sent to a cloud AI model" — but the camera tools
+  // (list_camera_events, search_camera_events) are not withheld from a cloud chat. It now claims only what the
+  // switch governs: who writes the summaries.
+  it("the summaries help claims only the summaries: written on this Droplet, never by a cloud model", () => {
+    expect(AI_COPY.summariesHelp).toBe(
+      "Summaries are written only by the AI model on this Droplet, never by a cloud AI model, even when cloud models are turned on for chat.",
+    );
+    expect(AI_COPY.summariesHelp).not.toMatch(/events|never sent/i);
+  });
+
   it("a failed read is an error with Retry — never the defaults", async () => {
     h.getSecurityAiSettings.mockRejectedValue(Object.assign(new Error("db down"), { code: "AI_SETTINGS_UNAVAILABLE", status: 503 }));
     renderPanel();

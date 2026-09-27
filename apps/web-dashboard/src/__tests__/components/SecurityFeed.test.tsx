@@ -420,6 +420,16 @@ describe("the source header", () => {
     expect(container.querySelector('[data-source="retention"]')).toHaveTextContent("Reporting");
   });
 
+  // #2423 review 13: the box sends a `links` row (WARP-2979); the card showed it with no name.
+  it("names Droplet's link-finding row (WARP-2979)", () => {
+    expect(SOURCE_LABEL.links).toBe("Droplet's links");
+    const sources = [...OK, { id: "links" as const, state: "not_configured" as const, detail: "Turned off in Security settings", lastSeenAt: null }];
+    const { container } = render(<SecurityFeed {...props({ sources })} />);
+    const links = container.querySelector('[data-source="links"]');
+    expect(links).toHaveTextContent("Droplet's links");
+    expect(links).toHaveTextContent("Turned off in Security settings");
+  });
+
   it("names the opening-hours ticker's row (WARP-2977 P2b)", () => {
     expect(SOURCE_LABEL.site_mode).toBe("Opening hours");
     const { container } = render(<SecurityFeed {...props()} />);
@@ -623,6 +633,7 @@ describe("WARP-2978 — incidents on the feed", () => {
       site_mode: true,
       incidents: true,
       alerts: true,
+      links: true,
       summaries: true,
       patterns: true,
       retention: true,

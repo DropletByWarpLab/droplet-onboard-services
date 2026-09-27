@@ -74,6 +74,8 @@ import {
   validateAnswerAgainstTrace,
   describeToolUseVerdict,
 } from "./tool-use-validation.js";
+// WARP-3193 ARCH-10 — in types/ so tool-use-validation.ts needs nothing from here.
+import type { AgentTraceEntry } from "../types/agent-trace.js";
 import {
   assertToolAdvertisementFitsBudget,
   toolAdvertisementCeilingTokens,
@@ -514,13 +516,6 @@ export interface AgentCheckpointPort {
     text: string;
     isError: boolean;
   }): Promise<void>;
-}
-
-export interface AgentTraceEntry {
-  tool_call_id: string;
-  tool: string;
-  args: Record<string, unknown>;
-  result: unknown;
 }
 
 /**

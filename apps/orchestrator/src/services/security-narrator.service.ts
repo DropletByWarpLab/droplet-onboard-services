@@ -14,7 +14,9 @@
  * `running` flag plus the per-incident claim:
  *   1. `running` → return;
  *   2. summaries off → return (health not_configured);
- *   3. expire: `pending` 7 days after the last activity → `expired`;
+ *   3. expire: `pending` 7 days after the last activity → `expired`, or
+ *      back to `written` when it still has its text (a Regenerate keeps the
+ *      old text until the new one is written; `expired` would hide it);
  *   4. count what waits (and, every 10th tick, what failed in a day);
  *      nothing waiting → done (the model is not even listed);
  *   5. chat busy (`interactiveInferenceIdle`: in flight, or ended < 30 s
@@ -28,8 +30,10 @@
  *      is someone's lease;
  *   9. for each, re-checking 5 and 7: claim (CAS on the lease as read) →
  *      build the input → call → check → store. A YIELD (a chat started and
- *      aborted the call) releases the claim, is not an attempt, and stops
- *      the batch. A FAILURE counts an attempt; the third is `failed`.
+ *      aborted the call, or the gateway answered 429 because chat keeps its
+ *      queue full) releases the claim, is not an attempt, and stops the
+ *      batch; a 429 also gives its place in the hour back. A FAILURE counts
+ *      an attempt; the third is `failed`.
  * "Batched" means several calls back to back in one tick while chat stays
  * idle — never several incidents in one prompt (D16).
  *
@@ -86,6 +90,7 @@ import {
 } from "../lib/security-narrative-prompt.js";
 import { checkNarrative, type NarrativeCheckRule } from "../lib/security-narrative-check.js";
 import { createLogger } from "../lib/logger.js";
+import { NARRATIVE_EXPIRE_MS } from "./security-narrative-view.js";
 
 const logger = createLogger("security-narrator");
 
@@ -104,8 +109,8 @@ export const NARRATOR_MAX_PER_TICK = 5;
 export const SECURITY_NARRATIVE_MAX_ATTEMPTS = 3;
 /** A claim younger than this is someone's lease; an attempt older than this may be retried. */
 export const NARRATOR_LEASE_MS = 5 * 60_000;
-/** `pending` this long after the incident's last activity → `expired`. */
-export const NARRATIVE_EXPIRE_MS = 7 * 86_400_000;
+/** `pending` this long after the incident's last activity → `expired` (route 28 refuses past it). */
+export { NARRATIVE_EXPIRE_MS };
 /** gpt-oss spends output tokens on reasoning first; 700 with effort low leaves room for the text. */
 export const NARRATOR_MAX_TOKENS = 700;
 export const NARRATOR_CALL_TIMEOUT_MS = 90_000;
@@ -121,7 +126,8 @@ const RETRY_LINE: Readonly<Record<NarrativeCheckRule, string>> = {
   SHAPE: "Your last answer was not in the right form. Write two to four plain sentences, under 600 characters, with no markdown, links, lists or symbols.",
   NAMES: "Your last answer named a person. Do not name anyone: say someone or a person.",
   TIMES: "Your last answer gave a time that is not in the JSON. Give only the times written in the JSON, exactly as written.",
-  WORDS: "Your last answer used a word that is not allowed. Do not say monitored, alarm, armed, secure, protected, guarded, zone, intruder, burglar, thief, break-in or stolen.",
+  WORDS:
+    "Your last answer used a word that is not allowed. Do not say monitored, alarm, armed, secure, protected, guarded, zone, intruder, burglar, burglary, thief, theft, steal, stolen, robbery, break-in or break in.",
 };
 
 export type NarrativeError = "MODEL_ERROR" | "TIMEOUT" | "LENGTH" | "EMPTY" | `CHECK_FAILED:${NarrativeCheckRule}`;
@@ -265,11 +271,29 @@ async function callNarratorModel(model: string, input: NarrativeInputV1, signal:
   );
 }
 
+/** What the calls of one summary cost: the box proof's numbers (§12), logged with each write — never the text. */
+interface CallCost {
+  /** The sum of `usage.total_tokens` over the calls, or null when no call reported it. */
+  totalTokens: number | null;
+  callMs: number;
+  calls: number;
+}
+
 type Attempt =
-  | { kind: "written"; text: string; model: string }
+  | { kind: "written"; text: string; model: string; cost: CallCost }
   | { kind: "failed"; error: NarrativeError }
   | { kind: "yield" }
   | { kind: "rate" };
+
+/**
+ * The gateway REJECTS a priority ≥ 5 request with 429 while chat keeps its
+ * queue full (ai-gateway.client.ts): chat is busy, the summary did not fail —
+ * agent-run-worker's `gatewayBusy` rule (#2423 review 5). The client throws
+ * `AI Gateway error 429…` on a non-OK blocking response.
+ */
+function gatewayBusy(err: unknown): boolean {
+  return err instanceof Error && /^AI Gateway error 429\b/.test(err.message);
+}
 
 function callsInLastHour(nowMs: number): number {
   callStarts = callStarts.filter((t) => nowMs - t < HOUR_MS);
@@ -285,6 +309,7 @@ function modelName(response: unknown, requested: string): string {
 /** One summary: the call, the check, one retry. Yields when a chat starts. */
 async function narrateOnce(model: string, input: NarrativeInputV1, forbidden: readonly string[], now: () => Date): Promise<Attempt> {
   let retry: NarrativeCheckRule | null = null;
+  const cost: CallCost = { totalTokens: null, callMs: 0, calls: 0 };
   for (let call = 0; call < 2; call++) {
     const nowMs = now().getTime();
     if (!interactiveInferenceIdle(nowMs)) return { kind: "yield" };
@@ -301,6 +326,11 @@ async function narrateOnce(model: string, input: NarrativeInputV1, forbidden: re
       body = (await res.json()) as ChatResponse;
     } catch (err) {
       if (yielded.signal.aborted) return { kind: "yield" };
+      if (gatewayBusy(err)) {
+        // Nothing was generated: the call's place in the hour goes back.
+        callStarts.splice(callStarts.lastIndexOf(nowMs), 1);
+        return { kind: "yield" };
+      }
       if (timeout.aborted) return { kind: "failed", error: "TIMEOUT" };
       logger.warn({ err: err instanceof Error ? err.message : String(err) }, "security narrator: the model call failed");
       return { kind: "failed", error: "MODEL_ERROR" };
@@ -309,10 +339,13 @@ async function narrateOnce(model: string, input: NarrativeInputV1, forbidden: re
     }
     if (yielded.signal.aborted) return { kind: "yield" };
     narratorHealth.lastCallMs = Date.now() - started;
+    cost.callMs += narratorHealth.lastCallMs;
+    cost.calls++;
     const tokens = body?.usage?.total_tokens;
     if (typeof tokens === "number" && Number.isFinite(tokens)) {
       narratorHealth.lastTotalTokens = tokens;
       narratorHealth.tokenSamples = [...narratorHealth.tokenSamples, tokens].slice(-TOKEN_SAMPLES);
+      cost.totalTokens = (cost.totalTokens ?? 0) + tokens;
     }
 
     const choice = body?.choices?.[0];
@@ -320,7 +353,7 @@ async function narrateOnce(model: string, input: NarrativeInputV1, forbidden: re
     if (choice?.finish_reason === "length") return { kind: "failed", error: "LENGTH" };
     if (text.trim().length === 0) return { kind: "failed", error: "EMPTY" };
     const checked = checkNarrative(text, input, forbidden);
-    if (checked.ok) return { kind: "written", text: checked.text, model: modelName(body?.model, model) };
+    if (checked.ok) return { kind: "written", text: checked.text, model: modelName(body?.model, model), cost };
     if (call === 1) return { kind: "failed", error: `CHECK_FAILED:${checked.rule}` };
     retry = checked.rule;
   }
@@ -486,9 +519,14 @@ async function runTick(prisma: PrismaClient, clock: () => Date, now: Date, resul
   const settings = await readSecurityAiSettings(prisma);
   if (settings.summaries === "off") return;
 
-  // 3. Expire.
+  // 3. Expire — a pending that still has its text keeps it, as `written` (#2423 review 3); the rest expire.
+  const expireBefore = new Date(nowMs - NARRATIVE_EXPIRE_MS);
   await prisma.securityIncident.updateMany({
-    where: { narrativeState: "pending", lastActivityAt: { lt: new Date(nowMs - NARRATIVE_EXPIRE_MS) } },
+    where: { narrativeState: "pending", lastActivityAt: { lt: expireBefore }, narrative: { not: null } },
+    data: { narrativeState: "written" },
+  });
+  await prisma.securityIncident.updateMany({
+    where: { narrativeState: "pending", lastActivityAt: { lt: expireBefore } },
     data: { narrativeState: "expired" },
   });
 
@@ -590,6 +628,11 @@ async function runTick(prisma: PrismaClient, clock: () => Date, now: Date, resul
       result.written++;
       narratorHealth.lastWrittenAt = clock();
       narratorHealth.pending = Math.max(0, narratorHealth.pending - 1);
+      // The box proof's line (#2423 review 9): numbers only — never the text, a place, a camera or a name.
+      logger.info(
+        { incidentId: p.id, totalTokens: attempt.cost.totalTokens, callMs: attempt.cost.callMs, calls: attempt.cost.calls },
+        "security narrator: a summary was written",
+      );
     } else {
       logger.info({ incidentId: p.id }, "security narrator: the incident moved while it was written; the text is discarded");
     }

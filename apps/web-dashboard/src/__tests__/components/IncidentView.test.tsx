@@ -348,6 +348,28 @@ describe("WARP-3195 — a camera only Droplet linked: the line and Keep (route 2
   });
 });
 
+describe("WARP-2979 #2423 review 3 — no Regenerate once a summary could not be written in time", () => {
+  const SUMMARY = "Someone was seen in the Stock room at 2:14 AM while the site was closed.";
+  const written = { state: "written" as const, text: SUMMARY, writtenAt: at("01:31"), model: "gpt-oss:20b", promptVersion: 1 };
+  const daysBefore = (d: number, extraMs = 0) => new Date(NOW.getTime() - d * 86_400_000 - extraMs).toISOString();
+
+  it.each([
+    ["a written summary", written, SUMMARY],
+    ["a failure", { state: "failed" as const, text: null, writtenAt: null, model: null, promptVersion: null }, NARRATIVE_COPY.failed],
+  ])("last activity over 7 days ago: %s stays, with no Regenerate", async (_l, narrative, shown) => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", actionable: false, lastActivityAt: daysBefore(7, 1), narrative }));
+    renderView();
+    expect(await screen.findByText(shown)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: NARRATIVE_COPY.regenerate })).toBeNull();
+  });
+
+  it("exactly 7 days: still offered", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", actionable: false, lastActivityAt: daysBefore(7), narrative: written }));
+    renderView();
+    expect(await screen.findByRole("button", { name: NARRATIVE_COPY.regenerate })).toBeInTheDocument();
+  });
+});
+
 describe("the page's order and content", () => {
   it("title, span, the mode it opened in and the state; reasons come before events", async () => {
     renderView();

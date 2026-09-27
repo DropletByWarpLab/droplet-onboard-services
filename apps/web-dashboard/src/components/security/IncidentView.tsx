@@ -71,7 +71,7 @@ import type { IncidentActionResult, IncidentDetail, IncidentDropletLinkView, Inc
 import { AckHistory } from "./AckHistory";
 import { sourcePhrase } from "./link-evidence-copy";
 import { ALERTING_KINDS } from "./LinkWhyPopover";
-import { NarrativeSection } from "./NarrativeSection";
+import { NarrativeSection, narrativeAskable } from "./NarrativeSection";
 import { NoticeList } from "./NoticeList";
 import { ReasonList } from "./ReasonList";
 import { RESOLVE_COPY, ResolveDialog } from "./ResolveDialog";
@@ -427,7 +427,7 @@ function IncidentBody({
       <NarrativeSection
         narrative={i.narrative}
         grouping={i.grouping}
-        canAct={canSummarise}
+        canAct={canSummarise && narrativeAskable(i.lastActivityAt, now)}
         paused={summariesPaused}
         timezone={timezone}
         now={now}

@@ -46,7 +46,14 @@ import type {
 } from "@prisma/client";
 import type { NarrativeAudience } from "../lib/security-narrative-prompt.js";
 import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
-import { seesEverything, type IncidentProjection, type IncidentViewer } from "./security-incident-view.js";
+// The leaf, never security-incident-view.ts: that module imports this one (WARP-3193 ARCH-1).
+import { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
+
+/** What the summary's rules read of the viewer's projection (security-incident-view.ts `IncidentProjection`). */
+export interface NarrativeProjection {
+  codes: readonly SecurityReasonCode[];
+  partial: boolean;
+}
 
 /**
  * What a seal, a resolve that seals, and route 28 write to ask for the
@@ -59,6 +66,13 @@ export const NARRATIVE_ON_SEAL = { narrativeState: "pending", narrativeAttemptAt
 
 /** Route 28: under this long since the last attempt or the text → 409 NARRATIVE_COOLDOWN. */
 export const NARRATIVE_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * `pending` this long after the incident's last activity → `expired` (the
+ * narrator's tick). Route 28 refuses an incident past it (409
+ * NARRATIVE_TOO_OLD, #2423 review 3): a request there would only expire.
+ */
+export const NARRATIVE_EXPIRE_MS = 7 * 86_400_000;
 
 /** The incident columns this module reads. Route 18 selects these beside INCIDENT_VIEW_SELECT. */
 export const NARRATIVE_SELECT = {
@@ -133,9 +147,10 @@ function requiredAudience(row: NarrativeRow, reasons: readonly NarrativeReasonRe
 /**
  * The viewer rule (see the header): sees every camera and may read threats —
  * `seesEverything`, the verdict's rule. Route 28 asks it before it reads an
- * incident, so its refusal is the same for every id.
+ * incident, so its refusal is the same for every id; /security/health asks it
+ * for the `summaries` row (#2423 review 2). It reads the viewer only.
  */
-export function mayReadSummaries(viewer: IncidentViewer): boolean {
+export function mayReadSummaries(viewer: Pick<IncidentViewer, "visibleCameras" | "mayReadThreats">): boolean {
   return seesEverything(viewer);
 }
 
@@ -147,7 +162,7 @@ export function mayReadSummaries(viewer: IncidentViewer): boolean {
 export function narrativeVisibleTo(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
+  projection: NarrativeProjection | null,
   viewer: IncidentViewer,
 ): boolean {
   return mayReadSummaries(viewer) && narrativeIncidentVisible(row, reasons, projection, viewer);
@@ -157,7 +172,7 @@ export function narrativeVisibleTo(
 export function narrativeIncidentVisible(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
+  projection: NarrativeProjection | null,
   viewer: IncidentViewer,
 ): boolean {
   if (!projection || projection.partial) return false;
@@ -184,7 +199,7 @@ export function narrativeIncidentVisible(
 export function narrativeView(
   row: NarrativeRow,
   reasons: readonly NarrativeReasonRef[],
-  projection: Pick<IncidentProjection, "codes" | "partial"> | null,
+  projection: NarrativeProjection | null,
   viewer: IncidentViewer,
   summariesOn: boolean,
 ): NarrativeView | null {
