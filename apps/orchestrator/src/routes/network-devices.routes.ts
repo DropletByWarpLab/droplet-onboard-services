@@ -92,8 +92,9 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
   });
 
   // --- WARP-82: groups ---
+  // WARP-3118: group membership lists staff device MACs — employees only.
 
-  router.get("/network/groups", async (_req, res, next) => {
+  router.get("/network/groups", requireNetworkMember, async (_req, res, next) => {
     try {
       // WARP-111: SWR-friendly caching — see /network/devices for rationale.
       res.set("Cache-Control", "private, max-age=5, stale-while-revalidate=10");

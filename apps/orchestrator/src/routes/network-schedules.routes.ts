@@ -10,6 +10,7 @@ import type { createScheduleApiService } from "../services/schedule-api.service.
 import { DeviceRegistryError } from "../types/device-registry-error.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireNetworkMember } from "./network-status.routes.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -25,8 +26,12 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
   // is the one enforcing subject/window/range invariants; the only
   // marshalling these handlers do is ISO-string → Date for the override
   // endpoints.
+  //
+  // WARP-3118: the reads (schedules, overrides, schedule events) name staff
+  // devices and when they are cut off, so they take `requireNetworkMember`
+  // like the device roster (WARP-3091): employees yes, external guests no.
 
-  router.get("/network/schedules", async (_req, res, next) => {
+  router.get("/network/schedules", requireNetworkMember, async (_req, res, next) => {
     try {
       // WARP-111: SWR-friendly caching for the dashboard's polling reads.
       res.set("Cache-Control", "private, max-age=5, stale-while-revalidate=10");
@@ -37,7 +42,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.get("/network/schedules/:id", async (req, res, next) => {
+  router.get("/network/schedules/:id", requireNetworkMember, async (req, res, next) => {
     try {
       const schedule = await scheduleApi.getSchedule(req.params.id);
       res.json({ schedule });
@@ -85,7 +90,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.get("/network/overrides", async (req, res, next) => {
+  router.get("/network/overrides", requireNetworkMember, async (req, res, next) => {
     try {
       const overrides = await scheduleApi.listOverrides({
         active: req.query.active === "1",
@@ -187,7 +192,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.get("/network/schedule-events", async (req, res, next) => {
+  router.get("/network/schedule-events", requireNetworkMember, async (req, res, next) => {
     try {
       // WARP-111: the event log is append-only and tolerates a slightly
       // longer plain max-age (no SWR window).
