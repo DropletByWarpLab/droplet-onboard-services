@@ -147,6 +147,38 @@ describe("useChat — dashboard navigation (WARP-3116)", () => {
     expect(onNavigate).not.toHaveBeenCalled();
   });
 
+  it("does not move a viewer who stopped the turn after the page resolved", async () => {
+    const onNavigate = vi.fn();
+    const [call, result] = openPageTurn("/voice");
+    // The navigate result is in, the answer is still streaming, and the
+    // stream fails the way a real fetch does when Stop aborts it.
+    mockSendChat.mockImplementationOnce(async ({ signal }: { signal: AbortSignal }) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(call + result));
+          signal.addEventListener("abort", () =>
+            controller.error(new DOMException("The user aborted a request.", "AbortError")),
+          );
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+    render(<Probe onNavigate={onNavigate} />);
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = hook!.sendMessage("take me to voice settings", "llama3:8b");
+    });
+    await waitFor(() => expect(hook!.messages.at(-1)?.toolCalls?.[0]?.ok).toBe(true));
+    act(() => hook!.stop());
+    await act(async () => {
+      await pending;
+    });
+
+    expect(hook!.messages.at(-1)?.stopped).toBe(true);
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
   it("omits the page list when there is none, so the server withholds the tools", async () => {
     mockSendChat.mockResolvedValueOnce(sseResponse([frame("done", { iterations: 1, stop_reason: "model_done" })]));
     render(<Probe onNavigate={vi.fn()} pages={[]} />);

@@ -457,6 +457,21 @@ describe("POST /api/llm/chat — the request the model actually receives (WARP-2
       }),
     );
   });
+
+  it("(d) WARP-3116: a turn carrying `dashboardPages` advertises the navigation tools; the same turn without them does not", async () => {
+    const app = buildApp(createPrismaMock());
+    const dashboardPages = [{ href: "/voice", label: "Voice", section: "Systems › Network" }];
+
+    expect((await chat(app, "take me to voice settings", { dashboardPages })).status).toBe(200);
+    expect(advertisedNames()).toEqual(expect.arrayContaining([...DASHBOARD_NAVIGATION_TOOLS]));
+    expect(systemPrompt()).toContain("Never guess dashboard paths: use find_dashboard_page.");
+
+    modelRequests.length = 0;
+    expect((await chat(app, "take me to voice settings")).status).toBe(200);
+    const names = advertisedNames();
+    for (const tool of DASHBOARD_NAVIGATION_TOOLS) expect(names).not.toContain(tool);
+    expect(systemPrompt()).not.toContain("find_dashboard_page");
+  });
 });
 
 describe("the 50-row continuity window, at its boundary (WARP-2643)", () => {
