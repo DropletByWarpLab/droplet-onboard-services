@@ -183,7 +183,12 @@ function createPrismaMock() {
       return { count: hits.length };
     }),
   });
+  // WARP-3152 review: the directory the approve route re-checks a requester
+  // against. `bob` is the member the sign-in-gate tests enroll as.
+  const users: any[] = [{ id: "u-bob-42", username: "bob", role: "family", directoryStatus: "ACTIVE" }];
   const client: any = {
+    user: table(users, "user"),
+    _users: users,
     overlayLinkToken: table(linkTokens, "tok"),
     pendingOverlayEnrollment: table(pendings, "pend", { conflict: false }),
     vpnPeer: table(vpnPeers, "vp"),
@@ -1780,6 +1785,79 @@ describe("POST /api/vpn/overlay/devices — approval gate (WARP-1882)", () => {
     const res = await enroll(app);
     expect(res.status).toBe(200);
     expect(res.body.profile).toBeTruthy();
+  });
+
+  // WARP-3152 — the member who asked owns the approved device. It used to land
+  // under the synthetic `overlay` user: invisible in their own list and
+  // removable only by an admin.
+  it("gives the approved device to the member who asked, not to `overlay`", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    expect(prisma._pendings[0].requestedBy).toBe("bob");
+
+    const { app: ownerApp } = buildApp({ prisma });
+    const queue = await request(ownerApp).get("/api/vpn/overlay/pending-enrollments");
+    expect(queue.body[0].requested_by).toBe("bob");
+
+    const approved = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(approved.status).toBe(200);
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.userId).toBe("bob");
+
+    const mine = await request(app).get("/api/vpn/peers");
+    expect(mine.status).toBe(200);
+    const list = mine.body.peers ?? mine.body;
+    expect(list.map((p: any) => p.publicKey)).toContain(VALID_WG_KEY);
+  });
+
+  it("refuses to approve, and denies, a request whose member has since been deactivated", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    prisma._users[0].directoryStatus = "DEACTIVATED";
+
+    const audit: AuditEntry[] = [];
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-1" }));
+    const { app: ownerApp } = buildApp({ prisma, audit, overlayEnroll });
+    const res = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("requester_not_active");
+    expect(prisma._pendings[0].state).toBe("denied");
+    expect(overlayEnroll).not.toHaveBeenCalled();
+    expect(prisma._vpnPeers).toHaveLength(0);
+    expect(audit.some((a) => a.event === "overlay_enroll_requester_ineligible")).toBe(true);
+  });
+
+  it("refuses a request whose member has since become an external guest", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    prisma._users[0].role = "guest";
+    const { app: ownerApp } = buildApp({ prisma });
+    const res = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(prisma._vpnPeers).toHaveLength(0);
+  });
+
+  it("leaves a row staged before the column existed admin-only (`overlay`)", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    delete prisma._pendings[0].requestedBy; // pre-migration row: NULL
+
+    const { app: ownerApp } = buildApp({ prisma });
+    await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.userId).toBe("overlay");
   });
 });
 

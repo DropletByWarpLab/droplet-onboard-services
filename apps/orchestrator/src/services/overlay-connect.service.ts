@@ -188,6 +188,10 @@ export interface OverlayVpnPeerRow {
   assignedIp: string;
   status: string;
   kind: string;
+  /** Owner username, or the synthetic `overlay` for a QR-linked device. */
+  userId?: string;
+  /** WARP-3172: revoked on the box while HQ was unreachable; HQ revoke owed. */
+  hqRevokePending?: boolean;
 }
 
 /** WARP-1474 — the approved dashboard-QR enrollment a newly-installed overlay
@@ -199,6 +203,8 @@ export interface OverlayPendingEnrollmentRow {
   label: string;
   approvedBy: string | null;
   enrolledAt: Date | null;
+  /** WARP-3152: the member who asked; null ⇒ QR / legacy (admin-only). */
+  requestedBy?: string | null;
 }
 
 /** Structural Prisma surface — tests pass a minimal in-memory stub. */
@@ -215,6 +221,14 @@ export interface OverlayConnectPrisma {
     findMany(args: {
       where: Record<string, unknown>;
     }): Promise<OverlayVpnPeerRow[]>;
+  };
+  // WARP-3172: the device's owner must still be an ACTIVE member of the company
+  // before the tick installs or revives their peer.
+  user: {
+    findUnique(args: {
+      where: { username: string };
+      select: { directoryStatus: true; role: true };
+    }): Promise<{ directoryStatus: string; role: string } | null>;
   };
   // WARP-1474: present in production; used to stamp QR-enroll provenance onto the
   // overlay peer the FIRST time it's installed after an owner approval.
@@ -456,7 +470,7 @@ export async function answerOverlaySession(
 export async function installOrRefreshOverlayPeer(
   deps: OverlayConnectDeps,
   offer: OverlayOffer,
-): Promise<OverlayVpnPeerRow> {
+): Promise<OverlayVpnPeerRow | null> {
   const { config, prisma } = deps;
   const now = deps.now?.() ?? new Date();
   const existing = await prisma.vpnPeer.findUnique({
@@ -468,11 +482,21 @@ export async function installOrRefreshOverlayPeer(
   // who linked which QR. Best-effort + guarded — a peer from the owner-JWT
   // /devices path (no pending row) or a runtime without the model just gets no
   // provenance, never an error.
-  const provenance = await resolveOverlayProvenance(
+  const { requestedBy: ownerOf, ...provenance } = await resolveOverlayProvenance(
     prisma,
     offer.clientPublicKey,
     now,
   );
+
+  // WARP-3172 — never install or revive a device whose owner has left
+  // (deactivated, deleted) or become an external guest. Without this, a leaver
+  // whose HQ revoke failed is back inside the LAN on their next Connect: HQ
+  // still brokers the session and the update below flips REVOKED to active.
+  const owner = existing?.userId ?? ownerOf ?? OVERLAY_PEER_USER;
+  if (owner !== OVERLAY_PEER_USER && !(await ownerMayConnect(prisma, owner))) {
+    await refuseInactiveOwnersDevice(deps, existing, offer.clientPublicKey, owner);
+    return null;
+  }
 
   let row: OverlayVpnPeerRow;
   let assignedIp: string;
@@ -509,7 +533,7 @@ export async function installOrRefreshOverlayPeer(
     assignedIp = await deps.allocateIp();
     row = await prisma.vpnPeer.create({
       data: {
-        userId: OVERLAY_PEER_USER,
+        userId: ownerOf ?? OVERLAY_PEER_USER,
         deviceLabel: offer.clientLabel ?? "Remote device",
         publicKey: offer.clientPublicKey,
         assignedIp,
@@ -542,6 +566,75 @@ export async function installOrRefreshOverlayPeer(
  *  sweep filters on `kind`, independent of this value. */
 const OVERLAY_PEER_USER = OVERLAY_PEER_USER_ID;
 
+/** WARP-3172 — owner, admin or member, and ACTIVE in the directory. */
+async function ownerMayConnect(
+  prisma: OverlayConnectPrisma,
+  username: string,
+): Promise<boolean> {
+  const person = await prisma.user.findUnique({
+    where: { username },
+    select: { directoryStatus: true, role: true },
+  });
+  return (
+    !!person &&
+    person.directoryStatus === "ACTIVE" &&
+    (person.role === "owner" || person.role === "admin" || person.role === "family")
+  );
+}
+
+/** WARP-3172 — the refusal: tear down a peer still live on the router, and
+ *  retry the HQ revoke the leaver sweep could not complete. Best-effort; the
+ *  refusal itself (no install, no revival) is what keeps the device out. */
+async function refuseInactiveOwnersDevice(
+  deps: OverlayConnectDeps,
+  existing: OverlayVpnPeerRow | null,
+  publicKey: string,
+  owner: string,
+): Promise<void> {
+  const logger = deps.logger ?? noopLogger;
+  logger.warn(
+    { owner, peerId: existing?.id ?? null },
+    "overlay-connect: device owner is no longer an active member — refusing to install",
+  );
+  try {
+    if (existing?.status === "active") {
+      const removal = await deps.peers.remove({
+        interface: deps.config.vpnInterface,
+        publicKey,
+      });
+      if (!removal || removal.applied !== false) {
+        await deps.prisma.vpnPeer.update({
+          where: { publicKey },
+          data: { status: "revoked", revokedAt: deps.now?.() ?? new Date(), hqRevokePending: true },
+        });
+      }
+    }
+    if (existing?.hqRevokePending || existing?.status === "active") {
+      await revokeOverlayDeviceAtHq(
+        {
+          config: {
+            hqBaseUrl: deps.config.hqBaseUrl,
+            deviceId: deps.config.deviceId,
+            httpTimeoutMs: deps.config.httpTimeoutMs,
+          },
+          identity: deps.identity,
+          fetchImpl: deps.fetchImpl,
+        },
+        publicKey,
+      );
+      await deps.prisma.vpnPeer.update({
+        where: { publicKey },
+        data: { hqRevokePending: false },
+      });
+    }
+  } catch (err) {
+    logger.error(
+      { err, owner, peerId: existing?.id ?? null },
+      "overlay-connect: cleanup for an inactive owner's device failed — retried on its next connect",
+    );
+  }
+}
+
 function existing_label_fallback(row: OverlayVpnPeerRow): string {
   return (row as { deviceLabel?: string }).deviceLabel ?? "Remote device";
 }
@@ -554,7 +647,7 @@ async function resolveOverlayProvenance(
   prisma: OverlayConnectPrisma,
   publicKey: string,
   now: Date,
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, unknown> & { requestedBy?: string | null }> {
   const model = prisma.pendingOverlayEnrollment;
   if (!model?.findFirst) return {};
   try {
@@ -567,6 +660,9 @@ async function resolveOverlayProvenance(
       linkTokenId: approved.linkTokenId,
       linkTokenLabel: approved.label,
       enrolledAt: approved.enrolledAt ?? now,
+      // WARP-3152: only used when the tick CREATES the peer (approval-time
+      // provisioning failed); never re-homes an existing row.
+      requestedBy: approved.requestedBy ?? null,
     };
   } catch {
     return {};
@@ -598,7 +694,8 @@ export async function runOverlayConnectTick(
   );
   const boxEndpoint = await probeBoxEndpoint(deps);
   await answerOverlaySession(deps, offer.sessionId, boxEndpoint);
-  await installOrRefreshOverlayPeer(deps, offer);
+  const installed = await installOrRefreshOverlayPeer(deps, offer);
+  if (!installed) return "idle"; // WARP-3172: refused — owner no longer active
   // WARP-1389 — one punch ATTEMPT recorded, tagged with the coarse NAT class the
   // box's own observed mapping implies (port-preserving vs symmetric). The
   // succeeded/failed split is settled later by the idle-expiry sweep from the
