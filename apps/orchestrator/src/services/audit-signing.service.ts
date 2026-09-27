@@ -351,10 +351,8 @@ export function loadAuditKeyFromDisk(
  * Single process-wide signer instance. Lazy so tests that construct
  * their own ephemeral signer don't have to mock the disk path.
  *
- * Resets are NOT exposed — once the orchestrator picks a key it stays
- * with it for the process lifetime. Key rotation is a future ticket;
- * the verification path can pick up additional public keys without
- * needing a hot-swap on this side.
+ * Resets are NOT exposed. Rotation (WARP-3165) swaps the key in the
+ * activity singleton (activity.singleton.ts), not here.
  */
 let cachedSigner: ActivityRowSigner | null = null;
 
@@ -378,4 +376,92 @@ export function _setDefaultSignerForTests(
  */
 export function auditKeyDirectory(): string {
   return path.dirname(AUDIT_KEY_PATH);
+}
+
+// ── WARP-3165: key ids, retired keys, and the epoch rule ─────────────────
+
+/** Where rotation archives each retired key, read-only in the container.
+ *  One file per key: `<UTC yyyymmddThhmmssZ>-<keyId>.key`, raw bytes, so
+ *  lexicographic order is retirement order. */
+export const AUDIT_RETIRED_DIR = "/data/secrets/audit-retired";
+
+const RETIRED_KEY_FILE_RE = /^\d{8}T\d{6}Z-([0-9a-f]{16})\.key$/;
+
+/** A key's public name: the first 16 hex chars of SHA-256 over its bytes.
+ *  Safe to show and to audit (a 32-byte random key can't be recovered from
+ *  it); never the key itself. */
+export function auditKeyId(key: Buffer): string {
+  return createHash("sha256").update(key).digest("hex").slice(0, 16);
+}
+
+/** One key of the audit keyring. */
+export interface AuditKeyEpoch {
+  keyId: string;
+  signer: ActivityRowSigner;
+}
+
+/**
+ * Read the retired keys, OLDEST FIRST. A missing directory is an empty
+ * keyring (a box that never rotated). A file whose name does not match its
+ * bytes, or that is too short, is skipped with a warning rather than
+ * failing boot: it can only cost the verification of the rows it signed,
+ * which then report as a break.
+ */
+export function loadRetiredAuditKeys(dir: string = AUDIT_RETIRED_DIR): AuditKeyEpoch[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: AuditKeyEpoch[] = [];
+  for (const name of names.sort()) {
+    const m = RETIRED_KEY_FILE_RE.exec(name);
+    if (!m) continue;
+    const bytes = fs.readFileSync(path.join(dir, name));
+    if (bytes.length < MIN_KEY_BYTES || auditKeyId(bytes) !== m[1]) {
+      logger.warn({ file: name }, "retired audit key skipped: its bytes don't match its name");
+      continue;
+    }
+    out.push({ keyId: m[1]!, signer: createHmacSigner(bytes) });
+  }
+  return out;
+}
+
+/**
+ * The epoch rule (WARP-3165), as a stateful per-walk checker over rows in
+ * ascending id order. `keys` is the keyring oldest first, the current key
+ * last. Each row must verify under the key of the current epoch or a NEWER
+ * one, and a row signed by a newer key moves the epoch forward for good.
+ *
+ * So after the first row signed by the new key (the rotation's own "Audit
+ * key rotated" row), a row signed by any retired key fails: whoever holds a
+ * leaked old key cannot append after the rotation. Rows before it keep
+ * verifying under the key that signed them. And rewriting them is caught by
+ * the chain itself: the first new-key row's prevSignatureHash commits to the
+ * last old-key row, and only the new key can re-sign that link.
+ *
+ * Returns the matching key's id, or null when no allowed key verifies.
+ */
+export function createEpochVerifier(keys: AuditKeyEpoch[]): {
+  verify(content: ActivityRowContent, prevSignatureHash: string, signature: string): string | null;
+} {
+  let epoch = 0;
+  return {
+    verify(content, prevSignatureHash, signature) {
+      for (let i = epoch; i < keys.length; i += 1) {
+        let ok = false;
+        try {
+          ok = keys[i]!.signer.verify(content, prevSignatureHash, signature);
+        } catch {
+          ok = false; // unknown schemaVersion → never vouch for it
+        }
+        if (ok) {
+          epoch = i;
+          return keys[i]!.keyId;
+        }
+      }
+      return null;
+    },
+  };
 }

@@ -4,6 +4,8 @@
  *   GET  /api/activity          — paginated, filterable list (AC5)
  *   POST /api/activity/export   — sealed JSON-Lines bundle (AC6)
  *   GET  /api/activity/verify   — server-side hash-chain walk (WARP-246)
+ *   POST /api/activity/rotate-key — owner + recent MFA: retire the audit
+ *                                   HMAC key (WARP-3165)
  *
  * All routes are gated via `requireOwnerOrAdmin`: owner/admin humans,
  * plus (WARP-1443) the MCP server's pinned `_service:mcp` principal so
@@ -17,10 +19,17 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import { getActivitySigner, recordActivity } from "../services/activity.singleton.js";
+import { getActivitySigner, getAuditKeyring, recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyActivityChainCoalesced } from "../services/audit-verify.service.js";
 import {
+  AuditKeyRotationError,
+  rotateAuditKey,
+} from "../services/audit-key-rotation.service.js";
+import { createRequireRecentMfa } from "../middleware/require-recent-mfa.js";
+import { getOtaHost } from "../services/update-agent/host-exec.js";
+import {
+  createEpochVerifier,
   hashSignature,
   type ActivityActorTypeName,
   type ActivityKindName,
@@ -287,7 +296,7 @@ export function createActivityRouter(
         // the nightly tamper-detection cron shares the exact same logic.
         // WARP-1027: coalesced so N concurrent admin tabs share one O(n) walk.
         // Response shape is byte-identical to the pre-extraction handler.
-        const result = await verifyActivityChainCoalesced(prisma, signer);
+        const result = await verifyActivityChainCoalesced(prisma, getAuditKeyring());
         res.json({
           ok: result.ok,
           rowsChecked: result.rowsChecked,
@@ -423,6 +432,9 @@ export function createActivityRouter(
         let exported = 0;
         let hmacFailed = 0;
         const hmacFailedRowIds: string[] = [];
+        // WARP-3165: every key the chain was ever signed with, under the
+        // epoch rule (rows come out in id order, so a subset works too).
+        const epoch = createEpochVerifier(getAuditKeyring());
         for (;;) {
           const page = await prisma.activityRow.findMany({
             where: cursor
@@ -462,12 +474,9 @@ export function createActivityRouter(
               actorId: r.actorId,
               schemaVersion: r.schemaVersion,
             };
-            let valid: boolean;
-            try {
-              valid = signer.verify(content, r.prevSignatureHash, r.signature);
-            } catch {
-              valid = false; // unknown schemaVersion → never vouch for it
-            }
+            // An unknown schemaVersion verifies under no key (the epoch
+            // verifier catches the throw), so it is never vouched for.
+            const valid = epoch.verify(content, r.prevSignatureHash, r.signature) !== null;
             if (!valid) {
               hmacFailed += 1;
               if (hmacFailedRowIds.length < MAX_LISTED_HMAC_FAILURES) {
@@ -541,6 +550,47 @@ export function createActivityRouter(
           // detached rejection from becoming an unhandled one.
         });
       } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── POST /api/activity/rotate-key (WARP-3165) ──
+  //
+  // Retire the audit HMAC key: every export made before WARP-3153 carried
+  // it. Owner only (an admin can't re-key the log that records admins), with
+  // a fresh MFA re-auth, the same gate as the device-identity reseal. The
+  // old key is archived for verification only; see
+  // services/audit-key-rotation.service.ts for the design.
+  router.post(
+    "/activity/rotate-key",
+    sensitiveRateLimit,
+    (req, res, next) => {
+      if (req.user?.role !== "owner") {
+        res.status(403).json({ error: "owner role required" });
+        return;
+      }
+      next();
+    },
+    createRequireRecentMfa(),
+    async (req, res, next) => {
+      try {
+        const host = getOtaHost();
+        const result = await rotateAuditKey({
+          runOnHost: host
+            ? async () => {
+                await host.exec(host.helperPath, ["rotate-audit-key"], { timeoutMs: 60_000 });
+              }
+            : null,
+          actor: actorFromRequest(req),
+          actorUsername: req.user?.username ?? null,
+        });
+        res.json({ rotated: true, ...result });
+      } catch (err) {
+        if (err instanceof AuditKeyRotationError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
         next(err);
       }
     },
