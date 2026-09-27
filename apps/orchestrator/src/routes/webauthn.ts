@@ -17,6 +17,8 @@
  *   - The same assertion is the natural place to later stamp `lastMfaAt` for
  *     step-up flows; that JWT-claim plumbing is owned by WARP-238 and is
  *     deliberately NOT expanded here (see the matching note in the PR body).
+ *   - WARP-3193: user verification is REQUIRED on both ceremonies, and a
+ *     user with TOTP enrolled must also pass it (same gate as /auth/login).
  *
  * Four routes, split to match the auth.ts public/protected mounting:
  *   PROTECTED (require a signed-in user — you enrol a passkey for yourself):
@@ -59,6 +61,8 @@ import {
   type Role,
 } from "../services/jwt.service.js";
 import { createSession } from "../services/session.service.js";
+import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
+import { createRequireCredentialStepUp } from "../middleware/require-credential-step-up.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { createChallenge, consumeChallenge } from "../services/webauthn-challenge.service.js";
 import { deriveWebAuthnRp, isIpRpId } from "../services/webauthn-config.js";
@@ -129,6 +133,10 @@ const renameBodySchema = z.object({
  *  Shape is validated by @simplewebauthn/server; we only assert it's present. */
 const verifyBodySchema = z.object({
   response: z.object({}).passthrough(),
+  // WARP-3193 SEC-AUTH-2 — the second factor for a user with TOTP enrolled,
+  // the same optional fields (and bounds) POST /auth/login takes.
+  totp: z.string().trim().max(16).optional(),
+  recoveryCode: z.string().trim().max(64).optional(),
 });
 
 /** CSV (stored) -> transports array (the library's shape). */
@@ -174,6 +182,9 @@ async function issueSession(
      *  straight into signAccessToken below, so a caller that omits it
      *  mints a claim-less token and consumers fall back to the database. */
     accessRoleId?: string | null;
+    /** WARP-3193 — ISO stamp of a second factor passed in this sign-in;
+     *  access token only, exactly like POST /auth/login. */
+    lastMfaAt?: string;
   },
 ): Promise<void> {
   // WARP-247 — record first so the sid rides inside both tokens; also
@@ -181,8 +192,9 @@ async function issueSession(
   // skipped registerRefreshSession, leaving these sessions invisible to
   // the admin revoke sweep.
   const { sid } = await createSession({ id: user.id, role: user.role });
-  const accessToken = signAccessToken({ ...user, sid });
-  const refreshToken = signRefreshToken({ ...user, sid });
+  const { lastMfaAt, ...identity } = user;
+  const accessToken = signAccessToken({ ...identity, lastMfaAt, sid });
+  const refreshToken = signRefreshToken({ ...identity, sid });
   await registerRefreshSession(user.id, refreshToken);
   const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
 
@@ -238,7 +250,12 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   // WebAuthn handlers: attestation / assertion verification is CPU-bound and
   // the authenticate pair is a session-issuing path (same posture as
   // /auth/login).
-  router.post("/auth/webauthn/register/options", authRateLimit, async (req, res, next) => {
+  // WARP-3193 SEC-AUTH-9 — step-up before registering a passkey (both
+  // halves), so a hijacked session cannot plant one: recent MFA when TOTP
+  // is enrolled, else the current password.
+  const requireCredentialStepUp = createRequireCredentialStepUp(prisma);
+
+  router.post("/auth/webauthn/register/options", authRateLimit, requireCredentialStepUp, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string; username: string; displayName: string } }).user;
       if (!user) {
@@ -274,7 +291,10 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
         })),
         authenticatorSelection: {
           residentKey: "preferred",
-          userVerification: "preferred",
+          // WARP-3193 SEC-AUTH-2 — REQUIRED (was "preferred"): a passkey is a
+          // primary credential only when its PIN/biometric is checked, so a
+          // PIN-less roaming key must not enrol (or, below, sign in).
+          userVerification: "required",
         },
       });
 
@@ -285,7 +305,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Registration: verify attestation + store the credential ──
-  router.post("/auth/webauthn/register/verify", authRateLimit, async (req, res, next) => {
+  router.post("/auth/webauthn/register/verify", authRateLimit, requireCredentialStepUp, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string } }).user;
       if (!user) {
@@ -330,7 +350,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
           expectedChallenge: clientChallenge,
           expectedOrigin: origin,
           expectedRPID: rpID,
-          requireUserVerification: false,
+          requireUserVerification: true,
         });
       } catch (err) {
         logger.warn({ err: (err as Error).message }, "WebAuthn registration verification failed");
@@ -529,7 +549,8 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
       const options = await generateAuthenticationOptions({
         rpID,
         challenge,
-        userVerification: "preferred",
+        // WARP-3193 SEC-AUTH-2 — enforced server-side at verify, too.
+        userVerification: "required",
       });
 
       res.json(options);
@@ -583,7 +604,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
           expectedChallenge: clientChallenge,
           expectedOrigin: origin,
           expectedRPID: rpID,
-          requireUserVerification: false,
+          requireUserVerification: true,
           credential: {
             id: dbCred.credentialId,
             publicKey: new Uint8Array(dbCred.publicKey),
@@ -652,6 +673,38 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
         return;
       }
 
+      // WARP-3193 SEC-AUTH-2 — the SAME second-factor gate POST /auth/login
+      // runs (services/login-second-factor.service.ts): a user with TOTP
+      // enrolled must send `totp` or `recoveryCode` with the assertion, or
+      // gets the password path's 401 TOTP_REQUIRED contract. Like the
+      // deactivation gate above, a refused attempt does not advance the
+      // counter. The challenge is spent, so the client re-runs the ceremony
+      // with the code.
+      const secondFactor = await checkLoginSecondFactor(prisma, dbUser.id, parsed.data);
+      if (secondFactor === "failed") {
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-alert",
+          what: "Two-factor challenge failed",
+          sub: `${dbUser.username} • ${callerIp(req) ?? "unknown"}`,
+          refs: {
+            outcome: "totp_required",
+            method: "webauthn",
+            userId: dbUser.id,
+            username: dbUser.username,
+            ip: callerIp(req) ?? null,
+          },
+          // WARP-181: still pre-auth — the sign-in has not completed.
+          actor: { type: "anonymous" },
+        });
+        res.status(401).json({
+          error: "Two-factor authentication required",
+          code: "TOTP_REQUIRED",
+        });
+        return;
+      }
+
       // Advance the signature counter to the verified value (clone detection
       // on the NEXT assertion) and stamp last-used — only now that the user is
       // verified AND active, so a blocked attempt never mutates state.
@@ -689,6 +742,9 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
         // must carry the same claim or every passkey user silently keeps
         // paying the per-turn read.
         accessRoleId: dbUser.accessRoleId ?? null,
+        // WARP-3193 — stamped exactly when the password path stamps it: the
+        // TOTP factor was just satisfied (require-recent-mfa, WARP-230).
+        lastMfaAt: secondFactor === "passed" ? new Date().toISOString() : undefined,
       });
     } catch (err) {
       next(err);

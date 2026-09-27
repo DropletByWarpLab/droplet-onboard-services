@@ -55,6 +55,7 @@ import { toMinorUnits } from "@droplet/shared-types";
 import { createLogger } from "../../lib/logger.js";
 
 import { landMoneyDocuments, landsMoney, type MoneyLandingDb } from "./land-money.js";
+import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
 const logger = createLogger("erp-sync-land");
 
@@ -177,14 +178,6 @@ function date(row: Row, key: string): Date | null {
   if (raw === null) return null;
   const parsed = new Date(raw);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: unknown }).code === "P2002"
-  );
 }
 
 /**

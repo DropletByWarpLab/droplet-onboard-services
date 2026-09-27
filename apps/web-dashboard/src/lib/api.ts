@@ -730,11 +730,16 @@ export interface TotpVerifyResponse {
 }
 
 /** Begin TOTP enrollment: returns the QR + otpauth URI for the current user. */
-export async function enrollTotp(signal?: AbortSignal): Promise<TotpEnrollResponse> {
+export async function enrollTotp(
+  signal?: AbortSignal,
+  // WARP-3193 — required by the box (403 STEP_UP_PASSWORD_REQUIRED) when the
+  // account has no second factor yet.
+  currentPassword?: string,
+): Promise<TotpEnrollResponse> {
   const res = await authFetch(`${BASE}/api/auth/totp/enroll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    body: JSON.stringify(currentPassword ? { currentPassword } : {}),
     signal,
   });
   if (!res.ok) {
@@ -755,11 +760,12 @@ export async function enrollTotp(signal?: AbortSignal): Promise<TotpEnrollRespon
  * Confirm a 6-digit code. On the first success the response carries the
  * one-time recovery codes (shown once); a later call enables nothing new.
  */
-export async function verifyTotp(code: string): Promise<TotpVerifyResponse> {
+export async function verifyTotp(code: string, currentPassword?: string): Promise<TotpVerifyResponse> {
   const res = await authFetch(`${BASE}/api/auth/totp/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
+    // WARP-3193 — the confirming verify carries the same step-up as enroll.
+    body: JSON.stringify(currentPassword ? { code, currentPassword } : { code }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));

@@ -40,6 +40,7 @@ vi.mock("../services/effective-access.service.js", () => ({
 import { createNotificationsRouter } from "../routes/notifications.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { makeFakeNotificationLog, type FakeNotificationLog } from "./helpers/fake-notification-log.js";
+import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 
 const MCP: AuthUser = { id: "_service:mcp", username: "_service:mcp", displayName: "MCP Server", role: "service" };
 
@@ -67,6 +68,8 @@ function fakePrisma(users: FakeUser[]): { prisma: PrismaClient; log: FakeNotific
         const u = users.find((x) => (where.id !== undefined ? x.id === where.id : x.username === where.username));
         return u ? { directoryStatus: "ACTIVE", accessRoleId: null, accessRole: null, ...u } : null;
       }),
+      // WARP-3098 — resolveAssertedUser's `findMany OR [...] take 2`.
+      findMany: userDirectory(() => users.map((u) => ({ nextcloudUsername: null, ...u }) as DirectoryUser)).findMany,
     },
     notificationLog: log.delegate,
   };
@@ -265,6 +268,18 @@ describe("N1 GET /api/notifications as the MCP principal (WARP-3099)", () => {
   it("a deactivated account → 403 ACTING_USER_REQUIRED", async () => {
     const { prisma, log } = fakePrisma([{ ...ALICE, directoryStatus: "DEACTIVATED" }]);
     seed(log);
+    const res = await list(appAs(MCP, prisma), ALICE.id);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe("ACTING_USER_REQUIRED");
+    expect(log.delegate.findMany).not.toHaveBeenCalled();
+  });
+
+  it("WARP-3098: a value that is one person's User.id AND another's username → 403 ACTING_USER_REQUIRED; neither list is read", async () => {
+    // A username-then-id lookup resolved this to the look-alike and read THEIR list.
+    const lookalike: FakeUser = { id: "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a", username: ALICE.id, role: "owner" };
+    const { prisma, log } = fakePrisma([ALICE, lookalike]);
+    seed(log);
+    log.seed({ id: "n-lookalike-1", username: ALICE.id, kind: "system", title: "The look-alike's", createdAt: ago(4) });
     const res = await list(appAs(MCP, prisma), ALICE.id);
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe("ACTING_USER_REQUIRED");

@@ -209,7 +209,7 @@ export function inFlightPasses(): ReadonlySet<string> {
 export async function runWithLease(
   prisma: PrismaClient,
   passKey: string,
-  run: () => Promise<void>,
+  run: (signal: AbortSignal) => Promise<void>,
   opts: { now?: Date; workerId?: string; heartbeatMs?: number } = {},
 ): Promise<{ started: boolean; reason?: string; done?: Promise<void> }> {
   const workerId = opts.workerId ?? WORKER_ID;
@@ -238,14 +238,30 @@ export async function runWithLease(
     // TIMER-driven, not iteration-driven. A pass sitting inside one slow model
     // call is still alive and must keep its lease; a heartbeat that only fired
     // between units would drop the claim on exactly the box this fix is for.
+    //
+    // WARP-3193 QUAL-2 — and its answer is acted on. A beat that finds the
+    // claim gone (`false`: another worker reclaimed the pass) ABORTS the run's
+    // signal, so the pass stops instead of running on beside its successor. A
+    // beat that REJECTS (a DB blip) is logged and is not a lost lease — the
+    // next beat retries; before this it was an untagged unhandled rejection.
+    const abort = new AbortController();
     const beat = setInterval(() => {
-      void beatPass(prisma, passKey, new Date(), workerId);
+      beatPass(prisma, passKey, new Date(), workerId)
+        .then((held) => {
+          if (!held && !abort.signal.aborted) {
+            logger.warn({ passKey, workerId }, "brain.pass.lease_lost");
+            abort.abort(new Error("brain pass lease lost"));
+          }
+        })
+        .catch((err: unknown) => {
+          logger.warn({ err, passKey, workerId }, "brain.pass.heartbeat_failed");
+        });
     }, opts.heartbeatMs ?? BRAIN_HEARTBEAT_MS);
     beat.unref?.();
 
     const done = (async () => {
       try {
-        await run();
+        await run(abort.signal);
         failureStreak.set(passKey, 0);
       } catch (err) {
         // 🔴 CAUGHT HERE, DELIBERATELY, AND NOT RE-THROWN. Nothing awaits

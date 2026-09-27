@@ -128,6 +128,61 @@ describe("POST /network/dns", () => {
   });
 });
 
+/**
+ * WARP-3193 SEC-INJ-4 — these values end up on lines of dnsmasq's generated
+ * config. A newline in any of them could become an extra directive (a
+ * LAN-wide DNS hijack), so the route types them before the safety evaluator
+ * or the router ever sees them. Mirrors services/routing/schemas.py.
+ */
+describe("SEC-INJ-4 typed lease / DNS bodies", () => {
+  it.each([
+    [["1.1.1.1\nserver=/bank.example/10.0.0.66"]],
+    [["1.1.1.1 8.8.8.8"]],
+    [["dns.google"]],
+    [["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"]],
+  ])("POST /network/dns refuses %j with 400 and never writes", async (servers) => {
+    const res = await request(buildApp()).post("/api/network/dns").send({ servers });
+    expect(res.status).toBe(400);
+    expect(networkService.setDnsServers).not.toHaveBeenCalled();
+  });
+
+  it("POST /network/dns accepts IPv6 resolvers", async () => {
+    const res = await request(buildApp())
+      .post("/api/network/dns")
+      .send({ servers: ["2606:4700:4700::1111"] });
+    expect(res.status).toBe(200);
+  });
+
+  const LEASE = { name: "living-room-tv", mac: "AA:BB:CC:DD:EE:FF", ip: "192.168.50.20" };
+
+  it("POST /network/dhcp/static-lease accepts a well-formed lease", async () => {
+    const res = await request(buildApp()).post("/api/network/dhcp/static-lease").send(LEASE);
+    expect(res.status).toBe(200);
+    expect(networkService.addStaticDhcpLease).toHaveBeenCalledWith(
+      "living-room-tv",
+      "AA:BB:CC:DD:EE:FF",
+      "192.168.50.20",
+    );
+  });
+
+  it.each([
+    ["ip", "192.168.50.20\naddress=/bank.example/10.0.0.66"],
+    ["ip", "192.168.50.256"],
+    ["ip", "fe80::1"],
+    ["name", "tv\naddress=/bank.example/10.0.0.66"],
+    ["name", "Living Room TV"],
+    ["name", "-tv"],
+    ["mac", "AA:BB:CC:DD:EE:FF\n"],
+    ["mac", "not-a-mac"],
+  ])("POST /network/dhcp/static-lease refuses %s=%j with 400 and never writes", async (field, value) => {
+    const res = await request(buildApp())
+      .post("/api/network/dhcp/static-lease")
+      .send({ ...LEASE, [field]: value });
+    expect(res.status).toBe(400);
+    expect(networkService.addStaticDhcpLease).not.toHaveBeenCalled();
+  });
+});
+
 describe("DNS host-records routes (/network/dhcp/hostnames)", () => {
   it("GET lists the current host-records", async () => {
     const res = await request(buildApp()).get("/api/network/dhcp/hostnames");

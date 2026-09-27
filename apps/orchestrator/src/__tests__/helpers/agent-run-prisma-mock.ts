@@ -16,6 +16,7 @@
 import { vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { userDirectory, type DirectoryUser } from "./user-directory.js";
 
 export interface AgentRunRow {
   id: string;
@@ -163,13 +164,27 @@ function pick(row: Record<string, unknown>, select?: Record<string, boolean>): R
 }
 
 export interface AgentRunPrismaMockOptions {
-  users?: Array<{ id: string; username: string; role: string }>;
+  /** A missing `nextcloudUsername` is NULL, as on every SSO / SCIM row. */
+  users?: Array<{
+    id: string;
+    username: string;
+    role: string;
+    nextcloudUsername?: string | null;
+    directoryStatus?: string;
+    displayName?: string;
+    email?: string | null;
+  }>;
   now?: () => Date;
 }
 
 export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
   const rows: AgentRunRow[] = [];
   const users = new Map((opts.users ?? []).map((u) => [u.id, u]));
+  // WARP-3098 — `resolveAssertedUser`'s `findMany OR [username,
+  // nextcloudUsername, id] take 2`, with Prisma's semantics.
+  const directory = userDirectory(() =>
+    [...users.values()].map((u) => ({ nextcloudUsername: null, ...u }) as DirectoryUser),
+  );
   const now = opts.now ?? (() => new Date());
   let seq = 0;
   /** Crash seam — see the module doc. */
@@ -279,6 +294,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
       const u = [...users.values()].find((x) => x.username === args.where.username);
       return u ? pick(u as unknown as Record<string, unknown>, args.select) : null;
     }),
+    findMany: directory.findMany,
   };
 
   /** WARP-2896 — the workshop's workspaces. */

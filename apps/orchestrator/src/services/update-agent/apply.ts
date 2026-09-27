@@ -98,7 +98,7 @@
  * guard in transitions.ts, so the lifecycle is reconstructible from logs
  * AND the DeviceUpdate audit table independently.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
 import { Readable, Transform } from "node:stream";
@@ -334,10 +334,19 @@ export interface ApplyUpdateOptions {
    * can answer. Absent → treated as already listening (tests, apply-now).
    */
   whenListening?: Promise<void>;
+  /**
+   * WARP-3193 PERF-3 — the caller already holds the apply claim on this row
+   * (POST /updates/apply-now claims before it audits or dispatches). Absent →
+   * applyPendingUpdate picks the row and claims it itself. Either way the run
+   * hands the claim back when it ends.
+   */
+  claimed?: { deviceUpdateId: string; claimId: string };
 }
 
 export type ApplyUpdateResult =
   | { outcome: "nothing_pending" }
+  /** WARP-3193 PERF-3 — another run holds this row's claim; nothing was touched. */
+  | { outcome: "apply_claimed_elsewhere"; deviceUpdateId: string }
   | { outcome: "deferred_setup_in_progress"; deviceUpdateId: string }
   | {
       outcome: "rejected";
@@ -842,25 +851,121 @@ function imageSignatureRefusalDetail(err: unknown): string {
 }
 
 /**
+ * WARP-3193 PERF-3 — take the apply claim on one row. Atomic on its own: the
+ * predicate is in the WHERE of a single `updateMany`, so of two racers exactly
+ * one sees `count === 1`, across processes as well as within one. The status
+ * is in the predicate too, so a row another run finished between our read and
+ * this write is not claimed.
+ *
+ * Why a claim and not just the status CAS in transitions.ts: `verifying` is a
+ * RESUMABLE status that every runner picks up, and it lasts minutes (pulls,
+ * snapshot, staging). The CAS only stops a second pending → verifying write;
+ * the second runner then finds the row already `verifying` and walks straight
+ * into the same snapshot, which records the new digests as "previous" and
+ * turns rollback into a no-op.
+ */
+export async function claimDeviceUpdateForApply(
+  prisma: PrismaClient,
+  deviceUpdateId: string,
+  claimId: string,
+): Promise<boolean> {
+  const res = await prisma.deviceUpdate.updateMany({
+    where: {
+      id: deviceUpdateId,
+      status: { in: ["pending", "verifying"] },
+      applyClaim: "unclaimed",
+    },
+    data: { applyClaim: "claimed", applyClaimId: claimId, applyClaimedAt: new Date() },
+  });
+  return res.count === 1;
+}
+
+/** Hand a claim back. Fenced on the claim id, so it never frees another run's. */
+export async function releaseDeviceUpdateClaim(
+  prisma: PrismaClient,
+  deviceUpdateId: string,
+  claimId: string,
+): Promise<void> {
+  await prisma.deviceUpdate.updateMany({
+    where: { id: deviceUpdateId, applyClaim: "claimed", applyClaimId: claimId },
+    data: { applyClaim: "unclaimed", applyClaimId: null, applyClaimedAt: null },
+  });
+}
+
+/**
  * Apply the newest pending (or resumable `verifying`) DeviceUpdate row —
  * steps 1-9. Never throws for expected failure shapes: every exit is a
  * typed outcome + a structured `update.*` log event (poller posture).
+ *
+ * WARP-3193 PERF-3 — the row is CLAIMED before any side effect (or was
+ * claimed by the caller, `opts.claimed`) and handed back when the run ends,
+ * however it ends.
  */
 export async function applyPendingUpdate(
   opts: ApplyUpdateOptions,
 ): Promise<ApplyUpdateResult> {
   const log = opts.logger ?? defaultLog;
+  const { prisma } = opts;
+
+  let row: DeviceUpdateRowSlice | null;
+  let claimId: string;
+  if (opts.claimed) {
+    claimId = opts.claimed.claimId;
+    row = (await prisma.deviceUpdate.findFirst({
+      where: {
+        id: opts.claimed.deviceUpdateId,
+        status: { in: ["pending", "verifying"] },
+        applyClaim: "claimed",
+        applyClaimId: claimId,
+      },
+    })) as DeviceUpdateRowSlice | null;
+    if (!row) {
+      // Ours but no longer applicable (e.g. skipped meanwhile): hand it back.
+      await releaseDeviceUpdateClaim(prisma, opts.claimed.deviceUpdateId, claimId);
+      log.info(
+        { event: "update.apply_claimed_elsewhere", deviceUpdateId: opts.claimed.deviceUpdateId },
+        "OTA apply skipped — this run does not hold the row's claim",
+      );
+      return { outcome: "apply_claimed_elsewhere", deviceUpdateId: opts.claimed.deviceUpdateId };
+    }
+  } else {
+    // `verifying` rows are restart cursors (a prior attempt died pre-swap
+    // or hit a transient fetch failure) — same pipeline, same top.
+    row = (await prisma.deviceUpdate.findFirst({
+      where: { status: { in: ["pending", "verifying"] } },
+      orderBy: { createdAt: "desc" },
+    })) as DeviceUpdateRowSlice | null;
+    if (!row) return { outcome: "nothing_pending" };
+    claimId = randomUUID();
+    if (!(await claimDeviceUpdateForApply(prisma, row.id, claimId))) {
+      log.info(
+        { event: "update.apply_claimed_elsewhere", deviceUpdateId: row.id },
+        "OTA apply skipped — another apply run holds this update",
+      );
+      return { outcome: "apply_claimed_elsewhere", deviceUpdateId: row.id };
+    }
+  }
+
+  const claimedRow = row;
+  try {
+    return await applyClaimedRow(opts, claimedRow);
+  } finally {
+    await releaseDeviceUpdateClaim(prisma, claimedRow.id, claimId).catch((err: unknown) => {
+      // Best effort: the next boot's resumeInterruptedApply clears it.
+      log.warn({ err, deviceUpdateId: claimedRow.id }, "OTA could not release the apply claim");
+    });
+  }
+}
+
+/** Steps 1-9 for a row this run has claimed. */
+async function applyClaimedRow(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+): Promise<ApplyUpdateResult> {
+  const log = opts.logger ?? defaultLog;
   const gate = opts.healthGate ?? DEFAULT_HEALTH_GATE;
   const probe = opts.probe ?? httpHealthProbe();
   const { prisma, runner } = opts;
-
-  // `verifying` rows are restart cursors (a prior attempt died pre-swap
-  // or hit a transient fetch failure) — same pipeline, same top.
-  const row = (await prisma.deviceUpdate.findFirst({
-    where: { status: { in: ["pending", "verifying"] } },
-    orderBy: { createdAt: "desc" },
-  })) as DeviceUpdateRowSlice | null;
-  if (!row) return { outcome: "nothing_pending" };
 
   // ── setup gate: never swap containers under a mid-wizard customer ──
   const setup = await getSetupState(prisma);
@@ -1155,6 +1260,22 @@ export async function resumeInterruptedApply(
   const gate = opts.healthGate ?? DEFAULT_HEALTH_GATE;
   const probe = opts.probe ?? httpHealthProbe();
   const { prisma, runner } = opts;
+
+  // WARP-3193 PERF-3 — a claim that survives into a boot belongs to a process
+  // that is gone (one orchestrator per box; index.ts starts this hook before
+  // `server.listen`, and the apply window awaits it). Left in place it would
+  // block every runner forever; cleared, the row's status is the exact cursor
+  // again.
+  const stale = await prisma.deviceUpdate.updateMany({
+    where: { applyClaim: "claimed" },
+    data: { applyClaim: "unclaimed", applyClaimId: null, applyClaimedAt: null },
+  });
+  if (stale.count > 0) {
+    log.warn(
+      { event: "update.stale_claims_cleared", count: stale.count },
+      "OTA resume cleared apply claims left by a previous process",
+    );
+  }
 
   const applying = (await prisma.deviceUpdate.findFirst({
     where: { status: "applying" },

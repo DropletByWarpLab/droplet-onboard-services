@@ -100,6 +100,27 @@ export async function cacheSet(
 }
 
 /**
+ * WARP-3193 QUAL-1 — strict write/delete for the session-revocation path.
+ * `cacheSet`/`cacheDel` swallow a Redis error because a lost CACHE write is
+ * harmless; a lost DENYLIST write is not — the revoked refresh token stays
+ * usable for its remaining ≤7 days while the endpoint reported success.
+ * These throw instead, so the revoker can report the failure. Reads stay
+ * fail-open by design (routes/auth.ts); only writes are strict.
+ */
+export async function cacheSetStrict(
+  key: string,
+  value: unknown,
+  ttlSeconds: number,
+): Promise<void> {
+  await getRedis().set(key, JSON.stringify(value), "EX", ttlSeconds);
+}
+
+/** Strict counterpart of `cacheDel` — see `cacheSetStrict`. */
+export async function cacheDelStrict(key: string): Promise<void> {
+  await getRedis().del(key);
+}
+
+/**
  * Atomic set-if-not-exists. Writes `value` only when `key` does not already
  * exist, with a TTL, in a single Redis round-trip (`SET … NX EX`). Returns
  * `true` when the caller created the key (won the race), `false` when the key
@@ -163,7 +184,10 @@ export async function cacheSetAdd(
     const client = getRedis();
     await client.sadd(key, member);
     if (ttlSeconds && ttlSeconds > 0) {
-      // GT: only extend, never shrink, the set's TTL.
+      // NX stamps the first TTL (WARP-3193 PERF-12: GT treats a key with no
+      // TTL as infinite, so GT alone never set one); GT then only extends,
+      // never shrinks, the set's TTL.
+      await client.expire(key, ttlSeconds, "NX");
       await client.expire(key, ttlSeconds, "GT");
     }
   } catch {

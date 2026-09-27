@@ -136,7 +136,7 @@ async function performRemove() {
       ) : (
         <ul className="flex flex-col gap-1">
           {reminders.map((r) => {
-            const completed = r.completedAt !== null;
+            const completed = r.status === "completed";
             // aria-label mirrors the visible title; fall back to the
             // stable id when the title is empty so the action is still
             // discoverable to screen readers (WARP-292).
