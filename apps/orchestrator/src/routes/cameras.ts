@@ -135,6 +135,7 @@ import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
 import type { ConfirmNetworkCommandError } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
+import { segmentSignatureTtlSec, signSegmentQuery } from "../services/segment-url-signing.service.js";
 import {
   assertedNextcloudLoginRefusal,
   resolveAssertedNextcloudLogin,
@@ -2699,7 +2700,20 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // as any other malformed upstream playlist (502 below).
       const segPrefix = `/api/cameras/${encodeURIComponent(req.params.name)}/playback.segment?after=${range.after}&before=${range.before}&seg=`;
       const isRemoteUri = (uri: string) => /^https?:\/\//i.test(uri) || uri.startsWith("//");
-      const toProxyUri = (uri: string) => `${segPrefix}${encodeURIComponent(uri)}`;
+      // WARP-3122 part 2 — each segment URL also carries a short-lived
+      // signature for THIS caller, so a native player can fetch segments
+      // without the bearer in its headers (services/segment-url-signing).
+      const expUnix = Math.floor(Date.now() / 1000) + segmentSignatureTtlSec(range.after, range.before);
+      const toProxyUri = (uri: string) =>
+        `${segPrefix}${encodeURIComponent(uri)}` +
+        signSegmentQuery(
+          { camera: req.params.name, after: String(range.after), before: String(range.before), seg: uri, userId: req.user?.id ?? "" },
+          expUnix,
+        );
+      logger.debug(
+        { userId: req.user?.id, camera: req.params.name, after: range.after, before: range.before },
+        "recordings playlist served",
+      );
       const rewritten = playlistText
         .split(/\r?\n/)
         .map((line) => {

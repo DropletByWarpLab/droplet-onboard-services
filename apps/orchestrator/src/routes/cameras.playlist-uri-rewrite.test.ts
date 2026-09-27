@@ -213,6 +213,29 @@ describe("WARP-3122: recordings playlist rewrite", () => {
     expect(mapLine?.startsWith('#EXT-X-MAP:URI="')).toBe(true);
   });
 
+  it("WARP-3122 part 2: every segment and URI= is signed for the caller", async () => {
+    process.env.DEVICE_SECRET = "playlist-signing-test-secret";
+    fetchHlsPlaylist.mockResolvedValue(
+      ["#EXTM3U", '#EXT-X-MAP:URI="init-0.mp4"', "#EXTINF:10.0,", "0.m4s", "#EXT-X-ENDLIST"].join("\n"),
+    );
+
+    const res = await fetchPlaylist(before(), after());
+
+    expect(res.status).toBe(200);
+    const urls = res.text
+      .split("\n")
+      .filter((l) => l.includes("playback.segment"))
+      .map((l) => new URL(l.replace(/^#EXT-X-MAP:URI="|"$/g, ""), "https://box.test"));
+    expect(urls).toHaveLength(2);
+    for (const u of urls) {
+      expect(u.searchParams.get("u")).toBe("u-test-owner");
+      expect(u.searchParams.get("sig")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      // 1 h window → TTL = 1 h + 5 min.
+      expect(Number(u.searchParams.get("exp")) - nowSec()).toBeGreaterThan(3600);
+      expect(Number(u.searchParams.get("exp")) - nowSec()).toBeLessThanOrEqual(3900);
+    }
+  });
+
   it("leaves ordinary tag lines with no URI attribute unchanged", async () => {
     fetchHlsPlaylist.mockResolvedValue(
       [

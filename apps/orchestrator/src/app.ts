@@ -77,6 +77,7 @@ import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createPanelSecurityRouter } from "./routes/panel-security.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createSignedSegmentRouter } from "./services/segment-url-signing.service.js";
 import { createSecurityRouter } from "./routes/security.js";
 import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
@@ -332,6 +333,12 @@ export function createApp(
   // principal (mcp-server, email-indexer, routing, …) comes from its own
   // container IP so they don't share a bucket with a browser.
   app.use(authenticatedApiRateLimit);
+
+  // WARP-3122 — a signed recordings-segment URL stands in for the bearer on
+  // GET /api/cameras/:name/playback.segment only. This router answers
+  // nothing: it resolves the signer and leaves the principal for
+  // authMiddleware, so every gate below still runs.
+  app.use("/api", createSignedSegmentRouter(prisma));
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
