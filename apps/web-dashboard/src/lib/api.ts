@@ -3289,7 +3289,7 @@ export async function enableCamera(name: string): Promise<void> {
 /** Consume a camera-domain Tier-2 confirmation token (WARP-861).
  *  Pairs with POST /api/cameras/command/confirm — the camera analogue of
  *  /switch/command/confirm. The operation echo is required (WARP-41). */
-async function confirmCameraCommand(
+export async function confirmCameraCommand(
   confirmationToken: string,
   operation: string,
 ): Promise<void> {

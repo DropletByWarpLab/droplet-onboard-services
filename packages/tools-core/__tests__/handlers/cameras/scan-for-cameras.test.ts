@@ -24,6 +24,7 @@ function ctxWith(
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
+    role: "owner", // WARP-3104: camera write tools are owner/admin only
     signal: new AbortController().signal,
   };
 }
