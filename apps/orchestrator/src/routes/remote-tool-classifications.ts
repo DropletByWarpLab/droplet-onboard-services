@@ -17,6 +17,13 @@
  * log exists to hold. `requireRole`, not `requireRoleOrMcpService`: no LLM
  * tool reaches this surface, and none should — a model must not be able to
  * classify the tools it is about to call.
+ *
+ * WARP-3205 — an `ext-*` row in the GET also carries what the owner's review
+ * of that tool is shown (services/extension-tool-review.service.ts): the
+ * input schema and signed description its review hash names, read from the
+ * extension's current signed manifest (both null when that manifest does not
+ * produce the row's hash), and what dispatch does with a call. The dashboard
+ * sends the hash back with the decision.
  */
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
@@ -30,7 +37,13 @@ import {
   remoteToolClassificationCache,
   type ClassificationPrisma,
   type RemoteToolClassificationCache,
+  type RemoteToolClassificationRow,
 } from "../services/remote-tool-classification.service.js";
+import {
+  withExtensionToolReview,
+  type ExtensionToolReviewPrisma,
+  type ReviewedClassificationRow,
+} from "../services/extension-tool-review.service.js";
 
 const classifySchema = z.object({
   requiresWrite: z.boolean(),
@@ -48,6 +61,8 @@ const TOOL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 export interface RemoteToolClassificationsRouterDeps {
   /** Injectable so the route test refreshes a private cache, not the process-wide one. */
   cache?: RemoteToolClassificationCache;
+  /** WARP-3205 — the review fields on `ext-*` rows. Defaults to the signed manifests in `prisma`. */
+  toolReview?: (rows: RemoteToolClassificationRow[]) => Promise<ReviewedClassificationRow[]>;
 }
 
 export function createRemoteToolClassificationsRouter(
@@ -57,6 +72,8 @@ export function createRemoteToolClassificationsRouter(
   const router = Router();
   const cache = deps.cache ?? remoteToolClassificationCache;
   const db = prisma as ClassificationPrisma;
+  const toolReview =
+    deps.toolReview ?? ((rows) => withExtensionToolReview(prisma as ExtensionToolReviewPrisma, rows));
 
   router.get(
     "/admin/remote-tools/classifications",
@@ -69,7 +86,7 @@ export function createRemoteToolClassificationsRouter(
           return;
         }
         const rows = await listRemoteToolClassifications(db, serverId);
-        res.json({ classifications: rows });
+        res.json({ classifications: await toolReview(rows) });
       } catch (err) {
         next(err);
       }
