@@ -298,15 +298,26 @@ export async function reactivateUser(prisma: PrismaClient, id: string): Promise<
   if (!existing) return null;
   if (existing.directoryStatus === "ACTIVE") return existing;
   if (isOperatorTier(existing.role)) throw operatorAccountRefusal();
-  try {
-    return await prisma.user.update({
-      where: { id, role: existing.role, directoryStatus: existing.directoryStatus },
-      data: { directoryStatus: "ACTIVE" },
-    });
-  } catch (err) {
-    if (isConcurrencyConflict(err)) throw RoleMutationRefusedError.concurrentMutation();
-    throw err;
+  // WARP-3113: pinned to NONE, as the dashboard enable is. A person
+  // scheduled for deletion (PENDING, or PURGING under the nightly job) is
+  // not brought back by the IdP; an admin cancels the deletion first.
+  // Also pinned to role + directoryStatus (WARP-3193), so a concurrent
+  // promotion or disable is a miss, not a silent overwrite.
+  const reactivated = await prisma.user.updateMany({
+    where: {
+      id,
+      role: existing.role,
+      directoryStatus: existing.directoryStatus,
+      deletionStatus: "NONE",
+    },
+    data: { directoryStatus: "ACTIVE" },
+  });
+  if (reactivated.count === 0) {
+    throw existing.deletionStatus === "NONE"
+      ? RoleMutationRefusedError.concurrentMutation()
+      : RoleMutationRefusedError.deletionPending();
   }
+  return prisma.user.findUnique({ where: { id } });
 }
 
 /** WARP-3193 SEC-AUTH-1 — operator rows are outside SCIM's reach for
