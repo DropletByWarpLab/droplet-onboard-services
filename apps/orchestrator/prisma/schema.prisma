@@ -3044,6 +3044,11 @@ model TotpCredential {
   // on the first successful code. The login gate requires TOTP only when
   // this is non-null.
   confirmedAt DateTime?
+  // WARP-3193 SEC-AUTH-10 — the RFC 6238 time step (unix seconds / 30) of
+  // the last code accepted. A code is accepted only through a conditional
+  // update `lastAcceptedStep < step`, so each code works at most once.
+  // 0 = no code accepted yet (step 0 is 1970; no live code can match it).
+  lastAcceptedStep Int     @default(0)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }

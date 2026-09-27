@@ -107,13 +107,23 @@ import {
   TOTP_ISSUER,
   generateTotpEnrollment,
   encryptTotpSecret,
-  decryptTotpSecret,
-  verifyTotpCode,
+  acceptTotpCode,
 } from "../services/totp.service.js";
 import {
   generateRecoveryCodes,
-  findMatchingRecoveryCodeHash,
+  consumeRecoveryCode,
 } from "../services/recovery.service.js";
+import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
+import {
+  passwordChangeBackoffSeconds,
+  checkPasswordChangeLock,
+  recordPasswordChangeFailure,
+  clearPasswordChangeRateState,
+} from "../services/password-change-throttle.service.js";
+import {
+  createRequireCredentialStepUp,
+  passCredentialStepUp,
+} from "../middleware/require-credential-step-up.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
 import { warmActiveModel } from "../services/active-model.service.js";
@@ -357,82 +367,10 @@ function getRequestIp(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
 
-/**
- * Progressive backoff for failed current-password checks on
- * POST /auth/change-password (PR #549 reviewer follow-up: without a lockout
- * the endpoint is a current-password brute-force oracle for whoever holds a
- * session cookie). Mirrors the WARP-631 claim-code model: a small free tier,
- * then FIXED escalating locks that always elapse on their own; the failure
- * counter resets after an hour without failures and on a successful verify.
- * Keyed by user id — the gate protects the ACCOUNT's password, and a NATed
- * household shares one IP. Fails OPEN on cache errors so a flaky Redis can
- * never lock a legitimate user out of rotating their password.
- */
-const PW_CHANGE_FREE_TIER = 5;
-/** Lock seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
-const PW_CHANGE_BACKOFF_SCHEDULE = [30, 60, 120, 300, 900] as const;
-/** Failure counter resets after an hour of no failures (rolling window). */
-const PW_CHANGE_FAILS_TTL_SEC = 60 * 60;
-
-function pwChangeFailsKey(userId: string): string {
-  return `ratelimit:change-password:fails:${userId}`;
-}
-function pwChangeLockKey(userId: string): string {
-  return `ratelimit:change-password:lock:${userId}`;
-}
-
-/** PURE schedule map (failure count → lock seconds). Exported for tests. */
-export function passwordChangeBackoffSeconds(failureCount: number): number {
-  const idx = failureCount - PW_CHANGE_FREE_TIER - 1;
-  if (idx < 0) return 0;
-  return PW_CHANGE_BACKOFF_SCHEDULE[
-    Math.min(idx, PW_CHANGE_BACKOFF_SCHEDULE.length - 1)
-  ];
-}
-
-async function checkPasswordChangeLock(
-  userId: string,
-): Promise<{ locked: boolean; retryAfterSeconds: number }> {
-  try {
-    const until = (await cacheGet<number>(pwChangeLockKey(userId))) ?? 0;
-    const now = Date.now();
-    if (until > now) {
-      return { locked: true, retryAfterSeconds: Math.ceil((until - now) / 1000) };
-    }
-    return { locked: false, retryAfterSeconds: 0 };
-  } catch {
-    return { locked: false, retryAfterSeconds: 0 };
-  }
-}
-
-async function recordPasswordChangeFailure(userId: string): Promise<void> {
-  try {
-    // cacheIncr is atomic (Redis INCR) — avoids the read-modify-write race
-    // where two concurrent wrong-password requests both read N and both write
-    // N+1, keeping the counter artificially low.
-    const next = await cacheIncr(pwChangeFailsKey(userId), PW_CHANGE_FAILS_TTL_SEC);
-    if (next === null) return; // Redis error — fail open
-    const lockedSeconds = passwordChangeBackoffSeconds(next);
-    if (lockedSeconds > 0) {
-      await cacheSet(
-        pwChangeLockKey(userId),
-        Date.now() + lockedSeconds * 1000,
-        lockedSeconds,
-      );
-    }
-  } catch {
-    // fail open — see the model comment above.
-  }
-}
-
-async function clearPasswordChangeRateState(userId: string): Promise<void> {
-  try {
-    await cacheDel(pwChangeFailsKey(userId));
-    await cacheDel(pwChangeLockKey(userId));
-  } catch {
-    // fail open.
-  }
-}
+// WARP-3193 — the current-password throttle (PR #549) now lives in
+// services/password-change-throttle.service.ts, shared with the credential
+// step-up gate. Re-exported so existing imports keep working.
+export { passwordChangeBackoffSeconds };
 
 /**
  * WARP-579 — progressive backoff for failed /auth/login credential checks.
@@ -1239,51 +1177,14 @@ export function createPublicAuthRouter(
       // On a successful challenge we stamp `mfaStampIso` into the access
       // token (signAccessToken) so require-recent-mfa (WARP-230) can gate
       // sensitive routes for this session.
+      //
+      // WARP-3193 SEC-AUTH-2 — the check itself lives in
+      // services/login-second-factor.service.ts, shared with the passkey and
+      // SSO sign-ins so neither can skip an enrolled factor.
       let mfaStampIso: string | undefined;
-      const totpCred = await prisma.totpCredential.findUnique({
-        where: { userId },
-      });
-      if (totpCred && totpCred.confirmedAt) {
-        const totpCode =
-          typeof parsed.data.totp === "string" ? parsed.data.totp.trim() : "";
-        const recoveryCode =
-          typeof parsed.data.recoveryCode === "string"
-            ? parsed.data.recoveryCode
-            : "";
-
-        let secondFactorOk = false;
-
-        if (totpCode) {
-          const secret = decryptTotpSecret(totpCred.secretEnc);
-          secondFactorOk = await verifyTotpCode(secret, totpCode);
-        } else if (recoveryCode) {
-          // Match against the user's UNUSED codes only; consume exactly the
-          // matched row so a replay of the same code finds nothing.
-          const unused = await prisma.recoveryCode.findMany({
-            where: { userId, usedAt: null },
-          });
-          const matchHash = await findMatchingRecoveryCodeHash(
-            recoveryCode,
-            unused.map((r) => r.codeHash),
-          );
-          if (matchHash) {
-            const consumed = unused.find((r) => r.codeHash === matchHash);
-            if (consumed) {
-              // Atomic single-use: only flip the row if it is STILL unused.
-              // Two concurrent logins presenting the same code both read it
-              // unused above; the usedAt:null guard means exactly one update
-              // flips a row (count 1) and the loser sees count 0 → the factor
-              // fails. Mirrors claimRefreshRotation / invite single-use.
-              const claimed = await prisma.recoveryCode.updateMany({
-                where: { id: consumed.id, usedAt: null },
-                data: { usedAt: new Date() },
-              });
-              secondFactorOk = claimed.count > 0;
-            }
-          }
-        }
-
-        if (!secondFactorOk) {
+      const secondFactor = await checkLoginSecondFactor(prisma, userId, parsed.data);
+      if (secondFactor !== "not_enrolled") {
+        if (secondFactor === "failed") {
           // WARP-579 finding 1: a wrong second factor IS a failed login attempt
           // for throttling purposes. Without this, an attacker holding a valid
           // password could spin through ~10^6 TOTP codes with no lockout. Bump
@@ -2608,6 +2509,11 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-3193 SEC-AUTH-9 — re-prove identity before minting a factor, so
+      // a hijacked session cannot plant its own authenticator. After the 409
+      // on purpose: the setup wizard reads it when the owner steps back.
+      if (!(await passCredentialStepUp(prisma, req, res))) return;
+
       // Label the authenticator entry with the user's email when present,
       // else the username — both are non-secret display identifiers.
       const label = req.user.username;
@@ -2675,7 +2581,9 @@ export function createProtectedAuthRouter(
   // recovery codes — returned ONCE in this response and never again. A
   // verify against an already-enabled factor is a re-challenge (e.g. a
   // step-up) and returns no new codes.
-  router.post("/auth/totp/verify", authRateLimit, async (req, res, next) => {
+  // WARP-3193 SEC-AUTH-9 — the same step-up as enroll (the confirming
+  // verify is what turns the factor on).
+  router.post("/auth/totp/verify", authRateLimit, createRequireCredentialStepUp(prisma), async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
@@ -2701,8 +2609,9 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const secret = decryptTotpSecret(cred.secretEnc);
-      const codeOk = await verifyTotpCode(secret, parsed.data.code);
+      // WARP-3193 SEC-AUTH-10 — the same single-use accept as login, so the
+      // code that confirms enrollment cannot be replayed at sign-in.
+      const codeOk = await acceptTotpCode(prisma, cred, parsed.data.code);
       if (!codeOk) {
         res.status(401).json({ error: "Invalid code", code: "TOTP_INVALID" });
         return;
@@ -2814,37 +2723,14 @@ export function createProtectedAuthRouter(
       }
       const userId = req.user.id;
 
-      const unused = await prisma.recoveryCode.findMany({
-        where: { userId, usedAt: null },
-      });
-      const matchHash = await findMatchingRecoveryCodeHash(
-        parsed.data.code,
-        unused.map((r) => r.codeHash),
-      );
-      if (!matchHash) {
+      // WARP-3193 ARCH-3 — the same single-use consume /auth/login uses. A
+      // racer that spent the code first leaves this one unconsumed → 401.
+      const result = await consumeRecoveryCode(prisma, userId, parsed.data.code);
+      if (!result.consumed) {
         res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
         return;
       }
-      const consumed = unused.find((r) => r.codeHash === matchHash);
-      if (!consumed) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-      // Atomic single-use: the usedAt:null guard makes the consume safe
-      // against a concurrent step-up presenting the same code. If a racer
-      // already spent it between our read and here, count is 0 → reject as
-      // invalid rather than re-authenticating. Mirrors claimRefreshRotation.
-      const claimed = await prisma.recoveryCode.updateMany({
-        where: { id: consumed.id, usedAt: null },
-        data: { usedAt: new Date() },
-      });
-      if (claimed.count === 0) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-
-      const remaining = unused.length - 1;
-      res.json({ ok: true, remaining });
+      res.json({ ok: true, remaining: result.remaining });
     } catch (err) {
       next(err);
     }

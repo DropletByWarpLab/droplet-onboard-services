@@ -169,6 +169,18 @@ describe("/login/passkey — failure causes", () => {
     ).toBeInTheDocument();
   });
 
+  it("WARP-3193: an account with two-factor on (TOTP_REQUIRED) is sent to password + code, not 'couldn't verify'", async () => {
+    const { PasskeyServerError } = await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn");
+    verify.mockRejectedValueOnce(new PasskeyServerError(401, "TOTP_REQUIRED", "Two-factor authentication required"));
+    render(<PasskeyApprovalPage />);
+
+    expect(
+      await screen.findByText(/uses two-factor/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't verify that passkey/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /use your password instead/i })).toBeInTheDocument();
+  });
+
   it("maps a transport failure at verify to the network copy", async () => {
     verify.mockRejectedValueOnce(new TypeError("Failed to fetch"));
     render(<PasskeyApprovalPage />);

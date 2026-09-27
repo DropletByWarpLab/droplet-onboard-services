@@ -588,6 +588,12 @@ const envSchema = z.object({
   DROPLET_SSO_GOOGLE_CLIENT_ID: z.string().default(""),
   DROPLET_SSO_GOOGLE_CLIENT_SECRET: z.string().default(""),
   DROPLET_SSO_GOOGLE_REDIRECT_URI: z.string().default(""),
+  // WARP-3193 SEC-AUTH-3 — comma-separated Google Workspace domains (the ID
+  // token's `hd` claim) allowed to link to or create a local account via
+  // Google SSO. Empty (default) = none: Google SSO then signs in only
+  // accounts already linked by `sub`, and never creates one. Without this,
+  // any Google account that could reach the box got a `family` account.
+  DROPLET_SSO_GOOGLE_ALLOWED_HD: z.string().default(""),
   DROPLET_SSO_ENTRA_ISSUER: z.string().default(""),
   DROPLET_SSO_ENTRA_CLIENT_ID: z.string().default(""),
   DROPLET_SSO_ENTRA_CLIENT_SECRET: z.string().default(""),

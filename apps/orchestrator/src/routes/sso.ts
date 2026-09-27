@@ -29,7 +29,9 @@ import {
   buildAuthorizeRequest,
   exchangeCodeAndValidate,
   enabledSsoProviders,
+  isGoogleHostedDomainAllowed,
   type SsoProvider,
+  type ValidatedIdentity,
 } from "../services/sso-oidc.service.js";
 import {
   createLoginState,
@@ -45,6 +47,7 @@ import {
   type Role,
 } from "../services/jwt.service.js";
 import { createSession } from "../services/session.service.js";
+import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
 import { findUserByEmail, emailWriteData } from "../services/user-directory.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -130,6 +133,14 @@ interface ResolvedUser {
    *  costs no extra read; it rides into the access token so the chat path
    *  can skip its per-turn lookup. */
   accessRoleId: string | null;
+  /** WARP-3193 SEC-AUTH-2 — whether this account can complete
+   *  POST /auth/login (a local password on a row the IdP did not
+   *  provision — the same rule auth.ts's isIdpProvisioned gate applies). */
+  canPasswordLogin: boolean;
+}
+
+function canPasswordLogin(row: { passwordHash: string | null; provisionSource?: string | null }): boolean {
+  return Boolean(row.passwordHash) && row.provisionSource !== "SSO" && row.provisionSource !== "SCIM";
 }
 
 /**
@@ -145,6 +156,16 @@ class SsoEmailUnverifiedError extends Error {
   constructor() {
     super("SSO sign-in refused: the identity provider did not verify this email address.");
     this.name = "SsoEmailUnverifiedError";
+  }
+}
+
+/** WARP-3193 SEC-AUTH-3 — a not-yet-linked Google account whose hosted
+ *  domain is not on DROPLET_SSO_GOOGLE_ALLOWED_HD. Mapped to a distinct 401. */
+class SsoDomainNotAllowedError extends Error {
+  readonly code = "SSO_DOMAIN_NOT_ALLOWED";
+  constructor() {
+    super("SSO sign-in refused: this Google account's domain is not allowed on this appliance.");
+    this.name = "SsoDomainNotAllowedError";
   }
 }
 
@@ -171,7 +192,7 @@ class SsoEmailUnverifiedError extends Error {
 async function ensureLinkedUser(
   prisma: PrismaClient,
   provider: SsoProvider,
-  identity: { sub: string; email?: string; emailVerified: boolean; name?: string },
+  identity: ValidatedIdentity,
 ): Promise<ResolvedUser | null> {
   // 1. Existing IdP identity → that user.
   const existing = await prisma.ssoIdentity.findUnique({
@@ -193,6 +214,7 @@ async function ensureLinkedUser(
       displayName: existing.user.displayName,
       role: existing.user.role as Role,
       accessRoleId: existing.user.accessRoleId ?? null,
+      canPasswordLogin: canPasswordLogin(existing.user),
     };
   }
 
@@ -220,6 +242,14 @@ async function ensureLinkedUser(
     throw new SsoEmailUnverifiedError();
   }
 
+  // WARP-3193 SEC-AUTH-3 — a Google account not yet linked by `sub` may link
+  // or be created only when its Workspace domain (`hd`) is on the explicit
+  // allowlist. An empty allowlist allows none (fail closed), and a consumer
+  // Google account has no `hd` at all. Already-linked users took branch 1.
+  if (provider === "google" && !isGoogleHostedDomainAllowed(identity.hostedDomain)) {
+    throw new SsoDomainNotAllowedError();
+  }
+
   // 2a. Link to an existing local user with this email.
   // WARP-233: blind-index lookup (email at rest is a dcv1 ciphertext).
   const byEmail = await findUserByEmail(prisma, email);
@@ -239,6 +269,7 @@ async function ensureLinkedUser(
       displayName: byEmail.displayName,
       role: byEmail.role as Role,
       accessRoleId: byEmail.accessRoleId ?? null,
+      canPasswordLogin: canPasswordLogin(byEmail),
     };
   }
 
@@ -267,6 +298,7 @@ async function ensureLinkedUser(
     displayName: created.displayName,
     role: created.role as Role,
     accessRoleId: created.accessRoleId ?? null,
+    canPasswordLogin: false, // SSO-only row, no passwordHash
   };
 }
 
@@ -422,7 +454,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
 
       // Exchange + validate the ID token (signature/iss/aud/exp + nonce +
       // state + PKCE). Any failure throws → 401, no session.
-      let identity: { sub: string; email?: string; emailVerified: boolean; name?: string };
+      let identity: ValidatedIdentity;
       try {
         identity = await exchangeCodeAndValidate(provider, currentUrl, {
           expectedNonce: loginState.nonce,
@@ -451,6 +483,11 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
           res.status(401).json({ error: "SSO sign-in failed", code: err.code });
           return;
         }
+        if (err instanceof SsoDomainNotAllowedError) {
+          logger.warn({ provider }, "SSO sign-in refused: Google hosted domain not on the allowlist");
+          res.status(401).json({ error: "SSO sign-in failed", code: err.code });
+          return;
+        }
         throw err;
       }
       if (!user) {
@@ -458,6 +495,32 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         logger.warn({ provider }, "SSO sign-in rejected: ID token had no usable email");
         res.status(401).json({ error: "SSO sign-in failed" });
         return;
+      }
+
+      // WARP-3193 SEC-AUTH-2 — SSO must not bypass an enrolled local TOTP
+      // factor (an IdP compromise would otherwise skip it). The redirect
+      // flow cannot carry a code, and the codebase does not parse `amr`, so
+      // the account is refused here with the password path's TOTP_REQUIRED
+      // and signs in through POST /auth/login (password + code) instead.
+      // Scoped to accounts that CAN do that: refusing an IdP-provisioned
+      // account (no local password) would lock it out with no remedy,
+      // since there is no MFA-reset route. That residual needs a pending-
+      // second-factor step on the SSO callback (not built here).
+      if (user.canPasswordLogin) {
+        const secondFactor = await checkLoginSecondFactor(prisma, user.id, {});
+        if (secondFactor !== "not_enrolled") {
+          await recordActivity({
+            kind: "auth",
+            severity: "warn",
+            sourceIcon: "shield-alert",
+            what: "Two-factor challenge failed",
+            sub: `${user.username} • ${provider}`,
+            refs: { outcome: "totp_required", method: "sso", provider, userId: user.id, username: user.username },
+            actor: { type: "anonymous" },
+          });
+          res.status(401).json({ error: "Two-factor authentication required", code: "TOTP_REQUIRED" });
+          return;
+        }
       }
 
       // Issue the SAME session cookies as /auth/login. WARP-247: record

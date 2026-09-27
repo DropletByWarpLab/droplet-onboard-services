@@ -35,6 +35,7 @@ import {
   classifyPasskeyError,
   passkeyErrorView,
   passkeyOriginProblem,
+  PasskeyServerError,
   type PasskeyErrorKind,
 } from "@/lib/webauthn";
 
@@ -71,7 +72,7 @@ type PasskeyState =
  *  WebAuthn spec (dismiss vs. timeout vs. no-credential are indistinguishable),
  *  so `cancelled` folds dismiss + no-match, and `timeout` is inferred from the
  *  elapsed time against the options' own timeout. */
-type FailCause = "cancelled" | "timeout" | "network" | "rejected" | "unavailable";
+type FailCause = "cancelled" | "timeout" | "network" | "rejected" | "unavailable" | "totp_required";
 
 /** WARP-1157 — failures that are about the address, not the attempt. Retrying
  *  from this page can never succeed, so they get the `blocked` state (no
@@ -141,6 +142,11 @@ function failGuidance(cause: FailCause): string {
       return "We couldn't reach your Droplet to finish signing in. Check that you're on your office network, then try again.";
     case "unavailable":
       return "Your Droplet can't take passkey sign-ins right now. Try again in a few minutes, or sign in with your password.";
+    case "totp_required":
+      // WARP-3193 — the box now asks a passkey sign-in for the account's
+      // two-factor code too; this page has no code field, so send them to
+      // the password form, which does.
+      return "This account uses two-factor authentication, so it also needs the code from your authenticator app. Sign in with your password and code instead.";
     case "rejected":
       return "We couldn't verify that passkey. Try again, or use your password — if this keeps happening, you can manage passkeys in Settings after signing in.";
     case "cancelled":
@@ -384,7 +390,13 @@ function PasskeyApprovalInner() {
           user = await verifyPasskeyAuthentication(assertion);
         } catch (err) {
           if (!isCurrent()) return;
-          fail(isNetworkError(err) ? "network" : "rejected");
+          fail(
+            isNetworkError(err)
+              ? "network"
+              : err instanceof PasskeyServerError && err.code === "TOTP_REQUIRED"
+                ? "totp_required"
+                : "rejected",
+          );
           return;
         }
         if (!isCurrent()) return;
