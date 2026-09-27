@@ -70,6 +70,8 @@ import {
   type BrainPassTrigger,
 } from "./services/brain/brain-pass-runner.js";
 import { notifyFindings } from "./services/brain/brain-notify.service.js";
+import { createTriageShadow } from "./services/brain/brain-triage-shadow.js";
+import { DecisionModelClient } from "./services/decision-model.client.js";
 import {
   brainPassesSchedulable,
   isBrainEnabled,
@@ -760,6 +762,13 @@ async function main() {
     // and the operator's "check now" are three callers of the same function
     // with the same lease, rather than three code paths with three ideas about
     // exclusion — which is the shape of defect this epic has already hit twice.
+    // WARP-3071 — shadow-only; undefined (today's code path) unless the flag is on.
+    let kev: DecisionModelClient | undefined;
+    const onTriaged = createTriageShadow({
+      enabled: config.DECISION_MODEL_TRIAGE_SHADOW,
+      decide: (args) => (kev ??= new DecisionModelClient({ url: config.AI_GATEWAY_GRPC_URL })).decide(args),
+    });
+
     const passRunners = {
       // Deterministic pass: no model call, so it never contends for the box's
       // single inference slot.
@@ -782,7 +791,7 @@ async function main() {
         // — so a run whose claim was lost meanwhile leaves delivery to the
         // worker that holds it now.
         if (signal.aborted) return;
-        const notified = await notifyFindings(prisma);
+        const notified = await notifyFindings(prisma, { onTriaged });
         if (notified.immediate > 0 || notified.digestSent) {
           logger.info({ notified }, "brain.findings.notified");
         }
