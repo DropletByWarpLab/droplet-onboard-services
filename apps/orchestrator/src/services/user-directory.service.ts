@@ -1,4 +1,5 @@
 import type { PrismaClient, User } from "@prisma/client";
+import { normalizeEmail } from "@droplet/auth-policy";
 import {
   deriveEmailColumnKey,
   emailLookupHash,
@@ -26,9 +27,10 @@ import {
  * (where shredding IS the point) stay in DocumentEncryptionKey.
  */
 
-export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
+// WARP-3193 ARCH-9 — the directory login key form (#374 trim+lowercase) is
+// @droplet/auth-policy's, shared with SSO, SCIM and the dashboard's user-id
+// checklist so they cannot drift into minting a second account.
+export { normalizeEmail };
 
 /** Data fragment for every prisma write that sets User.email. */
 export function emailWriteData(email: string): { email: string; emailLookupHash: string } {
