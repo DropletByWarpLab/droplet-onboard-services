@@ -972,6 +972,68 @@ describe("WARP-2894 — routines are reachable from a fresh turn", () => {
   });
 });
 
+describe("WARP-3116 — dashboard navigation is reachable from a fresh turn", () => {
+  const NAV_POOL = [...POOL, "find_dashboard_page", "open_dashboard_page"];
+
+  const advertisedFor = (userMessage: string) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool: NAV_POOL,
+      conversationToolNames: [],
+    }).advertised;
+
+  // Whole sentences, EMPTY continuity. The first pair is the incident: the
+  // follow-up names no page, so only the phrasing can admit the tool.
+  //
+  // MUTATION: delete the WARP-3116 rule from tool-selection.service.ts and
+  // every positive below goes red.
+  describe("positives — how a person asks to be moved or pointed somewhere", () => {
+    it.each([
+      "give me a link to the voice settings",
+      "take me to it",
+      "where do I change the wifi password?",
+      "go to settings",
+      "can you bring me to the calendar",
+      "navigate to people",
+      "open the security page",
+      "where are my deleted files?",
+      "how do I get to the camera recordings",
+      "open voice settings",
+      "show me the network settings",
+    ])("%s advertises the navigation tools", (message) => {
+      const advertised = advertisedFor(message);
+      expect(advertised).toContain("open_dashboard_page");
+      expect(advertised).toContain("find_dashboard_page");
+    });
+  });
+
+  describe("negatives — questions that are not about getting somewhere", () => {
+    it.each([
+      "turn off the kitchen lights",
+      "summarise the lease agreement",
+      // (no time words: those admit `data` through the utilities rule)
+      "who came to the front door",
+      "is the internet down?",
+      // A setting named in an ACTION is the network tools' job, not a trip:
+      // `settings` is claimed only after "open" / "show me".
+      "change the wifi settings to WPA3",
+    ])("%s does not advertise the navigation tools", (message) => {
+      expect(advertisedFor(message)).not.toContain("open_dashboard_page");
+    });
+  });
+
+  it("reaches the tools by continuity once one has been used", () => {
+    const advertised = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "yes that one",
+      pool: NAV_POOL,
+      conversationToolNames: ["find_dashboard_page"],
+    }).advertised;
+    expect(advertised).toContain("open_dashboard_page");
+  });
+});
+
 describe("WARP-2896 — a workshop run's binding admits the workspace domain; nothing else does", () => {
   const WORKSPACE = [
     "workspace_read",

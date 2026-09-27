@@ -62,6 +62,8 @@ import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
+import { dashboardPagesSchema } from "@droplet/shared-types";
+import { navigationToolsWithheld } from "../services/dashboard-navigation.js";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
@@ -402,6 +404,21 @@ const chatRequestSchema = z.object({
   // foreign ids are silently ignored). Existing conversations are never
   // moved by a turn.
   projectId: z.string().uuid().optional(),
+  // WARP-3116 — the pages this viewer can open, derived by the dashboard from
+  // its nav config on every turn. Forwarded to the tool dispatch as
+  // `_meta.dashboardPages` for find_dashboard_page / open_dashboard_page;
+  // absent (voice, phones, external clients) withholds both tools.
+  //
+  // An invalid list is DROPPED, not a 400: it is navigation metadata, and a
+  // bad nav entry must cost the turn its navigation tools, never the turn.
+  dashboardPages: dashboardPagesSchema.optional().catch(({ error }) => {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[llm/chat] dashboardPages rejected — navigation tools withheld this turn:",
+      error.issues[0]?.message,
+    );
+    return undefined;
+  }),
 });
 
 // WARP-1426 — POST /llm/complete. Single-turn, non-agentic completion:
@@ -1190,6 +1207,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         allowedForUser = withholdStoredContentTools(materialised);
       }
 
+      // WARP-3116 — the dashboard's page list. Without one there is no screen
+      // to move, and the navigation tools are withheld where the pool is built
+      // (here for the estimate and guidance, in the agent loop for the wire —
+      // see dashboard-navigation.ts for why not by rewriting allowedForUser).
+      const dashboardPages = chatReq.dashboardPages?.length
+        ? chatReq.dashboardPages
+        : undefined;
+      const navigationWithheld = navigationToolsWithheld(Boolean(dashboardPages));
+
       // Resolve the caller's Nextcloud session token so file-tool
       // handlers (`list_files`, `read_file`, `write_file`, etc.) can
       // authenticate to Nextcloud as the dashboard user. Threaded to
@@ -1230,12 +1256,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       const brainOwnerId = (req as AuthedRequest).user?.id;
       // WARP-845: also forward the caller's role so role-scoped handlers
       // (memory_recall) can filter what the model may read.
+      // WARP-3116: and the dashboard's page list, for the navigation tools.
       const toolCallContext: McpCallContext | undefined =
-        ncToken || userId || role
+        ncToken || userId || role || dashboardPages
           ? {
               ...(ncToken ? { ncToken } : {}),
               ...(userId ? { userId } : {}),
               ...(role ? { userRole: role } : {}),
+              ...(dashboardPages ? { dashboardPages } : {}),
             }
           : undefined;
 
@@ -2044,7 +2072,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         brainBlock = promptGate.blocks.brain;
         businessBlock = promptGate.blocks.business;
 
-        const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
+        const identityAndGuidance = buildBaseSystemPrompt(
+          allowedForUser,
+          "",
+          undefined,
+          navigationWithheld,
+        );
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
         // the NEVER-DROPPED identity part for sizing (it must survive
@@ -2055,13 +2088,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           : "";
         // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
         // default chat scope (registry minus chat-tool-scope.ts exclusions).
-        const pooledTools = allowedForUser
-          ? Array.from(TOOLS.values()).filter((t) =>
-              allowedForUser!.includes(t.name),
-            )
-          : Array.from(TOOLS.values()).filter(
-              (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
-            );
+        // WARP-3116: both branches then lose the navigation tools on a turn
+        // with no page list — the agent loop withholds them identically.
+        const pooledTools = (
+          allowedForUser
+            ? Array.from(TOOLS.values()).filter((t) =>
+                allowedForUser!.includes(t.name),
+              )
+            : Array.from(TOOLS.values()).filter(
+                (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
+              )
+        ).filter((t) => !navigationWithheld.has(t.name));
         // WARP-2556 — the §3 scope, applied BEFORE selection narrows further.
         //
         // `narrowAllowedToolsForRole` returns `undefined` for a privileged role
@@ -2182,6 +2219,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               allowedForUser,
               degraded.personaBlock,
               degraded.businessBlock,
+              navigationWithheld,
             ) +
             memoryBlock +
             // WARP-2752 (ADR-051) — the brain block, AFTER degradation so a

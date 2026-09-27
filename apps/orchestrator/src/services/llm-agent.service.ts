@@ -56,6 +56,7 @@ import {
   boundToolResultForModel,
 } from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import { navigationToolsWithheld } from "./dashboard-navigation.js";
 import {
   narrowToolsToScope,
   toolDispatchDenial,
@@ -1406,10 +1407,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // read the same registry/classification state.
   const scoped = req.toolAccessScope;
   const runtimeLookup = currentRuntimeToolLookup();
+  // WARP-3116 — no dashboard page list, no navigation tools: dropped from
+  // BOTH branches, so every runAgent caller (voice, phones, background runs)
+  // is covered, and routes/llm.ts's estimate drops the same set.
+  const navigationWithheld = navigationToolsWithheld(
+    Boolean(req.toolCallContext?.dashboardPages?.length),
+  );
   const filtered = narrowToolsToScope(
-    req.allowed_tools
+    (req.allowed_tools
       ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
-      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
+      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name))
+    ).filter((t) => !navigationWithheld.has(t.name)),
     scoped,
     runtimeLookup,
   );

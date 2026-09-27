@@ -195,6 +195,14 @@ export function createServer(
       !Array.isArray(meta._enhancement)
         ? (meta._enhancement as PrivateEnhancement)
         : undefined;
+    // WARP-3116 — the pages the calling dashboard can open. Same trusted-
+    // stdio posture: over HTTP a client could hand the navigation tools a
+    // list of its own choosing. Passed through as-is; the handlers parse it
+    // with the shared schema before it becomes a navigation target.
+    const metaDashboardPages =
+      trustedPrincipal && meta && Array.isArray(meta.dashboardPages)
+        ? (meta.dashboardPages as unknown[])
+        : undefined;
     const ctx = buildContext(
       deps,
       claims,
@@ -205,6 +213,7 @@ export function createServer(
       metaUserRole,
       metaAgentRunId,
       metaWorkspaceId,
+      metaDashboardPages,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 

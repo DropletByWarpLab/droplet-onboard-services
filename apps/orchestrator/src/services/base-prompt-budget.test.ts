@@ -393,6 +393,15 @@ describe("worst-case fixed system-block budget", () => {
     // 110K leaves room for roughly one more domain of this size before the
     // next author has to make the same call consciously.
     //
+    // WARP-3116 made that call: stage 3029b383b sat at 109,421 (579 chars of
+    // headroom) and find_dashboard_page (711) + open_dashboard_page (754)
+    // crossed it at 110,888. Raised to 115K for reason 1 above — the same
+    // allowance of roughly one more domain that 110K gave. What bounds a
+    // real chat turn is untouched: the per-domain assertion above stays green
+    // with both in the `data` pool, and the agent loop withholds both from
+    // every turn that carries no dashboard page list (voice, phones,
+    // background runs), so on those turns they cost nothing at all.
+    //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
     // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added
     // to chat scope tripped it. WARP-2547 resolved that: it is now a function
@@ -420,7 +429,7 @@ describe("worst-case fixed system-block budget", () => {
         },
       })),
     );
-    expect(fullRegistryJson.length).toBeLessThan(110000);
+    expect(fullRegistryJson.length).toBeLessThan(115000);
   });
 
   /**

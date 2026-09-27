@@ -403,6 +403,25 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
     domains: ["business", "crm"],
   },
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
+  // WARP-3116 — getting AROUND the dashboard: find_dashboard_page and
+  // open_dashboard_page live in `data`. The words are how a person asks to
+  // be moved or pointed somewhere ("take me to it", "where do I change…",
+  // "link to the voice settings"), not what the page is about — "take me to
+  // it" names no page at all, and it is the sentence this rule exists for.
+  // An over-match is not free: it admits the whole `data` domain (17 tools,
+  // ~15.4K chars, ~3.9K tokens measured with these two in it). So
+  // `where is / where are` stays bare — it is the ticket's own "where is X"
+  // question, and in the dashboard chat the place a person asks after is
+  // usually a page — but `settings` is NOT claimed bare: "change the wifi
+  // settings to WPA3" is an action for the network tools, not a trip, so it
+  // counts only after "open" / "show me". A miss self-heals: the guidance
+  // line names find_dashboard_page, and a call to it expands `data` next
+  // iteration. Both tools are withheld upstream on turns with no page list,
+  // so off the dashboard this rule only ever admits the other data tools.
+  {
+    pattern: /\b(take me|bring me|go(ing)? (back )?to|head (over )?to|navigate|jump to|links? (to|for)|link me|where (is|are|can i|do i|would i|should i)|how do i get to|(open|show me) (the |my )?(\w+ ){0,2}(settings|page|screen|tab)|(page|screen|tab|section) (for|with)|the \w+ (page|screen|tab))\b/i,
+    domains: ["data"],
+  },
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //
   // The defect this closes is the one WARP-2058 closed for `pm` and WARP-2454

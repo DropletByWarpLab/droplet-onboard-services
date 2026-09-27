@@ -151,6 +151,16 @@ const businessContext: CategoryRenderer = (can) => {
   return "- For questions about the business itself (what it does, customers, goals), use the business context above; call business_profile_get for the full profile.";
 };
 
+/** WARP-3116 — the model answered `/settings/voice` from a doc: a path that
+ *  never existed. Withheld off the dashboard with its tool, so this renders
+ *  only where there is a screen to move. Names find_dashboard_page alone:
+ *  the budget below had 57 chars left, and that tool's description is what
+ *  points at open_dashboard_page. */
+const dashboardNavigation: CategoryRenderer = (can) => {
+  if (!can("find_dashboard_page")) return null;
+  return "- Never guess dashboard paths: use find_dashboard_page.";
+};
+
 const CATEGORY_RENDERERS: CategoryRenderer[] = [
   contentSearch,
   email,
@@ -163,6 +173,7 @@ const CATEGORY_RENDERERS: CategoryRenderer[] = [
   memoryWrite,
   memoryForget,
   businessContext,
+  dashboardNavigation,
 ];
 
 const NEVER_INVENT_LINE =
@@ -172,9 +183,18 @@ const NEVER_INVENT_LINE =
  * Compose the tool-guidance block from the caller's EFFECTIVE tool set.
  * `allowed` undefined = privileged caller = every tool passes (the same
  * `can()` contract buildBaseSystemPrompt has always used).
+ *
+ * `withheld` — WARP-3116: tools this turn's pool drops whatever `allowed`
+ * says (today the navigation tools on a turn with no dashboard page list).
+ * `allowed` cannot carry that for the owner, whose `undefined` means "the
+ * default scope", so it arrives separately.
  */
-export function composeToolGuidance(allowed: string[] | undefined): string {
-  const can: Can = (name) => !allowed || allowed.includes(name);
+export function composeToolGuidance(
+  allowed: string[] | undefined,
+  withheld?: ReadonlySet<string>,
+): string {
+  const can: Can = (name) =>
+    (!allowed || allowed.includes(name)) && !withheld?.has(name);
   const rendered = CATEGORY_RENDERERS.map((render) => render(can)).filter(
     (line): line is string => line !== null,
   );
