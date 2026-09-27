@@ -316,6 +316,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "translate_text",
     "get_weather",
     "currency_convert",
+    "classify_items",
   ],
 };
 
@@ -516,6 +517,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Data (ambient web data — WARP-1436)
   get_weather: "Check the weather and forecast for any place",
   currency_convert: "Convert money between currencies using daily rates",
+  // Data (bulk labelling — WARP-3074)
+  classify_items: "Sort a batch of items into categories, with how sure it is about each",
   // Background runs (WARP-2180)
   start_agent_run: "Hand Droplet a longer task to work on in the background",
   list_agent_runs: "See your background tasks and how they went",

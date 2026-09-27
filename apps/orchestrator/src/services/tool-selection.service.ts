@@ -403,6 +403,15 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
     domains: ["business", "crm"],
   },
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
+  // WARP-3074 — bulk labelling (`classify_items`) lives in `data`. The
+  // ambiguous verbs are qualified by a batch object, not taken bare: `data`
+  // is one of the larger domains, and a bare `label` fires on "print a
+  // shipping label", a bare `sort` on "sort the files by newest". Whole-
+  // sentence positives and negatives in tool-selection.service.test.ts.
+  {
+    pattern: /\b(classif(y|ies|ied|ying|ication)|categori[sz](e|es|ed|ing)|triage|(sort|label|tag|group|bucket) (these|them|those|each|all|every)|which (team|department|category) (each|every))\b/i,
+    domains: ["data"],
+  },
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //
   // The defect this closes is the one WARP-2058 closed for `pm` and WARP-2454
