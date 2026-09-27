@@ -39,8 +39,10 @@ export const MAX_OCCURRENCES_PER_SERIES = 1000;
 /** Per sync. Feeds may be 50 MB; past this, further series are stored
  *  unexpanded (marked) rather than growing the table without bound. */
 export const MAX_OCCURRENCES_PER_FEED = 50_000;
-/** Loop guard: periods walked from DTSTART (a daily series since 1970 fits). */
-const MAX_PERIODS = 25_000;
+/** Per sync: periods + candidate days walked, across every series. A series
+ *  that would exceed what is left is stored `unexpanded`. */
+export const MAX_CANDIDATES_PER_FEED = 200_000;
+const YIELD_EVERY_CANDIDATES = 5_000;
 
 export const OCCURRENCE_KEY_SEPARATOR = "::";
 
@@ -226,13 +228,46 @@ function addMonths(d: Date, n: number): Date {
   return out;
 }
 
+/** Fast-forward target: the first period index whose period can still hold
+ *  an occurrence overlapping the window. Only valid without COUNT (COUNT has
+ *  to count the instances before the window). Errs early by one period. */
+function firstPeriodNear(rule: Rule, base: { dn: number; y: number; m: number }, fromDn: number): number {
+  const t = ymdOf(fromDn);
+  let k: number;
+  switch (rule.freq) {
+    case "DAILY":
+      k = Math.floor((fromDn - base.dn) / rule.interval);
+      break;
+    case "WEEKLY":
+      k = Math.floor((fromDn - base.dn) / (7 * rule.interval));
+      break;
+    case "MONTHLY":
+      k = Math.floor((t.y * 12 + t.m - (base.y * 12 + base.m)) / rule.interval);
+      break;
+    case "YEARLY":
+      k = Math.floor((t.y - base.y) / rule.interval);
+      break;
+  }
+  return Math.max(0, k - 1);
+}
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 /**
  * Flatten a parsed feed into the rows to store. Non-recurring events pass
  * through unchanged (key = UID). `now` is injectable for tests.
+ *
+ * Work is bounded feed-wide by CANDIDATES GENERATED (`MAX_CANDIDATES_PER_FEED`),
+ * not only by rows stored: a hostile rule can generate millions of instances
+ * before the window. Without COUNT the walk jumps straight to the window; with
+ * COUNT it must walk from DTSTART, so a series whose walk would exceed the
+ * remaining budget is stored `unexpanded` instead. Yields to the event loop
+ * between series once enough work has piled up.
  */
-export function expandIcsEvents(events: IcsEvent[], now: Date = new Date()): ExpandedIcsEvent[] {
+export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()): Promise<ExpandedIcsEvent[]> {
   const windowStart = addMonths(now, -RECURRENCE_PAST_MONTHS).getTime();
   const windowEnd = addMonths(now, RECURRENCE_FUTURE_MONTHS).getTime();
+  const windowEndDn = Math.floor(windowEnd / DAY_MS) + 1;
 
   const masters = new Map<string, IcsEvent>();
   const overrides = new Map<string, IcsEvent[]>();
@@ -251,92 +286,36 @@ export function expandIcsEvents(events: IcsEvent[], now: Date = new Date()): Exp
   const occKey = (uid: string, originalStart: number) =>
     `${uid}${OCCURRENCE_KEY_SEPARATOR}${new Date(originalStart).toISOString()}`;
   const inWindow = (s: number, e: number) => e > windowStart && s < windowEnd;
+  let budget = MAX_CANDIDATES_PER_FEED;
+  let sinceYield = 0;
 
   for (const uid of new Set([...masters.keys(), ...overrides.keys()])) {
+    if (sinceYield >= YIELD_EVERY_CANDIDATES) {
+      sinceYield = 0;
+      await yieldToEventLoop();
+    }
     const master = masters.get(uid);
     const byRid = new Map((overrides.get(uid) ?? []).map((o) => [o.recurrenceId!.getTime(), o]));
     const rule =
-      master?.rrule && out.length < MAX_OCCURRENCES_PER_FEED ? parseRrule(master.rrule, master.tzid) : null;
+      master?.rrule && out.length < MAX_OCCURRENCES_PER_FEED && budget > 0
+        ? parseRrule(master.rrule, master.tzid)
+        : null;
 
     if (master && !master.rrule) out.push({ ...master, key: uid, recurrence: "none" });
-    if (master && master.rrule && !rule) out.push({ ...master, key: uid, recurrence: "unexpanded" });
-
+    let expandedOk = false;
     if (master && rule) {
-      const duration = master.endsAt.getTime() - master.startsAt.getTime();
-      // DTSTART's wall clock, in the zone it was written in.
-      let baseYmd: string;
-      let minuteOfDay = 0;
-      if (master.allDay) {
-        baseYmd = master.startsAt.toISOString().slice(0, 10);
-      } else if (master.tzid) {
-        const lp = localPartsOf(master.startsAt, master.tzid);
-        baseYmd = lp.ymd;
-        minuteOfDay = lp.minuteOfDay;
+      const mark = out.length;
+      const consumed = expandSeries(master, rule, uid, byRid);
+      sinceYield += consumed.work;
+      if (consumed.ok) {
+        expandedOk = true;
       } else {
-        baseYmd = master.startsAt.toISOString().slice(0, 10);
-        minuteOfDay = master.startsAt.getUTCHours() * 60 + master.startsAt.getUTCMinutes();
-      }
-      const seconds = master.startsAt.getUTCSeconds();
-      const [by, bm, bd] = baseYmd.split("-").map(Number) as [number, number, number];
-      const base = { dn: dayNumber(by, bm, bd), y: by, m: bm, d: bd };
-      const startOf = (dn: number): number => {
-        const { y, m, d } = ymdOf(dn);
-        if (master.allDay) return dn * DAY_MS;
-        const h = Math.floor(minuteOfDay / 60);
-        const mi = minuteOfDay % 60;
-        return master.tzid
-          ? zonedWallClockToUtc(y, m, d, h, mi, seconds, master.tzid).getTime()
-          : Date.UTC(y, m - 1, d, h, mi, seconds);
-      };
-      const exAt = new Set((master.exdates ?? []).map((d) => d.getTime()));
-      const exDays = new Set(master.exdateDays ?? []);
-      const windowEndDn = Math.floor(windowEnd / DAY_MS) + 1;
-
-      let generated = 0;
-      let stored = 0;
-      const emit = (dn: number, start: number): boolean => {
-        generated++;
-        if (rule.count !== undefined && generated > rule.count) return false;
-        if (exAt.has(start) || exDays.has(ymdOf(dn).ymd)) return true; // EXDATE counts toward COUNT
-        const ov = byRid.get(start);
-        byRid.delete(start);
-        if (ov) {
-          if (ov.status !== "CANCELLED" && inWindow(ov.startsAt.getTime(), ov.endsAt.getTime())) {
-            out.push({ ...ov, key: occKey(uid, start), recurrence: "occurrence" });
-            stored++;
-          }
-        } else if (inWindow(start, start + duration)) {
-          out.push({
-            ...master,
-            startsAt: new Date(start),
-            endsAt: new Date(start + duration),
-            key: occKey(uid, start),
-            recurrence: "occurrence",
-          });
-          stored++;
-        }
-        return stored < MAX_OCCURRENCES_PER_SERIES;
-      };
-
-      // RFC 5545: DTSTART is always the first instance.
-      let going = emit(base.dn, master.startsAt.getTime());
-      for (let k = 0; going && k < MAX_PERIODS; k++) {
-        const p = period(rule, k, base);
-        if (p.start > windowEndDn) break;
-        for (const dn of p.days) {
-          if (dn <= base.dn) continue;
-          const start = startOf(dn);
-          if (rule.until) {
-            const past = "at" in rule.until ? start > rule.until.at : ymdOf(dn).ymd > rule.until.ymd;
-            if (past) {
-              going = false;
-              break;
-            }
-          }
-          if (!(going = emit(dn, start))) break;
-        }
+        out.length = mark; // roll back a series that ran out of budget
+        byRid.clear();
+        for (const o of overrides.get(uid) ?? []) byRid.set(o.recurrenceId!.getTime(), o);
       }
     }
+    if (master && master.rrule && !expandedOk) out.push({ ...master, key: uid, recurrence: "unexpanded" });
 
     // Overrides whose instance the master did not generate (master missing,
     // unexpanded, or the instance lies outside the walked range) still show.
@@ -347,4 +326,110 @@ export function expandIcsEvents(events: IcsEvent[], now: Date = new Date()): Exp
     }
   }
   return out;
+
+  function expandSeries(
+    master: IcsEvent,
+    rule: Rule,
+    uid: string,
+    byRid: Map<number, IcsEvent>,
+  ): { ok: boolean; work: number } {
+    const duration = master.endsAt.getTime() - master.startsAt.getTime();
+    // DTSTART's wall clock, in the zone it was written in.
+    let baseYmd: string;
+    let minuteOfDay = 0;
+    if (master.allDay) {
+      baseYmd = master.startsAt.toISOString().slice(0, 10);
+    } else if (master.tzid) {
+      const lp = localPartsOf(master.startsAt, master.tzid);
+      baseYmd = lp.ymd;
+      minuteOfDay = lp.minuteOfDay;
+    } else {
+      baseYmd = master.startsAt.toISOString().slice(0, 10);
+      minuteOfDay = master.startsAt.getUTCHours() * 60 + master.startsAt.getUTCMinutes();
+    }
+    const seconds = master.startsAt.getUTCSeconds();
+    const [by, bm, bd] = baseYmd.split("-").map(Number) as [number, number, number];
+    const base = { dn: dayNumber(by, bm, bd), y: by, m: bm, d: bd };
+    const startOf = (dn: number): number => {
+      const { y, m, d } = ymdOf(dn);
+      if (master.allDay) return dn * DAY_MS;
+      const h = Math.floor(minuteOfDay / 60);
+      const mi = minuteOfDay % 60;
+      return master.tzid
+        ? zonedWallClockToUtc(y, m, d, h, mi, seconds, master.tzid).getTime()
+        : Date.UTC(y, m - 1, d, h, mi, seconds);
+    };
+    const exAt = new Set((master.exdates ?? []).map((d) => d.getTime()));
+    const exDays = new Set(master.exdateDays ?? []);
+    // Days before this cannot hold an occurrence that overlaps the window
+    // (2 days of slack for zone offsets). Candidates there are only COUNTED:
+    // no zone conversion, no row.
+    const nearDn = Math.floor((windowStart - Math.max(0, duration)) / DAY_MS) - 2;
+    const untilDn = !rule.until
+      ? Number.POSITIVE_INFINITY
+      : "at" in rule.until
+        ? Math.floor(rule.until.at / DAY_MS) - 2
+        : dayNumber(...(rule.until.ymd.split("-").map(Number) as [number, number, number]));
+
+    let generated = 0;
+    let stored = 0;
+    let work = 0;
+    const emit = (dn: number, start: number): boolean => {
+      generated++;
+      if (rule.count !== undefined && generated > rule.count) return false;
+      if (exAt.has(start) || exDays.has(ymdOf(dn).ymd)) return true; // EXDATE counts toward COUNT
+      const ov = byRid.get(start);
+      byRid.delete(start);
+      if (ov) {
+        if (ov.status !== "CANCELLED" && inWindow(ov.startsAt.getTime(), ov.endsAt.getTime())) {
+          out.push({ ...ov, key: occKey(uid, start), recurrence: "occurrence" });
+          stored++;
+        }
+      } else if (inWindow(start, start + duration)) {
+        out.push({
+          ...master,
+          startsAt: new Date(start),
+          endsAt: new Date(start + duration),
+          key: occKey(uid, start),
+          recurrence: "occurrence",
+        });
+        stored++;
+      }
+      return stored < MAX_OCCURRENCES_PER_SERIES;
+    };
+
+    // RFC 5545: DTSTART is always the first instance.
+    let going = emit(base.dn, master.startsAt.getTime());
+    const k0 = rule.count === undefined ? firstPeriodNear(rule, base, nearDn) : 0;
+    for (let k = k0; going; k++) {
+      if (--budget < 0) return { ok: false, work };
+      work++;
+      const p = period(rule, k, base);
+      if (p.start > windowEndDn) break;
+      for (const dn of p.days) {
+        if (dn <= base.dn) continue;
+        if (--budget < 0) return { ok: false, work };
+        work++;
+        if (dn < nearDn && dn < untilDn) {
+          // Before the window and clear of UNTIL: only COUNT cares.
+          generated++;
+          if (rule.count !== undefined && generated > rule.count) {
+            going = false;
+            break;
+          }
+          continue;
+        }
+        const start = startOf(dn);
+        if (rule.until) {
+          const past = "at" in rule.until ? start > rule.until.at : ymdOf(dn).ymd > rule.until.ymd;
+          if (past) {
+            going = false;
+            break;
+          }
+        }
+        if (!(going = emit(dn, start))) break;
+      }
+    }
+    return { ok: true, work };
+  }
 }

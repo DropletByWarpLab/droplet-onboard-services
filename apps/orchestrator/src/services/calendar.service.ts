@@ -297,7 +297,7 @@ export async function syncSource(
   // ics-recurrence.ts). UID-less events are dropped there (RFC 5545 requires
   // UID); a repeated UID: the last one wins, as before.
   const now = new Date();
-  const expanded = expandIcsEvents(result.events, now);
+  const expanded = await expandIcsEvents(result.events, now);
   const incoming = new Map<string, (typeof expanded)[number]>();
   for (const ev of expanded) incoming.set(ev.key, ev);
   const fields = (ev: (typeof expanded)[number]) => ({
@@ -386,9 +386,10 @@ export async function syncSource(
   // expanded in THIS sync are touched, and only inside the window, so history
   // older than the window and events that merely left the feed are kept (the
   // same posture as before for one-off events).
-  const expandedSeries = new Set(
-    expanded.filter((e) => e.recurrence === "occurrence").map((e) => e.uid),
-  );
+  // Every UID in the feed, not only the ones expanded this time: a series
+  // that is now stored `unexpanded` must lose the occurrence rows an earlier
+  // sync made, or they show beside its bare row as duplicates.
+  const feedUids = new Set(result.events.map((e) => e.uid).filter(Boolean));
   const windowStart = new Date(now);
   windowStart.setUTCMonth(windowStart.getUTCMonth() - RECURRENCE_PAST_MONTHS);
   const windowEnd = new Date(now);
@@ -397,11 +398,11 @@ export async function syncSource(
     .filter((row) => {
       const key = row.externalUid;
       if (!key || incoming.has(key)) return false;
-      if (expandedSeries.has(key)) return true;
+      if (feedUids.has(key)) return true; // bare row a series no longer produces
       const sep = key.lastIndexOf(OCCURRENCE_KEY_SEPARATOR);
       return (
         sep > 0 &&
-        expandedSeries.has(key.slice(0, sep)) &&
+        feedUids.has(key.slice(0, sep)) &&
         row.endsAt > windowStart &&
         row.startsAt < windowEnd
       );

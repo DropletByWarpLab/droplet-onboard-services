@@ -434,6 +434,37 @@ describe("syncSource", () => {
     }
   });
 
+  it("WARP-3266: a series that turns unexpanded loses its old occurrence rows (no duplicates)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      const master = {
+        uid: "w@x",
+        summary: "Standup",
+        startsAt: new Date("2026-10-05T16:00:00Z"),
+        endsAt: new Date("2026-10-05T16:30:00Z"),
+        allDay: false,
+        rrule: "FREQ=WEEKLY;COUNT=4",
+      };
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [master] });
+      await syncSource(prisma, src.id);
+      expect(stub._events).toHaveLength(4);
+
+      syncCalendarSourceMock.mockResolvedValueOnce({
+        ok: true,
+        events: [{ ...master, rrule: "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1" }],
+      });
+      const r = await syncSource(prisma, src.id);
+      expect(r).toMatchObject({ added: 1, removed: 4, total: 1 });
+      expect(stub._events.map((e: any) => [e.externalUid, e.recurrence])).toEqual([["w@x", "unexpanded"]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("persists lastSyncError on fetch failure", async () => {
     const prisma = makePrismaStub();
     const src = await createSource(prisma, "alice", {
