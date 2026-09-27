@@ -222,6 +222,7 @@ import {
 import { CONTINUITY_TRACE_ROW_LIMIT } from "../services/chat-persistence.service.js";
 import { CORE_TOOL_NAMES } from "../services/tool-selection.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+import { DASHBOARD_NAVIGATION_TOOLS } from "../services/dashboard-navigation.js";
 import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
 import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
 
@@ -437,8 +438,12 @@ describe("POST /api/llm/chat — the request the model actually receives (WARP-2
     expect(res.status).toBe(200);
 
     const names = advertisedNames();
+    // WARP-3116 — this turn sends no `dashboardPages`, so the navigation
+    // tools are withheld from the pool even with selection off.
     const pool = Array.from(TOOLS.values()).filter(
-      (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
+      (t) =>
+        !EXCLUDED_FROM_CHAT_TOOLS.has(t.name) &&
+        !DASHBOARD_NAVIGATION_TOOLS.has(t.name),
     );
     expect(names).toHaveLength(pool.length);
     expect(names).toContain("list_cameras"); // unmatched domain, shipped anyway
