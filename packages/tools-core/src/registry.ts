@@ -236,6 +236,10 @@ import translateText from "./handlers/data/translate-text.js";
 // /api/web routes — ambient_data off-LAN channel, fail-closed.
 import getWeather from "./handlers/data/get-weather.js";
 import currencyConvert from "./handlers/data/currency-convert.js";
+// data (WARP-3116): dashboard navigation — resolve a page from the list the
+// dashboard sent with the turn; the dashboard does the moving.
+import findDashboardPage from "./handlers/dashboard/find-dashboard-page.js";
+import openDashboardPage from "./handlers/dashboard/open-dashboard-page.js";
 // WARP-2180: durable background runs (epic WARP-2176)
 import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
 import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
@@ -437,6 +441,10 @@ const allTools: Tool[] = [
   // WARP-1436: ambient web data (Tier-1; screened egress via /api/web)
   getWeather,
   currencyConvert,
+  // WARP-3116: dashboard navigation (Tier-1; pure lookup over the page list
+  // the dashboard sent — the handler moves nothing, the dashboard routes)
+  findDashboardPage,
+  openDashboardPage,
   // WARP-2180: background agent runs — start is Tier-2 (unattended compute),
   // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
   startAgentRun,

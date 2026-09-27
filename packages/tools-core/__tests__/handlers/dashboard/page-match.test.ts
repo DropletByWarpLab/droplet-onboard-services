@@ -1,0 +1,116 @@
+import { describe, it, expect } from "vitest";
+import type { DashboardPage } from "@droplet/shared-types";
+import {
+  findDashboardPages,
+  resolveDashboardPage,
+} from "../../../src/handlers/dashboard/page-match.js";
+
+// Shaped like what the dashboard derives from nav-config for an owner.
+const PAGES: DashboardPage[] = [
+  { href: "/", label: "Overview", section: "Work", keywords: ["home", "dashboard"] },
+  { href: "/chat", label: "Ask AI", section: "Work" },
+  { href: "/files", label: "Files", section: "Work" },
+  { href: "/files/trash", label: "Trash", section: "Work › Files", keywords: ["deleted"] },
+  { href: "/calendar", label: "Calendar", section: "Work" },
+  { href: "/security", label: "Security", section: "Systems" },
+  { href: "/security/settings", label: "Opening hours", section: "Systems › Security" },
+  { href: "/network", label: "Network", section: "Systems", keywords: ["wifi", "internet", "router"] },
+  { href: "/voice", label: "Voice", section: "Systems › Network", keywords: ["microphone", "wake word"] },
+  { href: "/settings", label: "Settings", section: "Admin" },
+  {
+    href: "/users",
+    label: "People",
+    section: "Settings › Account",
+    description: "Who can sign in and what they can reach",
+  },
+  { href: "/help", label: "Help", section: "Settings › Advanced" },
+];
+
+const hrefs = (pages: DashboardPage[]) => pages.map((p) => p.href);
+
+describe("resolveDashboardPage", () => {
+  it("resolves the words a person uses to the page they mean", () => {
+    const r = resolveDashboardPage(PAGES, "voice settings");
+    expect(r).toEqual({ kind: "match", page: expect.objectContaining({ href: "/voice" }) });
+  });
+
+  it("lands a guessed path on the page it was reaching for", () => {
+    // The WARP-3116 incident: the model offered /settings/voice, which has
+    // never existed. Its words still say Voice.
+    const r = resolveDashboardPage(PAGES, "/settings/voice");
+    expect(r.kind).toBe("match");
+    if (r.kind === "match") expect(r.page.href).toBe("/voice");
+  });
+
+  it("takes an exact path or an exact label outright", () => {
+    expect(resolveDashboardPage(PAGES, "/security/settings")).toMatchObject({
+      kind: "match",
+      page: { href: "/security/settings" },
+    });
+    expect(resolveDashboardPage(PAGES, "/files/trash/")).toMatchObject({
+      kind: "match",
+      page: { href: "/files/trash" },
+    });
+    expect(resolveDashboardPage(PAGES, "settings")).toMatchObject({
+      kind: "match",
+      page: { href: "/settings" },
+    });
+    expect(resolveDashboardPage(PAGES, "Ask AI")).toMatchObject({
+      kind: "match",
+      page: { href: "/chat" },
+    });
+  });
+
+  it("uses keywords and descriptions for the words the nav label does not carry", () => {
+    expect(resolveDashboardPage(PAGES, "wifi")).toMatchObject({ page: { href: "/network" } });
+    expect(resolveDashboardPage(PAGES, "deleted files")).toMatchObject({
+      page: { href: "/files/trash" },
+    });
+    expect(resolveDashboardPage(PAGES, "who can sign in")).toMatchObject({
+      page: { href: "/users" },
+    });
+    expect(resolveDashboardPage(PAGES, "the home dashboard")).toMatchObject({
+      page: { href: "/" },
+    });
+  });
+
+  it("reports a near tie as ambiguous instead of picking one", () => {
+    const pages: DashboardPage[] = [
+      { href: "/security/zones", label: "Areas", section: "Systems › Security" },
+      { href: "/security/patterns", label: "Patterns", section: "Systems › Security" },
+    ];
+    const r = resolveDashboardPage(pages, "security");
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind === "ambiguous") {
+      expect(hrefs(r.candidates).sort()).toEqual(["/security/patterns", "/security/zones"]);
+    }
+  });
+
+  it("reports nothing rather than guessing when no word matches", () => {
+    expect(resolveDashboardPage(PAGES, "spaceship controls")).toEqual({ kind: "none" });
+    expect(resolveDashboardPage(PAGES, "   ")).toEqual({ kind: "none" });
+  });
+});
+
+describe("findDashboardPages", () => {
+  it("treats 'settings' as a qualifier when the query names a place", () => {
+    expect(hrefs(findDashboardPages(PAGES, "voice settings", 3))).toEqual(["/voice"]);
+    expect(findDashboardPages(PAGES, "settings", 3)[0].href).toBe("/settings");
+  });
+
+  it("ranks the rare word over the common one", () => {
+    // "files" names two pages, "deleted" one.
+    expect(findDashboardPages(PAGES, "deleted files", 3)[0].href).toBe("/files/trash");
+  });
+
+  it("respects the limit and returns nothing for filler alone", () => {
+    expect(findDashboardPages(PAGES, "settings", 1)).toHaveLength(1);
+    expect(findDashboardPages(PAGES, "zzz", 5)).toEqual([]);
+  });
+
+  it("is deterministic", () => {
+    const a = findDashboardPages(PAGES, "security settings", 5);
+    const b = findDashboardPages(PAGES, "security settings", 5);
+    expect(hrefs(a)).toEqual(hrefs(b));
+  });
+});

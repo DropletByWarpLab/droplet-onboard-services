@@ -316,6 +316,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "translate_text",
     "get_weather",
     "currency_convert",
+    // WARP-3116 — `data` rather than a new domain: every role template
+    // already grants it, and a new domain would need a grant in each one
+    // before anyone below owner could ask to be taken to a page.
+    "find_dashboard_page",
+    "open_dashboard_page",
   ],
 };
 
@@ -516,6 +521,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Data (ambient web data — WARP-1436)
   get_weather: "Check the weather and forecast for any place",
   currency_convert: "Convert money between currencies using daily rates",
+  // Data (dashboard navigation — WARP-3116)
+  find_dashboard_page: "Find where a screen or setting lives and link to it",
+  open_dashboard_page: "Take you to a page of the dashboard",
   // Background runs (WARP-2180)
   start_agent_run: "Hand Droplet a longer task to work on in the background",
   list_agent_runs: "See your background tasks and how they went",

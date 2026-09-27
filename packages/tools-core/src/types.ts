@@ -185,6 +185,15 @@ export interface ToolContext {
    * another one by argument.
    */
   workspaceId?: string;
+  /**
+   * WARP-3116 — the pages the calling dashboard can open, derived per viewer
+   * from its nav config and forwarded by the orchestrator via
+   * `_meta.dashboardPages` (stdio-trusted only). Typed `unknown` on purpose:
+   * it crossed a process boundary as JSON, so the navigation handlers parse
+   * it with `dashboardPagesSchema` before using it. Absent on every turn
+   * that did not come from the web dashboard.
+   */
+  dashboardPages?: unknown;
   ncToken?: string;
   /**
    * WARP-437 — orchestrator-injected enhancement bundle plumbed through
