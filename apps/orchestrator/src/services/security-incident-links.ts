@@ -41,7 +41,8 @@
  * `{}`), never client-versioned (§6.5), so the page has nothing to echo.
  */
 import type { Prisma, PrismaClient, SecurityIncidentScope, SecurityZoneKind, SecurityZoneSourceKind } from "@prisma/client";
-import { seesEverything, type IncidentViewer } from "./security-incident-view.js";
+// The leaf, never security-incident-view.ts: that module imports this one (WARP-3193 ARCH-1).
+import { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
 import { loadCameraLabels, parseLinkRef, visibleLinks } from "./security-zones.service.js";
 
 /** One line on the incident page: a link only Droplet set, into the incident's area. */
