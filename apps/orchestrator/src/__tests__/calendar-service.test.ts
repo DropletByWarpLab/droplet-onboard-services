@@ -63,9 +63,12 @@ function makePrismaStub() {
         if (idx >= 0) events.splice(idx, 1);
       }),
       deleteMany: vi.fn(async ({ where }: any) => {
+        const before = events.length;
         for (let i = events.length - 1; i >= 0; i--) {
+          if (where.id?.in && !where.id.in.includes(events[i].id)) continue;
           if (events[i].sourceId === where.sourceId) events.splice(i, 1);
         }
+        return { count: before - events.length };
       }),
       // WARP-3193 PERF-10 — createMany with skipDuplicates on (sourceId, externalUid).
       createMany: vi.fn(async ({ data, skipDuplicates }: any) => {
@@ -385,6 +388,50 @@ describe("syncSource", () => {
     expect(third).toMatchObject({ added: 0, updated: 1, total: 250 });
     expect(stub.calendarEvent.update).toHaveBeenCalledTimes(1);
     expect(stub._events.find((e: any) => e.externalUid === "u7@x").endsAt).toEqual(moved[7]!.endsAt);
+  });
+
+  it("WARP-3266: stores each occurrence of a recurring event once, re-syncs without duplicating, and removes a newly EXDATE'd one and the old first-instance row", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      // The row an older build stored for this series: first instance, bare UID.
+      stub._events.push({
+        id: "legacy", userId: "alice", source: "external", sourceId: src.id, externalUid: "w@x",
+        title: "Standup", startsAt: new Date("2026-10-05T16:00:00Z"), endsAt: new Date("2026-10-05T16:30:00Z"),
+        allDay: false, recurrence: "none",
+      });
+      const master = {
+        uid: "w@x",
+        summary: "Standup",
+        startsAt: new Date("2026-10-05T16:00:00Z"),
+        endsAt: new Date("2026-10-05T16:30:00Z"),
+        allDay: false,
+        rrule: "FREQ=WEEKLY;COUNT=4",
+      };
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [master] });
+      const first = await syncSource(prisma, src.id);
+      expect(first).toMatchObject({ added: 4, total: 4, removed: 1 });
+      expect(stub._events.map((e: any) => e.externalUid).sort()).toEqual([
+        "w@x::2026-10-05T16:00:00.000Z",
+        "w@x::2026-10-12T16:00:00.000Z",
+        "w@x::2026-10-19T16:00:00.000Z",
+        "w@x::2026-10-26T16:00:00.000Z",
+      ]);
+      expect(stub._events.every((e: any) => e.recurrence === "occurrence")).toBe(true);
+
+      syncCalendarSourceMock.mockResolvedValueOnce({
+        ok: true,
+        events: [{ ...master, exdates: [new Date("2026-10-12T16:00:00Z")] }],
+      });
+      const second = await syncSource(prisma, src.id);
+      expect(second).toMatchObject({ added: 0, updated: 0, removed: 1, total: 3 });
+      expect(stub._events).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("persists lastSyncError on fetch failure", async () => {

@@ -15,6 +15,12 @@
 
 import type { PrismaClient } from "@prisma/client";
 import { syncCalendarSource } from "./caldav.client.js";
+import {
+  expandIcsEvents,
+  OCCURRENCE_KEY_SEPARATOR,
+  RECURRENCE_FUTURE_MONTHS,
+  RECURRENCE_PAST_MONTHS,
+} from "./ics-recurrence.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
 // WARP-2022 — the registration-time half of the SSRF guard. The fetch-time
 // half lives in caldav.client.ts; both call the same module so there is one
@@ -242,7 +248,7 @@ export async function deleteSource(
 export async function syncSource(
   prisma: PrismaClient,
   sourceId: string,
-): Promise<{ added: number; updated: number; total: number; error?: string }> {
+): Promise<{ added: number; updated: number; removed?: number; total: number; error?: string }> {
   const source = await prisma.calendarSource.findUnique({ where: { id: sourceId } });
   if (!source) throw new Error("source_not_found");
 
@@ -285,18 +291,23 @@ export async function syncSource(
   // transactions for only the rows whose fields actually changed. Still
   // keyed on (sourceId, externalUid), whose unique index keeps a re-sync
   // from ever duplicating (skipDuplicates covers a racing manual sync).
-  const incoming = new Map<string, (typeof result.events)[number]>();
-  for (const ev of result.events) {
-    if (!ev.uid) continue; // RFC 5545 requires UID; skip malformed
-    incoming.set(ev.uid, ev); // a repeated UID: the last one wins, as before
-  }
-  const fields = (ev: (typeof result.events)[number]) => ({
+  //
+  // WARP-3266 — recurring series are expanded into one row per occurrence
+  // inside a bounded window; each row's key is stable across syncs (see
+  // ics-recurrence.ts). UID-less events are dropped there (RFC 5545 requires
+  // UID); a repeated UID: the last one wins, as before.
+  const now = new Date();
+  const expanded = expandIcsEvents(result.events, now);
+  const incoming = new Map<string, (typeof expanded)[number]>();
+  for (const ev of expanded) incoming.set(ev.key, ev);
+  const fields = (ev: (typeof expanded)[number]) => ({
     title: ev.summary,
     description: ev.description ?? null,
     location: ev.location ?? null,
     startsAt: ev.startsAt,
     endsAt: ev.endsAt,
     allDay: ev.allDay,
+    recurrence: ev.recurrence,
   });
   const existing = await prisma.calendarEvent.findMany({
     where: { sourceId: source.id },
@@ -309,6 +320,7 @@ export async function syncSource(
       startsAt: true,
       endsAt: true,
       allDay: true,
+      recurrence: true,
     },
   });
   const byUid = new Map(existing.map((row) => [row.externalUid, row]));
@@ -326,7 +338,8 @@ export async function syncSource(
       row.location !== data.location ||
       row.startsAt.getTime() !== data.startsAt.getTime() ||
       row.endsAt.getTime() !== data.endsAt.getTime() ||
-      row.allDay !== data.allDay
+      row.allDay !== data.allDay ||
+      row.recurrence !== data.recurrence
     ) {
       toUpdate.push({ id: row.id, uid, data });
     }
@@ -367,11 +380,50 @@ export async function syncSource(
     }
   }
 
+  // WARP-3266 — rows an expanded series no longer produces: the pre-expansion
+  // single row keyed on the bare UID, and occurrences inside the window that
+  // an EXDATE or a cancelled override has since removed. Only rows of series
+  // expanded in THIS sync are touched, and only inside the window, so history
+  // older than the window and events that merely left the feed are kept (the
+  // same posture as before for one-off events).
+  const expandedSeries = new Set(
+    expanded.filter((e) => e.recurrence === "occurrence").map((e) => e.uid),
+  );
+  const windowStart = new Date(now);
+  windowStart.setUTCMonth(windowStart.getUTCMonth() - RECURRENCE_PAST_MONTHS);
+  const windowEnd = new Date(now);
+  windowEnd.setUTCMonth(windowEnd.getUTCMonth() + RECURRENCE_FUTURE_MONTHS);
+  const staleIds = existing
+    .filter((row) => {
+      const key = row.externalUid;
+      if (!key || incoming.has(key)) return false;
+      if (expandedSeries.has(key)) return true;
+      const sep = key.lastIndexOf(OCCURRENCE_KEY_SEPARATOR);
+      return (
+        sep > 0 &&
+        expandedSeries.has(key.slice(0, sep)) &&
+        row.endsAt > windowStart &&
+        row.startsAt < windowEnd
+      );
+    })
+    .map((row) => row.id);
+  let removed = 0;
+  if (staleIds.length > 0) {
+    try {
+      const res = await prisma.calendarEvent.deleteMany({
+        where: { id: { in: staleIds }, sourceId: source.id },
+      });
+      removed = res.count;
+    } catch (err) {
+      logger.warn({ err, sourceId: source.id, count: staleIds.length }, "calendar stale occurrence delete failed");
+    }
+  }
+
   await prisma.calendarSource.update({
     where: { id: source.id },
     data: { lastSyncAt: new Date(), lastSyncError: null },
   });
-  return { added, updated, total: result.events.length };
+  return { added, updated, removed, total: incoming.size };
 }
 
 /** Find sources whose syncIntervalSec has elapsed since lastSyncAt. Used by

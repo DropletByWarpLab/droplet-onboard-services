@@ -2129,6 +2129,13 @@ model CalendarEvent {
   sourceId     String? // FK to CalendarSource.id (when source="external")
   externalUid  String? // iCalendar UID — used as idempotency key on re-sync
   externalEtag String? // CalDAV ETag for change detection
+  /// WARP-3266 — explicit, never derived from externalUid's shape:
+  /// "none" — a one-off event (every local row);
+  /// "occurrence" — one instance of a subscribed recurring series, expanded
+  ///   at sync time (externalUid = "<UID>::<original start ISO>");
+  /// "unexpanded" — a recurring series whose RRULE is outside the supported
+  ///   subset, stored as its first instance only. Clients can say "repeats".
+  recurrence   String   @default("none")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
