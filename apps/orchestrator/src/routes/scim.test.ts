@@ -98,6 +98,18 @@ function createPrismaMock(seed: UserRow[] = []) {
   self.$transaction = seam.$transaction;
 
   self.user = {
+    // WARP-3113: reactivation is pinned to deletionStatus NONE (a missing
+    // field on a seeded row reads as NONE, the column default).
+    updateMany: vi.fn(async ({ where, data }: { where: any; data: any }) => {
+      const u = self._users.find(
+        (x: any) =>
+          x.id === where.id &&
+          (where.deletionStatus === undefined || (x.deletionStatus ?? "NONE") === where.deletionStatus),
+      );
+      if (!u) return { count: 0 };
+      Object.assign(u, data);
+      return { count: 1 };
+    }),
     findUnique: vi.fn(async ({ where }: { where: any }) => {
       // WARP-233: provisioning resolves users through the blind index.
       if (where.emailLookupHash !== undefined)

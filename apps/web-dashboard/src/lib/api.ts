@@ -706,11 +706,43 @@ export async function changePassword(
   }
 }
 
-export async function deleteUser(username: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/auth/users/${username}`, {
+/**
+ * WARP-3113 — schedule a person's deletion. They are cut off now; their files
+ * are kept for 30 days (lib/leaver-deletion.ts), then the box deletes the account.
+ * Resolves with the date the deletion runs.
+ *
+ * WARP-3169 — with a `recipientId` (the recipient's local user id), the box
+ * first hands the files to that person (a new folder in their home) and then
+ * deletes the account at once. A failed hand-over rejects; nothing is deleted.
+ */
+export async function deleteUser(
+  username: string,
+  opts: { recipientId?: string } = {},
+): Promise<{ deletionDueAt?: string; folder?: string | null; status?: string }> {
+  const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}`, {
     method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      opts.recipientId
+        ? { disposition: "handover", recipientId: opts.recipientId }
+        : { disposition: "retention" },
+    ),
   });
-  if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Failed to delete user: ${res.status}`);
+  return { deletionDueAt: body.deletionDueAt, folder: body.folder, status: body.status };
+}
+
+/** WARP-3113 — cancel a scheduled deletion. The person stays deactivated. */
+export async function cancelUserDeletion(username: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/auth/users/${encodeURIComponent(username)}/cancel-deletion`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to cancel the deletion: ${res.status}`);
+  }
 }
 
 // --- PR #375 — TOTP 2FA enrollment ---
@@ -3295,7 +3327,7 @@ export async function enableCamera(name: string): Promise<void> {
 /** Consume a camera-domain Tier-2 confirmation token (WARP-861).
  *  Pairs with POST /api/cameras/command/confirm — the camera analogue of
  *  /switch/command/confirm. The operation echo is required (WARP-41). */
-async function confirmCameraCommand(
+export async function confirmCameraCommand(
   confirmationToken: string,
   operation: string,
 ): Promise<void> {

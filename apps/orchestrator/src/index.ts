@@ -46,6 +46,11 @@ import { cleanupExpiredStorageTokens } from "./services/storage-safety.service.j
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
+import {
+  purgeDueDeletions,
+  releaseStaleHandovers,
+  LEAVER_DELETION_LOCK_KEY,
+} from "./services/leaver-deletion.service.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
@@ -165,6 +170,7 @@ import {
   recordActivity,
   getActivityRecorder,
 } from "./services/activity.singleton.js";
+import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
@@ -271,6 +277,8 @@ async function main() {
   // WARP-456: initialize the signed activity recorder. Boot-fatal —
   // an orchestrator that can't sign audit rows must NOT start.
   initActivityRecorder(prisma);
+  // WARP-3160: lifecycle post-effects revoke a leaver's VPN devices through it.
+  initVpnDeviceRevoke(prisma);
   // WARP-3165: a key rotated while the orchestrator was down
   // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
   // first new-key row, before the start-up row below.
@@ -1329,6 +1337,33 @@ async function main() {
       }
     },
     { lockKey: "droplet:department-reconciler" },
+  );
+
+  // WARP-3176: a hand-over claim orphaned by a crash or restart is released
+  // at boot (once it is older than any transfer can run) and again below.
+  releaseStaleHandovers(prisma)
+    .then((r) => {
+      if (r.released > 0 || r.failed > 0) logger.warn(r, "stale hand-over claims released at boot");
+    })
+    .catch((err) => logger.error({ err }, "stale hand-over sweep at boot failed"));
+
+  // WARP-3113: complete leaver deletions whose 30-day retention has run out
+  // (the person was revoked when the deletion was scheduled). 03:50 — clear
+  // of the 03:00–03:40 audit and sweep jobs. WARP-3176: stale hand-over
+  // claims first, so a released PENDING row that is due is purged tonight.
+  cronRuntime.scheduleCron(
+    "50 3 * * *",
+    async () => {
+      const stale = await releaseStaleHandovers(prisma);
+      if (stale.released > 0 || stale.failed > 0) {
+        logger.warn(stale, "stale hand-over claims released");
+      }
+      const res = await purgeDueDeletions(prisma);
+      if (res.completed > 0 || res.failed > 0) {
+        logger.info(res, "leaver-deletion job complete");
+      }
+    },
+    { lockKey: LEAVER_DELETION_LOCK_KEY },
   );
 
   // WARP-237: nightly tamper detection. 03:25 — after the 03:00 purge
