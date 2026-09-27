@@ -9,6 +9,7 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
+import { isUniqueViolation } from "../lib/prisma-errors.js";
 
 export class VpnIpExhaustedError extends Error {
   constructor(subnet: string) {
@@ -113,14 +114,6 @@ type VpnTxClient = Pick<PrismaClient, "$transaction"> & VpnPeerStore;
  * `instanceof Prisma.PrismaClientKnownRequestError` so the unit tests' plain
  * thrown objects behave like the real client error. Mirrors reset.service.ts.
  */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: unknown }).code === "P2002"
-  );
-}
-
 /**
  * Is this P2002 the active-IP race (retryable) rather than the publicKey clash?
  *

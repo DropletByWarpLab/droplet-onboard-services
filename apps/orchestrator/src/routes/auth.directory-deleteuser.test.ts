@@ -225,6 +225,34 @@ function createPrismaMock(seed: any[] = []) {
   };
   self._m365Rows = m365Rows;
   self._users = users;
+  // WARP-3193 SEC-AUTH-6 — the username-keyed private tables. Seeded with one
+  // row per seeded user plus one for a bystander, so a test can prove the
+  // purge took exactly the removed person's rows.
+  const owners = [...seed.map((u: any) => u.username), "bystander"];
+  const usernameTables: Record<string, { key: string; rows: any[] }> = {
+    note: { key: "userId", rows: [] },
+    calendarEvent: { key: "userId", rows: [] },
+    calendarSource: { key: "userId", rows: [] },
+    reminder: { key: "userId", rows: [] },
+    chatSession: { key: "userId", rows: [] },
+    chatProject: { key: "userId", rows: [] },
+    pushSubscription: { key: "username", rows: [] },
+  };
+  for (const [model, t] of Object.entries(usernameTables)) {
+    for (const o of owners) t.rows.push({ [t.key]: o });
+    self[model] = {
+      deleteMany: vi.fn(async ({ where }: any = {}) => {
+        const before = t.rows.length;
+        for (let i = t.rows.length - 1; i >= 0; i -= 1) {
+          if (t.rows[i][t.key] === where?.[t.key]) t.rows.splice(i, 1);
+        }
+        return { count: before - t.rows.length };
+      }),
+    };
+  }
+  self._usernameRows = (model: string, owner: string) =>
+    usernameTables[model]!.rows.filter((r) => r[usernameTables[model]!.key] === owner).length;
+  self._usernameModels = Object.keys(usernameTables);
   return self;
 }
 
@@ -325,6 +353,64 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
         refs: expect.objectContaining({ targetUserId: null }),
       }),
     );
+  });
+});
+
+// WARP-3193 SEC-AUTH-6 — notes, calendar (incl. CalDAV credentials),
+// reminders, chats and push subscriptions key on the USERNAME with no FK to
+// User. Deleting the row freed the username while the rows stayed, so the
+// next account deriving the same handle inherited all of it.
+describe("DELETE /api/auth/users/:username — username-keyed private data (WARP-3193 SEC-AUTH-6)", () => {
+  function twoUsers() {
+    return [
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ];
+  }
+
+  it("purges every username-keyed private row of the removed person, in the row-delete transaction", async () => {
+    const prisma = createPrismaMock(twoUsers());
+
+    const res = await request(buildApp(prisma, "owner")).delete("/api/auth/users/alice");
+
+    expect(res.status).toBe(200);
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(0);
+      // Nobody else's rows are touched.
+      expect(prisma._usernameRows(model, "o"), model).toBe(1);
+      expect(prisma._usernameRows(model, "bystander"), model).toBe(1);
+    }
+    // Same transaction as the row delete (the rails tx + this one).
+    expect(prisma._users.some((u: any) => u.id === "u-alice")).toBe(false);
+    expect(prisma._seam().calls()).toHaveLength(2);
+  });
+
+  it("purges NOTHING when the Nextcloud delete fails (the revoked row stays to retry from)", async () => {
+    (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("NC down"));
+    const prisma = createPrismaMock(twoUsers());
+
+    const res = await request(buildApp(prisma, "owner")).delete("/api/auth/users/alice");
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
+    }
+  });
+
+  it("purges NOTHING when the row was re-activated concurrently (row not deleted)", async () => {
+    const prisma = createPrismaMock(twoUsers());
+    // Re-activate between the rails transaction and the final delete.
+    (nc.ncDeleteUser as any).mockImplementationOnce(async () => {
+      const alice = prisma._users.find((u: any) => u.id === "u-alice");
+      alice.directoryStatus = "ACTIVE";
+    });
+
+    const res = await request(buildApp(prisma, "owner")).delete("/api/auth/users/alice");
+
+    expect(res.status).toBe(200);
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
+    }
   });
 });
 
@@ -457,7 +543,13 @@ describe("DELETE /api/auth/users/:username — serializable isolation", () => {
     const res = await request(app).delete("/api/auth/users/alice");
 
     expect(res.status).toBe(200);
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    // Two transactions: the removal rails, then — after Nextcloud confirms —
+    // the row delete + username-keyed purge (WARP-3193 SEC-AUTH-6). Both at
+    // SERIALIZABLE, like every transaction on a guarded mutation.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(prisma.$transaction.mock.calls[1][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
     expect(prisma.$transaction.mock.calls[0][1]).toEqual({
       isolationLevel: "Serializable",
     });

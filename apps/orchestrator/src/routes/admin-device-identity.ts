@@ -19,6 +19,7 @@ import {
   type Response,
   type NextFunction,
 } from "express";
+import { randomUUID } from "node:crypto";
 
 import { createRequireRecentMfa } from "../middleware/require-recent-mfa.js";
 import type { DeviceIdentityClient } from "../services/device-identity.client.js";
@@ -51,7 +52,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 // admin presents inside the trust boundary. Real cryptographic nonce
 // minting moves into the sidecar in the follow-up WARP-238 wiring.
 function mintOperatorNonce(): string {
-  return `op-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+  return `op-${randomUUID()}`;
 }
 
 export function createAdminDeviceIdentityRouter(
