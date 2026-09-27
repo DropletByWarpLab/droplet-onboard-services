@@ -14,11 +14,25 @@
  *   - rpID   = the hostname ONLY (no scheme, no port) — WebAuthn requires the
  *     RP ID to be a registrable domain suffix of the origin's host.
  *   - proto prefers `x-forwarded-proto` (nginx gateway), then `req.secure`.
- *   - host prefers `x-forwarded-host`, then `host`.
+ *   - host is the `Host` header ONLY. nginx forwards `Host $host` and never
+ *     sets `X-Forwarded-Host`, so that header can only have come from the
+ *     client and must not choose the RP (WARP-3229). The one exception is a
+ *     developer stack, where `next dev` puts the browser's address there.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Request } from "express";
 import { deriveWebAuthnRp } from "./webauthn-config.js";
+
+// Every test starts in a shipped box's posture (nothing sets NODE_ENV there,
+// setup.sh writes DROPLET_ENV=production), so the result does not depend on
+// the shell the suite runs in. The developer-stack block overrides it.
+beforeEach(() => {
+  vi.stubEnv("NODE_ENV", undefined);
+  vi.stubEnv("DROPLET_ENV", "production");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function fakeReq(opts: {
   host?: string;
@@ -57,12 +71,22 @@ describe("deriveWebAuthnRp — rpID/origin from the request (LAN + air-gap safe)
     expect(rp.rpID).toBe("droplet-ai.local");
   });
 
-  it("prefers x-forwarded-host over host", () => {
+  it("ignores a client-supplied x-forwarded-host (nginx never sets it)", () => {
     const rp = deriveWebAuthnRp(
-      fakeReq({ host: "internal:3000", xfHost: "droplet.local", xfProto: "https" }),
+      fakeReq({ host: "droplet-ai.local", xfHost: "evil.example", xfProto: "https" }),
     );
-    expect(rp.rpID).toBe("droplet.local");
-    expect(rp.origin).toBe("https://droplet.local");
+    expect(rp.rpID).toBe("droplet-ai.local");
+    expect(rp.origin).toBe("https://droplet-ai.local");
+  });
+
+  it("cannot be steered onto an IP by x-forwarded-host, nor off one", async () => {
+    const { isIpRpId } = await import("./webauthn-config.js");
+    const named = deriveWebAuthnRp(fakeReq({ host: "droplet-ai.local", xfHost: "192.168.9.195" }));
+    expect(isIpRpId(named.rpID)).toBe(false);
+    // The IP refusal still keys on the real Host.
+    const ip = deriveWebAuthnRp(fakeReq({ host: "192.168.9.195", xfHost: "droplet-ai.local" }));
+    expect(ip.rpID).toBe("192.168.9.195");
+    expect(isIpRpId(ip.rpID)).toBe(true);
   });
 
   it("works for a bare LAN IP (no domain) — air-gap path", () => {
@@ -80,6 +104,36 @@ describe("deriveWebAuthnRp — rpID/origin from the request (LAN + air-gap safe)
     const rp = deriveWebAuthnRp(fakeReq({ host: "droplet.local" }));
     expect(typeof rp.rpName).toBe("string");
     expect(rp.rpName.length).toBeGreaterThan(0);
+  });
+});
+
+// WARP-3229 — the one place X-Forwarded-Host is still read. The `next dev`
+// rewrite proxy sets Host to the orchestrator's own address and carries the
+// address the browser used in X-Forwarded-Host.
+describe("deriveWebAuthnRp — developer stack behind the next dev rewrite", () => {
+  // What apps/web-dashboard/next.config.js sends in docker/docker-compose.dev.yml.
+  const nextDevRequest = () =>
+    fakeReq({ host: "orchestrator:3000", xfHost: "localhost:3001" });
+
+  it("honours x-forwarded-host when NODE_ENV=development off a shipped box", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("DROPLET_ENV", undefined);
+    const rp = deriveWebAuthnRp(nextDevRequest());
+    expect(rp.rpID).toBe("localhost");
+    expect(rp.origin).toBe("http://localhost:3001");
+  });
+
+  it.each<[string, string | undefined, string | undefined]>([
+    ["NODE_ENV unset, as on every box (WARP-2551)", undefined, undefined],
+    ["NODE_ENV=production", "production", undefined],
+    ["NODE_ENV=test", "test", undefined],
+    ["NODE_ENV=development on a shipped box (DROPLET_ENV=production)", "development", "production"],
+  ])("ignores it with %s", (_label, nodeEnv, dropletEnv) => {
+    vi.stubEnv("NODE_ENV", nodeEnv);
+    vi.stubEnv("DROPLET_ENV", dropletEnv);
+    const rp = deriveWebAuthnRp(nextDevRequest());
+    expect(rp.rpID).toBe("orchestrator");
+    expect(rp.origin).toBe("http://orchestrator:3000");
   });
 });
 

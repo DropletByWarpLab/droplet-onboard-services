@@ -31,8 +31,9 @@
  * Security:
  *   - Challenges are server-side, single-use (consume-by-delete) and
  *     time-bound (webauthn-challenge.service) — no replay.
- *   - rpID + origin are derived from the request (webauthn-config) — no
- *     hardcoded host, no new env var; works on the LAN with the WAN down.
+ *   - rpID + origin come from the request's Host header (webauthn-config;
+ *     X-Forwarded-Host only on a developer stack, WARP-3229) — no hardcoded
+ *     host, no new env var; works on the LAN with the WAN down.
  *   - Signature counter monotonicity is enforced by @simplewebauthn/server
  *     (it throws on a regression) and the verified `newCounter` is persisted
  *     on every successful assertion (clone detection).

@@ -271,7 +271,7 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
     });
 
     it("isShippedDropletEnv matches ai-gateway's production signal", async () => {
-      const { isShippedDropletEnv } = await import("../config.js");
+      const { isShippedDropletEnv } = await import("../lib/droplet-env.js");
       expect(isShippedDropletEnv("production")).toBe(true);
       expect(isShippedDropletEnv(" Prod ")).toBe(true);
       expect(isShippedDropletEnv("development")).toBe(false);

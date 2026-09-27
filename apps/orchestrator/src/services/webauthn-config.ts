@@ -19,6 +19,7 @@
  *     itself is the natural RP ID.
  */
 import type { Request } from "express";
+import { isShippedDropletEnv } from "../lib/droplet-env.js";
 
 /**
  * Human-readable Relying Party name shown in the OS/browser passkey prompt
@@ -47,10 +48,40 @@ function resolveProtocol(req: Request): "http" | "https" {
   return req.secure ? "https" : "http";
 }
 
-/** Resolve the request host (incl. port), preferring x-forwarded-host. */
+/**
+ * WARP-3229 — true only on a developer stack, where `next dev` fronts the
+ * orchestrator. The Next.js rewrite proxy (`apps/web-dashboard/next.config.js`)
+ * sets `changeOrigin`, so `Host` arrives as the orchestrator's own address
+ * (`localhost:3000`, or `orchestrator:3000` in docker/docker-compose.dev.yml)
+ * and the address the browser used (`localhost:3001`) travels only in
+ * `X-Forwarded-Host`. Without it the RP would be `orchestrator` or the origin
+ * `http://localhost:3000`, and every dev passkey ceremony would fail.
+ *
+ * Both conditions, read at call time:
+ *   - `NODE_ENV` is literally `development` in the process env. Not
+ *     `config.NODE_ENV`: its schema default is `development` and nothing sets
+ *     NODE_ENV on a box (WARP-2551), so the default would re-open the hole.
+ *     The dev compose file sets it explicitly.
+ *   - Not a shipped box: `DROPLET_ENV=production` (which setup.sh writes)
+ *     wins even if someone puts NODE_ENV=development in a box's .env.
+ */
+function honoursForwardedHost(): boolean {
+  return (
+    process.env.NODE_ENV === "development" &&
+    !isShippedDropletEnv(process.env.DROPLET_ENV)
+  );
+}
+
+/**
+ * Resolve the request host (incl. port) from the `Host` header. The nginx
+ * gateway forwards `Host $host` and never sets `X-Forwarded-Host`, so on a box
+ * that header can only have come from the client; honouring it let any caller
+ * pick the rpID/origin the server expects (and dodge or trip the IP refusal).
+ * It is read on a developer stack only (`honoursForwardedHost`).
+ */
 function resolveHost(req: Request): string {
   const xfHost = req.headers["x-forwarded-host"];
-  if (typeof xfHost === "string" && xfHost.length > 0) {
+  if (honoursForwardedHost() && typeof xfHost === "string" && xfHost.length > 0) {
     return xfHost.split(",")[0]!.trim();
   }
   const host = req.headers.host;
