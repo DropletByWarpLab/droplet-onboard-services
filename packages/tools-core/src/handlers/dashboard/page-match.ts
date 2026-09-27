@@ -55,12 +55,13 @@ function words(text: string): string[] {
 }
 
 function queryWords(text: string): string[] {
-  const all = words(text);
-  const meaningful = all.filter((w) => !FILLER.has(w));
+  const meaningful = words(text).filter((w) => !FILLER.has(w));
   const naming = meaningful.filter((w) => !QUALIFIERS.has(w));
-  // "open the page" names nothing; fall back to the raw words rather than
-  // matching everything with an empty query.
-  const chosen = naming.length > 0 ? naming : meaningful.length > 0 ? meaningful : all;
+  // Filler alone ("take me to it", "open the page") names no page, so it
+  // matches none: the model resolves "it" from the conversation. Scoring the
+  // filler instead would land on whatever copy happens to contain "it" or
+  // start with "open".
+  const chosen = naming.length > 0 ? naming : meaningful;
   return [...new Set(chosen)];
 }
 

@@ -26,6 +26,16 @@ const PAGES: DashboardPage[] = [
   { href: "/help", label: "Help", section: "Settings › Advanced" },
 ];
 
+const PAGES_WITH_FILLER_COPY: DashboardPage[] = [
+  ...PAGES,
+  {
+    href: "/admin/prompt",
+    label: "Assistant",
+    section: "Settings › Automation",
+    description: "What the assistant is told, and which tools it can reach",
+  },
+];
+
 const hrefs = (pages: DashboardPage[]) => pages.map((p) => p.href);
 
 describe("resolveDashboardPage", () => {
@@ -90,6 +100,17 @@ describe("resolveDashboardPage", () => {
     expect(resolveDashboardPage(PAGES, "spaceship controls")).toEqual({ kind: "none" });
     expect(resolveDashboardPage(PAGES, "   ")).toEqual({ kind: "none" });
   });
+
+  // "take me to it" names no page: the model has to resolve "it" from the
+  // conversation. Real copy is full of filler — the Assistant blurb below is
+  // nav-config's, and "open" prefix-matches "Opening hours" — so matching on
+  // it would move the person somewhere they never named.
+  it.each(["it", "take me to it", "it please", "open it", "the page", "show me that"])(
+    "reports nothing for %j, which is filler alone",
+    (reference) => {
+      expect(resolveDashboardPage(PAGES_WITH_FILLER_COPY, reference)).toEqual({ kind: "none" });
+    },
+  );
 });
 
 describe("findDashboardPages", () => {
@@ -106,6 +127,8 @@ describe("findDashboardPages", () => {
   it("respects the limit and returns nothing for filler alone", () => {
     expect(findDashboardPages(PAGES, "settings", 1)).toHaveLength(1);
     expect(findDashboardPages(PAGES, "zzz", 5)).toEqual([]);
+    expect(findDashboardPages(PAGES_WITH_FILLER_COPY, "where is it", 5)).toEqual([]);
+    expect(findDashboardPages(PAGES_WITH_FILLER_COPY, "open it", 5)).toEqual([]);
   });
 
   it("is deterministic", () => {
