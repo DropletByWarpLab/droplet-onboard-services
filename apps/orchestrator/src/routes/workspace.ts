@@ -59,6 +59,7 @@ import {
   type WorkspaceSandboxClient,
 } from "../services/workspace.service.js";
 import { ACTIVE_AGENT_RUN_STATUSES } from "../services/agent-run-worker.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   connectorDraftReadback,
   parseConnectorDraftFacts,
@@ -121,15 +122,19 @@ interface Actor {
 async function resolveActor(prisma: PrismaClient, req: Request, onBehalfOf: string | undefined): Promise<Actor | null> {
   const user = (req as Request & { user?: AuthUser }).user;
   if (!user) return null;
-  let username = user.username;
   if (user.id === MCP_PRINCIPAL_ID && user.role === "service") {
     const header = req.header("x-nextcloud-user");
     const named = onBehalfOf ?? (header && header.trim().length > 0 ? header.trim() : undefined);
     if (!named) return null;
-    username = named;
+    // WARP-3098: either value is `User.username` (stdio) or `User.id` (HTTP).
+    // Nobody, more than one person, or a deactivated person is nobody.
+    const resolved = await resolveAssertedUser(prisma, named);
+    if (!resolved.ok) return null;
+    const { id, username, role, displayName, email } = resolved.user;
+    return { id, username, role, displayName, email };
   }
   const row = await prisma.user.findFirst({
-    where: { username },
+    where: { username: user.username },
     select: { id: true, username: true, role: true, displayName: true, email: true },
   });
   return row ? { ...row, role: String(row.role) } : null;

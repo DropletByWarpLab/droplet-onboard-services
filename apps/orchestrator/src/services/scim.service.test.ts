@@ -258,6 +258,11 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+/** Seed an existing SsoIdentity(okta, subject) → userId link. */
+function linkOkta(prisma: any, userId: string, subject: string): void {
+  prisma._identities.push({ id: `i-seed-${subject}`, userId, provider: "okta", subject, email: null });
+}
+
 describe("provisionUser — create-or-update by normalized email, idempotent", () => {
   it("CREATES a new directory user: least-privilege family, ACTIVE, no passwordHash", async () => {
     const prisma = createPrismaMock();
@@ -313,19 +318,66 @@ describe("provisionUser — create-or-update by normalized email, idempotent", (
     expect(prisma.ssoIdentity.create).toHaveBeenCalledTimes(1);
   });
 
-  it("links to an EXISTING local user (e.g. a password/SSO owner) by email — preserves their id + role", async () => {
-    const owner: UserRow = {
-      id: "u-owner", username: "owner", nextcloudUsername: "owner", displayName: "Owner", email: "boss@acme.test",
+  it("links to an EXISTING non-operator local user by email — preserves their id + role", async () => {
+    const member: UserRow = {
+      id: "u-fam", username: "fam", nextcloudUsername: "fam", displayName: "Fam", email: "fam@acme.test",
+      passwordHash: "$argon2id$x", role: "family", isLocal: true, directoryStatus: "ACTIVE",
+      createdAt: new Date(), updatedAt: new Date(),
+    };
+    const prisma = createPrismaMock([member]);
+    const { user, created } = await provisionUser(prisma, { email: "fam@acme.test", displayName: "Fam", active: true, externalId: "okta-3" });
+    expect(created).toBe(false);
+    expect(user.id).toBe("u-fam");
+    expect(prisma.user.create).not.toHaveBeenCalled();
+    expect(user.role).toBe("family");
+    expect(prisma._identities).toEqual([expect.objectContaining({ userId: "u-fam", provider: "okta", subject: "okta-3" })]);
+  });
+
+  // WARP-3193 SEC-AUTH-1 — an email-matched POST must never bind a NEW Okta
+  // subject to an operator row: `(okta, sub)` is what the SSO callback signs
+  // in by, so that link would hand the account to whoever holds the Okta
+  // identity named in `externalId`.
+  it.each(["owner", "admin"])(
+    "🔴 REFUSES to link a new Okta identity to an existing %s row — nothing written",
+    async (role) => {
+      const op: UserRow = {
+        id: "u-op", username: "op", nextcloudUsername: "op", displayName: "Op", email: "boss@acme.test",
+        passwordHash: "$argon2id$x", role, isLocal: true, directoryStatus: "ACTIVE",
+        createdAt: new Date(), updatedAt: new Date(),
+      };
+      const prisma = createPrismaMock([op]);
+      await expect(
+        provisionUser(prisma, { email: "boss@acme.test", displayName: "Pwned", active: true, externalId: "attacker-sub" }),
+      ).rejects.toMatchObject({ name: "RoleMutationRefusedError", status: 403, code: "ROLE_RANK_EXCEEDED" });
+      expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma._users[0].displayName).toBe("Op");
+    },
+  );
+
+  it("🔴 REFUSES an operator row even when Okta omits externalId (subject would be the User.id)", async () => {
+    const op: UserRow = {
+      id: "u-op", username: "op", nextcloudUsername: "op", displayName: "Op", email: "boss@acme.test",
       passwordHash: "$argon2id$x", role: "owner", isLocal: true, directoryStatus: "ACTIVE",
       createdAt: new Date(), updatedAt: new Date(),
     };
-    const prisma = createPrismaMock([owner]);
-    const { user, created } = await provisionUser(prisma, { email: "boss@acme.test", displayName: "Boss", active: true, externalId: "okta-3" });
-    expect(created).toBe(false);
-    expect(user.id).toBe("u-owner");
-    expect(prisma.user.create).not.toHaveBeenCalled();
-    // SCIM does not DEMOTE an existing owner to family.
-    expect(user.role).toBe("owner");
+    const prisma = createPrismaMock([op]);
+    await expect(
+      provisionUser(prisma, { email: "boss@acme.test", displayName: "Op", active: true }),
+    ).rejects.toMatchObject({ code: "ROLE_RANK_EXCEEDED" });
+    expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
+  });
+
+  it("an Okta RETRY for an operator already linked to THAT subject converges (no new link, no refusal)", async () => {
+    // A SCIM-created user later raised to admin by group mapping: Okta's next
+    // POST carries the same externalId, whose link already points here.
+    const prisma = createPrismaMock();
+    const { user } = await provisionUser(prisma, { email: "lead@acme.test", displayName: "Lead", active: true, externalId: "okta-lead" });
+    prisma._users[0].role = "admin";
+    const again = await provisionUser(prisma, { email: "lead@acme.test", displayName: "Lead R", active: true, externalId: "okta-lead" });
+    expect(again.user.id).toBe(user.id);
+    expect(again.user.displayName).toBe("Lead R");
+    expect(prisma.ssoIdentity.create).toHaveBeenCalledTimes(1);
   });
 
   it("provisioning with active:false creates the row already DEACTIVATED", async () => {
@@ -466,14 +518,45 @@ describe("WARP-2016 — the deactivate funnel runs the disable rails", () => {
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reactivateUser runs NO disable rails — the sole DEACTIVATED admin comes back", async () => {
-    const prisma = createPrismaMock([
-      seedRow({ id: "u-back", username: "back", role: "admin", directoryStatus: "DEACTIVATED" }),
-    ]);
-    const re = await reactivateUser(prisma, "u-back");
+  // WARP-3193 SEC-AUTH-1 — a DEACTIVATED operator is a LOCAL decision
+  // (SCIM cannot mint an operator on its own: new rows are `family` and only
+  // group mapping raises). Okta must not undo it. No lockout follows: the
+  // owner is disable-immutable and rail 5 keeps one ACTIVE operator, so the
+  // dashboard can always re-enable them.
+  it.each(["owner", "admin"])(
+    "🔴 reactivateUser REFUSES to re-enable a DEACTIVATED %s — row untouched",
+    async (role) => {
+      const prisma = createPrismaMock([
+        seedRow({ id: "u-back", username: "back", role, directoryStatus: "DEACTIVATED" }),
+      ]);
+      await expect(reactivateUser(prisma, "u-back")).rejects.toMatchObject({
+        status: 403,
+        code: "ROLE_RANK_EXCEEDED",
+      });
+      expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
+    },
+  );
+
+  it("reactivateUser on an already-ACTIVE admin is an idempotent no-op success (Okta PUT active:true)", async () => {
+    const prisma = createPrismaMock([admin()]);
+    const re = await reactivateUser(prisma, "u-adm");
     expect(re?.directoryStatus).toBe("ACTIVE");
-    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
-    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("reactivateUser pins role + directoryStatus so a concurrent promotion cannot slip through", async () => {
+    const prisma = createPrismaMock([
+      seedRow({ id: "u-fam", username: "fam", role: "family", directoryStatus: "DEACTIVATED" }),
+    ]);
+    const re = await reactivateUser(prisma, "u-fam");
+    expect(re?.directoryStatus).toBe("ACTIVE");
+    const write = prisma.user.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.directoryStatus === "ACTIVE");
+    expect(write?.[0]?.where).toEqual({
+      id: "u-fam",
+      role: "family",
+      directoryStatus: "DEACTIVATED",
+      // WARP-3113: nor is a person scheduled for deletion brought back.
+      deletionStatus: "NONE",
+    });
   });
 
   it("setUserActive(false) routes through the SAME funnel (PATCH shares the rails)", async () => {
@@ -511,6 +594,8 @@ describe("WARP-2016 — the deactivate funnel runs the disable rails", () => {
   // fourth verb was the open door WARP-2016 left; these pin it shut.
   it("refuses a POST active:false matching the sole owner — 403 OWNER_IMMUTABLE, NOTHING applied", async () => {
     const prisma = createPrismaMock([owner(), admin()]);
+    // Already linked, so the WARP-3193 identity-binding refusal is not what trips.
+    linkOkta(prisma, "u-owner", "okta-2550");
     await expect(
       provisionUser(prisma, {
         email: "boss@acme.test", displayName: "Renamed By Okta", active: false, externalId: "okta-2550",
@@ -528,6 +613,7 @@ describe("WARP-2016 — the deactivate funnel runs the disable rails", () => {
 
   it("refuses a POST active:false matching the last ACTIVE admin — 409 LAST_OPERATOR_INVARIANT", async () => {
     const prisma = createPrismaMock([admin(), seedRow({ id: "u-fam", username: "fam" })]);
+    linkOkta(prisma, "u-adm", "okta-2551");
     await expect(
       provisionUser(prisma, {
         email: "adm@acme.test", displayName: "Renamed By Okta", active: false, externalId: "okta-2551",
@@ -562,9 +648,9 @@ describe("WARP-2016 — the deactivate funnel runs the disable rails", () => {
     });
   });
 
-  it("a POST active:true on an existing row stays rail-free — the sole DEACTIVATED admin comes back", async () => {
+  it("a POST active:true on an existing DEACTIVATED member comes back without disable rails", async () => {
     const prisma = createPrismaMock([
-      seedRow({ id: "u-back", username: "back", role: "admin", directoryStatus: "DEACTIVATED" }),
+      seedRow({ id: "u-back", username: "back", role: "family", directoryStatus: "DEACTIVATED" }),
     ]);
     const { user } = await provisionUser(prisma, {
       email: "back@acme.test", displayName: "Back", active: true, externalId: "okta-2553",
@@ -573,6 +659,18 @@ describe("WARP-2016 — the deactivate funnel runs the disable rails", () => {
     expect(user.displayName).toBe("Back");
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
     expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("🔴 WARP-3193 a POST active:true cannot undo the local deactivation of a linked admin", async () => {
+    const prisma = createPrismaMock([
+      seedRow({ id: "u-back", username: "back", role: "admin", directoryStatus: "DEACTIVATED" }),
+    ]);
+    linkOkta(prisma, "u-back", "okta-2553");
+    await expect(
+      provisionUser(prisma, { email: "back@acme.test", displayName: "Back", active: true, externalId: "okta-2553" }),
+    ).rejects.toMatchObject({ status: 403, code: "ROLE_RANK_EXCEEDED" });
+    expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
+    expect(prisma._users[0].displayName).toBe("back");
   });
 
   it("a NEW row created with active:false needs no rails — it strands no operator", async () => {

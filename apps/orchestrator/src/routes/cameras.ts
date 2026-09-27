@@ -135,6 +135,7 @@ import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
 import type { ConfirmNetworkCommandError } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
+import { segmentSignatureTtlSec, signSegmentQuery } from "../services/segment-url-signing.service.js";
 import {
   assertedNextcloudLoginRefusal,
   resolveAssertedNextcloudLogin,
@@ -1214,7 +1215,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Manually add a camera (name + RTSP URL) ---
-  router.post("/cameras", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  //
+  // WARP-3193 SEC-INJ-5: owner/admin only — this points Frigate (and the
+  // camera credentials it holds) at an arbitrary host. Frigate expands
+  // `{FRIGATE_*}` placeholders in the URL, so braces are refused, and the URL
+  // is fully parsed BEFORE the Frigate write so a bad one cannot leave Frigate
+  // configured with no DB row.
+  router.post("/cameras", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { name, rtspUrl, manufacturer, model } = req.body;
       if (!name || typeof name !== "string" || !isValidCameraName(name)) {
@@ -1223,8 +1230,22 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!rtspUrl || typeof rtspUrl !== "string") {
         return res.status(400).json({ error: "Missing rtspUrl" });
       }
-      if (!/^rtsps?:\/\/.+/.test(rtspUrl)) {
+      if (!/^rtsps?:\/\/[^/]/.test(rtspUrl)) {
         return res.status(400).json({ error: "rtspUrl must start with rtsp:// or rtsps://" });
+      }
+      if (/[{}\s]/.test(rtspUrl)) {
+        return res.status(400).json({ error: "rtspUrl must not contain braces or whitespace" });
+      }
+      // rtsp: is not a WHATWG "special" scheme, so its host is left opaque;
+      // parse it as http(s) to get a validated hostname.
+      let ipAddress: string;
+      try {
+        ipAddress = new URL(rtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
+      } catch {
+        return res.status(400).json({ error: "rtspUrl is not a valid URL" });
+      }
+      if (!ipAddress) {
+        return res.status(400).json({ error: "rtspUrl must name a host" });
       }
 
       // Add to Frigate
@@ -1242,7 +1263,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           displayName,
           manufacturer: manufacturer || null,
           model: model || null,
-          ipAddress: new URL(rtspUrl.replace("rtsp://", "http://").replace("rtsps://", "https://")).hostname || "",
+          ipAddress,
           enabled: true,
           autoDiscovered: false,
           lastSeen: new Date(),
@@ -2685,20 +2706,70 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         playlistText = await fetchHlsPlaylist(subUrl);
       }
 
-      // Rewrite each segment line to point at our proxy. We pass the
-      // range params back through so the segment route knows which VOD
-      // window to fetch from. URL-encoding handles segment names with
-      // weird characters even though Frigate's emit boring "0.ts".
+      // Rewrite each segment line — and any URI="…" attribute (e.g. the
+      // fMP4 init segment on #EXT-X-MAP, or a #EXT-X-KEY) — to point at our
+      // proxy. We pass the range params back through so the segment route
+      // knows which VOD window to fetch from. URL-encoding handles segment
+      // names with weird characters even though Frigate's emit boring "0.ts".
+      //
+      // WARP-3122: an absolute or protocol-relative URL is REFUSED, not
+      // passed through. Native clients (AVPlayer) attach the bearer token
+      // as an HTTP header on every request the playlist causes, including
+      // one to a third-party host, so letting one through would leak the
+      // token. Frigate never emits one in practice, so treat it the same
+      // as any other malformed upstream playlist (502 below).
       const segPrefix = `/api/cameras/${encodeURIComponent(req.params.name)}/playback.segment?after=${range.after}&before=${range.before}&seg=`;
+      const isRemoteUri = (uri: string) => /^https?:\/\//i.test(uri) || uri.startsWith("//");
+      // WARP-3122 part 2 — each segment URL also carries a short-lived
+      // signature for THIS caller, so a native player can fetch segments
+      // without the bearer in its headers (services/segment-url-signing).
+      const expUnix = Math.floor(Date.now() / 1000) + segmentSignatureTtlSec(range.after, range.before);
+      const toProxyUri = (uri: string) =>
+        `${segPrefix}${encodeURIComponent(uri)}` +
+        signSegmentQuery(
+          { camera: req.params.name, after: String(range.after), before: String(range.before), seg: uri, userId: req.user?.id ?? "" },
+          expUnix,
+        );
+      logger.debug(
+        { userId: req.user?.id, camera: req.params.name, after: range.after, before: range.before },
+        "recordings playlist served",
+      );
       const rewritten = playlistText
         .split(/\r?\n/)
         .map((line) => {
-          if (line.startsWith("#") || line.trim() === "") return line;
-          // It's a URL line. Leave absolute URLs alone (defense — Frigate
-          // doesn't usually emit them, but a future version might). Otherwise
-          // route through our segment proxy.
-          if (/^https?:\/\//i.test(line)) return line;
-          return `${segPrefix}${encodeURIComponent(line.trim())}`;
+          if (line.trim() === "") return line;
+          if (line.startsWith("#")) {
+            // Attribute-list tags (#EXT-X-MAP, #EXT-X-KEY, …) carry their
+            // own URI="…" that the segment-line branch below never sees.
+            //
+            // Fail CLOSED: `/URI="([^"]*)"/i` only ever matched the strict
+            // double-quoted form, so a single-quoted (URI='...'), unquoted
+            // (URI=...) or otherwise-cased attribute fell through as
+            // "no match" and the ORIGINAL line — absolute URL included —
+            // was forwarded unchanged. Count every case-insensitive `URI=`
+            // occurrence and require each one to be in the strict form; any
+            // mismatch refuses the whole playlist rather than guessing.
+            const uriOccurrences = line.match(/URI\s*=/gi) ?? [];
+            if (uriOccurrences.length === 0) return line;
+            const strictMatches = [...line.matchAll(/URI\s*=\s*"([^"]*)"/gi)];
+            if (strictMatches.length !== uriOccurrences.length) {
+              throw new Error("HLS playlist: refused malformed URI attribute");
+            }
+            // Rewrite every strict match on the line (there can be more
+            // than one attribute-list tag's worth of URI= on one line).
+            return line.replace(/URI\s*=\s*"([^"]*)"/gi, (_full, uri: string) => {
+              if (isRemoteUri(uri)) {
+                throw new Error("HLS playlist: refused absolute URI attribute");
+              }
+              return `URI="${toProxyUri(uri)}"`;
+            });
+          }
+          // It's a segment URL line.
+          const uri = line.trim();
+          if (isRemoteUri(uri)) {
+            throw new Error("HLS playlist: refused absolute segment URL");
+          }
+          return toProxyUri(uri);
         })
         .join("\n");
 

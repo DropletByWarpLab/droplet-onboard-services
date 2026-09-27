@@ -218,6 +218,19 @@ function createPrismaMock(seed: any[] = []) {
   // WARP-2984: the roster reads the directory too.
   self.user.findMany = vi.fn(async () => users.map((u) => ({ ...u })));
   self.m365Connection = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  // WARP-3193 SEC-AUTH-6: the delete purges the username-keyed tables in the
+  // row-delete transaction (asserted in auth.directory-deleteuser.test.ts).
+  for (const model of [
+    "note",
+    "calendarEvent",
+    "calendarSource",
+    "reminder",
+    "chatSession",
+    "chatProject",
+    "pushSubscription",
+  ]) {
+    self[model] = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  }
   self._users = users;
   return self;
 }

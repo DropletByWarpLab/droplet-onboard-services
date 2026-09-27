@@ -77,6 +77,7 @@ import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createPanelSecurityRouter } from "./routes/panel-security.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createSignedSegmentRouter } from "./services/segment-url-signing.service.js";
 import { createSecurityRouter } from "./routes/security.js";
 import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
@@ -139,8 +140,6 @@ import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
 import { createTlsStatusPublicRouter } from "./routes/tls-status.public.route.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
-import { startRemindersPoller } from "./services/reminders-poller.js";
-import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch, ensurePushDispatch } from "./services/push-dispatch.service.js";
 import { outboundEmailGate } from "./services/off-lan-gate.service.js";
 import {
@@ -332,6 +331,12 @@ export function createApp(
   // principal (mcp-server, email-indexer, routing, …) comes from its own
   // container IP so they don't share a bucket with a browser.
   app.use(authenticatedApiRateLimit);
+
+  // WARP-3122 — a signed recordings-segment URL stands in for the bearer on
+  // GET /api/cameras/:name/playback.segment only. This router answers
+  // nothing: it resolves the signer and leaves the principal for
+  // authMiddleware, so every gate below still runs.
+  app.use("/api", createSignedSegmentRouter(prisma));
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
@@ -695,7 +700,7 @@ export function createApp(
   // has a shell to arrange. Service principals are refused in the router.
   app.use("/api", createMeDepartmentRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
-  app.use("/api", createActivityRouter(prisma));
+  app.use("/api", createActivityRouter(prisma, createDeviceIdentityClient()));
   // WARP-237: device-key-signed daily-root read surface.
   app.use("/api", createAuditRootsRouter(prisma));
   // WARP-823: owner/admin downloadable, secret-redacted diagnostics log
@@ -816,18 +821,9 @@ export function createApp(
   app.use("/api", createBriefingsRouter(prisma));
 
 
-  // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
-  // to dispatch due-time notifications and re-sync calendar sources.
-  startRemindersPoller(prisma);
-
-  // Status display screen QR — context-switched display. WARP-632/ADR-017
-  // adds the highest-priority claim-screen branch (mint + render the claim
-  // code on the PyPortal while the box is unclaimed); once claimed it falls
-  // through to setup URL on first boot, last-generated WireGuard peer for
-  // ~60 s after creation, WiFi-hotspot QR otherwise. 30 s poller; calls into
-  // Prisma + Nextcloud + device-bridge. Failures in any leg leave the screen
-  // alone rather than blanking it.
-  startScreenQRPoller(prisma);
+  // Reminders poller and status-display screen-QR poller: started from
+  // index.ts main() on cron-runtime (WARP-3193 QUAL-7), not here — building
+  // an app (every route test does) must not start background timers.
 
   // Web Push — initialise VAPID at startup.
   //

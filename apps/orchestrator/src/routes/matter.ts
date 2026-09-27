@@ -670,11 +670,16 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       const { entityId, userId, limit, offset } = req.query;
       const effectiveUserId =
         (userId as string | undefined) || (req as any).user?.id;
+      // WARP-3193 PERF-15: clamp before Prisma. Unclamped, a huge limit read
+      // the whole table, NaN became a 500, and a negative take reversed the
+      // read direction. 200 matches the other audit/activity list caps.
+      const parsedLimit = parseInt(limit as string, 10);
+      const parsedOffset = parseInt(offset as string, 10);
       const logs = await getAuditLog(prisma, {
         entityId: entityId as string | undefined,
         userId: effectiveUserId,
-        limit: limit ? parseInt(limit as string, 10) : undefined,
-        offset: offset ? parseInt(offset as string, 10) : undefined,
+        limit: Number.isFinite(parsedLimit) ? Math.min(200, Math.max(1, parsedLimit)) : undefined,
+        offset: Number.isFinite(parsedOffset) ? Math.max(0, parsedOffset) : undefined,
       });
       res.json({ logs });
     } catch (err) {

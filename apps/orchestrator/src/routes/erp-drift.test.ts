@@ -9,7 +9,7 @@
  * Only `recordActivity` — the append-lock singleton at the very bottom of that
  * call — is replaced, so the row can be observed.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 
@@ -74,6 +74,16 @@ function buildApp(user: { id?: string; role?: string } | undefined, prisma = pri
 
 beforeEach(() => {
   recordActivityMock.mockReset();
+  // The route's window is computed from the wall clock; pin it to the same
+  // NOW the fixture rows are dated against, or the suite rots once real time
+  // passes NOW + the 30-day default window. Only Date is faked so supertest's
+  // timers keep running.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("GET /api/integrations/:connectionId/drift — the guard", () => {

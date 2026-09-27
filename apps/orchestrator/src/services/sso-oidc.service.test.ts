@@ -68,6 +68,8 @@ import {
   exchangeCodeAndValidate,
   enabledSsoProviders,
   SSO_PROVIDERS,
+  isGoogleHostedDomainAllowed,
+  googleHostedDomainAllowlist,
 } from "./sso-oidc.service.js";
 
 beforeEach(() => {
@@ -299,5 +301,36 @@ describe("exchangeCodeAndValidate — delegates ID-token validation, pins nonce"
         expectedState: "fixed-state",
       }),
     ).rejects.toThrow(/subject|sub/i);
+  });
+});
+
+// WARP-3193 SEC-AUTH-3 — Google's `hd` (hosted domain) claim, and the
+// explicit allowlist the SSO callback enforces it against.
+describe("Google hosted domain (hd)", () => {
+  const url = new URL("https://droplet.local/api/sso/oidc/callback?code=abc&state=fixed-state");
+  const checks = { expectedNonce: "fixed-nonce", codeVerifier: "fixed-verifier", expectedState: "fixed-state" };
+
+  it("surfaces a string hd claim as hostedDomain; absent/non-string → undefined", async () => {
+    authorizationCodeGrant.mockResolvedValueOnce({ claims: () => ({ sub: "s1", hd: "Acme.com" }) });
+    expect((await exchangeCodeAndValidate("google", url, checks)).hostedDomain).toBe("Acme.com");
+    authorizationCodeGrant.mockResolvedValueOnce({ claims: () => ({ sub: "s2" }) });
+    expect((await exchangeCodeAndValidate("google", url, checks)).hostedDomain).toBeUndefined();
+    authorizationCodeGrant.mockResolvedValueOnce({ claims: () => ({ sub: "s3", hd: 7 }) });
+    expect((await exchangeCodeAndValidate("google", url, checks)).hostedDomain).toBeUndefined();
+  });
+
+  it("isGoogleHostedDomainAllowed matches the comma-separated allowlist, case-insensitively", () => {
+    mockConfig.DROPLET_SSO_GOOGLE_ALLOWED_HD = " acme.com , Example.org ";
+    expect(isGoogleHostedDomainAllowed("ACME.com")).toBe(true);
+    expect(isGoogleHostedDomainAllowed("example.org")).toBe(true);
+    expect(isGoogleHostedDomainAllowed("evil.com")).toBe(false);
+    // A consumer Google account carries no hd at all.
+    expect(isGoogleHostedDomainAllowed(undefined)).toBe(false);
+  });
+
+  it("an empty allowlist allows nothing (fail closed)", () => {
+    mockConfig.DROPLET_SSO_GOOGLE_ALLOWED_HD = "";
+    expect(isGoogleHostedDomainAllowed("acme.com")).toBe(false);
+    expect(googleHostedDomainAllowlist()).toEqual([]);
   });
 });

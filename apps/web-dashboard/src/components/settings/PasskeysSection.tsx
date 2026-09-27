@@ -54,6 +54,10 @@ export function PasskeysSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<PasskeyErrorView | null>(null);
   const [added, setAdded] = useState(false);
+  // WARP-3193 — shown once the box asks for the current password (an account
+  // with no two-factor yet must re-prove it before enrolling a credential).
+  const [needPassword, setNeedPassword] = useState(false);
+  const [password, setPassword] = useState("");
 
   const [passkeys, setPasskeys] = useState<PasskeySummary[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -87,11 +91,18 @@ export function PasskeysSection() {
     setAdded(false);
     setBusy(true);
     try {
-      await registerPasskey();
+      await registerPasskey(needPassword ? password : undefined);
       setAdded(true);
+      setNeedPassword(false);
+      setPassword("");
       await refresh();
     } catch (err) {
-      setError(describePasskeyError(err));
+      const view = describePasskeyError(err);
+      if (view.kind === "password_required" || view.kind === "password_invalid") {
+        setNeedPassword(true);
+        setPassword("");
+      }
+      setError(view);
     } finally {
       setBusy(false);
     }
@@ -134,10 +145,31 @@ export function PasskeysSection() {
         </p>
 
         {canAdd ? (
-          <button type="button" onClick={handleAdd} disabled={busy} className="btn">
-            <KeyRound size={16} strokeWidth={1.5} />
-            {busy ? "Waiting for passkey..." : "Add a passkey"}
-          </button>
+          <form
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleAdd();
+            }}
+          >
+            {needPassword && (
+              <input
+                type="password"
+                aria-label="Current password"
+                placeholder="Current password"
+                autoComplete="current-password"
+                autoFocus
+                // Same input treatment as the rename field below.
+                className="h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            )}
+            <button type="submit" disabled={busy || (needPassword && !password)} className="btn">
+              <KeyRound size={16} strokeWidth={1.5} />
+              {busy ? "Waiting for passkey..." : "Add a passkey"}
+            </button>
+          </form>
         ) : originProblem ? (
           // The browser would refuse every attempt here, so show the way
           // forward instead of a button that can't work.

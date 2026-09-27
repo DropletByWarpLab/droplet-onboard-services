@@ -20,6 +20,8 @@ import { ncDeleteUser, ncSetUserEnabled } from "./nextcloud.client.js";
 import { adminBasicToken } from "./department-provisioner.service.js";
 import { purgeUserData } from "./brain-memory.service.js";
 import { purgeM365ForUser } from "./m365/m365-auth.service.js";
+import { purgeUsernameKeyedData } from "./username-data-purge.service.js";
+import { revokeOverlayDevicesForUser } from "./vpn-peer-revoke.service.js";
 import {
   assertRemovalAllowed,
   assertRemovalInvariantsTx,
@@ -148,10 +150,13 @@ export async function scheduleUserDeletion(
     username: target.username,
     actor: req.actor,
     ncMirror,
+    // Revoked below with reason `removal`, not the disable's `deactivation`.
+    devices: null,
   });
   await denylistUser(target.id, ACCESS_TOKEN_TTL_SECONDS);
-  // WARP-3160: call revokeOverlayDevicesForUser once #2403 is on stage
-  // (a scheduled leaver's overlay/VPN devices are revoked now, not at purge).
+  // WARP-3160: a scheduled leaver's overlay/VPN devices are revoked now, not
+  // at purge. Best-effort; never throws.
+  const vpn = await revokeOverlayDevicesForUser(target.username, req.actor, "removal");
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -170,6 +175,7 @@ export async function scheduleUserDeletion(
         : {}),
       deletionDueAt: dueAt.toISOString(),
       ncMirror,
+      ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
     },
     actor: req.actor,
   });
@@ -213,9 +219,24 @@ export async function completeUserDeletion(
 
   // Pinned to the claim, so a row an admin somehow re-activated is never
   // removed as a silent second decision.
-  const removed = await prisma.user.deleteMany({
-    where: { id: row.id, directoryStatus: "DEACTIVATED", deletionStatus: "PURGING" },
-  });
+  //
+  // WARP-3193 SEC-AUTH-6: the rows keyed by USERNAME (notes, calendar +
+  // CalDAV credentials, reminders, chats, push subscriptions) go in the SAME
+  // transaction as the row, and only when the row really goes — the username
+  // must never be free while data still answers to it.
+  const removed = await prisma.$transaction(async (tx) => {
+    const r = await tx.user.deleteMany({
+      where: { id: row.id, directoryStatus: "DEACTIVATED", deletionStatus: "PURGING" },
+    });
+    if (r.count > 0) {
+      const purged = await purgeUsernameKeyedData(tx, row.username);
+      logger.info(
+        { username: row.username, userId: row.id, purged },
+        "Purged username-keyed private data with the deleted user row",
+      );
+    }
+    return r;
+  }, SERIALIZABLE_TX);
   if (removed.count === 0) {
     logger.warn(
       { username: row.username, userId: row.id },
@@ -234,8 +255,10 @@ export async function completeUserDeletion(
     }
   }
 
-  // WARP-3160: call revokeOverlayDevicesForUser once #2403 is on stage
-  // (or pass #2403's `devices` field here).
+  // WARP-3160: runRemovalPostEffects revokes the person's overlay/VPN devices
+  // (revokeOverlayDevicesForUser, reason `removal`, as `audit.actor` — the
+  // admin on a hand-over). On a retention purge they already went at
+  // scheduling, so this sweep finds nothing left.
   await runRemovalPostEffects({
     targetUserId: row.id,
     targetUsername: row.username,

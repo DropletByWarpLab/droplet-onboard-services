@@ -351,6 +351,20 @@ function createPrismaMock(seed: Row[]) {
     findMany: vi.fn(async () => []),
   };
 
+  // WARP-3193 SEC-AUTH-6: the user deletes purge the username-keyed tables
+  // inside their transaction.
+  for (const model of [
+    "note",
+    "calendarEvent",
+    "calendarSource",
+    "reminder",
+    "chatSession",
+    "chatProject",
+    "pushSubscription",
+  ]) {
+    self[model] = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  }
+
   (self as any)._users = users;
   (self as any)._exceptions = exceptions;
   (self as any)._seam = () => seam;

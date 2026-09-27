@@ -128,6 +128,15 @@ vi.mock("../services/auth-denylist.service.js", () => ({
   isUserDenied: vi.fn().mockResolvedValue(false),
 }));
 
+// WARP-3160 — lifecycle post-effects revoke the leaver's overlay/VPN devices.
+const { revokeOverlayDevicesMock } = vi.hoisted(() => ({
+  revokeOverlayDevicesMock: vi.fn(async () => ({ revoked: 1, failed: 0, hqPending: 0, pendingDenied: 0 })),
+}));
+vi.mock("../services/vpn-peer-revoke.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/vpn-peer-revoke.service.js")>()),
+  revokeOverlayDevicesForUser: revokeOverlayDevicesMock,
+}));
+
 // WARP-3169 — the hand-over transfer runs through the host helper; the exec
 // boundary is the seam, so the argv ncTransferOwnership builds is asserted.
 const { hostExecMock } = vi.hoisted(() => ({ hostExecMock: vi.fn() }));
@@ -310,6 +319,34 @@ function createPrismaMock(seed: any[] = []) {
   };
   self._m365Rows = m365Rows;
   self._users = users;
+  // WARP-3193 SEC-AUTH-6 — the username-keyed private tables. Seeded with one
+  // row per seeded user plus one for a bystander, so a test can prove the
+  // purge took exactly the removed person's rows.
+  const owners = [...seed.map((u: any) => u.username), "bystander"];
+  const usernameTables: Record<string, { key: string; rows: any[] }> = {
+    note: { key: "userId", rows: [] },
+    calendarEvent: { key: "userId", rows: [] },
+    calendarSource: { key: "userId", rows: [] },
+    reminder: { key: "userId", rows: [] },
+    chatSession: { key: "userId", rows: [] },
+    chatProject: { key: "userId", rows: [] },
+    pushSubscription: { key: "username", rows: [] },
+  };
+  for (const [model, t] of Object.entries(usernameTables)) {
+    for (const o of owners) t.rows.push({ [t.key]: o });
+    self[model] = {
+      deleteMany: vi.fn(async ({ where }: any = {}) => {
+        const before = t.rows.length;
+        for (let i = t.rows.length - 1; i >= 0; i -= 1) {
+          if (t.rows[i][t.key] === where?.[t.key]) t.rows.splice(i, 1);
+        }
+        return { count: before - t.rows.length };
+      }),
+    };
+  }
+  self._usernameRows = (model: string, owner: string) =>
+    usernameTables[model]!.rows.filter((r) => r[usernameTables[model]!.key] === owner).length;
+  self._usernameModels = Object.keys(usernameTables);
   return self;
 }
 
@@ -609,6 +646,42 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
     expect(nc.ncDeleteUser).not.toHaveBeenCalled();
   });
 
+  // WARP-3193 SEC-AUTH-6 — notes, calendar (incl. CalDAV credentials),
+  // reminders, chats and push subscriptions key on the USERNAME with no FK
+  // to User; they go with the row, in its transaction, or the next account
+  // deriving the same handle inherits them.
+  it("SEC-AUTH-6: purges exactly the removed person's username-keyed rows, at SERIALIZABLE with the row delete", async () => {
+    const prisma = createPrismaMock([due(), OWNER_ROW]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(0);
+      expect(prisma._usernameRows(model, OWNER_ROW.username), model).toBe(1);
+      expect(prisma._usernameRows(model, "bystander"), model).toBe(1);
+    }
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
+  });
+
+  it("SEC-AUTH-6: purges nothing when the Nextcloud delete fails (the claimed row stays to retry from)", async () => {
+    (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("nc down"));
+    const prisma = createPrismaMock([due()]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 1 });
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
+    }
+  });
+
+  it("SEC-AUTH-6: purges nothing when the row changed state concurrently (row not deleted)", async () => {
+    const prisma = createPrismaMock([due()]);
+    (nc.ncDeleteUser as any).mockImplementationOnce(async () => {
+      prisma._users.find((u: any) => u.id === "u-alice").directoryStatus = "ACTIVE";
+    });
+    await purgeDueDeletions(prisma);
+    expect(prisma._users.some((u: any) => u.id === "u-alice")).toBe(true);
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
+    }
+  });
+
   it("a person with no Nextcloud account (SSO/SCIM) is removed without a Nextcloud call", async () => {
     const prisma = createPrismaMock([{ ...due(), nextcloudUsername: null }]);
     expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
@@ -647,7 +720,19 @@ describe("WARP-3113 review follow-ups", () => {
     );
   });
 
-  it.todo("WARP-3160: scheduling revokes the person's overlay devices (revokeOverlayDevicesForUser, once #2403 is on stage)");
+  it("WARP-3160: scheduling revokes the person's overlay devices once, as the admin, reason removal", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    expect((await del(buildApp(prisma), "alice")).status).toBe(200);
+    // Once: the disable step is told not to sweep them again as `deactivation`.
+    expect(revokeOverlayDevicesMock).toHaveBeenCalledTimes(1);
+    expect(revokeOverlayDevicesMock).toHaveBeenCalledWith("alice", { type: "user", id: "owner-id" }, "removal");
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User deletion scheduled",
+        refs: expect.objectContaining({ vpnDevicesRevoked: 1, vpnDevicesFailed: 0 }),
+      }),
+    );
+  });
 
   it("the job skips an ACTIVE row even if it is marked PENDING", async () => {
     const prisma = createPrismaMock([due({ directoryStatus: "ACTIVE" })]);

@@ -178,6 +178,16 @@ function project(row: any, select?: Record<string, boolean>) {
   return out;
 }
 
+const USERNAME_KEYED_MODELS = [
+  "note",
+  "calendarEvent",
+  "calendarSource",
+  "reminder",
+  "chatSession",
+  "chatProject",
+  "pushSubscription",
+] as const;
+
 function createPrismaMock(initialRows: MockUser[] = []) {
   const rows = new Map<string, MockUser>(initialRows.map((u) => [u.id, u]));
   const scopeBindings = new Map<string, Set<string>>();
@@ -194,6 +204,10 @@ function createPrismaMock(initialRows: MockUser[] = []) {
   });
   self.$transaction = seam.$transaction;
   self._seam = () => seam;
+  // WARP-3193 SEC-AUTH-6: the username-keyed private tables the delete purges.
+  for (const model of USERNAME_KEYED_MODELS) {
+    self[model] = { deleteMany: vi.fn(async () => ({ count: 1 })) };
+  }
   return Object.assign(self, {
     rows,
     scopeBindings,
@@ -1080,6 +1094,37 @@ describe("DELETE /api/people/:id", () => {
     expect(scheduled.refs).toMatchObject({ actor: "stefan", targetUserId: "u1", dispositionDefaulted: true });
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u1");
     expect(denylistUserMock).toHaveBeenCalledWith("u1", expect.any(Number));
+  });
+
+  // WARP-3193 SEC-AUTH-6 + WARP-3113: DELETE now schedules (files kept 30
+  // days), so the username-keyed rows (no FK to User) must survive it; they
+  // go with the row when the deletion completes, in the row-delete
+  // transaction (asserted in auth.directory-deleteuser.test.ts).
+  it("scheduling a deletion purges no username-keyed private rows yet", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", isLocal: true }),
+    ]);
+
+    const res = await request(buildApp(prisma)).delete("/api/people/u1");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("pending_deletion");
+    for (const model of USERNAME_KEYED_MODELS) {
+      expect(prisma[model].deleteMany, model).not.toHaveBeenCalled();
+    }
+  });
+
+  it("purges nothing when the delete is refused", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", isLocal: false }),
+    ]);
+
+    const res = await request(buildApp(prisma)).delete("/api/people/u1");
+
+    expect(res.status).toBe(409);
+    for (const model of USERNAME_KEYED_MODELS) {
+      expect(prisma[model].deleteMany, model).not.toHaveBeenCalled();
+    }
   });
 
   it("does NOT revoke or denylist when the delete is refused (self / last-owner / OCS-owned)", async () => {

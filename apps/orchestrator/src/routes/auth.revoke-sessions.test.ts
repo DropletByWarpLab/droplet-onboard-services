@@ -99,7 +99,9 @@ import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
+import { revocationUnavailable } from "../services/jwt.service.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
+import { errorHandler } from "../middleware/error-handler.js";
 // WARP-2993: the /auth/users routes call Nextcloud as the box service
 // account, never with the caller's own NC credential ("caller-nc-token").
 import { adminBasicToken } from "../services/department-provisioner.service.js";
@@ -238,6 +240,25 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
           username: "alice",
         }),
       }),
+    );
+  });
+
+  // WARP-3193 QUAL-1 — a revoke Redis refused used to answer 200 with a
+  // count; the route now surfaces it as 503 so the admin knows it did not
+  // take, and emits no "Sessions revoked" row for sessions still alive.
+  it("answers 503 REVOCATION_UNAVAILABLE when the revoke could not be recorded", async () => {
+    revokeAllSessions.mockRejectedValueOnce(
+      revocationUnavailable(),
+    );
+    const app = buildApp(createPrismaMock([seededAlice()]), "owner");
+    app.use(errorHandler);
+
+    const res = await request(app).post("/api/auth/users/alice/revoke-sessions");
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("REVOCATION_UNAVAILABLE");
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Sessions revoked" }),
     );
   });
 
