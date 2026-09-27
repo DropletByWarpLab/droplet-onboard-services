@@ -466,6 +466,7 @@ export function Sidebar() {
                     active={isItemActive(item)}
                     showChildren={!showSettingsPanel && sectionOpen(item)}
                     onToggleChildren={() => toggleSection(item)}
+                    onActivate={item.href === "/settings" ? () => setMainTreeAt(null) : undefined}
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
                     collapsed={collapsed}
@@ -945,6 +946,7 @@ function NavLink({
   active,
   showChildren = false,
   onToggleChildren,
+  onActivate,
   pathname,
   badge = 0,
   collapsed = false,
@@ -955,6 +957,8 @@ function NavLink({
   showChildren?: boolean;
   /** Open/close the section without navigating — the row's chevron. */
   onToggleChildren?: () => void;
+  /** Reopen a contextual menu when this link already points to the current route. */
+  onActivate?: () => void;
   pathname: string;
   /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
   badge?: number;
@@ -973,6 +977,7 @@ function NavLink({
       <div className="relative">
         <Link
           href={item.href}
+          onClick={onActivate}
           aria-current={active ? "page" : undefined}
           aria-label={collapsed ? item.label : undefined}
           title={collapsed ? item.label : undefined}
