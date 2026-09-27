@@ -21,6 +21,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
 import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
+import { CloudModelsPill } from "@/components/chat/CloudModelsPill";
 import { ChatFileRail } from "@/components/chat/ChatFileRail";
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import {
@@ -1328,6 +1329,8 @@ export default function ChatPage() {
             <>
               <ModelSelector value={selectedModel} onChange={handleModelChange} />
               {isLocalModel && <span className="chat-tag">local · on-device</span>}
+              {/* WARP-3161 — chat text may leave the Droplet. */}
+              <CloudModelsPill />
             </>
           }
         />
