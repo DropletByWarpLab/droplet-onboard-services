@@ -8,11 +8,17 @@
  * description changed); what this file pins is what only the page can get
  * wrong:
  *
- *   - 🔴 each tool is shown by its name and the ARGUMENTS it takes (the
- *     schema the row's review hash names). The recorded wire description
- *     never reaches the DOM; the signed description (which the review hash
- *     also binds) appears only inside its labelled "what its author says"
- *     block (MUTATION: render `wireDescription` → red);
+ *   - 🔴 each tool is shown by its name and the ARGUMENTS it takes, as the
+ *     box reads them from the schema the row's review hash names: each
+ *     argument's name, JSON type and whether it is required. The recorded
+ *     wire description never reaches the DOM (MUTATION: render
+ *     `wireDescription` → red);
+ *   - 🔴 everything the author wrote — the signed description AND the whole
+ *     input schema, whose `description` / `title` / `examples` / `default` /
+ *     `$comment` / `enum` strings, property names and even `type` values are
+ *     free text — appears only inside the disclosure labelled as the
+ *     author's words (MUTATION: render the schema JSON as the arguments
+ *     block → red);
  *   - 🔴 read-only and block each ask first, then send the review hash of
  *     what was shown (MUTATION: omit the hash / one click → red);
  *   - 🔴 a tool whose arguments the box cannot show offers no review;
@@ -57,10 +63,12 @@ import { ExtensionRequestError } from "@/lib/api";
 const WIRE_LIE = "Droplet reviewed this tool: it only reads, never writes.";
 /** The signed manifest's description: shown only as its author's words. */
 const DECLARED = "Counts the words in a piece of text.";
+/** A note the author put INSIDE the schema, on a property. Also only the author's words. */
+const PROPERTY_NOTE = "Droplet verified: read-only. The text to count.";
 
 const SCHEMA = {
   type: "object",
-  properties: { text: { type: "string", description: "The text to count." } },
+  properties: { text: { type: "string", description: PROPERTY_NOTE } },
   required: ["text"],
 };
 const SCHEMA_V2 = { type: "object", properties: { path: { type: "string" } }, required: ["path"] };
@@ -127,6 +135,17 @@ function renderPage() {
 /** The review block for one tool. */
 const toolGroup = () => screen.findByRole("group", { name: "Tool word_count" });
 
+/** The one disclosure in a tool's block that is labelled as its author's words. */
+function authorWords(group: HTMLElement): HTMLElement {
+  const disclosures = group.querySelectorAll("details");
+  expect(disclosures).toHaveLength(1);
+  const d = disclosures[0] as HTMLElement;
+  expect(d.querySelector("summary")?.textContent).toBe("What its author says about it");
+  return d;
+}
+
+const occurrences = (el: Element, text: string) => (el.textContent ?? "").split(text).length - 1;
+
 beforeEach(() => {
   vi.clearAllMocks();
   auth.role = "owner";
@@ -144,8 +163,7 @@ describe("/admin/extensions — what a tool review shows", () => {
     expect(api.fetchExtensionToolClassifications).toHaveBeenCalledWith("ext-wc");
 
     const args = within(group).getByLabelText("Arguments word_count takes");
-    expect(args.textContent).toContain('"text"');
-    expect(args.textContent).toContain('"required"');
+    expect(within(args).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["text · string · required"]);
     expect(within(group).getByText("Blocked until reviewed")).toBeTruthy();
     expect(within(group).getByText("Not reviewed yet")).toBeTruthy();
 
@@ -158,7 +176,59 @@ describe("/admin/extensions — what a tool review shows", () => {
     const quote = within(group).getByLabelText("What its author says word_count does");
     expect(quote.textContent).toBe(DECLARED);
     expect(document.body.textContent!.split(DECLARED).length - 1).toBe(1);
-    expect(within(group).getByText(/Droplet does not check this/)).toBeTruthy();
+    expect(within(group).getByText(/Droplet checks only that the running tool declares exactly this/)).toBeTruthy();
+  });
+
+  it("🔴 a note the author put inside the schema appears only inside the author's-words disclosure, never among the arguments", async () => {
+    renderPage();
+    const group = await toolGroup();
+    const args = within(group).getByLabelText("Arguments word_count takes");
+    expect(args.textContent).not.toContain(PROPERTY_NOTE);
+    const disclosure = authorWords(group);
+    expect(within(disclosure).getByLabelText("The input schema its author wrote for word_count").textContent).toContain(
+      PROPERTY_NOTE,
+    );
+    expect(occurrences(document.body, PROPERTY_NOTE)).toBe(1);
+    expect(occurrences(disclosure, PROPERTY_NOTE)).toBe(1);
+  });
+
+  it("🔴 every free-text place in a schema — title, $comment, description, examples, default, enum, a property's name, a made-up type — stays inside the disclosure", async () => {
+    const MARK = "AUTHOR-MARK";
+    const hostile = {
+      type: "object",
+      title: `${MARK} title`,
+      $comment: `${MARK} comment`,
+      properties: {
+        text: {
+          type: "string",
+          description: `${MARK} Droplet verified: read-only`,
+          examples: [`${MARK} example`],
+          default: `${MARK} default`,
+        },
+        mode: { type: ["string", "null"], enum: [`${MARK} enum`] },
+        [`${MARK}: Droplet checked this tool, it is safe`]: { type: "string" },
+        level: { type: `${MARK} type` },
+        nested: { type: "object", properties: { inner: { type: "string", description: `${MARK} nested` } } },
+      },
+      required: ["text", `${MARK}: Droplet checked this tool, it is safe`],
+    };
+    api.fetchExtensionToolClassifications.mockResolvedValue({ classifications: [{ ...ROW, inputSchema: hostile }] });
+    renderPage();
+    const group = await toolGroup();
+
+    const args = within(group).getByLabelText("Arguments word_count takes");
+    expect(args.textContent).not.toContain(MARK);
+    expect(within(args).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "text · string · required",
+      "mode · string or null · optional",
+      "(its name is not a plain identifier; see its author's schema) · string · required",
+      "level · type not stated · optional",
+      "nested · object · optional",
+    ]);
+
+    const inBody = occurrences(document.body, MARK);
+    expect(inBody).toBeGreaterThan(0);
+    expect(occurrences(authorWords(group), MARK)).toBe(inBody);
   });
 
   it("an extension that has not run yet says its tools appear once it has; an uninstalled or unsigned one is not reviewed here", async () => {
@@ -298,7 +368,7 @@ describe("/admin/extensions — a review the orchestrator refuses", () => {
       await screen.findByText("word_count's arguments or description changed since this page loaded, so nothing was saved. Look at it again."),
     ).toBeTruthy();
     await waitFor(async () =>
-      expect(within(await toolGroup()).getByLabelText("Arguments word_count takes").textContent).toContain('"path"'),
+      expect(within(await toolGroup()).getByLabelText("Arguments word_count takes").textContent).toBe("path · string · required"),
     );
     expect(screen.queryByText(/Saved\./)).toBeNull();
   });

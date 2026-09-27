@@ -168,11 +168,14 @@ statement alone.
   review, and a review sent with the hash it was shown is then a
   `STALE_REVIEW`. An
   operator's block is never lifted by that reset. The owner reviews on
-  `/admin/extensions` ("Tool reviews", WARP-3205): it shows the schema and
-  the signed description the row's hash names, read from the current
-  signed manifest, and offers no review when that manifest no longer
-  produces the hash. The description sits in a disclosure labelled as the
-  author's words.
+  `/admin/extensions` ("Tool reviews", WARP-3205). It reads the schema and
+  the signed description the row's hash names from the current signed
+  manifest, and offers no review when that manifest no longer produces the
+  hash. Its arguments list is only what the box reads from the schema's
+  structure: each argument's name (when it is a plain identifier), JSON
+  type and whether it is required. The description and the whole schema,
+  whose `description`/`title`/`examples`/`enum` strings are the author's
+  prose too, sit in a disclosure labelled as the author's words.
 - **Call-back principal.** A `dxt_` header bearer is looked up by its
   sha256 and resolves to `_service:ext:<slug>` only while the extension is
   `installed` or `live`. An unknown one is a 401 at once; it never reaches

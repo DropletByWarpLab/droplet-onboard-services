@@ -9,15 +9,20 @@
  * refused at dispatch until an owner reviews it as read-only (or blocks it).
  * What the owner decides FROM is what the box can vouch for:
  *
- *   - the tool's name and the ARGUMENTS it takes — the schema the
- *     classification row's review hash names, which the orchestrator reads
- *     from the signed manifest and sends only when it hashes to that row.
- *     With no schema there is no review: a decision the box cannot bind to
- *     what was shown is not offered;
- *   - the signed description, only inside a disclosure that says whose words
- *     they are. It is shown at all because the review hash binds it
- *     (`remoteToolReviewHash(description, schemaHash)`): a reworded tool is
- *     reset and a review of the old words is STALE_REVIEW, so the owner is
+ *   - the tool's name and the ARGUMENTS it takes, read from the schema the
+ *     classification row's review hash names (the orchestrator reads it from
+ *     the signed manifest and sends it only when it hashes to that row). The
+ *     schema is its author's JSON and any string in it can be prose, so the
+ *     arguments list is only what the box reads from its structure — each
+ *     argument's name when it is a plain identifier, its JSON type, whether
+ *     it is required (./tool-arguments.ts). With no schema there is no
+ *     review: a decision the box cannot bind to what was shown is not
+ *     offered;
+ *   - the signed description AND the whole schema, notes included, only
+ *     inside a disclosure that says whose words they are. They are shown at
+ *     all because the review hash binds both
+ *     (`remoteToolReviewHash(description, schemaHash)`): a changed tool is
+ *     reset and a review of the old one is STALE_REVIEW, so the owner is
  *     reviewing these words too and must be able to read them. The row's
  *     recorded wire description has no field in this component's types, so
  *     it cannot be rendered.
@@ -34,15 +39,19 @@ import { Badge, Card, Row, Sect } from "@/components/shell/primitives";
 import { useExtensionToolReview } from "@/lib/hooks/useExtensionToolReview";
 import { classificationLabel } from "@/lib/runtime-tools";
 import type { ExtensionListItem, ExtensionToolClassification, ExtensionToolDecision } from "@/lib/types";
+import { readArguments } from "./tool-arguments";
 import {
+  ARGUMENT_NAME_WITHHELD,
   ARGUMENTS_LABEL,
   AUTHOR_WORDS_NOTE,
   AUTHOR_WORDS_SUMMARY,
   NO_ARGUMENTS_SHOWN,
+  NO_DECLARED_ARGUMENTS,
   NO_TOOLS_YET,
   TOOL_REVIEW_INTRO,
   TOOL_REVIEW_OWNER_ONLY,
   TOOLS_UNREADABLE,
+  argumentFacts,
   confirmSentence,
   explainToolReviewError,
   savedSentence,
@@ -56,8 +65,9 @@ const DECISIONS: Record<ToolReviewKind, Omit<ExtensionToolDecision, "inputSchema
 
 const NOTE: CSSProperties = { margin: 0, fontSize: 12.5, lineHeight: 1.5, color: "var(--text-muted)" };
 const BLOCK: CSSProperties = { display: "flex", flexDirection: "column", gap: 8, padding: "0 2px 14px" };
+const ARGS: CSSProperties = { margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6, color: "var(--text)" };
 const SCHEMA: CSSProperties = {
-  margin: 0,
+  margin: "8px 0 0",
   maxHeight: 240,
   overflow: "auto",
   padding: "10px 12px",
@@ -112,6 +122,24 @@ function reviewedLine(row: ExtensionToolClassification): string {
   return at && !Number.isNaN(at.getTime())
     ? `Reviewed by ${row.reviewedBy} · ${at.toLocaleDateString()}`
     : `Reviewed by ${row.reviewedBy}`;
+}
+
+/** The box's reading of a tool's arguments: names, JSON types, required. Never a string of the author's prose. */
+function ArgumentList({ schema, tool }: { schema: Record<string, unknown>; tool: string }) {
+  const args = readArguments(schema);
+  if (args.length === 0) return <p style={NOTE}>{NO_DECLARED_ARGUMENTS}</p>;
+  return (
+    <ul style={ARGS} aria-label={`Arguments ${tool} takes`}>
+      {args.map((a, i) => (
+        // An argument name need not be shown (or unique once withheld); the order is the schema's.
+        <li key={i}>
+          {a.name !== null ? <code style={MONO}>{a.name}</code> : ARGUMENT_NAME_WITHHELD}
+          {" · "}
+          {argumentFacts(a.types, a.required)}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export function ToolReview({ extension, canReview }: { extension: ExtensionListItem; canReview: boolean }) {
@@ -187,18 +215,19 @@ export function ToolReview({ extension, canReview }: { extension: ExtensionListI
                   ) : (
                     <>
                       <p style={NOTE}>{ARGUMENTS_LABEL}</p>
-                      <pre style={SCHEMA} aria-label={`Arguments ${name} takes`}>
-                        {JSON.stringify(row.inputSchema, null, 2)}
-                      </pre>
-                      {row.declaredDescription ? (
-                        <details>
-                          <summary style={NOTE}>{AUTHOR_WORDS_SUMMARY}</summary>
-                          <p style={{ ...NOTE, marginTop: 6 }}>{AUTHOR_WORDS_NOTE}</p>
+                      <ArgumentList schema={row.inputSchema} tool={name} />
+                      <details>
+                        <summary style={NOTE}>{AUTHOR_WORDS_SUMMARY}</summary>
+                        <p style={{ ...NOTE, marginTop: 6 }}>{AUTHOR_WORDS_NOTE}</p>
+                        {row.declaredDescription ? (
                           <blockquote style={QUOTE} aria-label={`What its author says ${name} does`}>
                             {row.declaredDescription}
                           </blockquote>
-                        </details>
-                      ) : null}
+                        ) : null}
+                        <pre style={SCHEMA} aria-label={`The input schema its author wrote for ${name}`}>
+                          {JSON.stringify(row.inputSchema, null, 2)}
+                        </pre>
+                      </details>
                     </>
                   )}
 
