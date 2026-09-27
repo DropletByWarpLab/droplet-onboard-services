@@ -1,3 +1,5 @@
+import type { DashboardPage } from "@droplet/shared-types";
+
 import type { ScoreKind } from "./relevance";
 
 /**
@@ -226,6 +228,10 @@ export interface ChatRequest {
    * entirely to get the role-default registry. The server distinguishes
    * `[]` from absent, so only send `[]` when zero tools is meant. */
   allowed_tools?: string[];
+  /** WARP-3116 — the pages this viewer can open (`assistantPages`), for the
+   *  assistant's find_dashboard_page / open_dashboard_page. Omitted = the
+   *  server withholds both tools. */
+  dashboardPages?: DashboardPage[];
 }
 
 export interface ModelInfo {

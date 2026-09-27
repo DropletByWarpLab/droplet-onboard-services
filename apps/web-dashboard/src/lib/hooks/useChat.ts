@@ -18,6 +18,11 @@ import type {
   ChatMessage,
   ChatToolCall,
 } from "../types";
+import {
+  OPEN_DASHBOARD_PAGE_TOOL,
+  isDashboardNavigateAction,
+  type DashboardPage,
+} from "@droplet/shared-types";
 import { appendReasoningStep } from "@/components/chat/reasoning-trace";
 
 /** WARP-304: response header carrying the server-assigned conversation id. */
@@ -487,6 +492,19 @@ export interface UseChatOptions {
    *  (set when the user starts a chat from a project's "+"). Sent on the
    *  first turn only; the server validates ownership. */
   projectId?: string | null;
+  /**
+   * WARP-3116 — the pages this viewer can open (`useAssistantPages`), sent
+   * with every turn so the assistant can link to them and move the viewer
+   * between them. Omitted = the navigation tools are withheld server-side.
+   */
+  dashboardPages?: DashboardPage[];
+  /**
+   * WARP-3116 — route the viewer to `href` (normally `router.push`). Called
+   * once, after a LIVE turn whose `open_dashboard_page` call resolved to a
+   * page this hook sent — never for a turn the user stopped, and never when
+   * a conversation is reloaded.
+   */
+  onNavigate?: (href: string) => void;
 }
 
 /**
@@ -586,6 +604,27 @@ export function useChat(options: UseChatOptions = {}) {
   useEffect(() => {
     projectIdRef.current = options.projectId;
   }, [options.projectId]);
+
+  // WARP-3116 — read at send / stream-end time, like projectId.
+  const dashboardPagesRef = useRef(options.dashboardPages);
+  useEffect(() => {
+    dashboardPagesRef.current = options.dashboardPages;
+  }, [options.dashboardPages]);
+  const onNavigateRef = useRef(options.onNavigate);
+  useEffect(() => {
+    onNavigateRef.current = options.onNavigate;
+  }, [options.onNavigate]);
+  // WARP-3116 — a turn only moves a viewer who is still here: a stream keeps
+  // running after its chat unmounts (WARP-329), and pulling someone off the
+  // page they walked to since would be the assistant overriding them. Set in
+  // the effect body, not only cleared, so StrictMode's remount restores it.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Same ref treatment for the loaded-conversation callback so the
   // stable `loadConversation` sees the caller's latest prop.
@@ -956,6 +995,20 @@ export function useChat(options: UseChatOptions = {}) {
         setAttachments([]);
       }
 
+      // WARP-3116 — this turn's page list, snapshotted: the navigate check at
+      // the end of the stream compares against what was SENT, not whatever
+      // the prop holds by then.
+      const turnPages = dashboardPagesRef.current;
+      // Set from the live stream only (tool_call names the tool, tool_result
+      // carries the page); consumed once the stream settles.
+      const navigation: { callIds: Set<string>; href: string | null } = {
+        callIds: new Set(),
+        href: null,
+      };
+      let userStopped = false;
+      // The conversation this turn belongs to, once the server has named it.
+      let turnConversationId: string | null = null;
+
       try {
         const response = await sendChat({
           model,
@@ -984,6 +1037,7 @@ export function useChat(options: UseChatOptions = {}) {
           ...(turnAttachments.length > 0
             ? { attachments: turnAttachments }
             : {}),
+          ...(turnPages && turnPages.length > 0 ? { dashboardPages: turnPages } : {}),
         });
 
         // WARP-304: capture the server-assigned conversation id from the
@@ -1081,12 +1135,19 @@ export function useChat(options: UseChatOptions = {}) {
           throw new Error("No response body");
         }
 
+        // Headers are processed above, so this is the turn's own thread.
+        turnConversationId = conversationIdRef.current;
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
         // WARP-1605 — one cursor per stream, carrying the agent-step boundary
         // across events (see applyEvent).
         const cursor: StreamCursor = { stepOpen: false };
+        const handle = (evt: SSEEvent) => {
+          const target = navigationTarget(evt, navigation.callIds, turnPages);
+          if (target) navigation.href = target;
+          applyEvent(setMessages, assistantMessage.id, evt, content, cursor);
+        };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -1105,16 +1166,14 @@ export function useChat(options: UseChatOptions = {}) {
             if (!frame.trim()) continue;
             const evt = parseSseFrame(frame);
             if (!evt) continue;
-            applyEvent(setMessages, assistantMessage.id, evt, content, cursor);
+            handle(evt);
           }
         }
 
         // Flush trailing frame if the stream ended without a final \n\n.
         if (buffer.trim()) {
           const evt = parseSseFrame(buffer);
-          if (evt) {
-            applyEvent(setMessages, assistantMessage.id, evt, content, cursor);
-          }
+          if (evt) handle(evt);
         }
       } catch (err) {
         // WARP-295: a user-initiated stop() aborts the underlying
@@ -1128,6 +1187,7 @@ export function useChat(options: UseChatOptions = {}) {
           controller.signal.aborted ||
           (err instanceof DOMException && err.name === "AbortError");
         if (isAbort) {
+          userStopped = true;
           setMessages((prev) => {
             const idx = prev.findIndex((m) => m.id === assistantMessage.id);
             if (idx === -1) return prev;
@@ -1185,6 +1245,19 @@ export function useChat(options: UseChatOptions = {}) {
         isStoppingRef.current = false;
         if (abortRef.current === controller) {
           abortRef.current = null;
+        }
+        // WARP-3116 — LAST, once the turn is settled and re-id'd: routing
+        // away can unmount this chat. The server persists the turn either
+        // way (WARP-329), so coming back finds it whole. It moves only a
+        // viewer still on this chat and this thread; a stopped turn stays
+        // put — Stop means "not that".
+        if (
+          navigation.href &&
+          !userStopped &&
+          mountedRef.current &&
+          conversationIdRef.current === turnConversationId
+        ) {
+          onNavigateRef.current?.(navigation.href);
         }
       }
     },
@@ -1967,6 +2040,30 @@ export function useChat(options: UseChatOptions = {}) {
  */
 interface StreamCursor {
   stepOpen: boolean;
+}
+
+/**
+ * WARP-3116 — the page an `open_dashboard_page` result asks to move to, or
+ * null. Pairs the result with its call by id (the result event does not name
+ * the tool), and admits only a page THIS turn sent: the handler resolves
+ * against that list, so anything else is a result the dashboard did not ask
+ * for and is never routed to. Exported for the unit pins.
+ */
+export function navigationTarget(
+  evt: SSEEvent,
+  navigateCallIds: Set<string>,
+  sentPages: readonly DashboardPage[] | undefined,
+): string | null {
+  if (evt.type === "tool_call") {
+    if (evt.name === OPEN_DASHBOARD_PAGE_TOOL) navigateCallIds.add(evt.id);
+    return null;
+  }
+  if (evt.type !== "tool_result" || !evt.ok || !navigateCallIds.has(evt.id)) {
+    return null;
+  }
+  if (!isDashboardNavigateAction(evt.data)) return null;
+  const href = evt.data.href;
+  return sentPages?.some((p) => p.href === href) ? href : null;
 }
 
 /**

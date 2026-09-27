@@ -48,6 +48,7 @@ import {
 } from "@/lib/api";
 import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
+import { useAssistantPages } from "@/lib/hooks/useAssistantPages";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
@@ -158,6 +159,8 @@ export default function ChatPage() {
   // Send the canonical wrap-up turn once the interview session finishes
   // loading (Resume-banner "Skip the rest" defers it through navigation).
   const pendingWrapUpRef = useRef(false);
+  // WARP-3116 — the pages the assistant may link to or take the viewer to.
+  const dashboardPages = useAssistantPages();
   const {
     messages,
     isStreaming,
@@ -189,6 +192,8 @@ export default function ChatPage() {
       // WARP-844 — restore the persona this conversation is held under.
       setSystemPrompt(persistedPrompt ?? "");
     },
+    dashboardPages,
+    onNavigate: (href) => router.push(href),
   });
 
   // The `?c=<id>` currently in the URL. Read HERE, above the interview

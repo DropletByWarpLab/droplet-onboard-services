@@ -1,4 +1,5 @@
 import { memo, useRef, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -23,6 +24,7 @@ import {
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CodeBlock } from "@/components/CodeBlock";
+import { safeNext } from "@/lib/safe-next";
 import { CitationCard } from "@/components/citations/CitationCard";
 import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
@@ -443,6 +445,18 @@ export const ChatMessage = memo(function ChatMessage({
                   ),
                   // Per-block hover copy button (Claude-chat parity).
                   pre: ({ node, ...props }) => <CodeBlock {...props} />,
+                  // WARP-3116 — an in-app path ("[Voice](/voice)", as the
+                  // dashboard-page tools hand back) routes client-side instead
+                  // of reloading the whole app. `safeNext` is the hardened
+                  // same-origin check (`/\evil`, `//evil`, `/..//evil`); only a
+                  // path it returns unchanged counts. Everything else renders
+                  // exactly as before.
+                  a: ({ node, href, ...props }) =>
+                    typeof href === "string" && href.startsWith("/") && safeNext(href) === href ? (
+                      <Link href={href} {...props} />
+                    ) : (
+                      <a href={href} {...props} />
+                    ),
                 }}
               >
                 {message.content}
