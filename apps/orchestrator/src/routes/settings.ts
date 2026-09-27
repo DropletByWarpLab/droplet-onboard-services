@@ -264,8 +264,11 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
     "ambient_data",
     // WARP-2904 — Web Push (Google / Apple / Mozilla push services).
     "web_push",
+    // WARP-3264 — calendar place suggestions (OpenStreetMap Nominatim).
+    "place_lookup",
   ] as const;
   type OffLanKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
+  const OWNER_ONLY_CHANNELS: ReadonlySet<OffLanKey> = new Set(["place_lookup"]);
   const isOffLanKey = (k: string): k is OffLanKey =>
     (OFF_LAN_CHANNEL_KEYS as readonly string[]).includes(k);
 
@@ -367,6 +370,14 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
         ) {
           return res.status(403).json({
             error: "this channel requires admin role to toggle",
+            channel: key,
+          });
+        }
+        // WARP-3264 — a channel that sends what employees type off the box
+        // is the owner's call alone (admins see it, can't flip it).
+        if (OWNER_ONLY_CHANNELS.has(key) && role !== "owner") {
+          return res.status(403).json({
+            error: "only the owner can change this channel",
             channel: key,
           });
         }

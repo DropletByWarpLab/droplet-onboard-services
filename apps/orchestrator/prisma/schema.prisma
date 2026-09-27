@@ -4588,6 +4588,10 @@ enum OffLanChannelKey {
   /// (Google / Apple / Mozilla) a PushSubscription row names. Read by
   /// `webPushGate` in dispatchToUser, the one dial site, on every call.
   web_push
+  /// WARP-3264 — "Look up places online": the calendar place field's
+  /// OpenStreetMap (Nominatim) lookup. Owner-only switch, default off;
+  /// read fail-closed by `placeLookupGate` in GET /api/calendar/places.
+  place_lookup
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.

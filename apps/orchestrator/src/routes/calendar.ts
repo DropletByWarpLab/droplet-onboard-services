@@ -45,6 +45,9 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { fetchNominatim, type PlaceSuggestion } from "../services/places.service.js";
+// WARP-3264 — the Nominatim leg is behind the owner-only `place_lookup`
+// off-LAN channel (default off).
+import { placeLookupGate } from "../services/off-lan-gate.service.js";
 // WARP-1906 — premade workspace locations (building + conference room) rank
 // ahead of the Nominatim results in the location autocomplete.
 import {
@@ -495,6 +498,36 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       // Nominatim failure (DNS, ECONNREFUSED, the 5s abort — the fetch
       // REJECTS, unlike a non-OK response which resolves to []) degrades to
       // rooms-only instead of discarding the rows already read above.
+      // WARP-3264 — with the `place_lookup` channel off (the default), the
+      // typed text never leaves the box: suggest only the caller's own
+      // previously used event places. Scoped to the caller's calendar so
+      // one person's meeting places never surface in a colleague's field.
+      if (!(await placeLookupGate(prisma))) {
+        const roomNames = new Set(rooms.map((r) => r.displayName.toLowerCase()));
+        let used: PlaceSuggestion[] = [];
+        try {
+          const rows = await prisma.calendarEvent.findMany({
+            where: {
+              userId: getUser(req),
+              location: { contains: q, mode: "insensitive" },
+            },
+            select: { location: true },
+            distinct: ["location"],
+            orderBy: { startsAt: "desc" },
+            take: limit,
+          });
+          used = rows
+            .map((r) => r.location?.trim() ?? "")
+            .filter((l) => l && !roomNames.has(l.toLowerCase()))
+            .map((l) => ({ name: l, context: "", displayName: l, lat: "", lon: "", type: null }));
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[calendar/places] used-places lookup failed:", err);
+        }
+        res.json({ places: [...rooms, ...used].slice(0, limit) });
+        return;
+      }
+
       let external: PlaceSuggestion[] = [];
       try {
         const cacheKey = `places:v2:${limit}:${q.toLowerCase()}`;

@@ -142,6 +142,46 @@ describe("WARP-467 — GET /api/settings/off-lan", () => {
   });
 });
 
+describe("WARP-3264 — place_lookup is owner-only and audited", () => {
+  const placeRow = (): MockChannelRow => ({
+    key: "place_lookup",
+    enabled: false,
+    requiresAdmin: true,
+    lastChangedBy: null,
+    lastChangedAt: new Date("2026-09-27T00:00:00Z"),
+    reason: null,
+  });
+
+  it("the owner turns it on; one audit row names the channel and the change", async () => {
+    const prisma = createPrismaMock([placeRow()]);
+    const res = await request(buildApp(prisma, mkUser("owner", "olga")))
+      .patch("/api/settings/off-lan/place_lookup")
+      .send({ enabled: true, reason: "Turned on from Settings" });
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(true);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    const call = recordActivityMock.mock.calls[0][0];
+    expect(call.refs).toMatchObject({
+      channel: "place_lookup",
+      previousEnabled: false,
+      nextEnabled: true,
+      actor: "olga",
+    });
+  });
+
+  it("an admin or member is refused (403) and nothing changes", async () => {
+    for (const role of ["admin", "family"] as const) {
+      const prisma = createPrismaMock([placeRow()]);
+      const res = await request(buildApp(prisma, mkUser(role)))
+        .patch("/api/settings/off-lan/place_lookup")
+        .send({ enabled: true, reason: "x" });
+      expect(res.status, role).toBe(403);
+      expect(prisma.rows.get("place_lookup")?.enabled).toBe(false);
+    }
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("WARP-467 — PATCH /api/settings/off-lan/:key", () => {
   it("admin can flip cloud_model_escape on with a reason; activity emitted", async () => {
     const prisma = createPrismaMock();
