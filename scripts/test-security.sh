@@ -865,6 +865,95 @@ else
 fi
 
 # =============================================================================
+# Test 22: WARP-3193 SEC-DATA-1 — `env_file: ../.env` only on an allowlist
+# =============================================================================
+# The root .env carries JWT_SECRET, DEVICE_SECRET_KEY, POSTGRES_PASSWORD and
+# the rest of the box's keys. A container that parses untrusted input (office
+# documents, web content, camera streams, ONVIF replies) must get an explicit
+# `environment:` list instead — one parser RCE there must not yield the key an
+# owner JWT is forged from. Adding a service here is a security decision:
+# say in the PR why it needs the whole file.
+# MUTATION: add `env_file: [../.env]` to web-fetch and this goes red.
+_envfile_exit=0
+_envfile_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+ALLOWED = {
+    "ai-gateway", "cache", "db", "device-identity-svc", "erp-sql-bridge",
+    "file-indexer", "fleet-agent", "inference-manager", "mcp-bridge",
+    "mcp-server", "nextcloud", "orchestrator", "rag-eval", "voice-io",
+}
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+
+bad = []
+for name, cfg in sorted((data.get("services") or {}).items()):
+    ef = cfg.get("env_file")
+    if ef is None:
+        continue
+    entries = ef if isinstance(ef, list) else [ef]
+    paths = [e.get("path") if isinstance(e, dict) else e for e in entries]
+    if any(str(p).rstrip("/").endswith(".env") and "../.env" in str(p) for p in paths) \
+            and name not in ALLOWED:
+        bad.append(name)
+if bad:
+    print("services loading ../.env outside the allowlist: " + ", ".join(bad), file=sys.stderr)
+    sys.exit(1)
+PYEOF
+) || _envfile_exit=$?
+if [ "$_envfile_exit" -eq 0 ]; then
+  pass "docker-compose.yml: env_file ../.env only on allowlisted services (SEC-DATA-1)"
+else
+  fail "docker-compose.yml: env_file ../.env on a non-allowlisted service (SEC-DATA-1)"
+  printf "${_RED}%s${_RESET}\n" "$_envfile_output" >&2
+fi
+
+# =============================================================================
+# Test 23: WARP-3193 SEC-DATA-12 — secrets stay off process command lines
+# =============================================================================
+# /proc/<pid>/cmdline is world-readable, container processes included when
+# viewed from the host. Where the tool can take the secret another way, it
+# must: `docker exec -e NAME` (value from the caller's env) instead of
+# `-e NAME="$VALUE"`, and `occ config:import <0600 file>` instead of
+# `occ config:app:set … --value="$SECRET"`.
+# MUTATION: restore `-e OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW"` and this goes red.
+_argv_secret_bad=""
+_ATTACH="$REPO_ROOT/scripts/host/usr-local-sbin/droplet-openwrt-attach"
+_NC_INIT="$REPO_ROOT/docker/nextcloud-init.sh"
+if grep -nE -- '-e (OPENWRT_ROOT_PW|AP_PSK|GUEST_PSK)=' "$_ATTACH" >/dev/null; then
+  _argv_secret_bad+="droplet-openwrt-attach: docker exec -e NAME=\$SECRET "
+fi
+if grep -nE -- '--value="?\$\{?[A-Z_]*(SECRET|PASSWORD|_PSK|TOKEN)' "$_NC_INIT" >/dev/null; then
+  _argv_secret_bad+="nextcloud-init.sh: occ --value=\$SECRET "
+fi
+if [ -z "$_argv_secret_bad" ]; then
+  pass "no secret passed as a command-line argument at the SEC-DATA-12 sites"
+else
+  fail "secret on a command line (SEC-DATA-12): $_argv_secret_bad"
+fi
+
+# =============================================================================
+# Test 24: WARP-3193 SEC-DATA-14 — the OpenWrt overlay ships no Wi-Fi PSK
+# =============================================================================
+# openwrt/files/etc/config/wireless is copied verbatim into every image built
+# from it, so any `option key` there is one PSK shared by every such box. The
+# single-box shape generates a per-box PSK at runtime; the overlay's AP
+# sections ship with a blank key and `disabled '1'`.
+# MUTATION: set default_radio3's key back to 'ChangeMe!2024'.
+_WIRELESS="$REPO_ROOT/openwrt/files/etc/config/wireless"
+_psk_bad=$(awk '
+  /^config /             { sec=$3; iface=($2=="wifi-iface"); next }
+  iface && /^[[:space:]]*option key /  { k=$0; sub(/^[^'"'"']*'"'"'/, "", k); sub(/'"'"'.*$/, "", k); if (k != "") print sec " has a static key" }
+  iface && /^[[:space:]]*option disabled .0./ { print sec " is enabled" }
+' "$_WIRELESS")
+if [ -z "$_psk_bad" ]; then
+  pass "openwrt overlay: every AP ships disabled with no static PSK (SEC-DATA-14)"
+else
+  fail "openwrt overlay ships a static/enabled Wi-Fi AP (SEC-DATA-14): $(printf '%s' "$_psk_bad" | tr '\n' ';')"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"

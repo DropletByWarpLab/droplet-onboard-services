@@ -20,6 +20,7 @@
  */
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
+import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { requireRoleOrService } from "../middleware/auth.js";
 import { resolveActiveModel } from "../services/active-model.service.js";
@@ -102,8 +103,7 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
         import("../services/cache.service.js"),
       ]);
 
-      const aiGatewayGrpcUrl =
-        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const aiGatewayGrpcUrl = config.AI_GATEWAY_GRPC_URL;
       const embedClient = new embedMod.EmbeddingClient({ url: aiGatewayGrpcUrl });
       const [vector] = await embedClient.embed([query]);
       if (!vector) {

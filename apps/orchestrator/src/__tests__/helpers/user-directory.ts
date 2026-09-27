@@ -22,6 +22,9 @@ export interface DirectoryUser {
   role: string;
   /** Defaults to ACTIVE (the column default); SCIM deactivation sets DEACTIVATED. */
   directoryStatus?: "ACTIVE" | "DEACTIVATED";
+  /** WARP-3098 — the author fields the workshop reads off the resolved person. */
+  displayName?: string;
+  email?: string | null;
 }
 
 type Column = "id" | "username" | "nextcloudUsername" | "directoryStatus";

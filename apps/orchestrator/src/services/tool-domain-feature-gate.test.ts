@@ -35,6 +35,7 @@ vi.mock("./effective-access.service.js", async (importOriginal) => ({
 
 import { actingUserAccessResolver, MCP_PRINCIPAL_ID } from "../middleware/mcp-acting-user-gate.js";
 import { mountMcpActingUserGates } from "../modules/module-mounts.js";
+import { userDirectory, type DirectoryUser } from "../__tests__/helpers/user-directory.js";
 
 const ALL_MODULES = new Set<ModuleId>(["chat", ...GATEABLE_MODULE_IDS]);
 const ALL_TOOLS = TOOL_CATALOG.map((t) => t.name);
@@ -80,9 +81,10 @@ async function scopeFor(opts: {
   };
   resolveMock.mockResolvedValue(computeEffectiveAccess(inputs));
   // One user row, returned only when `where` matches it: the MCP route gate
-  // looks the header up by username (stdio) then id (HTTP), the scope
-  // resolvers by id. `nextcloudUsername` is null, as for every SSO / SCIM
-  // account — a lookup on that column would miss.
+  // matches the header against username (stdio), nextcloudUsername and id
+  // (HTTP) at once (WARP-3098, `findMany`), the scope resolvers by id.
+  // `nextcloudUsername` is null, as for every SSO / SCIM account — a lookup
+  // on that column alone would miss.
   const row = {
     id: "u1",
     username: "sam",
@@ -97,6 +99,7 @@ async function scopeFor(opts: {
       findUnique: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
         Object.entries(where).every(([k, v]) => (row as Record<string, unknown>)[k] === v) ? row : null,
       ),
+      findMany: userDirectory([row as DirectoryUser]).findMany,
     },
   } as never;
   lastPrisma = prisma;

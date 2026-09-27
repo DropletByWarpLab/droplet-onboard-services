@@ -59,6 +59,7 @@ import {
   runRoleChangePostEffects,
   runRemovalPostEffects,
 } from "../services/role-mutation-guard.service.js";
+import { purgeUsernameKeyedData } from "../services/username-data-purge.service.js";
 // WARP-1527 (RBAC v2 T3): the per-person access surface — custom-role /
 // built-in-tier assignment, the §3 resolver read, and the feature-axis
 // exception editor.
@@ -856,6 +857,10 @@ export function createPeopleRouter(
           await tx.user.delete({
             where: { id: req.params.id, role: fresh.role },
           });
+          // WARP-3193 SEC-AUTH-6: rows keyed by USERNAME (no FK to User) go
+          // with the row, or the next account deriving this username
+          // inherits them.
+          await purgeUsernameKeyedData(tx, existing.username);
         }, SERIALIZABLE_TX);
 
         // Rail 6 (consolidated post-commit effects) — WARP-490 hard

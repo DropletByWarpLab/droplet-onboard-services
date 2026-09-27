@@ -609,18 +609,23 @@ if [ "$AP_BRIDGE" = 1 ]; then
 fi
 # <<< ap_bridge_veth (WARP-1364)
 
+# WARP-3193 SEC-DATA-12: the three secrets cross as bare `-e NAME` (docker
+# reads the value from ITS OWN environment, set by the prefix assignments) —
+# never `-e NAME="$VALUE"`, which puts them in the host's world-readable
+# /proc/<pid>/cmdline for the life of this exec.
+OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW" AP_PSK="$AP_PSK" GUEST_PSK="$GUEST_PSK" \
 docker exec -i \
   -e CONT_IP="$IP" -e CONT_GW="$GW" \
   -e GATEWAY_IP="$GATEWAY_IP" \
-  -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
+  -e AP_SSID="$AP_SSID" -e AP_PSK \
   -e AP_IFACE="$AP_IFACE" -e AP_BRIDGE="$AP_BRIDGE" \
   -e AP_ATTACH="$AP_ATTACH" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
   -e PUBLIC_FQDN="$PUBLIC_FQDN" \
-  -e GUEST_SSID="$GUEST_SSID" -e GUEST_PSK="$GUEST_PSK" \
+  -e GUEST_SSID="$GUEST_SSID" -e GUEST_PSK \
   -e GUEST_ENABLED="$GUEST_ENABLED" -e GUEST_IFACE="$GUEST_IFACE" \
   -e GUEST_GW="$GUEST_GW" \
-  -e OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW" \
+  -e OPENWRT_ROOT_PW \
   droplet-openwrt sh -c '
   # Container network bootstrap (CONT_IP/CONT_GW/GATEWAY_IP/AP_* from env).
   # NB: do this FIRST and again AFTER any /etc/init.d/network restart, since

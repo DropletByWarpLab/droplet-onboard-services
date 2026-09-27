@@ -9,7 +9,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 
 | Name | Domain | Description | requiresWrite | requiresConfirmation | Source |
 |---|---|---|---|---|---|
-| list_network_devices | network | List every network device the registry knows about (MAC, IP, hostname, vendor, presence, blocked flag). | false | false | both (was: `list_devices`/`get_connected_devices` in gateway) |
+| list_network_devices | network | List the 200 most-recently-seen network devices the registry knows about (MAC, IP, hostname, vendor, presence, blocked flag). | false | false | both (was: `list_devices`/`get_connected_devices` in gateway) |
 | get_network_status | network | WAN/LAN interface state, WiFi state, connected device count, router system info. | false | false | gateway |
 | list_dhcp_leases | network | Live DHCP lease table from the router. | false | false | orchestrator |
 | get_wifi_settings | network | Current Wi-Fi SSID, channel, encryption mode, associated wireless clients. | false | false | both (canonical name `get_wifi_settings`; was `get_wifi_info` in orchestrator) |
@@ -33,7 +33,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | search_content | files | Semantic full-text search via gRPC embedder + pgvector. | false | false | orchestrator |
 | read_document_text | files | Full extracted text of one document in chunk order, paged via `next_chunk`; NOT_INDEXED when the file has no extracted text. Reads PDFs/scans `read_file` rejects. WARP-2057. | false | false | orchestrator |
 | list_recent_files | files | 30 most recently modified files. | false | false | orchestrator |
-| write_file | files | Create or overwrite a file (UTF-8 or base64; max 10 MB). | true | false | orchestrator |
+| write_file | files | Create a new file, never replacing one (UTF-8 or base64; max 10 MB). | true | false | orchestrator |
 | delete_file | files | Delete a file, or a directory AND EVERYTHING INSIDE IT, to the Nextcloud trash (restorable from the dashboard; emptying the trash stays dashboard-only). Write-tier + interceptor-owned confirmation as of WARP-2669 — it shipped `false` from the WARP-102 port, which triaged destructiveness for network/switch/smart-home and never did the files domain; `docs/tool-confirmation-contract.md` §3 had been using this tool as its worked example of a challenging one the whole time. No `confirmed` flag in the schema, so only a human-minted token gets through. | true | true | orchestrator |
 | create_directory | files | Create a directory. | true | false | orchestrator |
 | rename_file | files | Rename in place (basename only). | true | false | orchestrator |
@@ -56,7 +56,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | get_update_status | system | OTA status: current/pending verified update, apply phase, last verdict, channel settings (`/api/updates/status`); handler role-gated owner/admin. WARP-1450. | false | false | orchestrator |
 | apply_update | system | Apply the pending cosign-verified update via `/api/updates/apply-now`: fire-and-return on the 202 (never awaits — services restart, chat may drop); honesty codes surfaced verbatim; handler role-gated owner/admin + two-step confirmation. WARP-1450. | true | true | orchestrator |
 | search_calendar_events | calendar | Case-insensitive text search over title/description/location on the local calendar (+ optional date range); pure prisma, `ctx.userId`-scoped. WARP-1452. | false | false | prisma |
-| search_contacts | email | Contacts derived on-read from indexed mail senders (address, name, last seen, message count; ranked by frequency then recency); `ctx.userId`-scoped via EmailAccount. WARP-1452. | false | false | prisma |
+| search_contacts | email | Contacts derived on-read from indexed mail senders (address, name, last seen, message count; ranked by frequency then recency) via `/api/email/contacts`, over the mailboxes the acting person may read (owner/admin every one, family their own). WARP-1452; WARP-3102. | false | false | orchestrator |
 | list_file_versions | files | List a file's saved versions (Nextcloud WebDAV PROPFIND via `/api/files/versions`). WARP-1456. | false | false | orchestrator → nextcloud |
 | restore_file_version | files | Roll a file back to an earlier version (`/api/files/versions/restore`; Nextcloud keeps the pre-restore content as a new version); handler-enforced confirmation. WARP-1456. | true | true | orchestrator → nextcloud |
 | share_file | files | Create a Nextcloud public share link (expiry/permissions/optional password; password never echoed); handler-enforced confirmation (public-link footgun). WARP-1456. | true | true | orchestrator → nextcloud |
