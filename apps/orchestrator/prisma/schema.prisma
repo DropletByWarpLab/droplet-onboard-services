@@ -3894,9 +3894,62 @@ model EmailMessage {
   extractedAt      DateTime?
   extractReason    ExtractReason?
 
+  /// WARP-3267 — the files this message carried.
+  attachments EmailAttachment[]
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
   @@index([extractStatus, receivedAt])
+}
+
+/// WARP-3267 — one MIME part of an inbound message that is not its body.
+///
+/// Ruling: the bytes live in box storage (this table), not in the mailbox
+/// owner's Nextcloud home. A mailbox an admin connects for the company has no
+/// owner (`EmailAccount.userId` is null) and so no home to write to; anything
+/// in a Nextcloud home is picked up by the preview generator and the file
+/// indexer, which would render and parse a stranger's file the moment it
+/// arrived; and here the bytes go with the message, so disconnecting a mailbox
+/// (which cascades) leaves nothing behind. Saving an attachment into Files is
+/// the person's own act, from a client.
+///
+/// Never rendered by the box. Served only as a download
+/// (`GET /api/email/:accountId/messages/:messageId/attachments/:attachmentId`).
+/// `status` says whether the bytes were kept: a part over the size limits is
+/// listed, so the reader knows it existed, but not stored.
+model EmailAttachment {
+  id             String                @id @default(uuid())
+  emailMessageId String
+  emailMessage   EmailMessage          @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+  /// Copied from the message so a forward can check, in one query, that the
+  /// attachment belongs to the mailbox the draft is sent from.
+  accountId      String
+  /// Position among the message's attachments (0-based). Unique per message.
+  partIndex      Int
+  /// As the sender named it, decoded. Sanitised when served, never trusted.
+  filename       String
+  /// As the sender declared it. Recorded, never used to decide how to open it.
+  contentType    String
+  size           Int
+  sha256         String
+  /// `Content-ID` of an inline part (a `cid:` image), without the brackets.
+  contentId      String?
+  status         EmailAttachmentStatus
+  /// Null unless `status` is `stored`.
+  data           Bytes?
+  createdAt      DateTime              @default(now())
+
+  @@unique([emailMessageId, partIndex])
+  @@index([accountId])
+}
+
+/// WARP-3267 — whether an attachment's bytes were kept.
+/// `too_large`: the part, or the message's running total, was over the limit.
+/// `over_limit`: the message carried more attachments than the box keeps.
+enum EmailAttachmentStatus {
+  stored
+  too_large
+  over_limit
 }
 
 /// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
@@ -3928,6 +3981,9 @@ model EmailDraft {
   /// every draft that has never been claimed.
   claimedAt        DateTime?
   error            String?
+  /// WARP-3267 — stored `EmailAttachment` ids a forward carries. Checked on
+  /// write to belong to this draft's mailbox; the indexer attaches them at send.
+  attachmentIds    String[]         @default([])
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 

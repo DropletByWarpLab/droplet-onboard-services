@@ -84,6 +84,7 @@ async def list_queued_drafts() -> list[DraftToSend]:
         """
         SELECT d.id, d."accountId", d."toAddrs", d."ccAddrs",
                d."bccAddrs", d.subject, d.body,
+               d."threadId", d."attachmentIds",
                a."address" AS from_addr,
                a."smtpHost", a."smtpPort", a."smtpTls",
                a."username", a."passwordEnc"
@@ -96,6 +97,40 @@ async def list_queued_drafts() -> list[DraftToSend]:
     )
     out: list[DraftToSend] = []
     for r in rows:
+        # WARP-3267 — the thread's Message-IDs (for In-Reply-To/References)
+        # and a forward's attachments, checked again to belong to this mailbox.
+        # ponytail: loads attachment bytes for every queued draft each tick;
+        # load after the claim if queues ever grow.
+        thread_ids: list[str] = []
+        if r["threadId"]:
+            thread_ids = [
+                m["messageId"]
+                for m in await _pool.fetch(
+                    """
+                    SELECT "messageId" FROM "EmailMessage"
+                    WHERE "threadId" = $1 AND "accountId" = $2
+                    ORDER BY "receivedAt" ASC
+                    """,
+                    r["threadId"], r["accountId"],
+                )
+            ]
+        wanted = list(r["attachmentIds"] or [])
+        attachments: list[tuple[str, str, bytes]] = []
+        if wanted:
+            att_rows = await _pool.fetch(
+                """
+                SELECT id, filename, "contentType", data FROM "EmailAttachment"
+                WHERE id = ANY($1::text[]) AND "accountId" = $2
+                  AND status = 'stored' AND data IS NOT NULL
+                """,
+                wanted, r["accountId"],
+            )
+            by_id = {a["id"]: a for a in att_rows}
+            attachments = [
+                (by_id[i]["filename"], by_id[i]["contentType"], bytes(by_id[i]["data"]))
+                for i in dict.fromkeys(wanted)
+                if i in by_id
+            ]
         out.append(
             DraftToSend(
                 id=r["id"],
@@ -111,6 +146,9 @@ async def list_queued_drafts() -> list[DraftToSend]:
                 bcc_addrs=list(r["bccAddrs"]) if r["bccAddrs"] else None,
                 subject=r["subject"],
                 body=r["body"] or "",
+                thread_message_ids=thread_ids,
+                attachments=attachments,
+                attachments_missing=len(attachments) != len(set(wanted)),
             )
         )
     return out

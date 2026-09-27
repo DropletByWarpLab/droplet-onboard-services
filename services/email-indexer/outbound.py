@@ -12,11 +12,24 @@ that's premature today.
 SMTP uses `aiosmtplib` for an async transaction matching the rest of
 the service. STARTTLS vs implicit TLS is decided by the account's
 smtpTls boolean + smtpPort heuristic (465 = implicit, 587 = STARTTLS).
+
+WARP-3267:
+  - A draft on a thread (a reply, or a forward started from one) carries
+    `In-Reply-To` (the thread's newest Message-ID) and `References` (the
+    thread's Message-IDs, oldest first), so the recipient's client threads it.
+    `Date` and `Message-ID` are set here rather than left to the SMTP server.
+  - Ruling: outbound mail stays plain text. The box does not compose HTML —
+    an HTML body is a second rendering of the same text with its own escaping
+    bugs, and every client shows text/plain. A forward carries the original's
+    attachments, picked by id (`EmailDraft.attachmentIds`), as
+    `multipart/mixed`.
 """
 from __future__ import annotations
 
+import email.utils
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from typing import Optional, Protocol
 
@@ -41,6 +54,33 @@ class DraftToSend:
     bcc_addrs: Optional[list[str]]
     subject: str
     body: str
+    #: Message-IDs of the draft's thread, oldest first, without brackets.
+    thread_message_ids: list[str] = field(default_factory=list)
+    #: (filename, content type, bytes) of each forwarded attachment.
+    attachments: list[tuple[str, str, bytes]] = field(default_factory=list)
+    #: A picked attachment is no longer on the box (its message or mailbox is
+    #: gone). Sending without it would send something the owner did not
+    #: approve, so the draft fails instead.
+    attachments_missing: bool = False
+
+
+#: A Message-ID we are willing to echo into a header. They come from inbound
+#: mail, so anything with whitespace or brackets (a header-injection attempt,
+#: or just junk) is left out rather than failing the whole send.
+_MSGID_RE = re.compile(r"[^\s<>]{1,900}")
+_CTYPE_RE = re.compile(r"([a-z0-9][a-z0-9.+-]*)/([a-z0-9][a-z0-9.+-]*)")
+#: RFC 5322 lets References be trimmed; keep the root and the newest ones.
+MAX_REFERENCES = 20
+
+
+def _thread_headers(ids: list[str]) -> tuple[Optional[str], Optional[str]]:
+    """(In-Reply-To, References) for a thread's Message-IDs, oldest first."""
+    ids = [i for i in ids if _MSGID_RE.fullmatch(i)]
+    if not ids:
+        return (None, None)
+    if len(ids) > MAX_REFERENCES:
+        ids = ids[:1] + ids[-(MAX_REFERENCES - 1):]
+    return (f"<{ids[-1]}>", " ".join(f"<{i}>" for i in ids))
 
 
 class StatusCallback(Protocol):
@@ -60,7 +100,23 @@ def build_message(draft: DraftToSend) -> EmailMessage:
     # bcc_addrs are NOT serialized into headers — they live only in
     # the envelope (RCPT TO). aiosmtplib accepts them via `recipients`.
     msg["Subject"] = draft.subject
+    msg["Date"] = email.utils.formatdate(usegmt=True)
+    domain = draft.from_addr.rpartition("@")[2] or None
+    msg["Message-ID"] = email.utils.make_msgid(domain=domain)
+    in_reply_to, references = _thread_headers(draft.thread_message_ids)
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = references
     msg.set_content(draft.body or "")
+    for filename, content_type, data in draft.attachments:
+        m = _CTYPE_RE.fullmatch(content_type.lower())
+        maintype, subtype = m.groups() if m else ("application", "octet-stream")
+        if maintype in ("multipart", "message"):
+            maintype, subtype = "application", "octet-stream"
+        # The name came from a stranger's mail: no line breaks into a header,
+        # no directory part for the recipient's client to honour.
+        safe_name = re.sub(r"[\x00-\x1f\x7f/\\]", "_", filename) or "attachment"
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=safe_name)
     return msg
 
 
@@ -89,6 +145,9 @@ async def send_one_draft(
             "draft %s not claimed (already in-flight or not queued); skipping",
             draft.id,
         )
+        return False
+    if draft.attachments_missing:
+        await callback.mark_failed(draft.id, "attachment no longer on the box")
         return False
     # Lazy import so the unit tests for build_message / envelope_recipients
     # don't need aiosmtplib installed in the test environment.

@@ -29,6 +29,26 @@ orchestrator, and drains the outbound SMTP queue.
 - MQTT publish on `email/<accountId>/new` after each successful
   ingest so the dashboard's email tabs refresh without polling.
 
+## Attachments and outbound format (WARP-3267)
+
+- **Ruling — attachments live in box storage, not Nextcloud.** The parser
+  lists every non-body part and sends the bytes (base64) with the ingest;
+  the orchestrator keeps them in `EmailAttachment` beside the message. Why:
+  a company mailbox an admin connects has no owner and so no Nextcloud home;
+  a file in a home is previewed and indexed on arrival, which would render
+  and parse a stranger's file unasked; and the bytes go with the message
+  when a mailbox is disconnected. Saving one into Files is the reader's act.
+- **Limits** (here and in `EMAIL_ATTACHMENT_LIMITS`): 10 MiB per part,
+  20 MiB and 20 parts stored per message. A part over them is listed without
+  bytes (`too_large` / `over_limit`); past 50 parts nothing more is listed.
+- Downloads: `GET /api/email/:accountId/messages/:messageId/attachments/:id`,
+  gated like the thread read, served as `attachment`, `application/octet-stream`,
+  `nosniff`, sanitised file name, one activity row per download.
+- **Ruling — outbound mail stays plain text.** Replies set `In-Reply-To` and
+  `References` from the thread's Message-IDs, plus `Date` and `Message-ID`.
+  A forward carries stored attachments of its own mailbox, picked by id
+  (`EmailDraft.attachmentIds`), as `multipart/mixed`.
+
 ## What this service does NOT do
 
 - Write the email tables directly. All writes go through orchestrator

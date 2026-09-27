@@ -13,6 +13,10 @@
  *   PATCH  /api/email/accounts/:id/status            — WARP-2957: the indexer
  *                                                      reports a sync cycle
  *                                                      (service principal)
+ *   GET    /api/email/:accountId/messages/:messageId/attachments
+ *   GET    /api/email/:accountId/messages/:messageId/attachments/:attachmentId
+ *                                                    — WARP-3267: list and
+ *                                                      download (never inline)
  *
  * WARP-1453 — the five email LLM tools (email_search / email_read /
  * email_summarize_thread / email_draft_reply / email_send) reach the
@@ -39,7 +43,8 @@
  * `status=queued` and waits for the email-indexer service (see PR
  * description) to pick it up via the indexer's outbound poller.
  */
-import { Router, Request, Response, NextFunction } from "express";
+import { createHash } from "node:crypto";
+import express, { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { recordAccessDenied, requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -183,6 +188,83 @@ type Filter = (typeof FILTERS)[number];
 
 const addressSchema = z.string().email().max(254);
 
+/**
+ * WARP-3267 — attachment limits. The email-indexer applies the same numbers
+ * (`services/email-indexer/parser.py`) and lists anything over them without
+ * its bytes; this side refuses a payload that breaks them anyway.
+ */
+export const EMAIL_ATTACHMENT_LIMITS = {
+  /** One attachment, decoded. */
+  maxBytes: 10 * 1024 * 1024,
+  /** All the stored attachments of one message (or of one forward), decoded. */
+  maxTotalBytes: 20 * 1024 * 1024,
+  /** Attachments stored per message; more are listed as `over_limit`. */
+  maxStored: 20,
+  /** Attachments listed per message at all. */
+  maxListed: 50,
+} as const;
+
+/**
+ * WARP-3267 — the ingest route carries attachments as base64, far past the
+ * global 100 kb JSON limit. app.ts skips its global parser for this path and
+ * the route parses with a larger limit AFTER `requireRole("service")`, so an
+ * unauthenticated caller can never make the box buffer 32 MB.
+ */
+export const EMAIL_INGEST_PATH = /^\/api\/email\/[^/]+\/messages-ingest$/;
+const ingestJson = express.json({ limit: "32mb" });
+
+/** What a list or thread read says about an attachment. Never `data`. */
+const ATTACHMENT_META = {
+  id: true,
+  partIndex: true,
+  filename: true,
+  contentType: true,
+  size: true,
+  sha256: true,
+  contentId: true,
+  status: true,
+} as const;
+
+/**
+ * WARP-3267 — a sender-chosen file name, made safe to put in a
+ * Content-Disposition header and on someone's disk: no directory part, no
+ * control or bidi-override characters (`invoice\u202Efdp.exe`), no leading
+ * dots, bounded length. `res.attachment` then quotes it and adds the RFC 5987
+ * `filename*` form.
+ */
+export function sanitizeAttachmentFilename(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() ?? "";
+  const cleaned = base
+    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069"<>:|?*]/g, "_")
+    .replace(/^[.\s]+/, "")
+    .trim()
+    .slice(0, 200);
+  return cleaned || "attachment";
+}
+
+const attachmentIdsSchema = z.array(z.string().uuid()).max(EMAIL_ATTACHMENT_LIMITS.maxStored);
+
+/**
+ * WARP-3267 — a forward may carry only stored attachments of its OWN mailbox,
+ * within the total limit. Returns an error code, or null when the ids are fine.
+ */
+async function checkForwardAttachments(
+  prisma: PrismaClient,
+  accountId: string,
+  ids: readonly string[],
+): Promise<string | null> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return null;
+  const rows = (await prisma.emailAttachment.findMany({
+    where: { id: { in: unique }, accountId, status: "stored" },
+    select: { id: true, size: true },
+  })) as Array<{ id: string; size: number }>;
+  if (rows.length !== unique.length) return "attachment_not_found";
+  const total = rows.reduce((n, r) => n + r.size, 0);
+  if (total > EMAIL_ATTACHMENT_LIMITS.maxTotalBytes) return "attachments_too_large";
+  return null;
+}
+
 const createDraftSchema = z.object({
   threadId: z.string().uuid().nullable().optional(),
   toAddrs: z.array(addressSchema).min(1).max(50),
@@ -191,6 +273,7 @@ const createDraftSchema = z.object({
   subject: z.string().min(1).max(998),
   body: z.string().max(64_000).optional(),
   draftedByDroplet: z.boolean().optional(),
+  attachmentIds: attachmentIdsSchema.optional(),
 });
 
 const patchDraftSchema = z.object({
@@ -199,6 +282,7 @@ const patchDraftSchema = z.object({
   bccAddrs: z.array(addressSchema).max(50).nullable().optional(),
   subject: z.string().min(1).max(998).optional(),
   body: z.string().max(64_000).optional(),
+  attachmentIds: attachmentIdsSchema.optional(),
 });
 
 // WARP-3102 — `search_contacts`: the bounds its input schema declares.
@@ -252,6 +336,7 @@ interface DraftRow {
   subject: string;
   body: string;
   draftedByDroplet: boolean;
+  attachmentIds: string[];
   status: "draft" | "queued" | "sending" | "sent" | "failed";
   sentAt: Date | null;
   claimedAt: Date | null;
@@ -593,7 +678,12 @@ export function createEmailRouter(
         const thread = (await prisma.emailThread.findUnique({
           where: { id: req.params.threadId },
           include: {
-            messages: { orderBy: { receivedAt: "asc" } },
+            messages: {
+              orderBy: { receivedAt: "asc" },
+              include: {
+                attachments: { select: ATTACHMENT_META, orderBy: { partIndex: "asc" } },
+              },
+            },
           },
         })) as unknown as
           | (ThreadRow & { messages: MessageRow[] })
@@ -691,6 +781,15 @@ export function createEmailRouter(
           res.status(404).json({ error: "Account not found" });
           return;
         }
+        const attachmentError = await checkForwardAttachments(
+          prisma,
+          req.params.accountId,
+          parsed.data.attachmentIds ?? [],
+        );
+        if (attachmentError) {
+          res.status(400).json({ error: attachmentError });
+          return;
+        }
 
         const draft = (await prisma.emailDraft.create({
           data: {
@@ -702,6 +801,7 @@ export function createEmailRouter(
             subject: parsed.data.subject,
             body: parsed.data.body ?? "",
             draftedByDroplet: parsed.data.draftedByDroplet ?? false,
+            attachmentIds: [...new Set(parsed.data.attachmentIds ?? [])],
           },
         })) as unknown as DraftRow;
         res.status(201).json(draft);
@@ -746,6 +846,17 @@ export function createEmailRouter(
           res.status(409).json({ error: "Draft is no longer editable", status: existing.status });
           return;
         }
+        if (parsed.data.attachmentIds) {
+          const attachmentError = await checkForwardAttachments(
+            prisma,
+            existing.accountId,
+            parsed.data.attachmentIds,
+          );
+          if (attachmentError) {
+            res.status(400).json({ error: attachmentError });
+            return;
+          }
+        }
         // ORCH-003 (P1): push the status guard INTO the write so a concurrent
         // /send (draft→queued) or the indexer's claim can't be overwritten
         // between the check above and here. Branch on count to disambiguate.
@@ -757,6 +868,9 @@ export function createEmailRouter(
             bccAddrs: parsed.data.bccAddrs === undefined ? undefined : (parsed.data.bccAddrs as any),
             subject: parsed.data.subject,
             body: parsed.data.body,
+            attachmentIds: parsed.data.attachmentIds
+              ? [...new Set(parsed.data.attachmentIds)]
+              : undefined,
           },
         });
         if (upd.count === 0) {
@@ -1038,11 +1152,76 @@ export function createEmailRouter(
     bodyHtml: z.string().max(2_000_000).nullable().optional(),
     receivedAt: z.string().datetime(),
     threadKey: z.string().min(1).max(998),
+    // WARP-3267 — `data` (base64) only when `status` is `stored`.
+    attachments: z
+      .array(
+        z.object({
+          filename: z.string().min(1).max(255),
+          contentType: z.string().min(1).max(255),
+          size: z.number().int().min(0),
+          sha256: z.string().regex(/^[0-9a-f]{64}$/),
+          contentId: z.string().max(998).nullable().optional(),
+          status: z.enum(["stored", "too_large", "over_limit"]),
+          data: z
+            .string()
+            .max(Math.ceil(EMAIL_ATTACHMENT_LIMITS.maxBytes / 3) * 4)
+            .optional(),
+        }),
+      )
+      .max(EMAIL_ATTACHMENT_LIMITS.maxListed)
+      .optional(),
   });
+
+  type IngestAttachment = NonNullable<z.infer<typeof ingestSchema>["attachments"]>[number];
+
+  /**
+   * WARP-3267 — turn the payload's attachments into rows, or name the limit
+   * they break. The size and hash of a stored part are measured here, never
+   * taken from the payload.
+   */
+  function attachmentRows(accountId: string, list: IngestAttachment[]) {
+    let stored = 0;
+    let total = 0;
+    const rows = [];
+    for (const [partIndex, a] of list.entries()) {
+      const base = {
+        accountId,
+        partIndex,
+        filename: a.filename,
+        contentType: a.contentType,
+        contentId: a.contentId ?? null,
+        status: a.status,
+      };
+      if (a.status !== "stored") {
+        if (a.data !== undefined) return { error: "attachment_data_not_stored" as const };
+        rows.push({ ...base, size: a.size, sha256: a.sha256, data: null });
+        continue;
+      }
+      if (a.data === undefined) return { error: "attachment_data_missing" as const };
+      const bytes = Buffer.from(a.data, "base64");
+      stored += 1;
+      total += bytes.length;
+      if (
+        bytes.length > EMAIL_ATTACHMENT_LIMITS.maxBytes ||
+        total > EMAIL_ATTACHMENT_LIMITS.maxTotalBytes ||
+        stored > EMAIL_ATTACHMENT_LIMITS.maxStored
+      ) {
+        return { error: "attachment_limit_exceeded" as const };
+      }
+      rows.push({
+        ...base,
+        size: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        data: bytes,
+      });
+    }
+    return { rows };
+  }
 
   router.post(
     "/email/:accountId/messages-ingest",
     requireRole("service"),
+    ingestJson,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = ingestSchema.safeParse(req.body);
@@ -1050,6 +1229,14 @@ export function createEmailRouter(
           res
             .status(400)
             .json({ error: "Invalid ingest payload", details: parsed.error.flatten() });
+          return;
+        }
+        const attachments = attachmentRows(
+          req.params.accountId,
+          parsed.data.attachments ?? [],
+        );
+        if ("error" in attachments) {
+          res.status(413).json({ error: attachments.error });
           return;
         }
         const account = (await prisma.emailAccount.findUnique({
@@ -1111,6 +1298,11 @@ export function createEmailRouter(
               bodyText: parsed.data.bodyText ?? null,
               bodyHtml: parsed.data.bodyHtml ?? null,
               receivedAt,
+              // Created with the message, so a message is never stored
+              // without the attachments it arrived with.
+              ...(attachments.rows.length > 0
+                ? { attachments: { create: attachments.rows } }
+                : {}),
             },
           });
           await prisma.emailThread.update({
@@ -1142,6 +1334,100 @@ export function createEmailRouter(
           { err, accountId: req.params.accountId },
           "messages-ingest failed",
         );
+        next(err);
+      }
+    },
+  );
+
+  // ── WARP-3267 — attachments: list and download ─────────────────
+  // Gated exactly like the thread read: the mailbox's owner, or owner/admin.
+  // A foreign mailbox, a message of another mailbox, or an attachment of
+  // another message is a 404 — never a hint that it exists. Human sessions
+  // only: no LLM tool reads attachment bytes.
+  router.get(
+    "/email/:accountId/messages/:messageId/attachments",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const account = await assertAccountAccessible(prisma, req, req.params.accountId);
+        if (!account) {
+          res.status(404).json({ error: "Message not found" });
+          return;
+        }
+        const message = await prisma.emailMessage.findFirst({
+          where: { id: req.params.messageId, accountId: req.params.accountId },
+          select: {
+            id: true,
+            attachments: { select: ATTACHMENT_META, orderBy: { partIndex: "asc" } },
+          },
+        });
+        if (!message) {
+          res.status(404).json({ error: "Message not found" });
+          return;
+        }
+        res.json({ attachments: message.attachments });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.get(
+    "/email/:accountId/messages/:messageId/attachments/:attachmentId",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const account = await assertAccountAccessible(prisma, req, req.params.accountId);
+        if (!account) {
+          res.status(404).json({ error: "Attachment not found" });
+          return;
+        }
+        const att = (await prisma.emailAttachment.findFirst({
+          where: {
+            id: req.params.attachmentId,
+            emailMessageId: req.params.messageId,
+            accountId: req.params.accountId,
+          },
+          select: { id: true, filename: true, size: true, status: true, data: true },
+        })) as {
+          id: string;
+          filename: string;
+          size: number;
+          status: string;
+          data: Uint8Array | null;
+        } | null;
+        if (!att) {
+          res.status(404).json({ error: "Attachment not found" });
+          return;
+        }
+        if (att.status !== "stored" || !att.data) {
+          res.status(409).json({ error: "attachment_not_stored", status: att.status });
+          return;
+        }
+        await recordActivity({
+          kind: "email",
+          severity: "info",
+          sourceIcon: "mail",
+          what: "Email attachment downloaded",
+          sub: sanitizeAttachmentFilename(att.filename),
+          refs: {
+            accountId: req.params.accountId,
+            messageId: req.params.messageId,
+            attachmentId: att.id,
+            actor: account.actor.username,
+          },
+          actor: actorFromRequest(req),
+        });
+        // Always a download, never rendered: the declared type is the
+        // sender's claim, so the bytes go out as octet-stream, with nosniff
+        // and a sandbox CSP in case anything opens them in place anyway.
+        res.attachment(sanitizeAttachmentFilename(att.filename));
+        res.setHeader("Content-Type", "application/octet-stream");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+        res.setHeader("Cache-Control", "private, no-store");
+        res.send(Buffer.from(att.data));
+      } catch (err) {
         next(err);
       }
     },

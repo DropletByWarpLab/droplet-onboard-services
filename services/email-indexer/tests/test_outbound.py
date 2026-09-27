@@ -105,3 +105,57 @@ async def test_send_one_draft_skips_when_claim_lost():
     assert cb.claimed == ["d1"]  # it attempted the claim first
     assert cb.sent == []  # but did not send
     assert cb.failed == []  # and did not mark failed — it simply skipped
+
+
+# WARP-3267 — threading headers and forwarded attachments.
+
+
+def test_reply_sets_in_reply_to_and_references_from_the_thread():
+    msg = build_message(_draft(thread_message_ids=["root@x", "mid@x", "newest@x"]))
+    assert msg["In-Reply-To"] == "<newest@x>"
+    assert msg["References"] == "<root@x> <mid@x> <newest@x>"
+    assert msg["Message-ID"].endswith("@example.com>")
+    assert msg["Date"]
+
+
+def test_new_message_has_no_threading_headers():
+    msg = build_message(_draft())
+    assert msg.get("In-Reply-To") is None
+    assert msg.get("References") is None
+    assert msg["Message-ID"]
+
+
+def test_injected_message_id_is_left_out_of_the_headers():
+    msg = build_message(_draft(thread_message_ids=["ok@x", "bad@x>\r\nBcc: evil@x"]))
+    assert msg["In-Reply-To"] == "<ok@x>"
+    assert "evil" not in msg.as_string()
+
+
+def test_references_keep_root_and_newest_when_long():
+    ids = [f"m{i}@x" for i in range(30)]
+    refs = build_message(_draft(thread_message_ids=ids))["References"].split()
+    assert len(refs) == 20 and refs[0] == "<m0@x>" and refs[-1] == "<m29@x>"
+
+
+def test_forward_carries_attachments_as_multipart_mixed():
+    msg = build_message(
+        _draft(attachments=[
+            ("quote.pdf", "application/pdf", b"%PDF-1.4"),
+            ("weird", "multipart/evil", b"x"),
+        ])
+    )
+    assert msg.get_content_type() == "multipart/mixed"
+    parts = list(msg.iter_attachments())
+    assert [p.get_filename() for p in parts] == ["quote.pdf", "weird"]
+    assert parts[0].get_content_type() == "application/pdf"
+    assert parts[0].get_payload(decode=True) == b"%PDF-1.4"
+    assert parts[1].get_content_type() == "application/octet-stream"
+    # Plain text stays the body.
+    assert msg.get_body(preferencelist=("plain",)).get_content().strip() == "Body line."
+
+
+def test_forwarded_filename_cannot_break_a_header():
+    msg = build_message(_draft(attachments=[("a\r\nBcc: x@y/../b.pdf", "application/pdf", b"1")]))
+    [part] = list(msg.iter_attachments())
+    assert "\n" not in part.get_filename() and "/" not in part.get_filename()
+    assert "Bcc: x@y" not in msg.as_string().split("\n\n", 1)[0]

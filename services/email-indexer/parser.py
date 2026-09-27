@@ -13,15 +13,44 @@ Body extraction:
   - text/plain part wins for bodyText (UTF-8 decoded; charset-aware
     via the email stdlib `get_content`).
   - text/html part wins for bodyHtml.
-  - Multipart traversal walks recursively but skips attachments
-    (Content-Disposition: attachment).
+  - Multipart traversal walks recursively but skips attachments.
+
+Attachments (WARP-3267):
+  - Any leaf part that is not a text/plain or text/html body — or that says
+    `attachment` or carries a file name — is an attachment, inline `cid:`
+    images included.
+  - The limits mirror the orchestrator's `EMAIL_ATTACHMENT_LIMITS`: a part is
+    stored when it fits (10 MiB each, 20 MiB and 20 parts per message); one
+    that does not is still LISTED, without bytes, as `too_large` or
+    `over_limit`, so the reader knows it existed. Past 50 parts, nothing more
+    is listed.
+  - Bytes travel base64 in the ingest payload. Nothing here opens, renders or
+    runs them; the content type is the sender's claim, recorded as is.
 """
 from __future__ import annotations
 
+import base64
 import email
+import email.header
 import email.utils
+import hashlib
 from email.message import Message
 from typing import Optional, TypedDict
+
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_STORED_ATTACHMENTS = 20
+MAX_LISTED_ATTACHMENTS = 50
+
+
+class ParsedAttachment(TypedDict, total=False):
+    filename: str
+    contentType: str
+    size: int
+    sha256: str
+    contentId: Optional[str]
+    status: str  # stored | too_large | over_limit
+    data: str  # base64, only when status == "stored"
 
 
 class ParsedMessage(TypedDict):
@@ -36,6 +65,7 @@ class ParsedMessage(TypedDict):
     bodyHtml: Optional[str]
     receivedAt: str  # ISO 8601
     threadKey: str
+    attachments: list[ParsedAttachment]
 
 
 def _decode_header(value: Optional[str]) -> str:
@@ -119,14 +149,56 @@ def _parse_date_header(value: Optional[str]):
         return None
 
 
+def _is_attachment(part: Message) -> bool:
+    """A leaf part that is not one of the message's text bodies."""
+    ctype = part.get_content_type()
+    if part.is_multipart() or ctype.startswith("message/"):
+        return False
+    disp = (part.get("Content-Disposition") or "").lower()
+    if "attachment" in disp or part.get_filename():
+        return True
+    return ctype not in ("text/plain", "text/html")
+
+
+def _extract_attachments(msg: Message) -> list[ParsedAttachment]:
+    out: list[ParsedAttachment] = []
+    stored = 0
+    total = 0
+    for part in msg.walk():
+        if not _is_attachment(part):
+            continue
+        if len(out) >= MAX_LISTED_ATTACHMENTS:
+            break  # ponytail: parts past 50 are dropped silently; list a count if anyone asks
+        payload = part.get_payload(decode=True)
+        data = payload if isinstance(payload, bytes) else b""
+        name = _decode_header(part.get_filename()) or f"attachment-{len(out) + 1}"
+        att: ParsedAttachment = {
+            "filename": name[:255],
+            "contentType": part.get_content_type()[:255],
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "contentId": _normalize_msgid(part.get("Content-ID")),
+        }
+        if stored >= MAX_STORED_ATTACHMENTS:
+            att["status"] = "over_limit"
+        elif len(data) > MAX_ATTACHMENT_BYTES or total + len(data) > MAX_TOTAL_ATTACHMENT_BYTES:
+            att["status"] = "too_large"
+        else:
+            att["status"] = "stored"
+            att["data"] = base64.b64encode(data).decode("ascii")
+            stored += 1
+            total += len(data)
+        out.append(att)
+    return out
+
+
 def _extract_bodies(msg: Message) -> tuple[Optional[str], Optional[str]]:
     """Walk a (possibly multipart) message; return (text, html)."""
     text: Optional[str] = None
     html: Optional[str] = None
     for part in msg.walk():
         ctype = part.get_content_type()
-        disp = (part.get("Content-Disposition") or "").lower()
-        if "attachment" in disp:
+        if _is_attachment(part):
             continue
         if ctype == "text/plain" and text is None:
             payload = part.get_payload(decode=True)
@@ -220,4 +292,5 @@ def parse_message(
         bodyHtml=html,
         receivedAt=received_at.isoformat(),
         threadKey=thread_key,
+        attachments=_extract_attachments(msg),
     )

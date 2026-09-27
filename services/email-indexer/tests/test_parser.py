@@ -183,3 +183,47 @@ class TestMalformedDateTolerance:
         parsed = parse_message(_make_raw(date="Wed, 27 May 2026 10:00:00 +0000"))
         assert parsed is not None
         assert parsed["receivedAt"].startswith("2026-05-27T10:00:00")
+
+
+# WARP-3267 — attachments are listed and, within the limits, kept.
+
+import base64 as _b64
+from email.message import EmailMessage as _EM
+
+import parser as _parser
+
+
+def _with_attachments(*parts):
+    m = _EM()
+    m["Message-ID"] = "<a@x>"
+    m["From"] = "a@x.com"
+    m["To"] = "b@x.com"
+    m["Subject"] = "files"
+    m["Date"] = "Mon, 1 Jun 2026 10:00:00 +0000"
+    m.set_content("see attached")
+    for name, data in parts:
+        m.add_attachment(data, maintype="application", subtype="pdf", filename=name)
+    return m.as_bytes()
+
+
+def test_attachment_is_stored_with_metadata():
+    out = _parser.parse_message(_with_attachments(("invoice.pdf", b"%PDF")))
+    assert out["bodyText"].strip() == "see attached"
+    [att] = out["attachments"]
+    assert att["filename"] == "invoice.pdf"
+    assert att["contentType"] == "application/pdf"
+    assert att["size"] == 4 and att["status"] == "stored"
+    assert _b64.b64decode(att["data"]) == b"%PDF"
+
+
+def test_attachment_over_the_size_limit_is_listed_without_bytes(monkeypatch):
+    monkeypatch.setattr(_parser, "MAX_ATTACHMENT_BYTES", 3)
+    out = _parser.parse_message(_with_attachments(("big.pdf", b"%PDF")))
+    [att] = out["attachments"]
+    assert att["status"] == "too_large" and "data" not in att and att["size"] == 4
+
+
+def test_attachments_over_the_count_limit_are_listed_as_over_limit(monkeypatch):
+    monkeypatch.setattr(_parser, "MAX_STORED_ATTACHMENTS", 1)
+    out = _parser.parse_message(_with_attachments(("a.pdf", b"1"), ("b.pdf", b"2")))
+    assert [a["status"] for a in out["attachments"]] == ["stored", "over_limit"]

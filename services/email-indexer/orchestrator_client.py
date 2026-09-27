@@ -55,7 +55,8 @@ async def ingest_message(account_id: str, payload: dict[str, Any]) -> bool:
         return False
     url = f"{ORCHESTRATOR_URL}/api/email/{account_id}/messages-ingest"
     try:
-        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
+        # 60 s, not 10: a message may carry up to 20 MiB of attachments (WARP-3267).
+        async with httpx.AsyncClient(timeout=60.0, **httpx_client_kwargs()) as client:
             resp = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("messages-ingest POST failed: %s", exc)
