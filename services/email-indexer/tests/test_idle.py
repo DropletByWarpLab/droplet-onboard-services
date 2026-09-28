@@ -136,3 +136,42 @@ async def test_413_holds_the_watermark_below_the_refused_uid(monkeypatch):
     assert ingested == ["5@x.com", "7@x.com"]
     # UID 6 is fetched again next cycle; the others move on.
     assert state.last_uid == 5
+
+
+@pytest.mark.asyncio
+async def test_413_hold_is_capped_then_the_uid_is_skipped(monkeypatch):
+    def fake_parse(raw, account_address=None):
+        mid = raw.split(b"Message-ID: ")[1].decode().strip().strip("<>")
+        return {"messageId": mid}
+
+    monkeypatch.setattr(idle, "parse_message", fake_parse)
+
+    async def ingest(_account_id, payload):
+        if payload["messageId"] == "6@x.com":
+            raise idle.IngestTooLarge("413")
+        return True
+
+    deps = IdleDeps(ingest=ingest, publish_new_mail=lambda a, t, m: None)
+    state = idle.SyncState(last_uid=4)
+    for _ in range(idle.MAX_TOO_LARGE_HOLDS):
+        state.last_uid = 4
+        await idle._sync_new_mail(_FakeImapWithSearch(), _account(), deps, state, None)
+        assert state.last_uid == 5
+    state.last_uid = 4
+    await idle._sync_new_mail(_FakeImapWithSearch(), _account(), deps, state, None)
+    assert state.last_uid == 7
+    assert state.too_large_holds == {}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_redelivery_does_not_signal_new_mail(monkeypatch):
+    monkeypatch.setattr(idle, "parse_message", lambda raw, account_address=None: {"messageId": "m"})
+    published: list[str] = []
+
+    async def ingest(_account_id, _payload):
+        return "duplicate"
+
+    deps = IdleDeps(ingest=ingest, publish_new_mail=lambda a, t, m: published.append(m))
+    success = await _fetch_and_ingest(_FakeImap(), _account(), deps, ["1"])
+    assert success == 1
+    assert published == []

@@ -215,7 +215,9 @@ export const EMAIL_ATTACHMENT_LIMITS = {
  * indexer demotes any part that would cross the budget to `too_large`, so no
  * message it sends is refused here. A 413 would hold the indexer's watermark.
  */
-export const EMAIL_INGEST_PATH = /^\/api\/email\/[^/]+\/messages-ingest$/;
+// Case-insensitive and trailing-slash tolerant, as Express routing is, so a
+// variant spelling can't slip past the skip and be parsed before auth.
+export const EMAIL_INGEST_PATH = /^\/api\/email\/[^/]+\/messages-ingest\/?$/i;
 const ingestJson = express.json({ limit: "48mb" });
 
 /** What a list or thread read says about an attachment. Never `data`. */
@@ -234,8 +236,9 @@ const ATTACHMENT_META = {
  * WARP-3267 — a sender-chosen file name, made safe to put in a
  * Content-Disposition header and on someone's disk: no directory part, no
  * control or bidi-override characters (`invoice\u202Efdp.exe`), no leading
- * dots, bounded length. `res.attachment` then quotes it and adds the RFC 5987
- * `filename*` form.
+ * dots, bounded length (200 UTF-16 units, never ending in half a surrogate
+ * pair, and no lone surrogates at all: Postgres can't store one).
+ * `res.attachment` then quotes it and adds the RFC 5987 `filename*` form.
  */
 export function sanitizeAttachmentFilename(raw: string): string {
   const base = raw.split(/[\\/]/).pop() ?? "";
@@ -243,7 +246,8 @@ export function sanitizeAttachmentFilename(raw: string): string {
     .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069"<>:|?*]/g, "_")
     .replace(/^[.\s]+/, "")
     .trim()
-    .slice(0, 200);
+    .slice(0, 200)
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "_");
   return cleaned || "attachment";
 }
 
@@ -1243,7 +1247,10 @@ export function createEmailRouter(
           parsed.data.attachments ?? [],
         );
         if ("error" in attachments) {
-          res.status(413).json({ error: attachments.error });
+          // Only a broken LIMIT is a 413 (it holds the indexer's watermark
+          // for a few cycles); a malformed entry is a 400 the indexer skips.
+          const status = attachments.error === "attachment_limit_exceeded" ? 413 : 400;
+          res.status(status).json({ error: attachments.error });
           return;
         }
         const account = (await prisma.emailAccount.findUnique({
@@ -1252,6 +1259,20 @@ export function createEmailRouter(
         })) as { id: string } | null;
         if (!account) {
           res.status(404).json({ error: "Account not provisioned" });
+          return;
+        }
+
+        // A re-delivery (indexer restart backfill, a held UID's neighbours)
+        // answers before the thread upsert, so it can't rewind the thread's
+        // lastMessageAt or snippet. The P2002 catch below still covers a race.
+        const existing = (await prisma.emailMessage.findUnique({
+          where: {
+            accountId_messageId: { accountId: account.id, messageId: parsed.data.messageId },
+          },
+          select: { threadId: true },
+        })) as { threadId: string } | null;
+        if (existing) {
+          res.json({ ok: true, threadId: existing.threadId, duplicate: true });
           return;
         }
 

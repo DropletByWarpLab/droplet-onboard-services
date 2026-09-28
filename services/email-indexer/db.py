@@ -97,8 +97,9 @@ async def list_queued_drafts() -> list[DraftToSend]:
     )
     out: list[DraftToSend] = []
     for r in rows:
-        # WARP-3267 — the thread's Message-IDs (for In-Reply-To/References)
-        # and a forward's attachments, checked again to belong to this mailbox.
+        # WARP-3267 — the thread's Message-IDs (for In-Reply-To/References),
+        # in ARRIVAL order (createdAt): a sender's skewed Date must not make
+        # an older message the parent. And a forward's attachments, checked again to belong to this mailbox.
         # ponytail: loads attachment bytes for every queued draft each tick;
         # load after the claim if queues ever grow.
         thread_ids: list[str] = []
@@ -109,7 +110,7 @@ async def list_queued_drafts() -> list[DraftToSend]:
                     """
                     SELECT "messageId" FROM "EmailMessage"
                     WHERE "threadId" = $1 AND "accountId" = $2
-                    ORDER BY "receivedAt" ASC
+                    ORDER BY "createdAt" ASC, "receivedAt" ASC
                     """,
                     r["threadId"], r["accountId"],
                 )

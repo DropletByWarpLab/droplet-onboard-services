@@ -70,6 +70,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backoff import BackoffState
 from creds import decrypt
+from errors import IngestTooLarge
 from parser import parse_message
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class AccountConfig:
 
 
 class IngestFn(Protocol):
-    async def __call__(self, account_id: str, payload: dict) -> bool: ...
+    async def __call__(self, account_id: str, payload: dict) -> bool | str: ...
 
 
 class MqttPublishFn(Protocol):
@@ -158,20 +159,14 @@ class SyncState:
     """
 
     last_uid: Optional[int] = None
+    #: WARP-3267 — UID → cycles it has held the watermark after a 413.
+    too_large_holds: dict[int, int] = field(default_factory=dict)
     #: Bookkeeping for tests and the log line.
     cycles: int = field(default=0)
 
 
-class IngestTooLarge(Exception):
-    """The orchestrator refused a message with 413 (WARP-3267).
-
-    Ruling: this is the one ingest refusal that holds the watermark. The
-    parser's payload budget means a valid message never gets a 413, so one
-    that does is a contract drift a deploy fixes, and the message must still
-    be there to fetch when it does. Holding costs re-fetching the UIDs after
-    it each cycle (their ingest is an idempotent duplicate). Every other
-    refusal is still skipped, as IDX-07 decided, and logged with its UID.
-    """
+#: Cycles a 413-refused UID holds the watermark before it is skipped (WARP-3267).
+MAX_TOO_LARGE_HOLDS = 3
 
 
 # Track scheduled per-account jobs so we can cancel + reschedule on
@@ -225,6 +220,10 @@ async def _fetch_and_ingest(
                 logger.warning("uid %s not ingested; skipped", uid)
             if ok:
                 success += 1
+                # A re-delivered duplicate (restart backfill, a held UID's
+                # neighbours) is not new mail: no refresh signal for it.
+                if ok == "duplicate":
+                    continue
                 # The orchestrator's ingest response carries threadId but
                 # we don't decode it here — MQTT consumers re-query for
                 # the row they care about. Pass the messageId so the
@@ -327,8 +326,17 @@ async def _sync_new_mail(
     success = await _fetch_and_ingest(
         imap, account, deps, [str(u) for u in uids], too_large=held,
     )
-    if held:
-        state.last_uid = min(held) - 1
+    # A held UID is fetched again next cycle, up to MAX_TOO_LARGE_HOLDS
+    # cycles; then it is skipped like any other refusal (IDX-07).
+    holds = {u: state.too_large_holds.get(u, 0) + 1 for u in held}
+    for uid, n in holds.items():
+        if n > MAX_TOO_LARGE_HOLDS:
+            logger.warning(
+                "uid %d refused as too large %d times; skipped", uid, MAX_TOO_LARGE_HOLDS,
+            )
+    state.too_large_holds = {u: n for u, n in holds.items() if n <= MAX_TOO_LARGE_HOLDS}
+    if state.too_large_holds:
+        state.last_uid = min(state.too_large_holds) - 1
     logger.info("account %s: ingested %d/%d UIDs", account.address, success, len(uids))
     return success
 

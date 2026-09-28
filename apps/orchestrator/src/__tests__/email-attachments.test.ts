@@ -20,6 +20,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 import {
   createEmailRouter,
   EMAIL_ATTACHMENT_LIMITS,
+  EMAIL_INGEST_PATH,
   sanitizeAttachmentFilename,
   type EmailGate,
 } from "../routes/email.js";
@@ -93,6 +94,7 @@ function mkPrisma() {
       update: vi.fn(async () => ({})),
     },
     emailMessage: {
+      findUnique: vi.fn(async () => null),
       create: vi.fn(async (args: unknown) => {
         created.push(args);
         return {};
@@ -110,7 +112,12 @@ function mkUser(id: string, role: AuthUser["role"]): AuthUser {
 
 function buildApp(prisma: ReturnType<typeof mkPrisma>, user: AuthUser) {
   const app = express();
-  app.use(express.json({ limit: "40mb" }));
+  // The same skip as app.ts: the global parser (default 100 kb) leaves the
+  // ingest path alone, so the route's own post-auth parser is what runs.
+  const jsonParser = express.json();
+  app.use((req, res, next) =>
+    EMAIL_INGEST_PATH.test(req.path) ? next() : jsonParser(req, res, next),
+  );
   app.use((req: Request, _res: Response, next: NextFunction) => {
     (req as Request & { user: AuthUser }).user = user;
     next();
@@ -216,7 +223,9 @@ describe("WARP-3267 — ingest stores attachments within the limits", () => {
     const res = await request(buildApp(prisma, SERVICE))
       .post("/api/email/acct-alice/messages-ingest")
       .send(ingestBody([{ ...stored(Buffer.from("x")), status: "too_large" }]));
-    expect(res.status).toBe(413);
+    // A malformed entry, not a broken limit: 400, so the indexer skips it
+    // instead of holding its watermark.
+    expect(res.status).toBe(400);
   });
 
   it("is service-only", async () => {
@@ -224,6 +233,22 @@ describe("WARP-3267 — ingest stores attachments within the limits", () => {
       .post("/api/email/acct-alice/messages-ingest")
       .send(ingestBody([]));
     expect(res.status).toBe(403);
+  });
+
+  it("checks the caller before parsing the body", async () => {
+    // Malformed JSON: parsed first, this would be a 400.
+    const res = await request(buildApp(mkPrisma(), mkUser("u-alice", "owner")))
+      .post("/api/email/acct-alice/messages-ingest")
+      .set("Content-Type", "application/json")
+      .send("{not json" + "x".repeat(200_000));
+    expect(res.status).toBe(403);
+  });
+
+  it("the global-parser skip matches every spelling Express routes to ingest", () => {
+    expect(EMAIL_INGEST_PATH.test("/api/email/a1/messages-ingest")).toBe(true);
+    expect(EMAIL_INGEST_PATH.test("/api/email/a1/messages-ingest/")).toBe(true);
+    expect(EMAIL_INGEST_PATH.test("/API/Email/a1/Messages-Ingest")).toBe(true);
+    expect(EMAIL_INGEST_PATH.test("/api/email/a1/messages")).toBe(false);
   });
 });
 
@@ -281,6 +306,14 @@ describe("WARP-3267 — sanitizeAttachmentFilename", () => {
     expect(sanitizeAttachmentFilename("..\\..\\boot.ini")).toBe("boot.ini");
     expect(sanitizeAttachmentFilename("...")).toBe("attachment");
     expect(sanitizeAttachmentFilename("a".repeat(500)).length).toBe(200);
+  });
+
+  it("never leaves a lone surrogate, even when the cut splits an emoji", () => {
+    const out = sanitizeAttachmentFilename("a".repeat(199) + "\u{1F600}.pdf");
+    expect(out.length).toBe(200);
+    expect(out.endsWith("_")).toBe(true);
+    expect(sanitizeAttachmentFilename("x\uDC80y.pdf")).toBe("x_y.pdf");
+    expect(sanitizeAttachmentFilename("\u{1F600}.pdf")).toBe("\u{1F600}.pdf");
   });
 });
 

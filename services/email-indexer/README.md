@@ -44,10 +44,15 @@ orchestrator, and drains the outbound SMTP queue.
 - **Payload budget.** The serialised ingest body stays under 30 MiB
   (`MAX_INGEST_PAYLOAD_BYTES`); a part that would cross it is listed as
   `too_large`. The orchestrator parses the route with a 48 MB limit.
-- **Ruling — a 413 holds the watermark.** It is the one ingest refusal that
-  does: with the budget, only a contract drift can cause it, and a deploy
-  fixes that, so the message must still be fetchable. Other refusals are
-  skipped (IDX-07) and logged with the UID.
+- **Ruling — a 413 holds the watermark, for three cycles.** It is the one
+  ingest refusal that does: with the budget, only a limit drift (e.g. a
+  rolling update) can cause it, and a deploy fixes that, so the message
+  should still be fetchable. After `MAX_TOO_LARGE_HOLDS` cycles it is skipped
+  like other refusals (IDX-07) and logged with the UID. Re-delivered
+  duplicates do not fire the new-mail signal, and one ingest is in flight at
+  a time. A malformed attachment entry is a 400, not a 413, so it never holds.
+- A forwarded message (`message/rfc822`) is one `.eml` attachment; the parser
+  does not walk into it, so its body and files are not the outer message's.
 - Downloads: `GET /api/email/:accountId/messages/:messageId/attachments/:id`,
   gated like the thread read, served as `attachment`, `application/octet-stream`,
   `nosniff`, sanitised file name, one activity row per download.

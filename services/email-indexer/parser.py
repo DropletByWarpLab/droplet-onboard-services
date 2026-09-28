@@ -13,12 +13,16 @@ Body extraction:
   - text/plain part wins for bodyText (UTF-8 decoded; charset-aware
     via the email stdlib `get_content`).
   - text/html part wins for bodyHtml.
-  - Multipart traversal walks recursively but skips attachments.
+  - Multipart traversal walks recursively but skips parts whose
+    Content-Disposition says `attachment`, and never enters a forwarded
+    `message/rfc822`: its body is not this message's body.
 
 Attachments (WARP-3267):
   - Any leaf part that is not a text/plain or text/html body — or that says
     `attachment` or carries a file name — is an attachment, inline `cid:`
-    images included.
+    images included. The parts picked as the message's own bodies never are.
+  - A forwarded message (`message/rfc822`) is ONE attachment, stored as its
+    `.eml`; its inner parts are not listed as this message's.
   - The limits mirror the orchestrator's `EMAIL_ATTACHMENT_LIMITS`: a part is
     stored when it fits (10 MiB each, 20 MiB and 20 parts per message); one
     that does not is still LISTED, without bytes, as `too_large` or
@@ -170,8 +174,25 @@ def _parse_date_header(value: Optional[str]):
         return None
 
 
+def _is_forwarded(part: Message) -> bool:
+    return part.get_content_type() == "message/rfc822"
+
+
+def _parts(msg: Message):
+    """`msg.walk()`, except a forwarded `message/rfc822` is yielded as one
+    part and not entered: its inner body and files are not this message's."""
+    yield msg
+    if _is_forwarded(msg) or not msg.is_multipart():
+        return
+    for sub in msg.get_payload():
+        if isinstance(sub, Message):
+            yield from _parts(sub)
+
+
 def _is_attachment(part: Message) -> bool:
     """A leaf part that is not one of the message's text bodies."""
+    if _is_forwarded(part):
+        return True
     ctype = part.get_content_type()
     if part.is_multipart() or ctype.startswith("message/"):
         return False
@@ -181,20 +202,33 @@ def _is_attachment(part: Message) -> bool:
     return ctype not in ("text/plain", "text/html")
 
 
-def _extract_attachments(msg: Message, budget: int) -> list[ParsedAttachment]:
-    """`budget`: bytes of serialised payload the attachment list may use."""
+def _part_bytes(part: Message) -> bytes:
+    if _is_forwarded(part):
+        inner = part.get_payload()
+        if isinstance(inner, list) and inner and isinstance(inner[0], Message):
+            return inner[0].as_bytes()
+        return b""
+    payload = part.get_payload(decode=True)
+    return payload if isinstance(payload, bytes) else b""
+
+
+def _extract_attachments(
+    msg: Message, budget: int, bodies: tuple[Optional[Message], Optional[Message]] = (None, None)
+) -> list[ParsedAttachment]:
+    """`budget`: bytes of serialised payload the attachment list may use.
+    `bodies`: the parts already shown as the message's text, never listed."""
     out: list[ParsedAttachment] = []
     stored = 0
     total = 0
     used = 2  # the list's brackets
-    for part in msg.walk():
-        if not _is_attachment(part):
+    for part in _parts(msg):
+        if not _is_attachment(part) or any(part is b for b in bodies):
             continue
         if len(out) >= MAX_LISTED_ATTACHMENTS:
             break  # ponytail: parts past 50 are dropped silently; list a count if anyone asks
-        payload = part.get_payload(decode=True)
-        data = payload if isinstance(payload, bytes) else b""
-        name = _decode_header(part.get_filename()) or f"attachment-{len(out) + 1}"
+        data = _part_bytes(part)
+        fallback = "forwarded.eml" if _is_forwarded(part) else f"attachment-{len(out) + 1}"
+        name = _decode_header(part.get_filename()) or fallback
         cid = _normalize_msgid(part.get("Content-ID"))
         att: ParsedAttachment = {
             "filename": _fit_utf16(name, 255),
@@ -227,31 +261,34 @@ def _extract_attachments(msg: Message, budget: int) -> list[ParsedAttachment]:
     return out
 
 
-def _extract_bodies(msg: Message) -> tuple[Optional[str], Optional[str]]:
-    """Walk a (possibly multipart) message; return (text, html)."""
-    text: Optional[str] = None
-    html: Optional[str] = None
-    for part in msg.walk():
-        ctype = part.get_content_type()
-        if _is_attachment(part):
+def _body_parts(msg: Message) -> tuple[Optional[Message], Optional[Message]]:
+    """The first text/plain and text/html parts that are not explicit
+    `attachment`s. A NAMED inline body (`text/html; name="message.htm"`) is
+    still the body — skipping every named part left such mail empty."""
+    text: Optional[Message] = None
+    html: Optional[Message] = None
+    for part in _parts(msg):
+        if "attachment" in (part.get("Content-Disposition") or "").lower():
             continue
+        ctype = part.get_content_type()
         if ctype == "text/plain" and text is None:
-            payload = part.get_payload(decode=True)
-            if isinstance(payload, bytes):
-                charset = part.get_content_charset() or "utf-8"
-                try:
-                    text = payload.decode(charset, errors="replace")
-                except LookupError:
-                    text = payload.decode("utf-8", errors="replace")
+            text = part
         elif ctype == "text/html" and html is None:
-            payload = part.get_payload(decode=True)
-            if isinstance(payload, bytes):
-                charset = part.get_content_charset() or "utf-8"
-                try:
-                    html = payload.decode(charset, errors="replace")
-                except LookupError:
-                    html = payload.decode("utf-8", errors="replace")
+            html = part
     return (text, html)
+
+
+def _decode_body(part: Optional[Message]) -> Optional[str]:
+    if part is None:
+        return None
+    payload = part.get_payload(decode=True)
+    if not isinstance(payload, bytes):
+        return None
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
 
 
 def derive_thread_key(
@@ -312,7 +349,8 @@ def parse_message(
     if received_at is None:
         return None
 
-    text, html = _extract_bodies(msg)
+    bodies = _body_parts(msg)
+    text, html = _decode_body(bodies[0]), _decode_body(bodies[1])
     thread_key = derive_thread_key(message_id, in_reply_to, references)
 
     out = ParsedMessage(
@@ -330,6 +368,6 @@ def parse_message(
         attachments=[],
     )
     out["attachments"] = _extract_attachments(
-        msg, MAX_INGEST_PAYLOAD_BYTES - _json_size(out)
+        msg, MAX_INGEST_PAYLOAD_BYTES - _json_size(out), bodies
     )
     return out

@@ -262,3 +262,42 @@ def test_overlong_content_id_is_dropped_not_fatal():
     part["Content-ID"] = "<" + "c" * 2000 + "@x>"
     [att] = _parser.parse_message(m.as_bytes())["attachments"]
     assert att["contentId"] is None
+
+
+def _envelope(subject):
+    m = _EM()
+    m["Message-ID"] = "<outer@x>"
+    m["From"] = "a@x.com"
+    m["To"] = "b@x.com"
+    m["Subject"] = subject
+    m["Date"] = "Mon, 1 Jun 2026 10:00:00 +0000"
+    return m
+
+
+def test_forwarded_message_is_one_attachment_and_not_walked_into():
+    inner = _EM()
+    inner["Message-ID"] = "<inner@x>"
+    inner["From"] = "c@x.com"
+    inner["Subject"] = "original"
+    inner.set_content("INNER BODY")
+    inner.add_attachment(b"%PDF", maintype="application", subtype="pdf", filename="inner.pdf")
+    outer = _envelope("fwd")
+    outer.set_content("<p>see below</p>", subtype="html")
+    outer.add_attachment(inner)
+    out = _parser.parse_message(outer.as_bytes())
+    # The inner message's text is not the outer message's body...
+    assert out["bodyText"] is None
+    # ...and its PDF is not listed as the outer's: one .eml, nothing else.
+    [att] = out["attachments"]
+    assert att["contentType"] == "message/rfc822"
+    assert att["filename"] == "forwarded.eml"
+    assert b"INNER BODY" in _b64.b64decode(att["data"])
+
+
+def test_named_inline_html_body_is_the_body_not_a_download():
+    m = _envelope("named body")
+    m.set_content("<p>hello</p>", subtype="html")
+    m.replace_header("Content-Type", 'text/html; charset="utf-8"; name="message.htm"')
+    out = _parser.parse_message(m.as_bytes())
+    assert "hello" in out["bodyHtml"]
+    assert out["attachments"] == []
