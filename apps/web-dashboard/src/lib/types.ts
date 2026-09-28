@@ -2197,6 +2197,9 @@ export interface MatterGrouped {
   covers: MatterDevice[];
   locks: MatterDevice[];
   other: MatterDevice[];
+  /** WARP-3276: set by the orchestrator when the Matter controller is down
+   *  (it answers 200 with empty groups rather than an error). */
+  _status?: "disconnected";
 }
 
 export interface MatterDiscoveredDevice {
