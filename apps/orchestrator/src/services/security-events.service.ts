@@ -459,6 +459,13 @@ export function buildSecurityHealth(input: {
    * Optional: omitted, the header is exactly P2b's.
    */
   patterns?: SecurityHealthRow;
+  /**
+   * WARP-3261 — true only for owners and admins. The down camera_ingest
+   * row's raw broker error (e.g. `connect ECONNREFUSED 172.18.0.9:1883`)
+   * names internal addresses; everyone else gets a fixed sentence. Omitted
+   * = false, so a new caller can't leak it by forgetting.
+   */
+  showRawErrors?: boolean;
   now: Date;
 }): SecurityHealthRow[] {
   const { ingest, now } = input;
@@ -471,7 +478,8 @@ export function buildSecurityHealth(input: {
     rows.push({
       id: "camera_ingest",
       state: "down",
-      detail: ingest.frigateSubscribeError ?? "Not listening to the camera system",
+      detail:
+        (input.showRawErrors ? ingest.frigateSubscribeError : null) ?? "Not listening to the camera system",
       lastSeenAt: iso(ingest.lastFrigateMessageAt),
     });
   } else {

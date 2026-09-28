@@ -20,10 +20,13 @@ type Editor = { mode: "create" } | { mode: "edit"; sceneId: string } | null;
 export function RoutinesSection({
   scenes,
   canAuthor = false,
+  canRun = true,
   onChanged,
 }: {
   scenes: Scene[];
   canAuthor?: boolean;
+  /** WARP-3276: false for an external guest — `/scenes/:id/run` admits owner/admin/member only. */
+  canRun?: boolean;
   onChanged?: () => void;
 }) {
   const [pending, setPending] = useState<Scene | null>(null);
@@ -149,6 +152,7 @@ export function RoutinesSection({
                   </button>
                 </>
               )}
+              {canRun && (
               <button
                 ref={pending?.id === scene.id ? triggerRef : undefined}
                 type="button"
@@ -164,6 +168,7 @@ export function RoutinesSection({
                 )}
                 Run
               </button>
+              )}
             </div>
           ))}
         </div>

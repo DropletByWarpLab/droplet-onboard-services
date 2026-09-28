@@ -200,26 +200,14 @@ function createTeamChatPrisma(seed: {
         const u = users.find((x) => x.id === args.where.id);
         return u ? { invitedById: u.invitedById ?? null } : null;
       }),
-      // resolveCaller's X-Droplet-User lookup (mcp service path).
-      findFirst: vi.fn(
-        async (args: {
-          where: { username: string; directoryStatus: string; role: { in: string[] } };
-        }) => {
-          const u = users.find(
-            (x) =>
-              x.username === args.where.username &&
-              x.directoryStatus === args.where.directoryStatus &&
-              args.where.role.in.includes(x.role),
-          );
-          return u ? { id: u.id, username: u.username, role: u.role } : null;
-        },
-      ),
       findMany: vi.fn(
         async (args: {
           where: {
             id?: { in?: string[]; not?: string };
             directoryStatus?: string;
             role?: { in: string[] };
+            // resolveAssertedUser (X-Droplet-User, the MCP service path).
+            OR?: Array<{ username?: string; nextcloudUsername?: string; id?: string }>;
           };
           select?: Record<string, true>;
         }) => {
@@ -227,6 +215,16 @@ function createTeamChatPrisma(seed: {
             const w = args.where;
             if (w.id?.in !== undefined && !w.id.in.includes(u.id)) return false;
             if (w.id?.not !== undefined && u.id === w.id.not) return false;
+            if (
+              w.OR !== undefined &&
+              !w.OR.some(
+                (o) =>
+                  (o.username !== undefined && o.username === u.username) ||
+                  (o.nextcloudUsername !== undefined && o.nextcloudUsername === u.username) ||
+                  (o.id !== undefined && o.id === u.id),
+              )
+            )
+              return false;
             if (
               w.directoryStatus !== undefined &&
               u.directoryStatus !== w.directoryStatus

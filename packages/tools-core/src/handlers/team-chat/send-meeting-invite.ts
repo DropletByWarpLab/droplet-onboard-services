@@ -19,9 +19,10 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
   actingHeaders,
   err,
-  pickParticipantIds,
+  previewRecipients,
   readRosterResponse,
   readThreadResponse,
+  resolveRecipients,
   truncateForPreview,
 } from "./_roster.js";
 
@@ -108,12 +109,9 @@ async function handler(
       `recipients must be 1-${MAX_RECIPIENTS} member usernames`,
     );
   }
-  const recipients = [...new Set(args.recipients.map((r) => r.trim()))].filter(
-    (r) => r !== ctx.userId,
-  );
-  if (recipients.length === 0) {
-    return err("INVALID_ARGS", "recipients must include someone other than yourself");
-  }
+  // The organizer is dropped against the roster's `me` (WARP-3196), never
+  // by comparing a username with ctx.userId: over HTTP that is a User.id.
+  let recipients = [...new Set(args.recipients.map((r) => r.trim()))];
 
   let durationMinutes: number | undefined;
   if (args.duration_minutes !== undefined) {
@@ -157,8 +155,10 @@ async function handler(
 
   // Confirmation gate — AFTER validation, BEFORE any WRITE (share_file).
   // The roster is read best-effort so the approval copy shows DISPLAY
-  // NAMES; the timestamp renders in the readable local form (UX review —
-  // raw ISO-UTC is machine copy). The ISO original stays in `details`.
+  // NAMES without the organizer, and a list that names only the organizer
+  // is refused here; the timestamp renders in the readable local form (UX
+  // review — raw ISO-UTC is machine copy). The ISO original stays in
+  // `details`.
   if (args.confirmed !== true) {
     let names = recipients;
     try {
@@ -168,13 +168,10 @@ async function handler(
       );
       const roster = await readRosterResponse(rosterRes);
       if (roster.ok) {
-        const byUsername = new Map(
-          roster.contacts.map((c) => [c.username, c] as const),
-        );
-        names = recipients.map((u) => {
-          const display = byUsername.get(u)?.displayName;
-          return display && display.length > 0 ? display : u;
-        });
+        const shown = previewRecipients(roster, recipients);
+        if (!shown.ok) return shown.result;
+        recipients = shown.usernames;
+        names = shown.names;
       }
     } catch {
       // Preview-only read — usernames are an honest fallback.
@@ -228,13 +225,15 @@ async function handler(
   });
   const roster = await readRosterResponse(rosterRes);
   if (!roster.ok) return roster.result;
-  const picked = pickParticipantIds(roster, recipients);
-  if (!picked.ok) return picked.result;
+  const resolved = resolveRecipients(roster, recipients);
+  if (!resolved.ok) return resolved.result;
+  // resolveRecipients only matches rows that carry a username.
+  recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
   const threadRes = await ctx.http.orchestrator.post(
     "/api/team-chat/threads",
     {
-      kind: picked.participantIds.length === 1 ? "direct" : "group",
-      participantIds: picked.participantIds,
+      kind: resolved.others.length === 1 ? "direct" : "group",
+      participantIds: resolved.others.map((c) => c.id),
     },
     { headers: actingHeaders(ctx) },
   );

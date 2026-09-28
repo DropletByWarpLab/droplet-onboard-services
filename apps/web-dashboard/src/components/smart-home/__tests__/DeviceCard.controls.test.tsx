@@ -171,3 +171,26 @@ describe("DeviceCard control widgets (WARP-897)", () => {
     expect(onCommand).toHaveBeenCalledWith("42", "stop_media");
   });
 });
+
+describe("DeviceCard switch intent + read-only (WARP-3276)", () => {
+  it("sends turn_off from an on light and turn_on from an off one, never toggle", () => {
+    const { rerender } = render(<DeviceCard device={device()} onCommand={onCommand} />);
+    fireEvent.click(screen.getByRole("switch"));
+    expect(onCommand).toHaveBeenLastCalledWith("42", "turn_off");
+
+    rerender(
+      <DeviceCard device={device({ state: "off", attributes: { onOff: false } })} onCommand={onCommand} />,
+    );
+    fireEvent.click(screen.getByRole("switch"));
+    expect(onCommand).toHaveBeenLastCalledWith("42", "turn_on");
+    expect(onCommand).not.toHaveBeenCalledWith("42", "toggle");
+  });
+
+  it("renders no controls without onCommand (external guest)", () => {
+    render(<DeviceCard device={device()} />);
+    expect(screen.getByText("Test device")).toBeInTheDocument();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("slider")).toBeNull();
+  });
+});

@@ -87,6 +87,11 @@ import {
   readSessionDeadline,
 } from "../services/session.service.js";
 import {
+  issueSessionTokens,
+  sessionTokenBody,
+  setSessionCookies,
+} from "../services/session-mint.js";
+import {
   storeNcToken,
   getNcToken,
   deleteNcToken,
@@ -578,7 +583,8 @@ function resolveToken(req: import("express").Request): string | null {
 // token cache key; the OCS auth path was already normalized in round 1
 // inside `src/middleware/auth.ts`):
 //
-//   1. POST /api/auth/login        — line ~275: signAccessToken({ id })
+//   1. POST /api/auth/login        — issueSessionTokens({ id })
+//                                    (services/session-mint.ts)
 //                                  — line ~267: storeNcToken(id, ...)
 //   2. POST /api/auth/refresh      — line ~447: signAccessToken({ id })
 //                                  — line ~452: touchNcToken(id, ...)
@@ -1290,51 +1296,31 @@ export function createPublicAuthRouter(
         );
       }
 
-      // WARP-247 — create the server-side session record FIRST so its sid
-      // rides inside both tokens. createSession enforces the concurrent-
-      // session cap (evicting + auditing the oldest) and starts the
-      // idle/absolute clocks for this login.
-      const { sid } = await createSession({ id: userId, role });
+      // WARP-247 — the shared mint creates the server-side session record
+      // FIRST so its sid rides inside both tokens (createSession enforces the
+      // concurrent-session cap and starts the idle/absolute clocks), then
+      // signs the pair and indexes the refresh token (WARP-116) so an admin
+      // "revoke now" reaches every live device session. The access token
+      // carries the MFA stamp (PR #375) when a second factor was just
+      // satisfied.
+      const minted = await issueSessionTokens(
+        {
+          id: userId,
+          username,
+          displayName,
+          role,
+          // WARP-1582 — snapshot the assigned custom role from the row we
+          // just authenticated against. `?? null` is the MEANINGFUL value
+          // ("no custom role"), not a defensive default: it is what lets the
+          // chat path skip a per-turn read for the role-less majority.
+          accessRoleId: localUser.accessRoleId ?? null,
+        },
+        { lastMfaAt: mfaStampIso },
+      );
 
-      // Issue JWT access + refresh tokens. The access token carries the
-      // MFA stamp (PR #375) when a second factor was just satisfied.
-      const accessToken = signAccessToken({
-        id: userId,
-        username,
-        displayName,
-        role,
-        lastMfaAt: mfaStampIso,
-        sid,
-        // WARP-1582 — snapshot the assigned custom role from the row we
-        // just authenticated against. `?? null` is the MEANINGFUL value
-        // ("no custom role"), not a defensive default: it is what lets the
-        // chat path skip a per-turn read for the role-less majority.
-        accessRoleId: localUser.accessRoleId ?? null,
-      });
-      const refreshToken = signRefreshToken({ id: userId, username, displayName, role, sid });
-      // WARP-116: index this refresh token so an admin "revoke now" (role
-      // change / disable) can denylist every live device session for the user.
-      await registerRefreshSession(userId, refreshToken);
-
-      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-
-      // Access token in session cookie
-      res.cookie(SESSION_COOKIE_NAME, accessToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/",
-        maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-      });
-
-      // Refresh token in separate cookie (scoped to /api/auth)
-      res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/api/auth",
-        maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-      });
+      // Access token in the session cookie, refresh token in its own cookie
+      // scoped to /api/auth.
+      setSessionCookies(req, res, minted);
 
       // WARP-456: successful sign-in audit row.
       await recordActivity({
@@ -1388,16 +1374,7 @@ export function createPublicAuthRouter(
         // screen. This is a UX convenience — the post-auth gate enforces it
         // server-side regardless of whether the client honours the redirect.
         user: { id: userId, username, displayName, role, mustChangePassword: localUser.mustChangePassword },
-        ...(wantBody
-          ? {
-              accessToken,
-              refreshToken,
-              accessTokenExpiresAt:
-                Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-              refreshTokenExpiresAt:
-                Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
-            }
-          : {}),
+        ...(wantBody ? sessionTokenBody(minted) : {}),
       });
 
       // WARP-1954 — the user just signed in; their next stop is usually

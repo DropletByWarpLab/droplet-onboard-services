@@ -11,8 +11,9 @@
  * `confirmation_required` (ZERO HTTP) previewing who gets what; only a
  * re-issue with `confirmed: true` — after the user explicitly approves —
  * dispatches. Identity: every orchestrator call carries X-Droplet-User =
- * ctx.userId (WARP-202 username), so the message is attributed to the
- * acting human and flows through the exact participant/module checks a
+ * ctx.userId (username on stdio, User.id over HTTP), so the message is
+ * attributed to the acting human and flows through the exact
+ * participant/module checks a
  * direct dashboard call gets (handlers/email/send.ts posture).
  */
 import { confirmationRequired } from "../../confirmation.js";
@@ -20,9 +21,10 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
   actingHeaders,
   err,
-  pickParticipantIds,
+  previewRecipients,
   readRosterResponse,
   readThreadResponse,
+  resolveRecipients,
   truncateForPreview,
 } from "./_roster.js";
 
@@ -98,15 +100,9 @@ async function handler(
         `recipients must be 1-${MAX_RECIPIENTS} member usernames`,
       );
     }
-    recipients = [...new Set(args.recipients.map((r) => r.trim()))].filter(
-      (r) => r !== ctx.userId,
-    );
-    if (recipients.length === 0) {
-      return err(
-        "INVALID_ARGS",
-        "recipients must include someone other than yourself",
-      );
-    }
+    // The sender is dropped against the roster's `me` (WARP-3196), never
+    // by comparing a username with ctx.userId: over HTTP that is a User.id.
+    recipients = [...new Set(args.recipients.map((r) => r.trim()))];
   }
 
   const threadIdArg =
@@ -120,7 +116,8 @@ async function handler(
   // Confirmation gate — AFTER validation (a malformed call should fail
   // loudly, not ask the user to approve it) and BEFORE any WRITE. The
   // roster is read best-effort so the approval copy shows DISPLAY NAMES
-  // ("Bob B", not "bob" — UX review); any roster hiccup falls back to
+  // ("Bob B", not "bob" — UX review) without the sender, and a list that
+  // names only the sender is refused here; any roster hiccup falls back to
   // the typed usernames, and phase 2 still validates them loudly.
   if (args.confirmed !== true) {
     let names = recipients;
@@ -132,13 +129,10 @@ async function handler(
         );
         const roster = await readRosterResponse(rosterRes);
         if (roster.ok) {
-          const byUsername = new Map(
-            roster.contacts.map((c) => [c.username, c] as const),
-          );
-          names = recipients.map((u) => {
-            const display = byUsername.get(u)?.displayName;
-            return display && display.length > 0 ? display : u;
-          });
+          const shown = previewRecipients(roster, recipients);
+          if (!shown.ok) return shown.result;
+          recipients = shown.usernames;
+          names = shown.names;
         }
       } catch {
         // Preview-only read — usernames are an honest fallback.
@@ -167,13 +161,15 @@ async function handler(
     });
     const roster = await readRosterResponse(rosterRes);
     if (!roster.ok) return roster.result;
-    const picked = pickParticipantIds(roster, recipients);
-    if (!picked.ok) return picked.result;
+    const resolved = resolveRecipients(roster, recipients);
+    if (!resolved.ok) return resolved.result;
+    // resolveRecipients only matches rows that carry a username.
+    recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
     const threadRes = await ctx.http.orchestrator.post(
       "/api/team-chat/threads",
       {
-        kind: picked.participantIds.length === 1 ? "direct" : "group",
-        participantIds: picked.participantIds,
+        kind: resolved.others.length === 1 ? "direct" : "group",
+        participantIds: resolved.others.map((c) => c.id),
       },
       { headers: actingHeaders(ctx) },
     );
