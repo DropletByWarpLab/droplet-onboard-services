@@ -1056,3 +1056,83 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
     expect(advertised.has("list_network_devices")).toBe(false);
   });
 });
+
+describe("WARP-3280 — contacts and the calculator are reachable from a fresh turn", () => {
+  const CONTACTS_POOL = [...POOL, "search_contacts", "email_search"];
+  const DATA_POOL = [...POOL, "calculate", "get_weather"];
+
+  const advertisedFor = (userMessage: string, pool: string[]) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames: [],
+    }).advertised;
+
+  // The ticket's own four sentences matched NO domain (or, for the second,
+  // not `email`), so the model answered "no contact found" without ever
+  // having search_contacts. MUTATION: drop `contacts?`/`address book`/the
+  // bare-address alternative from the email rule and these go red.
+  describe("contacts — positives", () => {
+    it.each([
+      "Look up the contact alice@example.com.",
+      "Look up charlie@example.com and open the work item from their contact note.",
+      "what's the plumber's number in my contacts?",
+      "is Dana Whitfield in the address book?",
+      "who is bob.smith+work@acme-corp.co.uk?",
+      "find Maria Lopez's contact info",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
+    });
+  });
+
+  // `contact` as a VERB ("contact me later", "who should I contact about the
+  // boiler") is knowingly admitted: reaching a person is what the email
+  // domain's tools do, and the whole domain is six schemas. What is NOT
+  // admitted is the eyewear and card-payment senses, which want nothing
+  // from an inbox.
+  describe("contacts — negatives", () => {
+    it.each([
+      "I need to reorder my contact lenses",
+      "does the shop take contactless payments?",
+      // An `@` that is not an address: a handle and a time.
+      "follow us @dropletbox",
+      "meet me @ 5",
+    ])("%s does not advertise search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).not.toContain("search_contacts");
+    });
+  });
+
+  // MUTATION: narrow `calculat\w*` back to `calculate`, or drop the
+  // arithmetic-expression alternative, and the matching positive goes red.
+  describe("calculator — positives", () => {
+    it.each([
+      "What is 187 * 43?",
+      "Use the calculator to work out 2+2.",
+      "can you do the math on 1250 × 12 for the annual rent?",
+      "what's 84 / 7",
+      "quick calculation: 15% of 240",
+      "what's 3 x 4.5",
+      "how much is 2^10",
+      "check my arithmetic, 17 - 9 is 8 right?",
+    ])("%s advertises calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).toContain("calculate");
+    });
+  });
+
+  // `-`, `/` and `x` are expressions only with spaces around them; tight,
+  // they are dates, phone numbers, resolutions and part numbers. Bare `sum`
+  // is not claimed ("sum up the thread" is a summary). These sentences carry
+  // no other data word, so they must stay off the domain.
+  describe("calculator — negatives", () => {
+    it.each([
+      "call the landlord on 555-0142",
+      "the 9/11 memorial photo",
+      "is the monitor 1920x1080?",
+      "sum up the thread with Karen",
+      "C++ developer resume",
+    ])("%s does not advertise calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).not.toContain("calculate");
+    });
+  });
+});
