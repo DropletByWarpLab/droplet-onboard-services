@@ -78,10 +78,6 @@ type AuthedRequest = {
   user?: { id?: string; username?: string; role?: string };
 };
 
-/** WARP-3263 — how long before a User row its own invite's acceptedAt may
- *  be (the accept route claims the invite, then provisions, then upserts). */
-const INVITE_ACCEPT_SLACK_MS = 10 * 60_000;
-
 /** The four human tiers — service principals never message. */
 const HUMAN_ROLES = ["owner", "admin", "family", "guest"] as const;
 
@@ -376,63 +372,48 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
    * only the people they already share a conversation with, plus the person
    * who invited them — names only (no username, no role).
    *
-   * The inviter is the `createdBy` USERNAME on the guest's accepted
-   * UserInvite (auth.ts mints the User with the invite's username).
+   * The inviter is `User.invitedById`, an explicit id stamped at invite
+   * accept (or by the admin who created the account). It is never inferred
+   * from usernames or timestamps, and it is SetNull when that person is
+   * deleted, so a new hire who reuses their username is never listed.
+   * Accounts with no recorded inviter (SSO/SCIM, pre-column rows) see only
+   * their conversations' people, which fails closed.
    */
   async function guestContacts(
     me: Caller,
   ): Promise<Array<{ id: string; displayName: string }>> {
-    const myThreads = await prisma.teamChatParticipant.findMany({
-      where: { userId: me.id },
-      select: { threadId: true },
-    });
-    const shared =
-      myThreads.length === 0
-        ? []
-        : await prisma.teamChatParticipant.findMany({
-            where: {
-              threadId: { in: myThreads.map((p) => p.threadId) },
-              userId: { not: me.id },
-            },
-            select: { userId: true },
-          });
-    // UserInvite.username is NOT unique: a guest who reuses a deleted
-    // person's username must not inherit that person's inviter. Only an
-    // invite accepted around or after THIS row's creation counts. Not a
-    // strict `>= createdAt`: auth.ts claims the invite (stamps acceptedAt)
-    // BEFORE the Nextcloud provisioning call and the User upsert, so the
-    // guest's own invite is accepted a few seconds before its row exists.
-    // ponytail: fixed 10-minute slack; a stored inviteId on User if an
-    // exact link is ever needed.
-    const self = await prisma.user.findUnique({
-      where: { id: me.id },
-      select: { createdAt: true },
-    });
-    const invite = self
-      ? await prisma.userInvite.findFirst({
-          where: {
-            username: me.username,
-            status: "accepted",
-            acceptedAt: { gte: new Date(self.createdAt.getTime() - INVITE_ACCEPT_SLACK_MS) },
-          },
-          orderBy: { acceptedAt: "desc" },
-          select: { createdBy: true },
-        })
-      : null;
-    const rows = await prisma.user.findMany({
+    const [self, shared] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: me.id },
+        select: { invitedById: true },
+      }),
+      // TeamChatParticipant.userId has no User relation, so this stays two
+      // participant reads rather than one relation filter.
+      prisma.teamChatParticipant
+        .findMany({ where: { userId: me.id }, select: { threadId: true } })
+        .then((mine) =>
+          mine.length === 0
+            ? []
+            : prisma.teamChatParticipant.findMany({
+                where: {
+                  threadId: { in: mine.map((p) => p.threadId) },
+                  userId: { not: me.id },
+                },
+                select: { userId: true },
+              }),
+        ),
+    ]);
+    const ids = new Set(shared.map((p) => p.userId));
+    if (self?.invitedById) ids.add(self.invitedById);
+    return prisma.user.findMany({
       where: {
         directoryStatus: "ACTIVE",
         role: { in: [...HUMAN_ROLES] },
-        id: { not: me.id },
-        OR: [
-          { id: { in: [...new Set(shared.map((p) => p.userId))] } },
-          ...(invite ? [{ username: invite.createdBy }] : []),
-        ],
+        id: { in: [...ids], not: me.id },
       },
       select: { id: true, displayName: true },
       orderBy: { displayName: "asc" },
     });
-    return rows;
   }
 
   // ── Roster ──────────────────────────────────────────────────────
@@ -451,8 +432,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
+      // `canStartConversation` states the POST /team-chat/threads rule
+      // explicitly, so a client (the LLM send tools) never has to infer
+      // "guest" from a roster that lacks usernames.
       if (me.role === "guest") {
-        res.json({ contacts: await guestContacts(me) });
+        res.json({ contacts: await guestContacts(me), canStartConversation: false });
         return;
       }
       const contacts = await prisma.user.findMany({
@@ -463,7 +447,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         select: contactSelect,
         orderBy: { displayName: "asc" },
       });
-      res.json({ contacts });
+      res.json({ contacts, canStartConversation: true });
     } catch (err) {
       next(err);
     }

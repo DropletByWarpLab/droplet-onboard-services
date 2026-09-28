@@ -90,8 +90,8 @@ interface UserRow {
   displayName: string;
   role: string;
   directoryStatus: "ACTIVE" | "DEACTIVATED";
-  /** WARP-3263 — anchors the guest's own invite; defaults to 2026-08-01. */
-  createdAt?: Date;
+  /** WARP-3263 — User.invitedById, the explicit inviter link. */
+  invitedById?: string | null;
 }
 interface ThreadRow {
   id: string;
@@ -146,7 +146,6 @@ interface ChatMessageRow {
   createdAt: Date;
 }
 
-const USER_CREATED_AT = new Date("2026-08-01T00:00:00Z");
 
 let seq = 0;
 const nextId = (prefix: string) => `${prefix}-${++seq}`;
@@ -159,7 +158,6 @@ function createTeamChatPrisma(seed: {
   sessions?: SessionRow[];
   chatMessages?: ChatMessageRow[];
   departments?: DepartmentRow[];
-  invites?: Array<{ username: string; status: string; createdBy: string; acceptedAt?: Date }>;
 }) {
   const users = [...(seed.users ?? [])];
   const threads = [...(seed.threads ?? [])];
@@ -200,7 +198,7 @@ function createTeamChatPrisma(seed: {
     user: {
       findUnique: vi.fn(async (args: { where: { id: string } }) => {
         const u = users.find((x) => x.id === args.where.id);
-        return u ? { createdAt: u.createdAt ?? USER_CREATED_AT } : null;
+        return u ? { invitedById: u.invitedById ?? null } : null;
       }),
       // resolveCaller's X-Droplet-User lookup (mcp service path).
       findFirst: vi.fn(
@@ -222,8 +220,6 @@ function createTeamChatPrisma(seed: {
             id?: { in?: string[]; not?: string };
             directoryStatus?: string;
             role?: { in: string[] };
-            // WARP-3263 guest roster: shared-thread ids OR the inviter.
-            OR?: Array<{ id?: { in: string[] }; username?: string }>;
           };
           select?: Record<string, true>;
         }) => {
@@ -231,15 +227,6 @@ function createTeamChatPrisma(seed: {
             const w = args.where;
             if (w.id?.in !== undefined && !w.id.in.includes(u.id)) return false;
             if (w.id?.not !== undefined && u.id === w.id.not) return false;
-            if (
-              w.OR !== undefined &&
-              !w.OR.some(
-                (o) =>
-                  (o.id?.in !== undefined && o.id.in.includes(u.id)) ||
-                  (o.username !== undefined && o.username === u.username),
-              )
-            )
-              return false;
             if (
               w.directoryStatus !== undefined &&
               u.directoryStatus !== w.directoryStatus
@@ -457,24 +444,6 @@ function createTeamChatPrisma(seed: {
         },
       ),
     },
-    // WARP-3263 — the guest's accepted invite names who invited them.
-    // Honors the acceptedAt floor and newest-first like the real query.
-    userInvite: {
-      findFirst: vi.fn(
-        async (args: {
-          where: { username: string; status: string; acceptedAt?: { gte: Date } };
-        }) =>
-          (seed.invites ?? [])
-            .map((i) => ({ ...i, acceptedAt: i.acceptedAt ?? USER_CREATED_AT }))
-            .filter(
-              (i) =>
-                i.username === args.where.username &&
-                i.status === args.where.status &&
-                (!args.where.acceptedAt || i.acceptedAt >= args.where.acceptedAt.gte),
-            )
-            .sort((a, b) => b.acceptedAt.getTime() - a.acceptedAt.getTime())[0] ?? null,
-      ),
-    },
     chatSession: {
       findUnique: vi.fn(
         async (args: { where: { id: string } }) =>
@@ -656,13 +625,14 @@ describe("team-chat — external guests (WARP-3263)", () => {
   it("a guest's directory is shared-conversation people + the inviter, names only", async () => {
     const t = seedThread({ id: "thread-bc" });
     const prisma = createTeamChatPrisma({
-      users: [alice, bob, carol, owner, deactivated, service],
+      users: [alice, bob, { ...carol, invitedById: alice.id }, owner, deactivated, service],
       threads: [t],
       participants: [seedParticipant(t.id, bob.id), seedParticipant(t.id, carol.id)],
-      invites: [{ username: carol.username, status: "accepted", createdBy: alice.username }],
     });
     const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
     expect(res.status).toBe(200);
+    // The start-a-conversation rule is stated, not left to inference.
+    expect(res.body.canStartConversation).toBe(false);
     // bob (shared thread) + alice (inviter); never the owner, never self.
     expect(res.body.contacts).toEqual([
       { id: alice.id, displayName: alice.displayName },
@@ -670,40 +640,16 @@ describe("team-chat — external guests (WARP-3263)", () => {
     ]);
   });
 
-  it("a reused username never inherits a deleted person's old inviter", async () => {
-    // An old "carol" was invited by bob and accepted in March; today's carol
-    // (a different person, created 2026-08-01, not via an invite) must not
-    // see bob as her inviter.
+  it("a deleted inviter's reused username is never listed (the link is an id, not a username)", async () => {
+    // carol was invited by an old "sam" who has since been deleted; a new
+    // hire now holds the username "sam". The stale id resolves to nobody.
+    const newSam: UserRow = { ...bob, id: "uuid-new-sam", username: "sam", displayName: "Sam New" };
     const prisma = createTeamChatPrisma({
-      users: [alice, bob, carol],
-      invites: [
-        {
-          username: carol.username,
-          status: "accepted",
-          createdBy: bob.username,
-          acceptedAt: new Date("2026-03-01T00:00:00Z"),
-        },
-      ],
+      users: [alice, newSam, { ...carol, invitedById: "uuid-old-sam" }],
     });
     const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
     expect(res.status).toBe(200);
     expect(res.body.contacts).toEqual([]);
-  });
-
-  it("the guest's own invite counts even though it was accepted seconds before the row existed", async () => {
-    const prisma = createTeamChatPrisma({
-      users: [alice, carol],
-      invites: [
-        {
-          username: carol.username,
-          status: "accepted",
-          createdBy: alice.username,
-          acceptedAt: new Date(USER_CREATED_AT.getTime() - 3_000),
-        },
-      ],
-    });
-    const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
-    expect(res.body.contacts).toEqual([{ id: alice.id, displayName: alice.displayName }]);
   });
 
   it("a guest acting through the MCP service (X-Droplet-User) gets the guest directory only", async () => {
@@ -728,7 +674,7 @@ describe("team-chat — external guests (WARP-3263)", () => {
     expect(post.status).toBe(403);
   });
 
-  it("a guest with no conversations and no invite row sees nobody", async () => {
+  it("a guest with no conversations and no recorded inviter sees nobody", async () => {
     const prisma = createTeamChatPrisma({ users: [alice, bob, carol, owner] });
     const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
     expect(res.status).toBe(200);
@@ -737,8 +683,7 @@ describe("team-chat — external guests (WARP-3263)", () => {
 
   it("a deactivated inviter is not listed", async () => {
     const prisma = createTeamChatPrisma({
-      users: [carol, deactivated],
-      invites: [{ username: carol.username, status: "accepted", createdBy: deactivated.username }],
+      users: [{ ...carol, invitedById: deactivated.id }, deactivated],
     });
     const res = await request(buildApp(prisma, asCarol)).get("/api/team-chat/contacts");
     expect(res.body.contacts).toEqual([]);
@@ -751,6 +696,7 @@ describe("team-chat — external guests (WARP-3263)", () => {
         buildApp(prisma, { id: owner.id, username: owner.username, role }),
       ).get("/api/team-chat/contacts");
       expect(res.body.contacts).toHaveLength(4);
+      expect(res.body.canStartConversation).toBe(true);
       expect(res.body.contacts[0]).toHaveProperty("role");
       expect(res.body.contacts[0]).toHaveProperty("username");
     }
@@ -758,8 +704,7 @@ describe("team-chat — external guests (WARP-3263)", () => {
 
   it("a guest can't start a conversation — direct or group, even with their inviter", async () => {
     const prisma = createTeamChatPrisma({
-      users: [alice, bob, carol],
-      invites: [{ username: carol.username, status: "accepted", createdBy: alice.username }],
+      users: [alice, bob, { ...carol, invitedById: alice.id }],
     });
     const app = buildApp(prisma, asCarol);
     for (const body of [
@@ -771,6 +716,20 @@ describe("team-chat — external guests (WARP-3263)", () => {
       expect(res.body.error).toBe("guest_cannot_start_conversation");
     }
     expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
+  });
+
+  it("a guest can still reply in a conversation they're in", async () => {
+    const t = seedThread({ id: "thread-bc" });
+    const prisma = createTeamChatPrisma({
+      users: [bob, carol],
+      threads: [t],
+      participants: [seedParticipant(t.id, bob.id), seedParticipant(t.id, carol.id)],
+    });
+    const res = await request(buildApp(prisma, asCarol))
+      .post(`/api/team-chat/threads/${t.id}/messages`)
+      .send({ kind: "text", body: "thanks, got it" });
+    expect(res.status).toBe(201);
+    expect(res.body.message.body).toBe("thanks, got it");
   });
 
   it("owners, admins and members can start a conversation with a guest", async () => {

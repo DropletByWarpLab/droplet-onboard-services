@@ -228,7 +228,7 @@ async function handler(
   });
   const roster = await readRosterResponse(rosterRes);
   if (!roster.ok) return roster.result;
-  const picked = pickParticipantIds(roster.contacts, recipients);
+  const picked = pickParticipantIds(roster, recipients);
   if (!picked.ok) return picked.result;
   const threadRes = await ctx.http.orchestrator.post(
     "/api/team-chat/threads",

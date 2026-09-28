@@ -43,16 +43,20 @@ export interface TeamChatHttpResponse {
 const UNAVAILABLE_MESSAGE =
   "Messages is unavailable — the Messages module may be turned off in Settings → Modules.";
 
-/** The roster row shape GET /api/team-chat/contacts serves. */
+/** The roster row shape GET /api/team-chat/contacts serves. `username` is
+ *  absent for an external guest caller, who gets names only (WARP-3263). */
 export interface RosterContact {
   id: string;
   displayName: string;
-  username: string;
+  username?: string;
 }
 
 export type RosterRead =
-  | { ok: true; contacts: RosterContact[] }
+  | { ok: true; contacts: RosterContact[]; canStartConversation: boolean }
   | { ok: false; result: ToolResult };
+
+const GUEST_CANNOT_START_MESSAGE =
+  "External guests can't start a conversation. They can only reply in one a member started (pass its thread_id).";
 
 /** Map the roster response. A 404 is the team_chat module gate. */
 export async function readRosterResponse(
@@ -72,8 +76,13 @@ export async function readRosterResponse(
   }
   const body = (await res.json().catch(() => null)) as {
     contacts?: RosterContact[];
+    canStartConversation?: boolean;
   } | null;
-  return { ok: true, contacts: body?.contacts ?? [] };
+  return {
+    ok: true,
+    contacts: body?.contacts ?? [],
+    canStartConversation: body?.canStartConversation !== false,
+  };
 }
 
 export type RecipientResolution =
@@ -86,10 +95,18 @@ export type RecipientResolution =
  * has already deduped and dropped the acting user from `usernames`.
  */
 export function pickParticipantIds(
-  contacts: RosterContact[],
+  roster: { contacts: RosterContact[]; canStartConversation: boolean },
   usernames: string[],
 ): RecipientResolution {
-  const byUsername = new Map(contacts.map((c) => [c.username, c] as const));
+  if (!roster.canStartConversation) {
+    return {
+      ok: false,
+      result: err("GUEST_CANNOT_START_CONVERSATION", GUEST_CANNOT_START_MESSAGE),
+    };
+  }
+  const byUsername = new Map(
+    roster.contacts.flatMap((c) => (c.username ? [[c.username, c] as const] : [])),
+  );
   const missing = usernames.filter((u) => !byUsername.has(u));
   if (missing.length > 0) {
     return {
@@ -131,6 +148,15 @@ export async function readThreadResponse(
       ok: false,
       result: err("INVALID_ARGS", body?.error ?? "invalid thread request"),
     };
+  }
+  if (res.status === 403) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    if (body?.error === "guest_cannot_start_conversation") {
+      return {
+        ok: false,
+        result: err("GUEST_CANNOT_START_CONVERSATION", GUEST_CANNOT_START_MESSAGE),
+      };
+    }
   }
   if (!res.ok) {
     return {

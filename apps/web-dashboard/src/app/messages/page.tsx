@@ -119,12 +119,16 @@ export default function MessagesPage() {
         </div>
       </div>
 
-      <NewThreadDialog
-        open={composeOpen}
-        onClose={() => setComposeOpen(false)}
-        meId={user?.id ?? ""}
-        onCreated={handleCreated}
-      />
+      {/* WARP-3263 — a guest can't start a conversation, so don't mount the
+          dialog (it reads GET /team-chat/contacts on mount). */}
+      {!isGuest && (
+        <NewThreadDialog
+          open={composeOpen}
+          onClose={() => setComposeOpen(false)}
+          meId={user?.id ?? ""}
+          onCreated={handleCreated}
+        />
+      )}
     </ShellPage>
   );
 }
