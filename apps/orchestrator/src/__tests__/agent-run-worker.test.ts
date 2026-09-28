@@ -36,7 +36,7 @@ vi.mock("../config.js", () => ({
       heartbeatMs: 15_000,
       reclaimAfterMs: 60_000,
       maxAttempts: 3,
-      maxWallMs: 2_400_000, maxIter: 10,
+      maxWallMs: 2_400_000, maxIter: 10, maxPreemptions: 3,
     },
   },
 }));
@@ -372,7 +372,7 @@ describe("agent-run worker — checkpoint, crash, resume (WARP-2177)", () => {
     });
     // Concurrency 0 capacity: fill the slot so the tick only reclaims.
     const { worker } = makeWorker(db, { now: () => clock, limits: {
-      concurrency: 0, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10,
+      concurrency: 0, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10, maxPreemptions: 3,
     } });
     expect(await worker.tickOnce()).toEqual({ reclaimed: 1, failed: 0, claimed: 0 });
     expect(db.row(id)).toMatchObject({ status: "queued", attempts: 2, claimedBy: null, heartbeatAt: null });
@@ -582,7 +582,7 @@ function stallingModel() {
 }
 
 const LIMITS_2 = {
-  concurrency: 2, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10,
+  concurrency: 2, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10, maxPreemptions: 3,
 };
 
 describe("agent-run worker — a lease is (worker, claimedAt), not the worker id (WARP-2744 item 1)", () => {
@@ -660,7 +660,8 @@ describe("agent-run worker — inference priority and yielding to chat (WARP-274
     expect(chat).toHaveBeenCalledTimes(3);
     for (const call of chat.mock.calls as unknown as Array<[unknown, unknown, unknown, unknown]>) {
       expect(call[2]).toBeUndefined(); // no userId is ever asserted by the worker
-      expect(call[3]).toEqual({ priority: 10 });
+      // WARP-3306 — and preemptible: chat may cut a run's call short.
+      expect(call[3]).toEqual({ priority: 10, preemptible: true });
     }
   });
 
@@ -699,5 +700,90 @@ describe("agent-run worker — inference priority and yielding to chat (WARP-274
     await settle(worker);
     expect(db.row(id)).toMatchObject({ status: "succeeded", attempts: 0, result: "Notified you at noon." });
     expect(chat).toHaveBeenCalledTimes(4);
+  });
+
+  // ── WARP-3306 — chat cuts a run's in-flight model call ──────────────────
+  const preemptedByChat = () => Object.assign(new Error("AI Gateway preempted_for_chat"), { code: "preempted_for_chat" });
+
+  it("a preemption re-queues the run at its checkpoint 5 s later, waiting for chat, no attempt charged", async () => {
+    let clock = new Date("2026-09-28T12:00:00Z");
+    const now = () => clock;
+    const db = createAgentRunPrismaMock({ users: [OWNER], now });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
+    let calls = 0;
+    const chat = vi.fn(async (req: { messages: Array<{ role: string }> }) => {
+      calls += 1;
+      // Chat arrives during the SECOND model call: iteration 0's tool ran.
+      if (calls === 2) throw preemptedByChat();
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: threeStep(req.messages.filter((m) => m.role === "tool").length) }],
+        }),
+      };
+    }) as unknown as ReturnType<typeof scriptedModel>;
+    const { worker, callTool } = makeWorker(db, { now, chat });
+    await worker.tickOnce();
+    await settle(worker);
+    expect(db.row(id)).toMatchObject({ status: "queued", queueWait: "chat", attempts: 0, claimedBy: null, iteration: 1, error: null });
+    expect((db.row(id).runAfter as Date).getTime()).toBe(clock.getTime() + 5_000);
+    expect(callTool).toHaveBeenCalledTimes(1);
+
+    clock = new Date(clock.getTime() + 5_001);
+    expect((await worker.tickOnce()).claimed).toBe(1);
+    await settle(worker);
+    // The cut call is redone from the checkpoint; the finished tool is not.
+    expect(db.row(id)).toMatchObject({ status: "succeeded", attempts: 0, result: "Notified you at noon." });
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(chat).toHaveBeenCalledTimes(4);
+  });
+
+  it("starvation guard: after 3 preemptions without progress the next claim is not preemptible, so the run finishes", async () => {
+    let clock = new Date("2026-09-28T12:00:00Z");
+    const now = () => clock;
+    const db = createAgentRunPrismaMock({ users: [OWNER], now });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
+    // Chat never lets up: every preemptible call is cut.
+    const chat = vi.fn(async (req: { messages: Array<{ role: string }> }, _s: unknown, _u: unknown, opts?: { preemptible?: boolean }) => {
+      if (opts?.preemptible) throw preemptedByChat();
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: threeStep(req.messages.filter((m) => m.role === "tool").length) }],
+        }),
+      };
+    }) as unknown as ReturnType<typeof scriptedModel>;
+    const { worker } = makeWorker(db, { now, chat });
+    for (let claim = 1; claim <= 3; claim += 1) {
+      expect((await worker.tickOnce()).claimed).toBe(1);
+      await settle(worker);
+      expect(db.row(id)).toMatchObject({ status: "queued", queueWait: "chat", attempts: 0 });
+      clock = new Date(clock.getTime() + 5_001);
+    }
+    expect((await worker.tickOnce()).claimed).toBe(1);
+    await settle(worker);
+    expect(db.row(id)).toMatchObject({ status: "succeeded", attempts: 0 });
+    const opts = (chat.mock.calls as unknown as Array<[unknown, unknown, unknown, { preemptible?: boolean }]>).map((c) => c[3].preemptible ?? false);
+    expect(opts).toEqual([true, true, true, false, false, false]);
+  });
+
+  it("AGENT_RUN_MAX_PREEMPTIONS=0 never sends the opt-in", async () => {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
+    const chat = scriptedModel(threeStep);
+    const m = fakeMcp();
+    const worker = createAgentRunWorker({
+      prisma: db.prisma,
+      agent: { mcp: m.mcp, aiGateway: { chat } as never },
+      workerId: "worker-A",
+      resolveAccess: ownerAccess as never,
+      toolSelectionMode: "off",
+      maxPreemptions: 0,
+    });
+    await worker.tickOnce();
+    await settle(worker);
+    for (const call of chat.mock.calls as unknown as Array<[unknown, unknown, unknown, unknown]>) {
+      expect(call[3]).toEqual({ priority: 10 });
+    }
   });
 });

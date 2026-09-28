@@ -139,6 +139,21 @@ still stands, so a run that keeps yielding ends on its wall clock with that
 reason. A run's iteration cap is `AGENT_RUN_MAX_ITER` (30), its own, carried
 into the loop as `AgentDeps.maxIterCap`; the chat cap is untouched.
 
+**Preempted for chat (WARP-3306).** Priority alone only orders the queue: a
+run's model call already holding the single slot kept it until it finished,
+and chat's first token waited 20–38 s behind it (bench box, 2026-09-28; ~0.5 s
+idle). So a run's calls also carry `X-Preemptible: 1`. A chat request that
+finds the slot held by one makes the gateway cut that call — 409
+`preempted_for_chat` before the stream starts, a final `preempted_for_chat`
+error frame after — and the worker re-queues the run at the same checkpoint
+with `queueWait=chat`, `runAfter` 5 s out, no attempt charged. Preemption only
+ever lands on a model call (the gateway holds the slot for inference, never
+for a tool), so the checkpoint at the top of the iteration replays exactly the
+cut call. Starvation guard: after `AGENT_RUN_MAX_PREEMPTIONS` (3) preemptions
+in a row with no finished iteration between them, the next claim is sent
+without the header and runs to its next stop. Only the run worker opts in;
+brain passes and any other background caller are never cut.
+
 **Heartbeat and reclaim.** The heartbeat is timer-driven (`AGENT_RUN_HEARTBEAT_MS`,
 15 s) and independent of iteration length, so a run parked in a slow model
 call still holds its lease. That is what lets the reclaim threshold be derived
@@ -213,6 +228,7 @@ resume needs both.
 | `AGENT_RUN_HEARTBEAT_MS` | 15000 | lease heartbeat |
 | `AGENT_RUN_RECLAIM_AFTER_MS` | 60000 | stale-lease threshold (≥ 2 × heartbeat, clamped) |
 | `AGENT_RUN_MAX_ITER` | 30 | a run's iteration cap, separate from the chat cap |
+| `AGENT_RUN_MAX_PREEMPTIONS` | 3 | WARP-3306: consecutive chat preemptions without a finished iteration before a claim runs unpreemptible; 0 = never preempt |
 | `AGENT_RUN_MAX_ATTEMPTS` | 3 | reclaims before a run is failed |
 | `AGENT_RUN_MAX_WALL_MS` | 2400000 | wall-clock ceiling (40 min) |
 
@@ -442,9 +458,9 @@ Best-effort (QoS 0): a client that missed one re-reads `GET
 (`runAfter`, then `createdAt`), with running runs counted ahead: 1 = next.
 `waitingFor` is `none` for any run not queued; a queued run's reason is the
 explicit `queueWait` column — `queue`, or `chat` when it yielded the slot on a
-gateway 429. A run whose in-flight model call is waiting behind chat inside
-the gateway still reads `running`/`none`: the worker cannot observe that wait
-today (WARP-3306 measures it). Module: `agent-run-events.service.ts`.
+gateway 429 or was preempted for chat (WARP-3306). A run whose model call is
+still queued inside the gateway behind a chat call reads `running`/`none`: the
+worker cannot observe that short wait. Module: `agent-run-events.service.ts`.
 
 **Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056; since
 WARP-2974 the run is a transcript in the Workshop space). It is the last
