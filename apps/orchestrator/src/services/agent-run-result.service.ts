@@ -23,9 +23,20 @@
  * on it).
  */
 import type { Prisma, PrismaClient } from "@prisma/client";
-import type { AgentRunTraceEntry } from "./agent-run-worker.service.js";
 import { ChatPersistenceService } from "./chat-persistence.service.js";
 import { publish as mqttPublish } from "./mqtt.service.js";
+
+// The fields of the worker's `AgentRunTraceEntry` this module reads. Declared
+// here, not imported: the worker imports this module, and the import-cycle
+// gate (WARP-3193) counts type-only imports too.
+type TraceEntry = {
+  tool: string;
+  args?: Record<string, unknown>;
+  text?: string;
+  isError?: boolean;
+  unknownOutcome?: boolean;
+  confirmation?: string;
+};
 
 /** Matches `AgentRun.summary @db.VarChar(2000)`. */
 export const SUMMARY_MAX_CHARS = 2000;
@@ -95,7 +106,7 @@ export function runArtifacts(trace: unknown): AgentRunArtifact[] {
   if (!Array.isArray(trace)) return [];
   const seen = new Set<string>();
   const out: AgentRunArtifact[] = [];
-  for (const e of trace as AgentRunTraceEntry[]) {
+  for (const e of trace as TraceEntry[]) {
     const arg = ARTIFACT_PATH_ARG[e.tool];
     if (!arg || e.text === undefined || e.isError || e.unknownOutcome) continue;
     if (e.confirmation === "parked" || e.confirmation === "denied") continue;
@@ -132,7 +143,7 @@ type FinishedRun = {
 export function runSummary(run: FinishedRun): string {
   if (run.status === "succeeded" && run.result?.trim()) return boundSummary(run.result);
   const steps = Array.isArray(run.trace)
-    ? (run.trace as AgentRunTraceEntry[]).filter((e) => e.text !== undefined && !e.isError).length
+    ? (run.trace as TraceEntry[]).filter((e) => e.text !== undefined && !e.isError).length
     : 0;
   const why =
     run.status === "cancelled"
