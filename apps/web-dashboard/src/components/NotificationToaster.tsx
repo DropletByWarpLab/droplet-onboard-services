@@ -37,6 +37,7 @@ import { useToast, type ToastAction } from "./Toast";
 import { useAuth } from "@/lib/auth";
 import { ackNotification } from "@/lib/api";
 import { isSecurityWallPath } from "@/lib/routing";
+import { refreshNotificationInbox } from "@/lib/hooks/useNotificationInbox";
 
 interface IncomingNotification {
   kind?: "reminder" | "event" | "system" | "ai";
@@ -166,6 +167,8 @@ export function NotificationToaster() {
           return;
         }
         if (!data.topic || !data.topic.startsWith("droplet/notifications/")) return;
+        // WARP-3307 — the inbox bell and list follow this same topic.
+        refreshNotificationInbox();
         const payload = data.payload ?? {};
         const title = payload.title ?? kindFallbackTitle(payload.kind);
         // The old shape did `${title} — ${body}` even when title was the
