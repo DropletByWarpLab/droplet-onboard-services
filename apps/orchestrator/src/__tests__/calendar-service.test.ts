@@ -23,6 +23,7 @@ import {
   deleteEvent,
   createSource,
   syncSource,
+  allDayDates,
 } from "../services/calendar.service.js";
 
 function makePrismaStub() {
@@ -398,5 +399,24 @@ describe("syncSource", () => {
     const r = await syncSource(prisma, src.id);
     expect(r.error).toBe("HTTP 503 Service Unavailable");
     expect((prisma as any)._sources[0].lastSyncError).toBe("HTTP 503 Service Unavailable");
+  });
+});
+
+describe("WARP-3265 allDayDates", () => {
+  it("sends the calendar dates of an external all-day event, end exclusive", () => {
+    expect(
+      allDayDates({
+        allDay: true,
+        source: "external",
+        startsAt: new Date("2026-09-15T00:00:00Z"),
+        endsAt: new Date("2026-09-16T00:00:00Z"),
+      }),
+    ).toEqual({ startDate: "2026-09-15", endDate: "2026-09-16" });
+  });
+
+  it("is null for a local all-day event and for a timed one", () => {
+    const at = { startsAt: new Date("2026-09-15T07:00:00Z"), endsAt: new Date("2026-09-16T07:00:00Z") };
+    expect(allDayDates({ ...at, allDay: true, source: "local" })).toEqual({ startDate: null, endDate: null });
+    expect(allDayDates({ ...at, allDay: false, source: "external" })).toEqual({ startDate: null, endDate: null });
   });
 });

@@ -232,6 +232,32 @@ describe("PATCH /calendar/events/:id — meetingUrl", () => {
   });
 });
 
+describe("PATCH /calendar/events/:id — empty notes and place (WARP-3262)", () => {
+  it("accepts null description + location (the web's empty fields) and clears both columns", async () => {
+    const stub = makeStub([seedRow({ description: "Agenda", location: "HQ - Room Aurora" })]);
+    const res = await request(buildApp(stub))
+      .patch("/api/calendar/events/ev-seed")
+      .send({ title: "Standup", description: null, location: null, meetingUrl: null, startsAt, endsAt, allDay: false });
+    expect(res.status).toBe(200);
+    expect(stub.events[0]).toMatchObject({ description: null, location: null });
+  });
+
+  it("still accepts \"\" (the Mac, R-CAL4)", async () => {
+    const stub = makeStub([seedRow({ description: "Agenda", location: "HQ" })]);
+    const res = await request(buildApp(stub))
+      .patch("/api/calendar/events/ev-seed")
+      .send({ description: "", location: "" });
+    expect(res.status).toBe(200);
+    expect(stub.events[0]).toMatchObject({ description: "", location: "" });
+  });
+
+  it("leaves notes and place untouched when omitted", async () => {
+    const stub = makeStub([seedRow({ description: "Agenda", location: "HQ" })]);
+    await request(buildApp(stub)).patch("/api/calendar/events/ev-seed").send({ title: "Renamed" });
+    expect(stub.events[0]).toMatchObject({ title: "Renamed", description: "Agenda", location: "HQ" });
+  });
+});
+
 describe("GET /calendar/publish/:user.ics — meetingUrl", () => {
   const tokenFor = (_username: string) => "valid-alice-token";
 

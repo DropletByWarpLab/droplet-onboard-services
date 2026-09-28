@@ -357,6 +357,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     key={v.href}
                     href={v.href}
                     aria-current={active ? "page" : undefined}
+                    aria-label={v.ariaLabel}
                     tabIndex={active || !activeViewHref ? 0 : -1}
                     data-roving
                     className={"ws-view" + (active ? " is-active" : "")}
