@@ -139,6 +139,17 @@ describe("publishAgentRunEvent", () => {
     expect(published.every((p) => !("args" in p.payload))).toBe(true);
   });
 
+  it("sends an unchanged state once: the claim and the first checkpoint both said 'running, step 0' (box, 2026-09-28)", async () => {
+    const r = row({ id: "r3", status: "running", queueWait: "none" });
+    const prisma = fakePrisma([r]);
+    await publishAgentRunEvent(prisma, "r3");
+    await publishAgentRunEvent(prisma, "r3");
+    expect(published).toHaveLength(1);
+    r.iteration = 1;
+    await publishAgentRunEvent(prisma, "r3");
+    expect(published.map((p) => p.payload.iteration)).toEqual([0, 1]);
+  });
+
   it("never throws: a missing run, a missing owner or a failing read publish nothing", async () => {
     await publishAgentRunEvent(fakePrisma([]), "nope");
     await publishAgentRunEvent(fakePrisma([row({ userId: "ghost" })]), "r1");
