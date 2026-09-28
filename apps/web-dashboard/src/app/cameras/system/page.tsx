@@ -18,7 +18,8 @@ import {
 } from "lucide-react";
 import { fetchCameraSystemStatus, fetchCameraStorage, restartFrigate } from "@/lib/api";
 import type { CameraStorageSummary } from "@/lib/types";
-import { confirmNetworkCommand } from "@/lib/api";
+import { confirmCameraCommand } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import type { CameraSystemStatus } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -58,6 +59,9 @@ export default function CameraSystemPage() {
     { refreshInterval: 60_000 },
   );
 
+  // The restart route is owner-only; nobody else sees the card.
+  const { user } = useAuth();
+  const isOwner = user?.role === "owner";
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
   // WARP-291: holds the tier-2 confirmation token + reason between the
@@ -99,17 +103,11 @@ export default function CameraSystemPage() {
     const ctx = pendingRestart;
     if (!ctx) return;
     try {
-      await confirmNetworkCommand(
-        ctx.confirmationToken,
-        "restart_frigate",
-        "frigate.system",
-      );
-      const second = await restartFrigate();
-      if (second.status === "restarting") {
-        setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
-      } else {
-        setRestartMsg(`Unexpected response: ${second.status}`);
-      }
+      // WARP-3104: the camera confirm endpoint executes the restart. The
+      // old path confirmed against the network endpoint (which never knew
+      // restart_frigate) and then re-called the route for a second 202.
+      await confirmCameraCommand(ctx.confirmationToken, "restart_frigate");
+      setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
       setPendingRestart(null);
       setRestarting(false);
       void mutate();
@@ -583,6 +581,7 @@ export default function CameraSystemPage() {
           </Card>
 
           {/* Restart card */}
+          {isOwner && (
           <Card className="span2">
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <div style={{ minWidth: 0 }}>
@@ -621,6 +620,7 @@ export default function CameraSystemPage() {
               </button>
             </div>
           </Card>
+          )}
         </>
       )}
 

@@ -78,6 +78,10 @@ case "${1:-}" in
       *" ps -a -q "*) printf '%s\n' "${DOCKER_STUB_PS_ALL_CID:-}" ;;
       # WARP-2970 enabled-services: scripted newline-joined service names.
       *" config --services"*) printf '%s\n' "${DOCKER_STUB_SERVICES:-}" ;;
+      # WARP-3169: `occ user:info -- <uid>` fails for the scripted unknown id.
+      *" user:info "*)
+        [ "${!#}" != "${DOCKER_STUB_NC_UNKNOWN:-}" ] || exit 1
+        ;;
       *" up "*)
         svc="${!#}"
         case ",${DOCKER_STUB_FAIL_RECREATE:-}," in
@@ -161,6 +165,7 @@ stub_reset() { rm -rf "$STUB_DIR"; mkdir -p "$STUB_DIR"; }
 run_apply() {
   PATH="$STUB_BIN:$PATH" \
   DOCKER_STUB_DIR="$STUB_DIR" \
+  DOCKER_STUB_NC_UNKNOWN="${DOCKER_STUB_NC_UNKNOWN:-}" \
   DOCKER_STUB_PS_CID="${DOCKER_STUB_PS_CID:-}" \
   DOCKER_STUB_MOUNTS="${DOCKER_STUB_MOUNTS:-}" \
   DOCKER_STUB_FAIL_RECREATE="${DOCKER_STUB_FAIL_RECREATE:-}" \
@@ -1107,6 +1112,43 @@ else
 fi
 
 # =============================================================================
+# WARP-3120 — stage-client-apps: a release's client installer into /downloads
+# =============================================================================
+# The orchestrator has already sha256-checked the file against the signed
+# manifest; the helper's job is to hand ONLY that file, from ONLY this
+# update's clients/ dir, to the box's own stage.sh.
+CA_FILE="$UDIR/clients/Droplet-0.2.0.dmg"
+mkdir -p "$UDIR/clients" && printf 'dmg' > "$CA_FILE"
+stub_reset
+CA_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 run_apply stage-client-apps --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --platform macos --version 0.2.0 --file "$CA_FILE" 2>&1)"; CA_RC=$?
+CA_ROOT="$(dirname "$(dirname "$COMPOSE_FILE")")"
+if [ "$CA_RC" -eq 0 ] \
+  && printf '%s' "$CA_OUT" | grep -qF -- "DRY-RUN: bash $CA_ROOT/scripts/app-downloads/stage.sh --no-restart --platform macos --version 0.2.0 $CA_FILE" \
+  && printf '%s' "$CA_OUT" | grep -qF -- "DRY-RUN: chown -R --reference=$CA_ROOT/data/app-downloads $CA_ROOT/data/app-downloads"; then
+  pass "stage-client-apps runs the box's stage.sh --no-restart on the verified file"
+else
+  fail "stage-client-apps invocation wrong (rc=$CA_RC out=$CA_OUT)"
+fi
+for bad in \
+  "--platform ios --version 0.2.0 --file $CA_FILE" \
+  "--platform macos --version 0.2 --file $CA_FILE" \
+  "--platform macos --version 0.2.0;id --file $CA_FILE" \
+  "--platform macos --version 0.2.0 --file $UDIR/Droplet-0.2.0.dmg" \
+  "--platform macos --version 0.2.0 --file $UDIR/clients/../clients/Droplet-0.2.0.dmg" \
+  "--platform macos --version 0.2.0 --file $UPDATES_DIR/other/clients/Droplet-0.2.0.dmg" \
+  "--platform macos --version 0.2.0 --file $UDIR/clients/.hidden"; do
+  stub_reset
+  # shellcheck disable=SC2086 # word-split on purpose: one case per line
+  if DROPLET_OTA_APPLY_DRY_RUN=1 run_apply stage-client-apps --compose-file "$COMPOSE_FILE" \
+      --update-id "$UPDATE_ID" $bad >/dev/null 2>&1; then
+    fail "stage-client-apps must refuse: $bad"
+  else
+    pass "stage-client-apps refuses: ${bad#--platform }"
+  fi
+done
+
+# =============================================================================
 # Phase 8 — WARP-2898 (ADR-056 slice K1): the helper's subcommand surface is
 # CLOSED. The orchestrator's socket reach is exactly this dispatcher, so an
 # unknown subcommand must die before any docker (or cosign) call, and the
@@ -1131,7 +1173,7 @@ for bad in install-extension recreate-extension "recreate-services;id" "docker" 
   fi
 done
 
-EXPECTED_SUBCOMMANDS=" current-image-refs snapshot pull-images stage-configs migrate-deploy recreate-services enabled-services reconcile-env restore-configs recreate-self-detached self-swap-supervise list-self-swap-helpers capture-self-swap-logs rm-self-swap-helper rotate-audit-key *"
+EXPECTED_SUBCOMMANDS=" current-image-refs snapshot pull-images stage-configs stage-client-apps migrate-deploy recreate-services enabled-services reconcile-env restore-configs recreate-self-detached self-swap-supervise list-self-swap-helpers capture-self-swap-logs rm-self-swap-helper nc-transfer-ownership rotate-audit-key *"
 DISPATCH_LABELS=""
 DISPATCH_SHAPE_OK=1
 in_case=0
@@ -1161,6 +1203,60 @@ if grep -q '^  \*) die "unknown subcommand: \$SUBCOMMAND" ;;$' "$APPLY_SH"; then
   pass "the dispatcher's fallback arm dies on an unknown subcommand"
 else
   fail "the dispatcher's fallback arm no longer dies"
+fi
+
+# =============================================================================
+echo ""
+echo "--- nc-transfer-ownership (WARP-3169 leaver hand-over) ---"
+
+stub_reset
+if run_apply nc-transfer-ownership --compose-file "$COMPOSE_FILE" \
+    --from tomas.w --to anna@corp.example >/dev/null 2>&1 \
+  && grep -qxF -- "compose -f $COMPOSE_FILE exec -T -u www-data nextcloud php occ user:info --output=json -- tomas.w" "$STUB_DIR/calls.log" \
+  && grep -qxF -- "compose -f $COMPOSE_FILE exec -T -u www-data nextcloud php occ user:info --output=json -- anna@corp.example" "$STUB_DIR/calls.log" \
+  && grep -qxF -- "compose -f $COMPOSE_FILE exec -T -u www-data nextcloud timeout 600 php occ files:transfer-ownership -- tomas.w anna@corp.example" "$STUB_DIR/calls.log"; then
+  pass "nc-transfer-ownership checks both users, then runs occ as www-data under timeout"
+else
+  fail "nc-transfer-ownership argv wrong (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+
+stub_reset
+if DOCKER_STUB_NC_UNKNOWN=ghost run_apply nc-transfer-ownership --compose-file "$COMPOSE_FILE" \
+    --from tomas.w --to ghost >/dev/null 2>&1 \
+  || grep -q "files:transfer-ownership" "$STUB_DIR/calls.log"; then
+  fail "nc-transfer-ownership must refuse an unknown recipient before any transfer"
+else
+  pass "nc-transfer-ownership refuses an unknown user and never transfers"
+fi
+
+# Injection shapes: every one must die in validation, before docker is touched.
+for bad in "--" "-rf" "--help" "a;rm -rf /" "a b" "a'b" 'a$(id)' "a/../b" "" \
+    "$(printf 'x%.0s' $(seq 1 65))"; do
+  for side in from to; do
+    stub_reset
+    if [ "$side" = from ]; then f="$bad"; t=anna; else f=tomas; t="$bad"; fi
+    if run_apply nc-transfer-ownership --compose-file "$COMPOSE_FILE" \
+        --from "$f" --to "$t" >/dev/null 2>&1 || [ -s "$STUB_DIR/calls.log" ]; then
+      fail "nc-transfer-ownership accepted --$side $(printf %q "$bad")"
+    else
+      pass "nc-transfer-ownership refuses --$side $(printf %q "$bad")"
+    fi
+  done
+done
+
+stub_reset
+if run_apply nc-transfer-ownership --compose-file "$COMPOSE_FILE" --from anna --to anna >/dev/null 2>&1 \
+   || [ -s "$STUB_DIR/calls.log" ]; then
+  fail "nc-transfer-ownership must refuse a transfer to the same user"
+else
+  pass "nc-transfer-ownership refuses a transfer to the same user"
+fi
+stub_reset
+if run_apply nc-transfer-ownership --compose-file "$COMPOSE_FILE" --from anna >/dev/null 2>&1 \
+   || [ -s "$STUB_DIR/calls.log" ]; then
+  fail "nc-transfer-ownership must refuse a missing --to"
+else
+  pass "nc-transfer-ownership refuses a missing --to"
 fi
 
 # =============================================================================

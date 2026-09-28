@@ -85,6 +85,7 @@ if (typeof window.PointerEvent === "undefined") {
 }
 HTMLElement.prototype.setPointerCapture ??= () => {};
 
+const BRAND_LINK = "Droplet home";
 const COLLAPSED_KEY = "droplet.sidebar.collapsed";
 const WIDTH_KEY = "droplet.sidebar.width";
 
@@ -111,9 +112,12 @@ describe("<Sidebar> collapse (WARP-2956)", () => {
     const aside = desktopAside();
     expect(sidebarW()).toBe("260px");
 
+    // The brand link is not a nav row: in the rail its slot becomes the
+    // expand control, so it is pinned separately below.
     const namesBefore = within(aside)
       .getAllByRole("link")
-      .map((a) => a.getAttribute("aria-label") ?? a.textContent?.trim() ?? "");
+      .map((a) => a.getAttribute("aria-label") ?? a.textContent?.trim() ?? "")
+      .filter((name) => name !== BRAND_LINK);
     expect(namesBefore.length).toBeGreaterThan(3);
 
     const btn = within(aside).getByRole("button", { name: "Collapse sidebar" });
@@ -166,6 +170,16 @@ describe("<Sidebar> collapse (WARP-2956)", () => {
     expect(
       within(aside).getByRole("button", { name: "Expand sidebar" }),
     ).toHaveAttribute("aria-expanded", "false");
+  });
+});
+
+describe("<Sidebar> brand mark", () => {
+  it("links the mark and wordmark to Overview", () => {
+    pathnameRef.current = "/settings";
+    render(<Sidebar />);
+    const brand = within(desktopAside()).getByRole("link", { name: BRAND_LINK });
+    expect(brand).toHaveAttribute("href", "/");
+    expect(within(brand).getByText("Droplet")).toBeInTheDocument();
   });
 });
 

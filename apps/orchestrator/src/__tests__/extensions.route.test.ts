@@ -17,7 +17,9 @@
  *   - the install request carries no service token but the extension's own;
  *   - a connector draft (no manifest) is not promotable; preflight blocks a
  *     tool name the catalog already has and a memory ask over budget;
- *   - disable / enable / uninstall are owner-only transitions, audited.
+ *   - disable / enable / uninstall are owner-only transitions, audited;
+ *   - WARP-3200: phase 2 stores under a hold on the workspace, and stores
+ *     nothing for a workspace a delete removed while it waited.
  *
  * The sidecar is a real in-process ECDSA key (every verify is real); the
  * sandbox and Prisma are recording fakes (the sandbox has its own suite).
@@ -311,6 +313,38 @@ describe("phase 2 — confirm, sign, store, install", () => {
     expect(r.body.error).toBe("slug_taken");
     expect(t.db.versions.size).toBe(0);
     expect((await phase1(t)).body.error).toBe("slug_taken");
+  });
+
+  it("stores under a KEY SHARE hold on the workspace, in a READ COMMITTED transaction (WARP-3200)", async () => {
+    const t = setup();
+    const p1 = (await phase1(t)).body;
+    const r = await request(t.app)
+      .post(`/api/extensions/${WS}/promote`)
+      .send({ confirmationToken: p1.confirmationToken, manifestSha256: p1.manifestSha256 });
+    expect(r.status).toBe(201);
+    expect(t.db.workspaceLocks).toEqual([{ id: WS, mode: "FOR KEY SHARE" }]);
+    expect(t.db.raw.$transaction.mock.calls[0][1]).toEqual({ isolationLevel: "ReadCommitted" });
+    const [holdAt] = t.db.raw.$queryRaw.mock.invocationCallOrder;
+    const [storeAt] = t.db.raw.extension.upsert.mock.invocationCallOrder;
+    expect(holdAt).toBeLessThan(storeAt);
+  });
+
+  it("a workspace deleted while the confirm waited for its hold stores nothing (WARP-3200)", async () => {
+    // MUTATION: drop the hold from the phase-2 transaction and a signed
+    // extension is stored — and installed — for a workspace that is gone.
+    const t = setup();
+    const p1 = (await phase1(t)).body;
+    // The delete (workspace-source-guard.service.ts) committed while this
+    // confirm waited for the row: the hold finds no row.
+    t.db.setOnWorkspaceLock((id) => t.db.workspaces.delete(id));
+    const r = await request(t.app)
+      .post(`/api/extensions/${WS}/promote`)
+      .send({ confirmationToken: p1.confirmationToken, manifestSha256: p1.manifestSha256 });
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe("not_found");
+    expect(t.db.extensions.size).toBe(0);
+    expect(t.db.versions.size).toBe(0);
+    expect(t.sandbox.installs).toEqual([]);
   });
 
   it("two proposals that were each clean at phase 1 cannot both be signed with one tool name", async () => {

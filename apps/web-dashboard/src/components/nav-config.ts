@@ -47,6 +47,7 @@ import {
   Settings,
   Shield,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Stethoscope,
   Trash2,
@@ -81,6 +82,13 @@ export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 export type NavItem = {
   href: string;
   label: string;
+  /**
+   * WARP-2978 — the accessible name, when the visible label alone would
+   * collide out of context (Security's "Settings" child beside the app's own
+   * Settings link in the mobile drawer). Must CONTAIN the visible label
+   * (WCAG 2.5.3). Default: the label is the name.
+   */
+  ariaLabel?: string;
   icon: LucideIcon;
   /** Restrict visibility by role. Default: visible to all. */
   roles?: Array<NonNullable<AuthRole>>;
@@ -502,16 +510,21 @@ export const NAV_GROUPS: NavGroup[] = [
       // and Cameras is one of its sources. Its own module, so a person can
       // hold it without holding cameras (and vice versa).
       //
-      // WARP-2977 P2b — Areas and Opening hours are part of the Security
+      // WARP-2977 P2b — Areas and Settings are part of the Security
       // section: they inherit its module gate (moduleForPath), carry no
       // `roles` (both pages are readable at view — manage only adds
       // controls), and live under /security, never /settings (ALWAYS_ON,
       // which would escape ModuleRouteGuard). Not destinations in SPACES, so
       // the Workspace shell shows them as the view pills
-      // "Security · Areas · Patterns · Opening hours".
+      // "Security · Areas · Patterns · Settings".
       //
       // WARP-2980 (P5) — Patterns: what normal looks like for each area and
       // camera. Read-only at view, like Areas.
+      //
+      // WARP-2978 (ADR-059 P3 D33): the settings page holds the opening hours
+      // AND who is told about alerts, so its label is Settings. Incident pages
+      // (/security/incidents/<id>) are details, not nav entries; the /security
+      // prefix gates them.
       {
         href: "/security",
         label: "Security",
@@ -520,7 +533,7 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           { href: "/security/zones", label: "Areas", icon: MapPin },
           { href: "/security/patterns", label: "Patterns", icon: Activity },
-          { href: "/security/settings", label: "Opening hours", icon: Clock },
+          { href: "/security/settings", label: "Settings", ariaLabel: "Security settings", icon: SlidersHorizontal },
         ],
       },
       {

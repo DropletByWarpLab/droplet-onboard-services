@@ -125,3 +125,87 @@ describe("WARP-2900 — the OTA release paths do not know the box extension key"
     expect(fields).toEqual(["cosignBin", "manifestPath", "publicKeyPath", "signaturePath"]);
   });
 });
+
+/**
+ * Review #2312: every file the extension key's contract rests on is
+ * code-owned. CODEOWNERS only REQUESTS the review until branch protection
+ * enforces it, but a path it does not name is never requested at all.
+ *
+ * The compose mounts of /var/lib/droplet/tpm and /var/run/droplet cannot be
+ * owned line by line (CODEOWNERS works per file), so Phase 10 of
+ * tests/factory-reset-secrets-wipe.test.sh pins them and that suite is owned
+ * instead. It also pins the factory-reset rotation of the key.
+ *
+ * The evaluator below implements the subset of CODEOWNERS syntax the file
+ * uses (anchored paths, a trailing `/` for a directory, `*` within one path
+ * segment, last match wins) and throws on anything else, so it cannot
+ * silently misjudge a pattern someone adds later.
+ */
+describe("WARP-2900 — the extension key's contract is code-owned", () => {
+  const OWNER = "@rjouffret";
+  const REQUIRED = [
+    // The keys, the RPC and the client.
+    "services/device-identity-svc/extension_signing.py",
+    "proto/device_identity.proto",
+    "apps/orchestrator/src/grpc-generated/device_identity.ts",
+    "apps/orchestrator/src/services/device-identity.client.ts",
+    // The verifiers, the statement format and the one signer caller.
+    "apps/orchestrator/src/services/update-agent/verify.ts",
+    "apps/orchestrator/src/services/update-agent/extension-verify.ts",
+    "apps/orchestrator/src/services/extension-manifest.ts",
+    "apps/orchestrator/src/services/extension-promotion.service.ts",
+    "docs/schemas/extension-manifest.schema.json",
+    // The pins.
+    "apps/orchestrator/src/__tests__/extension-signer.guard.test.ts",
+    "apps/orchestrator/src/__tests__/device-identity-proto.snapshot.test.ts",
+    "apps/orchestrator/src/__tests__/env-preflight.ts",
+    "docs/security/device-identity.md",
+    ".github/CODEOWNERS",
+    // Review #2312: the release-only app-downloads path, the guard that pins
+    // which suites need cosign, the reset that decides whether the key
+    // survives, the library that rotates it, and the suite that pins the
+    // rotation and the compose mounts.
+    "apps/orchestrator/src/services/app-downloads/store.ts",
+    "apps/orchestrator/src/__tests__/env-preflight.guard.test.ts",
+    "scripts/factory-reset.sh",
+    "scripts/lib/secrets-wipe.sh",
+    "tests/factory-reset-secrets-wipe.test.sh",
+  ];
+
+  function toRegExp(pattern: string): RegExp {
+    if (!pattern.startsWith("/") || pattern.includes("**") || /[?[\]!\\]/.test(pattern)) {
+      throw new Error(`CODEOWNERS pattern ${pattern} is outside what this evaluator implements`);
+    }
+    const dir = pattern.endsWith("/");
+    const body = pattern
+      .slice(1, dir ? -1 : undefined)
+      .split("*")
+      .map((part) => part.replace(/[.+^${}()|]/g, "\\$&"))
+      .join("[^/]*");
+    return new RegExp(`^${body}${dir ? "/.+" : "(/.+)?"}$`);
+  }
+
+  const rules = readFileSync(path.join(REPO_ROOT, ".github", "CODEOWNERS"), "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#"))
+    .map((line) => {
+      const [pattern, ...owners] = line.split(/\s+/);
+      return { pattern, owners, re: toRegExp(pattern) };
+    });
+
+  const ownersOf = (file: string): string[] =>
+    rules.reduce<string[]>((owners, rule) => (rule.re.test(file) ? rule.owners : owners), []);
+
+  it("reads real rules (not vacuous)", () => {
+    expect(rules.length).toBeGreaterThan(10);
+    expect(ownersOf("services/device-identity-svc/grpc_server.py")).toEqual([OWNER]);
+    expect(ownersOf("apps/orchestrator/src/services/llm-agent.service.ts")).toEqual([]);
+    expect(ownersOf("scripts/setup.sh")).toEqual([]);
+  });
+
+  it.each(REQUIRED)("%s exists and is owned by @rjouffret", (file) => {
+    expect(statSync(path.join(REPO_ROOT, file)).isFile(), `${file} is not a file`).toBe(true);
+    expect(ownersOf(file), `${file} is not code-owned`).toContain(OWNER);
+  });
+});

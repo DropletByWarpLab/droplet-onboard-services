@@ -141,11 +141,15 @@ export interface WorkspaceLastRun {
   finishedAt: string;
 }
 
-/** The route's own message when it sent one, with the HTTP status attached. */
+/**
+ * The route's own message when it sent one, with the HTTP status attached.
+ * `reason` is that message alone, for a refusal a person can act on (a 409).
+ */
 export class WorkspaceApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly reason: string | null = null,
   ) {
     super(message);
     this.name = "WorkspaceApiError";
@@ -154,7 +158,8 @@ export class WorkspaceApiError extends Error {
 
 async function readError(res: Response, fallback: string): Promise<WorkspaceApiError> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
-  return new WorkspaceApiError(body?.error ? `${fallback} (${body.error})` : `${fallback} (HTTP ${res.status})`, res.status);
+  const reason = typeof body?.error === "string" && body.error.trim() !== "" ? body.error : null;
+  return new WorkspaceApiError(reason ? `${fallback} (${reason})` : `${fallback} (HTTP ${res.status})`, res.status, reason);
 }
 
 export async function listWorkspaces(): Promise<WorkspaceSummary[]> {

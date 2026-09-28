@@ -401,3 +401,110 @@ secw_verify_wipe() {
 
   [ "$SECW_VERIFY_BLOCKED" -eq 0 ] && [ "$SECW_LEFTOVER_COUNT" -eq 0 ]
 }
+
+# =============================================================================
+# The box extension-signing key is ROTATED by a reset (WARP-2900, review #2312)
+# =============================================================================
+#
+# The device-identity sidecar keeps two keys in /var/lib/droplet/tpm (bind-
+# mounted from the host, docker/docker-compose.yml):
+#
+#   - the device-id key (device-id.sealed, its cert/pub, provisioned.json).
+#     WARP-980 keeps it across a reset ON PURPOSE: the box stays registered at
+#     HQ and self-heals. Nothing here touches it.
+#   - the extension-signing key (extension-signing.sealed, the sidecar's
+#     EXTENSION_KEY_FILE). It signs "the owner of this box promoted this
+#     extension". Boxes are leased and go to a new customer, and a statement,
+#     its signature and its manifest are none of them secret, so if the key
+#     survived, a promotion the PREVIOUS owner made would still verify `ok` on
+#     the next owner's box. A reset removes it; the sidecar mints a fresh one
+#     lazily on the next owner's first promote (backends/mock.py
+#     _load_extension_key).
+#
+# The sidecar caches the key in memory once loaded, so this must run with the
+# stack DOWN (factory-reset.sh Phase 4, after Phase 1's `down`). Removing the
+# file under a live sidecar would rotate nothing until it restarted.
+#
+# A symlink in the key's place is unlinked, never shredded through: whatever
+# it points at (device-id.sealed included) is not this key.
+#
+# Tests: Phase 10 of tests/factory-reset-secrets-wipe.test.sh (fixture dir, no
+# root, no Docker). It also pins SECW_EXTENSION_KEY_FILE to the sidecar's
+# EXTENSION_KEY_FILE and the reset's directory to the sidecar's bind mount.
+
+SECW_EXTENSION_KEY_FILE="extension-signing.sealed"
+# Set by secw_rotate_extension_key: key files actually removed. A count only.
+SECW_EXTENSION_KEY_REMOVED=0
+# Set by secw_verify_extension_key_rotated: surviving paths, one per line.
+SECW_EXTENSION_KEY_LEFTOVER=""
+
+# The key file, and the sibling Storage.write stages it in (a crash mid-write
+# can leave that .tmp holding the same key bytes).
+_secw_extension_key_paths() {
+  printf '%s\n' "$1/$SECW_EXTENSION_KEY_FILE" "$1/$SECW_EXTENSION_KEY_FILE.tmp"
+}
+
+# _secw_test <-e|-L> <path> — `test` as us, asked again under $SECW_SUDO only
+# when the parent directory exists but we cannot search it. The TPM dir belongs
+# to the sidecar's uid; a directory we cannot search reads as empty, and the
+# gate below must never mistake that for "gone".
+_secw_test() {
+  local _op="$1" _p="$2" _parent
+  test "$_op" "$_p" && return 0
+  _parent="$(dirname "$_p")"
+  [ -d "$_parent" ] && [ ! -x "$_parent" ] && [ -n "$SECW_SUDO" ] || return 1
+  $SECW_SUDO test "$_op" "$_p" >/dev/null 2>&1
+}
+
+_secw_present() {
+  _secw_test -e "$1" || _secw_test -L "$1"
+}
+
+# secw_rotate_extension_key <tpm-dir>
+#
+# Remove the extension-signing key (and its stale .tmp) from <tpm-dir>,
+# overwrite-then-unlink. Everything else in <tpm-dir> is left byte-identical.
+# A missing directory, or a box that never promoted, is a no-op. Returns the
+# verdict of secw_verify_extension_key_rotated: 0 when no key file remains.
+secw_rotate_extension_key() {
+  local _dir="$1" _f
+  SECW_EXTENSION_KEY_REMOVED=0
+  [ -n "$_dir" ] || return 1
+  while IFS= read -r _f; do
+    if _secw_test -L "$_f"; then
+      _secw_try rm -f "$_f" || true
+    elif _secw_present "$_f"; then
+      secw_shred_file "$_f" || true
+      # secw_shred_file looks with `-f` as US. In a directory only the
+      # sidecar's uid can search, that reads as absent, so finish privileged.
+      if _secw_present "$_f"; then
+        _secw_try shred -u "$_f" || _secw_try rm -f "$_f" || true
+      fi
+    else
+      continue
+    fi
+    if _secw_present "$_f"; then
+      _secw_warn "could not remove $_f — the previous owner's extension key is still on this box"
+    else
+      SECW_EXTENSION_KEY_REMOVED=$(( SECW_EXTENSION_KEY_REMOVED + 1 ))
+    fi
+  done < <(_secw_extension_key_paths "$_dir")
+  secw_verify_extension_key_rotated "$_dir"
+}
+
+# secw_verify_extension_key_rotated <tpm-dir>
+#
+# The gate. Re-scans the disk rather than trusting the counter above, and
+# returns 0 only when neither the key file nor its .tmp is there. Survivors go
+# to SECW_EXTENSION_KEY_LEFTOVER, paths only, never contents (rule 19).
+secw_verify_extension_key_rotated() {
+  local _dir="$1" _f
+  SECW_EXTENSION_KEY_LEFTOVER=""
+  [ -n "$_dir" ] || return 1
+  while IFS= read -r _f; do
+    if _secw_present "$_f"; then
+      SECW_EXTENSION_KEY_LEFTOVER="${SECW_EXTENSION_KEY_LEFTOVER}${SECW_EXTENSION_KEY_LEFTOVER:+$'\n'}$_f"
+    fi
+  done < <(_secw_extension_key_paths "$_dir")
+  [ -z "$SECW_EXTENSION_KEY_LEFTOVER" ]
+}
