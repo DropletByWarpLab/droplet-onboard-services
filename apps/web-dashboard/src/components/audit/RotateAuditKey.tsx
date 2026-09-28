@@ -20,11 +20,17 @@ import { StepUpDialog } from "@/components/auth/StepUpDialog";
 export const ROTATE_EXPLAINER =
   "Rotate the key if an audit bundle exported by an earlier Droplet version left the box: those bundles carried the signing key. New entries are signed with a new key right away. Earlier entries stay verifiable, because the old key is kept on the box for checking only. This is recorded in the audit log.";
 
-type Outcome = { kind: "ok"; newKeyId: string } | { kind: "error"; message: string };
+type Outcome =
+  | { kind: "running" }
+  | { kind: "ok"; newKeyId: string }
+  | { kind: "error"; message: string };
 
 /** Plain-English copy for each refusal the route can answer. */
 export function rotateErrorMessage(status: number, body: { error?: string; code?: string }): string {
-  if (status === 401) return "The confirmation expired before the key could rotate. Try again.";
+  if (status === 401 && (body.error === "mfa_stale" || body.error === "mfa_required")) {
+    return "The confirmation expired before the key could rotate. Try again.";
+  }
+  if (status === 401) return "Your session ended. Sign in again, then try again. Nothing changed.";
   if (status === 403) return "Only the owner can rotate the audit signing key.";
   if (status === 429) return "Too many attempts. Wait a few minutes, then try again.";
   if (body.code === "RETIRED_KEY_DIR_MISSING") {
@@ -46,6 +52,7 @@ export function RotateAuditKey({ onRotated }: { onRotated?: () => void }) {
   if (user?.role !== "owner") return null;
 
   async function rotate() {
+    setOutcome({ kind: "running" });
     try {
       const res = await authFetch("/api/activity/rotate-key", { method: "POST" });
       const body = (await res.json().catch(() => ({}))) as {
@@ -79,6 +86,7 @@ export function RotateAuditKey({ onRotated }: { onRotated?: () => void }) {
           ref={triggerRef}
           type="button"
           className="btn sm danger"
+          disabled={outcome?.kind === "running"}
           onClick={() => {
             setOutcome(null);
             setConfirmOpen(true);
@@ -89,6 +97,11 @@ export function RotateAuditKey({ onRotated }: { onRotated?: () => void }) {
         </button>
       </div>
 
+      {outcome?.kind === "running" && (
+        <p role="status" className="type-footnote" style={{ marginTop: 10, color: "var(--text-muted)" }}>
+          Rotating the key…
+        </p>
+      )}
       {outcome?.kind === "ok" && (
         <p role="status" className="type-footnote" style={{ marginTop: 10, color: "var(--text)" }}>
           Key rotated. New key ID: <code>{outcome.newKeyId}</code>

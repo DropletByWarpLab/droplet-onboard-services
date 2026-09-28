@@ -85,4 +85,16 @@ describe("CloudModelsPill", () => {
       screen.getByRole("link", { name: /manage cloud models/i }).getAttribute("href"),
     ).toBe("/models");
   });
+
+  it("Escape and an outside click close the explainer", () => {
+    cloudAccess = access({});
+    render(<CloudModelsPill />);
+    fireEvent.click(pill()!);
+    expect(screen.getByText(CLOUD_PILL_EXPLAINER)).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByText(CLOUD_PILL_EXPLAINER)).toBeNull();
+    fireEvent.click(pill()!);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByText(CLOUD_PILL_EXPLAINER)).toBeNull();
+  });
 });

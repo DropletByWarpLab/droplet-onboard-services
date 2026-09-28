@@ -12,7 +12,7 @@
  * and a retry, which would replay the password and burn the single-use code.
  * Both fields are cleared after every attempt.
  */
-import { useId, useState, type FormEvent, type RefObject } from "react";
+import { useId, useRef, useState, type FormEvent, type RefObject } from "react";
 import { Dialog } from "@/components/Dialog";
 
 export function stepUpErrorMessage(status: number, code?: string): string {
@@ -29,7 +29,11 @@ export function stepUpErrorMessage(status: number, code?: string): string {
 export interface StepUpDialogProps {
   open: boolean;
   onClose: () => void;
-  /** Runs right after a successful step-up; the dialog closes when it settles. */
+  /**
+   * Runs right after a successful step-up. The dialog has already closed
+   * (`onClose` ran first), so the caller shows its own progress, and a
+   * protected call that asks for MFA again can simply reopen it.
+   */
   onVerified: () => Promise<void> | void;
   /** Gets `onVerified`'s error message after the dialog has closed. */
   onError: (message: string) => void;
@@ -54,8 +58,12 @@ export function StepUpDialog({
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when the dialog is dismissed (Cancel, Escape, backdrop) while a
+  // step-up is in flight: the protected action must then NOT run.
+  const cancelledRef = useRef(false);
 
   function close() {
+    cancelledRef.current = true;
     setPassword("");
     setCode("");
     setError(null);
@@ -67,6 +75,7 @@ export function StepUpDialog({
     if (busy) return;
     setBusy(true);
     setError(null);
+    cancelledRef.current = false;
     const body = JSON.stringify({ password, totp: code.trim() });
     setPassword("");
     setCode("");
@@ -79,25 +88,27 @@ export function StepUpDialog({
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { code?: string };
-        setError(stepUpErrorMessage(res.status, data.code));
+        if (!cancelledRef.current) setError(stepUpErrorMessage(res.status, data.code));
         setBusy(false);
         return;
       }
     } catch {
-      setError("We couldn't reach your Droplet. Try again.");
+      if (!cancelledRef.current) setError("We couldn't reach your Droplet. Try again.");
       setBusy(false);
       return;
     }
-    // The step-up succeeded; whatever the protected action does next is the
-    // caller's to report, so its failure closes the dialog and hands the
-    // real message over instead of reading as a network problem.
+    setBusy(false);
+    // Dismissed while the step-up was in flight: the person said no, so the
+    // protected action doesn't run. (The fresh stamp just expires.)
+    if (cancelledRef.current) return;
+    // Close first, then run: the action's progress and result are the
+    // caller's to show, and its failure is handed over with its own message
+    // instead of reading as a network problem.
+    close();
     try {
       await onVerified();
     } catch (err) {
       onError(err instanceof Error && err.message ? err.message : "That didn't work. Try again.");
-    } finally {
-      setBusy(false);
-      close();
     }
   }
 
@@ -145,7 +156,7 @@ export function StepUpDialog({
           </p>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button type="button" className="btn" onClick={close} disabled={busy}>
+          <button type="button" className="btn" onClick={close}>
             Cancel
           </button>
           <button type="submit" className={destructive ? "btn danger" : "btn primary"} disabled={busy}>

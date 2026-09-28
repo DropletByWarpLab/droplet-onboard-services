@@ -25,6 +25,8 @@ import { RefreshCw } from "lucide-react";
 import { authFetch } from "@/lib/auth";
 import { StepUpDialog } from "@/components/auth/StepUpDialog";
 
+const MFA_PROMPT = "Confirm it's you to re-index.";
+
 export interface ReindexButtonProps {
   /**
    * Opaque file identifier accepted by the file-indexer's
@@ -56,7 +58,7 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
         const code = (body as { error?: string }).error;
         if (code === "mfa_required" || code === "mfa_stale") {
           setStatus("mfa");
-          setMessage("Confirm it's you to re-index.");
+          setMessage(MFA_PROMPT);
           setStepUpOpen(true);
           return;
         }
@@ -108,7 +110,13 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
       )}
       <StepUpDialog
         open={stepUpOpen}
-        onClose={() => setStepUpOpen(false)}
+        onClose={() => {
+          setStepUpOpen(false);
+          // Dismissed without confirming: drop the "Confirm it's you" line.
+          // (After a successful step-up onClick runs next and takes over.)
+          setStatus((s) => (s === "mfa" ? "idle" : s));
+          setMessage((m) => (m === MFA_PROMPT ? "" : m));
+        }}
         onVerified={onClick}
         onError={(m) => {
           setStatus("error");

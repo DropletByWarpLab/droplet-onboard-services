@@ -48,4 +48,38 @@ describe("StepUpDialog", () => {
     expect(onClose).toHaveBeenCalled();
     expect(screen.queryByText(/couldn't reach your Droplet/i)).toBeNull();
   });
+
+  it("Escape during an in-flight step-up cancels the protected action", async () => {
+    let resolveFetch!: (v: unknown) => void;
+    fetchMock.mockReturnValue(new Promise((r) => (resolveFetch = r)));
+    const { onVerified, onClose } = renderDialog();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+    resolveFetch(reply(200, { ok: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onVerified).not.toHaveBeenCalled();
+  });
+
+  it("Cancel stays usable while the step-up is in flight, and also cancels", async () => {
+    let resolveFetch!: (v: unknown) => void;
+    fetchMock.mockReturnValue(new Promise((r) => (resolveFetch = r)));
+    const { onVerified } = renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    resolveFetch(reply(200, { ok: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onVerified).not.toHaveBeenCalled();
+  });
+
+  it("on success it closes BEFORE running the action", async () => {
+    fetchMock.mockResolvedValue(reply(200, { ok: true }));
+    const order: string[] = [];
+    renderDialog(
+      vi.fn(() => void order.push("verified")),
+      vi.fn(),
+      vi.fn(() => void order.push("closed")),
+    );
+    await waitFor(() => expect(order).toEqual(["closed", "verified"]));
+  });
 });

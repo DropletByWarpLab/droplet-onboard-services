@@ -92,6 +92,8 @@ describe("RotateAuditKey", () => {
     [409, { code: "RETIRED_KEY_DIR_MISSING", error: "x" }, /latest update applied/],
     [503, { code: "HOST_HELPER_UNAVAILABLE", error: "x" }, /rotate-audit-key\.sh/],
     [401, { error: "mfa_stale" }, /confirmation expired/],
+    [401, { error: "auth_required" }, /session ended/],
+    [409, { code: "ROTATION_IN_PROGRESS", error: "A key rotation is already running. Wait for it to finish." }, /already running/],
     [502, { code: "ROTATION_FAILED", error: "The key could not be rotated. Nothing changed." }, /could not be rotated/],
   ])("maps %s to a plain message", async (status, body, text) => {
     fetchMock.mockResolvedValue(reply(200, { ok: true }));

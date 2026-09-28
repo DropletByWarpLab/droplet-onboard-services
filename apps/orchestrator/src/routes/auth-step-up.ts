@@ -15,22 +15,24 @@
  *
  * Wrong-password and wrong-code attempts share the per-user counter of
  * POST /auth/change-password and the credential step-up (WARP-3193), so the
- * three cannot be alternated to multiply guesses. The password is never
- * logged or written to the audit row.
+ * three cannot be alternated to multiply guesses (shared helper:
+ * throttled-credential-check.ts). The password is never logged or written to
+ * the audit row. A lockout is audited once, when it starts.
+ *
+ * Recovery codes are refused on purpose (`totp` only, `.strict()`): they are
+ * a one-time way back into an account, not something to spend on a routine
+ * sensitive action. An owner without their authenticator signs in again with
+ * a recovery code, which stamps `lastMfaAt` too, then re-enrols TOTP.
  */
 import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
-import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { authRateLimit } from "../middleware/rate-limit.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signAccessToken, type Role } from "../services/jwt.service.js";
 import { verifyPassword } from "../services/password.service.js";
 import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
-import {
-  checkPasswordChangeLock,
-  clearPasswordChangeRateState,
-  recordPasswordChangeFailure,
-} from "../services/password-change-throttle.service.js";
+import { throttledCredentialCheck } from "../services/throttled-credential-check.js";
 import { recordActivity } from "../services/activity.singleton.js";
 
 const bodySchema = z
@@ -45,7 +47,10 @@ const INVALID = { error: "Wrong password or code", code: "STEP_UP_INVALID" } as 
 export function createStepUpRouter(prisma: PrismaClient): Router {
   const router = Router();
 
-  router.post("/auth/step-up", sensitiveRateLimit, async (req, res, next) => {
+  // authRateLimit (20/min/IP), like every other credential check
+  // (/auth/login, /auth/change-password, /auth/totp/verify): the per-user
+  // lock below fails open on a cache error, so the IP limit must be tight.
+  router.post("/auth/step-up", authRateLimit, async (req, res, next) => {
     try {
       const me = req.user;
       // Fail closed: the auth middleware lets a JWT through when the session
@@ -79,17 +84,6 @@ export function createStepUpRouter(prisma: PrismaClient): Router {
           actor: { type: "user", id: me.id },
         });
 
-      const lock = await checkPasswordChangeLock(me.id);
-      if (lock.locked) {
-        await audit("locked");
-        res.status(429).set("Retry-After", String(lock.retryAfterSeconds)).json({
-          error: "Too many attempts. Try again shortly.",
-          code: "TOO_MANY_ATTEMPTS",
-          retryAfterSeconds: lock.retryAfterSeconds,
-        });
-        return;
-      }
-
       const row = await prisma.user.findUnique({
         where: { id: me.id },
         select: { passwordHash: true, provisionSource: true, directoryStatus: true, accessRoleId: true, role: true },
@@ -114,22 +108,34 @@ export function createStepUpRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const passwordOk = await verifyPassword(row.passwordHash, parsed.data.password);
+      const hash = row.passwordHash;
       // The code is checked only after the password matches. Checking it
       // anyway would even out a ~1 ms timing difference, but it would also
       // burn the user's one-time code (acceptTotpCode claims its time step)
       // on every wrong password. Wrong guesses are counted and locked out by
       // the shared throttle either way.
-      const codeOk =
-        passwordOk &&
-        (await checkLoginSecondFactor(prisma, me.id, { totp: parsed.data.totp })) === "passed";
-      if (!codeOk) {
-        await recordPasswordChangeFailure(me.id);
-        await audit("failed");
+      const result = await throttledCredentialCheck(
+        me.id,
+        async () =>
+          (await verifyPassword(hash, parsed.data.password)) &&
+          (await checkLoginSecondFactor(prisma, me.id, { totp: parsed.data.totp })) === "passed",
+      );
+      if (result.outcome === "locked") {
+        // Not audited: a refused attempt while locked tests nothing, and
+        // auditing each one would let a hijacked session flood the signed
+        // chain. The lockout itself is audited once, below.
+        res.status(429).set("Retry-After", String(result.retryAfterSeconds)).json({
+          error: "Too many attempts. Try again shortly.",
+          code: "TOO_MANY_ATTEMPTS",
+          retryAfterSeconds: result.retryAfterSeconds,
+        });
+        return;
+      }
+      if (result.outcome === "invalid") {
+        await audit(result.lockedNow ? "locked" : "failed");
         res.status(401).json(INVALID);
         return;
       }
-      await clearPasswordChangeRateState(me.id);
 
       const lastMfaAt = new Date().toISOString();
       const accessToken = signAccessToken({

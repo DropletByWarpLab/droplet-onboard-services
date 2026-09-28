@@ -18,6 +18,7 @@ vi.mock("../config.js", () => ({
   },
 }));
 vi.mock("../middleware/rate-limit.js", () => ({
+  authRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
   sensitiveRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
 }));
 // Secrets at rest are plaintext here so the REAL TOTP check can run.
@@ -229,6 +230,15 @@ describe("POST /api/auth/step-up", () => {
     expect(res!.status).toBe(429);
     expect(res!.body.code).toBe("TOO_MANY_ATTEMPTS");
     expect(auditText()).toContain("Step-up locked out");
+    // The lockout is audited once, when it starts; attempts refused while
+    // locked add nothing to the signed chain.
+    const rows = recordActivity.mock.calls.length;
+    for (let i = 0; i < 5; i++) {
+      const again = await request(app("owner1", "owner")).post("/api/auth/step-up").send({ password: "bad", totp: "123456" });
+      expect(again.status).toBe(429);
+    }
+    expect(recordActivity.mock.calls.length).toBe(rows);
+    expect(auditText().match(/Step-up locked out/g)).toHaveLength(1);
   });
 
   it("the audit rows carry no password or code", async () => {

@@ -21,11 +21,7 @@ import type { Request, Response, NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { createRequireRecentMfa } from "./require-recent-mfa.js";
 import { verifyPassword } from "../services/password.service.js";
-import {
-  checkPasswordChangeLock,
-  recordPasswordChangeFailure,
-  clearPasswordChangeRateState,
-} from "../services/password-change-throttle.service.js";
+import { throttledCredentialCheck } from "../services/throttled-credential-check.js";
 
 /** How recent the MFA stamp must be to enrol a credential. */
 export const CREDENTIAL_STEP_UP_WINDOW_SEC = 300;
@@ -84,24 +80,23 @@ export async function passCredentialStepUp(
     });
     return false;
   }
-  const lock = await checkPasswordChangeLock(userId);
-  if (lock.locked) {
+  const hash = row.passwordHash;
+  const result = await throttledCredentialCheck(userId, () => verifyPassword(hash, currentPassword));
+  if (result.outcome === "locked") {
     res
       .status(429)
-      .set("Retry-After", String(lock.retryAfterSeconds))
+      .set("Retry-After", String(result.retryAfterSeconds))
       .json({
         error: "Too many attempts. Try again shortly.",
         code: "TOO_MANY_ATTEMPTS",
-        retryAfterSeconds: lock.retryAfterSeconds,
+        retryAfterSeconds: result.retryAfterSeconds,
       });
     return false;
   }
-  if (!(await verifyPassword(row.passwordHash, currentPassword))) {
-    await recordPasswordChangeFailure(userId);
+  if (result.outcome === "invalid") {
     res.status(403).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
     return false;
   }
-  await clearPasswordChangeRateState(userId);
   return true;
 }
 
