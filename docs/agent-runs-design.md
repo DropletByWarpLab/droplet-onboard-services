@@ -571,5 +571,22 @@ conversation (`sessionId`), and the assistant message and tool call that
 started it (`originMessageId`, `originToolCallId`), all set server-side from
 the turn's `_meta` (WARP-3299). A person may have at most 3 active runs;
 schedule fires are exempt. Deleting a chat with a live run answers 409 unless
-the caller says `cancelRuns=true|false`. Results flowing back into the chat,
-live events and the chat UI are the epic's later tickets.
+the caller says `cancelRuns=true|false`. Live events and the chat UI are the
+epic's later tickets.
+
+**The brief and the result message (WARP-3300).** A chat-started run's first
+user message is a fixed brief (`chatRunBrief`): objective, deliverable, and
+the instruction that its final message is read by a parent with a very small
+context — a summary of at most 300 words plus the files it made. It never sees
+the chat history. When the run ends (any terminal status), the worker tick's
+`deliverRunResults` sweep posts ONE message into the conversation: role
+`assistant`, `ChatMessage.kind = agent_run_result`, `meta = {runId, status,
+title, summary, artifacts}`, and plain-text content (`Background task "…"
+finished: <summary>`), so older clients show it and the next chat turn replays
+it to the model with no polling tool. `summary` is capped at 2,000 characters
+at a word boundary; `artifacts` come only from recorded, successful
+`write_file` / `create_*` / `copy_file` calls. `resultDelivery` is the explicit
+state — `pending` → `delivered`, or `failed` (retried up to 5 posts), or
+`conversation_gone` when the chat was deleted first — and `turnId =
+agent-run:<id>` makes a repeat post a no-op. Each post also publishes the
+chat's `turn-completed` topic so an open dashboard reloads the thread.

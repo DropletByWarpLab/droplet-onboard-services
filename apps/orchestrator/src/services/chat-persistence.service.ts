@@ -72,6 +72,9 @@ export interface PersistedMessageInput {
    * submits when the user retries a transient network failure.
    */
   turnId?: string | null;
+  /** WARP-3300 — defaults to `message`; `agent_run_result` carries `meta`. */
+  kind?: "message" | "agent_run_result";
+  meta?: Prisma.InputJsonValue | null;
 }
 
 export interface PersistedConversationSummary {
@@ -119,6 +122,10 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
      */
     model: string | null;
     provider: string | null;
+    /** WARP-3300 — `agent_run_result` rows are a background run reporting
+     *  back; `meta` is then {runId, status, title, summary, artifacts}. */
+    kind: "message" | "agent_run_result";
+    meta: unknown;
   }>;
 }
 
@@ -181,6 +188,8 @@ export class ChatPersistenceService {
         // WARP-904 — per-message audit trail (see PersistedConversationDetail).
         model: m.model ?? null,
         provider: m.provider ?? null,
+        kind: m.kind as "message" | "agent_run_result",
+        meta: m.meta ?? null,
       })),
     };
   }
@@ -816,6 +825,8 @@ export class ChatPersistenceService {
                 : Prisma.JsonNull,
             toolCallId: m.toolCallId ?? null,
             turnId: m.turnId ?? null,
+            kind: m.kind ?? "message",
+            meta: m.meta ?? Prisma.JsonNull,
           },
         });
       }

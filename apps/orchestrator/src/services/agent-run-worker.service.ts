@@ -122,6 +122,7 @@ import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
+import { chatRunBrief, deliverRunResults } from "./agent-run-result.service.js";
 import {
   runAgent,
   type AgentCheckpointPort,
@@ -960,6 +961,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
   async function tickOnce(): Promise<TickCounts> {
     const at = now();
+    // WARP-3300 — post finished chat runs' results into their conversations.
+    // Never lets a delivery problem stop the queue from moving.
+    await deliverRunResults({ prisma, now }).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error("[agent-run-worker] result delivery sweep failed:", err);
+    });
     const { reclaimed, failed } = await reclaimStale(at);
     let claimed = 0;
     const capacity = limits.concurrency - inFlight.size;
@@ -1063,6 +1070,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           pendingToolCallId: string | null;
           pendingDecision: "approved" | "denied" | null;
           workspaceId: string | null;
+          origin: "workshop" | "schedule" | "chat";
+          title: string;
+          deliverable: string;
         }
       | null;
     const lease = leases.get(runId);
@@ -1185,7 +1195,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     let base = run.iteration;
     const messages = Array.isArray(run.messages)
       ? (run.messages as ChatMessage[])
-      : initialRunMessages(run.goal, offLanProvider !== null);
+      : initialRunMessages(
+          // WARP-3300 — a chat-started run gets the fixed brief; the others
+          // keep their goal verbatim.
+          run.origin === "chat" ? chatRunBrief(run) : run.goal,
+          offLanProvider !== null,
+        );
     // A resumed run re-derives its system prompt from THIS claim's verdict,
     // never from the checkpoint: the notice follows where the model runs now.
     if (messages[0]?.role === "system") {
