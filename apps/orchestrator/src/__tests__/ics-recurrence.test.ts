@@ -274,4 +274,112 @@ RRULE:FREQ=YEARLY;BYMONTH=1,2,3,4,5,6,7,8,9,10,11,12;BYMONTHDAY=${Array.from({ l
     expect(out.every((e) => e.recurrence === "unexpanded")).toBe(true);
     expect(out.map((e) => e.key).sort()).toEqual(["h0@x", "h1@x", "h2@x", "h3@x", "h4@x"]);
   });
+
+  const weeklyLegit = `
+UID:legit@x
+SUMMARY:Weekly
+DTSTART:20260907T160000Z
+DTEND:20260907T163000Z
+RRULE:FREQ=WEEKLY;COUNT=3`;
+
+  it("work bound is per series: a hostile series does not demote a legit series after it", async () => {
+    const out = await expand(hostile(";COUNT=10000000")[0]!, weeklyLegit);
+    expect(out.find((e) => e.key === "h0@x")?.recurrence).toBe("unexpanded");
+    expect(out.filter((e) => e.key.startsWith("legit@x::"))).toHaveLength(3);
+  });
+
+  it("a huge INTERVAL ends the walk instead of spinning on NaN dates", async () => {
+    const t0 = performance.now();
+    const out = await expand(
+      `
+UID:big@x
+SUMMARY:Rare
+DTSTART:20260907T160000Z
+DTEND:20260907T163000Z
+RRULE:FREQ=YEARLY;INTERVAL=300000`,
+      weeklyLegit,
+    );
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(out.filter((e) => e.key.startsWith("big@x::"))).toHaveLength(1);
+    expect(out.filter((e) => e.key.startsWith("legit@x::"))).toHaveLength(3);
+  });
+
+  it("BY* lists are deduped, and an RRULE longer than 1 KB is stored unexpanded", async () => {
+    expect(parseRrule("FREQ=MONTHLY;BYMONTHDAY=1,1,1;BYDAY=MO,MO", undefined)).toMatchObject({
+      byMonthDay: [1],
+      byDay: [{ n: 0, wd: 0 }],
+    });
+    const long = `FREQ=DAILY;BYMONTHDAY=${Array(600).fill(1).join(",")}`;
+    expect(parseRrule(long, undefined)).toBeNull();
+  });
+
+  it("a TZID override across a DST change replaces its instance, not duplicates it", async () => {
+    const out = await expand(
+      `
+UID:dst@x
+SUMMARY:Weekly
+DTSTART;TZID=America/Los_Angeles:20261026T090000
+DTEND;TZID=America/Los_Angeles:20261026T100000
+RRULE:FREQ=WEEKLY;COUNT=3`,
+      `
+UID:dst@x
+RECURRENCE-ID;TZID=America/Los_Angeles:20261102T090000
+SUMMARY:Moved
+DTSTART;TZID=America/Los_Angeles:20261102T110000
+DTEND;TZID=America/Los_Angeles:20261102T120000`,
+    );
+    expect(out).toHaveLength(3);
+    const moved = out.find((e) => e.key === "dst@x::2026-11-02T17:00:00.000Z");
+    expect(moved?.summary).toBe("Moved");
+    expect(moved?.startsAt.toISOString()).toBe("2026-11-02T19:00:00.000Z");
+  });
+
+  it("an override of an EXDATE'd instance, or one past COUNT, is dropped", async () => {
+    const out = await expand(
+      `
+UID:ex@x
+SUMMARY:Weekly
+DTSTART:20260907T160000Z
+DTEND:20260907T163000Z
+EXDATE:20260914T160000Z
+RRULE:FREQ=WEEKLY;COUNT=3`,
+      `
+UID:ex@x
+RECURRENCE-ID:20260914T160000Z
+SUMMARY:Excluded anyway
+DTSTART:20260914T170000Z
+DTEND:20260914T173000Z`,
+      `
+UID:ex@x
+RECURRENCE-ID:20260928T160000Z
+SUMMARY:Past COUNT
+DTSTART:20260928T170000Z
+DTEND:20260928T173000Z`,
+    );
+    expect(starts(out)).toEqual(["2026-09-07T16:00:00.000Z", "2026-09-21T16:00:00.000Z"]);
+  });
+
+  it("RECURRENCE-ID;RANGE=THISANDFUTURE stores the series unexpanded", async () => {
+    const out = await expand(
+      weeklyLegit,
+      `
+UID:legit@x
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260914T160000Z
+SUMMARY:Moved from here on
+DTSTART:20260914T170000Z
+DTEND:20260914T173000Z`,
+    );
+    expect(out.find((e) => e.key === "legit@x")?.recurrence).toBe("unexpanded");
+  });
+
+  it("a DTSTART in a spring-forward gap repeats at its written wall clock", async () => {
+    const out = await expand(`
+UID:gap@x
+SUMMARY:Early
+DTSTART;TZID=America/New_York:20270314T023000
+DTEND;TZID=America/New_York:20270314T043000
+RRULE:FREQ=WEEKLY;COUNT=2`);
+    // DTSTART itself takes the pre-gap offset (EST); the next week is 02:30 EDT.
+    expect(starts(out)).toEqual(["2027-03-14T07:30:00.000Z", "2027-03-21T06:30:00.000Z"]);
+  });
 });

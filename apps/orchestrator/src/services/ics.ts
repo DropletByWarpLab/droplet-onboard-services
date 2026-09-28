@@ -73,6 +73,11 @@ export interface IcsEvent {
   /** RECURRENCE-ID: this VEVENT overrides the instance of series `uid` that
    *  originally started at this instant. */
   recurrenceId?: Date;
+  /** RECURRENCE-ID's RANGE parameter, uppercased (`THISANDFUTURE`). */
+  recurrenceRange?: string;
+  /** DTSTART's wall clock as written, when it carries a TZID. Recurrence
+   *  repeats this, not the instant read back (which a DST gap shifts). */
+  dtstartWall?: { ymd: string; minuteOfDay: number };
   /** STATUS, uppercased. A CANCELLED override removes its instance. */
   status?: string;
 }
@@ -325,6 +330,8 @@ export function parseIcs(text: string): IcsEvent[] {
           exdates: current.exdates,
           exdateDays: current.exdateDays,
           recurrenceId: current.recurrenceId,
+          recurrenceRange: current.recurrenceRange,
+          dtstartWall: current.dtstartWall,
           status: current.status,
         });
       }
@@ -367,6 +374,13 @@ export function parseIcs(text: string): IcsEvent[] {
           parsed.params.TZID !== undefined && !parsed.value.trim().endsWith("Z")
             ? normalizeTzid(parsed.params.TZID)
             : undefined;
+        {
+          const w = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/.exec(parsed.value.trim());
+          current.dtstartWall =
+            current.tzid && w
+              ? { ymd: `${w[1]}-${w[2]}-${w[3]}`, minuteOfDay: Number(w[4]) * 60 + Number(w[5]) }
+              : undefined;
+        }
         if (parsed.params.VALUE === "DATE" || /^\d{8}$/.test(parsed.value.trim())) {
           current._allDay = true;
         }
@@ -393,6 +407,7 @@ export function parseIcs(text: string): IcsEvent[] {
       case "RECURRENCE-ID": {
         const at = parseIcsDateTime(parsed.value, parsed.params.TZID);
         if (!isNaN(at.getTime())) current.recurrenceId = at;
+        current.recurrenceRange = parsed.params.RANGE?.toUpperCase();
         break;
       }
       case "STATUS":

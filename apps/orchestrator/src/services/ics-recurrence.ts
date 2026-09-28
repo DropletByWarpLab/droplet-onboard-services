@@ -42,9 +42,30 @@ export const MAX_OCCURRENCES_PER_FEED = 50_000;
 /** Per sync: periods + candidate days walked, across every series. A series
  *  that would exceed what is left is stored `unexpanded`. */
 export const MAX_CANDIDATES_PER_FEED = 200_000;
+/** Per series, so one hostile series cannot exhaust the feed budget and
+ *  demote every series after it. A COUNT rule walked from DTSTART costs about
+ *  two per day for DAILY, so this covers ~27 years of daily history.
+ *  ponytail: ten hostile series in one feed still exhaust the feed budget and
+ *  demote later series; refund-on-rollback if that ever shows up in a real feed. */
+export const MAX_CANDIDATES_PER_SERIES = 20_000;
+/** An RRULE longer than this is not a real feed's rule; RFC-meaningful lists
+ *  (BYDAY ≤ 77 entries, BYMONTHDAY ≤ 62, BYMONTH ≤ 12) fit well inside it. */
+const MAX_RRULE_LENGTH = 1024;
 const YIELD_EVERY_CANDIDATES = 5_000;
 
 export const OCCURRENCE_KEY_SEPARATOR = "::";
+
+function addMonths(d: Date, n: number): Date {
+  const out = new Date(d);
+  out.setUTCMonth(out.getUTCMonth() + n);
+  return out;
+}
+
+/** The window occurrences are stored in. `syncSource` uses the same one to
+ *  decide which stored rows a sync may remove. */
+export function recurrenceWindow(now: Date): { start: Date; end: Date } {
+  return { start: addMonths(now, -RECURRENCE_PAST_MONTHS), end: addMonths(now, RECURRENCE_FUTURE_MONTHS) };
+}
 
 const DAY_MS = 86_400_000;
 const WEEKDAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]; // index 0 = Monday
@@ -66,7 +87,7 @@ interface Rule {
 const SUPPORTED = new Set(["FREQ", "INTERVAL", "COUNT", "UNTIL", "BYDAY", "BYMONTHDAY", "BYMONTH", "WKST"]);
 
 function ints(v: string, min: number, max: number): number[] | null {
-  const out = v.split(",").map((x) => Number(x.trim()));
+  const out = [...new Set(v.split(",").map((x) => Number(x.trim())))];
   return out.every((n) => Number.isInteger(n) && n !== 0 && Math.abs(n) >= min && Math.abs(n) <= max)
     ? out
     : null;
@@ -74,6 +95,7 @@ function ints(v: string, min: number, max: number): number[] | null {
 
 /** Parse the supported subset. `null` ⇒ outside the subset (store unexpanded). */
 export function parseRrule(text: string, tzid: string | undefined): Rule | null {
+  if (text.length > MAX_RRULE_LENGTH) return null;
   const parts = new Map<string, string>();
   for (const p of text.trim().replace(/^RRULE:/i, "").split(";")) {
     if (!p) continue;
@@ -121,7 +143,8 @@ export function parseRrule(text: string, tzid: string | undefined): Rule | null 
       if (!m) return null;
       const n = m[1] ? Number(m[1]) : 0;
       if (n !== 0 && (Math.abs(n) > 5 || (freq !== "MONTHLY" && freq !== "YEARLY"))) return null;
-      rule.byDay.push({ n, wd: WEEKDAYS.indexOf(m[2]!.toUpperCase()) });
+      const wd = WEEKDAYS.indexOf(m[2]!.toUpperCase());
+      if (!rule.byDay.some((b) => b.n === n && b.wd === wd)) rule.byDay.push({ n, wd });
     }
   }
   const byMonthDay = parts.get("BYMONTHDAY");
@@ -222,12 +245,6 @@ function period(rule: Rule, k: number, base: { dn: number; y: number; m: number;
   }
 }
 
-function addMonths(d: Date, n: number): Date {
-  const out = new Date(d);
-  out.setUTCMonth(out.getUTCMonth() + n);
-  return out;
-}
-
 /** Fast-forward target: the first period index whose period can still hold
  *  an occurrence overlapping the window. Only valid without COUNT (COUNT has
  *  to count the instances before the window). Errs early by one period. */
@@ -265,8 +282,9 @@ const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resol
  * between series once enough work has piled up.
  */
 export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()): Promise<ExpandedIcsEvent[]> {
-  const windowStart = addMonths(now, -RECURRENCE_PAST_MONTHS).getTime();
-  const windowEnd = addMonths(now, RECURRENCE_FUTURE_MONTHS).getTime();
+  const win = recurrenceWindow(now);
+  const windowStart = win.start.getTime();
+  const windowEnd = win.end.getTime();
   const windowEndDn = Math.floor(windowEnd / DAY_MS) + 1;
 
   const masters = new Map<string, IcsEvent>();
@@ -296,19 +314,26 @@ export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()
     }
     const master = masters.get(uid);
     const byRid = new Map((overrides.get(uid) ?? []).map((o) => [o.recurrenceId!.getTime(), o]));
+    // RANGE=THISANDFUTURE (Outlook/Exchange) rewrites every later instance:
+    // outside the subset, so the series is stored unexpanded.
+    const thisAndFuture = (overrides.get(uid) ?? []).some((o) => o.recurrenceRange === "THISANDFUTURE");
     const rule =
-      master?.rrule && out.length < MAX_OCCURRENCES_PER_FEED && budget > 0
+      master?.rrule && !thisAndFuture && out.length < MAX_OCCURRENCES_PER_FEED && budget > 0
         ? parseRrule(master.rrule, master.tzid)
         : null;
 
     if (master && !master.rrule) out.push({ ...master, key: uid, recurrence: "none" });
     let expandedOk = false;
+    /** Instances at or after this are beyond the series' COUNT/UNTIL. */
+    let stopAt = Number.POSITIVE_INFINITY;
     if (master && rule) {
       const mark = out.length;
       const consumed = expandSeries(master, rule, uid, byRid);
       sinceYield += consumed.work;
+      budget -= consumed.work;
       if (consumed.ok) {
         expandedOk = true;
+        stopAt = consumed.stopAt;
       } else {
         out.length = mark; // roll back a series that ran out of budget
         byRid.clear();
@@ -318,8 +343,10 @@ export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()
     if (master && master.rrule && !expandedOk) out.push({ ...master, key: uid, recurrence: "unexpanded" });
 
     // Overrides whose instance the master did not generate (master missing,
-    // unexpanded, or the instance lies outside the walked range) still show.
+    // unexpanded, or the instance lies before the walked range) still show.
+    // One past the series' COUNT/UNTIL overrides nothing and is dropped.
     for (const [rid, ov] of byRid) {
+      if (rid >= stopAt) continue;
       if (ov.status !== "CANCELLED" && inWindow(ov.startsAt.getTime(), ov.endsAt.getTime())) {
         out.push({ ...ov, key: occKey(uid, rid), recurrence: "occurrence" });
       }
@@ -332,13 +359,18 @@ export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()
     rule: Rule,
     uid: string,
     byRid: Map<number, IcsEvent>,
-  ): { ok: boolean; work: number } {
+  ): { ok: boolean; work: number; stopAt: number } {
     const duration = master.endsAt.getTime() - master.startsAt.getTime();
     // DTSTART's wall clock, in the zone it was written in.
     let baseYmd: string;
     let minuteOfDay = 0;
     if (master.allDay) {
       baseYmd = master.startsAt.toISOString().slice(0, 10);
+    } else if (master.tzid && master.dtstartWall) {
+      // As written, not read back from the instant: a DTSTART in a
+      // spring-forward gap (02:30) repeats at 02:30, not at the shifted 03:30.
+      baseYmd = master.dtstartWall.ymd;
+      minuteOfDay = master.dtstartWall.minuteOfDay;
     } else if (master.tzid) {
       const lp = localPartsOf(master.startsAt, master.tzid);
       baseYmd = lp.ymd;
@@ -374,12 +406,17 @@ export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()
     let generated = 0;
     let stored = 0;
     let work = 0;
+    let left = Math.min(budget, MAX_CANDIDATES_PER_SERIES);
+    let stopAt = Number.POSITIVE_INFINITY;
     const emit = (dn: number, start: number): boolean => {
       generated++;
-      if (rule.count !== undefined && generated > rule.count) return false;
-      if (exAt.has(start) || exDays.has(ymdOf(dn).ymd)) return true; // EXDATE counts toward COUNT
+      if (rule.count !== undefined && generated > rule.count) {
+        stopAt = start;
+        return false;
+      }
       const ov = byRid.get(start);
-      byRid.delete(start);
+      byRid.delete(start); // an EXDATE'd instance takes its override with it
+      if (exAt.has(start) || exDays.has(ymdOf(dn).ymd)) return true; // EXDATE counts toward COUNT
       if (ov) {
         if (ov.status !== "CANCELLED" && inWindow(ov.startsAt.getTime(), ov.endsAt.getTime())) {
           out.push({ ...ov, key: occKey(uid, start), recurrence: "occurrence" });
@@ -402,18 +439,21 @@ export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()
     let going = emit(base.dn, master.startsAt.getTime());
     const k0 = rule.count === undefined ? firstPeriodNear(rule, base, nearDn) : 0;
     for (let k = k0; going; k++) {
-      if (--budget < 0) return { ok: false, work };
+      if (--left < 0) return { ok: false, work, stopAt };
       work++;
       const p = period(rule, k, base);
-      if (p.start > windowEndDn) break;
+      // A huge INTERVAL walks the period past year 275760, where Date math
+      // turns NaN and would never compare past the window.
+      if (!Number.isFinite(p.start) || p.start > windowEndDn) break;
       for (const dn of p.days) {
         if (dn <= base.dn) continue;
-        if (--budget < 0) return { ok: false, work };
+        if (--left < 0) return { ok: false, work, stopAt };
         work++;
         if (dn < nearDn && dn < untilDn) {
           // Before the window and clear of UNTIL: only COUNT cares.
           generated++;
           if (rule.count !== undefined && generated > rule.count) {
+            stopAt = startOf(dn);
             going = false;
             break;
           }
@@ -423,6 +463,7 @@ export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()
         if (rule.until) {
           const past = "at" in rule.until ? start > rule.until.at : ymdOf(dn).ymd > rule.until.ymd;
           if (past) {
+            stopAt = start;
             going = false;
             break;
           }
@@ -430,6 +471,6 @@ export async function expandIcsEvents(events: IcsEvent[], now: Date = new Date()
         if (!(going = emit(dn, start))) break;
       }
     }
-    return { ok: true, work };
+    return { ok: true, work, stopAt };
   }
 }

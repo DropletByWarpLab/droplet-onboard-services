@@ -18,8 +18,7 @@ import { syncCalendarSource } from "./caldav.client.js";
 import {
   expandIcsEvents,
   OCCURRENCE_KEY_SEPARATOR,
-  RECURRENCE_FUTURE_MONTHS,
-  RECURRENCE_PAST_MONTHS,
+  recurrenceWindow,
 } from "./ics-recurrence.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
 // WARP-2022 — the registration-time half of the SSRF guard. The fetch-time
@@ -325,13 +324,30 @@ export async function syncSource(
   });
   const byUid = new Map(existing.map((row) => [row.externalUid, row]));
 
+  // WARP-3266 upgrade path: the row an older build stored for a series (bare
+  // UID, first instance) BECOMES that series' first occurrence, renamed in
+  // place, so CrmActivity / Reminder links to it survive.
+  const adopted = new Set<string>();
+  for (const ev of result.events) {
+    if (!ev.uid || !ev.rrule || ev.recurrenceId || incoming.has(ev.uid)) continue;
+    const legacy = byUid.get(ev.uid);
+    const firstKey = `${ev.uid}${OCCURRENCE_KEY_SEPARATOR}${ev.startsAt.toISOString()}`;
+    if (legacy && incoming.has(firstKey) && !byUid.has(firstKey)) {
+      byUid.delete(ev.uid);
+      byUid.set(firstKey, legacy);
+      adopted.add(legacy.id);
+    }
+  }
+
   const toCreate: Array<ReturnType<typeof fields> & { uid: string }> = [];
-  const toUpdate: Array<{ id: string; uid: string; data: ReturnType<typeof fields> }> = [];
+  const toUpdate: Array<{ id: string; uid: string; data: ReturnType<typeof fields> & { externalUid?: string } }> = [];
   for (const [uid, ev] of incoming) {
     const data = fields(ev);
     const row = byUid.get(uid);
     if (!row) {
       toCreate.push({ ...data, uid });
+    } else if (row.externalUid !== uid) {
+      toUpdate.push({ id: row.id, uid, data: { ...data, externalUid: uid } });
     } else if (
       row.title !== data.title ||
       row.description !== data.description ||
@@ -350,6 +366,7 @@ export async function syncSource(
   // One createMany: Prisma splits it into statements under Postgres's bind
   // parameter limit itself.
   let added = 0;
+  let notSaved = 0;
   if (toCreate.length > 0) {
     try {
       const res = await prisma.calendarEvent.createMany({
@@ -364,6 +381,7 @@ export async function syncSource(
       });
       added = res.count;
     } catch (err) {
+      notSaved += toCreate.length;
       logger.warn({ err, sourceId: source.id, count: toCreate.length }, "calendar event insert failed");
     }
   }
@@ -376,55 +394,55 @@ export async function syncSource(
       );
       updated += chunk.length;
     } catch (err) {
+      notSaved += chunk.length;
       logger.warn({ err, sourceId: source.id, count: chunk.length }, "calendar event update batch failed");
     }
   }
 
   // WARP-3266 — rows an expanded series no longer produces: the pre-expansion
-  // single row keyed on the bare UID, and occurrences inside the window that
-  // an EXDATE or a cancelled override has since removed. Only rows of series
-  // expanded in THIS sync are touched, and only inside the window, so history
-  // older than the window and events that merely left the feed are kept (the
-  // same posture as before for one-off events).
+  // single row keyed on the bare UID, and occurrences that an EXDATE or a
+  // cancelled override has since removed. Only rows of series still in the
+  // feed, and only inside the window: history older than the window, a
+  // series whose occurrences all lie outside it, and events that merely left
+  // the feed are kept (the same posture as before for one-off events).
   // Every UID in the feed, not only the ones expanded this time: a series
   // that is now stored `unexpanded` must lose the occurrence rows an earlier
   // sync made, or they show beside its bare row as duplicates.
-  const feedUids = new Set(result.events.map((e) => e.uid).filter(Boolean));
-  const windowStart = new Date(now);
-  windowStart.setUTCMonth(windowStart.getUTCMonth() - RECURRENCE_PAST_MONTHS);
-  const windowEnd = new Date(now);
-  windowEnd.setUTCMonth(windowEnd.getUTCMonth() + RECURRENCE_FUTURE_MONTHS);
-  const staleIds = existing
-    .filter((row) => {
-      const key = row.externalUid;
-      if (!key || incoming.has(key)) return false;
-      if (feedUids.has(key)) return true; // bare row a series no longer produces
-      const sep = key.lastIndexOf(OCCURRENCE_KEY_SEPARATOR);
-      return (
-        sep > 0 &&
-        feedUids.has(key.slice(0, sep)) &&
-        row.endsAt > windowStart &&
-        row.startsAt < windowEnd
-      );
-    })
-    .map((row) => row.id);
+  // Skipped entirely when a write failed: deleting the old rows without their
+  // replacements would lose events silently.
   let removed = 0;
-  if (staleIds.length > 0) {
-    try {
-      const res = await prisma.calendarEvent.deleteMany({
-        where: { id: { in: staleIds }, sourceId: source.id },
-      });
-      removed = res.count;
-    } catch (err) {
-      logger.warn({ err, sourceId: source.id, count: staleIds.length }, "calendar stale occurrence delete failed");
+  if (notSaved === 0) {
+    const feedUids = new Set(result.events.map((e) => e.uid).filter(Boolean));
+    const win = recurrenceWindow(now);
+    const staleIds = existing
+      .filter((row) => {
+        const key = row.externalUid;
+        if (!key || incoming.has(key) || adopted.has(row.id)) return false;
+        if (!(row.endsAt > win.start && row.startsAt < win.end)) return false;
+        if (feedUids.has(key)) return true; // bare row a series no longer produces
+        const sep = key.lastIndexOf(OCCURRENCE_KEY_SEPARATOR);
+        return sep > 0 && feedUids.has(key.slice(0, sep));
+      })
+      .map((row) => row.id);
+    for (let i = 0; i < staleIds.length; i += SYNC_WRITE_CHUNK) {
+      const chunk = staleIds.slice(i, i + SYNC_WRITE_CHUNK);
+      try {
+        const res = await prisma.calendarEvent.deleteMany({
+          where: { id: { in: chunk }, sourceId: source.id },
+        });
+        removed += res.count;
+      } catch (err) {
+        logger.warn({ err, sourceId: source.id, count: chunk.length }, "calendar stale occurrence delete failed");
+      }
     }
   }
 
+  const error = notSaved > 0 ? `write: ${notSaved} event(s) not saved; will retry` : undefined;
   await prisma.calendarSource.update({
     where: { id: source.id },
-    data: { lastSyncAt: new Date(), lastSyncError: null },
+    data: { lastSyncAt: new Date(), lastSyncError: error ?? null },
   });
-  return { added, updated, removed, total: incoming.size };
+  return { added, updated, removed, total: incoming.size, ...(error ? { error } : {}) };
 }
 
 /** Find sources whose syncIntervalSec has elapsed since lastSyncAt. Used by

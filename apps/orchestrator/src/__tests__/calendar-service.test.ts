@@ -390,7 +390,7 @@ describe("syncSource", () => {
     expect(stub._events.find((e: any) => e.externalUid === "u7@x").endsAt).toEqual(moved[7]!.endsAt);
   });
 
-  it("WARP-3266: stores each occurrence of a recurring event once, re-syncs without duplicating, and removes a newly EXDATE'd one and the old first-instance row", async () => {
+  it("WARP-3266: stores each occurrence of a recurring event once, re-syncs without duplicating, removes a newly EXDATE'd one, and renames the old first-instance row in place", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
     try {
@@ -413,7 +413,13 @@ describe("syncSource", () => {
       };
       syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [master] });
       const first = await syncSource(prisma, src.id);
-      expect(first).toMatchObject({ added: 4, total: 4, removed: 1 });
+      // The legacy row is adopted as the first occurrence (same id, so CRM /
+      // reminder links survive), not deleted and re-created.
+      expect(first).toMatchObject({ added: 3, updated: 1, total: 4, removed: 0 });
+      expect(stub._events.find((e: any) => e.id === "legacy")).toMatchObject({
+        externalUid: "w@x::2026-10-05T16:00:00.000Z",
+        recurrence: "occurrence",
+      });
       expect(stub._events.map((e: any) => e.externalUid).sort()).toEqual([
         "w@x::2026-10-05T16:00:00.000Z",
         "w@x::2026-10-12T16:00:00.000Z",
@@ -460,6 +466,61 @@ describe("syncSource", () => {
       const r = await syncSource(prisma, src.id);
       expect(r).toMatchObject({ added: 1, removed: 4, total: 1 });
       expect(stub._events.map((e: any) => [e.externalUid, e.recurrence])).toEqual([["w@x", "unexpanded"]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  const weekly = {
+    uid: "w@x",
+    summary: "Standup",
+    startsAt: new Date("2026-10-05T16:00:00Z"),
+    endsAt: new Date("2026-10-05T16:30:00Z"),
+    allDay: false,
+    rrule: "FREQ=WEEKLY;COUNT=4",
+  };
+
+  it("WARP-3266: a failed insert deletes nothing and surfaces lastSyncError", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      stub._events.push({
+        id: "legacy", userId: "alice", source: "external", sourceId: src.id, externalUid: "w@x",
+        title: "Standup", startsAt: new Date("2026-10-19T16:00:00Z"), endsAt: new Date("2026-10-19T16:30:00Z"),
+        allDay: false, recurrence: "none",
+      });
+      stub.calendarEvent.createMany.mockRejectedValueOnce(new Error("db down"));
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [weekly] });
+      const r = await syncSource(prisma, src.id);
+      expect(r.error).toMatch(/not saved/);
+      expect(r.removed).toBe(0);
+      expect(stub.calendarEvent.deleteMany).not.toHaveBeenCalled();
+      expect(stub._events.map((e: any) => e.id)).toEqual(["legacy"]);
+      expect(stub._sources.find((s: any) => s.id === src.id).lastSyncError).toMatch(/not saved/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("WARP-3266: a bare row outside the window is kept when its series has no in-window occurrence", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      const kickoff = { ...weekly, uid: "k@x", startsAt: new Date("2028-09-04T16:00:00Z"), endsAt: new Date("2028-09-04T17:00:00Z") };
+      stub._events.push({
+        id: "future", userId: "alice", source: "external", sourceId: src.id, externalUid: "k@x",
+        title: "Kickoff", startsAt: kickoff.startsAt, endsAt: kickoff.endsAt, allDay: false, recurrence: "none",
+      });
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [kickoff] });
+      const r = await syncSource(prisma, src.id);
+      expect(r).toMatchObject({ added: 0, removed: 0, total: 0 });
+      expect(stub._events.map((e: any) => e.id)).toEqual(["future"]);
     } finally {
       vi.useRealTimers();
     }
