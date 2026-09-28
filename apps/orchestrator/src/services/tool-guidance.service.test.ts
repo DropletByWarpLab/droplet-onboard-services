@@ -58,6 +58,14 @@ describe("composeToolGuidance", () => {
     expect(block).toContain("never invent one");
   });
 
+  it("WARP-3282 — tells the model never to repeat a credential from a result", () => {
+    expect(composeToolGuidance(["search_content"])).toContain(
+      "Never repeat a password, key or token",
+    );
+    // Gated with the retrieval line: no search tool, no credential rule.
+    expect(composeToolGuidance([])).not.toContain("password");
+  });
+
   it("stays under TOOL_GUIDANCE_MAX_CHARS at full render", () => {
     expect(composeToolGuidance(undefined).length).toBeLessThanOrEqual(
       TOOL_GUIDANCE_MAX_CHARS,

@@ -63,28 +63,51 @@ const SENSITIVE_KEY_WORD = `[A-Za-z0-9_.-]*(?:${SENSITIVE_WORDS})[A-Za-z0-9_.-]*
  */
 const SAFE_KEY_RE = /(?:PUBLIC[_-]?KEY|KEY[_-]?ID|KEYID|_PUBKEY)$/i;
 
+/** WARP-3282 — the marker that replaces a credential in a TOOL RESULT on its
+ *  way into the model context. Worded for a reader (the model relays it), not
+ *  for an operator grepping a log bundle. */
+export const CREDENTIAL_PLACEHOLDER = "[credential redacted]";
+
 /**
- * Ordered list of (pattern → replacement) rules. Each replacement keeps the
- * non-secret prefix it captured (`$1`) and substitutes the placeholder for the
- * secret value. Order matters: the multi-line PEM rule runs first so a key
- * body can't be partially matched by a later single-line rule.
+ * WARP-3282 — the ONE list of credential VALUE SHAPES, shared by the log-bundle
+ * scrub ({@link redactSecrets}, which runs it first, then its own log-only
+ * rules) and the tool-result scrub ({@link redactCredentials}, which runs only
+ * this list).
+ *
+ * Why the tool-result scrub cannot reuse the whole log list: the log rules are
+ * keyed on NAMES (`sensitive-assignment` redacts the value of anything named
+ * `*KEY*`, `*TOKEN*`, `*AUTH*` — `Author: Jane`, `Key: Q3 figures`, a share
+ * link's `token=`), and the bare-bearer rule takes any 8 chars after "Bearer".
+ * That over-redaction is right for a bundle leaving the box and wrong for a
+ * business document the assistant must still be able to read. So every rule
+ * HERE must match a value that is a credential by its own shape, or sits in a
+ * config-shaped assignment (`UPPER_SNAKE_SECRET=`, `password=`), and must leave
+ * prose, file paths, UUIDs and hex hashes alone (pinned by the negatives in
+ * `credential-redaction.test.ts`).
+ *
+ * Each rule takes the placeholder so the two callers keep their own marker.
+ * Values starting with `[` are never matched, so both scrubs are idempotent
+ * over their own (and each other's) placeholder.
  */
-interface RedactionRule {
+interface ShapeRule {
   readonly name: string;
   readonly pattern: RegExp;
-  readonly replace: (substring: string, ...groups: string[]) => string;
+  readonly replace: (placeholder: string, match: string, ...groups: string[]) => string;
 }
 
-const RULES: readonly RedactionRule[] = [
+const whole = (placeholder: string) => placeholder;
+const keepPrefix = (placeholder: string, _m: string, pre: string) => `${pre}${placeholder}`;
+
+const CREDENTIAL_SHAPE_RULES: readonly ShapeRule[] = [
   {
     // PEM blocks: -----BEGIN [X] PRIVATE KEY----- ... -----END [X] PRIVATE KEY-----
     // Collapse the whole block (delimiters + body) to a single placeholder so no
-    // base64 key material survives. `[\s\S]` so it spans newlines without the
-    // `s` flag (kept off to stay explicit).
+    // base64 key material survives. Runs first so a key body can't be partially
+    // matched by a later single-line rule.
     name: "pem-private-key",
     pattern:
       /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,
-    replace: () => `${REDACTION_PLACEHOLDER} (private key)`,
+    replace: (placeholder) => `${placeholder} (private key)`,
   },
   {
     // Credentials embedded in a URI userinfo: scheme://user:SECRET@host
@@ -96,9 +119,91 @@ const RULES: readonly RedactionRule[] = [
     // `host:port` with no userinfo.
     name: "uri-userinfo",
     pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]*:)([^\s@/]+)(@)/g,
-    replace: (_m, pre: string, _secret: string, at: string) =>
-      `${pre}${REDACTION_PLACEHOLDER}${at}`,
+    replace: (placeholder, _m, pre: string, _secret: string, at: string) =>
+      `${pre}${placeholder}${at}`,
   },
+  {
+    // AWS access key id (long-term AKIA, temporary ASIA): fixed 20-char shape.
+    name: "aws-access-key-id",
+    pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+    replace: whole,
+  },
+  {
+    // Env/credentials-file assignment of a secret: `AWS_SECRET_ACCESS_KEY=…`,
+    // `DB_PASSWORD=…`, `STRIPE_API_KEY=…`, and the lowercase keys of
+    // ~/.aws/credentials. Deliberately narrow: an UPPER_SNAKE name ENDING in a
+    // secret word, `=` only (a `TOP SECRET:` heading is prose), a 6+ char
+    // value. camelCase JSON keys (`confirmationToken`, `shareToken`) never
+    // match, so no loop-internal token is touched.
+    // ponytail: `api_key: …` YAML/JSON configs are not covered; add a
+    // `:` form here if a real document shows one.
+    name: "env-secret-assignment",
+    pattern:
+      /\b((?:(?:[A-Z][A-Z0-9]*_)*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|SECRET_KEY|PRIVATE_KEY)|aws_secret_access_key|aws_session_token)\s*=\s*["']?)(?!\[)([^\s"'`,;]{6,})/g,
+    replace: keepPrefix,
+  },
+  {
+    // `password=…`, `passwd: …`, `"password": "…"`. The `:` form with a bare
+    // letters-only value is prose ("Password: required.", "Reset your
+    // password: click …") and is left alone; `=`, a quoted value, or a value
+    // with a digit/symbol is a credential. `passwordProtected` never matches
+    // (word boundary after the name).
+    name: "password-assignment",
+    pattern:
+      /\b(pass(?:word|wd|phrase))("?\s*[:=]\s*)(?!\[)("[^"\n]+"|'[^'\n]+'|[^\s"'`,;]+)/gi,
+    replace: (placeholder, m, key: string, sep: string, value: string) =>
+      sep.includes(":") && /^[A-Za-z]+[.!?)]*$/.test(value)
+        ? m
+        : `${key}${sep}${placeholder}`,
+  },
+  {
+    // Provider API tokens, recognisable by prefix:
+    //   OpenAI/Anthropic `sk-…` (20+ chars, must contain a digit — `sk-learn`),
+    //   Stripe `sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`,
+    //   GitHub `ghp_/gho_/ghu_/ghs_/ghr_` and `github_pat_`,
+    //   Slack `xoxb-/xoxp-/xoxa-/xoxs-`.
+    name: "provider-token",
+    pattern:
+      /\b(?:sk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[bpas]-[A-Za-z0-9-]{10,})/g,
+    replace: whole,
+  },
+  {
+    // JWT: header and payload are base64url JSON, so both start `eyJ`.
+    name: "jwt",
+    pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+    replace: whole,
+  },
+  {
+    // `Bearer <opaque token>` in free text: 20+ chars with BOTH a digit and a
+    // letter, so "bearer instruments" survives. (The log list keeps its
+    // broader bearer rule.)
+    name: "bearer-opaque",
+    pattern:
+      /(\bBearer\s+)(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])([A-Za-z0-9._~+/=-]{20,})/gi,
+    replace: keepPrefix,
+  },
+];
+
+/**
+ * Ordered list of (pattern → replacement) rules for the LOG BUNDLE. Each
+ * replacement keeps the non-secret prefix it captured (`$1`) and substitutes
+ * the placeholder for the secret value. The shared value-shape rules run first
+ * (PEM before anything single-line), then the name-keyed log-only rules.
+ */
+interface RedactionRule {
+  readonly name: string;
+  readonly pattern: RegExp;
+  readonly replace: (substring: string, ...groups: string[]) => string;
+}
+
+const RULES: readonly RedactionRule[] = [
+  ...CREDENTIAL_SHAPE_RULES.map(
+    (rule): RedactionRule => ({
+      name: rule.name,
+      pattern: rule.pattern,
+      replace: (m, ...groups) => rule.replace(REDACTION_PLACEHOLDER, m, ...groups),
+    }),
+  ),
   {
     // Authorization: Bearer <token>  (and bare "Bearer <token>")
     name: "bearer-token",
@@ -181,6 +286,33 @@ export function redactSecrets(text: string): string {
     out = out.replace(rule.pattern, rule.replace as (...args: string[]) => string);
   }
   return out;
+}
+
+/**
+ * WARP-3282 — scrub credential VALUE SHAPES out of a tool result before it
+ * enters the model context. Runs only {@link CREDENTIAL_SHAPE_RULES} (never the
+ * name-keyed log rules — see that list's comment), replacing each hit with
+ * {@link CREDENTIAL_PLACEHOLDER}, and reports how many it replaced so the
+ * caller can log a count without the value.
+ *
+ * Safe over a JSON wire string: no rule matches a `"` or a `\\`, so a
+ * replacement never breaks the surrounding JSON string literal.
+ */
+export function redactCredentials(text: string): { text: string; count: number } {
+  if (!text) return { text, count: 0 };
+  let count = 0;
+  let out = text;
+  for (const rule of CREDENTIAL_SHAPE_RULES) {
+    out = out.replace(rule.pattern, (m: string, ...rest: unknown[]) => {
+      // replace() appends (offset, input) after the capture groups; no rule
+      // uses named groups, so the captures are everything before those two.
+      const groups = rest.slice(0, -2) as string[];
+      const next = rule.replace(CREDENTIAL_PLACEHOLDER, m, ...groups);
+      if (next !== m) count++;
+      return next;
+    });
+  }
+  return { text: out, count };
 }
 
 // ── Structured (object) redaction — WARP-1718 ────────────────────────────────

@@ -32,11 +32,13 @@ const contentSearch: CategoryRenderer = (can) => {
     can("summarize_file") ? "summarize_file" : null,
   ].filter((n): n is string => n !== null);
   return (
-    "- For questions about the business's files, documents, notes, or emails, call search_content and ground your answer in the returned passages (cite their path values)" +
+    "- For questions about the business's files, documents, notes or emails, call search_content and ground your answer in the returned passages (cite their paths)" +
     (deeper.length > 0
       ? `; go deeper on a specific file with ${deeper.join(" or ")}`
       : "") +
-    "."
+    // WARP-3282 — the loop already scrubs known credential shapes from tool
+    // results; this covers the shapes it can't recognise.
+    ". Never repeat a password, key or token in them; say one exists."
   );
 };
 
