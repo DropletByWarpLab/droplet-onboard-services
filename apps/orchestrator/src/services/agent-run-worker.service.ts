@@ -136,6 +136,7 @@ import {
   toolDispatchDenial,
 } from "./tool-access.service.js";
 import { boundToolResultForModel } from "./tool-result-bounding.js";
+import { malformedToolOutputText, parseToolResultPayload } from "./tool-result-payload.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
@@ -1406,8 +1407,13 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         }
       }
 
+      // WARP-3284 — the loop's verdict on unreadable output, applied to the
+      // stored call: the model gets the error envelope, the trace records a
+      // failure. The audit below keeps the dispatch verdict: the tool ran and
+      // answered, so "approved but did not run" would be false.
+      const malformedText = malformedToolOutputText(parseToolResultPayload(outcome.text, tool));
       entry.text = scrubInterceptorToken(outcome.text);
-      entry.isError = outcome.isError;
+      entry.isError = outcome.isError || malformedText !== null;
       entry.completedAt = now().toISOString();
       messages.push(
         {
@@ -1417,7 +1423,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
             { id: toolCallId, type: "function", function: { name: tool, arguments: JSON.stringify(entry.args) } },
           ],
         },
-        { role: "tool", tool_call_id: toolCallId, content: modelFacing(tool, outcome.text) },
+        { role: "tool", tool_call_id: toolCallId, content: modelFacing(tool, malformedText ?? outcome.text) },
       );
       base += 1;
       const completed = await finish(runId, {
@@ -1438,7 +1444,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       // WARP-2896 — an approved `workspace_propose` that ran ENDS the run
       // here, before the model is asked anything: it throws the `proposed`
       // stop, which the caller's `try` hands to the terminal write.
-      endOnProposal(tool, outcome.text, outcome.isError);
+      endOnProposal(tool, outcome.text, entry.isError);
       return true;
     };
 

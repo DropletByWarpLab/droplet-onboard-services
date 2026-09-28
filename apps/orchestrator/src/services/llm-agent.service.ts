@@ -42,7 +42,7 @@ import type {
 } from "./mcp-client.service.js";
 import type { McpClientPort } from "./mcp-client.port.js";
 import {
-  isMalformedToolOutput,
+  malformedToolOutputText,
   parseToolResultPayload,
   toolResultPayloadValue,
   type ToolResultPayload,
@@ -2439,9 +2439,25 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         };
       }
       const text = result.content[0]?.text ?? "{}";
+      // WARP-1604 — single parse point for the tool-result wire payload.
+      // `payload` carries the mcp-server contract in its type (see
+      // services/tool-result-payload.ts); `parsed` is the same value widened
+      // for the existing untyped consumers (SSE event, trace).
+      const payload = parseToolResultPayload(text, call.function.name);
+      const parsed: unknown = toolResultPayloadValue(payload);
+      // WARP-3284 — a local tool's output that doesn't parse is a FAILED
+      // call, whatever `isError` said: the SSE chip goes red, the failure is
+      // logged below, the checkpoint records it failed, and the model gets
+      // the error envelope (without the fragment) instead of a truncated body
+      // it would read as "no data". See parseToolResultPayload for why a
+      // remote/extension tool's plain text is still a success.
+      const malformedText = malformedToolOutputText(payload);
+      if (malformedText !== null) result = { ...result, isError: true };
+      const modelText = malformedText ?? text;
       // WARP-2177 — complete the trace entry with the wire result, so a
       // resume after THIS point replays instead of re-dispatching. Skipped
-      // for a replay: the entry is already complete.
+      // for a replay: the entry is already complete. The wire text is stored,
+      // not the envelope: a replay re-parses it to the same verdict.
       if (req.checkpoint && !replay) {
         await req.checkpoint.afterToolCall({
           tool_call_id: call.id,
@@ -2450,23 +2466,6 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           text,
           isError: Boolean(result.isError),
         });
-      }
-      // WARP-1604 — single parse point for the tool-result wire payload.
-      // `payload` carries the mcp-server contract in its type (see
-      // services/tool-result-payload.ts); `parsed` is the same value widened
-      // for the existing untyped consumers (SSE event, trace).
-      const payload = parseToolResultPayload(text);
-      const parsed: unknown = toolResultPayloadValue(payload);
-      // WARP-3284 — output that claimed to be JSON and didn't parse is a
-      // FAILED call, whatever `isError` said: the SSE chip goes red, the
-      // failure is logged below, and the model gets the error envelope
-      // (without the fragment) instead of a truncated body it would read as
-      // "no data". See parseToolResultPayload for the plain-text split.
-      let modelText = text;
-      if (isMalformedToolOutput(payload)) {
-        result = { ...result, isError: true };
-        const { status, error } = parsed as { status: string; error: unknown };
-        modelText = JSON.stringify({ status, error });
       }
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
@@ -2629,9 +2628,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // this step takes TEXT and returns TEXT and touches nothing else.
       // WARP-2178 — the cap is now config.AGENT_TOOL_RESULT_CAP_CHARS (default
       // the historical 8000), so it can be set from a measured distribution.
+      // WARP-2002 — the model never sees a confirmation token; see the helper.
+      const boundInput = isConfirmation ? redactConfirmationTokensForModel(modelText) : modelText;
       const bounded = boundToolResultForModel(
-        // WARP-2002 — the model never sees a confirmation token; see the helper.
-        isConfirmation ? redactConfirmationTokensForModel(modelText) : modelText,
+        boundInput,
         call.function.name,
         (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:
@@ -2668,7 +2668,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           iter,
           result_chars: text.length,
           bounded_chars: bounded.length,
-          reduced: bounded !== text,
+          // What the BOUND step cut, not the WARP-3284 envelope swap or the
+          // token redaction before it: this line tunes the cap.
+          reduced: bounded !== boundInput,
           ...(req.toolCallContext?.agentRunId
             ? { agent_run_id: req.toolCallContext.agentRunId }
             : {}),
