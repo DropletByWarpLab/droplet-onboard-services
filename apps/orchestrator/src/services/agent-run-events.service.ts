@@ -69,6 +69,9 @@ export async function queuePositions(prisma: Db): Promise<Map<string, number>> {
 /** The last tool each in-flight run called, fed by the worker's `onEvent`. */
 const lastTools = new Map<string, string>();
 
+/** The last payload sent per live run. Box finding (2026-09-28): the claim and the first checkpoint both published "running, step 0"; an unchanged state is not news. */
+const lastSent = new Map<string, string>();
+
 export function noteAgentRunTool(runId: string, tool: string): void {
   lastTools.set(runId, tool);
 }
@@ -107,7 +110,7 @@ export async function publishAgentRunEvent(prisma: Db, runId: string): Promise<v
     if (!user) return;
     const terminal = TERMINAL.has(run.status);
     const queuePosition = run.status === "queued" ? ((await queuePositions(prisma)).get(run.id) ?? null) : null;
-    publish(AGENT_RUN_EVENTS_TOPIC(user.username), {
+    const payload = {
       runId: run.id,
       sessionId: run.sessionId,
       status: run.status,
@@ -118,8 +121,14 @@ export async function publishAgentRunEvent(prisma: Db, runId: string): Promise<v
       waitingFor: waitingForOf(run.status, run.queueWait),
       title: run.title,
       ...(terminal ? { summary: run.summary } : {}),
-    });
-    if (terminal) lastTools.delete(run.id);
+    };
+    const key = JSON.stringify(payload);
+    if (lastSent.get(run.id) === key) return;
+    publish(AGENT_RUN_EVENTS_TOPIC(user.username), payload);
+    if (terminal) {
+      lastTools.delete(run.id);
+      lastSent.delete(run.id);
+    } else lastSent.set(run.id, key);
   } catch (err) {
     logger.warn({ err, runId }, "agent_run_event_publish_failed");
   }
