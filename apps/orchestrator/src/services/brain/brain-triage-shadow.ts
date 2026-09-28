@@ -11,8 +11,12 @@
  * business text, not guessed.
  *
  * Shadow only: nothing here changes what is sent, to whom, or when. It runs
- * after the verdict is final, off the delivery path (fire-and-forget, one
- * finding at a time), and every failure is a log line. Never on the
+ * after the verdict is final, off the delivery path (fire-and-forget), and
+ * every failure is a log line. All Kev calls — across every hook call, so the
+ * per-finding immediates and the digest of one pass too — go through ONE
+ * serial chain: the sidecar serves one request at a time, and concurrent calls
+ * would queue past their timeout and be logged `unavailable` while Kev is
+ * healthy, skewing the very data shadow mode exists to collect. Never on the
  * write-approval path. Logs ids, labels, probabilities, latency and status —
  * never the finding's title or rationale.
  */
@@ -53,12 +57,24 @@ export const TRIAGE_QUESTIONS: Record<string, DecideQuestion> = {
   },
 };
 
-type Decide = (args: { state: string; questions: Record<string, DecideQuestion> }) => Promise<DecideResult>;
+/**
+ * Per-call Kev timeout. ADR-006 (droplet-local-LLM) measures up to ~0.9 s per
+ * question row on fp32 CPU; 3 questions ≈ 2.7 s, so the 2 s client default
+ * would log healthy calls as `unavailable`. Calls are serial, so no queueing.
+ */
+export const TRIAGE_TIMEOUT_MS = 8000;
+
+type Decide = (args: {
+  state: string;
+  questions: Record<string, DecideQuestion>;
+  timeoutMs?: number;
+}) => Promise<DecideResult>;
 
 /**
  * Returns the hook brain-notify calls with each batch of final verdicts, or
  * `undefined` when the flag is off (today's code path, `decide` never called).
- * The hook returns at once; the Kev calls run afterwards, one at a time.
+ * The hook returns at once; the Kev calls run afterwards, strictly one at a
+ * time across all hook calls (one shared chain per shadow).
  */
 export function createTriageShadow(opts: {
   enabled: boolean;
@@ -70,7 +86,11 @@ export function createTriageShadow(opts: {
     for (const item of items) {
       let result: DecideResult;
       try {
-        result = await decide({ state: `${item.title}\n\n${item.rationale}`, questions: TRIAGE_QUESTIONS });
+        result = await decide({
+          state: `${item.title}\n\n${item.rationale}`,
+          questions: TRIAGE_QUESTIONS,
+          timeoutMs: TRIAGE_TIMEOUT_MS,
+        });
       } catch (e) {
         // `decide` is documented never to throw; a broken injection must not either.
         result = { status: "unavailable", detail: e instanceof Error ? e.message : String(e) };
@@ -83,9 +103,13 @@ export function createTriageShadow(opts: {
       logger.info({ ...base, latencyMs: result.latencyMs, model: result.model, kev: result.answers }, "brain.triage_shadow");
     }
   };
+  // ponytail: unbounded queue; fine at brain-notify's volume (a handful of
+  // findings per pass). Add a cap/drop if a pass can ever emit hundreds.
+  let tail: Promise<void> = Promise.resolve();
   return (items) => {
-    if (items.length > 0) {
-      run(items).catch((e) => logger.warn({ err: e instanceof Error ? e.message : String(e) }, "brain.triage_shadow.failed"));
-    }
+    if (items.length === 0) return;
+    tail = tail
+      .then(() => run(items))
+      .catch((e) => logger.warn({ err: e instanceof Error ? e.message : String(e) }, "brain.triage_shadow.failed"));
   };
 }

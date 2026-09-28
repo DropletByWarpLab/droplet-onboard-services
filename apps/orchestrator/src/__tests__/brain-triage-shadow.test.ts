@@ -22,7 +22,7 @@ vi.mock("../lib/logger.js", () => {
 });
 
 import { notifyFindings } from "../services/brain/brain-notify.service";
-import { createTriageShadow, TRIAGE_QUESTIONS, type ShadowItem } from "../services/brain/brain-triage-shadow";
+import { createTriageShadow, TRIAGE_QUESTIONS, TRIAGE_TIMEOUT_MS, type ShadowItem } from "../services/brain/brain-triage-shadow";
 import type { DecideResult } from "../services/decision-model.client";
 
 const NOW = new Date("2026-09-05T12:00:00.000Z");
@@ -159,5 +159,36 @@ describe("brain triage shadow — flag on (WARP-3071)", () => {
     expect(await runDelivery(MIXED(), () => {
       throw new Error("hook");
     })).toEqual(baseline);
+  });
+
+  it("a decide that never resolves does not hold up delivery", async () => {
+    const baseline = await runDelivery(MIXED());
+    const decide = vi.fn(() => new Promise<DecideResult>(() => {}));
+    // Would hang (and time out the test) if the hook awaited Kev.
+    expect(await runDelivery(MIXED(), createTriageShadow({ enabled: true, decide }))).toEqual(baseline);
+    expect(decide).toHaveBeenCalledTimes(1); // the second waits behind the first
+  });
+
+  it("calls from separate hook invocations run strictly one at a time", async () => {
+    const pending: Array<(r: DecideResult) => void> = [];
+    const decide = vi.fn(() => new Promise<DecideResult>((resolve) => pending.push(resolve)));
+    const hook = createTriageShadow({ enabled: true, decide })!;
+    const item = (id: string): ShadowItem => ({ id, kind: "loss", title: TITLE, rationale: RATIONALE, tier: "immediate" });
+
+    hook([item("f1")]);
+    hook([item("f2")]); // e.g. the digest, in the same brain-notify pass
+    await settle();
+    expect(decide).toHaveBeenCalledTimes(1);
+
+    pending[0](OK);
+    await settle();
+    expect(decide).toHaveBeenCalledTimes(2);
+    pending[1](OK);
+    await settle();
+
+    expect(logged.filter((l) => l.msg === "brain.triage_shadow").map((l) => l.obj.findingId)).toEqual(["f1", "f2"]);
+    for (const [args] of decide.mock.calls as unknown as Array<[{ timeoutMs?: number }]>) {
+      expect(args.timeoutMs).toBe(TRIAGE_TIMEOUT_MS);
+    }
   });
 });
