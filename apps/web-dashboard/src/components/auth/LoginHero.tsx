@@ -312,7 +312,6 @@ export function LoginHero({ className = "" }: { className?: string }) {
         className="lh-field"
         aria-hidden="true"
       />
-      <div className="lh-vignette" aria-hidden="true" />
 
       <div className="lh-brand">
         <DropletMark size={22} className="lh-mark" />

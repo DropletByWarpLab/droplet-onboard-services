@@ -56,7 +56,7 @@ import {
 // `NAV_GROUPS` itself — Whole business is today's nav, unchanged.
 import { DepartmentSwitcher } from "./Departments/DepartmentSwitcher";
 import { useActiveDepartment } from "@/lib/departments/active-department";
-import { departmentNavGroups } from "@/lib/departments/department-nav";
+import { departmentHomeHref, departmentNavGroups } from "@/lib/departments/department-nav";
 
 /**
  * One block of the mobile "More" drawer: a nav destination plus the
@@ -185,6 +185,12 @@ export function Sidebar() {
   const { active: activeDepartment, activeProfile } = useActiveDepartment();
   const navGroups = departmentNavGroups(NAV_GROUPS, activeDepartment, activeProfile);
   const inDepartment = navGroups !== NAV_GROUPS;
+  // The brand mark leads home: the department's home inside one, Overview
+  // otherwise — the same rule as the workspace header's mark.
+  const brandHref =
+    inDepartment && activeDepartment ? departmentHomeHref(activeDepartment.slug) : "/";
+  const brandLabel =
+    inDepartment && activeDepartment ? `Droplet — ${activeDepartment.name} home` : "Droplet home";
 
   // Compute the rendered groups once. Empty groups (e.g. Admin when the
   // user is family/guest without the Activity entry) are filtered out so
@@ -339,10 +345,19 @@ export function Sidebar() {
           </div>
         ) : (
           <div className="flex items-center gap-2.5 pl-5 pr-3 h-16 shrink-0 overflow-hidden">
-            <DropletMark size={22} className="text-accent" />
-            <span className="type-headline text-label-primary tracking-tight sidebar-fade-in">
-              Droplet
-            </span>
+            <Link
+              href={brandHref}
+              aria-label={brandLabel}
+              className="
+                flex items-center gap-2.5 rounded-lg
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+              "
+            >
+              <DropletMark size={22} className="text-accent" />
+              <span className="type-headline text-label-primary tracking-tight sidebar-fade-in">
+                Droplet
+              </span>
+            </Link>
             {/* Tiny chip — names the workspace mode. WARP-1341: business-only
                 build, so this is static. */}
             <span
@@ -466,6 +481,7 @@ export function Sidebar() {
                     active={isItemActive(item)}
                     showChildren={!showSettingsPanel && sectionOpen(item)}
                     onToggleChildren={() => toggleSection(item)}
+                    onActivate={item.href === "/settings" ? () => setMainTreeAt(null) : undefined}
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
                     collapsed={collapsed}
@@ -891,6 +907,7 @@ function DrawerLink({
       href={item.href}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
+      aria-label={item.ariaLabel}
       className={`
         flex items-center gap-3 min-h-[44px] rounded-lg
         type-subheadline transition-all duration-200 ease-smooth
@@ -945,6 +962,7 @@ function NavLink({
   active,
   showChildren = false,
   onToggleChildren,
+  onActivate,
   pathname,
   badge = 0,
   collapsed = false,
@@ -955,6 +973,8 @@ function NavLink({
   showChildren?: boolean;
   /** Open/close the section without navigating — the row's chevron. */
   onToggleChildren?: () => void;
+  /** Reopen a contextual menu when this link already points to the current route. */
+  onActivate?: () => void;
   pathname: string;
   /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
   badge?: number;
@@ -973,6 +993,7 @@ function NavLink({
       <div className="relative">
         <Link
           href={item.href}
+          onClick={onActivate}
           aria-current={active ? "page" : undefined}
           aria-label={collapsed ? item.label : undefined}
           title={collapsed ? item.label : undefined}
@@ -1070,7 +1091,9 @@ function NavLink({
                     key={sub.href}
                     href={sub.href}
                     aria-current={subActive ? "page" : undefined}
-                    aria-label={collapsed ? sub.label : undefined}
+                    // WARP-2978 — a child named for whose it is ("Security settings")
+                    // keeps that name; otherwise the collapsed rail names it by its label.
+                    aria-label={sub.ariaLabel ?? (collapsed ? sub.label : undefined)}
                     title={collapsed ? sub.label : undefined}
                     className={`
                       flex items-center h-8 rounded-md

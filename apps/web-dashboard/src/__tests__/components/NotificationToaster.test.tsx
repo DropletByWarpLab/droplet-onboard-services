@@ -413,3 +413,68 @@ describe("NotificationToaster ← the service worker (WARP-2804, review F1)", ()
     expect(container.listeners.size).toBe(0);
   });
 });
+
+describe("NotificationToaster — Security alerts (WARP-2978)", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    toastSpy.mockReset();
+    routerPush.mockReset();
+    ackSpy.mockClear();
+    (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { protocol: "http:", host: "localhost" } as Location,
+    });
+  });
+
+  async function toastFor(payload: unknown) {
+    render(<NotificationToaster />);
+    await act(async () => {
+      await Promise.resolve();
+      deliver(payload);
+    });
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    return toastSpy.mock.calls[0] as [string, string, { label: string; onClick: () => void } | undefined];
+  }
+
+  const ALERT = {
+    id: "clx9abc",
+    kind: "event",
+    title: "Person in Stock room after hours",
+    body: "Back camera saw someone at 2:14 AM. The site was closed.",
+    url: "/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f",
+    data: { incidentId: "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f" },
+    priority: "alert",
+  };
+
+  it("priority alert → the persistent error toast (role=alert, never times out), with Open", async () => {
+    const [message, type, action] = await toastFor(ALERT);
+    expect(type).toBe("error");
+    expect(message).toBe("Person in Stock room after hours — Back camera saw someone at 2:14 AM. The site was closed.");
+    expect(action?.label).toBe("Open");
+  });
+
+  it("Open goes to the incident with ?n=<notification>, so Acknowledge carries it — and acks the notification as opened", async () => {
+    const [, , action] = await toastFor(ALERT);
+    action!.onClick();
+    expect(routerPush).toHaveBeenCalledWith("/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f?n=clx9abc");
+    expect(ackSpy).toHaveBeenCalledWith("clx9abc", { via: "opened" });
+  });
+
+  it("without priority, an event keeps its ordinary toast", async () => {
+    const [, type] = await toastFor({ ...ALERT, priority: undefined });
+    expect(type).toBe("success");
+  });
+
+  it("only an incident page gets ?n=; any other link is left as the box sent it", async () => {
+    const [, , action] = await toastFor({ ...ALERT, url: "/calendar" });
+    action!.onClick();
+    expect(routerPush).toHaveBeenCalledWith("/calendar");
+  });
+
+  it("no row id (an older box): the incident link opens without ?n=", async () => {
+    const [, , action] = await toastFor({ ...ALERT, id: undefined });
+    action!.onClick();
+    expect(routerPush).toHaveBeenCalledWith("/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f");
+  });
+});

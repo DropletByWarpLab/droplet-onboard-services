@@ -52,18 +52,14 @@ import type {
   AuthenticationResponseJSON,
 } from "@simplewebauthn/server";
 import type { PrismaClient, WebAuthnCredential } from "@prisma/client";
+import type { Role } from "../services/jwt.service.js";
 import {
-  signAccessToken,
-  signRefreshToken,
-  registerRefreshSession,
-  ACCESS_TOKEN_TTL_SECONDS,
-  REFRESH_TOKEN_TTL_SECONDS,
-  type Role,
-} from "../services/jwt.service.js";
-import { createSession } from "../services/session.service.js";
+  issueSessionTokens,
+  sessionTokenBody,
+  setSessionCookies,
+} from "../services/session-mint.js";
 import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
 import { createRequireCredentialStepUp } from "../middleware/require-credential-step-up.js";
-import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { createChallenge, consumeChallenge } from "../services/webauthn-challenge.service.js";
 import { deriveWebAuthnRp, isIpRpId } from "../services/webauthn-config.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -178,9 +174,9 @@ async function issueSession(
     username: string;
     displayName: string;
     role: Role;
-    /** WARP-1582 — assigned custom access role, `null` for none. Spread
-     *  straight into signAccessToken below, so a caller that omits it
-     *  mints a claim-less token and consumers fall back to the database. */
+    /** WARP-1582 — assigned custom access role, `null` for none. A caller
+     *  that omits it mints a claim-less token and consumers fall back to
+     *  the database. */
     accessRoleId?: string | null;
     /** WARP-3193 — ISO stamp of a second factor passed in this sign-in;
      *  access token only, exactly like POST /auth/login. */
@@ -190,28 +186,10 @@ async function issueSession(
   // WARP-247 — record first so the sid rides inside both tokens; also
   // index the refresh token (WARP-116) — the passkey path previously
   // skipped registerRefreshSession, leaving these sessions invisible to
-  // the admin revoke sweep.
-  const { sid } = await createSession({ id: user.id, role: user.role });
+  // the admin revoke sweep. Both live in the shared mint.
   const { lastMfaAt, ...identity } = user;
-  const accessToken = signAccessToken({ ...identity, lastMfaAt, sid });
-  const refreshToken = signRefreshToken({ ...identity, sid });
-  await registerRefreshSession(user.id, refreshToken);
-  const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-
-  res.cookie(SESSION_COOKIE_NAME, accessToken, {
-    httpOnly: true,
-    secure: isHttps,
-    sameSite: "lax",
-    path: "/",
-    maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-  });
-  res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
-    httpOnly: true,
-    secure: isHttps,
-    sameSite: "lax",
-    path: "/api/auth",
-    maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-  });
+  const minted = await issueSessionTokens(identity, { lastMfaAt });
+  setSessionCookies(req, res, minted);
 
   // WARP-582 — same NATIVE-client-only gate as POST /auth/login: a browser
   // context (any Sec-Fetch-* / Origin / Referer marker present) never gets
@@ -228,14 +206,7 @@ async function issueSession(
   const wantBody = wantBodyParam && browserMarker === null;
   res.json({
     user: { id: user.id, username: user.username, displayName: user.displayName, role: user.role },
-    ...(wantBody
-      ? {
-          accessToken,
-          refreshToken,
-          accessTokenExpiresAt: Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-          refreshTokenExpiresAt: Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
-        }
-      : {}),
+    ...(wantBody ? sessionTokenBody(minted) : {}),
   });
 }
 
