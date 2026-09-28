@@ -2229,6 +2229,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           Connection: "keep-alive",
           "X-Accel-Buffering": "no",
         });
+        // Set once a terminal `done` reached the wire (see the catch below).
+        let doneSent = false;
         const onEvent = (e: SSEEvent) => {
           // WARP-854 — an "empty completion": the model "finished" without
           // producing any visible output or calling a tool. Seen in the
@@ -2273,6 +2275,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           } catch {
             /* client gone */
           }
+          if (e.type === "done") doneSent = true;
           if (e.type === "content_delta") {
             liveAssistantContent += e.text;
           } else if (e.type === "tool_call") {
@@ -2424,6 +2427,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             terminal = "failed";
             // eslint-disable-next-line no-console
             console.error("[llm/chat] agent loop failed:", err);
+            // A thrown loop (e.g. the model runner 500s on the chat template,
+            // or the gateway 502s) used to end a 200 stream with no terminal
+            // event: the client saw an empty turn and no retry chip. Send the
+            // documented error `done`. The message is fixed text on purpose —
+            // the thrown error can carry upstream internals.
+            if (!doneSent) {
+              onEvent({
+                type: "done",
+                iterations: 0,
+                stop_reason: "error",
+                error:
+                  "agent_loop_failed: the model service returned an error for " +
+                  "this turn. Try again; server logs carry the cause.",
+              });
+            }
           }
         } finally {
           res.end();
