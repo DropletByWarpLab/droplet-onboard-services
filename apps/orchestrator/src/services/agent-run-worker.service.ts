@@ -1888,7 +1888,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     switch (result.stop_reason) {
       case "model_done":
       case "context_budget":
-      case "repetition": {
+      case "repetition":
+      case "no_progress": {
         const text = contentToText(result.message.content);
         await finish(runId, {
           status: "succeeded",

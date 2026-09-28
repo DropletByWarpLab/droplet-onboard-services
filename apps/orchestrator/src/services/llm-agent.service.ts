@@ -607,7 +607,8 @@ export interface AgentResult {
     | "iteration_limit"
     | "error"
     | "context_budget"
-    | "repetition";
+    | "repetition"
+    | "no_progress";
   error?: string;
   /** WARP-1479 — set only when the terminal turn produced no visible answer. */
   blankDiagnostics?: BlankAnswerDiagnostics;
@@ -1522,7 +1523,15 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // than a break because the user still deserves an answer synthesized from
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
-  let finalizeReason: "context_budget" | "repetition" | null = null;
+  let finalizeReason: "context_budget" | "repetition" | "no_progress" | null = null;
+  // WARP-3283 — no-progress early-stop. A model that keeps REPHRASING a
+  // search that finds nothing makes distinct calls, so the repetition guard
+  // above never fires and the turn used to run to maxIter and end on the
+  // canned step-limit text (live: 8 search_content rephrasings, 102 s).
+  // Counts consecutive zero-hit results from SEARCH_TOOLS only: a search
+  // with hits resets it; failures and every other tool leave it alone.
+  const MAX_CONSECUTIVE_EMPTY_SEARCHES = 3;
+  let consecutiveEmptySearches = 0;
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -1732,7 +1741,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         content:
           finalizeReason === "repetition"
             ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
-            : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+            : finalizeReason === "no_progress"
+              ? "Your last searches found nothing — stop searching. Answer the user now: say what you looked for and that nothing matching was found, plus anything useful already gathered. Do not call any more tools."
+              : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
       });
     }
     const iterTools = finalizeReason !== null ? [] : tools;
@@ -2458,6 +2469,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const parsed: unknown = toolResultPayloadValue(payload);
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
+      // WARP-3283 — feed the no-progress guard (see its declaration).
+      if (!result.isError && SEARCH_TOOLS.has(call.function.name)) {
+        consecutiveEmptySearches = isZeroHitSearchResult(parsed)
+          ? consecutiveEmptySearches + 1
+          : 0;
+        if (consecutiveEmptySearches >= MAX_CONSECUTIVE_EMPTY_SEARCHES && finalizeReason === null) {
+          finalizeReason = "no_progress";
+          logger.info(
+            { turn_id: turnId, iter, empty_searches: consecutiveEmptySearches },
+            "agent_no_progress_finalize",
+          );
+        }
+      }
+
       // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
       // streaming and non-streaming paths. Until now nothing in this repo had
       // ever LOGGED a tool failure (`result.isError` was only ever read, below,
@@ -3025,6 +3050,37 @@ const RETRIEVAL_CLASS_TOOLS = new Set([
 
 function isRetrievalClassTool(name: string): boolean {
   return RETRIEVAL_CLASS_TOOLS.has(name);
+}
+
+/**
+ * WARP-3283 — query-driven lookups whose result can be "zero hits". Not
+ * `RETRIEVAL_CLASS_TOOLS`: `read_file` never returns zero hits and
+ * `list_files` of an empty folder is an answer, not a failed search.
+ * `memory_recall` is left out on purpose — on a miss it falls back to the
+ * recent facts, so its result is never empty.
+ */
+const SEARCH_TOOLS = new Set([
+  "search_content", // { query, results: [] }
+  "search_files", // nextcloud search body: { items: [] }
+  "email_search", // { type, filter, threadCount, threads: [] }
+  "search_contacts", // { contacts: [] }
+  "search_calendar_events", // { type, count, query, events: [] }
+  "search_camera_events", // { events: [] }
+  "workspace_search", // { pattern, hits: [], count, truncated }
+  "business_find", // { entity, <entity plural>: [], total }
+]);
+
+/**
+ * A successful search result with nothing in it: a bare `[]`, or an object
+ * whose root arrays exist and are all empty. Shape-driven (each handler
+ * names its list differently, see `SEARCH_TOOLS`); a root without any array
+ * (e.g. business_find `{ entity, work_item }` by id) is a hit.
+ */
+function isZeroHitSearchResult(parsed: unknown): boolean {
+  if (Array.isArray(parsed)) return parsed.length === 0;
+  if (parsed === null || typeof parsed !== "object") return false;
+  const arrays = Object.values(parsed).filter(Array.isArray);
+  return arrays.length > 0 && arrays.every((a) => a.length === 0);
 }
 
 /**
