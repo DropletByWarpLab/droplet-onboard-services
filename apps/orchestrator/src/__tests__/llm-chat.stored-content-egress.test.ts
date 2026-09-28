@@ -581,6 +581,28 @@ describe("POST /api/llm/chat — stored content in the PROMPT (WARP-2746)", () =
       ["brain", "business", "context_pins", "memory"],
     );
   });
+  // WARP-3281 — the date line's Workspace.tz label is workspace configuration:
+  // it stays on the box. The cloud model still gets the day.
+  it.each([
+    [false, true],
+    [true, false],
+  ])("cloud=%s: the date line carries the Workspace.tz zone=%s", async (cloud, zoneSent) => {
+    mockGetModelProvider.mockResolvedValue(cloud ? "anthropic" : "local");
+    const prisma = createPrismaMock();
+    prisma.workspace.findUnique = vi.fn(async () => ({ id: 1, type: "BUSINESS", tz: "Pacific/Auckland" }));
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as unknown as { user?: unknown }).user = { id: OWNER_ID, username: "stefan", role: "owner" };
+      next();
+    });
+    app.use("/api", createLlmRouter(prisma as never));
+
+    expect((await send(app, cloud)).status).toBe(200);
+    const sent = outboundText();
+    expect(sent).toMatch(/Today is \w+ \d{4}-\d{2}-\d{2}/);
+    expect(sent.includes("Pacific/Auckland")).toBe(zoneSent);
+  });
 });
 
 describe("withholdPromptBlocksForOffLan — the one definition", () => {

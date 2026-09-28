@@ -29,11 +29,11 @@ import { composeToolGuidance } from "./tool-guidance.service.js";
 // composed there. One source, imported — not a fourth copy of a literal that
 // already exists three times in this repo.
 import { MEMORY_FACTS_CHAR_BUDGET } from "./tool-budget.service.js";
-import { resolveBoxTimezone } from "./scene-schedule-tz-backfill.service.js";
+import { localDayInZone } from "./scene-schedule-tz-backfill.service.js";
 
 /**
  * WARP-3281 — today's date for the chat prompt, e.g.
- * `Today is Monday 2026-09-28 (America/Los_Angeles).`
+ * `Today is Monday 2026-09-28 (America/Los_Angeles); use that timezone for any clock or calendar tool.`
  *
  * Without it gpt-oss assumed a date near its training cutoff and refused
  * "the weather in Boston on 2026-10-03" (six days out) as beyond the
@@ -44,28 +44,25 @@ import { resolveBoxTimezone } from "./scene-schedule-tz-backfill.service.js";
  * a day. The time of day stays with get_current_datetime.
  *
  * Zone: the caller's `timeZone` (the route passes `Workspace.tz`, set at
- * setup), then the box zone, then UTC. That is the chain briefingToday
- * (routes/briefings.ts) uses. The orchestrator container sets no TZ, so
- * without a Workspace.tz the day turns over at UTC midnight.
+ * setup), then the box zone, then UTC (`localDayInZone`, shared with
+ * briefingToday). The zone hint exists because get_current_datetime defaults
+ * to the container zone (UTC): without it the prompt's "today" and the tool's
+ * "now" can name different days near midnight. The hint names no tool, so it
+ * is safe whatever the person's tool allowlist (WARP-642).
+ *
+ * `withZone: false` renders the day only. The route passes it on an off-LAN
+ * (cloud) turn: the zone is workspace configuration, the class of stored
+ * content the WARP-2746 gate keeps on the box.
  */
-export function todayLine(now: Date = new Date(), timeZone?: string | null): string {
-  for (const zone of [timeZone, resolveBoxTimezone(), "UTC"]) {
-    if (!zone) continue;
-    try {
-      // en-CA formats as YYYY-MM-DD.
-      const date = new Intl.DateTimeFormat("en-CA", {
-        timeZone: zone,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(now);
-      const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long" }).format(now);
-      return `Today is ${weekday} ${date} (${zone}).`;
-    } catch {
-      // An unknown zone string: try the next one.
-    }
-  }
-  return `Today is ${now.toISOString().slice(0, 10)} (UTC).`;
+export function todayLine(
+  now: Date = new Date(),
+  timeZone?: string | null,
+  opts: { withZone?: boolean } = {},
+): string {
+  const { date, weekday, zone } = localDayInZone(now, timeZone);
+  const day = weekday ? `${weekday} ${date}` : date;
+  if (opts.withZone === false) return `Today is ${day}.`;
+  return `Today is ${day} (${zone}); use that timezone for any clock or calendar tool.`;
 }
 
 // ── Base system prompt (RAG + durable-memory steering) ──

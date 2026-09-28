@@ -4,7 +4,7 @@
  * `BASE_PROMPT_MAX_CHARS = 12200` bounds the worst-case sum of EVERY fixed
  * system-prompt block: identity (4000) + persona (1200) + business (1500)
  * + tool guidance (2200) + memory facts (2000) + interview conductor (900)
- * = 11800, leaving 400 chars of slack. (2026-07-23: tool guidance became a
+ * + date line (150, WARP-3281) = 11950, leaving 250 chars of slack. (2026-07-23: tool guidance became a
  * counted, capped block — previously ~600 uncounted chars riding inside
  * the identity fold.) This canary fails in CI if a future budget edit
  * pushes the sum over the ceiling.
@@ -32,6 +32,7 @@ import {
   INTERVIEW_PROMPT_MAX_CHARS,
   TOOL_GUIDANCE_MAX_CHARS,
   BASE_PROMPT_MAX_CHARS,
+  DATE_LINE_MAX_CHARS,
   OUTPUT_RESERVE,
 } from "./prompt-budget.consts.js";
 import {
@@ -165,8 +166,8 @@ function chatToolSizes(): { name: string; chars: number }[] {
  * WARP-1891 — per-tool ceiling on a single serialized `tools[]` entry.
  *
  * Derivation: the effective window is DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE
- * = 15360 tokens = 61440 chars, of which the fixed blocks take 11800, leaving
- * ~49.6K chars for the whole ~70-tool chat advertisement. 2000 chars is ~4% of
+ * = 15360 tokens = 61440 chars, of which the fixed blocks take 11950, leaving
+ * ~49.5K chars for the whole ~70-tool chat advertisement. 2000 chars is ~4% of
  * that budget in ONE tool — past that a tool is pathological, not merely rich.
  *
  * This exists because the aggregate assertion below is FILE-scoped: when the
@@ -261,11 +262,13 @@ describe("worst-case fixed system-block budget", () => {
       BUSINESS_CONTEXT_MAX_CHARS +
       TOOL_GUIDANCE_MAX_CHARS +
       MEMORY_FACTS_CHAR_BUDGET +
-      INTERVIEW_PROMPT_MAX_CHARS;
-    // 4000 + 1200 + 1500 + 2200 + 2000 + 900 = 11800. (2026-07-23: tool
+      INTERVIEW_PROMPT_MAX_CHARS +
+      DATE_LINE_MAX_CHARS;
+    // 4000 + 1200 + 1500 + 2200 + 2000 + 900 + 150 = 11950 (WARP-3281 added
+    // the date line). (2026-07-23: tool
     // guidance became a counted, capped block — it was previously ~600
     // uncounted chars riding inside the identity fold.)
-    expect(fixedBlockChars).toBe(11800);
+    expect(fixedBlockChars).toBe(11950);
     expect(fixedBlockChars).toBeLessThanOrEqual(BASE_PROMPT_MAX_CHARS);
   });
 

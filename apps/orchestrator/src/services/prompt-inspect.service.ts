@@ -59,6 +59,7 @@ import {
   BUSINESS_CONTEXT_MAX_CHARS,
   TOOL_GUIDANCE_MAX_CHARS,
   INTERVIEW_PROMPT_MAX_CHARS,
+  DATE_LINE_MAX_CHARS,
 } from "./prompt-budget.consts.js";
 import {
   resolveAttributedToolAccess,
@@ -262,6 +263,16 @@ export async function inspectPromptForPerson(
     true,
     () => composeToolGuidance(input.allowedToolNames),
   );
+  // WARP-3281 — the date line, as its own block so the admin view accounts
+  // for it. After `business`, which reads the zone off the Workspace row. The
+  // route's off-LAN rule: a cloud turn carries the day without the zone.
+  const date = await compose(
+    "date",
+    "Today's date",
+    DATE_LINE_MAX_CHARS,
+    true,
+    () => todayLine(new Date(), workspaceTz, { withZone: !offLan }),
+  );
   const memory = await compose(
     "memory",
     "Things it was told to remember",
@@ -328,6 +339,7 @@ export async function inspectPromptForPerson(
     persona,
     business,
     toolGuidance,
+    date,
     memory,
     brain,
     interviewBlock,
@@ -344,7 +356,7 @@ export async function inspectPromptForPerson(
       input.allowedToolNames,
       persona.text ?? "",
       business.text ?? "",
-      todayLine(new Date(), workspaceTz),
+      date.text ?? "",
     ) +
     (memory.text ?? "") +
     (brain.text ?? "") +

@@ -450,7 +450,7 @@ describe("POST /api/llm/chat — base system prompt + memory injection", () => {
         .send({ model: "m1", messages: [{ role: "user", content: "weather in Boston on 2026-10-03?" }] });
 
       expect(res.status).toBe(200);
-      expect(agentMessages()[0]!.content).toMatch(/Today is \w+ \d{4}-\d{2}-\d{2} \(Pacific\/Auckland\)\./);
+      expect(agentMessages()[0]!.content).toMatch(/Today is \w+ \d{4}-\d{2}-\d{2} \(Pacific\/Auckland\); use that timezone/);
     });
 
     it("leaves the date out for the voice principal", async () => {

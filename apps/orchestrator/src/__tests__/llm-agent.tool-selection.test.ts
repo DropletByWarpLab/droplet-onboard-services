@@ -177,13 +177,13 @@ describe("runAgent — tool selection (spec §3)", () => {
       model: "m",
       messages: [{ role: "user", content: "hello there" }],
       tool_selection_mode: "domains",
-      // Ceiling = window - OUTPUT_RESERVE(1024) - fixed blocks(11800 chars
-      // ~= 2950 tokens), so 4070 leaves ~96 tokens: comfortably above the
+      // Ceiling = window - OUTPUT_RESERVE(1024) - fixed blocks(11950 chars
+      // ~= 2988 tokens; WARP-3281 added the 150-char date line), so 4108 leaves ~96 tokens: comfortably above the
       // 89-token core-only advertisement that opens the turn, and well below
       // what admitting the smart-home domain would cost. That isolates the
       // heal as the thing being refused — a smaller window would trip the
       // PRE-loop assertion instead and prove nothing about this branch.
-      context_window: 4070,
+      context_window: 4108,
     });
 
     // The advertisement did NOT widen: the refused heal leaves the turn on
