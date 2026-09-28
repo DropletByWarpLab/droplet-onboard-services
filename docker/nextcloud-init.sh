@@ -174,11 +174,14 @@ else
   echo "[droplet] group folder '${SHARED_FOLDER_NAME}' already exists (id ${FOLDER_ID}) — skipping create"
 fi
 
-# 4. Group permissions on the Workspace folder. Bits: 1 read, 2 update,
-#    4 create, 8 delete, 16 share. `groupfolders:group` on an attached group
-#    errors harmlessly (|| true); `permissions` re-applies the same mask. The
-#    orchestrator's reconciler (workspaceMasks) re-asserts these every tick,
-#    so this hook re-running on boot can never restore an older mask.
+# 4. Group permissions on the Workspace folder. `groupfolders:group <id>
+#    <group> [words...]` attaches the group if needed and SETS its mask on
+#    every run. It takes permission WORDS, not a number: read is always
+#    included, write = update+create (6), delete = 8, share = 16, and no
+#    words means read only (1). Do not add `groupfolders:permissions` here:
+#    that is the ACL command and never sets a group's folder mask. The
+#    orchestrator's reconciler (workspaceMasks) re-asserts the same masks
+#    every tick; this hook sets them right at boot so there is no window.
 #    - Workspace group (members, owners, admins): 15, NO share bit
 #      (WARP-3168: members may not share Workspace items at all; every member
 #      already sees the whole Workspace. Same mask as a department's rw group.)
@@ -190,9 +193,9 @@ fi
 for grp in droplet-admins guest; do
   $OCC group:list --output=json | grep -q "\"${grp}\"" || $OCC group:add "$grp" || true
 done
-for gm in "${HOUSEHOLD_GROUP}:15" "droplet-admins:31" "admin:31" "guest:1"; do
-  $OCC groupfolders:group "$FOLDER_ID" "${gm%%:*}" || true
-  $OCC groupfolders:permissions "$FOLDER_ID" "${gm%%:*}" "${gm##*:}" || true
+for gm in "${HOUSEHOLD_GROUP}:write delete" "droplet-admins:write share delete" "admin:write share delete" "guest:"; do
+  # shellcheck disable=SC2086 # the words after ':' are split on purpose
+  $OCC groupfolders:group "$FOLDER_ID" "${gm%%:*}" ${gm#*:} || true
 done
 
 # 5. Set the quota (idempotent — re-applying the same quota is a no-op).

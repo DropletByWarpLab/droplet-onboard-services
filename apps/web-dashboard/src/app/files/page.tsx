@@ -1831,6 +1831,8 @@ export default function FilesPage() {
                   onClick={() => handleShare(selectedFile)}
                   className="btn ghost sm"
                   type="button"
+                  disabled={!!shareBlockedReason}
+                  title={shareBlockedReason}
                 >
                   <LinkIcon size={14} />
                   Share…

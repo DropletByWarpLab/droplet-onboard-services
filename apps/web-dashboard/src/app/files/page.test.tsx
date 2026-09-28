@@ -1100,6 +1100,20 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     );
   });
 
+  // Review of #2416: the detail panel's "Share…" honours the same gate.
+  it("disables the detail panel's Share… for a member in the Workspace", () => {
+    mockFiles = [file("a.pdf")];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
+    fireEvent.click(screen.getAllByText("a.pdf")[0]);
+    const detailShare = screen.getByRole("button", { name: /^share…$/i });
+    expect(detailShare).toBeDisabled();
+    expect(detailShare).toHaveAttribute(
+      "title",
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+    );
+  });
+
   it("keeps Share for an admin in the Workspace", () => {
     mockUser = { id: "admin-1", email: "dana@example.com", role: "admin" };
     mockFiles = [file("a.pdf")];

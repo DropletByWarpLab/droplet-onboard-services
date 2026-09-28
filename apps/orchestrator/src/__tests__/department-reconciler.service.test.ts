@@ -746,9 +746,20 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
       const { join } = await import("node:path");
       const hook = readFileSync(join(__dirname, "..", "..", "..", "..", "docker", "nextcloud-init.sh"), "utf8");
       const line = /for gm in (.+); do/.exec(hook)?.[1] ?? "";
+      // groupfolders:group takes WORDS (read is implied; none = read only).
+      // Map them to bits so a hook passing a number or nothing fails here.
+      const bits: Record<string, number> = { read: 1, write: 6, delete: 8, share: 16 };
       const hookMasks = Object.fromEntries(
-        [...line.matchAll(/"([^":]+):(\d+)"/g)].map((m) => [m[1] === "${HOUSEHOLD_GROUP}" ? "household" : m[1], Number(m[2])]),
+        [...line.matchAll(/"([^":]+):([^"]*)"/g)].map((m) => [
+          m[1] === "${HOUSEHOLD_GROUP}" ? "household" : m[1],
+          m[2].split(/\s+/).filter(Boolean).reduce((mask, w) => {
+            if (!(w in bits)) throw new Error(`groupfolders:group does not accept "${w}"`);
+            return mask | bits[w];
+          }, 1),
+        ]),
       );
+      expect(hook).toMatch(/groupfolders:group "\$FOLDER_ID" "\$\{gm%%:\*\}" \$\{gm#\*:\}/);
+      expect(hook).not.toMatch(/^\s*\$OCC groupfolders:permissions/m);
       expect(hookMasks).toEqual({
         ...workspaceMasks(),
         [DROPLET_ADMINS_GROUP]: MASK_ADMIN,
