@@ -136,6 +136,8 @@ async function runTurn(args: {
   events: SSEEvent[];
   /** Receives the model stub, so a test can read what the model was sent. */
   onChat?: (chat: ReturnType<typeof vi.fn>) => void;
+  /** WARP-3279 — the persisted conversation this turn belongs to. */
+  threadId?: string;
 }) {
   const chat = vi.fn(async () => ({
     ok: true,
@@ -171,6 +173,9 @@ async function runTurn(args: {
     messages: [{ role: "user", content: "do the thing" }],
     max_iter: 4,
     toolCallContext: { userId: USER },
+    ...(args.threadId
+      ? { citationContext: { userId: USER, threadId: args.threadId, messageId: "msg" } }
+      : {}),
   });
 }
 
@@ -426,17 +431,16 @@ describe("WARP-2469 — the token is bound, through the chat path", () => {
       events: events2,
     });
 
-    // MUTATION (bind by tool name only): `/b` executes on `/a`'s
-    // approval → red. This is WARP-2305's binding test, now exercised
-    // through the chat approval path.
-    expect(handler).not.toHaveBeenCalled();
-    const ctx = callTool.mock.calls[1]![2] as { confirmationToken?: string };
-    expect(ctx.confirmationToken).toBeUndefined();
-    expect(confirmationHandle(events2)).toBeDefined();
-
-    // …and the original approval is untouched, so the user does not have
-    // to re-approve the call they already approved.
-    expect(approvals.get(handle.challengeId!, clock.now)!.status).toBe("approved");
+    // WARP-3279 — the approved call (`/a`) replays server-side, exactly as
+    // approved; the model's `/b` is answered from that result and never
+    // reaches the dispatch port, let alone with `/a`'s token.
+    // MUTATION (replay the MODEL's args, or bind by tool name only): `/b`
+    // executes on `/a`'s approval → red.
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith("delete_file", { path: "/a" });
+    expect(callTool.mock.calls.some((c) => (c[1] as { path?: string }).path === "/b")).toBe(false);
+    expect(confirmationHandle(events2)).toBeUndefined();
+    expect(approvals.get(handle.challengeId!, clock.now)!.status).toBe("spent");
   });
 });
 
@@ -535,5 +539,111 @@ describe("WARP-2469 — no approval store wired (voice, ToolSpec runs)", () => {
     // MUTATION (fall through to the WARP-640 branch when no store is
     // wired): the raw interceptor secret appears on the wire → red.
     expect(JSON.stringify(events)).not.toContain(minted.token);
+  });
+});
+
+describe("WARP-3279 — an approved chat call replays server-side, exactly as approved", () => {
+  async function challengeAndApprove(threadId?: string) {
+    const clock = { now: Date.now() };
+    const dispatch = makeDispatch(() => clock.now);
+    const approvals = createChatApprovalStore();
+    const events: SSEEvent[] = [];
+    let turn1Chat: ReturnType<typeof vi.fn> | undefined;
+    await runTurn({
+      callTool: dispatch.callTool,
+      approvals,
+      turns: [
+        toolCallTurn("pm_create_project", { name: "Q3 rollout" }),
+        { role: "assistant", content: "Waiting for your approval." },
+      ],
+      events,
+      threadId,
+      onChat: (c) => (turn1Chat = c),
+    });
+    const handle = confirmationHandle(events)!;
+    expect(approvals.approve(handle.challengeId!, USER, clock.now).ok).toBe(true);
+    return { ...dispatch, approvals, handle, turn1Chat: turn1Chat! };
+  }
+
+  it("a model that REWORDS the args on the approval turn still gets exactly one execution, of the approved args", async () => {
+    const { handler, callTool, approvals, handle } = await challengeAndApprove();
+    const events2: SSEEvent[] = [];
+    let chat: ReturnType<typeof vi.fn> | undefined;
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [
+        // gpt-oss reconstructing the call from its own prose.
+        toolCallTurn("pm_create_project", { name: "Q3 roll-out plan", description: "as discussed" }),
+        { role: "assistant", content: "Done — the project is created." },
+      ],
+      events: events2,
+      onChat: (c) => (chat = c),
+    });
+
+    // MUTATION (drop the replay; fall back to the model re-issue path): the
+    // reworded call is challenged again and nothing executes → red.
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith("pm_create_project", { name: "Q3 rollout" });
+    // No second approval prompt for the user.
+    expect(confirmationHandle(events2)).toBeUndefined();
+    expect(approvals.get(handle.challengeId!)!.status).toBe("spent");
+
+    // The model saw the replayed call and its result before its first answer.
+    const firstRequest = JSON.stringify(chat!.mock.calls[0]);
+    expect(firstRequest).toContain("pm_create_project");
+    expect(firstRequest).toContain('\\"created\\":true');
+
+    // The dashboard sees the call like any other.
+    const call = events2.find((e) => e.type === "tool_call");
+    expect(call).toMatchObject({ name: "pm_create_project", args: { name: "Q3 rollout" } });
+    const result = events2.find(
+      (e) => e.type === "tool_result" && e.id === (call as { id: string }).id,
+    );
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("replays once: a later turn does not run it again", async () => {
+    const { handler, callTool, approvals } = await challengeAndApprove();
+    for (let i = 0; i < 2; i++) {
+      await runTurn({
+        callTool,
+        approvals,
+        turns: [{ role: "assistant", content: "ok" }],
+        events: [],
+      });
+    }
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay into another conversation", async () => {
+    const { handler, callTool, approvals, handle } = await challengeAndApprove("thread-a");
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [{ role: "assistant", content: "ok" }],
+      events: [],
+      threadId: "thread-b",
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(approvals.get(handle.challengeId!)!.status).toBe("approved");
+
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [{ role: "assistant", content: "ok" }],
+      events: [],
+      threadId: "thread-a",
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("never tells the model to present a token in chat", async () => {
+    const { turn1Chat } = await challengeAndApprove();
+    const challengeSeen = JSON.stringify(turn1Chat.mock.calls[1]);
+    expect(challengeSeen).toContain("CONFIRMATION_REQUIRED");
+    // MUTATION (forward the interceptor's generic text): "presenting this
+    // confirmationToken" reaches the model → red.
+    expect(challengeSeen).not.toMatch(/confirmationToken|present/i);
   });
 });
