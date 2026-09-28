@@ -337,6 +337,17 @@ describe("agent-runs routes — ownership, list, detail, cancel (WARP-2180)", ()
     expect(page1.body.items[0]).not.toHaveProperty("trace");
   });
 
+  it("filters by the chat that started the run (WARP-3302)", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner] });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "from chat", model: "m", sessionId: "conv-1" });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "elsewhere", model: "m", sessionId: "conv-2" });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "workshop", model: "m" });
+    const { app } = buildApp(owner, db);
+    const res = await request(app).get("/api/agent-runs").query({ sessionId: "conv-1" });
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((r: { goal: string }) => r.goal)).toEqual(["from chat"]);
+  });
+
   it("pages by (createdAt, id): rows created in the same millisecond straddling a page boundary are not skipped", async () => {
     const same = new Date("2026-09-04T10:00:00Z");
     const db = createAgentRunPrismaMock({ users: [owner], now: () => same });
