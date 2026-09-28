@@ -985,6 +985,7 @@ def _extract_assistant_text(payload: dict) -> str:
         "trace":       [...],
         "iterations":  N,
         "stop_reason": "model_done" | "iteration_limit" | "error"
+                     | "context_budget" | "repetition" | "no_progress"
       }
 
     Legacy fallback (ai-gateway / OpenAI-compatible) — kept so the same
