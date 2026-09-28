@@ -117,6 +117,9 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
       // can fire a browser notification (or, in the future, a mobile
       // push when a push-dispatcher subscribes to the same topic).
       `droplet/chat/${user.username}/#`,
+      // WARP-3301: live background-run events (status, step, queue
+      // position) from agent-run-events.service.ts, for this user's runs only.
+      `droplet/agent-runs/${user.username}`,
     ];
 
     const unsubscribes = topics.map((t) =>

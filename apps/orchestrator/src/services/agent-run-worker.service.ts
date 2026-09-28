@@ -140,6 +140,7 @@ import { boundToolResultForModel } from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
+import { noteAgentRunTool, publishAgentRunEvent } from "./agent-run-events.service.js";
 import { summarizeToolArguments } from "./confirmation-summary.js";
 import { decideCloudTurn, resolveOffLanProvider } from "./cloud-access.service.js";
 import {
@@ -513,6 +514,10 @@ export async function enqueueAgentRun(
     },
     select: { id: true },
   });
+  // WARP-3301 — the new run's first live event (queued, with its position).
+  // Not from inside a transaction (the schedule ticker): the row is not
+  // committed yet and the client closes with it. Its claim event follows.
+  if ("$transaction" in prisma) void publishAgentRunEvent(prisma, row.id);
   return row;
 }
 
@@ -533,6 +538,7 @@ export async function cancelAgentRun(
     // call too, like every other terminal write.
     data: { status: "cancelled", endedAt: now, ...CLEAR_PENDING },
   });
+  if (res.count === 1) void publishAgentRunEvent(prisma, id);
   return res.count === 1;
 }
 
@@ -604,6 +610,7 @@ export async function decideAgentRun(
     where: { id: input.id, status: "awaiting_confirmation" },
     data: {
       status: "queued",
+      queueWait: "queue",
       runAfter: now,
       pendingDecision: input.decision,
       pendingDecidedAt: now,
@@ -612,6 +619,7 @@ export async function decideAgentRun(
     },
   });
   if (res.count !== 1) return { ok: false, reason: "not_parked" };
+  void publishAgentRunEvent(prisma, input.id);
   await recordActivity({
     kind: "tool_call",
     severity: input.decision === "approved" ? "info" : "warn",
@@ -905,6 +913,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         where: fence,
         data: {
           status: "queued",
+          queueWait: "queue",
           attempts: { increment: 1 },
           claimedBy: null,
           claimedAt: null,
@@ -914,6 +923,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       });
       if (res.count === 1) {
         reclaimed += 1;
+        void publishAgentRunEvent(prisma, row.id);
         logger.warn(
           { runId: row.id, attempts: row.attempts + 1, lastWorker: row.claimedBy },
           "agent_run_reclaimed",
@@ -941,7 +951,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       });
       return true;
     });
-    if (won) leases.set(runId, at);
+    if (won) {
+      leases.set(runId, at);
+      void publishAgentRunEvent(prisma, runId);
+    }
     return won;
   }
 
@@ -1045,6 +1058,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       where: { id: runId, claimedBy: workerId, status: { in: [...fenceStatuses] }, ...leaseFence(runId) },
       data,
     });
+    // WARP-3301 — one live event per status change and per checkpoint (the
+    // checkpoint writes `iteration` once per step), never per token.
+    if (res.count === 1 && (data.status !== undefined || data.iteration !== undefined)) {
+      void publishAgentRunEvent(prisma, runId);
+    }
     return res.count === 1;
   }
 
@@ -1735,7 +1753,17 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         result =
           left > 0
             ? await runAgent(
-                { mcp: deps.agent.mcp, aiGateway: runGateway(deps.agent.aiGateway), approvals, maxIterCap },
+                {
+                  mcp: deps.agent.mcp,
+                  aiGateway: runGateway(deps.agent.aiGateway),
+                  approvals,
+                  maxIterCap,
+                  // WARP-3301 — the run's first `onEvent`: it only notes the
+                  // tool NAME for the live event (never args, rule 19).
+                  onEvent: (e) => {
+                    if (e.type === "tool_call") noteAgentRunTool(runId, e.name);
+                  },
+                },
                 {
                   model: run.model,
                   messages,
@@ -1936,6 +1964,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       // lease loss: `attempts` is untouched. `deadlineAt` still stands.
       const ok = await finish(runId, {
         status: "queued",
+        queueWait: "chat",
         claimedBy: null,
         claimedAt: null,
         heartbeatAt: null,
@@ -2067,7 +2096,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const lease = held.get(id);
       await prisma.agentRun.updateMany({
         where: { id, claimedBy: workerId, status: "running", ...(lease ? { claimedAt: lease } : {}) },
-        data: { status: "queued", claimedBy: null, claimedAt: null, heartbeatAt: null, runAfter: at },
+        data: { status: "queued", queueWait: "queue", claimedBy: null, claimedAt: null, heartbeatAt: null, runAfter: at },
       });
     }
   }

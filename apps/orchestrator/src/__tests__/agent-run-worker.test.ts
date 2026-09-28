@@ -684,7 +684,8 @@ describe("agent-run worker — inference priority and yielding to chat (WARP-274
     const { worker, callTool } = makeWorker(db, { now, chat });
     await worker.tickOnce();
     await settle(worker);
-    expect(db.row(id)).toMatchObject({ status: "queued", attempts: 0, claimedBy: null, iteration: 0, error: null });
+    // WARP-3301 — it waits for chat, explicitly, not for the queue.
+    expect(db.row(id)).toMatchObject({ status: "queued", queueWait: "chat", attempts: 0, claimedBy: null, iteration: 0, error: null });
     expect((db.row(id).runAfter as Date).getTime()).toBe(clock.getTime() + 60_000);
     expect(callTool).not.toHaveBeenCalled();
     expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Agent run failed" }));

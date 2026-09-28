@@ -4215,6 +4215,12 @@ model AgentRun {
   /// WARP-3300 — posts of the result message tried so far. The worker stops
   /// retrying a `failed` delivery at 5 (RESULT_DELIVERY_MAX_ATTEMPTS).
   resultDeliveryAttempts Int                  @default(0)
+  /// WARP-3301 — why a `queued` run is not being worked on: `queue` (behind
+  /// other runs, or not due yet) or `chat` (it yielded the one inference slot
+  /// to interactive chat on a gateway 429). Written at every transition back
+  /// to `queued`; meaningless in any other status, where the API reports
+  /// `waitingFor: "none"`.
+  queueWait          AgentRunQueueWait        @default(queue)
   goal               String
   model              String
   status             AgentRunStatus           @default(queued)
@@ -4457,6 +4463,12 @@ enum AgentRunResultDelivery {
   /// WARP-3300 — the conversation was deleted before the result could be
   /// posted. Terminal, like `delivered`: there is nowhere left to post it.
   conversation_gone
+}
+
+/// WARP-3301 — why a queued run waits. See `AgentRun.queueWait`.
+enum AgentRunQueueWait {
+  queue
+  chat
 }
 
 /// WARP-2997 — where a run's model runs, and whether its owner may use it.
