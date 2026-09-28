@@ -342,13 +342,22 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   //   • `contacts?` and `address book`. The VERB sense ("contact me later",
   //     "who should I contact about the boiler") is knowingly admitted:
   //     reaching a person is what this domain's tools do, and it is six
-  //     schemas. `contact lens(es)` is excluded, and `contactless` never
-  //     matches the word boundary. The cloud rule still does NOT claim
-  //     `contact` (see WARP-2497 below), so this is the word's only owner.
+  //     schemas. `contact lens(es)` and `contact-lens` are excluded, and
+  //     `contactless` never matches the word boundary. The cloud rule still
+  //     does NOT claim `contact` (see WARP-2497 below), so this is the
+  //     word's only owner.
   //   • a bare email ADDRESS. Someone who types an address is asking about
   //     that person. It needs a dotted domain, so a handle ("@dropletbox")
-  //     or "meet me @ 5" stays out. Negatives pin both.
-  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|repl(y|ies|ied|ying)|sent|contacts?(?!\s+lens(es)?\b)|address book)\b|[\w.+-]+@[\w-]+(\.[\w-]+)*\.[a-z]{2,}\b/i, domains: ["email"] },
+  //     or "meet me @ 5" stays out. Negatives pin both. Any `user@host.tld`
+  //     token counts, so `git@github.com:org/repo` and `ssh root@droplet.local`
+  //     admit this domain too: the cheap direction (six schemas), pinned by
+  //     tests so it reads as a choice, not an accident.
+  //     LINEAR BY CONSTRUCTION: the lookbehind lets a match start only at the
+  //     head of a run, and the RFC bounds (local part 64, label 63) cap each
+  //     attempt. The earlier unbounded `[\w.+-]+@…` restarted at every
+  //     position and backtracked O(n²): 40k chars took ~3 s on the event loop.
+  //     The linear-time test in tool-selection.service.test.ts guards every rule.
+  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|repl(y|ies|ied|ying)|sent|contacts?(?![\s-]+lens(es)?\b)|address book)\b|(?<![\w.+-])[\w.+-]{1,64}@(?:[\w-]{1,63}\.)+[a-z]{2,}\b/i, domains: ["email"] },
   // WARP-2454 — team_chat had NO rule at all, so its tools were reachable
   // only by continuity: a conversation that had not already used the domain
   // could never start using it. Same defect class WARP-2058 fixed for `pm`,

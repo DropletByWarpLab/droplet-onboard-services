@@ -1098,8 +1098,21 @@ describe("WARP-3280 — contacts and the calculator are reachable from a fresh t
       // An `@` that is not an address: a handle and a time.
       "follow us @dropletbox",
       "meet me @ 5",
+      "reorder my contact-lens prescription",
     ])("%s does not advertise search_contacts", (message) => {
       expect(advertisedFor(message, CONTACTS_POOL)).not.toContain("search_contacts");
+    });
+  });
+
+  // Knowingly admitted: any `user@host.tld` token is read as an address, so a
+  // git remote or an ssh target advertises the email domain too. Six schemas
+  // is the cheap direction; pinned so a future narrowing is a decision.
+  describe("contacts — address-shaped tokens that are not mail (accepted)", () => {
+    it.each([
+      "clone git@github.com:org/repo for me",
+      "ssh root@droplet.local is refusing my key",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
     });
   });
 
@@ -1134,5 +1147,35 @@ describe("WARP-3280 — contacts and the calculator are reachable from a fresh t
     ])("%s does not advertise calculate", (message) => {
       expect(advertisedFor(message, DATA_POOL)).not.toContain("calculate");
     });
+  });
+});
+
+// WARP-3280 review — the first bare-address alternative (`[\w.+-]+@…`,
+// unanchored and unbounded) backtracked O(n²): 40k chars took ~3 s, blocking
+// the event loop on every turn and timing out llm-chat.integration.test.ts.
+// `selectAdvertisedTools` tests EVERY `DOMAIN_RULES` pattern (no short
+// circuit), so timing it times every rule. Each input is a worst case for at
+// least one rule shape: a long word run, a run of `.`/`@` separators, a
+// dotted domain with no TLD, whitespace after a digit (the arithmetic `\s*`
+// alternatives), and a repeated `contact` lookahead. The auth-policy userid
+// test is the precedent. MUTATION: restore `[\w.+-]+@[\w-]+(\.[\w-]+)*` and
+// the first case takes seconds.
+describe("WARP-3280 — every domain rule runs in linear time on hostile input", () => {
+  const N = 100_000;
+  it.each([
+    ["word run", "x".repeat(N)],
+    ["dotted run", "a.".repeat(N / 2)],
+    ["at run", "a@".repeat(N / 2)],
+    ["local part, no @", "a".repeat(N) + "@"],
+    ["domain, no TLD", "a@" + "a.".repeat(N / 2) + "1"],
+    ["plus/dash run", "+-".repeat(N / 2) + "@x"],
+    ["digit then spaces", "1" + " ".repeat(N) + "a"],
+    ["digit-space run", "1 ".repeat(N / 2)],
+    ["percent run", "1 % ".repeat(N / 4)],
+    ["contact run", "contact ".repeat(N / 8)],
+  ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
+    const started = performance.now();
+    selectAdvertisedTools({ mode: "domains", userMessage: hostile, pool: POOL, conversationToolNames: [] });
+    expect(performance.now() - started).toBeLessThan(50);
   });
 });
