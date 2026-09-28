@@ -221,8 +221,16 @@ const envSchema = z.object({
   // previously-unpassable eval rows converting at 6-10 iterations — while
   // typical turns still finish in ~3.6 iterations, so the raised budget
   // costs nothing on easy turns. Only hard rows use the depth.
-  AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(10),
-  AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
+  //
+  // WARP-3297 (2026-09-28, Romain's call, "for now"): both raised 10 → 20.
+  // Not a measured winner like the 5 → 10 flip above: the 2026-09-27
+  // agent-loop eval ended 2/66 turns at iteration_limit, and hard turns get
+  // more room while those causes are fixed. Costs: each extra step is one
+  // more model call (~10–40 s on gpt-oss:20b), more 16k context pressure,
+  // and a stuck model can issue more unapproved tier-1 writes. Revisit with
+  // a 10-vs-20 sweep before keeping it.
+  AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(20),
+  AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(20),
   // WARP-2177 — durable agent runs (epic WARP-2176). The worker in
   // agent-run-worker.service.ts reads the RESOLVED block (config.agentRuns),
   // never these raw values, so the reclaim/heartbeat relation below is
