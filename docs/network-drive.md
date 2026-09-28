@@ -80,6 +80,61 @@ Four pieces, all provisioned by `./scripts/setup.sh`:
   share forces all writes to it, matching what Nextcloud writes as — neither
   surface can strand files the other can't modify.
 
+## Per-user drive (WebDAV)
+
+The SMB share above is one device-wide login for the shared folder. Every
+Droplet user (owner, admin, family, guest — not `service`) can also map
+**their own** drive: Nextcloud's WebDAV endpoint, authenticated as that user,
+so Nextcloud's own ACLs (My Files / Household / department folders) apply
+exactly as in the web UI.
+
+**Flow.** Files page -> Connect as a network drive -> "Your drive" -> pick Mac
+or Windows -> "Create my drive login". The orchestrator mints a per-device
+Nextcloud **app password** for the caller (same mechanism as device pairing),
+stores it encrypted in `DeviceClient` (`deviceType: desktop`, name
+"Finder on My Mac" / "File Explorer on My PC"), and returns it once. The user
+pastes the address and login into Finder (Go -> Connect to Server, tick
+"Remember this password in my keychain") or Explorer (This PC -> Map network
+drive, tick "Reconnect at sign-in" and "Connect using different credentials").
+
+**Auth model.** The app password is scoped to the one user, shown once, and
+revocable individually (`DELETE /api/devices/clients/:id`, i.e. the devices
+list) without touching the user's real password. Minting needs the caller's
+Nextcloud session token, which SSO and passkey logins never receive: those
+callers get `409 {"error":"nc_credential_unavailable"}` and the UI asks them
+to sign in with their password once. Rate limit: 10 logins per user per hour.
+
+**Endpoint** (also for the droplet-windows desktop app and a future macOS app,
+which call it to map the drive automatically):
+
+```
+POST /api/storage/network-drive/personal      (session auth; owner|admin|family|guest)
+{ "platform": "macos" | "windows", "computerName"?: string /* 1-60 chars */ }
+
+200 {
+  "deviceId":    "<DeviceClient id>",
+  "username":    "<Nextcloud uid>",
+  "appPassword": "<plaintext, returned once>",
+  "webdavUrl":   "https://<host>/nextcloud/remote.php/dav/files/<uid>/",
+  "macosUrl":    "https://<host>/nextcloud/remote.php/dav/files/<uid>/",
+  "windowsPath": "\\\\<host>@SSL\\nextcloud\\remote.php\\dav\\files\\<uid>"
+}
+400 invalid body | 403 role not permitted | 409 nc_credential_unavailable
+429 rate limited | 502 Nextcloud refused to mint
+```
+
+`<host>` comes from the trusted-origin resolver (never a raw request header).
+A non-443 port is emitted as `<host>@SSL@<port>` in `windowsPath`.
+
+**Known limits.**
+
+- Windows' WebClient service caps file transfers at **50 MB by default**
+  (`FileSizeLimitInBytes`) and requires a certificate Windows trusts
+  (`scripts/trust-droplet-cert.sh` / the per-device public FQDN cert);
+  otherwise the mapping fails with "network path not found" or a cert error.
+- Finder over WebDAV is noticeably slower than SMB on very large folders.
+- The app password is per computer; a new machine needs its own login.
+
 ## Enablement matrix
 
 | Knob | Written by | Effect |
