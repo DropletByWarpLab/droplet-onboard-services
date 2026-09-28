@@ -120,6 +120,7 @@ import {
 } from "@droplet/tools-core";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { isGatewayPreempted } from "../lib/gateway-preempted.js";
 import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
 import {
@@ -139,6 +140,7 @@ import { boundToolResultForModel } from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
+import { noteAgentRunTool, publishAgentRunEvent } from "./agent-run-events.service.js";
 import { summarizeToolArguments } from "./confirmation-summary.js";
 import { decideCloudTurn, resolveOffLanProvider } from "./cloud-access.service.js";
 import {
@@ -220,10 +222,20 @@ export const WORKSPACE_TOOL_DOMAINS: readonly ToolDomain[] = [
  */
 const RUN_INFERENCE_PRIORITY = 10;
 const RUN_YIELD_MS = 60_000;
+/**
+ * WARP-3306 — a preempted run comes back sooner than a 429 yield: the chat
+ * that took the slot is one turn, and the run already did the work up to the
+ * call that was cut. Measured 2026-09-28 on the bench box: chat waited
+ * 20–38 s behind a run's model call before preemption existed.
+ */
+const RUN_PREEMPT_YIELD_MS = 5_000;
 
-/** The run's gateway: the caller's functions, each request stamped background priority. */
-function runGateway(gw: AgentDeps["aiGateway"]): AgentDeps["aiGateway"] {
-  const opts = { priority: RUN_INFERENCE_PRIORITY };
+/**
+ * The run's gateway: the caller's functions, each request stamped background
+ * priority and — WARP-3306 — preemptible when the run may still give way.
+ */
+function runGateway(gw: AgentDeps["aiGateway"], preemptible: boolean): AgentDeps["aiGateway"] {
+  const opts = { priority: RUN_INFERENCE_PRIORITY, ...(preemptible ? { preemptible } : {}) };
   return {
     chat: (r, s) => gw.chat(r, s, undefined, opts),
     ...(gw.chatStream ? { chatStream: (r, s) => gw.chatStream!(r, s, undefined, opts) } : {}),
@@ -512,6 +524,10 @@ export async function enqueueAgentRun(
     },
     select: { id: true },
   });
+  // WARP-3301 — the new run's first live event (queued, with its position).
+  // Not from inside a transaction (the schedule ticker): the row is not
+  // committed yet and the client closes with it. Its claim event follows.
+  if ("$transaction" in prisma) void publishAgentRunEvent(prisma, row.id);
   return row;
 }
 
@@ -532,6 +548,7 @@ export async function cancelAgentRun(
     // call too, like every other terminal write.
     data: { status: "cancelled", endedAt: now, ...CLEAR_PENDING },
   });
+  if (res.count === 1) void publishAgentRunEvent(prisma, id);
   return res.count === 1;
 }
 
@@ -603,6 +620,7 @@ export async function decideAgentRun(
     where: { id: input.id, status: "awaiting_confirmation" },
     data: {
       status: "queued",
+      queueWait: "queue",
       runAfter: now,
       pendingDecision: input.decision,
       pendingDecidedAt: now,
@@ -611,6 +629,7 @@ export async function decideAgentRun(
     },
   });
   if (res.count !== 1) return { ok: false, reason: "not_parked" };
+  void publishAgentRunEvent(prisma, input.id);
   await recordActivity({
     kind: "tool_call",
     severity: input.decision === "approved" ? "info" : "warn",
@@ -681,6 +700,8 @@ export interface AgentRunWorkerDeps {
   /** Test seams. Production leaves every one of these unset. */
   limits?: typeof config.agentRuns;
   maxIterCap?: number;
+  /** WARP-3306 — see AGENT_RUN_MAX_PREEMPTIONS. */
+  maxPreemptions?: number;
   contextWindow?: number;
   toolSelectionMode?: "off" | "domains";
   workerId?: string;
@@ -831,6 +852,13 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
   /** runId → the execution promise. */
   const inFlight = new Map<string, Promise<void>>();
+  // WARP-3306 — the starvation guard: consecutive preemptions of a run with
+  // no finished iteration in between. At AGENT_RUN_MAX_PREEMPTIONS the next
+  // claim runs unpreemptible, so a run always progresses however busy chat is.
+  // ponytail: in-memory, a restart resets it (only allows more preemption);
+  // persist it on AgentRun if the worker ever runs in more than one process.
+  const preemptionsWithoutProgress = new Map<string, number>();
+  const maxPreemptions = deps.maxPreemptions ?? config.agentRuns.maxPreemptions ?? 0;
   /** runId → the abort controller mapped onto the loop's `signal`. */
   const controllers = new Map<string, AbortController>();
   /** runId → why it was told to stop, so the terminal write names it. */
@@ -904,6 +932,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         where: fence,
         data: {
           status: "queued",
+          queueWait: "queue",
           attempts: { increment: 1 },
           claimedBy: null,
           claimedAt: null,
@@ -913,6 +942,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       });
       if (res.count === 1) {
         reclaimed += 1;
+        void publishAgentRunEvent(prisma, row.id);
         logger.warn(
           { runId: row.id, attempts: row.attempts + 1, lastWorker: row.claimedBy },
           "agent_run_reclaimed",
@@ -940,7 +970,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       });
       return true;
     });
-    if (won) leases.set(runId, at);
+    if (won) {
+      leases.set(runId, at);
+      void publishAgentRunEvent(prisma, runId);
+    }
     return won;
   }
 
@@ -1038,6 +1071,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       where: { id: runId, claimedBy: workerId, status: { in: [...fenceStatuses] }, ...leaseFence(runId) },
       data,
     });
+    // WARP-3301 — one live event per status change and per checkpoint (the
+    // checkpoint writes `iteration` once per step), never per token.
+    if (res.count === 1 && (data.status !== undefined || data.iteration !== undefined)) {
+      void publishAgentRunEvent(prisma, runId);
+    }
     return res.count === 1;
   }
 
@@ -1183,6 +1221,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // `let`: consuming a decided park completes the parked iteration and
     // advances the checkpoint past it (WARP-3044, `resumeDecidedCall`).
     let base = run.iteration;
+    // WARP-3306 — did this claim finish an iteration? (the starvation guard)
+    let progressed = false;
+    const preemptions = preemptionsWithoutProgress.get(runId) ?? 0;
+    const preemptible = preemptions < maxPreemptions;
     const messages = Array.isArray(run.messages)
       ? (run.messages as ChatMessage[])
       : initialRunMessages(run.goal, offLanProvider !== null);
@@ -1494,6 +1536,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
     const checkpoint: AgentCheckpointPort = {
       async onIteration(iter, msgs) {
+        if (iter >= 1) progressed = true;
         const observed = await observe(runId, now());
         if (observed) throw new AgentRunStopped(observed, `run stopped: ${observed}`);
         const ok = await finish(runId, {
@@ -1719,7 +1762,17 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         result =
           left > 0
             ? await runAgent(
-                { mcp: deps.agent.mcp, aiGateway: runGateway(deps.agent.aiGateway), approvals, maxIterCap },
+                {
+                  mcp: deps.agent.mcp,
+                  aiGateway: runGateway(deps.agent.aiGateway, preemptible),
+                  approvals,
+                  maxIterCap,
+                  // WARP-3301 — the run's first `onEvent`: it only notes the
+                  // tool NAME for the live event (never args, rule 19).
+                  onEvent: (e) => {
+                    if (e.type === "tool_call") noteAgentRunTool(runId, e.name);
+                  },
+                },
                 {
                   model: run.model,
                   messages,
@@ -1749,6 +1802,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // reason is "fenced" — but the row says why, and that is what the
     // terminal write must name.
     const reason = stopReasons.get(runId) ?? stopped?.reason ?? null;
+    // WARP-3306 — chat took the slot mid-call (see the yield below).
+    const preempted = reason === null && isGatewayPreempted(threw);
+    if (!preempted) preemptionsWithoutProgress.delete(runId);
 
     if (reason === "fenced") {
       // Someone else owns the row now. Nothing to write; the successor does.
@@ -1905,7 +1961,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
       return;
     }
-    if (gatewayBusy(threw, result)) {
+    if (preempted || gatewayBusy(threw, result)) {
       // Interactive chat has the box (see RUN_INFERENCE_PRIORITY). Hand the
       // row back to the queue at the same checkpoint — `iteration` and
       // `messages` were written at the top of the iteration that could not
@@ -1913,14 +1969,26 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       // lease loss: `attempts` is untouched. `deadlineAt` still stands.
       const ok = await finish(runId, {
         status: "queued",
+        queueWait: "chat",
         claimedBy: null,
         claimedAt: null,
         heartbeatAt: null,
-        runAfter: new Date(endedAt.getTime() + RUN_YIELD_MS),
+        runAfter: new Date(endedAt.getTime() + (preempted ? RUN_PREEMPT_YIELD_MS : RUN_YIELD_MS)),
       });
+      if (preempted) {
+        // WARP-3306 — the cut call was a model call (preemption never lands
+        // mid-tool: the gateway only holds the slot for inference), so the
+        // checkpoint at the top of this iteration replays it exactly.
+        preemptionsWithoutProgress.set(runId, progressed ? 1 : preemptions + 1);
+      }
       if (ok) {
         logger.info(
-          { runId, iteration: base + (result?.iterations ?? 0), yieldMs: RUN_YIELD_MS },
+          {
+            runId,
+            iteration: base + (result?.iterations ?? 0),
+            yieldMs: preempted ? RUN_PREEMPT_YIELD_MS : RUN_YIELD_MS,
+            ...(preempted ? { preempted: true, preemptionsWithoutProgress: preemptionsWithoutProgress.get(runId) } : {}),
+          },
           "agent_run_yielded_to_chat",
         );
       }
@@ -2044,7 +2112,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const lease = held.get(id);
       await prisma.agentRun.updateMany({
         where: { id, claimedBy: workerId, status: "running", ...(lease ? { claimedAt: lease } : {}) },
-        data: { status: "queued", claimedBy: null, claimedAt: null, heartbeatAt: null, runAfter: at },
+        data: { status: "queued", queueWait: "queue", claimedBy: null, claimedAt: null, heartbeatAt: null, runAfter: at },
       });
     }
   }
