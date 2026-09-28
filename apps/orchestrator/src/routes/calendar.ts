@@ -467,6 +467,44 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
   // Result shape is intentionally narrow: just enough for the combobox to
   // render a list and persist a string. Lat/lon are included so a follow-up
   // can store coordinates without changing the wire.
+  // WARP-3264 — the caller's own previously used event places matching `q`,
+  // most recently used first, minus anything already offered as a room.
+  // Scoped to the caller's calendar so one person's meeting places never
+  // surface in a colleague's field. Dedup + LIMIT run in Postgres (Prisma's
+  // `distinct` dedupes in memory, loading every matching row per keystroke).
+  // Values that are meeting links (pre-WARP-1874 rows) are not places.
+  // Never throws: a failed read is just no suggestions.
+  async function usedPlaces(
+    userId: string,
+    q: string,
+    limit: number,
+    rooms: PlaceSuggestion[],
+  ): Promise<PlaceSuggestion[]> {
+    try {
+      const pattern = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+      const rows = await prisma.$queryRaw<Array<{ location: string }>>`
+        SELECT btrim("location") AS location
+          FROM "CalendarEvent"
+         WHERE "userId" = ${userId}
+           AND "location" ILIKE ${pattern}
+           AND btrim("location") <> ''
+           AND btrim("location") !~* '^https?://'
+         GROUP BY btrim("location")
+         ORDER BY MAX("startsAt") DESC
+         LIMIT ${limit + rooms.length}`;
+      const roomNames = new Set(rooms.map((r) => r.displayName.toLowerCase()));
+      return rows
+        .map((r) => r.location)
+        .filter((l) => !roomNames.has(l.toLowerCase()))
+        .slice(0, limit)
+        .map((l) => ({ name: l, context: "", displayName: l, lat: "", lon: "", type: null }));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[calendar/places] used-places lookup failed:", err);
+      return [];
+    }
+  }
+
   router.get("/calendar/places", async (req, res) => {
     // Declared OUTSIDE the try so the catch can still serve them: on an
     // offline/air-gapped box (the flagship posture) the premade rooms are
@@ -507,28 +545,11 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       // previously used event places. Scoped to the caller's calendar so
       // one person's meeting places never surface in a colleague's field.
       if (!(await placeLookupGate(prisma))) {
-        const roomNames = new Set(rooms.map((r) => r.displayName.toLowerCase()));
-        let used: PlaceSuggestion[] = [];
-        try {
-          const rows = await prisma.calendarEvent.findMany({
-            where: {
-              userId: getUser(req),
-              location: { contains: q, mode: "insensitive" },
-            },
-            select: { location: true },
-            distinct: ["location"],
-            orderBy: { startsAt: "desc" },
-            take: limit,
-          });
-          used = rows
-            .map((r) => r.location?.trim() ?? "")
-            .filter((l) => l && !roomNames.has(l.toLowerCase()))
-            .map((l) => ({ name: l, context: "", displayName: l, lat: "", lon: "", type: null }));
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("[calendar/places] used-places lookup failed:", err);
-        }
-        res.json({ places: [...rooms, ...used].slice(0, limit) });
+        // Rooms and used places are capped separately (each ≤ limit), the
+        // same shape as rooms + externals below, so a workspace with many
+        // matching rooms never starves the caller's own places.
+        const used = await usedPlaces(getUser(req), q, limit, rooms);
+        res.json({ places: [...rooms, ...used] });
         return;
       }
 
@@ -549,6 +570,8 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("[calendar/places] external lookup failed:", err);
+        // Degraded ON is a superset of OFF: still offer the caller's places.
+        external = await usedPlaces(getUser(req), q, limit, rooms);
       }
 
       res.json({ places: [...rooms, ...external] });

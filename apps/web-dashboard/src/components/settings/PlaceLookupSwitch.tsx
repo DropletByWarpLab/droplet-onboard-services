@@ -20,7 +20,9 @@ export function PlaceLookupSwitch() {
   const { user } = useAuth();
   const isOwner = user?.role === "owner";
   const visible = isOwner || user?.role === "admin";
-  const [enabled, setEnabled] = useState<boolean | null>(null);
+  // undefined = still loading; null = the box couldn't tell us (row not
+  // seeded yet mid-upgrade, or a transient 5xx). Never guess a state.
+  const [enabled, setEnabled] = useState<boolean | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,7 +33,8 @@ export function PlaceLookupSwitch() {
       .catch(() => setEnabled(null));
   }, [visible]);
 
-  if (!visible || enabled === null) return null;
+  if (!visible || enabled === undefined) return null;
+  const unreadable = enabled === null;
 
   async function toggle(next: boolean) {
     setBusy(true);
@@ -51,8 +54,8 @@ export function PlaceLookupSwitch() {
       <label className="flex items-start gap-3">
         <input
           type="checkbox"
-          checked={enabled}
-          disabled={!isOwner || busy}
+          checked={enabled === true}
+          disabled={!isOwner || busy || unreadable}
           onChange={(e) => void toggle(e.target.checked)}
           className="mt-1"
         />
@@ -61,9 +64,13 @@ export function PlaceLookupSwitch() {
             {PLACE_LOOKUP_LABEL}
           </span>
           <span className="type-caption-1 block" style={{ color: "var(--text-muted)" }}>
-            {isOwner
-              ? "Off: the place field suggests only your rooms and places already used on this Droplet."
-              : "Only the owner can change this."}
+            {unreadable
+              ? "Couldn’t read this setting. Reload the page to try again."
+              : !isOwner
+                ? "Only the owner can change this."
+                : enabled
+                  ? "On: what someone types in the place field is also sent to OpenStreetMap."
+                  : "Off: the place field suggests only your rooms and places already used on this Droplet."}
           </span>
           {error && <span className="type-caption-1 block mt-1 text-system-red">{error}</span>}
         </span>

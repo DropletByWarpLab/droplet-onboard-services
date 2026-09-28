@@ -299,6 +299,9 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
             key: r.key,
             enabled: r.enabled,
             requiresAdmin: r.requiresAdmin,
+            // WARP-3264 — the PATCH gate below, exposed so clients don't
+            // re-derive who may flip the channel.
+            requiresOwner: isOffLanKey(r.key) && OWNER_ONLY_CHANNELS.has(r.key),
             lastChangedBy: r.lastChangedBy,
             lastChangedAt: r.lastChangedAt,
             reason: r.reason,

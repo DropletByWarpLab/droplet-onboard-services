@@ -169,6 +169,17 @@ describe("WARP-3264 — place_lookup is owner-only and audited", () => {
     });
   });
 
+  it("GET says the channel is owner-only; other channels are not", async () => {
+    const prisma = createPrismaMock([...seedChannels(), placeRow()]);
+    const res = await request(buildApp(prisma, mkUser("admin"))).get("/api/settings/off-lan");
+    expect(res.status).toBe(200);
+    const byKey = Object.fromEntries(
+      res.body.channels.map((c: { key: string; requiresOwner: boolean }) => [c.key, c.requiresOwner]),
+    );
+    expect(byKey.place_lookup).toBe(true);
+    expect(byKey.cloud_model_escape).toBe(false);
+  });
+
   it("an admin or member is refused (403) and nothing changes", async () => {
     for (const role of ["admin", "family"] as const) {
       const prisma = createPrismaMock([placeRow()]);

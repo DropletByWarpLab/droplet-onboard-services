@@ -37,6 +37,22 @@ describe("PlaceLookupSwitch", () => {
     expect(screen.getByText("Only the owner can change this.")).toBeTruthy();
   });
 
+  it("owner sees a disabled row, not nothing, when the setting can't be read", async () => {
+    mockRole = "owner";
+    fetchPlaceLookupChannel.mockResolvedValue(null);
+    render(<PlaceLookupSwitch />);
+    const box = (await screen.findByRole("checkbox")) as HTMLInputElement;
+    expect(box.disabled).toBe(true);
+    expect(screen.getByText(/Couldn’t read this setting/)).toBeTruthy();
+  });
+
+  it("owner caption follows the switch state", async () => {
+    mockRole = "owner";
+    fetchPlaceLookupChannel.mockResolvedValue({ enabled: true });
+    render(<PlaceLookupSwitch />);
+    expect(await screen.findByText(/^On: /)).toBeTruthy();
+  });
+
   it("members render nothing and never read the channel", () => {
     mockRole = "family";
     const { container } = render(<PlaceLookupSwitch />);
