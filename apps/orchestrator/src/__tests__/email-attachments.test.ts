@@ -168,6 +168,17 @@ describe("WARP-3267 — ingest stores attachments within the limits", () => {
     expect(Buffer.from(row.data).toString()).toBe("%PDF");
   });
 
+  it("stores an RTL-override filename clean, so every listing shows the clean name", async () => {
+    const prisma = mkPrisma();
+    const res = await request(buildApp(prisma, SERVICE))
+      .post("/api/email/acct-alice/messages-ingest")
+      .send(ingestBody([stored(Buffer.from("MZ"), "invoice\u202Efdp.exe")]));
+    expect(res.status).toBe(201);
+    const [row] = (prisma.created[0] as { data: { attachments: { create: any[] } } }).data
+      .attachments.create;
+    expect(row.filename).toBe("invoice_fdp.exe");
+  });
+
   it("refuses a part over the per-attachment limit", async () => {
     const prisma = mkPrisma();
     const res = await request(buildApp(prisma, SERVICE))

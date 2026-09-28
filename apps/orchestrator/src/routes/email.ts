@@ -1192,7 +1192,9 @@ export function createEmailRouter(
       const base = {
         accountId,
         partIndex,
-        filename: a.filename,
+        // Sanitised once, here, so every surface that lists it (web, Mac,
+        // iOS) shows and saves the clean name. The download sanitises again.
+        filename: sanitizeAttachmentFilename(a.filename),
         contentType: a.contentType,
         contentId: a.contentId ?? null,
         status: a.status,
