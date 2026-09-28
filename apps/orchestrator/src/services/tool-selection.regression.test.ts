@@ -539,3 +539,21 @@ describe("WARP-2454 — the closed gaps stayed closed, and stayed narrow", () =>
     expect(fresh.matchedDomains).toEqual([]);
   });
 });
+
+describe("WARP-3302 — checking and stopping a background run is selectable", () => {
+  const pool = [...TOOLS.keys()].filter((n) => !EXCLUDED_FROM_CHAT_TOOLS.has(n));
+  const advertisedFor = (message: string, priorCalls: string[] = []) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: message, pool, conversationToolNames: priorCalls }).advertised;
+
+  it("'stop that background task' advertises cancel_agent_run on its own words", () => {
+    expect(advertisedFor("stop that background task")).toContain("cancel_agent_run");
+    expect(advertisedFor("cancel the job please")).toContain("cancel_agent_run");
+  });
+
+  it("'how is the supplier research going?' reaches the runs by continuity, not by its words", () => {
+    expect(advertisedFor("how is the supplier research going?")).not.toContain("list_agent_runs");
+    expect(advertisedFor("how is the supplier research going?", ["start_agent_run"])).toEqual(
+      expect.arrayContaining(["list_agent_runs", "cancel_agent_run"]),
+    );
+  });
+});

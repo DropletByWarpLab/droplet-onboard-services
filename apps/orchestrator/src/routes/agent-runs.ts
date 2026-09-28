@@ -95,6 +95,8 @@ const listQuerySchema = z.object({
   cursor: z.string().min(1).max(300).optional(),
   /** WARP-2896 — only the runs that worked in this workspace. */
   workspaceId: z.string().regex(WORKSPACE_ID).optional(),
+  /** WARP-3302 — only the runs this chat conversation started. */
+  sessionId: z.string().trim().min(1).max(200).optional(),
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
 });
 
@@ -481,7 +483,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
-      const { status, limit, cursor, workspaceId } = parsed.data;
+      const { status, limit, cursor, workspaceId, sessionId } = parsed.data;
       const after = cursor ? parseCursor(cursor) : null;
       if (cursor && !after) {
         res.status(400).json({ error: "Invalid cursor" });
@@ -492,6 +494,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           userId: actor.id,
           ...(status ? { status } : {}),
           ...(workspaceId ? { workspaceId } : {}),
+          ...(sessionId ? { sessionId } : {}),
           ...(after
             ? {
                 OR: [
