@@ -72,6 +72,7 @@ export interface AgentRunRow {
   summary: string | null;
   artifacts: unknown;
   resultDelivery: string;
+  queueWait: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -259,6 +260,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         summary: null,
         artifacts: [],
         resultDelivery: (args.data.resultDelivery as string | undefined) ?? "not_applicable",
+        queueWait: (args.data.queueWait as string | undefined) ?? "queue",
         createdAt: now(),
         updatedAt: now(),
       };

@@ -24,7 +24,7 @@
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "@droplet/tools-core";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
-import { selectAdvertisedTools } from "./tool-selection.service.js";
+import { effectiveAdvertisedToolNames, selectAdvertisedTools, selectionUserText } from "./tool-selection.service.js";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
 import {
   assertToolAdvertisementFitsBudget,
@@ -537,5 +537,54 @@ describe("WARP-2454 — the closed gaps stayed closed, and stayed narrow", () =>
       runtimeTools: REMOTE_TOOLS,
     });
     expect(fresh.matchedDomains).toEqual([]);
+  });
+});
+
+describe("WARP-3302 — checking and stopping a background run is selectable", () => {
+  const pool = [...TOOLS.keys()].filter((n) => !EXCLUDED_FROM_CHAT_TOOLS.has(n));
+  const advertisedFor = (message: string, priorCalls: string[] = []) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: message, pool, conversationToolNames: priorCalls }).advertised;
+
+  it("'stop that background task' advertises cancel_agent_run on its own words", () => {
+    expect(advertisedFor("stop that background task")).toContain("cancel_agent_run");
+    expect(advertisedFor("cancel the job please")).toContain("cancel_agent_run");
+  });
+
+  // Box finding 2026-09-28: the model asked "shall I start it?" in text, the
+  // person said "Yes, go ahead and start it.", and that sentence alone matched
+  // no rule — start_agent_run vanished and the model claimed a run it never
+  // started. A bare affirmation now carries the previous ask's words.
+  const advertisedAfter = (ask: string, reply: string) =>
+    effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [
+        { role: "user", content: ask },
+        { role: "assistant", content: "Shall I start that?" },
+        { role: "user", content: reply },
+      ],
+      pool,
+    });
+
+  it("'yes, go ahead' after a background-run ask keeps start_agent_run advertised", () => {
+    expect(advertisedAfter("Do this in the background: summarize our IT policies", "Yes, go ahead and start it."))
+      .toContain("start_agent_run");
+  });
+
+  it("'yes' after a weather ask adds nothing from the runs domain", () => {
+    expect(advertisedAfter("What's the weather in Boston?", "yes")).not.toContain("start_agent_run");
+  });
+
+  it("a longer reply is judged on its own words", () => {
+    expect(selectionUserText([
+      { role: "user", content: "Do this in the background: summarize our IT policies" },
+      { role: "user", content: "yes but first tell me what files are in the Docs folder right now" },
+    ])).toBe("yes but first tell me what files are in the Docs folder right now");
+  });
+
+  it("'how is the supplier research going?' reaches the runs by continuity, not by its words", () => {
+    expect(advertisedFor("how is the supplier research going?")).not.toContain("list_agent_runs");
+    expect(advertisedFor("how is the supplier research going?", ["start_agent_run"])).toEqual(
+      expect.arrayContaining(["list_agent_runs", "cancel_agent_run"]),
+    );
   });
 });
