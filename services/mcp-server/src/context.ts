@@ -167,6 +167,8 @@ export function buildContext(
   metaAgentRunId?: string,
   // WARP-2896 — the workshop workspace that run works in, when it has one.
   metaWorkspaceId?: string,
+  // WARP-3299 — the chat turn this dispatch belongs to, when it does.
+  metaTurn?: { conversationId?: string; messageId?: string; toolCallId?: string },
 ): ToolContext {
   const userId = claims?.sub ?? metaUserId;
   // WARP-286: bind the searchHybrid shim with the authenticated userId
@@ -235,6 +237,7 @@ export function buildContext(
     userId,
     agentRunId: metaAgentRunId,
     workspaceId: metaWorkspaceId,
+    ...metaTurn,
     // HTTP: the JWT claim is authoritative. Stdio (no claims): the
     // orchestrator forwards the caller's role via _meta.userRole
     // (WARP-845) — validated against the Role union, anything else

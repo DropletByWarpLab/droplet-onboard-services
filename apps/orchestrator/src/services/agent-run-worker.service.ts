@@ -437,6 +437,40 @@ export interface EnqueueAgentRunInput {
   /** WARP-2896 — the workshop workspace this run works in. Absent for every
    *  ordinary run; the route checked it exists and belongs to the person. */
   workspaceId?: string | null;
+  /** WARP-3299 — who started the run. The Workshop is the default creator;
+   *  the schedule ticker and the chat path say so explicitly. */
+  origin?: "workshop" | "schedule" | "chat";
+  /** WARP-3299 — the assistant message and tool call that started a chat
+   *  run. Server-side values only (the route admits them from the mcp
+   *  service principal alone). */
+  originMessageId?: string | null;
+  originToolCallId?: string | null;
+  /** WARP-3299 — the card's label and what "done" means. The title defaults
+   *  to the goal's first line. */
+  title?: string;
+  deliverable?: string;
+}
+
+/** WARP-3299 — at most this many active runs per person (Romain,
+ *  2026-09-28). Schedules are exempt: their own overlap guard already allows
+ *  one active fire per schedule, and a refused fire would be a lost one. */
+export const MAX_ACTIVE_RUNS_PER_PERSON = 3;
+
+/** WARP-3299 — the per-person cap refused this start. */
+export class AgentRunCapError extends Error {
+  constructor(readonly active: number) {
+    super(
+      `You already have ${active} background runs going; the limit is ${MAX_ACTIVE_RUNS_PER_PERSON}. ` +
+        "Wait for one to finish or stop one, then try again.",
+    );
+    this.name = "AgentRunCapError";
+  }
+}
+
+/** WARP-3299 — a run's default title: the goal's first line, bounded. */
+export function titleFromGoal(goal: string): string {
+  const line = goal.split("\n", 1)[0]!.trim();
+  return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
 
 /** Create a `queued` run. The worker's next tick claims it. */
@@ -449,6 +483,15 @@ export async function enqueueAgentRun(
 ): Promise<{ id: string }> {
   const cap = config.agentRuns.maxIter;
   const maxIter = Math.max(1, Math.min(input.maxIter ?? cap, cap));
+  const origin = input.origin ?? "workshop";
+  if (origin !== "schedule") {
+    // ponytail: count-then-create is not atomic; two starts in the same
+    // instant can both pass. The cap is a courtesy bound, not a safety one.
+    const active = await prisma.agentRun.count({
+      where: { userId: input.userId, status: { in: [...ACTIVE_AGENT_RUN_STATUSES] } },
+    });
+    if (active >= MAX_ACTIVE_RUNS_PER_PERSON) throw new AgentRunCapError(active);
+  }
   const row = await prisma.agentRun.create({
     data: {
       userId: input.userId,
@@ -458,6 +501,13 @@ export async function enqueueAgentRun(
       maxIter,
       scheduleId: input.scheduleId ?? null,
       workspaceId: input.workspaceId ?? null,
+      origin,
+      originMessageId: input.originMessageId ?? null,
+      originToolCallId: input.originToolCallId ?? null,
+      title: input.title?.trim() || titleFromGoal(input.goal),
+      deliverable: input.deliverable?.trim() ?? "",
+      // A chat run owes its conversation a result message (WARP-3300).
+      resultDelivery: origin === "chat" ? "pending" : "not_applicable",
       ...(input.runAfter ? { runAfter: input.runAfter } : {}),
     },
     select: { id: true },
@@ -1079,7 +1129,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // Here, at EVERY claim, not at enqueue: a start, a resume after a park,
     // a reclaim and every schedule fire all come through this line, so a
     // revoked cloud grant stops the next fire and no enqueue caller (the
-    // schedule ticker, the morning briefing) can skip it. The same two
+    // schedule ticker, the Workshop, a chat turn) can skip it. The same two
     // questions chat asks, asked the same way (routes/llm.ts): "may this
     // person use cloud?" and, separately, "is this request leaving the box?".
     const principal = { id: run.userId, role: user.role };

@@ -2356,12 +2356,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // schema rejects unknown properties). Failures fall through to the
       // baseline tool call so a flaky classifier / embedder can never
       // block retrieval.
-      let toolContext = req.toolCallContext;
+      // WARP-3299 — the model's call id rides `_meta` so a tool can record
+      // which call produced what it starts. Only on a chat turn (a
+      // conversation is present); a run's own calls carry `agentRunId`.
+      let toolContext = req.toolCallContext?.conversationId
+        ? { ...req.toolCallContext, toolCallId: call.id }
+        : req.toolCallContext;
       if (call.function.name === "search_content" && deps.enhancement) {
         toolContext = await resolveSearchEnhancement(
           deps.enhancement,
           args,
-          req.toolCallContext,
+          toolContext,
         );
       }
 

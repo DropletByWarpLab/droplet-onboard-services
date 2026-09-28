@@ -71,6 +71,57 @@ describe("start_agent_run (WARP-2180)", () => {
   });
 });
 
+// WARP-3299 — the run links back to the chat turn, from the server-set
+// context only; the model's arguments never supply those ids.
+describe("start_agent_run links the run to its chat turn (WARP-3299)", () => {
+  const turn = { conversationId: "conv-1", messageId: "msg-1", toolCallId: "call-1" };
+
+  it("sends title, deliverable, the brief and the turn ids from the context", async () => {
+    const post = vi.fn(async (_path: string, _body: unknown, _init?: unknown) =>
+      makeResponse(201, { id: "run-1", status: "queued", queuePosition: 2 }),
+    );
+    const res = await startAgentRun.handler(
+      {
+        title: "Price check",
+        goal: "compare supplier prices",
+        deliverable: "a table",
+        constraints: "read-only",
+        refs: ["/Docs/suppliers.xlsx"],
+      },
+      ctxWith({ post }, turn),
+    );
+    expect(res).toMatchObject({ ok: true, data: { runId: "run-1", queuePosition: 2 } });
+    expect(post.mock.calls[0]![1]).toEqual({
+      goal: "compare supplier prices\n\nConstraints: read-only\n\nStart from: /Docs/suppliers.xlsx",
+      onBehalfOf: "romain",
+      title: "Price check",
+      deliverable: "a table",
+      origin: "chat",
+      sessionId: "conv-1",
+      originMessageId: "msg-1",
+      originToolCallId: "call-1",
+    });
+  });
+
+  it("ignores ids the model puts in its arguments", async () => {
+    const post = vi.fn(async () => makeResponse(201, { id: "run-1", status: "queued" }));
+    await startAgentRun.handler(
+      { goal: "g", sessionId: "other-chat", originMessageId: "x", origin: "chat" },
+      ctxWith({ post }),
+    );
+    const body = (post.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(body).not.toHaveProperty("sessionId");
+    expect(body).not.toHaveProperty("origin");
+    expect(body).not.toHaveProperty("originMessageId");
+  });
+
+  it("relays the per-person cap as AGENT_RUN_CAP with the route's words", async () => {
+    const post = vi.fn(async () => makeResponse(429, { error: "You already have 3 background runs going; the limit is 3." }));
+    const res = await startAgentRun.handler({ goal: "g" }, ctxWith({ post }, turn));
+    expect(res).toMatchObject({ ok: false, error: { code: "AGENT_RUN_CAP", message: expect.stringMatching(/limit is 3/) } });
+  });
+});
+
 describe("list_agent_runs (WARP-2180)", () => {
   it("is Tier-1", () => {
     expect(listAgentRuns.requiresWrite).toBe(false);

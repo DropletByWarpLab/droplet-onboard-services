@@ -182,8 +182,8 @@ the loop's unknown-tool guard; the worker turns that into a failed run naming
 the tool and WARP-2179 rather than letting the model spend iterations around
 the refusal.
 
-**Bounds.** `maxIter` (clamped to `config.agentMaxIter.capIter`, 10, because
-the loop itself clamps there — longer runs are §6's problem, as the epic says)
+**Bounds.** `maxIter` (clamped to `config.agentRuns.maxIter`, 30 — the run's
+own cap since WARP-2749, separate from the chat cap; corrected by WARP-3299)
 **and** `deadlineAt`. Cancellation flips `status = cancelled`; the executor
 observes it at the next heartbeat or checkpoint and maps it onto the loop's
 own `AbortController`, so the existing `req.signal?.aborted` checks stop it
@@ -564,3 +564,12 @@ extension work); `workspace-checkouts` joins `EXCLUDED_VOLUMES`
 
 Parallel tool dispatch within an iteration; sub-agents / delegation; the
 ADR-014 client-target axis; the trigger→action automation engine (WARP-1448).
+
+**Follow-up: chat-started runs (WARP-3298).** Delegation from chat is now its
+own epic. A run started from a chat turn records `origin = chat`, the
+conversation (`sessionId`), and the assistant message and tool call that
+started it (`originMessageId`, `originToolCallId`), all set server-side from
+the turn's `_meta` (WARP-3299). A person may have at most 3 active runs;
+schedule fires are exempt. Deleting a chat with a live run answers 409 unless
+the caller says `cancelRuns=true|false`. Results flowing back into the chat,
+live events and the chat UI are the epic's later tickets.

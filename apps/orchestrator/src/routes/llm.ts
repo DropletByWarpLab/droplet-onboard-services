@@ -117,6 +117,10 @@ import {
   resolveTurnContextWindow,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
+import {
+  ACTIVE_AGENT_RUN_STATUSES,
+  cancelAgentRun,
+} from "../services/agent-run-worker.service.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -1389,6 +1393,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
       }
 
+      // WARP-3299 — the persisted turn, so a tool can link what it starts
+      // (a background run) back to this conversation. Server-side only: the
+      // model never supplies these, and a turn that was not persisted
+      // (ephemeral, service caller) simply carries none.
+      const turnToolCallContext: McpCallContext | undefined =
+        toolCallContext && conversationId
+          ? {
+              ...toolCallContext,
+              conversationId,
+              ...(assistantMessageId ? { messageId: assistantMessageId } : {}),
+            }
+          : toolCallContext;
+
       // WARP-437 follow-up — production-wire EnhancementDeps behind a
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
@@ -2357,7 +2374,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // every tool dispatch inside the loop.
             toolAccessScope,
             tool_choice: chatReq.tool_choice,
-            toolCallContext,
+            toolCallContext: turnToolCallContext,
             captureReasoning: chatReq.captureReasoning,
             citationContext,
             // WARP-329 — cancel inference + halt the loop on disconnect.
@@ -2444,7 +2461,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // every tool dispatch inside the loop.
           toolAccessScope,
           tool_choice: chatReq.tool_choice,
-          toolCallContext,
+          toolCallContext: turnToolCallContext,
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
@@ -2675,6 +2692,35 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         wasInterviewSession = profile?.interviewChatId === req.params.id;
       } catch {
         /* not an interview delete as far as we can tell */
+      }
+      // WARP-3299 — a background run this chat started is still working.
+      // Deleting the chat must not strand it silently: without an explicit
+      // `cancelRuns`, answer 409 with the live runs so the client can ask;
+      // `cancelRuns=true` stops them first, `cancelRuns=false` keeps them.
+      const ownerId = (req as AuthedRequest).user?.id;
+      const cancelRuns = req.query.cancelRuns;
+      if (ownerId) {
+        // Fail-open, like the interview probe above: a lookup error must
+        // never block deleting a chat.
+        const liveRuns = await prisma.agentRun
+          .findMany({
+            where: {
+              sessionId: req.params.id,
+              userId: ownerId,
+              status: { in: [...ACTIVE_AGENT_RUN_STATUSES] },
+            },
+            select: { id: true, title: true, status: true },
+          })
+          .catch(() => []);
+        if (liveRuns.length > 0) {
+          if (cancelRuns !== "true" && cancelRuns !== "false") {
+            res.status(409).json({ error: "conversation_has_live_runs", runs: liveRuns });
+            return;
+          }
+          if (cancelRuns === "true") {
+            for (const run of liveRuns) await cancelAgentRun(prisma, run.id);
+          }
+        }
       }
       const deleted = await persistence.deleteConversationForUser(
         req.params.id,

@@ -185,6 +185,16 @@ export interface ToolContext {
    * another one by argument.
    */
   workspaceId?: string;
+  /**
+   * WARP-3299 — the chat turn this dispatch belongs to: the conversation
+   * (`ChatSession.id`), the assistant message being written and the model's
+   * tool call id. Forwarded by the orchestrator via `_meta`, stdio-trusted
+   * only, never from tool arguments. `start_agent_run` sends them so the run
+   * links back to the chat that started it.
+   */
+  conversationId?: string;
+  messageId?: string;
+  toolCallId?: string;
   ncToken?: string;
   /**
    * WARP-437 — orchestrator-injected enhancement bundle plumbed through

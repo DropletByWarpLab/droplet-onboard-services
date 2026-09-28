@@ -4177,8 +4177,29 @@ model AgentRun {
   /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
   /// run cannot outlive a role change with stale reach.
   userId             String
-  /// The chat conversation that started the run, when one did.
+  /// The chat conversation that started the run, when one did. WARP-3299:
+  /// set by the server from the chat turn (never from model arguments),
+  /// together with the two ids below, when `origin = chat`.
   sessionId          String?
+  /// WARP-3299 — who started the run. Explicit, never inferred from which
+  /// ids are NULL (a schedule run also has no session).
+  origin             AgentRunOrigin
+  /// WARP-3299 — the assistant message whose tool call started the run, and
+  /// that call's id. Lets the chat card find its run.
+  originMessageId    String?
+  originToolCallId   String?
+  /// WARP-3299 — the short label the card shows, and what "done" means.
+  /// Backfilled from the goal's first line for runs that predate them.
+  title              String                   @default("")
+  deliverable        String                   @default("")
+  /// WARP-3299 — the bounded result written back to the chat (the full final
+  /// text stays in `result`). Written by the result-message work, WARP-3300.
+  summary            String?                  @db.VarChar(2000)
+  /// WARP-3299 — `[{kind, ref, title}]`: what the run created.
+  artifacts          Json                     @default("[]")
+  /// WARP-3299 — whether the result message reached the conversation.
+  /// `not_applicable` for runs no chat started.
+  resultDelivery     AgentRunResultDelivery   @default(not_applicable)
   goal               String
   model              String
   status             AgentRunStatus           @default(queued)
@@ -4402,6 +4423,22 @@ enum ExtensionStatus {
 enum ExtensionSigner {
   box
   release
+}
+
+/// WARP-3299 — who started a run.
+enum AgentRunOrigin {
+  workshop
+  schedule
+  chat
+}
+
+/// WARP-3299 — whether a chat-started run's result message reached its
+/// conversation. `not_applicable` for every run no chat started.
+enum AgentRunResultDelivery {
+  not_applicable
+  pending
+  delivered
+  failed
 }
 
 /// WARP-2997 — where a run's model runs, and whether its owner may use it.

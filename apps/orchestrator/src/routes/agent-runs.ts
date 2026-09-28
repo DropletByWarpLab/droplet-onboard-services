@@ -42,6 +42,7 @@ import {
 } from "../middleware/auth.js";
 import {
   ACTIVE_AGENT_RUN_STATUSES,
+  AgentRunCapError,
   cancelAgentRun,
   decideAgentRun,
   enqueueAgentRun,
@@ -75,6 +76,14 @@ const startRunSchema = z.object({
   workspaceId: z.string().regex(WORKSPACE_ID).optional(),
   /** Username the mcp principal acts for. Ignored for everyone else. */
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
+  /** WARP-3299 — the card's label and what "done" means. */
+  title: z.string().trim().min(1).max(120).optional(),
+  deliverable: z.string().trim().min(1).max(1000).optional(),
+  /** WARP-3299 — a chat-started run. The mcp principal alone may set these:
+   *  they come from the chat turn's `_meta`, never from a person's request. */
+  origin: z.literal("chat").optional(),
+  originMessageId: z.string().trim().min(1).max(200).optional(),
+  originToolCallId: z.string().trim().min(1).max(200).optional(),
 });
 
 const listQuerySchema = z.object({
@@ -114,6 +123,12 @@ interface Actor {
  * browser caller is themselves. `null` when nobody can be established — the
  * caller answers 403, never falls back to a wider identity.
  */
+/** WARP-3299 — the mcp-server's own principal (a tool call), not a person. */
+function isMcpService(req: Request): boolean {
+  const user = (req as Request & { user?: AuthUser }).user;
+  return user?.id === MCP_PRINCIPAL_ID && user.role === "service";
+}
+
 async function resolveActor(
   prisma: PrismaClient,
   req: Request,
@@ -197,6 +212,14 @@ interface RunRow {
   pendingDecision: string | null;
   pendingDecidedAt: Date | null;
   workspaceId: string | null;
+  origin: string;
+  originMessageId: string | null;
+  originToolCallId: string | null;
+  title: string;
+  deliverable: string;
+  summary: string | null;
+  artifacts: unknown;
+  resultDelivery: string;
   cloudGate: string;
   offLanProvider: string | null;
   offLanWithheldTools: string[];
@@ -227,6 +250,15 @@ function serializeRun(r: RunRow, withTrace: boolean) {
     error: r.error,
     // WARP-2896 — the workshop workspace, for the run list and the run page.
     workspaceId: r.workspaceId,
+    // WARP-3299 — who started it, the chat turn that did, and what it owes.
+    origin: r.origin,
+    originMessageId: r.originMessageId,
+    originToolCallId: r.originToolCallId,
+    title: r.title,
+    deliverable: r.deliverable,
+    summary: r.summary,
+    artifacts: Array.isArray(r.artifacts) ? r.artifacts : [],
+    resultDelivery: r.resultDelivery,
     // WARP-2997 — where the model ran, and what it was not given.
     cloudGate: r.cloudGate,
     offLanProvider: r.offLanProvider,
@@ -279,6 +311,14 @@ const RUN_SELECT = {
   pendingDecision: true,
   pendingDecidedAt: true,
   workspaceId: true,
+  origin: true,
+  originMessageId: true,
+  originToolCallId: true,
+  title: true,
+  deliverable: true,
+  summary: true,
+  artifacts: true,
+  resultDelivery: true,
   cloudGate: true,
   offLanProvider: true,
   offLanWithheldTools: true,
@@ -367,6 +407,9 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           return;
         }
       }
+      // WARP-3299 — the chat link is honoured from the mcp service principal
+      // only; anyone else's claim to be "from chat" is dropped, not refused.
+      const fromChat = isMcpService(req) && parsed.data.origin === "chat";
       let id: string;
       try {
         ({ id } = await enqueueAgentRun(prisma, {
@@ -376,8 +419,17 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           sessionId: parsed.data.sessionId ?? null,
           maxIter: parsed.data.maxIter,
           workspaceId: parsed.data.workspaceId ?? null,
+          origin: fromChat ? "chat" : "workshop",
+          originMessageId: fromChat ? (parsed.data.originMessageId ?? null) : null,
+          originToolCallId: fromChat ? (parsed.data.originToolCallId ?? null) : null,
+          title: parsed.data.title,
+          deliverable: parsed.data.deliverable,
         }));
       } catch (err) {
+        if (err instanceof AgentRunCapError) {
+          res.status(429).json({ error: err.message, code: "agent_run_cap", active: err.active });
+          return;
+        }
         // The only unique constraint a workshop run's create can trip is the
         // one-active-run-per-workspace index: the row's own id is a fresh
         // cuid. So a P2002 here IS the race the count above could not see.
@@ -401,7 +453,20 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           ...(parsed.data.workspaceId ? { workspaceId: parsed.data.workspaceId } : {}),
         },
       });
-      res.status(201).json({ id, status: "queued", workspaceId: parsed.data.workspaceId ?? null });
+      // WARP-3299 — where it stands: 1 = next to be worked on. Every other
+      // due run is ahead of it (the worker claims oldest first).
+      const ahead = await prisma.agentRun.count({
+        where: {
+          id: { not: id },
+          OR: [{ status: "running" }, { status: "queued", runAfter: { lte: new Date() } }],
+        },
+      });
+      res.status(201).json({
+        id,
+        status: "queued",
+        workspaceId: parsed.data.workspaceId ?? null,
+        queuePosition: ahead + 1,
+      });
     } catch (err) {
       next(err);
     }
