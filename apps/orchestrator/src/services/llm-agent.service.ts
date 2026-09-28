@@ -42,6 +42,7 @@ import type {
 } from "./mcp-client.service.js";
 import type { McpClientPort } from "./mcp-client.port.js";
 import {
+  isMalformedToolOutput,
   parseToolResultPayload,
   toolResultPayloadValue,
   type ToolResultPayload,
@@ -2456,6 +2457,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // for the existing untyped consumers (SSE event, trace).
       const payload = parseToolResultPayload(text);
       const parsed: unknown = toolResultPayloadValue(payload);
+      // WARP-3284 — output that claimed to be JSON and didn't parse is a
+      // FAILED call, whatever `isError` said: the SSE chip goes red, the
+      // failure is logged below, and the model gets the error envelope
+      // (without the fragment) instead of a truncated body it would read as
+      // "no data". See parseToolResultPayload for the plain-text split.
+      let modelText = text;
+      if (isMalformedToolOutput(payload)) {
+        result = { ...result, isError: true };
+        const { status, error } = parsed as { status: string; error: unknown };
+        modelText = JSON.stringify({ status, error });
+      }
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
       // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
@@ -2619,7 +2631,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // the historical 8000), so it can be set from a measured distribution.
       const bounded = boundToolResultForModel(
         // WARP-2002 — the model never sees a confirmation token; see the helper.
-        isConfirmation ? redactConfirmationTokensForModel(text) : text,
+        isConfirmation ? redactConfirmationTokensForModel(modelText) : modelText,
         call.function.name,
         (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:

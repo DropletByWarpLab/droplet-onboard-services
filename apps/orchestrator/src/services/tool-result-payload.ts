@@ -61,20 +61,62 @@ export interface ToolFailureWirePayload {
   error: ToolError;
 }
 
+/** WARP-3284 — the error code for output that claimed to be JSON and wasn't. */
+export const TOOL_OUTPUT_MALFORMED = "TOOL_OUTPUT_MALFORMED";
+const MALFORMED_EXCERPT_CHARS = 200;
+
 /**
  * Parse the raw `content[0].text` mcp-server put on the wire.
  *
  * This is the single parse point for a tool result in the agent loop.
- * Non-JSON output (a raw stdio hiccup — mcp-server itself always emits
- * JSON) degrades to the historical `{ raw }` shape so the SSE `tool_result`
- * event and the trace keep rendering something useful.
+ *
+ * WARP-3284 — non-JSON text splits two ways, because both are real:
+ *
+ *   - Text that STARTS like JSON (`{` / `[`) but does not parse is a broken
+ *     tool: a truncated stream, a crash mid-write, an extension body cut by
+ *     the 32 KiB cap. It becomes an explicit `status: "error"` envelope with
+ *     code TOOL_OUTPUT_MALFORMED; the agent loop marks the call failed. A
+ *     bounded `raw` excerpt rides along for the trace, never as data.
+ *   - Any other text keeps the historical `{ raw }` success shape. Local
+ *     tools can't produce it (mcp-server always `JSON.stringify`s), but
+ *     remote MCP servers (`mcp-multiplexer` → `remote-mcp-gateway`) and
+ *     extension tools (`extension-mcp.port`) pass the upstream's text
+ *     content through verbatim, and markdown/plain text is a normal MCP
+ *     success. An HTML error page from an upstream also lands here; it is
+ *     only caught if the upstream sets `isError`.
  */
 export function parseToolResultPayload(text: string): ToolResultPayload {
   try {
     return JSON.parse(text) as ToolResultPayload;
   } catch {
+    const head = text.trimStart()[0];
+    if (head === "{" || head === "[") {
+      return {
+        status: "error",
+        error: {
+          code: TOOL_OUTPUT_MALFORMED,
+          message:
+            "The tool returned output that could not be read, so this call failed. " +
+            "Tell the user which tool failed; do not treat it as an empty result " +
+            "and do not ask the user to supply the data.",
+        },
+        raw: text.slice(0, MALFORMED_EXCERPT_CHARS),
+      } as unknown as ToolResultPayload;
+    }
     return { raw: text } as unknown as ToolResultPayload;
   }
+}
+
+/** WARP-3284 — true when {@link parseToolResultPayload} rejected the text. */
+export function isMalformedToolOutput(payload: ToolResultPayload): boolean {
+  const v = payload as unknown as { error?: { code?: unknown } } | null;
+  return (
+    v !== null &&
+    typeof v === "object" &&
+    typeof v.error === "object" &&
+    v.error !== null &&
+    v.error.code === TOOL_OUTPUT_MALFORMED
+  );
 }
 
 /**
