@@ -135,7 +135,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const startAgentRun: Tool = {
   name: "start_agent_run",
   description:
-    "Start a background run: Droplet works on a multi-step task unattended (minutes, not seconds) and notifies you when it finishes or needs your approval for an action. Use for jobs too long for one reply — sweeping files, reviewing many items. Needs your confirmation to start.",
+    "Start a background run: Droplet works on a multi-step task unattended (minutes) and posts the result in this chat. Use for jobs too long for one reply: sweeping files, reviewing many items. Call it directly: the person approves it on a card, never ask first in text.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

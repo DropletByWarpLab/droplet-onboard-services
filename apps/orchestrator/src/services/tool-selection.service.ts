@@ -665,6 +665,22 @@ export function lastUserMessageText(messages: readonly SelectionMessage[]): stri
   return typeof lastUser?.content === "string" ? lastUser.content : "";
 }
 
+// WARP-3302 (box finding, 2026-09-28) — "Yes, go ahead" after a turn that
+// matched a domain but called nothing (the model asked first) matched no
+// rule, so the tool it meant to call was not advertised and it claimed a run
+// it never started. A short affirmation carries the previous user message's
+// words forward; anything longer is judged on its own.
+const AFFIRMATION = /^\s*(yes|yeah|yep|sure|ok(ay)?|please|go ahead|do it|start it|sounds good)\b[\s\w,.!']{0,40}$/i;
+
+/** The text selection rules read: the last user message, plus the one before it when the last is a bare "yes, go ahead". */
+export function selectionUserText(messages: readonly SelectionMessage[]): string {
+  const last = lastUserMessageText(messages);
+  if (!AFFIRMATION.test(last) || last.trim().split(/\s+/).length > 6) return last;
+  const users = messages.filter((m) => m.role === "user");
+  const prev = users.at(-2)?.content;
+  return typeof prev === "string" ? `${prev}\n${last}` : last;
+}
+
 /**
  * Continuity: every tool name this conversation has already called.
  *
@@ -732,7 +748,7 @@ export function effectiveAdvertisedToolNames(opts: {
   // question itself.
   const { advertised } = selectAdvertisedTools({
     mode: opts.mode,
-    userMessage: lastUserMessageText(opts.messages),
+    userMessage: selectionUserText(opts.messages),
     pool: [...opts.pool],
     conversationToolNames: conversationToolNamesFor(opts.priorToolNames, opts.messages),
     runtimeTools: opts.runtimeTools,
