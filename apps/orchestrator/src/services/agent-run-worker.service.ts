@@ -1178,7 +1178,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run refused (cloud access)", error,
-        { username: user.username, goal: run.goal },
+        { username: user.username, goal: run.goal, sessionId: run.sessionId },
         { cloudGate, offLanProvider: cloudDecision.body.provider });
       return;
     }
@@ -1810,7 +1810,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ["cancelled"],
       );
       await audit(runId, run.userId, "cancelled", "Agent run cancelled", undefined,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (reason === "parked" && park.request) {
@@ -1903,7 +1903,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const proposed = proposalKindOf(text);
       const draft = proposed.kind === "connector-draft";
       await audit(runId, run.userId, "succeeded", draft ? "Agent run proposed a connector draft" : "Agent run proposed an extension", undefined,
-        user ? { username: user.username, goal: run.goal, result: text } : undefined);
+        user ? { username: user.username, goal: run.goal, result: text, sessionId: run.sessionId } : undefined);
       if (user) {
         const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
         await sendNotification(prisma, {
@@ -1941,7 +1941,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run halted (outcome unknown)", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (reason === "deadline") {
@@ -1955,7 +1955,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (gatewayBusy(threw, result)) {
@@ -1984,7 +1984,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const error = threw instanceof Error ? threw.message : String(threw ?? "no result");
       await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000), ...CLEAR_PENDING });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
 
@@ -2004,7 +2004,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "succeeded", "Agent run completed", undefined,
-          user ? { username: user.username, goal: run.goal, result: text } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, result: text, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
       case "iteration_limit": {
@@ -2018,7 +2018,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
       case "error":
@@ -2033,7 +2033,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
     }
@@ -2047,7 +2047,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     error?: string,
     // WARP-2180 — on a terminal status the owner is told over the same
     // ws-bridge topic the park notification uses, with the result summary.
-    notify?: { username: string; goal: string; result?: string | null },
+    notify?: { username: string; goal: string; result?: string | null; sessionId?: string | null },
     // WARP-2997 — the cloud gate's verdict and what it withheld, on the
     // signed row, as chat records `offLanProvider` on its turn row.
     offLan?: Record<string, unknown>,
@@ -2068,7 +2068,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         // WARP-2909 — same link and tag as the park, so the finish replaces
         // the approval prompt in the tray. No `needsDecision` here.
         ...agentRunLink(runId),
-        data: { agentRunId: runId, status },
+        data: { agentRunId: runId, status, ...(notify.sessionId ? { sessionId: notify.sessionId } : {}) },
       }).catch((err) => {
         logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
       });

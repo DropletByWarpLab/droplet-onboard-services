@@ -4296,6 +4296,19 @@ export interface PersistedConversation {
      * `completed` defensively.
      */
     status?: "pending" | "streaming" | "completed" | "failed" | "aborted";
+    /**
+     * WARP-3300 — `agent_run_result` on the message a background run posts
+     * into the chat that started it; `meta` then carries the run. Absent on
+     * an older box (read as `message`).
+     */
+    kind?: "message" | "agent_run_result";
+    meta?: {
+      runId?: string;
+      status?: "succeeded" | "failed" | "cancelled";
+      title?: string;
+      summary?: string;
+      artifacts?: { kind: string; ref: string; title: string }[];
+    } | null;
     createdAt: string;
   }>;
 }
@@ -4381,13 +4394,34 @@ export async function renameConversation(
   return res.json() as Promise<{ id: string; title: string }>;
 }
 
-/** WARP-331 — delete a conversation. Returns true on 200, false on 404. */
-export async function deleteConversation(conversationId: string): Promise<boolean> {
+/**
+ * WARP-3299 — the chat started background runs that are still going. The
+ * server refuses the delete until the person says what happens to them.
+ */
+export class ConversationHasLiveRunsError extends Error {
+  constructor(public readonly runs: { id: string; title: string; status: string }[]) {
+    super("conversation_has_live_runs");
+    this.name = "ConversationHasLiveRunsError";
+  }
+}
+
+/**
+ * WARP-331 — delete a conversation. Returns true on 200, false on 404.
+ * WARP-3303 — throws `ConversationHasLiveRunsError` when the chat has live
+ * background runs and `cancelRuns` was not given; pass `true` to stop them
+ * first or `false` to keep them running.
+ */
+export async function deleteConversation(conversationId: string, cancelRuns?: boolean): Promise<boolean> {
+  const qs = cancelRuns === undefined ? "" : `?cancelRuns=${cancelRuns}`;
   const res = await authFetch(
-    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}${qs}`,
     { method: "DELETE" },
   );
   if (res.status === 404) return false;
+  if (res.status === 409) {
+    const body = (await res.json().catch(() => null)) as { error?: string; runs?: { id: string; title: string; status: string }[] } | null;
+    if (body?.error === "conversation_has_live_runs") throw new ConversationHasLiveRunsError(body.runs ?? []);
+  }
   if (!res.ok) throw new Error(`Failed to delete conversation: ${res.status}`);
   return true;
 }

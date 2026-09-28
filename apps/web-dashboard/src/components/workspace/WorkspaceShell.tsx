@@ -55,6 +55,7 @@ import { useCapabilities } from "@/lib/hooks/useCapabilities";
 import { useIntegrations } from "@/lib/hooks/useIntegrations";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
+import { useAgentRunsActive } from "@/lib/hooks/useAgentRunsActive";
 import type { AuthRole, NavItem } from "@/components/nav-config";
 // WARP-2976 (ADR-059 §2.3) — the same switcher and the same department
 // filter as the sidebar. Here the filter is `resolveSpaces`' `restrictTo`,
@@ -134,8 +135,11 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const { connected } = useIntegrations(role === "owner" || role === "admin");
   const medicalConnector = connected.some((e) => isMedicalConnector(e.meta.id));
   const teamChatUnread = useTeamChatUnread();
+  // WARP-3303 — same count as the Sidebar's Workshop badge.
+  const agentRunsActive = useAgentRunsActive(role === "owner" || role === "admin").count;
   const badgeCounts: Record<NonNullable<NavItem["badgeKey"]>, number> = {
     teamChatUnread,
+    agentRunsActive,
   };
 
   // WARP-2976 — null for Whole business (and for a department that is not
