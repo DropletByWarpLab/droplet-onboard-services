@@ -74,9 +74,10 @@ function honoursForwardedHost(): boolean {
 
 /**
  * Resolve the request host (incl. port) from the `Host` header. The nginx
- * gateway forwards `Host $host` and never sets `X-Forwarded-Host`, so on a box
- * that header can only have come from the client; honouring it let any caller
- * pick the rpID/origin the server expects (and dodge or trip the IP refusal).
+ * gateway forwards the client's Host header and never sets
+ * `X-Forwarded-Host`, so on a box that header can only have come from the
+ * client; honouring it let any caller pick the rpID/origin the server expects
+ * (and dodge or trip the IP refusal).
  * It is read on a developer stack only (`honoursForwardedHost`).
  */
 function resolveHost(req: Request): string {

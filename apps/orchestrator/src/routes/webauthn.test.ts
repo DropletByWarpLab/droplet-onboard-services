@@ -958,12 +958,12 @@ describe("WARP-3193 — passkeys require user verification and an enrolled TOTP"
   });
 });
 
-// WARP-3229 — the RP comes from the Host header. nginx forwards `Host $host`
-// and never sets X-Forwarded-Host, so on a box that header can only come from
-// the client and must not steer the RP: neither to force the IP refusal nor to
-// dodge it or pick the rpID/origin the server will expect. A developer stack
-// is the one exception: the `next dev` rewrite proxy sets Host to the
-// orchestrator's own address and puts the browser's address in
+// WARP-3229 — the RP comes from the Host header. nginx forwards the client's
+// Host header and never sets X-Forwarded-Host, so on a box that header can
+// only come from the client and must not steer the RP: neither to force the IP
+// refusal nor to dodge it or pick the rpID/origin the server will expect. A
+// developer stack is the one exception: the `next dev` rewrite proxy sets Host
+// to the orchestrator's own address and puts the browser's address in
 // X-Forwarded-Host.
 describe("WARP-3229 — the RP comes from Host; X-Forwarded-Host only on a developer stack", () => {
   const credential: CredentialRow = {

@@ -14,10 +14,11 @@
  *   - rpID   = the hostname ONLY (no scheme, no port) — WebAuthn requires the
  *     RP ID to be a registrable domain suffix of the origin's host.
  *   - proto prefers `x-forwarded-proto` (nginx gateway), then `req.secure`.
- *   - host is the `Host` header ONLY. nginx forwards `Host $host` and never
- *     sets `X-Forwarded-Host`, so that header can only have come from the
- *     client and must not choose the RP (WARP-3229). The one exception is a
- *     developer stack, where `next dev` puts the browser's address there.
+ *   - host is the `Host` header ONLY. nginx forwards the client's Host header
+ *     and never sets `X-Forwarded-Host`, so that header can only have come
+ *     from the client and must not choose the RP (WARP-3229). The one
+ *     exception is a developer stack, where `next dev` puts the browser's
+ *     address there.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Request } from "express";
