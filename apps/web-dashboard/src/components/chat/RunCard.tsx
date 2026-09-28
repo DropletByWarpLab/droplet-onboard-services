@@ -143,7 +143,7 @@ export function RunCard({ call }: { call: ChatToolCall }) {
 
   return (
     <section
-      className="mb-2 rounded-lg border border-separator bg-surface-secondary p-3 type-caption-1 text-label-primary"
+      className="mb-2 rounded-lg border border-[var(--card-bd)] bg-[var(--card-inner)] p-3 type-caption-1 text-[var(--text)]"
       aria-label={`Background task: ${title}`}
       data-testid="run-card"
       data-run-id={runId}
@@ -155,11 +155,11 @@ export function RunCard({ call }: { call: ChatToolCall }) {
       </div>
 
       {hidden ? (
-        <p className="mt-1 text-label-secondary" data-testid="run-card-hidden">
+        <p className="mt-1 text-[var(--text-muted)]" data-testid="run-card-hidden">
           This background task isn&apos;t visible to your account.
         </p>
       ) : run ? (
-        <p className="mt-1 text-label-secondary" role="status" aria-live="polite" data-testid="run-card-progress">
+        <p className="mt-1 text-[var(--text-muted)]" role="status" aria-live="polite" data-testid="run-card-progress">
           {progressLine(run)}
         </p>
       ) : null}
@@ -214,7 +214,7 @@ export function RunCard({ call }: { call: ChatToolCall }) {
 
       {!hidden && (
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <Link href={`/workshop?run=${encodeURIComponent(runId)}`} className="text-accent hover:text-accent-hover font-medium">
+          <Link href={`/workshop?run=${encodeURIComponent(runId)}`} className="text-[var(--brand)] hover:underline font-medium">
             View
           </Link>
           {live && (
@@ -222,7 +222,7 @@ export function RunCard({ call }: { call: ChatToolCall }) {
               type="button"
               disabled={busy}
               onClick={() => void act(() => cancelAgentRun(runId))}
-              className="inline-flex items-center gap-1 text-label-secondary hover:text-label-primary disabled:opacity-60"
+              className="inline-flex items-center gap-1 text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-60"
               data-testid="run-card-stop"
             >
               <Square size={11} aria-hidden /> Stop
@@ -233,7 +233,7 @@ export function RunCard({ call }: { call: ChatToolCall }) {
 
       {run && run.trace.length > 0 && (
         <details className="mt-2">
-          <summary className="cursor-pointer text-label-secondary">Steps ({run.trace.length})</summary>
+          <summary className="cursor-pointer text-[var(--text-muted)]">Steps ({run.trace.length})</summary>
           <ol className="ws-steps mt-2" aria-label="Steps this task took">
             {run.trace.map((e, i) => (
               <Step key={`${e.tool_call_id}-${i}`} entry={e} />
@@ -267,7 +267,7 @@ export function RunResultCard({ result }: { result: RunResult }) {
         : `Background task didn't finish: ${result.title}`;
   return (
     <section
-      className="rounded-lg border border-separator bg-surface-secondary p-3 type-caption-1 text-label-primary"
+      className="rounded-lg border border-[var(--card-bd)] bg-[var(--card-inner)] p-3 type-caption-1 text-[var(--text)]"
       aria-label={heading}
       data-testid="run-result-card"
       data-run-id={result.runId}
@@ -283,7 +283,7 @@ export function RunResultCard({ result }: { result: RunResult }) {
             <li key={a.ref}>
               <Link
                 href={a.kind === "file" ? `/files?path=${encodeURIComponent(folderOf(a.ref))}` : `/workshop?run=${encodeURIComponent(result.runId)}`}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-surface-tertiary text-label-primary hover:text-accent"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-[var(--inset)] text-[var(--text)] hover:text-[var(--brand)]"
                 title={a.ref}
               >
                 <FileText size={12} aria-hidden /> {a.title}
@@ -293,7 +293,7 @@ export function RunResultCard({ result }: { result: RunResult }) {
         </ul>
       )}
       <div className="mt-2">
-        <Link href={`/workshop?run=${encodeURIComponent(result.runId)}`} className="text-accent hover:text-accent-hover font-medium">
+        <Link href={`/workshop?run=${encodeURIComponent(result.runId)}`} className="text-[var(--brand)] hover:underline font-medium">
           View full run
         </Link>
       </div>
