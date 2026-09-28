@@ -33,6 +33,7 @@
  * server-side would imply a private key we must never hold.
  */
 
+import { OVERLAY_PEER_USER_ID } from "@droplet/auth-policy";
 import type { VpnPeerMode } from "./vpn.service.js";
 
 /** An endpoint a client may try to reach the box on, best first.
@@ -163,7 +164,7 @@ export interface ProvisionedOverlayPeer {
 
 /** The synthetic userId overlay peers share — they carry no per-user Nextcloud
  *  identity. Mirrors `OVERLAY_PEER_USER` in overlay-connect.service.ts. */
-const OVERLAY_PEER_USER = "overlay";
+const OVERLAY_PEER_USER = OVERLAY_PEER_USER_ID;
 
 /** Overlay peers are remote devices dialling the box from OUTSIDE the home LAN
  *  — always AWAY mode, exactly like the ones overlay-connect installs. Named so

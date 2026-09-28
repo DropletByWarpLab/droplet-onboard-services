@@ -123,6 +123,18 @@ autoinstall:
         done
         test -d /home/droplet/edge-platform/.git || { echo "FATAL: droplet platform clone failed during autoinstall; aborting so this surfaces now, not as a crash-looping first boot." >&2; exit 1; }
       '
+    # WARP-3174: the client installers this image carries. build-iso.sh stages
+    # them (clients.lock.json, size/sha256-verified, plus any hand stage) and
+    # maps the staging root to /server/app-downloads; git-ignored files never
+    # arrive with the clone. -n keeps the clone's tracked files. The
+    # orchestrator re-hashes every byte against catalog.json before serving,
+    # so a bad copy is refused, never served.
+    - |
+      if [ -f /cdrom/server/app-downloads/catalog.json ]; then
+        cp -rn /cdrom/server/app-downloads/. /target/home/droplet/edge-platform/data/app-downloads/
+        # ISO files arrive read-only; a later stage must be able to replace them.
+        chmod -R u+w /target/home/droplet/edge-platform/data/app-downloads
+      fi
     - curtin in-target --target=/target -- chown -R droplet:droplet /home/droplet/edge-platform
     # Install a oneshot systemd unit that runs setup.sh --single-box --systemd
     # on the FIRST real boot, then disables itself. setup.sh is the single
