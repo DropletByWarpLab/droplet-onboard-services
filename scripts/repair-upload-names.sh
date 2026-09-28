@@ -17,7 +17,10 @@
 # file keeps its id, shares, tags and versions.
 #
 # Scope: people's own folders and the company Workspace (both live under a
-# user's `files/`). Department folders (groupfolders) are not walked.
+# user's `files/`). Department folders (groupfolders) are not walked. The walk
+# covers each user's WHOLE `files/` tree, not only dashboard uploads, so read
+# the dry-run list for paths that did not come from an upload (a desktop-sync
+# client, WebDAV) before passing --apply.
 #
 # Usage (as root, from the repo root on the box):
 #   scripts/repair-upload-names.sh           # dry run: lists, changes nothing
@@ -36,7 +39,9 @@ case "${1:-}" in
   *) say "usage: $0 [--apply]"; exit 2 ;;
 esac
 
-nc() { "${COMPOSE[@]}" exec -T -u www-data nextcloud "$@"; }
+# </dev/null: `exec -T` drops the TTY but keeps stdin attached, so without it
+# the first `nc` inside the rename loop drains the rest of the plan.
+nc() { "${COMPOSE[@]}" exec -T -u www-data nextcloud "$@" </dev/null; }
 
 datadir="$(nc php occ config:system:get datadirectory | tr -d '\r\n')"
 [ -n "$datadir" ] || { say "could not read Nextcloud's data directory"; exit 1; }
@@ -48,7 +53,7 @@ trap 'rm -f "$plan"' EXIT
 # NUL-separated. Directories are listed so a repaired name that matches one is
 # skipped rather than moved INTO it.
 # shellcheck disable=SC2016 # $1 expands inside the container's shell
-nc sh -c 'cd "$1" && for d in */files; do [ -d "$d" ] && find "$d" \( -type f -printf "f%p\0" \) -o \( -type d -printf "d%p\0" \); done' _ "$datadir" \
+nc sh -c 'cd "$1" && for d in */files; do [ -d "$d" ] || continue; find "$d" \( -type f -printf "f%p\0" \) -o \( -type d -printf "d%p\0" \); done' _ "$datadir" \
   | "${COMPOSE[@]}" exec -T orchestrator node dist/cli/upload-name-repair.js >"$plan"
 
 count=0
@@ -66,7 +71,7 @@ while IFS= read -r -d '' from && IFS= read -r -d '' to; do
     fi
     # -n: never answer the "overwrite?" prompt, so a race with a new file of
     # the same name fails instead of replacing it.
-    if ! nc php occ files:move -n "/$from" "/$to" </dev/null; then
+    if ! nc php occ files:move -n "/$from" "/$to"; then
       failed=$((failed + 1))
       say "not renamed: $from"
     fi

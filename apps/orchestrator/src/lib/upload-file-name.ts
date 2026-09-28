@@ -10,15 +10,17 @@
  * - `\` is kept as part of the name, never read as a path separator, but
  *   Nextcloud refuses it in every file name (`OCP\Constants::FILENAME_INVALID_CHARS`
  *   is `\\/`), so it is stored as `_` and the upload reports the rename;
- * - an empty name, or `.`, is refused.
+ * - an empty name, or `.`, is refused. Segments are compared trimmed,
+ *   because Nextcloud trims before its own `.`/`..` check: `" .."` would
+ *   pass here, stage, and then fail the commit as a 500.
  *
  * Returns the name to store, or null to refuse the upload.
  */
 export function storedUploadName(raw: string): string | null {
   if (raw.includes("/") || /[\u0000-\u001f\u007f-\u009f]/.test(raw)) return null;
-  if (raw.split("\\").includes("..")) return null;
+  if (raw.split("\\").some((seg) => seg.trim() === "..")) return null;
   const name = raw.replaceAll("\\", "_");
-  if (name.trim() === "" || name === ".") return null;
+  if (name.trim() === "" || name.trim() === ".") return null;
   return name;
 }
 

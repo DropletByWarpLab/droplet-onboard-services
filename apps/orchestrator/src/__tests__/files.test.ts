@@ -1054,6 +1054,23 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         expect(ncMock.ncStageUpload).not.toHaveBeenCalled();
         expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
       });
+
+      it("a refused second part discards the already-staged first part: the batch lands whole or not at all", async () => {
+        const boundary = "b3057";
+        const part = (name: string) =>
+          `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="${name}"\r\n` +
+          `Content-Type: text/plain\r\n\r\nx\r\n`;
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .set("Content-Type", `multipart/form-data; boundary=${boundary}`)
+          .send(Buffer.from(part("good.txt") + part("../x") + `--${boundary}--\r\n`));
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe("UPLOAD_BAD_NAME");
+        expect(ncMock.ncStageUpload).toHaveBeenCalledTimes(1);
+        const stagedId = ncMock.ncStageUpload.mock.calls[0][2];
+        expect(ncMock.ncDiscardUpload.mock.calls.map((c: unknown[]) => c[2])).toEqual([stagedId]);
+        expect(ncMock.ncCommitUpload).not.toHaveBeenCalled();
+      });
     });
   });
 

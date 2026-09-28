@@ -48,7 +48,7 @@ describe("storedUploadName", () => {
   it("keeps a backslash as a character, stored as _", () => {
     expect(storedUploadName("a\\b.txt")).toBe("a_b.txt");
   });
-  it.each(["../x", "..\\x", "a/b", "..", ".", "", "a\0b", "a\u0007b", "a\u009bb"])("refuses %j", (name) => {
+  it.each(["../x", "..\\x", "a/b", "..", ".", "", "a\0b", "a\u0007b", "a\u009bb", " ..", ".. ", ". ", "x\\ .."])("refuses %j", (name) => {
     expect(storedUploadName(name)).toBeNull();
   });
 });
