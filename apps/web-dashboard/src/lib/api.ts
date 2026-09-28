@@ -1347,10 +1347,10 @@ export interface SystemHealth {
   status: SystemHealthStatus;
   components: SystemComponent[];
   uptime: number;
-  // WARP-3154 — the real committed OTA release tag; null on a box that has
+  // WARP-3154 — the real committed OTA release tag; absent on a box that has
   // never taken an update (still on its factory image). No longer the
   // hardcoded "0.1.0" literal.
-  version: string | null;
+  version?: string;
 }
 
 export async function fetchSystemHealth(): Promise<SystemHealth> {

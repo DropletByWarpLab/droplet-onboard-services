@@ -604,8 +604,10 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body.components.length).toBe(ALL_COMPONENTS.length);
     // WARP-3154 — no `startHealthMonitor` call in this test, so the version
     // never resolved off its default: null, same honest state as a factory-
-    // image box. No hardcoded "0.1.0" literal any more.
-    expect(res.body.version).toBeNull();
+    // image box. No hardcoded "0.1.0" literal any more. The key is ABSENT,
+    // not null: droplet-android's non-null `version: String = "0.0.0"` only
+    // falls back to its default when the key is missing.
+    expect(res.body).not.toHaveProperty("version");
     expect(typeof res.body.uptime).toBe("number");
   });
 
@@ -728,12 +730,12 @@ describe("refreshCurrentVersion + getAggregateHealth().version (WARP-3154)", () 
     stopHealthMonitor();
   });
 
-  it("is null when the box has never taken an OTA update", async () => {
+  it("is absent when the box has never taken an OTA update", async () => {
     const prisma = {
       deviceUpdate: { findFirst: vi.fn().mockResolvedValue(null) },
     } as unknown as PrismaClient;
     await refreshCurrentVersion(prisma);
-    expect(getAggregateHealth().version).toBeNull();
+    expect(getAggregateHealth()).not.toHaveProperty("version");
   });
 
   it("is the newest committed release's tag", async () => {

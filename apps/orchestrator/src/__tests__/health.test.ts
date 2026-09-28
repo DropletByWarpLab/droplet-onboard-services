@@ -47,12 +47,13 @@ describe("GET /api/health", () => {
     expect(res.body.status).toBe("ok");
   });
 
-  it("includes a version field — null when this test process never OTA'd (WARP-3154)", async () => {
+  it("omits the version key when this test process never OTA'd (WARP-3154)", async () => {
     // No `startHealthMonitor(prisma)` runs in this suite, so `currentVersion`
     // never resolves off its default — same honest state as a fresh box on
     // its factory image. No hardcoded "0.1.0" literal any more.
+    // Absent, not null: an explicit null breaks droplet-android's decoder.
     const res = await request(app).get("/api/health");
-    expect(res.body.version).toBeNull();
+    expect(res.body).not.toHaveProperty("version");
   });
 
   it("includes service health fields", async () => {

@@ -3,16 +3,16 @@
  * `guest` (every camera route refuses that role — showing "No cameras yet"
  * would be a lie about a box that has cameras). Filtered at render time
  * (not out of the WIDGETS registry), so an owner/admin/member's saved
- * layout is unaffected and a guest's own layout edits never strip cameras
- * from someone else's stored preference — the two roles never see the same
- * `items` array.
+ * layout is unaffected. The saved layout key is per browser, not per user,
+ * so a guest's edit carries the hidden cameras tile through to what it saves
+ * rather than stripping it from the next owner's board.
  *
  * Follows the mocking pattern proven in
  * home.density-option-spacing.test.tsx: BentoBoard/bento-engine mocked out,
  * a minimal WIDGETS registry, matchMedia stubbed for useIsMobile.
  */
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import type { LayoutItem } from "@/components/home/bento-engine";
 
 const authUser = vi.hoisted(() => ({
@@ -28,9 +28,12 @@ vi.mock("@/lib/hooks/useBoxAddress", () => ({
 vi.mock("@/lib/api", () => ({ fetchSystemHealth: vi.fn() }));
 vi.mock("@/components/home/AmbientLayer", () => ({ AmbientLayer: () => null }));
 
-const bentoBoardMock = vi.fn((_props: { items: LayoutItem[] }) => null);
+const bentoBoardMock = vi.fn(
+  (_props: { items: LayoutItem[]; onChange?: (next: LayoutItem[]) => void }) => null,
+);
 vi.mock("@/components/home/BentoBoard", () => ({
-  BentoBoard: (props: { items: LayoutItem[] }) => bentoBoardMock(props),
+  BentoBoard: (props: { items: LayoutItem[]; onChange?: (next: LayoutItem[]) => void }) =>
+    bentoBoardMock(props),
 }));
 vi.mock("@/components/home/bento-engine", () => ({
   fillGaps: (items: unknown[]) => items,
@@ -94,5 +97,20 @@ describe("Home board — Cameras tile hidden for guests (WARP-3157)", () => {
     authUser.current = { username: "stefan", role: "owner" };
     render(<DashboardPage />);
     expect(renderedItemIds()).toContain("cameras");
+  });
+
+  it("a guest's layout edit keeps the hidden cameras tile in the saved (per-browser) layout", () => {
+    authUser.current = { username: "sam", role: "guest" };
+    render(<DashboardPage />);
+    const props = bentoBoardMock.mock.calls.at(-1)?.[0];
+    const guestItems = props?.items ?? [];
+    act(() => props?.onChange?.([...guestItems].reverse()));
+    const saved = Object.keys(window.localStorage)
+      .filter((k) => k.startsWith("droplet-home-bento-v1-") && !k.endsWith("dir"))
+      .flatMap((k) => JSON.parse(window.localStorage.getItem(k) ?? "[]") as LayoutItem[])
+      .map((it) => it.id);
+    expect(saved).toContain("cameras");
+    // …and the guest still never sees it.
+    expect(renderedItemIds()).not.toContain("cameras");
   });
 });

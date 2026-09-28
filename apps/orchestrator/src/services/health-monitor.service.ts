@@ -60,9 +60,12 @@ export interface AggregateHealth {
   status: AggregateStatus;
   components: ComponentHealth[];
   uptime: number; // seconds
-  // WARP-3154 — null on a box that has never taken an OTA update (still on
-  // its factory image). Never a hardcoded literal.
-  version: string | null;
+  // WARP-3154 — the committed OTA release tag. OMITTED (key absent, never
+  // `null`) on a box that has never taken an OTA update (still on its factory
+  // image): droplet-android decodes `version` as a non-null `String` with a
+  // default, which only applies when the key is absent — an explicit `null`
+  // throws and leaves its Home on "Checking system status" forever.
+  version?: string;
 }
 
 type Probe = () => Promise<boolean>;
@@ -267,7 +270,7 @@ export function getAggregateHealth(): AggregateHealth {
     status: classifyAggregate(components),
     components,
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    version: currentVersion,
+    ...(currentVersion ? { version: currentVersion } : {}),
   };
 }
 

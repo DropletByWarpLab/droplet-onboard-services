@@ -332,7 +332,14 @@ export default function DashboardPage() {
   const items = isGuest ? layouts[dir].filter((it) => it.id !== "cameras") : layouts[dir];
   const cfg = DIRECTIONS[dir];
 
-  const persist = (next: LayoutItem[]) => {
+  const persist = (edited: LayoutItem[]) => {
+    // WARP-3157 — the layout key is per browser, not per user: a guest's edit
+    // (which never contains the hidden cameras tile) must not strip it from
+    // the next owner/admin/member's board. Carry it through at the end.
+    const next =
+      isGuest && !edited.some((it) => it.id === "cameras")
+        ? [...edited, ...layouts[dir].filter((it) => it.id === "cameras")]
+        : edited;
     setLayouts((L) => {
       const n = { ...L, [dir]: next };
       try {

@@ -704,16 +704,19 @@ function StatusWidget({ w, h }: WidgetProps) {
   const isGuest = user?.role === "guest";
   const { items: recents } = useRecents(50);
   const { models } = useModels();
-  const { totalCameras } = useCameras();
+  // WARP-3157 — no camera polls for a guest: every camera route 403s them
+  // and each 403 writes an audited "Access denied" row.
+  const { totalCameras } = useCameras({ enabled: !isGuest });
   const { totalDevices } = useSmartHome();
   // WARP-1055 — the Home surface's Voice status line lives inside this
   // existing system-health tile (design brief §2), not a new tile.
   // WARP-3157 — GET /api/voice/status is owner/admin only; a member or
   // guest polling it forever gets a 403 and the row read "— · checking…"
-  // with no way to resolve. The hook still runs (rules of hooks), but the
-  // row below is dropped from `stats` for non-admins.
+  // with no way to resolve. The hook still runs (rules of hooks) but with
+  // its poll disabled — each 403 would write an audited "Access denied"
+  // row — and the row below is dropped from `stats` for non-admins.
   const { state: voiceState, unavailable: voiceUnavailable } =
-    useVoiceHealthSummary();
+    useVoiceHealthSummary({ enabled: isAdmin });
 
   const local = models.filter((m) => isLocalProvider(m.provider)).length;
   const cloud = models.length - local;
