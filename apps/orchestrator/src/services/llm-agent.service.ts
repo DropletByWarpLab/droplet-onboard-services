@@ -17,7 +17,8 @@
  * so legacy consumers don't break.
  *
  * Iteration cap: config.agentMaxIter (env AGENT_MAX_ITER_DEFAULT / CAP,
- * ships 10 / 10 — config.ts, raised from 5 by the 2026-07-21 tuning sweep)
+ * ships 20 / 20 — config.ts, raised from 5 by the 2026-07-21 tuning sweep,
+ * then to 20 by WARP-3297)
  * — a confused or prompt-injected model can't burn unbounded tokens.
  *
  * WARP-1602 — channel discipline. The model's ANALYSIS (chain-of-thought)
