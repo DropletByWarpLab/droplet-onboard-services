@@ -20,7 +20,7 @@
  *      and attaches the token via `_meta`
  *
  * WARP-3279 changed step 4 for chat: at the start of the next turn the loop
- * TAKES every approved grant (`takeApproved`) and dispatches the stored call
+ * TAKES each approved grant (`takeNextApproved`) and dispatches the stored call
  * itself, exactly as the person saw it. The model rebuilt the call from its
  * own prose and reworded free-text args, so a byte-identical re-issue almost
  * never happened. `claimGrant` stays for a re-issue inside the same turn.
@@ -108,7 +108,7 @@ export interface RegisterChallengeInput {
   userId: string;
   /**
    * WARP-3279 — the conversation the challenge was raised in, when the turn
-   * is persisted. `takeApproved` replays a grant only into a turn of the SAME
+   * is persisted. `takeNextApproved` replays a grant only into a turn of the SAME
    * conversation, so approving in one thread never runs a write in another.
    */
   threadId?: string;
@@ -164,16 +164,17 @@ export interface ChatApprovalStore {
    */
   claimGrant(input: ClaimGrantInput, now?: number): string | null;
   /**
-   * WARP-3279 — the replay side: every approved, unexpired, unspent grant
-   * for THIS user in THIS conversation (`threadId` compared exactly, so an
-   * unpersisted turn only meets challenges raised by unpersisted turns).
-   * Each returned grant is spent here, before anything dispatches it, so a
-   * grant can be replayed at most once. Oldest first.
+   * WARP-3279 — the replay side: the OLDEST approved, unexpired, unspent
+   * grant for THIS user in THIS conversation (`threadId` compared exactly, so
+   * an unpersisted turn only meets challenges raised by unpersisted turns),
+   * or `null`. The grant is spent here, before anything dispatches it, so it
+   * can be replayed at most once. One per call, so a turn aborted between
+   * replays leaves the rest approved for the next turn.
    */
-  takeApproved(
+  takeNextApproved(
     input: { userId: string; threadId?: string },
     now?: number,
-  ): ApprovedCall[];
+  ): ApprovedCall | null;
   /** Live entry count. Test/diagnostic surface. */
   size(): number;
 }
@@ -314,24 +315,26 @@ export function createChatApprovalStore(
       return null;
     },
 
-    takeApproved(input, now = Date.now()) {
-      const taken: ApprovedCall[] = [];
+    takeNextApproved(input, now = Date.now()) {
       for (const entry of entries.values()) {
         if (entry.userId !== input.userId) continue;
         if (entry.threadId !== input.threadId) continue;
         settle(entry, now);
         if (entry.status !== "approved") continue;
-        // The stored args must still be the call the human approved.
+        // Belt and braces: `register` hashes and clones the args in the same
+        // statement and nothing writes `entry.args` after, so this cannot
+        // fire today. It keeps a future write path from replaying a call
+        // other than the one the human was shown.
         if (confirmationBindingHash(entry.tool, entry.args) !== entry.bindingHash) continue;
         entry.status = "spent";
-        taken.push({
+        return {
           challengeId: entry.challengeId,
           tool: entry.tool,
           args: structuredClone(entry.args),
           token: entry.token,
-        });
+        };
       }
-      return taken;
+      return null;
     },
 
     size() {

@@ -145,7 +145,7 @@ export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant"
   // WARP-3279 — optional: only the chat store replays approved calls. The
   // durable-run worker supplies its own two-method port and replays its
   // parked call itself (WARP-3044).
-  Partial<Pick<ChatApprovalStore, "takeApproved">>;
+  Partial<Pick<ChatApprovalStore, "takeNextApproved">>;
 
 /**
  * WARP-3279 — what the model reads in place of the interceptor's challenge
@@ -169,6 +169,15 @@ function chatChallengeTextForModel(tool: string): string {
         "the approved call runs by itself and its result appears in the conversation.",
     },
   });
+}
+
+/** Any `status: "confirmation_required"` envelope — a challenge or a refused token. */
+export function isConfirmationEnvelope(text: string): boolean {
+  try {
+    return (JSON.parse(text) as { status?: unknown })?.status === "confirmation_required";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1626,7 +1635,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // §3-refused one). Carry WHY so the terminal error names the real problem;
   // an operator reading "unknown tool" for a tool that exists and is simply
   // not granted would chase the wrong bug.
-  let lastBadToolReason: "unknown tool" | "forbidden tool" = "unknown tool";
+  let lastBadToolReason: "unknown tool" | "forbidden tool" | "already-run tool" = "unknown tool";
 
   // WARP-329 — the result returned when the client disconnects mid-turn.
   // We don't emit a `done` event (the SSE consumer is gone) and the route
@@ -1734,19 +1743,29 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // through the same RBAC gate and dispatch port as any call, and the model
   // meets it as an ordinary tool_call + result.
   //
-  // Fail-closed: `takeApproved` returns only grants a human moved to
+  // Fail-closed: `takeNextApproved` returns only grants a human moved to
   // `approved` through the role-gated confirm route, for THIS user in THIS
   // conversation, unexpired, and spends each one before it is dispatched.
+  // One at a time, so an abort between replays leaves the rest approved.
   // The interceptor still re-checks the token's binding on redemption.
+  //
+  // `replayedTools` holds only tools whose approved call actually RAN. It is
+  // keyed by tool NAME for the whole turn: a re-issue comes back with
+  // reworded free-text args, so matching on args would miss it and run the
+  // write twice. The price is that a genuinely different second call of the
+  // same tool in this turn is also refused; the model can ask for it next
+  // turn, where it is challenged normally. A replay that did NOT run is not
+  // recorded, so the model's re-issue falls through to normal dispatch and is
+  // challenged afresh: the user gets a new prompt instead of being told an
+  // unexecuted write happened.
   const replayedTools = new Set<string>();
   const replayUserId = req.toolCallContext?.userId;
-  if (deps.approvals?.takeApproved && replayUserId && toolChoice !== "none") {
-    const approved = deps.approvals.takeApproved({
-      userId: replayUserId,
-      threadId: req.citationContext?.threadId,
-    });
-    for (const grant of approved) {
+  const takeNext = deps.approvals?.takeNextApproved;
+  if (takeNext && replayUserId && toolChoice !== "none") {
+    for (;;) {
       if (req.signal?.aborted) return abortedResult(0);
+      const grant = takeNext({ userId: replayUserId, threadId: req.citationContext?.threadId });
+      if (!grant) break;
       const callId = `approved-${grant.challengeId}`;
       const denial = fullPoolNames.has(grant.tool)
         ? toolDispatchDenial(grant.tool, grant.args, scoped, runtimeLookup)
@@ -1777,14 +1796,36 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           isError = true;
         }
       }
-      const parsed: unknown = toolResultPayloadValue(parseToolResultPayload(text));
+      // The WARP-3044 worker's predicate: a refused token comes back as a
+      // `confirmation_required` envelope with `isError: false` (mcp-server
+      // sets it only for `status: "error"`), and the tool did not run.
+      const ran = !isError && !isConfirmationEnvelope(text);
+      const payload = parseToolResultPayload(text);
+      const parsed: unknown = toolResultPayloadValue(payload);
       trace.push({ tool_call_id: callId, tool: grant.tool, args: grant.args, result: parsed });
-      emit({ type: "tool_result", id: callId, ok: !isError, data: parsed });
+      emit({ type: "tool_result", id: callId, ok: ran, data: parsed });
       logger.info(
-        { tool: grant.tool, challengeId: grant.challengeId, turn_id: turnId, ok: !isError },
+        { tool: grant.tool, challengeId: grant.challengeId, turn_id: turnId, ok: ran },
         "chat_approved_call_replayed",
       );
-      replayedTools.add(grant.tool);
+      if (!ran) {
+        // WARP-1480 — the same failure line as the loop's dispatch point.
+        logger.warn(
+          describeToolError({
+            tool: grant.tool,
+            toolCallId: callId,
+            turnId,
+            iter: 0,
+            args: grant.args,
+            payload,
+            includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
+            threadId: req.citationContext?.threadId,
+          }),
+          "agent_tool_error",
+        );
+      } else {
+        replayedTools.add(grant.tool);
+      }
       messages.push(
         {
           role: "assistant",
@@ -1803,7 +1844,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           content: boundToolResultForModel(
             redactConfirmationTokensForModel(text),
             grant.tool,
-            () => {},
+            (refusal) => {
+              logger.warn(
+                {
+                  tool: grant.tool,
+                  tool_call_id: callId,
+                  turn_id: turnId,
+                  iter: 0,
+                  input_chars: refusal.inputChars,
+                  reason: refusal.reason,
+                  ...(refusal.detail ? { detail: refusal.detail } : {}),
+                },
+                "agent_tool_result_refused",
+              );
+            },
             config.AGENT_TOOL_RESULT_CAP_CHARS,
           ),
         },
@@ -2454,6 +2508,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           tool_call_id: call.id,
           content: boundControlEnvelopeForModel(JSON.stringify(already)),
         });
+        // A model that keeps re-issuing it must still trip the breaker.
+        lastBadToolName = call.function.name;
+        lastBadToolReason = "already-run tool";
+        iterGuardHits++;
         continue;
       }
 
@@ -2696,7 +2754,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
         if (isInterceptorChallenge) {
           if (deps.approvals && approvalUserId) {
-            chatOwnsApproval = Boolean(deps.approvals.takeApproved);
+            chatOwnsApproval = Boolean(deps.approvals.takeNextApproved);
             const challenge = deps.approvals.register({
               tool: call.function.name,
               args,

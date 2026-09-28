@@ -232,7 +232,7 @@ describe("createChatApprovalStore — bounded", () => {
   });
 });
 
-describe("WARP-3279 — takeApproved", () => {
+describe("WARP-3279 — takeNextApproved", () => {
   it("hands back only the owner's approved, unexpired grants for this thread, once, with the args as challenged", () => {
     const store = createChatApprovalStore();
     const now = Date.now();
@@ -246,13 +246,29 @@ describe("WARP-3279 — takeApproved", () => {
       expect(store.approve(c.challengeId, u, now).ok).toBe(true);
     }
 
-    const taken = store.takeApproved({ userId: "romain", threadId: "a" }, now + 20);
-    expect(taken).toEqual([
+    const taken = store.takeNextApproved({ userId: "romain", threadId: "a" }, now + 20);
+    expect(taken).toEqual(
       { challengeId: approved.challengeId, tool: "pm_create_project", args: { name: "Q3" }, token: "t" },
-    ]);
+    );
     expect(store.get(approved.challengeId)!.status).toBe("spent");
-    expect(store.takeApproved({ userId: "romain", threadId: "a" }, now + 20)).toEqual([]);
+    expect(store.takeNextApproved({ userId: "romain", threadId: "a" }, now + 20)).toBeNull();
     // Spent grants are not claimable by a model re-issue either.
     expect(store.claimGrant({ tool: "pm_create_project", args: { name: "Q3" }, userId: "romain" }, now + 20)).toBeNull();
+  });
+
+  it("spends ONE grant per call, oldest first, leaving the rest approved", () => {
+    const store = createChatApprovalStore();
+    const now = Date.now();
+    const base = { tool: "pm_create_project", token: "t", expiresAt: now + 60_000, userId: "romain", threadId: "a" };
+    const first = store.register({ ...base, args: { name: "one" } });
+    const second = store.register({ ...base, args: { name: "two" } });
+    store.approve(first.challengeId, "romain", now);
+    store.approve(second.challengeId, "romain", now);
+
+    // MUTATION (spend every match on the first call): `second` reads spent
+    // here, and an aborted turn would silently lose it → red.
+    expect(store.takeNextApproved({ userId: "romain", threadId: "a" }, now)!.challengeId).toBe(first.challengeId);
+    expect(store.get(second.challengeId)!.status).toBe("approved");
+    expect(store.takeNextApproved({ userId: "romain", threadId: "a" }, now)!.challengeId).toBe(second.challengeId);
   });
 });

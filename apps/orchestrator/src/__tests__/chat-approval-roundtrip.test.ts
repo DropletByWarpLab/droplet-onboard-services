@@ -28,6 +28,7 @@ import {
 } from "@droplet/tools-core";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { createChatApprovalStore } from "../services/chat-approval.service.js";
+import { DENY_ALL_TOOL_SCOPE } from "../services/tool-access.service.js";
 import type { SSEEvent } from "../types/sse-events.js";
 
 const USER = "romain";
@@ -96,7 +97,12 @@ function makeDispatch(now: () => number) {
           content: [{ type: "text", text: JSON.stringify(refusal) }],
         };
       }
-      handler(name, args);
+      // A test can make the tool itself fail (e.g. AUTH_REQUIRED) by having
+      // the handler return an MCP result.
+      const override = handler(name, args) as
+        | { isError: boolean; content: { type: string; text: string }[] }
+        | undefined;
+      if (override) return override;
       return {
         isError: false,
         content: [
@@ -138,6 +144,9 @@ async function runTurn(args: {
   onChat?: (chat: ReturnType<typeof vi.fn>) => void;
   /** WARP-3279 — the persisted conversation this turn belongs to. */
   threadId?: string;
+  /** WARP-3279 — this turn's RBAC: the scope and the client's tool shelf. */
+  toolAccessScope?: typeof DENY_ALL_TOOL_SCOPE;
+  allowed_tools?: string[];
 }) {
   const chat = vi.fn(async () => ({
     ok: true,
@@ -173,6 +182,8 @@ async function runTurn(args: {
     messages: [{ role: "user", content: "do the thing" }],
     max_iter: 4,
     toolCallContext: { userId: USER },
+    ...(args.toolAccessScope ? { toolAccessScope: args.toolAccessScope } : {}),
+    ...(args.allowed_tools ? { allowed_tools: args.allowed_tools } : {}),
     ...(args.threadId
       ? { citationContext: { userId: USER, threadId: args.threadId, messageId: "msg" } }
       : {}),
@@ -543,7 +554,11 @@ describe("WARP-2469 — no approval store wired (voice, ToolSpec runs)", () => {
 });
 
 describe("WARP-3279 — an approved chat call replays server-side, exactly as approved", () => {
-  async function challengeAndApprove(threadId?: string) {
+  async function challengeAndApprove(
+    threadId?: string,
+    tool = "pm_create_project",
+    args: Record<string, unknown> = { name: "Q3 rollout" },
+  ) {
     const clock = { now: Date.now() };
     const dispatch = makeDispatch(() => clock.now);
     const approvals = createChatApprovalStore();
@@ -553,7 +568,7 @@ describe("WARP-3279 — an approved chat call replays server-side, exactly as ap
       callTool: dispatch.callTool,
       approvals,
       turns: [
-        toolCallTurn("pm_create_project", { name: "Q3 rollout" }),
+        toolCallTurn(tool, args),
         { role: "assistant", content: "Waiting for your approval." },
       ],
       events,
@@ -645,5 +660,75 @@ describe("WARP-3279 — an approved chat call replays server-side, exactly as ap
     // MUTATION (forward the interceptor's generic text): "presenting this
     // confirmationToken" reaches the model → red.
     expect(challengeSeen).not.toMatch(/confirmationToken|present/i);
+  });
+
+  it.each([
+    // `delete_file` is a catalog tool, so the scope applies to it. The scope
+    // narrows this turn's pool first, so the replay meets it as unavailable.
+    ["the current scope denies it", "delete_file", { toolAccessScope: DENY_ALL_TOOL_SCOPE }, "TOOL_UNAVAILABLE"],
+    ["allowed_tools omits it", "pm_create_project", { allowed_tools: ["declaring_write"] }, "TOOL_UNAVAILABLE"],
+  ])("RBAC is re-decided at replay: not executed when %s", async (_label, tool, rbac, code) => {
+    const { handler, callTool, approvals, handle } = await challengeAndApprove(undefined, tool, { path: "/a" });
+    const events2: SSEEvent[] = [];
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [{ role: "assistant", content: "ok" }],
+      events: events2,
+      ...rbac,
+    });
+    // MUTATION (skip the denial check on the replay path): the approved
+    // call dispatches despite the turn's scope → red.
+    expect(handler).not.toHaveBeenCalled();
+    expect(callTool.mock.calls.some((c) => c[2]?.confirmationToken)).toBe(false);
+    const result = events2.find((e) => e.type === "tool_result" && e.id === `approved-${handle.challengeId}`);
+    expect(result).toMatchObject({ ok: false, data: { error: { code } } });
+  });
+
+  it.each([
+    [
+      "the tool returned an error (AUTH_REQUIRED)",
+      "handler",
+      { isError: true, content: [{ type: "text", text: JSON.stringify({ status: "error", error: { code: "AUTH_REQUIRED", message: "sign in to Nextcloud" } }) }] },
+    ],
+    [
+      "the interceptor refused the token (CONFIRMATION_REJECTED)",
+      "dispatch",
+      { isError: false, content: [{ type: "text", text: JSON.stringify({ status: "confirmation_required", error: { code: "CONFIRMATION_REJECTED", message: "expired" } }) }] },
+    ],
+  ])("a replay that did not run is reported as failed, and the model's re-issue is challenged afresh: %s", async (_label, where, outcome) => {
+    const { handler, callTool, approvals, handle } = await challengeAndApprove();
+    if (where === "handler") handler.mockReturnValueOnce(outcome);
+    else callTool.mockResolvedValueOnce(outcome);
+
+    const events2: SSEEvent[] = [];
+    let chat: ReturnType<typeof vi.fn> | undefined;
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [
+        toolCallTurn("pm_create_project", { name: "Q3 rollout" }),
+        { role: "assistant", content: "Waiting for your approval." },
+      ],
+      events: events2,
+      onChat: (c) => (chat = c),
+    });
+
+    // MUTATION (emit `ok: !isError`): the refused token reads as a green chip → red.
+    const replay = events2.find((e) => e.type === "tool_result" && e.id === `approved-${handle.challengeId}`);
+    expect(replay).toMatchObject({ ok: false });
+    // MUTATION (add to replayedTools unconditionally): the re-issue is
+    // answered "it has already run" and no new prompt appears → red.
+    expect(JSON.stringify(chat!.mock.calls[1])).not.toContain("already run");
+    const fresh = confirmationHandle(events2);
+    expect(fresh).toBeDefined();
+    expect(fresh!.challengeId).not.toBe(handle.challengeId);
+
+    // The user can approve again, and the next turn runs it.
+    expect(approvals.approve(fresh!.challengeId!, USER).ok).toBe(true);
+    const events3: SSEEvent[] = [];
+    await runTurn({ callTool, approvals, turns: [{ role: "assistant", content: "Done." }], events: events3 });
+    expect(handler).toHaveBeenLastCalledWith("pm_create_project", { name: "Q3 rollout" });
+    expect(events3.find((e) => e.type === "tool_result")).toMatchObject({ ok: true });
   });
 });
