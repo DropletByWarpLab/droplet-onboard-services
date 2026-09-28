@@ -430,6 +430,22 @@ the model on the Models page reaches it; an explicit `model` stays pinned
 `droplet/notifications/<username>` topic the park uses, with the result
 summary (or the error).
 
+**Live events (WARP-3301)** — every status change and every checkpoint (at
+most one per step, never per token) publishes on MQTT topic
+`droplet/agent-runs/<username>`, which ws-bridge forwards on `/api/ws/events`
+to that user's sockets only. Payload: `{runId, sessionId, status, iteration,
+maxIter, lastTool, queuePosition, waitingFor, title}` plus `summary` on a
+terminal status. `lastTool` is the tool NAME only, never its arguments.
+Best-effort (QoS 0): a client that missed one re-reads `GET
+/api/agent-runs/:id`, which carries the same `queuePosition` and `waitingFor`.
+`queuePosition` is set for queued runs only, in the worker's claim order
+(`runAfter`, then `createdAt`), with running runs counted ahead: 1 = next.
+`waitingFor` is `none` for any run not queued; a queued run's reason is the
+explicit `queueWait` column — `queue`, or `chat` when it yielded the slot on a
+gateway 429. A run whose in-flight model call is waiting behind chat inside
+the gateway still reads `running`/`none`: the worker cannot observe that wait
+today (WARP-3306 measures it). Module: `agent-run-events.service.ts`.
+
 **Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056; since
 WARP-2974 the run is a transcript in the Workshop space). It is the last
 visible row of the sidebar's Work group, after Calendar, for owner/admin only,

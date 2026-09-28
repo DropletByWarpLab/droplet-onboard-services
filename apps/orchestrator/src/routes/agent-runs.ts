@@ -60,6 +60,7 @@ import {
   nextFireFromRrule,
 } from "../utils/rrule.js";
 import { isUniqueViolation } from "../lib/prisma-errors.js";
+import { queuePositions, waitingForOf } from "../services/agent-run-events.service.js";
 
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
@@ -220,12 +221,13 @@ interface RunRow {
   summary: string | null;
   artifacts: unknown;
   resultDelivery: string;
+  queueWait: string;
   cloudGate: string;
   offLanProvider: string | null;
   offLanWithheldTools: string[];
 }
 
-function serializeRun(r: RunRow, withTrace: boolean) {
+function serializeRun(r: RunRow, withTrace: boolean, positions: ReadonlyMap<string, number>) {
   const pendingArgs =
     r.pendingArgs && typeof r.pendingArgs === "object" && !Array.isArray(r.pendingArgs)
       ? (r.pendingArgs as Record<string, unknown>)
@@ -259,6 +261,12 @@ function serializeRun(r: RunRow, withTrace: boolean) {
     summary: r.summary,
     artifacts: Array.isArray(r.artifacts) ? r.artifacts : [],
     resultDelivery: r.resultDelivery,
+    // WARP-3301 — where it stands. `queuePosition`: queued runs only, 1 = next
+    // to be worked on (running runs count as ahead). `waitingFor`: "queue"
+    // (behind other runs or not due), "chat" (yielded the slot to chat), or
+    // "none" for any run that is not queued.
+    queuePosition: r.status === "queued" ? (positions.get(r.id) ?? null) : null,
+    waitingFor: waitingForOf(r.status, r.queueWait),
     // WARP-2997 — where the model ran, and what it was not given.
     cloudGate: r.cloudGate,
     offLanProvider: r.offLanProvider,
@@ -319,6 +327,7 @@ const RUN_SELECT = {
   summary: true,
   artifacts: true,
   resultDelivery: true,
+  queueWait: true,
   cloudGate: true,
   offLanProvider: true,
   offLanWithheldTools: true,
@@ -453,19 +462,14 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           ...(parsed.data.workspaceId ? { workspaceId: parsed.data.workspaceId } : {}),
         },
       });
-      // WARP-3299 — where it stands: 1 = next to be worked on. Every other
-      // due run is ahead of it (the worker claims oldest first).
-      const ahead = await prisma.agentRun.count({
-        where: {
-          id: { not: id },
-          OR: [{ status: "running" }, { status: "queued", runAfter: { lte: new Date() } }],
-        },
-      });
+      // WARP-3299 — where it stands: 1 = next to be worked on. WARP-3301:
+      // the same ordering the run API and the live events report.
+      const queuePosition = (await queuePositions(prisma)).get(id) ?? null;
       res.status(201).json({
         id,
         status: "queued",
         workspaceId: parsed.data.workspaceId ?? null,
-        queuePosition: ahead + 1,
+        queuePosition,
       });
     } catch (err) {
       next(err);
@@ -505,8 +509,9 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         take: limit,
         select: RUN_SELECT,
       })) as unknown as RunRow[];
+      const positions = rows.some((r) => r.status === "queued") ? await queuePositions(prisma) : new Map<string, number>();
       res.json({
-        items: rows.map((r) => serializeRun(r, false)),
+        items: rows.map((r) => serializeRun(r, false, positions)),
         nextCursor: rows.length === limit ? encodeCursor(rows[rows.length - 1]!) : null,
       });
     } catch (err) {
@@ -657,7 +662,8 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       if (!actor) return;
       const row = await ownRun(req, res, actor);
       if (!row) return;
-      res.json(serializeRun(row, true));
+      const positions = row.status === "queued" ? await queuePositions(prisma) : new Map<string, number>();
+      res.json(serializeRun(row, true, positions));
     } catch (err) {
       next(err);
     }
