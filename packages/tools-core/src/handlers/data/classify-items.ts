@@ -11,12 +11,18 @@
  * Read-only on purpose: it only labels. Acting on a label is a separate
  * tool call that goes through the normal write-confirmation path.
  *
- * Caps, from latency. The MCP SDK times a tool call out at 60 s. On CPU a
- * one-question Kev call is ~0.65 s p95 and each extra question adds roughly
- * 0.15 s (ADR-006 early measurements), so 25 items x 3 questions is ~25-30 s
- * typical. `DEADLINE_MS` stops starting new items well before the MCP
- * timeout when the box is slower than that; the rest come back `not_run`
- * so the model can call again with them.
+ * Caps, from latency. The MCP SDK times a tool call out at 60 s. On the
+ * fp32 CPU default each question runs as its own Kev row at 0.35-0.9 s
+ * (ADR-006; caching barely helps), more under chat load, so an item with
+ * 3 questions costs ~1-2.7 s and 25 items ~26-68 s. `DEADLINE_MS` is the
+ * guard for the MCP limit: no new item starts after 40 s, so the worst case
+ * is 40 s + one `PER_ITEM_TIMEOUT_MS` (8 s) = 48 s. Items past the deadline
+ * come back `not_run` so the model can call again with them.
+ *
+ * `PER_ITEM_TIMEOUT_MS` only catches a hung call; it sits well above the
+ * slowest measured item (3 x 0.9 s) and under the route's 10 s max. One slow
+ * item is not an outage, so the batch stops only after two consecutive
+ * `unavailable` results (a dead sidecar then costs at most 2 x 8 s).
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
@@ -26,7 +32,9 @@ const MAX_TEXT_CHARS = 4000;
 const MAX_INSTRUCTIONS_CHARS = 500;
 /** Option count sets the cost of a `choice` row (ADR-006), so keep it small. */
 const MAX_OPTIONS = 20;
-const PER_ITEM_TIMEOUT_MS = 3000;
+const PER_ITEM_TIMEOUT_MS = 8000;
+/** Consecutive `unavailable` results that mean the sidecar is down, not slow. */
+const STOP_AFTER_UNAVAILABLE = 2;
 const DEADLINE_MS = 40_000;
 const QUESTION_NAME = /^[A-Za-z0-9_-]{1,32}$/;
 
@@ -172,16 +180,18 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   let classified = 0;
   let model = "";
   let stopped: { reason: string } | null = null;
+  let unavailableRun = 0;
+  let lastUnavailable = "";
 
   for (const item of items) {
-    if (!stopped && (Date.now() - started > DEADLINE_MS || ctx.signal.aborted)) {
-      stopped = { reason: "time budget used up" };
-    }
+    if (!stopped && ctx.signal.aborted) stopped = { reason: "the call was cancelled" };
+    if (!stopped && Date.now() - started > DEADLINE_MS) stopped = { reason: "time budget used up" };
     if (stopped) {
       rows.push(`| ${cell(item.id)} | not_run |${" |".repeat(names.length)}`);
       continue;
     }
     const r = await decide(ctx, item.text, questions);
+    unavailableRun = r.status === "unavailable" ? unavailableRun + 1 : 0;
     if (r.status === "ok") {
       classified += 1;
       model ||= r.model ?? "";
@@ -189,20 +199,24 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     } else if (r.status === "invalid") {
       rows.push(`| ${cell(item.id)} | invalid: ${cell(r.detail)} |${" |".repeat(names.length)}`);
     } else {
-      // Sidecar down or timing out: stop rather than burn the time budget
-      // waiting out the same failure once per item.
-      stopped = { reason: `classifier unavailable (${r.detail})` };
+      // One slow item is not an outage; two in a row is. Stop then rather
+      // than burn the time budget waiting out the same failure per item.
+      lastUnavailable = `classifier unavailable (${r.detail})`;
+      if (unavailableRun >= STOP_AFTER_UNAVAILABLE) stopped = { reason: lastUnavailable };
       rows.push(`| ${cell(item.id)} | unavailable |${" |".repeat(names.length)}`);
     }
   }
 
-  if (classified === 0 && stopped) {
+  // Nothing classified and the batch ended on the classifier failing
+  // (stopped, or a batch too short to reach two in a row): it is down.
+  const downReason = stopped?.reason ?? (unavailableRun > 0 ? lastUnavailable : "");
+  if (classified === 0 && downReason) {
     return {
       ok: false,
       status: "error",
       error: {
         code: "CLASSIFIER_UNAVAILABLE",
-        message: `The item classifier is off or unavailable on this box: ${stopped.reason}. Read and label the items yourself instead.`,
+        message: `The item classifier is off or unavailable on this box: ${downReason}. Read and label the items yourself instead.`,
       },
     };
   }
@@ -221,6 +235,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       ...(stopped && {
         note: `Stopped early: ${stopped.reason}. Rows marked not_run or unavailable were not classified; call again with just those items, or label them yourself.`,
       }),
+      ...(!stopped &&
+        lastUnavailable && {
+          note: "Rows marked unavailable timed out and were not classified; call again with just those items, or label them yourself.",
+        }),
     },
   };
 }

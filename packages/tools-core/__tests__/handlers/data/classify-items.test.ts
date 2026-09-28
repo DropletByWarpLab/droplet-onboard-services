@@ -66,7 +66,7 @@ describe("classify_items", () => {
           urgent: { type: "noul", instructions: "Is this urgent?" },
           tone: { type: "score", instructions: "How upset is the sender?", levels: ["calm", "annoyed", "angry"] },
         },
-        timeoutMs: 3000,
+        timeoutMs: 8000,
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -83,10 +83,10 @@ describe("classify_items", () => {
     ]);
   });
 
-  it("returns CLASSIFIER_UNAVAILABLE and stops after the first failure when the sidecar is off", async () => {
-    const post = vi.fn().mockResolvedValue(json({ status: "unavailable", detail: "gRPC 14: connect refused" }));
+  it("returns CLASSIFIER_UNAVAILABLE and stops after two consecutive failures when the sidecar is off", async () => {
+    const post = vi.fn().mockImplementation(async () => json({ status: "unavailable", detail: "gRPC 14: connect refused" }));
     const res = await classifyItems.handler({ items: items(5), questions: QUESTIONS }, ctxWith(post));
-    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledTimes(2);
     expect(res).toMatchObject({ ok: false, error: { code: "CLASSIFIER_UNAVAILABLE" } });
     if (!res.ok) expect(res.error.message).toMatch(/yourself/);
   });
@@ -98,20 +98,55 @@ describe("classify_items", () => {
     }
   });
 
+  it("does not stop the batch on one slow item followed by a success", async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(json({ status: "unavailable", detail: "deadline" }))
+      .mockImplementation(async () => json(OK));
+    const res = await classifyItems.handler({ items: items(3), questions: QUESTIONS }, ctxWith(post));
+    expect(post).toHaveBeenCalledTimes(3);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const data = res.data as { classified: number; table: string; note: string };
+    expect(data.classified).toBe(2);
+    expect(data.table).toContain("| m0 | unavailable |");
+    expect(data.table).toContain("| m2 | ok |");
+    expect(data.table).not.toContain("not_run");
+    expect(data.note).toMatch(/call again/);
+  });
+
   it("keeps finished rows and marks the rest not_run when the classifier drops mid-batch", async () => {
     const post = vi
       .fn()
       .mockResolvedValueOnce(json(OK))
-      .mockResolvedValueOnce(json({ status: "unavailable", detail: "deadline" }));
-    const res = await classifyItems.handler({ items: items(3), questions: QUESTIONS }, ctxWith(post));
-    expect(post).toHaveBeenCalledTimes(2);
+      .mockImplementation(async () => json({ status: "unavailable", detail: "deadline" }));
+    const res = await classifyItems.handler({ items: items(4), questions: QUESTIONS }, ctxWith(post));
+    expect(post).toHaveBeenCalledTimes(3);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const data = res.data as { classified: number; table: string; note: string };
     expect(data.classified).toBe(1);
     expect(data.table).toContain("| m1 | unavailable |");
-    expect(data.table).toContain("| m2 | not_run |");
+    expect(data.table).toContain("| m2 | unavailable |");
+    expect(data.table).toContain("| m3 | not_run |");
     expect(data.note).toMatch(/call again/);
+  });
+
+  it("marks the remaining items not_run once the call is aborted", async () => {
+    const ctrl = new AbortController();
+    const post = vi.fn().mockImplementation(async () => {
+      ctrl.abort();
+      return json(OK);
+    });
+    const res = await classifyItems.handler({ items: items(3), questions: QUESTIONS }, { ...ctxWith(post), signal: ctrl.signal });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const data = res.data as { classified: number; table: string; note: string };
+    expect(data.classified).toBe(1);
+    expect(data.table).toContain("| m1 | not_run |");
+    expect(data.table).toContain("| m2 | not_run |");
+    expect(data.note).toMatch(/cancelled/);
   });
 
   it("reports an item Kev refused as invalid and carries on", async () => {

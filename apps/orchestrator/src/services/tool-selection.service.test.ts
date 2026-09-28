@@ -1002,6 +1002,8 @@ describe("WARP-3074 — bulk labelling reaches classify_items from a fresh turn"
     "sort the files by newest first",
     "who is in the group chat for the front desk",
     "what's the name tag on the garage camera?",
+    "what is the security classification of this file?",
+    "who is on triage duty at the front desk this week?",
   ])("%s does not advertise classify_items", (message) => {
     expect(advertisedFor(message)).not.toContain("classify_items");
   });
