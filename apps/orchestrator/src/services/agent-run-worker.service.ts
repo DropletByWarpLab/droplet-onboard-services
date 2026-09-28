@@ -120,6 +120,7 @@ import {
 } from "@droplet/tools-core";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { isGatewayPreempted } from "../lib/gateway-preempted.js";
 import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
 import { chatRunBrief, deliverRunResults } from "./agent-run-result.service.js";
@@ -225,10 +226,20 @@ export const WORKSPACE_TOOL_DOMAINS: readonly ToolDomain[] = [
  */
 const RUN_INFERENCE_PRIORITY = 10;
 const RUN_YIELD_MS = 60_000;
+/**
+ * WARP-3306 — a preempted run comes back sooner than a 429 yield: the chat
+ * that took the slot is one turn, and the run already did the work up to the
+ * call that was cut. Measured 2026-09-28 on the bench box: chat waited
+ * 20–38 s behind a run's model call before preemption existed.
+ */
+const RUN_PREEMPT_YIELD_MS = 5_000;
 
-/** The run's gateway: the caller's functions, each request stamped background priority. */
-function runGateway(gw: AgentDeps["aiGateway"]): AgentDeps["aiGateway"] {
-  const opts = { priority: RUN_INFERENCE_PRIORITY };
+/**
+ * The run's gateway: the caller's functions, each request stamped background
+ * priority and — WARP-3306 — preemptible when the run may still give way.
+ */
+function runGateway(gw: AgentDeps["aiGateway"], preemptible: boolean): AgentDeps["aiGateway"] {
+  const opts = { priority: RUN_INFERENCE_PRIORITY, ...(preemptible ? { preemptible } : {}) };
   return {
     chat: (r, s) => gw.chat(r, s, undefined, opts),
     ...(gw.chatStream ? { chatStream: (r, s) => gw.chatStream!(r, s, undefined, opts) } : {}),
@@ -693,6 +704,8 @@ export interface AgentRunWorkerDeps {
   /** Test seams. Production leaves every one of these unset. */
   limits?: typeof config.agentRuns;
   maxIterCap?: number;
+  /** WARP-3306 — see AGENT_RUN_MAX_PREEMPTIONS. */
+  maxPreemptions?: number;
   contextWindow?: number;
   toolSelectionMode?: "off" | "domains";
   workerId?: string;
@@ -834,6 +847,13 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
   /** runId → the execution promise. */
   const inFlight = new Map<string, Promise<void>>();
+  // WARP-3306 — the starvation guard: consecutive preemptions of a run with
+  // no finished iteration in between. At AGENT_RUN_MAX_PREEMPTIONS the next
+  // claim runs unpreemptible, so a run always progresses however busy chat is.
+  // ponytail: in-memory, a restart resets it (only allows more preemption);
+  // persist it on AgentRun if the worker ever runs in more than one process.
+  const preemptionsWithoutProgress = new Map<string, number>();
+  const maxPreemptions = deps.maxPreemptions ?? config.agentRuns.maxPreemptions ?? 0;
   /** runId → the abort controller mapped onto the loop's `signal`. */
   const controllers = new Map<string, AbortController>();
   /** runId → why it was told to stop, so the terminal write names it. */
@@ -1206,6 +1226,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // `let`: consuming a decided park completes the parked iteration and
     // advances the checkpoint past it (WARP-3044, `resumeDecidedCall`).
     let base = run.iteration;
+    // WARP-3306 — did this claim finish an iteration? (the starvation guard)
+    let progressed = false;
+    const preemptions = preemptionsWithoutProgress.get(runId) ?? 0;
+    const preemptible = preemptions < maxPreemptions;
     const messages = Array.isArray(run.messages)
       ? (run.messages as ChatMessage[])
       : initialRunMessages(
@@ -1522,6 +1546,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
     const checkpoint: AgentCheckpointPort = {
       async onIteration(iter, msgs) {
+        if (iter >= 1) progressed = true;
         const observed = await observe(runId, now());
         if (observed) throw new AgentRunStopped(observed, `run stopped: ${observed}`);
         const ok = await finish(runId, {
@@ -1749,7 +1774,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
             ? await runAgent(
                 {
                   mcp: deps.agent.mcp,
-                  aiGateway: runGateway(deps.agent.aiGateway),
+                  aiGateway: runGateway(deps.agent.aiGateway, preemptible),
                   approvals,
                   maxIterCap,
                   // WARP-3301 — the run's first `onEvent`: it only notes the
@@ -1787,6 +1812,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // reason is "fenced" — but the row says why, and that is what the
     // terminal write must name.
     const reason = stopReasons.get(runId) ?? stopped?.reason ?? null;
+    // WARP-3306 — chat took the slot mid-call (see the yield below).
+    const preempted = reason === null && isGatewayPreempted(threw);
+    if (!preempted) preemptionsWithoutProgress.delete(runId);
 
     if (reason === "fenced") {
       // Someone else owns the row now. Nothing to write; the successor does.
@@ -1950,7 +1978,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
-    if (gatewayBusy(threw, result)) {
+    if (preempted || gatewayBusy(threw, result)) {
       // Interactive chat has the box (see RUN_INFERENCE_PRIORITY). Hand the
       // row back to the queue at the same checkpoint — `iteration` and
       // `messages` were written at the top of the iteration that could not
@@ -1962,11 +1990,22 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         claimedBy: null,
         claimedAt: null,
         heartbeatAt: null,
-        runAfter: new Date(endedAt.getTime() + RUN_YIELD_MS),
+        runAfter: new Date(endedAt.getTime() + (preempted ? RUN_PREEMPT_YIELD_MS : RUN_YIELD_MS)),
       });
+      if (preempted) {
+        // WARP-3306 — the cut call was a model call (preemption never lands
+        // mid-tool: the gateway only holds the slot for inference), so the
+        // checkpoint at the top of this iteration replays it exactly.
+        preemptionsWithoutProgress.set(runId, progressed ? 1 : preemptions + 1);
+      }
       if (ok) {
         logger.info(
-          { runId, iteration: base + (result?.iterations ?? 0), yieldMs: RUN_YIELD_MS },
+          {
+            runId,
+            iteration: base + (result?.iterations ?? 0),
+            yieldMs: preempted ? RUN_PREEMPT_YIELD_MS : RUN_YIELD_MS,
+            ...(preempted ? { preempted: true, preemptionsWithoutProgress: preemptionsWithoutProgress.get(runId) } : {}),
+          },
           "agent_run_yielded_to_chat",
         );
       }

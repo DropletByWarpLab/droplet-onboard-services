@@ -263,6 +263,12 @@ const envSchema = z.object({
   // loop honours it through `AgentDeps.maxIterCap`, which only in-process
   // callers can set — /api/llm/chat never does, so chat is byte-identical.
   AGENT_RUN_MAX_ITER: z.coerce.number().int().positive().default(30),
+  // WARP-3306 — a run's model call gives the gateway slot up when chat
+  // arrives (measured 2026-09-28: chat otherwise waited 20–38 s behind it).
+  // Starvation guard: after this many consecutive preemptions with no
+  // finished iteration in between, the run's next claim is not preemptible,
+  // so it always progresses. 0 turns preemption off.
+  AGENT_RUN_MAX_PREEMPTIONS: z.coerce.number().int().nonnegative().default(3),
   // WARP-2178 — characters of ONE tool result the model is fed per call
   // (tool-result-bounding.ts). 8000 is the value the loop has always used and
   // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
@@ -1685,6 +1691,7 @@ export const config = {
       maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
     }),
     maxIter: parsed.AGENT_RUN_MAX_ITER,
+    maxPreemptions: parsed.AGENT_RUN_MAX_PREEMPTIONS,
   },
 };
 export type Config = typeof config;
