@@ -142,7 +142,62 @@ export interface CitationDeps {
  * `services/chat-approval.service.ts` is the production instance; the
  * route half (`POST /api/llm/confirm/:challengeId`) uses the same one.
  */
-export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant">;
+export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant"> &
+  // WARP-3279 — optional: only the chat store replays approved calls. The
+  // durable-run worker supplies its own two-method port and replays its
+  // parked call itself (WARP-3044).
+  Partial<Pick<ChatApprovalStore, "takeNextApproved">>;
+
+/**
+ * WARP-3279 — what the model reads in place of the interceptor's challenge
+ * text when chat owns the approval. The generic text tells the model to
+ * "re-issue the SAME call ... presenting this confirmationToken", which in
+ * chat has no token to present (WARP-2486 scrubs it) and led the assistant
+ * to ask the user to paste one. In chat the person approves on the prompt
+ * and the server runs the approved call itself, so the model has nothing to
+ * re-issue.
+ */
+function chatChallengeTextForModel(tool: string): string {
+  return JSON.stringify({
+    ok: false,
+    status: "confirmation_required",
+    error: {
+      code: "CONFIRMATION_REQUIRED",
+      message:
+        `'${tool}' writes, so it needs a thumbs-up. The user is being shown an approval ` +
+        "prompt for this exact call. Tell them it is waiting for their approval and stop. " +
+        "Do not retry the call and do not ask the user for any code: once they approve, " +
+        "the approved call runs by itself and its result appears in the conversation.",
+    },
+  });
+}
+
+/** Any `status: "confirmation_required"` envelope — a challenge or a refused token. */
+export function isConfirmationEnvelope(text: string): boolean {
+  try {
+    return (JSON.parse(text) as { status?: unknown })?.status === "confirmation_required";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * WARP-3279 — the answer to a model call of a tool whose approved call was
+ * already replayed this turn. The loop's own vocabulary for a repeat
+ * (`REPEATED_CALL`), as the run worker's `alreadyRunText` (WARP-3044).
+ */
+function approvedAlreadyRanEnvelope(tool: string) {
+  return {
+    status: "error" as const,
+    error: {
+      code: "REPEATED_CALL",
+      message:
+        `You already called '${tool}': the user approved it and it has already run with the ` +
+        "approved arguments; its result is in the conversation above. Do not call it again — " +
+        "report that result to the user.",
+    },
+  };
+}
 
 export interface AgentDeps {
   /**
@@ -1581,7 +1636,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // §3-refused one). Carry WHY so the terminal error names the real problem;
   // an operator reading "unknown tool" for a tool that exists and is simply
   // not granted would chase the wrong bug.
-  let lastBadToolReason: "unknown tool" | "forbidden tool" = "unknown tool";
+  let lastBadToolReason: "unknown tool" | "forbidden tool" | "already-run tool" = "unknown tool";
 
   // WARP-329 — the result returned when the client disconnects mid-turn.
   // We don't emit a `done` event (the SSE consumer is gone) and the route
@@ -1676,6 +1731,140 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       ...(steps.length > 0 ? { reasoningSteps: steps } : {}),
     };
   };
+
+  // WARP-3279 — replay the calls a person approved since the last turn,
+  // BEFORE the model is asked anything. The chat twin of WARP-3044.
+  //
+  // The model used to be responsible for re-issuing an approved call with
+  // byte-identical arguments so `claimGrant` could attach the token. It can't:
+  // no earlier tool call re-enters its context (routes/llm.ts, WARP-2849), so
+  // it rebuilds the call from its own prose and free-text fields come back
+  // reworded — re-challenged forever (4/4 eval cases). Here the stored call,
+  // exactly as the person was shown it, runs once with its human-issued token
+  // through the same RBAC gate and dispatch port as any call, and the model
+  // meets it as an ordinary tool_call + result.
+  //
+  // Fail-closed: `takeNextApproved` returns only grants a human moved to
+  // `approved` through the role-gated confirm route, for THIS user in THIS
+  // conversation, unexpired, and spends each one before it is dispatched.
+  // One at a time, so an abort between replays leaves the rest approved.
+  // The interceptor still re-checks the token's binding on redemption.
+  //
+  // `replayedTools` holds only tools whose approved call actually RAN. It is
+  // keyed by tool NAME for the whole turn: a re-issue comes back with
+  // reworded free-text args, so matching on args would miss it and run the
+  // write twice. The price is that a genuinely different second call of the
+  // same tool in this turn is also refused; the model can ask for it next
+  // turn, where it is challenged normally. A replay that did NOT run is not
+  // recorded, so the model's re-issue falls through to normal dispatch and is
+  // challenged afresh: the user gets a new prompt instead of being told an
+  // unexecuted write happened.
+  const replayedTools = new Set<string>();
+  const replayUserId = req.toolCallContext?.userId;
+  const takeNext = deps.approvals?.takeNextApproved;
+  if (takeNext && replayUserId && toolChoice !== "none") {
+    for (;;) {
+      if (req.signal?.aborted) return abortedResult(0);
+      const grant = takeNext({ userId: replayUserId, threadId: req.citationContext?.threadId });
+      if (!grant) break;
+      const callId = `approved-${grant.challengeId}`;
+      const denial = fullPoolNames.has(grant.tool)
+        ? toolDispatchDenial(grant.tool, grant.args, scoped, runtimeLookup)
+        : {
+            code: "TOOL_UNAVAILABLE",
+            message: `'${grant.tool}' is not available on this turn, so the approved call did not run.`,
+          };
+      let text: string;
+      let isError: boolean;
+      if (denial) {
+        text = JSON.stringify({ status: "error", error: denial });
+        isError = true;
+      } else {
+        emit({ type: "tool_call", id: callId, name: grant.tool, args: grant.args });
+        try {
+          const result = await deps.mcp.callTool(grant.tool, grant.args, {
+            ...(req.toolCallContext ?? {}),
+            confirmationToken: grant.token,
+          });
+          text = result.content[0]?.text ?? "{}";
+          isError = Boolean(result.isError);
+        } catch (err) {
+          text = JSON.stringify({
+            error: "tool_dispatch_failed",
+            tool: grant.tool,
+            message: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+          });
+          isError = true;
+        }
+      }
+      // The WARP-3044 worker's predicate: a refused token comes back as a
+      // `confirmation_required` envelope with `isError: false` (mcp-server
+      // sets it only for `status: "error"`), and the tool did not run.
+      const ran = !isError && !isConfirmationEnvelope(text);
+      const payload = parseToolResultPayload(text);
+      const parsed: unknown = toolResultPayloadValue(payload);
+      trace.push({ tool_call_id: callId, tool: grant.tool, args: grant.args, result: parsed });
+      emit({ type: "tool_result", id: callId, ok: ran, data: parsed });
+      logger.info(
+        { tool: grant.tool, challengeId: grant.challengeId, turn_id: turnId, ok: ran },
+        "chat_approved_call_replayed",
+      );
+      if (!ran) {
+        // WARP-1480 — the same failure line as the loop's dispatch point.
+        logger.warn(
+          describeToolError({
+            tool: grant.tool,
+            toolCallId: callId,
+            turnId,
+            iter: 0,
+            args: grant.args,
+            payload,
+            includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
+            threadId: req.citationContext?.threadId,
+          }),
+          "agent_tool_error",
+        );
+      } else {
+        replayedTools.add(grant.tool);
+      }
+      messages.push(
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: callId,
+              type: "function",
+              function: { name: grant.tool, arguments: JSON.stringify(grant.args) },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: callId,
+          content: boundToolResultForModel(
+            redactConfirmationTokensForModel(text),
+            grant.tool,
+            (refusal) => {
+              logger.warn(
+                {
+                  tool: grant.tool,
+                  tool_call_id: callId,
+                  turn_id: turnId,
+                  iter: 0,
+                  input_chars: refusal.inputChars,
+                  reason: refusal.reason,
+                  ...(refusal.detail ? { detail: refusal.detail } : {}),
+                },
+                "agent_tool_result_refused",
+              );
+            },
+            config.AGENT_TOOL_RESULT_CAP_CHARS,
+          ),
+        },
+      );
+    }
+  }
 
   for (let iter = 0; iter < maxIter; iter++) {
     // WARP-329 — bail before issuing another inference call if the client
@@ -2308,6 +2497,25 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         continue;
       }
 
+      // WARP-3279 — the approved call for this tool already ran this turn
+      // (replayed above). A model re-issue — reworded or not — is answered
+      // from that result: never a second execution, never a second prompt.
+      if (replayedTools.has(call.function.name)) {
+        const already = approvedAlreadyRanEnvelope(call.function.name);
+        trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: already });
+        emit({ type: "tool_result", id: call.id, ok: false, data: already });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: boundControlEnvelopeForModel(JSON.stringify(already)),
+        });
+        // A model that keeps re-issuing it must still trip the breaker.
+        lastBadToolName = call.function.name;
+        lastBadToolReason = "already-run tool";
+        iterGuardHits++;
+        continue;
+      }
+
       // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
       // call is neither a guard hit nor a real dispatch, so the WARP-642
       // circuit breaker is unaffected.
@@ -2491,6 +2699,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // confirmation_required is NOT a hard error — surface ok=true so
       // the dashboard renders it as a "needs approval" chip rather than
       // a red failure. The status/message fields drive the UX label.
+      // WARP-3279 — set when this challenge went to the chat approval store,
+      // which replays the approved call itself; the model then reads
+      // `chatChallengeTextForModel` instead of the interceptor's text.
+      let chatOwnsApproval = false;
       const isConfirmation =
         parsed !== null &&
         typeof parsed === "object" &&
@@ -2548,6 +2760,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
         if (isInterceptorChallenge) {
           if (deps.approvals && approvalUserId) {
+            chatOwnsApproval = Boolean(deps.approvals.takeNextApproved);
             const challenge = deps.approvals.register({
               tool: call.function.name,
               args,
@@ -2557,6 +2770,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
                   ? interceptorBlock!.expiresAt
                   : Date.now(),
               userId: approvalUserId,
+              // WARP-3279 — replayed only into a turn of this conversation.
+              threadId: req.citationContext?.threadId,
             });
             evt.confirmation = {
               kind: "tool_confirmation",
@@ -2625,7 +2840,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // the historical 8000), so it can be set from a measured distribution.
       const bounded = boundToolResultForModel(
         // WARP-2002 — the model never sees a confirmation token; see the helper.
-        isConfirmation ? redactConfirmationTokensForModel(text) : text,
+        chatOwnsApproval
+          ? chatChallengeTextForModel(call.function.name)
+          : isConfirmation
+            ? redactConfirmationTokensForModel(text)
+            : text,
         call.function.name,
         (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:

@@ -124,6 +124,7 @@ import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
 import { chatRunBrief, deliverRunResults } from "./agent-run-result.service.js";
 import {
+  isConfirmationEnvelope,
   runAgent,
   type AgentCheckpointPort,
   type AgentDeps,
@@ -743,15 +744,6 @@ function interceptorTokenOf(text: string): string | null {
       : null;
   } catch {
     return null;
-  }
-}
-
-/** Any `status: "confirmation_required"` envelope — a challenge or a refused token. */
-function isConfirmationEnvelope(text: string): boolean {
-  try {
-    return (JSON.parse(text) as { status?: unknown })?.status === "confirmation_required";
-  } catch {
-    return false;
   }
 }
 
