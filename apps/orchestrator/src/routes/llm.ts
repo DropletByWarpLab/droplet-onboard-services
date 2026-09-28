@@ -100,6 +100,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   buildBaseSystemPrompt,
   buildMemoryFactsBlock,
+  todayLine,
 } from "../services/system-prompt.service.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
@@ -2002,10 +2003,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // composeBusinessBlock role-filters and gates on type again
         // (defense-in-depth). Fail-open to no block on any error.
         let businessBlock = "";
+        // WARP-3281 — the business's zone for the date line, off the same row.
+        let workspaceTz: string | null = null;
         try {
           const workspace = await prisma.workspace.findUnique({
             where: { id: 1 },
           });
+          workspaceTz = workspace?.tz ?? null;
           const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
           if (workspaceType === "BUSINESS") {
             businessBlock = composeBusinessBlock(
@@ -2044,7 +2048,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         brainBlock = promptGate.blocks.brain;
         businessBlock = promptGate.blocks.business;
 
-        const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
+        // WARP-3281 — today's date, computed once so the size estimate and the
+        // wire carry the same line. Voice gets none: voice-io appends its own
+        // "Right now it is …" clock (services/voice-io/voice/llm.py), and two
+        // clocks from two zone sources could disagree near midnight.
+        const dateLine = isVoice ? "" : todayLine(new Date(), workspaceTz);
+        const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "", "", dateLine);
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
         // the NEVER-DROPPED identity part for sizing (it must survive
@@ -2182,6 +2191,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               allowedForUser,
               degraded.personaBlock,
               degraded.businessBlock,
+              dateLine,
             ) +
             memoryBlock +
             // WARP-2752 (ADR-051) — the brain block, AFTER degradation so a

@@ -29,6 +29,44 @@ import { composeToolGuidance } from "./tool-guidance.service.js";
 // composed there. One source, imported — not a fourth copy of a literal that
 // already exists three times in this repo.
 import { MEMORY_FACTS_CHAR_BUDGET } from "./tool-budget.service.js";
+import { resolveBoxTimezone } from "./scene-schedule-tz-backfill.service.js";
+
+/**
+ * WARP-3281 — today's date for the chat prompt, e.g.
+ * `Today is Monday 2026-09-28 (America/Los_Angeles).`
+ *
+ * Without it gpt-oss assumed a date near its training cutoff and refused
+ * "the weather in Boston on 2026-10-03" (six days out) as beyond the
+ * forecast horizon, never calling get_current_datetime to check.
+ *
+ * DAY granularity only, never a time: WARP-3125 showed a minute timestamp
+ * busts llama.cpp's prefix cache on every request, and a date busts it once
+ * a day. The time of day stays with get_current_datetime.
+ *
+ * Zone: the caller's `timeZone` (the route passes `Workspace.tz`, set at
+ * setup), then the box zone, then UTC. That is the chain briefingToday
+ * (routes/briefings.ts) uses. The orchestrator container sets no TZ, so
+ * without a Workspace.tz the day turns over at UTC midnight.
+ */
+export function todayLine(now: Date = new Date(), timeZone?: string | null): string {
+  for (const zone of [timeZone, resolveBoxTimezone(), "UTC"]) {
+    if (!zone) continue;
+    try {
+      // en-CA formats as YYYY-MM-DD.
+      const date = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(now);
+      const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long" }).format(now);
+      return `Today is ${weekday} ${date} (${zone}).`;
+    } catch {
+      // An unknown zone string: try the next one.
+    }
+  }
+  return `Today is ${now.toISOString().slice(0, 10)} (UTC).`;
+}
 
 // ── Base system prompt (RAG + durable-memory steering) ──
 //
@@ -74,6 +112,13 @@ export function buildBaseSystemPrompt(
    * fresh read failed (fail-open).
    */
   businessBlock?: string,
+  /**
+   * WARP-3281 — the date line (see `todayLine`). Defaults to today in the
+   * box zone, so a caller that passes nothing still gets a date; the chat
+   * route passes one built from `Workspace.tz`. "" omits it: the voice
+   * principal's own prompt already carries a clock.
+   */
+  dateLine: string = todayLine(),
 ): string {
   // Identity leads: the full "who you are / what this box does" block
   // from data/droplet-identity.md (fail-open to the legacy one-liner),
@@ -96,6 +141,10 @@ export function buildBaseSystemPrompt(
   const guidanceBlock = composeToolGuidance(allowed);
   if (guidanceBlock.length > 0) {
     lines.push("", guidanceBlock);
+  }
+  // Last, so everything above it stays a stable cache prefix all day.
+  if (dateLine.length > 0) {
+    lines.push("", dateLine);
   }
   return lines.join("\n");
 }

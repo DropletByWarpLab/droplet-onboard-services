@@ -36,6 +36,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   buildBaseSystemPrompt,
   buildMemoryFactsBlock,
+  todayLine,
 } from "./system-prompt.service.js";
 import { loadIdentityPrompt, IDENTITY_MAX_CHARS } from "./identity-prompt.js";
 import { composeToolGuidance } from "./tool-guidance.service.js";
@@ -236,6 +237,9 @@ export async function inspectPromptForPerson(
     false,
     async () => composePersonaBlock(await getPersona(prisma)),
   );
+  // WARP-3281 — the business's zone for the date line, read off the same row
+  // the route reads it from.
+  let workspaceTz: string | null = null;
   const business = await compose(
     "business",
     "About this business",
@@ -245,6 +249,7 @@ export async function inspectPromptForPerson(
       // The route's own gate, in the route's own order: a HOME box composes
       // nothing, and a missing singleton reads as BUSINESS (WARP-1341).
       const workspace = await prisma.workspace.findUnique({ where: { id: 1 } });
+      workspaceTz = workspace?.tz ?? null;
       const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
       if (workspaceType !== "BUSINESS") return "";
       return composeBusinessBlock(role, await getBusinessProfile(prisma), workspaceType);
@@ -339,6 +344,7 @@ export async function inspectPromptForPerson(
       input.allowedToolNames,
       persona.text ?? "",
       business.text ?? "",
+      todayLine(new Date(), workspaceTz),
     ) +
     (memory.text ?? "") +
     (brain.text ?? "") +
