@@ -2,8 +2,8 @@
  * WARP-3283 — no-progress early-stop. A model that keeps REPHRASING a search
  * that finds nothing makes distinct calls, so the repetition guard never
  * fires and the loop used to run to the iteration cap and emit the canned
- * "couldn't finish within my step limit" text. After three consecutive
- * zero-hit search results the loop now runs the same finalization pass the
+ * "couldn't finish within my step limit" text. After three zero-hit search
+ * results in one turn the loop now runs the same finalization pass the
  * repetition / context-budget guards use (no tools, tool_choice "none").
  */
 import { describe, it, expect, vi } from "vitest";
@@ -56,7 +56,7 @@ const empty = (name: string) =>
 type Req = { tools: unknown[]; tool_choice: string; messages: { role: string; content: unknown }[] };
 
 describe("runAgent — no-progress early-stop (WARP-3283)", () => {
-  it("finalizes after three consecutive zero-hit searches from a model that rephrases forever", async () => {
+  it("finalizes after three zero-hit searches from a model that rephrases forever", async () => {
     const { deps, chat, callTool } = makeDeps([], empty);
     // Rephrases forever across three search tools; only a request that
     // advertises NO tools (the finalize pass) gets a text answer out of it.
@@ -100,13 +100,14 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
     expect(result.message.content).toBe("I couldn't find a data-deletion policy.");
   });
 
-  it("a search with hits resets the count", async () => {
+  it("counts empty searches across the turn: an irrelevant hit in between does not reset it", async () => {
+    // adv-010's real trace: rephrasings interleave low-relevance partial hits.
     const hit = '{"query":"q","results":[{"path":"/a.md","text":"x"}]}';
     let i = 0;
-    const { deps, callTool } = makeDeps(
-      [search("a"), search("b"), search("c"), search("d"), { role: "assistant", content: "done" }],
-      // empty, empty, HIT, empty → never three in a row.
-      () => (++i === 3 ? hit : '{"query":"q","results":[]}'),
+    const { deps, chat, callTool } = makeDeps(
+      [search("a"), search("b"), search("c"), search("d"), { role: "assistant", content: "not found" }],
+      // empty, HIT, empty, empty
+      () => (++i === 2 ? hit : '{"query":"q","results":[]}'),
     );
     const result = await runAgent(deps, {
       model: "m",
@@ -114,6 +115,21 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
       max_iter: 10,
     });
     expect(callTool).toHaveBeenCalledTimes(4);
+    expect((chat.mock.calls[4]![0] as Req).tools).toEqual([]);
+    expect(result.stop_reason).toBe("no_progress");
+  });
+
+  it("two empty searches are not enough", async () => {
+    const { deps, callTool } = makeDeps(
+      [search("a"), search("b"), { role: "assistant", content: "not found" }],
+      () => '{"query":"q","results":[]}',
+    );
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "find it" }],
+      max_iter: 10,
+    });
+    expect(callTool).toHaveBeenCalledTimes(2);
     expect(result.stop_reason).toBe("model_done");
   });
 

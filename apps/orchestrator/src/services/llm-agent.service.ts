@@ -1528,10 +1528,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // search that finds nothing makes distinct calls, so the repetition guard
   // above never fires and the turn used to run to maxIter and end on the
   // canned step-limit text (live: 8 search_content rephrasings, 102 s).
-  // Counts consecutive zero-hit results from SEARCH_TOOLS only: a search
-  // with hits resets it; failures and every other tool leave it alone.
-  const MAX_CONSECUTIVE_EMPTY_SEARCHES = 3;
-  let consecutiveEmptySearches = 0;
+  // Counts zero-hit results from SEARCH_TOOLS across the whole turn. Not
+  // "consecutive": in the eval trace that motivated this (adv-010) the
+  // rephrasings interleave low-relevance partial hits, exactly as a top-k
+  // index does, so a streak never reached 3 and the turn still hit the cap.
+  // Failed searches and every other tool don't count.
+  // ponytail: a per-turn count can finalize a long sequential multi-entity
+  // lookup after its third miss (parallel calls in one step all still run);
+  // track "new paths seen" instead if that shows up.
+  const MAX_EMPTY_SEARCHES = 3;
+  let emptySearches = 0;
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -2470,14 +2476,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
       // WARP-3283 — feed the no-progress guard (see its declaration).
-      if (!result.isError && SEARCH_TOOLS.has(call.function.name)) {
-        consecutiveEmptySearches = isZeroHitSearchResult(parsed)
-          ? consecutiveEmptySearches + 1
-          : 0;
-        if (consecutiveEmptySearches >= MAX_CONSECUTIVE_EMPTY_SEARCHES && finalizeReason === null) {
+      if (
+        !result.isError &&
+        SEARCH_TOOLS.has(call.function.name) &&
+        isZeroHitSearchResult(parsed) &&
+        ++emptySearches >= MAX_EMPTY_SEARCHES
+      ) {
+        if (finalizeReason === null) {
           finalizeReason = "no_progress";
           logger.info(
-            { turn_id: turnId, iter, empty_searches: consecutiveEmptySearches },
+            { turn_id: turnId, iter, empty_searches: emptySearches },
             "agent_no_progress_finalize",
           );
         }
