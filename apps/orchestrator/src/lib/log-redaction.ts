@@ -98,6 +98,21 @@ interface ShapeRule {
 const whole = (placeholder: string) => placeholder;
 const keepPrefix = (placeholder: string, _m: string, pre: string) => `${pre}${placeholder}`;
 
+/** WARP-3282 — the secret-naming words of a config-shaped name. Shared by the
+ *  text rule ({@link CREDENTIAL_SHAPE_RULES} `env-secret-assignment`) and the
+ *  field-name test ({@link CREDENTIAL_FIELD_RE}) so the two cannot drift. */
+const CONFIG_SECRET_NAME =
+  "(?:[A-Z][A-Z0-9]*_)*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|SECRET_KEY|PRIVATE_KEY)" +
+  "|(?:[a-z][a-z0-9]*_)+(?:secret|token|password|passwd|api_?key|access_key|secret_key|private_key)" +
+  "|(?:api|secret|access|private)_key|client_secret";
+
+/** A quoted value's quotes survive redaction, so a redacted JSON/YAML/shell
+ *  string is still a string. */
+const requote = (placeholder: string, value: string): string => {
+  const q = value[0];
+  return q === '"' || q === "'" || q === "`" ? `${q}${placeholder}${q}` : placeholder;
+};
+
 const CREDENTIAL_SHAPE_RULES: readonly ShapeRule[] = [
   {
     // PEM blocks: -----BEGIN [X] PRIVATE KEY----- ... -----END [X] PRIVATE KEY-----
@@ -110,15 +125,30 @@ const CREDENTIAL_SHAPE_RULES: readonly ShapeRule[] = [
     replace: (placeholder) => `${placeholder} (private key)`,
   },
   {
+    // A PEM block with no END line: search snippets are cut at 280 chars and
+    // read_file pages at 10 000, so a key block is routinely truncated. Fail
+    // closed — everything from the BEGIN line to the end of the string goes.
+    // Tool results are redacted per JSON string leaf ({@link redactToolResult}),
+    // so "the end" is the end of THAT snippet, never a sibling field.
+    name: "pem-private-key-truncated",
+    pattern: /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*$/g,
+    replace: (placeholder) => `${placeholder} (private key)`,
+  },
+  {
     // Credentials embedded in a URI userinfo: scheme://user:SECRET@host
     // Redacts only the password component, preserving scheme/user/host so the
     // line still tells you which service/db it was. The username class is `*`
     // (not `+`) so empty-username forms — `redis://:pw@host`, the exact shape
     // secrets.sh generates for REDIS_URL, and `postgresql://:pw@db/...` — are
     // also redacted. The trailing `@` anchor still prevents matching a plain
-    // `host:port` with no userinfo.
+    // `host:port` with no userinfo. The scheme is bounded to 32 chars:
+    // unbounded, every letter of a long alphanumeric run started a scan to
+    // its end (quadratic — ~20 s over a 200k base64 blob). Neither class
+    // crosses `"` or `\`, so in compact JSON
+    // `"see http://host:8080","from":"bob@x.io"` cannot match across the
+    // field boundary and eat `from`.
     name: "uri-userinfo",
-    pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]*:)([^\s@/]+)(@)/g,
+    pattern: /([a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/[^\s:/@"\\]*:)([^\s@/"\\]+)(@)/g,
     replace: (placeholder, _m, pre: string, _secret: string, at: string) =>
       `${pre}${placeholder}${at}`,
   },
@@ -129,42 +159,56 @@ const CREDENTIAL_SHAPE_RULES: readonly ShapeRule[] = [
     replace: whole,
   },
   {
-    // Env/credentials-file assignment of a secret: `AWS_SECRET_ACCESS_KEY=…`,
-    // `DB_PASSWORD=…`, `STRIPE_API_KEY=…`, and the lowercase keys of
-    // ~/.aws/credentials. Deliberately narrow: an UPPER_SNAKE name ENDING in a
-    // secret word, `=` only (a `TOP SECRET:` heading is prose), a 6+ char
-    // value. camelCase JSON keys (`confirmationToken`, `shareToken`) never
-    // match, so no loop-internal token is touched.
-    // ponytail: `api_key: …` YAML/JSON configs are not covered; add a
-    // `:` form here if a real document shows one.
+    // A config-shaped assignment of a secret: `AWS_SECRET_ACCESS_KEY=…`,
+    // `DB_PASSWORD: …` (YAML), `db_password=…`, `"STRIPE_API_KEY": "…"`, the
+    // lowercase keys of ~/.aws/credentials. The name must be UPPER_SNAKE or
+    // snake_case ending in a secret word; camelCase JSON keys
+    // (`confirmationToken`, `shareToken`) and a bare lowercase `token=` (a
+    // share link) never match. `=` takes any 6+ char value; `:` only when
+    // the name has an underscore, so a `TOP SECRET: launch plan` heading is
+    // prose. The value may be "…", '…' or `…` quoted; its class stops at a
+    // quote or `\`, so the closing quote survives and JSON stays JSON.
     name: "env-secret-assignment",
-    pattern:
-      /\b((?:(?:[A-Z][A-Z0-9]*_)*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|SECRET_KEY|PRIVATE_KEY)|aws_secret_access_key|aws_session_token)\s*=\s*["']?)(?!\[)([^\s"'`,;]{6,})/g,
-    replace: keepPrefix,
+    pattern: new RegExp(
+      `\\b(${CONFIG_SECRET_NAME})("?[ \\t]*[:=][ \\t]*["'\`]?)(?!\\[)([^\\s"'\`\\\\,;]{6,})`,
+      "g",
+    ),
+    replace: (placeholder, m, key: string, sep: string) =>
+      sep.includes(":") && !key.includes("_") ? m : `${key}${sep}${placeholder}`,
   },
   {
-    // `password=…`, `passwd: …`, `"password": "…"`. The `:` form with a bare
-    // letters-only value is prose ("Password: required.", "Reset your
-    // password: click …") and is left alone; `=`, a quoted value, or a value
-    // with a digit/symbol is a credential. `passwordProtected` never matches
-    // (word boundary after the name).
+    // `password=…`, `passwd: …`, `"password": "…"`, `**Password:** …`.
+    // `=` is always a credential. The `:` form is where prose lives
+    // ("Password: required.", "Password: 12 characters minimum"), so an
+    // UNQUOTED `:` value must look like a password: 6+ chars with a digit or
+    // symbol. Markdown emphasis around the label is part of the separator,
+    // never mistaken for the value. A quoted value keeps its quotes.
+    // `passwordProtected` never matches (word boundary after the name).
     name: "password-assignment",
     pattern:
-      /\b(pass(?:word|wd|phrase))("?\s*[:=]\s*)(?!\[)("[^"\n]+"|'[^'\n]+'|[^\s"'`,;]+)/gi,
-    replace: (placeholder, m, key: string, sep: string, value: string) =>
-      sep.includes(":") && /^[A-Za-z]+[.!?)]*$/.test(value)
-        ? m
-        : `${key}${sep}${placeholder}`,
+      /\b(pass(?:word|wd|phrase))((?:\*\*|__)?"?[ \t]*[:=][ \t]*(?:\*\*|__)?[ \t]*)(?!\[)("[^"\n]+"|'[^'\n]+'|`[^`\n]+`|[^\s"'`,;]+)/gi,
+    replace: (placeholder, m, key: string, sep: string, value: string) => {
+      const quoted = /^["'`]/.test(value);
+      const bare = value.replace(/[.!?)]+$/, "");
+      if (sep.includes(":") && !quoted && !(bare.length >= 6 && /[^A-Za-z]/.test(bare))) return m;
+      return `${key}${sep}${requote(placeholder, value)}`;
+    },
   },
   {
     // Provider API tokens, recognisable by prefix:
-    //   OpenAI/Anthropic `sk-…` (20+ chars, must contain a digit — `sk-learn`),
-    //   Stripe `sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`,
+    //   OpenAI/Anthropic `sk-…` — a digit and a 20+ char alphanumeric run, so
+    //     `sk-learn-notes` and a file named `sk-projects-2026-budget.xlsx`
+    //     survive,
+    //   Stripe `sk_/rk_/pk_` `live_`/`test_`,
     //   GitHub `ghp_/gho_/ghu_/ghs_/ghr_` and `github_pat_`,
-    //   Slack `xoxb-/xoxp-/xoxa-/xoxs-`.
+    //   Slack `xoxb-/xoxp-/xoxa-/xoxs-`,
+    //   HubSpot private-app `pat-<region>-…`,
+    //   Google API key `AIza…` and OAuth access token `ya29.…`.
+    // Never preceded by `/`, `\`, `.` or `-`: a path segment or a longer
+    // hyphenated name is not a token.
     name: "provider-token",
     pattern:
-      /\b(?:sk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[bpas]-[A-Za-z0-9-]{10,})/g,
+      /(?<![/\\.-])\b(?:sk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]*?[A-Za-z0-9]{20}[A-Za-z0-9_-]*|[srp]k_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[bpas]-[A-Za-z0-9-]{10,}|pat-[a-z]{2}\d-[A-Za-z0-9-]{20,}|AIza[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9._-]{20,})/g,
     replace: whole,
   },
   {
@@ -295,8 +339,10 @@ export function redactSecrets(text: string): string {
  * {@link CREDENTIAL_PLACEHOLDER}, and reports how many it replaced so the
  * caller can log a count without the value.
  *
- * Safe over a JSON wire string: no rule matches a `"` or a `\\`, so a
- * replacement never breaks the surrounding JSON string literal.
+ * This is the RAW-TEXT scrub. Over JSON wire text it is not enough: a quoted
+ * value arrives escaped (`KEY=\\"value\\"`) and slips past the value classes.
+ * A tool result goes through {@link redactToolResult}, which runs this per
+ * decoded string leaf.
  */
 export function redactCredentials(text: string): { text: string; count: number } {
   if (!text) return { text, count: 0 };
@@ -313,6 +359,75 @@ export function redactCredentials(text: string): { text: string; count: number }
     });
   }
   return { text: out, count };
+}
+
+/**
+ * WARP-3282 — a field whose NAME says its value is a credential (`password`,
+ * `DB_PASSWORD`, `client_secret`, `aws_session_token`). camelCase names
+ * (`confirmationToken`, `passwordProtected`) never match.
+ */
+const CREDENTIAL_FIELD_RE = new RegExp(`^(?:[Pp]ass(?:word|wd|phrase)|${CONFIG_SECRET_NAME})$`);
+
+/**
+ * WARP-3282 — {@link redactCredentials} over a PARSED tool result: every
+ * string leaf is scrubbed as text, and a string under a credential-named field
+ * ({@link CREDENTIAL_FIELD_RE}) is replaced whole. Never mutates its input;
+ * hands back the SAME reference when nothing matched.
+ */
+export function redactCredentialValues(value: unknown): { value: unknown; count: number } {
+  let count = 0;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      const r = redactCredentials(v);
+      count += r.count;
+      return r.text;
+    }
+    if (Array.isArray(v)) {
+      const out = v.map(walk);
+      return out.every((x, i) => x === v[i]) ? v : out;
+    }
+    if (v === null || typeof v !== "object") return v;
+    let changed = false;
+    // Null prototype: a JSON `"__proto__"` key stays an own property instead
+    // of hitting the setter (which would drop it from the re-serialised text).
+    const out: Record<string, unknown> = Object.create(null);
+    for (const [k, entry] of Object.entries(v as Record<string, unknown>)) {
+      let next: unknown;
+      if (CREDENTIAL_FIELD_RE.test(k) && typeof entry === "string" && entry !== "" && !entry.startsWith("[")) {
+        count++;
+        next = CREDENTIAL_PLACEHOLDER;
+      } else {
+        next = walk(entry);
+      }
+      if (next !== entry) changed = true;
+      out[k] = next;
+    }
+    return changed ? out : v;
+  };
+  const out = walk(value);
+  return { value: out, count };
+}
+
+/**
+ * WARP-3282 — THE scrub for a tool result's wire text on its way to the model.
+ *
+ * JSON (every mcp-server result) is parsed, its decoded string leaves are
+ * scrubbed ({@link redactCredentialValues}) and it is re-serialised — so a
+ * quoted `KEY="value"`, escaped on the wire, is seen as the document had it,
+ * a redaction can never break the JSON, and no rule can run across a field
+ * boundary. A result with nothing to redact comes back byte-identical (the
+ * confirmation envelope's token is read from these exact bytes). Non-JSON
+ * text falls back to the raw scrub.
+ */
+export function redactToolResult(text: string): { text: string; count: number } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return redactCredentials(text);
+  }
+  const { value, count } = redactCredentialValues(parsed);
+  return count === 0 ? { text, count: 0 } : { text: JSON.stringify(value), count };
 }
 
 // ── Structured (object) redaction — WARP-1718 ────────────────────────────────

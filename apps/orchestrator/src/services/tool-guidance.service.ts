@@ -36,9 +36,7 @@ const contentSearch: CategoryRenderer = (can) => {
     (deeper.length > 0
       ? `; go deeper on a specific file with ${deeper.join(" or ")}`
       : "") +
-    // WARP-3282 — the loop already scrubs known credential shapes from tool
-    // results; this covers the shapes it can't recognise.
-    ". Never repeat a password, key or token in them; say one exists."
+    "."
   );
 };
 
@@ -170,6 +168,16 @@ const CATEGORY_RENDERERS: CategoryRenderer[] = [
 const NEVER_INVENT_LINE =
   "- Use tool names exactly as advertised — never invent one.";
 
+// WARP-3282 — renders for EVERY non-empty tool set, not with one category:
+// any tool can return a credential (read_file, email_read, a remote MCP
+// page), not only search. The loop scrubs the shapes it recognises
+// (lib/log-redaction.ts); this covers the shapes it can't. It rides on the
+// never-invent line when that renders (no extra "- " line), which keeps the
+// full render ~10 chars under TOOL_GUIDANCE_MAX_CHARS without raising the
+// cap — the cap feeds the ADR-056 tools[] ceiling (12,410 tokens) that the
+// add-llm-tool skill and its test cite.
+const CREDENTIAL_RULE = "Never repeat a password, key or token from a result.";
+
 /**
  * Compose the tool-guidance block from the caller's EFFECTIVE tool set.
  * `allowed` undefined = privileged caller = every tool passes (the same
@@ -184,6 +192,9 @@ export function composeToolGuidance(allowed: string[] | undefined): string {
   // surviving line names a tool — as does the pointer's own memory_recall
   // fragment. Only then does the never-invent rule earn its chars.
   const namesATool = rendered.length > 1 || can("memory_recall");
-  const lines = namesATool ? [...rendered, NEVER_INVENT_LINE] : rendered;
+  const lines = namesATool
+    ? [...rendered, `${NEVER_INVENT_LINE} ${CREDENTIAL_RULE}`]
+    : [...rendered];
+  if (!namesATool && (!allowed || allowed.length > 0)) lines.push(`- ${CREDENTIAL_RULE}`);
   return ["Tool guidance:", ...lines].join("\n");
 }

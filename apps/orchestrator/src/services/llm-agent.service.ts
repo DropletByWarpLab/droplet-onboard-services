@@ -93,7 +93,7 @@ import {
 import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
-import { redactCredentials } from "../lib/log-redaction.js";
+import { redactToolResult } from "../lib/log-redaction.js";
 
 const logger = createLogger("llm-agent");
 
@@ -2451,8 +2451,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // may see the credential still opens the document itself through
       // Files, which this does not touch. Confirmation tokens are hex under
       // camelCase keys and match no rule, so the approval path is unaffected.
+      // Redacted per decoded JSON string leaf, not over the escaped wire text
+      // (where `KEY="v"` arrives as `KEY=\"v\"` and slips past the rules).
       // Count only in the log — never the value.
-      const { text, count: credentialsRedacted } = redactCredentials(
+      const { text, count: credentialsRedacted } = redactToolResult(
         result.content[0]?.text ?? "{}",
       );
       if (credentialsRedacted > 0) {

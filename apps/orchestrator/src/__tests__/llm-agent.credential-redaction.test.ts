@@ -132,6 +132,24 @@ describe("WARP-3282 — tool results are scrubbed of credentials", () => {
     expect(JSON.stringify(logged)).not.toContain(SECRET);
   });
 
+  it("a QUOTED env assignment — escaped on the wire — is scrubbed too, and the result still parses (review #2469)", async () => {
+    const wire = JSON.stringify({
+      results: [
+        { path: "/Shared/IT/.env", snippet: `export AWS_SECRET_ACCESS_KEY="${SECRET}"` },
+        { path: "/Shared/IT/app.json", snippet: '{"user": "svc", "password": "correct horse battery"}' },
+      ],
+    });
+    // The escaped form is what the loop receives.
+    expect(wire).toContain('AWS_SECRET_ACCESS_KEY=\\"');
+    const { toolMsg, result } = await runOneSearch(wire);
+    expect(toolMsg.content).not.toContain(SECRET);
+    expect(toolMsg.content).not.toContain("correct horse battery");
+    const parsed = JSON.parse(toolMsg.content) as { results: Array<{ path: string; snippet: string }> };
+    expect(parsed.results.map((r) => r.path)).toEqual(["/Shared/IT/.env", "/Shared/IT/app.json"]);
+    expect(parsed.results[0]!.snippet).toBe(`export AWS_SECRET_ACCESS_KEY="${CREDENTIAL_PLACEHOLDER}"`);
+    expect(JSON.stringify(result.trace)).not.toContain(SECRET);
+  });
+
   it("a clean result passes through byte-identical and logs nothing", async () => {
     const clean = JSON.stringify({ results: [{ path: "/a.md", snippet: "Q3 revenue grew 12%." }] });
     const { toolMsg } = await runOneSearch(clean);
