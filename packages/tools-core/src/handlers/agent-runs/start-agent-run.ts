@@ -25,29 +25,21 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 const inputSchema = {
   type: "object",
   properties: {
-    title: { type: "string", description: "Short label for the task, under 60 characters." },
-    goal: {
-      type: "string",
-      description:
-        "What to accomplish, in plain language. The run works on it unattended, with the same tools you have, and reports back when done.",
-    },
+    title: { type: "string", description: "Short label, under 60 characters." },
+    goal: { type: "string", description: "What to accomplish, in plain language." },
     deliverable: { type: "string", description: "What the finished result should be." },
     constraints: { type: "string", description: "Optional limits to respect." },
     refs: {
       type: "array",
       items: { type: "string" },
-      description: "Optional file paths or ids the run should start from.",
+      description: "Optional files or ids to start from.",
     },
     max_iter: {
       type: "integer",
       minimum: 1,
       description: "Optional step budget for the run.",
     },
-    workspace: {
-      type: "string",
-      description:
-        "Optional. The id of a Workshop workspace to work in. The run then builds an extension there — reading, editing, testing and finally proposing it for review — instead of doing ordinary work.",
-    },
+    workspace: { type: "string", description: "Optional Workshop workspace id: build an extension there instead." },
   },
   required: ["goal"],
   additionalProperties: false,

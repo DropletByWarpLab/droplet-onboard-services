@@ -239,6 +239,7 @@ import currencyConvert from "./handlers/data/currency-convert.js";
 // WARP-2180: durable background runs (epic WARP-2176)
 import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
 import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
+import cancelAgentRun from "./handlers/agent-runs/cancel-agent-run.js";
 import routineDraft from "./handlers/routines/routine-draft.js";
 import routineList from "./handlers/routines/routine-list.js";
 import routineRun from "./handlers/routines/routine-run.js";
@@ -441,6 +442,9 @@ const allTools: Tool[] = [
   // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
   startAgentRun,
   listAgentRuns,
+  // WARP-3302: stop one run (write, no prompt: it only stops work). Checking
+  // one run is list_agent_runs({run_id}). The worker keeps cancel out of runs.
+  cancelAgentRun,
   // WARP-2894 (ADR-056 §5.1): routines — the model DRAFTS, a person PROMOTES.
   // draft is Write-tier with no confirmation (a draft is inert: POST
   // /api/tools has no status field, the row is born `draft`); list is

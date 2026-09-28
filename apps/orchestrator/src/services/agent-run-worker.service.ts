@@ -177,8 +177,10 @@ export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notifica
  * WARP-2180 — tools a run may never see. `start_agent_run` is how a chat
  * turn hands work off; inside a run it is how one prompt spawns a fleet that
  * saturates the model. Structural refusal here; the handler refuses too.
+ * WARP-3302 — `cancel_agent_run` likewise: stopping runs is the person's
+ * call from chat, never one unattended run's call about another.
  */
-export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run"]);
+export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run", "cancel_agent_run"]);
 
 /**
  * WARP-2896 (ADR-056 slice G) — the workshop's tools, derived from the

@@ -426,6 +426,8 @@ describe("agent-run worker — access, tiers, ceilings, cancellation (WARP-2177)
     expect(pool).not.toContain("delete_clip");
     // WARP-2180 — a run may not start a run.
     expect(pool).not.toContain("start_agent_run");
+    // WARP-3302 — a run may not stop runs either.
+    expect(pool).not.toContain("cancel_agent_run");
     expect(pool).toContain("list_agent_runs");
   });
 
