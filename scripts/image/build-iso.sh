@@ -133,6 +133,16 @@ done
 #
 # Placed BEFORE the ISO download deliberately: refusing after a multi-gigabyte
 # fetch teaches people to pass the override reflexively.
+#
+# WARP-3174: the audit reads the staging root THIS IMAGE CARRIES, not the
+# checkout. A box clones a fresh checkout on first boot and installers are
+# git-ignored, so anything staged only in the builder's checkout never reached
+# a box; auditing the checkout passed while the image shipped nothing. The
+# root is the checkout's data/app-downloads (tracked files plus anything an
+# operator staged there by hand) plus every installer clients.lock.json pins,
+# fetched and size/sha256-verified by the same script the OTA release uses.
+# Step 4 maps it into the ISO at /server/app-downloads and the autoinstall
+# copies it into the clone (scripts/image/autoinstall/user-data).
 echo "[0/5] Client-app pre-flight (data/app-downloads/EXPECTED)..."
 AUDIT_SH="${REPO_ROOT}/scripts/app-downloads/audit.sh"
 if [ ! -r "$AUDIT_SH" ]; then
@@ -140,9 +150,21 @@ if [ ! -r "$AUDIT_SH" ]; then
   echo "       Refusing to build rather than guessing. (WARP-2666)" >&2
   exit 1
 fi
+APP_DOWNLOADS_ROOT="${WORK_DIR}/app-downloads"
+rm -rf "$APP_DOWNLOADS_ROOT"
+mkdir -p "$APP_DOWNLOADS_ROOT"
+cp -a "${REPO_ROOT}/data/app-downloads/." "$APP_DOWNLOADS_ROOT/"
+if ! bash "${REPO_ROOT}/scripts/app-downloads/stage-lock.sh" \
+    --lock "${REPO_ROOT}/data/app-downloads/clients.lock.json" \
+    --dir "$APP_DOWNLOADS_ROOT"; then
+  echo "ERROR: could not stage the installers data/app-downloads/clients.lock.json" >&2
+  echo "       pins (see above). --allow-blank-downloads does NOT waive this: the" >&2
+  echo "       lock is a promise that this release carries them. (WARP-3174)" >&2
+  exit 1
+fi
 audit_rc=0
 # `set -e` would abort on the non-zero exits this pre-flight is here to READ.
-bash "$AUDIT_SH" --dir "${REPO_ROOT}/data/app-downloads" || audit_rc=$?
+bash "$AUDIT_SH" --dir "$APP_DOWNLOADS_ROOT" || audit_rc=$?
 case "$audit_rc" in
   0)
     echo "  OK: every platform EXPECTED declares is staged and verified."
@@ -162,8 +184,9 @@ case "$audit_rc" in
       echo "ERROR: this image would ship a /downloads page with nothing on it" >&2
       echo "       for the platforms listed above." >&2
       echo "" >&2
-      echo "       Stage the installers first:" >&2
-      echo "         ./scripts/app-downloads/stage.sh <installer> [...]" >&2
+      echo "       Pin them in data/app-downloads/clients.lock.json, or stage them" >&2
+      echo "       into this checkout first (the image carries what is staged there):" >&2
+      echo "         node scripts/app-downloads/stage.mjs --dir data/app-downloads <installer>" >&2
       echo "" >&2
       echo "       Or, if shipping without them is the decision, say so:" >&2
       echo "         $0 --allow-blank-downloads" >&2
@@ -261,6 +284,7 @@ echo "[4/5] Injecting the autoinstall seed (dockerized xorriso, boot replay)..."
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${WORK_DIR}:/work" \
   -v "${AUTOINSTALL_DIR}:/seed:ro" \
+  -v "${APP_DOWNLOADS_ROOT}:/app-downloads:ro" \
   -v "${GRUB_CFG}:/grub-autoinstall.cfg:ro" \
   -v "${OUTPUT_DIR}:/out" \
   -e "UBUNTU_ISO=${UBUNTU_ISO}" \
@@ -289,6 +313,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
       -overwrite on \
       -map /seed/user-data /server/user-data \
       -map /seed/meta-data /server/meta-data \
+      -map /app-downloads /server/app-downloads \
       -map /grub-autoinstall.cfg /boot/grub/grub.cfg \
       -commit -end
     echo "repack complete: /out/${OUT_ISO_NAME}"

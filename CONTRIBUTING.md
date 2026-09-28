@@ -290,6 +290,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 # Terminal 2: API Server
 cd apps/orchestrator
+NODE_ENV=development \
 DATABASE_URL=postgresql://droplet:droplet@localhost:5432/droplet \
 REDIS_URL=redis://localhost:6379 \
 MQTT_BROKER=mqtt://localhost:1883 \
@@ -302,7 +303,7 @@ npm run dev
 # Open http://localhost:3001
 ```
 
-The Next.js dev server auto-proxies `/api/*` to localhost:3000 and `/ai/*` to localhost:8000 via `next.config.js` rewrites.
+The Next.js dev server auto-proxies `/api/*` to localhost:3000 and `/ai/*` to localhost:8000 via `next.config.js` rewrites. The proxy passes the dashboard's address (`localhost:3001`) in `X-Forwarded-Host`, and the orchestrator reads that header for passkeys only when `NODE_ENV=development` is set, as above (WARP-3229).
 
 ### Database setup
 

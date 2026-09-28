@@ -19,6 +19,7 @@ import type { KnownFace } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { useAuth } from "@/lib/auth";
 
 /**
  * Known-faces management (Phase 7.5).
@@ -38,6 +39,9 @@ import { ShellPage } from "@/components/shell/ShellPage";
  * page.
  */
 export default function PeoplePage() {
+  // WARP-3104: the face and plate rosters are owner/admin to change.
+  const { user } = useAuth();
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const router = useRouter();
   const [faces, setFaces] = useState<KnownFace[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -196,6 +200,7 @@ export default function PeoplePage() {
                   <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/70 text-white type-caption-2">
                     {face.images.length} image{face.images.length === 1 ? "" : "s"}
                   </div>
+                  {canManage && (
                   <button
                     onClick={() => handleDeleteFace(face)}
                     disabled={deleting}
@@ -204,6 +209,7 @@ export default function PeoplePage() {
                   >
                     <Trash2 size={12} />
                   </button>
+                  )}
                 </div>
                 <div className="p-3">
                   <h3 className="type-subheadline text-label-primary capitalize truncate">
@@ -235,6 +241,7 @@ export default function PeoplePage() {
                               className="w-full h-full object-cover rounded"
                               loading="lazy"
                             />
+                            {canManage && (
                             <button
                               onClick={() => handleDeleteImage(face, img.name)}
                               disabled={imgBusy}
@@ -243,6 +250,7 @@ export default function PeoplePage() {
                             >
                               <X size={10} />
                             </button>
+                            )}
                           </li>
                         );
                       })}

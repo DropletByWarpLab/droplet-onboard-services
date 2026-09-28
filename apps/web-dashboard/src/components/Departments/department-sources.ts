@@ -19,6 +19,7 @@ import type { PmWorkItem } from "@/components/projects/types";
 import type { MoneySummary } from "@/app/money/useMoney";
 import { fetchCameras, fetchSystemHealth, type SystemHealth } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
+import { useSecurityIncidentSummary } from "@/lib/hooks/useSecurity";
 import type { CameraInfo } from "@/lib/types";
 
 interface StatusError extends Error {
@@ -170,4 +171,43 @@ export function salesFigure(stages: readonly CrmStageSummary[]): SalesFigure {
     value: null,
     note: mixed ? "mixed currencies" : "not every deal is priced yet",
   };
+}
+
+/* ── Security incidents (WARP-2978, ADR-059 P3 §8) ──────────────────────── */
+
+/** The words the Security widget and headline share (P6's native Security home reuses them). */
+export const OPEN_INCIDENTS_COPY = {
+  nothing: "Nothing needs attention",
+  notReady: "Alerts need opening hours and an Inside area",
+  loadFailed: "Couldn't load incidents",
+  off: "Security is off on this box",
+  openSecurity: "Open Security",
+} as const;
+
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The figure for what needs attention, as number + label — or null when
+ * nothing is open (the caller says `Nothing needs attention`). Never a 0:
+ * `2 open alerts · 1 notice`, or `1 open notice` when no alert is open.
+ */
+export function openIncidentsFigure(openAlerts: number, openNotices: number): { n: string; label: string } | null {
+  if (openAlerts > 0) {
+    const label = openAlerts === 1 ? "open alert" : "open alerts";
+    return { n: String(openAlerts), label: openNotices > 0 ? `${label} · ${count(openNotices, "notice", "notices")}` : label };
+  }
+  if (openNotices > 0) return { n: String(openNotices), label: openNotices === 1 ? "open notice" : "open notices" };
+  return null;
+}
+
+/**
+ * GET /api/security/incidents/summary, shared with /security (same SWR key).
+ * `off`: the box answered 404 — the Security module is off (box-wide or for
+ * this person) and the nav gate hadn't caught up yet. Any other failure is
+ * `error`: the caller says it couldn't load, never a zero.
+ */
+export function useOpenIncidents(enabled: boolean) {
+  const { summary, error, isLoading } = useSecurityIncidentSummary(enabled);
+  const status = (error as StatusError | undefined)?.status;
+  return { summary, off: status === 404, error: status === 404 ? undefined : error, isLoading };
 }

@@ -102,13 +102,14 @@ class ChatRequest(BaseModel):
     tools: list[ToolDefinition] | None = None
     # WARP-1442 — optional gpt-oss reasoning-effort control. Additive +
     # backward-compatible: unset (None) → the provider builds a byte-for-byte
-    # unchanged Ollama request, so every existing caller (voice + dashboard
-    # share this path) is unaffected. When set, the local provider forwards it
-    # as a top-level `reasoning_effort` on Ollama's OpenAI-compat
-    # /v1/chat/completions call for the gpt-oss family (a no-op for other
-    # models). The three values are gpt-oss's harmony reasoning levels; the
+    # unchanged request, so every existing caller (voice + dashboard share this
+    # path) is unaffected. When set, the local provider forwards it for the
+    # gpt-oss family (a no-op for other models) as a top-level
+    # `reasoning_effort` on the OpenAI-compat /v1/chat/completions call, and on
+    # the DMR runtime also as `chat_template_kwargs.reasoning_effort`
+    # (WARP-3123). The three values are gpt-oss's harmony reasoning levels; the
     # Literal makes anything else a 422 at the edge rather than a malformed
-    # field silently reaching Ollama.
+    # field silently reaching the inference runtime.
     reasoning_effort: Literal["low", "medium", "high"] | None = None
 
     @model_validator(mode="after")
