@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { Lock, LockOpen, Moon, Plane, Shield, Store } from "lucide-react";
 import {
+  AlertsLine,
   COPY,
   SOURCE_LABEL,
   SecurityFeed,
@@ -850,5 +851,64 @@ describe("door locks (WARP-2977 P2b-2)", () => {
       // Unknown counts keep PR-2's behaviour.
       expect(sourcesForView("all", owner)).toEqual(["camera_ingest", "camera_system", "locks"]);
     });
+  });
+});
+
+describe("WARP-2978 — incidents on the feed", () => {
+  it("SOURCE_LABEL names every health row the box sends — incidents, alerts and patterns included (a missing id fails the Record at compile time)", () => {
+    const IDS: Record<SecurityHealthRow["id"], true> = {
+      camera_ingest: true,
+      camera_system: true,
+      locks: true,
+      threat_mirror: true,
+      site_mode: true,
+      incidents: true,
+      alerts: true,
+      patterns: true,
+      retention: true,
+    };
+    for (const id of Object.keys(IDS) as SecurityHealthRow["id"][]) expect(SOURCE_LABEL[id], id).toBeTruthy();
+    expect(SOURCE_LABEL.incidents).toBe("Incidents");
+    expect(SOURCE_LABEL.alerts).toBe("Alerts");
+  });
+
+  it("a row the engine grouped links to its incident; the link says where it goes", () => {
+    render(<SecurityFeed {...props({ events: [event({ incident: { id: "inc-1" } })] })} />);
+    const link = screen.getByRole("link", { name: COPY.inIncident });
+    expect(link).toHaveAttribute("href", "/security/incidents/inc-1");
+  });
+
+  it("a row in no incident (or from a box older than P3) has no incident link", () => {
+    render(<SecurityFeed {...props({ events: [event({ incident: null }), event({ id: "2" })] })} />);
+    expect(screen.queryByRole("link", { name: COPY.inIncident })).toBeNull();
+  });
+
+  it("the feed no longer says alerts come later", () => {
+    const { container } = render(<SecurityFeed {...props()} />);
+    expect(container).not.toHaveTextContent("Alerts come later");
+    expect(COPY).not.toHaveProperty("notAlarm");
+  });
+});
+
+describe("WARP-2978 — the alerts line", () => {
+  it("alerts can fire → says who is alerted, and that Droplet calls nobody", () => {
+    render(<AlertsLine alertsReady />);
+    expect(screen.getByText(COPY.alertsLine)).toBeInTheDocument();
+    expect(COPY.alertsLine).toBe(
+      "Droplet alerts the people chosen in Security settings when someone is seen inside after hours. It doesn't call anyone.",
+    );
+  });
+
+  it("not ready → says what alerts need", () => {
+    render(<AlertsLine alertsReady={false} />);
+    expect(screen.getByText(COPY.alertsNotReady)).toBeInTheDocument();
+    expect(COPY.alertsNotReady).toBe(
+      "Droplet shows what happened here. Alerts need opening hours and an area marked Inside or Staff only.",
+    );
+  });
+
+  it("unknown (the summary hasn't loaded, or failed) → says nothing rather than guess", () => {
+    const { container } = render(<AlertsLine alertsReady={null} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

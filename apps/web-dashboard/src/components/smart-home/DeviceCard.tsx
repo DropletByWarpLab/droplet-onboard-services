@@ -58,7 +58,8 @@ function deviceSource(device: MatterDevice): string {
 
 interface DeviceCardProps {
   device: MatterDevice;
-  onCommand: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
+  /** WARP-3276: omitted for a read-only viewer (external guest) — no controls render. */
+  onCommand?: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
   onClick?: () => void;
 }
 
@@ -67,16 +68,21 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
   const isOn = device.state === "on" || device.state === "playing";
   const isToggleable = TOGGLEABLE.has(device.category);
   const isConnected = device.connectionState === "connected";
+  const controllable = isConnected && !!onCommand;
+  // Only reached when `controllable`; the no-op just satisfies the widget types.
+  const send = onCommand ?? (() => {});
   const brightness = device.attributes.currentLevel as number | undefined;
   // Matter brightness is 0-254, convert to percentage
   const brightnessPct = brightness != null ? Math.round((brightness / 254) * 100) : undefined;
 
+  // WARP-3276: send the intent from the state the person saw, never `toggle` —
+  // a view up to one poll stale would otherwise flip the device the wrong way.
   function handleToggle() {
-    onCommand(device.nodeId, "toggle");
+    onCommand?.(device.nodeId, isOn ? "turn_off" : "turn_on");
   }
 
   function handleBrightness(value: number) {
-    onCommand(device.nodeId, "set_brightness", { brightness: value });
+    onCommand?.(device.nodeId, "set_brightness", { brightness: value });
   }
 
   const subtitle = (() => {
@@ -148,13 +154,13 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
         </div>
 
         {/* Toggle for binary devices */}
-        {isToggleable && isConnected && (
+        {isToggleable && controllable && (
           <ToggleSwitch on={isOn} onToggle={handleToggle} />
         )}
       </div>
 
       {/* Brightness slider for lights that are on */}
-      {device.category === "light" && isOn && isConnected && brightnessPct != null && (
+      {device.category === "light" && isOn && controllable && brightnessPct != null && (
         <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
           <BrightnessSlider
             brightness={brightnessPct}
@@ -167,41 +173,41 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
           ColorControl (capability truth from the endpoint clusters). */}
       {device.category === "light" &&
         isOn &&
-        isConnected &&
+        controllable &&
         hasCluster(device, CLUSTER.COLOR_CONTROL) && (
           <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
-            <ColorControls device={device} onCommand={onCommand} />
+            <ColorControls device={device} onCommand={send} />
           </div>
         )}
 
       {/* WARP-897: cover motion + position */}
-      {device.category === "cover" && isConnected && (
+      {device.category === "cover" && controllable && (
         <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
-          <CoverControls device={device} onCommand={onCommand} />
+          <CoverControls device={device} onCommand={send} />
         </div>
       )}
 
       {/* WARP-897: fan speed + mode (cluster-gated — an on/off fan keeps
           just its toggle) */}
       {device.category === "fan" &&
-        isConnected &&
+        controllable &&
         hasCluster(device, CLUSTER.FAN_CONTROL) && (
           <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
-            <FanControls device={device} onCommand={onCommand} />
+            <FanControls device={device} onCommand={send} />
           </div>
         )}
 
       {/* WARP-897: lock / unlock — routes through the page's Tier-2 confirm */}
-      {device.category === "lock" && isConnected && (
+      {device.category === "lock" && controllable && (
         <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
-          <LockControl device={device} onCommand={onCommand} />
+          <LockControl device={device} onCommand={send} />
         </div>
       )}
 
       {/* WARP-897: media playback verbs */}
-      {device.category === "media_player" && isConnected && (
+      {device.category === "media_player" && controllable && (
         <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
-          <MediaControls device={device} onCommand={onCommand} />
+          <MediaControls device={device} onCommand={send} />
         </div>
       )}
 

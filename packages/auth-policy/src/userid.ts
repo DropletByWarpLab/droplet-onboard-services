@@ -1,4 +1,8 @@
-export const RESERVED_USERNAMES = ["admin", "root"];
+/** The synthetic `VpnPeer.userId` shared by QR-linked / connect-installed
+ *  overlay peers that carry no per-user identity. Reserved below so no real
+ *  account can ever be named this and "own" every such device (WARP-3121). */
+export const OVERLAY_PEER_USER_ID = "overlay";
+export const RESERVED_USERNAMES = ["admin", "root", OVERLAY_PEER_USER_ID];
 export const USERID_MIN = 2;
 export const USERID_MAX = 64;
 

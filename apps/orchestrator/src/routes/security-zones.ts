@@ -29,11 +29,11 @@
  *     accepted only for a viewer with `mayReadLocks`; for anyone else a lock
  *     link does not exist (an area made only of locks is hidden, and asking
  *     to link one is SOURCE_NOT_FOUND);
- *   · /sources gains a `locks` half from ONE fresh smart-home list, asked
+ *   · /sources gains a `locks` half from ONE fresh device-control list, asked
  *     only for such a viewer, degrading on its own (`unavailable`);
  *   · a NEW lock link is checked against a fresh list; an existing one is
  *     kept without a check;
- *   · lock labels on page loads come from the last sweep (no smart-home call).
+ *   · lock labels on page loads come from the last sweep (no device-control call).
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -163,7 +163,7 @@ function writeContext(req: Request, deps: SecurityRouteDeps): ZoneWriteContext {
   return { req, now: deps.now?.() ?? new Date() };
 }
 
-/** The labels a page load can put on lock links without asking the smart-home service: the last sweep's names. */
+/** The labels a page load can put on lock links without asking the device-control service: the last sweep's names. */
 function lockLabelsFor(scope: SecurityViewerScope, reader: SecurityLockReader | null): Map<string, string> {
   if (!scope.mayReadLocks || !reader) return new Map();
   return new Map(reader.knownLocks().map((l) => [l.ref, l.name]));
@@ -191,7 +191,7 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
   const frigateConfig = deps.frigateConfig ?? fetchConfig;
   /** The lock adapter, read per request (it is started after the routers are built). */
   const lockReader = (): SecurityLockReader | null => (deps.locks ?? securityLockAdapter)();
-  /** One FRESH smart-home list as the catalog's lock half. Throws when it cannot be read — never an empty list. */
+  /** One FRESH device-control list as the catalog's lock half. Throws when it cannot be read — never an empty list. */
   const freshLocks = async (): Promise<Map<string, LinkableLock>> => {
     const reader = lockReader();
     if (!reader) throw new Error("the door-lock adapter is not running");
@@ -253,7 +253,7 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
     //
     // WARP-2977 P2b-2: the lock half is a fourth read, and only for a viewer
     // who may read locks (DS-019) — nobody else's page load asks the
-    // smart-home service anything.
+    // device-control service anything.
     const [rows, links, cfg, locks] = await Promise.allSettled([
       loadCameraLabels(prisma),
       loadActiveLinks(prisma),

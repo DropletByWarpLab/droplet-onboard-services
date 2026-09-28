@@ -211,6 +211,8 @@ export interface OtaHost {
   exec: ExecFn;
   /** HOST path of the helper — always the release-shipped docker/ota copy. */
   helperPath: string;
+  /** The compose file the helper drives (WARP-3169 nc-transfer-ownership). */
+  composeFile: string;
 }
 
 let current: OtaHost | null = null;
@@ -229,6 +231,8 @@ export async function initOtaHost(opts: {
   composeFile: string;
   configRoot: string;
   updatesDir: string;
+  /** WARP-3120 — this process's read-only view of the staged /downloads. */
+  appDownloadsDir?: string;
   githubToken?: string;
   request?: DockerRequest;
   logger?: pino.Logger;
@@ -253,11 +257,12 @@ export async function initOtaHost(opts: {
       composeFile: opts.composeFile,
       updatesDir: opts.updatesDir,
       helperUpdatesDir: context.hostUpdatesDir,
+      appDownloadsDir: opts.appDownloadsDir,
       githubToken: opts.githubToken,
       exec,
       logger: log,
     });
-    current = { runner, exec, helperPath };
+    current = { runner, exec, helperPath, composeFile: opts.composeFile };
     log.info(
       { event: "update.host_exec_ready", image: context.image, helperPath },
       "OTA apply provisioned — helper runs on the host",

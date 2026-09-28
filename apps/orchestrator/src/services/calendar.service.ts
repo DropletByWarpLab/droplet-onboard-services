@@ -65,6 +65,27 @@ export async function createEvent(
   });
 }
 
+/** WARP-3265 — date-only view of an all-day event from a subscribed feed.
+ *
+ *  An ICS DATE value (`DTSTART;VALUE=DATE:20260915`) has no time of day; the
+ *  parser stores it as UTC midnight. A client that reads that instant in its
+ *  own zone lands a day early west of UTC, so the API also sends the calendar
+ *  dates themselves: `startDate`/`endDate`, `YYYY-MM-DD`, end EXCLUSIVE.
+ *  Additive: `startsAt`/`endsAt` are unchanged.
+ *
+ *  Null for everything else. A LOCAL all-day event carries whatever instants
+ *  the form sent (the creator's local midnight), so its UTC date is not its
+ *  day and deriving one would be a guess. */
+export function allDayDates(ev: {
+  allDay: boolean;
+  source: string;
+  startsAt: Date;
+  endsAt: Date;
+}): { startDate: string | null; endDate: string | null } {
+  if (!ev.allDay || ev.source !== "external") return { startDate: null, endDate: null };
+  return { startDate: ev.startsAt.toISOString().slice(0, 10), endDate: ev.endsAt.toISOString().slice(0, 10) };
+}
+
 export async function listEvents(
   prisma: PrismaClient,
   userId: string,

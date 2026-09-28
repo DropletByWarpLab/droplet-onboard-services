@@ -34,6 +34,7 @@ export default function DevicesPage() {
   const router = useRouter();
   const {
     grouped,
+    disconnected,
     discovered,
     totalDevices,
     isLoading,
@@ -48,6 +49,10 @@ export default function DevicesPage() {
   const { scenes, refresh: refreshScenes } = useScenes();
   const { user } = useAuth();
   const canAuthor = user?.role === "owner" || user?.role === "admin";
+  // WARP-3276: the command, confirm, alias, rooms, delete, reconnect,
+  // commission and scene-run routes admit owner, admin and member (`family`)
+  // only. An external guest gets the list read-only instead of controls that 403.
+  const canControl = canAuthor || user?.role === "family";
 
   // KAN-5: a Tier-2 device write (lock/unlock, climate setpoint >= 30C) answers
   // confirmation_required instead of executing. `request` stages that, opening
@@ -99,6 +104,7 @@ export default function DevicesPage() {
   const actions = (
     <>
       {/* WARP-102: scan QR / commission a new Matter device. */}
+      {canControl && (
       <button
         className="btn primary"
         onClick={() => router.push("/devices/add-matter")}
@@ -108,6 +114,7 @@ export default function DevicesPage() {
         <Plus size={15} />
         <span className="hidden sm:inline">Add device</span>
       </button>
+      )}
       <button
         className="btn"
         onClick={() => router.push("/devices/clients")}
@@ -141,7 +148,7 @@ export default function DevicesPage() {
               <div key={i} className="card" style={{ height: 96, opacity: 0.5 }} />
             ))}
           </div>
-        ) : error ? (
+        ) : error || disconnected ? (
           <div className="card">
             <div className="empty">
               <span className="ei">
@@ -156,7 +163,7 @@ export default function DevicesPage() {
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-            <DiscoveryBanner count={discovered.length} />
+            {canControl && <DiscoveryBanner count={discovered.length} />}
 
             {/* KPI strip — lights / climate / locks / routines at a glance. */}
             {totalDevices > 0 && (
@@ -170,6 +177,7 @@ export default function DevicesPage() {
                 onCommand={request}
                 onDeviceClick={setSelectedDevice}
                 onBulkLights={handleBulkLights}
+                readOnly={!canControl}
                 actions={{
                   create: createRoom,
                   rename: renameRoom,
@@ -183,6 +191,7 @@ export default function DevicesPage() {
               <RoutinesSection
                 scenes={scenes}
                 canAuthor={canAuthor}
+                canRun={canControl}
                 onChanged={refreshScenes}
               />
             )}
@@ -194,6 +203,8 @@ export default function DevicesPage() {
                     <Wifi size={24} />
                   </span>
                   <span className="eh">No devices yet</span>
+                  {canControl && (
+                  <>
                   <span>
                     Scan a Matter QR code to add your first device. Most plugs, lights, and switches
                     that say <em>“Works with Matter”</em> on the box will work.
@@ -206,6 +217,8 @@ export default function DevicesPage() {
                   >
                     <Plus size={16} /> Add your first device
                   </button>
+                  </>
+                  )}
                 </div>
               </div>
             )}
@@ -223,18 +236,18 @@ export default function DevicesPage() {
       {selectedDevice && liveSelected && (
         <DeviceDetailPanel
           device={liveSelected}
-          onCommand={request}
+          onCommand={canControl ? request : undefined}
           onClose={() => setSelectedDevice(null)}
           rooms={rooms}
-          onSetAlias={setAlias}
-          onCreateRoom={createRoom}
+          onSetAlias={canControl ? setAlias : undefined}
+          onCreateRoom={canControl ? createRoom : undefined}
           takenNames={allDevices
             .filter((d) => d.nodeId !== selectedDevice.nodeId)
             .map((d) => displayName(d))}
           // WARP-1469 — device lifecycle. Remove force-clears even an offline
           // device; reconnect nudges matter.js; re-pair removes + routes into
           // add-device for a factory-reset unit that won't come back.
-          onRemove={async (nodeId) => {
+          onRemove={!canControl ? undefined : async (nodeId) => {
             try {
               await remove(nodeId);
             } catch {
@@ -245,8 +258,8 @@ export default function DevicesPage() {
             setSelectedDevice(null);
             toast("Device removed");
           }}
-          onReconnect={reconnect}
-          onRepair={async (nodeId) => {
+          onReconnect={canControl ? reconnect : undefined}
+          onRepair={!canControl ? undefined : async (nodeId) => {
             try {
               await remove(nodeId);
             } catch {
