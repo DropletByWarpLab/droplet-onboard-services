@@ -135,11 +135,13 @@ These are edits, not omissions. Re-apply them on every re-sync.
    enforces no loaded-model cap. A model switch needs the lifecycle sidecar to
    unload the old model because DMR v1.2.6 has no memory-aware eviction.
    Upstream them to `droplet-local-LLM` rather than dropping them on re-sync.
-10. **WARP-3270 — catalog `description` is customer copy; internal wording
-    lives in `notes`.** Every `description` in `models/model-manifest.json`
-    was rewritten in plain language and the engineering detail moved to a new
-    `notes` field (`manifest.py`), which `GET /models/manifest` strips and
-    `/models/eligible` never lists. `test_shipped_catalog_sends_clients_customer_copy_only`
+10. **WARP-3270 / WARP-3273 — catalog `description` is customer copy;
+    internal wording lives in `notes`.** Every `description` in
+    `models/model-manifest.json` was rewritten in plain language and the
+    engineering detail moved to a new `notes` field (`manifest.py`, listed in
+    `INTERNAL_FIELDS` and `exclude=True`), which `GET /models/manifest` strips
+    and `/models/eligible` never lists. Upstream carries the same code in
+    droplet-local-LLM PR #59 (WARP-3273). `test_shipped_catalog_sends_clients_customer_copy_only`
     guards it. Upstream them to `droplet-local-LLM` rather than dropping them
     on re-sync; a re-sync that takes upstream's descriptions puts
     "UNMEASURED: bench-gate … (WARP-1114 shape)" back on the Models page.

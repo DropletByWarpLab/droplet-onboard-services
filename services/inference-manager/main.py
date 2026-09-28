@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 import disk
 from auth import setup_auth
 from eligible import build_eligible
-from manifest import DEFAULT_MANIFEST_PATH, load_manifest_resilient_with_status
+from manifest import DEFAULT_MANIFEST_PATH, INTERNAL_FIELDS, load_manifest_resilient_with_status
 import vram
 
 from logging_config import (
@@ -306,16 +306,21 @@ async def unload_models(body: UnloadRequest):
 
 @app.get("/models/manifest")
 async def get_manifest():
-    """Raw manifest contents (desired state)."""
+    """Manifest contents (desired state), with INTERNAL_FIELDS stripped."""
     path = Path(MANIFEST_PATH)
     if not path.exists():
         return {"models": []}
     with open(path) as f:
         data = json.load(f)
-    # WARP-3270: `notes` is internal; it never leaves the box's sidecar.
+    if not isinstance(data, dict):
+        # A malformed manifest (e.g. a bare list) is caught here rather than
+        # 500ing on the .get() below — matches the missing-file case above.
+        return {"models": []}
+    # WARP-3270 / WARP-3273: internal-only fields never leave the sidecar.
     for entry in data.get("models", []):
         if isinstance(entry, dict):
-            entry.pop("notes", None)
+            for field in INTERNAL_FIELDS:
+                entry.pop(field, None)
     return data
 
 
