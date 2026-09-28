@@ -1073,6 +1073,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           origin: "workshop" | "schedule" | "chat";
           title: string;
           deliverable: string;
+          sessionId: string | null;
         }
       | null;
     const lease = leases.get(runId);
@@ -1838,7 +1839,14 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           // by POST /api/agent-runs/:id/confirm from that page. No token, no
           // hash, no args (they can carry customer data) ride on the payload.
           ...agentRunLink(runId),
-          data: { agentRunId: runId, pendingTool: parkRequest.tool, needsDecision: true },
+          // WARP-3300 — `sessionId` lets a client show the approval inline in
+          // the chat that started the run.
+          data: {
+            agentRunId: runId,
+            pendingTool: parkRequest.tool,
+            needsDecision: true,
+            ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+          },
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_park_notification_failed");
         });
