@@ -32,12 +32,11 @@
 # ship-check and the box's own watchdog all go red. Flip it in the same
 # change that makes the artifact real, never ahead of it.
 
-# Windows — droplet-windows builds an NSIS installer via release.yml.
-# Blocked on the first tag: the repo has 0 tags and release.yml has never
-# run, so there is no artifact to stage. Signing secrets ARE present, so
-# this is a release decision, not a capability gap (WARP-1955 covers the
-# updater-distribution + key-custody half that gates the tag).
-windows   blocked   WARP-1955   no v* tag cut yet; release.yml has never run, so no installer exists to stage
+# Windows — the native client (ADR-062) ships an MSI, box-served updates
+# (ADR-045 Amendment 1). Blocked until the v1.0.0 MSI exists: no artifact
+# to stage yet. It flips only in the same change that stages the MSI
+# (roadmap gate G9). WARP-1955 is decided by ADR-062 (Tauri key moot).
+windows   blocked   v1.0.0-release-ticket-tbd   no v* tag cut yet; release.yml has never run, so no installer exists to stage
 
 # Android — droplet-android's release workflow needs four signing secrets
 # that do not exist (actions/secrets total_count 0) and its one attempted

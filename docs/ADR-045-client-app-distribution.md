@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-09-03
 - **Ticket:** WARP-2666
+- **Amended by:** [Amendment 1](#amendment-1-box-served-windows-updates-warp-3246) (2026-09-28, WARP-3246): Windows updates are box-served and verified by the client with SHA-256 plus WinVerifyTrust; the Tauri updater envelope is retired ([ADR-062](ADR-062-native-desktop-clients.md)).
 - **Supersedes nothing.** Builds on ADR-020 (signed-manifest image substrate)
   and the WARP-2046 serving surface.
 
@@ -30,8 +31,8 @@ Three things kept that invisible for months:
    told the answer lived somewhere else.
 
 Meanwhile no artifact exists to stage: `droplet-windows` has zero tags and its
-release workflow has never run (WARP-1955 gates the first tag on a
-signing-key-custody decision), `droplet-android` has none of its four signing
+release workflow has never run (WARP-1955 gated the first tag on a
+signing-key-custody decision; ADR-062 decided it, see Amendment 1), `droplet-android` has none of its four signing
 secrets and no Play listing, and `droplet-ios` has no distribution pipeline at
 all — `ios.yml` is a simulator build with `CODE_SIGNING_ALLOWED=NO`.
 
@@ -114,9 +115,9 @@ is a box which was supposed to have something and does not.
 
 - **The distribution host** for `droplet-windows` (a public releases-only
   mirror vs hosting on droplet-us.com). Not needed for operator staging; it is
-  needed before any automated fetch, and the in-app Tauri auto-updater stays
-  non-functional until it lands, since its configured endpoint 404s for
-  anonymous clients.
+  needed before any automated fetch. *(Amendment 1: the Windows client no
+  longer uses a Tauri auto-updater; it updates from the box, so the host is
+  not on its path.)*
 - **Play App Signing key custody** must be settled before Android upload #1 and
   is irreversible: it determines whether box-sideloaded and Play builds can
   ever update each other. Do **not** wire the debug APK as a stopgap — its
@@ -126,3 +127,33 @@ is a box which was supposed to have something and does not.
   `ai.warplab.droplet`. Two reverse-DNS namespaces for one product, and neither
   id can be changed after publication. This needs a product call before either
   store listing exists.
+
+## Amendment 1: box-served Windows updates (WARP-3246)
+
+Roadmap 2026-09-25, GOV-7. [ADR-062](ADR-062-native-desktop-clients.md) replaces
+the Tauri Windows shell with a native C# client, so the Tauri updater envelope
+this ADR carried as a passenger no longer has a consumer. The decision of
+"the operator stages; the box never fetches" is unchanged.
+
+1. **Windows updates are box-served.** The client checks the box it is paired
+   with, never the internet, and never a cloud endpoint. There is no telemetry.
+2. **Integrity is SHA-256 over the pinned channel.** The client takes the
+   installer's size and SHA-256 from the box's `catalog.json` (served over the
+   pinned TLS channel, see ADR-062) and refuses an installer that does not
+   match.
+3. **Authenticity is WinVerifyTrust with a publisher-subject pin.** The client
+   verifies the Authenticode signature and pins the publisher *subject*, not a
+   thumbprint. The expected subject is baked in at build time.
+4. **UAC prompts once per update** in v1. There is no silent elevation.
+5. **No Ed25519, no minisign.** The box does not verify or hold an Ed25519
+   opinion, and the client does not use one, so
+   `docs/security/fips-allowed-algorithms.md` needs no exception. The Tauri
+   `.sig` and `latest.json` are no longer produced for Windows. The catalog
+   still accepts `signature` and `manifest` asset kinds for other platforms and
+   for older staged bundles.
+6. **WARP-1955** (updater distribution and key custody) is decided by ADR-062:
+   the Tauri signing key is moot. It closes when this amendment merges.
+7. **The Windows `EXPECTED` row stays `blocked`.** It flips only when the
+   v1.0.0 MSI is staged in the same change (roadmap gate G9); flipping it
+   earlier turns the image build and ship-check red. Only its ticket is
+   re-pointed, to the v1.0.0 release ticket (to be filed).
