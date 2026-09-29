@@ -25,9 +25,10 @@
 - **Append-only in the database, not by convention.** A BEFORE UPDATE OR DELETE trigger refuses every UPDATE and every DELETE except inside the retention job's own transaction. A BEFORE INSERT trigger holds the derived-alarm rules of §9.7/§11.3: a `forced_door` or `held_open` row must reference a `door_open` row of the same door, and cannot exist for a door whose `doorPositionSource` is `none`.
 - **Derivations (§9.7)** as pure functions: forced door, held open, relock, position unknown. A `none` door yields no forced-door or held-open claim.
 - **Module `doors`**, registered in the App-Modules registry and feature-gated from day one, with a boot assertion that it is where it claims to be (§11.2).
-- **Routes** under `/api/doors`: list doors, recent events (cursor-paged), and create / update / retire an `AccessPoint`. Reads are for owner and admin; writes are `owner` alone (§11.4).
-- **Two read-only chat tools**, `doors_list` and `doors_recent_events`, with the §11.5 rule enforced at dispatch: nothing in the `doors_` namespace may write or ask to confirm, whatever registered it.
-- **Retention:** a daily purge on the cron runtime, 365 days by default.
+- **Routes** under `/api/doors`: list doors, recent events (cursor-paged), and create / update / retire an `AccessPoint`. Reads are for owner and admin; writes are `owner` alone (§11.4) and never a service principal. Every change to a door is audited.
+- **Two read-only chat tools**, `doors_list` and `doors_recent_events`, with the §11.5 rule enforced at dispatch: nothing in the `doors_` namespace may write or ask to confirm, whatever registered it. The assistant's read path is narrowed by the acting person's tool scope, their `doors` grant **and their tier**: the routes admit `_service:mcp` before any role check, so without the tier floor a staff member could ask the assistant for what the browser would refuse them.
+- **Retention:** one daily purge at 03:55 on the cron runtime, `DOORS_EVENT_RETENTION_DAYS` days (365 by default), running whether or not `DOORS_ENABLED` is on — rows already written keep identifying people.
+- **A boot assertion** (§11.2) that fails the start if the module is on and any list downstream of its descriptor is missing, including the append-only trigger in the database.
 
 ## Deviations from the brief, on purpose
 
@@ -35,7 +36,11 @@
 - **A trigger that covers DELETE.** The `SecurityEvent` trigger (ADR-059) covers UPDATE only and lets retention `DELETE` through by not being asked. Decision 3's retention and §11.3's "never updated" are both honoured here by covering DELETE too and giving the purge one sanctioned path: a transaction-local setting only `purgeExpiredAccessEvents` sets. A source guard pins that no other file names it.
 - **Retention counts from receipt (`createdAt`), not from the device's `occurredAt`.** A device with a wrong clock must not be able to keep a row forever or expire it at once.
 - **Corrections are not modelled.** §11.3 says a correction is a new row referencing the old one, but the fourteen kinds include no correction kind, so there is nothing to give that row. It waits for the service slice to say what a correction is.
-- **Read floor is `admin`.** The brief asks for grants per door group and an emptied grant set denies (§11.4). Door groups and grants are out of scope, so until they exist the module's own grant is the only narrowing and the floor is set high. Widening to `family` is one line in the access catalog and one in the router.
+- **Read floor is `admin`.** The brief asks for grants per door group and an emptied grant set denies (§11.4). Door groups and grants are out of scope, so until they exist the module's own grant is the only narrowing and the floor is set high. Widening to `family` is `services/doors-access.ts` and the access catalog's `view` floor.
+- **The access catalog offers `view` and nothing above it.** Door writes are the owner's and an owner holds every level through the §3 bypass, so a `manage` rung could only advertise a grant no non-owner can use. This adds `doors` to the one documented exception in the "admin ceiling is each module's top level" invariant (beside `team_chat`), pinned exactly.
+- **Both tools stay out of default chat.** Module gating does not yet reach the chat pool for an owner or a role-less user (WARP-2972), so with the module off the model would still be offered a tool whose only answer is "not switched on". Reachable over MCP and the API. Lift it, and add a `doors` selection rule in the same change, once the module gate reaches the chat pool and P4b lands.
+- **The held-open time defaults to 30 s.** §9.7 names "the door's held-open time" and gives no number. It is a default the owner edits, not a spec value.
+- **A strike-only door's unused grant stays outstanding until the door next closes.** There is no latch report there to say the strike re-secured, and the brief defines relock by state, never by a timer. It is part of why that claim is the weaker one.
 
 ## Cross-cutting negative suite (§14)
 
