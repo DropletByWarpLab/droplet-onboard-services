@@ -431,6 +431,21 @@ describe("negative 5 — the module is ABSENT when DOORS_ENABLED is off", () => 
     expect(res.body).toEqual({ error: "module_disabled", module: "doors" });
   });
 
+  it("absent means absent everywhere: not in Features, and nothing the assistant or the nav could list", () => {
+    const doors = MODULE_BY_ID.get("doors" as ModuleId)!;
+    // Settings → Features: the module opts out of the "Not installed" row.
+    expect(doors.listedWhenUnavailable).toBe(false);
+    // No nav entry, and no preset switches it on.
+    expect(doors.navHrefs).toEqual([]);
+    // /tools, /api/llm/tools and MCP tools/list are all built from the tools-core
+    // registry and catalog. P4a ships no doors tool and no doors domain, so there
+    // is nothing for any of them to list; P4b, which adds the tools, replaces this
+    // pin with the module gate that hides them.
+    expect(doors.toolDomains).toEqual([]);
+    expect([...TOOLS.keys()].filter((n) => n.startsWith("doors_"))).toEqual([]);
+    expect(TOOL_CATALOG.filter((e) => e.name.startsWith("doors_") || (e.domain as string) === "doors")).toEqual([]);
+  });
+
   it("the registry's own `available` is the only thing that reads the flag (no second derivation)", () => {
     const doors = MODULE_BY_ID.get("doors" as ModuleId)!;
     expect(doors.available(REGISTRY_CFG(false))).toBe(false);

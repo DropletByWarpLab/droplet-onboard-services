@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ModuleId } from "@prisma/client";
-import { computeModuleStates, computeEffectiveIds, setModuleEnabled } from "./modules.service.js";
-import type { AvailabilityConfig } from "../modules/module-registry.js";
+import { applyBusinessType, computeModuleStates, computeEffectiveIds, getModulesView, setModuleEnabled } from "./modules.service.js";
+import { MODULES, type AvailabilityConfig } from "../modules/module-registry.js";
 
 /** Config where every availability signal is satisfied. */
 const ALL_AVAILABLE: AvailabilityConfig = {
@@ -195,5 +195,54 @@ describe("setModuleEnabled re-derives instead of answering locally", () => {
       "owner",
     );
     expect(row).toMatchObject({ id: "files", enabled: false, effective: false });
+  });
+});
+
+// ── ADR-055 — a module the box does not have is ABSENT, not "Not installed" ──
+describe("getModulesView lists an unavailable module only when it says so (ADR-055)", () => {
+  const OFF: AvailabilityConfig = { ...ALL_AVAILABLE, DOORS_ENABLED: "0" };
+  /** Enough prisma for the read path: the stored toggles and the workspace singleton. */
+  const prismaWith = (rows: Array<[ModuleId, boolean]> = []) =>
+    ({
+      moduleSetting: { findMany: async () => rows.map(([moduleId, enabled]) => ({ moduleId, enabled })) },
+      workspace: { findUnique: async () => null },
+    }) as never;
+  const ids = (view: { modules: Array<{ id: string }> }) => view.modules.map((m) => m.id);
+
+  it("with DOORS_ENABLED off, doors is not in the view at all", async () => {
+    expect(ids(await getModulesView(prismaWith(), OFF))).not.toContain("doors");
+  });
+
+  it("with DOORS_ENABLED on, doors is listed, available, and off until an operator turns it on", async () => {
+    const view = await getModulesView(prismaWith(), ALL_AVAILABLE);
+    expect(view.modules.find((m) => m.id === "doors")).toMatchObject({ available: true, enabled: false, effective: false });
+  });
+
+  it("a stored `enabled: true` row does not bring an absent module back", async () => {
+    expect(ids(await getModulesView(prismaWith([["doors", true]]), OFF))).not.toContain("doors");
+  });
+
+  it("every other unavailable module keeps its row, so the operator still reads 'Not installed'", async () => {
+    // email and smart_home are unavailable here (no service token / Matter URL).
+    const noEmail: AvailabilityConfig = { ...OFF, SERVICE_TOKEN_EMAIL: "", DROPLET_MATTER_SERVICE_URL: "" };
+    const view = await getModulesView(prismaWith(), noEmail);
+    expect(view.modules.find((m) => m.id === "email")).toMatchObject({ available: false });
+    expect(view.modules.find((m) => m.id === "smart_home")).toMatchObject({ available: false });
+    // Nothing but doors is dropped: the view is the registry minus that one id.
+    expect(ids(view).sort()).toEqual(MODULES.map((m) => m.id).filter((id) => id !== "doors").sort());
+  });
+
+  it("the same answer comes back from applying a business type", async () => {
+    const prisma = {
+      moduleSetting: { findMany: async () => [], upsert: async () => ({}) },
+      workspace: { findUnique: async () => null, upsert: async () => ({}) },
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ moduleSetting: { upsert: async () => ({}) }, workspace: { upsert: async () => ({}) } }),
+    } as never;
+    expect(ids(await applyBusinessType(prisma, OFF, "custom", "owner"))).not.toContain("doors");
+  });
+
+  it("the flag is explicit on the module, and doors is the only module that sets it false", () => {
+    expect(MODULES.filter((m) => m.listedWhenUnavailable === false).map((m) => m.id)).toEqual(["doors"]);
   });
 });

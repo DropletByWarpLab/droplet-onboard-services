@@ -91,6 +91,23 @@ export interface ModuleDef {
   ownedPaths?: string[];
   /** Fallback enablement when there's no ModuleSetting row and no preset applied. */
   defaultEnabled: boolean;
+  /**
+   * ADR-055 — does Settings → Features still list this module on a box where it
+   * is NOT available? `true` (what a module that leaves the field out gets) keeps
+   * the greyed "Not installed on this Droplet" row that tells an operator the
+   * capability exists. `false` makes the module ABSENT until `available` is true
+   * — no row at all — for a module whose existence is not yet something
+   * customers are offered (doors ships dark while AC-001, product line or
+   * feature, is undecided).
+   *
+   * An explicit flag, never derived: "unavailable" says the backend is not
+   * deployed, and "not listed" says the product is not on offer. Those are two
+   * facts, and the second is a decision someone makes per module, not something
+   * to be inferred from the first or from the module's id. It filters the
+   * operator's VIEW only (`getModulesView`); effectiveness, gates and the
+   * toggle's own rejection still read `available`.
+   */
+  listedWhenUnavailable?: boolean;
   /** Availability signal, reusing the existing deploy-time config reads. NOTE:
    *  modules gated only by a URL with a non-empty default (files/cameras/network/
    *  switch/knowledge) read as always-available in v1 — a health-probe refinement
@@ -309,8 +326,8 @@ export const MODULES: readonly ModuleDef[] = [
     // SHIPS DARK. `available` reads DOORS_ENABLED, an EXPLICIT boolean (the
     // DOCS_ENABLED idiom — never derived from another variable's emptiness),
     // so a box that has not turned it on has NO doors module: /api/doors 404s
-    // `module_disabled` and the module cannot be switched on in Settings.
-    // Absent, not empty.
+    // `module_disabled`, the module cannot be switched on in Settings, and it
+    // is not listed under Features. Absent, not empty.
     //
     // `navHrefs: []` — there is no dashboard page until P4b, and a nav entry
     // pointing at nothing would be worse than none (the `docs` / `contacts`
@@ -322,6 +339,9 @@ export const MODULES: readonly ModuleDef[] = [
     description: "The doors this box knows about, and the log of what happened at them.",
     category: "operations", routePrefixes: ["/api/doors"], navHrefs: [],
     toolDomains: [], core: false, defaultEnabled: false,
+    // Absent from Settings → Features while the flag is off: a product decision
+    // still open (AC-001) is not shown to a customer who was not offered it.
+    listedWhenUnavailable: false,
     available: (c) => isTruthy(c.DOORS_ENABLED),
   },
   {
