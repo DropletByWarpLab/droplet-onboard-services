@@ -28,6 +28,7 @@ A workspace leaves the box only as a `git bundle` an owner downloads
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -36,9 +37,10 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 REPOS_DIR = Path(os.getenv("SANDBOX_REPOS_DIR", "/var/lib/workspace-git"))
 WORK_DIR = Path(os.getenv("SANDBOX_WORK_DIR", "/var/lib/workspace"))
@@ -374,10 +376,23 @@ def _qualified(ref: str) -> str:
     return f"refs/heads/{ref}" if ref == WORK_BRANCH else f"refs/tags/{ref}"
 
 
-def _git_stdout_capped(args: list[str], cwd: Path, cap: int, timeout: int) -> bytes:
-    """git's stdout, read as it streams: the child is killed the moment it
-    passes `cap` bytes (413) or `timeout` seconds (504), so an oversized
-    export is never held whole in the sandbox's memory."""
+class BuiltBundle:
+    """An export spooled to an unnamed file: the caller owns `file` (read it,
+    then close it). `size` and `sha256` were taken as the bytes were written."""
+
+    def __init__(self, file: Any, head: str, size: int, sha256: str) -> None:
+        self.file = file
+        self.head = head
+        self.size = size
+        self.sha256 = sha256
+
+
+def _git_stdout_spooled(args: list[str], cwd: Path, cap: int, timeout: int) -> tuple[Any, int, str]:
+    """git's stdout, written as it streams to an unnamed file on the checkouts
+    volume (never /tmp: a run's HOME, and a small tmpfs) and hashed on the way
+    in. The child is killed the moment it passes `cap` bytes (413), `timeout`
+    seconds (504) or the spool cannot be written (500); the spool is closed on
+    every failure. Returns (file rewound to 0, size, sha256)."""
     proc = subprocess.Popen(
         ["git", *args], cwd=str(cwd), env=dict(GIT_ENV), stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
@@ -392,9 +407,12 @@ def _git_stdout_capped(args: list[str], cwd: Path, cap: int, timeout: int) -> by
 
     timer = threading.Timer(timeout, _expire)
     timer.start()
-    chunks: list[bytes] = []
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    spool = tempfile.TemporaryFile(dir=WORK_DIR)
+    digest = hashlib.sha256()
     total = 0
     over = False
+    spool_error: OSError | None = None
     try:
         assert proc.stdout is not None
         while chunk := proc.stdout.read(65_536):
@@ -403,53 +421,73 @@ def _git_stdout_capped(args: list[str], cwd: Path, cap: int, timeout: int) -> by
                 over = True
                 proc.kill()
                 break
-            chunks.append(chunk)
+            try:
+                spool.write(chunk)
+            except OSError as e:
+                spool_error = e
+                proc.kill()
+                break
+            digest.update(chunk)
+    except BaseException:
+        spool.close()
+        proc.kill()
+        raise
     finally:
         timer.cancel()
         returncode = proc.wait()
         drain.join(timeout=5)
-    if over:
-        raise StoreError(413, f"the workspace exceeds the {cap // (1024 * 1024)} MB export ceiling")
-    if expired.is_set():
-        raise StoreError(504, "the export took too long")
-    if returncode != 0:
-        lines = b"".join(stderr).decode("utf-8", "replace").strip().splitlines()
-        raise StoreError(500, f"bundle: {(lines[-1] if lines else f'exit {returncode}')[:200]}")
-    return b"".join(chunks)
+    try:
+        if over:
+            raise StoreError(413, f"the workspace exceeds the {cap // (1024 * 1024)} MB export ceiling")
+        if spool_error is not None:
+            raise StoreError(500, f"bundle: could not write the export spool: {spool_error.strerror or spool_error}"[:200])
+        if expired.is_set():
+            raise StoreError(504, "the export took too long")
+        if returncode != 0:
+            lines = b"".join(stderr).decode("utf-8", "replace").strip().splitlines()
+            raise StoreError(500, f"bundle: {(lines[-1] if lines else f'exit {returncode}')[:200]}")
+        spool.flush()
+        spool.seek(0)
+    except BaseException:
+        spool.close()
+        raise
+    return spool, total, digest.hexdigest()
 
 
-def bundle(workspace_id: str) -> tuple[bytes, str]:
+def bundle(workspace_id: str) -> BuiltBundle:
     """The workspace as a `git bundle`: the `work` branch, every proposal/*
     tag, and HEAD when it names `work` — nothing else a /git push may have
-    left in the bare repo. Built from the local bare repo and returned on
-    stdout — no temp file for a run child (same UID, HOME=/tmp) to swap.
-    Returns the bytes and the head of `work`."""
+    left in the bare repo. Built from the local bare repo and spooled to an
+    unnamed file (no directory entry for a run child, same UID, to swap).
+    The caller closes `.file`."""
     bare = _bare_or_404(workspace_id)
     head = must(git(["rev-parse", f"refs/heads/{WORK_BRANCH}"], bare), "rev-parse").stdout.strip()
     tags = must(git(["for-each-ref", "--format=%(refname)", "refs/tags/proposal/"], bare), "list proposals").stdout.split()
     refs = [f"refs/heads/{WORK_BRANCH}", *tags]
     if git(["symbolic-ref", "-q", "HEAD"], bare).stdout.strip() == f"refs/heads/{WORK_BRANCH}":
         refs.insert(0, "HEAD")
-    body = _git_stdout_capped(["bundle", "create", "-", *refs], bare, MAX_BUNDLE_BYTES, BUNDLE_TIMEOUT_S)
-    return body, head
+    spool, size, sha256 = _git_stdout_spooled(["bundle", "create", "-", *refs], bare, MAX_BUNDLE_BYTES, BUNDLE_TIMEOUT_S)
+    return BuiltBundle(spool, head, size, sha256)
 
 
-def ref_exists(workspace_id: str, ref: str) -> bool:
+def reader_at(workspace_id: str, ref: str) -> Callable[[str], str | None]:
+    """A reader of the bare repo at `ref` (work, or a proposal tag). The ref is
+    resolved ONCE, to a commit id, so every read is at that commit even if
+    `work` moves. read(path) is the file's text, or None when the path is not
+    there. 404 for an unknown workspace or ref."""
     bare = _bare_or_404(workspace_id)
-    return git(["rev-parse", "-q", "--verify", f"{_qualified(ref)}^{{commit}}"], bare).returncode == 0
-
-
-def show_at(workspace_id: str, ref: str, path: str) -> str | None:
-    """One file of the bare repo at `ref` (work, or a proposal tag), or None
-    when the path is not there. 404 for an unknown workspace or ref."""
-    bare = _bare_or_404(workspace_id)
-    qualified = _qualified(ref)
-    if not ref_exists(workspace_id, ref):
+    cp = git(["rev-parse", "-q", "--verify", f"{_qualified(ref)}^{{commit}}"], bare)
+    commit = cp.stdout.strip()
+    if cp.returncode != 0 or not commit:
         raise StoreError(404, f"no {ref} in workspace {workspace_id}")
-    cp = git(["cat-file", "blob", f"{qualified}:{path}"], bare, binary=True)
-    if cp.returncode != 0:
-        return None
-    return cp.stdout[:MAX_SHOW_BYTES].decode("utf-8", "replace")
+
+    def read(path: str) -> str | None:
+        blob = git(["cat-file", "blob", f"{commit}:{path}"], bare, binary=True)
+        if blob.returncode != 0:
+            return None
+        return blob.stdout[:MAX_SHOW_BYTES].decode("utf-8", "replace")
+
+    return read
 
 
 def delete_workspace(workspace_id: str) -> bool:
