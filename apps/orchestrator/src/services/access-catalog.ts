@@ -108,6 +108,23 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "admin" },
   ],
+  // ADR-055 (P4a). `view` only — deliberately no `act` or `manage` rung. §11.4:
+  // door authority is the OWNER's, "not admin", and does not inherit the rank
+  // ladder that lets an admin escalate on some update paths. Every write route
+  // floors at `owner` (routes/doors.ts) and an owner holds every catalog level
+  // through the §3 bypass, so a `manage` rung could only advertise a
+  // permission that no one but the owner may use. Add one when there is a
+  // door-group grant for it to mean something (AC-017).
+  //
+  // The `view` floor is `admin`, not `family`: with no per-door-group grants
+  // yet (§11.4 — out of scope, they depend on AC-017) the module's own grant
+  // is the ONLY narrowing, and access logs identify people entering places at
+  // times. Default-deny until a narrower grant exists; widening is this one
+  // line and the router's role list. (`view` is never enforced from here —
+  // the floor is documentation the routes back with `requireRole`.)
+  doors: [
+    { level: "view", minTier: "admin" },
+  ],
   smart_home: [
     { level: "view" },
     { level: "act", minTier: "family" },

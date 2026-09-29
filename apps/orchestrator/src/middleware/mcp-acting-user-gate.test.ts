@@ -393,6 +393,8 @@ const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   email: [],
   // WARP-3162: every team_chat hop is under /api/team-chat.
   team_chat: [],
+  // ADR-055: every doors hop is under /api/doors.
+  doors: [],
 };
 
 describe("mcp acting-user gate — the route manifest agrees with it", () => {

@@ -28,6 +28,7 @@ export interface AvailabilityConfig {
   DROPLET_MATTER_SERVICE_URL: string;
   ROUTING_SERVICE_URL: string;
   SWITCH_SERVICE_URL: string;
+  DOORS_ENABLED: unknown; // ADR-055 — string "1"/"true"/… or boolean, normalized by isTruthy
 }
 
 const isSet = (v: string | undefined | null): boolean => !!(v && v.trim().length > 0);
@@ -299,6 +300,29 @@ export const MODULES: readonly ModuleDef[] = [
     category: "operations", routePrefixes: ["/api/security"], navHrefs: ["/security"],
     toolDomains: [], core: false, defaultEnabled: false,
     available: () => true, // native to the orchestrator; threats need no camera
+  },
+  {
+    // ADR-055 (P4a) — doors: the access points a box knows about and the
+    // append-only log of what happened at them. Named `doors`, never `access`:
+    // /api/access, routes/access.ts and lib/access.ts are ADR-032's RBAC.
+    //
+    // SHIPS DARK. `available` reads DOORS_ENABLED, an EXPLICIT boolean (the
+    // DOCS_ENABLED idiom — never derived from another variable's emptiness),
+    // so a box that has not turned it on has NO doors module: /api/doors 404s
+    // `module_disabled`, the module cannot be switched on in Settings, and the
+    // `doors` tool domain reaches nobody who holds a role. Absent, not empty.
+    //
+    // `navHrefs: []` — there is no dashboard page until P4b, and a nav entry
+    // pointing at nothing would be worse than none (the `docs` / `contacts`
+    // shape). It is in no BUSINESS_TYPES preset for the same reason.
+    //
+    // The `doors` tool domain is claimed in the same change that adds its two
+    // read-only tools — never left unclaimed (WARP-2742).
+    id: "doors", label: "Doors",
+    description: "The doors this box knows about, and the log of what happened at them.",
+    category: "operations", routePrefixes: ["/api/doors"], navHrefs: [],
+    toolDomains: ["doors"], core: false, defaultEnabled: false,
+    available: (c) => isTruthy(c.DOORS_ENABLED),
   },
   {
     id: "smart_home", label: "Devices",

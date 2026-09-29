@@ -23,6 +23,7 @@ import {
   isGrantableDomain,
   tierReachableDomains,
   FEATURE_UNGATED_TOOL_DOMAINS,
+  OWNERS_BY_DOMAIN,
   unmappedToolDomains,
 } from "./access-catalog.js";
 import { toolLayers } from "./tool-layers.service.js";
@@ -30,10 +31,10 @@ import { MODULES } from "../modules/module-registry.js";
 
 describe("access-catalog — module vocabulary", () => {
   // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
-  // WARP-2581 added `money` for 15; WARP-2977 added `security` for 16. The
-  // list is pinned so a new ModuleId cannot arrive without someone writing its
+  // WARP-2581 added `money` for 15; WARP-2977 added `security` for 16;
+  // ADR-055 added `doors` for 17. The list is pinned so a new ModuleId cannot arrive without someone writing its
   // §9 ladder — which is exactly what this test caught each time they did.
-  it("gates the 16 non-core ModuleIds; chat is the always-on module at act", () => {
+  it("gates the 17 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
@@ -41,6 +42,7 @@ describe("access-catalog — module vocabulary", () => {
         "contacts",
         "crm",
         "docs",
+        "doors",
         "email",
         "files",
         "knowledge",
@@ -80,12 +82,19 @@ describe("access-catalog — §9 floor ceilings per tier", () => {
     expect(maxLevelFor("family", "managed_switch")).toBe("view");
   });
 
-  it("admin (and owner) ceiling is each module's own top level (manage everywhere except team_chat)", () => {
+  it("admin (and owner) ceiling is each module's own top level (manage everywhere except team_chat and doors)", () => {
     for (const moduleId of GATEABLE_MODULE_IDS) {
       // WARP-1683: team_chat tops out at `act` BY DESIGN — v1 has no admin
       // surface, and a `manage` level that gates nothing would be a lie in
       // the roles UI. Every other module still ceilings at manage.
-      const top = moduleId === "team_chat" ? "act" : "manage";
+      //
+      // ADR-055: doors tops out at `view` for the SAME reason, and a second
+      // one. Its write routes floor at `owner` (§11.4: "not admin"), and an
+      // owner holds every level through the §3 bypass, so a `manage` rung
+      // would be a grant an admin-based role could be given and could never
+      // use — the inert stored grant clampConnectorLevel's comment refuses.
+      // Pinned exactly (not "anything below manage") in the doors block below.
+      const top = moduleId === "team_chat" ? "act" : moduleId === "doors" ? "view" : "manage";
       expect(maxLevelFor("admin", moduleId), moduleId).toBe(top);
       expect(maxLevelFor("owner", moduleId), moduleId).toBe(top);
     }
@@ -392,5 +401,24 @@ describe("access-catalog — connector floors (O-2)", () => {
 
   it("service principals hold none either — they never resolve through layer 2 (§3)", () => {
     expect(clampConnectorLevel("service", "read_write")).toBeNull();
+  });
+});
+
+describe("access-catalog — doors (ADR-055)", () => {
+  it("offers `view` and nothing above it: door writes are owner-only (§11.4), so no grant level can widen them", () => {
+    // Door authority does not get to inherit the rank ladder that lets an
+    // admin escalate on some update paths. The write routes floor at
+    // `owner` (routes/doors.ts) and owners hold every catalog level through
+    // the §3 bypass, so a `manage` rung would only ever advertise a
+    // permission no non-owner can use.
+    for (const tier of ["owner", "admin", "family", "guest"] as const) {
+      expect(maxLevelFor(tier, "doors"), tier).toBe("view");
+      expect(clampLevel(tier, "doors", "manage"), tier).toBe("view");
+      expect(clampLevel(tier, "doors", "act"), tier).toBe("view");
+    }
+  });
+
+  it("is claimed by exactly one module, and that module is `doors`", () => {
+    expect(OWNERS_BY_DOMAIN.get("doors")).toEqual(["doors"]);
   });
 });

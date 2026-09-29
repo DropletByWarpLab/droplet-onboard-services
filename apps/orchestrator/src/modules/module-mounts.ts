@@ -118,6 +118,10 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   // WARP-2977 (ADR-059 §6) — gated from the day it exists, so a custom role
   // narrowed away from Security never reaches `/api/security`.
   "security",
+  // ADR-055 (P4a) — gated from the day it exists, exactly as `security` was:
+  // a role narrowed away from Doors never reaches `/api/doors`. `/api/doors`
+  // nests inside no other module's prefix, so `gateScopeFor` is null for it.
+  "doors",
 ]);
 
 /**
@@ -216,6 +220,14 @@ export function mountModuleGates(
  * prefix. The email module is not feature-gated for humans, so the gate asks
  * question 1 only, and browser sessions are untouched.
  *
+ * `doors` (ADR-055 P4a): `doors_list` and `doors_recent_events` reach
+ * routes/doors.ts as `_service:mcp`, and access logs identify people entering
+ * places at times, so the assistant must never read more than the person it
+ * acts for could. Both tools are reads and every `doors` hop is under
+ * `/api/doors` (the same test pins it). The `doors` module IS feature-gated for
+ * humans, so the gate asks question 2 (the person's `doors` grant) as well.
+ * There is no write hop to gate — the write routes admit no service principal
+ * at all (§11.5) — and `everyToolWrites` is false because the domain has reads.
  * `team_chat` (WARP-3162): `team_chat_send_message` and
  * `team_chat_send_meeting_invite` reach routes/team-chat.ts as `_service:mcp`,
  * and the route resolves the acting person for thread membership but never
@@ -226,7 +238,7 @@ export function mountModuleGates(
  * `team_chat` module is not feature-gated for humans, so the gate asks question
  * 1 only, and browser sessions are untouched.
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat"];
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "doors"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(

@@ -30,6 +30,7 @@ export const ALL_AVAILABLE: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
   ROUTING_SERVICE_URL: "http://routing:8080",
   SWITCH_SERVICE_URL: "http://switch:8081",
+  DOORS_ENABLED: "1",
 };
 
 /** A minimal box: only the always-defaulted URLs; empty tokens/flags. */
@@ -40,6 +41,7 @@ export const MINIMAL: AvailabilityConfig = {
   SERVICE_TOKEN_EMAIL: "",
   SERVICE_TOKEN_VOICE: "",
   DROPLET_MATTER_SERVICE_URL: "",
+  DOORS_ENABLED: "0",
 };
 
 describe("module registry — catalog integrity", () => {
@@ -359,5 +361,52 @@ describe("availability signals", () => {
   it("docs requires BOTH the flag and the internal URL", () => {
     expect(avail("docs", { ...ALL_AVAILABLE, DOCS_ENABLED: "1", DOCS_INTERNAL_URL: "" })).toBe(false);
     expect(avail("docs", { ...ALL_AVAILABLE, DOCS_ENABLED: "0", DOCS_INTERNAL_URL: "http://d" })).toBe(false);
+  });
+});
+
+describe("doors module — ADR-055 (ships dark)", () => {
+  const doors = () => MODULE_BY_ID.get("doors" as never)!;
+  const avail = (cfg: AvailabilityConfig) => doors().available(cfg);
+
+  it("is registered as `doors` — never `access`, which is ADR-032's RBAC", () => {
+    expect(doors()).toBeDefined();
+    expect(doors().routePrefixes).toEqual(["/api/doors"]);
+    expect(doors().toolDomains).toEqual(["doors"]);
+    expect(MODULES.some((m) => (m.id as string) === "access")).toBe(false);
+    for (const m of MODULES) {
+      for (const p of m.routePrefixes) expect(p).not.toBe("/api/access");
+    }
+  });
+
+  it("is off by default and needs no dashboard page yet", () => {
+    expect(doors().defaultEnabled).toBe(false);
+    expect(doors().core).toBe(false);
+    // P4b adds /doors. Until then a nav entry would point at nothing.
+    expect(doors().navHrefs).toEqual([]);
+  });
+
+  it("is ABSENT when DOORS_ENABLED is off, and present when it is on", () => {
+    expect(avail(MINIMAL)).toBe(false);
+    expect(avail(ALL_AVAILABLE)).toBe(true);
+    expect(avail({ ...ALL_AVAILABLE, DOORS_ENABLED: "0" })).toBe(false);
+    expect(avail({ ...ALL_AVAILABLE, DOORS_ENABLED: "" })).toBe(false);
+    // config.ts hands the module a boolean, the tests a string; both work.
+    expect(avail({ ...ALL_AVAILABLE, DOORS_ENABLED: true })).toBe(true);
+    expect(avail({ ...ALL_AVAILABLE, DOORS_ENABLED: false })).toBe(false);
+  });
+
+  it("is never derived from another variable: every other signal satisfied and the flag off is still absent", () => {
+    // The DOCS_ENABLED rule (CLAUDE.md, ENVIRONMENT.md): explicit, not inferred.
+    const everythingElse: AvailabilityConfig = { ...ALL_AVAILABLE, DOORS_ENABLED: "0" };
+    expect(avail(everythingElse)).toBe(false);
+    // And the flag alone is enough: nothing else has to be set.
+    const flagOnly: AvailabilityConfig = { ...MINIMAL, DOORS_ENABLED: "1" };
+    expect(avail(flagOnly)).toBe(true);
+  });
+
+  it("is in no business-type preset: a dark module is not switched on by a preset", () => {
+    for (const bt of BUSINESS_TYPES) {
+      expect(bt.modules as readonly string[], `${bt.id} preset`).not.toContain("doors");
+    }
   });
 });
