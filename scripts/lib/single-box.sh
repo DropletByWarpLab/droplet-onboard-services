@@ -1722,12 +1722,23 @@ EOF
   # left behind. Gated on a framebuffer existing AND no PyPortal on USB, so a
   # real PyPortal box still auto-probes exactly as before.
   # Test/dev hooks (so the detection is unit-testable without a real panel):
-  #   DROPLET_FB_DEV   override the framebuffer device probed  (default /dev/fb0)
+  #   DROPLET_FB_DEV   override the framebuffer device probed
+  #                    (default: FB_DEVICE from .env, else /dev/fb0)
   #   DROPLET_FB_SIZE  override the virtual_size sysfs file
+  #   DROPLET_FB_SYSFS override the sysfs class dir (default /sys/class/graphics)
   #   DROPLET_USB_TTY  override the PyPortal USB glob prefix
-  local _fb_dev _fb_sizefile _usb_glob
-  _fb_dev="${DROPLET_FB_DEV:-/dev/fb0}"
-  _fb_sizefile="${DROPLET_FB_SIZE:-/sys/class/graphics/fb0/virtual_size}"
+  #
+  # Probe the operator's FB_DEVICE, not a hard-wired fb0 — WARP-2128. The
+  # runtime (services/oled-display/fb.py `_open_or_raise`) opens FB_DEVICE and
+  # reads its size from /sys/class/graphics/<basename FB_DEVICE>/virtual_size.
+  # Reading fb0 here instead would, on a Vault whose GPU exposes a console fbdev
+  # (fb0 = the 1920x1080 console, the panel on fb1), overwrite LCD_WIDTH /
+  # LCD_HEIGHT with the console's size on every run: the crop, re-created.
+  # An empty FB_DEVICE= counts as unset, as in compose's ${FB_DEVICE:-/dev/fb0}.
+  local _fb_dev _fb_sizefile _usb_glob _current_fb_device
+  _current_fb_device="$( { grep -E '^FB_DEVICE=' "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
+  _fb_dev="${DROPLET_FB_DEV:-${_current_fb_device:-/dev/fb0}}"
+  _fb_sizefile="${DROPLET_FB_SIZE:-${DROPLET_FB_SYSFS:-/sys/class/graphics}/$(basename "$_fb_dev")/virtual_size}"
   _usb_glob="${DROPLET_USB_TTY:-/dev/tty}"
   local _current_display_backend
   _current_display_backend="$( { grep -E '^DISPLAY_BACKEND=' "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
