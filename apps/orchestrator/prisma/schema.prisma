@@ -4746,6 +4746,15 @@ model Workspace {
   /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
   /// the org step is NOT skippable.
   orgConfigured     Boolean       @default(false)
+  /// Owner setting, OFF by default: may owner/admin/family map their own
+  /// drive in Finder / File Explorer (POST /api/storage/network-drive/personal
+  /// mints a per-user Nextcloud app password)? EXPLICIT boolean, never derived
+  /// from the presence of DeviceClient rows or a role (CLAUDE.md no-guessing
+  /// rule; same discipline as `orgConfigured` above). Written only by the
+  /// owner-only PUT /api/settings/workspace/personal-drive; readable by any
+  /// signed-in user through GET /api/settings/workspace so the dialog can say
+  /// why the drive is unavailable. See docs/network-drive.md.
+  personalDriveEnabled Boolean       @default(false)
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.
   setBy             String?

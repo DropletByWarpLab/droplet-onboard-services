@@ -15,8 +15,9 @@ Files written from the desktop appear in the web dashboard's Files UI (and
 vice versa) — both surfaces are views of the same tree.
 
 The dashboard renders all of this for the customer: **Files → Connect
-drive** (owner/admin only) shows the two addresses, the username, and the
-password with copy buttons.
+drive** shows the two addresses, the username, and the password with copy
+buttons (owner/admin only), plus each user's own drive login when the owner
+has turned personal drives on (see "Per-user drive (WebDAV)" below).
 
 ## How it fits together
 
@@ -64,7 +65,7 @@ Four pieces, all provisioned by `./scripts/setup.sh`:
   the rest of Nextcloud are *not* exposed over SMB. Because the credential is
   device-wide (no per-user permissions on the wire), the orchestrator's
   `GET /api/storage/network-drive` is `requireRole("owner", "admin")` and the
-  dashboard hides the "Connect drive" button from family/guest sessions.
+  dashboard hides the shared-folder section from family/guest sessions.
   Per-user SMB accounts mapped to Nextcloud identities are the natural
   follow-up if per-user permissions over SMB are ever needed.
 - **LAN-only.** smbd binds the host on the Vault's LAN; nothing crosses the
@@ -82,13 +83,27 @@ Four pieces, all provisioned by `./scripts/setup.sh`:
 
 ## Per-user drive (WebDAV)
 
-The SMB share above is one device-wide login for the shared folder. Every
-Droplet user (owner, admin, family, guest — not `service`) can also map
-**their own** drive: Nextcloud's WebDAV endpoint, authenticated as that user.
+The SMB share above is one device-wide login for the shared folder. Owners,
+admins and family members (not guests, not `service`) can also map **their
+own** drive: Nextcloud's WebDAV endpoint, authenticated as that user.
 Nextcloud's own ACLs apply — a user sees only their My Files, Household and
 the department folders whose Nextcloud group they are in — but the drive
 talks to Nextcloud directly, so the controls only the orchestrator enforces
 do **not** apply (see "What the drive does not enforce" below).
+
+**Owner setting, off by default.** Personal drives only work once the owner
+turns on **Settings -> Personal drives**. The setting is the explicit boolean
+`Workspace.personalDriveEnabled` (default `false`, singleton row `id = 1`).
+Only the owner may change it (`PUT /api/settings/workspace/personal-drive`,
+body `{ "enabled": boolean }`; admins get `403 owner_required`); any signed-in
+user can read it as `personalDriveEnabled` in `GET /api/settings/workspace`,
+which is how the dialog knows to show "Personal drives aren't turned on for
+this Droplet" instead of the create button. Every change is an Activity row.
+While it is off, the POST below answers `403 {"error":"personal_drive_disabled"}`
+and mints nothing. Turning it off stops *new* logins only: app passwords
+already created keep working until their owner removes them from the devices
+list. The setting's copy tells the owner that drive access skips the download
+audit and the per-file upload limit.
 
 **Flow.** Files page -> Connect as a network drive -> "Your drive" -> pick Mac
 or Windows -> "Create my drive login". The orchestrator mints a per-device
@@ -110,7 +125,7 @@ to sign in with their password once. Rate limit: 10 logins per user per hour.
 which call it to map the drive automatically):
 
 ```
-POST /api/storage/network-drive/personal      (session auth; owner|admin|family|guest)
+POST /api/storage/network-drive/personal      (session auth; owner|admin|family)
 { "platform": "macos" | "windows", "computerName"?: string /* 1-60 chars */ }
 
 200 {
@@ -121,7 +136,8 @@ POST /api/storage/network-drive/personal      (session auth; owner|admin|family|
   "macosUrl":    "https://<host>/nextcloud/remote.php/dav/files/<uid>/",
   "windowsPath": "\\\\<host>@SSL\\nextcloud\\remote.php\\dav\\files\\<uid>"
 }
-400 invalid body | 403 role not permitted | 409 nc_credential_unavailable
+400 invalid body | 403 role not permitted (guest, service)
+403 personal_drive_disabled (owner setting is off) | 409 nc_credential_unavailable
 429 rate limited | 502 Nextcloud refused to mint
 ```
 
@@ -130,25 +146,29 @@ A non-443 port is emitted as `<host>@SSL@<port>` in `windowsPath`.
 
 **What the drive does not enforce.** Everything below is enforced by the
 orchestrator's Files API (`routes/files.ts`) and not by Nextcloud, so a
-Finder/Explorer mount bypasses it:
+Finder/Explorer mount bypasses it. These two remain documented gaps:
 
 - **Download audit.** The Files API records a "File downloaded" Activity
-  row; files read or copied out over WebDAV leave none.
+  row; files opened or copied out over WebDAV leave none.
 - **Per-file upload size cap.** `UserUsagePolicy.maxUploadSizeMb`
   (WARP-1271) is checked only on Files API uploads. The *storage quota* is
   different: the usage-policy reconciler pushes it into Nextcloud, so it
   still applies to WebDAV writes.
-- **Department manager bit and share policy.** Contributor and manager are
-  the same Nextcloud group (`dept-<slug>`); the manager-only rights are
-  orchestrator policy (`department-membership.service.ts`). The app password
-  also works against Nextcloud's OCS sharing API, so any user Nextcloud lets
-  share — guests included, unless their group is restricted in Nextcloud —
-  can create shares and public links without the manager check or the
-  WARP-3053 rule that only owners/admins publish Workspace files.
 
-Opening this to every role is a deliberate product decision that needs
-security sign-off; narrowing it (dropping `guest`, or an owner setting that
-is off by default) is the fallback if that sign-off is not given.
+**Sharing is closed at the gateway.** An app password is full-scope and would
+also work against Nextcloud's OCS sharing API, letting any user mint shares
+and public links without the department manager check or the WARP-3053 rule
+that only owners/admins publish Workspace files. The gateway therefore
+answers 403 for `/nextcloud/ocs/v1.php/apps/files_sharing` and
+`/nextcloud/ocs/v2.php/apps/files_sharing` (any suffix, any method) before
+proxying (`docker/nginx/nginx.conf`, pinned by
+`tests/nginx-nextcloud-assets.test.sh` Phase 7; `docs/THREAT_MODEL.md` §3a).
+That covers every app password, including the ones device pairing mints. The
+web app's own sharing is unaffected: the orchestrator reaches Nextcloud over
+the compose network (`NEXTCLOUD_URL`), not through the gateway. Contributor and
+manager are the same Nextcloud group (`dept-<slug>`), so the department
+manager check and the WARP-3053 share rule are orchestrator policy; with
+sharing closed here, a mounted drive can no longer sidestep either.
 
 **Known limits.**
 

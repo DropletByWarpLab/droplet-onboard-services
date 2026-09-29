@@ -1,6 +1,8 @@
 /**
  * POST /api/storage/network-drive/personal — per-user WebDAV drive login for
  * Finder / File Explorer (docs/network-drive.md "Per-user drive (WebDAV)").
+ * Owner/admin/family only, and only while the owner has turned personal
+ * drives on (`Workspace.personalDriveEnabled`, default off).
  *
  * Real config (default trusted origin https://droplet-ai.local); Nextcloud,
  * cache, crypto, MQTT and push are stubbed like device-clients.routes.test.ts.
@@ -11,6 +13,7 @@ import request from "supertest";
 
 const mockPrisma = {
   deviceClient: { create: vi.fn() },
+  workspace: { findUnique: vi.fn() },
 };
 
 vi.mock("../services/nextcloud.client.js", () => ({
@@ -85,6 +88,7 @@ beforeEach(() => {
   mockNcDelete.mockResolvedValue(undefined as never);
   mockCacheGet.mockResolvedValue(undefined as never);
   mockPrisma.deviceClient.create.mockResolvedValue({ id: "dc-1" });
+  mockPrisma.workspace.findUnique.mockResolvedValue({ personalDriveEnabled: true });
 });
 
 describe("POST /api/storage/network-drive/personal", () => {
@@ -131,7 +135,7 @@ describe("POST /api/storage/network-drive/personal", () => {
   });
 
   it("defaults the device name per platform", async () => {
-    await request(makeApp("guest")).post(URL_PATH).send({ platform: "windows" });
+    await request(makeApp("family")).post(URL_PATH).send({ platform: "windows" });
     expect(mockPrisma.deviceClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         deviceName: "File Explorer on My PC",
@@ -140,16 +144,51 @@ describe("POST /api/storage/network-drive/personal", () => {
     });
   });
 
-  it.each(["owner", "admin", "family", "guest"])("allows %s", async (role) => {
+  it.each(["owner", "admin", "family"])("allows %s when personal drives are on", async (role) => {
     const res = await request(makeApp(role)).post(URL_PATH).send({ platform: "macos" });
     expect(res.status).toBe(200);
   });
 
-  it("403s the service role without minting anything", async () => {
-    const res = await request(makeApp("service"))
-      .post(URL_PATH)
-      .send({ platform: "macos" });
+  it.each(["guest", "service"])("403s %s without minting anything", async (role) => {
+    const res = await request(makeApp(role)).post(URL_PATH).send({ platform: "macos" });
     expect(res.status).toBe(403);
+    expect(mockNcGenerate).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["owner", "admin", "family"])(
+    "403s personal_drive_disabled for %s while the owner setting is off, minting nothing",
+    async (role) => {
+      mockPrisma.workspace.findUnique.mockResolvedValue({ personalDriveEnabled: false });
+      const res = await request(makeApp(role)).post(URL_PATH).send({ platform: "macos" });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: "personal_drive_disabled" });
+      expect(mockNcGenerate).not.toHaveBeenCalled();
+      expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reads the flag from the Workspace singleton (id = 1)", async () => {
+    await request(makeApp()).post(URL_PATH).send({ platform: "macos" });
+    expect(mockPrisma.workspace.findUnique).toHaveBeenCalledWith({
+      where: { id: 1 },
+      select: { personalDriveEnabled: true },
+    });
+  });
+
+  it("treats a missing Workspace row as off", async () => {
+    mockPrisma.workspace.findUnique.mockResolvedValue(null);
+    const res = await request(makeApp()).post(URL_PATH).send({ platform: "macos" });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "personal_drive_disabled" });
+    expect(mockNcGenerate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed (500, nothing minted) when the setting cannot be read", async () => {
+    mockPrisma.workspace.findUnique.mockRejectedValue(new Error("db down"));
+    const res = await request(makeApp()).post(URL_PATH).send({ platform: "macos" });
+    expect(res.status).toBe(500);
     expect(mockNcGenerate).not.toHaveBeenCalled();
   });
 

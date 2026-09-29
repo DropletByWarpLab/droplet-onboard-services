@@ -538,15 +538,29 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
   // Per-user Finder / File Explorer drive: mints a Nextcloud app password for
   // THIS user and returns the WebDAV address to map. Nextcloud enforces the
   // user's own My Files / Household / department ACLs, unlike the device-wide
-  // SMB share. Open to every human role; `service` principals get no drive.
+  // SMB share. Owner/admin/family only — guests and `service` principals get
+  // no drive — and only while the owner has turned personal drives on
+  // (`Workspace.personalDriveEnabled`, default OFF; 403 personal_drive_disabled).
   // The mount talks to Nextcloud directly, so orchestrator-only controls
-  // (download audit, per-file upload cap, department manager bit / share
-  // policy) do not apply — see docs/network-drive.md "Per-user drive (WebDAV)".
+  // (download audit, per-file upload cap) do not apply, and the gateway blocks
+  // Nextcloud's OCS sharing API on /nextcloud/ so the app password cannot mint
+  // shares (docker/nginx/nginx.conf, WARP-3053) — see docs/network-drive.md
+  // "Per-user drive (WebDAV)".
   router.post(
     "/storage/network-drive/personal",
-    requireRole("owner", "admin", "family", "guest"),
+    requireRole("owner", "admin", "family"),
     async (req, res, next) => {
       try {
+        // Fail closed: no singleton row, or a DB error (-> 500), is "off".
+        const workspace = await prisma.workspace.findUnique({
+          where: { id: 1 },
+          select: { personalDriveEnabled: true },
+        });
+        if (!workspace?.personalDriveEnabled) {
+          res.status(403).json({ error: "personal_drive_disabled" });
+          return;
+        }
+
         const parsed = z
           .object({
             platform: z.enum(["macos", "windows"]),

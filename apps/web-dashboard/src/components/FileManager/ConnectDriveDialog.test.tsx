@@ -1,10 +1,12 @@
 /**
  * ConnectDriveDialog — per-user WebDAV "Your drive" section (POST
- * /api/storage/network-drive/personal, every user) plus the SMB "Droplet"
- * shared drive (GET /api/storage/network-drive, gated by `showSharedDrive`).
+ * /api/storage/network-drive/personal, owner/admin/family while the owner has
+ * turned personal drives on — `personalDriveEnabled` from GET
+ * /api/settings/workspace) plus the SMB "Droplet" shared drive (GET
+ * /api/storage/network-drive, gated by `showSharedDrive`).
  *
  * Covers: personal login creation + one-time password + per-OS steps + error
- * copy; and for the shared section: happy-path render of both OS addresses +
+ * copy, and the owner-setting-off state; and for the shared section: happy-path render of both OS addresses +
  * credential, password masking/reveal, the disabled-share state, fetch-failure
  * copy, and the showSharedDrive gate. authFetch is mocked; no network.
  */
@@ -34,6 +36,33 @@ function mockInfo(body: unknown, ok = true) {
     status: ok ? 200 : 500,
     json: async () => body,
   } as unknown as Response);
+}
+
+/** Route by URL: the workspace flag GET and the personal-drive POST. */
+function mockPersonal(opts: {
+  enabled?: boolean;
+  flag?: "fail";
+  post?: { ok: boolean; status: number; body: unknown };
+}) {
+  authFetchMock.mockImplementation(async (url: string) => {
+    if (url === "/api/settings/workspace") {
+      if (opts.flag === "fail") {
+        return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ workspaceType: "business", personalDriveEnabled: opts.enabled ?? true }),
+      } as unknown as Response;
+    }
+    const post = opts.post ?? { ok: true, status: 200, body: {} };
+    return { ok: post.ok, status: post.status, json: async () => post.body } as unknown as Response;
+  });
+}
+
+/** Wait until the "Your drive" section has resolved the flag and shows the button. */
+async function createButton() {
+  return screen.findByRole("button", { name: "Create my drive login" });
 }
 
 beforeEach(() => {
@@ -114,7 +143,7 @@ describe("ConnectDriveDialog showSharedDrive gate", () => {
   it("neither fetches nor renders the shared share when showSharedDrive is off", () => {
     mockInfo(INFO);
     render(<ConnectDriveDialog open onClose={() => {}} />);
-    expect(authFetchMock).not.toHaveBeenCalled();
+    expect(authFetchMock).not.toHaveBeenCalledWith("/api/storage/network-drive");
     expect(screen.queryByText("Shared Droplet folder")).not.toBeInTheDocument();
     expect(screen.getByText("Your drive")).toBeInTheDocument();
   });
@@ -131,8 +160,9 @@ describe("ConnectDriveDialog personal drive", () => {
   };
 
   it("creates a login for the chosen platform and shows the Mac steps + credentials once", async () => {
-    mockInfo(LOGIN);
+    mockPersonal({ post: { ok: true, status: 200, body: LOGIN } });
     render(<ConnectDriveDialog open onClose={() => {}} />);
+    await createButton();
     fireEvent.click(screen.getByRole("button", { name: "Mac" }));
     fireEvent.click(screen.getByRole("button", { name: "Create my drive login" }));
     await waitFor(() =>
@@ -155,8 +185,9 @@ describe("ConnectDriveDialog personal drive", () => {
   });
 
   it("shows the Windows path and steps when Windows is chosen", async () => {
-    mockInfo(LOGIN);
+    mockPersonal({ post: { ok: true, status: 200, body: LOGIN } });
     render(<ConnectDriveDialog open onClose={() => {}} />);
+    await createButton();
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
     fireEvent.click(screen.getByRole("button", { name: "Create my drive login" }));
     await waitFor(() =>
@@ -171,12 +202,11 @@ describe("ConnectDriveDialog personal drive", () => {
   });
 
   it("tells SSO/passkey users to sign in with their password once", async () => {
-    authFetchMock.mockResolvedValue({
-      ok: false,
-      status: 409,
-      json: async () => ({ error: "nc_credential_unavailable" }),
-    } as unknown as Response);
+    mockPersonal({
+      post: { ok: false, status: 409, body: { error: "nc_credential_unavailable" } },
+    });
     render(<ConnectDriveDialog open onClose={() => {}} />);
+    await createButton();
     fireEvent.click(screen.getByRole("button", { name: "Create my drive login" }));
     await waitFor(() =>
       expect(screen.getByText(/sign out and sign in with your password once/)).toBeInTheDocument(),
@@ -185,15 +215,74 @@ describe("ConnectDriveDialog personal drive", () => {
   });
 
   it("shows generic error copy on other failures", async () => {
-    authFetchMock.mockResolvedValue({
-      ok: false,
-      status: 500,
-      json: async () => ({}),
-    } as unknown as Response);
+    mockPersonal({ post: { ok: false, status: 500, body: {} } });
     render(<ConnectDriveDialog open onClose={() => {}} />);
+    await createButton();
     fireEvent.click(screen.getByRole("button", { name: "Create my drive login" }));
     await waitFor(() =>
       expect(screen.getByText(/Couldn't create your drive login/)).toBeInTheDocument(),
     );
+  });
+
+  it("reads the owner setting from GET /api/settings/workspace when it opens", async () => {
+    mockPersonal({});
+    render(<ConnectDriveDialog open onClose={() => {}} />);
+    await createButton();
+    expect(authFetchMock).toHaveBeenCalledWith("/api/settings/workspace");
+  });
+
+  it("does not read the setting while closed", () => {
+    mockPersonal({});
+    render(<ConnectDriveDialog open={false} onClose={() => {}} />);
+    expect(authFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a note instead of the create button while the owner setting is off", async () => {
+    mockPersonal({ enabled: false });
+    render(<ConnectDriveDialog open onClose={() => {}} />);
+    expect(await screen.findByText(/aren't turned on for this Droplet/)).toBeInTheDocument();
+    expect(screen.getByText(/Your Droplet owner can turn them on in Settings/)).toBeInTheDocument();
+    expect(screen.getByText("Your drive")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create my drive login" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mac" })).not.toBeInTheDocument();
+  });
+
+  it("treats a response without the flag as off", async () => {
+    authFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ workspaceType: "business" }),
+    } as unknown as Response);
+    render(<ConnectDriveDialog open onClose={() => {}} />);
+    expect(await screen.findByText(/aren't turned on for this Droplet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create my drive login" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer the create button when the setting cannot be read", async () => {
+    mockPersonal({ flag: "fail" });
+    render(<ConnectDriveDialog open onClose={() => {}} />);
+    expect(await screen.findByText(/Couldn't check whether personal drives are on/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create my drive login" })).not.toBeInTheDocument();
+  });
+
+  it("falls back to the off note when the owner turns it off mid-session", async () => {
+    mockPersonal({
+      post: { ok: false, status: 403, body: { error: "personal_drive_disabled" } },
+    });
+    render(<ConnectDriveDialog open onClose={() => {}} />);
+    await createButton();
+    fireEvent.click(screen.getByRole("button", { name: "Create my drive login" }));
+    expect(await screen.findByText(/aren't turned on for this Droplet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create my drive login" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the shared SMB section independent of the personal setting", async () => {
+    authFetchMock.mockImplementation(async (url: string) => {
+      const body = url === "/api/storage/network-drive" ? INFO : { personalDriveEnabled: false };
+      return { ok: true, status: 200, json: async () => body } as unknown as Response;
+    });
+    render(<ConnectDriveDialog open onClose={() => {}} showSharedDrive />);
+    expect(await screen.findByLabelText("Windows address")).toBeInTheDocument();
+    expect(screen.getByText(/aren't turned on for this Droplet/)).toBeInTheDocument();
   });
 });

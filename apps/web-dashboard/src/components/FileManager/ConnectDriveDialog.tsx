@@ -43,10 +43,13 @@ interface ConnectDriveDialogProps {
  * "Connect as a network drive" — puts a Droplet drive in Windows Explorer /
  * macOS Finder.
  *
- * "Your drive" (every user): mints a personal WebDAV login through Nextcloud
+ * "Your drive" (owner/admin/family, while the owner has turned personal drives
+ * on): mints a personal WebDAV login through Nextcloud
  * (POST /api/storage/network-drive/personal) — the user's own My Files /
  * Household / department access, no shared password. The app password is
- * returned once and shown once; it can be revoked from the devices list.
+ * returned once and shown once; it can be revoked from the devices list. The
+ * on/off flag is `personalDriveEnabled` from GET /api/settings/workspace; while
+ * it is off the section shows a note instead of the create button.
  *
  * "Shared Droplet folder" (`showSharedDrive`, owner/admin only): step-by-step
  * connect instructions for the SMB "Droplet" share (the compose `samba`
@@ -181,6 +184,9 @@ export function ConnectDriveDialog({ open, onClose, showSharedDrive = false }: C
 
 /** "Your drive": per-user WebDAV login, created on demand and shown once. */
 function PersonalDrive({ open }: { open: boolean }) {
+  // null = not known yet. Only an explicit `true` from the server turns it on.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [platform, setPlatform] = useState<DrivePlatform>(() =>
     typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent)
       ? "windows"
@@ -199,6 +205,26 @@ function PersonalDrive({ open }: { open: boolean }) {
     setShowPassword(false);
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setEnabled(null);
+    setLoadFailed(false);
+    (async () => {
+      try {
+        const res = await authFetch("/api/settings/workspace");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as { personalDriveEnabled?: boolean };
+        if (!cancelled) setEnabled(body.personalDriveEnabled === true);
+      } catch {
+        if (!cancelled) setLoadFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
   const create = async () => {
     setCreating(true);
     setError(null);
@@ -210,7 +236,10 @@ function PersonalDrive({ open }: { open: boolean }) {
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        if (body.error === "nc_credential_unavailable") {
+        if (body.error === "personal_drive_disabled") {
+          // The owner switched it off while this dialog was open.
+          setEnabled(false);
+        } else if (body.error === "nc_credential_unavailable") {
           setError(
             "To set up your drive, sign out and sign in with your password once, then try again.",
           );
@@ -229,6 +258,27 @@ function PersonalDrive({ open }: { open: boolean }) {
       setCreating(false);
     }
   };
+
+  if (enabled !== true) {
+    return (
+      <section>
+        <h3 className="text-sm font-semibold mb-1">Your drive</h3>
+        {loadFailed ? (
+          <p className="text-sm text-red-500">
+            Couldn&apos;t check whether personal drives are on. Try again in a
+            moment.
+          </p>
+        ) : enabled === null ? (
+          <p className="text-sm opacity-70">Loading…</p>
+        ) : (
+          <p className="text-sm opacity-70">
+            Personal drives aren&apos;t turned on for this Droplet. Your
+            Droplet owner can turn them on in Settings.
+          </p>
+        )}
+      </section>
+    );
+  }
 
   return (
     <section>
