@@ -70,8 +70,10 @@ import * as IncidentView from "./IncidentView";
 import * as NoticeList from "./NoticeList";
 import * as ReasonList from "./ReasonList";
 import * as ResolveDialog from "./ResolveDialog";
+import * as ShowOlder from "./show-older";
 import * as incidentCopy from "./incident-copy";
 import * as ModeCard from "./ModeCard";
+import * as PatternFlagList from "./PatternFlagList";
 import * as PrecisionCard from "./PrecisionCard";
 import * as SecurityFeed from "./SecurityFeed";
 import * as SecurityWall from "./SecurityWall";
@@ -79,6 +81,7 @@ import * as TimezoneSelect from "./TimezoneSelect";
 import * as UsualGrid from "./UsualGrid";
 import * as WallCameras from "./WallCameras";
 import * as WallNotice from "./WallNotice";
+import * as VerdictBar from "./VerdictBar";
 import * as PatternsCopy from "./patterns-copy";
 import * as WallStatus from "./wall-status";
 import * as SecurityPage from "@/app/security/page";
@@ -106,9 +109,14 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/incident-copy.ts": incidentCopy,
   "src/components/security/IncidentView.tsx": IncidentView,
   "src/components/security/ReasonList.tsx": ReasonList,
+  // WARP-2980 (P5 PR-C) — the verdict and the pattern flags on the incident page.
+  "src/components/security/VerdictBar.tsx": VerdictBar,
+  "src/components/security/PatternFlagList.tsx": PatternFlagList,
   "src/components/security/NoticeList.tsx": NoticeList,
   "src/components/security/AckHistory.tsx": AckHistory,
   "src/components/security/ResolveDialog.tsx": ResolveDialog,
+  // WARP-3185 B — no copy of its own; listed because every module here is.
+  "src/components/security/show-older.ts": ShowOlder,
   "src/components/security/AlertRoutingPanel.tsx": AlertRoutingPanel,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,

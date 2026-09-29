@@ -18,6 +18,7 @@ import type { IncidentSummary, SecurityHealthRow, SecurityZoneRef } from "@/lib/
 import { IncidentCard } from "./IncidentCard";
 import { INCIDENT_COPY, incidentsEmpty } from "./incident-copy";
 import { AreaSelect } from "./SecurityFeed";
+import { useShowOlder } from "./show-older";
 
 export type IncidentFilter = "attention" | "all";
 
@@ -31,6 +32,8 @@ export const COPY = {
   all: "All",
   loadError: "Droplet can't read the incidents right now",
   loadErrorBody: "This is not the same as a quiet site. Try again in a moment.",
+  // WARP-3185 — a refresh that failed with incidents already shown: they stay, and say how old they are.
+  refreshFailed: "Couldn't refresh the incidents just now. This is the last list Droplet sent.",
   retry: "Retry",
   loadMore: "Show older",
   showEverything: "Show everything",
@@ -102,6 +105,13 @@ function Busy() {
 }
 
 function ListBody(props: IncidentListProps & { now: Date }) {
+  // Before any early return: a hook runs on every render.
+  const older = useShowOlder({
+    count: props.incidents?.length ?? 0,
+    hasMore: props.hasMore,
+    isLoadingMore: props.isLoadingMore,
+    onLoadMore: props.onLoadMore,
+  });
   if (props.error && !props.incidents?.length) {
     return (
       <div className="empty" role="alert">
@@ -148,14 +158,28 @@ function ListBody(props: IncidentListProps & { now: Date }) {
 
   return (
     <>
-      <ul className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+      {props.error && (
+        <p
+          role="status"
+          data-refresh-failed
+          style={{ margin: "0 0 8px", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13, color: "var(--text-muted)" }}
+        >
+          <span style={{ flex: "1 1 220px" }}>{COPY.refreshFailed}</span>
+          <button type="button" className="btn sm" onClick={props.onRetry}>
+            <RefreshCw size={14} aria-hidden />
+            {COPY.retry}
+          </button>
+        </p>
+      )}
+      <ul ref={older.listRef} className="rows" style={{ listStyle: "none", margin: 0, padding: 0 }}>
         {props.incidents.map((i) => (
           <IncidentCard key={i.id} incident={i} cameraLabel={props.cameraLabel} timezone={props.timezone} now={props.now} />
         ))}
       </ul>
       {props.hasMore && (
         <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-          <button type="button" className="btn" onClick={props.onLoadMore} disabled={props.isLoadingMore}>
+          {/* aria-disabled, never disabled: the pressed button keeps focus (WARP-3185 B). */}
+          <button type="button" className="btn" onClick={older.onClick} aria-disabled={props.isLoadingMore || undefined}>
             {props.isLoadingMore ? <Loader2 size={16} className="animate-spin" aria-hidden /> : null}
             {COPY.loadMore}
           </button>

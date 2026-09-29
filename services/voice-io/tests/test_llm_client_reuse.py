@@ -77,6 +77,9 @@ class TestOrchestratorClientReuse:
         llm.reply("two")
         _ = llm.available
         list(llm.reply_stream("three"))
+        # WARP-3127 — the wake-time warm rides the same pool.
+        llm.warm()
+        llm.warm()
         assert count["n"] == 1
 
     def test_same_client_instance_used_every_call(self, monkeypatch):
@@ -86,6 +89,7 @@ class TestOrchestratorClientReuse:
         assert llm._client is client
         llm.reply("hi")
         _ = llm.available
+        llm.warm()
         assert llm._client is client  # never swapped out mid-life
 
 
