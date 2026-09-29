@@ -42,7 +42,6 @@ import { PACKAGE_ROOT, packagePath } from "../../__tests__/helpers/test-paths";
 
 import * as DoorDialog from "./DoorDialog";
 import * as DoorEvents from "./DoorEvents";
-import * as DoorsNotAvailable from "./DoorsNotAvailable";
 import * as DoorsPanel from "./DoorsPanel";
 import * as doorCopy from "./door-copy";
 import * as DoorsPage from "@/app/doors/page";
@@ -50,7 +49,6 @@ import * as DoorsPage from "@/app/doors/page";
 const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/doors/DoorDialog.tsx": DoorDialog,
   "src/components/doors/DoorEvents.tsx": DoorEvents,
-  "src/components/doors/DoorsNotAvailable.tsx": DoorsNotAvailable,
   "src/components/doors/DoorsPanel.tsx": DoorsPanel,
   "src/components/doors/door-copy.ts": doorCopy,
   "src/app/doors/page.tsx": DoorsPage,

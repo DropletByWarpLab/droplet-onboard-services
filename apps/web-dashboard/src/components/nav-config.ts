@@ -553,8 +553,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // reported and when, and the log of what happened at them. Its own
       // module (`doors`), which SHIPS DARK: DOORS_ENABLED is off by default and
       // the module is then ABSENT from GET /api/modules rather than listed as
-      // off, so `isModuleEffective` treats "absent" as off for it (see
-      // `ABSENT_UNLESS_LISTED` in useModuleGate). Owner/admin only, mirroring
+      // off, so `isModuleEffective` treats "absent" as off for it and fails
+      // CLOSED while the probe is unresolved (see `ABSENT_UNLESS_LISTED` in
+      // lib/dark-modules.ts); the page is a plain 404 when off. Owner/admin only, mirroring
       // the API's read floor (`READ_ROLES` in routes/doors.ts): the module's
       // own grant is the only narrowing until door groups exist, and a page
       // that would 403 for everyone else is not offered to them. The owner

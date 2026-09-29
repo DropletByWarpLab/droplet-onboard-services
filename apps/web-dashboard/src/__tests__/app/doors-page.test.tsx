@@ -5,20 +5,25 @@
  * The presentational pieces are pinned in components/doors/*.test.tsx; this is
  * what only the page can show — the two reads and the writes meeting the hooks,
  * the owner/admin split reaching the controls, cursor paging end to end, and the
- * page's own answer when the box refuses the read (Doors off, or above the
- * person's role), which must be the standard "isn't available" card and never a
- * Retry that cannot help.
+ * page's gate: the module list answers through the REAL `useModuleGateState`
+ * (mocked one layer below, at `authFetch`), and Doors ships dark, so the page
+ * renders NOTHING until the list has answered, is a plain 404 (`notFound()`,
+ * here caught by a stand-in for Next's boundary) when the list does not list it
+ * as on — and, when the box then refuses the read itself (404 module_disabled
+ * or 403), the same 404, never a Retry that cannot help. Neither 404 asks the
+ * box anything about doors first.
  *
- * States: owner, admin, empty, error, and not available.
+ * States: owner, admin, empty, error, unresolved, and absent (404).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { Component, type ReactNode } from "react";
 import { SWRConfig } from "swr";
 
 const h = vi.hoisted(() => ({
   role: "owner" as string,
   toast: vi.fn(),
+  authFetch: vi.fn(),
   getDoors: vi.fn(),
   getDoorEvents: vi.fn(),
   createDoor: vi.fn(),
@@ -41,7 +46,14 @@ vi.mock("@/components/shell/ShellPage", () => ({
     </div>
   ),
 }));
-vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { id: "u1", role: h.role } }), authFetch: vi.fn() }));
+vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { id: "u1", role: h.role } }), authFetch: h.authFetch }));
+// Next's own `notFound()` throws an error the segment's boundary turns into app/not-found.tsx.
+vi.mock("next/navigation", async (orig) => ({
+  ...(await orig<typeof import("next/navigation")>()),
+  notFound: () => {
+    throw Object.assign(new Error("NEXT_HTTP_ERROR_FALLBACK;404"), { digest: "NEXT_HTTP_ERROR_FALLBACK;404" });
+  },
+}));
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: h.toast }) }));
 vi.mock("@/lib/api", async (orig) => ({
   ...(await orig<typeof import("@/lib/api")>()),
@@ -56,8 +68,24 @@ import DoorsPage from "@/app/doors/page";
 import { COPY } from "@/components/doors/door-copy";
 import type { DoorEventView, DoorView } from "@/lib/types";
 
+/** Stands in for the segment's NotFoundBoundary: renders what app/not-found.tsx would. */
+class NotFoundBoundary extends Component<{ children: ReactNode }, { notFound: boolean }> {
+  state = { notFound: false };
+  static getDerivedStateFromError(err: { digest?: string }) {
+    if (err?.digest === "NEXT_HTTP_ERROR_FALLBACK;404") return { notFound: true };
+    throw err;
+  }
+  render() {
+    return this.state.notFound ? <div data-testid="not-found">Page not found</div> : this.props.children;
+  }
+}
+
 function Wrap({ children }: { children: ReactNode }) {
-  return <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig>;
+  return (
+    <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+      <NotFoundBoundary>{children}</NotFoundBoundary>
+    </SWRConfig>
+  );
 }
 const renderPage = () => render(<DoorsPage />, { wrapper: Wrap });
 
@@ -94,9 +122,17 @@ function event(id: string, over: Partial<DoorEventView> = {}): DoorEventView {
   };
 }
 
+/** GET /api/modules with doors listed, effective and in the person's set. */
+const DOORS_ON = {
+  modules: [{ id: "doors", effective: true }],
+  effectiveForUser: [{ moduleId: "doors", level: "view" }],
+};
+const respondModules = (body: unknown) => h.authFetch.mockResolvedValue({ ok: true, status: 200, json: async () => body });
+
 beforeEach(() => {
   vi.clearAllMocks();
   h.role = "owner";
+  respondModules(DOORS_ON);
   h.getDoors.mockResolvedValue({ doors: [door(), door({ id: "d2", name: "Back door", doorPositionSource: "none", position: "not_monitored", positionSince: null })] });
   h.getDoorEvents.mockResolvedValue({ events: [event("2"), event("1", { kind: "door_closed" })], nextCursor: null });
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -105,7 +141,7 @@ beforeEach(() => {
 describe("/doors — owner", () => {
   it("is titled Doors, says nothing here locks or unlocks a door, and lists the doors and their activity", async () => {
     renderPage();
-    expect(screen.getByRole("heading", { level: 1, name: "Doors" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Doors" })).toBeInTheDocument();
     expect(screen.getByTestId("page-sub")).toHaveTextContent(/Nothing here locks or unlocks a door/);
     expect(await screen.findByRole("heading", { level: 3, name: "Front door" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 3, name: "Back door" })).toBeInTheDocument();
@@ -149,7 +185,7 @@ describe("/doors — owner", () => {
     await waitFor(() => expect(h.toast).toHaveBeenCalledWith("Only the owner can add, change or retire doors.", "error"));
     await waitFor(() => expect(screen.queryByRole("button", { name: COPY.add })).toBeNull());
     expect(screen.getByRole("heading", { level: 3, name: "Front door" })).toBeInTheDocument();
-    expect(screen.queryByTestId("doors-not-available")).toBeNull();
+    expect(screen.queryByTestId("not-found")).toBeNull();
   });
 });
 
@@ -185,7 +221,7 @@ describe("/doors — error", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(2);
     expect(screen.queryByText(COPY.emptyTitle)).toBeNull();
     expect(screen.queryByText(COPY.emptyEventsTitle)).toBeNull();
-    expect(screen.queryByTestId("doors-not-available")).toBeNull();
+    expect(screen.queryByTestId("not-found")).toBeNull();
   });
 
   it("the retry re-reads the doors", async () => {
@@ -197,29 +233,60 @@ describe("/doors — error", () => {
   });
 });
 
-describe("/doors — not available", () => {
+describe("/doors — the page's gate (ships dark = absent)", () => {
+  const doorsCalls = () => h.getDoors.mock.calls.length + h.getDoorEvents.mock.calls.length;
+
+  it("UNRESOLVED: renders nothing at all, and asks the box nothing about doors", async () => {
+    h.authFetch.mockReturnValue(new Promise(() => undefined)); // the module list never answers
+    const { container } = renderPage();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByTestId("not-found")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Doors" })).toBeNull();
+    expect(doorsCalls()).toBe(0);
+  });
+
+  it("a probe that FAILED stays blank, the closed direction: never the page, and not a 404 either", async () => {
+    h.authFetch.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    const { container } = renderPage();
+    await waitFor(() => expect(h.authFetch).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 30));
+    expect(container).toBeEmptyDOMElement();
+    expect(doorsCalls()).toBe(0);
+  });
+
+  it("LISTED as on: the page", async () => {
+    renderPage();
+    expect(await screen.findByRole("heading", { level: 3, name: "Front door" })).toBeInTheDocument();
+    expect(screen.queryByTestId("not-found")).toBeNull();
+  });
+
   it.each([
-    ["404 (Doors off for this box or this person)", 404],
+    ["UNLISTED (DOORS_ENABLED off)", { modules: [{ id: "cameras", effective: true }], effectiveForUser: [{ moduleId: "cameras", level: "view" }] }],
+    ["unlisted, and no per-user set", { modules: [{ id: "cameras", effective: true }] }],
+    ["listed but switched off", { modules: [{ id: "doors", effective: false }], effectiveForUser: [{ moduleId: "cameras", level: "view" }] }],
+    ["listed, but not in this person's set", { modules: [{ id: "doors", effective: true }], effectiveForUser: [{ moduleId: "cameras", level: "view" }] }],
+  ])("%s: a plain 404, with none of the page and no request about doors", async (_name, payload) => {
+    respondModules(payload);
+    const { container } = renderPage();
+    expect(await screen.findByTestId("not-found")).toHaveTextContent("Page not found");
+    expect(screen.queryByRole("heading", { name: "Doors" })).toBeNull();
+    // Not the route guard's card, and nothing that says the product exists or can be switched on.
+    expect(container).not.toHaveTextContent(/isn.t available|owner or admin can turn/i);
+    expect(screen.queryByRole("button", { name: COPY.add })).toBeNull();
+    expect(doorsCalls()).toBe(0);
+  });
+
+  it.each([
+    ["404 (module_disabled: a toggle raced the module list)", 404],
     ["403 (above this person's role)", 403],
-  ])("a read the box refuses with %s shows the standard card and nothing else", async (_name, status) => {
+  ])("a read the box refuses with %s is the same 404, never a Retry", async (_name, status) => {
     h.getDoors.mockRejectedValue(apiError(status));
     h.getDoorEvents.mockRejectedValue(apiError(status));
     renderPage();
-    const card = await screen.findByTestId("doors-not-available");
-    expect(within(card).getByRole("heading", { name: COPY.notAvailableTitle })).toBeInTheDocument();
-    expect(within(card).getByText(COPY.notAvailableBody)).toBeInTheDocument();
-    expect(within(card).getByRole("link", { name: /overview/i })).toHaveAttribute("href", "/");
-    expect(screen.queryByTestId("door-events")).toBeNull();
-    expect(screen.queryByRole("button", { name: COPY.add })).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(await screen.findByTestId("not-found")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: COPY.retryLabel })).toBeNull();
-  });
-
-  it("uses the route guard's own words: one wording", () => {
-    expect(COPY.notAvailableBody).toBe(
-      "This feature is switched off for this Droplet, or it isn't part of your access. An owner or admin can turn it on.",
-    );
-    expect(COPY.notAvailableTitle).toBe("Doors isn't available");
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 

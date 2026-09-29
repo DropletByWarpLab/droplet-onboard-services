@@ -75,12 +75,6 @@ export const COPY = {
   changed: "Saved {name}.",
   retired: "Retired {name}.",
 
-  // The same words as the route guard's card, so there is one wording.
-  notAvailableTitle: "Doors isn't available",
-  notAvailableBody:
-    "This feature is switched off for this Droplet, or it isn't part of your access. An owner or admin can turn it on.",
-  backHome: "Back to Overview",
-
   moreEvents: "Show older",
   emptyEventsTitle: "Nothing reported yet.",
   emptyEventsBody:

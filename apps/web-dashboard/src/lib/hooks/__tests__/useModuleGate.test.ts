@@ -17,7 +17,8 @@ vi.mock("../../auth", () => ({
   useAuth: () => ({ user: h.user }),
 }));
 
-import { ABSENT_UNLESS_LISTED, isModuleEffective, levelAtLeast, moduleLevelFor, useModuleLevel } from "../useModuleGate";
+import { ABSENT_UNLESS_LISTED } from "../../dark-modules";
+import { isModuleEffective, levelAtLeast, moduleLevelFor, useModuleGateState, useModuleLevel } from "../useModuleGate";
 
 const view = {
   modules: [
@@ -123,8 +124,14 @@ describe("isModuleEffective — modules that ship dark (ADR-055)", () => {
     expect(isModuleEffective({ modules: [{ id: "doors", effective: false }] }, "doors")).toBe(false);
   });
 
-  it("still fails OPEN while the probe has not answered, for doors as for every module", () => {
-    expect(isModuleEffective(undefined, "doors")).toBe(true);
+  it("fails CLOSED while the probe has not answered: nothing about doors shows until the list lists it", () => {
+    expect(isModuleEffective(undefined, "doors")).toBe(false);
+  });
+
+  it("every other module still fails OPEN while the probe has not answered", () => {
+    for (const id of ["cameras", "security", "files", "chat", "mystery_module"]) {
+      expect(isModuleEffective(undefined, id), id).toBe(true);
+    }
   });
 
   it("does not turn 'unknown id → show' off for anything else", () => {
@@ -230,5 +237,64 @@ describe("useModuleLevel", () => {
     // Give SWR a beat to settle the error; the level must not move off view.
     await new Promise((r) => setTimeout(r, 20));
     expect(result.current).toBe("view");
+  });
+});
+
+// ── ADR-055: the three states a page that ships dark needs to tell apart ──
+//
+// `useModuleGate`'s predicate answers false for BOTH "not yet answered" and
+// "off" on a dark module, which is right for a nav entry and wrong for a page:
+// unresolved renders nothing, off is a 404.
+
+describe("useModuleGateState", () => {
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(SWRConfig, { value: { provider: () => new Map(), dedupingInterval: 0 } }, children);
+
+  const respond = (body: unknown, ok = true) =>
+    h.authFetch.mockResolvedValue({ ok, status: ok ? 200 : 500, json: async () => body });
+
+  beforeEach(() => {
+    h.authFetch.mockReset();
+    h.user = null;
+  });
+
+  it("is unresolved until /api/modules answers, then on when doors is listed for the person", async () => {
+    let release: (v: unknown) => void = () => undefined;
+    h.authFetch.mockReturnValue(new Promise((r) => (release = r)));
+    const { result } = renderHook(() => useModuleGateState("doors"), { wrapper });
+    expect(result.current).toBe("unresolved");
+    release({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        modules: [{ id: "doors", effective: true }],
+        effectiveForUser: [{ moduleId: "doors", level: "view" }],
+      }),
+    });
+    await waitFor(() => expect(result.current).toBe("on"));
+    expect(h.authFetch).toHaveBeenCalledWith("/api/modules");
+  });
+
+  it("is off when the list answered and does not list doors (absent)", async () => {
+    respond({ modules: [{ id: "cameras", effective: true }], effectiveForUser: [{ moduleId: "cameras", level: "view" }] });
+    const { result } = renderHook(() => useModuleGateState("doors"), { wrapper });
+    await waitFor(() => expect(result.current).toBe("off"));
+  });
+
+  it("is off when doors is listed but switched off, and when the payload has no per-user set", async () => {
+    respond({ modules: [{ id: "doors", effective: false }] });
+    const listedOff = renderHook(() => useModuleGateState("doors"), { wrapper });
+    await waitFor(() => expect(listedOff.result.current).toBe("off"));
+    respond({ modules: [{ id: "cameras", effective: true }] });
+    const noSet = renderHook(() => useModuleGateState("doors"), { wrapper });
+    await waitFor(() => expect(noSet.result.current).toBe("off"));
+  });
+
+  it("a failed probe stays unresolved, the closed direction", async () => {
+    respond({}, false);
+    const { result } = renderHook(() => useModuleGateState("doors"), { wrapper });
+    await waitFor(() => expect(h.authFetch).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(result.current).toBe("unresolved");
   });
 });

@@ -1,19 +1,25 @@
 /**
- * ADR-055 P4b — Doors is ABSENT when the module is off, on every surface, and
- * present for exactly owners and admins when it is on.
+ * ADR-055 P4b — Doors is ABSENT when the module is off, on every nav surface,
+ * and present for exactly owners and admins when it is on.
  *
  * The module ships dark: DOORS_ENABLED is off by default and the orchestrator
  * then does not LIST `doors` in GET /api/modules at all (`listedWhenUnavailable:
  * false`). That is a different shape from every other switched-off module,
  * which is listed with `effective: false`, and the client's gate reads "not in
- * the payload" as "a module I can't classify: show it". These cases drive the
- * REAL `isModuleEffective` through every nav surface and the route guard, in
- * every shape the payload can take, so the dark shape can never leave Doors
- * standing on a box that has none.
+ * the payload" as "a module I can't classify: show it". "Ship dark = absent"
+ * therefore has two halves here, and both are pinned:
  *
- *   surfaces: the desktop aside, the More drawer (the bottom bar has no Doors
- *   tab — it is not a primary), the Workspace layout's Operations chip, and
- *   ModuleRouteGuard at /doors.
+ *   · every shape the payload can take (on, absent, absent with no per-user
+ *     set, listed but off) drives the REAL `isModuleEffective` through the
+ *     desktop aside, the More drawer (the bottom bar has no Doors tab — it is
+ *     not a primary) and the Workspace layout's Operations chip;
+ *   · while the probe has not answered, Doors FAILS CLOSED (every other module
+ *     stays fail-open), so a cold cache never flashes a nav entry.
+ *
+ * The page itself is not the guard's business: `ModuleRouteGuard` steps aside
+ * for a module that ships dark, because absent is a plain 404 that the PAGE
+ * renders (doors-page.test.tsx), not the guard's "an owner or admin can turn it
+ * on" card.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
@@ -196,17 +202,11 @@ describe.each(OFF_SHAPES)("module OFF — %s", (_name, payload) => {
     expect(visibleItems(systemsItems(), "owner", NO_CAPS, isOn(payload)).map((i) => i.href)).not.toContain("/doors");
   });
 
-  it("the page is not rendered: the route guard shows its standard card in its place", () => {
+  it("the route guard steps aside: the page renders its own 404, never the guard's card", () => {
     guardAt("/doors");
-    expect(screen.queryByTestId("page-content")).toBeNull();
-    expect(screen.getByTestId("module-route-blocked")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /doors isn.t available/i })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /overview/i })).toHaveAttribute("href", "/");
-  });
-
-  it("a deep path under /doors is blocked too", () => {
-    guardAt("/doors/anything");
-    expect(screen.queryByTestId("page-content")).toBeNull();
+    expect(screen.getByTestId("page-content")).toBeInTheDocument();
+    expect(screen.queryByTestId("module-route-blocked")).toBeNull();
+    expect(screen.queryByText(/an owner or admin can turn it on/i)).toBeNull();
   });
 });
 
@@ -219,10 +219,46 @@ describe("module OFF must not spill onto the neighbours", () => {
   });
 });
 
-describe("the probe has not answered", () => {
-  it("fails OPEN, as it does for every module: a blip must never blank a page a box has", () => {
+describe("the probe has not answered (unresolved): Doors fails CLOSED, everything else stays open", () => {
+  beforeEach(() => {
     payloadRef.current = undefined;
+  });
+
+  it("no Doors nav entry on any surface, for an owner and for an admin", () => {
+    for (const role of ["owner", "admin"] as const) {
+      authRef.current = { ...authRef.current, role };
+      const { unmount } = render(<Sidebar />);
+      expect(doorsLink(desktopAside()), role).toBeNull();
+      expect(doorsLink(openDrawer()), role).toBeNull();
+      expect(opsHrefs(role, undefined), role).not.toContain("/doors");
+      unmount();
+    }
+  });
+
+  it("the neighbours still show: a blip must not blank the modules a box has", () => {
+    render(<Sidebar />);
+    expect(within(desktopAside()).getByRole("link", { name: /^security$/i })).toBeInTheDocument();
+    expect(opsHrefs("owner", undefined)).toContain("/security");
+    expect(opsHrefs("owner", undefined)).toContain("/cameras");
+  });
+
+  it("the guard still steps aside for /doors (the page renders nothing until the list answers)", () => {
     guardAt("/doors");
     expect(screen.getByTestId("page-content")).toBeInTheDocument();
+    expect(screen.queryByTestId("module-route-blocked")).toBeNull();
+  });
+
+  it("and still fails open for a module that does not ship dark", () => {
+    guardAt("/security");
+    expect(screen.getByTestId("page-content")).toBeInTheDocument();
+  });
+});
+
+describe("the guard is unchanged for every other module", () => {
+  it("a switched-off Security still gets the standard card", () => {
+    payloadRef.current = { modules: [{ id: "security", effective: false }], effectiveForUser: [{ moduleId: "chat", level: "act" }] };
+    guardAt("/security");
+    expect(screen.queryByTestId("page-content")).toBeNull();
+    expect(screen.getByTestId("module-route-blocked")).toBeInTheDocument();
   });
 });
