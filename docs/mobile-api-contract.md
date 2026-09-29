@@ -667,6 +667,434 @@ never grants**: what the person can reach is the same whatever is chosen.
   other code, or none, means the box is older than this route: keep the choice
   on the device.
 
+### Security incidents and alert routing (`/api/security/*` — WARP-2981)
+
+> **Added for WARP-2981 (ADR-059 P6, §8).** Android and Windows build the
+> incident inbox, acknowledge-from-the-phone and "who is told" screens on these
+> routes (iOS is out of P6, DS-038). The numbers 16–22 are ADR-059's; the route
+> file's own header carries the same ones. Where the ADR and the code differ,
+> this section follows the code. Paths `routes/…`, `services/…`, `middleware/…`,
+> `modules/…` and `lib/…` are under `apps/orchestrator/src/`. None of these
+> shapes is defined in `packages/shared-types`; the web dashboard mirrors them in
+> `apps/web-dashboard/src/lib/types.ts`.
+
+An **incident** groups the events that belong together (one area or camera, one
+visit) and carries **reason codes**. Only an `alert` incident notifies anyone. A
+person reads incidents; at `act` level they acknowledge or resolve them; an owner
+or admin at `manage` level chooses who is told (`routes/security-incidents.ts`).
+
+| # | Method | Path | Auth | Body / query | 200 response |
+|---|---|---|---|---|---|
+| 16 | GET | `/security/incidents` | Security `view` | query: `limit` 1–100 (default 30), `cursor`, `state` = `attention` \| `open` \| `acknowledged` \| `resolved` \| `activity` \| `all` (default `all`), `severity` = `alert` \| `notice`, `zone` = an area uuid | `{ incidents: IncidentSummary[], nextCursor }` |
+| 17 | GET | `/security/incidents/summary` | `view` | — | `{ openAlerts, openNotices, latest: IncidentSummary[], alertsReady }` |
+| 18 | GET | `/security/incidents/:id` | `view` | — | `IncidentDetail` |
+| 19 | POST | `/security/incidents/:id/acknowledge` | `act` | `{ notificationId? }` | `{ incident: IncidentDetail, changed }` |
+| 20 | POST | `/security/incidents/:id/resolve` | `act` | `{ note? }`, at most 280 characters | `{ incident: IncidentDetail, changed }` |
+| 21 | GET | `/security/alert-routing` | `view` | — | `AlertRouting` |
+| 22 | PUT | `/security/alert-routing/:userId` | `manage`, owner/admin | `{ state: "receiving" \| "not_receiving", expectedVersion: <int> \| null }` | `{ person: RoutingPerson }` |
+| 35 | POST | `/security/incidents/:id/verdict` | `act`, owner/admin | `{ verdict: "expected" \| "not_expected" }` | `{ incident: IncidentDetail, changed }` |
+
+Route 35 is P5's, not one of §8's 16–22. It is in the same router and route 18
+reports it (`verdict`, `viewer.canGiveVerdict`), so it is listed. `:id` is an
+incident uuid, `:userId` a user uuid; a value that is not a uuid is a `400`.
+
+**Who may call.**
+
+- **Two gates first, mounted off `/api/security`** (`modules/module-mounts.ts`):
+  the box's Security toggle, then the person's Security level (`view` < `act` <
+  `manage`). Security is **off by default** (`defaultEnabled: false`,
+  `modules/module-registry.ts`; the retail, clinic and hospitality presets turn it
+  on), and `manage` is floored at the admin tier (`services/access-catalog.ts`).
+  A closed gate answers the **flat** `404 { "error": "module_disabled", "module":
+  "security" }`: the toggle is off, the person holds no Security grant, or the route
+  needs a level the person lacks (19, 20 and 35 need `act`, 22 needs `manage`). It
+  is not the nested envelope below and not `INCIDENT_NOT_FOUND`.
+- **Role, on each route** (`routes/security-incidents.ts`): 16–21 owner, admin or
+  family (`family` is "Staff" in the UI); 22 and 35 owner or admin only. A role
+  outside the list, a guest or a service token, gets the flat `403 { "error":
+  "Forbidden: role not permitted" }` (a guest whose access role holds no Security
+  grant is turned away earlier, by the `404` above). No route takes a service
+  principal, so Droplet's AI can never acknowledge, resolve or change routing.
+- **Rate limit on the writes** (19, 20, 22, 35): 60 a minute per IP, then `429 {
+  "error": "Too many requests, slow down" }` (`middleware/rate-limit.ts`).
+- **Do not probe.** Ask `GET /api/modules` whether to draw Security at all:
+  `effectiveForUser: [{ moduleId, level }]` lists what the person holds (no
+  `security` entry: no Security screens and no Security calls; the field is
+  omitted when the box cannot resolve it, and then `modules[].effective` decides)
+  (`routes/modules.routes.ts`). The role `403` and the per-person `404` are each
+  written to the audit log as an `auth` warn "Access denied" row, which Security
+  copies into its own feed as a threat for owners and admins (`recordAccessDenied`,
+  `middleware/auth.ts`; `mirrorThreatRows`, `services/security-events.service.ts`).
+  Once a screen is open, route 18's `viewer.level` and route 21's `level` say
+  which controls to draw.
+
+**A hidden camera changes nothing (DS-005).** One place decides it
+(`services/security-incident-view.ts`, fed by `securityViewerScope` in
+`services/security-access.ts`). Owner and admin see every camera; anyone else
+sees the cameras they were granted.
+
+- An incident none of whose cameras the person can see does not exist for them:
+  absent from 16, from 17's counts and `latest`, and `404 INCIDENT_NOT_FOUND`, the
+  same body as a missing id, from 18–20 and 35. `site_threat` incidents (network
+  and sign-in warnings) are owner/admin only; `site_camera_system` incidents
+  (Frigate as a whole) are visible to every Security viewer.
+- A visible incident is **projected** onto the visible cameras: `state`,
+  `severity`, `reasonCodes`, `eventCount`, `labels`, `firstActivityAt`,
+  `lastActivityAt` and `grouping`, and route 16's order and `nextCursor`, come from
+  them alone, so activity on a hidden camera never moves an incident, reorders the
+  list or changes a count. Route 16's `state` and `severity` filters and route 17's
+  counts read visible codes only. In route 18, `reasons`, `events` and
+  `patternFlags` hold only what the person can see.
+- **No visible code** is plain activity: `state: "no_action"`, `severity: "info"`,
+  no acks, no notices, and `409 NOT_ACTIONABLE` on 19–20.
+- **Partial view**: the person sees a code, but a reason at the incident's top
+  severity rests on a camera they cannot see. `state` reads `open` (`resolved`
+  once resolved), never `acknowledged`; `lastAck` is `null`; `acks` holds only
+  their own; `notices` is empty; and 19–20 answer `409 NOT_ACTIONABLE`, the same
+  body as plain activity, because both actions settle the whole incident. A view
+  with a visible code that is not partial is a **full view**.
+- `?zone=` naming an area the person cannot see (or one that is missing, archived
+  or unlinked) is the empty page `{ "incidents": [], "nextCursor": null }`, the
+  same as a quiet area.
+- Alerts follow the rule too: a person is told only if they can see a camera an
+  alert rests on, and the text is built from what they can see (below).
+- **DS-019 applies to none of these routes on `stage`.** There is no lock source,
+  event kind or link yet: `SecurityEventSource` and `SecurityEventKind`
+  (`apps/orchestrator/prisma/schema.prisma`) carry none, and
+  `services/security-access.ts` has no lock scope.
+
+**Errors on 16–22 and 35 are nested**, as on the Notifications routes:
+`{ "error": { "code": "…", "message": "…", "issues"? } }`. Key on `code`; `message`
+is calm copy for the person; `issues` (Zod's list) is present only when the query
+or body failed its schema. The two gate answers above are flat.
+
+| HTTP | `error.code` | Routes | When |
+|---|---|---|---|
+| 400 | `VALIDATION_ERROR` | 16, 18–20, 22, 35 | Unknown key, value out of range, a non-uuid id, a `cursor` the box did not mint (or over 60 characters), a `note` with characters that cannot be stored |
+| 404 | `INCIDENT_NOT_FOUND` | 18–20, 35 | Missing **or hidden**, byte for byte the same |
+| 404 | `USER_NOT_FOUND` | 22 | No such person |
+| 409 | `NOT_ACTIONABLE` | 19, 20 | Plain activity, or a partial view |
+| 409 | `NOT_JUDGEABLE` | 35 | Nothing this person can judge, or a partial view |
+| 409 | `INCIDENT_CONFLICT` | 19, 20, 35 | Someone changed the incident at the same moment, twice in a row; re-read (route 18) and try again if still wanted |
+| 409 | `VERSION_CONFLICT` | 22 | `expectedVersion` is not the row's current `version` |
+| 409 | `NO_RECIPIENT` | 22 | The change would leave nobody eligible to be told |
+| 422 | `NOT_ELIGIBLE` | 22 | `receiving` for a person who cannot open Security at `act` |
+| 500 | `INTERNAL_ERROR` | 19, 20, 22, 35 | A bug on the box |
+| 503 | `INCIDENTS_UNAVAILABLE` | 16–20, 35 | The read or write could not be answered: **never an empty 200** |
+| 503 | `ROUTING_UNAVAILABLE` | 21, 22 | Same, for routing |
+| 503 | `AUDIT_UNAVAILABLE` | 19, 20, 22, 35 | The audit row is written in the same transaction, and it could not be: nothing changed, safe to retry |
+
+**`IncidentSummary`** (routes 16 and 17's `latest`; `IncidentSummary`, `summaryOf`
+in `services/security-incident-view.ts`). Times are UTC ISO-8601.
+
+```json
+{
+  "id": "<uuid>",
+  "scope": "area" | "camera" | "site_threat" | "site_camera_system",
+  "zone": { "id": "<uuid>", "name": "…", "kind": "entry" | "interior" | "perimeter" | "parking" | "restricted" } | null,
+  "camera": "<Frigate camera name>" | null,
+  "state": "no_action" | "open" | "acknowledged" | "resolved",
+  "severity": "info" | "notice" | "alert",
+  "reasonCodes": ["after_hours_presence" | "camera_offline" | "threat_signal"],
+  "grouping": "collecting" | "closed",
+  "openedInMode": "open" | "closed" | "away",
+  "firstActivityAt": "ISO-8601", "lastActivityAt": "ISO-8601",
+  "eventCount": 3,
+  "labels": { "person": 2, "_status": 1 },
+  "lastAck": { "action": "acknowledge" | "resolve", "byName": "…", "at": "ISO-8601" } | null
+}
+```
+
+- **`zone` and `camera`** are the incident's place as it was when it opened: `zone`
+  only for `scope: "area"`, `camera` only for `scope: "camera"`, both `null` on a
+  site scope (the `SecurityIncident_scope_shape` CHECK). A later change to the
+  area's links does not move history.
+- **`reasonCodes`** hold only `after_hours_presence` (alert), `camera_offline` and
+  `threat_signal` (notices) today. The enum also names `out_of_place`,
+  `unusual_volume` and `long_dwell`, but they are in trial: the database refuses
+  them on a reason (`SecurityIncidentReason_code_severity`), so they never move
+  `state`, `severity` or a notification. Ignore a code you do not know.
+- **`labels`** counts the visible events: Frigate labels (the box tracks `person`,
+  `car`, `dog` and `cat`, `docker/frigate/config.yml`), plus `_status` (camera or system status rows), `_threat` (warning rows)
+  and `_ongoing` (a person still in view). `eventCount` is their sum.
+- **`grouping`**: `collecting` means the incident can still gain events (the web's
+  "still happening"), `closed` that it is sealed. Projected per viewer.
+- **`lastAck`** is the latest acknowledgement by anyone, only in a full view.
+
+**`IncidentDetail`** (route 18, and `incident` in 19, 20 and 35; `IncidentDetail`,
+`loadIncidentDetail` in `services/security-incident-view.ts`) is an
+`IncidentSummary` plus:
+
+```json
+{
+  "actionable": true,
+  "reasons": [{
+    "code": "after_hours_presence" | "camera_offline" | "threat_signal", "severity": "alert" | "notice",
+    "evidence": { "eventId": "<id>", "camera": "<Frigate camera name>" | null, "source": "<event source>", "kind": "<event kind>", "label": "<label>" | null, "at": "ISO-8601", "summary": "…" },
+    "detail": { … }
+  }],
+  "events": [ /* the feed row below, without `incident` */ ],
+  "moreEvents": false,
+  "acks": [{
+    "action": "acknowledge" | "resolve", "byName": "…", "at": "ISO-8601",
+    "client": "<product>/<version> (…)" | null, "viaNotification": false, "note": "…",
+    "signIn": { "recorded": true, "confirmedLive": true } | null
+  }],
+  "notices": [{
+    "userId": "<uuid>", "name": "…",
+    "outcome": "queued" | "sent" | "not_sent" | "outcome_unknown" | "skipped_no_access" | "skipped_not_visible" | "skipped_capped" | "skipped_no_address",
+    "reason": "routed" | "fallback_owner", "channels": "toast,push",
+    "pushOutcome": "sent" | "no_subscribers" | "refused_gate" | "failed" | null,
+    "createdAt": "ISO-8601", "settledAt": "ISO-8601" | null
+  }],
+  "eventsKept": "kept" | "partly_removed" | "removed",
+  "verdict": { "state": "unreviewed" | "expected" | "not_expected", "byName": "…" | null, "at": "ISO-8601" | null, "codes": ["…"] } | null,
+  "patternFlags": [{
+    "code": "out_of_place" | "unusual_volume" | "long_dwell", "effect": "trial" | "suppressed", "severity": "info" | "notice" | "alert",
+    "key": { "kind": "area" | "camera", "zoneId": "<uuid>" | null, "camera": "…" | null },
+    "evidence": { "eventId": "<id>", "camera": "…", "label": "…", "at": "ISO-8601", "summary": "…" },
+    "detail": { … }, "suppression": { "id": "<uuid>", "reason": "…", "state": "active" | "removed" | "expired" } | null
+  }],
+  "viewer": { "level": "view" | "act" | "manage", "acknowledged": false, "canGiveVerdict": false }
+}
+```
+
+- **`actionable`** is true exactly when a **resolve** from this person would change
+  the incident: their level is `act` or above, the view has a visible code and is
+  not partial, and the incident is `open` or `acknowledged`. **Acknowledge** follows
+  it, except that once `viewer.acknowledged` is true it is a `changed: false` no-op.
+  Draw the buttons from these, never from the role.
+- **`reasons[].detail`** is the rule's numbers, optional context: ignore keys you do
+  not know. Today `after_hours_presence` `{ mode, modeSource, nonOpenAt, zoneKind }`,
+  `camera_offline` `{ offlineForSec, backAt }`, `threat_signal` `{ activityId, kind }`
+  (`lib/security-rules.ts`). Each reason keeps its own evidence snapshot (at most 5
+  per code and camera) that outlives the event trim.
+- **`events`**: the visible members, newest first, at most 200 (`moreEvents` says
+  there are more; there is no second page), empty once `eventsKept` is `removed`.
+  Each is route 1's feed row (`listSecurityEvents`,
+  `services/security-events.service.ts`) without its `incident` field:
+
+  ```json
+  { "id": "<id>", "source": "frigate" | "frigate_status" | "activity_mirror" | "site_mode",
+    "kind": "detection" | "detection_ongoing" | "detection_low" | "camera_offline" | "camera_online" | "source_offline" | "source_online" | "threat" | "mode_changed",
+    "severity": "info" | "notice" | "alert", "camera": "…" | null, "labels": ["person"], "cameraZones": ["…"], "score": <number> | null,
+    "startedAt": "ISO-8601", "endedAt": "ISO-8601" | null, "summary": "…", "frigateEventId": "…" | null,
+    "zones": [{ "id": "<uuid>", "name": "…" }], "alsoIn": [{ "id": "<uuid>", "name": "…" }] }
+  ```
+
+  `zones` are the person's visible areas for that event; `alsoIn` the other visible
+  areas it matched when it was sorted.
+- **`acks`**: every acknowledgement in a full view; only their own in a partial
+  view; none for plain activity. `client` is what the device *said*
+  it was (`X-Droplet-Client`, below), never proof, and may be `null`. `signIn` is
+  owner/admin only (`null` for anyone else): whether the request carried a sign-in
+  id and whether the box confirmed that sign-in live; the id itself is never
+  returned. `viaNotification` is true when the ack came from the person's own alert
+  notification for this incident (verified).
+- **`notices`**: who was told, in a full view. Owner/admin see every notice;
+  anyone else sees only their own, and never a `skipped_not_visible` one (it says
+  an alert was raised on a camera they cannot see).
+- **`eventsKept`**: events are kept 30 days, so an older incident reads
+  `partly_removed` or `removed` and `events` shrinks or empties. Counts, the
+  reasons' evidence, acks and notices stay.
+- **`verdict`** is `null` unless the person sees every camera and may read threats;
+  **`patternFlags`** is empty for everyone but owners and admins. A flag is a trial:
+  it never counts towards `state`, `severity` or a notification.
+
+**Route 16 (list).** Newest first by the person's own last activity, then id
+descending. `nextCursor` is opaque (`<ms>.<uuid>`): pass it back as `cursor` for
+the next page; `null` is the last page. Trust `nextCursor`, not the page length,
+and re-read page 1 to catch an incident that gained events (the key is its last
+activity, which moves). `state` selects the incidents whose **projected** `state`
+is the one asked for, over visible codes only: `attention` and `open` are the same
+(nobody is on it yet), `activity` is plain activity, `all` everything visible.
+`severity=alert` needs a visible alert code; `severity=notice` a visible notice
+and no visible alert. The query is strict: an unknown key is a `400`. `zone` is
+the area an incident opened in (`IncidentSummary.zone.id`).
+
+**Route 17 (summary).** Reads no query. `openAlerts` and `openNotices` count the
+incidents that need attention (`state` `open`: nobody has acknowledged) whose
+visible codes include an alert, or only notices; acknowledged, resolved and plain
+activity never count. Their sum is the wall's "Needs attention". `latest` is up to
+three of them, in route 16's order. `alertsReady` is true when opening hours are
+set and at least one area marked Inside or Staff only (`interior` or `restricted`)
+has an active link (`alertsReady`, `services/security-alerts.service.ts`): false
+means after-hours alerts cannot fire yet.
+
+**Routes 19 and 20 (act).** Both bodies are strict; an empty body is fine.
+`notificationId` is the id of the notification the person opened the incident
+from (`^[A-Za-z0-9_-]{1,64}$`): the box stores it only when it is that person's
+own alert for this incident, and otherwise ignores it without an error. Each write
+is one transaction on the incident's `version` (a lost race is re-read once, then
+`INCIDENT_CONFLICT`), and the response is the whole incident as this person may
+now see it. What each does (`services/security-incident-actions.ts`):
+
+| Incident, as this person sees it | Acknowledge | Resolve |
+|---|---|---|
+| plain activity, or a partial view | `409 NOT_ACTIONABLE` | `409 NOT_ACTIONABLE` |
+| `open` | → `acknowledged`, `changed: true` | → `resolved` and sealed, `changed: true` |
+| `acknowledged` | `changed: true` and the state stays, if this person has no ack yet; else `changed: false` | → `resolved` and sealed, `changed: true` |
+| `resolved` | `changed: false` | `changed: false` |
+
+- **Every person's first acknowledgement is recorded**, so several people can
+  acknowledge one incident. A resolve takes an optional `note`. Nothing resolves an
+  incident automatically, and later events never re-notify.
+- **Send `X-Droplet-Client: <product>/<version>`** on 19 and 20, with the grammar
+  given under Notifications: the box stores it as `acks[].client`, labelled as
+  reported. A header that does not match falls back to a coarse User-Agent label,
+  else `null` (`lib/client-descriptor.ts`).
+- **Side effect on notifications.** An acknowledge or resolve marks the actor's
+  **own** notification rows for this incident `acked` with `ackMethod: "incident"`
+  (N1's `unread` follows), never anyone else's. The reverse does not hold: N3 and
+  N4 mean "I saw this" and never acknowledge an incident.
+- A resolve before the notifier has reached a pending alert settles the alert:
+  nobody is woken for it. An acknowledge leaves it pending, so the others are still
+  told.
+
+**Routes 21 and 22 (who is told).** `AlertRouting` is by level (`readAlertRouting`,
+`services/security-alerts.service.ts`); `level` is the person's own Security level.
+
+```json
+// level "manage" (an owner or admin at manage): everyone
+{ "level": "manage", "people": [RoutingPerson], "fallbackActive": false }
+// anyone else: only their own line
+{ "level": "view" | "act", "self": { "state": "receiving" | "not_receiving", "eligible": true } }
+
+// RoutingPerson
+{ "userId": "<uuid>", "name": "…", "role": "owner" | "admin" | "family" | "guest" | "service",
+  "state": "receiving" | "not_receiving", "origin": "owner_default" | "chosen" | null, "version": <int> | null,
+  "eligible": true, "ineligibleReason": "inactive" | "role" | "no_address" | "no_access" | null,
+  "managesSecurityDepartment": false, "delivery": "push" | "in_app_only" }
+```
+
+- An owner is told by default (`origin: "owner_default"`, its row created on the
+  first read); anyone else only after a person chose them (`state:
+  "not_receiving"`, `origin: null`, `version: null` until then). Membership of a
+  Security department routes nobody: `managesSecurityDepartment` is a suggestion.
+- **Eligible** means active, an owner/admin/family role, a usable address, and
+  Security at `act` or above; `ineligibleReason` says which is missing.
+  `fallbackActive` is true when nobody set to be told is eligible: the eligible
+  owners are told instead. `delivery` is `push` when the person has a phone
+  subscribed and the box's web push is on, else they hear only while Droplet is open.
+- **Route 22** is compare-and-set on `version`. `expectedVersion: null` inserts (the
+  person has no row; if one exists, `VERSION_CONFLICT`); an integer (0 to
+  2147483647) must equal the current `version`. `receiving` for an ineligible person is `422 NOT_ELIGIBLE`;
+  `not_receiving` is always allowed. A change that would leave no eligible person
+  receiving is `409 NO_RECIPIENT`. On success `person` carries the new `version`.
+
+**Route 35 (verdict).** Marks an incident Expected or Not expected, for precision
+only: it never changes `state`, `severity`, codes or notifications. The `state` in
+`verdict` can change between the two, never back to `unreviewed`. Send it only when
+route 18 says `viewer.canGiveVerdict`. The `409 NOT_JUDGEABLE` body is the same
+whether there is nothing to judge or the view is partial.
+
+**Freshness and empty states.**
+
+- The engine that makes incidents ticks every 10 s (`SECURITY_INCIDENT_INTERVAL_MS`,
+  `services/security-incidents.service.ts`), so new events are sorted into incidents
+  on that tick, and a `camera_offline` reason waits until the camera has been down 60 s
+  (`OFFLINE_MIN_MS`). An incident stays `collecting` until 5 minutes of
+  quiet plus a 90 s settle (`QUIET_MS`, `SETTLE_MS`), and never spans more than an
+  hour. Frigate reports a detection when it ends, so a person still in view is
+  counted about 30 s in (`SECURITY_ONGOING_AFTER_MS`, an `_ongoing` label) and
+  their `end` joins the same incident. The web polls the list and one incident every
+  15 s and the summary every 30 s (`apps/web-dashboard/src/lib/hooks/useSecurity.ts`);
+  these routes are request and response only.
+- **`incidents: []` is a real answer, not an outage**: nothing visible matched. An
+  outage is a `503`. It is also not "all clear". Read `GET /security/health`'s
+  `incidents` row (`down`: the engine is not sorting) and route 17's `alertsReady`
+  (`false`: after-hours alerts cannot fire) before showing a calm screen. The
+  engine starts from the newest event the first time it runs, so events from before
+  it existed never become incidents.
+- **Retention**: events 30 days, incidents that carry a code 365 days; plain
+  activity (severity `info`, no verdict) goes with its events at 30 days
+  (`trimSecurityIncidents`, `services/security-incidents.service.ts`).
+
+**Alert notifications.** An alert reaches a person as an ordinary notification (N1)
+with `kind: "event"`, `url: "/security/incidents/<uuid>"` and `data: { incidentId }`
+(`notifyIncident`, `services/security-alerts.service.ts`). Open route 18 with
+`data.incidentId`, and send that notification's `id` as `notificationId` on route 19.
+One notification per incident per person, at most 6 per person per rolling hour (the
+rest show only in Security). The owner is told by default and everyone else by
+choice (route 22), each re-checked when sent; when nobody routed can be told, the
+eligible owners are. With Security off box-wide, incidents still group and nothing
+is sent. Web push adds `priority: "alert"` (kept an hour, `Urgency: high`) and tag
+`security-incident-<uuid>` (`incidentTag`, `PUSH_ALERT_TTL_S`); native push is
+still pending (see "Push status").
+
+**The wall (`/security/wall`) is a web page, and nothing on the box is specific to
+it.** It has no route, no kiosk token and no device principal; "the wall runs on a
+Staff (`family`) account, never an owner or admin" is a client-side rule
+(`wallRunsFor` in `apps/web-dashboard/src/components/security/wall-status.ts`,
+applied in `apps/web-dashboard/src/components/AuthGate.tsx`) and the server does not
+check it. Every read it makes is an ordinary route a native client can call the same
+way, so a native wall needs no server work; there is none yet (ADR-059 §8, #2368 F5).
+
+| Read | Route | Used for | Web cadence |
+|---|---|---|---|
+| Features | `GET /api/modules` | Security and Cameras must both be open to the person before anything else is asked | 120 s |
+| Attention | route 17 (`openAlerts`, `openNotices` only) | "Needs attention" = their sum; an alert badge when `openAlerts` > 0 | 15 s |
+| Sources | `GET /api/security/health` (route 2) | which event sources are reporting, and whether the count may be behind | 15 s |
+| Mode | `GET /api/security/mode` (route 5) | the site mode | 15 s |
+| Cameras | `GET /api/cameras` | one tile per camera | 15 s |
+| Pictures | `GET /api/cameras/:name/snapshot?h=720` | each tile | 3 s |
+| Sign-in end | `GET /api/auth/me` `session.endsAt` | "signed out by … at the latest", in the last 30 minutes | 300 s |
+
+- **Route 2** (`routes/security.ts`, floored at owner/admin/family like 16–21):
+  `{ sources: [{ id, state, detail, lastSeenAt }] }`, `id` ∈ `camera_ingest`,
+  `camera_system`, `threat_mirror`, `site_mode`, `incidents`, `alerts`, `patterns`,
+  `retention`; `state` ∈ `ok` \| `quiet` \| `down` \| `not_configured`. `camera_system`
+  is absent when no camera system is set up (`camera_ingest` then reads
+  `not_configured`); `threat_mirror` and `alerts` are sent to owners and admins only
+  (`buildSecurityHealth`, `services/security-events.service.ts`). An outage is a flat
+  `503 { "error": "SECURITY_HEALTH_UNAVAILABLE" }`. The wall counts `camera_ingest`, `camera_system`
+  and `threat_mirror` as sources, and says the attention count may be behind when
+  `incidents`, `camera_ingest` or `threat_mirror` is `down` (`WALL_ROW_ROLE`,
+  `countBehind`).
+- **Route 5** (`ModeView`, `services/security-mode.service.ts`; floored like route 2):
+
+  ```json
+  { "mode": "open" | "closed" | "away", "source": "schedule" | "manual",
+    "manualEnd": "none" | "next_opening" | "at_time" | "until_changed",
+    "until": "ISO-8601" | null, "setBy": { "id": "<uuid>", "name": "…" } | null, "setAt": "ISO-8601",
+    "hours": { "state": "not_set" } | { "state": "set", "timezone": "<IANA zone>", "scheduledMode": "open" | "closed",
+                                         "upcoming": { "at": "ISO-8601", "mode": "open" | "closed" } | null },
+    "displayTimezone": "<IANA zone>" | null, "stale": false, "version": <int> }
+  ```
+
+  `mode` is the effective mode, resolved on every read. `stale` true means the box's
+  own record of it may be out of date. `displayTimezone` is the zone to format its
+  times in (`null`: the device's). The wall never shows `setBy`. An outage is a
+  nested `503 MODE_UNAVAILABLE`.
+- **`GET /api/cameras`** is already narrowed to the person's grants (owner and
+  admin see all). `{ cameras: [], _status: "disconnected" }` means the camera system
+  is unreachable, **not** "no cameras". A tile is not asked for, and shows no
+  picture, when `enabled` is `false` or `status` is `offline` or `idle`.
+  **`/cameras/:name/snapshot`** takes `h` clamped to 100–1080 (default 480), sends
+  `Cache-Control: private, no-store`, and re-checks the grant on every request: a
+  camera the person cannot see is `404 { "error": "Camera not found" }`, a grant
+  check that could not run `503 { "error": "access_check_unavailable" }`. The
+  Frigate birdseye composite is not used: it is all-or-nothing (WARP-2982), so it
+  needs the owner or admin session the wall refuses.
+- **Rules to keep** (`wall-status.ts` and `WallCameras.tsx` under
+  `apps/web-dashboard/src/components/security/`, and
+  `apps/web-dashboard/src/lib/hooks/useSecurity.ts`). Draw no value before its read
+  has answered (a dash, never `0`). When a read fails, keep the
+  last answer, dimmed, under a banner with its time; the strip is stale after 45 s
+  without an answer. A tile whose picture is older than 15 s stays, dimmed, under
+  "Picture from {time}"; a frozen frame is never shown as current. Retry every
+  failure on a backoff (15 s doubling to 2 min; tiles 3 s doubling to 2 min), a `404`
+  included, because the module gate answers `404` when it cannot read the toggle.
+  Show no toast on the wall: it faces a room, and a toast's Open is not the room's to
+  press (`apps/web-dashboard/src/components/NotificationToaster.tsx`).
+- **Not for clients**: `GET /api/panel/security` is the rack panel's count. Only the
+  display service principal may call it; every person, an owner included, gets a
+  `403` (`routes/panel-security.ts`).
+
+**Pending.** Lock rows and the Doors view arrive with #2350 and are gated on Devices
+view (DS-019) as well as Security view; they are not on `stage` and not part of
+this contract.
+
 ## Error shape
 
 > **Corrected 2026-06-28 (XR-03).** Earlier drafts of this section described a
@@ -747,8 +1175,12 @@ event: done
 data: {"iterations": 1, "stop_reason": "model_done"}
 ```
 
-`stop_reason` ∈ `model_done | iteration_limit | error` (an `error` frame
-also carries an `error` string). The agent loop also emits these event
+`stop_reason` ∈ `model_done | iteration_limit | error | context_budget |
+repetition | no_progress` (an `error` frame also carries an `error`
+string). The last three mean the loop stopped calling tools early — the
+context filled up, the model repeated an identical call, or its searches
+kept finding nothing — and the final text is still a normal answer; treat
+any value you do not recognise like `model_done`. The agent loop also emits these event
 types on the same stream — render or ignore as needed:
 
 | `event:` | `data` payload | Meaning |

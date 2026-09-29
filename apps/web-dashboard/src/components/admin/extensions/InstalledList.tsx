@@ -22,7 +22,7 @@
  *     and reinstalls it, so the row stays listed with that one action rather
  *     than vanishing and leaving the owner no way back but a new version.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Puzzle } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionListItem } from "@/lib/types";
@@ -45,6 +45,12 @@ function signerLabel(signer: string): string {
 
 export function InstalledList(props: InstalledListProps) {
   const [confirmingUninstall, setConfirmingUninstall] = useState<string | null>(null);
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
+  // Uninstall swaps its own button for Confirm / Keep: put focus on Confirm so
+  // a keyboard or screen-reader user is not left on a button that is gone.
+  useEffect(() => {
+    if (confirmingUninstall !== null) confirmRef.current?.focus();
+  }, [confirmingUninstall]);
 
   if (props.error) {
     return (
@@ -106,8 +112,10 @@ export function InstalledList(props: InstalledListProps) {
                       <>
                         <button
                           type="button"
+                          ref={confirmRef}
                           className="btn danger sm"
                           disabled={busy}
+                          aria-label={`Confirm uninstall ${ext.id}`}
                           onClick={() => {
                             setConfirmingUninstall(null);
                             props.onUninstall(ext.id);
@@ -115,7 +123,12 @@ export function InstalledList(props: InstalledListProps) {
                         >
                           Confirm uninstall
                         </button>
-                        <button type="button" className="btn ghost sm" onClick={() => setConfirmingUninstall(null)}>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          aria-label={`Keep ${ext.id}`}
+                          onClick={() => setConfirmingUninstall(null)}
+                        >
                           Keep
                         </button>
                       </>
