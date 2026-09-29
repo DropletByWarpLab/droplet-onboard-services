@@ -662,7 +662,8 @@ export interface AgentResult {
     | "iteration_limit"
     | "error"
     | "context_budget"
-    | "repetition";
+    | "repetition"
+    | "no_progress";
   error?: string;
   /** WARP-1479 — set only when the terminal turn produced no visible answer. */
   blankDiagnostics?: BlankAnswerDiagnostics;
@@ -1577,7 +1578,28 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // than a break because the user still deserves an answer synthesized from
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
-  let finalizeReason: "context_budget" | "repetition" | null = null;
+  let finalizeReason: "context_budget" | "repetition" | "no_progress" | null = null;
+  // WARP-3283 — no-progress early-stop. A model that keeps REPHRASING a
+  // search that finds nothing makes distinct calls, so the repetition guard
+  // above never fires and the turn used to run to maxIter and end on the
+  // canned step-limit text (live: 8 search_content rephrasings, 102 s).
+  // Counts zero-hit results PER SEARCH TOOL across the whole turn. Not
+  // "consecutive": in the eval trace that motivated this (adv-010) the
+  // rephrasings interleave low-relevance partial hits, exactly as a top-k
+  // index does, so a streak never reached 3 and the turn still hit the cap.
+  // Per tool, not pooled: adv-010 was 8x search_content, while three empties
+  // from three DIFFERENT tools is a legitimate "look everywhere" fan-out
+  // ("check files, email and the CRM; if there's none, add a task") that
+  // must keep its tools for the conditional write.
+  // Failed searches and every other tool don't count.
+  // Not persisted: a durable run resumed mid-turn (WARP-2177) restarts these
+  // counts at 0, so it can spend up to 2 more empties per tool; maxIter still
+  // bounds the turn.
+  // ponytail: three empty lookups of DIFFERENT entities with the same tool
+  // (three business_find customer searches) still finalize after the third;
+  // key on (tool, entity) if that shows up.
+  const MAX_EMPTY_SEARCHES = 3;
+  const emptySearches = new Map<string, number>();
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -1921,7 +1943,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         content:
           finalizeReason === "repetition"
             ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
-            : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+            : finalizeReason === "no_progress"
+              ? "Your last searches found nothing — stop searching. Answer the user now: say what you looked for and that nothing matching was found, plus anything useful already gathered. Do not call any more tools."
+              : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
       });
     }
     const iterTools = finalizeReason !== null ? [] : tools;
@@ -2666,6 +2690,22 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const parsed: unknown = toolResultPayloadValue(payload);
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
+      // WARP-3283 — feed the no-progress guard (see its declaration).
+      if (
+        !result.isError &&
+        isZeroHitSearchResult(call.function.name, args, parsed)
+      ) {
+        const empties = (emptySearches.get(call.function.name) ?? 0) + 1;
+        emptySearches.set(call.function.name, empties);
+        if (empties >= MAX_EMPTY_SEARCHES && finalizeReason === null) {
+          finalizeReason = "no_progress";
+          logger.info(
+            { turn_id: turnId, iter, tool: call.function.name, empty_searches: empties },
+            "agent_no_progress_finalize",
+          );
+        }
+      }
+
       // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
       // streaming and non-streaming paths. Until now nothing in this repo had
       // ever LOGGED a tool failure (`result.isError` was only ever read, below,
@@ -3244,6 +3284,53 @@ const RETRIEVAL_CLASS_TOOLS = new Set([
 
 function isRetrievalClassTool(name: string): boolean {
   return RETRIEVAL_CLASS_TOOLS.has(name);
+}
+
+/**
+ * WARP-3283 — query-driven lookups whose result can be "zero hits", each
+ * mapped to the root key its handler (packages/tools-core) puts the hits
+ * under. Not `RETRIEVAL_CLASS_TOOLS`: `read_file` never returns zero hits
+ * and `list_files` of an empty folder is an answer, not a failed search.
+ * `memory_recall` is left out on purpose — on a miss it falls back to the
+ * recent facts, so its result is never empty. `business_find` is handled
+ * separately in `isZeroHitSearchResult`: its list key varies by entity.
+ */
+const SEARCH_TOOLS = new Map([
+  ["search_content", "results"], // { query, results }
+  ["search_files", "items"], // /api/files/search { items }
+  ["email_search", "threads"], // { type, filter, threadCount, threads }
+  // No mailbox connected is `{ contacts: [], count: 0, note }` and counts on
+  // purpose: rephrasing cannot find mail that is not indexed.
+  ["search_contacts", "contacts"],
+  ["search_calendar_events", "events"], // { type, count, query, events }
+  ["search_camera_events", "events"], // { type, query, events, count }
+  ["workspace_search", "hits"], // { pattern, hits, count, truncated }
+]);
+
+/**
+ * A successful search that found nothing. Tool-aware, not shape-driven: a
+ * record read carries root arrays too (business_find customer by id is
+ * `{ entity, customer, contacts: [], open_deals: [], projects: [], … }`),
+ * and an empty link list on a FOUND record is not a miss.
+ */
+function isZeroHitSearchResult(
+  tool: string,
+  args: Record<string, unknown>,
+  parsed: unknown,
+): boolean {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const p = parsed as Record<string, unknown>;
+  if (tool === "business_find") {
+    // With `id` it is a record read (the handler's own test: a non-blank
+    // string). `pipeline` without id is a roll-up, never carries `total`.
+    if (typeof args.id === "string" && args.id.trim() !== "") return false;
+    // Every list branch carries `total` except work_item's search.
+    if (typeof p.total === "number") return p.total === 0;
+    return Array.isArray(p.work_items) && p.work_items.length === 0;
+  }
+  const key = SEARCH_TOOLS.get(tool);
+  const hits = key === undefined ? undefined : p[key];
+  return Array.isArray(hits) && hits.length === 0;
 }
 
 /**
