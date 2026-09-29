@@ -41,6 +41,7 @@ import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge } from "@/components/shell/primitives";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
 import { useRuntimeTools } from "@/lib/hooks/useRuntimeTools";
+import { displayVersion } from "@/components/admin/extensions/copy";
 import { classificationLabel, humanizeToolName as humanizeWireName } from "@/lib/runtime-tools";
 import { iconForDomain, labelForDomain, reachNote } from "@/lib/tool-domains";
 import {
@@ -306,17 +307,28 @@ function ExtensionsSection({ query, domainFilter }: { query: string; domainFilte
       <div className="grid c3">
         {shown.map((t) => {
           const chip = classificationLabel(t.classification);
+          const chipId = `ext-tool-${t.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
           return (
             <div key={t.name} className="card ds-tool-card" style={CARD_STYLE} data-testid="extension-tool">
               <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
                 {humanizeWireName(t.wireName)}
               </span>
               <p style={{ fontSize: 13, color: "var(--text)", opacity: 0.82, lineHeight: 1.5, flex: 1, margin: 0 }}>
-                {`From the ${t.extension.id} extension, version ${t.extension.version} · ${labelForDomain(t.domain)}`}
+                {`From the ${t.extension.id} extension, version ${displayVersion(t.extension.version)} · ${labelForDomain(t.domain)}`}
               </p>
               <div className="chiprow" style={{ gap: 6, paddingTop: 2 }}>
-                <span className={`badge ${chip.kind}`} title={chip.note}>
+                {/* The note is a title= too, but a title is neither focusable nor read
+                    reliably: the same words are in the accessible description. */}
+                <span
+                  className={`badge ${chip.kind}`}
+                  title={chip.note}
+                  tabIndex={0}
+                  aria-describedby={`${chipId}-note`}
+                >
                   {chip.label}
+                </span>
+                <span id={`${chipId}-note`} className="sr-only">
+                  {chip.note}
                 </span>
               </div>
             </div>

@@ -480,6 +480,8 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     expect(res.status).toBe(200);
     expect(res.body.accessToken).toEqual(expect.any(String));
     expect(res.body.refreshToken).toEqual(expect.any(String));
+    // WARP-3038 — a body-token passkey sign-in sets no session cookies.
+    expect(res.headers["set-cookie"]).toBeUndefined();
   });
 
   it("verify: ?return=body from a BROWSER context (Origin present) issues the cookie session but NO body tokens (WARP-582)", async () => {
