@@ -249,7 +249,8 @@ planted-file shape this ADR bans. From VPND-3 on, the service mints a fresh
 token at every start and only writes it. It checks the path's owner and that
 the path is not a link, deletes any existing file, and creates the file new
 with a protected descriptor: SYSTEM and Administrators get full control,
-interactive users get read. It never reads the file. A client therefore reads
+interactive users get read. Under policy A that is every interactive user on the
+machine, not only the installing user. It never reads the file. A client therefore reads
 the file for each connection and does not cache it. The token stays a cheap
 first reject in v1; dropping it is reserved for protocol v2 (`PROTOCOL.md`
 §10).
@@ -272,7 +273,7 @@ gate required before the first signed MSI:
 | Publisher-subject pin, baked in at build time. A subject, not a thumbprint, because the certificates rotate every few days. The release pipeline asserts the production subject on tags | Any other trusted publisher's binary | VPND-2 |
 | Exact image allow-list: `Droplet.exe` | `createdump.exe` and any other signed helper the publish adds | VPND-2 |
 | `StartupHookSupport=false` in the app's runtime config, and a self-contained .NET runtime | `DOTNET_STARTUP_HOOKS` running a user's assembly inside the signed process; `DOTNET_ROOT` redirecting the host | The client (ADR-062 row 1) |
-| `O:SY` in the pipe descriptor. Before it sends the token, the client requires a SYSTEM-owned server, or one in session 0 | A user process that squats the pipe name while the service is stopped and hands back its own WireGuard key | VPND-3; the client's check in WIN-16 |
+| `O:SY` in the pipe descriptor. Before it sends the token, the client requires the server to be in session 0 and, once `O:SY` lands, to be owned by SYSTEM (`PROTOCOL.md` §7) | A user process that squats the pipe name while the service is stopped and hands back its own WireGuard key | VPND-3; the client's check in WIN-16 |
 | SCM failure actions (restart on failure) | A crashed service leaving the name free for a squatter. None are configured today, although `service.rs:186-187` assumes they are | VPND-3 |
 
 Residual risk, recorded: the CLR profiler variables (`CORECLR_ENABLE_PROFILING`,
