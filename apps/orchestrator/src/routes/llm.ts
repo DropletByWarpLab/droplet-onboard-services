@@ -2338,7 +2338,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             liveAssistantContent.trim().length === 0 &&
             (e.stop_reason === "model_done" ||
               e.stop_reason === "context_budget" ||
-              e.stop_reason === "repetition")
+              e.stop_reason === "repetition" ||
+              e.stop_reason === "no_progress")
           ) {
             emptyCompletion = true;
             e = {
@@ -2588,7 +2589,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           contentToText(result.message.content).trim().length === 0 &&
           (result.stop_reason === "model_done" ||
             result.stop_reason === "context_budget" ||
-            result.stop_reason === "repetition")
+            result.stop_reason === "repetition" ||
+            result.stop_reason === "no_progress")
         ) {
           result = {
             ...result,

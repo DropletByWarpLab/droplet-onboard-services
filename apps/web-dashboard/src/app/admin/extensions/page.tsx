@@ -197,6 +197,7 @@ export default function ExtensionsAdminPage() {
         error={ext.proposalsError}
         canPromote={isOwner}
         reviewing={reviewing}
+        locked={confirming}
         onReview={(id) => void onReview(id)}
       />
       {reviewError ? (
