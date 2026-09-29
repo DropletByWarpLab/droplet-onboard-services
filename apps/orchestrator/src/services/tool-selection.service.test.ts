@@ -1056,3 +1056,126 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
     expect(advertised.has("list_network_devices")).toBe(false);
   });
 });
+
+describe("WARP-3280 — contacts and the calculator are reachable from a fresh turn", () => {
+  const CONTACTS_POOL = [...POOL, "search_contacts", "email_search"];
+  const DATA_POOL = [...POOL, "calculate", "get_weather"];
+
+  const advertisedFor = (userMessage: string, pool: string[]) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames: [],
+    }).advertised;
+
+  // The ticket's own four sentences matched NO domain (or, for the second,
+  // not `email`), so the model answered "no contact found" without ever
+  // having search_contacts. MUTATION: drop `contacts?`/`address book`/the
+  // bare-address alternative from the email rule and these go red.
+  describe("contacts — positives", () => {
+    it.each([
+      "Look up the contact alice@example.com.",
+      "Look up charlie@example.com and open the work item from their contact note.",
+      "what's the plumber's number in my contacts?",
+      "is Dana Whitfield in the address book?",
+      "who is bob.smith+work@acme-corp.co.uk?",
+      "find Maria Lopez's contact info",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
+    });
+  });
+
+  // `contact` as a VERB ("contact me later", "who should I contact about the
+  // boiler") is knowingly admitted: reaching a person is what the email
+  // domain's tools do, and the whole domain is six schemas. What is NOT
+  // admitted is the eyewear and card-payment senses, which want nothing
+  // from an inbox.
+  describe("contacts — negatives", () => {
+    it.each([
+      "I need to reorder my contact lenses",
+      "does the shop take contactless payments?",
+      // An `@` that is not an address: a handle and a time.
+      "follow us @dropletbox",
+      "meet me @ 5",
+      "reorder my contact-lens prescription",
+    ])("%s does not advertise search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).not.toContain("search_contacts");
+    });
+  });
+
+  // Knowingly admitted: any `user@host.tld` token is read as an address, so a
+  // git remote or an ssh target advertises the email domain too. Six schemas
+  // is the cheap direction; pinned so a future narrowing is a decision.
+  describe("contacts — address-shaped tokens that are not mail (accepted)", () => {
+    it.each([
+      "clone git@github.com:org/repo for me",
+      "ssh root@droplet.local is refusing my key",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
+    });
+  });
+
+  // MUTATION: narrow `calculat\w*` back to `calculate`, or drop the
+  // arithmetic-expression alternative, and the matching positive goes red.
+  describe("calculator — positives", () => {
+    it.each([
+      "What is 187 * 43?",
+      "Use the calculator to work out 2+2.",
+      "can you do the math on 1250 × 12 for the annual rent?",
+      "what's 84 / 7",
+      "quick calculation: 15% of 240",
+      "what's 3 x 4.5",
+      "how much is 2^10",
+      "check my arithmetic, 17 - 9 is 8 right?",
+    ])("%s advertises calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).toContain("calculate");
+    });
+  });
+
+  // `-`, `/` and `x` are expressions only with spaces around them; tight,
+  // they are dates, phone numbers, resolutions and part numbers. Bare `sum`
+  // is not claimed ("sum up the thread" is a summary). These sentences carry
+  // no other data word, so they must stay off the domain.
+  describe("calculator — negatives", () => {
+    it.each([
+      "call the landlord on 555-0142",
+      "the 9/11 memorial photo",
+      "is the monitor 1920x1080?",
+      "sum up the thread with Karen",
+      "C++ developer resume",
+    ])("%s does not advertise calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).not.toContain("calculate");
+    });
+  });
+});
+
+// WARP-3280 review — the first bare-address alternative (`[\w.+-]+@…`,
+// unanchored and unbounded) backtracked O(n²): 40k chars took ~3 s, blocking
+// the event loop on every turn and timing out llm-chat.integration.test.ts.
+// `selectAdvertisedTools` tests EVERY `DOMAIN_RULES` pattern (no short
+// circuit), so timing it times every rule. Each input is a worst case for at
+// least one rule shape: a long word run, a run of `.`/`@` separators, a
+// dotted domain with no TLD, whitespace after a digit (the arithmetic `\s*`
+// alternatives), and a repeated `contact` lookahead. The auth-policy userid
+// test is the precedent. MUTATION: restore `[\w.+-]+@[\w-]+(\.[\w-]+)*` and
+// the first case takes seconds.
+describe("WARP-3280 — every domain rule runs in linear time on hostile input", () => {
+  const N = 100_000;
+  it.each([
+    ["word run", "x".repeat(N)],
+    ["dotted run", "a.".repeat(N / 2)],
+    ["at run", "a@".repeat(N / 2)],
+    ["local part, no @", "a".repeat(N) + "@"],
+    ["domain, no TLD", "a@" + "a.".repeat(N / 2) + "1"],
+    ["plus/dash run", "+-".repeat(N / 2) + "@x"],
+    ["digit then spaces", "1" + " ".repeat(N) + "a"],
+    ["digit-space run", "1 ".repeat(N / 2)],
+    ["percent run", "1 % ".repeat(N / 4)],
+    ["contact run", "contact ".repeat(N / 8)],
+  ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
+    const started = performance.now();
+    selectAdvertisedTools({ mode: "domains", userMessage: hostile, pool: POOL, conversationToolNames: [] });
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+});
