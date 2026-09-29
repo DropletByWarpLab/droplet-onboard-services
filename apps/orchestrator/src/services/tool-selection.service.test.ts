@@ -1322,8 +1322,14 @@ describe("WARP-3280 — contacts and the calculator are reachable from a fresh t
 // alternatives), and a repeated `contact` lookahead. The auth-policy userid
 // test is the precedent. MUTATION: restore `[\w.+-]+@[\w-]+(\.[\w-]+)*` and
 // the first case takes seconds.
+//
+// WARP-3116 — `NAVIGATION_RULES` run only for a pool that holds a navigation
+// tool, so a pool without one never times them. Each input therefore runs
+// against BOTH pools, and the last four are worst cases for the navigation
+// shapes (`open|show me` + the bounded `(\w+ ){0,2}`, `where …`).
 describe("WARP-3280 — every domain rule runs in linear time on hostile input", () => {
   const N = 100_000;
+  const NAV_POOL = [...POOL, "find_dashboard_page", "open_dashboard_page"];
   it.each([
     ["word run", "x".repeat(N)],
     ["dotted run", "a.".repeat(N / 2)],
@@ -1335,9 +1341,15 @@ describe("WARP-3280 — every domain rule runs in linear time on hostile input",
     ["digit-space run", "1 ".repeat(N / 2)],
     ["percent run", "1 % ".repeat(N / 4)],
     ["contact run", "contact ".repeat(N / 8)],
+    ["open run", "open ".repeat(N / 5)],
+    ["show me run", "show me ".repeat(N / 8)],
+    ["open then words", "open " + "a ".repeat(N / 2)],
+    ["where run", "where ".repeat(N / 6)],
   ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
-    const started = performance.now();
-    selectAdvertisedTools({ mode: "domains", userMessage: hostile, pool: POOL, conversationToolNames: [] });
-    expect(performance.now() - started).toBeLessThan(50);
+    for (const pool of [POOL, NAV_POOL]) {
+      const started = performance.now();
+      selectAdvertisedTools({ mode: "domains", userMessage: hostile, pool, conversationToolNames: [] });
+      expect(performance.now() - started).toBeLessThan(50);
+    }
   });
 });
