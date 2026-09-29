@@ -12,7 +12,9 @@
 import { describe, it, expect } from "vitest";
 import { ExtensionRequestError } from "@/lib/api";
 import {
+  EXTENSION_ERROR_DEFAULT,
   LIFECYCLE_COPY,
+  LIFECYCLE_FAILURE_DEFAULT,
   displayVersion,
   explainExtensionError,
   explainLifecycleFailure,
@@ -48,7 +50,7 @@ describe("explainExtensionError", () => {
     expect(explainExtensionError(MARKER)).not.toContain(MARKER);
   });
 
-  it.each(["install_failed", "attach_refused", "verify_failed", "wrong_state", "not_promoted", "statement_mismatch"])(
+  it.each(["install_failed", "attach_refused", "verify_failed", "wrong_state", "not_promoted", "statement_mismatch", "source_deleted"])(
     "says what %s means, in its own sentence",
     (code) => {
       const text = explainExtensionError(new ExtensionRequestError(MARKER, 409, code));
@@ -95,6 +97,15 @@ describe("a proposal's reason is read by its code only", () => {
     expect(explainProposalReason(`manifest invalid: provides.tools.0.name: ${MARKER}`)).not.toContain(MARKER);
     expect(explainProposalReason(`the sandbox said ${MARKER}`)).not.toContain(MARKER);
     expect(explainProposalReason(null)).toBeTruthy();
+  });
+});
+
+describe("prototype keys are not codes", () => {
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])("%s never resolves to a function", (code) => {
+    expect(explainLifecycleFailure(`${code}: boom`)).toBe(LIFECYCLE_FAILURE_DEFAULT);
+    expect(explainProposalReason(`${code}: boom`)).toBe("The sandbox could not read this proposal.");
+    const err = new ExtensionRequestError("x", 400, code);
+    expect(explainExtensionError(err)).toBe(EXTENSION_ERROR_DEFAULT);
   });
 });
 

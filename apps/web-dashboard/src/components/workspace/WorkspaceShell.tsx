@@ -73,18 +73,9 @@ import {
 } from "./workspace-nav-config";
 
 import { VERSION_LABEL } from "@/lib/brand";
+import { greetingNow } from "@/lib/greeting";
 import "@/components/shell/indigo-tokens.css";
 import "./workspace-nav.css";
-
-/** Same buckets as the Home board's `greetingNow` — one voice on both shells. */
-function greetingNow(): string {
-  const hr = new Date().getHours();
-  if (hr < 5) return "Still up";
-  if (hr < 12) return "Good morning";
-  if (hr < 18) return "Good afternoon";
-  if (hr < 22) return "Good evening";
-  return "Working late";
-}
 
 /**
  * Roving focus for one horizontal row of tabs/chips/pills (WAI-ARIA tabs
@@ -357,6 +348,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     key={v.href}
                     href={v.href}
                     aria-current={active ? "page" : undefined}
+                    aria-label={v.ariaLabel}
                     tabIndex={active || !activeViewHref ? 0 : -1}
                     data-roving
                     className={"ws-view" + (active ? " is-active" : "")}

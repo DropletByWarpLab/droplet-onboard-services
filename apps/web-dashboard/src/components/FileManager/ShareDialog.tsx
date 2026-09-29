@@ -41,6 +41,14 @@ interface ShareDialogProps {
    */
   isDirectory?: boolean;
   existingShares?: ShareDetail[];
+  /**
+   * WARP-3053: set when this viewer may not publish this item outside the
+   * company (a member on a company library). The box enforces it; the dialog
+   * replaces the link form with this sentence, keeps existing links
+   * revocable but not editable, and drops the re-share levels from the
+   * person form (a re-share grant is a public link one hop later).
+   */
+  publicLinkBlockedReason?: string;
   onClose: () => void;
   onChange?: () => void;
 }
@@ -196,6 +204,7 @@ export function ShareDialog({
   fileName,
   isDirectory = false,
   existingShares = [],
+  publicLinkBlockedReason,
   onClose,
   onChange,
 }: ShareDialogProps) {
@@ -258,6 +267,10 @@ export function ShareDialog({
 
   // WARP-1601: files and folders do not offer the same access levels.
   const levels = accessLevelsFor(isDirectory);
+  // WARP-3053: no re-share grants on company data for a member.
+  const personLevels = publicLinkBlockedReason
+    ? levels.filter((l) => (l.bits & PERM_SHARE) === 0)
+    : levels;
   const toSendable = (bits: number): number =>
     sendablePermissions(bits, isDirectory);
 
@@ -581,6 +594,8 @@ export function ShareDialog({
                       <div className="flex items-center gap-2">
                         <select
                           aria-label="Access level"
+                          disabled={!!publicLinkBlockedReason}
+                          title={publicLinkBlockedReason}
                           value={presetBitsFor(share.permissions, isDirectory)}
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
@@ -784,7 +799,7 @@ export function ShareDialog({
                     Access level
                   </label>
                   <div className="flex gap-2">
-                    {levels.map((level) => {
+                    {personLevels.map((level) => {
                       const active = permissions === level.bits;
                       return (
                         <button
@@ -813,6 +828,19 @@ export function ShareDialog({
                   </div>
                 </div>
               </>
+            ) : publicLinkBlockedReason ? (
+              <p
+                role="note"
+                className="type-footnote p-2"
+                style={{
+                  color: "var(--text-muted)",
+                  background: "var(--surface-2)",
+                  border: "1px solid var(--card-bd)",
+                  borderRadius: "var(--radius-input)",
+                }}
+              >
+                {publicLinkBlockedReason}
+              </p>
             ) : (
               <>
                 {/* Permissions */}
@@ -1010,6 +1038,7 @@ export function ShareDialog({
           <button onClick={onClose} className="btn ghost">
             Close
           </button>
+          {!(mode === "link" && publicLinkBlockedReason) && (
           <button
             onClick={handleCreate}
             disabled={createDisabled}
@@ -1033,6 +1062,7 @@ export function ShareDialog({
               </>
             )}
           </button>
+          )}
         </div>
       </div>
 

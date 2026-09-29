@@ -184,3 +184,56 @@ describe("parseReleaseManifest (WARP-537)", () => {
     });
   });
 });
+
+describe("release.json clients (WARP-3120)", () => {
+  const golden = (): Record<string, unknown> =>
+    JSON.parse(fixture("release.valid.json")) as Record<string, unknown>;
+  const DMG = {
+    platform: "macos",
+    version: "0.2.0",
+    file: "Droplet-0.2.0.dmg",
+    size: 50331648,
+    sha256: "e".repeat(64),
+  };
+  const withClients = (clients: unknown) => JSON.stringify({ ...golden(), clients });
+
+  it("a manifest without clients parses as before", () => {
+    const res = parseReleaseManifest(fixture("release.valid.json"));
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.manifest.clients).toBeUndefined();
+  });
+
+  it("parses and exposes a clients entry", () => {
+    const res = parseReleaseManifest(withClients([DMG]));
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.manifest.clients).toEqual([DMG]);
+  });
+
+  it("an older parser strips an unknown top-level key rather than refusing it", () => {
+    // What a box on a pre-WARP-3120 orchestrator does with `clients`: the
+    // schema is a non-strict zod object. Pinned with a key no version knows.
+    const res = parseReleaseManifest(JSON.stringify({ ...golden(), notYetInvented: [1] }));
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.manifest).not.toHaveProperty("notYetInvented");
+  });
+
+  it.each([
+    ["a bad sha256", { sha256: "E".repeat(64) }],
+    ["a file with a slash", { file: "../Droplet.dmg" }],
+    ["an unknown platform", { platform: "ios" }],
+    ["a non-x.y.z version", { version: "0.2" }],
+    ["a zero size", { size: 0 }],
+  ])("refuses the manifest for %s", (_label, over) => {
+    expect(parseReleaseManifest(withClients([{ ...DMG, ...over }]))).toMatchObject({
+      ok: false,
+      failureReason: "schema_invalid",
+    });
+  });
+
+  it("refuses two entries for one platform", () => {
+    expect(parseReleaseManifest(withClients([DMG, { ...DMG, file: "Droplet-0.2.1.dmg" }]))).toMatchObject({
+      ok: false,
+      failureReason: "schema_invalid",
+    });
+  });
+});

@@ -121,8 +121,13 @@ export function useSmartHome() {
     mutate(DISCOVERED_KEY);
   }
 
+  // WARP-3276: a controller outage answers 200 + empty groups + this marker;
+  // without it the page read the outage as "No devices yet".
+  const disconnected = grouped?._status === "disconnected";
+
   return {
     grouped: grouped ?? null,
+    disconnected,
     discovered,
     totalDevices,
     isLoading,

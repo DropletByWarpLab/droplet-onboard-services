@@ -6,6 +6,7 @@ import { z } from "zod";
 // graph — the concern the `resolveAgentIterLimits` note below is about.
 import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "./services/erp-sync/money-snapshot.service.js";
 import { PUBLIC_DEVICE_SECRET_VALUES, isWeakDeviceSecret } from "./lib/device-secret.js";
+import { isShippedDropletEnv } from "./lib/droplet-env.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -146,13 +147,6 @@ export function findEmptyProductionSecrets(
     const trimmed = v.trim();
     return trimmed === "" || PLACEHOLDER_SECRET_VALUES.has(trimmed);
   });
-}
-
-/** PURE — the shipped-box posture signal (mirrors ai-gateway
- *  keystore._is_production). Exported for tests. */
-export function isShippedDropletEnv(v: string | undefined): boolean {
-  const t = (v ?? "").trim().toLowerCase();
-  return t === "production" || t === "prod";
 }
 
 /**

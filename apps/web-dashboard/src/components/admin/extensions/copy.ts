@@ -67,6 +67,7 @@ export const LIFECYCLE_COPY: Readonly<Record<string, string>> = {
   wrong_state: "It changed state while this was happening. The list shows where it is now.",
   not_promoted: "It has no signed version to start.",
   not_found: "This box has no extension by that name.",
+  source_deleted: "The custom tool it was built from was deleted in the workshop, so it cannot start again.",
   preflight_blocked: "Something on this box now blocks it, such as another extension using one of its tool names.",
   sandbox_error: "The sandbox did not answer. Try again.",
 };
@@ -90,7 +91,16 @@ export function lifecycleFailureCode(reason: string | null | undefined): string 
 /** An extension's `failureReason`, in this box's words: by its code, never its detail. */
 export function explainLifecycleFailure(reason: string | null | undefined): string {
   const code = lifecycleFailureCode(reason);
-  return (code !== null && LIFECYCLE_COPY[code]) || LIFECYCLE_FAILURE_DEFAULT;
+  return lifecycleCopyFor(code) ?? LIFECYCLE_FAILURE_DEFAULT;
+}
+
+/**
+ * Copy for a code, own keys only. The codes come from a sandbox's error text,
+ * so `constructor` or `toString` must not resolve to an Object.prototype
+ * function and render as the message.
+ */
+function lifecycleCopyFor(code: string | null | undefined): string | undefined {
+  return typeof code === "string" && Object.hasOwn(LIFECYCLE_COPY, code) ? LIFECYCLE_COPY[code] : undefined;
 }
 
 /** Why a proposal cannot be promoted, by the orchestrator's reason code (the text before any colon). */
@@ -102,7 +112,10 @@ const PROPOSAL_REASON_COPY: Readonly<Record<string, string>> = {
 
 export function explainProposalReason(reason: string | null | undefined): string {
   const code = (reason ?? "").split(":")[0].trim();
-  return PROPOSAL_REASON_COPY[code] ?? "The sandbox could not read this proposal.";
+  return (
+    (Object.hasOwn(PROPOSAL_REASON_COPY, code) ? PROPOSAL_REASON_COPY[code] : undefined) ??
+    "The sandbox could not read this proposal."
+  );
 }
 
 /** A refused request, said by its code. Never the server's message: see the header. */
@@ -135,7 +148,7 @@ export function explainExtensionError(err: unknown): string {
       case "invalid_domain":
         return "That area is not one this box knows.";
       default:
-        return (err.code !== null && LIFECYCLE_COPY[err.code]) || EXTENSION_ERROR_DEFAULT;
+        return lifecycleCopyFor(err.code) ?? EXTENSION_ERROR_DEFAULT;
     }
   }
   return EXTENSION_ERROR_DEFAULT;
