@@ -11,7 +11,8 @@
  *                 term: forced degrades to the weaker "open with no preceding
  *                 grant or REX", and the row says which claim it is.
  *   held open     door position open past the door's held-open time after a
- *                 grant or REX.
+ *                 grant or REX. A key override authorises an opening (it is
+ *                 not forced) but does not start this: nothing granted it.
  *   relock        fires on door-closed + latch-extended, NOT on a timer.
  *   unknown       a door whose cell has died cannot report; on the third
  *                 missed heartbeat its position is UNKNOWN — never left at
@@ -51,11 +52,13 @@ export interface DoorState {
   open: boolean | null;
   /** `null` until the lock has reported its latch. */
   latch: "extended" | "retracted" | null;
-  /** A grant, REX or (on a lock) key override stands, unspent by a relock. */
+  /** A grant, REX or (on a lock) key override stands, unspent by a relock. Keeps an opening from being forced. */
   authorized: boolean;
+  /** A grant or REX stands, unspent by a relock. Only these start held-open (§9.7); a key override does not. */
+  heldOpenArmed: boolean;
   /** When the current opening began. `null` unless `open`. */
   openedAt: number | null;
-  /** Whether the current opening followed an authorisation. */
+  /** Whether the current opening followed a grant or REX. */
   openedAuthorized: boolean;
 }
 
@@ -63,6 +66,7 @@ export const INITIAL_DOOR_STATE: DoorState = Object.freeze({
   open: null,
   latch: null,
   authorized: false,
+  heldOpenArmed: false,
   openedAt: null,
   openedAuthorized: false,
 });
@@ -102,7 +106,7 @@ export function advanceDoorState(
       if (source !== "none" && state.open !== true) {
         next.open = true;
         next.openedAt = event.at.getTime();
-        next.openedAuthorized = state.authorized;
+        next.openedAuthorized = state.heldOpenArmed;
       }
       break;
     case "door_closed":
@@ -120,6 +124,7 @@ export function advanceDoorState(
       break;
     default:
       if (authorizes(source, event.kind)) next.authorized = true;
+      if (source !== "none" && (event.kind === "unlock_granted" || event.kind === "rex")) next.heldOpenArmed = true;
   }
 
   // The relock is evaluated only on the events that can complete the pair. A
@@ -129,6 +134,7 @@ export function advanceDoorState(
     event.kind === "door_closed" || (source === "lock" && event.kind === "latch_extended");
   if (completes && next.authorized && isSecure(source, next)) {
     next.authorized = false;
+    next.heldOpenArmed = false;
     return { state: next, relock: true };
   }
   return { state: next, relock: false };
@@ -163,9 +169,10 @@ export function assessDoorOpen(
 }
 
 /**
- * Is the current opening past its held-open time? Only after an authorisation
- * (an unauthorised opening is a forced door, not a held one), only while
- * still open, and never on a `none` door. "Past" is strict.
+ * Is the current opening past its held-open time? Only after a grant or REX
+ * (an unauthorised opening is a forced door, not a held one; a key override
+ * starts nothing, §9.7), only while still open, and never on a `none` door.
+ * "Past" is strict.
  */
 export function heldOpenDue(
   source: DoorPositionSource,

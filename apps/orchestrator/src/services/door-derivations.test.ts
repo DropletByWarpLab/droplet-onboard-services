@@ -145,6 +145,18 @@ describe("held open — brief §9.7", () => {
     ).toEqual(["held_open"]);
   });
 
+  it("a key override does not start it: §9.7 says 'after a grant or REX' (the override still keeps the open from being forced)", () => {
+    const keyed = [ev("latch_extended", 0), ev("key_override", 1), ev("latch_retracted", 2), ev("door_open", 10)];
+    // Not forced (the override authorised the opening) and not held open (nothing
+    // granted it): a door someone keyed open and left open raises neither claim.
+    expect(deriveAlarms("lock", 30, keyed, at(10 + 500))).toEqual([]);
+  });
+
+  it("a grant after a key override still starts it", () => {
+    const events = [ev("latch_extended", 0), ev("key_override", 1), ev("unlock_granted", 2), ev("door_open", 10)];
+    expect(deriveAlarms("lock", 30, events, at(10 + 31)).map((a) => a.kind)).toEqual(["held_open"]);
+  });
+
   it("not once the door has closed", () => {
     const events = [...granted(), ev("door_open", 10), ev("door_closed", 20)];
     expect(deriveAlarms("lock", 30, events, at(500))).toEqual([]);
@@ -265,6 +277,7 @@ describe("state fold", () => {
       open: null,
       latch: null,
       authorized: false,
+      heldOpenArmed: false,
       openedAt: null,
       openedAuthorized: false,
     });
