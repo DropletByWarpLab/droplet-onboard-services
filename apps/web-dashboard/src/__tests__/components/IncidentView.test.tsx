@@ -53,6 +53,11 @@ vi.mock("@/lib/hooks/useModuleGate", async (orig) => ({
   ...(await orig<typeof import("@/lib/hooks/useModuleGate")>()),
   useModuleLevel: (moduleId: string) => (moduleId === "security" ? h.level : "none"),
 }));
+// WARP-2980 (P5 PR-C): the page reads the role for the trial rule (owner/admin only).
+vi.mock("@/lib/auth", async (orig) => ({
+  ...(await orig<typeof import("@/lib/auth")>()),
+  useAuth: () => ({ user: { id: "u1", username: "alex", displayName: "Alex", role: "owner" } }),
+}));
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: h.toast }) }));
 vi.mock("@/lib/security-time", async (orig) => ({
   ...(await orig<typeof import("@/lib/security-time")>()),
@@ -124,7 +129,10 @@ function detail(over: Partial<IncidentDetail> = {}): IncidentDetail {
     notices: [],
     eventsKept: "kept",
     actionable: true,
-    viewer: { level: "act", acknowledged: false },
+    // WARP-2980 (P5 PR-C): what route 18 sends a viewer who doesn't see every camera — no verdict, no flags.
+    verdict: null,
+    patternFlags: [],
+    viewer: { level: "act", acknowledged: false, canGiveVerdict: false },
     ...over,
   };
 }
@@ -208,7 +216,7 @@ describe("WARP-3195 — a camera only Droplet linked: the line and Keep (route 2
   };
   const KEEP_BACK = fill(INCIDENT_COPY.keepLinkNamed, { camera: "Back camera" });
   const atManage = (over: Partial<IncidentDetail> = {}) =>
-    detail({ dropletLinks: [BACK], viewer: { level: "manage", acknowledged: false }, ...over });
+    detail({ dropletLinks: [BACK], viewer: { level: "manage", acknowledged: false, canGiveVerdict: false }, ...over });
 
   beforeEach(() => {
     h.level = "manage";
@@ -241,7 +249,7 @@ describe("WARP-3195 — a camera only Droplet linked: the line and Keep (route 2
     ["the module level is still view", "view", "manage"],
   ] as const)("🔴 not at manage — %s: no line and no Keep, even if the box sent a list", async (_l, moduleLevel, boxLevel) => {
     h.level = moduleLevel;
-    h.getSecurityIncident.mockResolvedValue(atManage({ viewer: { level: boxLevel, acknowledged: false } }));
+    h.getSecurityIncident.mockResolvedValue(atManage({ viewer: { level: boxLevel, acknowledged: false, canGiveVerdict: false } }));
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByText(INCIDENT_COPY.dropletLinked)).toBeNull();
@@ -543,7 +551,7 @@ describe("the page's order and content", () => {
           { action: "acknowledge", byName: "Maria", at: at("01:17"), client: "Droplet for iPhone 1.4", viaNotification: true, note: "", signIn: { recorded: true, confirmedLive: true } },
           { action: "resolve", byName: "Stefan", at: at("01:30"), client: null, viaNotification: false, note: "It was the cleaner.", signIn: null },
         ],
-        viewer: { level: "act", acknowledged: true },
+        viewer: { level: "act", acknowledged: true, canGiveVerdict: false },
       }),
     );
     renderView();
@@ -602,7 +610,7 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
   });
 
   it("view-only on the box (as it sends it: viewer.level view, actionable false): neither button, and the one can't-act sentence", async () => {
-    h.getSecurityIncident.mockResolvedValue(detail({ actionable: false, viewer: { level: "view", acknowledged: false } }));
+    h.getSecurityIncident.mockResolvedValue(detail({ actionable: false, viewer: { level: "view", acknowledged: false, canGiveVerdict: false } }));
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
@@ -611,7 +619,7 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
   });
 
   it("defence in depth: a box that says actionable at view level (never sent) still gets no buttons", async () => {
-    h.getSecurityIncident.mockResolvedValue(detail({ viewer: { level: "view", acknowledged: false } }));
+    h.getSecurityIncident.mockResolvedValue(detail({ viewer: { level: "view", acknowledged: false, canGiveVerdict: false } }));
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
@@ -620,7 +628,7 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
 
   it("acknowledged by someone else: this person can still acknowledge (D23), as a secondary button", async () => {
     h.getSecurityIncident.mockResolvedValue(
-      detail({ state: "acknowledged", lastAck: { action: "acknowledge", byName: "Maria", at: at("01:17") }, viewer: { level: "act", acknowledged: false } }),
+      detail({ state: "acknowledged", lastAck: { action: "acknowledge", byName: "Maria", at: at("01:17") }, viewer: { level: "act", acknowledged: false, canGiveVerdict: false } }),
     );
     renderView();
     const ack = await screen.findByRole("button", { name: COPY.acknowledge });
@@ -657,7 +665,7 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
         lastAck: null,
         notices: [],
         acks: [{ action: "acknowledge", byName: "Jordan", at: at("01:17"), client: null, viaNotification: true, note: "", signIn: null }],
-        viewer: { level: "act", acknowledged: true },
+        viewer: { level: "act", acknowledged: true, canGiveVerdict: false },
       }),
     );
     renderView();
@@ -672,7 +680,7 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
   it("DS-005: the can't-act words are the same whatever the cause — a view-only level reads exactly like a hidden camera", async () => {
     const texts: string[] = [];
     for (const over of [
-      { actionable: false, viewer: { level: "view" as const, acknowledged: false } },
+      { actionable: false, viewer: { level: "view" as const, acknowledged: false, canGiveVerdict: false } },
       { actionable: false, severity: "notice" as const, reasonCodes: ["camera_offline" as const] },
       { actionable: false, state: "acknowledged" as const },
     ]) {
@@ -715,14 +723,14 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
   });
 
   it("already acknowledged by this person: only Resolve…", async () => {
-    h.getSecurityIncident.mockResolvedValue(detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true } }));
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true, canGiveVerdict: false } }));
     renderView();
     expect(await screen.findByRole("button", { name: COPY.resolve })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: COPY.acknowledge })).toBeNull();
   });
 
   it("resolved: nothing to act on", async () => {
-    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", viewer: { level: "act", acknowledged: true } }));
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", viewer: { level: "act", acknowledged: true, canGiveVerdict: false } }));
     renderView();
     await screen.findByRole("heading", { level: 1, name: "Stock room" });
     expect(screen.queryByRole("button", { name: COPY.resolve })).toBeNull();
@@ -731,7 +739,7 @@ describe("who may act (rendered only at act, never rendered-then-refused)", () =
 
 describe("Acknowledge", () => {
   it("sends the notification the page was opened from, and shows the box's answer", async () => {
-    const after = detail({ state: "acknowledged", lastAck: { action: "acknowledge", byName: "Alex", at: at("01:31") }, viewer: { level: "act", acknowledged: true } });
+    const after = detail({ state: "acknowledged", lastAck: { action: "acknowledge", byName: "Alex", at: at("01:31") }, viewer: { level: "act", acknowledged: true, canGiveVerdict: false } });
     h.acknowledgeSecurityIncident.mockResolvedValue({ incident: after, changed: true });
     renderView({ notificationId: "clx9abc" });
     fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
@@ -748,7 +756,7 @@ describe("Acknowledge", () => {
   });
 
   it("already done (changed:false) is silent", async () => {
-    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: detail({ viewer: { level: "act", acknowledged: true } }), changed: false });
+    h.acknowledgeSecurityIncident.mockResolvedValue({ incident: detail({ viewer: { level: "act", acknowledged: true, canGiveVerdict: false } }), changed: false });
     renderView();
     fireEvent.click(await screen.findByRole("button", { name: COPY.acknowledge }));
     await waitFor(() => expect(h.acknowledgeSecurityIncident).toHaveBeenCalled());
@@ -778,7 +786,7 @@ describe("Acknowledge", () => {
 
   it("when Acknowledge goes away, focus moves to Resolve… instead of dropping to the page", async () => {
     h.acknowledgeSecurityIncident.mockResolvedValue({
-      incident: detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true } }),
+      incident: detail({ state: "acknowledged", viewer: { level: "act", acknowledged: true, canGiveVerdict: false } }),
       changed: true,
     });
     renderView();
@@ -813,7 +821,7 @@ describe("Acknowledge", () => {
 
 describe("Resolve…", () => {
   it("opens a dialog with the optional note; Resolve sends it, and focus lands on the state once both buttons are gone", async () => {
-    const after = detail({ state: "resolved", lastAck: { action: "resolve", byName: "Alex", at: at("01:31") }, viewer: { level: "act", acknowledged: true } });
+    const after = detail({ state: "resolved", lastAck: { action: "resolve", byName: "Alex", at: at("01:31") }, viewer: { level: "act", acknowledged: true, canGiveVerdict: false } });
     h.resolveSecurityIncident.mockResolvedValue({ incident: after, changed: true });
     renderView();
     fireEvent.click(await screen.findByRole("button", { name: COPY.resolve }));

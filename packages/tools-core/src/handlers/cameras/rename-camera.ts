@@ -20,6 +20,7 @@
  * so ambiguity is reachable, not theoretical.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseUnlessOwnerOrAdmin } from "./owner-admin-only.js";
 
 /** Mirrors MAX_DISPLAY_NAME_LEN on the orchestrator route — validate
  *  client-side so the model gets a precise error, not a proxied 400. */
@@ -72,6 +73,8 @@ function describe(c: KnownCamera): string {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseUnlessOwnerOrAdmin(ctx); // WARP-3104
+  if (denied) return denied;
   const camera = typeof args.camera === "string" ? args.camera.trim() : "";
   if (camera.length === 0) return invalidArgs("camera is required");
 

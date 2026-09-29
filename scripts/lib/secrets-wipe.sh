@@ -401,3 +401,161 @@ secw_verify_wipe() {
 
   [ "$SECW_VERIFY_BLOCKED" -eq 0 ] && [ "$SECW_LEFTOVER_COUNT" -eq 0 ]
 }
+
+# =============================================================================
+# The box extension-signing key is ROTATED by a reset (WARP-2900, review #2312)
+# =============================================================================
+#
+# The device-identity sidecar keeps two keys in /var/lib/droplet/tpm (bind-
+# mounted from the host, docker/docker-compose.yml):
+#
+#   - the device-id key (device-id.sealed, its cert/pub, provisioned.json).
+#     WARP-980 keeps it across a reset ON PURPOSE: the box stays registered at
+#     HQ and self-heals. Nothing here touches it.
+#   - the extension-signing key (extension-signing.sealed, the sidecar's
+#     EXTENSION_KEY_FILE). It signs "the owner of this box promoted this
+#     extension". Boxes are leased and go to a new customer, and a statement,
+#     its signature and its manifest are none of them secret, so if the key
+#     survived, a promotion the PREVIOUS owner made would still verify `ok` on
+#     the next owner's box. A reset removes it; the sidecar mints a fresh one
+#     lazily on the next owner's first promote (backends/mock.py
+#     _load_extension_key).
+#
+# The sidecar caches the key in memory once loaded, so this must run with the
+# stack DOWN (factory-reset.sh Phase 4, after Phase 1's `down`). Removing the
+# file under a live sidecar would rotate nothing until it restarted.
+#
+# A symlink in the key's place is unlinked, never shredded through: whatever
+# it points at (device-id.sealed included) is not this key.
+#
+# CANNOT SEE IS NOT GONE (WARP-3207, follow-up to #2447). The TPM dir belongs
+# to the sidecar's uid. A directory this user cannot search (the dir, or a
+# parent) reads as empty, and `$SECW_SUDO test -e` exits non-zero both for
+# "absent" and for "sudo failed" (NoNewPrivileges, as under the device-bridge
+# unit that runs the dashboard's reset; no tty; not installed). So when the key
+# dir is out of sight, the gate first asks $SECW_SUDO to search the directory
+# it knows is there (`test -x`). If that fails, it returns a third verdict,
+# BLOCKED (SECW_EXTENSION_KEY_BLOCKED), the same shape as SECW_VERIFY_BLOCKED
+# above: the rotation cannot be verified, which fails the reset, but nothing is
+# known to have survived.
+#
+# Tests: Phase 10 of tests/factory-reset-secrets-wipe.test.sh (fixture dir, no
+# root, no Docker). It also pins SECW_EXTENSION_KEY_FILE to the sidecar's
+# EXTENSION_KEY_FILE and the reset's directory to the sidecar's bind mount.
+
+SECW_EXTENSION_KEY_FILE="extension-signing.sealed"
+# Set by secw_rotate_extension_key: key files actually removed. A count only.
+SECW_EXTENSION_KEY_REMOVED=0
+# Set by secw_verify_extension_key_rotated: surviving paths, one per line.
+SECW_EXTENSION_KEY_LEFTOVER=""
+# Set by secw_verify_extension_key_rotated: 1 when it could not look into the
+# key dir at all (see "CANNOT SEE IS NOT GONE" above), with the reason.
+# shellcheck disable=SC2034  # read by factory-reset.sh's gate, not in this file
+SECW_EXTENSION_KEY_BLOCKED=0
+# shellcheck disable=SC2034  # read by factory-reset.sh's gate, not in this file
+SECW_EXTENSION_KEY_BLOCKED_REASON=""
+
+# The key file, and the sibling Storage.write stages it in (a crash mid-write
+# can leave that .tmp holding the same key bytes).
+_secw_extension_key_paths() {
+  printf '%s\n' "$1/$SECW_EXTENSION_KEY_FILE" "$1/$SECW_EXTENSION_KEY_FILE.tmp"
+}
+
+# _secw_unsearchable_above <path> — 0 when a `test` on <path> as us proves
+# nothing: the deepest ancestor we can see is a directory we cannot search, so
+# everything below it reads as absent whether it is there or not. That
+# ancestor goes to _SECW_UNSEARCHABLE_DIR. 1 when "absent" as us is real.
+_SECW_UNSEARCHABLE_DIR=""
+_secw_unsearchable_above() {
+  local _d _up
+  _SECW_UNSEARCHABLE_DIR=""
+  _d="$(dirname "$1")"
+  while [ ! -e "$_d" ]; do
+    _up="$(dirname "$_d")"
+    [ "$_up" != "$_d" ] || return 1
+    _d="$_up"
+  done
+  [ -d "$_d" ] && [ ! -x "$_d" ] || return 1
+  _SECW_UNSEARCHABLE_DIR="$_d"
+}
+
+# _secw_test <-e|-L> <path> — `test` as us, asked again under $SECW_SUDO only
+# when we cannot see the path ourselves. A non-zero answer here still means
+# "absent OR sudo failed"; the gate tells those apart with a positive control.
+_secw_test() {
+  local _op="$1" _p="$2"
+  test "$_op" "$_p" && return 0
+  _secw_unsearchable_above "$_p" && [ -n "$SECW_SUDO" ] || return 1
+  $SECW_SUDO test "$_op" "$_p" >/dev/null 2>&1
+}
+
+_secw_present() {
+  _secw_test -e "$1" || _secw_test -L "$1"
+}
+
+# secw_rotate_extension_key <tpm-dir>
+#
+# Remove the extension-signing key (and its stale .tmp) from <tpm-dir>,
+# overwrite-then-unlink. Everything else in <tpm-dir> is left byte-identical.
+# A missing directory, or a box that never promoted, is a no-op. Returns the
+# verdict of secw_verify_extension_key_rotated: 0 when no key file remains.
+secw_rotate_extension_key() {
+  local _dir="$1" _f
+  SECW_EXTENSION_KEY_REMOVED=0
+  [ -n "$_dir" ] || return 1
+  while IFS= read -r _f; do
+    if _secw_test -L "$_f"; then
+      _secw_try rm -f "$_f" || true
+    elif _secw_present "$_f"; then
+      secw_shred_file "$_f" || true
+      # secw_shred_file looks with `-f` as US. In a directory only the
+      # sidecar's uid can search, that reads as absent, so finish privileged.
+      if _secw_present "$_f"; then
+        _secw_try shred -u "$_f" || _secw_try rm -f "$_f" || true
+      fi
+    else
+      continue
+    fi
+    if _secw_present "$_f"; then
+      _secw_warn "could not remove $_f — the previous owner's extension key is still on this box"
+    else
+      SECW_EXTENSION_KEY_REMOVED=$(( SECW_EXTENSION_KEY_REMOVED + 1 ))
+    fi
+  done < <(_secw_extension_key_paths "$_dir")
+  secw_verify_extension_key_rotated "$_dir"
+}
+
+# secw_verify_extension_key_rotated <tpm-dir>
+#
+# The gate. Re-scans the disk rather than trusting the counter above, and
+# returns 0 only when neither the key file nor its .tmp is there. Survivors go
+# to SECW_EXTENSION_KEY_LEFTOVER, paths only, never contents (rule 19).
+# Returns 1 with SECW_EXTENSION_KEY_BLOCKED=1 and no survivors when it cannot
+# look into the key dir at all.
+secw_verify_extension_key_rotated() {
+  local _dir="$1" _f _how
+  SECW_EXTENSION_KEY_LEFTOVER=""
+  SECW_EXTENSION_KEY_BLOCKED=0
+  SECW_EXTENSION_KEY_BLOCKED_REASON=""
+  [ -n "$_dir" ] || return 1
+  # Out of sight as us: only a privilege path that demonstrably works may stand
+  # in. The control is a directory we KNOW is there, so a "no" is sudo failing.
+  # `-x`, not `-d`: we can stat that directory ourselves, so only search
+  # permission proves the privileged view sees more than we do.
+  if _secw_unsearchable_above "$_dir/$SECW_EXTENSION_KEY_FILE" \
+     && ! { [ -n "$SECW_SUDO" ] && $SECW_SUDO test -x "$_SECW_UNSEARCHABLE_DIR" >/dev/null 2>&1; }; then
+    _how="no privilege command is configured"
+    [ -z "$SECW_SUDO" ] || _how="'$SECW_SUDO' could not look inside it either"
+    # shellcheck disable=SC2034  # read by factory-reset.sh's gate, not in this file
+    SECW_EXTENSION_KEY_BLOCKED=1
+    # shellcheck disable=SC2034  # read by factory-reset.sh's gate, not in this file
+    SECW_EXTENSION_KEY_BLOCKED_REASON="$_SECW_UNSEARCHABLE_DIR is not searchable by $(id -un) and $_how, so a key file under it can be neither seen nor ruled out"
+    return 1
+  fi
+  while IFS= read -r _f; do
+    if _secw_present "$_f"; then
+      SECW_EXTENSION_KEY_LEFTOVER="${SECW_EXTENSION_KEY_LEFTOVER}${SECW_EXTENSION_KEY_LEFTOVER:+$'\n'}$_f"
+    fi
+  done < <(_secw_extension_key_paths "$_dir")
+  [ -z "$SECW_EXTENSION_KEY_LEFTOVER" ]
+}

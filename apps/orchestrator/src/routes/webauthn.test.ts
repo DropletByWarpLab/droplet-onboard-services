@@ -27,7 +27,7 @@
  * Security posture mirrors auth.directory-login.test.ts: same JWT decode of the
  * session cookie, same in-memory Prisma mock shape.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -78,6 +78,21 @@ vi.mock("../middleware/rate-limit.js", () => {
 const recordActivity = vi.fn().mockResolvedValue(undefined);
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: (...a: unknown[]) => recordActivity(...a),
+}));
+
+// WARP-3193 SEC-AUTH-2 — the shared sign-in second-factor check (its own
+// suite covers TOTP / recovery). Default: the user has no TOTP enrolled.
+const checkLoginSecondFactor = vi.fn();
+vi.mock("../services/login-second-factor.service.js", () => ({
+  checkLoginSecondFactor: (...a: unknown[]) => checkLoginSecondFactor(...a),
+}));
+
+// WARP-3193 SEC-AUTH-9 — the credential step-up gate (its own suite covers
+// the rules). Default: the caller has stepped up.
+const stepUp = vi.fn();
+vi.mock("../middleware/require-credential-step-up.js", () => ({
+  createRequireCredentialStepUp:
+    () => (req: unknown, res: unknown, next: () => void) => stepUp(req, res, next),
 }));
 
 import {
@@ -174,10 +189,11 @@ const stefan: UserRow = {
 };
 
 /** supertest sends `Host: 127.0.0.1:<port>` — an IP, which the routes refuse
- *  as an RP ID (WARP-1157). Stand in the box's LAN name unless a test sets
- *  x-forwarded-host itself to exercise that refusal. */
+ *  as an RP ID (WARP-1157). Stand in the box's LAN name for that default, and
+ *  leave a Host a test set itself (to exercise the IP refusal) untouched. The
+ *  RP is derived from Host only; X-Forwarded-Host is ignored (WARP-3229). */
 const lanHost: express.RequestHandler = (req, _res, next) => {
-  req.headers.host = "droplet-ai.local";
+  if (req.headers.host?.startsWith("127.0.0.1:")) req.headers.host = "droplet-ai.local";
   next();
 };
 
@@ -239,6 +255,8 @@ function sessionFromCookie(res: request.Response) {
 beforeEach(() => {
   vi.clearAllMocks();
   createChallenge.mockResolvedValue("mock-challenge-aaaaaaaaaaaaaaaaaaaaaa");
+  checkLoginSecondFactor.mockResolvedValue("not_enrolled");
+  stepUp.mockImplementation((_req: unknown, _res: unknown, next: () => void) => next());
 });
 
 describe("WebAuthn registration (protected) — POST /auth/webauthn/register/*", () => {
@@ -646,7 +664,7 @@ describe("WARP-1157 — honest refusals and coded errors", () => {
     const { prisma } = createPrismaMock({ users: [stefan] });
     const res = await request(buildProtectedApp(prisma, stefan))
       .post("/api/auth/webauthn/register/options")
-      .set("X-Forwarded-Host", "192.168.9.195");
+      .set("Host", "192.168.9.195");
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("origin_unsupported");
     expect(createChallenge).not.toHaveBeenCalled();
@@ -656,7 +674,7 @@ describe("WARP-1157 — honest refusals and coded errors", () => {
     const { prisma } = createPrismaMock();
     const res = await request(buildPublicApp(prisma))
       .post("/api/auth/webauthn/authenticate/options")
-      .set("X-Forwarded-Host", "[fe80::1]:443");
+      .set("Host", "[fe80::1]:443");
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("origin_unsupported");
     expect(createChallenge).not.toHaveBeenCalled();
@@ -824,5 +842,199 @@ describe("WARP-1157 — the signed-in user's passkey list", () => {
     const res = await request(buildProtectedApp(prisma, stefan)).delete("/api/auth/webauthn/credentials/row-theirs");
     expect(res.status).toBe(404);
     expect(credentials).toHaveLength(2);
+  });
+});
+
+// WARP-3193 SEC-AUTH-2 — a PIN-less stolen key must not sign in (user
+// verification is REQUIRED on both ceremonies), and a passkey sign-in must
+// not skip an enrolled TOTP factor.
+describe("WARP-3193 — passkeys require user verification and an enrolled TOTP", () => {
+  const credential: CredentialRow = {
+    id: "cred-1",
+    userId: "u-uuid-stefan-7777",
+    credentialId: "cred-id-b64url",
+    publicKey: Buffer.from([1, 2, 3, 4]),
+    counter: 5,
+    transports: "internal",
+    createdAt: new Date(),
+    lastUsedAt: null,
+  };
+  function primeAssertion() {
+    consumeChallenge.mockResolvedValue({
+      id: "c-1", challenge: CHALLENGE, type: "AUTHENTICATION", userId: null,
+      expiresAt: new Date(Date.now() + 60000), createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({ verified: true, authenticationInfo: { newCounter: 6 } });
+  }
+
+  it("🔴 both option endpoints ask the authenticator for REQUIRED user verification", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan] });
+    generateRegistrationOptions.mockResolvedValue({ challenge: CHALLENGE });
+    generateAuthenticationOptions.mockResolvedValue({ challenge: CHALLENGE });
+    await request(buildProtectedApp(prisma, stefan)).post("/api/auth/webauthn/register/options");
+    await request(buildPublicApp(prisma)).post("/api/auth/webauthn/authenticate/options");
+    expect(generateRegistrationOptions.mock.calls[0]![0].authenticatorSelection.userVerification).toBe("required");
+    expect(generateAuthenticationOptions.mock.calls[0]![0].userVerification).toBe("required");
+  });
+
+  it("🔴 both verify endpoints reject a response without user verification", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1", challenge: CHALLENGE, type: "REGISTRATION", userId: stefan.id,
+      expiresAt: new Date(Date.now() + 60000), createdAt: new Date(),
+    });
+    verifyRegistrationResponse.mockResolvedValue({ verified: false });
+    await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("new-cred") });
+    expect(verifyRegistrationResponse.mock.calls[0]![0].requireUserVerification).toBe(true);
+
+    primeAssertion();
+    await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(verifyAuthenticationResponse.mock.calls[0]![0].requireUserVerification).toBe(true);
+  });
+
+  it("🔴 TOTP enrolled, no/wrong code → 401 TOTP_REQUIRED, no session, counter NOT advanced", async () => {
+    const { prisma, credentials } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    primeAssertion();
+    checkLoginSecondFactor.mockResolvedValue("failed");
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url"), totp: "000000" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("TOTP_REQUIRED");
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(credentials[0]!.counter).toBe(5);
+    expect(checkLoginSecondFactor).toHaveBeenCalledWith(
+      prisma,
+      "u-uuid-stefan-7777",
+      expect.objectContaining({ totp: "000000" }),
+    );
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Two-factor challenge failed" }),
+    );
+  });
+
+  it("TOTP enrolled + valid code → session issued with the lastMfaAt stamp", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    primeAssertion();
+    checkLoginSecondFactor.mockResolvedValue("passed");
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url"), totp: "123456" });
+
+    expect(res.status).toBe(200);
+    const decoded = sessionFromCookie(res);
+    expect(typeof decoded.lastMfaAt).toBe("string");
+  });
+
+  it("🔴 SEC-AUTH-9: registration (options AND verify) is refused until the caller steps up", async () => {
+    stepUp.mockImplementation((_req: unknown, res: any) =>
+      res.status(403).json({ error: "Enter your current password to continue.", code: "STEP_UP_PASSWORD_REQUIRED" }),
+    );
+    const { prisma, credentials } = createPrismaMock({ users: [stefan] });
+    const opts = await request(buildProtectedApp(prisma, stefan)).post("/api/auth/webauthn/register/options");
+    const verify = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("new-cred") });
+    expect([opts.status, verify.status]).toEqual([403, 403]);
+    expect(opts.body.code).toBe("STEP_UP_PASSWORD_REQUIRED");
+    expect(createChallenge).not.toHaveBeenCalled();
+    expect(consumeChallenge).not.toHaveBeenCalled();
+    expect(credentials).toHaveLength(0);
+  });
+
+  it("no TOTP enrolled → session issued without an MFA stamp (unchanged)", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    primeAssertion();
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(res.status).toBe(200);
+    expect(sessionFromCookie(res).lastMfaAt).toBeUndefined();
+  });
+});
+
+// WARP-3229 — the RP comes from the Host header. nginx forwards the client's
+// Host header and never sets X-Forwarded-Host, so on a box that header can
+// only come from the client and must not steer the RP: neither to force the IP
+// refusal nor to dodge it or pick the rpID/origin the server will expect. A
+// developer stack is the one exception: the `next dev` rewrite proxy sets Host
+// to the orchestrator's own address and puts the browser's address in
+// X-Forwarded-Host.
+describe("WARP-3229 — the RP comes from Host; X-Forwarded-Host only on a developer stack", () => {
+  const credential: CredentialRow = {
+    id: "cred-1",
+    userId: "u-uuid-stefan-7777",
+    credentialId: "cred-id-b64url",
+    publicKey: Buffer.from([1, 2, 3, 4]),
+    counter: 5,
+    transports: "internal",
+    createdAt: new Date(),
+    lastUsedAt: null,
+  };
+
+  // A shipped box's posture: nothing sets NODE_ENV there, and setup.sh writes
+  // DROPLET_ENV=production. Pinned so the shell running the suite can't
+  // change the result.
+  beforeEach(() => {
+    vi.stubEnv("NODE_ENV", undefined);
+    vi.stubEnv("DROPLET_ENV", "production");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("ignores a client-supplied X-Forwarded-Host when deriving the RP", async () => {
+    const { prisma } = createPrismaMock();
+    generateAuthenticationOptions.mockResolvedValue({ challenge: CHALLENGE, rpId: "droplet-ai.local" });
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/options")
+      .set("X-Forwarded-Host", "192.168.9.195");
+    expect(res.status).toBe(200);
+    expect(generateAuthenticationOptions).toHaveBeenCalledWith(
+      expect.objectContaining({ rpID: "droplet-ai.local" }),
+    );
+  });
+
+  it("a client-supplied X-Forwarded-Host cannot dodge the IP refusal", async () => {
+    const { prisma } = createPrismaMock();
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/options")
+      .set("Host", "192.168.9.195")
+      .set("X-Forwarded-Host", "droplet-ai.local");
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("origin_unsupported");
+    expect(createChallenge).not.toHaveBeenCalled();
+  });
+
+  it("developer stack (NODE_ENV=development, not a shipped box): verifies against the browser's address from X-Forwarded-Host", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("DROPLET_ENV", undefined);
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1",
+      challenge: CHALLENGE,
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + 60000),
+      createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({ verified: true, authenticationInfo: { newCounter: 6 } });
+
+    // What the dashboard's next dev rewrite sends in docker/docker-compose.dev.yml.
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .set("Host", "orchestrator:3000")
+      .set("X-Forwarded-Host", "localhost:3001")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+
+    expect(res.status).toBe(200);
+    expect(verifyAuthenticationResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedOrigin: "http://localhost:3001", expectedRPID: "localhost" }),
+    );
   });
 });

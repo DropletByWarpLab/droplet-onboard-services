@@ -6,6 +6,7 @@ import { z } from "zod";
 // graph — the concern the `resolveAgentIterLimits` note below is about.
 import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "./services/erp-sync/money-snapshot.service.js";
 import { PUBLIC_DEVICE_SECRET_VALUES, isWeakDeviceSecret } from "./lib/device-secret.js";
+import { isShippedDropletEnv } from "./lib/droplet-env.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -146,13 +147,6 @@ export function findEmptyProductionSecrets(
     const trimmed = v.trim();
     return trimmed === "" || PLACEHOLDER_SECRET_VALUES.has(trimmed);
   });
-}
-
-/** PURE — the shipped-box posture signal (mirrors ai-gateway
- *  keystore._is_production). Exported for tests. */
-export function isShippedDropletEnv(v: string | undefined): boolean {
-  const t = (v ?? "").trim().toLowerCase();
-  return t === "production" || t === "prod";
 }
 
 /**
@@ -588,6 +582,12 @@ const envSchema = z.object({
   DROPLET_SSO_GOOGLE_CLIENT_ID: z.string().default(""),
   DROPLET_SSO_GOOGLE_CLIENT_SECRET: z.string().default(""),
   DROPLET_SSO_GOOGLE_REDIRECT_URI: z.string().default(""),
+  // WARP-3193 SEC-AUTH-3 — comma-separated Google Workspace domains (the ID
+  // token's `hd` claim) allowed to link to or create a local account via
+  // Google SSO. Empty (default) = none: Google SSO then signs in only
+  // accounts already linked by `sub`, and never creates one. Without this,
+  // any Google account that could reach the box got a `family` account.
+  DROPLET_SSO_GOOGLE_ALLOWED_HD: z.string().default(""),
   DROPLET_SSO_ENTRA_ISSUER: z.string().default(""),
   DROPLET_SSO_ENTRA_CLIENT_ID: z.string().default(""),
   DROPLET_SSO_ENTRA_CLIENT_SECRET: z.string().default(""),
