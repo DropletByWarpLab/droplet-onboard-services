@@ -3,7 +3,10 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Maximize2, VideoOff } from "lucide-react";
-import { getBirdseyeLiveUrl } from "@/lib/api";
+import { getBirdseyeLiveUrl, getBirdseyeStatus } from "@/lib/api";
+
+/** A live stream reconnects this often: a clean upstream end freezes the last frame with no error. */
+const RECONNECT_MS = 5 * 60_000;
 
 /**
  * Birdseye view (Phase 6.2) — Frigate auto-composites every active
@@ -19,6 +22,12 @@ import { getBirdseyeLiveUrl } from "@/lib/api";
  * 404 from the proxied route means Frigate doesn't have birdseye
  * enabled in its config. We show a clean message instead of a black
  * box so the operator knows what to do (turn it on in config.yml).
+ *
+ * The feed is an endless MJPEG stream (wall follow-up F2, WARP-2981): the
+ * "is it enabled" check is a GET whose status is read and the request aborted
+ * (`getBirdseyeStatus`, never HEAD, which a live stream never answers), and a
+ * live stream reconnects (`RECONNECT_MS`), since a clean upstream end fires no
+ * `error` event.
  */
 export default function BirdseyePage() {
   const router = useRouter();
@@ -28,19 +37,26 @@ export default function BirdseyePage() {
   const [available, setAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch(getBirdseyeLiveUrl(), { method: "HEAD", credentials: "include" })
-      .then((res) => {
-        if (cancelled) return;
-        setAvailable(res.ok);
-      })
-      .catch(() => {
-        if (!cancelled) setAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    const ctrl = new AbortController();
+    getBirdseyeStatus(ctrl.signal).then(
+      (status) => {
+        if (!ctrl.signal.aborted) setAvailable(status >= 200 && status < 300);
+      },
+      () => {
+        if (!ctrl.signal.aborted) setAvailable(false);
+      },
+    );
+    return () => ctrl.abort();
   }, []);
+
+  // A new `src` is a new stream; the browser keeps the old frame until the new one's first.
+  const [reconnects, setReconnects] = useState(0);
+  const streaming = available !== false && !imgError;
+  useEffect(() => {
+    if (!streaming) return;
+    const timer = setInterval(() => setReconnects((n) => n + 1), RECONNECT_MS);
+    return () => clearInterval(timer);
+  }, [streaming]);
 
   return (
     <div className="fixed inset-0 z-40 bg-black flex flex-col">
@@ -103,7 +119,7 @@ export default function BirdseyePage() {
           </div>
         ) : (
           <img
-            src={getBirdseyeLiveUrl()}
+            src={reconnects === 0 ? getBirdseyeLiveUrl() : `${getBirdseyeLiveUrl()}?w=${reconnects}`}
             alt="Birdseye live composite"
             className="max-w-full max-h-full object-contain"
             onError={() => setImgError(true)}

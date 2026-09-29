@@ -27,6 +27,7 @@ import type { ReactNode } from "react";
 import { SWRConfig } from "swr";
 import { IncidentView, COPY } from "@/components/security/IncidentView";
 import { INCIDENT_COPY } from "@/components/security/incident-copy";
+import { NARRATIVE_COPY } from "@/components/security/NarrativeSection";
 import type { IncidentDetail, IncidentMemberView, SecurityModeView } from "@/lib/types";
 
 const h = vi.hoisted(() => ({
@@ -37,6 +38,8 @@ const h = vi.hoisted(() => ({
   resolveSecurityIncident: vi.fn(),
   getSecurityMode: vi.fn(),
   fetchCameras: vi.fn(),
+  getSecurityHealth: vi.fn(),
+  requestSecurityIncidentNarrative: vi.fn(),
 }));
 
 vi.mock("framer-motion", async () => {
@@ -64,6 +67,8 @@ vi.mock("@/lib/api", async (orig) => ({
   resolveSecurityIncident: h.resolveSecurityIncident,
   getSecurityMode: h.getSecurityMode,
   fetchCameras: h.fetchCameras,
+  getSecurityHealth: h.getSecurityHealth,
+  requestSecurityIncidentNarrative: h.requestSecurityIncidentNarrative,
 }));
 
 const ID = "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f";
@@ -149,7 +154,74 @@ beforeEach(() => {
   h.getSecurityIncident.mockResolvedValue(detail());
   h.getSecurityMode.mockResolvedValue(MODE);
   h.fetchCameras.mockResolvedValue([{ name: "back_cam", displayName: "Back camera" }]);
+  h.getSecurityHealth.mockResolvedValue({ sources: [] });
   vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+describe("WARP-2979 PR-2 — Summary by Droplet on the incident page", () => {
+  const SUMMARY = "Someone was seen in the Stock room at 2:14 AM while the site was closed.";
+  const written = { state: "written" as const, text: SUMMARY, writtenAt: at("01:31"), model: "gpt-oss:20b", promptVersion: 1 };
+
+  it("🔴 codes before the summary, in DOM order — then What happened", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ narrative: written }));
+    renderView();
+    const summary = await screen.findByText(SUMMARY);
+    const reason = screen.getByText("Someone was seen inside while the site was closed");
+    expect(reason.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((x) => x.textContent);
+    expect(headings).toEqual([COPY.whyTitle, NARRATIVE_COPY.title, COPY.whatTitle]);
+  });
+
+  it("narrative null (the box's DS-005 answer) → no section, no heading, no hint", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ narrative: null }));
+    renderView();
+    await screen.findByRole("heading", { level: 1, name: "Stock room" });
+    expect(screen.queryByTestId("incident-narrative")).toBeNull();
+    expect(screen.queryByText(NARRATIVE_COPY.title)).toBeNull();
+  });
+
+  it("pending while the summaries row is Paused → the on-box model line", async () => {
+    h.getSecurityHealth.mockResolvedValue({ sources: [{ id: "summaries", state: "down", detail: "Paused: the AI model on this Droplet isn't available", lastSeenAt: null }] });
+    h.getSecurityIncident.mockResolvedValue(detail({ narrative: { ...written, state: "pending", text: null, writtenAt: null } }));
+    renderView();
+    expect(await screen.findByText(NARRATIVE_COPY.paused)).toBeInTheDocument();
+  });
+
+  it("Regenerate at act posts route 28 and re-reads — also on a resolved incident; not at view", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", actionable: false, narrative: written }));
+    h.requestSecurityIncidentNarrative.mockResolvedValue({ narrative: { ...written, state: "pending" } });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: NARRATIVE_COPY.regenerate }));
+    await waitFor(() => expect(h.requestSecurityIncidentNarrative).toHaveBeenCalledWith(ID));
+    await waitFor(() => expect(h.getSecurityIncident.mock.calls.length).toBeGreaterThanOrEqual(2));
+
+    h.level = "view";
+    const view = renderView();
+    await within(view.container).findByText(SUMMARY);
+    expect(within(view.container).queryByRole("button", { name: NARRATIVE_COPY.regenerate })).toBeNull();
+  });
+});
+
+describe("WARP-2979 #2423 review 3 — no Regenerate once a summary could not be written in time", () => {
+  const SUMMARY = "Someone was seen in the Stock room at 2:14 AM while the site was closed.";
+  const written = { state: "written" as const, text: SUMMARY, writtenAt: at("01:31"), model: "gpt-oss:20b", promptVersion: 1 };
+  const daysBefore = (d: number, extraMs = 0) => new Date(NOW.getTime() - d * 86_400_000 - extraMs).toISOString();
+
+  it.each([
+    ["a written summary", written, SUMMARY],
+    ["a failure", { state: "failed" as const, text: null, writtenAt: null, model: null, promptVersion: null }, NARRATIVE_COPY.failed],
+  ])("last activity over 7 days ago: %s stays, with no Regenerate", async (_l, narrative, shown) => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", actionable: false, lastActivityAt: daysBefore(7, 1), narrative }));
+    renderView();
+    expect(await screen.findByText(shown)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: NARRATIVE_COPY.regenerate })).toBeNull();
+  });
+
+  it("exactly 7 days: still offered", async () => {
+    h.getSecurityIncident.mockResolvedValue(detail({ state: "resolved", actionable: false, lastActivityAt: daysBefore(7), narrative: written }));
+    renderView();
+    expect(await screen.findByRole("button", { name: NARRATIVE_COPY.regenerate })).toBeInTheDocument();
+  });
 });
 
 describe("the page's order and content", () => {

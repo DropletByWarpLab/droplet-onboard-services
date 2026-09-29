@@ -15,8 +15,14 @@
  * made only of cameras the viewer cannot see is absent — its filter answers
  * the empty page without a query, and no row ever names it.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
+import {
+  _resetNarratorForTests,
+  narratorHealthState,
+  registerSecurityNarratorJobs,
+  type NarratorHealthState,
+} from "../services/security-narrator.service.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 
 const h = vi.hoisted(() => ({
@@ -271,7 +277,7 @@ describe("GET /api/security/health", () => {
     // WARP-2977 P2b-2: so does `locks`, after camera_system (the owner reads locks).
     // WARP-2978: `incidents` and `alerts` join it after site_mode; WARP-2980's `patterns` follows
     // them, before retention (whichever merged second moved this pin). WARP-2979: `links` (Droplet's
-    // link proposals) sits between alerts and patterns.
+    // link proposals) sits between alerts and patterns; PR-2's `summaries` (the incident narrator) right after links.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
@@ -281,9 +287,62 @@ describe("GET /api/security/health", () => {
       "incidents",
       "alerts",
       "links",
+      "summaries",
       "patterns",
       "retention",
     ]);
+  });
+
+  it("WARP-2979 PR-2: the summaries row says DOWN 'Not running' while the narrator is not registered — naming nothing", async () => {
+    for (const role of ["owner", "admin"] as const) {
+      const res = await request(app(role)).get("/api/security/health");
+      expect(res.body.sources.find((s: { id: string }) => s.id === "summaries"), role).toEqual({
+        id: "summaries",
+        state: "down",
+        detail: "Not running",
+        lastSeenAt: null,
+      });
+    }
+  });
+
+  // #2423 review 2: the row's counts are site-wide — "; 1 waiting", "Couldn't write 2 summaries", and Paused (which
+  // shows only while something waits). To a viewer limited to some cameras they would say an incident closed on a
+  // camera they cannot see. The row goes only to a viewer who sees everything: the summaries' own viewer rule, which
+  // never shows such a viewer a summary anyway.
+  describe("the summaries row: only for a viewer who sees everything (#2423 review 2)", () => {
+    afterEach(() => _resetNarratorForTests());
+    const busy = () => {
+      registerSecurityNarratorJobs({ scheduleInterval: vi.fn() }, {} as never);
+      Object.assign(narratorHealthState() as NarratorHealthState, { pending: 1, failedLastDay: 0, lastOkAt: NOW });
+    };
+    const summaries = (res: { body: { sources: Array<{ id: string }> } }) => res.body.sources.find((s) => s.id === "summaries");
+
+    it("owner and admin get it, counts and all", async () => {
+      busy();
+      for (const role of ["owner", "admin"] as const) {
+        expect(summaries(await request(app(role)).get("/api/security/health")), role).toMatchObject({ state: "ok", detail: expect.stringContaining("; 1 waiting") });
+      }
+    });
+
+    it("🔴 a family member with some cameras gets no summaries row at all — waiting, failing or paused", async () => {
+      grants.mockResolvedValue([{ camera: { name: "front" } }]);
+      busy();
+      for (const over of [{}, { failedLastDay: 2 }, { unavailable: { reason: "no local model", at: NOW } }]) {
+        Object.assign(narratorHealthState() as NarratorHealthState, over);
+        const res = await request(app("family")).get("/api/security/health");
+        expect(res.status).toBe(200);
+        expect(summaries(res), JSON.stringify(over)).toBeUndefined();
+        expect(JSON.stringify(res.body)).not.toMatch(/summar/i);
+      }
+    });
+
+    it("a viewer scope that cannot be read gives no summaries row (never 'sees everything') — and no 503", async () => {
+      grants.mockRejectedValue(new Error("db down"));
+      busy();
+      const res = await request(app("family")).get("/api/security/health");
+      expect(res.status).toBe(200);
+      expect(summaries(res)).toBeUndefined();
+    });
   });
 
   it("WARP-2979: the links row says DOWN 'Not running' while the job is not registered — for every viewer, naming nothing", async () => {
@@ -336,7 +395,8 @@ describe("GET /api/security/health", () => {
   it("family does not get a threat row for a feed they cannot see, but does get the site mode and patterns", async () => {
     const res = await request(app("family")).get("/api/security/health");
     // WARP-2978: nor the alerts row (it names who is told); the incidents row is everyone's.
-    // WARP-2979: so is the links row.
+    // WARP-2979: so is the links row. PR-2's summaries row is not (#2423 review 2: it is only for a viewer who sees
+    // everything).
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",

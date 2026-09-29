@@ -296,8 +296,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "workspace_run",
     "workspace_propose",
   ],
-  // WARP-2979 — four reads, and only reads.
-  security: ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"],
+  // WARP-2979 — reads, and only reads (WARP-2980 P5 PR-E added the fifth).
+  security: ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -543,6 +543,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   security_get_incident: "Open one Security incident and see why it was flagged",
   security_search_events: "Look back through camera activity",
   security_zone_status: "Check which areas are covered and which cameras are reporting",
+  // WARP-2980 (ADR-059 P5 §6.18).
+  security_explain_pattern: "See what's usual for an area at a given time",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

@@ -95,7 +95,7 @@ describe("the sources cell (T-D2)", () => {
   // #2423 review 13: `links` reached the wall unclassified and, counted as a source, read "1 not set up" whenever
   // linking was off. An id this build does not know is never a source: the sources cell claims only what it knows.
   it("an id this build does not know is never a source; the known ones keep the server's order", () => {
-    const rows = [row("camera_system", "ok"), row("summaries", "down"), row("camera_ingest", "quiet")];
+    const rows = [row("camera_system", "ok"), row("digest_v9", "down"), row("camera_ingest", "quiet")];
     expect(sourceRows(rows).map((r) => r.id)).toEqual(["camera_system", "camera_ingest"]);
     expect(sourcesHeadline(rows)).toBe("1 quiet");
     expect(sourcesHeadline([row("camera_ingest", "ok"), row("summaries_v9", "not_configured")])).toBe(WALL_COPY.sourcesAllReporting);
