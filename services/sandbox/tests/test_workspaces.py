@@ -851,6 +851,76 @@ def test_reader_at_resolves_the_ref_once_and_every_read_is_at_that_commit(store,
     assert [c[0] for c in calls] == ["rev-parse", "cat-file", "cat-file", "cat-file", "cat-file"]
 
 
+def _serve_bundle(workspace_id: str, spec_version: str, *, disconnect: str) -> bytes:
+    """Run the bundle route as an ASGI app, the way a server would, and return
+    the body bytes it sent. `disconnect`: "never" serves it whole; "at-start"
+    is a client that has gone before the first byte (asgi 2.3 reports it on
+    `receive`, 2.4 as an OSError from `send`)."""
+    import asyncio
+
+    import main
+
+    sent = bytearray()
+
+    async def receive():
+        if disconnect == "at-start" and spec_version == "2.3":
+            return {"type": "http.disconnect"}
+        await asyncio.sleep(3600)  # never disconnects; cancelled when the response ends
+
+    async def send(message):
+        if message["type"] == "http.response.start" and disconnect == "at-start" and spec_version == "2.4":
+            raise OSError("client gone")
+        sent.extend(message.get("body", b""))
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": f"/workspaces/{workspace_id}/bundle",
+        "raw_path": f"/workspaces/{workspace_id}/bundle".encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"authorization", b"Bearer pytest-fake-token")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def run() -> None:
+        try:
+            await main.app(scope, receive, send)
+        except Exception:
+            pass  # a departed client surfaces as an error to the server; the spool must be closed regardless
+
+    asyncio.run(run())
+    return bytes(sent)
+
+
+@pytest.mark.parametrize(
+    "spec_version,disconnect",
+    [("2.3", "never"), ("2.3", "at-start"), ("2.4", "at-start")],
+    ids=["served-whole", "gone-before-first-chunk-asgi-2.3", "gone-before-first-chunk-asgi-2.4"],
+)
+def test_bundle_route_closes_the_spool_however_the_response_ends(store, monkeypatch, spec_version, disconnect):
+    # rjouffret on #2512: the spool was closed only in the streaming
+    # generator's `finally`. A client that leaves before the first chunk means
+    # the generator never starts, so the fd waited for GC. The response closes
+    # it itself. A BackgroundTask would not do: Starlette skips `background`
+    # when the send raises (asgi spec 2.4), so the close lives in the response
+    # call. MUTATION: drop the response-level close → the two
+    # gone-before-first-chunk cases go red.
+    opened = _spy_spools(monkeypatch)
+    store.create_workspace("ws-dc", "typescript-tool", ALICE)
+    body = _serve_bundle("ws-dc", spec_version, disconnect=disconnect)
+    assert len(opened) == 1
+    assert opened[0][1].closed
+    if disconnect == "never":
+        assert body.startswith((b"# v2 git bundle", b"# v3 git bundle"))
+    else:
+        assert body == b""
+
+
 def test_bundle_and_connector_draft_routes(client, auth, store):
     store.create_workspace("ws-r2", "typescript-tool", ALICE)
     r = client.get("/workspaces/ws-r2/bundle", headers=auth)
