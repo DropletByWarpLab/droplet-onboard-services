@@ -36,7 +36,9 @@
 # (ADR-045 Amendment 1). Blocked until the v1.0.0 MSI exists: no artifact
 # to stage yet. It flips only in the same change that stages the MSI
 # (roadmap gate G9). WARP-1955 is decided by ADR-062 (Tauri key moot).
-windows   blocked   v1.0.0-release-ticket-tbd   no v* tag cut yet; release.yml has never run, so no installer exists to stage
+# The ticket is WARP-3246 (this amendment) until the v1.0.0 release ticket is
+# filed; re-point the row then. A blocked row needs a real WARP key.
+windows   blocked   WARP-3246   no v1.0.0 MSI exists to stage
 
 # Android — droplet-android's release workflow needs four signing secrets
 # that do not exist (actions/secrets total_count 0) and its one attempted

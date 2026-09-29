@@ -156,4 +156,5 @@ this ADR carried as a passenger no longer has a consumer. The decision of
 7. **The Windows `EXPECTED` row stays `blocked`.** It flips only when the
    v1.0.0 MSI is staged in the same change (roadmap gate G9); flipping it
    earlier turns the image build and ship-check red. Only its ticket is
-   re-pointed, to the v1.0.0 release ticket (to be filed).
+   re-pointed, to WARP-3246 (the audit accepts only a WARP key on a blocked
+   row), and moves again to the v1.0.0 release ticket once that is filed.
