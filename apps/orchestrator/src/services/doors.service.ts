@@ -8,7 +8,7 @@
  * existing event is delete it — and only the retention job, inside its own
  * transaction, after opening the gate the database trigger looks for
  * (migration 20260929100200). No UPDATE and no other DELETE exists in this
- * file or anywhere else in the orchestrator; `doors-append-only.guard.test.ts`
+ * file or anywhere else in the orchestrator; `__tests__/doors-negative-suite.test.ts`
  * reads the source to keep it that way.
  *
  * Everything here is private to the `doors` module: it is unreachable when
@@ -359,7 +359,7 @@ export async function retireDoor(
  * has set `droplet.access_event_retention` to `on`; this opens one, sets it
  * with a transaction-local `set_config` (so it cannot outlive the
  * transaction, or leak to another statement on a pooled connection), and
- * deletes. `doors-append-only.guard.test.ts` pins that no other file names it.
+ * deletes. `__tests__/doors-negative-suite.test.ts` pins that no other file names it.
  *
  * Counts from `createdAt` — when THIS box received the row — not `occurredAt`,
  * the device's word: a device with a wrong clock must not be able to keep a
