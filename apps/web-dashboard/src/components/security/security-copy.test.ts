@@ -67,6 +67,7 @@ import * as linkEvidenceCopy from "./link-evidence-copy";
 import * as IncidentCard from "./IncidentCard";
 import * as IncidentList from "./IncidentList";
 import * as IncidentView from "./IncidentView";
+import * as NarrativeSection from "./NarrativeSection";
 import * as NoticeList from "./NoticeList";
 import * as ReasonList from "./ReasonList";
 import * as ResolveDialog from "./ResolveDialog";
@@ -107,6 +108,8 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/IncidentView.tsx": IncidentView,
   "src/components/security/ReasonList.tsx": ReasonList,
   "src/components/security/NoticeList.tsx": NoticeList,
+  // WARP-2979 (P4 PR-2) — "Summary by Droplet".
+  "src/components/security/NarrativeSection.tsx": NarrativeSection,
   "src/components/security/AckHistory.tsx": AckHistory,
   "src/components/security/ResolveDialog.tsx": ResolveDialog,
   "src/components/security/AlertRoutingPanel.tsx": AlertRoutingPanel,

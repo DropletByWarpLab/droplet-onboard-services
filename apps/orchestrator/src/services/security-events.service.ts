@@ -477,13 +477,13 @@ export type SourceState = "ok" | "quiet" | "down" | "not_configured";
 
 /**
  * The header's rows, in the pinned display order
- * `camera_ingest, camera_system, locks, threat_mirror, site_mode, incidents, alerts, links, (summaries — P4 PR-2), patterns, retention`.
+ * `camera_ingest, camera_system, locks, threat_mirror, site_mode, incidents, alerts, links, summaries, patterns, retention`.
  * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row; `locks`
  * (P2b-2) is the Matter lock adapter's, shown only to viewers who may read
  * locks (DS-019); `incidents` and `alerts` (WARP-2978 P3) are the incident
  * engine's and the notifier's; `links` (WARP-2979 P4) is Droplet's
- * link-proposal job's; `patterns` (WARP-2980 P5) is the baseline job's. P4
- * PR-2's `summaries` goes right after `links`.
+ * link-proposal job's; `patterns` (WARP-2980 P5) is the baseline job's.
+ * `summaries` (WARP-2979 P4 PR-2) is Droplet's incident narrator's, right after `links`.
  */
 export type SecurityHealthId =
   | "camera_ingest"
@@ -494,6 +494,7 @@ export type SecurityHealthId =
   | "incidents"
   | "alerts"
   | "links"
+  | "summaries"
   | "patterns"
   | "retention";
 
@@ -551,6 +552,13 @@ export function buildSecurityHealth(input: {
    * header is exactly P5's.
    */
   links?: SecurityHealthRow;
+  /**
+   * WARP-2979 P4 PR-2 — the incident narrator's row (`securitySummariesHealth`
+   * in security-narrator.service.ts), every viewer; it names no area, camera
+   * or incident. Placed right after `links`. Optional: omitted, the header is
+   * exactly PR-1's.
+   */
+  summaries?: SecurityHealthRow;
   /**
    * WARP-2980 P5 — the baseline job's row (`patternsHealthRow` in
    * security-baselines.service.ts), placed right before `retention`.
@@ -623,6 +631,7 @@ export function buildSecurityHealth(input: {
   if (input.incidents) rows.push(input.incidents);
   if (input.alerts) rows.push(input.alerts);
   if (input.links) rows.push(input.links);
+  if (input.summaries) rows.push(input.summaries);
   if (input.patterns) rows.push(input.patterns);
 
   const retentionRan = input.state?.retentionRanAt ?? null;
