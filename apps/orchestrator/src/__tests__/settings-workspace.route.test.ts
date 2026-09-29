@@ -72,7 +72,26 @@ describe("GET /api/settings/workspace", () => {
     expect(res.status).toBe(200);
     expect(res.body.workspaceType).toBe("business");
     expect(res.body.setBy).toBeNull();
+    // Personal drives are off until the owner turns them on.
+    expect(res.body.personalDriveEnabled).toBe(false);
   });
+
+  it.each(["family", "guest"])(
+    "reports personalDriveEnabled to a %s session (the dialog needs it)",
+    async (role) => {
+      identity = { id: UUID, username: "sam", role };
+      findUniqueMock.mockResolvedValueOnce({
+        type: WorkspaceType.BUSINESS,
+        displayName: null,
+        setBy: "romain",
+        setAt: new Date("2026-07-11T00:00:00Z"),
+        personalDriveEnabled: true,
+      });
+      const res = await request(app).get("/api/settings/workspace");
+      expect(res.status).toBe(200);
+      expect(res.body.personalDriveEnabled).toBe(true);
+    },
+  );
 
   it("reports a stale pre-migration HOME row as business (WARP-1341)", async () => {
     findUniqueMock.mockResolvedValueOnce({
@@ -125,4 +144,56 @@ describe("POST /api/settings/workspace", () => {
     expect(res.body.error).toBe("invalid_body");
     expect(upsertMock).not.toHaveBeenCalled();
   });
+});
+
+describe("PUT /api/settings/workspace/personal-drive", () => {
+  const URL_PATH = "/api/settings/workspace/personal-drive";
+
+  it("lets the owner turn personal drives on, on the singleton row", async () => {
+    upsertMock.mockResolvedValueOnce({ personalDriveEnabled: true });
+    const res = await request(app).put(URL_PATH).send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ personalDriveEnabled: true });
+    expect(upsertMock).toHaveBeenCalledWith({
+      where: { id: 1 },
+      update: { personalDriveEnabled: true },
+      create: { id: 1, personalDriveEnabled: true },
+    });
+  });
+
+  it("lets the owner turn them off again", async () => {
+    upsertMock.mockResolvedValueOnce({ personalDriveEnabled: false });
+    const res = await request(app).put(URL_PATH).send({ enabled: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ personalDriveEnabled: false });
+    expect(upsertMock.mock.calls[0][0].update).toEqual({ personalDriveEnabled: false });
+  });
+
+  it.each(["admin", "family", "guest"])(
+    "refuses %s with 403 owner_required and writes nothing",
+    async (role) => {
+      identity = { id: UUID, username: "sam", role };
+      const res = await request(app).put(URL_PATH).send({ enabled: true });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe("owner_required");
+      expect(upsertMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns 401 when unauthenticated", async () => {
+    identity = null;
+    const res = await request(app).put(URL_PATH).send({ enabled: true });
+    expect(res.status).toBe(401);
+    expect(upsertMock).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { enabled: "yes" }, { enabled: 1 }])(
+    "rejects a non-boolean body %j with 400",
+    async (body) => {
+      const res = await request(app).put(URL_PATH).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid_body");
+      expect(upsertMock).not.toHaveBeenCalled();
+    },
+  );
 });
