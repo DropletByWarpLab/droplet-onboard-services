@@ -70,6 +70,12 @@
  *     floored at owner/admin — so nobody overwrites a judgement about things
  *     they cannot see (review item 2). Everyone else: `verdict: null`,
  *     `canGiveVerdict: false`. Routes 16–17 are untouched.
+ *
+ * WARP-3195 (P4 §6.7.1, §8) — route 18 gains `dropletLinks`, the links only
+ * Droplet made that back the incident, for Keep. The same viewer-level rule
+ * (manage, owner/admin, sees everything; security-incident-links.ts): anyone
+ * else reads `null` on every incident, so the R1 pin holds. Routes 16–17 are
+ * untouched.
  */
 import type {
   Prisma,
@@ -93,6 +99,7 @@ import { projectedIncidentPage } from "./security-incident-page.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
 import { NARRATIVE_SELECT, narrativeView, type NarrativeView } from "./security-narrative-view.js";
+import { loadIncidentDropletLinks, type IncidentDropletLinkView } from "./security-incident-links.js";
 import { readSummariesSetting } from "./security-ai-settings.js";
 import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
@@ -694,6 +701,15 @@ export interface IncidentDetail extends IncidentSummary {
    */
   narrative: NarrativeView | null;
   /**
+   * WARP-3195 (P4 §6.7.1, §8) — the links only Droplet made that back this
+   * incident: "Droplet linked this camera. Keep the link to get alerts from
+   * it." with Keep (route 24). Null unless the viewer is at manage, owner/admin
+   * and sees everything — a rule that never reads the incident, so it cannot
+   * tell a camera-limited viewer's two R1 worlds apart
+   * (security-incident-links.ts); else the list, `[]` when there is none.
+   */
+  dropletLinks: IncidentDropletLinkView[] | null;
+  /**
    * `canGiveVerdict` — exactly when route 35 would accept a mark from them:
    * owner/admin (its role floor) who see everything, at act or above, on a
    * view that is not partial with something to judge.
@@ -1046,6 +1062,7 @@ export async function loadIncidentDetail(
       suppression: f.suppression ? { id: f.suppression.id, reason: f.suppression.reason, state: f.suppression.state } : null,
     })),
     narrative: narrativeView(row, reasons, p, v, summariesOn),
+    dropletLinks: await loadIncidentDropletLinks(prisma, row, v, level),
     viewer: {
       level,
       acknowledged: acks.some((a) => a.byUserId === v.userId),

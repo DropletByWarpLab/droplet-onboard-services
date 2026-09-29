@@ -4470,6 +4470,31 @@ export interface IncidentDetail extends IncidentSummary {
    * Absent on a box before PR-2.
    */
   narrative?: IncidentNarrativeView | null;
+  /**
+   * WARP-3195 (P4 §6.7.1, §8) — the links only Droplet made that back this
+   * incident. An event matched through Droplet's links alone never alerts, so
+   * the page says "Droplet linked this camera. Keep the link to get alerts
+   * from it." with Keep (route 24, manage). Null unless this viewer is at
+   * manage, owner/admin, and sees every camera and may read threats — a rule
+   * that never reads the incident (DS-005, the R1 pin) — else the list, `[]`
+   * when there is none. Absent on a box before WARP-3195.
+   */
+  dropletLinks?: IncidentDropletLinkView[] | null;
+}
+
+/** WARP-3195 — one link only Droplet set, into the incident's area (route 18's `dropletLinks`). */
+export interface IncidentDropletLinkView {
+  /** Route 24's `:linkId`. */
+  linkId: string;
+  /** The area as it is now. */
+  zone: { id: string; name: string; kind: SecurityZoneKind };
+  sourceKind: SecurityZoneSourceKind;
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  sourceRef: string;
+  /** The Frigate camera the link points at. */
+  camera: string;
+  /** The camera's display name (live, else the link's snapshot) — never the part. */
+  label: string;
 }
 
 /** WARP-2979 P4 PR-2 — route 18's `narrative`, and route 28's 202 body. Written on the box only (DS-007). */
