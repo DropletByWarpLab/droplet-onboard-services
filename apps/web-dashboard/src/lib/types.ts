@@ -3661,6 +3661,8 @@ export interface SecurityHealthRow {
     | "incidents"
     | "alerts"
     | "links"
+    // WARP-2979 P4 PR-2 — Droplet's incident summaries (every viewer), right after `links`.
+    | "summaries"
     | "patterns"
     | "retention";
   state: "ok" | "quiet" | "down" | "not_configured";
@@ -4048,6 +4050,10 @@ export type SecurityErrorCode =
   | "LINK_LIMIT"
   | "LINKS_UNAVAILABLE"
   | "AI_SETTINGS_UNAVAILABLE"
+  // WARP-2979 P4 PR-2 (route 28): Summarise now / Regenerate.
+  | "NARRATIVE_COOLDOWN"
+  | "NARRATIVE_TOO_OLD"
+  | "SUMMARIES_OFF"
   // WARP-2980 (P5 PR-C) — route 35: nothing this viewer can mark, or a partial view (one body).
   | "NOT_JUDGEABLE";
 
@@ -4455,6 +4461,25 @@ export interface IncidentDetail extends IncidentSummary {
    * a trial-only incident has nothing to acknowledge and can still be judged.
    */
   viewer: { level: "view" | "act" | "manage"; acknowledged: boolean; canGiveVerdict: boolean };
+  /**
+   * WARP-2979 P4 PR-2 — "Summary by Droplet" (§6.11.3, DS-005): null unless this
+   * viewer sees every camera and may read threats (owner/admin) AND can see
+   * everything the summary names — every other viewer gets null on every
+   * incident, so the section and its buttons never render for them — and null
+   * with summaries off, for plain activity, and when there is nothing to say.
+   * Absent on a box before PR-2.
+   */
+  narrative?: IncidentNarrativeView | null;
+}
+
+/** WARP-2979 P4 PR-2 — route 18's `narrative`, and route 28's 202 body. Written on the box only (DS-007). */
+export interface IncidentNarrativeView {
+  state: "none" | "pending" | "written" | "failed" | "expired";
+  /** Plain text. In `pending` it may be the previous summary, shown until the new one is written. */
+  text: string | null;
+  writtenAt: string | null;
+  model: string | null;
+  promptVersion: number | null;
 }
 
 /** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */

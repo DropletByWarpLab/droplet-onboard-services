@@ -62,6 +62,8 @@ import { securityIncidentsHealth } from "../services/security-incidents.service.
 import { securityAlertsHealth } from "../services/security-alerts.service.js";
 import { securityPatternsHealth } from "../services/security-baselines.service.js";
 import { securityLinksHealth } from "../services/security-link-proposals.service.js";
+import { securitySummariesHealth } from "../services/security-narrator.service.js";
+import { mayReadSummaries } from "../services/security-narrative-view.js";
 import { loadActiveLinks, viewerAreas, zoneChipsFor, zoneFilterFor } from "../services/security-zones.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -201,7 +203,9 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
     try {
       const now = deps.now?.() ?? new Date();
       const ownerOrAdmin = mayReadThreats(req);
-      const [state, siteMode, patterns, incidents, alerts, links] = await Promise.all([
+      // Read once; two rows depend on it. A rejection is handled by each `.then`.
+      const scope = securityViewerScope(prisma, req, deps.resolve);
+      const [state, siteMode, patterns, incidents, alerts, links, summaries] = await Promise.all([
         prisma.securityIngestState.findUnique({
           where: { id: "singleton" },
           select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true, retentionIncidentsDeleted: true },
@@ -211,8 +215,8 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         // WARP-2980 — never throws either. Visible to every viewer, with its
         // counts scoped to the viewer's cameras (DS-005); a scope that cannot
         // be read gives the row nothing to count (null), never "all".
-        securityViewerScope(prisma, req, deps.resolve).then(
-          (scope) => securityPatternsHealth(prisma, scope, now),
+        scope.then(
+          (s) => securityPatternsHealth(prisma, s, now),
           (err: unknown) => {
             logger.warn({ err }, "security health: viewer scope unreadable for the patterns row");
             return securityPatternsHealth(prisma, null, now);
@@ -224,6 +228,15 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         ownerOrAdmin ? securityAlertsHealth(prisma, deps.resolve, now) : Promise.resolve(undefined),
         // WARP-2979 — never throws either; every viewer's.
         securityLinksHealth(prisma, now),
+        // WARP-2979 PR-2 — never throws either. ONLY for a viewer who sees everything (#2423 review 2): its
+        // counts ("; 1 waiting", "Couldn't write 2 summaries") and its Paused (shown only while something waits)
+        // are site-wide, so to a viewer limited to some cameras they would say an incident closed on a camera
+        // they cannot see. The summaries' own viewer rule — such a viewer is never shown a summary anyway. A
+        // scope that cannot be read gives no row, never "sees everything".
+        scope.then(
+          (s) => (mayReadSummaries(s) ? securitySummariesHealth(prisma, now) : undefined),
+          () => undefined,
+        ),
       ]);
       const sources = buildSecurityHealth({
         frigateConfigured: Boolean(config.FRIGATE_URL && config.FRIGATE_URL.trim()),
@@ -235,6 +248,7 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         incidents,
         alerts,
         links,
+        summaries,
         // WARP-3261 — the raw broker error is for owners and admins only.
         showRawErrors: ownerOrAdmin,
         now,

@@ -184,6 +184,7 @@ import type {
   AlertRoutingView,
   IncidentActionResult,
   IncidentDetail,
+  IncidentNarrativeView,
   IncidentVerdict,
   IncidentsPage,
   IncidentsSummary,
@@ -9565,6 +9566,18 @@ export function acknowledgeSecurityIncident(
   return securityFetch<IncidentActionResult>(
     `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/acknowledge`,
     jsonBody("POST", opts.notificationId ? { notificationId: opts.notificationId } : {}),
+  );
+}
+
+/**
+ * 28 (act) — WARP-2979 P4 PR-2: "Summarise now" / "Regenerate". 202 {narrative}
+ * in state `pending`; 409 NARRATIVE_COOLDOWN, NARRATIVE_TOO_OLD, SUMMARIES_OFF or NOT_ACTIONABLE;
+ * 404 INCIDENT_NOT_FOUND. The body is strict and empty.
+ */
+export function requestSecurityIncidentNarrative(id: string): Promise<{ narrative: IncidentNarrativeView }> {
+  return securityFetch<{ narrative: IncidentNarrativeView }>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/narrative`,
+    jsonBody("POST", {}),
   );
 }
 

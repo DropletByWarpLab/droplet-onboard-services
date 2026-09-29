@@ -92,21 +92,19 @@ import { loadActiveLinks, viewerAreas, zoneChipsFor } from "./security-zones.ser
 import { projectedIncidentPage } from "./security-incident-page.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
+import { NARRATIVE_SELECT, narrativeView, type NarrativeView } from "./security-narrative-view.js";
+import { readSummariesSetting } from "./security-ai-settings.js";
 import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
 import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
 import type { PatternCode } from "../lib/security-baseline-math.js";
 import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
-export interface IncidentViewer {
-  userId: string;
-  /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
-  visibleCameras: "all" | ReadonlySet<string>;
-  mayReadThreats: boolean;
-  /** Owner/admin: every notice. Anyone else: their own (D34). */
-  ownerOrAdmin: boolean;
-}
+// The viewer and `seesEverything` live in a leaf (WARP-3193 ARCH-1): the summary's rules use them without
+// importing this module, which imports those rules. Re-exported so every importer of this module is unchanged.
+export { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
 
 /** The incident columns the projection reads. */
 export const INCIDENT_VIEW_SELECT = {
@@ -408,10 +406,6 @@ export function judgeableCodes(p: Pick<IncidentProjection, "codes">, flags: read
   return REASON_CODE_ORDER.filter((c) => codes.has(c));
 }
 
-/** Review item 2 — who may see (and give) a verdict: a viewer who sees every camera and may read threats (P4's rule). */
-export function seesEverything(v: IncidentViewer): boolean {
-  return v.visibleCameras === "all" && v.mayReadThreats;
-}
 
 // ── the list's SQL (routes 16–17) ──────────────────────────────────────────
 
@@ -693,6 +687,13 @@ export interface IncidentDetail extends IncidentSummary {
   /** WARP-2980 PR-B: visible flags only (D16), in evidence order. */
   patternFlags: IncidentPatternFlagView[];
   /**
+   * WARP-2979 P4 PR-2 — "Summary by Droplet" (§6.11.3): null unless this viewer
+   * can see everything it could name (security-narrative-view.ts) — no state,
+   * no hint otherwise — and null with summaries off, for plain activity, and
+   * when there is nothing to say (`none` once closed, `expired` with no text).
+   */
+  narrative: NarrativeView | null;
+  /**
    * `canGiveVerdict` — exactly when route 35 would accept a mark from them:
    * owner/admin (its role floor) who see everything, at act or above, on a
    * view that is not partial with something to judge.
@@ -899,7 +900,7 @@ export async function loadIncidentDetail(
   now: Date,
   presence?: PresenceSource,
 ): Promise<IncidentDetail | null> {
-  const row = await prisma.securityIncident.findUnique({ where: { id }, select: { ...INCIDENT_VIEW_SELECT, ...VERDICT_SELECT } });
+  const row = await prisma.securityIncident.findUnique({ where: { id }, select: { ...INCIDENT_VIEW_SELECT, ...VERDICT_SELECT, ...NARRATIVE_SELECT } });
   if (!row) return null;
   const reasons = await prisma.securityIncidentReason.findMany({
     where: { incidentId: id },
@@ -973,6 +974,11 @@ export async function loadIncidentDetail(
   }
 
   const lastAck = acks.length > 0 ? acks[acks.length - 1]! : null;
+  // WARP-2979: a missing settings row is its default (on); one that cannot be read shows no summary.
+  const summariesOn = await readSummariesSetting(prisma).then(
+    (s) => s === "on",
+    () => false,
+  );
   return {
     ...summaryOf(p, lastAck),
     actionable: p.actionable && level !== "view" && (p.state === "open" || p.state === "acknowledged"),
@@ -1039,6 +1045,7 @@ export async function loadIncidentDetail(
       detail: f.detail,
       suppression: f.suppression ? { id: f.suppression.id, reason: f.suppression.reason, state: f.suppression.state } : null,
     })),
+    narrative: narrativeView(row, reasons, p, v, summariesOn),
     viewer: {
       level,
       acknowledged: acks.some((a) => a.byUserId === v.userId),

@@ -183,6 +183,7 @@ export const WALL_ROW_ROLE: Record<SecurityHealthRow["id"], WallRowRole> = {
   incidents: "engine",
   alerts: "other",
   links: "other",
+  summaries: "other",
   patterns: "other",
   retention: "other",
 };

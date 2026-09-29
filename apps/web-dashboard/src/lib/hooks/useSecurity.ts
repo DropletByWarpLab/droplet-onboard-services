@@ -46,6 +46,7 @@ import {
   getSecurityIncidents,
   putAlertRouting,
   resolveSecurityIncident,
+  requestSecurityIncidentNarrative,
   setSecurityIncidentVerdict,
   type SecurityIncidentsQuery,
   archiveSecurityZone,
@@ -725,6 +726,12 @@ export function useSecurityIncident(id: string | null) {
     },
     [apply, id],
   );
+  // WARP-2979 P4 PR-2 (route 28) — Summarise now / Regenerate, then a re-read (the answer carries only the summary).
+  const summarise = useCallback(async () => {
+    const r = await requestSecurityIncidentNarrative(id!);
+    await mutate();
+    return r;
+  }, [id, mutate]);
   // WARP-2980 (P5 PR-C) — route 35: Expected / Not expected. The box returns the incident, like acknowledge.
   const giveVerdict = useCallback(
     async (verdict: IncidentVerdict) => apply(await setSecurityIncidentVerdict(id!, verdict)),
@@ -738,6 +745,7 @@ export function useSecurityIncident(id: string | null) {
     refresh: () => mutate(),
     acknowledge,
     resolve,
+    summarise,
     giveVerdict,
   };
 }
