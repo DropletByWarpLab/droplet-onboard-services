@@ -949,6 +949,14 @@ if grep -qE 'rm[[:space:]]+-[a-zA-Z]*r' <<<"$TPM_CODE" \
 else
   pass "the reset never removes the TPM dir or any device-id artefact (WARP-980)"
 fi
+# The backups rm must stay on /var/lib/droplet/backups: widening it to the
+# parent (or above) would take the whole device identity with it, and it never
+# names DROPLET_TPM_DIR, so the filter above cannot see it.
+if printf '%s\n' "$CODE_NUM" | grep -E 'rm[[:space:]]+-[a-zA-Z]*r[^|;&]*[[:space:]]"?(/var|/var/lib|/var/lib/droplet)/?"?([[:space:]]|$)' >/dev/null; then
+  fail "the reset removes /var/lib/droplet (or a parent) — that deletes the TPM dir and the device identity (WARP-980)"
+else
+  pass "the reset never removes /var/lib/droplet or a parent of it (WARP-980)"
+fi
 
 # --- grounding: the file and the directory are the sidecar's -----------------
 SIDECAR_KEY_FILE="$(sed -nE 's/^EXTENSION_KEY_FILE = "([^"]+)"$/\1/p' "$SIDECAR_SIGNING" 2>/dev/null | head -n 1)"
@@ -1013,6 +1021,21 @@ if [ -z "$OVERLAY_HITS" ]; then
   pass "compose: no overlay file re-mounts the key or socket dir"
 else
   fail "compose overlay(s) mount the key or socket dir:$OVERLAY_HITS"
+fi
+# `volumes_from:` (or a `container:` reference) inherits the sidecar's
+# read-write key bind without naming a path, so the pins above cannot see it.
+# None exists today; a service that needs the key dir must be a reviewed change.
+VOLUMES_FROM_HITS=""
+for _cf in "$COMPOSE" "$REPO_ROOT_REAL"/docker/docker-compose.*.yml; do
+  [ -f "$_cf" ] || continue
+  if grep -qE '^[[:space:]]*volumes_from:|container:[[:space:]]*"?(droplet-)?device-identity-svc' "$_cf"; then
+    VOLUMES_FROM_HITS="$VOLUMES_FROM_HITS $(basename "$_cf")"
+  fi
+done
+if [ -z "$VOLUMES_FROM_HITS" ]; then
+  pass "compose: no service inherits the sidecar's key dir through volumes_from"
+else
+  fail "compose file(s) use volumes_from/container: to inherit the key dir mount:$VOLUMES_FROM_HITS"
 fi
 # And the reset rotates the directory the sidecar actually binds.
 SIDECAR_TPM_HOST="$(compose_key_mounts "$COMPOSE" | awk '$1 == "device-identity-svc" && $2 ~ /^\/var\/lib\/droplet\/tpm/ { e = $2; sub(/:.*$/, "", e); print e; exit }')"
