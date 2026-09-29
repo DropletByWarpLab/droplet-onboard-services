@@ -267,6 +267,18 @@ describe("summarize after a withheld domain's step: the local model only", () =>
     expect(completeOnceMock.mock.calls[0]![0].model).toBe("gpt-oss:20b");
   });
 
+  // The model id alone is not the pin: the gateway routes by name prefix when no provider is named, so a locally
+  // served model called gpt-* or claude-* would still reach a cloud provider. Every call names the local provider.
+  it("every call names provider `local` — the first, and the blank-answer retry", async () => {
+    completeOnceMock
+      .mockResolvedValueOnce({ content: "  ", model: "m", reasoning: "…", finishReason: "length" })
+      .mockResolvedValueOnce({ content: "Done.", model: "m", reasoning: "", finishReason: "stop" });
+    const summarizer = createToolSpecSummarizer(activeModel, localModel);
+    await summarizer.summarize("Write it up.", [ok("security_list_incidents", { incidents: [] })]);
+    expect(completeOnceMock).toHaveBeenCalledTimes(2);
+    for (const [args] of completeOnceMock.mock.calls) expect(args.provider).toBe("local");
+  });
+
   it("no local model → the step fails plainly; nothing is sent to any model", async () => {
     localModel.mockResolvedValue(null);
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
@@ -278,6 +290,7 @@ describe("summarize after a withheld domain's step: the local model only", () =>
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
     await summarizer.summarize("Write it up.", [ok("get_system_health", { status: "ok" }), ok("list_cameras", { cameras: [] })]);
     expect(completeOnceMock.mock.calls[0]![0].model).toBe("claude-sonnet-4");
+    expect(Object.keys(completeOnceMock.mock.calls[0]![0])).not.toContain("provider");
     expect(localModel).not.toHaveBeenCalled();
   });
 });
