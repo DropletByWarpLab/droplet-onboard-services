@@ -7,14 +7,14 @@
  * ensure_birdseye convergence). These tests pin the dashboard half of the
  * contract so the fix stays honest end-to-end:
  *
- *  - the page probes the proxied route (HEAD /api/cameras/birdseye/live —
- *    the orchestrator answers 404 only when Frigate reports birdseye
- *    disabled);
+ *  - the page probes the proxied route (GET /api/cameras/birdseye/live, status
+ *    read and the request aborted — never HEAD, see the F2 block below; the
+ *    orchestrator answers 404 only when Frigate reports birdseye disabled);
  *  - the composite grid `<img>` renders when the probe says enabled;
  *  - the empty state renders ONLY when the probe says disabled.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor, act } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, act, fireEvent } from "@testing-library/react";
 
 import BirdseyePage from "@/app/cameras/birdseye/page";
 
@@ -23,10 +23,12 @@ const BIRDSEYE_LIVE_URL = "/api/cameras/birdseye/live";
 /** Flush the probe's .then(setAvailable) through React's commit. */
 async function flushProbe() {
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
   });
 }
+
+const ENABLED = { ok: true, status: 200, headers: new Headers() };
+const DISABLED = { ok: false, status: 404, headers: new Headers() };
 
 describe("Birdseye live view (WARP-1918)", () => {
   const fetchMock = vi.fn();
@@ -41,18 +43,19 @@ describe("Birdseye live view (WARP-1918)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("probes the proxied birdseye route with a HEAD request", async () => {
-    fetchMock.mockResolvedValue({ ok: true });
+  it("probes the proxied birdseye route with a GET, and aborts it once the status is read", async () => {
+    fetchMock.mockResolvedValue(ENABLED);
     render(<BirdseyePage />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    expect(fetchMock).toHaveBeenCalledWith(
-      BIRDSEYE_LIVE_URL,
-      expect.objectContaining({ method: "HEAD" }),
-    );
+    await flushProbe();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(BIRDSEYE_LIVE_URL);
+    expect(init.method ?? "GET").toBe("GET");
+    expect(init.signal!.aborted).toBe(true);
   });
 
   it("renders the composite stream, not the empty state, when the probe says enabled", async () => {
-    fetchMock.mockResolvedValue({ ok: true });
+    fetchMock.mockResolvedValue(ENABLED);
     render(<BirdseyePage />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     await flushProbe();
@@ -63,7 +66,7 @@ describe("Birdseye live view (WARP-1918)", () => {
   });
 
   it("renders the not-enabled empty state only when the probe says disabled", async () => {
-    fetchMock.mockResolvedValue({ ok: false, status: 404 });
+    fetchMock.mockResolvedValue(DISABLED);
     render(<BirdseyePage />);
 
     await screen.findByText("Birdseye not enabled");
@@ -91,5 +94,146 @@ describe("Birdseye live view (WARP-1918)", () => {
 
     expect(screen.queryByText("Birdseye not enabled")).not.toBeInTheDocument();
     expect(screen.getByAltText("Birdseye live composite")).toBeInTheDocument();
+  });
+});
+
+/**
+ * Wall follow-up F2 (WARP-2981, #2368). Birdseye is an endless MJPEG stream,
+ * and two things about it went wrong on this page:
+ *
+ *  - Express runs the GET handler for a HEAD, and Node sends a HEAD's headers
+ *    only when the response ends, which a live stream never does. The page's
+ *    HEAD check therefore never answered, and (having no signal) stayed open,
+ *    holding a proxied Frigate stream for as long as the tab lived, and after
+ *    it was left. The check is now a GET whose status is read off the headers
+ *    and aborted at once (`getBirdseyeStatus`), the wall's own check.
+ *  - A clean end of the upstream stream freezes the last frame with no
+ *    `error` event. Only reconnecting bounds a frozen picture, so a live
+ *    stream reconnects every 5 minutes, the wall's cadence.
+ *
+ * The route is modelled as the orchestrator behaves: a GET answers its headers
+ * at once and the body stays open until the request is aborted; a HEAD is
+ * never answered.
+ */
+describe("Birdseye live view — a live stream never freezes the page (wall F2)", () => {
+  const fetchMock = vi.fn();
+  /** Requests still open: not aborted, and (a HEAD) never answered. */
+  let open: Set<number>;
+
+  /** `getAnswers`: the GET answers its status at once (a live stream) or hangs until aborted. */
+  function liveRoute(getAnswers: boolean) {
+    let n = 0;
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      const id = n++;
+      open.add(id);
+      init?.signal?.addEventListener("abort", () => open.delete(id));
+      const method = init?.method ?? "GET";
+      if (method === "HEAD" || !getAnswers) {
+        return new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))),
+        );
+      }
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers() });
+    });
+  }
+
+  const RECONNECT_MS = 5 * 60_000;
+
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    open = new Set();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves no request open once its check has an answer", async () => {
+    liveRoute(true);
+    render(<BirdseyePage />);
+    await advance(0);
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect([...open]).toEqual([]);
+    expect(screen.getByAltText("Birdseye live composite")).toBeInTheDocument();
+  });
+
+  it("never asks with a HEAD, which a live stream never answers", async () => {
+    liveRoute(true);
+    render(<BirdseyePage />);
+    await advance(0);
+
+    for (const [, init] of fetchMock.mock.calls) {
+      expect((init as RequestInit | undefined)?.method ?? "GET").toBe("GET");
+    }
+  });
+
+  it("leaving the page abandons a check that has not answered", async () => {
+    liveRoute(false);
+    const { unmount } = render(<BirdseyePage />);
+    await advance(0);
+    expect(open.size).toBe(1);
+
+    unmount();
+    expect([...open]).toEqual([]);
+  });
+
+  it("reconnects the live stream every 5 minutes: a clean upstream end freezes the last frame with no error", async () => {
+    liveRoute(true);
+    render(<BirdseyePage />);
+    await advance(0);
+    const first = screen.getByAltText("Birdseye live composite").getAttribute("src");
+
+    await advance(RECONNECT_MS - 1);
+    expect(screen.getByAltText("Birdseye live composite").getAttribute("src")).toBe(first);
+
+    await advance(1);
+    const second = screen.getByAltText("Birdseye live composite").getAttribute("src");
+    expect(second).not.toBe(first);
+    expect(second).toContain("/api/cameras/birdseye/live");
+
+    await advance(RECONNECT_MS);
+    const third = screen.getByAltText("Birdseye live composite").getAttribute("src");
+    expect(third).not.toBe(second);
+    expect(third).not.toBe(first);
+  });
+
+  it("does not reconnect a stream that is not on screen, and leaves no timer behind", async () => {
+    // Not enabled: nothing is streaming, so there is nothing to reconnect.
+    fetchMock.mockResolvedValue(DISABLED);
+    const { unmount } = render(<BirdseyePage />);
+    await advance(0);
+    expect(screen.getByText("Birdseye not enabled")).toBeInTheDocument();
+    await advance(RECONNECT_MS * 2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // A stream that errored is on screen as "Stream lost": nothing to reconnect either.
+    liveRoute(true);
+    fetchMock.mockClear();
+    const lost = render(<BirdseyePage />);
+    await advance(0);
+    fireEvent.error(screen.getByAltText("Birdseye live composite"));
+    expect(screen.getByText(/Stream lost/)).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+    lost.unmount();
+
+    // Live: leaving the page stops the reconnect.
+    liveRoute(true);
+    fetchMock.mockClear();
+    const live = render(<BirdseyePage />);
+    await advance(0);
+    live.unmount();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
