@@ -1,4 +1,6 @@
-# Mobile API Contract
+# Native Client API Contract
+
+> Formerly "Mobile API Contract" (file name kept so existing links keep working). Widened to native desktop clients by WARP-3230 (ADR-062, WARP-3211).
 
 **Status:** Living document (mirror of the orchestrator routes that mobile clients consume)
 **Date:** 2026-05-18 (chat route + SSE wire corrected 2026-06-01 — XR-01/XR-02; error
@@ -6,10 +8,19 @@ envelope, VPN/DDNS shapes, and missing endpoints reconciled against `src/routes/
 2026-06-28 during the `droplet-ios` build — XR-03)
 **Companion to:** ADR-008 (Native Mobile — Design System + API Contract)
 
-This document is the contract that the iOS + Android apps build against. Both apps
-re-derive their model layer from this doc. If you change the orchestrator's
-mobile-relevant routes, update this doc IN THE SAME PR and the mobile teams will
-mirror the change.
+This document is the contract that the native clients build against: the iOS and
+Android apps, and the native Windows client (`droplet-windows`, C# / WinUI 3,
+ADR-062). The native clients re-derive their model layer from this doc. If you
+change the orchestrator's client-relevant routes, update this doc IN THE SAME PR
+and the client teams will mirror the change.
+
+**Native desktop clients.** A desktop client is a native app, not a browser: it
+signs in with `POST /auth/login?return=body` (Bearer pair in the body, no
+cookies; the native-only gate described under Auth applies), sends
+`Authorization: Bearer` on every route, pins the box's identity as described in
+the pairing / sign-in flow, and receives real-time events over
+`/api/ws/events` (see "Real-time events"). The passkey and native SSO sign-in
+flows are not part of this contract yet (ADR-063, WARP-3226).
 
 > **Source of truth (XR-03).** Where this doc and the shipped orchestrator routes
 > disagree, **`apps/orchestrator/src/routes/*` wins** — a cross-repo audit while
@@ -180,7 +191,8 @@ Sign-in + optional enrollment sequence:
    client that pins it keeps verifying every later connection (API, WebSocket,
    WebView) against the same pin. Absent when the box cannot read its own
    leaf; unknown parameters are ignored by older clients. Reference
-   implementation: droplet-windows `trust.rs` (WARP-2953).
+   implementation: the native Windows client's C# trust code in `droplet-windows`
+   (a port of the retired Rust `trust.rs`, WARP-2953; WARP-3236).
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
@@ -198,17 +210,28 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 |---|---|---|---|
 | GET | `/cameras` | Bearer | `{ cameras, discovered, recentEvents, totalCameras }` |
 | GET | `/cameras/:name` | Bearer | full `CameraInfo` |
-| GET | `/cameras/:name/thumbnail` | Bearer | image bytes |
-| GET | `/cameras/:name/stream-url?protocol=hls\|webrtc` | Bearer | `{ url, expiresAt }` |
-| GET | `/cameras/clips?camera=&from=&to=` | Bearer | `[{ id, camera, startedAt, durationMs, thumbnailUrl, downloadUrl }]` |
-| GET | `/cameras/clips/:id/download` | Bearer | mp4 bytes |
-| POST | `/cameras/clips/:id/share` | Bearer | `{ ttl? }` → `{ url, expiresAt }` |
+| GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
+| GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
+| GET | `/cameras/:name/events` | Bearer | events for one camera |
+| GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
+| GET | `/cameras/events/:eventId/thumbnail` | Bearer | image bytes (`Cache-Control: private, no-store`) |
+| GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
+| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
+| GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
+| GET | `/cameras/clips?camera=&limit=` | Bearer | `{ clips: [{ id, camera, label, score, start_time, end_time, thumbnail_url, clip_url }] }` (`limit` default 50, max 200; only events that have a clip) |
+| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes |
+| POST | `/cameras/clips/share` | Bearer (custody roles) | share a clip |
 | GET | `/cameras/groups` | Bearer | `[{ id, name, members }]` |
 | GET | `/cameras/pins` | Bearer | `[{ cameraName, sortOrder }]` |
 | POST | `/cameras/pins` | Bearer | `{ cameraName, sortOrder? }` → 201 |
 | DELETE | `/cameras/pins/:cameraName` | Bearer | `{ ok }` |
 
-Stream URL is short-lived (signed); fetch fresh on every player open.
+There is no HLS or WebRTC `stream-url` route and no per-camera `thumbnail`
+route: live view is the MJPEG `/cameras/:name/live` stream (send the Bearer
+header; the stream is per-connection and never cached) and stills come from
+`snapshot`. Camera routes are scoped per person: a client only sees the cameras
+it is granted. A save or download asked by a role that is not owner or admin
+answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
 
 ### LLM (`/api/llm/*`)
 
@@ -410,9 +433,10 @@ preview tiles.
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
 | GET | `/matter/devices` | Bearer | `[{ id, name, type, room?, state, capabilities }]` |
-| POST | `/matter/devices/:id/command` | Bearer | `{ command: "on"\|"off"\|"toggle"\|..., args? }` → `{ ok }` |
-| GET | `/matter/events?since=…` | Bearer | `[{ id, deviceId, type, ts, payload }]` |
-| DELETE | `/matter/devices/:id` | Bearer | `{ ok }` |
+| GET | `/matter/devices/events` | Bearer | SSE stream: `data: {json}` frames of `{ type: "connected" }`, `{ type: "state_changed", … }` and `{ type: "connection_changed", … }`, plus `: heartbeat` every 30 s |
+| POST | `/matter/devices/:nodeId/command` | Bearer (owner/admin/family) | `{ command, data? }` → `200 { …result, nodeId, command, tier }`; a Tier-2 (lock-like) command answers `202 { status: "confirmation_required", nodeId, command, service, tier, reason, confirmationToken, expiresIn: 60 }` |
+| POST | `/matter/devices/:nodeId/confirm` | Bearer (owner/admin/family) | `{ confirmationToken, service }` → `200 { …result, nodeId, confirmed: true }` or `400 { error, code }`; the command comes from the token, never from this body |
+| DELETE | `/matter/devices/:nodeId` | Bearer | `{ ok }` |
 | POST | `/matter/commission` | Bearer | `{ qrPayload }` → `{ deviceId }` (dashboard only in v1) |
 
 Commissioning happens via dashboard QR scanner (WARP-182). Mobile v1
@@ -766,14 +790,44 @@ fields.
 If a route gets a breaking change, gate it behind a versioned path
 (`/api/v2/...`) and keep the v1 path alive for ≥1 mobile release.
 
+## Real-time events (`/api/ws/events`)
+
+A WebSocket bridge that forwards the box's MQTT events for the signed-in person.
+Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
+
+- **URL:** `wss://<host>/api/ws/events` (matched by prefix; any other upgrade
+  path is answered `404`).
+- **Auth:** at upgrade time, either the session cookie (browsers) or a Bearer
+  access token passed as the WebSocket subprotocol `bearer.<accessToken>`
+  (native clients use this). The token is validated like an HTTP request: a
+  revoked user or an ended session is refused. Failure is a plain
+  `401 Unauthorized` on the upgrade and no WebSocket is established. The
+  server does not echo a selected subprotocol, so a client must not require one
+  back. The token is checked only at upgrade: refresh it before it expires,
+  and reconnect with the new one.
+- **Topics:** there is no subscribe message. The server subscribes each
+  connection to the person's own topics only: `droplet/files/<username>/#`
+  (and `droplet/files/<userId>/#`), `droplet/devices/<username>/#`,
+  `droplet/index/<username>/#`, `droplet/notifications/<username>` and
+  `droplet/chat/<username>/#`. Other people's topics are never forwarded.
+- **Frames:** server to client JSON text frames
+  `{ "topic": "<mqtt topic>", "payload": <json> }`. Client-sent frames are
+  ignored. The server sends a WebSocket ping every 25 s (the client library
+  answers with a pong automatically).
+- **Reconnect:** on close, reconnect with exponential backoff and jitter, and
+  stop once sign-in has ended. Events are not replayed, so after a reconnect
+  re-fetch state (`GET /notifications`, files, devices).
+
 ## Open items
 
 - [ ] OpenAPI generation: should we write `openapi.yaml` and codegen
-      Swift/Kotlin clients? Reduces drift but adds a build step.
-      Defer — markdown contract is the v1 mechanism.
-- [ ] WebSocket / Server-Sent Events for real-time notifications when
-      app is foregrounded. Today the only real-time channel is APNs/FCM
-      push (background) + polling.
+      Swift/Kotlin/C# clients? Reduces drift but adds a build step. The
+      markdown contract is still the mechanism; a generated client for the
+      desktop subset is a possible follow-up.
+- [x] Real-time channel while the app is foregrounded: shipped as the
+      `/api/ws/events` WebSocket bridge (see "Real-time events") plus the
+      camera and Matter SSE streams. APNs/FCM push remains the background
+      channel on mobile.
 - [ ] WebRTC vs HLS for camera streams. Frigate supports both; HLS is
       simpler client-side, WebRTC has lower latency. v1 ships HLS.
 ## Project Management (native PM)
