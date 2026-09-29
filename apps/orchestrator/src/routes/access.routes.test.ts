@@ -764,6 +764,38 @@ describe("POST /api/access/roles (create)", () => {
     expect(stored.storageQuotaBytes).toBe(9_000_000_000n);
   });
 
+  // ADR-059 — the Security `view` floor (family) is a refusal: a guest holds no
+  // security grant, so the server does not store one (the client is never trusted).
+  it("does not store security:view on a Guest-based role at create (ADR-059)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint: "guest", featureGrants: [{ moduleId: "security", level: "view" }, { moduleId: "files", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+    expect(prisma._roles().get(res.body.role.id).featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+  });
+
+  it("keeps security:view on a Family-based role: the D6 wall account is a Staff role at Security View (ADR-059)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint: "family", featureGrants: [{ moduleId: "security", level: "view" }, { moduleId: "cameras", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "security", level: "view" }, { moduleId: "cameras", level: "view" }]);
+  });
+
+  it("clamps security:manage to act on a Family-based role, and keeps it on an Admin-based one (ADR-059)", async () => {
+    for (const [startingPoint, level] of [["family", "act"], ["admin", "manage"]] as const) {
+      const prisma = createPrismaMock();
+      const res = await request(buildApp(prisma))
+        .post("/api/access/roles")
+        .send(payload({ startingPoint, featureGrants: [{ moduleId: "security", level: "manage" }] }));
+      expect(res.status).toBe(200);
+      expect(res.body.role.featureGrants, startingPoint).toEqual([{ moduleId: "security", level }]);
+    }
+  });
+
   // WARP-1578 — the Guest floor at create time. O-2's read floor is
   // family-and-UP; erp.ts enforces the "and-up" half at the consumption site,
   // so a connector grant on a Guest-based role is inert by construction. The
@@ -1320,6 +1352,15 @@ describe("PATCH /api/access/roles/:id", () => {
     expect(res.status).toBe(200);
     expect(res.body.role.startingPoint).toBe("family");
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
+  });
+
+  it("…and drops a STORED security:view when the starting point drops to Guest (ADR-059)", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, startingPoint: "family", featureGrants: [{ moduleId: "security", level: "view" }] }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ startingPoint: "guest" });
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([]);
   });
 
   // WARP-1578 — the Guest floor. O-2's read floor is family-and-UP, and
