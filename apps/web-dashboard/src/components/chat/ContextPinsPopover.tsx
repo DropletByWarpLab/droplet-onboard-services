@@ -30,6 +30,7 @@ import {
   listContextPins,
   type ContextPin,
 } from "@/lib/api";
+import { MenuSelect, type MenuSelectOption } from "@/components/ui/MenuSelect";
 
 const KIND_ICON: Record<ContextPin["kind"], typeof Folder> = {
   folder: Folder,
@@ -55,6 +56,10 @@ const KIND_ICON: Record<ContextPin["kind"], typeof Folder> = {
  *  arrive from the record surfaces (the CRM record drawer, the project header)
  *  where the id is already in hand. */
 const ADDABLE_KINDS: ContextPin["kind"][] = ["folder", "file", "camera"];
+const KIND_OPTIONS: MenuSelectOption<ContextPin["kind"]>[] = ADDABLE_KINDS.map((k) => ({
+  value: k,
+  label: k,
+}));
 
 /**
  * WARP-2582 — what a row says. The `ref` fallback is what keeps a folder pin
@@ -172,8 +177,8 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
           className="absolute right-0 mt-1 w-80 max-w-[85vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
           style={{
             background: "var(--glass)",
-            border: "1px solid var(--card-bd)",
-            boxShadow: "var(--lift)",
+            // Shadow only — `--lift` carries a 1px brand ring (WARP-3043).
+            boxShadow: "0 16px 40px -12px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.08)",
           }}
         >
           <div className="type-caption-1 mb-2" style={{ color: "var(--text-muted)" }}>
@@ -225,23 +230,15 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
 
           <div
             className="flex items-center gap-1.5 pt-2"
-            style={{ borderTop: "1px solid var(--card-bd)" }}
           >
-            <label className="sr-only" htmlFor="pin-kind">
-              Kind
-            </label>
-            <select
+            <MenuSelect
               id="pin-kind"
+              label="Kind"
               value={kind}
-              onChange={(e) => setKind(e.target.value as ContextPin["kind"])}
-              className="type-footnote h-8 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
-            >
-              {ADDABLE_KINDS.map((k) => (
-                <option key={k} value={k}>
-                  {k}
-                </option>
-              ))}
-            </select>
+              options={KIND_OPTIONS}
+              onChange={setKind}
+              className="type-footnote h-8 w-24"
+            />
             <label className="sr-only" htmlFor="pin-ref">
               Path or reference
             </label>
@@ -253,7 +250,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
                 if (e.key === "Enter") void handleAdd();
               }}
               placeholder="/share/projects/…"
-              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
+              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:ring-2 focus:ring-[var(--brand)]"
             />
             <button
               type="button"

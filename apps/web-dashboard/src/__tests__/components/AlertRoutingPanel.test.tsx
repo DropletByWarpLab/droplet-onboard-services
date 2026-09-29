@@ -39,6 +39,7 @@ vi.mock("@/lib/api", async (orig) => ({
 }));
 
 import { AlertRoutingPanel, ROUTING_COPY } from "@/components/security/AlertRoutingPanel";
+import { tierLabel } from "@/lib/access";
 
 function person(over: Partial<AlertRoutingPerson> = {}): AlertRoutingPerson {
   return {
@@ -102,6 +103,22 @@ describe("at manage", () => {
     expect(within(maria).getByText("Manages the Security department")).toBeInTheDocument();
     // On a phone the chip is wider than its column beside the switch: it wraps instead of being cut off.
     expect(within(maria).getByText("Manages the Security department")).toHaveStyle({ flexShrink: "1", whiteSpace: "normal" });
+  });
+
+  it("names a role the way tierLabel does, never with a map of its own: a family row leads with tierLabel's word, and Family is nowhere", async () => {
+    render(<AlertRoutingPanel />, { wrapper: Wrap });
+    const jordan = await waitFor(() => row("Jordan"));
+    // tierLabel (lib/access.ts) is the ONE place the `family` relabel lives.
+    expect(jordan).toHaveTextContent(`${tierLabel("family")} · ${ROUTING_COPY.cantBeTold.no_access}`);
+    // Neither the home-product label nor the raw enum value reaches the list.
+    expect(screen.getByTestId("alert-routing")).not.toHaveTextContent(/family/i);
+  });
+
+  it("a role this client doesn't know reads as the box sent it", async () => {
+    h.getAlertRouting.mockResolvedValue(manageView([person(), person({ userId: "u-kim", name: "Kim", role: "contractor", origin: "chosen" })]));
+    render(<AlertRoutingPanel />, { wrapper: Wrap });
+    const kim = await waitFor(() => row("Kim"));
+    expect(kim).toHaveTextContent(`contractor · ${ROUTING_COPY.deliveryPush}`);
   });
 
   it("an ineligible person: can't be told, and the switch is off and inert", async () => {

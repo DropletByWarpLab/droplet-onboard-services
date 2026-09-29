@@ -60,7 +60,11 @@ vi.mock("../services/security-baselines.service.js", () => ({
 import { createSecurityRouter } from "../routes/security.js";
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 import { MODULE_BY_ID } from "../modules/module-registry.js";
-import { _resetSecurityIngestHealthForTests, registerSecurityJobs } from "../services/security-events.service.js";
+import {
+  _resetSecurityIngestHealthForTests,
+  noteFrigateSubscribeFailed,
+  registerSecurityJobs,
+} from "../services/security-events.service.js";
 import { _resetIncidentHealthForTests } from "../services/security-incidents.service.js";
 
 type Role = "owner" | "admin" | "family" | "guest";
@@ -380,6 +384,23 @@ describe("GET /api/security/health", () => {
       "patterns",
       "retention",
     ]);
+  });
+
+  it("WARP-3261: the raw broker error reaches owners and admins only; a member gets a plain status", async () => {
+    noteFrigateSubscribeFailed(new Error("connect ECONNREFUSED 172.18.0.9:1883"));
+    for (const role of ["owner", "admin"] as const) {
+      const res = await request(app(role)).get("/api/security/health");
+      expect(res.body.sources[0], role).toMatchObject({
+        id: "camera_ingest",
+        state: "down",
+        detail: "connect ECONNREFUSED 172.18.0.9:1883",
+      });
+    }
+    const res = await request(app("family")).get("/api/security/health");
+    expect(res.body.sources[0]).toEqual(
+      expect.objectContaining({ id: "camera_ingest", state: "down", detail: "Not listening to the camera system" }),
+    );
+    expect(JSON.stringify(res.body)).not.toContain("172.18.0.9");
   });
 
   it("an ingest that never subscribed says DOWN", async () => {

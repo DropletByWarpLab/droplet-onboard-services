@@ -101,6 +101,10 @@ export type PasskeyErrorKind =
   | "storage_failed"
   | "unavailable"
   | "network"
+  // WARP-3193 — the box wants the caller to re-prove who they are first.
+  | "password_required"
+  | "password_invalid"
+  | "mfa_required"
   | "unknown";
 
 export interface PasskeyErrorView {
@@ -140,6 +144,14 @@ export function classifyPasskeyError(err: unknown): PasskeyErrorKind {
         return "storage_failed";
       case "directory_unavailable":
         return "unavailable";
+      case "STEP_UP_PASSWORD_REQUIRED":
+        return "password_required";
+      case "INVALID_PASSWORD":
+        return "password_invalid";
+    }
+    // require-recent-mfa answers `{ error: "mfa_required" | "mfa_stale" }`.
+    if (err.status === 401 && (err.message === "mfa_required" || err.message === "mfa_stale")) {
+      return "mfa_required";
     }
     return err.status >= 500 || err.status === 429 ? "unavailable" : "unknown";
   }
@@ -250,6 +262,17 @@ export function passkeyErrorView(kind: PasskeyErrorKind): PasskeyErrorView {
         retryable: true,
         message: "We couldn't reach your Droplet. Check that you're on your office network, then try again.",
       };
+    case "password_required":
+      return { kind, retryable: true, message: "Enter your current password to add a passkey." };
+    case "password_invalid":
+      return { kind, retryable: true, message: "That password didn't match. Try again." };
+    case "mfa_required":
+      return {
+        kind,
+        retryable: false,
+        message:
+          "For your security, sign out and sign back in with your two-factor code, then add the passkey within 5 minutes.",
+      };
     case "unknown":
     default:
       return { kind: "unknown", retryable: true, message: "We couldn't add that passkey. Try again." };
@@ -291,14 +314,19 @@ export async function removePasskey(id: string): Promise<void> {
  * or a roaming key), and posts the attestation back for verification. Resolves
  * on success; throws with a usable message otherwise.
  */
-export async function registerPasskey(): Promise<void> {
+export async function registerPasskey(currentPassword?: string): Promise<void> {
+  // WARP-3193 — the box asks for the current password before enrolling a
+  // credential when the account has no two-factor yet (`password_required`);
+  // both halves of the ceremony carry it.
+  const stepUp = currentPassword ? { currentPassword } : {};
   const options = await postJson<PublicKeyCredentialCreationOptionsJSON>(
     "/api/auth/webauthn/register/options",
+    stepUp,
   );
   const attestation = await startRegistration({ optionsJSON: options });
   const result = await postJson<{ verified: boolean }>(
     "/api/auth/webauthn/register/verify",
-    { response: attestation },
+    { response: attestation, ...stepUp },
   );
   if (!result.verified) {
     throw new Error("Passkey could not be registered");

@@ -1,8 +1,11 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseUnlessOwnerOrAdmin } from "./owner-admin-only.js";
 
 const inputSchema = { type: "object", properties: {}, additionalProperties: false } as const;
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseUnlessOwnerOrAdmin(ctx); // WARP-3104
+  if (denied) return denied;
   // WARP-1462 — route through the ORCHESTRATOR, not camera-discovery. The old
   // ctx.http.cameras.post("/scan") hit camera-discovery (:8085) directly, whose
   // /scan is gated behind a `Bearer DEVICE_SECRET` (NET-05) that the cameras

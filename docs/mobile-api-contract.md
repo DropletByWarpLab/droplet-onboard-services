@@ -723,8 +723,12 @@ event: done
 data: {"iterations": 1, "stop_reason": "model_done"}
 ```
 
-`stop_reason` ∈ `model_done | iteration_limit | error` (an `error` frame
-also carries an `error` string). The agent loop also emits these event
+`stop_reason` ∈ `model_done | iteration_limit | error | context_budget |
+repetition | no_progress` (an `error` frame also carries an `error`
+string). The last three mean the loop stopped calling tools early — the
+context filled up, the model repeated an identical call, or its searches
+kept finding nothing — and the final text is still a normal answer; treat
+any value you do not recognise like `model_done`. The agent loop also emits these event
 types on the same stream — render or ignore as needed:
 
 | `event:` | `data` payload | Meaning |

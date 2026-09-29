@@ -181,7 +181,8 @@ export function parseDigests(raw: string): Array<Required<ModelDigest>> {
  */
 export async function runCorpusPass(
   deps: CorpusDeps,
-  opts: { now?: Date; limit?: number } = {},
+  /** `signal` — WARP-3193 QUAL-2: aborted when this worker's lease is lost. */
+  opts: { now?: Date; limit?: number; signal?: AbortSignal } = {},
 ): Promise<CorpusOutcome> {
   const { prisma, chat, model } = deps;
   const now = opts.now ?? new Date();
@@ -233,6 +234,11 @@ export async function runCorpusPass(
   let cursor = pass.cursor;
 
   for (const f of files) {
+    // WARP-3193 QUAL-2 — the lease is gone: another worker owns this pass now,
+    // and every cursor and counter write below would land on ITS row. Stop
+    // between units (a unit already in flight finishes; its cursor write is
+    // idempotent re-digest territory, see below).
+    if (opts.signal?.aborted) break;
     try {
       const rawChunks = await prisma.fileContentChunk.findMany({
         // `ncFileId` is nullable on FileIndexStatus; the query above already
@@ -364,6 +370,11 @@ export async function runCorpusPass(
       });
       break;
     }
+  }
+
+  // Lease lost: the run summary belongs to the successor's run, not this one.
+  if (opts.signal?.aborted) {
+    return { passKey: CORPUS_PASS_KEY, ran: true, unitsSeen: files.length, digestsWritten, cursor, errors };
   }
 
   await prisma.brainPass.update({

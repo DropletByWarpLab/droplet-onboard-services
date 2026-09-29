@@ -20,10 +20,7 @@ import {
   shutdownMatterService,
   setPrismaForMatter,
 } from "./services/matter.service.js";
-import {
-  initDeviceRegistration,
-  shutdownDeviceRegistration,
-} from "./services/device-registration.service.js";
+import { initDeviceRegistration } from "./services/device-registration.service.js";
 import {
   startHealthMonitor,
   stopHealthMonitor,
@@ -41,11 +38,21 @@ import {
   EXTENSION_RECONCILE_LOCK_KEY,
 } from "./services/extension-lifecycle.service.js";
 import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
-import { stopScreenQRPoller } from "./services/screen-qr.service.js";
+import { startScreenQRPoller, stopScreenQRPoller } from "./services/screen-qr.service.js";
+import { startRemindersPoller } from "./services/reminders-poller.js";
+import { cleanupExpiredTokens } from "./services/safety-tier.service.js";
+import { cleanupExpiredNetworkTokens } from "./services/network-safety.service.js";
+import { cleanupExpiredStorageTokens } from "./services/storage-safety.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
+import {
+  purgeDueDeletions,
+  releaseStaleHandovers,
+  LEAVER_DELETION_LOCK_KEY,
+} from "./services/leaver-deletion.service.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
   createAgentRunWorker,
@@ -163,6 +170,7 @@ import {
   recordActivity,
   getActivityRecorder,
 } from "./services/activity.singleton.js";
+import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
@@ -271,6 +279,14 @@ async function main() {
   // WARP-456: initialize the signed activity recorder. Boot-fatal —
   // an orchestrator that can't sign audit rows must NOT start.
   initActivityRecorder(prisma);
+  // WARP-3160: lifecycle post-effects revoke a leaver's VPN devices through it.
+  initVpnDeviceRevoke(prisma);
+  // WARP-3165: a key rotated while the orchestrator was down
+  // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
+  // first new-key row, before the start-up row below.
+  await recordRotationFoundAtBoot(prisma).catch((err) =>
+    logger.error({ err }, "audit key rotation check at boot failed"),
+  );
   // Genesis-or-restart event so the first row of every container's
   // lifetime is always a `system` start-up. Makes the chain easier to
   // segment in the dashboard's activity feed.
@@ -356,8 +372,17 @@ async function main() {
   // Initialize services
   initDeviceService(prisma);
 
+  // Critical fix #1: pass prisma so `scheduleInterval`/`scheduleCron` can
+  // acquire a pg advisory lock per tick. In multi-instance deploys (K8s
+  // replicas, warm standby) only the replica that wins the lock runs
+  // the handler; the others silently skip. Each distinct cron task gets
+  // its own lock key so they don't starve each other.
+  // WARP-3193 QUAL-7 — created this early because the device-registration
+  // and health-monitor pollers below schedule on it too.
+  const cronRuntime = createCronRuntime(prisma);
+
   // Start periodic device self-registration (detects hostname, IP, hardware)
-  await initDeviceRegistration(prisma);
+  await initDeviceRegistration(prisma, cronRuntime);
 
   // WARP-615: fleet-analytics agent — fail-open; a no-op until configured.
   initAnalytics();
@@ -436,7 +461,7 @@ async function main() {
 
   // WARP-43: begin background polling of component health. Non-blocking —
   // the first snapshot is seeded immediately and the poller keeps running.
-  startHealthMonitor(prisma);
+  startHealthMonitor(prisma, cronRuntime);
 
   // WARP-101: spawn the MCP stdio child so /api/llm/chat can drive the
   // orchestrator agent loop. Non-fatal: if the child crashes the chat
@@ -497,12 +522,6 @@ async function main() {
   // client. A daily 03:00 cron purges old schedule events (>7d) and
   // long-expired overrides (>24h past endAt).
   const firewall = createFirewallAdapter(openwrt);
-  // Critical fix #1: pass prisma so `scheduleInterval`/`scheduleCron` can
-  // acquire a pg advisory lock per tick. In multi-instance deploys (K8s
-  // replicas, warm standby) only the replica that wins the lock runs
-  // the handler; the others silently skip. Each distinct cron task gets
-  // its own lock key so they don't starve each other.
-  const cronRuntime = createCronRuntime(prisma);
   // WARP-2850 — built inside the brain block when the feature is on, and
   // handed to createApp so the manual-run route can reach it. Undefined
   // when BRAIN_ENABLED is off: the READ surface is mounted unconditionally,
@@ -754,7 +773,8 @@ async function main() {
     const passRunners = {
       // Deterministic pass: no model call, so it never contends for the box's
       // single inference slot.
-      [DETECTOR_PASS_KEY]: async () => {
+      // `signal` aborts when the lease is lost mid-run (WARP-3193 QUAL-2).
+      [DETECTOR_PASS_KEY]: async (signal: AbortSignal) => {
         const outcome = await runDetectorPass(prisma);
         if (outcome.errors.length > 0) {
           // 🔴 ERROR, not warn (WARP-2825). `runDetectorPass` catches per
@@ -768,7 +788,10 @@ async function main() {
         }
         // Delivery runs INSIDE the same claim as the pass that produced the
         // findings. Two instances notifying concurrently would double-announce
-        // the window between one stamping `notifiedAt` and the other reading it.
+        // the window between one stamping `notifiedAt` and the other reading it
+        // — so a run whose claim was lost meanwhile leaves delivery to the
+        // worker that holds it now.
+        if (signal.aborted) return;
         const notified = await notifyFindings(prisma);
         if (notified.immediate > 0 || notified.digestSent) {
           logger.info({ notified }, "brain.findings.notified");
@@ -783,10 +806,10 @@ async function main() {
       // of the claim. By the time this body runs, `claimPass` has already
       // stamped `runState` and `lastRunAt`, so a bail-out here is a run the
       // box has already recorded and the route has already reported started.
-      [CORPUS_PASS_KEY]: async () => {
+      [CORPUS_PASS_KEY]: async (signal: AbortSignal) => {
         const outcome = await runCorpusPass(
           { prisma, chat: aiGateway.chat, model: await resolveBrainModel() },
-          { limit: config.brain.corpusUnitsPerRun },
+          { limit: config.brain.corpusUnitsPerRun, signal },
         );
         if (outcome.errors.length > 0) {
           logger.warn({ outcome }, "brain.corpus_pass.partial");
@@ -838,7 +861,9 @@ async function main() {
     // 🔴 NEITHER PASS TAKES cron-runtime's `lockKey`, and neither may be given
     // one. That lock runs the handler inside a 60 s `$transaction` (WARP-2837);
     // exclusion is the lease, which holds across replicas without keeping a
-    // transaction open. Both passes now share it, so there is exactly one
+    // transaction open. (WARP-3193 PERF-1 has since removed the 60 s ceiling —
+    // the lock now lasts the whole run — but a lease is still the right tool
+    // for a run that must outlive a restart and not pin a connection.) Both passes now share it, so there is exactly one
     // answer to "is this pass already running" for every caller.
     for (const [passKey, tickMs] of [
       [DETECTOR_PASS_KEY, config.brain.detectorTickMs],
@@ -1330,6 +1355,33 @@ async function main() {
     { lockKey: "droplet:department-reconciler" },
   );
 
+  // WARP-3176: a hand-over claim orphaned by a crash or restart is released
+  // at boot (once it is older than any transfer can run) and again below.
+  releaseStaleHandovers(prisma)
+    .then((r) => {
+      if (r.released > 0 || r.failed > 0) logger.warn(r, "stale hand-over claims released at boot");
+    })
+    .catch((err) => logger.error({ err }, "stale hand-over sweep at boot failed"));
+
+  // WARP-3113: complete leaver deletions whose 30-day retention has run out
+  // (the person was revoked when the deletion was scheduled). 03:50 — clear
+  // of the 03:00–03:40 audit and sweep jobs. WARP-3176: stale hand-over
+  // claims first, so a released PENDING row that is due is purged tonight.
+  cronRuntime.scheduleCron(
+    "50 3 * * *",
+    async () => {
+      const stale = await releaseStaleHandovers(prisma);
+      if (stale.released > 0 || stale.failed > 0) {
+        logger.warn(stale, "stale hand-over claims released");
+      }
+      const res = await purgeDueDeletions(prisma);
+      if (res.completed > 0 || res.failed > 0) {
+        logger.info(res, "leaver-deletion job complete");
+      }
+    },
+    { lockKey: LEAVER_DELETION_LOCK_KEY },
+  );
+
   // WARP-237: nightly tamper detection. 03:25 — after the 03:00 purge
   // reshapes the chain origin and before the 03:35 root signing.
   cronRuntime.scheduleCron(
@@ -1421,6 +1473,7 @@ async function main() {
           composeFile: config.DROPLET_OTA_COMPOSE_FILE,
           configRoot: config.DROPLET_OTA_CONFIG_ROOT,
           updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+          appDownloadsDir: config.DROPLET_APP_DOWNLOADS_DIR,
           githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
         })
       )?.runner ?? null)
@@ -1573,7 +1626,8 @@ async function main() {
   // 23 short DB sweeps that use it; wrong for this one, because a CPU-inference
   // extraction can legitimately outlive 60 s (`completeOnce` allows 120 s per
   // call for exactly that reason) and a handler that outlives its transaction
-  // has every write rolled back while the model keeps running.
+  // has every write rolled back while the model keeps running. (WARP-3193
+  // PERF-1 has since removed the 60 s ceiling; the reasons below still hold.)
   //
   // The exclusion is the durable CLAIM instead — `FOR UPDATE SKIP LOCKED` plus
   // a guarded `updateMany` — which is strictly stronger here: it is atomic
@@ -2037,6 +2091,21 @@ async function main() {
     );
   }
 
+  // WARP-3193 QUAL-7 — pollers that used to own a setInterval (two of them at
+  // module scope, started by a bare import; two from createApp, so every test
+  // that built an app started them). Same cadence, now on cron-runtime:
+  // overlap-guarded, failure-counted, torn down by cronRuntime.stop().
+  // Reminders poller: due-time notifications + calendar re-sync
+  // (REMINDER_POLL_INTERVAL_SEC, default 30 s), two independent jobs.
+  startRemindersPoller(prisma, cronRuntime);
+  // Status display screen QR (WARP-632/ADR-017) — 30 s.
+  startScreenQRPoller(prisma, cronRuntime);
+  // Expired confirmation tokens + stale rate-limit entries, every 60 s
+  // (WARP-3193 PERF-11: the smart-home one had no caller at all).
+  cronRuntime.scheduleInterval(60_000, cleanupExpiredTokens);
+  cronRuntime.scheduleInterval(60_000, cleanupExpiredNetworkTokens);
+  cronRuntime.scheduleInterval(60_000, cleanupExpiredStorageTokens);
+
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.
   // feat/scene-schedules: pass the hoisted Matter dispatcher so the scenes
@@ -2090,12 +2159,10 @@ async function main() {
       logger.warn("agent run release failed: %s", (err as Error).message);
     });
     stopHealthMonitor();
-    // WARP-165: stop the screen-QR poller's setInterval so integration
-    // test suites that drive `createApp()` end-to-end don't leak the
-    // timer (the handle is unref'd so it doesn't block process exit in
-    // production, but explicit stop keeps shutdown ordering predictable).
+    // WARP-165: stop the screen-QR poller acting on refreshes. Its schedule
+    // is cron-runtime's (WARP-3193 QUAL-7), already cleared by
+    // `cronRuntime.stop()` above.
     stopScreenQRPoller();
-    shutdownDeviceRegistration();
     await shutdownMatterService();
     await shutdownCameraService();
     // Stop the MCP stdio child first so it doesn't keep its Prisma

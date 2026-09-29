@@ -103,6 +103,15 @@ statement alone.
   then ask the sandbox. If that call fails, the row already says `disabled`
   / `uninstalled`, and a retry of the same transition acts again while the
   sandbox still runs (holds) the extension, instead of answering `409`.
+- The source workspace outlives every extension that can still be
+  installed (WARP-3200). Every install re-exports the code from it, so
+  deleting a workshop workspace is `409` while its extension is anything
+  but `uninstalled`, and enabling an uninstalled extension whose workspace
+  is gone is `409 source_deleted`. The delete's check and write, a
+  promote's store and an enable's claim all take a lock on the workspace
+  row (`FOR UPDATE` against `FOR KEY SHARE`), so neither can land between
+  the delete's check and its write
+  (`services/workspace-source-guard.service.ts`).
 - A stop takes the whole process tree. Every extension leads its own
   process group (`start_new_session`), and a stop signals the group:
   `SIGTERM`, a grace period, then `SIGKILL` to what is left. When the
@@ -167,7 +176,15 @@ statement alone.
   description or schema resets the tool to the default and clears the
   review, and a review sent with the hash it was shown is then a
   `STALE_REVIEW`. An
-  operator's block is never lifted by that reset.
+  operator's block is never lifted by that reset. The owner reviews on
+  `/admin/extensions` ("Tool reviews", WARP-3205). It reads the schema and
+  the signed description the row's hash names from the current signed
+  manifest, and offers no review when that manifest no longer produces the
+  hash. Its arguments list is only what the box reads from the schema's
+  structure: each argument's name (when it is a plain identifier), JSON
+  type and whether it is required. The description and the whole schema,
+  whose `description`/`title`/`examples`/`enum` strings are the author's
+  prose too, sit in a disclosure labelled as the author's words.
 - **Call-back principal.** A `dxt_` header bearer is looked up by its
   sha256 and resolves to `_service:ext:<slug>` only while the extension is
   `installed` or `live`. An unknown one is a 401 at once; it never reaches
