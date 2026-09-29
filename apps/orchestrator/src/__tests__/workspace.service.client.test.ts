@@ -10,6 +10,7 @@
  *     sandbox is a 502, and a head that is not a commit id is refused rather
  *     than placed in a response header.
  */
+import { createHash } from "node:crypto";
 import { describe, it, expect, vi } from "vitest";
 
 vi.mock("../config.js", () => ({
@@ -19,6 +20,13 @@ vi.mock("../config.js", () => ({
 import { createWorkspaceSandboxClient, WorkspaceSandboxError } from "../services/workspace.service.js";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+
+async function drain(stream: AsyncIterable<Buffer | Uint8Array>): Promise<Buffer> {
+  const parts: Buffer[] = [];
+  for await (const c of stream) parts.push(Buffer.from(c));
+  return Buffer.concat(parts);
+}
 
 function clientWith(respond: (url: string, init: RequestInit) => Response | Promise<Response>) {
   const fetchImpl = vi.fn(async (url: string, init: RequestInit) => respond(url, init));
@@ -40,11 +48,17 @@ describe("bundle()", () => {
   it("dials only the sandbox's bundle route, with the bearer, and returns bytes and head", async () => {
     const bytes = Buffer.from("# v2 git bundle\nPACK");
     const { client, fetchImpl } = clientWith(
-      () => new Response(new Uint8Array(bytes), { status: 200, headers: { "X-Bundle-Head": HEAD } }),
+      () =>
+        new Response(new Uint8Array(bytes), {
+          status: 200,
+          headers: { "X-Bundle-Head": HEAD, "X-Bundle-Sha256": sha(bytes), "Content-Length": String(bytes.length) },
+        }),
     );
     const out = await client.bundle("ws-a");
     expect(out.head).toBe(HEAD);
-    expect(Buffer.compare(out.body, bytes)).toBe(0);
+    expect(out.size).toBe(bytes.length);
+    expect(out.sha256).toBe(sha(bytes));
+    expect(Buffer.compare(await drain(out.stream), bytes)).toBe(0);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe("http://sandbox:8030/workspaces/ws-a/bundle");
@@ -63,6 +77,18 @@ describe("bundle()", () => {
       throw new TypeError("fetch failed");
     });
     expect(await rejection(down.client.bundle("ws-a"))).toMatchObject({ status: 502, code: "UNREACHABLE" });
+  });
+
+  it("refuses an export that states no length or a malformed sha256 — it cannot be verified", async () => {
+    const bytes = Buffer.from("PACK");
+    for (const headers of <Record<string, string>[]>[
+      { "X-Bundle-Head": HEAD },
+      { "X-Bundle-Head": HEAD, "X-Bundle-Sha256": "abc", "Content-Length": "4" },
+      { "X-Bundle-Head": HEAD, "X-Bundle-Sha256": sha(bytes).toUpperCase(), "Content-Length": "4" },
+    ]) {
+      const { client } = clientWith(() => new Response(new Uint8Array(bytes), { status: 200, headers }));
+      expect(await rejection(client.bundle("ws-a")), JSON.stringify(headers)).toMatchObject({ status: 502 });
+    }
   });
 
   it("refuses a head that is not a commit id — it becomes a filename in a header", async () => {

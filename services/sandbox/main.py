@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 import connector_draft
@@ -635,14 +636,24 @@ async def workspace_propose(workspace_id: str, req: ProposeRequest):
 
 @app.get("/workspaces/{workspace_id}/bundle")
 async def workspace_bundle(workspace_id: str):
-    content, head = await _in_thread(gitstore.bundle, workspace_id)
-    return Response(content=content, media_type="application/octet-stream", headers={"X-Bundle-Head": head})
+    built = await _in_thread(gitstore.bundle, workspace_id)
+
+    def _chunks():
+        try:
+            while chunk := built.file.read(65_536):
+                yield chunk
+        finally:
+            built.file.close()
+
+    return StreamingResponse(
+        _chunks(),
+        media_type="application/octet-stream",
+        headers={"X-Bundle-Head": built.head, "X-Bundle-Sha256": built.sha256, "Content-Length": str(built.size)},
+    )
 
 
 def _connector_draft_at(workspace_id: str, ref: str) -> dict[str, Any] | None:
-    if not gitstore.ref_exists(workspace_id, ref):
-        raise gitstore.StoreError(404, f"no {ref} in workspace {workspace_id}")
-    return connector_draft.describe_tree(lambda path: gitstore.show_at(workspace_id, ref, path))
+    return connector_draft.describe_tree(gitstore.reader_at(workspace_id, ref))
 
 
 @app.get("/workspaces/{workspace_id}/connector-draft")

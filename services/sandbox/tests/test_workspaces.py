@@ -12,11 +12,13 @@ security properties this file pins:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -671,6 +673,14 @@ def test_git_route_needs_an_actor_and_forwards_the_push_decision(client, auth, s
 # ── export: the bundle (WARP-2899) ─────────────────────────────────────────
 
 
+def _drain(built) -> bytes:
+    """A built bundle's bytes; the spool is closed, as the route closes it."""
+    try:
+        return built.file.read()
+    finally:
+        built.file.close()
+
+
 def test_bundle_is_the_work_branch_and_every_proposal_tag_and_clones_offline(store, tmp_path):
     # AC2: the bytes an owner downloads. Built from the local bare repo; a
     # `git clone` of the file — a path, no network — reproduces the branch
@@ -679,7 +689,9 @@ def test_bundle_is_the_work_branch_and_every_proposal_tag_and_clones_offline(sto
     workspace.write("ws-x", "NOTES.md", "# notes\n")
     workspace.commit("ws-x", "notes", ALICE)
     workspace.propose("ws-x", "Word counter", "0.1.0", "Counts.", ALICE)
-    body, head = store.bundle("ws-x")
+    built = store.bundle("ws-x")
+    head = built.head
+    body = _drain(built)
     assert head == store.git(["rev-parse", "refs/heads/work"], store.bare_path("ws-x")).stdout.strip()
     assert body.startswith((b"# v2 git bundle", b"# v3 git bundle"))
     bundle = tmp_path / "ws-x.bundle"
@@ -700,7 +712,7 @@ def test_bundle_carries_only_work_and_the_proposal_tags(store, tmp_path):
     bare = store.bare_path("ws-refs")
     store.must(store.git(["branch", "other", "refs/heads/work"], bare), "branch")
     store.must(store.git(["tag", "v1", "refs/heads/work"], bare), "tag")
-    body, _head = store.bundle("ws-refs")
+    body = _drain(store.bundle("ws-refs"))
     path = tmp_path / "refs.bundle"
     path.write_bytes(body)
     heads = store.must(store.git(["bundle", "list-heads", str(path)], tmp_path), "list-heads").stdout.split()
@@ -708,12 +720,51 @@ def test_bundle_carries_only_work_and_the_proposal_tags(store, tmp_path):
     assert refs == ["HEAD", "refs/heads/work", "refs/tags/proposal/0.1.0"]
 
 
+def _spy_spools(monkeypatch) -> list[tuple[object, object]]:
+    """Every spool `bundle()` opens, with the directory it was opened in."""
+    opened: list[tuple[object, object]] = []
+    real = tempfile.TemporaryFile
+
+    def spy(*args, **kwargs):
+        f = real(*args, **kwargs)
+        opened.append((kwargs.get("dir"), f))
+        return f
+
+    monkeypatch.setattr(tempfile, "TemporaryFile", spy)
+    return opened
+
+
+def test_bundle_is_spooled_to_an_unnamed_file_on_the_checkouts_volume_not_held_in_memory(store, monkeypatch):
+    # rjouffret on #2324 (export memory): the export came back as one bytes
+    # object — up to the 64 MB cap, joined from its chunks — and the route
+    # handed that over whole. git's stdout is now written, as it streams, to
+    # an unnamed file on the checkouts volume (never /tmp: that is a run's
+    # HOME and a 64 MB tmpfs), hashed on the way in, and the route streams
+    # the file back. MUTATION: return b"".join(chunks) again → red.
+    opened = _spy_spools(monkeypatch)
+    store.create_workspace("ws-sp", "typescript-tool", ALICE)
+    before = sorted(p.name for p in store.WORK_DIR.iterdir())
+    built = store.bundle("ws-sp")
+    assert [d for d, _f in opened] == [store.WORK_DIR]
+    assert built.file is opened[0][1]
+    if sys.platform != "win32":
+        # O_TMPFILE: no directory entry for a run child to find or swap.
+        assert sorted(p.name for p in store.WORK_DIR.iterdir()) == before
+    body = _drain(built)
+    assert body.startswith((b"# v2 git bundle", b"# v3 git bundle"))
+    assert built.size == len(body)
+    assert built.sha256 == hashlib.sha256(body).hexdigest()
+
+
 def test_bundle_is_capped_and_an_unknown_workspace_is_404(store, monkeypatch):
+    opened = _spy_spools(monkeypatch)
     store.create_workspace("ws-y", None, ALICE)
     monkeypatch.setattr(store, "MAX_BUNDLE_BYTES", 64)
     with pytest.raises(StoreError) as exc:
         store.bundle("ws-y")
     assert exc.value.status == 413
+    # A refused export leaves no spool open behind it.
+    assert opened and all(f.closed for _d, f in opened)
     with pytest.raises(StoreError) as missing:
         store.bundle("ws-nope")
     assert missing.value.status == 404
@@ -722,19 +773,82 @@ def test_bundle_is_capped_and_an_unknown_workspace_is_404(store, monkeypatch):
     assert bad.value.status == 400
 
 
-def test_show_at_reads_the_bare_repo_at_a_ref_with_a_closed_ref_grammar(store):
+def test_a_failed_spool_write_kills_git_and_is_a_store_error(store, monkeypatch):
+    # A full volume while spooling: git is killed (never left blocked on a
+    # pipe nobody reads) and the export is a 500 with a reason, not a hang.
+    store.create_workspace("ws-full", "typescript-tool", ALICE)
+    real = tempfile.TemporaryFile
+
+    class Full:
+        def __init__(self, f):
+            self._f = f
+            self.closed = False
+
+        def write(self, _chunk):
+            raise OSError(28, "No space left on device")
+
+        def close(self):
+            self.closed = True
+            self._f.close()
+
+    spools: list[Full] = []
+
+    def full(*args, **kwargs):
+        spools.append(Full(real(*args, **kwargs)))
+        return spools[-1]
+
+    monkeypatch.setattr(tempfile, "TemporaryFile", full)
+    with pytest.raises(StoreError) as exc:
+        store.bundle("ws-full")
+    assert exc.value.status == 500 and "spool" in str(exc.value)
+    assert spools and spools[0].closed
+
+
+def test_reader_at_reads_the_bare_repo_at_a_ref_with_a_closed_ref_grammar(store):
     store.create_workspace("ws-s", "python-tool", ALICE)
-    assert "def run(" in store.show_at("ws-s", "work", "tool.py")
-    assert store.show_at("ws-s", "work", "no-such-file") is None
+    read = store.reader_at("ws-s", "work")
+    assert "def run(" in read("tool.py")
+    assert read("no-such-file") is None
     for ref in ("HEAD", "main", "refs/heads/work", "proposal/x", "work:tool.py", "--output=/tmp/x", "proposal/1.0"):
         with pytest.raises(StoreError) as exc:
-            store.show_at("ws-s", ref, "tool.py")
+            store.reader_at("ws-s", ref)
         assert exc.value.status == 400, ref
     with pytest.raises(StoreError) as missing_ref:
-        store.show_at("ws-s", "proposal/9.9.9", "tool.py")
+        store.reader_at("ws-s", "proposal/9.9.9")
     assert missing_ref.value.status == 404
+    with pytest.raises(StoreError) as missing_ws:
+        store.reader_at("ws-nope", "work")
+    assert missing_ws.value.status == 404
     workspace.propose("ws-s", "Tool", "0.1.0", "s", ALICE)
-    assert "def run(" in store.show_at("ws-s", "proposal/0.1.0", "tool.py")
+    assert "def run(" in store.reader_at("ws-s", "proposal/0.1.0")("tool.py")
+
+
+def test_reader_at_resolves_the_ref_once_and_every_read_is_at_that_commit(store, monkeypatch):
+    # rjouffret on #2324: show_at() re-ran `rev-parse` on every file, after
+    # the connector-draft route had already checked the ref. A reader
+    # resolves the ref ONCE, to a commit id, so a later push to `work` cannot
+    # hand one reader two trees. MUTATION: resolve the ref inside read() →
+    # the second read sees the new commit, red.
+    store.create_workspace("ws-pin", "python-tool", ALICE)
+    read = store.reader_at("ws-pin", "work")
+    before = read("tool.py")
+    workspace.write("ws-pin", "tool.py", "# moved on\n")
+    workspace.commit("ws-pin", "move work", ALICE)
+    assert store.reader_at("ws-pin", "work")("tool.py") == "# moved on\n"
+    assert read("tool.py") == before
+
+    calls: list[list[str]] = []
+    real = store.git
+
+    def counting(args, *a, **kw):
+        calls.append(list(args))
+        return real(args, *a, **kw)
+
+    monkeypatch.setattr(store, "git", counting)
+    read = store.reader_at("ws-pin", "work")
+    for path in ("tool.py", "README.md", "no-such-file", "tool.py"):
+        read(path)
+    assert [c[0] for c in calls] == ["rev-parse", "cat-file", "cat-file", "cat-file", "cat-file"]
 
 
 def test_bundle_and_connector_draft_routes(client, auth, store):
@@ -744,6 +858,10 @@ def test_bundle_and_connector_draft_routes(client, auth, store):
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["x-bundle-head"] == store.status("ws-r2")["head"]
     assert r.content.startswith(b"# v")
+    # What the orchestrator checks the stream against before the last byte
+    # reaches the owner.
+    assert r.headers["content-length"] == str(len(r.content))
+    assert r.headers["x-bundle-sha256"] == hashlib.sha256(r.content).hexdigest()
     assert client.get("/workspaces/ws-zz/bundle", headers=auth).status_code == 404
 
     assert client.get("/workspaces/ws-r2/connector-draft?ref=work", headers=auth).json() == {"draft": None}

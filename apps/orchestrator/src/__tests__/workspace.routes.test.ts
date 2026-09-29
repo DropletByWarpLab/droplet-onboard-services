@@ -28,6 +28,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
+import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 
 vi.mock("../config.js", () => ({
@@ -67,6 +68,16 @@ const ACME: ConnectorDraftFacts = {
 };
 const ACME_READBACK = "drafts a connector for Acme; nothing on this box will dial api.acme.example until Warp Lab ships it";
 
+/** What the sandbox client hands the route: a stream plus the length and sha256 the sandbox stated. */
+function bundleOf(bytes: Buffer, over: { sha256?: string; size?: number } = {}) {
+  return {
+    stream: Readable.from([bytes.subarray(0, 5), bytes.subarray(5)]),
+    head: HEAD,
+    size: over.size ?? bytes.length,
+    sha256: over.sha256 ?? createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
 function fakeSandbox(draft: ConnectorDraftFacts | null = null) {
   const calls: Array<{ op: string; args: unknown[] }> = [];
   const rec = (op: string) => (...args: unknown[]) => {
@@ -98,7 +109,7 @@ function fakeSandbox(draft: ConnectorDraftFacts | null = null) {
     }),
     bundle: vi.fn(async (id: string) => {
       rec("bundle")(id);
-      return { body: BUNDLE, head: HEAD };
+      return bundleOf(BUNDLE);
     }),
     connectorDraft: vi.fn(async (id: string, ref: string) => {
       rec("connectorDraft")(id, ref);
@@ -675,6 +686,7 @@ describe("GET /api/workspace/:id/export (WARP-2899)", () => {
       expect(res.headers["x-content-type-options"]).toBe("nosniff");
       expect(res.headers["cache-control"]).toBe("no-store");
       expect(Buffer.compare(res.body as Buffer, BUNDLE)).toBe(0);
+      expect(res.headers["content-length"]).toBe(String(BUNDLE.length));
       // MUTATION: drop the recordActivity call → red.
       const rows = recordActivityMock.mock.calls.filter((c) => (c[0] as { what?: string }).what === "Workspace exported");
       expect(rows).toHaveLength(1);
@@ -711,6 +723,28 @@ describe("GET /api/workspace/:id/export (WARP-2899)", () => {
     expect(res.status).toBe(403);
     expect(sandbox.calls).toEqual([]);
     // (the denial itself is recorded — recordAccessDenied — but no export row)
+    expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Workspace exported" }));
+  });
+
+  it("streams through, and a stream that does not match x-bundle-sha256 is refused: no export row", async () => {
+    // MUTATION: drop the flush check in the verify transform → 200 + a row.
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    (sandbox.client.bundle as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce(
+      bundleOf(BUNDLE, { sha256: "0".repeat(64) }),
+    );
+    const outcome = await request(app)
+      .get("/api/workspace/ws-a/export")
+      .buffer(true)
+      .parse(binary)
+      .then(
+        (r) => ({ ok: true as const, r }),
+        (e: unknown) => ({ ok: false as const, e }),
+      );
+    // The length was right, so the client may hold every byte; what it also
+    // holds is the sha256 the export was checked against, and the audit log
+    // holds no row claiming the export happened.
+    if (outcome.ok) expect(outcome.r.headers["x-bundle-sha256"]).toBe("0".repeat(64));
     expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Workspace exported" }));
   });
 

@@ -40,12 +40,15 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { createHash, randomBytes } from "node:crypto";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import {
   recordAccessDenied,
   requireRole,
   requireRoleOrMcpService,
   type AuthUser,
 } from "../middleware/auth.js";
+import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
@@ -67,6 +70,7 @@ import {
   summarizeConnectorDraft,
 } from "../services/connector-draft.js";
 
+const logger = createLogger("workspace-routes");
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const WORKSHOP_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 // Fetch for every authenticated HUMAN role; push for owner/admin only. This is
@@ -481,33 +485,69 @@ export function createWorkspaceRouter(
         res.status(404).json({ error: "No such workspace" });
         return;
       }
-      const { body, head } = await sandbox.bundle(id.data);
-      const sha256 = createHash("sha256").update(body).digest("hex");
-      // Which vendor, for the audit row. Best effort: a draft that cannot be
-      // read never blocks the owner's download of their own workspace.
-      let provider: string | null = null;
+      const bundle = await sandbox.bundle(id.data);
       try {
-        provider = (await sandbox.connectorDraft(id.data, row.proposedTag ?? "work"))?.provider || null;
-      } catch {
-        provider = null;
+        // Which vendor, for the audit row. Best effort: a draft that cannot be
+        // read never blocks the owner's download of their own workspace.
+        let provider: string | null = null;
+        try {
+          provider = (await sandbox.connectorDraft(id.data, row.proposedTag ?? "work"))?.provider || null;
+        } catch {
+          provider = null;
+        }
+        res.status(200);
+        res.setHeader("Content-Type", "application/octet-stream");
+        res.setHeader("Content-Length", String(bundle.size));
+        res.setHeader("X-Bundle-Sha256", bundle.sha256);
+        res.setHeader("Content-Disposition", `attachment; filename="${id.data}-${bundle.head.slice(0, 7)}.bundle"`);
+        // Bundle bytes for git, as an attachment — never rendered, never cached.
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Cache-Control", "no-store");
+        // Stream-through: the bytes are hashed as they pass, and the stream
+        // ends in an error (response destroyed, no export row) unless they
+        // are exactly the length and sha256 the sandbox stated. The sha256
+        // rides the response so the owner can check the file too.
+        const hash = createHash("sha256");
+        let bytes = 0;
+        const verify = new Transform({
+          transform(chunk: Buffer, _enc, cb) {
+            hash.update(chunk);
+            bytes += chunk.length;
+            cb(null, chunk);
+          },
+          flush(cb) {
+            cb(bytes === bundle.size && hash.digest("hex") === bundle.sha256 ? null : new Error("bundle bytes do not match x-bundle-sha256"));
+          },
+        });
+        try {
+          await pipeline(bundle.stream, verify, res);
+        } catch (err) {
+          bundle.stream.destroy();
+          logger.error({ err, workspaceId: id.data }, "workspace_export_stream_failed");
+          return; // pipeline already destroyed the response: the download fails, and there is no export row
+        }
+        // Exactly one row per export, written once the verified bytes have all
+        // been handed over.
+        await recordActivity({
+          kind: "tool_run",
+          severity: "info",
+          sourceIcon: "download",
+          what: "Workspace exported",
+          sub: row.name,
+          actor: actorFromRequest(req),
+          refs: {
+            workspaceId: id.data,
+            head: bundle.head,
+            sha256: bundle.sha256,
+            bytes: bundle.size,
+            proposedTag: row.proposedTag ?? null,
+            provider,
+          },
+        });
+      } catch (err) {
+        bundle.stream.destroy();
+        throw err;
       }
-      await recordActivity({
-        kind: "tool_run",
-        severity: "info",
-        sourceIcon: "download",
-        what: "Workspace exported",
-        sub: row.name,
-        actor: actorFromRequest(req),
-        refs: { workspaceId: id.data, head, sha256, bytes: body.length, proposedTag: row.proposedTag ?? null, provider },
-      });
-      res.status(200);
-      res.setHeader("Content-Type", "application/octet-stream");
-      res.setHeader("Content-Disposition", `attachment; filename="${id.data}-${head.slice(0, 7)}.bundle"`);
-      // Bundle bytes for git, as an attachment — never rendered, never cached.
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Cache-Control", "no-store");
-      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
-      res.send(body);
     } catch (err) {
       relaySandboxError(err, res, next);
     }
