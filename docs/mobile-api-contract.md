@@ -15,12 +15,16 @@ change the orchestrator's client-relevant routes, update this doc IN THE SAME PR
 and the client teams will mirror the change.
 
 **Native desktop clients.** A desktop client is a native app, not a browser: it
-signs in with `POST /auth/login?return=body` (Bearer pair in the body, no
-cookies; the native-only gate described under Auth applies), sends
+signs in with `POST /auth/login?return=body` (the JWT pair comes back in the
+body; the native-only gate described under Auth applies), sends
 `Authorization: Bearer` on every route, pins the box's identity as described in
 the pairing / sign-in flow, and receives real-time events over
-`/api/ws/events` (see "Real-time events"). The passkey and native SSO sign-in
-flows are not part of this contract yet (ADR-063, WARP-3226).
+`/api/ws/events` (see "Real-time events"). Since WARP-3038 the box sets no
+cookies on a body-token sign-in or refresh; before it, the box also set the
+httpOnly session pair on those responses. A client keeps only the body tokens
+and must not store any cookie the box sets, whichever version it talks to. The
+passkey and native SSO sign-in flows are not part of this contract yet (ADR-063,
+WARP-3226).
 
 > **Source of truth (XR-03).** Where this doc and the shipped orchestrator routes
 > disagree, **`apps/orchestrator/src/routes/*` wins** — a cross-repo audit while
@@ -208,7 +212,7 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/cameras` | Bearer | `{ cameras, discovered, recentEvents, totalCameras }` |
+| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras") |
 | GET | `/cameras/:name` | Bearer | full `CameraInfo` |
 | GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
 | GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
@@ -1261,7 +1265,8 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
       camera and Matter SSE streams. APNs/FCM push remains the background
       channel on mobile.
 - [ ] WebRTC vs HLS for camera streams. Frigate supports both; HLS is
-      simpler client-side, WebRTC has lower latency. v1 ships HLS.
+      simpler client-side, WebRTC has lower latency. v1 ships MJPEG live
+      (`/cameras/:name/live`); HLS/WebRTC are not served to clients.
 ## Project Management (native PM)
 
 > Backed by the native PM module owned by the orchestrator
