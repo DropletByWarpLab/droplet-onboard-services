@@ -23,8 +23,10 @@ import { MODULES } from "../modules/module-registry.js";
 import {
   FEATURE_GATED_MODULES,
   MCP_ACTING_USER_GATED_DOMAINS,
+  MCP_ACTING_USER_ROLE_FLOORS,
   mountMcpActingUserGates,
 } from "../modules/module-mounts.js";
+import { DOORS_READ_ROLES } from "../services/doors-access.js";
 import {
   actingUserAccessResolver,
   MCP_PRINCIPAL_ID,
@@ -67,7 +69,7 @@ function appAs(
     next();
   });
   mountMcpActingUserGates(app, resolve, features);
-  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x", "/api/team-chat/contacts"]) {
+  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x", "/api/team-chat/contacts", "/api/doors", "/api/doors/events"]) {
     app.get(path, (_q, res) => { res.json({ hit: path }); });
     app.post(path, (_q, res) => { res.json({ hit: path }); });
   }
@@ -435,4 +437,51 @@ describe("mcp acting-user gate — the route manifest agrees with it", () => {
       }
     });
   }
+});
+
+// ADR-055 — a tier floor on the ACTING person. The doors read routes floor at
+// owner/admin for a human (`requireRole`), but `requireRoleOrMcpService` admits
+// `_service:mcp` before any role check, and a role-less family person's tool
+// scope is null (passes question 1) and their catalog holds `doors` at view
+// (passes question 2). Without a floor here, a staff member could ask the
+// assistant for what the browser would refuse them: the escalation this gate
+// exists to prevent ("the assistant never reaches more than the person could
+// in the browser").
+describe("mcp acting-user gate — the acting person's tier floor (ADR-055 doors)", () => {
+  const tierOf = (tier: string | null) => ({ scope: null, tier, unresolved: null, userId: "u-sam" }) as unknown as ActingUserAccess;
+
+  beforeEach(() => {
+    heldFeatures = ["doors", "crm", "projects"];
+  });
+
+  it.each(["/api/doors", "/api/doors/events"])("%s: an acting family or guest person is 404 module_disabled, even holding the grant", async (path) => {
+    for (const tier of ["family", "guest", "service"]) {
+      resolveMock.mockResolvedValue(tierOf(tier));
+      const res = await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam");
+      expect(res.status, `${path} as ${tier}`).toBe(404);
+      expect(res.body).toEqual({ error: "module_disabled", module: "doors" });
+    }
+  });
+
+  it.each(["/api/doors", "/api/doors/events"])("%s: an acting owner or admin passes", async (path) => {
+    for (const tier of ["owner", "admin"]) {
+      resolveMock.mockResolvedValue(tierOf(tier));
+      expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status, `${path} as ${tier}`).toBe(200);
+    }
+  });
+
+  it("an unknown tier (null) is refused: nobody is attributable", async () => {
+    resolveMock.mockResolvedValue(tierOf(null));
+    expect((await request(appAs(MCP)).get("/api/doors").set("X-Nextcloud-User", "sam")).status).toBe(404);
+  });
+
+  it("no other gated domain grows a floor: a family person's business read still passes", async () => {
+    resolveMock.mockResolvedValue(tierOf("family"));
+    expect((await request(appAs(MCP)).get("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
+  });
+
+  it("the floor is exactly the doors read routes' role list — one definition, not two that can drift", () => {
+    expect(MCP_ACTING_USER_ROLE_FLOORS.doors).toEqual([...DOORS_READ_ROLES]);
+    expect(Object.keys(MCP_ACTING_USER_ROLE_FLOORS)).toEqual(["doors"]);
+  });
 });

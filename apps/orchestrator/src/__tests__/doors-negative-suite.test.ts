@@ -215,6 +215,7 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     grants: Array<{ moduleId: string; level: string }>;
     user: { id: string; role: string; username?: string };
     acting?: { domains: string[] } | null;
+    actingTier?: string;
   }) {
     const prisma = {
       moduleSetting: {
@@ -237,7 +238,7 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
       app,
       (async () => ({
         scope: opts.acting === null || opts.acting === undefined ? null : { domains: new Set(opts.acting.domains), writeDomains: new Set(), locks: false },
-        tier: "admin",
+        tier: opts.actingTier ?? "admin",
         unresolved: null,
         userId: "u-1",
       })) as never,
@@ -310,6 +311,21 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
       expect(okRes.status).toBe(200);
     },
   );
+
+  it("the MCP principal acting for a STAFF person (family tier) is refused even holding the doors grant and domain — the assistant never reads what the browser would 403", async () => {
+    const staff = buildApp({
+      cfg: CFG_ON,
+      toggle: true,
+      grants: [{ moduleId: "doors", level: "view" }],
+      user: { id: "_service:mcp", role: "service" },
+      acting: { domains: ["doors"] },
+      actingTier: "family",
+    });
+    for (const r of READS) {
+      const res = await request(staff).get(concrete(r)).set("X-Nextcloud-User", "sam");
+      expect(res.status, r.key).toBe(404);
+    }
+  });
 
   it("with the grant held, an admin reads but the door-changing routes still refuse them (403, not 404: the module is theirs, the authority is not)", async () => {
     const app = buildApp({

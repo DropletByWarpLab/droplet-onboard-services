@@ -21,8 +21,8 @@
  * `requireRoleOrMcpService`: the assistant can read doors and can never
  * change one (§11.5). Reads DO admit `_service:mcp` — that is how the two
  * `doors_*` tools reach them — and are narrowed by the acting user's own
- * scope (MCP_ACTING_USER_GATED_DOMAINS), so the assistant never reads more
- * than the person it acts for could.
+ * scope AND tier (MCP_ACTING_USER_GATED_DOMAINS, MCP_ACTING_USER_ROLE_FLOORS),
+ * so the assistant never reads more than the person it acts for could.
  *
  * Literal paths come before `:id` paths. Errors are `{error: {code, message,
  * issues?}}` (the dashboard's apiFetch shape), and a failed read is a 503,
@@ -33,6 +33,7 @@ import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { DOORS_READ_ROLES, DOORS_WRITE_ROLES } from "../services/doors-access.js";
 import {
   DOOR_EVENTS_DEFAULT_LIMIT,
   DOOR_EVENTS_MAX_LIMIT,
@@ -49,11 +50,6 @@ import {
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("doors-routes");
-
-/** Reads: admin and up. Guests and staff are refused until door-group grants exist. */
-const DOORS_READ_ROLES = ["owner", "admin"] as const;
-/** Writes: the owner alone (§11.4). */
-const DOORS_WRITE_ROLES = ["owner"] as const;
 
 const source = z.enum(["lock", "dp1", "none"]);
 /** Raw cap before normalising — the real rule (1–80 characters, nothing that reorders text) is normaliseDoorName's. */

@@ -25,7 +25,9 @@
  * match wins": a value that is one person's username and another's id is
  * AMBIGUOUS, and picking either scopes the call with a stranger's reach.
  *
- * Two questions, both about the acting person:
+ * Two questions, both about the acting person (and, for a domain whose routes
+ * floor their callers by tier — `roleFloor`, ADR-055 doors — a third: is the
+ * person's tier at or above the floor the browser would apply?):
  *   1. the tool scope — is `domain` in their §3 reach (a write needs `use`)?
  *      The method stands in for "a write": a GET is a read tool's hop. Where
  *      the domain has NO read tool (`team_chat`: both tools send, and both
@@ -132,6 +134,14 @@ export function requireMcpActingUserToolDomain(
   resolve: ActingUserAccessResolver,
   /** Question 2's resolver; `null` when the module is not feature-gated for humans. */
   features: EffectiveAccessResolver | null = resolveEffectiveAccess,
+  /**
+   * ADR-055 — a tier floor on the acting person (`User.role`), or `null` for
+   * none. Only where the routes behind this domain floor their human callers
+   * above what the tool scope and the §9 catalog can express: both of those
+   * pass a role-less staff member (null scope; `view` is never floored), while
+   * the route's own `requireRole` would 403 them in the browser.
+   */
+  roleFloor: readonly string[] | null = null,
 ): RequestHandler {
   function deny(req: Request, res: Response, reason: string): void {
     recordAccessDenied(req, "mcp-acting-user-tool-domain-denied");
@@ -179,6 +189,10 @@ export function requireMcpActingUserToolDomain(
     }
     if (access.unresolved) {
       deny(req, res, access.unresolved);
+      return;
+    }
+    if (roleFloor !== null && (access.tier === null || !roleFloor.includes(access.tier))) {
+      deny(req, res, "acting_tier_below_floor");
       return;
     }
     const scope = access.scope;
