@@ -259,19 +259,20 @@ non-legacy TLD is only taken when it is written as a *value* — the whole
 string literal or the whole right-hand side of a config setting — rather than
 as a word inside running text.
 
-## Per-user WebDAV drive logins (credential surface)
+## Per-user WebDAV drive logins (credential surface, WARP-3318)
 
 `POST /api/storage/network-drive/personal` mints a per-user, per-computer,
 full-scope Nextcloud app password (stored encrypted as a `DeviceClient`,
 revocable from the devices list) so a user can map their drive in Finder or
-File Explorer. It is limited to owner/admin/family and OFF by default behind
-the owner setting `Workspace.personalDriveEnabled` (Settings -> Personal
-drives). Access through the drive is NOT recorded as downloads in the activity
-log and skips the per-file upload cap; Nextcloud's OCS sharing API
-(`/nextcloud/ocs/v{1,2}.php/apps/files_sharing`) is refused at the gateway so
-no app password can mint shares or public links (WARP-3053). Details:
-[`network-drive.md`](network-drive.md#per-user-drive-webdav); gateway rule:
-[`THREAT_MODEL.md`](THREAT_MODEL.md) §3a.
+File Explorer. It is limited to owner/admin/family (never guest) and OFF by
+default behind the owner setting `Workspace.personalDriveEnabled` (Settings ->
+Personal drives). Access through the drive is NOT recorded as downloads in the
+activity log and skips the per-file upload cap; WARP-3318 records that
+unaudited-read trade-off and the owner's explicit opt-in to it. Nextcloud's OCS
+sharing API (`/nextcloud/ocs/v{1,2}.php/apps/files_sharing`) is refused at the
+gateway so no app password can mint shares or public links (WARP-3053).
+Details: [`network-drive.md`](network-drive.md#per-user-drive-webdav); gateway
+rule: [`THREAT_MODEL.md`](THREAT_MODEL.md) §3a.
 
 # Supply-chain security — signing & verification {#supply-chain}
 

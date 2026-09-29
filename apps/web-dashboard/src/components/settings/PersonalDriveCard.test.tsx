@@ -86,6 +86,17 @@ describe("PersonalDriveCard", () => {
     expect(screen.getByText(/logins people already made keep working/)).toBeInTheDocument();
   });
 
+  // The `family` tier is displayed as "Staff" everywhere (lib/access.ts
+  // tierLabel); the raw enum value must never reach the owner's screen.
+  it("names the audience with the dashboard's role labels, never the raw `family` tier", async () => {
+    const { container } = render(<PersonalDriveCard />);
+    await screen.findByRole("switch", { name: SWITCH });
+    expect(
+      screen.getByText(/Owners, admins and staff members can put their own files in Finder or File Explorer/),
+    ).toBeInTheDocument();
+    expect(container.textContent ?? "").not.toMatch(/famil/i);
+  });
+
   it("toggles optimistically, PUTs the owner endpoint, and toasts", async () => {
     render(<PersonalDriveCard />);
     const sw = await screen.findByRole("switch", { name: SWITCH });

@@ -4753,7 +4753,7 @@ model Workspace {
   /// rule; same discipline as `orgConfigured` above). Written only by the
   /// owner-only PUT /api/settings/workspace/personal-drive; readable by any
   /// signed-in user through GET /api/settings/workspace so the dialog can say
-  /// why the drive is unavailable. See docs/network-drive.md.
+  /// why the drive is unavailable. WARP-3318; see docs/network-drive.md.
   personalDriveEnabled Boolean       @default(false)
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.

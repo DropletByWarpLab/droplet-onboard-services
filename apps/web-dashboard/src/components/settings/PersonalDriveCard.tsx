@@ -10,8 +10,9 @@ import { Sect } from "@/components/shell/primitives";
  * Settings -> "Personal drives" (owner only).
  *
  * The owner switch for POST /api/storage/network-drive/personal: whether
- * owners, admins and family members may map their own Droplet drive in Finder
- * or File Explorer. OFF by default. The flag is `Workspace.personalDriveEnabled`
+ * owners, admins and staff (the `family` tier, labelled "Staff" on screen) may
+ * map their own Droplet drive in Finder or File Explorer. OFF by default.
+ * The flag is `Workspace.personalDriveEnabled`
  * (GET /api/settings/workspace reads it, the owner-only PUT
  * /api/settings/workspace/personal-drive writes it).
  *
@@ -90,7 +91,7 @@ export function PersonalDriveCard() {
               <span className="sub">
                 {loadFailed
                   ? LOAD_ERROR_LINE
-                  : "Owners, admins and family members can put their own files in Finder or File Explorer with a personal login. Guests can't."}
+                  : "Owners, admins and staff members can put their own files in Finder or File Explorer with a personal login. Guests can't."}
               </span>
             </span>
             {!loadFailed && (

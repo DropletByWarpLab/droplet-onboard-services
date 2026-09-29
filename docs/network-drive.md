@@ -146,7 +146,9 @@ A non-443 port is emitted as `<host>@SSL@<port>` in `windowsPath`.
 
 **What the drive does not enforce.** Everything below is enforced by the
 orchestrator's Files API (`routes/files.ts`) and not by Nextcloud, so a
-Finder/Explorer mount bypasses it. These two remain documented gaps:
+Finder/Explorer mount bypasses it. These two remain documented gaps
+(WARP-3318 tracks them and the credential surface itself; the owner accepts
+both, in plain words, when turning the setting on):
 
 - **Download audit.** The Files API records a "File downloaded" Activity
   row; files opened or copied out over WebDAV leave none.

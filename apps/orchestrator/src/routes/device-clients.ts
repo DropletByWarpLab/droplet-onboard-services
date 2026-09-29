@@ -542,7 +542,8 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
   // no drive — and only while the owner has turned personal drives on
   // (`Workspace.personalDriveEnabled`, default OFF; 403 personal_drive_disabled).
   // The mount talks to Nextcloud directly, so orchestrator-only controls
-  // (download audit, per-file upload cap) do not apply, and the gateway blocks
+  // (download audit, per-file upload cap) do not apply — WARP-3318 tracks that
+  // unaudited-read trade-off and the credential surface — and the gateway blocks
   // Nextcloud's OCS sharing API on /nextcloud/ so the app password cannot mint
   // shares (docker/nginx/nginx.conf, WARP-3053) — see docs/network-drive.md
   // "Per-user drive (WebDAV)".
