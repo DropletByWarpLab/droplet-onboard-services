@@ -552,3 +552,69 @@ describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
     expect(agentRequest().prior_tool_names).toEqual([]);
   });
 });
+
+/**
+ * WARP-3316 — the voice principal is NOT domain-narrowed.
+ *
+ * Voice already ships a curated 17-tool `allowed_tools` scope
+ * (services/voice-io/voice/llm.py). The relevance selector then narrowed THAT
+ * by keyword rules written for typed chat, and spoken phrasings miss them
+ * ("is everything working?" names no domain word, so `get_system_health` was
+ * never advertised). The model called it anyway, hit TOOL_NOW_AVAILABLE, and
+ * the self-heal retry burned one of the turn's few iterations.
+ *
+ * So for `_service:voice` the route passes `tool_selection_mode: "off"` — the
+ * request's own `allowed_tools` are advertised as-is. Every other caller keeps
+ * the configured mode, and the assertions below pin both halves: the voice
+ * case must go red if the exemption is removed, the typed-chat case if it
+ * leaks.
+ */
+describe("/api/llm/chat — WARP-3316 voice skips domain tool-selection", () => {
+  // Read-only, one per domain, none in CORE_TOOL_NAMES except the floor.
+  const VOICE_POOL = ["search_content", "list_cameras", "list_smart_home_devices"];
+  const SPOKEN = [{ role: "user", content: "is everything working" }];
+
+  function buildAppAs(user: { id: string; username?: string; role: string }) {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as unknown as { user?: unknown }).user = user;
+      next();
+    });
+    app.use("/api", createLlmRouter(createPrismaMock(null) as never));
+    return app;
+  }
+
+  it("ships tool_selection_mode off and advertises the whole allowed_tools list for voice", async () => {
+    const res = await chat(
+      buildAppAs({ id: "_service:voice", role: "service" }),
+      { messages: SPOKEN, allowed_tools: VOICE_POOL },
+    );
+    expect(res.status).toBe(200);
+    expect(agentRequest().tool_selection_mode).toBe("off");
+    expect(agentRequest().allowed_tools).toEqual(VOICE_POOL);
+    const advertised = advertisedFromAgentRequest(VOICE_POOL);
+    // No keyword in the utterance names a domain, yet nothing is dropped.
+    expect([...advertised].sort()).toEqual([...VOICE_POOL].sort());
+  });
+
+  it("keeps the configured mode for a typed-chat caller — narrowing unchanged", async () => {
+    const res = await chat(
+      buildAppAs({ id: "u-1", username: "sam", role: "owner" }),
+      { messages: SPOKEN, allowed_tools: VOICE_POOL },
+    );
+    expect(res.status).toBe(200);
+    expect(agentRequest().tool_selection_mode).toBe("domains");
+    expect([...advertisedFromAgentRequest(VOICE_POOL)]).toEqual(["search_content"]);
+  });
+
+  it("does not exempt another service principal", async () => {
+    // isVoicePrincipal keys on the exact id, not the coarse `service` role.
+    const res = await chat(
+      buildAppAs({ id: "_service:agent", role: "service" }),
+      { messages: SPOKEN, allowed_tools: VOICE_POOL },
+    );
+    expect(res.status).toBe(200);
+    expect(agentRequest().tool_selection_mode).toBe("domains");
+  });
+});
