@@ -5,11 +5,11 @@
  * Deliberately NOT here: anything that writes an `AccessEvent`. Events come
  * from the cartridge, and `services/access-control/` (brief §11.1) is a later
  * slice; until it exists nothing appends. The one thing this file may do to an
- * existing event is delete it — and only the retention job, inside its own
- * transaction, after opening the gate the database trigger looks for
- * (migration 20260929100200). No UPDATE and no other DELETE exists in this
- * file or anywhere else in the orchestrator; `__tests__/doors-negative-suite.test.ts`
- * reads the source to keep it that way.
+ * existing event is have it deleted — and only by calling the database's
+ * retention function, which opens the gate the append-only trigger looks for
+ * itself (migration 20260929100200). No UPDATE and no DELETE exists in this
+ * file or anywhere else in the orchestrator, and no .ts file names the gate;
+ * `__tests__/doors-negative-suite.test.ts` reads the source to keep it that way.
  *
  * Everything here is private to the `doors` module: it is unreachable when
  * DOORS_ENABLED is off — except the retention job, which must keep running,
@@ -45,9 +45,6 @@ export const DOOR_EVENTS_MAX_LIMIT = 200;
 /** 03:55 — a slot none of the other nightly legs (03:00 … 03:50) uses. */
 export const DOORS_RETENTION_CRON = "55 3 * * *";
 export const DOORS_RETENTION_LOCK_KEY = "droplet:doors-event-retention";
-/** Rows per DELETE, and DELETEs per run: a backlog drains over nights, never over the cron lock's transaction. */
-const PURGE_BATCH = 5000;
-const PURGE_MAX_BATCHES = 20;
 
 // ── views ───────────────────────────────────────────────────────────────
 
@@ -371,27 +368,23 @@ export async function retireDoor(
 // ── retention ───────────────────────────────────────────────────────────
 
 /**
- * Delete events the box received more than `retentionDays` ago. The ONLY code
- * in the orchestrator that deletes an AccessEvent.
+ * Delete events the box received more than `retentionDays` ago, by calling the
+ * database function `access_event_purge` (migration 20260929100200). The ONLY
+ * code in the orchestrator that deletes an AccessEvent, and it does not do so
+ * itself: the append-only trigger refuses every DELETE except inside that
+ * function, which opens the gate for its own duration with a function-level
+ * `SET`. So no application code names the gate, and this cannot leave it open
+ * on a pooled connection. `__tests__/doors-negative-suite.test.ts` pins that no
+ * .ts file names it.
  *
- * The database trigger refuses every DELETE except inside a transaction that
- * has set `droplet.access_event_retention` to `on`; this opens one, sets it
- * with a transaction-local `set_config` (so it cannot outlive the
- * transaction, or leak to another statement on a pooled connection), and
- * deletes. `__tests__/doors-negative-suite.test.ts` pins that no other file names it.
- *
- * Counts from `createdAt` — when THIS box received the row — not `occurredAt`,
- * the device's word: a device with a wrong clock must not be able to keep a
- * row forever, or expire it at once.
- *
- * A `door_open` row that a younger alarm still cites is kept until that alarm
- * ages out too (§11.3: derived alarms reference it, so the evidence must be
- * whole for as long as the alarm exists). Deleting highest id first means an
- * alarm always goes before, or in the same statement as, the row it cites; the
- * foreign key is NO ACTION for exactly that reason.
+ * The function counts from `createdAt` — when THIS box received the row — not
+ * `occurredAt`, the device's word: a device with a wrong clock must not be
+ * able to keep a row forever, or expire it at once. It keeps a `door_open` row
+ * that a younger alarm still cites until that alarm ages out too (§11.3), and
+ * deletes in bounded batches so a backlog drains over nights.
  */
 export async function purgeExpiredAccessEvents(
-  prisma: Pick<PrismaClient, "$transaction">,
+  prisma: Pick<PrismaClient, "$queryRaw">,
   retentionDays: number,
   now: Date = new Date(),
 ): Promise<{ deleted: number; before: Date }> {
@@ -400,30 +393,10 @@ export async function purgeExpiredAccessEvents(
     throw new Error(`door event retention must be a whole number of days >= 1, got ${String(retentionDays)}`);
   }
   const before = new Date(now.getTime() - retentionDays * 86_400_000);
-  const deleted = await prisma.$transaction(
-    async (tx) => {
-      await tx.$queryRaw`SELECT set_config('droplet.access_event_retention', 'on', true)`;
-      let total = 0;
-      for (let batch = 0; batch < PURGE_MAX_BATCHES; batch++) {
-        const n = await tx.$executeRaw`
-          DELETE FROM "AccessEvent" WHERE "id" IN (
-            SELECT e."id" FROM "AccessEvent" e
-            WHERE e."createdAt" < ${before}
-              AND NOT EXISTS (
-                SELECT 1 FROM "AccessEvent" d
-                WHERE d."derivedFromId" = e."id" AND d."createdAt" >= ${before}
-              )
-            ORDER BY e."id" DESC
-            LIMIT ${PURGE_BATCH}
-          )`;
-        total += n;
-        if (n < PURGE_BATCH) break;
-      }
-      return total;
-    },
-    { timeout: 30_000, maxWait: 5_000 },
-  );
-  return { deleted, before };
+  const rows = await prisma.$queryRaw<Array<{ deleted: bigint }>>`SELECT "access_event_purge"(${before}::timestamptz) AS "deleted"`;
+  const row = rows[0];
+  if (!row) throw new Error("access_event_purge returned no row");
+  return { deleted: Number(row.deleted), before };
 }
 
 /**

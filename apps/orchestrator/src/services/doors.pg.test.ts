@@ -67,6 +67,7 @@ const TAG = "adr055";
 const NOW = new Date("2026-09-29T03:55:00Z");
 const DAY = 86_400_000;
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * DAY);
+const FAR_FUTURE = new Date("2999-01-01T00:00:00Z");
 const REQ = { user: { id: "u-owner", role: "owner", username: "owner" } } as never;
 
 describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
@@ -74,13 +75,15 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
   let seq = 0;
   const key = (label: string) => `${TAG}:${label}:${++seq}`;
 
-  /** Delete through the ONE sanctioned door — the retention gate — because nothing else may. */
+  /**
+   * Delete through the ONE sanctioned door — the retention function — because
+   * nothing else may. A cutoff in the far future takes every event, which is
+   * what this lane's dedicated database wants: nothing else writes AccessEvent,
+   * and the tests need the doors to be deletable (a door with events is not).
+   */
   async function cleanup() {
     if (!prisma) return;
-    await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT set_config('droplet.access_event_retention', 'on', true)`;
-      await tx.$executeRaw`DELETE FROM "AccessEvent" WHERE "dedupeKey" LIKE ${TAG + ":%"}`;
-    });
+    await prisma.$executeRaw`SELECT "access_event_purge"(${FAR_FUTURE}::timestamptz)`;
     await prisma.accessPoint.deleteMany({ where: { name: { startsWith: TAG } } });
     await prisma.moduleSetting.deleteMany({ where: { moduleId: "doors" } });
   }
@@ -172,7 +175,7 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       expect(await prisma.accessEvent.count({ where: { accessPointId: d.id } })).toBe(1);
     });
 
-    it("the retention gate is transaction-local: after the purge, and on the very next statement, DELETE is refused again", async () => {
+    it("the gate is the purge function's alone: after the purge, and on the very next statement, DELETE is refused again", async () => {
       const d = await door();
       await event(d.id, "door_open", { createdAt: daysAgo(400), occurredAt: daysAgo(400) });
       await purgeExpiredAccessEvents(prisma, 365, NOW);
@@ -185,11 +188,16 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       }
     });
 
-    it("a SET LOCAL outside a transaction opens nothing (it is a no-op, and the trigger still refuses)", async () => {
+    it("…and inside ONE transaction: the purge function's setting is restored when it returns, so the next DELETE in that same transaction is refused", async () => {
       const d = await door();
-      const e = await event(d.id, "door_open");
-      await prisma.$executeRawUnsafe(`SET LOCAL droplet.access_event_retention = 'on'`).catch(() => undefined);
-      await expect(prisma.accessEvent.delete({ where: { id: e.id } })).rejects.toThrow(/append-only/);
+      const fresh = await event(d.id, "door_open");
+      await expect(
+        prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT "access_event_purge"(${daysAgo(1)}::timestamptz)`;
+          await tx.$executeRaw`DELETE FROM "AccessEvent" WHERE "id" = ${fresh.id}`;
+        }),
+      ).rejects.toThrow(/append-only/);
+      expect(await prisma.accessEvent.count({ where: { id: fresh.id } })).toBe(1);
     });
   });
 
@@ -253,6 +261,26 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       expect(await prisma.accessEvent.count({ where: { accessPointId: d.id } })).toBe(0);
     });
 
+    it("drains in bounded batches: keeps going while a batch comes back full, stops on a short one, and a capped run leaves the rest for tomorrow", async () => {
+      const d = await door();
+      for (let i = 0; i < 7; i++) {
+        await event(d.id, "latch_extended", { createdAt: daysAgo(500), occurredAt: daysAgo(500), dedupeKey: key("bulk") });
+      }
+      const purge = async (batch: number, maxBatches: number) =>
+        Number((await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT "access_event_purge"(${daysAgo(365)}::timestamptz, ${batch}::integer, ${maxBatches}::integer) AS n`)[0]!.n);
+      // Batches of 2, at most 2 of them: 4 go, 3 stay.
+      expect(await purge(2, 2)).toBe(4);
+      expect(await prisma.accessEvent.count({ where: { accessPointId: d.id } })).toBe(3);
+      // Uncapped: 2 (full, keep going), 1 (short, stop).
+      expect(await purge(2, 20)).toBe(3);
+      expect(await prisma.accessEvent.count({ where: { accessPointId: d.id } })).toBe(0);
+    });
+
+    it("refuses a batch size or a batch cap below 1", async () => {
+      await expect(prisma.$queryRaw`SELECT "access_event_purge"(${NOW}::timestamptz, 0::integer, 1::integer)`).rejects.toThrow(/at least 1/);
+      await expect(prisma.$queryRaw`SELECT "access_event_purge"(${NOW}::timestamptz, 1::integer, 0::integer)`).rejects.toThrow(/at least 1/);
+    });
+
     it("the cron leg registered by registerDoorsJobs runs the same purge", async () => {
       _resetDoorsJobsForTests();
       const d = await door();
@@ -265,21 +293,54 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
   });
 
   describe("derived alarms — the BEFORE INSERT trigger and the CHECKs (§9.7, §11.3)", () => {
-    it("a door with doorPositionSource `none` can have NO forced-door and NO held-open row, however it is inserted", async () => {
+    it("a door with doorPositionSource `none` can have NO position row: door_open and door_closed are refused, however they are inserted", async () => {
       const none = await door({ source: "none" });
-      const open = await event(none.id, "door_open");
+      await expect(event(none.id, "door_open")).rejects.toThrow(/doorPositionSource none has no door_open/);
+      await expect(event(none.id, "door_closed")).rejects.toThrow(/doorPositionSource none has no door_closed/);
       await expect(
-        event(none.id, "forced_door", { derivedFromId: open.id, forcedClaim: "latch_witnessed" }),
-      ).rejects.toThrow(/no forced_door claim|doorPositionSource none/);
-      await expect(
-        event(none.id, "forced_door", { derivedFromId: open.id, forcedClaim: "unwitnessed_open" }),
+        prisma.$executeRaw`INSERT INTO "AccessEvent" ("accessPointId","kind","occurredAt","dedupeKey") VALUES (${none.id}, 'door_open', now(), ${key("raw")})`,
       ).rejects.toThrow(/doorPositionSource none/);
-      await expect(event(none.id, "held_open", { derivedFromId: open.id })).rejects.toThrow(/doorPositionSource none/);
+      await expect(
+        prisma.accessEvent.createMany({ data: [{ accessPointId: none.id, kind: "door_closed", occurredAt: NOW, dedupeKey: key("many") }] }),
+      ).rejects.toThrow(/doorPositionSource none/);
+      // What a `none` door can still say is not position: a latch reports for itself.
+      await expect(event(none.id, "latch_extended")).resolves.toBeDefined();
+      expect(await prisma.accessEvent.count({ where: { accessPointId: none.id, kind: { in: ["door_open", "door_closed"] } } })).toBe(0);
+    });
+
+    it("…and NO forced-door and NO held-open row, even for a door that WAS a lock and cites a real door_open row of its own", async () => {
+      const door_ = await door({ source: "lock" });
+      const open = await event(door_.id, "door_open");
+      // The owner changes the door to `none` later. Its history stays (evidence)…
+      await prisma.accessPoint.update({ where: { id: door_.id }, data: { doorPositionSource: "none" } });
+      expect(await prisma.accessEvent.count({ where: { id: open.id } })).toBe(1);
+      // …but nothing new may claim a position or an alarm for it.
+      await expect(event(door_.id, "forced_door", { derivedFromId: open.id, forcedClaim: "latch_witnessed" })).rejects.toThrow(/doorPositionSource none/);
+      await expect(event(door_.id, "forced_door", { derivedFromId: open.id, forcedClaim: "unwitnessed_open" })).rejects.toThrow(/doorPositionSource none/);
+      await expect(event(door_.id, "held_open", { derivedFromId: open.id })).rejects.toThrow(/doorPositionSource none/);
+      await expect(event(door_.id, "door_closed")).rejects.toThrow(/doorPositionSource none/);
       await expect(
         prisma.$executeRaw`INSERT INTO "AccessEvent" ("accessPointId","kind","occurredAt","dedupeKey","derivedFromId","forcedClaim")
-          VALUES (${none.id}, 'forced_door', now(), ${key("raw")}, ${open.id}, 'latch_witnessed')`,
+          VALUES (${door_.id}, 'forced_door', now(), ${key("raw")}, ${open.id}, 'latch_witnessed')`,
       ).rejects.toThrow(/doorPositionSource none/);
-      expect(await prisma.accessEvent.count({ where: { accessPointId: none.id, kind: { in: ["forced_door", "held_open"] } } })).toBe(0);
+      expect(await prisma.accessEvent.count({ where: { accessPointId: door_.id, kind: { in: ["forced_door", "held_open"] } } })).toBe(0);
+    });
+
+    it("one derived alarm of each kind per door_open row, whatever its dedupeKey says (unique index)", async () => {
+      const lock = await door({ source: "lock" });
+      const open = await event(lock.id, "door_open");
+      const other = await event(lock.id, "door_open");
+      await event(lock.id, "forced_door", { derivedFromId: open.id, forcedClaim: "latch_witnessed" });
+      await expect(event(lock.id, "forced_door", { derivedFromId: open.id, forcedClaim: "latch_witnessed" })).rejects.toThrow(/Unique constraint failed/);
+      await expect(
+        prisma.$executeRaw`INSERT INTO "AccessEvent" ("accessPointId","kind","occurredAt","dedupeKey","derivedFromId","forcedClaim")
+          VALUES (${lock.id}, 'forced_door', now(), ${key("dup")}, ${open.id}, 'latch_witnessed')`,
+      ).rejects.toThrow(/\("derivedFromId", kind\)=\(\d+, forced_door\) already exists/);
+      // A different kind for the same opening, and the same kind for another opening, are fine.
+      await expect(event(lock.id, "held_open", { derivedFromId: open.id })).resolves.toBeDefined();
+      await expect(event(lock.id, "forced_door", { derivedFromId: other.id, forcedClaim: "latch_witnessed" })).resolves.toBeDefined();
+      // Rows that derive from nothing are not constrained: the two door_open rows above coexist.
+      expect(await prisma.accessEvent.count({ where: { accessPointId: lock.id, kind: "door_open" } })).toBe(2);
     });
 
     it("a lock door: forced_door(latch_witnessed) and held_open, each referencing a door_open row of that door", async () => {
@@ -368,7 +429,7 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       // Closed, then the cartridge lost it.
       await event(gone.id, "door_closed", { occurredAt: daysAgo(1) });
       await event(gone.id, "trouble", { occurredAt: new Date(NOW.getTime() - 500), troubleCode: "position_unknown" });
-      await event(none.id, "door_open");
+      await event(none.id, "latch_extended"); // a `none` door can report a latch, never a position
 
       const doors = await listDoors(prisma, { includeRetired: false, now: NOW });
       const byName = new Map(doors.map((x) => [x.name, x]));
@@ -451,6 +512,30 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       _resetDoorsJobsForTests();
       registerDoorsJobs({ scheduleCron: () => undefined } as never, prisma, 365);
       await expect(assertDoorsWired({ app: wiredApp(), config: ON, prisma })).resolves.toEqual({ state: "wired" });
+    });
+
+    it("fails, by name, when the retention function is gone (rolled back, so nothing is left behind)", async () => {
+      _resetDoorsJobsForTests();
+      registerDoorsJobs({ scheduleCron: () => undefined } as never, prisma, 365);
+      const rollback = new Error("rollback");
+      let caught: unknown;
+      await prisma
+        .$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`DROP FUNCTION "access_event_purge"(timestamptz, integer, integer)`);
+          try {
+            await assertDoorsWired({ app: wiredApp(), config: ON, prisma: tx as never });
+          } catch (e) {
+            caught = e;
+          }
+          throw rollback;
+        })
+        .catch((e) => {
+          if (e !== rollback) throw e;
+        });
+      expect(caught).toBeInstanceOf(DoorsWiringError);
+      expect((caught as DoorsWiringError).problems.join("\n")).toMatch(/access_event_purge/);
+      // …and it really was rolled back: the function is still there.
+      await expect(prisma.$queryRaw`SELECT "access_event_purge"(${daysAgo(9999)}::timestamptz)`).resolves.toBeDefined();
     });
 
     it("fails, by name, when the append-only trigger is gone (rolled back, so nothing is left behind)", async () => {

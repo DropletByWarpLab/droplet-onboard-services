@@ -29,8 +29,8 @@ const ON = { DOORS_ENABLED: true } as AvailabilityConfig;
 const OFF = { DOORS_ENABLED: false } as AvailabilityConfig;
 
 /** A Prisma stub that says the migration applied, with both triggers. */
-function db(over: Partial<{ point: boolean; event: boolean; append_only: boolean; derived_guard: boolean }> = {}) {
-  const $queryRaw = vi.fn(async () => [{ point: true, event: true, append_only: true, derived_guard: true, ...over }]);
+function db(over: Partial<{ point: boolean; event: boolean; append_only: boolean; derived_guard: boolean; purge_fn: boolean }> = {}) {
+  const $queryRaw = vi.fn(async () => [{ point: true, event: true, append_only: true, derived_guard: true, purge_fn: true, ...over }]);
   return { $queryRaw } as unknown as PrismaClient & { $queryRaw: typeof $queryRaw };
 }
 
@@ -189,6 +189,12 @@ describe("DOORS_ENABLED on — every list downstream of the descriptor", () => {
     expect(p.join("\n")).toMatch(/AccessEvent_append_only/);
     const p2 = await problemsOf(assertDoorsWired({ app: buildApp(), config: ON, prisma: db({ derived_guard: false }) }));
     expect(p2.join("\n")).toMatch(/AccessEvent_derived_guard/);
+  });
+
+  it("the retention function missing — the purge job would have nothing to call", async () => {
+    registerJobs();
+    const p = await problemsOf(assertDoorsWired({ app: buildApp(), config: ON, prisma: db({ purge_fn: false }) }));
+    expect(p.join("\n")).toMatch(/access_event_purge/);
   });
 
   it("an unreachable database is a failure, not a pass", async () => {

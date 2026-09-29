@@ -379,30 +379,24 @@ describe("retireDoor", () => {
 });
 
 describe("purgeExpiredAccessEvents — the retention path", () => {
-  it("opens the transaction-local retention gate BEFORE deleting, counts from createdAt, and reports the cutoff", async () => {
+  it("calls the database purge function with the cutoff, counts from `now`, and reports what it deleted — naming no gate itself", async () => {
     const p = makePrisma();
-    const order: string[] = [];
-    p.$queryRaw.mockImplementation((async (strings: TemplateStringsArray) => {
-      order.push(`query:${strings.join("?").replace(/\s+/g, " ").trim()}`);
-      return [];
-    }) as never);
-    p.$executeRaw.mockImplementation((async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      order.push(`exec:${strings.join("?").replace(/\s+/g, " ").trim()}`);
-      order.push(`cutoff:${(values[0] as Date).toISOString()}`);
-      return 3;
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    p.$queryRaw.mockImplementation((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      calls.push({ sql: strings.join("?").replace(/\s+/g, " ").trim(), values });
+      return [{ deleted: 3n }];
     }) as never);
 
     const out = await purgeExpiredAccessEvents(asPrisma(p), 365, NOW);
 
-    expect(out.deleted).toBe(3);
-    expect(out.before).toEqual(new Date("2025-09-29T03:55:00.000Z"));
-    expect(order[0]).toMatch(/^query:SELECT set_config\('droplet\.access_event_retention', 'on', true\)/);
-    expect(order[1]).toMatch(/^exec:DELETE FROM "AccessEvent"/);
-    expect(order[1]).toMatch(/"createdAt" </);
-    // An alarm's door_open row outlives it: never delete evidence a younger row still cites.
-    expect(order[1]).toMatch(/NOT EXISTS/);
-    expect(order[1]).toMatch(/"derivedFromId"/);
-    expect(order[2]).toBe("cutoff:2025-09-29T03:55:00.000Z");
+    expect(out).toEqual({ deleted: 3, before: new Date("2025-09-29T03:55:00.000Z") });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toMatch(/^SELECT "access_event_purge"\(\?::timestamptz\)/);
+    expect(calls[0]!.values).toEqual([new Date("2025-09-29T03:55:00.000Z")]);
+    // The function owns the gate: this file neither opens a transaction nor runs a DELETE of its own.
+    expect(p.$transaction).not.toHaveBeenCalled();
+    expect(p.$executeRaw).not.toHaveBeenCalled();
+    expect(calls[0]!.sql).not.toMatch(/DELETE FROM|set_config/i);
   });
 
   it("refuses a retention that is not a whole number of days ≥ 1 — a typo is never 'delete everything'", async () => {
@@ -410,24 +404,13 @@ describe("purgeExpiredAccessEvents — the retention path", () => {
     for (const bad of [0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       await expect(purgeExpiredAccessEvents(asPrisma(p), bad, NOW), String(bad)).rejects.toThrow(/retention/i);
     }
-    expect(p.$transaction).not.toHaveBeenCalled();
-    expect(p.$executeRaw).not.toHaveBeenCalled();
+    expect(p.$queryRaw).not.toHaveBeenCalled();
   });
 
-  it("drains in bounded batches: keeps going while a batch comes back full, stops on a short one", async () => {
+  it("a function that returns no row is an error, not zero", async () => {
     const p = makePrisma();
-    p.$executeRaw.mockResolvedValueOnce(5000).mockResolvedValueOnce(5000).mockResolvedValueOnce(12);
-    const out = await purgeExpiredAccessEvents(asPrisma(p), 30, NOW);
-    expect(out.deleted).toBe(10_012);
-    expect(p.$executeRaw).toHaveBeenCalledTimes(3);
-  });
-
-  it("caps a run, so a huge backlog cannot outlast the cron lock's transaction — the rest drains tomorrow", async () => {
-    const p = makePrisma();
-    p.$executeRaw.mockResolvedValue(5000);
-    const out = await purgeExpiredAccessEvents(asPrisma(p), 30, NOW);
-    expect(p.$executeRaw.mock.calls.length).toBeLessThanOrEqual(20);
-    expect(out.deleted).toBe(p.$executeRaw.mock.calls.length * 5000);
+    p.$queryRaw.mockResolvedValue([]);
+    await expect(purgeExpiredAccessEvents(asPrisma(p), 30, NOW)).rejects.toThrow(/no row/);
   });
 });
 
@@ -449,8 +432,9 @@ describe("registerDoorsJobs", () => {
     const scheduleCron = vi.fn();
     const p = makePrisma();
     registerDoorsJobs({ scheduleCron, scheduleInterval: vi.fn() } as never, asPrisma(p) as never, 90);
+    p.$queryRaw.mockResolvedValue([{ deleted: 0n }]);
     await (scheduleCron.mock.calls[0]![1] as () => Promise<void>)();
-    const cutoff = (p.$executeRaw.mock.calls[0] as unknown[])[1] as Date;
+    const cutoff = (p.$queryRaw.mock.calls[0] as unknown[])[1] as Date;
     // 90 days before "now" (the handler's own clock), to the day.
     expect(Math.round((Date.now() - cutoff.getTime()) / 86_400_000)).toBe(90);
   });

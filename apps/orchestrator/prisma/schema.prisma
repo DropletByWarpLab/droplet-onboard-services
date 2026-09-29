@@ -9764,6 +9764,8 @@ model AccessEvent {
   @@index([accessPointId, occurredAt])
   @@index([occurredAt, id])
   @@index([kind, occurredAt])
-  @@index([derivedFromId])
+  /// One derived alarm of each kind per opening, whatever its dedupeKey. Rows
+  /// that derive from nothing carry a NULL, which a unique index never compares.
+  @@unique([derivedFromId, kind])
   @@index([createdAt])
 }

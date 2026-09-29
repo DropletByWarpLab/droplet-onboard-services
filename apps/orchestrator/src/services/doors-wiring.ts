@@ -120,6 +120,7 @@ interface DbFacts {
   event: boolean;
   append_only: boolean;
   derived_guard: boolean;
+  purge_fn: boolean;
 }
 
 async function readDbFacts(prisma: Pick<PrismaClient, "$queryRaw">): Promise<DbFacts> {
@@ -130,7 +131,8 @@ async function readDbFacts(prisma: Pick<PrismaClient, "$queryRaw">): Promise<DbF
       EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'AccessEvent_append_only' AND NOT tgisinternal
               AND tgrelid = to_regclass('"AccessEvent"')) AS append_only,
       EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'AccessEvent_derived_guard' AND NOT tgisinternal
-              AND tgrelid = to_regclass('"AccessEvent"')) AS derived_guard`;
+              AND tgrelid = to_regclass('"AccessEvent"')) AS derived_guard,
+      to_regprocedure('"access_event_purge"(timestamptz, integer, integer)') IS NOT NULL AS purge_fn`;
   const row = rows[0];
   if (!row) throw new Error("the catalog query returned no row");
   return row;
@@ -225,7 +227,8 @@ export async function assertDoorsWired(
       problems.push("the AccessPoint / AccessEvent tables do not exist — the doors migrations have not been applied");
     }
     if (facts.event && !facts.append_only) problems.push("the AccessEvent_append_only trigger is missing: door events could be rewritten or deleted");
-    if (facts.event && !facts.derived_guard) problems.push("the AccessEvent_derived_guard trigger is missing: a forced-door alarm could be recorded for a door with no position source");
+    if (facts.event && !facts.derived_guard) problems.push("the AccessEvent_derived_guard trigger is missing: a position or forced-door row could be recorded for a door with no position source");
+    if (facts.event && !facts.purge_fn) problems.push("the access_event_purge function is missing: the retention job has nothing to call, and door events would never age out");
   } catch (err) {
     problems.push(`could not check the database: ${(err as Error).message}`);
   }

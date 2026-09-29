@@ -7,8 +7,9 @@
  *
  *   1. no `doors_*` tool can unlock or write (P4a ships none; the guard is forward);
  *   2. no `/api/doors` route lacks the RBAC grant;
- *   3. no in-place AccessEvent UPDATE or DELETE — here, as source (the trigger
- *      itself is proved on real Postgres in doors.pg.test.ts);
+ *   3. no in-place AccessEvent UPDATE or DELETE — here, as source, and that no
+ *      .ts file names the retention setting (the trigger itself is proved on
+ *      real Postgres in doors.pg.test.ts);
  *   4. no forced-door or held-open claim on a door whose doorPositionSource is
  *      `none` — the pure rule is door-derivations.test.ts and the database's
  *      is doors.pg.test.ts; here, that no surface advertises one;
@@ -311,6 +312,20 @@ const PRODUCTION = [
 ];
 const PURGE_FILE = "apps/orchestrator/src/services/doors.service.ts";
 
+/** Every .ts / .tsx file in the repo's three code roots, as [repo-relative path, raw text]. Tests and comments included. */
+const SKIP_DIRS = new Set(["node_modules", "dist", ".next", ".git", "coverage", "__pycache__", "venv", ".venv"]);
+function allTsUnder(dir: string, out: Array<[string, string]> = []): Array<[string, string]> {
+  for (const name of readdirSync(dir)) {
+    if (SKIP_DIRS.has(name)) continue;
+    const full = join(dir, name);
+    const st = statSync(full);
+    if (st.isDirectory()) allTsUnder(full, out);
+    else if (/\.tsx?$/.test(name) && !name.endsWith(".d.ts")) out.push([relative(REPO, full), readFileSync(full, "utf8")]);
+  }
+  return out;
+}
+const ALL_TS = ["apps", "packages", "services"].flatMap((root) => allTsUnder(resolve(REPO, root)));
+
 describe("negative 3 — no in-place AccessEvent UPDATE or DELETE (source; the trigger itself is doors.pg.test.ts)", () => {
   it("scans real production source (not vacuous)", () => {
     expect(PRODUCTION.length).toBeGreaterThan(300);
@@ -322,16 +337,28 @@ describe("negative 3 — no in-place AccessEvent UPDATE or DELETE (source; the t
     expect(offenders).toEqual([]);
   });
 
-  it('no raw SQL updates AccessEvent, and the ONE raw DELETE is the retention purge', () => {
+  it("no raw SQL updates or deletes AccessEvent: the retention purge is a database function, and only the doors service calls it", () => {
     const updaters = PRODUCTION.filter(([, code]) => /UPDATE\s+"AccessEvent"/i.test(code)).map(([f]) => f);
     expect(updaters).toEqual([]);
     const deleters = PRODUCTION.filter(([, code]) => /DELETE\s+FROM\s+"AccessEvent"/i.test(code)).map(([f]) => f);
-    expect(deleters).toEqual([PURGE_FILE]);
+    expect(deleters).toEqual([]);
+    // Calls, not mentions: the boot assertion looks the function up by name.
+    const purgers = PRODUCTION.filter(([, code]) => /SELECT\s+"access_event_purge"\s*\(/i.test(code)).map(([f]) => f);
+    expect(purgers).toEqual([PURGE_FILE]);
   });
 
-  it("only the purge names the transaction-local gate the trigger looks for", () => {
-    const namers = PRODUCTION.filter(([, code]) => code.includes("droplet.access_event_retention")).map(([f]) => f);
-    expect(namers).toEqual([PURGE_FILE]);
+  it("NO .ts file names the setting the append-only trigger looks for — the purge function sets it itself", () => {
+    // Built from two halves so this file does not name it either. Raw text,
+    // comments and tests included: a comment that names it is a hint to the
+    // next person, and a test that sets it is a second way in.
+    const needle = "droplet." + "access_event_retention";
+    const namers = ALL_TS.filter(([, text]) => text.includes(needle)).map(([f]) => f);
+    expect(namers).toEqual([]);
+    // Not vacuous: the walk reaches the doors service and this file, and its
+    // needle is a real setting name (the migration is what carries it).
+    expect(ALL_TS.map(([f]) => f)).toEqual(expect.arrayContaining([PURGE_FILE, "apps/orchestrator/src/__tests__/doors-negative-suite.test.ts"]));
+    const migration = readFileSync(resolve(REPO, "apps/orchestrator/prisma/migrations/20260929100200_adr_055_doors_tables/migration.sql"), "utf8");
+    expect(migration.includes(needle)).toBe(true);
   });
 
   it("nothing turns the triggers off: no DISABLE TRIGGER, no session_replication_role, no DROP TRIGGER on AccessEvent", () => {
@@ -346,7 +373,7 @@ describe("negative 3 — no in-place AccessEvent UPDATE or DELETE (source; the t
       const file = join(dir, name, "migration.sql");
       if (!existsSync(file)) continue;
       const sql = readFileSync(file, "utf8");
-      if (/AccessEvent_append_only|AccessEvent_derived_guard|access_event_append_only|access_event_derived_guard/.test(sql) && !name.endsWith("_adr_055_doors_tables")) {
+      if (/AccessEvent_append_only|AccessEvent_derived_guard|access_event_append_only|access_event_derived_guard|access_event_purge/.test(sql) && !name.endsWith("_adr_055_doors_tables")) {
         offenders.push(name);
       }
       if (/(DISABLE|DROP)\s+TRIGGER[^;]*AccessEvent/i.test(sql.replace(/DROP TRIGGER IF EXISTS "AccessEvent_(append_only|derived_guard)" ON "AccessEvent";/g, "")) ) {
