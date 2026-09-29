@@ -386,9 +386,9 @@ export default function FilesPage() {
   const { toast } = useToast();
   const [error, setError] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
-  // Network drive: every user gets their own WebDAV drive login; the
-  // device-wide SMB section inside the dialog stays owner/admin-only
-  // (showSharedDrive — its endpoint 403s other roles regardless).
+  // Network drive (SMB): owner/admin-only connect instructions — the
+  // credential behind it is device-wide, so the trigger hides for other
+  // roles (the endpoint 403s them regardless).
   const [showConnectDrive, setShowConnectDrive] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   // Reader posture (WARP-1267): close a still-open new-folder composer if
@@ -1639,15 +1639,17 @@ export default function FilesPage() {
         <Star size={14} />
         <span className="hidden sm:inline">Favorites</span>
       </Link>
-      <button
-        onClick={() => setShowConnectDrive(true)}
-        aria-label="Connect network drive"
-        className="btn ghost"
-        type="button"
-      >
-        <HardDrive size={14} />
-        <span className="hidden sm:inline">Connect drive</span>
-      </button>
+      {isOwnerOrAdmin && (
+        <button
+          onClick={() => setShowConnectDrive(true)}
+          aria-label="Connect network drive"
+          className="btn ghost"
+          type="button"
+        >
+          <HardDrive size={14} />
+          <span className="hidden sm:inline">Connect drive</span>
+        </button>
+      )}
       <button
         onClick={() => !isReaderSpace && setShowNewFolder(true)}
         disabled={isReaderSpace}
@@ -2438,7 +2440,6 @@ export default function FilesPage() {
       <ConnectDriveDialog
         open={showConnectDrive}
         onClose={() => setShowConnectDrive(false)}
-        showSharedDrive={isOwnerOrAdmin}
       />
 
       {/* Move / Copy dialog */}

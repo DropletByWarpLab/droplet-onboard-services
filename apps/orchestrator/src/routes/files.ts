@@ -1863,8 +1863,12 @@ export function createFilesRouter(
     return id;
   };
 
-  /** (space, path) → the folder's ncFileId, or null after writing the 4xx. */
-  const resolveFolderIdOr404 = async (
+  /**
+   * (space, path) → the entry's ncFileId, or null after writing the 4xx.
+   * Does not check the entry is a folder: a colour row on a file is inert
+   * (the UI only paints folders), so a folder-only PROPFIND buys nothing.
+   */
+  const resolveColorTargetIdOr404 = async (
     req: Request,
     res: Response,
     rawPath: unknown,
@@ -1923,7 +1927,7 @@ export function createFilesRouter(
         }
         const userId = folderColorOwner(req, res);
         if (!userId) return;
-        const ncFileId = await resolveFolderIdOr404(req, res, parsed.data.path);
+        const ncFileId = await resolveColorTargetIdOr404(req, res, parsed.data.path);
         if (ncFileId === null) return;
         const row = await prisma.fileFolderColor.upsert({
           where: { userId_ncFileId: { userId, ncFileId } },
@@ -1947,7 +1951,7 @@ export function createFilesRouter(
       try {
         const userId = folderColorOwner(req, res);
         if (!userId) return;
-        const ncFileId = await resolveFolderIdOr404(req, res, req.query.path);
+        const ncFileId = await resolveColorTargetIdOr404(req, res, req.query.path);
         if (ncFileId === null) return;
         await prisma.fileFolderColor.deleteMany({ where: { userId, ncFileId } });
         res.status(204).end();

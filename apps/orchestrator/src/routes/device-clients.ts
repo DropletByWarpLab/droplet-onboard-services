@@ -18,7 +18,7 @@ import {
 } from "../services/push-dispatch.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { buildPairUrl, servedCertPin } from "../lib/served-cert-pin.js";
-import { SESSION_COOKIE_NAME, requireRole } from "../middleware/auth.js";
+import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 import { PushEndpointRejected, vetPushEndpoint } from "../lib/push-endpoint.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -53,7 +53,6 @@ const PAIRING_CODE_CREATE_ATTEMPTS = 5;
 const RATE_LIMIT_WINDOW_SEC = 3600;
 const MAX_PAIR_CREATE_PER_USER_PER_HOUR = 5;
 const MAX_PAIR_CLAIM_PER_IP_PER_HOUR = 20;
-const MAX_PERSONAL_DRIVE_PER_USER_PER_HOUR = 10;
 // WARP-1030: brute-force budget for the unauthenticated Basic self-revoke
 // path. A legitimate client revokes once, so both budgets are generous;
 // the per-target bucket also caps a rotating-IP attacker guessing one
@@ -153,25 +152,6 @@ const MDNS_HOST = "droplet.local";
  */
 export async function webdavBaseUrl(req: Request): Promise<string> {
   return trustedOriginUrl(req, "/nextcloud", [MDNS_HOST]);
-}
-
-/**
- * Mint a dedicated Nextcloud app password for a new device and encrypt it for
- * storage. Shared by pairing claim and the per-user drive login so both mint
- * the same way. `no_session` = the caller's session carries no Nextcloud token
- * (SSO/passkey logins never receive one); `nc_failed` = Nextcloud refused.
- */
-async function mintDeviceCredential(
-  req: Request,
-): Promise<
-  | { ok: true; appPassword: string; encrypted: string }
-  | { ok: false; reason: "no_session" | "nc_failed" }
-> {
-  const ncToken = await resolveNcToken(req);
-  if (!ncToken) return { ok: false, reason: "no_session" };
-  const appPassword = await ncGenerateAppPassword(ncToken);
-  if (!appPassword) return { ok: false, reason: "nc_failed" };
-  return { ok: true, appPassword, encrypted: encryptSecret(appPassword) };
 }
 
 /**
@@ -419,20 +399,22 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       // hold an interactive Postgres transaction open. The trade-off is that we
       // may mint a password for a claim that then loses the atomic consume race
       // or fails to persist — both compensated below by deleting it.
-      const minted = await mintDeviceCredential(req);
-      if (!minted.ok) {
-        if (minted.reason === "no_session") {
-          res.status(401).json({
-            error: "Nextcloud session unavailable — please log in again",
-          });
-        } else {
-          res.status(502).json({
-            error: "Failed to generate device credentials from Nextcloud",
-          });
-        }
+      const ncToken = await resolveNcToken(req);
+      if (!ncToken) {
+        res.status(401).json({
+          error: "Nextcloud session unavailable — please log in again",
+        });
         return;
       }
-      const { appPassword, encrypted } = minted;
+      const appPassword = await ncGenerateAppPassword(ncToken);
+      if (!appPassword) {
+        res.status(502).json({
+          error: "Failed to generate device credentials from Nextcloud",
+        });
+        return;
+      }
+
+      const encrypted = encryptSecret(appPassword);
 
       let client: { id: string };
       try {
@@ -533,122 +515,6 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
-
-  // ── POST /api/storage/network-drive/personal ──
-  // Per-user Finder / File Explorer drive: mints a Nextcloud app password for
-  // THIS user and returns the WebDAV address to map. Nextcloud enforces the
-  // user's own My Files / Household / department ACLs, unlike the device-wide
-  // SMB share. Open to every human role; `service` principals get no drive.
-  // See docs/network-drive.md "Per-user drive (WebDAV)".
-  router.post(
-    "/storage/network-drive/personal",
-    requireRole("owner", "admin", "family", "guest"),
-    async (req, res, next) => {
-      try {
-        const parsed = z
-          .object({
-            platform: z.enum(["macos", "windows"]),
-            computerName: z.string().trim().min(1).max(60).optional(),
-          })
-          .safeParse(req.body);
-        if (!parsed.success) {
-          res.status(400).json({ error: "Invalid drive request" });
-          return;
-        }
-        const { platform } = parsed.data;
-
-        const user = getUser(req);
-        const rl = await rateLimit(
-          `drive:personal:${user}`,
-          MAX_PERSONAL_DRIVE_PER_USER_PER_HOUR,
-        );
-        if (!rl.allowed) {
-          res.status(429).json({
-            error: "Too many drive logins created. Try again in an hour.",
-          });
-          return;
-        }
-
-        const minted = await mintDeviceCredential(req);
-        if (!minted.ok) {
-          if (minted.reason === "no_session") {
-            // SSO/passkey sessions never held a Nextcloud token; only a
-            // password sign-in can mint one.
-            res.status(409).json({ error: "nc_credential_unavailable" });
-          } else {
-            res.status(502).json({
-              error: "Failed to generate drive credentials from Nextcloud",
-            });
-          }
-          return;
-        }
-        const { appPassword, encrypted } = minted;
-
-        const deviceName = `${platform === "macos" ? "Finder" : "File Explorer"} on ${
-          parsed.data.computerName ?? (platform === "macos" ? "My Mac" : "My PC")
-        }`;
-        let client: { id: string };
-        try {
-          client = await prisma.deviceClient.create({
-            data: {
-              userId: user,
-              deviceName,
-              deviceType: "desktop",
-              platform,
-              ncAppPassword: encrypted,
-              status: "active",
-            },
-          });
-        } catch (err) {
-          // Compensate: don't leak a live credential nobody can revoke.
-          try {
-            await ncDeleteAppPassword(appPassword);
-          } catch (compErr) {
-            logger.warn(
-              { err: compErr },
-              "Failed to compensate (delete) Nextcloud app password after drive login persist failure",
-            );
-          }
-          throw err;
-        }
-
-        safePublish(`droplet/devices/${user}/paired`, {
-          deviceId: client.id,
-          deviceName,
-          platform,
-        });
-        await recordActivity({
-          kind: "auth",
-          severity: "ok",
-          sourceIcon: "hard-drive",
-          what: "Personal drive login created",
-          sub: deviceName,
-          refs: { clientId: client.id },
-          actor: actorFromRequest(req),
-        });
-
-        const base = new URL(await webdavBaseUrl(req));
-        const url = `${base.origin}${base.pathname}/remote.php/dav/files/${encodeURIComponent(user)}/`;
-        // Windows WebClient UNC form: \\host@SSL[@port]\path (raw uid, no URL-encoding).
-        const winHost =
-          base.port && base.port !== "443"
-            ? `${base.hostname}@SSL@${base.port}`
-            : `${base.hostname}@SSL`;
-        const winPath = `${base.pathname}/remote.php/dav/files/${user}`.replace(/\//g, "\\");
-        res.json({
-          deviceId: client.id,
-          username: user,
-          // Plaintext is returned ONCE; revoke via DELETE /api/devices/clients/:id.
-          appPassword,
-          webdavUrl: url,
-          macosUrl: url,
-          windowsPath: `\\\\${winHost}${winPath}`,
-        });
-      } catch (err) {
-        next(err);
-      }
-    },
-  );
 
   // ── GET /api/devices/clients ──
   // List the caller's own devices. Never returns the encrypted app password.

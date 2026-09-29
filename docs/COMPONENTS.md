@@ -646,9 +646,7 @@ network. Host-published ports and host-network services are called out.
   smbd on `:445`; account `droplet` (uid 33 = www-data) with the per-device
   `SMB_PASSWORD`. The same volume mounts into Nextcloud as the `/Droplet`
   files_external mount (`nextcloud-init.sh`) so web + desktop see one tree.
-  Connect info: `GET /api/storage/network-drive` (owner/admin). Every user's
-  own drive (WebDAV via Nextcloud): `POST /api/storage/network-drive/personal`
-  — see [`network-drive.md`](network-drive.md#per-user-drive-webdav). Guide:
+  Connect info: `GET /api/storage/network-drive` (owner/admin). Guide:
   [`network-drive.md`](network-drive.md).
 
 ## scripts/
