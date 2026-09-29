@@ -124,15 +124,22 @@ DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
 # slower models.
 DEFAULT_LLM_TIMEOUT_S = 120.0
 # Cap the agent loop. The orchestrator hard-caps at 10; we ask for a
-# much lower number so voice replies stay snappy. A voice turn should
-# resolve in at most one tool-call iteration ("list_cameras" → result
-# → final answer). Letting the model take 3-5 iterations on noisy or
-# ambiguous transcripts is the main reason voice replies feel slow —
-# each iteration is a full ai-gateway round-trip (~2-4 s on the POC's
-# 8 B model). 2 is the smallest value that still preserves the "one
-# tool call, then answer" pattern. Override via the request body's
-# max_iter for callers that explicitly need a multi-step plan.
-DEFAULT_LLM_MAX_ITER = 2
+# much lower number so voice replies stay snappy — each iteration is a
+# full ai-gateway round-trip (~2-4 s on the POC's 8 B model), so letting
+# the model wander on noisy transcripts is what makes replies feel slow.
+# But the budget must still cover a realistic multi-tool turn: iteration
+# 0 is the first tool call and the LAST iteration is the answer, so a
+# budget of 2 (the old value) dies on the SECOND tool call with the
+# orchestrator's iteration_limit fallback ("couldn't finish… within my
+# step limit") (WARP-3316). 4 = up to three tool calls (or one tool call
+# plus a TOOL_NOW_AVAILABLE self-heal retry) and then the answer. Tune
+# per box via VOICE_MAX_ITER; a request body's max_iter can still ask
+# for a longer multi-step plan.
+DEFAULT_LLM_MAX_ITER = 4
+# The orchestrator bound (AGENT_MAX_ITER_CAP default 10; routes/llm.ts —
+# int, >= 1). VOICE_MAX_ITER is clamped into this window.
+MIN_LLM_MAX_ITER = 1
+MAX_LLM_MAX_ITER = 10
 # WARP-1432 — voice turn shaping (client-side request-shape only).
 #
 # gpt-oss:20b (the box's voice model) spends reasoning-channel tokens
@@ -306,6 +313,40 @@ def parse_max_tokens(raw: Optional[str]) -> int:
         )
         return DEFAULT_VOICE_MAX_TOKENS
     return n
+
+
+def parse_max_iter(raw: Optional[str]) -> int:
+    """Resolve VOICE_MAX_ITER → the agent-loop budget voice sends.
+
+    Unset / empty / non-numeric fall back to DEFAULT_LLM_MAX_ITER with a
+    warning. A number outside [1, 10] is clamped to the nearest bound
+    (with a warning) rather than defaulted: the operator clearly wanted
+    "more" or "fewer" steps, and the orchestrator would reject or cap
+    anything beyond its own window anyway. Voice must never break on a
+    fat-fingered env."""
+    s = (raw or "").strip()
+    if not s:
+        return DEFAULT_LLM_MAX_ITER
+    try:
+        n = int(s)
+    except ValueError:
+        logger.warning(
+            "VOICE_MAX_ITER=%r is not an integer — using default %d.",
+            raw,
+            DEFAULT_LLM_MAX_ITER,
+        )
+        return DEFAULT_LLM_MAX_ITER
+    clamped = max(MIN_LLM_MAX_ITER, min(MAX_LLM_MAX_ITER, n))
+    if clamped != n:
+        logger.warning(
+            "VOICE_MAX_ITER=%d is outside the accepted range %d..%d — "
+            "clamping to %d.",
+            n,
+            MIN_LLM_MAX_ITER,
+            MAX_LLM_MAX_ITER,
+            clamped,
+        )
+    return clamped
 
 
 def parse_allowed_tools(raw: Optional[str]) -> list[str]:
@@ -1127,10 +1168,13 @@ def build_llm_from_env(
     # breaks the voice loop. VOICE_ALLOWED_TOOLS unset → the curated
     # DEFAULT scope; VOICE_MAX_TOKENS unset → DEFAULT_VOICE_MAX_TOKENS.
     max_tokens = parse_max_tokens(os.environ.get("VOICE_MAX_TOKENS"))
+    max_iter = parse_max_iter(os.environ.get("VOICE_MAX_ITER"))
     allowed_tools = parse_allowed_tools(os.environ.get("VOICE_ALLOWED_TOOLS"))
     logger.info(
-        "voice turn shaping: ephemeral=on, max_tokens=%d, allowed_tools=%d scoped",
+        "voice turn shaping: ephemeral=on, max_tokens=%d, max_iter=%d, "
+        "allowed_tools=%d scoped",
         max_tokens,
+        max_iter,
         len(allowed_tools),
     )
 
@@ -1142,6 +1186,7 @@ def build_llm_from_env(
         # LLM_MODEL) is only the fallback when the orchestrator can't name one.
         follow_active_model=True,
         max_tokens=max_tokens,
+        max_iter=max_iter,
         allowed_tools=allowed_tools,
         location=geo.description,
         timezone=geo.timezone,
