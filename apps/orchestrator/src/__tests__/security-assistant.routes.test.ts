@@ -44,6 +44,8 @@ import { assistantBodyBudget } from "../services/security-assistant-view.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 import { explainSecurityPattern } from "../services/security-patterns-read.js";
 import { loadIncidentDetail } from "../services/security-incident-view.js";
+import { SECURITY_ZONE_ACTIVE_LIMIT } from "../services/security-zones.service.js";
+import { getTool, type ToolContext } from "@droplet/tools-core";
 import {
   areaRows as fakeAreaRows,
   baselineRows,
@@ -699,6 +701,20 @@ describe("A4 pages through the areas, reading only what a page holds (WARP-3194)
       expect(res.status, offset).toBe(400);
       expect(res.body.error.code, offset).toBe("BAD_REQUEST");
     }
+  });
+
+  // tools-core cannot import the orchestrator's limit, so the tool's `offset` ceiling (OFFSET_MAX) is a literal
+  // there. This runs the real tool and ties the two: it refuses an offset exactly where the route would.
+  it("security_zone_status's offset ceiling is A4's (SECURITY_ZONE_ACTIVE_LIMIT)", async () => {
+    const tool = getTool("security_zone_status")!;
+    const body = { site: { mode: "closed" }, areas: [], moreAreas: 0, nextOffset: null, suggestionsWaiting: null };
+    const orchestratorGet = vi.fn().mockImplementation(async () => new globalThis.Response(JSON.stringify(body), { status: 200 }));
+    const ctx = { http: { orchestrator: { get: orchestratorGet } }, signal: new AbortController().signal } as unknown as ToolContext;
+    expect((await tool.handler({ offset: SECURITY_ZONE_ACTIVE_LIMIT }, ctx)).ok).toBe(true);
+    expect(orchestratorGet).toHaveBeenCalledTimes(1);
+    const past = await tool.handler({ offset: SECURITY_ZONE_ACTIVE_LIMIT + 1 }, ctx);
+    expect(past.ok).toBe(false);
+    expect(orchestratorGet).toHaveBeenCalledTimes(1);
   });
 
   it("?area= and offset together: the one area, then nothing", async () => {
