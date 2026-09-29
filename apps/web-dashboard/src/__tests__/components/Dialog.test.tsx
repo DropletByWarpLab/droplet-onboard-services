@@ -39,6 +39,7 @@ function Harness({
   placement,
   sideWidth,
   flush,
+  seamless,
 }: {
   initiallyOpen?: boolean;
   closeOnBackdrop?: boolean;
@@ -46,6 +47,7 @@ function Harness({
   placement?: "center" | "right";
   sideWidth?: "default" | "sheet";
   flush?: boolean;
+  seamless?: boolean;
 }) {
   const [open, setOpen] = React.useState(initiallyOpen);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -64,6 +66,7 @@ function Harness({
         placement={placement}
         sideWidth={sideWidth}
         flush={flush}
+        seamless={seamless}
       >
         <h2 id="dialog-heading">Confirm</h2>
         {withDescribedBy && <p id="dialog-desc">Are you sure?</p>}
@@ -312,6 +315,22 @@ describe("<Dialog> primitive", () => {
     expect(body.className).toContain("max-h-[90vh]");
     expect(body.className).toContain("overflow-y-auto");
     expect(body.className).toContain("overflow-x-hidden");
+  });
+
+  /* WARP-3043 — /chat's drawers wear the Mac chrome: no stroke. `--lift`
+     carries a 1px brand ring, so a seamless panel lifts by shadow only. */
+  it("a seamless side panel draws no left border and no --lift ring; the default keeps both", () => {
+    const { unmount } = render(<Harness initiallyOpen placement="right" seamless />);
+    const seamless = screen.getByRole("dialog");
+    expect(seamless.style.borderLeft).toBe("");
+    expect(seamless.style.boxShadow).not.toContain("--lift");
+    expect(seamless.style.boxShadow).not.toBe("");
+    unmount();
+
+    render(<Harness initiallyOpen placement="right" />);
+    const plain = screen.getByRole("dialog");
+    expect(plain.style.borderLeft).toContain("var(--border)");
+    expect(plain.style.boxShadow).toBe("var(--lift)");
   });
 
   it("side placement: container clips horizontal overflow; default adds the p-5 inset", () => {

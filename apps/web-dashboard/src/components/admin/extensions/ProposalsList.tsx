@@ -31,10 +31,17 @@ export interface ProposalsListProps {
   canPromote: boolean;
   /** The proposal whose readback is being fetched (cleared once it lands). */
   reviewing: string | null;
+  /**
+   * True while a promotion is being confirmed. `reviewing` is cleared as soon
+   * as the readback lands, so on its own it would leave the buttons live during
+   * the confirm, and a Review click then would replace the review under the
+   * owner's hands.
+   */
+  locked?: boolean;
   onReview: (workspaceId: string) => void;
 }
 
-export function ProposalsList({ proposals, loading, error, canPromote, reviewing, onReview }: ProposalsListProps) {
+export function ProposalsList({ proposals, loading, error, canPromote, reviewing, locked = false, onReview }: ProposalsListProps) {
   if (error) {
     return (
       <Card>
@@ -81,7 +88,7 @@ export function ProposalsList({ proposals, loading, error, canPromote, reviewing
                   <button
                     type="button"
                     className="btn sm"
-                    disabled={reviewing !== null}
+                    disabled={reviewing !== null || locked}
                     aria-label={`Review ${p.slug} ${displayVersion(p.version)}`}
                     onClick={() => onReview(p.workspaceId)}
                   >

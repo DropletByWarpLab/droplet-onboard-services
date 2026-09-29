@@ -241,6 +241,18 @@ describe("/security — Incidents (WARP-2978)", () => {
     expect(h.replace).toHaveBeenLastCalledWith("/security", { scroll: false });
   });
 
+  it("the tab follows the URL: a same-route navigation to /security brings Incidents back (WARP-3185 2)", async () => {
+    h.search = "tab=everything";
+    const { rerender } = render(<SecurityPage />, { wrapper: Wrap });
+    expect(await screen.findByRole("tab", { name: "Everything" })).toHaveAttribute("aria-selected", "true");
+    h.search = "";
+    rerender(<SecurityPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: /Incidents/ })).toHaveAttribute("aria-selected", "true"));
+    h.search = "tab=everything";
+    rerender(<SecurityPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Everything" })).toHaveAttribute("aria-selected", "true"));
+  });
+
   it("the tabs follow the arrow keys (the tabs pattern), and only the selected tab is in the tab order", async () => {
     render(<SecurityPage />, { wrapper: Wrap });
     const incidents = await screen.findByRole("tab", { name: /Incidents/ });

@@ -181,6 +181,88 @@ describe("WallCameras — exactly this account's cameras (DS-005)", () => {
   });
 });
 
+describe("WallCameras — the grid follows the tiles' own box (F14)", () => {
+  // The tiles' box is what the banners and the strip leave (wall.css); jsdom has no layout, so the observer's answers are scripted.
+  let observers: Array<{ cb: ResizeObserverCallback; target: Element | null; disconnected: boolean }>;
+  const resize = (width: number, height: number) =>
+    act(() => {
+      for (const o of observers) if (!o.disconnected) o.cb([{ contentRect: { width, height } } as ResizeObserverEntry], o as unknown as ResizeObserver);
+    });
+  const twelve = () => Array.from({ length: 12 }, (_, i) => cam(`c${i}`));
+  const grid = () => document.querySelector(".sec-wall-tiles") as HTMLElement;
+  const dims = () => [grid().style.getPropertyValue("--cols"), grid().style.getPropertyValue("--rows")];
+
+  beforeEach(() => {
+    observers = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        o = { cb: null as unknown as ResizeObserverCallback, target: null as Element | null, disconnected: false };
+        constructor(cb: ResizeObserverCallback) {
+          this.o.cb = cb;
+          observers.push(this.o);
+        }
+        observe(t: Element) {
+          this.o.target = t;
+        }
+        unobserve() {}
+        disconnect() {
+          this.o.disconnected = true;
+        }
+      },
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("observes the tiles' own element, and is the near-square grid until that answers", () => {
+    render(<WallCameras {...props({ cameras: twelve() })} />, { wrapper: Wrap });
+    expect(observers).toHaveLength(1);
+    expect(observers[0]!.target).toBe(grid());
+    expect(dims()).toEqual(["4", "3"]);
+  });
+
+  it("room for 72 px pictures: 4 × 3 stays", () => {
+    render(<WallCameras {...props({ cameras: twelve() })} />, { wrapper: Wrap });
+    resize(928, 398);
+    expect(dims()).toEqual(["4", "3"]);
+  });
+
+  it("too short for that (both banners and two sources down at 960×540): 6 × 2 — and back to 4 × 3 when the banners go", () => {
+    render(<WallCameras {...props({ cameras: twelve() })} />, { wrapper: Wrap });
+    resize(928, 208);
+    expect(dims()).toEqual(["6", "2"]);
+    resize(928, 398);
+    expect(dims()).toEqual(["4", "3"]);
+  });
+
+  it("the same tiles stay mounted while the grid changes: nothing is asked again, no picture is dropped", async () => {
+    render(<WallCameras {...props({ cameras: twelve() })} />, { wrapper: Wrap });
+    await advance(0);
+    const before = h.authFetch.mock.calls.length;
+    const first = tile("c0");
+    resize(928, 208);
+    expect(tile("c0")).toBe(first);
+    expect(screen.getAllByRole("img")).toHaveLength(12);
+    expect(h.authFetch.mock.calls.length).toBe(before);
+  });
+
+  it("stops observing when the tiles go, and observes the new ones when they come back", () => {
+    const { rerender } = render(<WallCameras {...props({ cameras: twelve() })} />, { wrapper: Wrap });
+    resize(928, 208);
+    rerender(<WallCameras {...props({ cameras: [] })} />);
+    expect(observers[0]!.disconnected).toBe(true);
+    rerender(<WallCameras {...props({ cameras: twelve() })} />);
+    expect(observers).toHaveLength(2);
+    expect(observers[1]!.target).toBe(grid());
+  });
+
+  it("a browser with no ResizeObserver gets the near-square grid", () => {
+    vi.stubGlobal("ResizeObserver", undefined);
+    render(<WallCameras {...props({ cameras: twelve() })} />, { wrapper: Wrap });
+    expect(dims()).toEqual(["4", "3"]);
+  });
+});
+
 describe("WallCameras — a tile's own clock", () => {
   it("a new picture every 3 s; the one it replaces is let go", async () => {
     render(<WallCameras {...props({ cameras: [cam("front")] })} />, { wrapper: Wrap });

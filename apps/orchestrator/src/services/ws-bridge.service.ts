@@ -68,7 +68,9 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
           ? protocolHeader.slice("bearer.".length)
           : null;
 
-      const token = cookieToken ?? bearerFromProtocol;
+      // WARP-3038 — an explicit Bearer beats a cookie that rides the same
+      // upgrade, as in authMiddleware.
+      const token = bearerFromProtocol ?? cookieToken;
       const user = await validateTokenForWs(token);
       if (!user) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
