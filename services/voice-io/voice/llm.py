@@ -138,6 +138,15 @@ DEFAULT_LLM_TIMEOUT_S = 120.0
 DEFAULT_LLM_MAX_ITER = 4
 # The orchestrator bound (AGENT_MAX_ITER_CAP default 10; routes/llm.ts —
 # int, >= 1). VOICE_MAX_ITER is clamped into this window.
+#
+# COUPLING (WARP-3316): MAX_LLM_MAX_ITER hardcodes the orchestrator's
+# DEFAULT AGENT_MAX_ITER_CAP; voice cannot read the operator's actual value.
+# The route validates the request's max_iter against
+# config.agentMaxIter.capIter (the `max_iter` field of the chat request
+# schema in routes/llm.ts) and answers 400 on overflow. So if an operator
+# lowers AGENT_MAX_ITER_CAP below what voice sends (DEFAULT_LLM_MAX_ITER, or
+# VOICE_MAX_ITER), EVERY voice turn fails with a 400 until VOICE_MAX_ITER is
+# lowered to fit. Keep this constant in step with that default.
 MIN_LLM_MAX_ITER = 1
 MAX_LLM_MAX_ITER = 10
 # WARP-1432 — voice turn shaping (client-side request-shape only).
