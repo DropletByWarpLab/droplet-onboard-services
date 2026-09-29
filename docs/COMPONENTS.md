@@ -221,6 +221,8 @@ network. Host-published ports and host-network services are called out.
 - **Build/deploy:** Next.js **standalone** output (monorepo-aware
   `outputFileTracingRoot`); multi-stage Docker (`node:20`), served on 3001.
   Requires `@droplet/shared-types` at build — **cannot build standalone**.
+  Fonts are vendored under `src/app/fonts/` (`next/font/local`) so `next build`
+  needs no network — don't import `next/font/google` (test-guarded, WARP-3317).
 - **Tests:** Vitest + React Testing Library (`src/__tests__/`, ~119 files).
 - **Gotchas:** admin-page gating is **client-side only** (`useAuth().user.role`) —
   the backend is the real enforcement point. Dev rewrites don't exist in prod;
