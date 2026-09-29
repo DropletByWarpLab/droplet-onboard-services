@@ -286,13 +286,12 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                         sw.onSelect();
                         onClose();
                       }}
-                      className="w-5 h-5 rounded-full flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-offset-1"
+                      className={`w-5 h-5 rounded-full flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-offset-1 ${sw.selected ? "ring-2 ring-[var(--brand)]" : ""}`}
                       style={{
                         background: sw.css ?? "transparent",
                         border: sw.css
                           ? "1px solid rgba(0,0,0,0.15)"
                           : "1.5px dashed var(--text-faint)",
-                        boxShadow: sw.selected ? "0 0 0 2px var(--brand)" : undefined,
                       }}
                     >
                       {!sw.css && (

@@ -234,7 +234,7 @@ export function FileTile({
             if (e.key === "Escape") onCancelRename();
           }}
           onBlur={commitRename}
-          className="w-full py-1 px-2 outline-none focus:border-[var(--brand)] text-center text-[16px] lg:text-[13.5px]"
+          className="w-full py-1 px-2 outline-none focus:ring-2 focus:ring-[var(--brand)] text-center text-[16px] lg:text-[13.5px]"
           style={{
             background: "var(--surface)",
             border: "1px solid var(--border)",
