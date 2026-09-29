@@ -73,11 +73,13 @@ describe("one derivation, two call sites", () => {
 
   // WARP-3316 — the route no longer reads `config.TOOL_SELECTION_MODE` at the
   // estimate and the wire. It derives `toolSelectionMode` ONCE (the voice
-  // principal advertises its own scope, so it resolves to "off"; every other
-  // caller resolves to the configured mode) and both sites consume that one
-  // value. The three tests below pin the three halves of that: the derivation
-  // still starts from the config, and the estimate and the wire payload both
-  // read the derived value rather than a literal or the raw config.
+  // principal, when it names its own scope, resolves to "explicit" — WARP-3125
+  // superseded WARP-3316's inline "off"; every other caller resolves to the
+  // configured mode) and both sites consume that one value. The three tests
+  // below pin the three halves of that: the derivation still starts from the
+  // config, and the estimate and the wire payload both read the derived value
+  // rather than a literal or the raw config — so an explicit voice turn is
+  // sized as the explicit turn it is, not as a selected one.
 
   it("the route derives its mode from the configured TOOL_SELECTION_MODE", () => {
     // Under TOOL_SELECTION_MODE=off the pool genuinely IS the wire payload.
@@ -88,6 +90,13 @@ describe("one derivation, two call sites", () => {
     // Mutation: `isVoice ? "off" : "domains"` (or a bare `"domains"`) → red.
     expect(ROUTE_SRC).toMatch(
       /const toolSelectionMode\s*=[^;]*config\.TOOL_SELECTION_MODE/,
+    );
+    // WARP-3125 — the derivation is the per-turn resolver, and it starts from
+    // the configured mode: `explicit` is voice-only and never operator-set, so
+    // the resolver may narrow what the operator configured but not replace it.
+    // Mutation: `configured: "domains"` (or any literal) → red.
+    expect(ROUTE_SRC).toMatch(
+      /const toolSelectionMode = resolveTurnToolSelectionMode\(\{\s*configured: config\.TOOL_SELECTION_MODE,/,
     );
   });
 

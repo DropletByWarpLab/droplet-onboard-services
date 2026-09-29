@@ -40,6 +40,35 @@ export const BRAIN_BLOCK_FINDINGS_LIMIT = 5;
 export const BRAIN_BLOCK_DIGESTS_LIMIT = 8;
 export const BRAIN_BLOCK_CHAR_BUDGET = 1800;
 
+/**
+ * WARP-3125 — what the caller's turn can actually do, so the block does not
+ * point the model at a tool it cannot see.
+ */
+export interface BrainBlockOptions {
+  /**
+   * The tool names ADVERTISED ON THIS TURN (what the loop puts on the wire,
+   * i.e. `effectiveAdvertisedToolNames` — after RBAC and after selection).
+   * The closing sentence names `business_find` and is dropped when it is not
+   * in this set.
+   *
+   * Why: voice sends a fixed `allowed_tools` with no `business_find`, so on a
+   * box with digests or findings every voice turn was told to call a tool it
+   * was not given. A tool outside the pool is rejected by the
+   * hallucinated-tool guard; one in the pool but not selected costs the turn
+   * an iteration to self-heal. Voice has two.
+   *
+   * `undefined` means the call site has no notion of a tool set (the prompt
+   * inspector) and the hint stays: the same contract as
+   * `composeToolGuidance(undefined)`. An EMPTY set is a real answer — no
+   * tools — and names none.
+   */
+  advertisedTools?: ReadonlySet<string>;
+}
+
+const STANDING_SUMMARY_NOTE =
+  "This is a standing summary from a background pass, not a live read, and it is partial.";
+const BUSINESS_FIND_HINT = "Use business_find (entity: finding or digest) for the current list.";
+
 function money(minor: bigint | null, currency: string | null): string {
   if (minor === null || currency === null) return "";
   // CURRENCY-AWARE via formatMinorUnits. Dividing by 100n was wrong by 100x
@@ -95,6 +124,7 @@ function money(minor: bigint | null, currency: string | null): string {
 export async function buildBrainBlock(
   prisma: PrismaClient,
   caller: { id: string; role: string },
+  opts: BrainBlockOptions = {},
 ): Promise<string> {
   try {
     if (!(await isBrainEnabled(prisma))) return "";
@@ -151,7 +181,11 @@ export async function buildBrainBlock(
     // pass covers ~240 documents a day. A model that says "I have reviewed all
     // your documents" on the strength of eight digests is lying on the box's
     // behalf, and `business_find` is how it checks.
-    "This is a standing summary from a background pass, not a live read, and it is partial. Use business_find (entity: finding or digest) for the current list.",
+    STANDING_SUMMARY_NOTE +
+      // Only name the tool when the turn can call it (BrainBlockOptions).
+      (opts.advertisedTools && !opts.advertisedTools.has("business_find")
+        ? ""
+        : ` ${BUSINESS_FIND_HINT}`),
   );
 
   const block = lines.join("\n");

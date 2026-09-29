@@ -161,15 +161,14 @@ function createPrismaMock(
   };
 }
 
-function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
+type TestUser = { id: string; username: string; role: string };
+const OWNER: TestUser = { id: "owner-uuid", username: "stefan", role: "owner" };
+
+function buildApp(prisma: ReturnType<typeof createPrismaMock>, user: TestUser = OWNER) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as unknown as { user?: unknown }).user = {
-      id: "owner-uuid",
-      username: "stefan",
-      role: "owner",
-    };
+    (req as unknown as { user?: unknown }).user = user;
     next();
   });
   app.use("/api", createLlmRouter(prisma as never));
@@ -267,5 +266,104 @@ describe("POST /api/llm/chat — the brain block obeys the consent switch (WARP-
     const res = await chat(buildApp(prisma));
     expect(res.status).toBe(200);
     expect(systemPromptText()).not.toContain(BRAIN_BLOCK_HEADING);
+  });
+});
+
+/**
+ * WARP-3125 — the block's closing hint follows the tools ADVERTISED ON THE
+ * TURN, not the ones the model might once have been given.
+ *
+ * THE DEFECT. The block always ended "Use business_find (entity: finding or
+ * digest) for the current list." Voice sends a fixed `allowed_tools` that has
+ * no `business_find`, so on a box with digests or findings every voice turn
+ * was told to call a tool it could not see. The test that should have caught
+ * it ran with the brain tables empty, and an empty brain returns "" — which
+ * passes an absence assertion against any implementation. The rows are
+ * present here, as in the consent cases above.
+ */
+describe("POST /api/llm/chat — the brain block names only advertised tools (WARP-3125)", () => {
+  const HINT = "Use business_find";
+  const VOICE: TestUser = { id: "_service:voice", username: "_service:voice", role: "service" };
+  // A slice of voice-io's DEFAULT_VOICE_ALLOWED_TOOLS — no `business_find`.
+  const VOICE_TOOLS = ["get_system_health", "list_cameras", "control_device", "search_content"];
+
+  const voiceTurn = (allowed_tools: string[]) => ({
+    model: "m1",
+    messages: [
+      { role: "system", content: "You're Droplet's voice. One short sentence." },
+      { role: "user", content: "how is the business doing?" },
+    ],
+    allowed_tools,
+    max_iter: 2,
+  });
+
+  const post = (app: express.Express, body: Record<string, unknown>) =>
+    request(app).post("/api/llm/chat").send(body);
+
+  it("a voice turn still carries the block (the control)", async () => {
+    // Without this the absence test below passes against a route that built
+    // no block at all.
+    const res = await post(
+      buildApp(createPrismaMock({ enabled: true }), VOICE),
+      voiceTurn(VOICE_TOOLS),
+    );
+    expect(res.status).toBe(200);
+    const sys = systemPromptText();
+    expect(sys).toContain(BRAIN_BLOCK_HEADING);
+    expect(sys).toContain(DIGEST_SENTINEL);
+    expect(sys).toContain(FINDING_SENTINEL);
+    expect(sys).toContain("not a live read");
+  });
+
+  it("🔴 a voice turn is NOT told to call business_find, a tool it was not given", async () => {
+    const res = await post(
+      buildApp(createPrismaMock({ enabled: true }), VOICE),
+      voiceTurn(VOICE_TOOLS),
+    );
+    expect(res.status).toBe(200);
+    const req = mockRunAgent.mock.calls.at(-1)![1] as { allowed_tools?: string[] };
+    // The premise: the tool really is not on offer.
+    expect(req.allowed_tools).not.toContain("business_find");
+    expect(systemPromptText()).not.toContain("business_find");
+  });
+
+  it("a voice turn that DOES advertise business_find keeps the hint", async () => {
+    const res = await post(
+      buildApp(createPrismaMock({ enabled: true }), VOICE),
+      voiceTurn([...VOICE_TOOLS, "business_find"]),
+    );
+    expect(res.status).toBe(200);
+    expect(systemPromptText()).toContain(`${HINT} (entity: finding or digest) for the current list.`);
+  });
+
+  it("the voice prompt is byte-identical across two utterances, hint or no hint", async () => {
+    // The cache claim: the hint is decided by the (fixed) tool set, not by
+    // what was said.
+    const app = buildApp(createPrismaMock({ enabled: true }), VOICE);
+    const a = voiceTurn(VOICE_TOOLS);
+    const b = {
+      ...a,
+      messages: [a.messages[0]!, { role: "user", content: "is the front camera online?" }],
+    };
+    await post(app, a);
+    const first = systemPromptText();
+    await post(app, b);
+    expect(systemPromptText()).toBe(first);
+  });
+
+  it("a dashboard turn's hint follows keyword selection: absent on 'hi', present on a project question", async () => {
+    // Under `domains` the turn advertises the core tools plus matched domains.
+    // "hi" matches none, so business_find is not on offer; a project sentence
+    // opens the `business` domain.
+    const app = buildApp(createPrismaMock({ enabled: true }));
+    await post(app, { model: "m1", messages: [{ role: "user", content: "hi" }] });
+    expect(systemPromptText()).toContain(BRAIN_BLOCK_HEADING);
+    expect(systemPromptText()).not.toContain(HINT);
+
+    await post(app, {
+      model: "m1",
+      messages: [{ role: "user", content: "which projects are at risk?" }],
+    });
+    expect(systemPromptText()).toContain(HINT);
   });
 });

@@ -563,11 +563,13 @@ describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
  * never advertised). The model called it anyway, hit TOOL_NOW_AVAILABLE, and
  * the self-heal retry burned one of the turn's few iterations.
  *
- * So for `_service:voice` the route passes `tool_selection_mode: "off"` — the
- * request's own `allowed_tools` are advertised as-is. Every other caller keeps
- * the configured mode, and the assertions below pin both halves: the voice
- * case must go red if the exemption is removed, the typed-chat case if it
- * leaks.
+ * So for `_service:voice` the route passes `tool_selection_mode: "explicit"`
+ * (WARP-3125 — it was `"off"` under WARP-3316's inline derivation; `explicit`
+ * advertises the same whole list and additionally keeps the tool budget
+ * asserted) — the request's own `allowed_tools` are advertised as-is. Every
+ * other caller keeps the configured mode, and the assertions below pin both
+ * halves: the voice case must go red if the exemption is removed, the
+ * typed-chat case if it leaks.
  */
 describe("/api/llm/chat — WARP-3316 voice skips domain tool-selection", () => {
   // Read-only, one per domain, none in CORE_TOOL_NAMES except the floor.
@@ -585,13 +587,13 @@ describe("/api/llm/chat — WARP-3316 voice skips domain tool-selection", () => 
     return app;
   }
 
-  it("ships tool_selection_mode off and advertises the whole allowed_tools list for voice", async () => {
+  it("ships tool_selection_mode explicit and advertises the whole allowed_tools list for voice", async () => {
     const res = await chat(
       buildAppAs({ id: "_service:voice", role: "service" }),
       { messages: SPOKEN, allowed_tools: VOICE_POOL },
     );
     expect(res.status).toBe(200);
-    expect(agentRequest().tool_selection_mode).toBe("off");
+    expect(agentRequest().tool_selection_mode).toBe("explicit");
     expect(agentRequest().allowed_tools).toEqual(VOICE_POOL);
     const advertised = advertisedFromAgentRequest(VOICE_POOL);
     // No keyword in the utterance names a domain, yet nothing is dropped.
