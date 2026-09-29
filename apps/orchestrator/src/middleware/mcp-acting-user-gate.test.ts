@@ -316,6 +316,8 @@ const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   business: ["business_find GET /api/brain/digests", "business_find GET /api/brain/findings"],
   // WARP-2979 — every security hop is under /api/security/assistant/, inside the gated prefix.
   security: [],
+  // WARP-3145: every email hop is under /api/email.
+  email: [],
 };
 
 describe("mcp acting-user gate — which domains it narrows", () => {
@@ -323,8 +325,8 @@ describe("mcp acting-user gate — which domains it narrows", () => {
   // from it would take its own checks with it and nothing would go red.
   // WARP-2979: `security` — its tools' routes resolve the person too, but the
   // mcp-server's HTTP transport runs only write-tier RBAC (ADR-059 P4 §6.12.2).
-  it("narrows exactly business and security", () => {
-    expect([...MCP_ACTING_USER_GATED_DOMAINS].sort()).toEqual(["business", "security"]);
+  it("narrows exactly business, email and security", () => {
+    expect([...MCP_ACTING_USER_GATED_DOMAINS].sort()).toEqual(["business", "email", "security"]);
   });
 });
 

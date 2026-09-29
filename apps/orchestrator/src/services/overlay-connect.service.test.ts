@@ -92,13 +92,21 @@ function makeFetch(route: (call: FetchCall) => Response) {
   return { impl: impl as unknown as typeof fetch, calls };
 }
 
-function makePrisma(seed: OverlayVpnPeerRow[] = []) {
+function makePrisma(
+  seed: OverlayVpnPeerRow[] = [],
+  users: Record<string, { directoryStatus: string; role: string }> = {},
+) {
   const rows: Array<OverlayVpnPeerRow & Record<string, unknown>> = seed.map(
     (r) => ({ ...r }),
   );
   let counter = 0;
   const prisma = {
     rows,
+    // WARP-3172: the directory the connect tick checks a device owner against.
+    user: {
+      findUnique: async ({ where }: { where: { username: string } }) =>
+        users[where.username] ?? null,
+    },
     vpnPeer: {
       findUnique: async ({ where }: { where: { publicKey: string } }) =>
         rows.find((r) => r.publicKey === where.publicKey) ?? null,
@@ -978,7 +986,7 @@ describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
   };
 
   it("stamps the approved enrollment's provenance onto a freshly-created peer", async () => {
-    const prisma = makePrisma() as ReturnType<typeof makePrisma> & {
+    const prisma = makePrisma([], { bob: { directoryStatus: "ACTIVE", role: "family" } }) as ReturnType<typeof makePrisma> & {
       pendingOverlayEnrollment?: unknown;
     };
     const enrolledAt = new Date("2026-07-21T09:00:00.000Z");
@@ -990,6 +998,8 @@ describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
               label: "Alice iPhone",
               approvedBy: "owner-1",
               enrolledAt,
+              // WARP-3152: a member's staged sign-in enrollment.
+              requestedBy: "bob",
             }
           : null,
     };
@@ -1005,6 +1015,9 @@ describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
       } as OverlayConnectDeps,
       offer,
     );
+    // WARP-3152: the tick that creates the peer gives it to the requester.
+    expect((row as unknown as Record<string, unknown>).userId).toBe("bob");
+    expect(row).not.toHaveProperty("requestedBy");
     expect(row).toMatchObject({
       linkTokenEnrolledBy: "owner-1",
       linkTokenId: "tok-1",
@@ -1031,5 +1044,93 @@ describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
       offer,
     );
     expect((row as unknown as Record<string, unknown>).linkTokenId).toBeUndefined();
+    expect((row as unknown as Record<string, unknown>).userId).toBe("overlay");
+  });
+});
+
+// --- WARP-3172: a leaver's device is never installed or revived ------------
+
+describe("installOrRefreshOverlayPeer — owner must still be an active member (WARP-3172)", () => {
+  const offer = {
+    sessionId: "sess-9",
+    clientEndpoint: "198.51.100.9:41000",
+    clientPublicKey: "LEAVERKEY",
+    clientLabel: "Bob laptop",
+  };
+  function deps(prisma: ReturnType<typeof makePrisma>, fetchImpl?: typeof fetch) {
+    const { peers, installed, removed } = makePeers();
+    return {
+      d: {
+        config: baseConfig(),
+        identity: makeIdentity().identity,
+        prisma,
+        peers,
+        allocateIp: async () => "10.13.13.9",
+        now: () => FIXED_NOW,
+        fetchImpl,
+      } as OverlayConnectDeps,
+      installed,
+      removed,
+    };
+  }
+  const revokedRow = (extra: Record<string, unknown> = {}) =>
+    ({
+      id: "vp-bob",
+      publicKey: "LEAVERKEY",
+      assignedIp: "10.13.13.5",
+      status: "revoked",
+      kind: "overlay",
+      userId: "bob",
+      hqRevokePending: true,
+      ...extra,
+    }) as OverlayVpnPeerRow;
+
+  it("refuses to revive a REVOKED row of a deactivated owner, and retries the owed HQ revoke", async () => {
+    const prisma = makePrisma([revokedRow()], {
+      bob: { directoryStatus: "DEACTIVATED", role: "family" },
+    });
+    const { impl: fetchImpl, calls } = makeFetch((call) =>
+      call.url.endsWith("/api/overlay/devices/revoke")
+        ? jsonResponse(200, { device_id: "droplet-abc", wg_public_key: "LEAVERKEY", state: "revoked" })
+        : jsonResponse(500, { error: "unexpected" }),
+    );
+    const { d, installed } = deps(prisma, fetchImpl);
+    const row = await installOrRefreshOverlayPeer(d, offer);
+    expect(row).toBeNull();
+    expect(installed).toHaveLength(0);
+    expect(prisma.rows[0].status).toBe("revoked");
+    expect(calls.some((c) => c.url.endsWith("/api/overlay/devices/revoke"))).toBe(true);
+    expect(prisma.rows[0].hqRevokePending).toBe(false);
+  });
+
+  it("keeps the retry owed when HQ is still down, and still installs nothing", async () => {
+    const prisma = makePrisma([revokedRow()], {});
+    const { impl: fetchImpl } = makeFetch(() => jsonResponse(503, { error: "down" }));
+    const { d, installed } = deps(prisma, fetchImpl);
+    expect(await installOrRefreshOverlayPeer(d, offer)).toBeNull(); // deleted owner
+    expect(installed).toHaveLength(0);
+    expect(prisma.rows[0].hqRevokePending).toBe(true);
+  });
+
+  it("tears down a still-active peer of an owner demoted to external guest", async () => {
+    const prisma = makePrisma([revokedRow({ status: "active", hqRevokePending: false })], {
+      bob: { directoryStatus: "ACTIVE", role: "guest" },
+    });
+    const { impl: fetchImpl } = makeFetch(() => jsonResponse(503, { error: "down" }));
+    const { d, installed, removed } = deps(prisma, fetchImpl);
+    expect(await installOrRefreshOverlayPeer(d, offer)).toBeNull();
+    expect(installed).toHaveLength(0);
+    expect(removed).toHaveLength(1);
+    expect(prisma.rows[0]).toMatchObject({ status: "revoked", hqRevokePending: true });
+  });
+
+  it("still revives an ACTIVE member's own idle-expired device", async () => {
+    const prisma = makePrisma([revokedRow({ hqRevokePending: false })], {
+      bob: { directoryStatus: "ACTIVE", role: "family" },
+    });
+    const { d, installed } = deps(prisma);
+    const row = await installOrRefreshOverlayPeer(d, offer);
+    expect(row?.status).toBe("active");
+    expect(installed).toHaveLength(1);
   });
 });

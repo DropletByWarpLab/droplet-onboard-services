@@ -15,6 +15,8 @@ import type {
   ExtensionProposal,
   ExtensionPromotePhase1,
   ExtensionPromoteResult,
+  ExtensionToolClassification,
+  ExtensionToolDecision,
   CameraInfo,
   CameraGroupInfo,
   CameraPinInfo,
@@ -719,11 +721,43 @@ export async function changePassword(
   }
 }
 
-export async function deleteUser(username: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/auth/users/${username}`, {
+/**
+ * WARP-3113 — schedule a person's deletion. They are cut off now; their files
+ * are kept for 30 days (lib/leaver-deletion.ts), then the box deletes the account.
+ * Resolves with the date the deletion runs.
+ *
+ * WARP-3169 — with a `recipientId` (the recipient's local user id), the box
+ * first hands the files to that person (a new folder in their home) and then
+ * deletes the account at once. A failed hand-over rejects; nothing is deleted.
+ */
+export async function deleteUser(
+  username: string,
+  opts: { recipientId?: string } = {},
+): Promise<{ deletionDueAt?: string; folder?: string | null; status?: string }> {
+  const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}`, {
     method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      opts.recipientId
+        ? { disposition: "handover", recipientId: opts.recipientId }
+        : { disposition: "retention" },
+    ),
   });
-  if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Failed to delete user: ${res.status}`);
+  return { deletionDueAt: body.deletionDueAt, folder: body.folder, status: body.status };
+}
+
+/** WARP-3113 — cancel a scheduled deletion. The person stays deactivated. */
+export async function cancelUserDeletion(username: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/auth/users/${encodeURIComponent(username)}/cancel-deletion`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to cancel the deletion: ${res.status}`);
+  }
 }
 
 // --- PR #375 — TOTP 2FA enrollment ---
@@ -743,11 +777,16 @@ export interface TotpVerifyResponse {
 }
 
 /** Begin TOTP enrollment: returns the QR + otpauth URI for the current user. */
-export async function enrollTotp(signal?: AbortSignal): Promise<TotpEnrollResponse> {
+export async function enrollTotp(
+  signal?: AbortSignal,
+  // WARP-3193 — required by the box (403 STEP_UP_PASSWORD_REQUIRED) when the
+  // account has no second factor yet.
+  currentPassword?: string,
+): Promise<TotpEnrollResponse> {
   const res = await authFetch(`${BASE}/api/auth/totp/enroll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    body: JSON.stringify(currentPassword ? { currentPassword } : {}),
     signal,
   });
   if (!res.ok) {
@@ -768,11 +807,12 @@ export async function enrollTotp(signal?: AbortSignal): Promise<TotpEnrollRespon
  * Confirm a 6-digit code. On the first success the response carries the
  * one-time recovery codes (shown once); a later call enables nothing new.
  */
-export async function verifyTotp(code: string): Promise<TotpVerifyResponse> {
+export async function verifyTotp(code: string, currentPassword?: string): Promise<TotpVerifyResponse> {
   const res = await authFetch(`${BASE}/api/auth/totp/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
+    // WARP-3193 — the confirming verify carries the same step-up as enroll.
+    body: JSON.stringify(currentPassword ? { code, currentPassword } : { code }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -3302,7 +3342,7 @@ export async function enableCamera(name: string): Promise<void> {
 /** Consume a camera-domain Tier-2 confirmation token (WARP-861).
  *  Pairs with POST /api/cameras/command/confirm — the camera analogue of
  *  /switch/command/confirm. The operation echo is required (WARP-41). */
-async function confirmCameraCommand(
+export async function confirmCameraCommand(
   confirmationToken: string,
   operation: string,
 ): Promise<void> {
@@ -9086,6 +9126,37 @@ export function uninstallExtension(slug: string): Promise<{ id: string; status: 
   return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, { method: "DELETE" });
 }
 
+/**
+ * WARP-3205 — an extension's tools as the classification record has them,
+ * each with the arguments and signed description its review hash names
+ * (null when the box cannot show them) and what dispatch does with a call.
+ * Owner/admin.
+ */
+export function fetchExtensionToolClassifications(
+  serverId: string,
+): Promise<{ classifications: ExtensionToolClassification[] }> {
+  return extensionRequest(
+    `/api/admin/remote-tools/classifications?serverId=${encodeURIComponent(serverId)}`,
+  );
+}
+
+/**
+ * The owner's decision on one extension tool. Carries the review hash of
+ * what was shown, so a tool whose arguments or description changed in
+ * between is a 409 STALE_REVIEW, never a review of a tool nobody saw. The
+ * answer is the bare record row (no review fields): read the list again.
+ */
+export function classifyExtensionTool(
+  serverId: string,
+  toolName: string,
+  decision: ExtensionToolDecision,
+): Promise<{ classification: Omit<ExtensionToolClassification, "inputSchema" | "declaredDescription" | "decision"> }> {
+  return extensionRequest(
+    `/api/admin/remote-tools/classifications/${encodeURIComponent(serverId)}/${encodeURIComponent(toolName)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(decision) },
+  );
+}
+
 /** WARP-2991 — what a cloud turn on this conversation would carry. Mirrors
  *  `CloudHistorySummary` in the orchestrator's cloud-history-consent.service. */
 export interface CloudHistorySummary {
@@ -9389,7 +9460,7 @@ export async function deleteSecurityHoursException(date: string, version: number
 // Every call goes through `securityFetch`: a failure throws with `.code` (the
 // server's `error.code`) and `.status` — render it with
 // `translateError(err, "security")`, never `err.message`. Reads are view-level
-// for every household role and never produce a feature-gate denial (the threat
+// for every role in the business and never produce a feature-gate denial (the threat
 // mirror would show one as a threat); acknowledge/resolve are act, the routing
 // PUT is manage, and the page renders those controls only at that level.
 // Everything a read returns is already projected for the viewer (DS-005).

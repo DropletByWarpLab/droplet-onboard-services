@@ -78,6 +78,7 @@ import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createPanelSecurityRouter } from "./routes/panel-security.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createSignedSegmentRouter } from "./services/segment-url-signing.service.js";
 import { createSecurityRouter } from "./routes/security.js";
 import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
@@ -333,6 +334,12 @@ export function createApp(
   // container IP so they don't share a bucket with a browser.
   app.use(authenticatedApiRateLimit);
 
+  // WARP-3122 — a signed recordings-segment URL stands in for the bearer on
+  // GET /api/cameras/:name/playback.segment only. This router answers
+  // nothing: it resolves the signer and leaves the principal for
+  // authMiddleware, so every gate below still runs.
+  app.use("/api", createSignedSegmentRouter(prisma));
+
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
@@ -396,7 +403,9 @@ export function createApp(
   mountModuleGates(app, moduleGate);
   // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
   // the CRM / PM routes are narrowed by the ACTING user's §3 tool scope
-  // (`business` needs CRM or Projects). Humans are untouched by this mount.
+  // (`business` needs CRM or Projects), and, since WARP-3145, tool calls
+  // reaching /api/email need `email`. Mounted before the email router below.
+  // Humans are untouched by this mount.
   mountMcpActingUserGates(app, actingUserAccessResolver(prisma));
 
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
@@ -707,7 +716,7 @@ export function createApp(
   // has a shell to arrange. Service principals are refused in the router.
   app.use("/api", createMeDepartmentRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
-  app.use("/api", createActivityRouter(prisma));
+  app.use("/api", createActivityRouter(prisma, createDeviceIdentityClient()));
   // WARP-237: device-key-signed daily-root read surface.
   app.use("/api", createAuditRootsRouter(prisma));
   // WARP-823: owner/admin downloadable, secret-redacted diagnostics log
@@ -786,6 +795,8 @@ export function createApp(
   // off-lan-gate.service.ts and FAILS CLOSED (no egress) on any DB
   // error or missing row — a sovereignty control must not default-open
   // on a transient hiccup (mirrors ai-gateway/middleware/off_lan_gating.py).
+  // WARP-3145: the email tools' `_service:mcp` calls reach this router only
+  // past `mountMcpActingUserGates` above (the acting person needs `email`).
   app.use(
     "/api",
     createEmailRouter(prisma, {

@@ -67,6 +67,11 @@ export function TwoFactorStep({
   // "Try again" loop with the wrong copy; instead we show a calm "already on"
   // confirmation with a Continue.
   const [alreadyEnabled, setAlreadyEnabled] = useState(false);
+  // WARP-3193 — the box asks for the current password before minting a
+  // factor (a hijacked session must not plant its own authenticator). Kept in
+  // memory only, and sent again with the confirming verify.
+  const [needPassword, setNeedPassword] = useState(false);
+  const [password, setPassword] = useState("");
 
   // The otpauth secret, pulled from the URI for manual entry when a camera
   // can't scan the QR (`secret=` query param).
@@ -78,20 +83,28 @@ export function TwoFactorStep({
   // WARP-931 — auto-start enrollment so the QR is on the first screen.
   // Idempotent server-side (the factor isn't active until verify), so a retry
   // just mints a fresh pending secret.
-  const handleStart = useCallback(async (signal?: AbortSignal) => {
+  const handleStart = useCallback(async (signal?: AbortSignal, currentPassword?: string) => {
     setError(null);
     setEnrolling(true);
     try {
-      const res = await enrollTotp(signal);
+      const res = await enrollTotp(signal, currentPassword);
       setOtpauthUri(res.otpauthUri);
       setQrDataUrl(res.qrDataUrl);
     } catch (err) {
       if ((err as { name?: string })?.name === "AbortError") return;
+      const code = (err as { code?: unknown })?.code;
       // Returning to an already-completed 2FA step: the orchestrator answers
       // 409 TOTP_ALREADY_ENABLED. Treat it as "done", not an error — otherwise
       // the enroll-failed card loops "Try again" → 409 forever.
-      if ((err as { code?: unknown })?.code === "TOTP_ALREADY_ENABLED") {
+      if (code === "TOTP_ALREADY_ENABLED") {
         setAlreadyEnabled(true);
+      } else if (code === "STEP_UP_PASSWORD_REQUIRED") {
+        // WARP-3193 — not a failure: ask for the password, then enroll.
+        setNeedPassword(true);
+      } else if (code === "INVALID_PASSWORD") {
+        setNeedPassword(true);
+        setPassword("");
+        setError("That password didn't match. Try again.");
       } else {
         setError(translateError(err, "auth"));
       }
@@ -118,7 +131,9 @@ export function TwoFactorStep({
     }
     setIsBusy(true);
     try {
-      const res = await verifyTotp(code.trim());
+      const res = needPassword
+        ? await verifyTotp(code.trim(), password)
+        : await verifyTotp(code.trim());
       // WARP-991 — advance ONLY when the response says the factor is ON.
       // A 2xx that doesn't confirm (defensive — no current server path)
       // must keep the owner here with an inline error, never let them walk
@@ -219,6 +234,39 @@ export function TwoFactorStep({
             >
               <Loader2 size={24} className="animate-spin text-label-tertiary" />
             </div>
+          ) : !qrReady && needPassword ? (
+            // WARP-3193 — confirm it's you before the QR is minted.
+            <form
+              className="dp-card p-4 space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (password) void handleStart(undefined, password);
+              }}
+            >
+              <label
+                htmlFor="totp-current-password"
+                className="type-subheadline text-label-secondary block"
+              >
+                Enter your current password to set up two-factor
+              </label>
+              <input
+                id="totp-current-password"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="dp-input"
+                autoFocus
+              />
+              {error && (
+                <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+                  {error}
+                </p>
+              )}
+              <button type="submit" disabled={!password} className="dp-btn-secondary">
+                Continue
+              </button>
+            </form>
           ) : !qrReady ? (
             // Enrollment finished but produced no QR — it failed; offer a retry.
             <div className="dp-card p-4 text-center space-y-3">

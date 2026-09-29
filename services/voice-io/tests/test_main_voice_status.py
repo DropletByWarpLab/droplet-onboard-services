@@ -69,3 +69,22 @@ def test_voice_status_without_pipeline_defaults_level_fields(client, monkeypatch
     assert body["input_rms_dbfs"] is None
     assert body["last_audio_at"] is None
     assert body["input_flatlined"] is False
+    # WARP-3124 — additive: no pipeline, no turn timing.
+    assert body["last_turn_timing"] is None
+
+
+def test_voice_status_carries_last_turn_timing(client, monkeypatch):
+    """WARP-3124 — the last turn's `voice_turn_timing` fields ride
+    /voice/status additively (null before the first turn)."""
+    pipe = _listening_pipeline()
+    monkeypatch.setattr(main, "_pipeline", pipe)
+    assert client.get("/voice/status").json()["last_turn_timing"] is None
+
+    # Drive one real (no-LLM) turn end to end through the default callback.
+    pipe._default_on_transcript("what time is it")
+    body = client.get("/voice/status").json()
+    timing = body["last_turn_timing"]
+    assert timing == pipe.status().last_turn_timing
+    assert timing["outcome"] == "no_llm"
+    assert "first_audio_ms" in timing and timing["first_audio_ms"] is None
+    assert isinstance(timing["ended_at"], float)

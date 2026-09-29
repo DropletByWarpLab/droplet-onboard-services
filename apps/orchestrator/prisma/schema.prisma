@@ -1176,6 +1176,15 @@ enum DirectoryUserStatus {
   DEACTIVATED
 }
 
+// WARP-3113 — see User.deletionStatus. WARP-3169: HANDING_OVER is a
+// hand-over's claim while its file transfer runs.
+enum UserDeletionStatus {
+  NONE
+  PENDING
+  PURGING
+  HANDING_OVER
+}
+
 // WARP-2858 — how a User row came to exist. LOCAL: /auth/setup, admin
 // create, invite accept (the box owns the credential). SSO: just-in-time
 // created by an OIDC sign-in (sso.ts). SCIM: pushed by the IdP's directory
@@ -2257,6 +2266,10 @@ model VpnPeer {
   lastSessionAt DateTime?
   createdAt     DateTime  @default(now())
   revokedAt     DateTime?
+  // WARP-3172: the peer was revoked locally (router + row) but HQ could not be
+  // reached, so HQ may still broker sessions for it. The connect tick refuses
+  // the device and retries the HQ revoke, clearing this on success.
+  hqRevokePending Boolean @default(false)
 
   // WARP-1474: provenance for a peer enrolled via the dashboard-QR link flow
   // (ADR-030). Nullable — a peer minted via POST /api/vpn/peers (kind='static')
@@ -2357,6 +2370,10 @@ model PendingOverlayEnrollment {
   approvedBy         String?
   enrolledAt         DateTime?
   hqDeviceRef        String?
+  // WARP-3152: username of the account that asked, for a sign-in enrollment
+  // staged for owner review. Becomes the peer's owner at approval. NULL for a
+  // QR-linked device and for rows staged before the column existed (admin-only).
+  requestedBy        String?
 
   @@index([state])
   @@index([linkTokenId])
@@ -2862,6 +2879,27 @@ model User {
   // because a local password is a login the IdP's disable/deprovision cannot
   // reach. A LOCAL row that later links an SSO identity stays LOCAL.
   provisionSource    UserProvisionSource @default(LOCAL)
+  // WARP-3113 — leaver deletion. Delete never purges a person's files on the
+  // spot: it parks the row (already DEACTIVATED) on PENDING with a due date,
+  // and the nightly leaver-deletion job completes the removal after the
+  // retention window. PURGING is the job's claim, so an admin's cancel can
+  // never land between the Nextcloud delete and the row delete. Explicit
+  // enum, never derived from a null `deletionDueAt`. WARP-3169: HANDING_OVER
+  // holds the row while a hand-over's file transfer runs; the previous value
+  // is restored if the transfer fails.
+  deletionStatus      UserDeletionStatus @default(NONE)
+  deletionDueAt       DateTime?
+  deletionRequestedBy String?
+  // WARP-3176 — when the current HANDING_OVER or PURGING claim was taken
+  // (null on NONE / PENDING). It is the claim's token: every later write by
+  // the request that took it is pinned to it, and the stale-claim sweep and
+  // the nightly retry age it (never inferred from updatedAt).
+  // `handoverPriorStatus` is the NONE|PENDING value a HANDING_OVER claim
+  // replaced, so a released claim never silently cancels a scheduled
+  // retention delete; `handoverRecipientId` names who was receiving.
+  deletionClaimedAt   DateTime?
+  handoverPriorStatus UserDeletionStatus?
+  handoverRecipientId String?
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was
@@ -3044,6 +3082,11 @@ model TotpCredential {
   // on the first successful code. The login gate requires TOTP only when
   // this is non-null.
   confirmedAt DateTime?
+  // WARP-3193 SEC-AUTH-10 — the RFC 6238 time step (unix seconds / 30) of
+  // the last code accepted. A code is accepted only through a conditional
+  // update `lastAcceptedStep < step`, so each code works at most once.
+  // 0 = no code accepted yet (step 0 is 1970; no live code can match it).
+  lastAcceptedStep Int     @default(0)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }

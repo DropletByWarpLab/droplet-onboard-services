@@ -519,12 +519,21 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     ]);
   });
 
-  it("not subscribed → the camera ingest is DOWN, with the broker's reason", () => {
+  it("not subscribed → the camera ingest is DOWN, with the broker's reason for owners/admins", () => {
     const rows = buildSecurityHealth({
       ...base,
+      showRawErrors: true,
       ingest: ingest({ frigateSubscribed: false, frigateSubscribeError: "broker refused frigate/events" }),
     });
     expect(row(rows, "camera_ingest")).toMatchObject({ state: "down", detail: "broker refused frigate/events" });
+  });
+
+  it("WARP-3261: without showRawErrors (the default) the down row is a fixed sentence, never the exception text", () => {
+    const rows = buildSecurityHealth({
+      ...base,
+      ingest: ingest({ frigateSubscribed: false, frigateSubscribeError: "connect ECONNREFUSED 172.18.0.9:1883" }),
+    });
+    expect(row(rows, "camera_ingest")).toMatchObject({ state: "down", detail: "Not listening to the camera system" });
   });
 
   it("subscribed but silent for more than 6 hours → quiet, not ok", () => {
