@@ -142,8 +142,9 @@ function pkceS256Matches(codeVerifier: string, codeChallenge: string): boolean {
 }
 
 /**
- * OAuth 2.0 / OIDC authorization-error codes (RFC 6749 §4.1.2.1, OIDC Core
- * §3.1.2.6) the IdP may send back on the callback. Only these are relayed to
+ * OAuth 2.0 / OIDC authorization-error codes (RFC 6749 section 4.1, OIDC Core
+ * authentication error response) the IdP may send back on the callback. Only
+ * these are relayed to
  * the native app, verbatim; anything else (and never `error_description`, which
  * is IdP-controlled free text) collapses to `server_error`.
  */
@@ -166,7 +167,7 @@ const RELAYED_IDP_ERRORS: ReadonlySet<string> = new Set([
  * `sso_email_unverified` and `sso_domain_not_allowed` (documented in
  * docs/mobile-api-contract.md).
  */
-/** RFC 6749 §4.1.2.1 shape: the app's redirect with `error` and the state it sent. */
+/** RFC 6749 section 4.1 (authorization error response) shape: the app's redirect with `error` and the state it sent. */
 function nativeErrorRedirectUrl(redirectUri: string, state: string, error: string): string {
   return `${redirectUri}?error=${encodeURIComponent(error)}&state=${encodeURIComponent(state)}`;
 }
@@ -666,7 +667,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
 
       // NATIVE flow: the system browser is not the app, so a failure has
       // nowhere useful to render. Relay it to the app's own redirect as
-      // `error=` (RFC 6749 §4.1.2.1, so the app can stop waiting) and audit it.
+      // `error=` (RFC 6749 section 4.1, so the app can stop waiting) and audit it.
       // Returns false for a BROWSER flow, which keeps answering in place.
       const relayNativeError = async (
         error: string,
