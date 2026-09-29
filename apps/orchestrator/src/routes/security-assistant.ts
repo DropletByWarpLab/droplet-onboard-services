@@ -50,9 +50,11 @@
  * mcp-server's HTTP transport runs only write-tier RBAC.
  *
  * What the tools see is built field by field in
- * services/security-assistant-view.ts: no person's name, no stored summary.
- * A read that cannot be answered is 503, never an empty 200: an empty list
- * reads as a quiet site.
+ * services/security-assistant-view.ts: no person's name, no stored event
+ * summary. The one stored text A2 passes is Droplet's own "Summary by
+ * Droplet" (`summaryByDroplet`), under `narrativeVisibleTo` and only once
+ * written. A read that cannot be answered is 503, never an empty 200: an
+ * empty list reads as a quiet site.
  *
  * A5 (WARP-2980, ADR-059 P5 PR-E, spec §6.18) calls PR-A's
  * `explainSecurityPattern` — the function behind route 31 and the Patterns
@@ -85,8 +87,9 @@ import {
 } from "../services/security-incident-view.js";
 import { SECURITY_EVENT_RETENTION_DAYS, feedVisibilityWhere, listSecurityEvents, parseFeedCursor } from "../services/security-events.service.js";
 import { SECURITY_INCIDENT_RETENTION_DAYS } from "../services/security-incidents.service.js";
-import { HoursUnreadableError, readModeView, readSiteClock } from "../services/security-mode.service.js";
+import { HoursUnreadableError, readModeView, readSiteClock, resolveSecurityTimezone, type ModeView } from "../services/security-mode.service.js";
 import {
+  SECURITY_ZONE_ACTIVE_LIMIT,
   listLinkProposals,
   loadActiveLinks,
   loadCameraLabels,
@@ -116,6 +119,7 @@ import {
   patternAnswer,
   severityWord,
   stateWord,
+  summaryOut,
 } from "../services/security-assistant-view.js";
 import {
   ASSISTANT_PERIODS,
@@ -141,6 +145,11 @@ const INCIDENT_EVENTS_SHOWN = 30;
 const AREAS_PER_EVENT = 3;
 /** Evidence rows per code A2 carries. */
 const EVIDENCE_PER_CODE = 3;
+/**
+ * WARP-3194 — A4 reads this many areas at once (two reads each), and only as
+ * many batches as its page can hold: never every visible area at once.
+ */
+export const AREA_READ_BATCH = 8;
 /** A5's `at`: how far back (the event retention; the numbers are the last 4 weeks either way)… */
 const PATTERN_AT_BACK_MS = 30 * DAY_MS;
 /** …and how far ahead (route 31's bound: a clock a little ahead of the box's). */
@@ -235,14 +244,47 @@ function viewerOf(actor: SecurityActor, scope: SecurityViewerScope): IncidentVie
 
 // ── shared pieces ─────────────────────────────────────────────────────────
 
-/** The site clock; stored hours that cannot be evaluated read as "no zone known" (the site_mode health row says why). */
+/**
+ * WARP-3194 — the zone when the stored opening hours cannot be evaluated (the
+ * site_mode health row says why). The site's own zone when the runtime knows
+ * it — the rows are broken, not the zone, and THE display rule
+ * (`resolveSecurityTimezone`) keeps it — else the workspace's: the rule
+ * answers null for a site zone it cannot read, which cost `today`,
+ * `last_night` and A4 their answers altogether. Nothing is swapped silently:
+ * every answer names the zone it used (`timezone`). Null only when neither is
+ * known.
+ */
+async function unreadableHoursZone(prisma: PrismaClient): Promise<string | null> {
+  return (await resolveSecurityTimezone(prisma)) ?? resolveSecurityTimezone(prisma, { state: "not_set" });
+}
+
+/** The site clock; stored hours that cannot be evaluated read as not set, in `unreadableHoursZone`. */
 async function siteClockOf(prisma: PrismaClient, now: Date): Promise<AssistantSite> {
   try {
     return await readSiteClock(prisma, now);
   } catch (err) {
-    if (err instanceof HoursUnreadableError) return { hours: { state: "not_set" } satisfies SiteHours, timezone: null };
+    if (err instanceof HoursUnreadableError) return { hours: { state: "not_set" } satisfies SiteHours, timezone: await unreadableHoursZone(prisma) };
     throw err;
   }
+}
+
+/**
+ * A4's `site`: the effective mode and why (never who). `mode` null = the
+ * stored hours cannot be evaluated (WARP-3194): the mode is then "unknown" —
+ * route 5 answers 503 rather than a fake "open", and so does this field —
+ * while the areas still answer.
+ */
+function siteOut(mode: ModeView | null, tz: string | null, now: Date) {
+  if (!mode) return { mode: "unknown", why: "opening hours can't be read", until: null, hoursSet: true, timezone: tz };
+  const upcoming = mode.hours.state === "set" ? mode.hours.upcoming : null;
+  const until = mode.until ?? upcoming?.at ?? null;
+  return {
+    mode: mode.mode,
+    why: mode.source === "manual" ? "set by hand" : "opening hours",
+    until: until ? assistantInstant(new Date(until), tz, now) : null,
+    hoursSet: mode.hours.state === "set",
+    timezone: tz,
+  };
 }
 
 function periodOut(p: ResolvedAssistantPeriod | null, tz: string | null, now: Date) {
@@ -373,7 +415,13 @@ const eventsQuery = z
   })
   .strict();
 
-const areasQuery = z.object({ area: z.string().max(60).optional() }).strict();
+const areasQuery = z
+  .object({
+    area: z.string().max(60).optional(),
+    // WARP-3194 — A4's `nextOffset`: where the next page starts among this viewer's visible areas.
+    offset: z.coerce.number().int().min(0).max(SECURITY_ZONE_ACTIVE_LIMIT).default(0),
+  })
+  .strict();
 
 const patternsQuery = z
   .object({
@@ -474,10 +522,13 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const base = {
         ...incidentItem(detail, labels, tz, now),
         codes,
+        // Route 18's `narrative` for this viewer (narrativeVisibleTo), written text only.
+        summaryByDroplet: summaryOut(detail.narrative, tz, now),
         eventsRemoved: detail.eventsKept === "removed",
         acknowledged: lastOf("acknowledge"),
         resolved: lastOf("resolve"),
       };
+      // The summary is in `base`, so it counts toward the budget: the events give way, never the summary.
       const n = fitList(events, (kept) => ({ incident: { ...base, events: kept, moreEvents: true } }));
       res.json({
         incident: { ...base, events: events.slice(0, n), moreEvents: detail.moreEvents || members.length > n },
@@ -549,12 +600,16 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const scope = await securityScopeForPerson(prisma, who, resolver);
       const viewer = viewerOf(who, scope);
       const [mode, records, links, labels] = await Promise.all([
-        readModeView(prisma, now),
+        // WARP-3194: hours that cannot be evaluated leave the mode unknown, not the whole answer a 503.
+        readModeView(prisma, now).catch((err: unknown) => {
+          if (err instanceof HoursUnreadableError) return null;
+          throw err;
+        }),
         loadZoneRecords(prisma, false),
         loadActiveLinks(prisma),
         loadCameraLabels(prisma),
       ]);
-      const tz = mode.displayTimezone;
+      const tz = mode ? mode.displayTimezone : await unreadableHoursZone(prisma);
       let zones = visibleZoneViews(records, scope, labels);
       if (q.data.area !== undefined) {
         const key = nameKey(q.data.area);
@@ -571,48 +626,57 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
         return r.health === "online" ? "yes" : r.health === "disabled" ? "detection off" : "offline";
       };
       const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats);
-      const areas = await Promise.all(
-        zones.map(async (z) => {
-          const clause = zoneFilterFor(links, z.id, scope);
-          const latest =
-            clause === "none"
-              ? null
-              : (await listSecurityEvents(prisma, visibility, { limit: 1, kinds: { in: ["detection"] }, includeLow: false }, [clause])).events[0] ?? null;
-          const openIncidents = await prisma.securityIncident.count({ where: incidentListWhere(viewer, { state: "open", zoneId: z.id }) });
-          return {
-            name: z.name,
-            kind: ZONE_KIND_WORD[z.kind],
-            lastActivity: latest
-              ? { at: assistantInstant(new Date(latest.startedAt), tz, now), what: eventWhat(latest.kind, latest.labels, latest.camera), source: eventSource(latest.kind, latest.camera, labels) }
-              : null,
-            openIncidents,
-            coveredBy: z.links.map((l) => {
-              const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-              return {
-                source: l.label,
-                part: parsed?.frigateZone ?? null,
-                reporting: reporting(parsed?.camera),
-                linkedBy: l.setBy === "droplet" ? "Droplet" : "a person",
-              };
-            }),
-          };
-        }),
-      );
-      const upcoming = mode.hours.state === "set" ? mode.hours.upcoming : null;
-      const until = mode.until ?? upcoming?.at ?? null;
-      const site = {
-        mode: mode.mode,
-        why: mode.source === "manual" ? "set by hand" : "opening hours",
-        until: until ? assistantInstant(new Date(until), tz, now) : null,
-        hoursSet: mode.hours.state === "set",
-        timezone: tz,
+      // One area's answer: its last visible activity and its open incidents (two reads), and what covers it.
+      const readArea = async (z: (typeof zones)[number]) => {
+        const clause = zoneFilterFor(links, z.id, scope);
+        const latest =
+          clause === "none"
+            ? null
+            : (await listSecurityEvents(prisma, visibility, { limit: 1, kinds: { in: ["detection"] }, includeLow: false }, [clause])).events[0] ?? null;
+        const openIncidents = await prisma.securityIncident.count({ where: incidentListWhere(viewer, { state: "open", zoneId: z.id }) });
+        return {
+          name: z.name,
+          kind: ZONE_KIND_WORD[z.kind],
+          lastActivity: latest
+            ? { at: assistantInstant(new Date(latest.startedAt), tz, now), what: eventWhat(latest.kind, latest.labels, latest.camera), source: eventSource(latest.kind, latest.camera, labels) }
+            : null,
+          openIncidents,
+          coveredBy: z.links.map((l) => {
+            const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+            return {
+              source: l.label,
+              part: parsed?.frigateZone ?? null,
+              reporting: reporting(parsed?.camera),
+              linkedBy: l.setBy === "droplet" ? "Droplet" : "a person",
+            };
+          }),
+        };
       };
-      // Suggestions are a manage-level surface (route 23): below it, not even a count.
+      const site = siteOut(mode, tz, now);
+      // Suggestions are a manage-level surface (route 23): below it, not even a count. Over every area shown, not the page.
       const shown = new Set(zones.map((z) => z.id));
       const suggestionsWaiting =
         who.level === "manage" ? (await listLinkProposals(prisma, scope, labels)).filter((s) => shown.has(s.zone.id)).length : null;
-      const n = fitList(areas, (kept) => ({ site, areas: kept, moreAreas: areas.length, suggestionsWaiting }));
-      res.json({ site, areas: areas.slice(0, n), moreAreas: areas.length - n, suggestionsWaiting });
+      // WARP-3194 — the page: `offset` counts THIS viewer's visible areas only (DS-005), so no offset, count or
+      // page says anything about an area she cannot see. `wrap` is the exact body for a page of `kept`.
+      const offset = q.data.offset;
+      const page = zones.slice(offset);
+      const wrap = (kept: readonly unknown[]) => ({
+        site,
+        areas: kept,
+        moreAreas: page.length - kept.length,
+        nextOffset: kept.length < page.length ? offset + kept.length : null,
+        suggestionsWaiting,
+      });
+      // WARP-3194 — read the page's areas only, AREA_READ_BATCH at a time, and stop at the first batch the body
+      // overflows: a longer prefix never fits once a shorter one does not, so the page is exactly what fitting
+      // every area would give.
+      const items: Array<Awaited<ReturnType<typeof readArea>>> = [];
+      for (let i = 0; i < page.length; i += AREA_READ_BATCH) {
+        items.push(...(await Promise.all(page.slice(i, i + AREA_READ_BATCH).map(readArea))));
+        if (fitList(items, wrap) < items.length) break;
+      }
+      res.json(wrap(items.slice(0, fitList(items, wrap))));
     } catch (err) {
       unavailable(res, err, "assistant area status");
     }

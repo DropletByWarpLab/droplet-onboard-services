@@ -1,7 +1,10 @@
 /**
  * WARP-2979 (ADR-059 P4 §6.12.3) — `security_get_incident`: one incident the
- * person may see, by id — its reasons with their evidence, its events, and
- * when it was acknowledged or resolved (never by whom).
+ * person may see, by id — its reasons with their evidence, its events, when
+ * it was acknowledged or resolved (never by whom), and `summaryByDroplet`:
+ * Droplet's own written summary, only for a person the orchestrator's
+ * `narrativeVisibleTo` admits (else null). The codes are what is true; the
+ * summary only explains them.
  *
  * Read-only (§6.12.4): GET A2 only. Missing and hidden are the same answer
  * (INCIDENT_NOT_FOUND). See ./common.ts.
@@ -37,7 +40,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "security_get_incident",
   description:
-    "One Security incident by id: the reasons Droplet flagged it (these are what is true), the events behind it with local times, and whether it was acknowledged or resolved. Never name or guess who a person was; Droplet does not know. Events are kept 30 days; the reasons stay for a year.",
+    "One Security incident by id: the reasons Droplet flagged it (these are what is true), the events behind it with local times, whether it was acknowledged or resolved, and summaryByDroplet, Droplet's own summary when there is one: it only explains the reasons, and where they differ the reasons are right. Never name or guess who a person was; Droplet does not know. Events are kept 30 days; the reasons stay for a year.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

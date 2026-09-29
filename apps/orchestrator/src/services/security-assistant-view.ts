@@ -15,6 +15,12 @@
  * The model conflates "acknowledged by Maria" with "Maria was seen" (D26),
  * and Droplet knows that a person was seen, never who.
  *
+ * The ONE stored text that passes through is Droplet's own incident summary
+ * (`summaryOut`, A2's `summaryByDroplet`): PR-2's check refused any name in
+ * it before it was stored (§6.11.1 NAMES), and it reaches only a viewer
+ * `narrativeVisibleTo` admits — and only once written, never a pending or
+ * failed attempt's leftover text.
+ *
  * Names that DO appear are places and devices a person chose: area names and
  * camera display names — the same the dashboard shows this viewer.
  *
@@ -35,6 +41,7 @@
 import type { SecurityEventKind, SecurityIncidentScope, SecurityIncidentState, SecurityReasonCode, SecuritySeverity, SecurityZoneKind } from "@prisma/client";
 import { assistantInstant } from "../lib/security-assistant-period.js";
 import { config } from "../config.js";
+import type { NarrativeView } from "./security-narrative-view.js";
 import { PATTERN_CODES, type PatternCode, type PatternRelease } from "../lib/security-baseline-math.js";
 import type { ExplainPatternView } from "./security-patterns-read.js";
 
@@ -196,6 +203,23 @@ export function stateWord(s: SecurityIncidentState): "open" | "acknowledged" | "
 
 export function codesOut(codes: readonly SecurityReasonCode[]): Array<{ code: SecurityReasonCode; sentence: string }> {
   return codes.map((code) => ({ code, sentence: CODE_SENTENCE[code] }));
+}
+
+/**
+ * A2's `summaryByDroplet` (§6.12.3) from route 18's own `narrative` for this
+ * viewer — `narrativeView`, so `narrativeVisibleTo`, the summaries switch and
+ * plain activity are already applied, and a viewer it refuses gets null with
+ * no hint. On top of that: only a WRITTEN text. A pending Regenerate, a failed
+ * or an expired attempt can still hold an earlier text; the tool gets none of
+ * it. Its time is local, like every other instant the tools return.
+ */
+export function summaryOut(
+  n: Pick<NarrativeView, "state" | "text" | "writtenAt"> | null,
+  tz: string | null,
+  now: Date,
+): { text: string; writtenAt: AssistantInstant } | null {
+  if (!n || n.state !== "written" || n.text === null || n.writtenAt === null) return null;
+  return { text: n.text, writtenAt: assistantInstant(new Date(n.writtenAt), tz, now) };
 }
 
 export function incidentUrl(id: string): string {
