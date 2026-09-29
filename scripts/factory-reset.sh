@@ -176,8 +176,11 @@ Options:
   --purge-images   Also remove built Docker images + dangling images/networks
   --force          Restart Docker if volumes cannot be removed (stuck references)
   --backup         Emit a pre-reset full-device safety backup and KEEP the
-                   backups dir (WARP-570 gate: a failed backup aborts the reset)
-  --no-backup      DEPRECATED no-op — no backup is already the default
+                   backups dir (WARP-570 gate: a failed backup aborts the reset).
+                   The backup does not carry the extension-signing key, which
+                   the reset rotates: after a restore, re-promote the owner's
+                   extensions (they read as failed until then)
+  --no-backup     DEPRECATED no-op — no backup is already the default
   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
                    registry). DEFAULT: RELEASE only — the device stays
                    registered/trusted and self-heals (WARP-980).
