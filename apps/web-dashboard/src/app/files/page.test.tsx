@@ -293,6 +293,20 @@ describe("<FilesPage /> (WARP-883 smoke)", () => {
     render(<FilesPage />);
     expect(screen.getByText("report.pdf")).toBeInTheDocument();
   });
+
+  // Personal WebDAV drives are open to owner/admin/family only — a guest has
+  // nothing to connect (the route 403s them), so the toolbar hides the button.
+  it.each(["owner", "admin", "family"])("offers Connect drive to %s", (role) => {
+    mockUser = { id: "u1", email: "x@example.com", role };
+    render(<FilesPage />);
+    expect(screen.getByRole("button", { name: "Connect network drive" })).toBeInTheDocument();
+  });
+
+  it("hides Connect drive from a guest", () => {
+    mockUser = { id: "u1", email: "guest@example.com", role: "guest" };
+    render(<FilesPage />);
+    expect(screen.queryByRole("button", { name: "Connect network drive" })).not.toBeInTheDocument();
+  });
 });
 
 // WARP-1338 — a FAILED listing must never masquerade as an empty folder.

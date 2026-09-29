@@ -46,6 +46,7 @@ import { _resetIncidentHealthForTests, tickSecurityIncidents, trimSecurityIncide
 import { setIncidentVerdict } from "./security-incident-actions.js";
 import { PatternTally, _resetPatternRulesForTests, flagPatterns, loadPatternContext, patternRuleHealth } from "./security-pattern-rules.js";
 import { loadActiveLinks } from "./security-zones.service.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import {
   areaRows,
   baselineRows,
@@ -146,7 +147,7 @@ describe("a rare person in the Stock room (interior) after closing", () => {
         effect: "trial",
         severity: "alert",
         keyCameras: ["back"],
-        rulesetVersion: 3,
+        rulesetVersion: SECURITY_RULESET_VERSION,
         zoneKey: `area:${STOCK}`,
       }),
     ]);

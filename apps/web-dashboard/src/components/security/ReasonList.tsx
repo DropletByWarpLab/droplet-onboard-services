@@ -13,7 +13,7 @@ import { codeSentence, evidenceLine } from "./incident-copy";
 
 function iconFor(code: string): LucideIcon {
   if (code === "after_hours_presence") return User;
-  if (code === "camera_offline") return VideoOff;
+  if (code === "camera_offline" || code === "camera_offline_during_activity") return VideoOff;
   return ShieldAlert;
 }
 

@@ -15,6 +15,7 @@
  * The client is injected into the router (like `Transformer` into the
  * ToolSpec walker) so the routes are testable without a container.
  */
+import { pipeline, Readable, Transform } from "node:stream";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { parseConnectorDraftFacts, type ConnectorDraftFacts } from "./connector-draft.js";
@@ -105,11 +106,22 @@ export interface WorkspaceSandboxClient {
   /**
    * WARP-2899 — the workspace as a `git bundle` (the `work` branch and every
    * proposal tag), built by the sandbox from its local bare repo, plus the
-   * head of `work`. The export's only dial.
+   * head of `work`. The export's only dial. The bytes are NOT buffered: the
+   * caller drains `stream` and checks it against `size` and `sha256` (the
+   * sandbox hashed the file as it wrote it) before trusting the download.
    */
-  bundle(id: string): Promise<{ body: Buffer; head: string }>;
+  bundle(id: string): Promise<WorkspaceBundle>;
   /** WARP-2899 — a connector draft's facts at `ref` (work, or a proposal tag); null when there is no draft. */
   connectorDraft(id: string, ref: string): Promise<ConnectorDraftFacts | null>;
+}
+
+export interface WorkspaceBundle {
+  stream: Readable;
+  head: string;
+  /** Bytes the sandbox will send (its content-length). */
+  size: number;
+  /** Lowercase hex sha256 of those bytes (its x-bundle-sha256). */
+  sha256: string;
 }
 
 export type WorkspaceOp = "read" | "search" | "diff" | "log" | "write" | "commit" | "run" | "propose";
@@ -123,7 +135,15 @@ export interface WorkspaceSandboxClientOptions {
 const CALLER_TIMEOUT_GRACE_MS = 5_000;
 const DEFAULT_OP_TIMEOUT_MS = 30_000;
 const BUNDLE_TIMEOUT_MS = 120_000;
+/**
+ * Once an export's headers and integrity checks have passed, the body moves at
+ * the owner's pace (the route pipes it to them with backpressure). It is
+ * abandoned only when no bytes move for this long, not when the transfer as a
+ * whole runs long.
+ */
+export const BUNDLE_STALL_TIMEOUT_MS = 60_000;
 /** A commit id — the export's filename is built from it, so nothing else passes. */
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 const COMMIT_ID = /^[0-9a-f]{40,64}$/;
 export const RUN_DEFAULT_TIMEOUT_MS = 120_000;
 export const RUN_MAX_TIMEOUT_MS = 600_000;
@@ -229,43 +249,92 @@ export function createWorkspaceSandboxClient(opts: WorkspaceSandboxClientOptions
     async bundle(id) {
       const { baseUrl, token } = settings();
       const controller = new AbortController();
+      // Bounds the wait for the sandbox's headers and the checks on them. It
+      // is cleared the moment the export is handed over (the body is then
+      // bounded by the stall timer below, not by how long the owner's
+      // connection takes) and on every failure before that.
       const timer = setTimeout(() => controller.abort(), BUNDLE_TIMEOUT_MS + CALLER_TIMEOUT_GRACE_MS);
       let res: Response;
-      let body: Buffer;
       try {
         res = await fetchImpl(`${baseUrl}/workspaces/${encodeURIComponent(id)}/bundle`, {
           method: "GET",
           headers: { Accept: "application/octet-stream", Authorization: `Bearer ${token}` },
           signal: controller.signal,
         });
-        body = Buffer.from(await res.arrayBuffer());
       } catch (err) {
+        clearTimeout(timer);
         if (controller.signal.aborted) {
           throw new WorkspaceSandboxError(`the sandbox did not answer within ${BUNDLE_TIMEOUT_MS} ms`, 504, "TIMEOUT");
         }
         logger.warn({ err }, "workspace_bundle_unreachable");
         throw new WorkspaceSandboxError("the sandbox could not be reached", 502, "UNREACHABLE");
-      } finally {
-        clearTimeout(timer);
       }
+      const fail = async (e: WorkspaceSandboxError): Promise<never> => {
+        clearTimeout(timer);
+        controller.abort();
+        throw e;
+      };
       if (res.status === 503) {
-        throw new WorkspaceSandboxError("the sandbox refused: its bearer is not configured", 503, "NOT_CONFIGURED");
+        return fail(new WorkspaceSandboxError("the sandbox refused: its bearer is not configured", 503, "NOT_CONFIGURED"));
       }
       if (res.status < 200 || res.status >= 300) {
         let json: unknown = null;
         try {
-          json = JSON.parse(body.toString("utf8"));
+          json = JSON.parse(Buffer.from(await res.arrayBuffer()).toString("utf8"));
         } catch {
           json = null;
         }
-        unwrap({ status: res.status, json }, "bundle");
+        clearTimeout(timer);
+        return unwrap({ status: res.status, json }, "bundle") as never;
       }
       const head = res.headers.get("x-bundle-head") ?? "";
       if (!COMMIT_ID.test(head)) {
         logger.warn({ id }, "workspace_bundle_bad_head");
-        throw new WorkspaceSandboxError("bundle: the sandbox named no commit for work", 502, "SANDBOX_ERROR");
+        return fail(new WorkspaceSandboxError("bundle: the sandbox named no commit for work", 502, "SANDBOX_ERROR"));
       }
-      return { body, head };
+      const sha256 = res.headers.get("x-bundle-sha256") ?? "";
+      const lengthHeader = res.headers.get("content-length") ?? "";
+      const size = /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : -1;
+      if (!SHA256_HEX.test(sha256) || !Number.isSafeInteger(size) || size < 0 || !res.body) {
+        logger.warn({ id }, "workspace_bundle_bad_integrity_headers");
+        return fail(new WorkspaceSandboxError("bundle: the sandbox sent no length and sha256 for the export", 502, "SANDBOX_ERROR"));
+      }
+      clearTimeout(timer);
+      const source = Readable.fromWeb(res.body as import("node:stream/web").ReadableStream<Uint8Array>);
+      // The route pipes this to the owner with backpressure, so the body runs at
+      // their pace: a slow download is fine, a stalled one is not. Every chunk
+      // that passes re-arms the stall timer, so it fires only when no bytes
+      // have moved for BUNDLE_STALL_TIMEOUT_MS (a dead sandbox or a client that
+      // stopped reading). It is cleared when the stream ends, errors or is
+      // destroyed by the caller.
+      let stall: NodeJS.Timeout | undefined;
+      const arm = () => {
+        clearTimeout(stall);
+        stall = setTimeout(() => {
+          stream.destroy(
+            new WorkspaceSandboxError(`bundle: no bytes moved for ${BUNDLE_STALL_TIMEOUT_MS} ms`, 504, "TIMEOUT"),
+          );
+          controller.abort();
+        }, BUNDLE_STALL_TIMEOUT_MS);
+      };
+      const stream = new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          arm();
+          cb(null, chunk);
+        },
+        flush(cb) {
+          clearTimeout(stall);
+          cb();
+        },
+        destroy(err, cb) {
+          clearTimeout(stall);
+          cb(err);
+        },
+      });
+      // Errors from either end land on `stream`; destroying it closes `source`.
+      pipeline(source, stream, () => undefined);
+      arm();
+      return { stream, head, size, sha256 };
     },
     async connectorDraft(id, ref) {
       const r = unwrap<{ draft?: unknown }>(

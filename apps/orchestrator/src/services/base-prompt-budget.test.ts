@@ -393,13 +393,26 @@ describe("worst-case fixed system-block budget", () => {
     // 110K leaves room for roughly one more domain of this size before the
     // next author has to make the same call consciously.
     //
-    // WARP-3116 made that call: stage 3029b383b sat at 109,421 (579 chars of
-    // headroom) and find_dashboard_page (711) + open_dashboard_page (754)
-    // crossed it at 110,888. Raised to 115K for reason 1 above — the same
-    // allowance of roughly one more domain that 110K gave. What bounds a
-    // real chat turn is untouched: the per-domain assertion above stays green
-    // with both in the `data` pool, and the agent loop withholds both from
-    // every turn that carries no dashboard page list (voice, phones,
+    // WARP-2979 (ADR-059 P4 §6.12.7) — that call, made and written down. Step 0
+    // measured 109,403 chars over 152 tools before the Security domain: 597 of
+    // headroom, less than one tool. Its four read-only tools serialize to
+    // 3,525 (list 1,308, search 1,159, get 546, status 512 — mean 881, under
+    // both the 2,000 per-tool and the 1,000 pool-mean lines), so the registry
+    // is 112,932 over 156. No description trim can close a 2,932-char gap,
+    // and shaving other domains' prose to fit is what the note above rules
+    // out. Raised to 115,000: the reasons above still hold (this is the
+    // MCP-facing surface, and every per-turn assertion in this file is green
+    // with Security in it — the domain is selected, never core), and the new
+    // line again leaves about two ordinary tools before the next crossing is
+    // somebody's conscious decision. The decision is Stefan's to reverse.
+    //
+    // WARP-3116 spends most of that allowance and does not move the line:
+    // find_dashboard_page (711) + open_dashboard_page (754) take the registry
+    // to 114,417 over 158 tools, 583 chars under 115,000 — less than one tool
+    // of headroom, so the next crossing is a decision, not an accident. What
+    // bounds a real chat turn is untouched: the per-domain assertion above
+    // stays green with both in the `data` pool, and the agent loop withholds
+    // both from every turn that carries no dashboard page list (voice, phones,
     // background runs), so on those turns they cost nothing at all.
     //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at

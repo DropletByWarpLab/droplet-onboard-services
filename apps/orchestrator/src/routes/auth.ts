@@ -557,16 +557,14 @@ export async function getRedirectUri(
 }
 
 /**
- * Resolve the session token from cookie (browser) or Authorization header (API client).
+ * Resolve the session token from the Authorization header (API client) or cookie (browser).
  */
 function resolveToken(req: import("express").Request): string | null {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
-
+  // WARP-3038 — the Bearer wins when both are sent, as in authMiddleware.
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
 
-  return null;
+  return req.cookies?.[SESSION_COOKIE_NAME] ?? null;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1304,9 +1302,44 @@ export function createPublicAuthRouter(
         { lastMfaAt: mfaStampIso },
       );
 
+      // ADR-008 §3 + action item #2: native mobile clients can't read
+      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
+      // them; Android's OkHttp can but it's ugly). When the caller
+      // opts in with `?return=body=1`, return the JWTs in the JSON
+      // body INSTEAD of cookies.
+      //
+      // WARP-582 — the escape hatch is NATIVE-client-only. A browser context
+      // must never receive tokens in the body (an XSS payload could read them
+      // where the httpOnly cookies are script-unreadable), so the opt-in is
+      // refused whenever the request carries a browser-only marker header
+      // (Sec-Fetch-* / Origin / Referer — browsers attach at least one to
+      // every request they originate, and Sec-Fetch-*+Origin are forbidden
+      // header names page script cannot strip; see lib/browser-context.ts).
+      // The login itself still succeeds for a browser — it keeps its normal
+      // cookie-only session. The shipped native callers (droplet-android
+      // OkHttp, droplet-ios URLSession) send none of these headers;
+      // droplet-windows never uses ?return=body at all (its WebView2 runs
+      // the dashboard's ordinary cookie login).
+      //
+      // WARP-3038 — a body-token login sets NO session cookies. A default
+      // URLSession/CookieJar would otherwise persist the session to disk,
+      // breaking the client's tokens-only-in-Keychain guarantee, and a stale
+      // cookie could later authenticate a request the client meant to send
+      // bearer-less. A browser (no opt-in, or refused above) keeps its
+      // cookies exactly as before.
+      const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
+      const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
+      if (wantBodyParam && browserMarker !== null) {
+        logger.warn(
+          { marker: browserMarker, username },
+          "login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
+        );
+      }
+      const wantBody = wantBodyParam && browserMarker === null;
+
       // Access token in the session cookie, refresh token in its own cookie
-      // scoped to /api/auth.
-      setSessionCookies(req, res, minted);
+      // scoped to /api/auth — browsers only (WARP-3038).
+      if (!wantBody) setSessionCookies(req, res, minted);
 
       // WARP-456: successful sign-in audit row.
       await recordActivity({
@@ -1325,35 +1358,6 @@ export function createPublicAuthRouter(
         actor: { type: "user", id: userId },
       });
 
-      // ADR-008 §3 + action item #2: native mobile clients can't read
-      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
-      // them; Android's OkHttp can but it's ugly). When the caller
-      // opts in with `?return=body=1`, return the JWTs in the JSON
-      // body too. The cookies are STILL set so browsers behave
-      // unchanged. No behavior change for any existing caller — the
-      // body field is only added when the query param is present.
-      //
-      // WARP-582 — the escape hatch is NATIVE-client-only. A browser context
-      // must never receive tokens in the body (an XSS payload could read them
-      // where the httpOnly cookies are script-unreadable), so the opt-in is
-      // refused whenever the request carries a browser-only marker header
-      // (Sec-Fetch-* / Origin / Referer — browsers attach at least one to
-      // every request they originate, and Sec-Fetch-*+Origin are forbidden
-      // header names page script cannot strip; see lib/browser-context.ts).
-      // The login itself still succeeds for a browser — it keeps its normal
-      // cookie-only session. The shipped native callers (droplet-android
-      // OkHttp, droplet-ios URLSession) send none of these headers;
-      // droplet-windows never uses ?return=body at all (its WebView2 runs
-      // the dashboard's ordinary cookie login).
-      const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
-      const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
-      if (wantBodyParam && browserMarker !== null) {
-        logger.warn(
-          { marker: browserMarker, username },
-          "login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
-        );
-      }
-      const wantBody = wantBodyParam && browserMarker === null;
       res.json({
         // WARP-824: surface the explicit forced-change flag so the dashboard
         // redirects an admin-created temp-password user to the change-password
@@ -1670,22 +1674,6 @@ export function createPublicAuthRouter(
         // original 7-day window elapses even though their JWT is fresh).
         await touchNcToken(sub, REFRESH_TOKEN_TTL_SECONDS);
 
-        const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-        res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
-          httpOnly: true,
-          secure: isHttps,
-          sameSite: "lax",
-          path: "/",
-          maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-        });
-        res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, {
-          httpOnly: true,
-          secure: isHttps,
-          sameSite: "lax",
-          path: "/api/auth",
-          maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-        });
-
         // Native clients want the new tokens in body since they can't
         // read Set-Cookie. WARP-3193 SEC-AUTH-7: ONLY native clients — the
         // same WARP-582 rule as /auth/login?return=body. A browser rotates
@@ -1701,6 +1689,26 @@ export function createPublicAuthRouter(
           );
         }
         const wantBody = refreshTokenBody !== null && browserMarker === null;
+
+        // WARP-3038 — a native body-token rotation sets NO cookies, matching
+        // /auth/login?return=body; browsers rotate through the cookies.
+        if (!wantBody) {
+          const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+          res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
+            httpOnly: true,
+            secure: isHttps,
+            sameSite: "lax",
+            path: "/",
+            maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
+          });
+          res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, {
+            httpOnly: true,
+            secure: isHttps,
+            sameSite: "lax",
+            path: "/api/auth",
+            maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+          });
+        }
         res.json({
           status: "ok",
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,

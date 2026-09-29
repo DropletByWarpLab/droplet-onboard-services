@@ -34,6 +34,7 @@ import pytest
 
 import voice.llm
 from voice.llm import (
+    DEFAULT_LLM_MAX_ITER,
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
     DEFAULT_LLM_WARM_PATH,
@@ -48,6 +49,7 @@ from voice.llm import (
     build_llm_from_env,
     build_system_prompt,
     parse_allowed_tools,
+    parse_max_iter,
     parse_max_tokens,
 )
 
@@ -753,6 +755,54 @@ class TestMaxTokensCap:
         assert bodies[0]["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
 
 
+class TestMaxIterBudget:
+    """WARP-3316 — the voice agent-loop budget. Iteration 0 is the tool
+    call and iteration 1 the answer, so a budget of 2 dies on the SECOND
+    tool call with the orchestrator's iteration_limit fallback ("couldn't
+    finish within my step limit"). Default is 4; VOICE_MAX_ITER tunes it."""
+
+    def test_default_is_four(self):
+        assert DEFAULT_LLM_MAX_ITER == 4
+
+    def test_reply_sends_default_max_iter(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("what time is it")
+        assert bodies[0]["max_iter"] == 4
+
+    def test_configured_max_iter_is_honored(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test", max_iter=6).reply("hi")
+        assert bodies[0]["max_iter"] == 6
+
+
+class TestParseMaxIter:
+    """VOICE_MAX_ITER parsing: unset/garbage fall back to the default;
+    out-of-range numbers clamp to the orchestrator's 1..10 window."""
+
+    def test_unset_and_blank_use_default(self):
+        assert parse_max_iter(None) == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("") == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("   ") == DEFAULT_LLM_MAX_ITER
+
+    def test_valid_value_is_used(self):
+        assert parse_max_iter("6") == 6
+        assert parse_max_iter("  3 ") == 3
+
+    def test_window_edges_are_accepted(self):
+        assert parse_max_iter("1") == 1
+        assert parse_max_iter("10") == 10
+
+    def test_non_numeric_falls_back(self):
+        assert parse_max_iter("abc") == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("2.5") == DEFAULT_LLM_MAX_ITER
+
+    def test_out_of_range_clamps(self):
+        assert parse_max_iter("0") == 1
+        assert parse_max_iter("-5") == 1
+        assert parse_max_iter("11") == 10
+        assert parse_max_iter("999") == 10
+
+
 class TestAllowedToolsScope:
     """A curated `allowed_tools` scope replaces the inherited ~43-tool set
     on tool-enabled turns. On the greeting fast path (tool_choice="none")
@@ -960,6 +1010,24 @@ class TestBuildLLMFromEnvTurnShaping:
         monkeypatch.setenv("VOICE_MAX_TOKENS", "not-a-number")
         llm = build_llm_from_env()
         assert llm._max_tokens == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_default_build_uses_default_max_iter(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.delenv("VOICE_MAX_ITER", raising=False)
+        llm = build_llm_from_env()
+        assert llm._max_iter == DEFAULT_LLM_MAX_ITER == 4
+
+    def test_voice_max_iter_env_propagates(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_ITER", "7")
+        llm = build_llm_from_env()
+        assert llm._max_iter == 7
+
+    def test_voice_max_iter_env_invalid_falls_back(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_ITER", "lots")
+        llm = build_llm_from_env()
+        assert llm._max_iter == DEFAULT_LLM_MAX_ITER
 
     def test_voice_allowed_tools_env_propagates(self, monkeypatch, stub_geo):
         monkeypatch.delenv("LLM_URL", raising=False)
