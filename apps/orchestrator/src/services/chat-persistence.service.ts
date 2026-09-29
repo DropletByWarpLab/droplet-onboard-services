@@ -583,6 +583,14 @@ export class ChatPersistenceService {
    * case — if the assistant row is already `completed`, it's safe to no-op
    * the entire route.
    *
+   * WARP-3193 PERF-9 — the database now holds that key unique (partial index
+   * `ChatMessage_sessionId_turnId_role_key`). A concurrent submit of the same
+   * turn that passes the check before the other commits hits P2002 on its
+   * insert; that aborts its transaction, so it re-runs once and returns the
+   * turn the winner created. `assistantInFlight` is true whenever the turn
+   * already existed with its assistant row still `streaming` — an agent loop
+   * is running for it, and callers MUST NOT start a second one.
+   *
    * Returns the row IDs so the route can:
    *   - put `X-Assistant-Message-Id` on the response header (lets the
    *     client tie the in-flight stream to a persisted row), and
@@ -607,7 +615,20 @@ export class ChatPersistenceService {
     userMessageId: string;
     assistantMessageId: string;
     assistantAlreadyFinal: boolean;
+    assistantInFlight: boolean;
   }> {
+    try {
+      return await this.createTurnRowsOnce(args);
+    } catch (err) {
+      if (!args.turnId || (err as { code?: unknown } | null)?.code !== "P2002") throw err;
+      // Lost the race: the winner's transaction committed this turn's rows.
+      return this.createTurnRowsOnce(args);
+    }
+  }
+
+  private async createTurnRowsOnce(
+    args: Parameters<ChatPersistenceService["createTurnRows"]>[0],
+  ): ReturnType<ChatPersistenceService["createTurnRows"]> {
     return this.prisma.$transaction(async (tx) => {
       const findRow = async (role: "user" | "assistant") =>
         args.turnId
@@ -666,6 +687,7 @@ export class ChatPersistenceService {
           assistantRow.status === "completed" ||
           assistantRow.status === "failed" ||
           assistantRow.status === "aborted",
+        assistantInFlight: existingAssistant !== null && existingAssistant.status === "streaming",
       };
     });
   }

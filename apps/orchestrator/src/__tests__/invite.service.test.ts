@@ -2,13 +2,14 @@
  * Unit tests for invite token generation and constant-time comparison.
  * These are pure-function tests — no Prisma, no Express, no Nextcloud.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   generateInviteToken,
   compareTokensConstantTime,
   isExpired,
   isUsed,
   isRevoked,
+  expireOverdueInvites,
 } from "../services/invite.service.js";
 
 describe("invite.service — token generation", () => {
@@ -64,13 +65,14 @@ describe("invite.service — state predicates", () => {
     role: "user",
     createdBy: "admin",
     expiresAt: new Date(Date.now() + 60_000),
+    status: "pending" as const,
     acceptedAt: null,
     acceptedFrom: null,
     revokedAt: null,
     createdAt: new Date(),
   };
 
-  it("isExpired: true when expiresAt is in the past", () => {
+  it("isExpired: true when a pending invite is past expiresAt (real-time deadline)", () => {
     expect(isExpired({ ...baseInvite, expiresAt: new Date(Date.now() - 1000) })).toBe(true);
   });
 
@@ -78,13 +80,32 @@ describe("invite.service — state predicates", () => {
     expect(isExpired(baseInvite)).toBe(false);
   });
 
-  it("isUsed: true iff acceptedAt is not null", () => {
-    expect(isUsed(baseInvite)).toBe(false);
-    expect(isUsed({ ...baseInvite, acceptedAt: new Date() })).toBe(true);
+  // WARP-3193 QUAL-3: the lifecycle is the explicit status column, never the
+  // absence of a timestamp.
+  it("isExpired: true when the daily sweep stamped status=expired", () => {
+    expect(isExpired({ ...baseInvite, status: "expired" })).toBe(true);
   });
 
-  it("isRevoked: true iff revokedAt is not null", () => {
+  it("isUsed: true iff status is accepted", () => {
+    expect(isUsed(baseInvite)).toBe(false);
+    expect(isUsed({ ...baseInvite, status: "accepted" })).toBe(true);
+  });
+
+  it("isRevoked: true iff status is revoked", () => {
     expect(isRevoked(baseInvite)).toBe(false);
-    expect(isRevoked({ ...baseInvite, revokedAt: new Date() })).toBe(true);
+    expect(isRevoked({ ...baseInvite, status: "revoked" })).toBe(true);
+  });
+});
+
+describe("WARP-3193 QUAL-3 — expireOverdueInvites (daily sweep)", () => {
+  it("stamps status=expired on pending invites past expiresAt, and only those", async () => {
+    const updateMany = vi.fn(async () => ({ count: 2 }));
+    const now = new Date("2026-09-26T03:00:00Z");
+    const n = await expireOverdueInvites({ userInvite: { updateMany } } as never, now);
+    expect(n).toBe(2);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { status: "pending", expiresAt: { lt: now } },
+      data: { status: "expired" },
+    });
   });
 });

@@ -20,7 +20,7 @@ import useSWR from "swr";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { fetchPtzCapabilities, getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
-import { authFetch } from "@/lib/auth";
+import { authFetch, useAuth } from "@/lib/auth";
 import { PtzOverlay } from "@/components/ptz/PtzOverlay";
 import type { CameraInfo, DetectionEvent, PtzCapabilities } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -72,6 +72,10 @@ export default function CameraFullscreenPage() {
   const { cameras, isLoading, enableCam, disableCam, removeCam } = useCameras();
   const [removeOpen, setRemoveOpen] = useState(false);
   const { toast } = useToast();
+  const { user } = useAuth();
+  // WARP-3104: turning detection on or off, PTZ, settings and removing the
+  // camera are owner/admin; the box refuses members.
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const camera = cameras.find((c) => c.name === name);
 
   // PTZ capabilities — fetched once per camera, cheap. Drives whether
@@ -218,7 +222,7 @@ export default function CameraFullscreenPage() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {camera.enabled ? (
+          {!canManage ? null : camera.enabled ? (
             <button
               onClick={() => disableCam(camera.name)}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
@@ -235,7 +239,7 @@ export default function CameraFullscreenPage() {
               <span className="type-subheadline hidden sm:inline">Enable</span>
             </button>
           )}
-          {hasPtz && (
+          {hasPtz && canManage && (
             <button
               onClick={() => setPtzOpen((o) => !o)}
               aria-pressed={ptzOpen}
@@ -258,6 +262,7 @@ export default function CameraFullscreenPage() {
             <Film size={16} />
             <span className="type-subheadline hidden sm:inline">Recordings</span>
           </button>
+          {canManage && (
           <button
             onClick={() => router.push(`/cameras/${encodeURIComponent(camera.name)}/settings`)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
@@ -266,6 +271,7 @@ export default function CameraFullscreenPage() {
             <Settings size={16} />
             <span className="type-subheadline hidden sm:inline">Settings</span>
           </button>
+          )}
           <button
             onClick={handleTogglePin}
             disabled={pinBusy}
@@ -305,6 +311,7 @@ export default function CameraFullscreenPage() {
           >
             <Maximize2 size={16} aria-hidden="true" />
           </button>
+          {canManage && (
           <button
             onClick={() => setRemoveOpen(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-system-red hover:bg-system-red/15 transition-colors"
@@ -313,6 +320,7 @@ export default function CameraFullscreenPage() {
           >
             <Trash2 size={16} />
           </button>
+          )}
         </div>
       </header>
 

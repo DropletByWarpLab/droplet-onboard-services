@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Loader2,
   Mic,
+  Undo2,
 } from "lucide-react";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
@@ -27,6 +28,7 @@ import {
   fetchUsers,
   createUser as apiCreateUser,
   deleteUser as apiDeleteUser,
+  cancelUserDeletion,
   updateUser,
   setUserEnabled,
   createInvite,
@@ -41,6 +43,11 @@ import {
   putAccessExceptions,
   fetchEffectiveAccess,
 } from "@/lib/api";
+import {
+  DELETE_USER_COPY,
+  DELETION_RETENTION_DAYS,
+  HANDOVER_RECIPIENT_ROLES,
+} from "@/lib/leaver-deletion";
 import { fetchIntegrations } from "@/lib/api.erp";
 import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-policy";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -298,6 +305,8 @@ export default function UsersPage() {
   // boolean) lets the dialog body render the username/displayName.
   const [revokeInvite, setRevokeInvite] = useState<InviteListItem | null>(null);
   const [deleteUserTarget, setDeleteUserTarget] = useState<AuthUser | null>(null);
+  // WARP-3169 — "" = keep for 30 days; otherwise the recipient's local user id.
+  const [handoverRecipient, setHandoverRecipient] = useState("");
   const [disableUserTarget, setDisableUserTarget] = useState<AuthUser | null>(
     null,
   );
@@ -756,7 +765,9 @@ export default function UsersPage() {
     const before = invites;
     setInvites((prev) =>
       prev.map((i) =>
-        i.token === invite.token ? { ...i, revokedAt: new Date().toISOString() } : i,
+        i.token === invite.token
+          ? { ...i, status: "revoked", revokedAt: new Date().toISOString() }
+          : i,
       ),
     );
     try {
@@ -778,6 +789,7 @@ export default function UsersPage() {
       setError("You can't delete your own account.");
       return;
     }
+    setHandoverRecipient("");
     setDeleteUserTarget(u);
   };
 
@@ -785,14 +797,37 @@ export default function UsersPage() {
     const u = deleteUserTarget;
     if (!u) return;
     try {
-      await apiDeleteUser(u.id);
+      const recipientId = handoverRecipient || undefined;
+      const recipient = recipientId
+        ? (() => {
+            const r = users.find((x) => x.userId === recipientId);
+            return r?.displayName || r?.id || "the recipient";
+          })()
+        : undefined;
+      const { deletionDueAt, folder } = await apiDeleteUser(u.id, { recipientId });
       if (!mountedRef.current) return;
       setDeleteUserTarget(null);
-      toast(`Deleted ${u.id}.`, "success");
+      toast(
+        recipient
+          ? `${u.id} was deleted. Their files are now with ${recipient}${folder ? `, in "${folder}"` : ""}.`
+          : `${u.id} will be deleted on ${formatDeletionDate(deletionDueAt ?? null)}.`,
+        "success",
+      );
       await reload();
     } catch (err: any) {
       if (mountedRef.current) setError(err?.message || "Failed to delete user");
       throw err;
+    }
+  };
+
+  const performCancelDeletion = async (u: RosterUser) => {
+    try {
+      await cancelUserDeletion(u.id);
+      if (!mountedRef.current) return;
+      toast(`Deletion of ${u.id} cancelled. They stay deactivated.`, "success");
+      await reload();
+    } catch (err: any) {
+      if (mountedRef.current) setError(err?.message || "Failed to cancel the deletion");
     }
   };
 
@@ -1056,12 +1091,18 @@ export default function UsersPage() {
   }
 
   // Status pill copy + badge kind for the pending-invites list.
+  // WARP-3193 QUAL-3: read the server's explicit status, never the timestamps.
   function inviteStatus(i: InviteListItem): { label: string; kind: BadgeKind } {
-    if (i.revokedAt) return { label: "Revoked", kind: "muted" };
-    if (i.acceptedAt) return { label: "Accepted", kind: "ok" };
-    if (new Date(i.expiresAt).getTime() < Date.now())
-      return { label: "Expired", kind: "warn" };
-    return { label: "Pending", kind: "info" };
+    switch (i.status) {
+      case "revoked":
+        return { label: "Revoked", kind: "muted" };
+      case "accepted":
+        return { label: "Accepted", kind: "ok" };
+      case "expired":
+        return { label: "Expired", kind: "warn" };
+      default:
+        return { label: "Pending", kind: "info" };
+    }
   }
 
   // WARP-1532 (T8): the roster grouped for the "By role" filter. Rows
@@ -1124,6 +1165,9 @@ export default function UsersPage() {
     // roster's `enabled` field sends nothing, and an undefined value has to
     // read as active. Only an explicit false deactivates a row.
     const isDeactivated = u.enabled === false;
+    // WARP-3113: explicit enum from the box; absent = an older box = NONE.
+    const deletionPending = u.deletionStatus === "PENDING";
+    const deletionRunning = u.deletionStatus === "PURGING" || u.deletionStatus === "HANDING_OVER";
     return (
     <div key={u.id} className="lrow">
       <span className="ri brand">
@@ -1168,6 +1212,17 @@ export default function UsersPage() {
         >
           <Shield size={11} aria-hidden="true" />
           Deactivated
+        </span>
+      )}
+      {(deletionPending || deletionRunning) && (
+        <span
+          className="chip"
+          style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12, color: "var(--system-red)" }}
+        >
+          <Trash2 size={11} aria-hidden="true" />
+          {deletionRunning
+            ? "Deleting"
+            : `Deletion on ${formatDeletionDate(u.deletionDueAt ?? null)}`}
         </span>
       )}
       {/* WARP-1271 (T19a): "used / limit" — mono, matches the
@@ -1224,7 +1279,16 @@ export default function UsersPage() {
                 everyone else, so an admin could cut someone off and had no
                 way to undo it from any screen — `performEnable` existed and
                 nothing ever called it with `true`. */}
-            {isDeactivated ? (
+            {deletionPending ? (
+              <button
+                onClick={() => void performCancelDeletion(u)}
+                aria-label={`Cancel deletion of ${label}`}
+                title="Cancel deletion"
+                className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+              >
+                <Undo2 size={14} />
+              </button>
+            ) : deletionRunning ? null : isDeactivated ? (
               <button
                 onClick={() => handleSetEnabled(u, true)}
                 aria-label={`Enable user ${label}`}
@@ -1245,6 +1309,7 @@ export default function UsersPage() {
                 <Shield size={14} />
               </button>
             )}
+            {!deletionPending && !deletionRunning && (
             <button
               onClick={() => handleDelete(u)}
               aria-label={`Delete user ${label}`}
@@ -1254,6 +1319,7 @@ export default function UsersPage() {
             >
               <Trash2 size={14} />
             </button>
+            )}
           </>
         )}
       </div>
@@ -1444,7 +1510,7 @@ export default function UsersPage() {
             <div className="rows">
             {invites.map((i) => {
               const status = inviteStatus(i);
-              const canRevoke = !i.revokedAt && !i.acceptedAt;
+              const canRevoke = i.status === "pending" || i.status === "expired";
               // Mirror the row's primary visible label (displayName falls
               // back to username) so the screen-reader announcement matches.
               const inviteLabel = i.displayName || i.username;
@@ -2430,12 +2496,49 @@ export default function UsersPage() {
         onCancel={() => setDeleteUserTarget(null)}
         title={
           deleteUserTarget
-            ? `Delete user "${deleteUserTarget.id}"?`
+            ? `Delete "${deleteUserTarget.id}"?`
             : "Delete user?"
         }
-        description="The account, sessions, and all per-user state are removed. This cannot be undone."
-        confirmLabel="Delete"
+        description={DELETE_USER_COPY}
+        confirmLabel={
+          handoverRecipient
+            ? "Hand over files, then delete"
+            : `Keep for ${DELETION_RETENTION_DAYS} days, then delete`
+        }
         variant="destructive"
+        accessory={
+          <label className="flex flex-col gap-1 text-sm">
+            <span>Or hand their files to someone now</span>
+            <select
+              aria-label="Hand files to"
+              value={handoverRecipient}
+              onChange={(e) => setHandoverRecipient(e.target.value)}
+              className="rounded-sm border px-2 py-1.5 bg-transparent"
+            >
+              <option value="">No one: keep for {DELETION_RETENTION_DAYS} days</option>
+              {users
+                .filter(
+                  (r) =>
+                    !!r.userId &&
+                    r.id !== deleteUserTarget?.id &&
+                    r.enabled !== false &&
+                    (r.deletionStatus ?? "NONE") === "NONE" &&
+                    HANDOVER_RECIPIENT_ROLES.has(r.role ?? ""),
+                )
+                .map((r) => (
+                  <option key={r.id} value={r.userId ?? ""}>
+                    {r.displayName || r.id}
+                  </option>
+                ))}
+            </select>
+            {handoverRecipient && (
+              <span className="text-label-tertiary">
+                Their files move to a new folder in the recipient&apos;s files, then the
+                account is deleted right away. If the move fails, nothing is deleted.
+              </span>
+            )}
+          </label>
+        }
       />
 
       <ConfirmDialog
@@ -2453,4 +2556,14 @@ export default function UsersPage() {
       />
     </ShellPage>
   );
+}
+
+/** WARP-3113 — the day a scheduled deletion runs, in the viewer's locale. */
+function formatDeletionDate(iso: string | null): string {
+  if (!iso) return "a date the box didn't send";
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }

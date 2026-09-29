@@ -77,6 +77,37 @@ describe("PasskeysSection", () => {
     expect(screen.queryByText(/ECONNREFUSED/)).not.toBeInTheDocument();
   });
 
+  it("WARP-3193: asks for the current password when the box requires it, then retries with it", async () => {
+    const { PasskeyServerError } = await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn");
+    registerPasskey
+      .mockRejectedValueOnce(new PasskeyServerError(403, "STEP_UP_PASSWORD_REQUIRED", "Enter your current password to continue."))
+      .mockResolvedValueOnce(undefined);
+    render(<PasskeysSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: /add a passkey/i }));
+    const field = await screen.findByLabelText(/current password/i);
+    expect(screen.getByText(/enter your current password to add a passkey/i)).toBeInTheDocument();
+    // Can't submit an empty password.
+    expect(screen.getByRole("button", { name: /add a passkey/i })).toBeDisabled();
+
+    fireEvent.change(field, { target: { value: "hunter2" } });
+    fireEvent.click(screen.getByRole("button", { name: /add a passkey/i }));
+
+    await waitFor(() => expect(registerPasskey).toHaveBeenLastCalledWith("hunter2"));
+    expect(await screen.findByText(/passkey added/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/current password/i)).not.toBeInTheDocument();
+  });
+
+  it("WARP-3193: a stale two-factor sign-in explains how to step up, with no password field", async () => {
+    const { PasskeyServerError } = await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn");
+    registerPasskey.mockRejectedValueOnce(new PasskeyServerError(401, null, "mfa_required"));
+    render(<PasskeysSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: /add a passkey/i }));
+    expect(await screen.findByText(/sign back in with your two-factor code/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/current password/i)).not.toBeInTheDocument();
+  });
+
   it("shows an unsupported note instead of a dead button when WebAuthn is unavailable", () => {
     isPasskeySupported.mockReturnValue(false);
     render(<PasskeysSection />);

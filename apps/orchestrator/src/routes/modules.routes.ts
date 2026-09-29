@@ -29,6 +29,7 @@ import {
 import type { ModuleGate } from "../middleware/module-gate.js";
 import { recordAccessDenied } from "../middleware/auth.js";
 import { resolveEffectiveAccessForRequest } from "../middleware/feature-gate.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 const logger = createLogger("modules-route");
 
@@ -45,10 +46,6 @@ function userId(req: Request): string | null {
  *  above is the human-readable `setBy` / log label and is NOT interchangeable. */
 function localUserId(req: Request): string | null {
   return getUser(req)?.id ?? null;
-}
-function isAdmin(req: Request): boolean {
-  const r = getUser(req)?.role;
-  return r === "owner" || r === "admin";
 }
 
 const patchBody = z.object({ enabled: z.boolean() });
@@ -113,7 +110,7 @@ export function createModulesRouter(
   router.patch("/admin/modules/:id", async (req, res, next) => {
     try {
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
-      if (!isAdmin(req)) {
+      if (!isOwnerOrAdmin(req)) {
         // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
         // local isAdmin() denials must not be silent (requireRole parity).
         recordAccessDenied(req, "role-not-permitted");
@@ -155,7 +152,7 @@ export function createModulesRouter(
   router.post("/admin/business-type", async (req, res, next) => {
     try {
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
-      if (!isAdmin(req)) {
+      if (!isOwnerOrAdmin(req)) {
         // WARP-1062 (audit item B): requireRole-parity policy-violation row.
         recordAccessDenied(req, "role-not-permitted");
         res.status(403).json({ error: "admin_required", message: "Only an owner or admin can apply a business type." });

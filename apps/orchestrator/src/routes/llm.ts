@@ -1448,6 +1448,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               });
               return;
             }
+            // WARP-3193 PERF-9 — the same turn is still streaming: the agent
+            // loop that created it is running. A second loop would run every
+            // tool side effect (email, unlock) twice, so refuse; the client
+            // follows the existing row instead.
+            if (turn.assistantInFlight) {
+              res.status(409).json({
+                error: "turn_in_progress",
+                conversationId,
+                assistantMessageId,
+              });
+              return;
+            }
           } else if (conversationId) {
             // Couldn't create rows but conversation exists — still expose
             // the id so the client can rehydrate later.
@@ -1460,8 +1472,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
       // default no-enhancement path runs (byte-for-byte WARP-286).
-      const aiGatewayGrpcUrl =
-        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const aiGatewayGrpcUrl = config.AI_GATEWAY_GRPC_URL;
       // WARP-3047 — HyDE / multi-query rewrites run on the model THIS turn
       // is using when that model is local (it is already resident; asking
       // for any other local model mid-turn is the DMR load collision — two

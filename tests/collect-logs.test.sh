@@ -60,6 +60,8 @@ Authorization: Bearer eyJplantedjwt.aaaa.bbbb
 boot env JWT_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef
 DATABASE_URL=postgresql://droplet:pgpass-supersecret@db:5432/droplet
 REDIS_URL=redis://:redis-empty-user-pw-5544@cache:6379/0
+{"level":30,"name":"http","req":{"method":"POST","url":"/api/files/list","headers":{"x-nextcloud-token":"ncAppPwPlanted-Q7wE9-rT2yU","x-api-key":"apiKeyPlanted-zXcV-1234"}},"msg":"request completed"}
+proxy: X-Nextcloud-Token: Basic YWxpY2U6cA==
 EOF
 
 cat > "$FIXDIR/ai-gateway.log" <<'EOF'
@@ -126,6 +128,9 @@ assert_absent "0123456789abcdef0123456789abcdef0123456789abcdef"    "JWT_SECRET 
 assert_absent "pgpass-supersecret"                                  "DB URL password"
 assert_absent "redis-empty-user-pw-5544"                            "REDIS_URL empty-username password"
 assert_absent "Sup3rSecretValue!"                                   "password= value"
+assert_absent "ncAppPwPlanted-Q7wE9-rT2yU"                          "x-nextcloud-token in a pino JSON line"
+assert_absent "apiKeyPlanted-zXcV-1234"                             "x-api-key in a pino JSON line"
+assert_absent "YWxpY2U6cA=="                                        "X-Nextcloud-Token Basic credential"
 assert_absent "MIIEPLANTEDprivatekeymaterialmustnotleak0000000000"  "PEM key body"
 # WARP-1688 — bearer-equivalent credential in a URL PATH SEGMENT (both the
 # index.php and pretty-URL route shapes).

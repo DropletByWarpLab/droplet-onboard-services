@@ -58,6 +58,7 @@ import {
   isSupportedTimezone,
   nextFireFromRrule,
 } from "../utils/rrule.js";
+import { isUniqueViolation } from "../lib/prisma-errors.js";
 
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
@@ -65,10 +66,6 @@ const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 /** Prisma's unique-constraint failure (`P2002`), without importing the class
  *  — the unit suites stub the client, and a structural check is what a raw
  *  `Prisma.PrismaClientKnownRequestError` satisfies too. */
-function isUniqueViolation(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
-}
-
 const startRunSchema = z.object({
   goal: z.string().trim().min(1).max(4000),
   model: z.string().trim().min(1).max(200).optional(),

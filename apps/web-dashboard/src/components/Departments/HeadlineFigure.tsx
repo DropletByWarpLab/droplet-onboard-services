@@ -8,6 +8,7 @@
  * invented, and none is ever a zero it did not read:
  *
  *   cameras_online       GET /api/cameras               (module: cameras)
+ *   open_incidents       GET /api/security/incidents/summary (module: security; WARP-2978)
  *   open_deals           GET /api/crm/pipelines + summary (module: crm)
  *   overdue_invoices     GET /api/money                 (module: money)
  *   open_work            GET /api/pm/work-items?department= (module: projects)
@@ -25,10 +26,13 @@ import { usePipelines, useCrmSummary } from "@/components/crm/useCrm";
 import type { HeadlineFigureId } from "@/lib/departments/templates";
 
 import {
+  OPEN_INCIDENTS_COPY,
+  openIncidentsFigure,
   salesFigure,
   useCameraFleet,
   useDepartmentWork,
   useMoneyOverdue,
+  useOpenIncidents,
   useServiceHealth,
 } from "./department-sources";
 
@@ -36,6 +40,7 @@ import {
  *  (the nav label of the surface, so the words match the sidebar). */
 const FIGURE_MODULE: Partial<Record<HeadlineFigureId, { id: string; label: string }>> = {
   cameras_online: { id: "cameras", label: "Cameras" },
+  open_incidents: { id: "security", label: "Security" },
   open_deals: { id: "crm", label: "Customers" },
   overdue_invoices: { id: "money", label: "Money" },
   open_work: { id: "projects", label: "Projects" },
@@ -43,9 +48,9 @@ const FIGURE_MODULE: Partial<Record<HeadlineFigureId, { id: string; label: strin
 
 function Figure({ n, label }: { n: string; label: string }): JSX.Element {
   return (
+    // The space reads "2 open alerts" to a screen reader; the flex column ignores it.
     <p className="dept-figure">
-      <span className="dept-figure-n">{n}</span>
-      <span className="dept-figure-l">{label}</span>
+      <span className="dept-figure-n">{n}</span> <span className="dept-figure-l">{label}</span>
     </p>
   );
 }
@@ -70,6 +75,17 @@ function CamerasOnline(): JSX.Element {
   if (isLoading || online === undefined || total === undefined) return <Skeleton />;
   if (total === 0) return <Quiet>No cameras yet.</Quiet>;
   return <Figure n={`${online} of ${total}`} label={`${plural(total, "camera", "cameras")} online`} />;
+}
+
+/** WARP-2978 — open alerts (and notices); `Nothing needs attention`, or what alerts still need. Never a 0. */
+function OpenIncidents(): JSX.Element {
+  const { summary, off, error, isLoading } = useOpenIncidents(true);
+  if (off) return <Quiet>{OPEN_INCIDENTS_COPY.off}</Quiet>;
+  if (error) return <Quiet>{OPEN_INCIDENTS_COPY.loadFailed}</Quiet>;
+  if (isLoading || !summary) return <Skeleton />;
+  const fig = openIncidentsFigure(summary.openAlerts, summary.openNotices);
+  if (fig) return <Figure n={fig.n} label={fig.label} />;
+  return <Quiet>{summary.alertsReady ? OPEN_INCIDENTS_COPY.nothing : OPEN_INCIDENTS_COPY.notReady}</Quiet>;
 }
 
 function OpenDeals(): JSX.Element {
@@ -130,6 +146,8 @@ export function HeadlineFigure({
   switch (figure) {
     case "cameras_online":
       return <CamerasOnline />;
+    case "open_incidents":
+      return <OpenIncidents />;
     case "open_deals":
       return <OpenDeals />;
     case "overdue_invoices":

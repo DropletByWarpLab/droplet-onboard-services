@@ -183,7 +183,12 @@ function createPrismaMock() {
       return { count: hits.length };
     }),
   });
+  // WARP-3152 review: the directory the approve route re-checks a requester
+  // against. `bob` is the member the sign-in-gate tests enroll as.
+  const users: any[] = [{ id: "u-bob-42", username: "bob", role: "family", directoryStatus: "ACTIVE" }];
   const client: any = {
+    user: table(users, "user"),
+    _users: users,
     overlayLinkToken: table(linkTokens, "tok"),
     pendingOverlayEnrollment: table(pendings, "pend", { conflict: false }),
     vpnPeer: table(vpnPeers, "vp"),
@@ -1780,5 +1785,272 @@ describe("POST /api/vpn/overlay/devices — approval gate (WARP-1882)", () => {
     const res = await enroll(app);
     expect(res.status).toBe(200);
     expect(res.body.profile).toBeTruthy();
+  });
+
+  // WARP-3152 — the member who asked owns the approved device. It used to land
+  // under the synthetic `overlay` user: invisible in their own list and
+  // removable only by an admin.
+  it("gives the approved device to the member who asked, not to `overlay`", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    expect(prisma._pendings[0].requestedBy).toBe("bob");
+
+    const { app: ownerApp } = buildApp({ prisma });
+    const queue = await request(ownerApp).get("/api/vpn/overlay/pending-enrollments");
+    expect(queue.body[0].requested_by).toBe("bob");
+
+    const approved = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(approved.status).toBe(200);
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.userId).toBe("bob");
+
+    const mine = await request(app).get("/api/vpn/peers");
+    expect(mine.status).toBe(200);
+    const list = mine.body.peers ?? mine.body;
+    expect(list.map((p: any) => p.publicKey)).toContain(VALID_WG_KEY);
+  });
+
+  it("refuses to approve, and denies, a request whose member has since been deactivated", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    prisma._users[0].directoryStatus = "DEACTIVATED";
+
+    const audit: AuditEntry[] = [];
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-1" }));
+    const { app: ownerApp } = buildApp({ prisma, audit, overlayEnroll });
+    const res = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("requester_not_active");
+    expect(prisma._pendings[0].state).toBe("denied");
+    expect(overlayEnroll).not.toHaveBeenCalled();
+    expect(prisma._vpnPeers).toHaveLength(0);
+    expect(audit.some((a) => a.event === "overlay_enroll_requester_ineligible")).toBe(true);
+  });
+
+  it("refuses a request whose member has since become an external guest", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    prisma._users[0].role = "guest";
+    const { app: ownerApp } = buildApp({ prisma });
+    const res = await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(prisma._vpnPeers).toHaveLength(0);
+  });
+
+  it("leaves a row staged before the column existed admin-only (`overlay`)", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const staged = await enroll(app);
+    delete prisma._pendings[0].requestedBy; // pre-migration row: NULL
+
+    const { app: ownerApp } = buildApp({ prisma });
+    await request(ownerApp)
+      .post(`/api/vpn/overlay/pending-enrollments/${staged.body.pending_id}/approve`)
+      .send({});
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.userId).toBe("overlay");
+  });
+});
+
+// ── WARP-3121 — who may enroll, and who may revoke ─────────────────────────
+//
+// Enroll hands back a profile that routes the office LAN, so it is for the
+// company's own people only: owner, admin, member (wire role `family`). An
+// external `guest` — or a role nobody has decided about yet — gets a typed 403.
+//
+// Revoke: an admin removes any device; a member removes their OWN overlay
+// device (a forgotten or lost laptop), identified by the row's `userId`, which
+// the sign-in enroll stamps with the caller's username.
+describe("overlay enroll + revoke roles (WARP-3121)", () => {
+  const MEMBER = { id: "u-bob-42", username: "bob", role: "family", displayName: "bob" };
+  const OTHER_MEMBER = { id: "u-carol-7", username: "carol", role: "family", displayName: "carol" };
+  const GUEST = { id: "u-gus-9", username: "gus", role: "guest", displayName: "gus" };
+  const ADMIN = { id: "u-ada-1", username: "ada", role: "admin", displayName: "ada" };
+  const SIGN_PEM = generateKeyPairSync("ec", { namedCurve: "P-256" })
+    .publicKey.export({ type: "spki", format: "pem" })
+    .toString();
+
+  const enroll = (app: any) =>
+    request(app).post("/api/vpn/overlay/devices").send({
+      wg_public_key: VALID_WG_KEY,
+      sign_public_key_pem: SIGN_PEM,
+      label: "Laptop",
+    });
+
+  /** Enroll bob's laptop and return its peer id. */
+  async function bobsDevice(prisma: any) {
+    expect((await enroll(buildApp({ prisma, user: MEMBER }).app)).status).toBe(200);
+    const listed = await request(buildApp({ prisma, user: MEMBER }).app).get("/api/vpn/peers");
+    return listed.body.peers[0].id as string;
+  }
+
+  it("refuses an external guest with a typed 403 and never vouches or provisions", async () => {
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "x" }));
+    const { app, audit } = buildApp({ user: GUEST, overlayEnroll });
+    const res = await enroll(app);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("REMOTE_ACCESS_NOT_PERMITTED");
+    expect(overlayEnroll).not.toHaveBeenCalled();
+    expect(installOverlayPeerMock).not.toHaveBeenCalled();
+    expect(audit).toContainEqual(
+      expect.objectContaining({ event: "overlay_enroll_refused", status: 403, clientId: "u-gus-9" }),
+    );
+  });
+
+  it("refuses an unknown role the same way", async () => {
+    const { app } = buildApp({ user: { ...MEMBER, role: "contractor" } });
+    const res = await enroll(app);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("REMOTE_ACCESS_NOT_PERMITTED");
+  });
+
+  it("lets a member enroll their own device", async () => {
+    const res = await enroll(buildApp({ user: MEMBER }).app);
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBeTruthy();
+  });
+
+  it("lets a member revoke their own overlay device, and audits it with the actor", async () => {
+    const prisma = createPrismaMock();
+    const id = await bobsDevice(prisma);
+    const overlayRevoke = vi.fn(async () => {});
+    const { app, audit } = buildApp({ prisma, user: MEMBER, overlayRevoke });
+
+    const res = await request(app).delete(`/api/vpn/peers/${id}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "revoked", id });
+    expect(overlayRevoke).toHaveBeenCalledWith(VALID_WG_KEY);
+    expect(audit).toContainEqual(
+      expect.objectContaining({ event: "overlay_revoke_own", status: 200, clientId: "u-bob-42" }),
+    );
+  });
+
+  it("refuses a member revoking someone else's device", async () => {
+    const prisma = createPrismaMock();
+    const id = await bobsDevice(prisma);
+    const overlayRevoke = vi.fn(async () => {});
+    const { app, audit } = buildApp({ prisma, user: OTHER_MEMBER, overlayRevoke });
+
+    const res = await request(app).delete(`/api/vpn/peers/${id}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("NOT_YOUR_DEVICE");
+    expect(overlayRevoke).not.toHaveBeenCalled();
+    expect(audit).toContainEqual(
+      expect.objectContaining({ event: "overlay_revoke_refused", clientId: "u-carol-7" }),
+    );
+  });
+
+  it("lets an admin revoke anyone's device", async () => {
+    const prisma = createPrismaMock();
+    const id = await bobsDevice(prisma);
+    const { app, audit } = buildApp({ prisma, user: ADMIN });
+
+    const res = await request(app).delete(`/api/vpn/peers/${id}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "revoked", id });
+    expect(audit).toContainEqual(
+      expect.objectContaining({ event: "overlay_revoke", clientId: "u-ada-1" }),
+    );
+  });
+});
+
+// ── WARP-3121 review round 1 — revoke edge cases ───────────────────────────
+describe("DELETE /api/vpn/peers/:id — own-device edge cases (WARP-3121)", () => {
+  function seeded(row: { userId: string; kind: string }) {
+    const prisma = createPrismaMock();
+    prisma.vpnPeer.rows.push({
+      id: "p1",
+      deviceLabel: "Laptop",
+      publicKey: VALID_WG_KEY,
+      assignedIp: "10.13.13.9",
+      status: "active",
+      mode: "away",
+      createdAt: new Date(),
+      ...row,
+    });
+    return prisma;
+  }
+  const del = (prisma: any, user: any, extra: any = {}) => {
+    const built = buildApp({ prisma, user, ...extra });
+    return request(built.app).delete("/api/vpn/peers/p1").then((res) => ({ res, audit: built.audit }));
+  };
+
+  it("refuses a member's own STATIC peer — the overlay-only rule is load-bearing", async () => {
+    const prisma = seeded({ userId: "bob", kind: "static" });
+    const { res } = await del(prisma, { id: "u-bob", username: "bob", role: "family" });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("NOT_YOUR_DEVICE");
+    expect(prisma.vpnPeer.rows[0].status).toBe("active");
+  });
+
+  it("lets a guest revoke their own overlay device (revoking only reduces access)", async () => {
+    const prisma = seeded({ userId: "gus", kind: "overlay" });
+    const { res, audit } = await del(prisma, { id: "u-gus", username: "gus", role: "guest" });
+    expect(res.status).toBe(200);
+    expect(audit).toContainEqual(expect.objectContaining({ event: "overlay_revoke_own", clientId: "u-gus" }));
+  });
+
+  it("refuses a caller named after the overlay placeholder on a QR-linked device", async () => {
+    const prisma = seeded({ userId: "overlay", kind: "overlay" });
+    const { res } = await del(prisma, { id: "u-ov", username: "overlay", role: "family" });
+    expect(res.status).toBe(403);
+    expect(prisma.vpnPeer.rows[0].status).toBe("active");
+  });
+
+  it("refuses a session with no role before looking the row up", async () => {
+    const prisma = seeded({ userId: "bob", kind: "overlay" });
+    const { res } = await del(prisma, { id: "u-bob", username: "bob", role: "" });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/no role/);
+    expect(prisma.vpnPeer.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unauthenticated caller", async () => {
+    const prisma = seeded({ userId: "bob", kind: "overlay" });
+    const { res } = await del(prisma, null);
+    expect(res.status).toBe(403);
+  });
+
+  it("refuses a service principal even when the row carries its username", async () => {
+    const prisma = seeded({ userId: "mcp", kind: "overlay" });
+    const { res } = await del(prisma, { id: "_service:mcp", username: "mcp", role: "service" });
+    expect(res.status).toBe(403);
+    expect(prisma.vpnPeer.rows[0].status).toBe("active");
+  });
+
+  it("audits a revoke that fails at HQ with its outcome", async () => {
+    const prisma = seeded({ userId: "bob", kind: "overlay" });
+    const overlayRevoke = vi.fn(async () => {
+      throw new Error("hq down");
+    });
+    const { res, audit } = await del(prisma, { id: "u-bob", username: "bob", role: "family" }, { overlayRevoke });
+    expect(res.status).toBe(502);
+    expect(audit).toContainEqual(
+      expect.objectContaining({
+        event: "overlay_revoke_failed",
+        status: 502,
+        clientId: "u-bob",
+        refs: expect.objectContaining({ outcome: "HQ_REVOKE_FAILED" }),
+      }),
+    );
+  });
+
+  it("audits a revoke the router staged but never applied", async () => {
+    (openwrt.deleteVpnPeer as any).mockResolvedValueOnce({ status: "staged", applied: false, removed: 1 });
+    const prisma = seeded({ userId: "bob", kind: "overlay" });
+    const { res, audit } = await del(prisma, { id: "u-ada", username: "ada", role: "admin" });
+    expect(res.status).toBe(502);
+    expect(audit).toContainEqual(
+      expect.objectContaining({ event: "overlay_revoke_failed", refs: expect.objectContaining({ outcome: "REVOKE_STAGED" }) }),
+    );
   });
 });
