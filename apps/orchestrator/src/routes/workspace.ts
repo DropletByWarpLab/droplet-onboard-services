@@ -495,6 +495,26 @@ export function createWorkspaceRouter(
         } catch {
           provider = null;
         }
+        const auditRefs = {
+          workspaceId: id.data,
+          head: bundle.head,
+          sha256: bundle.sha256,
+          bytes: bundle.size,
+          proposedTag: row.proposedTag ?? null,
+          provider,
+        };
+        // Every export that starts is audited, before a byte leaves: a client
+        // that drops mid-download, or a stream that fails its check, has
+        // still had (part of) the workspace.
+        await recordActivity({
+          kind: "tool_run",
+          severity: "info",
+          sourceIcon: "download",
+          what: "Workspace export started",
+          sub: row.name,
+          actor: actorFromRequest(req),
+          refs: auditRefs,
+        });
         res.status(200);
         res.setHeader("Content-Type", "application/octet-stream");
         res.setHeader("Content-Length", String(bundle.size));
@@ -524,26 +544,39 @@ export function createWorkspaceRouter(
         } catch (err) {
           bundle.stream.destroy();
           logger.error({ err, workspaceId: id.data }, "workspace_export_stream_failed");
-          return; // pipeline already destroyed the response: the download fails, and there is no export row
+          // The download failed or was cut short, and the client may hold
+          // part or all of the bytes: leave a visible failed row.
+          try {
+            await recordActivity({
+              kind: "tool_run",
+              severity: "warn",
+              sourceIcon: "download",
+              what: "Workspace export failed",
+              sub: row.name,
+              actor: actorFromRequest(req),
+              refs: { ...auditRefs, bytesSent: bytes },
+            });
+          } catch (auditErr) {
+            logger.error({ err: auditErr, workspaceId: id.data }, "workspace_export_audit_failed");
+          }
+          return; // pipeline already destroyed the response
         }
-        // Exactly one row per export, written once the verified bytes have all
-        // been handed over.
-        await recordActivity({
-          kind: "tool_run",
-          severity: "info",
-          sourceIcon: "download",
-          what: "Workspace exported",
-          sub: row.name,
-          actor: actorFromRequest(req),
-          refs: {
-            workspaceId: id.data,
-            head: bundle.head,
-            sha256: bundle.sha256,
-            bytes: bundle.size,
-            proposedTag: row.proposedTag ?? null,
-            provider,
-          },
-        });
+        // The completion row, once the verified bytes have all been handed
+        // over. The download has succeeded and the headers are gone, so an
+        // audit-store failure here is logged, never passed to Express.
+        try {
+          await recordActivity({
+            kind: "tool_run",
+            severity: "info",
+            sourceIcon: "download",
+            what: "Workspace exported",
+            sub: row.name,
+            actor: actorFromRequest(req),
+            refs: auditRefs,
+          });
+        } catch (auditErr) {
+          logger.error({ err: auditErr, workspaceId: id.data }, "workspace_export_audit_failed");
+        }
       } catch (err) {
         bundle.stream.destroy();
         throw err;

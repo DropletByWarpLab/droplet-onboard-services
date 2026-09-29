@@ -28,6 +28,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
+import http from "node:http";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 
@@ -746,6 +747,71 @@ describe("GET /api/workspace/:id/export (WARP-2899)", () => {
     // holds no row claiming the export happened.
     if (outcome.ok) expect(outcome.r.headers["x-bundle-sha256"]).toBe("0".repeat(64));
     expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Workspace exported" }));
+  });
+
+  it("an export that starts is audited even when the stream fails: a started row and a failed row, no completed row", async () => {
+    // MUTATION: drop the started/failed rows (audit only after success) → red.
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    (sandbox.client.bundle as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce(
+      bundleOf(BUNDLE, { sha256: "0".repeat(64) }),
+    );
+    await request(app).get("/api/workspace/ws-a/export").buffer(true).parse(binary).catch(() => undefined);
+    const whats = recordActivityMock.mock.calls.map((c) => (c[0] as { what?: string }).what);
+    expect(whats).toContain("Workspace export started");
+    expect(whats).toContain("Workspace export failed");
+    expect(whats).not.toContain("Workspace exported");
+    const failed = recordActivityMock.mock.calls.find((c) => (c[0] as { what?: string }).what === "Workspace export failed")![0];
+    expect(failed).toMatchObject({ severity: "warn", refs: expect.objectContaining({ workspaceId: "ws-a", bytes: BUNDLE.length }) });
+  });
+
+  it("a client that aborts mid-download still leaves a started row and a failed row", async () => {
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    const big = Buffer.alloc(4 * 1024 * 1024, 1);
+    (sandbox.client.bundle as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce({
+      stream: Readable.from((async function* () {
+        for (let i = 0; i < 64; i++) {
+          yield big.subarray(0, 65536);
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      })()),
+      head: HEAD,
+      size: 64 * 65536,
+      sha256: "f".repeat(64),
+    });
+    await new Promise<void>((resolve) => {
+      const server = app.listen(0, () => {
+        const port = (server.address() as { port: number }).port;
+        const req = http.get({ port, path: "/api/workspace/ws-a/export" }, (res) => {
+          res.once("data", () => {
+            req.destroy();
+            setTimeout(() => server.close(() => resolve()), 300);
+          });
+        });
+        req.on("error", () => undefined);
+      });
+    });
+    const whats = recordActivityMock.mock.calls.map((c) => (c[0] as { what?: string }).what);
+    expect(whats).toContain("Workspace export started");
+    expect(whats).toContain("Workspace export failed");
+    expect(whats).not.toContain("Workspace exported");
+  });
+
+  it("an audit failure after a completed download is logged, not relayed: the client still gets the whole bundle", async () => {
+    const { app, db } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    recordActivityMock.mockImplementation(async (row: { what?: string }) => {
+      if (row.what === "Workspace exported") throw new Error("audit store down");
+    });
+    try {
+      const res = await request(app).get("/api/workspace/ws-a/export").buffer(true).parse(binary);
+      expect(res.status).toBe(200);
+      expect(Buffer.compare(res.body as Buffer, BUNDLE)).toBe(0);
+    } finally {
+      recordActivityMock.mockReset();
+      recordActivityMock.mockResolvedValue(null);
+    }
   });
 
   it("an owner's request carrying a run header is 403 — a run does not export", async () => {
