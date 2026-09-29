@@ -41,6 +41,7 @@ import { BentoBoard } from "@/components/home/BentoBoard";
 import { AmbientLayer } from "@/components/home/AmbientLayer";
 import { WIDGETS, CATALOG } from "@/components/home/widgets";
 import { fillGaps, type LayoutItem } from "@/components/home/bento-engine";
+import { greetingNow } from "@/lib/greeting";
 import "@/components/home/home-bento.css";
 import "@/components/home/home-widgets.css";
 
@@ -140,15 +141,6 @@ function useIsMobile(): boolean {
     return () => mq.removeEventListener("change", on);
   }, []);
   return m;
-}
-
-function greetingNow(): string {
-  const hr = new Date().getHours();
-  if (hr < 5) return "Still up";
-  if (hr < 12) return "Good morning";
-  if (hr < 18) return "Good afternoon";
-  if (hr < 22) return "Good evening";
-  return "Working late";
 }
 
 /* ─────────────────────────── Settings (density) ─────────────────────────── */

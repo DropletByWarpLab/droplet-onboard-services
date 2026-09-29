@@ -125,6 +125,8 @@ describe.skipIf(!RUN)("The baseline build against real Postgres (WARP-2980)", ()
           sourceRef: ref,
           sourceLabel: ref,
           state: opts.removed?.includes(ref) ? "removed" : "active",
+          origin: "person",
+          stateSetBy: "person",
         },
       });
     }

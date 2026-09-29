@@ -7,6 +7,15 @@
  * the health header and (P4) the chat tools. A second copy of any of these
  * rules is how a hidden camera leaks through the one surface that forgot.
  *
+ * WARP-2979 (P4 §6.12.2): ONE function computes the scope for a PERSON
+ * (`securityScopeForPerson`). The human routes reach it through
+ * `securityViewerScope`, which only builds the person from `req`; P4's chat
+ * tools reach it with the acting person their own router resolved (by
+ * username, then id), through `securityScopeWithoutLocks` — the same cameras
+ * and threats, door locks off — so a tool answer and a dashboard page can
+ * never disagree about what one person may see of cameras, and the tools
+ * never see more than the page.
+ *
  *   · `visibleCameras` — CameraAccessGrant, via camera-access.service. A
  *     camera outside the grant is ABSENT (no row, no count, no area that is
  *     only made of it), never redacted.
@@ -23,12 +32,13 @@
  */
 import type { Request } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { principalFromRequest, visibleCameraNames } from "./camera-access.service.js";
+import { visibleCameraNames } from "./camera-access.service.js";
 import {
   resolveEffectiveAccessForRequest,
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
+import { resolveEffectiveAccess, type EffectiveAccessResult } from "./effective-access.service.js";
 import type { SecurityLockReader } from "./security-lock-adapter.js";
 import type { OngoingSource } from "./security-inflight.js";
 
@@ -64,9 +74,14 @@ export interface SecurityRouteDeps {
   ongoing?: Pick<OngoingSource, "inView">;
 }
 
+/** Mirrored threats are owner/admin-only rows (role-based, never a grant). */
+function roleMayReadThreats(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
 /** Moved from routes/security.ts (P2a) with the same semantics: role-based. */
 export function mayReadThreats(req: Pick<Request, "user">): boolean {
-  return req.user?.role === "owner" || req.user?.role === "admin";
+  return roleMayReadThreats(req.user?.role);
 }
 
 /**
@@ -78,30 +93,90 @@ export function mayReadThreats(req: Pick<Request, "user">): boolean {
  *   · unresolved (null: no local User row, a service principal, no
  *     principal) → owner/admin only. Fail closed.
  *   · the resolver throws → REJECTS. The caller answers 503; nothing guesses.
- *     (In production the module gate has already resolved this request, and
- *     `resolveEffectiveAccessForRequest` shares its memo, so this is one read.)
  */
-export async function mayReadLocksFor(req: Request, resolve?: EffectiveAccessResolver): Promise<boolean> {
-  const access = await resolveEffectiveAccessForRequest(req, resolve);
-  if (!access) return req.user?.role === "owner" || req.user?.role === "admin";
+function locksReadable(access: EffectiveAccessResult | null, role: string | undefined): boolean {
+  if (!access) return role === "owner" || role === "admin";
   const level = access.features.find((f) => f.moduleId === "smart_home")?.level;
   return level !== undefined && FEATURE_LEVEL_RANK[level] >= FEATURE_LEVEL_RANK.view;
 }
 
 /**
- * The viewer's scope for one request. `resolve` is `deps.resolve` (the §9
- * resolver behind the gates); it decides `mayReadLocks`.
+ * `locksReadable` for one request's user. In production the module gate has
+ * already resolved this request, and `resolveEffectiveAccessForRequest`
+ * shares its memo, so this is one read.
+ */
+export async function mayReadLocksFor(req: Request, resolve?: EffectiveAccessResolver): Promise<boolean> {
+  return locksReadable(await resolveEffectiveAccessForRequest(req, resolve), req.user?.role);
+}
+
+/**
+ * WARP-2979 — the person a Security scope is computed for: a User's `id` and
+ * `role`. For a human request that is `req.user`; for P4's chat tools it is
+ * the acting person the assistant router resolved. Never a service principal
+ * — `_service:mcp` here scopes to nothing (camera-access fails it closed with
+ * no asserted user), so a caller that forgets to resolve the person gets an
+ * empty scope, not the service's.
+ */
+export interface SecurityPerson {
+  id?: string;
+  role?: string;
+}
+
+/**
+ * WARP-2979 (P4 §6.12.2) — THE scope computation, for one person:
+ *
+ *   · `visibleCameras` — `visibleCameraNames` with a plain principal: owner/
+ *     admin → `"all"`, anyone else → their CameraAccessGrant rows, read by
+ *     `userId`; no role → nothing;
+ *   · `mayReadThreats` — owner/admin;
+ *   · `mayReadLocks` — Devices (smart_home) ≥ view in the person's resolved
+ *     §9 catalog (`locksReadable`); `resolve` reads that catalog by `person.id`.
+ *
+ * A grant lookup or resolver failure REJECTS (the caller answers 503, never
+ * an unfiltered page).
+ */
+export async function securityScopeForPerson(
+  prisma: PrismaClient,
+  person: SecurityPerson,
+  resolve?: EffectiveAccessResolver,
+): Promise<SecurityViewerScope> {
+  // The same "nothing to resolve" set as `resolveEffectiveAccessForRequest`: no id, or a service principal.
+  const catalog = !person.id || person.role === "service" ? null : (resolve ?? resolveEffectiveAccess)(person.id);
+  const [scope, access] = await Promise.all([securityScopeWithoutLocks(prisma, person), catalog]);
+  return { ...scope, mayReadLocks: locksReadable(access, person.role) };
+}
+
+/**
+ * `securityScopeForPerson` with door locks OFF (`mayReadLocks: false`), and no
+ * resolver read: for a surface that does not speak of locks — the assistant's
+ * chat tools (routes/security-assistant.ts) answer for cameras, and lock state
+ * is presence data. Always the safe side of `securityScopeForPerson`, never
+ * wider; it is also where that function gets its cameras and threats from, so
+ * the two cannot disagree about either.
+ */
+export async function securityScopeWithoutLocks(prisma: PrismaClient, person: SecurityPerson): Promise<SecurityViewerScope> {
+  return {
+    visibleCameras: await visibleCameraNames(prisma, { id: person.id, role: person.role }),
+    mayReadThreats: roleMayReadThreats(person.role),
+    mayReadLocks: false,
+  };
+}
+
+/**
+ * The viewer's scope for one request: `securityScopeForPerson` for
+ * `req.user`, its §9 catalog read through the request's memo (shared with the
+ * feature gates: one resolver read per request). The human routes refuse
+ * `_service:mcp` (never `requireRoleOrMcpService`), so no asserted-user
+ * header is ever consulted here.
  */
 export async function securityViewerScope(
   prisma: PrismaClient,
   req: Request,
   resolve?: EffectiveAccessResolver,
 ): Promise<SecurityViewerScope> {
-  const [visibleCameras, mayReadLocks] = await Promise.all([
-    visibleCameraNames(prisma, principalFromRequest(req)),
-    mayReadLocksFor(req, resolve),
-  ]);
-  return { visibleCameras, mayReadThreats: mayReadThreats(req), mayReadLocks };
+  return securityScopeForPerson(prisma, { id: req.user?.id, role: req.user?.role }, () =>
+    resolveEffectiveAccessForRequest(req, resolve),
+  );
 }
 
 /**

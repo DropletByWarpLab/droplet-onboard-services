@@ -41,6 +41,14 @@
  * act with an owner/admin floor (review item 2): nobody overwrites a
  * judgement about cameras they cannot see, and the AI gives none.
  *
+ * WARP-2979 (P4 §6.12, §7): createSecurityAssistantRouter (A1–A4), mounted
+ * last, is NOT in the human table either — nobody's browser calls it. Its own
+ * table below: exactly four routes, every one a GET; the first handler admits
+ * exactly `_service:mcp` (a person gets 403), the second resolves the person
+ * the assistant acts for, the third answers; no feature-gate meta and no
+ * `requireRoleOrMcpService`. Read-only by construction: a write route there
+ * fails this file before it fails review.
+ *
  * WARP-2981 (P6): P6-3, the rack panel's count (routes/panel-security.ts), is
  * NOT a Security router and is not in the table: it lives under /api/panel,
  * before the module gates, and no person may call it. Its own block below
@@ -65,6 +73,7 @@ import { createSecuritySiteRouter } from "../routes/security-site.js";
 import { createSecurityIncidentsRouter } from "../routes/security-incidents.js";
 import { createSecurityPatternsRouter } from "../routes/security-patterns.js";
 import { createPanelSecurityRouter } from "../routes/panel-security.js";
+import { createSecurityAssistantRouter, isSecurityActorResolver } from "../routes/security-assistant.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
@@ -89,6 +98,10 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["POST /security/zones/:id/archive", "manage", MANAGE_ROLES],
   ["POST /security/zones/:id/unarchive", "manage", MANAGE_ROLES],
   ["PUT /security/zones/:id/links", "manage", MANAGE_ROLES],
+  // WARP-2979 P4 — routes 23–25: Droplet's suggestions (a manage FILTER on a view GET) and a person's decisions.
+  ["GET /security/link-proposals", "view", VIEW_ROLES],
+  ["POST /security/links/:linkId/accept", "manage", MANAGE_ROLES],
+  ["POST /security/links/:linkId/reject", "manage", MANAGE_ROLES],
   // createSecuritySiteRouter (routes 5, 6, 7, 13–15)
   ["GET /security/mode", "view", VIEW_ROLES],
   ["GET /security/hours", "view", VIEW_ROLES],
@@ -96,6 +109,9 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
   ["PUT /security/hours", "manage", MANAGE_ROLES],
   ["PUT /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
   ["DELETE /security/hours/exceptions/:date", "manage", MANAGE_ROLES],
+  // WARP-2979 P4 — routes 26, 27: what Droplet's AI may do.
+  ["GET /security/ai-settings", "view", VIEW_ROLES],
+  ["PUT /security/ai-settings", "manage", MANAGE_ROLES],
   // createSecurityIncidentsRouter (WARP-2978, routes 16–22)
   ["GET /security/incidents", "view", VIEW_ROLES],
   ["GET /security/incidents/summary", "view", VIEW_ROLES],
@@ -119,10 +135,11 @@ const TABLE: ReadonlyArray<readonly [key: string, level: Level, roles: readonly 
 /**
  * P2b spec §9's 9 write routes and 6 GETs; WARP-2978 adds 3 writes (19, 20, 22)
  * and 4 GETs (16, 17, 18, 21); WARP-2980 PR-A adds 3 GETs (29–31) and no
- * write; PR-B adds 3 writes (33, 34, 35) and 1 GET (32).
+ * write; PR-B adds 3 writes (33, 34, 35) and 1 GET (32); WARP-2979 P4 PR-1
+ * adds 3 writes (24, 25, 27) and 2 GETs (23, 26) — P4 PR-2's route 28 makes it 19.
  */
-const WRITE_ROUTES = 15;
-const GET_ROUTES = 14;
+const WRITE_ROUTES = 18;
+const GET_ROUTES = 16;
 
 type Handle = (req: unknown, res: unknown, next: () => void) => unknown;
 interface Layer {
@@ -275,10 +292,10 @@ describe("Security level invariant — the four routers' real stacks (spec §7, 
     expect(keys.indexOf("GET /security/incidents/summary")).toBeLessThan(keys.indexOf("GET /security/incidents/:id"));
   });
 
-  it("app.ts mounts the Security routers at /api in the order this table assumes", () => {
+  it("app.ts mounts the Security routers at /api in the order this table assumes (WARP-2979: the assistant's last)", () => {
     const app = readFileSync(resolve(__dirname, "../app.ts"), "utf8");
     const mounts = [...app.matchAll(/app\.use\(\s*"\/api"\s*,\s*(createSecurity\w*Router)\(/g)].map((m) => m[1]);
-    expect(mounts).toEqual(ROUTERS.map(([name]) => name));
+    expect(mounts).toEqual([...ROUTERS.map(([name]) => name), "createSecurityAssistantRouter"]);
   });
 
   // Guards the probes themselves: a check that cannot fail proves nothing.
@@ -287,6 +304,61 @@ describe("Security level invariant — the four routers' real stacks (spec §7, 
     expect(pathRegex("/security/zones/:id").test("/security/zones/a/links")).toBe(false);
     expect(readFeatureGateMeta(sensitiveRateLimit)).toBeNull();
     expect(isRoleGuard(sensitiveRateLimit)).toBe(false);
+  });
+});
+
+describe("WARP-2979 — the assistant router (A1–A4): GET only, the MCP principal only", () => {
+  const ASSISTANT = routesOf("createSecurityAssistantRouter", createSecurityAssistantRouter(PRISMA, {}));
+  const ASSISTANT_TABLE = [
+    "GET /security/assistant/incidents",
+    "GET /security/assistant/incidents/:id",
+    "GET /security/assistant/events",
+    "GET /security/assistant/areas",
+  ];
+
+  it("exactly the four A-routes, every one a GET — never a write", () => {
+    expect(ASSISTANT.map((r) => r.key)).toEqual(ASSISTANT_TABLE);
+    expect(ASSISTANT.filter((r) => r.method !== "GET")).toEqual([]);
+  });
+
+  it.each(ASSISTANT_TABLE)("%s: the MCP-only guard, then the acting-person resolver, then the handler", (key) => {
+    const route = ASSISTANT.find((r) => r.key === key)!;
+    expect(route.handles, key).toHaveLength(3);
+    const [guard, actor] = route.handles;
+    expect(admitted(guard!), key).toEqual(["service:mcp"]);
+    expect(isSecurityActorResolver(actor), key).toBe(true);
+    expect(isSecurityActorResolver(guard), key).toBe(false);
+  });
+
+  it.each(ASSISTANT_TABLE)("%s: no feature-gate meta and no human role guard", (key) => {
+    const route = ASSISTANT.find((r) => r.key === key)!;
+    expect(route.handles.map(readFeatureGateMeta).filter((m) => m !== null), key).toEqual([]);
+    expect(route.handles.filter(isRoleGuard), key).toEqual([]);
+  });
+
+  it("its source never uses requireRoleOrMcpService (comments aside)", () => {
+    const code = readFileSync(resolve(__dirname, "../routes/security-assistant.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    expect(code).not.toMatch(/\brequireRoleOrMcpService\b/);
+    expect(code).not.toMatch(/router\.(post|put|patch|delete)\(/);
+  });
+
+  it("no path of it shadows, or is shadowed by, a human Security route", () => {
+    const all = [...ROUTES, ...ASSISTANT];
+    const shadowed: string[] = [];
+    all.forEach((later, j) => {
+      all.slice(0, j).forEach((earlier) => {
+        if (earlier.method !== later.method || earlier.path === later.path || !earlier.path.includes(":")) return;
+        if (pathRegex(earlier.path).test(later.path)) shadowed.push(`${earlier.key} shadows ${later.key}`);
+      });
+    });
+    expect(shadowed).toEqual([]);
+  });
+
+  it("the probes can see a violation: the resolver marker is on nothing else", () => {
+    expect(isSecurityActorResolver(sensitiveRateLimit)).toBe(false);
+    for (const r of ROUTES) expect(r.handles.some(isSecurityActorResolver), r.key).toBe(false);
   });
 });
 

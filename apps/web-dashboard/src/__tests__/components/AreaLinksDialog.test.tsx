@@ -23,7 +23,7 @@ import type { SecuritySourcesView, SecurityZoneLinkView, SecurityZoneView } from
 const AT = "2026-09-23T10:00:00.000Z";
 
 function link(id: string, sourceKind: SecurityZoneLinkView["sourceKind"], sourceRef: string, label: string): SecurityZoneLinkView {
-  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT };
+  return { id, sourceKind, sourceRef, label, state: "active", stateChangedAt: AT, origin: "person", setBy: "person", evidence: null };
 }
 
 const SOURCES: SecuritySourcesView = {
@@ -406,5 +406,38 @@ describe("AreaLinksDialog — door locks (WARP-2977 P2b-2)", () => {
 
   it("a lock link reads as '<name> (door lock)'", () => {
     expect(linkPhrase({ sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" })).toBe("Back door lock (door lock)");
+  });
+});
+
+describe("WARP-2979 — Droplet's suggestion in the checklist", () => {
+  it("is an unticked row tagged 'Suggested by Droplet'; ticking it and saving sends it", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const zone: SecurityZoneView = { id: "z1", name: "Stock room", kind: "interior", state: "active", version: 3, links: [link("l1", "camera", "front_cam", "Front camera")] };
+    render(
+      <AreaLinksDialog
+        open
+        zone={zone}
+        sources={SOURCES}
+        suggested={[{ sourceKind: "camera", sourceRef: "yard_cam" }]}
+        onRetrySources={vi.fn()}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />,
+    );
+    const yard = screen.getByRole("group", { name: "Yard camera" });
+    expect(within(yard).getByText(COPY.suggested)).toBeInTheDocument();
+    const box = within(yard).getByRole("checkbox", { name: COPY.wholeView });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    fireEvent.click(screen.getByRole("button", { name: COPY.save }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("z1", {
+        links: [
+          { sourceKind: "camera", sourceRef: "front_cam" },
+          { sourceKind: "camera", sourceRef: "yard_cam" },
+        ],
+        expectedVersion: 3,
+      }),
+    );
   });
 });

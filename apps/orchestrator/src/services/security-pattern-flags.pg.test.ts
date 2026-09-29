@@ -45,6 +45,7 @@ import { countSlotDetections, _resetPatternRulesForTests } from "./security-patt
 import { explainSecurityPattern } from "./security-patterns-read.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
 import { windowFor } from "../lib/security-baseline-slots.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -411,7 +412,7 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B schema against real Postgres", () => {
 
   // ── 52: re-runnable ──────────────────────────────────────────────────────
 
-  it("applying both folders again changes nothing: 6 codes, the same CHECK and FK text", async () => {
+  it("applying both folders again changes nothing: the same codes (P5's six, then P4's), the same CHECK and FK text", async () => {
     const snapshot = async (tx: Pick<PrismaClient, "$queryRawUnsafe">) => ({
       labels: (
         await tx.$queryRawUnsafe<Array<{ l: string }>>(
@@ -439,7 +440,16 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B schema against real Postgres", () => {
         return e;
       });
     const { before, after } = outcome as unknown as { before: Awaited<ReturnType<typeof snapshot>>; after: Awaited<ReturnType<typeof snapshot>> };
-    expect(before.labels).toEqual(["after_hours_presence", "camera_offline", "threat_signal", "out_of_place", "unusual_volume", "long_dwell"]);
+    // WARP-2979 appends camera_offline_during_activity (20260926000000_warp_2979_security_ai_values).
+    expect(before.labels).toEqual([
+      "after_hours_presence",
+      "camera_offline",
+      "threat_signal",
+      "out_of_place",
+      "unusual_volume",
+      "long_dwell",
+      "camera_offline_during_activity",
+    ]);
     expect(after).toEqual(before);
     expect(before.constraints.map((c) => c.name)).toEqual(
       expect.arrayContaining([
@@ -558,10 +568,14 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     // The Front door (entry), linked to the whole camera.
     const zone = await prisma.securityZone.create({ data: { name: `${TAG} Front door`, nameKey: `${TAG} front door`, kind: "entry" } });
     zoneId = zone.id;
-    await prisma.securityZoneLink.create({ data: { zoneId, sourceKind: "camera", sourceRef: PCAM, sourceLabel: PCAM, state: "active" } });
+    await prisma.securityZoneLink.create({
+      data: { zoneId, sourceKind: "camera", sourceRef: PCAM, sourceLabel: PCAM, state: "active", origin: "person", stateSetBy: "person" },
+    });
     // WARP-2977 P2b-2: and to its door lock. A lock link is never one of the area's
     // baseline cameras, and a lock row feeds no rule (D21): nothing below moves for it.
-    await prisma.securityZoneLink.create({ data: { zoneId, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Front door lock", state: "active" } });
+    await prisma.securityZoneLink.create({
+      data: { zoneId, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Front door lock", state: "active", origin: "person", stateSetBy: "person" },
+    });
 
     // 28 days of coverage, and a person at noon every day of the window.
     await prisma.securityCoverageSpan.create({
@@ -622,7 +636,7 @@ describe.skipIf(!RUN)("WARP-2980 P5 PR-B: the pattern rules on real rows", () =>
     expect(incident).toMatchObject({ scope: "area", zoneId, severity: "info", state: "no_action", reasonCodes: [] });
     const flags = await prisma.securityPatternFlag.findMany({ where: { incidentId: incident.id } });
     expect(flags).toHaveLength(1);
-    expect(flags[0]).toMatchObject({ code: "out_of_place", effect: "trial", severity: "alert", zoneKey: `area:${zoneId}`, keyCameras: [PCAM], rulesetVersion: 3 });
+    expect(flags[0]).toMatchObject({ code: "out_of_place", effect: "trial", severity: "alert", zoneKey: `area:${zoneId}`, keyCameras: [PCAM], rulesetVersion: SECURITY_RULESET_VERSION });
     const detail = flags[0]!.detail as Record<string, unknown>;
 
     const explained = await explainSecurityPattern(prisma, { visibleCameras: "all", mayReadThreats: true, mayReadLocks: true }, { zoneId, label: "person", at: AT_0310 }, NOW);

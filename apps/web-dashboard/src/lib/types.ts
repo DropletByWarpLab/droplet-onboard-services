@@ -814,6 +814,26 @@ export interface BulkOperationResult {
 /** View mode for the file manager — list or grid */
 export type FileViewMode = "list" | "grid";
 
+/**
+ * Finder-tag-style folder colours. Mirrors the orchestrator's `FolderColor`
+ * enum; "no colour" is the absence of a row (clearing deletes it), so it is
+ * deliberately not a member here.
+ */
+export type FolderColor =
+  | "red"
+  | "orange"
+  | "yellow"
+  | "green"
+  | "blue"
+  | "purple"
+  | "gray";
+
+/** One coloured folder, keyed on the Nextcloud fileId a listing entry carries. */
+export interface FolderColorEntry {
+  ncFileId: number;
+  color: FolderColor;
+}
+
 // --- Phase 3: device clients + pairing ---
 
 export interface DeviceClientInfo {
@@ -3200,6 +3220,14 @@ export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 export const PENDING_PROMPT_KEY = "droplet.pendingPrompt";
 
 /**
+ * WARP-3062 — `sessionStorage[CHAT_DRAFT_KEY]` holds the /chat composer's
+ * unsent text, so it survives the composer unmounting (the assistant
+ * layout's switch to Overview and back). Cleared by sending, and on sign-out
+ * with the hand-offs above: it is the signed-in person's words.
+ */
+export const CHAT_DRAFT_KEY = "droplet.chatDraft";
+
+/**
  * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
  * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
  * contract and change together.
@@ -3630,10 +3658,13 @@ export interface SecurityEventsPage {
 /**
  * One line of the feed header: what the feed is listening to, and whether it
  * is reporting. Served in the order camera_ingest, camera_system, locks,
- * threat_mirror, site_mode, incidents, alerts, patterns, retention. `locks`
- * (WARP-2977 P2b-2) comes only to people with Devices view; `threat_mirror`
- * and `alerts` (WARP-2978) only to owners and admins. `incidents` (WARP-2978)
- * is the incident engine's row, `patterns` (WARP-2980) the baseline job's.
+ * threat_mirror, site_mode, incidents, alerts, links, patterns, retention.
+ * `locks` (WARP-2977 P2b-2) comes only to people with Devices view;
+ * `threat_mirror` and `alerts` (WARP-2978) only to owners and admins.
+ * `incidents` (WARP-2978) is the incident engine's row, every viewer's.
+ * `links` (WARP-2979) is Droplet's link-finding job's row, after `alerts`.
+ * `patterns` (WARP-2980) is the baseline job's row. Mirrors the
+ * orchestrator's `SecurityHealthId`.
  */
 export interface SecurityHealthRow {
   id:
@@ -3644,6 +3675,7 @@ export interface SecurityHealthRow {
     | "site_mode"
     | "incidents"
     | "alerts"
+    | "links"
     | "patterns"
     | "retention";
   state: "ok" | "quiet" | "down" | "not_configured";
@@ -3660,7 +3692,62 @@ export type SecurityZoneKind = "entry" | "interior" | "perimeter" | "parking" | 
 export type SecurityZoneState = "active" | "archived";
 /** `lock` (WARP-2977 P2b-2): one Matter door-lock endpoint; shown only to people with Devices view. */
 export type SecurityZoneSourceKind = "camera" | "camera_zone" | "lock";
-export type SecurityZoneLinkState = "active" | "removed";
+/**
+ * `removed` = a person unlinked it. WARP-2979: `proposed` = Droplet suggests it
+ * (nothing uses it until a person adds it); `rejected` = a person turned
+ * Droplet's suggestion down, or undid Droplet's link. Route 3 lists `active`
+ * links only; suggestions come from route 23.
+ */
+export type SecurityZoneLinkState = "active" | "removed" | "proposed" | "rejected";
+/** WARP-2979 — who created a link (`origin`) and who set its current state (`setBy`). */
+export type SecurityLinkActor = "person" | "droplet";
+
+/**
+ * WARP-2979 (ADR-059 P4 §6.4) — why Droplet linked or suggested a source: the
+ * co-occurrence counts it decided on. Every number is an integer
+ * (`lambdaMilli` = expected by chance × 1000, `liftTenths` = lift × 10,
+ * `confidenceBp` = confidence × 10 000); `pAdj` is a string. The server sends
+ * it only to a viewer who can see every source it names (DS-005); the page
+ * turns it into sentences (components/security/link-evidence-copy.ts).
+ */
+export interface LinkEvidenceDirection {
+  n: number;
+  k: number;
+  excluded: number;
+  lambdaMilli: number;
+  liftTenths: number;
+  confidenceBp: number;
+}
+
+export interface LinkEvidenceSource {
+  sourceKind: "lock" | "camera" | "camera_zone";
+  sourceRef: string;
+  /** The camera's (or lock's) display name when the evidence was computed. */
+  label: string;
+}
+
+export interface LinkEvidenceView {
+  v: 1;
+  kind: "lock_camera" | "camera_camera";
+  /** ISO instants of the 14-day window. */
+  window: { from: string; to: string };
+  anchor: LinkEvidenceSource & { linkId: string };
+  candidate: LinkEvidenceSource;
+  /** The anchor's visits → the candidate. */
+  forward: LinkEvidenceDirection;
+  /** camera_camera only: the candidate's visits → the anchor. */
+  reverse: LinkEvidenceDirection | null;
+  chosen: "whole" | "part" | "lock";
+  wholeK: number | null;
+  /** Names are a tiebreak, never evidence: shown below the numbers. */
+  names: { match: boolean; shared: string[] };
+  hypotheses: number;
+  pAdj: string;
+  gate: "auto" | "propose";
+  /** Up to 5 recent hits, newest first; removed after 30 days (then `samplesTrimmedBefore` is set). */
+  samples: Array<{ anchorAt: string; hitAt: string }>;
+  samplesTrimmedBefore: string | null;
+}
 
 export interface SecurityZoneLinkView {
   id: string;
@@ -3679,6 +3766,16 @@ export interface SecurityZoneLinkView {
   label: string;
   state: SecurityZoneLinkState;
   stateChangedAt: string;
+  /** WARP-2979 — who created the link: a person, or Droplet (a suggestion or its own link). */
+  origin: SecurityLinkActor;
+  /**
+   * WARP-2979 — who set its current state. `origin droplet` + `setBy droplet`
+   * = "Linked by Droplet" (Keep / Undo); `origin droplet` + `setBy person` =
+   * a suggestion a person added or kept. Only person-set links make alerts.
+   */
+  setBy: SecurityLinkActor;
+  /** WARP-2979 — Droplet's evidence; null unless origin is droplet AND this viewer can see every source it names. */
+  evidence: LinkEvidenceView | null;
 }
 
 export interface SecurityZoneView {
@@ -3756,6 +3853,62 @@ export interface SecurityZoneCreated {
 /** PATCH, archive, unarchive and links → 200. `changed:false` = nothing to do (no audit row). */
 export interface SecurityZoneWriteResult {
   zone: SecurityZoneView;
+  changed: boolean;
+}
+
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+/** What Droplet may do with links on its own (manage). */
+export type SecurityAiLinking = "link_and_suggest" | "suggest_only" | "off";
+/** Whether Droplet writes incident summaries (on this Droplet only). */
+export type SecurityAiSummaries = "on" | "off";
+
+/** One of Droplet's open suggestions (route 23). */
+export interface SecurityLinkProposal {
+  linkId: string;
+  zone: { id: string; name: string; kind: SecurityZoneKind };
+  sourceKind: SecurityZoneSourceKind;
+  sourceRef: string;
+  /** The camera's display name (never the part — see SecurityZoneLinkView.label). */
+  label: string;
+  /** Wilson lower bound, 0..1. */
+  confidence: number;
+  evidence: LinkEvidenceView | null;
+  /** When the evidence behind it was last computed (ISO). */
+  suggestedAt: string;
+}
+
+/**
+ * GET /api/security/link-proposals. `proposals` is filled only at manage (or
+ * for an owner/admin with no per-person level); below it the list is empty,
+ * never refused. Ordered: a name match first, then confidence.
+ */
+export interface SecurityLinkProposalsView {
+  level: "view" | "act" | "manage" | null;
+  linking: SecurityAiLinking;
+  proposals: SecurityLinkProposal[];
+}
+
+/** POST /api/security/links/:id/{accept,reject} → 200. `changed:false` = already decided that way (no audit row). */
+export type SecurityLinkDecisionResult = SecurityZoneWriteResult;
+
+/** GET /api/security/ai-settings. */
+export interface SecurityAiSettingsView {
+  linking: SecurityAiLinking;
+  summaries: SecurityAiSummaries;
+  /** Send back as `expectedVersion`. */
+  version: number;
+}
+
+/** PUT /api/security/ai-settings (manage). */
+export interface SecurityAiSettingsBody {
+  linking: SecurityAiLinking;
+  summaries: SecurityAiSummaries;
+  expectedVersion: number;
+}
+
+/** PUT /api/security/ai-settings → 200. `changed:false` = nothing to change (no audit row). */
+export interface SecurityAiSettingsWriteResult extends SecurityAiSettingsView {
   changed: boolean;
 }
 
@@ -3942,7 +4095,16 @@ export type SecurityErrorCode =
   | "NO_RECIPIENT"
   | "NOT_ELIGIBLE"
   | "ROUTING_UNAVAILABLE"
-  | "USER_NOT_FOUND";
+  | "USER_NOT_FOUND"
+  // WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and the AI settings.
+  | "LINK_NOT_FOUND"
+  | "LINK_NOT_DECIDABLE"
+  | "LINK_CONFLICT"
+  | "LINK_LIMIT"
+  | "LINKS_UNAVAILABLE"
+  | "AI_SETTINGS_UNAVAILABLE"
+  // WARP-2980 (P5 PR-C) — route 35: nothing this viewer can mark, or a partial view (one body).
+  | "NOT_JUDGEABLE";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
@@ -4106,8 +4268,16 @@ export type SecurityIncidentGrouping = "collecting" | "closed";
  * `reasons` only once P5 PR-D releases it as counted; until then it is a
  * trial flag, which route 18 sends apart, in `patternFlags` (see
  * IncidentDetail). The copy names every member (incident-copy.ts).
+ * WARP-2979 (P4): `camera_offline_during_activity`, an alert — a camera a
+ * person linked to an area stopped reporting soon after someone was seen
+ * there, while the site was closed or away.
  */
-export type SecurityReasonCode = "after_hours_presence" | "camera_offline" | "threat_signal" | SecurityPatternCode;
+export type SecurityReasonCode =
+  | "after_hours_presence"
+  | "camera_offline"
+  | "threat_signal"
+  | SecurityPatternCode
+  | "camera_offline_during_activity";
 /** Whether the events behind the incident are still kept (they are trimmed after 30 days; the incident stays a year). */
 export type SecurityIncidentEventsKept = "kept" | "partly_removed" | "removed";
 export type SecurityIncidentAckAction = "acknowledge" | "resolve";
@@ -4190,8 +4360,16 @@ export interface IncidentReasonView {
    * zoneKind}`; camera_offline `{offlineForSec, backAt}`; threat_signal
    * `{activityId, kind}`; a counted pattern code (P5 PR-D) the flag's own
    * numbers, which P5 PR-C words — this page shows its name alone.
+   * WARP-2979 — camera_offline_during_activity `{offlineForSec, backAt, mode,
+   * modeSource, activity: {eventId, kind, label, at, zoneId, zoneName}}`.
    */
-  detail: Record<string, string | number | null> | null;
+  detail: Record<string, string | number | null | Record<string, string | number | null>> | null;
+  /**
+   * WARP-2979 — the second camera the evidence names (camera_offline_during_activity:
+   * where the person was seen), else null. The box sends the reason only when
+   * this viewer can see that camera too.
+   */
+  relatedCamera?: string | null;
 }
 
 export interface IncidentAckView {
@@ -4246,15 +4424,55 @@ export interface IncidentNoticeView {
  */
 export type IncidentMemberView = Omit<SecurityEvent, "incident"> & { alsoIn: SecurityZoneRef[] };
 
+/** WARP-2980 (P5 PR-B route 18, PR-C) — Expected / Not expected, as the box keeps it. */
+export type IncidentVerdictState = "unreviewed" | "expected" | "not_expected";
+/** Route 35's body: an answer can change, never go back to unreviewed. */
+export type IncidentVerdict = Exclude<IncidentVerdictState, "unreviewed">;
+
+/**
+ * Route 18's verdict — sent only to a viewer who sees every camera and may
+ * read threats (null to anyone else: an answer about things they can't see).
+ */
+export interface IncidentVerdictView {
+  state: IncidentVerdictState;
+  /** Display-safe; null iff unreviewed. */
+  byName: string | null;
+  at: string | null;
+  /** The codes judged when it was marked. */
+  codes: SecurityReasonCode[];
+}
+
+/**
+ * One pattern flag on route 18 (WARP-2980 P5 PR-B): what Droplet would have
+ * flagged (`trial` — every pattern code is trial until P5 PR-D) or what
+ * expected activity kept quiet (`suppressed`). Neither counts: neither sets
+ * the incident's severity or state, and neither told anyone. The box sends
+ * flags only to owner/admin who see the flag's cameras.
+ */
+export interface IncidentPatternFlagView {
+  code: SecurityPatternCode;
+  effect: "trial" | "suppressed";
+  /** What it would carry if it counted. Never shown as the incident's severity. */
+  severity: SecuritySeverity;
+  key: { kind: "area" | "camera"; zoneId: string | null; camera: string | null };
+  evidence: { eventId: string; camera: string; label: string; at: string; summary: string };
+  /**
+   * The numbers behind it (safe integers and exact strings): every flag
+   * `{dayType, hour, windowFrom, windowTo, mode, zoneKind, rulesetVersion}`;
+   * out_of_place `{daysObserved, daysWithEvent, …}`; unusual_volume `{k,
+   * lambda, typicalPerHour, …}`; long_dwell `{durationSec, p99Sec, …}`.
+   */
+  detail: Record<string, string | number | null> | null;
+  /** effect = suppressed: the expected activity that kept it quiet, as it is NOW; else null. */
+  suppression: { id: string; reason: string; state: "active" | "removed" | "expired" } | null;
+}
+
 /**
  * GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike.
  *
- * Deliberately NOT mirrored here: what P5 PR-B (WARP-2980) added to route 18
- * — `verdict`, `patternFlags` and `viewer.canGiveVerdict` — and route 35
- * (POST …/verdict, whose 409 is NOT_JUDGEABLE). The box sends them; this
- * page ignores them. P5 PR-C mirrors and renders them (the verdict bar, the
- * Trial chip, a flag quietened by expected activity), each with its own
- * viewer rule, so none of it is shown before that rule is.
+ * WARP-2980 (P5 PR-C) mirrors what P5 PR-B added — `verdict`, `patternFlags`
+ * and `viewer.canGiveVerdict` — and route 35 (POST …/verdict, 409
+ * NOT_JUDGEABLE), each rendered under its own viewer rule.
  */
 export interface IncidentDetail extends IncidentSummary {
   reasons: IncidentReasonView[];
@@ -4279,16 +4497,25 @@ export interface IncidentDetail extends IncidentSummary {
    * the cause.
    */
   actionable: boolean;
+  /** WARP-2980: null unless this viewer sees every camera and may read threats. */
+  verdict: IncidentVerdictView | null;
+  /** WARP-2980: the flags this viewer may see, in evidence order (owner/admin only, on the box). */
+  patternFlags: IncidentPatternFlagView[];
   /**
    * The viewer's Security level on the box, and whether they have acknowledged
    * or resolved this incident — kept in a partial view too (their own act).
+   * `canGiveVerdict` (WARP-2980): exactly when route 35 would accept an answer
+   * from them — owner/admin who see everything, at act or above, on a view
+   * that isn't partial, with something to judge. Independent of `actionable`:
+   * a trial-only incident has nothing to acknowledge and can still be judged.
    */
-  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
+  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean; canGiveVerdict: boolean };
 }
 
 /** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
 export interface IncidentActionResult {
-  incident: IncidentDetail;
+  /** null when, after the write, this person can no longer see the incident (route 18 would answer 404). */
+  incident: IncidentDetail | null;
   changed: boolean;
 }
 

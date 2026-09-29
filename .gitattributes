@@ -12,6 +12,12 @@
 # silently resolves to no such unit. Same hazard, same pin.
 *.timer text eol=lf
 *.py text eol=lf
+# WARP-3209 — TypeScript. Unpinned, a Windows clone (core.autocrlf=true) that
+# commits one CRLF-materialized edit leaves the file CRLF in the index, and git
+# then stops normalizing it: routes/workspace.ts went CRLF that way and a ~90
+# line change read as a 1,590 line rewrite (blame gone, every open PR touching
+# the router conflicting). Guarded by apps/orchestrator/src/__tests__/source-eol.test.ts.
+*.ts text eol=lf
 Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf

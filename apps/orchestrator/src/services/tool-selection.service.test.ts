@@ -12,6 +12,7 @@ import {
   toolNamesForDomain,
 } from "./tool-selection.service.js";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 
 const POOL = [
   "search_content",
@@ -1054,5 +1055,187 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
     expect(advertised.has("control_device")).toBe(true);
     expect(advertised.has("workspace_write")).toBe(true);
     expect(advertised.has("list_network_devices")).toBe(false);
+  });
+});
+
+describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4 §6.12.6)", () => {
+  const SECURITY = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"];
+  const SECURITY_POOL = [...POOL, ...SECURITY];
+  const select = (sentence: string) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: SECURITY_POOL, conversationToolNames: [] });
+
+  it.each([
+    "anything odd at the back door last night?",
+    "did anything happen while we were away",
+    "any security incidents this week?",
+    "is the stock room covered?",
+    "which areas had people after hours?",
+  ])("routes to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).toContain(name);
+  });
+
+  it.each(["add a dentist appointment tomorrow", "block my son's tablet"])("does not route to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains).not.toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).not.toContain(name);
+  });
+
+  it("is never in the core pool: pulled in by the turn, or not at all", () => {
+    for (const name of SECURITY) expect(CORE_TOOL_NAMES.has(name), name).toBe(false);
+    for (const name of SECURITY) expect(domainOfTool(name), name).toBe("security");
+  });
+
+  it("a follow-up keeps the domain by continuity", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the one before that?",
+      pool: SECURITY_POOL,
+      conversationToolNames: ["security_get_incident"],
+    });
+    expect(r.advertised).toContain("security_list_incidents");
+  });
+
+  // Review #2420 (item 4): the tools' OWN examples — the questions each description tells the model it answers —
+  // must reach them. Read from the catalog, so an example added to a description is checked the day it lands.
+  const EXAMPLE = /(?:^|[\s(])'([^']+\?)'/g;
+  const examples = TOOL_CATALOG.filter((t) => t.domain === "security").flatMap((t) =>
+    [...t.description.matchAll(EXAMPLE)].map((m) => [t.name, m[1]!] as const),
+  );
+
+  it("the descriptions carry examples to check (not vacuous)", () => {
+    expect(examples.length).toBeGreaterThanOrEqual(5);
+    expect(examples.map(([, q]) => q)).toEqual(
+      expect.arrayContaining(["any alerts this week?", "is any camera offline?", "was anyone in the stock room after 9?"]),
+    );
+  });
+
+  it.each(examples)("%s's own example routes to security: %s", (_tool, question) => {
+    const r = select(question);
+    expect(r.matchedDomains, `"${question}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
+  });
+});
+
+describe("WARP-3280 — contacts and the calculator are reachable from a fresh turn", () => {
+  const CONTACTS_POOL = [...POOL, "search_contacts", "email_search"];
+  const DATA_POOL = [...POOL, "calculate", "get_weather"];
+
+  const advertisedFor = (userMessage: string, pool: string[]) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames: [],
+    }).advertised;
+
+  // The ticket's own four sentences matched NO domain (or, for the second,
+  // not `email`), so the model answered "no contact found" without ever
+  // having search_contacts. MUTATION: drop `contacts?`/`address book`/the
+  // bare-address alternative from the email rule and these go red.
+  describe("contacts — positives", () => {
+    it.each([
+      "Look up the contact alice@example.com.",
+      "Look up charlie@example.com and open the work item from their contact note.",
+      "what's the plumber's number in my contacts?",
+      "is Dana Whitfield in the address book?",
+      "who is bob.smith+work@acme-corp.co.uk?",
+      "find Maria Lopez's contact info",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
+    });
+  });
+
+  // `contact` as a VERB ("contact me later", "who should I contact about the
+  // boiler") is knowingly admitted: reaching a person is what the email
+  // domain's tools do, and the whole domain is six schemas. What is NOT
+  // admitted is the eyewear and card-payment senses, which want nothing
+  // from an inbox.
+  describe("contacts — negatives", () => {
+    it.each([
+      "I need to reorder my contact lenses",
+      "does the shop take contactless payments?",
+      // An `@` that is not an address: a handle and a time.
+      "follow us @dropletbox",
+      "meet me @ 5",
+      "reorder my contact-lens prescription",
+    ])("%s does not advertise search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).not.toContain("search_contacts");
+    });
+  });
+
+  // Knowingly admitted: any `user@host.tld` token is read as an address, so a
+  // git remote or an ssh target advertises the email domain too. Six schemas
+  // is the cheap direction; pinned so a future narrowing is a decision.
+  describe("contacts — address-shaped tokens that are not mail (accepted)", () => {
+    it.each([
+      "clone git@github.com:org/repo for me",
+      "ssh root@droplet.local is refusing my key",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
+    });
+  });
+
+  // MUTATION: narrow `calculat\w*` back to `calculate`, or drop the
+  // arithmetic-expression alternative, and the matching positive goes red.
+  describe("calculator — positives", () => {
+    it.each([
+      "What is 187 * 43?",
+      "Use the calculator to work out 2+2.",
+      "can you do the math on 1250 × 12 for the annual rent?",
+      "what's 84 / 7",
+      "quick calculation: 15% of 240",
+      "what's 3 x 4.5",
+      "how much is 2^10",
+      "check my arithmetic, 17 - 9 is 8 right?",
+    ])("%s advertises calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).toContain("calculate");
+    });
+  });
+
+  // `-`, `/` and `x` are expressions only with spaces around them; tight,
+  // they are dates, phone numbers, resolutions and part numbers. Bare `sum`
+  // is not claimed ("sum up the thread" is a summary). These sentences carry
+  // no other data word, so they must stay off the domain.
+  describe("calculator — negatives", () => {
+    it.each([
+      "call the landlord on 555-0142",
+      "the 9/11 memorial photo",
+      "is the monitor 1920x1080?",
+      "sum up the thread with Karen",
+      "C++ developer resume",
+    ])("%s does not advertise calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).not.toContain("calculate");
+    });
+  });
+});
+
+// WARP-3280 review — the first bare-address alternative (`[\w.+-]+@…`,
+// unanchored and unbounded) backtracked O(n²): 40k chars took ~3 s, blocking
+// the event loop on every turn and timing out llm-chat.integration.test.ts.
+// `selectAdvertisedTools` tests EVERY `DOMAIN_RULES` pattern (no short
+// circuit), so timing it times every rule. Each input is a worst case for at
+// least one rule shape: a long word run, a run of `.`/`@` separators, a
+// dotted domain with no TLD, whitespace after a digit (the arithmetic `\s*`
+// alternatives), and a repeated `contact` lookahead. The auth-policy userid
+// test is the precedent. MUTATION: restore `[\w.+-]+@[\w-]+(\.[\w-]+)*` and
+// the first case takes seconds.
+describe("WARP-3280 — every domain rule runs in linear time on hostile input", () => {
+  const N = 100_000;
+  it.each([
+    ["word run", "x".repeat(N)],
+    ["dotted run", "a.".repeat(N / 2)],
+    ["at run", "a@".repeat(N / 2)],
+    ["local part, no @", "a".repeat(N) + "@"],
+    ["domain, no TLD", "a@" + "a.".repeat(N / 2) + "1"],
+    ["plus/dash run", "+-".repeat(N / 2) + "@x"],
+    ["digit then spaces", "1" + " ".repeat(N) + "a"],
+    ["digit-space run", "1 ".repeat(N / 2)],
+    ["percent run", "1 % ".repeat(N / 4)],
+    ["contact run", "contact ".repeat(N / 8)],
+  ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
+    const started = performance.now();
+    selectAdvertisedTools({ mode: "domains", userMessage: hostile, pool: POOL, conversationToolNames: [] });
+    expect(performance.now() - started).toBeLessThan(50);
   });
 });

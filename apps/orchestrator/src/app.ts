@@ -16,6 +16,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createLlmWarmRouter } from "./routes/llm-warm.js";
 import { createToolsRuntimeRouter } from "./routes/tools-runtime.js";
 import { resolveToolAccessScope } from "./services/tool-access.service.js";
 import { createTeamChatRouter } from "./routes/team-chat.js";
@@ -83,6 +84,7 @@ import { createSecurityZonesRouter } from "./routes/security-zones.js";
 import { createSecuritySiteRouter } from "./routes/security-site.js";
 import { createSecurityIncidentsRouter } from "./routes/security-incidents.js";
 import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
+import { createSecurityAssistantRouter } from "./routes/security-assistant.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createBuildingRouter } from "./routes/building.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -434,10 +436,17 @@ export function createApp(
       resolveScope: (user) => resolveToolAccessScope(prisma, user),
     }),
   );
+  // WARP-3127 — POST /api/llm/warm: voice-io starts loading the active model
+  // the moment the wake word fires. Mounted BEFORE createLlmRouter so no
+  // `/llm/:param` route there can ever shadow it; the `chat` module gate
+  // (`/api/llm`) covers it like /api/llm/chat.
+  app.use("/api", createLlmWarmRouter(prisma));
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the
-  // registry's /api/team-chat prefix.
+  // registry's /api/team-chat prefix. WARP-3162: the team-chat tools'
+  // `_service:mcp` calls reach this router only past `mountMcpActingUserGates`
+  // above (the acting person needs `team_chat` with `use`).
   app.use("/api", createTeamChatRouter(prisma));
   app.use("/api", createMemoryRouter(prisma));
   // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
@@ -639,8 +648,14 @@ export function createApp(
   // paths (`/incidents/summary`) are declared before `/incidents/:id`.
   app.use("/api", createSecurityIncidentsRouter(prisma));
   // WARP-2980 (ADR-059 P5) — "what normal looks like", read-only (routes
-  // 29–31). Same /api/security module gate; the last Security router.
+  // 29–31). Same /api/security module gate.
   app.use("/api", createSecurityPatternsRouter(prisma));
+  // WARP-2979 (ADR-059 P4 §6.12) — what the read-only `security` chat tools
+  // read (A1–A4): GET only, the `_service:mcp` principal only, for the person
+  // X-Nextcloud-User names. Same /api/security module gate, and the WARP-2988
+  // acting-user gate above (`security` is in MCP_ACTING_USER_GATED_DOMAINS).
+  // The last Security router: every path is under the literal /assistant/.
+  app.use("/api", createSecurityAssistantRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).
   app.use("/api", createBuildingRouter(prisma));

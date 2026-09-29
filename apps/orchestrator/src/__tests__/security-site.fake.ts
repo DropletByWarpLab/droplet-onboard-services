@@ -56,8 +56,18 @@ export interface FakeException {
   updatedAt: Date;
 }
 
+/** WARP-2979 — the AI settings row (routes 26/27). */
+export interface FakeAiSettings {
+  id: string;
+  linking: "link_and_suggest" | "suggest_only" | "off";
+  summaries: "on" | "off";
+  version: number;
+  updatedById: string | null;
+}
+
 export interface FakeTables {
   hours: FakeHours | null;
+  ai: FakeAiSettings | null;
   mode: FakeMode | null;
   days: FakeDay[];
   exceptions: FakeException[];
@@ -106,6 +116,7 @@ export function weekRows(spec: readonly string[]): FakeDay[] {
 export function newWorld(over: Partial<FakeWorld> = {}): FakeWorld {
   return {
     hours: null,
+    ai: null,
     mode: null,
     days: [],
     exceptions: [],
@@ -282,6 +293,25 @@ export function fakePrisma(w: FakeWorld) {
         return { count };
       }),
     },
+    securityAiSettings: {
+      findUnique: vi.fn(async () => (w.ai ? copy(w.ai) : null)),
+      createMany: vi.fn(async () => {
+        if (w.ai) return { count: 0 };
+        w.ai = { id: "singleton", linking: "link_and_suggest", summaries: "on", version: 0, updatedById: null };
+        w.log.push("ai.create");
+        return { count: 1 };
+      }),
+      findUniqueOrThrow: vi.fn(async () => {
+        if (!w.ai) throw new Error("No SecurityAiSettings found");
+        return copy(w.ai);
+      }),
+      updateMany: vi.fn(async (a: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        if (!w.ai || !matches(w.ai, a.where)) return { count: 0 };
+        apply(w.ai, a.data);
+        w.log.push("ai.update");
+        return { count: 1 };
+      }),
+    },
     user: {
       findUnique: vi.fn(async (a: { where: { id: string } }) => {
         const u = w.users[a.where.id];
@@ -293,7 +323,7 @@ export function fakePrisma(w: FakeWorld) {
   };
   const $transaction = vi.fn(async (fn: (tx: typeof delegates) => Promise<unknown>, opts?: unknown) => {
     void opts;
-    const snap = copy({ hours: w.hours, mode: w.mode, days: w.days, exceptions: w.exceptions, events: w.events });
+    const snap = copy({ hours: w.hours, ai: w.ai, mode: w.mode, days: w.days, exceptions: w.exceptions, events: w.events });
     const logLength = w.log.length;
     try {
       return await fn(delegates);

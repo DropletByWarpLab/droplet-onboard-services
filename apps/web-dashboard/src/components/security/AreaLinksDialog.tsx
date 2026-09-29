@@ -22,6 +22,10 @@
  *   - anything else unlisted and not `missing` → "Couldn't check these".
  * The server only verifies NEW links, so keeping one is always allowed.
  *
+ * WARP-2979 — a pending Droplet suggestion for this area is an unticked row
+ * tagged "Suggested by Droplet"; ticking it and saving sends it in the set,
+ * and the server accepts it (a person's link from then on).
+ *
  * Presentational: the Areas panel does the write and shows failures; this
  * stays open on a rejection. A right-edge side panel (a sheet on a phone), so
  * it owns a labelled Close control (WARP-1787).
@@ -67,6 +71,7 @@ export const COPY = {
   save: "Save",
   wholeViewPhrase: "{camera} (whole view)",
   partPhrase: "{camera} (the '{part}' part of the view)",
+  suggested: "Suggested by Droplet",
   // WARP-2977 P2b-2 — door locks.
   locksLegend: "Door locks",
   locksHint: "Tick the locks on this area's doors.",
@@ -118,6 +123,8 @@ export interface AreaLinksDialogProps {
   /** GET /api/security/sources; null while loading or when it failed. */
   sources: SecuritySourcesView | null;
   sourcesError?: Error;
+  /** WARP-2979 — Droplet's open suggestions for this area (tagged, unticked). */
+  suggested?: ReadonlyArray<{ sourceKind: SecurityZoneSourceKind; sourceRef: string }>;
   onRetrySources: () => void;
   onClose: () => void;
   /** Reject to keep the dialog open (the caller shows the error). */
@@ -129,10 +136,12 @@ export function AreaLinksDialog({
   zone,
   sources,
   sourcesError,
+  suggested = [],
   onRetrySources,
   onClose,
   onSave,
 }: AreaLinksDialogProps) {
+  const suggestedKeys = new Set(suggested.map((s) => keyOf(s.sourceKind, s.sourceRef)));
   const uid = useId();
   const titleId = `${uid}-title`;
   const subId = `${uid}-sub`;
@@ -267,6 +276,11 @@ export function AreaLinksDialog({
       {hint && (
         <span id={`${id}-hint`} style={{ fontSize: 12.5, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
           {hint}
+        </span>
+      )}
+      {suggestedKeys.has(key) && (
+        <span className="badge muted" data-suggested={key}>
+          {COPY.suggested}
         </span>
       )}
     </div>

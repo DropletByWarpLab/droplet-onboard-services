@@ -163,8 +163,9 @@ describe("POST /api/auth/login?return=body — WARP-582 browser gate", () => {
     expect(res.body.accessToken).toEqual(expect.any(String));
     expect(res.body.refreshToken).toEqual(expect.any(String));
     expect(res.body.accessTokenExpiresAt).toEqual(expect.any(Number));
-    // Cookies are still set alongside (unchanged native contract).
-    expect(setCookieText(res)).toContain("droplet_session=");
+    // WARP-3038 — a body-token login sets NO session cookies: a default
+    // URLSession cookie jar would persist them to disk.
+    expect(res.headers["set-cookie"]).toBeUndefined();
   });
 
   it("accepts the legacy ?return=body=1 spelling from a native client", async () => {
@@ -200,6 +201,14 @@ describe("POST /api/auth/login?return=body — WARP-582 browser gate", () => {
       expect(setCookieText(res)).toContain("droplet_session=");
     },
   );
+
+  it("WARP-3038: the browser path (no ?return=body) still sets BOTH session cookies and no body tokens", async () => {
+    const res = await request(publicApp()).post("/api/auth/login").send(CREDS);
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toBeUndefined();
+    expect(setCookieText(res)).toContain("droplet_session=");
+    expect(setCookieText(res)).toContain("droplet_refresh=");
+  });
 
   it("a browser-marked login WITHOUT return=body is byte-identical to before (no tokens)", async () => {
     const res = await request(publicApp())
@@ -243,7 +252,8 @@ describe("POST /api/auth/refresh — WARP-582 browser gate (WARP-3193 SEC-AUTH-7
     expect(res.body.refreshToken).toEqual(expect.any(String));
     expect(res.body.accessTokenExpiresAt).toEqual(expect.any(Number));
     expect(res.body.refreshTokenExpiresAt).toEqual(expect.any(Number));
-    expect(setCookieText(res)).toContain("droplet_session=");
+    // WARP-3038 — no cookies on a body-token rotation either.
+    expect(res.headers["set-cookie"]).toBeUndefined();
   });
 
   it.each([

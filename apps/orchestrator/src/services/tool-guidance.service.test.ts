@@ -58,6 +58,16 @@ describe("composeToolGuidance", () => {
     expect(block).toContain("never invent one");
   });
 
+  it("WARP-3282 — tells the model never to repeat a credential from a result, whatever the tool set", () => {
+    // Any tool can return one (read_file, email_read, a remote MCP page), so
+    // the rule rides with the always-on never-invent line, not with search.
+    for (const set of [["search_content"], ["email_read"], ["calculate"], undefined]) {
+      expect(composeToolGuidance(set)).toContain("Never repeat a password, key or token");
+    }
+    // No tools, no tool results: no rule.
+    expect(composeToolGuidance([])).not.toContain("password");
+  });
+
   it("stays under TOOL_GUIDANCE_MAX_CHARS at full render", () => {
     expect(composeToolGuidance(undefined).length).toBeLessThanOrEqual(
       TOOL_GUIDANCE_MAX_CHARS,

@@ -104,9 +104,10 @@ Apply guards at route registration, not inside the handler. Mirror the existing 
 | `POST/PUT/DELETE /api/cameras/*`, `/api/matter/*`, `/api/smart-home/*` | `owner`, `admin`, `family` |
 | `POST/PUT/DELETE /api/files/*` (write) | `owner`, `admin`, `family` |
 | `POST/PUT/DELETE /api/llm/sessions/*` (own session) | `owner`, `admin`, `family`, `guest` |
+| `POST /api/llm/warm` (WARP-3127, warm on wake) | `owner`, `admin`, and the `_service:voice` principal (pinned by id) |
 | All `GET` endpoints | unchanged (auth middleware still applies; no role gate) |
 
-Service principals (`service` role) are read-only by design — they hit `GET` endpoints and the MCP tool surface only. The matrix above does NOT include `service` on any write row.
+Service principals (`service` role) are read-only by design — they hit `GET` endpoints and the MCP tool surface only. The matrix above does NOT include the `service` role on any write row; the one pinned principal id it names (`_service:voice` on `POST /api/llm/warm`) is the scoped WARP-3127 exception below.
 
 #### Voice smart-home control exception (WARP-1398 amendment)
 
@@ -138,6 +139,27 @@ Service principals (`service` role) are read-only by design — they hit `GET` e
 >
 > Human RBAC is unchanged; this widens exactly one non-human principal by exactly
 > one tool, with the lock carve-out preserved.
+
+#### Voice warm-on-wake exception (WARP-3127 amendment)
+
+> **Status of this note:** added 2026-09-25 by WARP-3127 (voice latency, epic
+> WARP-1430; scope approved by Stefan on 2026-09-25, guard as specified in the
+> ticket). A second scoped exception to the read-only default above.
+>
+> When the wake word fires, voice-io POSTs `/api/llm/warm` so the orchestrator
+> starts loading the box's active chat model while the person is still
+> speaking. The route is guarded by
+> `requireRoleOrService("_service:voice", "owner", "admin")`: the
+> `_service:voice` principal id AND the `service` role must both match, so every
+> other service principal (`_service:mcp`, `_service:email`, ...) is refused, and
+> `family` / `guest` are refused among humans.
+>
+> The grant is deliberately inert: the body names no model (the orchestrator
+> warms `resolveActiveModel`'s answer, so a caller cannot load a second model
+> onto the GPU), the warm is probe-first and in-flight-guarded, it never sets
+> `keep_alive` (WARP-1826's 5-minute residency stands), and the route answers
+> 202 without waiting. Pinned by `routes/llm-warm.test.ts` and the
+> service-principal block of `src/__tests__/rbac.test.ts`.
 
 #### Managed-switch control surface (WARP-559)
 

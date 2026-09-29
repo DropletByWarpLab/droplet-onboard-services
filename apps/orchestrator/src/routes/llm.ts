@@ -1104,6 +1104,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // WARP-1398: the voice principal may replay/use its scoped smart-home
       // control tools; every other non-privileged caller stays write-free.
       const isVoice = isVoicePrincipal((req as AuthedRequest).user);
+      // WARP-3316 — voice already sends a curated `allowed_tools` scope, and the
+      // relevance selector's keyword rules are written for typed chat: a
+      // spoken "is everything working?" names no domain, so the tool the
+      // model then calls is un-advertised and the TOOL_NOW_AVAILABLE self-heal
+      // burns one of voice's few iterations. Voice advertises its scope as-is.
+      // Every other caller keeps the configured mode.
+      const toolSelectionMode = isVoice ? "off" : config.TOOL_SELECTION_MODE;
       // WARP-1442 — resolve the reasoning-effort knob once for this turn. The
       // voice principal defaults to "low" (server-side) when it sends nothing;
       // an explicit value always wins; every other caller resolves to
@@ -1481,7 +1488,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // fail. Continuity must never cost the user their answer; try/catch is
       // what enforces that rather than merely asserting it.
       let priorToolNames: string[] = [];
-      if (config.TOOL_SELECTION_MODE !== "off" && conversationId && userId) {
+      if (toolSelectionMode !== "off" && conversationId && userId) {
         try {
           priorToolNames = await persistence.getConversationToolNames(
             conversationId,
@@ -2120,7 +2127,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // loop's own `assertToolAdvertisementFitsBudget` is the gate that sees
         // the fully assembled advertisement.
         const advertisedNamesForEstimate = effectiveAdvertisedToolNames({
-          mode: config.TOOL_SELECTION_MODE,
+          mode: toolSelectionMode,
           messages: agentMessages,
           priorToolNames,
           pool: effectiveTools.map((t) => t.name),
@@ -2237,7 +2244,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             liveAssistantContent.trim().length === 0 &&
             (e.stop_reason === "model_done" ||
               e.stop_reason === "context_budget" ||
-              e.stop_reason === "repetition")
+              e.stop_reason === "repetition" ||
+              e.stop_reason === "no_progress")
           ) {
             emptyCompletion = true;
             e = {
@@ -2349,7 +2357,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
             context_window: turnWindow.window,
-            tool_selection_mode: config.TOOL_SELECTION_MODE,
+            tool_selection_mode: toolSelectionMode,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
             allowed_tools: allowedForUser,
@@ -2436,7 +2444,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
           context_window: turnWindow.window,
-          tool_selection_mode: config.TOOL_SELECTION_MODE,
+          tool_selection_mode: toolSelectionMode,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,
           allowed_tools: allowedForUser,
@@ -2487,7 +2495,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           contentToText(result.message.content).trim().length === 0 &&
           (result.stop_reason === "model_done" ||
             result.stop_reason === "context_budget" ||
-            result.stop_reason === "repetition")
+            result.stop_reason === "repetition" ||
+            result.stop_reason === "no_progress")
         ) {
           result = {
             ...result,

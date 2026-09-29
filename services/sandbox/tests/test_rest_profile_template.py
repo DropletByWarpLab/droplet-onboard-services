@@ -328,6 +328,28 @@ def test_propose_a_connector_draft_writes_no_manifest_and_tags(store):
     assert store.status("ws-cd")["dirty"] is False
 
 
+def test_the_draft_detail_resolves_its_ref_once(store, monkeypatch):
+    # rjouffret on #2324: one detail view ran `rev-parse` six times — once in
+    # the route, then again in show_at() for each of the five files it read.
+    # MUTATION: check the ref per read again (ref_exists in the reader) → red.
+    import main
+
+    _draft_workspace(store, "ws-once", _static_draft())
+    workspace.commit("ws-once", "draft", ALICE)
+    calls: list[list[str]] = []
+    real = store.git
+
+    def counting(args, *a, **kw):
+        calls.append(list(args))
+        return real(args, *a, **kw)
+
+    monkeypatch.setattr(store, "git", counting)
+    facts = main._connector_draft_at("ws-once", "work")
+    assert facts is not None and facts["provider"] == "acme" and facts["problems"] == []
+    assert [c[0] for c in calls].count("rev-parse") == 1
+    assert [c[:2] for c in calls].count(["cat-file", "blob"]) == 5
+
+
 @pytest.mark.parametrize(
     "breakage, expect",
     [
