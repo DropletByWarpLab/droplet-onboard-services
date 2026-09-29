@@ -9,8 +9,8 @@ import { featureDef } from "@/lib/access";
 describe("the Security levels' copy", () => {
   const levels = Object.fromEntries((featureDef("security")?.levels ?? []).map((l) => [l.value, l.grants]));
 
-  it("manage names who's told about alerts", () => {
-    expect(levels.manage).toBe("Areas, opening hours, who's told about alerts and what counts as expected");
+  it("manage names who's told about alerts, and (WARP-2979) Droplet's links", () => {
+    expect(levels.manage).toBe("Areas, opening hours, who's told about alerts, Droplet's links and what counts as expected");
   });
 
   it("act still names acknowledging", () => {

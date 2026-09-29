@@ -160,9 +160,9 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
     office = b.id;
     await prisma.securityZoneLink.createMany({
       data: [
-        { zoneId: stockRoom, sourceKind: "camera", sourceRef: FRONT, sourceLabel: "Front", state: "active" },
-        { zoneId: stockRoom, sourceKind: "camera", sourceRef: BACK, sourceLabel: "Back", state: "active" },
-        { zoneId: office, sourceKind: "camera", sourceRef: SIDE, sourceLabel: "Side", state: "active" },
+        { zoneId: stockRoom, sourceKind: "camera", sourceRef: FRONT, sourceLabel: "Front", state: "active", origin: "person", stateSetBy: "person" },
+        { zoneId: stockRoom, sourceKind: "camera", sourceRef: BACK, sourceLabel: "Back", state: "active", origin: "person", stateSetBy: "person" },
+        { zoneId: office, sourceKind: "camera", sourceRef: SIDE, sourceLabel: "Side", state: "active", origin: "person", stateSetBy: "person" },
       ],
     });
   });
@@ -288,7 +288,13 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       };
     }
 
-    type Code = { code: "after_hours_presence" | "camera_offline" | "threat_signal"; severity: "alert" | "notice"; camera: string | null };
+    type Code = {
+      code: "after_hours_presence" | "camera_offline" | "threat_signal" | "camera_offline_during_activity";
+      severity: "alert" | "notice";
+      camera: string | null;
+      /** WARP-2979 — where the person was seen (camera_offline_during_activity only); may be a camera outside the incident. */
+      related?: string;
+    };
     /** One incident to insert: the CHECKs are derived from it (severity, reason codes, notify state, closedAt). */
     interface Spec {
       scope: (typeof SCOPES)[number];
@@ -300,7 +306,7 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       closed: boolean;
       zoneId: string | null;
     }
-    const ORDER = ["after_hours_presence", "camera_offline", "threat_signal"];
+    const ORDER = ["after_hours_presence", "camera_offline", "threat_signal", "camera_offline_during_activity"];
 
     async function insert(s: Spec, k: number): Promise<string> {
       const times = Object.values(s.spans);
@@ -350,11 +356,13 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
             evidenceEventId: BigInt(1_000_000 + k * 10 + j),
             evidenceCamera: c.camera,
             evidenceSource: c.code === "threat_signal" ? "activity_mirror" : "frigate",
-            evidenceKind: c.code === "camera_offline" ? "camera_offline" : c.code === "threat_signal" ? "threat" : "detection",
+            evidenceKind:
+              c.code === "camera_offline" || c.code === "camera_offline_during_activity" ? "camera_offline" : c.code === "threat_signal" ? "threat" : "detection",
             evidenceLabel: c.code === "after_hours_presence" ? "person" : null,
             evidenceAt: T0,
             evidenceSummary: "x",
             detail: {},
+            relatedCamera: c.related ?? null,
           },
         });
       }
@@ -386,6 +394,8 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
           for (const cam of cams) {
             if (r() < 0.5) codes.push({ code: "after_hours_presence", severity: "alert", camera: cam });
             if (r() < 0.3) codes.push({ code: "camera_offline", severity: "notice", camera: cam });
+            // WARP-2979 — the new alert, naming a second camera the viewer may not see (reasonVisibleTo's related clause).
+            if (r() < 0.25) codes.push({ code: "camera_offline_during_activity", severity: "alert", camera: cam, related: pick(CAMS3) });
           }
         }
         const state = codes.length ? pick(["open", "acknowledged", "resolved"] as const) : "open";

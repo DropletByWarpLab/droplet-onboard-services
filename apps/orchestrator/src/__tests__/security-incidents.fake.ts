@@ -238,7 +238,8 @@ const DEFAULTS: Partial<Record<TableName, (now: Date) => Row>> = {
     verdictFirstAt: null,
     verdictCodes: [],
   }),
-  securityIncidentReason: (now) => ({ id: randomUUID(), createdAt: now, evidenceCamera: null, evidenceLabel: null }),
+  // WARP-2979 — relatedCamera NULL and relatedLock false, as the migration defaults them.
+  securityIncidentReason: (now) => ({ id: randomUUID(), createdAt: now, evidenceCamera: null, evidenceLabel: null, relatedCamera: null, relatedLock: false }),
   securityIncidentAck: (now) => ({
     id: randomUUID(),
     at: now,
@@ -539,8 +540,14 @@ function check(table: TableName, r: Row): void {
   if (table === "securityIncidentReason") {
     const ok =
       (r.code === "after_hours_presence" && r.severity === "alert") ||
-      ((r.code === "camera_offline" || r.code === "threat_signal") && r.severity === "notice");
+      ((r.code === "camera_offline" || r.code === "threat_signal") && r.severity === "notice") ||
+      // WARP-2979 — P4's arm (20260926000100_warp_2979_security_ai).
+      (r.code === "camera_offline_during_activity" && r.severity === "alert");
     if (!ok) fail("SecurityIncidentReason_code_severity");
+    // WARP-2979 — SecurityIncidentReason_related: a second source only on the new code, and a Frigate name.
+    const related = (r.relatedCamera ?? null) as string | null;
+    if (related !== null && !/^[a-zA-Z0-9_-]{1,64}$/.test(related)) fail("SecurityIncidentReason_related");
+    if (r.code !== "camera_offline_during_activity" && (related !== null || r.relatedLock === true)) fail("SecurityIncidentReason_related");
     const siteWide =
       r.evidenceCamera != null ||
       (r.code === "threat_signal" && r.evidenceKind === "threat") ||
@@ -1000,6 +1007,9 @@ export function areaRows(
       sourceRef: ref,
       sourceLabel: ref.split("/")[0],
       state: "active",
+      // WARP-2979 — a person linked it (route 12); both explicit, like every writer.
+      origin: "person",
+      stateSetBy: "person",
     })),
   };
 }
