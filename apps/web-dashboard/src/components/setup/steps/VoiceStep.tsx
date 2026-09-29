@@ -191,8 +191,9 @@ export function VoiceStep({
   //   (a) the check itself failed — a relayed upstream fault / non-2xx (voice-io
   //       reachable but the pipeline faulted; a genuinely-unreachable container
   //       is the DISTINCT 503 voice_unavailable that auto-skips above, not this);
-  //   (b) /voice/status answered 200 with a latched `state: "error"` — the
-  //       boot-race STT/TTS/LLM reachability failure (WARP-1092), which used to
+  //   (b) /voice/status answered 200 with a latched `state: "error"` — a stuck
+  //       pipeline fault such as the boot-race STT failure (WARP-1092; a failed
+  //       reply turn no longer latches it, WARP-3199), which used to
   //       fall through to the "say Hey Droplet" hero and tell the customer to
   //       talk to an assistant that can't hear them.
   // Continue stays reachable (voice never blocks setup); the 1 s poll flips
@@ -308,12 +309,12 @@ export function VoiceStep({
   }
 
   // WARP-1105 — reachable but unhealthy: /voice/status answered 200 with the
-  // pipeline latched in `error` (a boot-race STT/TTS/LLM reachability failure —
-  // WARP-1092). It's not no_mic and not flatlined, so before this branch it
-  // fell through to the try-it hero below and told the customer to say "Hey
-  // Droplet" to an assistant that can't hear them ("still not working"). Render
-  // the honest not-responding panel instead; the poll flips back to the hero
-  // the moment the pipeline leaves `error`.
+  // pipeline latched in `error` (a stuck fault such as the boot-race STT
+  // failure — WARP-1092). It's not no_mic and not flatlined, so before this
+  // branch it fell through to the try-it hero below and told the customer to
+  // say "Hey Droplet" to an assistant that can't hear them ("still not
+  // working"). Render the honest not-responding panel instead; the poll flips
+  // back to the hero the moment the pipeline leaves `error`.
   if (status?.state === "error") {
     return renderNotResponding();
   }

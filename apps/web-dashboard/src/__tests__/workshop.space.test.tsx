@@ -23,6 +23,9 @@
  *      workshop.work-in-picker.test.tsx).
  * Custom tools:
  *  10. `New custom tool` POSTs name + template and points the composer at it.
+ *      The languages come first, each with its file and test command, then
+ *      every other start; a missing name is said, not silently disabled; a
+ *      box that can't list its templates still offers Blank.
  *  11. `?workspace=<id>` opens the context pane: branch, proposal, changes,
  *      last command, history, clone URL; one failing read blanks its own
  *      section only; a 404 says so.
@@ -49,6 +52,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { WorkshopSpace } from "@/components/workshop/WorkshopSpace";
+import { HelpLauncher } from "@/components/help/HelpLauncher";
 import { orderRuns } from "@/components/workshop/WorkshopRail";
 import type { AgentRunSchedule, AgentRunSummary, TraceEntry } from "@/components/workshop/agent-runs/api";
 
@@ -434,10 +438,11 @@ describe("Workshop — custom tools", () => {
     fireEvent.click(screen.getByTestId("new-tool"));
     const form = await screen.findByRole("form", { name: "New custom tool" });
     await within(form).findByTestId("template-typescript-tool");
-    expect(form.textContent).toContain("TypeScript MCP server (Node 20)");
+    expect(form.textContent).toContain("TypeScript");
+    expect(form.textContent).not.toContain("MCP server");
     fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "Booking reminders" } });
     fireEvent.click(within(form).getByTestId("template-typescript-tool"));
-    fireEvent.click(within(form).getByRole("button", { name: /^create$/i }));
+    fireEvent.click(within(form).getByRole("button", { name: /^create tool$/i }));
 
     await waitFor(() => {
       const post = authFetchMock.mock.calls.find((c) => c[0] === "/api/workspace" && (c[1] as RequestInit)?.method === "POST");
@@ -447,6 +452,64 @@ describe("Workshop — custom tools", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-picker")).toHaveAccessibleName("Work in: Booking reminders"));
     expect(screen.getByLabelText("What should Booking reminders do?")).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Custom tools" }).textContent).toContain("Booking reminders");
+  });
+
+  it("'Start from' shows the languages first, with the file and test command, then everything else", async () => {
+    // The box lists its templates alphabetically — the connector draft lands between the two languages.
+    wire({ override: (url) => (url === "/api/workspace/templates" ? okJson({ templates: ["python-tool", "rest-profile", "typescript-tool"] }) : undefined) });
+    render(<WorkshopSpace />);
+    fireEvent.click(screen.getByTestId("new-tool"));
+    const form = await screen.findByRole("form", { name: "New custom tool" });
+    await within(form).findByTestId("template-rest-profile");
+
+    const order = within(form).getAllByRole("radio").map((r) => r.getAttribute("data-testid"));
+    expect(order).toEqual(["template-python-tool", "template-typescript-tool", "template-rest-profile", "template-blank"]);
+    expect(within(form).getByTestId("template-python-tool")).toBeChecked();
+
+    const card = (id: string) => within(form).getByTestId(id).closest("label")!.textContent;
+    expect(card("template-python-tool")).toContain("tool.py");
+    expect(card("template-python-tool")).toContain("pytest");
+    expect(card("template-typescript-tool")).toContain("src/index.ts");
+    expect(card("template-typescript-tool")).toContain("npm test");
+    expect(card("template-rest-profile")).toContain("Connector draft");
+    expect(card("template-blank")).toContain("No starter files");
+  });
+
+  it("Create tool with no name says so, keeps focus on the field, and creates nothing", async () => {
+    wire();
+    render(<WorkshopSpace />);
+    fireEvent.click(screen.getByTestId("new-tool"));
+    const form = await screen.findByRole("form", { name: "New custom tool" });
+    await within(form).findByTestId("template-python-tool");
+
+    const create = within(form).getByRole("button", { name: /^create tool$/i });
+    expect(create).toBeEnabled();
+    fireEvent.click(create);
+
+    const field = within(form).getByLabelText("Name");
+    expect(await within(form).findByText("Give the tool a name first.")).toBeInTheDocument();
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveFocus();
+    expect(authFetchMock.mock.calls.some((c) => c[0] === "/api/workspace" && (c[1] as RequestInit)?.method === "POST")).toBe(false);
+
+    fireEvent.change(field, { target: { value: "Booking reminders" } });
+    expect(within(form).queryByText("Give the tool a name first.")).not.toBeInTheDocument();
+  });
+
+  it("a box that can't list its templates says so and still creates a blank workspace", async () => {
+    wire({ override: (url) => (url === "/api/workspace/templates" ? okJson({ error: "sandbox down" }, 503) : undefined) });
+    render(<WorkshopSpace />);
+    fireEvent.click(screen.getByTestId("new-tool"));
+    const form = await screen.findByRole("form", { name: "New custom tool" });
+    expect(await within(form).findByText(/Couldn't load the templates from the box/)).toBeInTheDocument();
+    expect(within(form).getByTestId("template-blank")).toBeChecked();
+
+    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "Scratch" } });
+    fireEvent.click(within(form).getByRole("button", { name: /^create tool$/i }));
+    await waitFor(() => {
+      const post = authFetchMock.mock.calls.find((c) => c[0] === "/api/workspace" && (c[1] as RequestInit)?.method === "POST");
+      expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ name: "Scratch" });
+    });
   });
 
   it("the composer pill's + opens the same New custom tool dialog", async () => {
@@ -521,5 +584,25 @@ describe("Workshop — the drawers close from their own header (WARP-1787)", () 
     const drawer = await screen.findByRole("dialog");
     fireEvent.click(within(drawer).getByRole("button", { name: "Close the workspace pane" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
+
+// WARP-3043 — the floating Help button sat over the docked pill's send
+// button. The Workshop's head offers `helpSlot`; HelpLauncher (mounted once,
+// beside the page, by AuthGate) portals its trigger there.
+describe("Workshop — Help in the header (WARP-3043)", () => {
+  it("shows exactly one Help button, and it sits in .chat-head's slot", async () => {
+    mockSearchParamsString = "";
+    wire();
+    render(
+      <>
+        <WorkshopSpace />
+        <HelpLauncher />
+      </>,
+    );
+    await screen.findByLabelText("What should your Droplet do?");
+    const help = screen.getAllByRole("button", { name: "Open help" });
+    expect(help).toHaveLength(1);
+    expect(help[0].closest(".chat-head .help-slot")).not.toBeNull();
   });
 });
