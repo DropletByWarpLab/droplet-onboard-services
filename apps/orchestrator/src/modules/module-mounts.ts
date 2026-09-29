@@ -206,6 +206,16 @@ export function mountModuleGates(
  *   - `business_profile_get` reads through `ctx.prisma`, no HTTP hop at all.
  * Both rely on the tool-level gate (the chat / runner dispatch check).
  *
+ * `email` (WARP-3145): the five email tools reach routes/email.ts as
+ * `_service:mcp`, and the route resolves the acting person for mailbox
+ * ownership but never asked their tool scope, so over the HTTP transport
+ * (WARP-2989) an admin whose role leaves Email out could read and send the
+ * household's mail. Every `email` hop is under `/api/email` (the same test
+ * pins it). `search_contacts` reads `ctx.prisma`, so it has no hop for this
+ * gate to see; WARP-3102 moves it to `GET /api/email/contacts`, under the
+ * prefix. The email module is not feature-gated for humans, so the gate asks
+ * question 1 only, and browser sessions are untouched.
+ *
  * `team_chat` (WARP-3162): `team_chat_send_message` and
  * `team_chat_send_meeting_invite` reach routes/team-chat.ts as `_service:mcp`,
  * and the route resolves the acting person for thread membership but never
@@ -216,7 +226,7 @@ export function mountModuleGates(
  * `team_chat` module is not feature-gated for humans, so the gate asks question
  * 1 only, and browser sessions are untouched.
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "team_chat"];
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(

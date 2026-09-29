@@ -169,10 +169,17 @@ the device-id key, and the device-id key never signs an extension.
   extension then fails verification with `extension_key_changed` until the
   owner re-promotes it. Extensions Warp Lab signed with the release key are
   unaffected.
-- **Survives a factory reset.** The reset keeps `/var/lib/droplet/tpm` on
-  purpose (WARP-980), so the extension key outlives the extensions it signed
-  (those rows are in Postgres, which the reset wipes). Whether a reset should
-  also rotate this key is an open decision (WARP-2923).
+- **Rotated by a factory reset.** The reset keeps `/var/lib/droplet/tpm` on
+  purpose (WARP-980: the device-id key stays, so the box stays registered),
+  but it removes `extension-signing.sealed` (and a stale `.tmp` beside it)
+  from that directory, overwrite-then-unlink, once the stack is down
+  (`secw_rotate_extension_key`, `scripts/lib/secrets-wipe.sh`). Boxes are
+  leased and go to new customers. A statement, its signature and its
+  manifest are none of them secret, so a kept key would let a promotion the
+  previous owner made verify `ok` on the next owner's box. The next owner's
+  first promote mints a new key. The reset re-scans the directory and refuses
+  to report a clean reset while the key file survives. Nothing else in the
+  directory is touched (Phase 10 of `tests/factory-reset-secrets-wipe.test.sh`).
 
 The verifier is `apps/orchestrator/src/services/update-agent/extension-verify.ts`.
 Keys are chosen by the statement's own `kind`: `extension` accepts the box

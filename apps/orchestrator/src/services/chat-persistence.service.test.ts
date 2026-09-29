@@ -1122,6 +1122,110 @@ describe("ChatPersistenceService (WARP-304)", () => {
     expect(messages).toHaveLength(2); // no duplicates
   });
 
+  it("WARP-3193 PERF-9: a re-submit of a still-streaming turn is flagged assistantInFlight, and a fresh turn is not", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const first = await svc.createTurnRows({ conversationId: "s1", userContent: "ping", turnId: "t1" });
+    expect(first.assistantInFlight).toBe(false);
+
+    const again = await svc.createTurnRows({ conversationId: "s1", userContent: "ping", turnId: "t1" });
+    expect(again).toMatchObject({
+      userMessageId: first.userMessageId,
+      assistantMessageId: first.assistantMessageId,
+      assistantAlreadyFinal: false,
+      assistantInFlight: true,
+    });
+    expect(messages).toHaveLength(2);
+  });
+
+  it("WARP-3193 PERF-9: losing the insert race to a concurrent submit (P2002) returns the winner's turn", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    // The winner's transaction committed both rows...
+    messages.push(
+      {
+        id: "u-win",
+        sessionId: "s1",
+        role: "user",
+        content: "ping",
+        turnId: "t1",
+        status: "completed",
+        completedAt: new Date(),
+        createdAt: new Date(),
+      },
+      {
+        id: "a-win",
+        sessionId: "s1",
+        role: "assistant",
+        content: "",
+        turnId: "t1",
+        status: "streaming",
+        completedAt: null,
+        createdAt: new Date(),
+      },
+    );
+    // ...after this request's check had already read "no such turn".
+    prisma.chatMessage.findFirst.mockResolvedValueOnce(null);
+    // The partial unique index refuses the duplicate insert.
+    const realCreate = prisma.chatMessage.create.getMockImplementation()!;
+    prisma.chatMessage.create.mockImplementation(async (args) => {
+      const d = args.data;
+      if (d.turnId && messages.some((m) => m.sessionId === d.sessionId && m.turnId === d.turnId && m.role === d.role)) {
+        throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+      }
+      return realCreate(args);
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const turn = await svc.createTurnRows({ conversationId: "s1", userContent: "ping", turnId: "t1" });
+
+    expect(turn).toEqual({
+      userMessageId: "u-win",
+      assistantMessageId: "a-win",
+      assistantAlreadyFinal: false,
+      assistantInFlight: true,
+    });
+    expect(messages).toHaveLength(2);
+  });
+
+  it("WARP-3193 PERF-9: a unique violation with no turnId is not swallowed", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    prisma.chatMessage.create.mockRejectedValueOnce(
+      Object.assign(new Error("Unique constraint failed"), { code: "P2002" }),
+    );
+    const svc = new ChatPersistenceService(prisma as never);
+    await expect(
+      svc.createTurnRows({ conversationId: "s1", userContent: "ping", turnId: null }),
+    ).rejects.toThrow("Unique constraint failed");
+  });
+
   it("createTurnRows flags assistantAlreadyFinal when a prior turn already finished", async () => {
     const { prisma, sessions, messages } = makePrismaMock();
     sessions.push({

@@ -152,13 +152,14 @@ export function requireMcpActingUserToolDomain(
       return;
     }
     const asserted = (req.header("x-nextcloud-user") ?? "").trim();
-    // WARP-3162 — routes/team-chat.ts acts for `X-Droplet-User`, not the
-    // header this gate resolves. The mcp-server sets both from the same
-    // `ctx.userId` (`withActingUser`, and the team-chat handlers'
-    // `actingHeaders`), so on a real call they are equal. When they are not,
-    // this gate would clear one person while the route acts for another:
-    // refuse. That includes an `X-Droplet-User` with no `X-Nextcloud-User`,
-    // which would otherwise pass below as a call that names nobody.
+    // WARP-3145 / WARP-3162 — routes/email.ts and routes/team-chat.ts act for
+    // `X-Droplet-User`, not the header this gate resolves. The mcp-server sets
+    // both from the same `ctx.userId` (`withActingUser`, each tools-core email
+    // handler, and the team-chat handlers' `actingHeaders`), so on a real call
+    // they are equal. When they are not, this gate would clear one person
+    // while the route acts for another: refuse. That includes an
+    // `X-Droplet-User` with no `X-Nextcloud-User`, which would otherwise pass
+    // below as a call that names nobody.
     const forwarded = (req.header("x-droplet-user") ?? "").trim();
     if (forwarded && forwarded !== asserted) {
       deny(req, res, "acting_user_headers_disagree");

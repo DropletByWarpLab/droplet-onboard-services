@@ -67,6 +67,7 @@ export const LIFECYCLE_COPY: Readonly<Record<string, string>> = {
   wrong_state: "It changed state while this was happening. The list shows where it is now.",
   not_promoted: "It has no signed version to start.",
   not_found: "This box has no extension by that name.",
+  source_deleted: "The custom tool it was built from was deleted in the workshop, so it cannot start again.",
   preflight_blocked: "Something on this box now blocks it, such as another extension using one of its tool names.",
   sandbox_error: "The sandbox did not answer. Try again.",
 };

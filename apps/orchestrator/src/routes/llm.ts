@@ -1369,6 +1369,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               });
               return;
             }
+            // WARP-3193 PERF-9 — the same turn is still streaming: the agent
+            // loop that created it is running. A second loop would run every
+            // tool side effect (email, unlock) twice, so refuse; the client
+            // follows the existing row instead.
+            if (turn.assistantInFlight) {
+              res.status(409).json({
+                error: "turn_in_progress",
+                conversationId,
+                assistantMessageId,
+              });
+              return;
+            }
           } else if (conversationId) {
             // Couldn't create rows but conversation exists — still expose
             // the id so the client can rehydrate later.

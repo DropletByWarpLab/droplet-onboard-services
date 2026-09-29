@@ -389,6 +389,8 @@ describe("mcp acting-user gate — app.ts wiring", () => {
 // every method there, so a write tool's GET is checked as the write it serves.
 const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   business: ["business_find GET /api/brain/digests", "business_find GET /api/brain/findings"],
+  // WARP-3145: every email hop is under /api/email.
+  email: [],
   // WARP-3162: every team_chat hop is under /api/team-chat.
   team_chat: [],
 };
