@@ -945,8 +945,13 @@
      anywhere on the pill (52px tall) focuses it. */
 
   /* The header popovers' text boxes owe the same target, and 16px text so iOS
-     Safari doesn't zoom the page when one takes focus. */
+     Safari doesn't zoom the page when one takes focus. The Add button and the
+     `MenuSelect` trigger share a row with a text box, so they take the height
+     too: a 32px button beside a 44px box is misaligned and under the minimum.
+     `> button` is the row's own Add, not the picker's menu items. */
   .droplet-shell .chat-field { height: 44px; font-size: 16px; }
+  .droplet-shell .chat-field-row > button,
+  .droplet-shell .chat-field-row .pick-select { height: 44px; }
 }
 
 /* Phones, landscape phones and 200% zoom: a centred pill jumps with the

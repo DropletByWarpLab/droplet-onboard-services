@@ -232,7 +232,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
           )}
 
           <div
-            className="flex items-center gap-1.5 pt-2"
+            className="chat-field-row flex items-center gap-1.5 pt-2"
           >
             <MenuSelect
               id="pin-kind"

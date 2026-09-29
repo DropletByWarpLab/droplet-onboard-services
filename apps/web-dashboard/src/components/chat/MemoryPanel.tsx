@@ -297,7 +297,7 @@ export function MemoryPanel() {
           <div
             className="flex flex-col gap-1.5 pt-2"
           >
-            <div className="flex items-center gap-1.5">
+            <div className="chat-field-row flex items-center gap-1.5">
               <label className="sr-only" htmlFor="memory-draft">
                 New fact
               </label>
@@ -320,7 +320,7 @@ export function MemoryPanel() {
                 <Plus size={14} aria-hidden="true" /> Add
               </button>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="chat-field-row flex items-center gap-1.5">
               <MenuSelect
                 id="memory-category"
                 label="Category"
