@@ -407,9 +407,9 @@ describe("worst-case fixed system-block budget", () => {
     // somebody's conscious decision. The decision is Stefan's to reverse.
     //
     // WARP-2980 (ADR-059 P5 PR-E) — `security_explain_pattern`, the fifth
-    // Security read, measured under this line without moving it: 112,942 over
+    // Security read, measured under this line without moving it: 112,950 over
     // 156 before, 970 for the tool (under both the 2,000 per-tool and the
-    // 1,000 pool-mean lines), 113,913 over 157 after — 1,087 of headroom,
+    // 1,000 pool-mean lines), 113,921 over 157 after — 1,079 of headroom,
     // about one ordinary tool. The line did not move.
     //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
