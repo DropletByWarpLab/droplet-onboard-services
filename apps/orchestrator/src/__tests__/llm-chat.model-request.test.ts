@@ -209,7 +209,7 @@ vi.mock("../services/chat-persistence.service.js", async () => {
 });
 
 import { createLlmRouter } from "../routes/llm.js";
-import { TOOLS } from "@droplet/tools-core";
+import { TOOLS, TOOL_CATALOG } from "@droplet/tools-core";
 import {
   measureToolSpecs,
   toolAdvertisementCeilingTokens,
@@ -471,6 +471,47 @@ describe("POST /api/llm/chat — the request the model actually receives (WARP-2
     const names = advertisedNames();
     for (const tool of DASHBOARD_NAVIGATION_TOOLS) expect(names).not.toContain(tool);
     expect(systemPrompt()).not.toContain("find_dashboard_page");
+  });
+
+  it("(e) WARP-3116: the navigation phrasing rule costs no `data` schemas where it cannot be used, and none on an ordinary sentence", async () => {
+    // The review of PR #2443: the rule ran on EVERY turn, so a navigation
+    // sentence with no page list, and an ordinary sentence with one, each put
+    // the `data` domain on the wire for nothing: seven utilities (~1.8K
+    // tokens) without a page list, nine (~2.2K) with one.
+    //
+    // The utilities in `data` other than the two navigation tools, as the
+    // owner's chat pool actually holds them. Read off the catalog rather than
+    // listed, so a tool added to the domain is covered without an edit here.
+    const otherData = TOOL_CATALOG.filter(
+      (e) =>
+        e.domain === "data" &&
+        !DASHBOARD_NAVIGATION_TOOLS.has(e.name) &&
+        !EXCLUDED_FROM_CHAT_TOOLS.has(e.name),
+    ).map((e) => e.name);
+    // Without this, every `not.toContain` below passes for an empty domain.
+    expect(otherData.length).toBeGreaterThan(0);
+
+    const app = buildApp(createPrismaMock());
+    const dashboardPages = [{ href: "/voice", label: "Voice", section: "Systems › Network" }];
+
+    // No page list: both navigation tools are withheld, so the rule has
+    // nothing to reach and must not admit the rest of the domain.
+    expect((await chat(app, "take me to voice settings")).status).toBe(200);
+    for (const name of otherData) expect(advertisedNames()).not.toContain(name);
+
+    // The control: with the list the same sentence admits the whole domain.
+    // Without it the case above passes for a rule that never fires.
+    modelRequests.length = 0;
+    expect((await chat(app, "take me to voice settings", { dashboardPages })).status).toBe(200);
+    for (const name of otherData) expect(advertisedNames()).toContain(name);
+
+    // A page list, and a sentence that is not a request to go anywhere.
+    modelRequests.length = 0;
+    expect((await chat(app, "send the link to Bob", { dashboardPages })).status).toBe(200);
+    const names = advertisedNames();
+    for (const name of [...otherData, ...DASHBOARD_NAVIGATION_TOOLS]) {
+      expect(names).not.toContain(name);
+    }
   });
 });
 
