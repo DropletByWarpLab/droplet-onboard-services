@@ -406,14 +406,30 @@ describe("worst-case fixed system-block budget", () => {
     // line again leaves about two ordinary tools before the next crossing is
     // somebody's conscious decision. The decision is Stefan's to reverse.
     //
-    // WARP-3116 spends most of that allowance and does not move the line:
-    // find_dashboard_page (711) + open_dashboard_page (754) take the registry
-    // to 114,417 over 158 tools, 583 chars under 115,000 — less than one tool
-    // of headroom, so the next crossing is a decision, not an accident. What
-    // bounds a real chat turn is untouched: the per-domain assertion above
-    // stays green with both in the `data` pool, and the agent loop withholds
-    // both from every turn that carries no dashboard page list (voice, phones,
-    // background runs), so on those turns they cost nothing at all.
+    // WARP-2980 (ADR-059 P5 PR-E) — `security_explain_pattern`, the fifth
+    // Security read, measured under this line without moving it: 112,950 over
+    // 156 before, 970 for the tool (under both the 2,000 per-tool and the
+    // 1,000 pool-mean lines), 113,921 over 157 after — 1,079 of headroom,
+    // about one ordinary tool. The line did not move.
+    //
+    // WARP-3116 does not move it either, and it had to fit. The two navigation
+    // tools as first written, find_dashboard_page (711) + open_dashboard_page
+    // (754), took the registry to 115,388 over 159 tools: 388 chars over, with
+    // no written decision to raise the line. So the prose was cut, not the
+    // ceiling raised: both descriptions and their parameter docs now say only
+    // what routes the model (find = where is it, link it; open = take me
+    // there; never a path the tool did not return), 515 + 545 = 1,060, and the
+    // closing "Tier-1 read; safe to call without operator confirmation." was
+    // dropped from six read tools that already state it as
+    // `requiresWrite: false` / `requiresConfirmation: false`
+    // (get_bandwidth_usage, list_vpn_peers, list_threat_events,
+    // get_drive_health, get_audit_log, get_update_status). Registry: 114,641
+    // over 159, 359 chars under 115,000 — under half an ordinary tool, so the
+    // next crossing is a decision, not an accident. What bounds a real chat
+    // turn is untouched: the per-domain assertion above stays green with both
+    // in the `data` pool, and the agent loop withholds both from every turn
+    // that carries no dashboard page list (voice, phones, background runs), so
+    // on those turns they cost nothing at all.
     //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
     // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added

@@ -83,7 +83,77 @@ import { pinnedToolDomainsFromMessages } from "./context-pin-prompt.js";
 // (shared-types only), so this direction cannot cycle either.
 import { DASHBOARD_NAVIGATION_TOOLS } from "./dashboard-navigation.js";
 
-export type ToolSelectionMode = "off" | "domains";
+/**
+ * How a turn's advertised tools are derived from its pool.
+ *
+ *   • `domains` — keyword/continuity selection (the shipping default).
+ *   • `off` — the whole pool, no budget assert. The operator's diagnostic and
+ *     rollback lever (`TOOL_SELECTION_MODE=off`).
+ *   • `explicit` — WARP-3125. The whole pool, because the CALLER already named
+ *     it: the voice principal's own `allowed_tools`, after RBAC. Never set by
+ *     an operator (config admits only `off`/`domains`); the chat route picks
+ *     it per turn through `resolveTurnToolSelectionMode`. Unlike `off`, the
+ *     tool budget is still asserted (`selectionAssertsToolBudget`).
+ */
+export type ToolSelectionMode = "off" | "domains" | "explicit";
+
+/**
+ * WARP-3125 — the selection mode for ONE chat turn.
+ *
+ * The voice principal, when it sends its own `allowed_tools`, has already
+ * chosen its tools. Running keyword selection on top of that list changed the
+ * advertised `tools[]` with every sentence. llama-server reuses the KV cache
+ * only for the prompt prefix that is byte-identical to the previous request,
+ * and the tool block sits near the front, so the change cost a re-prefill of
+ * everything after it on every voice turn. It also dropped tools the sentence
+ * needed ("is everything working?" matched no rule, so `get_system_health`
+ * was not advertised), and each miss cost a self-heal iteration out of
+ * voice's two.
+ *
+ * Scoped to the VOICE principal WITH a list, and to nothing else:
+ *   • Dashboard callers keep `domains`. Their `allowed_tools` is a request
+ *     filtered by role, and the setup wizard's `[]` is zero tools either way.
+ *   • The other service tokens (`_service:mcp`, `_service:email`, ...) keep
+ *     `domains` too. `/api/llm/chat` admits every one of them, but none has
+ *     opted in, and none is sized to a fixed list. Widen this deliberately,
+ *     per caller, not by sharing the `service` role.
+ *   • The voice principal with no list gets the whole chat scope, which does
+ *     not fit the window unselected (WARP-1893), so it keeps `domains`.
+ *   • Agent and durable runs never reach this. `agent-run-worker.service.ts`
+ *     calls `runAgent` directly with `runToolPool()` and the configured mode,
+ *     and relies on selection to fit the budget.
+ *   • `off` stays `off`, so the rollback lever keeps meaning "whole pool, no
+ *     assert" for every caller.
+ */
+export function resolveTurnToolSelectionMode(opts: {
+  configured: ToolSelectionMode;
+  callerSuppliedAllowedTools: boolean;
+  voicePrincipal: boolean;
+}): ToolSelectionMode {
+  if (
+    opts.configured === "domains" &&
+    opts.callerSuppliedAllowedTools &&
+    opts.voicePrincipal
+  ) {
+    return "explicit";
+  }
+  return opts.configured;
+}
+
+/**
+ * Whether the agent loop asserts the assembled advertisement against the
+ * tool budget (`assertToolAdvertisementFitsBudget`) for this mode.
+ *
+ * `off` deliberately does not: it is the lever that advertises the whole chat
+ * pool, which has not fitted the window since WARP-1893. `explicit` does,
+ * because a caller-named set is expected to fit. If it ever stops fitting,
+ * that must fail loudly rather than go on the wire unmeasured.
+ */
+export function selectionAssertsToolBudget(
+  mode: ToolSelectionMode | undefined,
+): boolean {
+  return mode === "domains" || mode === "explicit";
+}
 
 /** Reverse index over the CI-complete catalog: tool name → its domain. */
 const DOMAIN_BY_NAME: ReadonlyMap<string, ToolDomain> = new Map(
@@ -246,7 +316,11 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // Review #2420: `alerts?`, `offline` and "(anyone|anybody|someone) in/at the …" — the tools' own examples
   // ("any alerts this week?", "is any camera offline?", "was anyone in the stock room after 9?"), pinned by a
   // test that reads every quoted example out of the security descriptions.
-  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the)\b/i, domains: ["security"] },
+  // WARP-2980 (ADR-059 P5 PR-E) — "is it normal…?" / "what's usual…?": the
+  // question security_explain_pattern answers. The spec's own box-proof
+  // sentence, "is it normal for someone to be in the stock room at 2 AM?",
+  // matched none of the words above.
+  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the|(is|was) (it|that|this) (normal|usual)|what(['’]?s| is) (normal|usual))\b/i, domains: ["security"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
   //
@@ -707,7 +781,9 @@ export function selectAdvertisedTools(opts: {
    */
   extraDomains?: readonly ToolDomain[];
 }): { advertised: string[]; matchedDomains: ToolDomain[] } {
-  if (opts.mode === "off") {
+  // WARP-3125 — `explicit` advertises the caller's named set as-is, like
+  // `off`. The two differ only in whether the loop asserts the budget.
+  if (opts.mode === "off" || opts.mode === "explicit") {
     return { advertised: opts.pool, matchedDomains: [] };
   }
   const runtimeDomains = indexRuntimeDomains(opts.runtimeTools);
@@ -799,8 +875,9 @@ export function conversationToolNamesFor(
 /**
  * The names this turn will actually advertise, derived once.
  *
- * Under `off` the whole pool genuinely IS the wire payload, so it is returned
- * unnarrowed — a budget estimate for that mode must charge for all of it.
+ * Under `off` and `explicit` the whole pool genuinely IS the wire payload, so
+ * it is returned unnarrowed — a budget estimate for those modes must charge
+ * for all of it.
  */
 export function effectiveAdvertisedToolNames(opts: {
   mode: ToolSelectionMode;

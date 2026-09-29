@@ -11,7 +11,7 @@ const inputSchema = {
       type: "string",
       maxLength: 200,
       description:
-        'What the person is looking for, in their words — e.g. "voice settings", "wifi password", "deleted files".',
+        'What they are looking for, in their words.',
     },
   },
   required: ["query"],
@@ -54,7 +54,7 @@ const tool: Tool = {
   // a handler by its `name:` literal. The handler test pins the two equal.
   name: "find_dashboard_page",
   description:
-    "Look up where something lives in the Droplet dashboard and get its link. Use when the person asks where a screen or setting is, or asks for a link to it. Write the page as a markdown link using the href exactly as returned, e.g. [Voice](/voice) — never write a dashboard path you did not get from this tool. To move the person there, call open_dashboard_page instead.",
+    "Find a dashboard page's link. Use when the person asks where a screen or setting is. Link it as markdown with the returned href, e.g. [Voice](/voice); never write a path this tool did not return. To take them there, use open_dashboard_page.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

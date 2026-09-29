@@ -11,7 +11,7 @@ const inputSchema = {
       type: "string",
       maxLength: 200,
       description:
-        'The page to open: its label ("Voice"), its path ("/voice"), or what the person called it ("voice settings").',
+        'Page label, path or the person\'s words.',
     },
   },
   required: ["page"],
@@ -78,7 +78,7 @@ const tool: Tool = {
   // a handler by its `name:` literal. The handler test pins the two equal.
   name: "open_dashboard_page",
   description:
-    'Take the person to a page of the Droplet dashboard — their screen switches to it when your reply finishes. Use when they ask to go to, open, or be taken to part of the app ("take me to voice settings", "open the calendar", "take me to it"). Pass the page\'s label, its path, or their own words; never guess a path. Then reply with one short sentence that links the page, e.g. "Opening [Voice](/voice)."',
+    'Take the person to a dashboard page; their screen switches when your reply finishes. Use when they ask to go to or open part of the app. Pass the label, path or their own words, never a guessed path. Reply with one short sentence linking it, e.g. "Opening [Voice](/voice)."',
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

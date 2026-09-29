@@ -16,6 +16,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { trackInteractiveInference } from "./services/interactive-inference.service.js";
 import { createLlmWarmRouter } from "./routes/llm-warm.js";
 import { createToolsRuntimeRouter } from "./routes/tools-runtime.js";
 import { resolveToolAccessScope } from "./services/tool-access.service.js";
@@ -441,6 +442,12 @@ export function createApp(
   // `/llm/:param` route there can ever shadow it; the `chat` module gate
   // (`/api/llm`) covers it like /api/llm/chat.
   app.use("/api", createLlmWarmRouter(prisma));
+  // WARP-2979 (ADR-059 P4 §6.9.2) — the in-flight counter on the two
+  // interactive LLM routes (typed chat, voice, /llm/complete). Background
+  // model work (Droplet's incident summaries) waits for it to be idle and
+  // aborts when a chat starts. Before the router, after auth: a refused
+  // request still ends, so it counts down again.
+  app.use(["/api/llm/chat", "/api/llm/complete"], trackInteractiveInference);
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the

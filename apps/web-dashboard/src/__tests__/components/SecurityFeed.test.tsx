@@ -634,6 +634,7 @@ describe("WARP-2978 — incidents on the feed", () => {
       incidents: true,
       alerts: true,
       links: true,
+      summaries: true,
       patterns: true,
       retention: true,
     };

@@ -54,12 +54,14 @@ beforeEach(() => {
 });
 
 describe("AiSettingsPanel", () => {
-  it("at manage: the three linking choices (the current one checked), and Save disabled until something changes", async () => {
+  it("at manage: the three linking choices (the current one checked), the summaries switch, and Save disabled until something changes", async () => {
     renderPanel();
     const radio = await screen.findByRole("radio", { name: AI_COPY.linking.link_and_suggest });
     expect(radio).toBeChecked();
     expect(screen.getByRole("radio", { name: AI_COPY.linking.suggest_only })).not.toBeChecked();
     expect(screen.getByRole("radio", { name: AI_COPY.linking.off })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: AI_COPY.summaries })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByText(AI_COPY.summariesHelp)).toBeInTheDocument();
     // Review #2418: aria-disabled, never `disabled` — it keeps focus, and a press does nothing.
     expect(screen.getByRole("button", { name: AI_COPY.save })).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByRole("button", { name: AI_COPY.save })).not.toBeDisabled();
@@ -83,12 +85,12 @@ describe("AiSettingsPanel", () => {
   });
 
   it("Save sends the whole choice with the version it was read at, then confirms", async () => {
-    h.putSecurityAiSettings.mockResolvedValue({ linking: "suggest_only", summaries: "on", version: 5, changed: true });
+    h.putSecurityAiSettings.mockResolvedValue({ linking: "suggest_only", summaries: "off", version: 5, changed: true });
     renderPanel();
     fireEvent.click(await screen.findByRole("radio", { name: AI_COPY.linking.suggest_only }));
+    fireEvent.click(screen.getByRole("switch", { name: AI_COPY.summaries }));
     fireEvent.click(screen.getByRole("button", { name: AI_COPY.save }));
-    // The summaries setting is sent back exactly as read (review #2418: nothing in PR-1 reads it, so it is not shown).
-    await waitFor(() => expect(h.putSecurityAiSettings).toHaveBeenCalledWith({ linking: "suggest_only", summaries: "on", expectedVersion: 4 }));
+    await waitFor(() => expect(h.putSecurityAiSettings).toHaveBeenCalledWith({ linking: "suggest_only", summaries: "off", expectedVersion: 4 }));
     await waitFor(() => expect(h.toast).toHaveBeenCalledWith(AI_COPY.saved, "success"));
   });
 
@@ -108,10 +110,21 @@ describe("AiSettingsPanel", () => {
     h.getSecurityAiSettings.mockResolvedValue(V({ linking: "suggest_only", summaries: "off" }));
     renderPanel();
     expect(await screen.findByText(AI_COPY.linking.suggest_only)).toBeInTheDocument();
+    expect(screen.getByText(AI_COPY.summariesOff)).toBeInTheDocument();
     expect(screen.getByText(AI_COPY.readOnly)).toBeInTheDocument();
     expect(screen.queryByRole("radio")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByRole("button", { name: AI_COPY.save })).toBeNull();
+  });
+
+  // #2423 review 11: the help said "Security events are never sent to a cloud AI model" — but the camera tools
+  // (list_camera_events, search_camera_events) are not withheld from a cloud chat. It now claims only what the
+  // switch governs: who writes the summaries.
+  it("the summaries help claims only the summaries: written on this Droplet, never by a cloud model", () => {
+    expect(AI_COPY.summariesHelp).toBe(
+      "Summaries are written only by the AI model on this Droplet, never by a cloud AI model, even when cloud models are turned on for chat.",
+    );
+    expect(AI_COPY.summariesHelp).not.toMatch(/events|never sent/i);
   });
 
   it("a failed read is an error with Retry — never the defaults", async () => {
@@ -123,27 +136,5 @@ describe("AiSettingsPanel", () => {
     h.getSecurityAiSettings.mockResolvedValue(V());
     fireEvent.click(screen.getByRole("button", { name: AI_COPY.retry }));
     expect(await screen.findByRole("radio", { name: AI_COPY.linking.link_and_suggest })).toBeChecked();
-  });
-});
-
-// Review #2418 (finding 8, spec §11: no half-built feature) — nothing reads the summaries setting until P4 PR-2
-// builds the writer, so PR-1 shows no switch and no line about it, at any level. PR-2 brings them back.
-describe("AiSettingsPanel — no summaries control before the summaries exist", () => {
-  it.each(["manage", "view"] as const)("%s: no summaries switch, and no words about summaries", async (level) => {
-    h.level = level;
-    h.getSecurityAiSettings.mockResolvedValue(V({ summaries: "off" }));
-    renderPanel();
-    expect(await screen.findByText(AI_COPY.linking.link_and_suggest)).toBeInTheDocument();
-    expect(screen.queryByRole("switch")).toBeNull();
-    expect(screen.queryByText(/summar/i)).toBeNull();
-  });
-
-  it("Save still sends back the stored summaries setting untouched", async () => {
-    h.getSecurityAiSettings.mockResolvedValue(V({ summaries: "off" }));
-    h.putSecurityAiSettings.mockResolvedValue({ linking: "off", summaries: "off", version: 5, changed: true });
-    renderPanel();
-    fireEvent.click(await screen.findByRole("radio", { name: AI_COPY.linking.off }));
-    fireEvent.click(screen.getByRole("button", { name: AI_COPY.save }));
-    await waitFor(() => expect(h.putSecurityAiSettings).toHaveBeenCalledWith({ linking: "off", summaries: "off", expectedVersion: 4 }));
   });
 });

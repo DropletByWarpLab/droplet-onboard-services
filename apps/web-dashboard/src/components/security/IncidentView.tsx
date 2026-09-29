@@ -6,6 +6,11 @@
  *   1. Header: title, span and the mode it opened in, the state, and — at
  *      act — Acknowledge and Resolve….
  *   2. Why Droplet flagged this: the visible codes first, with evidence.
+ *   2b. Summary by Droplet (WARP-2979 P4 PR-2, NarrativeSection): AFTER the
+ *      codes, never before them — the reasons are the record; the summary
+ *      is the box's own model's words, shown only when the box sends it
+ *      for this viewer (DS-005). Regenerate / Summarise now at act, on any
+ *      state (a resolved incident too).
  *   3. What happened: the visible events (the feed's row), each with its
  *      thumbnail, Clip (or Clip expired) and the other areas it was in; once
  *      the events are trimmed, the sentence that says what is kept.
@@ -65,10 +70,11 @@ import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
 import { useAuth } from "@/lib/auth";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
-import { useCameraDisplayNames, useSecurityIncident, useSecurityMode } from "@/lib/hooks/useSecurity";
+import { useCameraDisplayNames, useSecurityHealth, useSecurityIncident, useSecurityMode } from "@/lib/hooks/useSecurity";
 import { deviceTimeZone } from "@/lib/security-time";
 import type { IncidentActionResult, IncidentDetail, IncidentMemberView, IncidentVerdict } from "@/lib/types";
 import { AckHistory } from "./AckHistory";
+import { NarrativeSection, narrativeAskable } from "./NarrativeSection";
 import { NoticeList } from "./NoticeList";
 import { PatternFlagList } from "./PatternFlagList";
 import { ReasonList } from "./ReasonList";
@@ -200,6 +206,7 @@ function IncidentBody({
   refresh,
   acknowledge,
   resolve,
+  summarise,
   giveVerdict,
   notificationId,
   back,
@@ -211,6 +218,8 @@ function IncidentBody({
   // The trial rule (spec §6.13, D19): owner/admin only. Unknown yet → nobody.
   const ownerOrAdmin = user?.role === "owner" || user?.role === "admin";
   const { mode } = useSecurityMode();
+  // WARP-2979: the `summaries` row says whether the on-box model is Paused (a pending summary then says so).
+  const { sources } = useSecurityHealth();
   const cameraLabel = useCameraDisplayNames();
   const { toast } = useToast();
   const device = deviceTimeZone();
@@ -312,6 +321,10 @@ function IncidentBody({
   // The box's answer alone decides the sentence, never the module level: that
   // reads `view` while it loads, and the sentence would flash for someone who can act.
   const cantAct = live && i.actionable !== true;
+  // WARP-2979 — Summarise now / Regenerate: act (both levels), in any state; the box sends a summary only to a
+  // viewer who can see all of it, so a partial view never gets the section at all.
+  const canSummarise = levelAtLeast(level, "act") && levelAtLeast(i.viewer.level, "act");
+  const summariesPaused = (sources ?? []).some((s) => s.id === "summaries" && s.state === "down" && s.detail.startsWith("Paused"));
   const badge = severityBadge(i.severity);
   const chip = stateChip(i.state, i.severity);
   const title = incidentTitle(i, cameraLabel);
@@ -433,6 +446,17 @@ function IncidentBody({
           </section>
         </>
       )}
+
+      <NarrativeSection
+        narrative={i.narrative}
+        grouping={i.grouping}
+        canAct={canSummarise && narrativeAskable(i.lastActivityAt, now)}
+        paused={summariesPaused}
+        timezone={timezone}
+        now={now}
+        onSummarise={summarise}
+        refresh={() => void refresh()}
+      />
 
       <VerdictBar
         verdict={i.verdict}
