@@ -27,7 +27,9 @@
  * Nothing is asked while the modules read has not said Security and Cameras
  * are open to this person (every request to a gate that refuses them would be
  * a denial row). The tiles fill the space the strip leaves on a TV (a
- * near-square grid, `--cols` × `--rows`) and stack one per row on a phone.
+ * `--cols` × `--rows` grid: the near-square one, or, when the banners and the
+ * strip leave too little for it, the one that keeps the pictures largest —
+ * `tileGrid`, from the tiles' own measured box) and stack one per row on a phone.
  */
 import { useEffect, useState, type CSSProperties } from "react";
 import { TriangleAlert, VideoOff } from "lucide-react";
@@ -72,6 +74,21 @@ function useObjectUrl(blob: Blob | null): string | null {
     return () => URL.revokeObjectURL(u);
   }, [blob]);
   return url;
+}
+
+/** An element's content box, kept current. Null until measured, and where the browser has no ResizeObserver. */
+function useBoxSize(el: HTMLElement | null): { width: number; height: number } | null {
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    if (el === null || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      const box = entries[entries.length - 1]?.contentRect;
+      if (box) setSize((s) => (s && s.width === box.width && s.height === box.height ? s : { width: box.width, height: box.height }));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return size;
 }
 
 export type WallTileState = "connecting" | "live" | "stale" | "lost" | "off" | "not_sending";
@@ -126,11 +143,15 @@ function WallTile({ camera, now, time }: { camera: CameraInfo; now: number; time
 }
 
 export function WallCameras({ allowed, noCameraSystem, cameras, listFailed, now, time }: WallCamerasProps) {
+  // The tiles' box is the room the banners and the strip leave (a phone's is its content, and wall.css ignores the grid there).
+  const [tilesEl, setTilesEl] = useState<HTMLDivElement | null>(null);
+  const area = useBoxSize(tilesEl);
+
   if (allowed === true && !noCameraSystem && cameras !== null && cameras.length > 0) {
-    const { cols, rows } = tileGrid(cameras.length);
+    const { cols, rows } = tileGrid(cameras.length, area ?? undefined);
     return (
       <div className="sec-wall-cameras">
-        <div className="sec-wall-tiles" style={{ "--cols": cols, "--rows": rows } as CSSProperties}>
+        <div className="sec-wall-tiles" ref={setTilesEl} style={{ "--cols": cols, "--rows": rows } as CSSProperties}>
           {cameras.map((c) => (
             <WallTile key={c.name} camera={c} now={now} time={time} />
           ))}

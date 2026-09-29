@@ -161,9 +161,10 @@ function serializeTransports(transports: readonly string[] | undefined): string 
 }
 
 /**
- * Issue the cookie session for an authenticated user — byte-for-byte the same
- * shape as POST /auth/login (access cookie + refresh cookie + JSON user, with
- * the optional `?return=body` mobile escape hatch). Keeping this identical to
+ * Issue the session for an authenticated user — byte-for-byte the same
+ * shape as POST /auth/login (access cookie + refresh cookie + JSON user, or,
+ * for the native `?return=body` escape hatch, tokens in the body and no
+ * cookies — WARP-3038). Keeping this identical to
  * the password path means downstream (auth middleware, refresh, logout) treats
  * a passkey session exactly like a password session.
  */
@@ -190,7 +191,6 @@ async function issueSession(
   // the admin revoke sweep. Both live in the shared mint.
   const { lastMfaAt, ...identity } = user;
   const minted = await issueSessionTokens(identity, { lastMfaAt });
-  setSessionCookies(req, res, minted);
 
   // WARP-582 — same NATIVE-client-only gate as POST /auth/login: a browser
   // context (any Sec-Fetch-* / Origin / Referer marker present) never gets
@@ -205,6 +205,9 @@ async function issueSession(
     );
   }
   const wantBody = wantBodyParam && browserMarker === null;
+  // WARP-3038 — a body-token sign-in sets NO cookies, same as
+  // POST /auth/login?return=body; a browser keeps its cookie session.
+  if (!wantBody) setSessionCookies(req, res, minted);
   res.json({
     user: { id: user.id, username: user.username, displayName: user.displayName, role: user.role },
     ...(wantBody ? sessionTokenBody(minted) : {}),
