@@ -115,6 +115,21 @@ describe("POST /api/storage/network-drive/personal", () => {
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
   });
 
+  it("percent-encodes the uid in the URL but keeps it raw in the UNC path", async () => {
+    // Nextcloud uids may contain spaces (never \\, / or %). The URL form must be
+    // encoded; Windows WebClient encodes UNC components itself.
+    const res = await request(makeApp("family", "anne marie"))
+      .post(URL_PATH)
+      .send({ platform: "windows" });
+    expect(res.status).toBe(200);
+    expect(res.body.webdavUrl).toBe(
+      "https://droplet-ai.local/nextcloud/remote.php/dav/files/anne%20marie/",
+    );
+    expect(res.body.windowsPath).toBe(
+      "\\\\droplet-ai.local@SSL\\nextcloud\\remote.php\\dav\\files\\anne marie",
+    );
+  });
+
   it("defaults the device name per platform", async () => {
     await request(makeApp("guest")).post(URL_PATH).send({ platform: "windows" });
     expect(mockPrisma.deviceClient.create).toHaveBeenCalledWith({

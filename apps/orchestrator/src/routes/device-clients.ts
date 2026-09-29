@@ -631,7 +631,10 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
 
         const base = new URL(await webdavBaseUrl(req));
         const url = `${base.origin}${base.pathname}/remote.php/dav/files/${encodeURIComponent(user)}/`;
-        // Windows WebClient UNC form: \\host@SSL[@port]\path (raw uid, no URL-encoding).
+        // Windows WebClient UNC form: \\host@SSL[@port]\path. The uid stays RAW here
+        // while webdavUrl percent-encodes it: WebClient URL-encodes UNC components
+        // itself, so a pre-encoded `%20` would arrive double-encoded. Safe because
+        // Nextcloud uids are limited to [A-Za-z0-9 _.@'-] — never `\`, `/` or `%`.
         const winHost =
           base.port && base.port !== "443"
             ? `${base.hostname}@SSL@${base.port}`
