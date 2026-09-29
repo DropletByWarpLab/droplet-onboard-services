@@ -19,6 +19,12 @@
  *   4. the agent loop CLAIMS the grant on the model's re-issued call     ← this file
  *      and attaches the token via `_meta`
  *
+ * WARP-3279 changed step 4 for chat: at the start of the next turn the loop
+ * TAKES each approved grant (`takeNextApproved`) and dispatches the stored call
+ * itself, exactly as the person saw it. The model rebuilt the call from its
+ * own prose and reworded free-text args, so a byte-identical re-issue almost
+ * never happened. `claimGrant` stays for a re-issue inside the same turn.
+ *
  * WHY THE TOKEN STAYS HERE. The obvious shortcut is to forward the
  * interceptor's token to the browser in the SSE `tool_result` and let the
  * client echo it back. That would make the approval authenticated by
@@ -100,6 +106,12 @@ export interface RegisterChallengeInput {
   expiresAt: number;
   /** The chat user whose turn was challenged. Only they may approve. */
   userId: string;
+  /**
+   * WARP-3279 — the conversation the challenge was raised in, when the turn
+   * is persisted. `takeNextApproved` replays a grant only into a turn of the SAME
+   * conversation, so approving in one thread never runs a write in another.
+   */
+  threadId?: string;
 }
 
 export type ApprovalFailureReason =
@@ -122,6 +134,17 @@ export interface ClaimGrantInput {
   userId: string;
 }
 
+/**
+ * WARP-3279 — an approved call handed back for server-side replay: the tool
+ * and arguments exactly as the human was shown them, plus the bound token.
+ */
+export interface ApprovedCall {
+  challengeId: string;
+  tool: string;
+  args: Record<string, unknown>;
+  token: string;
+}
+
 export interface ChatApprovalStore {
   register(input: RegisterChallengeInput): ChatApprovalChallenge;
   /** Public view, with expiry materialised. `null` for an unknown id. */
@@ -140,6 +163,18 @@ export interface ChatApprovalStore {
    * authorises one.
    */
   claimGrant(input: ClaimGrantInput, now?: number): string | null;
+  /**
+   * WARP-3279 — the replay side: the OLDEST approved, unexpired, unspent
+   * grant for THIS user in THIS conversation (`threadId` compared exactly, so
+   * an unpersisted turn only meets challenges raised by unpersisted turns),
+   * or `null`. The grant is spent here, before anything dispatches it, so it
+   * can be replayed at most once. One per call, so a turn aborted between
+   * replays leaves the rest approved for the next turn.
+   */
+  takeNextApproved(
+    input: { userId: string; threadId?: string },
+    now?: number,
+  ): ApprovedCall | null;
   /** Live entry count. Test/diagnostic surface. */
   size(): number;
 }
@@ -151,6 +186,9 @@ interface ApprovalEntry {
   token: string;
   expiresAt: number;
   userId: string;
+  threadId?: string;
+  /** A private copy of the challenged args — what a replay dispatches. */
+  args: Record<string, unknown>;
   summary: ConfirmationSummary;
   status: ChatApprovalStatus;
 }
@@ -228,6 +266,8 @@ export function createChatApprovalStore(
         token: input.token,
         expiresAt: input.expiresAt,
         userId: input.userId,
+        threadId: input.threadId,
+        args: structuredClone(input.args),
         summary: summarizeToolArguments(input.tool, input.args),
         status: "pending",
       };
@@ -271,6 +311,28 @@ export function createChatApprovalStore(
         if (entry.status !== "approved") continue;
         entry.status = "spent";
         return entry.token;
+      }
+      return null;
+    },
+
+    takeNextApproved(input, now = Date.now()) {
+      for (const entry of entries.values()) {
+        if (entry.userId !== input.userId) continue;
+        if (entry.threadId !== input.threadId) continue;
+        settle(entry, now);
+        if (entry.status !== "approved") continue;
+        // Belt and braces: `register` hashes and clones the args in the same
+        // statement and nothing writes `entry.args` after, so this cannot
+        // fire today. It keeps a future write path from replaying a call
+        // other than the one the human was shown.
+        if (confirmationBindingHash(entry.tool, entry.args) !== entry.bindingHash) continue;
+        entry.status = "spent";
+        return {
+          challengeId: entry.challengeId,
+          tool: entry.tool,
+          args: structuredClone(entry.args),
+          token: entry.token,
+        };
       }
       return null;
     },

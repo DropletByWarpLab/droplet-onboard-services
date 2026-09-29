@@ -344,7 +344,30 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `replie`, and missed `reply` and `replies` entirely — so "did the
   // accountant ever reply" advertised no email tool at all. Every other
   // alternative is unchanged.
-  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|repl(y|ies|ied|ying)|sent)\b/i, domains: ["email"] },
+  //
+  // WARP-3280 — CONTACTS. `search_contacts` lives in this domain, yet
+  // "look up the contact alice@example.com" matched nothing: no rule named
+  // the address book, so the model searched memory and files and told the
+  // user "no contact record found", a false negative stated as fact. Added:
+  //   • `contacts?` and `address book`. The VERB sense ("contact me later",
+  //     "who should I contact about the boiler") is knowingly admitted:
+  //     reaching a person is what this domain's tools do, and it is six
+  //     schemas. `contact lens(es)` and `contact-lens` are excluded, and
+  //     `contactless` never matches the word boundary. The cloud rule still
+  //     does NOT claim `contact` (see WARP-2497 below), so this is the
+  //     word's only owner.
+  //   • a bare email ADDRESS. Someone who types an address is asking about
+  //     that person. It needs a dotted domain, so a handle ("@dropletbox")
+  //     or "meet me @ 5" stays out. Negatives pin both. Any `user@host.tld`
+  //     token counts, so `git@github.com:org/repo` and `ssh root@droplet.local`
+  //     admit this domain too: the cheap direction (six schemas), pinned by
+  //     tests so it reads as a choice, not an accident.
+  //     LINEAR BY CONSTRUCTION: the lookbehind lets a match start only at the
+  //     head of a run, and the RFC bounds (local part 64, label 63) cap each
+  //     attempt. The earlier unbounded `[\w.+-]+@…` restarted at every
+  //     position and backtracked O(n²): 40k chars took ~3 s on the event loop.
+  //     The linear-time test in tool-selection.service.test.ts guards every rule.
+  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|repl(y|ies|ied|ying)|sent|contacts?(?![\s-]+lens(es)?\b)|address book)\b|(?<![\w.+-])[\w.+-]{1,64}@(?:[\w-]{1,63}\.)+[a-z]{2,}\b/i, domains: ["email"] },
   // WARP-2454 — team_chat had NO rule at all, so its tools were reachable
   // only by continuity: a conversation that had not already used the domain
   // could never start using it. Same defect class WARP-2058 fixed for `pm`,
@@ -412,7 +435,19 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
     pattern: /\b(business|company|opening hours|customers?|crm|deals?|pipelines?|leads?|opportunit(y|ies)|prospects?|clients?|follow-?ups?)\b/i,
     domains: ["business", "crm"],
   },
-  { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
+  // WARP-3280 — THE CALCULATOR. The rule had the literal `calculate` and
+  // nothing else, so "what is 187 * 43?" and even "use the calculator to
+  // work out 2+2" advertised no `calculate`; the model did the arithmetic in
+  // its head. Added `calculat\w*` (calculator, calculation), `math(s)`,
+  // `arithmetic`, `N% of`, and an arithmetic EXPRESSION. The expression is
+  // split on purpose: `+ * × ÷ ^` between digits count with or without
+  // spaces, but `-`, `/` and `x` count only with a space on each side,
+  // because tight they are dates (2026-10-03, 9/11), phone numbers
+  // (555-0142) and resolutions (1920x1080). Bare `sum` is not claimed:
+  // "sum up the thread" is a summary. Negatives pin those shapes. A time
+  // range such as "3 - 4 pm" still admits this domain; that is the cheap
+  // direction, and the date tools live here anyway.
+  { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculat\w*|maths?|mathematics|arithmetic|convert|translate|timestamp)\b|\d\s*[+*×÷^]\s*\d|\d\s+[-/x]\s+\d|\d\s*%\s*of\b/i, domains: ["data"] },
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //
   // The defect this closes is the one WARP-2058 closed for `pm` and WARP-2454

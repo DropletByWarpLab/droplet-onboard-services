@@ -144,7 +144,8 @@ export type SSEEvent =
         | "iteration_limit"
         | "error"
         | "context_budget"
-        | "repetition";
+        | "repetition"
+        | "no_progress";
       error?: string;
     };
 

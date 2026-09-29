@@ -86,6 +86,12 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
+  // WARP-3091: `view` stays un-floored on purpose. It gates the whole
+  // /api/network prefix, the Network nav entry and the `network` tool domain,
+  // so a family floor here would also take status and summary from guests.
+  // What guests must not see (the device roster, DHCP leases, the Wi-Fi
+  // settings read) is role-floored on those routes instead: see
+  // `requireNetworkMember` in routes/network-status.routes.ts.
   network: [
     { level: "view" },
     { level: "act", minTier: "admin" },

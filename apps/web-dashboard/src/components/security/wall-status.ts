@@ -40,7 +40,7 @@ export const WALL_COPY = {
   // One tile per camera; {camera} is the name the household gave it.
   tileAlt: "{camera}, latest picture",
   tileConnecting: "Connecting…",
-  // Short: it sits on the picture, which can be 72 px high, and the tile keeps asking without saying so.
+  // Short: it sits on the picture, which can be 72 px high or less on a TV, and the tile keeps asking without saying so.
   tileLost: "No picture yet",
   tileStale: "Picture from {time}",
   tileNotSending: "Not sending pictures",
@@ -125,15 +125,45 @@ export const WALL_TILE_STALE_AFTER_MS = 15_000;
 /** The render clock: "Updated", staleness and the sign-out warning are re-judged this often. */
 export const WALL_TICK_MS = 5_000;
 
+/** A picture is kept at least this high while any grid can give it that (wall.css has no floor of its own on a TV). */
+export const WALL_TILE_MIN_PICTURE_PX = 72;
+/** wall.css `.sec-wall-tiles`: the gap between tiles. */
+const TILE_GAP_PX = 8;
+/**
+ * What a tile spends besides its picture: its caption (one line at the smallest type, 14 px × 1.5 plus 16 px of
+ * padding) and its two 1 px borders. An estimate that only ranks grids against each other: wall.css does the fitting.
+ */
+const TILE_CHROME_PX = 39;
+
 /**
  * The camera tiles' grid on a TV: the nearest square that holds them, wider
  * than tall (1 → 1×1, 2 → 2×1, 3–4 → 2×2, 5–6 → 3×2, 7–9 → 3×3, 10–12 → 4×3),
- * so the tiles share the space the strip leaves (wall.css keeps each picture
- * at least 72 px high, and scrolls the page a little when that doesn't fit).
+ * so the tiles share the space the strip leaves.
+ *
+ * `area` is the tiles' own box (their content, inside the padding). When the
+ * near-square grid would leave a picture under WALL_TILE_MIN_PICTURE_PX high
+ * (a 1080p TV browser at 960×540 with 12 cameras, a banner and two sources
+ * down: the strip and the banners come first, the tiles get what is left),
+ * it is replaced by the grid whose pictures are largest (12 cameras in a
+ * 928 × 208 px box → 6×2, not 4×3); a tie keeps the earlier grid, the
+ * near-square one first. Without `area`, or before it is measured, it is the
+ * near-square grid.
  */
-export function tileGrid(n: number): { cols: number; rows: number } {
-  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
-  return { cols, rows: Math.max(1, Math.ceil(n / cols)) };
+export function tileGrid(n: number, area?: { width: number; height: number }): { cols: number; rows: number } {
+  const grid = (cols: number) => ({ cols, rows: Math.max(1, Math.ceil(n / cols)) });
+  const near = grid(Math.max(1, Math.ceil(Math.sqrt(n))));
+  if (!area || !(area.width > 0) || !(area.height > 0)) return near;
+  const frameH = (g: { rows: number }) => (area.height - (g.rows - 1) * TILE_GAP_PX) / g.rows - TILE_CHROME_PX;
+  if (frameH(near) >= WALL_TILE_MIN_PICTURE_PX) return near;
+  // The tallest 16:9 picture the frame holds: as high as the frame, or as wide as the cell allows.
+  const pictureH = (g: { cols: number; rows: number }) =>
+    Math.min(frameH(g), (((area.width - (g.cols - 1) * TILE_GAP_PX) / g.cols) * 9) / 16);
+  let best = near;
+  for (let cols = 1; cols <= n; cols++) {
+    const g = grid(cols);
+    if (pictureH(g) > pictureH(best)) best = g;
+  }
+  return best;
 }
 
 /**

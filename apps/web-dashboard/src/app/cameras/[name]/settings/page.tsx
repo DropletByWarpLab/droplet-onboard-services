@@ -28,6 +28,7 @@ import {
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { useAuth } from "@/lib/auth";
 import type {
   CameraInfo,
   CameraSettings,
@@ -76,6 +77,10 @@ export default function CameraSettingsPage() {
   );
 
   const { cameras, refresh: refreshCameras } = useCameras();
+  // WARP-3104: camera settings (detection, recording, zones, name, budget)
+  // are owner/admin; the box refuses members, so they get no editor.
+  const { user } = useAuth();
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const camera: CameraInfo | undefined = cameras.find((c) => c.name === name);
 
   const { data: fetched, error, isLoading, mutate } = useSWR<CameraSettings>(
@@ -336,7 +341,13 @@ export default function CameraSettingsPage() {
         </div>
       )}
 
-      {!draft ? (
+      {!canManage ? (
+        <div className="card">
+          <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
+            Only owners and admins can change camera settings.
+          </p>
+        </div>
+      ) : !draft ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="card" style={{ height: 192, background: "var(--surface-2)" }} />

@@ -45,6 +45,10 @@ export const UPDATE_EVENTS = {
   "update.status_transition": "transitions",
 
   // ── apply (apply.ts — pending → verifying → applying → verdict) ──
+  /** info — WARP-3193: another run holds this row's apply claim; nothing touched. */
+  "update.apply_claimed_elsewhere": "apply",
+  /** warn — WARP-3193: boot resume cleared apply claims a dead process left. */
+  "update.stale_claims_cleared": "apply",
   /** info — apply deferred: onboarding wizard in progress. */
   "update.apply_deferred": "apply",
   /** info — window reached with autoApply off; waiting for explicit apply. */
@@ -66,6 +70,10 @@ export const UPDATE_EVENTS = {
   /** warn — the installed helper predates reconcile-env; step 3b skipped
    *  (additive), so an OTA-only box is never stranded (#2320 review). */
   "update.env_reconcile_skipped": "apply",
+  /** info — WARP-3120: a client installer the release carries was staged into /downloads. */
+  "update.client_app_staged": "apply",
+  /** warn — WARP-3120: a client installer was NOT staged (reason); the box update goes on. */
+  "update.client_apps_skipped": "apply",
   /** info — step 4 done: `prisma migrate deploy` for this build ran. */
   "update.migrations_applied": "apply",
   /** info — verifying → applying committed; container swaps begin. */

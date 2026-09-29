@@ -67,7 +67,8 @@ vi.mock("../services/encryption.service.js", () => ({
 
 import { createCalendarRouter } from "../routes/calendar.js";
 import { createRemindersRouter } from "../routes/reminders.js";
-import { startRemindersPoller, stopRemindersPoller } from "../services/reminders-poller.js";
+import { startRemindersPoller } from "../services/reminders-poller.js";
+import { createCronRuntime } from "../services/cron-runtime.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { makeFakeTable, type FakeTable, type Row } from "./helpers/fake-table.js";
 import { makeFakeNotificationLog, type FakeNotificationLog } from "./helpers/fake-notification-log.js";
@@ -354,12 +355,13 @@ describe.each([
     const w = world();
     await run("create_reminder", { title: "Take the bins out", due_at: at(-1).toISOString() }, toolCtx(w, acting));
 
-    startRemindersPoller(w.prisma);
+    const cron = createCronRuntime();
+    startRemindersPoller(w.prisma, cron);
     try {
       await vi.waitFor(() => expect(w.reminders.rows[0]!.notifiedAt).toBeInstanceOf(Date));
       await vi.waitFor(() => expect(mqttPublish).toHaveBeenCalled());
     } finally {
-      stopRemindersPoller();
+      cron.stop();
     }
 
     expect(mqttPublish.mock.calls.map(([topic]) => topic)).toEqual(["droplet/notifications/alice"]);
@@ -687,11 +689,12 @@ describe("WARP-3193 Reminder.status is written with its timestamp and read inste
     // that still reads the timestamp would fire it again.
     seedReminder(w, { id: "rm-fired", userId: "alice", dueAt: at(-2), status: "notified" });
 
-    startRemindersPoller(w.prisma);
+    const cron = createCronRuntime();
+    startRemindersPoller(w.prisma, cron);
     try {
       await vi.waitFor(() => expect(w.log.rows).toHaveLength(1));
     } finally {
-      stopRemindersPoller();
+      cron.stop();
     }
 
     const where = (w.reminders.delegate.findMany.mock.calls[0] as unknown as [{ where: Record<string, unknown> }])[0].where;
@@ -714,11 +717,12 @@ describe("WARP-3193 Reminder.status is written with its timestamp and read inste
       return rows;
     });
 
-    startRemindersPoller(w.prisma);
+    const cron = createCronRuntime();
+    startRemindersPoller(w.prisma, cron);
     try {
       await vi.waitFor(() => expect(w.reminders.delegate.updateMany).toHaveBeenCalled());
     } finally {
-      stopRemindersPoller();
+      cron.stop();
     }
 
     expect(rm.status).toBe("completed");
