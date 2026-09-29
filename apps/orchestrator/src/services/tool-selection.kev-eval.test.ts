@@ -65,6 +65,7 @@ const DOMAIN_TEXT: Record<ToolDomain, string> = {
   agent_runs: "long-running background tasks the assistant works on while the user is away",
   routines: "automations or routines that run on a schedule",
   workspace: "the shared company Workspace, its members, guests and access",
+  doors: "the building's doors: whether each is open, closed or not reporting, and what happened at them",
   system: "the Droplet box itself: health, storage, updates, backups, logs",
   data: "analysing tables, spreadsheets or numbers",
 };

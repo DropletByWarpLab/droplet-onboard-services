@@ -199,6 +199,11 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     // all now — they are EMPTY, which is a different condition, and the
     // deadRules assertion above is the one that catches it.
     expect([...fullyExcluded].sort()).toEqual([
+      // ADR-055 — doors joins them: both reads are excluded while the module
+      // ships dark and module gating does not yet reach the chat pool (see the
+      // note on the exclusion). A rule would promise a tool the pool can never
+      // deliver.
+      "doors",
       "erp",
       // WARP-2581 — money joins them: its one tool is excluded while the
       // base-prompt budget tripwire stands (WARP-2547 owns the re-baseline),
@@ -211,7 +216,8 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
       // so no selection rule may promise them.
       "workspace",
     ]);
-    // switch, erp, money and workspace are ruleless, which is the coherent state.
+    // switch, erp, money, workspace and doors are ruleless, which is the coherent state.
+    expect(RULED_DOMAINS.has("doors")).toBe(false);
     expect(RULED_DOMAINS.has("switch")).toBe(false);
     expect(RULED_DOMAINS.has("erp")).toBe(false);
     expect(RULED_DOMAINS.has("money")).toBe(false);

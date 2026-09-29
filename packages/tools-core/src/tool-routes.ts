@@ -367,6 +367,13 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
     hops: [admit("get", "/api/money/documents")],
   },
 
+  // ── doors (ADR-055 P4a) ─────────────────────────────────────────────────
+  // Two reads, and only reads (§11.5). Both routes admit the mcp principal
+  // (`requireRoleOrMcpService`) and are narrowed by the acting user's scope
+  // (MCP_ACTING_USER_GATED_DOMAINS). No write hop exists to list.
+  { tool: "doors_list", client: "orchestrator", hops: [admit("get", "/api/doors")] },
+  { tool: "doors_recent_events", client: "orchestrator", hops: [admit("get", "/api/doors/events")] },
+
   // ── cloud (WARP-2497) ───────────────────────────────────────────────────
   // Lives under /api/erp/* because the cloud connectors reuse the ERP
   // route surface and its connector-grant gate; the tool domain is `cloud`.

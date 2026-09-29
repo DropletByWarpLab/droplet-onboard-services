@@ -17,6 +17,7 @@ import {
   Camera,
   Cloud,
   Contact,
+  DoorOpen,
   FolderOpen,
   HardDrive,
   Heater,
@@ -87,6 +88,9 @@ export const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-2896 (ADR-056) — the workshop's workspace tools. Label matches the
   // /workshop nav entry for the same reason.
   workspace: { label: "Workshop", icon: Hammer },
+  // ADR-055 (P4a) — doors_list / doors_recent_events. Two reads; there is no
+  // /doors page yet (P4b), so this only names the /tools filter chip.
+  doors: { label: "Doors", icon: DoorOpen },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */
