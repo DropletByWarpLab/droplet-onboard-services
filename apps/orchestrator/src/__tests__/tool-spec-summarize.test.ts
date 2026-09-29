@@ -399,3 +399,44 @@ describe("optional steps — one unreadable source does not kill the narrative",
     expect(dispatcher.call).toHaveBeenCalledWith("list_events", {}, { userId: "romain", userRole: "owner" });
   });
 });
+
+describe("WARP-3282 — a step's result is scrubbed of credentials before the summary model and the run record see it", () => {
+  const SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+  it("the facts, the returned trace and the persisted ToolRun hold the placeholder; the next step still gets the real value", async () => {
+    const seen: RunStepTrace[][] = [];
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async (_p, facts) => {
+        seen.push(facts);
+        return "prose";
+      }),
+    };
+    const page = `export AWS_SECRET_ACCESS_KEY="${SECRET}"`;
+    const call = vi.fn(async (tool: string, _args?: Record<string, unknown>) => (tool === "read_file" ? { page } : { ok: true }));
+    const p = fakePrisma();
+
+    const { outcome } = await runToolSpec(p.client, { call }, {
+      specId: "spec-1",
+      specName: "copy-config",
+      steps: [
+        callStep(0, "read_file"),
+        { id: "s1", idx: 1, kind: "call", args: { tool: "write_file", args: { content: "${prev}" } } },
+        summarizeStep(2),
+      ],
+      triggeredBy: "u1",
+      summarizer,
+    });
+
+    expect(outcome.status).toBe("ok");
+    // What the model is handed.
+    expect(JSON.stringify(seen)).not.toContain(SECRET);
+    expect((seen[0]![0]!.result as { page: string }).page).toBe(
+      'export AWS_SECRET_ACCESS_KEY="[credential redacted]"',
+    );
+    // What the run record keeps.
+    expect(JSON.stringify(outcome.trace)).not.toContain(SECRET);
+    expect(JSON.stringify(p.created)).not.toContain(SECRET);
+    // Data flow between steps is not a model path: the write gets the file as read.
+    expect(call.mock.calls[1]![1]).toEqual({ content: { page } });
+  });
+});
