@@ -68,6 +68,7 @@
 /* ── Header ─────────────────────────────────────────────────────────── */
 
 .droplet-shell .chat-head {
+  position: relative;
   height: 56px;
   flex-shrink: 0;
   display: flex;
@@ -75,10 +76,21 @@
   gap: 12px;
   padding: 0 20px;
   border-bottom: 1px solid var(--border);
+  z-index: 20;
+}
+/* The glass lives on a layer behind the header's content, not on the header.
+   An element with `backdrop-filter` is the backdrop root for everything inside
+   it, so with the blur on the header itself, the Memory and Context popovers
+   (which open from the header) could only blur the header, and the
+   conversation showed through them unblurred. */
+.droplet-shell .chat-head::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
   background: var(--glass);
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
-  z-index: 20;
 }
 
 .droplet-shell .chat-head-title {
@@ -647,6 +659,37 @@
   color: var(--text-muted);
 }
 
+/* ── Header popover fields (Memory, Context pins) ──────────────────── */
+
+/* The popovers' selects and text boxes were authored in utilities with no
+   inset, so option text sat on the border and the native chevron crowded it,
+   unlike every other field in the shell. Same treatment as `.mx-field` /
+   `.pm-input`: surface-2, 1px border, the input radius, a 10px inset, a
+   brand-tinted border on focus. Compact (32px) because the popovers are. */
+.droplet-shell .chat-field {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 160ms var(--ease);
+}
+.droplet-shell .chat-field::placeholder { color: var(--text-muted); }
+.droplet-shell .chat-field:focus {
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--border));
+}
+/* The per-fact audience select sits inside a list row, so it is shorter. */
+.droplet-shell .chat-field.sm {
+  width: 96px;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 11.5px;
+}
+
 /* ── Mobile (≤760px to match the design; Tailwind lg: still governs the
       rail visibility, this only adjusts paddings) ────────────────────── */
 
@@ -682,6 +725,13 @@
      area of the product's main input was 24px. Give it the target height; it
      still auto-grows from there. */
   .droplet-shell .chat-composer-inner textarea { min-height: 44px; }
+
+  /* The header popovers' fields owe the same target, and 16px text so iOS
+     Safari doesn't zoom the page when one takes focus. */
+  .droplet-shell .chat-field,
+  .droplet-shell .chat-field.sm { height: 44px; font-size: 16px; }
+  /* At 16px, "Everyone" and "Admins+" clip in 96px. */
+  .droplet-shell .chat-field.sm { width: 112px; }
 }
 
 /* ── File rail (WARP-2205) ──────────────────────────────────────────── */

@@ -169,7 +169,10 @@ export function MemoryPanel() {
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    // Below lg the panel anchors to the header (.chat-head is positioned),
+    // not this button: the button sits mid-header on a phone, and a panel
+    // right-aligned to it started off the left edge of the screen.
+    <div ref={rootRef} className="lg:relative">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -190,7 +193,7 @@ export function MemoryPanel() {
         <div
           role="dialog"
           aria-label="Assistant memory"
-          className="absolute right-0 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
+          className="absolute right-0 max-lg:right-3 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
           style={{
             background: "var(--glass)",
             border: "1px solid var(--card-bd)",
@@ -245,7 +248,7 @@ export function MemoryPanel() {
                       )
                     }
                     title="Who receives this fact"
-                    className="type-caption-2 h-6 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
+                    className="chat-field sm flex-none"
                   >
                     {/* If the fact's current audience outranks the caller
                         (e.g. an admin viewing an owner-only fact), keep it
@@ -292,66 +295,73 @@ export function MemoryPanel() {
             </ul>
           )}
 
+          {/* Two rows: on one, the two selects took 224 of the popover's
+              360px and left the fact itself a 54px box. The fact and its
+              Add go first; what it is and who gets it go under it. */}
           <div
-            className="flex items-center gap-1.5 pt-2"
+            className="flex flex-col gap-1.5 pt-2"
             style={{ borderTop: "1px solid var(--card-bd)" }}
           >
-            <label className="sr-only" htmlFor="memory-category">
-              Category
-            </label>
-            <select
-              id="memory-category"
-              value={category}
-              onChange={(e) =>
-                setCategory(e.target.value as MemoryFact["category"])
-              }
-              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
-            >
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-            <label className="sr-only" htmlFor="memory-audience">
-              Audience
-            </label>
-            <select
-              id="memory-audience"
-              value={audience}
-              onChange={(e) =>
-                setAudience(e.target.value as MemoryFact["audience"])
-              }
-              title="Who receives this fact"
-              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
-            >
-              {audienceOptions.map((a) => (
-                <option key={a.value} value={a.value}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
-            <label className="sr-only" htmlFor="memory-draft">
-              New fact
-            </label>
-            <input
-              id="memory-draft"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void handleAdd();
-              }}
-              placeholder="e.g. Prefers answers in French"
-              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
-            />
-            <button
-              type="button"
-              onClick={() => void handleAdd()}
-              disabled={busy || draft.trim().length === 0}
-              className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
-            >
-              <Plus size={14} aria-hidden="true" /> Add
-            </button>
+            <div className="flex items-center gap-1.5">
+              <label className="sr-only" htmlFor="memory-draft">
+                New fact
+              </label>
+              <input
+                id="memory-draft"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleAdd();
+                }}
+                placeholder="e.g. Prefers answers in French"
+                className="chat-field flex-1 min-w-0"
+              />
+              <button
+                type="button"
+                onClick={() => void handleAdd()}
+                disabled={busy || draft.trim().length === 0}
+                className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
+              >
+                <Plus size={14} aria-hidden="true" /> Add
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="sr-only" htmlFor="memory-category">
+                Category
+              </label>
+              <select
+                id="memory-category"
+                value={category}
+                onChange={(e) =>
+                  setCategory(e.target.value as MemoryFact["category"])
+                }
+                className="chat-field flex-1 min-w-0"
+              >
+                {CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              <label className="sr-only" htmlFor="memory-audience">
+                Audience
+              </label>
+              <select
+                id="memory-audience"
+                value={audience}
+                onChange={(e) =>
+                  setAudience(e.target.value as MemoryFact["audience"])
+                }
+                title="Who receives this fact"
+                className="chat-field flex-1 min-w-0"
+              >
+                {audienceOptions.map((a) => (
+                  <option key={a.value} value={a.value}>
+                    {a.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {error && (

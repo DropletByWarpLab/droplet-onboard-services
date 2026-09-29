@@ -23,12 +23,9 @@
 .droplet-shell.workshop-app .conv-head { border-bottom: 0; }
 .droplet-shell.workshop-app .conv-new-btn { border: 0; background: transparent; }
 .droplet-shell.workshop-app .conv-new-btn:hover { background: var(--surface-2); }
-.droplet-shell.workshop-app .chat-head {
-  border-bottom: 0;
-  background: transparent;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
+.droplet-shell.workshop-app .chat-head { border-bottom: 0; }
+/* chat-indigo.css paints the header's glass on this layer. */
+.droplet-shell.workshop-app .chat-head::before { content: none; }
 /* Selection is a tone, not a stripe. */
 .droplet-shell.workshop-app .conv-item { border-left: 0; }
 /* The Mac app's QuietButtonStyle: a secondary button is text only, with a
