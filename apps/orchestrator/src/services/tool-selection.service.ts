@@ -313,7 +313,11 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // Review #2420: `alerts?`, `offline` and "(anyone|anybody|someone) in/at the …" — the tools' own examples
   // ("any alerts this week?", "is any camera offline?", "was anyone in the stock room after 9?"), pinned by a
   // test that reads every quoted example out of the security descriptions.
-  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the)\b/i, domains: ["security"] },
+  // WARP-2980 (ADR-059 P5 PR-E) — "is it normal…?" / "what's usual…?": the
+  // question security_explain_pattern answers. The spec's own box-proof
+  // sentence, "is it normal for someone to be in the stock room at 2 AM?",
+  // matched none of the words above.
+  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the|(is|was) (it|that|this) (normal|usual)|what(['’]?s| is) (normal|usual))\b/i, domains: ["security"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
   //
