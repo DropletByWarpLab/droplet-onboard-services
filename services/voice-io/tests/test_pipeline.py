@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pytest
@@ -1787,8 +1787,9 @@ class TestSpeak:
         pipe._tts_available = True
         result = pipe.speak("hello")
         assert result["ok"] is False
-        # Error message surfaces via /voice/status
-        assert pipe.status().state == "error"
+        # Error message surfaces via /voice/status — but one failed utterance
+        # is not a stuck pipeline: it goes back to listening (WARP-3199).
+        assert pipe.status().state == "listening"
         assert "synth blew up" in (pipe.status().error_message or "")
 
     def test_playback_failure_arms_post_speak_cooldown(self, monkeypatch):
@@ -1816,7 +1817,7 @@ class TestSpeak:
 
         result = pipe.speak("hello")
         assert result["ok"] is False
-        assert pipe.status().state == "error"
+        assert pipe.status().state == "listening"  # WARP-3199 — not latched
         # The load-bearing assertion: the cooldown timestamp is armed even
         # though playback raised, so wake detection is suppressed for the
         # post-speak window.
@@ -2100,9 +2101,10 @@ class TestClosedLoop:
         s = pipe.status()
         assert s.state in ("transcript_ready", "listening")
 
-    def test_llm_raises_lands_in_error_state(self, monkeypatch):
+    def test_llm_raises_surfaces_error_and_keeps_listening(self, monkeypatch):
         # Hard failure during reply() — orchestrator returned 500. The
-        # error message surfaces via /voice/status.
+        # error message surfaces via /voice/status, and the pipeline goes
+        # back to listening so the next wake is a fresh try (WARP-3199).
         _patch_play(monkeypatch)
         llm = _RecordingLLM(raise_on_reply=True)
         stt = _RecordingSTT(scripted_transcripts=["what time is it"])
@@ -2126,7 +2128,7 @@ class TestClosedLoop:
         pipe._on_frame(_silence_frame())
 
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"
         assert "LLM blew up" in (s.error_message or "")
         # No speaking happened:
         assert tts.texts_received == []
@@ -2410,7 +2412,7 @@ class TestStreamingChunkedSpeak:
             "Second sentence here.",
         ]
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"  # WARP-3199 — a failed turn doesn't latch
         assert "synth failed" in (s.error_message or "")
         # Cooldown armed because sentence 1 drove the speaker.
         assert pipe._speak_ended_at is not None
@@ -2449,7 +2451,7 @@ class TestStreamingChunkedSpeak:
         # Sentence 1 spoke before the break.
         assert tts.texts_received == ["The camera is online."]
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"  # WARP-3199 — a failed turn doesn't latch
         assert "stream dropped" in (s.error_message or "")
         assert pipe._speak_ended_at is not None  # cooldown armed after partial audio
         assert reporter.events.count("wake_heard") == 1
@@ -2723,7 +2725,7 @@ class TestSynthAhead:
         assert len(tts.texts_received) <= 3
         assert _synth_threads_alive() == []
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"  # WARP-3199 — not latched
         assert "playback" in (s.error_message or "")
         # The speaker was driven, so the anti-feedback cooldown is armed.
         assert pipe._speak_ended_at is not None
@@ -2741,7 +2743,7 @@ class TestSynthAhead:
         assert llm.closed is True
         assert player.played == []
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"  # WARP-3199 — not latched
         assert "(tts)" in (s.error_message or "")
         # Nothing reached the speaker — no bleed to guard against.
         assert pipe._speak_ended_at is None
@@ -2755,7 +2757,7 @@ class TestSynthAhead:
         pipe._default_on_transcript("go now please")
         assert llm.closed is True
         assert player.played == ["First sentence here."]
-        assert pipe.status().state == "error"
+        assert pipe.status().state == "listening"  # WARP-3199 — not latched
         assert pipe._speak_ended_at is not None
         assert _synth_threads_alive() == []
 
@@ -2783,7 +2785,7 @@ class TestSynthAhead:
         result = pipe._speak_reply_stream("go now please", tool_choice=None)
         assert result["ok"] is False
         assert result["error_kind"] == "tts"
-        assert pipe.status().state == "error"
+        assert pipe.status().state == "listening"  # WARP-3199 — not latched
         assert llm.closed is True
         assert _synth_threads_alive() == []
 
@@ -2939,7 +2941,7 @@ class TestSpokenCues:
         pipe.prime_cues()
         pipe._default_on_transcript("check the cameras")
         assert player.played == ["Let me check."]
-        assert pipe.status().state == "error"
+        assert pipe.status().state == "listening"  # WARP-3199 — not latched
         assert pipe._speak_ended_at is not None
         assert reporter.events == ["wake_heard"]
 
@@ -3886,6 +3888,161 @@ class TestWindowedMeasure:
             t.join(timeout=1.0)
         assert result["rms_dbfs"] == pytest.approx(-30.31, abs=0.5)
         assert pipe._measure_collector is None
+
+
+class TestFailedTurnKeepsListening:
+    """WARP-3199 — one failed voice turn (a TTS timeout, a playback fault, a
+    dropped LLM stream) latched the pipeline in 'error'. `_on_frame` drops
+    every frame there, so the assistant went deaf and `/audio/measure`
+    answered 503 until voice-io restarted: the Mic setup wizard's "Couldn't
+    measure the room" on a healthy mic. The turn's failure is reported; the
+    pipeline keeps listening."""
+
+    def _after_failed_reply(self, monkeypatch, detector=None) -> WakePipeline:
+        _patch_play(monkeypatch)
+        pipe = WakePipeline(
+            detector=detector or _ScriptedDetector([{"hey_jarvis": 0.0}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            tts=_RecordingTTS(raise_on_synthesize=True),
+            llm=_RecordingLLM(scripted_replies=["It is noon."]),
+            post_speak_cooldown_s=0.0,
+        )
+        pipe._tts_available = True
+        pipe._llm_available = True
+        pipe._state = "transcript_ready"  # what _finish_transcription sets
+        pipe._default_on_transcript("what time is it")
+        return pipe
+
+    def test_the_failure_is_reported_not_latched(self, monkeypatch):
+        s = self._after_failed_reply(monkeypatch).status()
+        assert s.state == "listening"
+        assert s.mic_fault is None  # /health stays 200
+        assert "synth blew up" in (s.error_message or "")
+
+    def test_the_mic_stays_measurable(self, monkeypatch):
+        # The wizard's step 1: measure the room off the live stream.
+        pipe = self._after_failed_reply(monkeypatch)
+        pipe._start_measure()
+        for _ in range(4):
+            pipe._on_frame(_audio_frame(1000))
+        result = pipe._finish_measure()
+        assert result["rms_dbfs"] == pytest.approx(-30.31, abs=0.05)
+
+    def test_wake_detection_keeps_running(self, monkeypatch):
+        pipe = self._after_failed_reply(
+            monkeypatch, detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+        )
+        pipe._on_frame(_silence_frame())
+        assert pipe._state == "wake_detected"
+        assert pipe.status().last_wake_at is not None
+
+    def test_the_next_wake_clears_the_note(self, monkeypatch):
+        # The note describes the LAST turn; a new turn starts clean.
+        pipe = self._after_failed_reply(
+            monkeypatch, detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+        )
+        pipe._on_frame(_silence_frame())
+        assert pipe.status().error_message is None
+
+    def _wire(self, monkeypatch, tts) -> WakePipeline:
+        _patch_play(monkeypatch)
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.0}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            tts=tts,
+            llm=_RecordingLLM(scripted_replies=["It is noon."]),
+        )
+        pipe._tts_available = True
+        pipe._llm_available = True
+        return pipe
+
+    def test_a_tts_dropped_mid_event_ends_the_reply_turn(self, monkeypatch):
+        # WyomingTTS reuses stt.py's wire helpers, so Piper closing the
+        # socket mid-event surfaces as STTUnavailable, not TTSUnavailable.
+        # It must still end the turn — not strand the pipeline in
+        # 'speaking', where every frame is dropped and /health says 200.
+        pipe = self._wire(monkeypatch, _DroppingTTS())
+        pipe._state = "transcript_ready"
+        pipe._default_on_transcript("what time is it")
+        s = pipe.status()
+        assert s.state == "listening"
+        assert "peer closed mid-line" in (s.error_message or "")
+
+    def test_a_tts_dropped_mid_event_ends_a_say(self, monkeypatch):
+        pipe = self._wire(monkeypatch, _DroppingTTS())
+        pipe._state = "listening"
+        result = pipe.speak("hello")
+        assert result["ok"] is False
+        assert pipe.status().state == "listening"
+        assert "peer closed mid-line" in (pipe.status().error_message or "")
+
+    def test_a_fault_latched_during_a_say_keeps_its_state_and_message(self, monkeypatch):
+        # /voice/say runs on the request thread, so the capture thread can
+        # latch a real fault while it synthesizes; the say's own failure
+        # must not paper over it.
+        tts = _DroppingTTS()
+        pipe = self._wire(monkeypatch, tts)
+        tts.before_raise = lambda: pipe._set_error("wake loop crashed: boom")
+        pipe._state = "listening"
+        pipe.speak("hello")
+        s = pipe.status()
+        assert s.state == "error"
+        assert s.error_message == "wake loop crashed: boom"
+
+    @pytest.mark.parametrize("tts_factory", [_RecordingTTS, lambda: _DroppingTTS()])
+    def test_a_say_does_not_clear_an_existing_fault(self, monkeypatch, tts_factory):
+        # A fault latched BEFORE the say (the capture thread may be gone)
+        # must survive it, whether the say fails or plays — otherwise a
+        # deaf pipeline reads 'listening' and /health says 200.
+        pipe = self._wire(monkeypatch, tts_factory())
+        pipe._set_error("wake loop crashed: boom")
+        pipe.speak("hello")
+        s = pipe.status()
+        assert s.state == "error"
+        assert s.error_message == "wake loop crashed: boom"
+
+    def test_a_say_does_not_clear_no_mic(self, monkeypatch):
+        pipe = self._wire(monkeypatch, _RecordingTTS())
+        pipe._set_state("no_mic")
+        assert pipe.speak("hello")["ok"] is True
+        assert pipe.status().state == "no_mic"
+
+    def test_an_unexpected_synth_bug_keeps_its_traceback(self, monkeypatch, caplog):
+        # The broad catch must not swallow a programming error silently.
+        import logging as _logging
+
+        class _BuggyTTS(_DroppingTTS):
+            def synthesize(self, text, voice=None):
+                raise AttributeError("'NoneType' object has no attribute 'rate'")
+
+        pipe = self._wire(monkeypatch, _BuggyTTS())
+        pipe._state = "listening"
+        with caplog.at_level(_logging.WARNING, logger="voice.pipeline"):
+            pipe.speak("hello")
+        assert pipe.status().state == "listening"
+        assert any(
+            r.exc_info and r.exc_info[0] is AttributeError for r in caplog.records
+        )
+
+
+class _DroppingTTS(TextToSpeech):
+    """Piper closing the socket mid-event, as WyomingTTS reports it."""
+
+    def __init__(self):
+        self.before_raise: Optional[Callable[[], None]] = None
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def synthesize(self, text: str, voice: Optional[str] = None) -> SynthesizedAudio:
+        if self.before_raise is not None:
+            self.before_raise()
+        raise STTUnavailable("peer closed mid-line (test)")
 
 
 class TestInputLevelTracking:
