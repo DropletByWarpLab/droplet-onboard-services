@@ -74,6 +74,7 @@ import {
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useChat } from "@/lib/hooks/useChat";
+import { useAssistantPages } from "@/lib/hooks/useAssistantPages";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
@@ -246,6 +247,8 @@ function InlineChat({
   const router = useRouter();
   const { user } = useAuth();
   const [chatId] = useState(() => `chat-${Date.now()}`);
+  // WARP-3116 — "take me to …" from the Home composer moves the viewer too.
+  const dashboardPages = useAssistantPages();
   const {
     messages,
     isStreaming,
@@ -254,7 +257,12 @@ function InlineChat({
     retryMessage,
     approveScene,
     conversationId,
-  } = useChat({ chatId, authReady: Boolean(user) });
+  } = useChat({
+    chatId,
+    authReady: Boolean(user),
+    dashboardPages,
+    onNavigate: (href) => router.push(href),
+  });
   const { scrollRef, onScroll, scrollToBottom, stickyScrollToBottom } =
     useStickyScroll();
   const [val, setVal] = useState("");

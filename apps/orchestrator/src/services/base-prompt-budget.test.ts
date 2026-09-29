@@ -412,6 +412,28 @@ describe("worst-case fixed system-block budget", () => {
     // 1,000 pool-mean lines), 113,921 over 157 after — 1,079 of headroom,
     // about one ordinary tool. The line did not move.
     //
+    // WARP-3116 does not move it either, and it had to fit. The two navigation
+    // tools as first written, find_dashboard_page (711) + open_dashboard_page
+    // (754), took the registry to 115,388 over 159 tools: 388 chars over, with
+    // no written decision to raise the line. So the prose was cut, not the
+    // ceiling raised: both descriptions and their parameter docs now say only
+    // what routes the model (find = where is it, link it; open = take me
+    // there; never a path the tool did not return), 515 + 545 = 1,060, and the
+    // closing "Tier-1 read; safe to call without operator confirmation." was
+    // dropped from nine read tools that already state it as
+    // `requiresWrite: false` / `requiresConfirmation: false`
+    // (get_bandwidth_usage, list_vpn_peers, list_threat_events,
+    // get_drive_health, get_audit_log, get_update_status, network_summary,
+    // memory_recall, business_profile_get). That took it to 114,641 at stage
+    // 7363c4ba5. WARP-3194 then lengthened two Security descriptions (+206),
+    // so it stands at 114,676 over 159 with the last three of those dropped
+    // (−171): 324 chars under 115,000 — under half an ordinary tool, so the
+    // next crossing is a decision, not an accident. What bounds a real chat
+    // turn is untouched: the per-domain assertion above stays green with both
+    // in the `data` pool, and the agent loop withholds both from every turn
+    // that carries no dashboard page list (voice, phones, background runs), so
+    // on those turns they cost nothing at all.
+    //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
     // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added
     // to chat scope tripped it. WARP-2547 resolved that: it is now a function

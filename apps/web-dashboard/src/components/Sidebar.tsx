@@ -16,10 +16,7 @@ import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
-import { useCapabilities } from "@/lib/hooks/useCapabilities";
-import { useIntegrations } from "@/lib/hooks/useIntegrations";
-import { isMedicalConnector } from "@/components/integrations/provider-descriptors";
-import { useModuleGate } from "@/lib/hooks/useModuleGate";
+import { useNavGates } from "@/components/Departments/useNavGates";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
 import { VERSION_LABEL } from "@/lib/brand";
 // WARP-2956 — collapse (64px icon rail) + drag-resize (200–360px) state for
@@ -80,17 +77,9 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
-  const adminCapabilities = useCapabilities();
-  const isModuleOn = useModuleGate();
-  // WARP-2880: /practice is advertised only while a medical integration is
-  // connected. Fetched for owner/admin only — the route 403s everyone else,
-  // and Practice is role-hidden from them anyway.
-  const role = user?.role as AuthRole | undefined;
-  const { connected } = useIntegrations(role === "owner" || role === "admin");
-  const capabilities = {
-    ...adminCapabilities,
-    medicalConnector: connected.some((e) => isMedicalConnector(e.meta.id)),
-  };
+  // Role, capabilities (incl. WARP-2880's medical connector) and module
+  // switches — shared with the chat's page list (WARP-3116).
+  const { capabilities, isModuleOn } = useNavGates();
   // WARP-1683: resolves nav-config's `badgeKey` names to live counts. The
   // Sidebar owns the polling hook (nav-config stays pure data); the badge
   // reads 0 — and renders nothing — while the module is off or unresolved.

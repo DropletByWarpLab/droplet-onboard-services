@@ -220,7 +220,7 @@ async function handler(
 const tool: Tool = {
   name: "get_update_status",
   description:
-    "Software-update status of the Droplet appliance: the currently running version, any pending verified update, apply progress (with a human-readable phase), the last update verdict, and the update settings (channel / auto-apply). The companion to apply_update — use it to check whether an update is available and to follow progress after an apply is dispatched. Owner/admin only — other roles get FORBIDDEN. Tier-1 read; safe to call without operator confirmation.",
+    "Software-update status of the Droplet appliance: the currently running version, any pending verified update, apply progress (with a human-readable phase), the last update verdict, and the update settings (channel / auto-apply). The companion to apply_update — use it to check whether an update is available and to follow progress after an apply is dispatched. Owner/admin only — other roles get FORBIDDEN.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
