@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseUnlessOwnerOrAdmin } from "./owner-admin-only.js";
 
 const inputSchema = {
   type: "object",
@@ -18,6 +19,8 @@ function parseIso(input: unknown): Date | null {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseUnlessOwnerOrAdmin(ctx); // WARP-3104
+  if (denied) return denied;
   if (!ctx.userId || !ctx.ncToken) {
     return {
       ok: false,

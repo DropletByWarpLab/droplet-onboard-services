@@ -14,14 +14,15 @@ channel 0 and the echo-cancellation residual on channel 1). Inside the
 voice-io container a single background thread consumes 80 ms frames and runs
 a state machine (`services/voice-io/voice/pipeline.py`). Every frame is fed
 to the wake-word detector — by default a grammar-constrained Vosk recognizer
-that only knows the phrases "droplet" and "hey droplet" plus an unknown-word
-bucket (`services/voice-io/voice/wake.py`; it fires on either, and threshold
-0.7 is the minimum per-word confidence, so TV and ambient speech rarely
-false-fire).
+that only knows the phrase "hey droplet" plus an unknown-word bucket
+(`services/voice-io/voice/wake.py`; threshold 0.85 is the minimum per-word
+confidence, so TV and ambient speech rarely false-fire). The bare one-word
+"droplet" is off by default: ambient speech gets forced into it at full
+confidence (WARP-3128).
 
 On wake, the next utterance streams to a local Whisper container
 (wyoming-faster-whisper, small.en, int8 CPU) with an energy-based
-voice-activity detector that ends capture after 1.0 s of trailing silence
+voice-activity detector that ends capture after 0.6 s of trailing silence
 (hard cap 5 s). The transcript passes two local gates: an actionability
 filter (drops fragments like "uh" from residual false wakes) and an intent
 gate (a regex classifier — greetings, "what time is it", "who are you",
@@ -85,33 +86,52 @@ time and score, last transcript, last spoken reply, per-stage loaded flags.
 
 ## The wake word
 
-"Droplet" **or** "Hey Droplet" — both recognized out of the box by the
-grammar-constrained Vosk engine (no per-phrase model training, no licensing).
-`WAKE_WORD` is a comma-separated list of phrases (default `droplet,hey
-droplet`) and the box wakes on ANY of them; each fires scored on its own
-window, so the shorter "droplet" and the two-word "hey droplet" both carry
-real per-word confidence evidence (WARP-1431). "Hey Droplet" remains the
-primary spoken form in the UI copy. Engine fallback: if the Vosk model is
+"Hey Droplet", recognized out of the box by the grammar-constrained Vosk
+engine (no per-phrase model training, no licensing). `WAKE_WORD` is a
+comma-separated list of phrases (default `hey droplet`) and the box wakes on
+ANY of them, each scored on its own window (WARP-1431). The bare one-word
+"droplet" is off by default: grammar-forced decoding squeezes ambient speech
+into a lone "droplet" at confidence up to 1.00, so no threshold can filter it
+(~23 false wakes/hour on the bench, WARP-3128). Operators can opt back in with
+`WAKE_WORD=droplet,hey droplet`. "Hey Droplet" is also the spoken form in the
+UI copy. Engine fallback: if the Vosk model is
 missing, openWakeWord takes over (single-model) with "hey jarvis" as the
 closest bundled phonetic shape, and `/voice/status` exposes
-`using_wake_fallback` so a UI can say "configured: droplet/hey droplet
+`using_wake_fallback` so a UI can say "configured: hey droplet
 (currently answering to hey jarvis)".
 
 ## Latency character
 
 - Wake: near-instant (sub-second, per-frame scoring).
-- Capture: your utterance plus a 1.0 s silence tail (max 5 s).
+- Capture: your utterance plus a 0.6 s silence tail (`VAD_SILENCE_S`, max
+  5 s).
 - STT: about 1 s (small.en int8).
 - LLM: the dominant cost — each agent iteration is a full local-model round
   trip (roughly 2–4 s on the box), max 2 iterations; intent-gated small talk
-  skips tools entirely and is fastest.
-- TTS and playback: roughly 1–2 s synthesis, then real-time speech.
+  skips tools entirely and is fastest. The reply streams (WARP-626): speech
+  starts once the first sentence has arrived, not after the whole reply.
+- TTS and playback: each sentence is synthesized as it completes, and the
+  next one is synthesized while the current one plays (synth-ahead,
+  WARP-3124), so there's no synthesis gap between sentences.
 
-Typical end to end: about 4–6 s for "what time is it", about 8–15 s for a
-tool question ("is the front camera online?"). Known improvement path:
-WARP-626 — voice calls the LLM with `stream: false`, so speech cannot start
-until the whole reply is done; streaming plus sentence-chunked TTS would
-roughly halve perceived latency.
+Typical end to end, as last measured: about 4–6 s for "what time is it" and
+about 8–15 s for a tool question ("is the front camera online?"). With
+streaming, the first words arrive well before the end. A tool question is two
+model round trips plus the tool call, and the orchestrator holds back the
+first round's text until it knows a tool fired (WARP-1602). So the box says a
+short cue, "Let me check.", the moment the tool call starts instead of sitting
+silent. If the model has to load first, the cue is "One moment." There is at
+most one cue per turn, never once the answer has begun. A cue is ordinary
+speech, so `/voice/status` reads `speaking` from the cue to the end of the
+answer, including the quiet stretch while the tool runs (there is still no
+separate thinking state).
+
+To see where a turn's time goes, every turn logs one `voice_turn_timing` line
+(wake to capture, capture, STT, first reply text, first audio, first answer
+audio and total, in ms, plus the cue, sentence count and error kind).
+`/voice/status` carries the same fields for the last turn as
+`last_turn_timing`. The plan and history are in
+`services/voice-io/docs/voice-latency-plan.md`.
 
 ## Privacy story
 
@@ -157,7 +177,8 @@ the device rather than opening a second stream on it.
    hardware mute-switch integration, a self-expiring "be quiet for an hour"
    pause, and a `mute_mic` tool the assistant could call on request
    (WARP-627, unbuilt).
-2. Non-streaming replies (WARP-626) — TTS waits for the full agent reply.
+2. Tool questions are still slow — two model round trips plus the tool call
+   (about 8–15 s). The spoken cue fills the silence but doesn't shorten it.
 3. Read-only tools — voice cannot control devices in v1.
 4. Almost no user-facing surface: the wizard step (WARP-1036) is the first;
    there is still no settings page and no status indicator.
@@ -176,13 +197,14 @@ the device rather than opening a second stream on it.
 | Setting | What it does |
 | --- | --- |
 | `WAKE_ENGINE` | `vosk` (default) or `openwakeword` |
-| `WAKE_WORD` | comma-separated wake phrases (default `droplet,hey droplet`); any English phrase(s) under vosk, wakes on any |
-| `WAKE_THRESHOLD` | default 0.7 (vosk) / 0.3 (openwakeword) |
+| `WAKE_WORD` | comma-separated wake phrases (default `hey droplet`; the bare one-word `droplet` is left out because it false-wakes on ambient speech, WARP-3128); any English phrase(s) under vosk, wakes on any |
+| `WAKE_THRESHOLD` | default 0.85 (vosk) / 0.3 (openwakeword) |
 | `WAKE_DEBOUNCE_S` | wake re-trigger suppression window |
 | `VOICE_INPUT_DEVICE` / `VOICE_OUTPUT_DEVICE` | pin specific hardware |
 | `VOICE_INPUT_DOWNMIX` | `first` or `mean` channel downmix |
 | `VOICE_INPUT_GAIN` | software input gain |
 | `STT_URL` / `STT_LANGUAGE` / `STT_MAX_RECORD_S` | Whisper sidecar (5.0 s cap via compose) |
+| `WHISPER_CPUS` / `WHISPER_CPU_THREADS` | Whisper sidecar CPU quota and decode threads, default 4 / 4 (WARP-3126, was 2 / 2). Keep them equal (WARP-1434). STT is CPU-only |
 | `TTS_URL` / `TTS_VOICE` | Piper sidecar; `en_US-ryan-medium` default, other voices download on demand |
 | `LLM_MODEL` | model the reply call requests |
 | `DROPLET_LOCATION` / `TZ` | pin geo/timezone; removes the ipapi.co startup lookup |

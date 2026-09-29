@@ -10,7 +10,10 @@
  *   - a person on the dashboard reads log/diff/output, creates and deletes;
  *     the write ops are a run's alone (403 for a person without a run);
  *   - create rolls the sandbox back when the row cannot be written, and
- *     delete refuses while a run is active;
+ *     delete refuses while a run is active, or while the workspace backs an
+ *     extension that can still be installed from it (WARP-3200) — decided
+ *     behind the row lock, in the transaction that deletes the row, and the
+ *     repository removed only after the row is gone;
  *   - propose flips the row to `proposed` with the tag;
  *   - git: the mcp principal is 403, family and guest fetch (push flag off),
  *     owner pushes (push flag on), an unknown repo 404;
@@ -248,6 +251,58 @@ describe("run owns workspace (WARP-2896)", () => {
   });
 });
 
+// WARP-3098 — the header carries the mcp-server's `ctx.userId`:
+// `User.username` on stdio, `User.id` over HTTP (the shipped container).
+// Resolved by resolveAssertedUser: one active person, or 403.
+describe("the acting person is named by username OR User.id (WARP-3098)", () => {
+  async function commitAs(users: Parameters<typeof createAgentRunPrismaMock>[0], asserted: string, personId: string) {
+    const { app, db, sandbox } = buildApp(mcp, createAgentRunPrismaMock(users));
+    await seed(db, "ws-a", personId);
+    const runId = await seedRun(db, "ws-a", personId);
+    const res = await request(app)
+      .post("/api/workspace/ws-a/commit")
+      .set("X-Nextcloud-User", asserted)
+      .set(AGENT_RUN_HEADER, runId)
+      .send({ message: "m" });
+    return { res, sandbox };
+  }
+
+  it("a caller named by User.id (the HTTP transport) commits as that person", async () => {
+    const { res, sandbox } = await commitAs({ users: [owner, admin] }, "u-owner", "u-owner");
+    expect(res.status).toBe(200);
+    expect(sandbox.calls).toEqual([
+      { op: "commit", args: ["ws-a", { message: "m", author: { name: "Romain", email: "romain@droplet.local" } }] },
+    ]);
+  });
+
+  it("an SSO row (nextcloudUsername NULL) resolves by username, and the author is read off that row", async () => {
+    const maria = { id: "u-maria", username: "maria", nextcloudUsername: null, role: "admin", displayName: "Maria", email: "maria@acme.test" };
+    const { res, sandbox } = await commitAs({ users: [owner, maria] }, "maria", "u-maria");
+    expect(res.status).toBe(200);
+    expect(sandbox.calls).toEqual([
+      { op: "commit", args: ["ws-a", { message: "m", author: { name: "Maria", email: "maria@acme.test" } }] },
+    ]);
+  });
+
+  it("a value naming two people is refused — 403, the sandbox is never dialled", async () => {
+    // One person's username is another's id; the look-alike is an owner.
+    // The workspace and run are the look-alike's, and the look-alike's row
+    // comes first, so neither run ownership nor "take the first match" can
+    // refuse this — only the identity check can.
+    const lookalike = { id: "u-other", username: "u-owner", role: "owner" };
+    const { res, sandbox } = await commitAs({ users: [lookalike, owner] }, "u-owner", "u-other");
+    expect(res.status).toBe(403);
+    expect(sandbox.calls).toEqual([]);
+  });
+
+  it("a deactivated person is refused", async () => {
+    const gone = { ...owner, directoryStatus: "DEACTIVATED" as const };
+    const { res, sandbox } = await commitAs({ users: [gone] }, "romain", "u-owner");
+    expect(res.status).toBe(403);
+    expect(sandbox.calls).toEqual([]);
+  });
+});
+
 describe("the run op refuses the allow-list BEFORE the sandbox", () => {
   it("bash never reaches the sandbox; pytest does", async () => {
     // MUTATION: drop the refuseRunArgv call in opHandler("run") and the
@@ -327,6 +382,113 @@ describe("create / detail / delete", () => {
     const asAdmin = buildApp(admin, db);
     await seed(db, "ws-b");
     expect((await request(asAdmin.app).delete("/api/workspace/ws-b")).status).toBe(403);
+  });
+
+  // WARP-3200 — the sandbox re-exports an extension's code from its workspace
+  // on every install (a promote, an enable, the reconciler after a reboot),
+  // so the workspace must outlive every extension that can still be installed.
+  it.each(["signed", "installed", "live", "disabled", "failed"])(
+    "delete refuses while the workspace backs a %s extension, and touches nothing",
+    async (status) => {
+      const { app, db, sandbox } = buildApp(owner);
+      await seed(db);
+      db.extensions.push({ id: "ws-a", workspaceId: "ws-a", name: "Word counter", status });
+      const res = await request(app).delete("/api/workspace/ws-a");
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('This workspace is the source of the extension "Word counter"; uninstall the extension first');
+      expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+      expect(db.workspaces).toHaveLength(1);
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("delete goes ahead once the workspace's extension is uninstalled", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.extensions.push({ id: "ws-a", workspaceId: "ws-a", name: "Word counter", status: "uninstalled" });
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: "ws-a", deleted: true });
+    expect(sandbox.calls.filter((c) => c.op === "remove").map((c) => c.args)).toEqual([["ws-a"]]);
+    expect(db.workspaces).toHaveLength(0);
+  });
+
+  it("decides behind the row lock: lock, extension read and row delete in one READ COMMITTED transaction, the repository after", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    expect((await request(app).delete("/api/workspace/ws-a")).status).toBe(200);
+    expect(db.workspaceLocks).toEqual([{ id: "ws-a", mode: "FOR UPDATE" }]);
+    expect(db.prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(db.prisma.$transaction.mock.calls[0][1]).toEqual({ isolationLevel: "ReadCommitted" });
+    const order = [
+      db.prisma.$queryRaw.mock.invocationCallOrder[0],
+      db.prisma.extension.findUnique.mock.invocationCallOrder[0],
+      db.prisma.workshopWorkspace.delete.mock.invocationCallOrder[0],
+      (sandbox.client.remove as unknown as { mock: { invocationCallOrder: number[] } }).mock.invocationCallOrder[0],
+    ];
+    expect(order.every((n) => typeof n === "number")).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it("a promote that committed while the delete waited for the row is seen, and the delete refuses", async () => {
+    // MUTATION: read the extension before taking the lock (the old
+    // findUnique → check → act) and this is a 200 that leaves a signed
+    // extension whose workspace, and repository, are gone.
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.setOnWorkspaceLock(({ id }) => {
+      db.extensions.push({ id, workspaceId: id, name: "Word counter", status: "signed" });
+    });
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('This workspace is the source of the extension "Word counter"; uninstall the extension first');
+    expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+    expect(db.workspaces).toHaveLength(1);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a workspace another delete removed while this one waited for the row is 404, and nothing is removed twice", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.setOnWorkspaceLock(({ id }) => {
+      db.workspaces.splice(db.workspaces.findIndex((w) => w.id === id), 1);
+    });
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(404);
+    expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a row delete that fails leaves the row AND its repository: never a row with nothing behind it", async () => {
+    // MUTATION: remove the repository before the transaction (the old order)
+    // and the row survives with its repository gone.
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.prisma.workshopWorkspace.delete.mockRejectedValueOnce(new Error("db down"));
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(500);
+    expect(db.workspaces).toHaveLength(1);
+    expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a repository the sandbox cannot remove after the row is gone: the delete stands, and the audit row says what was left", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    (sandbox.client.remove as unknown as { mockRejectedValueOnce: (e: Error) => void }).mockRejectedValueOnce(
+      new WorkspaceSandboxError("the sandbox is unreachable", 503, "UNREACHABLE"),
+    );
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: "ws-a", deleted: true });
+    expect(db.workspaces).toHaveLength(0);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0][0]).toMatchObject({
+      severity: "warn",
+      what: "Workspace deleted, but its repository could not be removed",
+      sub: "ws-a",
+      refs: { workspaceId: "ws-a", repositoryError: "the sandbox is unreachable" },
+    });
   });
 
   it("lists templates and workspaces with the last run", async () => {

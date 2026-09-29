@@ -483,6 +483,11 @@ services:
       # would let this container mint arbitrary service identities.
       # (Single-file bind: setup.sh materializes audit.key before compose up.)
       - ../data/secrets/audit.key:/data/secrets/audit.key:ro
+      # WARP-3165: keys retired by an audit-key rotation, read-only, so rows
+      # signed before a rotation keep verifying. Only retired audit keys live
+      # in this directory (decision-4 still holds: no data/secrets root).
+      # rotate-audit-key (docker/ota/apply-update.sh) writes it on the host.
+      - ../data/secrets/audit-retired:/data/secrets/audit-retired:ro
       # WARP-242: doc-KEK master keyfile — wraps the per-document DEKs that
       # encrypt brain chunks (decrypt-on-read lives in file-search.service /
       # the chat attachment-context builder). Deliberately a keyfile and NOT
@@ -1062,9 +1067,10 @@ services:
     depends_on:
       nextcloud:
         condition: service_started
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file. This container parses untrusted office
+    # documents, so it must not carry the box's .env (JWT_SECRET,
+    # DEVICE_SECRET_KEY, POSTGRES_PASSWORD, ...). Every knob either engine
+    # reads is set explicitly below; neither image reads any other .env key.
     environment:
       # ── Collabora CODE knobs (DOCS_ENGINE=collabora; OnlyOffice ignores) ──
       # aliasgroup1 is coolwsd's WOPI-host ALLOWLIST: the only WOPI host this
@@ -1357,6 +1363,16 @@ services:
       # DROPLET_FIPS_REQUIRED=true.
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+      # WARP-3070: the `Decide` RPC's target, the Kev decision-model sidecar
+      # (droplet-local-LLM docs/ADR-006-decision-model-kev.md; profile
+      # `decision`, off by default), e.g. http://host.docker.internal:8009.
+      # Unset/empty = Decide answers UNAVAILABLE with no network call. The key
+      # must equal that repo's DECISION_MODEL_API_KEY. BARE NAMES on purpose:
+      # `${VAR:-}` here would inject an empty string that OVERRIDES a value set
+      # in the ../.env env_file above; bare, compose passes each through only
+      # when set in the shell, and otherwise leaves the env_file value alone.
+      - DECISION_MODEL_URL
+      - DECISION_MODEL_API_KEY
     volumes:
       - aikeys:/data/keys
       # WARP-234/236: internal-TLS bundle — the rediss:// URL above points
@@ -2018,12 +2034,18 @@ services:
       # mqtts:// broker connection — host/port/cert paths are static in
       # docker/frigate/config.yml now (no env substitution, no password).
       - ../data/secrets/service-tls/frigate:/data/service-tls:ro
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file. Frigate runs ffmpeg over untrusted
+    # camera streams, so it gets only the names it reads. A bare `- NAME`
+    # takes its value from .env (via --env-file / the docker/.env symlink) and
+    # stays UNSET when .env lacks it — the same semantics env_file had.
+    # A `{FRIGATE_*}` placeholder added to docker/frigate/config.yml must have
+    # its name listed here too, or Frigate KeyErrors at boot.
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+      # Frigate+ API key and container timezone (both optional).
+      - PLUS_API_KEY
+      - TZ
       # JP6 image only: ``YOLO_MODELS`` triggers the ``trt-model-prepare``
       # s6-overlay service which still expects legacy ``.cfg`` inputs and
       # fails with "file (yolov9-s.cfg) not found!" on the 0.17.1 image.
@@ -2059,15 +2081,24 @@ services:
       dockerfile: services/web-fetch/Dockerfile
     expose:
       - "8010"
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — this container parses untrusted web
+    # content. Only the names services/web-fetch + services/_shared read.
     environment:
       # Not one of the six FIPS provider-carrying images — pin the boot
       # gate + OpenSSL config to the literal OFF posture (see the
-      # device-identity-svc comment; `environment:` beats env_file).
+      # device-identity-svc comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Bare names: value from .env, unset when absent (env_file semantics).
+      - WEB_FETCH_SERVICE_TOKEN
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     profiles: ["web"]
     restart: unless-stopped
     <<: *default-logging
@@ -2162,15 +2193,24 @@ services:
       dockerfile: services/doc-render/Dockerfile
     expose:
       - "8020"
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — this container parses LLM-authored
+    # document specs. Only the names services/doc-render + services/_shared read.
     environment:
       # Not one of the six FIPS provider-carrying images — pin the boot
       # gate + OpenSSL config to the literal OFF posture (see the
-      # device-identity-svc comment; `environment:` beats env_file).
+      # device-identity-svc comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Bare names: value from .env, unset when absent (env_file semantics).
+      - DOC_RENDER_SERVICE_TOKEN
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     <<: *default-logging
     mem_limit: ${DOC_RENDER_MEM_LIMIT:-384m}
@@ -2357,20 +2397,34 @@ services:
     network_mode: host
     cap_add:
       - NET_ADMIN
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — this container parses ONVIF/RTSP
+    # responses from LAN cameras. Only the names services/camera-discovery +
+    # services/_shared read are passed (below).
     volumes:
       # WARP-235: this service's own TLS bundle (CN = "camera-discovery") for
       # the mqtts:// broker connection over the loopback :8883 publish.
       - ../data/secrets/service-tls/camera-discovery:/data/service-tls:ro
     environment:
       # WARP-317: no validated fips.so in this image — pin the FIPS boot
-      # gate + OpenSSL config to the literal OFF posture so a FIPS-on .env
-      # inherited via env_file can't crash-loop it (see the
-      # device-identity-svc comment; `environment:` beats env_file).
+      # gate + OpenSSL config to the literal OFF posture (see the
+      # device-identity-svc comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Bare names: value from .env, unset when absent (env_file semantics).
+      # DEVICE_SECRET is the bearer the orchestrator sends (main.py fails
+      # closed without it); ROUTING_SERVICE_TOKEN authenticates to routing.
+      - DEVICE_SECRET
+      - ROUTING_SERVICE_TOKEN
+      - CAMERA_ALLOW_NO_AUTH
+      - CAMERA_AUTO_INITIALIZE
+      - CAMERA_DEFAULT_USERNAME
+      - CAMERA_DEFAULT_PASSWORD
+      - CAMERA_CREDENTIALS_JSON
+      - ONVIF_WS_DISCOVERY_ENABLED
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
       # Host-mode service — dials the broker's host-loopback TLS publish
       # (127.0.0.1:8883) via MQTT_BROKER_LOCAL from .env
       - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtts://localhost:8883}
@@ -2561,17 +2615,20 @@ services:
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_VOICE:-${ORCHESTRATOR_TOKEN:-}}
       # Wake-word backend. `vosk` (default) recognizes the WAKE_WORD
       # phrases out of the box — no per-phrase training, no licensing fee
-      # — so "droplet" and "hey droplet" both work on every box.
+      # — so "hey droplet" works on every box.
       # Automatically falls back to openWakeWord (hey_jarvis) if the
       # bundled Vosk model is absent. WAKE_WORD is a comma-separated list
-      # of phrases; the box wakes on ANY of them (WARP-1431).
+      # of phrases; the box wakes on ANY of them (WARP-1431). The default
+      # leaves out the bare one-word "droplet": Vosk forces ambient speech
+      # into it at confidence up to 1.00 (~23 false wakes/hour on the
+      # bench, WARP-3128). Opt back in with WAKE_WORD=droplet,hey droplet.
       - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
-      - WAKE_WORD=${WAKE_WORD:-droplet,hey droplet}
+      - WAKE_WORD=${WAKE_WORD:-hey droplet}
       # Threshold semantics are engine-aware (resolve_wake_threshold in
       # voice-io main.py). Under vosk every fire carries real acoustic
       # evidence — the MINIMUM per-word confidence of the finalized
       # phrase match (evidence-free matches never fire) — and a genuine
-      # spoken wake scores ~0.9+, so unset means the vosk default (0.7).
+      # spoken wake scores ~0.9+, so unset means the vosk default (0.85).
       # That gates the living-room-TV false accepts the old fixed-0.5
       # partial-fire scoring let through. Lower toward 0.5 if real wakes
       # get missed at distance; tune per docs/voice-assistant-plan.md.
@@ -2694,18 +2751,24 @@ services:
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
-    # WARP-1434 — the CTranslate2 thread count MUST track the CPU quota
-    # (cpus: ${WHISPER_CPUS:-2.0} below). The old --cpu-threads 4 inside a
-    # 2.0-core cap oversubscribed: 4 compute threads contending for 2 cores
-    # adds context-switch churn without speeding transcription. Default 2 =
-    # the quota; if you raise WHISPER_CPUS, raise WHISPER_CPU_THREADS to match.
+    # WARP-1434 — the CTranslate2 thread count MUST equal the CPU quota
+    # (cpus: ${WHISPER_CPUS:-4.0} below). More threads than cores (the old
+    # --cpu-threads 4 inside a 2.0-core cap) only adds context-switch churn;
+    # fewer leaves part of the quota idle. WHISPER_CPUS and
+    # WHISPER_CPU_THREADS move together: change one, change the other.
+    # WARP-3126 — default 4 threads = a 4.0-core quota (was 2/2).
+    # Transcription starts only when the speaker stops, so this decode sits
+    # directly in front of the LLM call on every voice turn; 4 cores roughly
+    # halves it. Trade-off: the host lends STT two more cores of burst for
+    # about a second per turn, shared with Frigate, the inference runtime and
+    # the rest of the stack. On a CPU-tight host lower both knobs together.
     command: >
       --model ${WHISPER_MODEL:-small.en}
       --language ${WHISPER_LANGUAGE:-en}
       --uri tcp://0.0.0.0:10300
       --beam-size 1
       --compute-type ${WHISPER_COMPUTE:-int8}
-      --cpu-threads ${WHISPER_CPU_THREADS:-2}
+      --cpu-threads ${WHISPER_CPU_THREADS:-4}
     volumes:
       # Whisper model cache (~470 MB for small.en). Named volume so a
       # `docker compose down` doesn't redownload; mounted read-write so
@@ -2715,7 +2778,7 @@ services:
     <<: *default-logging
     # Whisper loads the full model into RAM at startup: small.en ~470 MB.
     mem_limit: ${WHISPER_MEM_LIMIT:-1g}
-    cpus: ${WHISPER_CPUS:-2.0}
+    cpus: ${WHISPER_CPUS:-4.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Piper TTS sidecar (WARP-154) ---
@@ -2862,7 +2925,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # Operator pastes this token into the UI. setup.sh writes a 32-byte
       # hex string to .env; if missing the container generates an
-      # ephemeral one and logs it loudly (NOT for production).
+      # ephemeral one and logs only its sha256 fingerprint (NOT for production).
       - OPS_TOKEN=${OPS_TOKEN:-}
       # Per-service probe URLs. Defaults verified live on the single-box 2026-05-15.
       # Empty default = container exists but exposes no HTTP /health
@@ -3618,9 +3681,11 @@ services:
     # AP resolver/LAN (192.168.20.1) that the tunnel's private-network route serves.
     network_mode: host
     command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3193 SEC-DATA-1: NO env_file — only the connector token. cloudflared
+    # maps its flags to TUNNEL_* env vars; TUNNEL_TOKEN is the only one .env
+    # carries (every other flag is on `command:` above).
+    environment:
+      - TUNNEL_TOKEN
     restart: unless-stopped
     mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
     cpus: ${CLOUDFLARED_CPUS:-0.5}

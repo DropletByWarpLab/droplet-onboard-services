@@ -59,6 +59,8 @@ import {
   type WorkspaceSandboxClient,
 } from "../services/workspace.service.js";
 import { ACTIVE_AGENT_RUN_STATUSES } from "../services/agent-run-worker.service.js";
+import { deleteWorkspaceRowUnlessSource } from "../services/workspace-source-guard.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   connectorDraftReadback,
   parseConnectorDraftFacts,
@@ -121,15 +123,19 @@ interface Actor {
 async function resolveActor(prisma: PrismaClient, req: Request, onBehalfOf: string | undefined): Promise<Actor | null> {
   const user = (req as Request & { user?: AuthUser }).user;
   if (!user) return null;
-  let username = user.username;
   if (user.id === MCP_PRINCIPAL_ID && user.role === "service") {
     const header = req.header("x-nextcloud-user");
     const named = onBehalfOf ?? (header && header.trim().length > 0 ? header.trim() : undefined);
     if (!named) return null;
-    username = named;
+    // WARP-3098: either value is `User.username` (stdio) or `User.id` (HTTP).
+    // Nobody, more than one person, or a deactivated person is nobody.
+    const resolved = await resolveAssertedUser(prisma, named);
+    if (!resolved.ok) return null;
+    const { id, username, role, displayName, email } = resolved.user;
+    return { id, username, role, displayName, email };
   }
   const row = await prisma.user.findFirst({
-    where: { username },
+    where: { username: user.username },
     select: { id: true, username: true, role: true, displayName: true, email: true },
   });
   return row ? { ...row, role: String(row.role) } : null;
@@ -402,16 +408,43 @@ export function createWorkspaceRouter(
         res.status(409).json({ error: "A run is still working in this workspace; cancel it first" });
         return;
       }
-      await sandbox.remove(id.data);
-      await prisma.workshopWorkspace.delete({ where: { id: id.data } });
+      // WARP-3200 — the sandbox re-exports an extension's code from its
+      // workspace on every install (a promote, an enable, the reconciler
+      // after a reboot), so the workspace outlives every extension that can
+      // still be installed from it; only an uninstalled one lets it go. The
+      // guard and the row delete are one transaction behind a lock on the
+      // row, which a promote's store and an enable's claim take too
+      // (workspace-source-guard.service.ts): one of them racing this delete
+      // either lands first and is refused here, or waits and finds no row.
+      const outcome = await deleteWorkspaceRowUnlessSource(prisma, id.data);
+      if (!outcome.deleted) {
+        if (outcome.reason === "not_found") res.status(404).json({ error: "No such workspace" });
+        else res.status(409).json({ error: `This workspace is the source of the extension "${outcome.extensionName}"; uninstall the extension first` });
+        return;
+      }
+      // The repository goes only AFTER the row, create's order reversed.
+      // Removing it first left a row with no repository behind it whenever
+      // the row delete then failed — the one state create refuses to leave —
+      // and removing it inside the transaction would hold the row lock
+      // across a sandbox call (up to 35 s). Once the row is gone no promote
+      // or enable can name this workspace, so a sandbox failure here can
+      // only leave a repository nothing refers to: nothing installs from it,
+      // and the sandbox refuses a new workspace with its id. The owner's
+      // delete stands, and the audit row says what was left behind.
+      let repositoryError: string | null = null;
+      try {
+        await sandbox.remove(id.data);
+      } catch (err) {
+        repositoryError = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+      }
       await recordActivity({
         kind: "tool_run",
         severity: "warn",
         sourceIcon: "trash",
-        what: "Workspace deleted",
+        what: repositoryError ? "Workspace deleted, but its repository could not be removed" : "Workspace deleted",
         sub: row.name,
         actor: actorFromRequest(req),
-        refs: { workspaceId: id.data },
+        refs: { workspaceId: id.data, ...(repositoryError ? { repositoryError } : {}) },
       });
       res.json({ id: id.data, deleted: true });
     } catch (err) {

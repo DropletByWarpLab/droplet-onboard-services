@@ -110,6 +110,16 @@ describe("GET /api/storage/pools (read-only, honest empty)", () => {
     expect(res.body.pools[0].displayName).toBe("Vault");
   });
 
+  it("sends the bridge shared secret on the /pools read (WARP-3193 SEC-DATA-6: /pools is token-gated)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const res = await request(app).get("/api/storage/pools");
+    expect(res.status).toBe(200);
+    const call = (bridge as any).mock.calls.find((c: any[]) => String(c[0]).endsWith("/pools"));
+    expect(call?.[1]?.headers).toEqual({ "X-Droplet-Auth": "test-bridge-token" });
+  });
+
   it("returns an honest empty list when the bridge reports no array (no fake sum)", async () => {
     const prisma = createPrismaMock();
     const app = makeApp(prisma, bridgePoolsResponse([]));
@@ -704,6 +714,17 @@ describe("PATCH /api/storage/pools/:device (WARP-1048 rename)", () => {
     // is raid1), never a host-specific default.
     const call = (prisma.storagePool.upsert as any).mock.calls[0][0];
     expect(call.create.level).toBe("raid1");
+  });
+
+  it("sends the bridge shared secret when resolving the level (WARP-3193 SEC-DATA-6)", async () => {
+    const prisma = prismaWithPoolUpsert();
+    const bridge = bridgePoolsResponse([
+      { device: "md127", level: "raid1", status: "active", members: ["sda", "sdb"] },
+    ]);
+    const app = makeApp(prisma, bridge);
+    await request(app).patch("/api/storage/pools/md127").send({ displayName: "Vault" });
+    const call = (bridge as any).mock.calls.find((c: any[]) => String(c[0]).endsWith("/pools"));
+    expect(call?.[1]?.headers).toEqual({ "X-Droplet-Auth": "test-bridge-token" });
   });
 
   it("rejects an invalid pool device name", async () => {

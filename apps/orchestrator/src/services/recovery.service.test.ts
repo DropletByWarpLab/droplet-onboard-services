@@ -9,13 +9,14 @@
  * These tests run the real argon2id hashing (slow but correct) so the
  * generate → hash → match round-trip is exercised exactly as production.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   RECOVERY_CODE_COUNT,
   generateRecoveryCodes,
   findMatchingRecoveryCodeHash,
+  consumeRecoveryCode,
 } from "./recovery.service.js";
-import { verifyPassword } from "./password.service.js";
+import { hashPassword, verifyPassword } from "./password.service.js";
 
 describe("recovery.service — generation", () => {
   it("produces RECOVERY_CODE_COUNT plaintext codes and an equal number of hashes", async () => {
@@ -78,5 +79,60 @@ describe("recovery.service — matching at login", () => {
   it("returns null for a malformed candidate without throwing", async () => {
     const { hashes } = await generateRecoveryCodes();
     expect(await findMatchingRecoveryCodeHash("", hashes)).toBeNull();
+  });
+});
+
+// WARP-3193 ARCH-3 — the ONE consume path shared by /auth/login and
+// /auth/recovery: match against UNUSED codes, then claim exactly that row
+// under a `usedAt: null` guard so a concurrent replay loses.
+describe("recovery.service — consumeRecoveryCode", () => {
+  async function prismaWith(codes: string[]) {
+    const rows = await Promise.all(
+      codes.map(async (c, i) => ({
+        id: `rc-${i}`,
+        userId: "u1",
+        codeHash: await hashPassword(c),
+        usedAt: null as Date | null,
+      })),
+    );
+    const prisma = {
+      recoveryCode: {
+        findMany: vi.fn(async ({ where }: any) =>
+          rows.filter((r) => r.userId === where.userId && r.usedAt === null),
+        ),
+        updateMany: vi.fn(async ({ where, data }: any) => {
+          const r = rows.find((x) => x.id === where.id && x.usedAt === null);
+          if (!r) return { count: 0 };
+          r.usedAt = data.usedAt;
+          return { count: 1 };
+        }),
+      },
+    };
+    return { prisma, rows };
+  }
+
+  it("consumes a matching code once and reports the remaining count", async () => {
+    const { prisma, rows } = await prismaWith(["aaaa-bbbb", "cccc-dddd"]);
+    const first = await consumeRecoveryCode(prisma as any, "u1", " AAAA-BBBB ");
+    expect(first).toEqual({ consumed: true, remaining: 1 });
+    expect(rows[0]!.usedAt).toBeInstanceOf(Date);
+    // A replay of the same code matches nothing.
+    expect(await consumeRecoveryCode(prisma as any, "u1", "aaaa-bbbb")).toEqual({ consumed: false });
+  });
+
+  it("rejects a non-matching code without writing", async () => {
+    const { prisma } = await prismaWith(["aaaa-bbbb"]);
+    expect(await consumeRecoveryCode(prisma as any, "u1", "zzzz-zzzz")).toEqual({ consumed: false });
+    expect(prisma.recoveryCode.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("loses the race when a concurrent consume already claimed the row (count 0)", async () => {
+    const { prisma } = await prismaWith(["aaaa-bbbb"]);
+    prisma.recoveryCode.updateMany.mockResolvedValueOnce({ count: 0 });
+    expect(await consumeRecoveryCode(prisma as any, "u1", "aaaa-bbbb")).toEqual({ consumed: false });
+    expect(prisma.recoveryCode.updateMany).toHaveBeenCalledWith({
+      where: { id: "rc-0", usedAt: null },
+      data: { usedAt: expect.any(Date) },
+    });
   });
 });

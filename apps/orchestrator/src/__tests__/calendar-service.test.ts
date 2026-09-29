@@ -23,6 +23,7 @@ import {
   deleteEvent,
   createSource,
   syncSource,
+  allDayDates,
 } from "../services/calendar.service.js";
 
 function makePrismaStub() {
@@ -43,6 +44,7 @@ function makePrismaStub() {
       }),
       findMany: vi.fn(async ({ where, take }: any) => {
         let rows = events.filter((e) => !where?.userId || e.userId === where.userId);
+        if (where?.sourceId) rows = rows.filter((e) => e.sourceId === where.sourceId);
         if (where?.endsAt?.gte) rows = rows.filter((e) => e.endsAt >= where.endsAt.gte);
         if (where?.startsAt?.lte) rows = rows.filter((e) => e.startsAt <= where.startsAt.lte);
         return rows.slice(0, take);
@@ -65,6 +67,20 @@ function makePrismaStub() {
         for (let i = events.length - 1; i >= 0; i--) {
           if (events[i].sourceId === where.sourceId) events.splice(i, 1);
         }
+      }),
+      // WARP-3193 PERF-10 — createMany with skipDuplicates on (sourceId, externalUid).
+      createMany: vi.fn(async ({ data, skipDuplicates }: any) => {
+        let count = 0;
+        for (const d of data) {
+          const dup = events.some((e) => e.sourceId === d.sourceId && e.externalUid === d.externalUid);
+          if (dup) {
+            if (skipDuplicates) continue;
+            throw new Error("unique violation");
+          }
+          events.push({ id: `ev-${nextId++}`, createdAt: new Date(), updatedAt: new Date(), ...d });
+          count += 1;
+        }
+        return { count };
       }),
       upsert: vi.fn(async ({ where, create, update: upd }: any) => {
         const existing = events.find(
@@ -327,6 +343,51 @@ describe("syncSource", () => {
     expect((prisma as any)._events[0].title).toBe("Coffee (renamed)");
   });
 
+  it("WARP-3193 PERF-10: diffs before writing — batch-creates new events, writes nothing for unchanged ones, updates only what changed", async () => {
+    const prisma = makePrismaStub();
+    const src = await createSource(prisma, "alice", {
+      name: "Feed",
+      url: "https://x.ics",
+      authMode: "none",
+    });
+    const feed = Array.from({ length: 250 }, (_, i) => ({
+      uid: `u${i}@x`,
+      summary: `Event ${i}`,
+      startsAt: new Date(Date.UTC(2026, 3, 1, 0, i)),
+      endsAt: new Date(Date.UTC(2026, 3, 1, 1, i)),
+      allDay: false,
+    }));
+    const stub = prisma as any;
+
+    syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: feed });
+    const first = await syncSource(prisma, src.id);
+    expect(first).toMatchObject({ added: 250, updated: 0, total: 250 });
+    expect(stub.calendarEvent.upsert).not.toHaveBeenCalled();
+    expect(stub.calendarEvent.createMany).toHaveBeenCalledTimes(1);
+    expect(stub._events).toHaveLength(250);
+
+    // Same feed again: nothing is written at all.
+    stub.calendarEvent.createMany.mockClear();
+    syncCalendarSourceMock.mockResolvedValueOnce({
+      ok: true,
+      events: feed.map((e) => ({ ...e, startsAt: new Date(e.startsAt), endsAt: new Date(e.endsAt) })),
+    });
+    const second = await syncSource(prisma, src.id);
+    expect(second).toMatchObject({ added: 0, updated: 0, total: 250 });
+    expect(stub.calendarEvent.createMany).not.toHaveBeenCalled();
+    expect(stub.calendarEvent.update).not.toHaveBeenCalled();
+
+    // One event moved: exactly one update, inside a chunked transaction.
+    const moved = feed.map((e, i) =>
+      i === 7 ? { ...e, endsAt: new Date(e.endsAt.getTime() + 60_000) } : e,
+    );
+    syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: moved });
+    const third = await syncSource(prisma, src.id);
+    expect(third).toMatchObject({ added: 0, updated: 1, total: 250 });
+    expect(stub.calendarEvent.update).toHaveBeenCalledTimes(1);
+    expect(stub._events.find((e: any) => e.externalUid === "u7@x").endsAt).toEqual(moved[7]!.endsAt);
+  });
+
   it("persists lastSyncError on fetch failure", async () => {
     const prisma = makePrismaStub();
     const src = await createSource(prisma, "alice", {
@@ -338,5 +399,24 @@ describe("syncSource", () => {
     const r = await syncSource(prisma, src.id);
     expect(r.error).toBe("HTTP 503 Service Unavailable");
     expect((prisma as any)._sources[0].lastSyncError).toBe("HTTP 503 Service Unavailable");
+  });
+});
+
+describe("WARP-3265 allDayDates", () => {
+  it("sends the calendar dates of an external all-day event, end exclusive", () => {
+    expect(
+      allDayDates({
+        allDay: true,
+        source: "external",
+        startsAt: new Date("2026-09-15T00:00:00Z"),
+        endsAt: new Date("2026-09-16T00:00:00Z"),
+      }),
+    ).toEqual({ startDate: "2026-09-15", endDate: "2026-09-16" });
+  });
+
+  it("is null for a local all-day event and for a timed one", () => {
+    const at = { startsAt: new Date("2026-09-15T07:00:00Z"), endsAt: new Date("2026-09-16T07:00:00Z") };
+    expect(allDayDates({ ...at, allDay: true, source: "local" })).toEqual({ startDate: null, endDate: null });
+    expect(allDayDates({ ...at, allDay: false, source: "external" })).toEqual({ startDate: null, endDate: null });
   });
 });

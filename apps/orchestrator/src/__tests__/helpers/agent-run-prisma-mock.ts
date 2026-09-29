@@ -16,6 +16,13 @@
 import { vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { userDirectory, type DirectoryUser } from "./user-directory.js";
+
+/** WARP-3200 — one row lock taken through the guard's raw query. */
+export interface WorkspaceLock {
+  id: string;
+  mode: "FOR UPDATE" | "FOR KEY SHARE";
+}
 
 export interface AgentRunRow {
   id: string;
@@ -163,13 +170,27 @@ function pick(row: Record<string, unknown>, select?: Record<string, boolean>): R
 }
 
 export interface AgentRunPrismaMockOptions {
-  users?: Array<{ id: string; username: string; role: string }>;
+  /** A missing `nextcloudUsername` is NULL, as on every SSO / SCIM row. */
+  users?: Array<{
+    id: string;
+    username: string;
+    role: string;
+    nextcloudUsername?: string | null;
+    directoryStatus?: string;
+    displayName?: string;
+    email?: string | null;
+  }>;
   now?: () => Date;
 }
 
 export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
   const rows: AgentRunRow[] = [];
   const users = new Map((opts.users ?? []).map((u) => [u.id, u]));
+  // WARP-3098 — `resolveAssertedUser`'s `findMany OR [username,
+  // nextcloudUsername, id] take 2`, with Prisma's semantics.
+  const directory = userDirectory(() =>
+    [...users.values()].map((u) => ({ nextcloudUsername: null, ...u }) as DirectoryUser),
+  );
   const now = opts.now ?? (() => new Date());
   let seq = 0;
   /** Crash seam — see the module doc. */
@@ -279,6 +300,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
       const u = [...users.values()].find((x) => x.username === args.where.username);
       return u ? pick(u as unknown as Record<string, unknown>, args.select) : null;
     }),
+    findMany: directory.findMany,
   };
 
   /** WARP-2896 — the workshop's workspaces. */
@@ -329,6 +351,33 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     }),
   };
 
+  /** WARP-2900 — promoted extensions, read by the workspace delete guard. */
+  const extensions: Array<Record<string, unknown>> = [];
+  const extension = {
+    findUnique: vi.fn(async (args: { where: { workspaceId: string }; select?: Record<string, boolean> }) => {
+      const row = extensions.find((r) => r.workspaceId === args.where.workspaceId);
+      return row ? pick(row, args.select) : null;
+    }),
+  };
+
+  /**
+   * WARP-3200 — the workspace row lock (workspace-source-guard.service.ts),
+   * the only raw SQL this mock answers. `onWorkspaceLock` runs as the lock
+   * is granted: the seam where a suite lands what a concurrent writer
+   * committed while this one waited for it.
+   */
+  const workspaceLocks: WorkspaceLock[] = [];
+  let onWorkspaceLock: ((lock: WorkspaceLock) => void) | null = null;
+  const $queryRaw = vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join("?").replace(/\s+/g, " ").trim();
+    const m = /^SELECT "id" FROM "WorkshopWorkspace" WHERE "id" = \? (FOR UPDATE|FOR KEY SHARE)$/.exec(sql);
+    if (!m) throw new Error(`agent-run-prisma-mock: unsupported raw query: ${sql}`);
+    const lock: WorkspaceLock = { id: String(values[0]), mode: m[1] as WorkspaceLock["mode"] };
+    workspaceLocks.push(lock);
+    onWorkspaceLock?.(lock);
+    return workspaces.some((r) => r.id === lock.id) ? [{ id: lock.id }] : [];
+  });
+
   /** WARP-2180 — recurring runs. */
   const schedules: Array<Record<string, unknown>> = [];
   let scheduleSeq = 0;
@@ -372,17 +421,22 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     agentRun,
     agentRunSchedule,
     workshopWorkspace,
+    extension,
     user,
+    $queryRaw,
     // Rolls back on a throw, like the real thing: the ticker's enqueue+advance
-    // atomicity test depends on a failed advance leaving no run behind.
-    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+    // atomicity test depends on a failed advance leaving no run behind, and
+    // the workspace delete's on a failed row delete leaving the row.
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>, _options?: unknown) => {
       const rowsBefore = structuredClone(rows);
       const schedulesBefore = structuredClone(schedules);
+      const workspacesBefore = structuredClone(workspaces);
       try {
         return await fn(prisma);
       } catch (err) {
         rows.splice(0, rows.length, ...rowsBefore);
         schedules.splice(0, schedules.length, ...schedulesBefore);
+        workspaces.splice(0, workspaces.length, ...workspacesBefore);
         throw err;
       }
     }),
@@ -393,7 +447,12 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     prisma: prisma as unknown as PrismaClient & typeof prisma,
     rows,
     workspaces,
+    extensions,
     schedules,
+    workspaceLocks,
+    setOnWorkspaceLock(fn: typeof onWorkspaceLock) {
+      onWorkspaceLock = fn;
+    },
     row: (id: string) => {
       const r = rows.find((x) => x.id === id);
       if (!r) throw new Error(`no row ${id}`);

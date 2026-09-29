@@ -62,6 +62,8 @@ import {
 } from "./extension-lifecycle.service.js";
 import type { RecordParams } from "./activity.service.js";
 import { recordActivity } from "./activity.singleton.js";
+import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
+import { holdWorkspaceAsSource } from "./workspace-source-guard.service.js";
 
 export const PROMOTE_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const PROPOSAL_TAG_PREFIX = "proposal/";
@@ -408,6 +410,13 @@ export async function confirmPromotion(
     const slug = signed.statement.extensionId;
     try {
       await deps.prisma.$transaction(async (tx) => {
+        // WARP-3200 — the workspace is held until this commits, so a delete
+        // racing the promote either waits and then sees this extension (and
+        // refuses), or deleted the row first and nothing is stored here.
+        // What was signed above is dropped with the refusal.
+        if (!(await holdWorkspaceAsSource(tx, workspaceId))) {
+          throw new PromoteError(404, "not_found", `workspace ${workspaceId} was deleted`);
+        }
         const ext = await tx.extension.upsert({
           where: { id: slug },
           create: {
@@ -450,7 +459,9 @@ export async function confirmPromotion(
           select: { id: true },
         });
         await tx.extension.update({ where: { id: slug }, data: { currentVersionId: row.id } });
-      });
+        // READ COMMITTED: the lock above then answers "no row" for a workspace
+        // a delete removed meanwhile, where a snapshot would abort instead.
+      }, READ_COMMITTED_TX);
     } catch (err) {
       // Prisma's unique violation (the (extensionId, version) pair, or a slug
       // another workspace won in a race): never a second signed row.

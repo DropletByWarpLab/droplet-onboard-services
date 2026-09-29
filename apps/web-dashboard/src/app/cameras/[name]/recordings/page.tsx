@@ -16,7 +16,7 @@ import {
   useRecordingsRange,
   useRecordingsSummary,
 } from "@/lib/hooks/useRecordings";
-import { authFetch } from "@/lib/auth";
+import { authFetch, useAuth } from "@/lib/auth";
 import { getRecordingHlsUrl } from "@/lib/api";
 import { HlsPlayer, type HlsPlayerHandle } from "@/components/recordings/HlsPlayer";
 import {
@@ -73,6 +73,9 @@ export default function RecordingsPage() {
   );
 
   const { cameras } = useCameras();
+  const { user } = useAuth();
+  // WARP-3103: exporting footage is owner/admin custody; the box refuses members.
+  const canExport = user?.role === "owner" || user?.role === "admin";
   const camera: CameraInfo | undefined = cameras.find((c) => c.name === name);
 
   const [day, setDay] = useState<string>(() => localDayString(new Date()));
@@ -444,6 +447,7 @@ export default function RecordingsPage() {
         {/* Right rail */}
         <div className="space-y-4">
           {/* Export */}
+          {canExport && (
           <div className="card">
             <div className="flex items-start justify-between gap-2 mb-1">
               <h3 className="type-subheadline text-label-primary font-medium">
@@ -499,6 +503,7 @@ export default function RecordingsPage() {
               </p>
             )}
           </div>
+          )}
 
           {/* Segment list */}
           <div className="card">

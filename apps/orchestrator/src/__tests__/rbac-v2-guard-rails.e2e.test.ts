@@ -351,6 +351,20 @@ function createPrismaMock(seed: Row[]) {
     findMany: vi.fn(async () => []),
   };
 
+  // WARP-3193 SEC-AUTH-6: the user deletes purge the username-keyed tables
+  // inside their transaction.
+  for (const model of [
+    "note",
+    "calendarEvent",
+    "calendarSource",
+    "reminder",
+    "chatSession",
+    "chatProject",
+    "pushSubscription",
+  ]) {
+    self[model] = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  }
+
   (self as any)._users = users;
   (self as any)._exceptions = exceptions;
   (self as any)._seam = () => seam;
@@ -444,7 +458,7 @@ describe("rail 1 (OWNER_IMMUTABLE) — every owner-targeting mutation, both surf
     [
       "DELETE /api/auth/users/:username",
       "auth",
-      (app) => request(app).delete(`/api/auth/users/${OWNER.nextcloudUsername}`),
+      (app) => request(app).delete(`/api/auth/users/${OWNER.nextcloudUsername}`).send({ disposition: "retention" }),
     ],
   ];
 
@@ -519,7 +533,7 @@ describe("rail 2 (SELF_ACTION_NOT_ALLOWED) — an operator cannot act on themsel
     ],
     [
       "DELETE /api/auth/users/:username",
-      (app, me) => request(app).delete(`/api/auth/users/${me.nextcloudUsername}`),
+      (app, me) => request(app).delete(`/api/auth/users/${me.nextcloudUsername}`).send({ disposition: "retention" }),
     ],
   ];
 
@@ -940,7 +954,7 @@ describe("every guarded mutation opens its transaction at SERIALIZABLE", () => {
     ],
     [
       "DELETE /api/auth/users/:username",
-      (app) => request(app).delete(`/api/auth/users/${FAMILY.nextcloudUsername}`),
+      (app) => request(app).delete(`/api/auth/users/${FAMILY.nextcloudUsername}`).send({ disposition: "retention" }),
     ],
   ];
 
