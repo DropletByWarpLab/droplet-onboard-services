@@ -218,7 +218,7 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 | GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
 | GET | `/cameras/:name/events` | Bearer | events for one camera |
 | GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
-| GET | `/cameras/events/:eventId/thumbnail` | Bearer | image bytes (`Cache-Control: private, no-store`) |
+| GET | `/cameras/events/:eventId/thumbnail` | Bearer (owner, admin, family) | image bytes: Frigate's own `Content-Type` (`image/jpeg` when it sends none), `Cache-Control: private, no-store`. `:eventId` is a Frigate event id, `^[a-zA-Z0-9._-]{1,128}$`; errors below the table |
 | GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
 | GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
 | GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
@@ -236,6 +236,23 @@ header; the stream is per-connection and never cached) and stills come from
 `snapshot`. Camera routes are scoped per person: a client only sees the cameras
 it is granted. A save or download asked by a role that is not owner or admin
 answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
+
+**Event still (`GET /cameras/events/:eventId/thumbnail`).** `:eventId` is a
+Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. For the
+still of a Security incident's event, send the feed row's `frigateEventId`
+(`IncidentDetail.events`, under Security), never its `id`; it is `null` on a row
+with no Frigate event, so there is nothing to ask for. Its errors
+(`routes/cameras.ts`, `services/camera-access.service.ts`,
+`middleware/error-handler.ts`):
+
+| HTTP | Body | When |
+|---|---|---|
+| 400 | `{ "error": "Invalid event ID format" }` | `:eventId` does not match the pattern |
+| 403 | `{ "error": "Forbidden: role not permitted" }` | A role outside owner, admin and family (a guest, a service token) |
+| 404 | `{ "error": "module_disabled", "module": "cameras" }` | Cameras is off on the box, or the person's access does not include it |
+| 404 | `{ "error": "Not found" }` | A person with per-camera grants asks for an event on a camera they do not hold, or one Frigate does not know: the same body for both. Owner and admin skip this check |
+| 500 | `{ "error": "Internal server error", "message": "Something went wrong" }` | Frigate has no thumbnail for the event (pruned, or never made) or cannot be reached. The route does not pass Frigate's status through, unlike `/cameras/events/:eventId/snapshot` and `/cameras/reviews/:reviewId/thumbnail`, which answer `{ "error": "frigate <status>" }`: a gone thumbnail is a `500` here, not a `404` |
+| 503 | `{ "error": "access_check_unavailable" }` | The grant check could not run (the database, or Frigate's event lookup, failed): retry |
 
 ### LLM (`/api/llm/*`)
 
@@ -793,7 +810,7 @@ or admin at `manage` level chooses who is told (`routes/security-incidents.ts`).
 | 17 | GET | `/security/incidents/summary` | `view` | — | `{ openAlerts, openNotices, latest: IncidentSummary[], alertsReady }` |
 | 18 | GET | `/security/incidents/:id` | `view` | — | `IncidentDetail` |
 | 19 | POST | `/security/incidents/:id/acknowledge` | `act` | `{ notificationId? }` | `{ incident: IncidentDetail, changed }` |
-| 20 | POST | `/security/incidents/:id/resolve` | `act` | `{ note? }`, at most 280 characters | `{ incident: IncidentDetail, changed }` |
+| 20 | POST | `/security/incidents/:id/resolve` | `act` | `{ note? }`, at most 280 UTF-16 code units (below) | `{ incident: IncidentDetail, changed }` |
 | 21 | GET | `/security/alert-routing` | `view` | — | `AlertRouting` |
 | 22 | PUT | `/security/alert-routing/:userId` | `manage`, owner/admin | `{ state: "receiving" \| "not_receiving", expectedVersion: <int> \| null }` | `{ person: RoutingPerson }` |
 | 35 | POST | `/security/incidents/:id/verdict` | `act`, owner/admin | `{ verdict: "expected" \| "not_expected" }` | `{ incident: IncidentDetail, changed }` |
@@ -819,8 +836,12 @@ incident uuid, `:userId` a user uuid; a value that is not a uuid is a `400`.
   "Forbidden: role not permitted" }` (a guest whose access role holds no Security
   grant is turned away earlier, by the `404` above). No route takes a service
   principal, so Droplet's AI can never acknowledge, resolve or change routing.
-- **Rate limit on the writes** (19, 20, 22, 35): 60 a minute per IP, then `429 {
-  "error": "Too many requests, slow down" }` (`middleware/rate-limit.ts`).
+- **Rate limit on the writes** (19, 20, 22, 35): 60 a minute per IP
+  (`sensitiveRateLimit`, `middleware/rate-limit.ts`), then a `429` whose body is
+  exactly `{ "error": "Too many requests, slow down" }`. It is **flat**: `error` is
+  a string, and there is no `code`, no `message` and no `retryAfterSeconds`. The
+  wait is only in the `Retry-After` response header, in whole seconds. It is not
+  the nested envelope below.
 - **Do not probe.** Ask `GET /api/modules` whether to draw Security at all:
   `effectiveForUser: [{ moduleId, level }]` lists what the person holds (no
   `security` entry: no Security screens and no Security calls; the field is
@@ -869,8 +890,11 @@ sees the cameras they were granted.
 
 **Errors on 16–22 and 35 are nested**, as on the Notifications routes:
 `{ "error": { "code": "…", "message": "…", "issues"? } }`. Key on `code`; `message`
-is calm copy for the person; `issues` (Zod's list) is present only when the query
-or body failed its schema. The two gate answers above are flat.
+is calm copy for the person. `issues` is present only when the query or body
+failed its schema: a non-uuid id, a `cursor` of 60 characters or fewer that the box
+did not mint, and a `note` with characters that cannot be stored are a `400`
+without it. Its shape is under [Nested envelope](#nested-envelope-on-some-routes).
+The two gate answers above and the `429` are flat.
 
 | HTTP | `error.code` | Routes | When |
 |---|---|---|---|
@@ -1043,6 +1067,15 @@ now see it. What each does (`services/security-incident-actions.ts`):
 - **Every person's first acknowledgement is recorded**, so several people can
   acknowledge one incident. A resolve takes an optional `note`. Nothing resolves an
   incident automatically, and later events never re-notify.
+- **`note` is at most 280 UTF-16 code units**, not characters and not code points.
+  The schema is `z.string().max(280)` (`resolveBodySchema`,
+  `routes/security-incidents.ts`), and Zod 3 compares the JavaScript string's
+  `length`. That is the count of Kotlin's `String.length` and C#'s
+  `string.Length`. A character outside the Basic Multilingual Plane (most emoji) is
+  2 units, so 140 of them fit and 141 do not. The limit is checked on the note as
+  sent, before the box trims it, so leading and trailing whitespace count. Over
+  it is `400 VALIDATION_ERROR` with an `issues` entry `{ code: "too_big", maximum:
+  280, path: ["note"], … }`.
 - **Send `X-Droplet-Client: <product>/<version>`** on 19 and 20, with the grammar
   given under Notifications: the box stores it as `acks[].client`, labelled as
   reported. A header that does not match falls back to a coarse User-Agent label,
@@ -1116,8 +1149,10 @@ whether there is nothing to judge or the view is partial.
 
 **Alert notifications.** An alert reaches a person as an ordinary notification (N1)
 with `kind: "event"`, `url: "/security/incidents/<uuid>"` and `data: { incidentId }`
-(`notifyIncident`, `services/security-alerts.service.ts`). Open route 18 with
-`data.incidentId`, and send that notification's `id` as `notificationId` on route 19.
+(`notifyIncident`, `services/security-alerts.service.ts`). A connected app also
+gets it as a frame on `/api/ws/events`, with `priority: "alert"` (see "Real-time
+events"). Open route 18 with `data.incidentId`, and send that notification's `id`
+as `notificationId` on route 19.
 One notification per incident per person, at most 6 per person per rolling hour (the
 rest show only in Security). The owner is told by default and everyone else by
 choice (route 22), each re-checked when sent; when nobody routed can be told, the
@@ -1201,13 +1236,18 @@ this contract.
 
 ## Error shape
 
-> **Corrected 2026-06-28 (XR-03).** Earlier drafts of this section described a
-> **nested** envelope `{ error: { code, message } }`. **No orchestrator route emits
-> that shape** — a sweep of `src/routes/*` found ~621 flat `error` responses and
-> **zero** nested ones. The fictional codes the old table listed (`PAIR_CODE_EXPIRED`,
-> `PAIR_CODE_INVALID`, `RATE_LIMITED`, `INTERNAL`) do not exist in any handler.
+> **Corrected 2026-06-28 (XR-03), narrowed 2026-09-29 (WARP-2975).** Earlier drafts
+> of this section described a **nested** envelope `{ error: { code, message } }` for
+> the whole API. On 2026-06-28 **no** orchestrator route emitted that shape: a sweep
+> of `src/routes/*` found ~621 flat `error` responses and **zero** nested ones. A few
+> route families have emitted it since (the first, WARP-2977, on 2026-09-23); they are
+> listed under [Nested envelope](#nested-envelope-on-some-routes) below, and every
+> other route is still flat. The fictional codes the old table listed
+> (`PAIR_CODE_EXPIRED`, `PAIR_CODE_INVALID`, `RATE_LIMITED`, `INTERNAL`) do not
+> exist in any handler.
 
-Every 4xx / 5xx response is a **flat** object whose `error` is a **string**:
+Every 4xx / 5xx response **outside those families** is a **flat** object whose
+`error` is a **string**:
 
 ```json
 { "error": "auth_required" }
@@ -1260,6 +1300,46 @@ per-domain tables): `auth` → `INVALID_CREDENTIALS`, `WEAK_PASSWORD`,
 `401 { "error": "Two-factor authentication required", "code": "TOTP_REQUIRED" }`
 (flat, with the `code` sibling) — resubmit `/auth/login` with `totp` (or
 `recoveryCode`). Switch on `code`, not the sentence.
+
+### Nested envelope on some routes
+
+These routes answer `{ "error": { "code": "…", "message": "…", "issues"? } }`:
+`error` is an **object**, and there is no top-level `code`.
+
+- `/notifications` N1–N4 (`routes/notifications.ts`; `POST /notifications/send`
+  keeps the flat shape).
+- `/me/active-department` (`routes/me-department.ts`).
+- The Security routes of `routes/security-incidents.ts` (16–22, 35),
+  `routes/security-site.ts`, `routes/security-zones.ts` and
+  `routes/security-patterns.ts`. Routes 1 and 2 (`routes/security.ts`) are flat,
+  and so are the gate, role and rate-limit answers in front of all of them (see
+  Security).
+
+Both shapes reach the same client, so check whether `error` is an object or a
+string before reading `code`. `code` is an UPPER_SNAKE slug to key on; do not parse
+`message`.
+
+On the Security routes, `issues` is present only on a `400 VALIDATION_ERROR` whose
+query or body failed its schema (`routes/security-incidents.ts`, `fail`); the
+Notifications and active-department routes never send it. It is Zod's
+`error.issues` array as it comes, one entry per failed check. That is not the
+`{ formErrors, fieldErrors }` object that `details` carries in the flat shape.
+
+```json
+{ "error": { "code": "VALIDATION_ERROR", "message": "That request isn't in a shape Droplet understands.",
+    "issues": [{ "code": "too_big", "maximum": 280, "type": "string", "inclusive": true, "exact": false,
+                 "message": "String must contain at most 280 character(s)", "path": ["note"] }] } }
+```
+
+- Every entry has `code` (Zod's issue code, for example `invalid_type`, `too_big`,
+  `invalid_enum_value`, `invalid_string`, `unrecognized_keys`), `path` and
+  `message`. Other keys depend on `code`: `maximum` on `too_big`, `keys` on
+  `unrecognized_keys`, `options` and `received` on `invalid_enum_value`.
+- `path` is the list of keys (strings) and array indexes (numbers) from the top of
+  the query or body to the value: `["note"]`. It is `[]` when the whole object is
+  at fault, as for an unknown key (`code: "unrecognized_keys"`, `keys: ["…"]`).
+- `issues[].message` is Zod's own English text. Do not show it; key on `code` and
+  `path`.
 
 ## SSE / streaming reads
 
@@ -1350,6 +1430,27 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
   `{ "topic": "<mqtt topic>", "payload": <json> }`. Client-sent frames are
   ignored. The server sends a WebSocket ping every 25 s (the client library
   answers with a pong automatically).
+- **Notification frames.** A frame on `droplet/notifications/<username>` carries
+  a notification the box has just recorded and is delivering:
+  `{ id, kind, title, body, at, url?, data?, priority? }`
+  (`publishNotificationToast`, `services/notifications.service.ts`). `id` is N1's
+  row id (send it to N3 to acknowledge), `kind` is N1's, `body` is a string or
+  `null`, and `at` is UTC ISO-8601. `url` and `data` are N1's; they are **absent**,
+  not `null`, when the notification has none or the box refused them.
+  `priority` is present, as `"alert"`, only on an alert. There is no `tag`: that
+  is a web push field. A **Security alert** therefore arrives as:
+
+  ```json
+  { "topic": "droplet/notifications/<username>",
+    "payload": { "id": "clx…", "kind": "event", "title": "…", "body": "…", "at": "ISO-8601",
+                 "url": "/security/incidents/<uuid>", "data": { "incidentId": "<uuid>" },
+                 "priority": "alert" } }
+  ```
+
+  So `payload.url` and `payload.data.incidentId` are there, the same as in the
+  push and in N1's row: open route 18 with `data.incidentId`, and send
+  `payload.id` as `notificationId` on route 19 (see "Alert notifications" under
+  Security).
 - **Reconnect:** on close, reconnect with exponential backoff and jitter, and
   stop once sign-in has ended. Events are not replayed, so after a reconnect
   re-fetch state (`GET /notifications`, files, devices).
