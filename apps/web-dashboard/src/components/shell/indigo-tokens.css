@@ -26,10 +26,17 @@
    WARP-2976: `.dept-switcher` (the ADR-059 department switcher) is a third
    scope, for the same reason. It renders at the top of the desktop sidebar,
    which sits above every page scope, so without its own scope the ramp would
-   not resolve there. Tokens only, like `.droplet-workspace`. */
+   not resolve there. Tokens only, like `.droplet-workspace`.
+
+   WARP-3062: the Assistant navigation layout's bar is a fourth, for the
+   same reason: it sits above every page scope. The scope is the BAR, not
+   `.droplet-assistant`, because the layout's business side must render
+   today's pages unchanged — a shell-wide scope would restyle every page
+   that is not itself a `.droplet-shell`. Tokens only. */
 .droplet-shell,
 .droplet-workspace,
-.dept-switcher {
+.dept-switcher,
+.droplet-assistant > .da-bar {
   /* ── Indigo identity — LIGHT (default) ─────────────────── */
   --bg: #f5f6fb;
   --surface: #ffffff;
@@ -95,13 +102,6 @@
   --nav-link: #565a66;
   --scrim: rgba(28, 30, 40, 0.32);
 
-  /* ambient blob opacities (AmbientLayer reuse) */
-  --hero-aurora-opacity: 0.4;
-  --blob-a: 0.05;
-  --blob-b: 0.045;
-  --blob-c: 0.035;
-  --blob-d: 0.03;
-
   color-scheme: light;
   color: var(--text);
   font-family: var(--font-ui);
@@ -109,7 +109,8 @@
 
 .dark .droplet-shell,
 .dark .droplet-workspace,
-.dark .dept-switcher {
+.dark .dept-switcher,
+.dark .droplet-assistant > .da-bar {
   /* ── Indigo identity — DARK (the original handoff ramp) ── */
   --bg: #0f1117;
   --surface: #1a1d27;
@@ -145,12 +146,6 @@
   --text-faint: #3f3f46;
   --nav-link: #a1a1aa;
   --scrim: rgba(8, 9, 13, 0.6);
-
-  --hero-aurora-opacity: 0.5;
-  --blob-a: 0.1;
-  --blob-b: 0.085;
-  --blob-c: 0.065;
-  --blob-d: 0.05;
 
   color-scheme: dark;
 }

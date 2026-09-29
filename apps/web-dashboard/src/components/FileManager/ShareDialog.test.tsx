@@ -819,3 +819,34 @@ describe("WARP-1543 — multi-recipient person shares", () => {
     });
   });
 });
+
+describe("WARP-3053 — a member on company files cannot publish a public link", () => {
+  const REASON = "Only an owner or admin can create a public link to company files.";
+
+  it("Link mode shows why instead of the form, and no Create link button", async () => {
+    renderDialog({ publicLinkBlockedReason: REASON });
+    fireEvent.click(await screen.findByRole("button", { name: "Link" }));
+    expect(screen.getByRole("note")).toHaveTextContent(REASON);
+    expect(screen.queryByRole("button", { name: "Create link" })).not.toBeInTheDocument();
+  });
+
+  it("Person mode drops the re-share level but still shares with people", async () => {
+    renderDialog({ publicLinkBlockedReason: REASON });
+    expect(await screen.findByText("Romain")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Can edit + reshare" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Can edit" })).toBeInTheDocument();
+  });
+
+  it("an existing link stays revocable but its access level is locked", async () => {
+    renderDialog({ publicLinkBlockedReason: REASON, existingShares: [makeLinkShare()] });
+    expect(await screen.findByTitle("Revoke")).toBeInTheDocument();
+    const selects = screen.getAllByLabelText("Access level");
+    expect(selects.some((s) => (s as HTMLSelectElement).disabled)).toBe(true);
+  });
+
+  it("without a reason (owner/admin, or a personal file) Create link is offered", async () => {
+    renderDialog();
+    fireEvent.click(await screen.findByRole("button", { name: "Link" }));
+    expect(screen.getByRole("button", { name: "Create link" })).toBeInTheDocument();
+  });
+});

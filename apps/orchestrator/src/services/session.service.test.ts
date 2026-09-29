@@ -66,6 +66,9 @@ type Entry = { value: string; expiresAt: number };
 function makeFakeRedis() {
   const kv = new Map<string, Entry>();
   const zsets = new Map<string, Map<string, number>>();
+  // Index-key TTLs with real EXPIRE NX/GT semantics: a key with no TTL is
+  // "infinite" to GT, so GT alone never stamps one (PERF-12).
+  const ttls = new Map<string, number>();
   const live = (e?: Entry) => !!e && (!e.expiresAt || Date.now() <= e.expiresAt);
   return {
     kv,
@@ -119,7 +122,15 @@ function makeFakeRedis() {
       if (!z) return 0;
       return z.delete(member) ? 1 : 0;
     }),
-    expire: vi.fn(async () => 1),
+    ttls,
+    expire: vi.fn(async (k: string, ttl: number, mode?: string) => {
+      const cur = ttls.get(k);
+      const next = Date.now() + Number(ttl) * 1000;
+      if (mode === "NX" && cur !== undefined) return 0;
+      if (mode === "GT" && (cur === undefined || next <= cur)) return 0;
+      ttls.set(k, next);
+      return 1;
+    }),
   };
 }
 
@@ -383,6 +394,17 @@ describe("checkSession — idle + absolute enforcement", () => {
   });
 });
 
+describe("session index TTL (WARP-3193 PERF-12)", () => {
+  it("stamps a TTL on a freshly created index ZSET, and later logins only extend it", async () => {
+    await createSession(alice);
+    const first = fake.ttls.get(SESSION_INDEX_PREFIX + "u-alice");
+    expect(first).toBeDefined();
+    advanceSeconds(10);
+    await createSession(alice);
+    expect(fake.ttls.get(SESSION_INDEX_PREFIX + "u-alice")!).toBeGreaterThan(first!);
+  });
+});
+
 describe("deleteSession / revokeAllSessions", () => {
   it("deleteSession removes the record and the index member", async () => {
     const { sid } = await createSession(alice);
@@ -401,6 +423,28 @@ describe("deleteSession / revokeAllSessions", () => {
     expect(fake.kv.has(SESSION_KEY_PREFIX + s1.sid)).toBe(false);
     expect(fake.kv.has(SESSION_KEY_PREFIX + s2.sid)).toBe(false);
     expect(revokeUserSessions).toHaveBeenCalledWith("u-alice");
+  });
+
+  // WARP-3193 QUAL-1 — a sweep that Redis refused used to return a count and
+  // log; callers reported "revoked" for sessions that were still alive.
+  it("revokeAllSessions REJECTS (503) when the record sweep fails — after still running the denylist sweep", async () => {
+    await createSession(alice);
+    fake.zrange.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+
+    await expect(revokeAllSessions("u-alice")).rejects.toMatchObject({
+      status: 503,
+      code: "REVOCATION_UNAVAILABLE",
+    });
+    // Defense in depth is kept: the refresh denylist sweep still ran.
+    expect(revokeUserSessions).toHaveBeenCalledWith("u-alice");
+  });
+
+  it("revokeAllSessions REJECTS when the refresh denylist sweep fails", async () => {
+    await createSession(alice);
+    revokeUserSessions.mockRejectedValueOnce(
+      Object.assign(new Error("down"), { status: 503, code: "REVOCATION_UNAVAILABLE" }),
+    );
+    await expect(revokeAllSessions("u-alice")).rejects.toMatchObject({ status: 503 });
   });
 
   it("revokeAllSessions with exceptSid keeps the current session and SKIPS the refresh denylist", async () => {

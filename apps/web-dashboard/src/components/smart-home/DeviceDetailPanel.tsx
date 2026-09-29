@@ -21,7 +21,8 @@ import { useToast } from "@/components/Toast";
 
 interface DeviceDetailPanelProps {
   device: MatterDevice;
-  onCommand: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
+  /** WARP-3276: omitted for a read-only viewer (external guest) — no controls render. */
+  onCommand?: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
   onClose: () => void;
   /** WARP-1396 — rooms + alias plumbing. Optional so existing callers/tests
    *  that only exercise controls keep working. */
@@ -70,6 +71,7 @@ export function DeviceDetailPanel({
 }: DeviceDetailPanelProps) {
   const isOn = device.state === "on" || device.state === "playing";
   const isConnected = device.connectionState === "connected";
+  const controllable = isConnected && !!onCommand;
   const isToggleable = TOGGLEABLE.has(device.category);
   const brightness = device.attributes.currentLevel as number | undefined;
   const brightnessPct = brightness != null ? Math.round((brightness / 254) * 100) : undefined;
@@ -108,7 +110,7 @@ export function DeviceDetailPanel({
   }
 
   function cmd(command: string, data?: Record<string, unknown>) {
-    onCommand(device.nodeId, command, data);
+    onCommand?.(device.nodeId, command, data);
   }
 
   // WARP-1469 — lifecycle actions. `confirm` drives the destructive
@@ -289,15 +291,16 @@ export function DeviceDetailPanel({
         )}
 
         {/* Toggle */}
-        {isToggleable && isConnected && (
+        {isToggleable && controllable && (
           <div className="flex items-center justify-between">
             <span className="type-subheadline" style={{ color: "var(--text)" }}>Power</span>
-            <ToggleSwitch on={isOn} onToggle={() => cmd("toggle")} />
+            {/* WARP-3276: the intent from the state shown, never `toggle`. */}
+            <ToggleSwitch on={isOn} onToggle={() => cmd(isOn ? "turn_off" : "turn_on")} />
           </div>
         )}
 
         {/* Brightness */}
-        {device.category === "light" && isConnected && brightnessPct != null && (
+        {device.category === "light" && controllable && brightnessPct != null && (
           <div>
             <span className="type-caption-1 mb-2 block" style={{ color: "var(--text-muted)" }}>
               Brightness
@@ -311,7 +314,7 @@ export function DeviceDetailPanel({
 
         {/* WARP-897: color for ColorControl-capable lights */}
         {device.category === "light" &&
-          isConnected &&
+          controllable &&
           hasCluster(device, CLUSTER.COLOR_CONTROL) && (
             <div>
               <span className="type-caption-1 mb-2 block" style={{ color: "var(--text-muted)" }}>
@@ -322,29 +325,29 @@ export function DeviceDetailPanel({
           )}
 
         {/* WARP-897: cover motion + position */}
-        {device.category === "cover" && isConnected && (
+        {device.category === "cover" && controllable && (
           <CoverControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
         )}
 
         {/* WARP-897: fan speed + mode */}
         {device.category === "fan" &&
-          isConnected &&
+          controllable &&
           hasCluster(device, CLUSTER.FAN_CONTROL) && (
             <FanControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
           )}
 
         {/* WARP-897: lock / unlock (Tier-2 confirm flows via the page) */}
-        {device.category === "lock" && isConnected && (
+        {device.category === "lock" && controllable && (
           <LockControl device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
         )}
 
         {/* WARP-897: media playback */}
-        {device.category === "media_player" && isConnected && (
+        {device.category === "media_player" && controllable && (
           <MediaControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
         )}
 
         {/* Climate */}
-        {device.category === "climate" && isConnected && (
+        {device.category === "climate" && controllable && (
           <ClimateControl device={device} onCommand={cmd} />
         )}
 

@@ -23,6 +23,11 @@
  *      tokens, boot-unit profile flags) with the staged
  *      docker/ota/env-reconcile.sh; a failure refuses the release
  *      (`env_reconcile_failed`) before anything is swapped;
+ *   3c. WARP-3120: stage each client installer the release carries (the
+ *      manifest's optional `clients`, sha256-gated like configs) into the
+ *      box's /downloads; a failure is logged and skipped, never fatal. A
+ *      later rollback keeps the staged installer (it is newer and Warp Lab
+ *      signed; the platform directory was replaced, not versioned);
  *   4. `prisma migrate deploy` — gated on minOrchestratorSchema (the
  *      parse gate refuses `orchestrator_schema_unsupported` outright);
  *   5. recreate every manifest service EXCEPT the orchestrator via the
@@ -93,13 +98,19 @@
  * guard in transitions.ts, so the lifecycle is reconstructible from logs
  * AND the DeviceUpdate audit table independently.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { rm } from "node:fs/promises";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import type { PrismaClient } from "@prisma/client";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
 import { getSetupState } from "../setup.service.js";
 import {
   parseReleaseManifest,
+  type ReleaseClient,
   type ReleaseManifest,
   type ReleaseService,
   type UpdateFailureReason,
@@ -183,6 +194,21 @@ export interface ApplyRunner {
     configsTar: Buffer;
     manifest: ReleaseManifest;
   }): Promise<void>;
+  /**
+   * WARP-3120 — step 3c: stage one client installer the release carries into
+   * the box's app-downloads directory (what /downloads serves). The runner
+   * picks the file's path under this update's dir, awaits `write(dest)` (the
+   * caller streams the sha256-verified bytes there), then hands the file to
+   * the host helper's `stage-client-apps`, and removes its copy. Returns
+   * `already_staged` (nothing downloaded) when the box's catalog already
+   * serves that exact installer. Throws on any failure; the caller turns that
+   * into a skip, never a failed update.
+   */
+  stageClientApp(opts: {
+    updateId: string;
+    client: ReleaseClient;
+    write: (dest: string) => Promise<void>;
+  }): Promise<"staged" | "already_staged">;
   /** Step 4 — `prisma migrate deploy` for this build's migrations. */
   migrateDeploy(): Promise<void>;
   /** Steps 5/8 — recreate the named services on release/previous refs. */
@@ -308,10 +334,19 @@ export interface ApplyUpdateOptions {
    * can answer. Absent → treated as already listening (tests, apply-now).
    */
   whenListening?: Promise<void>;
+  /**
+   * WARP-3193 PERF-3 — the caller already holds the apply claim on this row
+   * (POST /updates/apply-now claims before it audits or dispatches). Absent →
+   * applyPendingUpdate picks the row and claims it itself. Either way the run
+   * hands the claim back when it ends.
+   */
+  claimed?: { deviceUpdateId: string; claimId: string };
 }
 
 export type ApplyUpdateResult =
   | { outcome: "nothing_pending" }
+  /** WARP-3193 PERF-3 — another run holds this row's claim; nothing was touched. */
+  | { outcome: "apply_claimed_elsewhere"; deviceUpdateId: string }
   | { outcome: "deferred_setup_in_progress"; deviceUpdateId: string }
   | {
       outcome: "rejected";
@@ -608,6 +643,134 @@ async function recreateAndLog(
   );
 }
 
+function githubAuthHeaders(opts: ApplyUpdateOptions): Record<string, string> {
+  return opts.githubToken ? { authorization: `Bearer ${opts.githubToken}` } : {};
+}
+
+/**
+ * Find one asset of the release this row tracks, by exact name. Every
+ * failure is transient: the poller supersedes a row whose release moved on.
+ */
+async function releaseAssetUrl(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+  name: string,
+): Promise<{ ok: true; url: string } | { ok: false; detail: string }> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const authHeaders = githubAuthHeaders(opts);
+  try {
+    const res = await fetchImpl(opts.releasesLatestUrl, {
+      headers: { accept: "application/vnd.github+json", ...authHeaders },
+    });
+    if (!res.ok) return { ok: false, detail: `releases endpoint HTTP ${res.status}` };
+    const release = (await res.json()) as {
+      tag_name?: string;
+      assets?: Array<{ name: string; url: string }>;
+    };
+    if (row.releaseTag && release.tag_name && release.tag_name !== row.releaseTag) {
+      // The latest release moved on mid-apply; the poller will supersede
+      // this row on its next tick. Retry semantics keep us honest.
+      return { ok: false, detail: `latest release is ${release.tag_name}, row tracks ${row.releaseTag}` };
+    }
+    const url = release.assets?.find((a) => a.name === name)?.url;
+    return url ? { ok: true, url } : { ok: false, detail: `release has no ${name} asset` };
+  } catch (err) {
+    return {
+      ok: false,
+      detail: `releases endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * WARP-3120 — stream one client installer from the release to `dest`,
+ * hashing as it goes, and refuse it (file removed) unless its size and
+ * sha256 equal the VERIFIED manifest's. Streamed, never buffered: a DMG is
+ * tens of MB and the orchestrator runs under a 768 MB cap.
+ */
+async function downloadClientAsset(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+  client: ReleaseClient,
+  dest: string,
+): Promise<void> {
+  const lookup = await releaseAssetUrl(opts, row, client.file);
+  if (!lookup.ok) throw new Error(lookup.detail);
+  const res = await (opts.fetchImpl ?? fetch)(lookup.url, {
+    headers: { accept: "application/octet-stream", ...githubAuthHeaders(opts) },
+    redirect: "follow",
+  });
+  if (!res.ok || !res.body) throw new Error(`${client.file} download HTTP ${res.status}`);
+  const hash = createHash("sha256");
+  let size = 0;
+  try {
+    await pipeline(
+      Readable.fromWeb(res.body as WebReadableStream),
+      new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          size += chunk.length;
+          if (size > client.size) return cb(new Error(`${client.file} is larger than the manifest's ${client.size} bytes`));
+          hash.update(chunk);
+          cb(null, chunk);
+        },
+      }),
+      createWriteStream(dest),
+    );
+    if (size !== client.size) throw new Error(`${client.file} is ${size} bytes, manifest ${client.size}`);
+    const sha = hash.digest("hex");
+    if (sha !== client.sha256) throw new Error(`${client.file} sha256 ${sha} != manifest ${client.sha256}`);
+  } catch (err) {
+    await rm(dest, { force: true });
+    throw err;
+  }
+}
+
+/**
+ * WARP-3120 — step 3c: stage every client installer the release carries.
+ * A client app never fails the box's own update: each failure is logged as
+ * `update.client_apps_skipped` and the apply goes on. The box's audit and
+ * watchdog then report that platform stale or missing, like a missed stage.
+ */
+async function stageClientApps(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+  manifest: ReleaseManifest,
+  log: pino.Logger,
+): Promise<void> {
+  for (const client of manifest.clients ?? []) {
+    try {
+      const outcome = await opts.runner.stageClientApp({
+        updateId: row.id,
+        client,
+        write: (dest) => downloadClientAsset(opts, row, client, dest),
+      });
+      log.info(
+        {
+          event: "update.client_app_staged",
+          deviceUpdateId: row.id,
+          platform: client.platform,
+          version: client.version,
+          alreadyStaged: outcome === "already_staged",
+        },
+        outcome === "already_staged"
+          ? "OTA step 3c — /downloads already serves this client installer; nothing downloaded"
+          : "OTA step 3c — client installer staged into /downloads",
+      );
+    } catch (err) {
+      log.warn(
+        {
+          event: "update.client_apps_skipped",
+          deviceUpdateId: row.id,
+          platform: client.platform,
+          version: client.version,
+          reason: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+        },
+        "OTA step 3c skipped a client installer — the box update continues",
+      );
+    }
+  }
+}
+
 /**
  * Download the release's configs asset and verify it against the VERIFIED
  * manifest's sha256 — the signed manifest is the trust anchor, the asset
@@ -623,45 +786,10 @@ async function fetchConfigsAsset(
   | { ok: false; kind: "mismatch"; detail: string }
 > {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const authHeaders: Record<string, string> = opts.githubToken
-    ? { authorization: `Bearer ${opts.githubToken}` }
-    : {};
-  let assetUrl: string | undefined;
-  try {
-    const res = await fetchImpl(opts.releasesLatestUrl, {
-      headers: { accept: "application/vnd.github+json", ...authHeaders },
-    });
-    if (!res.ok) {
-      return { ok: false, kind: "transient", detail: `releases endpoint HTTP ${res.status}` };
-    }
-    const release = (await res.json()) as {
-      tag_name?: string;
-      assets?: Array<{ name: string; url: string }>;
-    };
-    if (row.releaseTag && release.tag_name && release.tag_name !== row.releaseTag) {
-      // The latest release moved on mid-apply; the poller will supersede
-      // this row on its next tick. Retry semantics keep us honest.
-      return {
-        ok: false,
-        kind: "transient",
-        detail: `latest release is ${release.tag_name}, row tracks ${row.releaseTag}`,
-      };
-    }
-    assetUrl = release.assets?.find((a) => a.name === manifest.configs.file)?.url;
-  } catch (err) {
-    return {
-      ok: false,
-      kind: "transient",
-      detail: `releases endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  if (!assetUrl) {
-    return {
-      ok: false,
-      kind: "transient",
-      detail: `release has no ${manifest.configs.file} asset`,
-    };
-  }
+  const lookup = await releaseAssetUrl(opts, row, manifest.configs.file);
+  if (!lookup.ok) return { ok: false, kind: "transient", detail: lookup.detail };
+  const assetUrl = lookup.url;
+  const authHeaders = githubAuthHeaders(opts);
 
   let configsTar: Buffer;
   try {
@@ -723,25 +851,121 @@ function imageSignatureRefusalDetail(err: unknown): string {
 }
 
 /**
+ * WARP-3193 PERF-3 — take the apply claim on one row. Atomic on its own: the
+ * predicate is in the WHERE of a single `updateMany`, so of two racers exactly
+ * one sees `count === 1`, across processes as well as within one. The status
+ * is in the predicate too, so a row another run finished between our read and
+ * this write is not claimed.
+ *
+ * Why a claim and not just the status CAS in transitions.ts: `verifying` is a
+ * RESUMABLE status that every runner picks up, and it lasts minutes (pulls,
+ * snapshot, staging). The CAS only stops a second pending → verifying write;
+ * the second runner then finds the row already `verifying` and walks straight
+ * into the same snapshot, which records the new digests as "previous" and
+ * turns rollback into a no-op.
+ */
+export async function claimDeviceUpdateForApply(
+  prisma: PrismaClient,
+  deviceUpdateId: string,
+  claimId: string,
+): Promise<boolean> {
+  const res = await prisma.deviceUpdate.updateMany({
+    where: {
+      id: deviceUpdateId,
+      status: { in: ["pending", "verifying"] },
+      applyClaim: "unclaimed",
+    },
+    data: { applyClaim: "claimed", applyClaimId: claimId, applyClaimedAt: new Date() },
+  });
+  return res.count === 1;
+}
+
+/** Hand a claim back. Fenced on the claim id, so it never frees another run's. */
+export async function releaseDeviceUpdateClaim(
+  prisma: PrismaClient,
+  deviceUpdateId: string,
+  claimId: string,
+): Promise<void> {
+  await prisma.deviceUpdate.updateMany({
+    where: { id: deviceUpdateId, applyClaim: "claimed", applyClaimId: claimId },
+    data: { applyClaim: "unclaimed", applyClaimId: null, applyClaimedAt: null },
+  });
+}
+
+/**
  * Apply the newest pending (or resumable `verifying`) DeviceUpdate row —
  * steps 1-9. Never throws for expected failure shapes: every exit is a
  * typed outcome + a structured `update.*` log event (poller posture).
+ *
+ * WARP-3193 PERF-3 — the row is CLAIMED before any side effect (or was
+ * claimed by the caller, `opts.claimed`) and handed back when the run ends,
+ * however it ends.
  */
 export async function applyPendingUpdate(
   opts: ApplyUpdateOptions,
 ): Promise<ApplyUpdateResult> {
   const log = opts.logger ?? defaultLog;
+  const { prisma } = opts;
+
+  let row: DeviceUpdateRowSlice | null;
+  let claimId: string;
+  if (opts.claimed) {
+    claimId = opts.claimed.claimId;
+    row = (await prisma.deviceUpdate.findFirst({
+      where: {
+        id: opts.claimed.deviceUpdateId,
+        status: { in: ["pending", "verifying"] },
+        applyClaim: "claimed",
+        applyClaimId: claimId,
+      },
+    })) as DeviceUpdateRowSlice | null;
+    if (!row) {
+      // Ours but no longer applicable (e.g. skipped meanwhile): hand it back.
+      await releaseDeviceUpdateClaim(prisma, opts.claimed.deviceUpdateId, claimId);
+      log.info(
+        { event: "update.apply_claimed_elsewhere", deviceUpdateId: opts.claimed.deviceUpdateId },
+        "OTA apply skipped — this run does not hold the row's claim",
+      );
+      return { outcome: "apply_claimed_elsewhere", deviceUpdateId: opts.claimed.deviceUpdateId };
+    }
+  } else {
+    // `verifying` rows are restart cursors (a prior attempt died pre-swap
+    // or hit a transient fetch failure) — same pipeline, same top.
+    row = (await prisma.deviceUpdate.findFirst({
+      where: { status: { in: ["pending", "verifying"] } },
+      orderBy: { createdAt: "desc" },
+    })) as DeviceUpdateRowSlice | null;
+    if (!row) return { outcome: "nothing_pending" };
+    claimId = randomUUID();
+    if (!(await claimDeviceUpdateForApply(prisma, row.id, claimId))) {
+      log.info(
+        { event: "update.apply_claimed_elsewhere", deviceUpdateId: row.id },
+        "OTA apply skipped — another apply run holds this update",
+      );
+      return { outcome: "apply_claimed_elsewhere", deviceUpdateId: row.id };
+    }
+  }
+
+  const claimedRow = row;
+  try {
+    return await applyClaimedRow(opts, claimedRow);
+  } finally {
+    await releaseDeviceUpdateClaim(prisma, claimedRow.id, claimId).catch((err: unknown) => {
+      // Best effort: the next boot's resumeInterruptedApply clears it.
+      log.warn({ err, deviceUpdateId: claimedRow.id }, "OTA could not release the apply claim");
+    });
+  }
+}
+
+/** Steps 1-9 for a row this run has claimed. */
+async function applyClaimedRow(
+  opts: ApplyUpdateOptions,
+  row: DeviceUpdateRowSlice,
+): Promise<ApplyUpdateResult> {
+  const log = opts.logger ?? defaultLog;
   const gate = opts.healthGate ?? DEFAULT_HEALTH_GATE;
   const probe = opts.probe ?? httpHealthProbe();
   const { prisma, runner } = opts;
-
-  // `verifying` rows are restart cursors (a prior attempt died pre-swap
-  // or hit a transient fetch failure) — same pipeline, same top.
-  const row = (await prisma.deviceUpdate.findFirst({
-    where: { status: { in: ["pending", "verifying"] } },
-    orderBy: { createdAt: "desc" },
-  })) as DeviceUpdateRowSlice | null;
-  if (!row) return { outcome: "nothing_pending" };
 
   // ── setup gate: never swap containers under a mid-wizard customer ──
   const setup = await getSetupState(prisma);
@@ -936,6 +1160,9 @@ export async function applyPendingUpdate(
     };
   }
 
+  // ── step 3c (WARP-3120): client installers into /downloads (never fatal) ──
+  await stageClientApps(opts, row, manifest, log);
+
   // minOrchestratorSchema gate: enforced by parseReleaseManifest above
   // (orchestrator_schema_unsupported → rejected before any side effect).
   const migrateStartedAt = Date.now();
@@ -1033,6 +1260,22 @@ export async function resumeInterruptedApply(
   const gate = opts.healthGate ?? DEFAULT_HEALTH_GATE;
   const probe = opts.probe ?? httpHealthProbe();
   const { prisma, runner } = opts;
+
+  // WARP-3193 PERF-3 — a claim that survives into a boot belongs to a process
+  // that is gone (one orchestrator per box; index.ts starts this hook before
+  // `server.listen`, and the apply window awaits it). Left in place it would
+  // block every runner forever; cleared, the row's status is the exact cursor
+  // again.
+  const stale = await prisma.deviceUpdate.updateMany({
+    where: { applyClaim: "claimed" },
+    data: { applyClaim: "unclaimed", applyClaimId: null, applyClaimedAt: null },
+  });
+  if (stale.count > 0) {
+    log.warn(
+      { event: "update.stale_claims_cleared", count: stale.count },
+      "OTA resume cleared apply claims left by a previous process",
+    );
+  }
 
   const applying = (await prisma.deviceUpdate.findFirst({
     where: { status: "applying" },

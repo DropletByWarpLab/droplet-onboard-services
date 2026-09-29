@@ -766,6 +766,10 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // can't see) answers: the same words as the incident page's, never why.
     NOT_ACTIONABLE: "You can't acknowledge or resolve this incident. Refresh the page to see where it stands.",
     INCIDENTS_UNAVAILABLE: "Droplet can't read the incidents right now. Try again in a moment.",
+    // WARP-2980 (P5 PR-C) — route 35. Nothing this person can mark, or a view
+    // that went partial (a camera they can't see): one body, so the words
+    // never say which.
+    NOT_JUDGEABLE: "There's nothing here you can mark as expected or not. Refresh the page to see where it stands.",
     NO_RECIPIENT:
       "Someone who can open Security has to be told about alerts. Turn someone else on first, then try again.",
     NOT_ELIGIBLE: "This person can't open Security, so they can't be told about alerts.",

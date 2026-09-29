@@ -178,6 +178,13 @@ describe("the sidebar swaps to the Settings panel inside Settings (WARP-2967)", 
     expect(
       within(aside()).queryByRole("navigation", { name: /settings/i }),
     ).toBeNull();
+
+    // /settings is still the current route. Clicking its main-tree row must
+    // reopen the contextual menu even though the URL does not change.
+    fireEvent.click(within(aside()).getByRole("link", { name: /^settings$/i }));
+    expect(
+      within(aside()).getByRole("navigation", { name: /settings/i }),
+    ).toBeInTheDocument();
   });
 
   it("does not swap on a working route", () => {
