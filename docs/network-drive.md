@@ -84,9 +84,11 @@ Four pieces, all provisioned by `./scripts/setup.sh`:
 
 The SMB share above is one device-wide login for the shared folder. Every
 Droplet user (owner, admin, family, guest — not `service`) can also map
-**their own** drive: Nextcloud's WebDAV endpoint, authenticated as that user,
-so Nextcloud's own ACLs (My Files / Household / department folders) apply
-exactly as in the web UI.
+**their own** drive: Nextcloud's WebDAV endpoint, authenticated as that user.
+Nextcloud's own ACLs apply — a user sees only their My Files, Household and
+the department folders whose Nextcloud group they are in — but the drive
+talks to Nextcloud directly, so the controls only the orchestrator enforces
+do **not** apply (see "What the drive does not enforce" below).
 
 **Flow.** Files page -> Connect as a network drive -> "Your drive" -> pick Mac
 or Windows -> "Create my drive login". The orchestrator mints a per-device
@@ -125,6 +127,28 @@ POST /api/storage/network-drive/personal      (session auth; owner|admin|family|
 
 `<host>` comes from the trusted-origin resolver (never a raw request header).
 A non-443 port is emitted as `<host>@SSL@<port>` in `windowsPath`.
+
+**What the drive does not enforce.** Everything below is enforced by the
+orchestrator's Files API (`routes/files.ts`) and not by Nextcloud, so a
+Finder/Explorer mount bypasses it:
+
+- **Download audit.** The Files API records a "File downloaded" Activity
+  row; files read or copied out over WebDAV leave none.
+- **Per-file upload size cap.** `UserUsagePolicy.maxUploadSizeMb`
+  (WARP-1271) is checked only on Files API uploads. The *storage quota* is
+  different: the usage-policy reconciler pushes it into Nextcloud, so it
+  still applies to WebDAV writes.
+- **Department manager bit and share policy.** Contributor and manager are
+  the same Nextcloud group (`dept-<slug>`); the manager-only rights are
+  orchestrator policy (`department-membership.service.ts`). The app password
+  also works against Nextcloud's OCS sharing API, so any user Nextcloud lets
+  share — guests included, unless their group is restricted in Nextcloud —
+  can create shares and public links without the manager check or the
+  WARP-3053 rule that only owners/admins publish Workspace files.
+
+Opening this to every role is a deliberate product decision that needs
+security sign-off; narrowing it (dropping `guest`, or an owner setting that
+is off by default) is the fallback if that sign-off is not given.
 
 **Known limits.**
 

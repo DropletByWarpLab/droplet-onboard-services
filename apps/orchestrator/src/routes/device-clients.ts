@@ -539,7 +539,9 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
   // THIS user and returns the WebDAV address to map. Nextcloud enforces the
   // user's own My Files / Household / department ACLs, unlike the device-wide
   // SMB share. Open to every human role; `service` principals get no drive.
-  // See docs/network-drive.md "Per-user drive (WebDAV)".
+  // The mount talks to Nextcloud directly, so orchestrator-only controls
+  // (download audit, per-file upload cap, department manager bit / share
+  // policy) do not apply — see docs/network-drive.md "Per-user drive (WebDAV)".
   router.post(
     "/storage/network-drive/personal",
     requireRole("owner", "admin", "family", "guest"),
