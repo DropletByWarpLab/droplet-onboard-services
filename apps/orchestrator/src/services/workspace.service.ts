@@ -15,7 +15,7 @@
  * The client is injected into the router (like `Transformer` into the
  * ToolSpec walker) so the routes are testable without a container.
  */
-import { Readable } from "node:stream";
+import { pipeline, Readable, Transform } from "node:stream";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { parseConnectorDraftFacts, type ConnectorDraftFacts } from "./connector-draft.js";
@@ -135,6 +135,13 @@ export interface WorkspaceSandboxClientOptions {
 const CALLER_TIMEOUT_GRACE_MS = 5_000;
 const DEFAULT_OP_TIMEOUT_MS = 30_000;
 const BUNDLE_TIMEOUT_MS = 120_000;
+/**
+ * Once an export's headers and integrity checks have passed, the body moves at
+ * the owner's pace (the route pipes it to them with backpressure). It is
+ * abandoned only when no bytes move for this long, not when the transfer as a
+ * whole runs long.
+ */
+export const BUNDLE_STALL_TIMEOUT_MS = 60_000;
 /** A commit id — the export's filename is built from it, so nothing else passes. */
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const COMMIT_ID = /^[0-9a-f]{40,64}$/;
@@ -242,8 +249,10 @@ export function createWorkspaceSandboxClient(opts: WorkspaceSandboxClientOptions
     async bundle(id) {
       const { baseUrl, token } = settings();
       const controller = new AbortController();
-      // Armed for the whole transfer, not just the headers: it is cleared
-      // when the stream ends, or errors, or the caller closes it.
+      // Bounds the wait for the sandbox's headers and the checks on them. It
+      // is cleared the moment the export is handed over (the body is then
+      // bounded by the stall timer below, not by how long the owner's
+      // connection takes) and on every failure before that.
       const timer = setTimeout(() => controller.abort(), BUNDLE_TIMEOUT_MS + CALLER_TIMEOUT_GRACE_MS);
       let res: Response;
       try {
@@ -290,8 +299,41 @@ export function createWorkspaceSandboxClient(opts: WorkspaceSandboxClientOptions
         logger.warn({ id }, "workspace_bundle_bad_integrity_headers");
         return fail(new WorkspaceSandboxError("bundle: the sandbox sent no length and sha256 for the export", 502, "SANDBOX_ERROR"));
       }
-      const stream = Readable.fromWeb(res.body as import("node:stream/web").ReadableStream<Uint8Array>);
-      stream.once("close", () => clearTimeout(timer));
+      clearTimeout(timer);
+      const source = Readable.fromWeb(res.body as import("node:stream/web").ReadableStream<Uint8Array>);
+      // The route pipes this to the owner with backpressure, so the body runs at
+      // their pace: a slow download is fine, a stalled one is not. Every chunk
+      // that passes re-arms the stall timer, so it fires only when no bytes
+      // have moved for BUNDLE_STALL_TIMEOUT_MS (a dead sandbox or a client that
+      // stopped reading). It is cleared when the stream ends, errors or is
+      // destroyed by the caller.
+      let stall: NodeJS.Timeout | undefined;
+      const arm = () => {
+        clearTimeout(stall);
+        stall = setTimeout(() => {
+          stream.destroy(
+            new WorkspaceSandboxError(`bundle: no bytes moved for ${BUNDLE_STALL_TIMEOUT_MS} ms`, 504, "TIMEOUT"),
+          );
+          controller.abort();
+        }, BUNDLE_STALL_TIMEOUT_MS);
+      };
+      const stream = new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          arm();
+          cb(null, chunk);
+        },
+        flush(cb) {
+          clearTimeout(stall);
+          cb();
+        },
+        destroy(err, cb) {
+          clearTimeout(stall);
+          cb(err);
+        },
+      });
+      // Errors from either end land on `stream`; destroying it closes `source`.
+      pipeline(source, stream, () => undefined);
+      arm();
       return { stream, head, size, sha256 };
     },
     async connectorDraft(id, ref) {
