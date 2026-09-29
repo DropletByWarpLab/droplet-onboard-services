@@ -187,7 +187,10 @@ export function MemoryPanel() {
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    // Below lg the panel anchors to the header (.chat-head is positioned),
+    // not this button: the button sits mid-header on a phone, and a panel
+    // right-aligned to it started off the left edge of the screen.
+    <div ref={rootRef} className="lg:relative">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -208,7 +211,7 @@ export function MemoryPanel() {
         <div
           role="dialog"
           aria-label="Assistant memory"
-          className="absolute right-0 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
+          className="absolute right-0 max-lg:right-3 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
           style={{
             background: "var(--glass)",
             // Shadow only — `--lift` carries a 1px brand ring (WARP-3043).
@@ -288,47 +291,54 @@ export function MemoryPanel() {
             </ul>
           )}
 
+          {/* Two rows: on one, the two selects took 224 of the popover's
+              360px and left the fact itself a 54px box. The fact and its
+              Add go first; what it is and who gets it go under it. */}
           <div
-            className="flex items-center gap-1.5 pt-2"
+            className="flex flex-col gap-1.5 pt-2"
           >
-            <MenuSelect
-              id="memory-category"
-              label="Category"
-              value={category}
-              options={CATEGORY_OPTIONS}
-              onChange={setCategory}
-              className="type-footnote h-8 w-28"
-            />
-            <MenuSelect
-              id="memory-audience"
-              label="Audience"
-              value={audience}
-              options={audienceOptions}
-              onChange={setAudience}
-              title="Who receives this fact"
-              className="type-footnote h-8 w-28"
-            />
-            <label className="sr-only" htmlFor="memory-draft">
-              New fact
-            </label>
-            <input
-              id="memory-draft"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void handleAdd();
-              }}
-              placeholder="e.g. Prefers answers in French"
-              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:ring-2 focus:ring-[var(--brand)]"
-            />
-            <button
-              type="button"
-              onClick={() => void handleAdd()}
-              disabled={busy || draft.trim().length === 0}
-              className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
-            >
-              <Plus size={14} aria-hidden="true" /> Add
-            </button>
+            <div className="chat-field-row flex items-center gap-1.5">
+              <label className="sr-only" htmlFor="memory-draft">
+                New fact
+              </label>
+              <input
+                id="memory-draft"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleAdd();
+                }}
+                placeholder="e.g. Prefers answers in French"
+                className="chat-field flex-1 min-w-0"
+              />
+              <button
+                type="button"
+                onClick={() => void handleAdd()}
+                disabled={busy || draft.trim().length === 0}
+                className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
+              >
+                <Plus size={14} aria-hidden="true" /> Add
+              </button>
+            </div>
+            <div className="chat-field-row flex items-center gap-1.5">
+              <MenuSelect
+                id="memory-category"
+                label="Category"
+                value={category}
+                options={CATEGORY_OPTIONS}
+                onChange={setCategory}
+                className="type-footnote h-8 w-28"
+              />
+              <MenuSelect
+                id="memory-audience"
+                label="Audience"
+                value={audience}
+                options={audienceOptions}
+                onChange={setAudience}
+                title="Who receives this fact"
+                className="type-footnote h-8 w-28"
+              />
+            </div>
           </div>
 
           {error && (

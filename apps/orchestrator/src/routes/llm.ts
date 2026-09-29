@@ -1203,6 +1203,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // tokens (`_service:mcp`, `_service:email`, ...) that share this route
       // and the `service` role. Agent and durable runs call runAgent directly
       // and never pass through here.
+      //
+      // WARP-3316 — the same intent, and the reason this resolver replaced its
+      // inline `isVoice ? "off" : config.TOOL_SELECTION_MODE`: the relevance
+      // selector's keyword rules are written for typed chat, so a spoken "is
+      // everything working?" names no domain, the tool the model then calls is
+      // un-advertised, and the TOOL_NOW_AVAILABLE self-heal burns one of
+      // voice's few iterations. `explicit` advertises voice's scope as-is
+      // (nothing dropped) and, unlike `off`, keeps the budget asserted.
       const toolSelectionMode = resolveTurnToolSelectionMode({
         configured: config.TOOL_SELECTION_MODE,
         callerSuppliedAllowedTools: chatReq.allowed_tools !== undefined,

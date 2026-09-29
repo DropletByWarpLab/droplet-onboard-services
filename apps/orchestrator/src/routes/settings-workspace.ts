@@ -23,6 +23,15 @@
  *     trail. Idempotent — re-posting "business" is a no-op 200,
  *     not a 400.
  *
+ *   PUT /api/settings/workspace/personal-drive
+ *     Body: { enabled: boolean }
+ *     → { personalDriveEnabled }
+ *     Owner-only (same rule as POST above; admin is refused). Turns the
+ *     personal WebDAV drive on or off for the whole box (default OFF); the
+ *     flag is `Workspace.personalDriveEnabled`, read back by GET above as
+ *     `personalDriveEnabled` and enforced by POST
+ *     /api/storage/network-drive/personal. Every change is an Activity row.
+ *
  * The setup wizard's org step calls POST once at first-run to pin the
  * singleton to BUSINESS. This route is the orchestrator half; the
  * dashboard half in `apps/web-dashboard/src/lib/workspace.tsx` is now a
@@ -35,6 +44,8 @@ import { Router, type Request } from "express";
 import { WorkspaceType, type PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 
 const logger = createLogger("settings-workspace-route");
 
@@ -82,6 +93,8 @@ const postBodySchema = z.object({
   displayName: z.string().min(1).max(120).optional(),
 });
 
+const personalDriveBodySchema = z.object({ enabled: z.boolean() });
+
 export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -103,6 +116,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
           displayName: null,
           setBy: null,
           setAt: null,
+          personalDriveEnabled: false,
         });
         return;
       }
@@ -111,6 +125,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         displayName: row.displayName,
         setBy: row.setBy,
         setAt: row.setAt.toISOString(),
+        personalDriveEnabled: row.personalDriveEnabled,
       });
     } catch (e) {
       next(e);
@@ -182,6 +197,59 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         setBy: row.setBy,
         setAt: row.setAt.toISOString(),
       });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ── PUT /api/settings/workspace/personal-drive ─────────────────
+  // Owner-only, like POST above: whether members may hold a full-scope
+  // Nextcloud app password is a box-wide security decision, not routine
+  // admin tuning. Deliberately its own endpoint — POST /settings/workspace
+  // overwrites displayName when the body omits it, so folding a flag into
+  // that body would let an unrelated save silently flip it.
+  router.put("/settings/workspace/personal-drive", async (req, res, next) => {
+    try {
+      const user = getUser(req);
+      if (!user || !getUsername(req)) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      if (user.role !== "owner") {
+        res.status(403).json({
+          error: "owner_required",
+          message: "Only the owner can turn personal drives on or off.",
+        });
+        return;
+      }
+
+      const parsed = personalDriveBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "invalid_body",
+          message: parsed.error.issues.map((i) => i.message).join("; "),
+        });
+        return;
+      }
+      const { enabled } = parsed.data;
+
+      const row = await prisma.workspace.upsert({
+        where: { id: 1 },
+        update: { personalDriveEnabled: enabled },
+        create: { id: 1, personalDriveEnabled: enabled },
+      });
+
+      logger.info({ user: getUsername(req), enabled }, "personal_drive_setting_set");
+      await recordActivity({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "hard-drive",
+        what: enabled ? "Personal drives turned on" : "Personal drives turned off",
+        actor: actorFromRequest(req),
+        refs: { setting: "personalDriveEnabled", enabled },
+      });
+
+      res.json({ personalDriveEnabled: row.personalDriveEnabled });
     } catch (e) {
       next(e);
     }

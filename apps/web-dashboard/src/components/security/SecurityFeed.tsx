@@ -117,6 +117,8 @@ export const SOURCE_LABEL: Record<SecurityHealthRow["id"], string> = {
   // WARP-2978 — the engine that sorts events into incidents (every viewer), and who alerts reach (owner/admin).
   incidents: "Incidents",
   alerts: "Alerts",
+  // WARP-2979 (P4) — the job that finds which cameras cover which areas (AreasPanel's "Droplet's links").
+  links: "Droplet's links",
   // WARP-2980 (P5) — the job that learns what normal looks like.
   patterns: "Patterns",
   retention: "Record keeping",
