@@ -10,6 +10,7 @@ import {
   PinOff,
   Trash2,
 } from "lucide-react";
+import "@/components/ui/pick-menu.css";
 
 export interface ChatHistoryRowProps {
   id: string;
@@ -169,8 +170,7 @@ export function ChatHistoryRow({
           {menuOpen && (
             <div
               role="menu"
-              className="absolute right-0 top-full mt-1 w-36 rounded-[9px] border z-10"
-              style={{ background: "var(--surface)", borderColor: "var(--border)", boxShadow: "var(--lift)" }}
+              className="pick-surface absolute right-0 top-full mt-1 w-36 z-10"
               onMouseLeave={() => setMenuOpen(false)}
             >
               {/* WARP-1917 — pin toggle first: it's the "keep this handy"

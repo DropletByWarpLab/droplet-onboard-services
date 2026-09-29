@@ -13,7 +13,7 @@
  * the round-trip (mint → encrypt → decrypt → verify the live code) is
  * exercised end-to-end without touching env or a DB.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { generate as otplibGenerate } from "otplib";
 import { __setEncryptionKeyForTest } from "./encryption.service.js";
 import {
@@ -21,7 +21,7 @@ import {
   generateTotpEnrollment,
   encryptTotpSecret,
   decryptTotpSecret,
-  verifyTotpCode,
+  acceptTotpCode,
 } from "./totp.service.js";
 
 // A known 32-byte key (base64) so encrypt/decrypt work without env setup.
@@ -67,6 +67,14 @@ describe("totp.service — encryption at rest", () => {
 });
 
 describe("totp.service — verification", () => {
+  // WARP-3193 SEC-AUTH-10: verification is reachable only through
+  // acceptTotpCode now; a fresh row (nothing accepted yet) isolates it.
+  async function verifyTotpCode(secret: string, code: string): Promise<boolean> {
+    const prisma = { totpCredential: { updateMany: vi.fn(async () => ({ count: 1 })) } };
+    const cred = { userId: "u1", secretEnc: encryptTotpSecret(secret), lastAcceptedStep: 0 };
+    return acceptTotpCode(prisma as any, cred, code);
+  }
+
   it("accepts the current valid code for the secret", async () => {
     const { secret } = generateTotpEnrollment("stefan@warp.test");
     const code = await otplibGenerate({ secret });
@@ -91,5 +99,69 @@ describe("totp.service — verification", () => {
   it("rejects a code against a corrupt stored secret without throwing", async () => {
     // A foreign / non-Base32 secret must read as 'invalid code', not crash.
     expect(await verifyTotpCode("not a real secret!!", "123456")).toBe(false);
+  });
+});
+
+// WARP-3193 SEC-AUTH-10 — a TOTP code is accepted at most once. The accepted
+// RFC 6238 time step is persisted in `lastAcceptedStep` and claimed through
+// ONE conditional update (`lastAcceptedStep < step`), so a replay — or two
+// concurrent requests presenting the same code — finds count 0.
+describe("totp.service — acceptTotpCode (replay protection)", () => {
+  function store(row: { userId: string; secretEnc: string; lastAcceptedStep: number }) {
+    return {
+      row,
+      prisma: {
+        totpCredential: {
+          updateMany: vi.fn(async ({ where, data }: any) => {
+            const ok =
+              where.userId === row.userId &&
+              where.secretEnc === row.secretEnc &&
+              row.lastAcceptedStep < where.lastAcceptedStep.lt;
+            if (!ok) return { count: 0 };
+            row.lastAcceptedStep = data.lastAcceptedStep;
+            return { count: 1 };
+          }),
+        },
+      },
+    };
+  }
+
+  it("accepts a live code once, stores its step, and refuses the replay", async () => {
+    const { secret } = generateTotpEnrollment("stefan@warp.test");
+    const { row, prisma } = store({ userId: "u1", secretEnc: encryptTotpSecret(secret), lastAcceptedStep: 0 });
+    const code = await otplibGenerate({ secret });
+
+    expect(await acceptTotpCode(prisma as any, row, code)).toBe(true);
+    const nowStep = Math.floor(Date.now() / 1000 / 30);
+    expect(nowStep - row.lastAcceptedStep).toBeLessThanOrEqual(1);
+    expect(nowStep - row.lastAcceptedStep).toBeGreaterThanOrEqual(0);
+    expect(prisma.totpCredential.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", secretEnc: row.secretEnc, lastAcceptedStep: { lt: row.lastAcceptedStep } },
+      data: { lastAcceptedStep: row.lastAcceptedStep },
+    });
+
+    // Same code again → its step is not after the stored one → refused.
+    expect(await acceptTotpCode(prisma as any, { ...row }, code)).toBe(false);
+  });
+
+  it("two concurrent presentations of the same code → exactly one wins the conditional update", async () => {
+    const { secret } = generateTotpEnrollment("stefan@warp.test");
+    const { row, prisma } = store({ userId: "u1", secretEnc: encryptTotpSecret(secret), lastAcceptedStep: 0 });
+    const code = await otplibGenerate({ secret });
+    // Both read the same stale snapshot (lastAcceptedStep 0).
+    const snapshot = { ...row };
+    const results = await Promise.all([
+      acceptTotpCode(prisma as any, snapshot, code),
+      acceptTotpCode(prisma as any, snapshot, code),
+    ]);
+    expect(results.sort()).toEqual([false, true]);
+  });
+
+  it("refuses a wrong code without writing", async () => {
+    const { secret } = generateTotpEnrollment("stefan@warp.test");
+    const { row, prisma } = store({ userId: "u1", secretEnc: encryptTotpSecret(secret), lastAcceptedStep: 0 });
+    const valid = await otplibGenerate({ secret });
+    expect(await acceptTotpCode(prisma as any, row, valid === "000000" ? "111111" : "000000")).toBe(false);
+    expect(prisma.totpCredential.updateMany).not.toHaveBeenCalled();
   });
 });

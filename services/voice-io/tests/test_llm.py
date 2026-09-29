@@ -36,11 +36,13 @@ import voice.llm
 from voice.llm import (
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
+    DEFAULT_LLM_WARM_PATH,
     DEFAULT_VOICE_ALLOWED_TOOLS,
     DEFAULT_VOICE_MAX_TOKENS,
     LLMUnavailable,
     MockLLM,
     OrchestratorLLM,
+    SpokenCue,
     _extract_assistant_text,
     _extract_error_detail,
     build_llm_from_env,
@@ -101,6 +103,85 @@ class TestOrchestratorAvailable:
             raise httpx.ConnectError("connection refused")
         _install_mock_transport(monkeypatch, handler)
         assert OrchestratorLLM(base_url="http://test").available is False
+
+
+# ────────────────────────────────────────────────────────────────────
+# OrchestratorLLM — warm() (WARP-3127 warm on wake)
+# ────────────────────────────────────────────────────────────────────
+
+class TestOrchestratorWarm:
+    def test_warm_path_default(self):
+        assert DEFAULT_LLM_WARM_PATH == "/api/llm/warm"
+
+    def test_warm_posts_to_the_warm_path_with_the_service_bearer(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warming"}),
+        )
+        OrchestratorLLM(base_url="http://test", bearer_token="voice-secret").warm()
+        assert len(captured) == 1
+        req = captured[0]
+        assert req.method == "POST"
+        assert req.url.path == "/api/llm/warm"
+        assert req.headers["Authorization"] == "Bearer voice-secret"
+
+    def test_warm_names_no_model(self, monkeypatch):
+        # The orchestrator warms the box's ACTIVE model (resolveActiveModel).
+        # A client-chosen model would let a caller load a second model onto
+        # the GPU (WARP-1826 / one-model rule).
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "unknown"}),
+        )
+        OrchestratorLLM(base_url="http://test", model="qwen3:8b").warm()
+        body = json.loads(captured[0].content or b"{}")
+        assert "model" not in body
+
+    def test_warm_uses_a_short_timeout(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warm"}),
+        )
+        OrchestratorLLM(base_url="http://test", timeout_s=120.0).warm()
+        timeout = captured[0].extensions["timeout"]
+        # Never the 120 s agent-loop timeout: this is a nudge, not a turn.
+        assert all(v is not None and v <= 2.0 for v in timeout.values())
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 500, 503])
+    def test_warm_swallows_http_errors(self, monkeypatch, status):
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(status, text="nope"))
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ConnectError("connection refused"),
+            httpx.ReadTimeout("slow"),
+            httpx.RemoteProtocolError("reset"),
+            OSError("no route to host"),
+        ],
+    )
+    def test_warm_swallows_transport_errors(self, monkeypatch, exc):
+        def handler(req):
+            raise exc
+        _install_mock_transport(monkeypatch, handler)
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    def test_warm_failure_logs_at_debug_only(self, monkeypatch, caplog):
+        def handler(req):
+            raise httpx.ConnectError("connection refused")
+        _install_mock_transport(monkeypatch, handler)
+        with caplog.at_level("DEBUG", logger="voice.llm"):
+            OrchestratorLLM(base_url="http://test").warm()
+        records = [r for r in caplog.records if r.name == "voice.llm"]
+        assert records, "a failed warm leaves a debug breadcrumb"
+        assert all(r.levelno == 10 for r in records)
+
+    def test_warm_after_close_does_not_raise(self, monkeypatch):
+        # The warm runs on a background thread, so it can land after main.py's
+        # shutdown hook closed the pool. httpx raises RuntimeError (not an
+        # HTTPError) on a closed client; that must be swallowed too.
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(202, json={}))
+        client = OrchestratorLLM(base_url="http://test")
+        client.close()
+        client.warm()  # must not raise
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -319,6 +400,13 @@ class TestMockLLM:
 
     def test_available_false_when_explicitly_set(self):
         assert MockLLM(available=False).available is False
+
+    def test_warm_is_an_inherited_no_op(self):
+        # WARP-3127: warm() lives on the LLMClient interface so the pipeline
+        # can call it on whatever build_llm_from_env returned.
+        m = MockLLM(scripted_replies=["one"])
+        assert m.warm() is None
+        assert m.requests == []
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -956,6 +1044,60 @@ class _BreakingByteStream(httpx.SyncByteStream):
         pass
 
 
+class _ClosableSSEStream(httpx.SyncByteStream):
+    """A complete SSE body that records whether the response was closed,
+    i.e. whether the orchestrator would see the client disconnect."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+        self.closed = False
+
+    def __iter__(self):
+        yield self._body
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestStreamTeardown:
+    """WARP-329: a caller that stops reading early closes the SSE at once,
+    so the orchestrator aborts its agent loop instead of finishing a reply
+    nobody hears. Both public generators share `_stream_reply`; the spy
+    keeps a live reference to it so the test cannot pass through GC."""
+
+    @pytest.mark.parametrize("method", ["reply_stream", "reply_events"])
+    def test_early_close_tears_the_sse_down_now(self, monkeypatch, method):
+        body = _sse(
+            ("content_delta", {"text": "The camera is online. "}),
+            ("content_delta", {"text": "It is recording."}),
+            ("done", {"iterations": 1, "stop_reason": "model_done"}),
+        )
+        streams: list[_ClosableSSEStream] = []
+
+        def handler(req):
+            s = _ClosableSSEStream(body)
+            streams.append(s)
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=s,
+            )
+
+        _install_mock_stream(monkeypatch, handler)
+        inners: list = []
+        real = OrchestratorLLM._stream_reply
+
+        def spy(self, *args, **kwargs):
+            gen = real(self, *args, **kwargs)
+            inners.append(gen)  # a live reference: teardown cannot lean on GC
+            return gen
+
+        monkeypatch.setattr(OrchestratorLLM, "_stream_reply", spy)
+        llm = OrchestratorLLM(base_url="http://test")
+        gen = getattr(llm, method)("is the camera up")
+        assert next(gen) == "The camera is online. "
+        gen.close()
+        assert streams and streams[0].closed is True
+
+
 class TestReplyStreamSSE:
     def test_yields_content_deltas_in_order(self, monkeypatch):
         def handler(req):
@@ -1184,4 +1326,108 @@ class TestMockReplyStreamFallbackDefault:
     def test_mock_reply_stream_threads_tool_choice(self):
         m = MockLLM(scripted_replies=["ok"])
         list(m.reply_stream("good morning", tool_choice="none"))
+        assert m.last_tool_choice == "none"
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-3124 — spoken cues: `reply_events` surfaces tool_call and
+# model_loading as typed SpokenCue items (opt-in; reply_stream stays str)
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestReplyEventsCues:
+    """`reply_events` is the cue-aware sibling of `reply_stream`: the same
+    SSE consume, but the first tool_call frame and the model_loading frame
+    come through as `SpokenCue` markers IN ORDER with the text deltas, so the
+    pipeline can fill the 8-15 s tool-dispatch silence. `reply_stream`'s
+    plain-str contract is untouched (see test_tool_frames_ignored_for_audio)."""
+
+    def test_first_tool_call_yields_one_cue_in_order(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("tool_result", {"id": "t1", "ok": True, "data": []}),
+                ("tool_call", {"id": "t2", "name": "get_camera", "args": {}}),
+                ("tool_result", {"id": "t2", "ok": True, "data": {}}),
+                ("content_delta", {"text": "All cameras are online."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        # ONE cue for the first tool_call only; tool_result never surfaces.
+        assert list(llm.reply_events("check cameras")) == [
+            SpokenCue("tool_call"),
+            "All cameras are online.",
+        ]
+
+    def test_model_loading_yields_a_cue(self, monkeypatch):
+        # On DMR sizeGb is always null — the cue carries no size at all.
+        def handler(req):
+            return _sse_response(
+                ("model_loading", {"model": "gpt-oss:20b", "sizeGb": None}),
+                ("content_delta", {"text": "Good morning."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("good morning")) == [
+            SpokenCue("model_loading"),
+            "Good morning.",
+        ]
+
+    def test_reply_stream_still_yields_str_only(self, monkeypatch):
+        # Opt-in: the plain reply_stream never carries a cue object.
+        def handler(req):
+            return _sse_response(
+                ("model_loading", {"model": "m", "sizeGb": 12.5}),
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("content_delta", {"text": "Done."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("check")) == ["Done."]
+
+    def test_blocking_fallback_yields_no_cues(self, monkeypatch):
+        # The stream POST fails → blocking reply() → one str, never a cue.
+        def handler(req):
+            if "text/event-stream" in req.headers.get("accept", ""):
+                raise httpx.ConnectError("stream connect refused")
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "blocking reply won"},
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("hi")) == ["blocking reply won"]
+
+    def test_cue_then_transport_break_still_falls_back(self, monkeypatch):
+        # A cue is not content: a break after only a cue re-runs the blocking
+        # reply() (no audio would be doubled), exactly as before cues existed.
+        calls = {"n": 0}
+
+        def handler(req):
+            calls["n"] += 1
+            if "text/event-stream" in req.headers.get("accept", ""):
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=_BreakingByteStream(_sse(
+                        ("tool_call", {"id": "t1", "name": "x", "args": {}}),
+                    )),
+                )
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "fallback answer"},
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("check")) == [
+            SpokenCue("tool_call"),
+            "fallback answer",
+        ]
+        assert calls["n"] == 2
+
+    def test_base_client_reply_events_delegates_to_reply_stream(self):
+        # MockLLM and every reply_stream-only client get str-only events.
+        m = MockLLM(scripted_replies=["the whole reply"])
+        assert list(m.reply_events("hi", tool_choice="none")) == ["the whole reply"]
         assert m.last_tool_choice == "none"

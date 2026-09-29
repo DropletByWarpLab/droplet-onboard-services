@@ -1,0 +1,222 @@
+/* ============================================================
+   Droplet — Assistant navigation layout (WARP-3062).
+
+   A bar across the top with the "Ask AI | Overview" switch at its centre,
+   over either the conversation (Ask side) or today's sidebar and page
+   (business side). The bar (`.droplet-assistant > .da-bar`) is a token scope
+   declared in `components/shell/indigo-tokens.css` next to
+   `.droplet-workspace`, so nothing below names a colour — it reads the ramp,
+   and dark arrives through `.dark`. Only the bar: the business side renders
+   today's pages unchanged, and a shell-wide scope would restyle every page
+   that is not itself a `.droplet-shell`.
+
+   This file loads on every authenticated route in EVERY nav layout (AuthGate
+   imports AssistantShell), so — the lesson workspace-nav.css learned in
+   WARP-3063 — every class carries the `da-` prefix and every rule is anchored
+   to the shell region that owns it:
+     .droplet-assistant > .da-bar    the bar and the switch
+     .droplet-assistant > .da-main   the page column
+   The overrides at the bottom that reach into pages are scoped under
+   `.droplet-assistant` and exist only because those pages size themselves to
+   the viewport.
+
+   Geometry: `--shell-bar-h` is the bar's height. The Sidebar reads the same
+   property for its top edge (0 in every other layout), which is what keeps
+   the bar and the rail from overlapping.
+   ============================================================ */
+
+.droplet-assistant {
+  --shell-bar-h: 52px;
+  min-height: 100dvh;
+}
+
+/* ── The bar ─────────────────────────────────────────────────────────── */
+.droplet-assistant > .da-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  height: var(--shell-bar-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--border);
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+}
+
+/* ── The switch: two equal segments and a thumb that slides between them ─ */
+.droplet-assistant > .da-bar .da-switch {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-width: 248px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--inset);
+  isolation: isolate;
+}
+.droplet-assistant > .da-bar .da-thumb {
+  position: absolute;
+  z-index: 0;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border-radius: var(--radius-pill);
+  background: var(--card-bg);
+  box-shadow: 0 1px 2px rgba(17, 19, 32, 0.08), 0 0 0 1px var(--card-bd);
+  transition: transform 250ms var(--ease);
+}
+.droplet-assistant > .da-bar .da-switch[data-side="business"] .da-thumb {
+  transform: translateX(100%);
+}
+.droplet-assistant > .da-bar .da-tab {
+  position: relative;
+  z-index: 1;
+  height: 34px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  /* --nav-link, not --text-muted: muted measures ~4.4:1 on the track over
+     the glass, under AA for 13px text; --nav-link is ≥5.9:1 in both themes. */
+  color: var(--nav-link);
+  text-decoration: none;
+  transition: color 200ms var(--ease), background-color 200ms var(--ease);
+}
+/* 34px drawn, 46px to the pointer — the hit area reaches into the bar. */
+.droplet-assistant > .da-bar .da-tab::after {
+  content: "";
+  position: absolute;
+  inset: -6px 0;
+}
+.droplet-assistant > .da-bar .da-tab svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  transition: color 200ms var(--ease);
+}
+/* Hover takes a fill as well as the ink, so a hovered side never reads as
+   the selected one — the thumb is a faint cue on its own. */
+.droplet-assistant > .da-bar .da-tab:hover:not([aria-selected="true"]) {
+  color: var(--text);
+  background: var(--hover);
+}
+.droplet-assistant > .da-bar .da-tab[aria-selected="true"] {
+  color: var(--text);
+  font-weight: 600;
+}
+.droplet-assistant > .da-bar .da-tab[aria-selected="true"] svg {
+  color: var(--brand);
+}
+.droplet-assistant > .da-bar .da-tab:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+/* Dark: the card fill is darker than the glass it sits on, so the thumb
+   takes the ramp's raised step instead (the handoff's #2a2e3c thumb). */
+.dark .droplet-assistant > .da-bar .da-thumb {
+  background: var(--border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+/* Forced colours drop the thumb's fill — give the THUMB a system-coloured
+   edge so the selected side is not left with weight alone. On the thumb, not
+   as an outline on the tab: a tab outline would tie with, and override, the
+   :focus-visible ring on the one tab that is in the Tab order. */
+@media (forced-colors: active) {
+  .droplet-assistant > .da-bar .da-thumb {
+    border: 2px solid CanvasText;
+  }
+}
+
+/* ── Page column ─────────────────────────────────────────────────────── */
+.droplet-assistant > .da-main {
+  padding-top: var(--shell-bar-h);
+  min-height: 100dvh;
+}
+.droplet-assistant > .da-main:focus {
+  outline: none;
+}
+
+/* ── Phones ──────────────────────────────────────────────────────────── */
+@media (max-width: 759.98px) {
+  .droplet-assistant > .da-bar .da-switch {
+    min-width: 0;
+    width: 100%;
+    max-width: 280px;
+  }
+  .droplet-assistant > .da-bar .da-tab {
+    height: 38px;
+    padding: 0 10px;
+  }
+}
+@media (max-width: 479.98px) {
+  .droplet-assistant > .da-bar .da-tab {
+    padding: 0 8px;
+    gap: 6px;
+  }
+  .droplet-assistant > .da-bar .da-tab svg {
+    width: 15px;
+    height: 15px;
+  }
+}
+/* Landscape phones and short windows — give the conversation the height. */
+@media (max-height: 479.98px) {
+  .droplet-assistant {
+    --shell-bar-h: 48px;
+  }
+  .droplet-assistant > .da-bar .da-tab {
+    height: 32px;
+  }
+  .droplet-assistant > .da-bar .da-tab::after {
+    inset: -7px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .droplet-assistant > .da-bar .da-thumb,
+  .droplet-assistant > .da-bar .da-tab,
+  .droplet-assistant > .da-bar .da-tab svg {
+    transition: none;
+  }
+}
+
+/* ── Pages under this shell ──────────────────────────────────────────────
+   Two reaches into page styling, each because the page assumed the sidebar
+   layout's geometry — nothing on top, a 56px tab bar below on phones:
+
+   1. ShellPage's slim `.page-top` sticks to the top of the WINDOW, which
+      here is behind the bar — it sticks below the bar instead.
+   2. Surfaces that lock to the viewport (`100dvh`) must subtract the bar,
+      or their bottom (the chat composer, the email preview) falls below the
+      fold. The Ask side has no tab bar at all. */
+.droplet-assistant .droplet-shell .page-top {
+  top: var(--shell-bar-h);
+}
+.droplet-assistant[data-side="ask"] .droplet-shell.chat-app {
+  height: calc(100dvh - var(--shell-bar-h));
+}
+.droplet-assistant[data-side="business"] .droplet-shell.chat-app,
+.droplet-assistant[data-side="business"] .droplet-shell.email-app {
+  height: calc(100dvh - var(--shell-bar-h) - 56px - env(safe-area-inset-bottom));
+}
+@media (min-width: 1024px) {
+  .droplet-assistant[data-side="business"] .droplet-shell.chat-app,
+  .droplet-assistant[data-side="business"] .droplet-shell.email-app,
+  .droplet-assistant .droplet-home {
+    height: calc(100dvh - var(--shell-bar-h));
+  }
+}

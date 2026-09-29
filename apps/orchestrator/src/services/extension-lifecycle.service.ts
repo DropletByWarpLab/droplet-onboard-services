@@ -69,11 +69,12 @@
  * `refs.extensionId` and `refs.op` — no new activity kind.
  */
 import { randomBytes } from "node:crypto";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { TOOL_CATALOG } from "@droplet/tools-core";
 import { createLogger } from "../lib/logger.js";
 import type { ActivityActor, RecordParams } from "./activity.service.js";
 import { recordActivity } from "./activity.singleton.js";
+import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import {
   parseExtensionManifest,
   type ExtensionManifest,
@@ -89,6 +90,7 @@ import {
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { verifyExtensionStatement, type ExtensionSigner } from "./update-agent/extension-verify.js";
 import { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken } from "./extension-token.js";
+import { holdWorkspaceAsSource } from "./workspace-source-guard.service.js";
 
 export { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken };
 
@@ -257,7 +259,9 @@ export type ExtensionLifecycleErrorCode =
   | "verify_failed"
   | "install_failed"
   | "supervision_off"
-  | "attach_refused";
+  | "attach_refused"
+  /** WARP-3200 — enable: the workspace it is built from was deleted. */
+  | "source_deleted";
 
 export class ExtensionLifecycleError extends Error {
   constructor(
@@ -688,7 +692,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
    * Move `slug` from one of `from` to `to` in ONE statement (updateMany with
    * the status in the WHERE), so two tabs — or an owner and the reconciler —
    * cannot both pass a read-then-check. count 0 → 404 or 409 with the state
-   * that won.
+   * that won. `db` is the transaction the claim must commit with, if any.
    */
   async function claim(
     slug: string,
@@ -696,8 +700,9 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     to: ExtensionStatusName,
     extra: { serviceTokenHash?: null } = {},
     stillToDo?: () => Promise<boolean>,
+    db: Prisma.TransactionClient = prisma,
   ): Promise<{ retry: boolean }> {
-    const u = await prisma.extension.updateMany({
+    const u = await db.extension.updateMany({
       where: { id: slug, status: { in: [...from] } },
       data: { status: to, ...extra },
     });
@@ -735,8 +740,21 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
         }
       }
       // Claimed to `signed` (not running yet) first: a second enable racing
-      // this one finds `signed` and gets the 409.
-      await claim(slug, ["disabled", "failed", "uninstalled"], "signed");
+      // this one finds `signed` and gets the 409. WARP-3200 — in the same
+      // transaction as a hold on its source workspace: an uninstalled
+      // extension lets its workspace be deleted, and the install below
+      // re-exports the code from it. A delete racing this enable either
+      // waits and then sees `signed` (and refuses), or deleted the row first.
+      await prisma.$transaction(async (tx) => {
+        if (!(await holdWorkspaceAsSource(tx, ext.workspaceId))) {
+          throw new ExtensionLifecycleError(
+            "source_deleted",
+            409,
+            `the workspace ${ext.workspaceId} that extension ${slug} is built from was deleted`,
+          );
+        }
+        await claim(slug, ["disabled", "failed", "uninstalled"], "signed", {}, undefined, tx);
+      }, READ_COMMITTED_TX);
       return install(slug, actor, "enable");
     },
 

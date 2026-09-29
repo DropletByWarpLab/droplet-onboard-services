@@ -52,9 +52,9 @@ describe("ContextPinsPopover", () => {
     fireEvent.click(screen.getByRole("button", { name: /context/i }));
     await waitFor(() => screen.getByText("/share/logistics"));
 
-    fireEvent.change(screen.getByLabelText(/kind/i), {
-      target: { value: "file" },
-    });
+    // WARP-3043: a themed menu, not a native select.
+    fireEvent.click(screen.getByRole("button", { name: "Kind: folder" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "file" }));
     fireEvent.change(screen.getByLabelText(/path or reference/i), {
       target: { value: "/docs/spec.pdf" },
     });

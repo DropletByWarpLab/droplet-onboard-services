@@ -40,14 +40,17 @@ import { FilesLibrariesNav } from "./nav/FilesLibrariesNav";
 // in the chrome. This file owns rendering; nav-config owns what there is to
 // render and who may see it.
 import {
+  ASSISTANT_OVERVIEW_HREF,
   MOBILE_PRIMARY_HREFS,
   NAV_GROUPS,
   isSettingsContext,
   settingsGroups,
   visibleItems,
+  withOverviewAt,
   type AuthRole,
   type NavItem,
 } from "./nav-config";
+import { useNavLayout } from "@/lib/nav-layout";
 // WARP-2976 (ADR-059 §2.3) — the department switcher and the department
 // filter. The filter only NARROWS `NAV_GROUPS` to the active department's
 // profile; `visibleItems` below still runs every gate over the result, so a
@@ -56,7 +59,7 @@ import {
 // `NAV_GROUPS` itself — Whole business is today's nav, unchanged.
 import { DepartmentSwitcher } from "./Departments/DepartmentSwitcher";
 import { useActiveDepartment } from "@/lib/departments/active-department";
-import { departmentNavGroups } from "@/lib/departments/department-nav";
+import { departmentHomeHref, departmentNavGroups } from "@/lib/departments/department-nav";
 
 /**
  * One block of the mobile "More" drawer: a nav destination plus the
@@ -183,8 +186,21 @@ export function Sidebar() {
   // WARP-2976 — the active department's arrangement of the nav, or
   // NAV_GROUPS itself for Whole business. Gating runs AFTER this, below.
   const { active: activeDepartment, activeProfile } = useActiveDepartment();
-  const navGroups = departmentNavGroups(NAV_GROUPS, activeDepartment, activeProfile);
-  const inDepartment = navGroups !== NAV_GROUPS;
+  const departmentGroups = departmentNavGroups(NAV_GROUPS, activeDepartment, activeProfile);
+  const inDepartment = departmentGroups !== NAV_GROUPS;
+  // WARP-3062 — under the assistant layout `/` is the Ask side's front door,
+  // so Overview is served at ASSISTANT_OVERVIEW_HREF. Only the href moves;
+  // every other layout gets the groups back untouched.
+  const { layout: navLayout } = useNavLayout();
+  const overviewHref = navLayout === "assistant" ? ASSISTANT_OVERVIEW_HREF : "/";
+  const navGroups = withOverviewAt(departmentGroups, overviewHref);
+  // The brand mark leads home: the department's home inside one, `/`
+  // otherwise (Overview, or the Ask side under the assistant layout) — the
+  // same rule as the workspace header's mark.
+  const brandHref =
+    inDepartment && activeDepartment ? departmentHomeHref(activeDepartment.slug) : "/";
+  const brandLabel =
+    inDepartment && activeDepartment ? `Droplet — ${activeDepartment.name} home` : "Droplet home";
 
   // Compute the rendered groups once. Empty groups (e.g. Admin when the
   // user is family/guest without the Activity entry) are filtered out so
@@ -231,7 +247,7 @@ export function Sidebar() {
     ? (renderedGroups[0]?.items ?? [])
         .slice(0, MOBILE_PRIMARY_HREFS.length)
         .map((i) => i.href)
-    : MOBILE_PRIMARY_HREFS;
+    : MOBILE_PRIMARY_HREFS.map((href) => (href === "/" ? overviewHref : href));
   /** Does this href own a slot in the mobile bottom tab bar? */
   const isMobilePrimary = (href: string): boolean => primaryHrefs.includes(href);
 
@@ -293,11 +309,13 @@ export function Sidebar() {
 
   return (
     <>
-      {/* ── Desktop Sidebar ── */}
+      {/* ── Desktop Sidebar ──
+          The top edge is `--shell-bar-h`: 0 unless a layout mounts a bar
+          above the rail (WARP-3062's assistant layout sets it). */}
       <aside
         aria-label="Primary navigation"
         className="
-          hidden lg:flex lg:flex-col lg:fixed lg:inset-y-0 lg:left-0 lg:w-[var(--sidebar-w)]
+          hidden lg:flex lg:flex-col lg:fixed lg:top-[var(--shell-bar-h,0px)] lg:bottom-0 lg:left-0 lg:w-[var(--sidebar-w)]
           sidebar-w-transition whitespace-nowrap
           bg-[var(--color-sidebar-bg)] dp-material
           border-r border-separator z-40
@@ -339,10 +357,19 @@ export function Sidebar() {
           </div>
         ) : (
           <div className="flex items-center gap-2.5 pl-5 pr-3 h-16 shrink-0 overflow-hidden">
-            <DropletMark size={22} className="text-accent" />
-            <span className="type-headline text-label-primary tracking-tight sidebar-fade-in">
-              Droplet
-            </span>
+            <Link
+              href={brandHref}
+              aria-label={brandLabel}
+              className="
+                flex items-center gap-2.5 rounded-lg
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+              "
+            >
+              <DropletMark size={22} className="text-accent" />
+              <span className="type-headline text-label-primary tracking-tight sidebar-fade-in">
+                Droplet
+              </span>
+            </Link>
             {/* Tiny chip — names the workspace mode. WARP-1341: business-only
                 build, so this is static. */}
             <span
@@ -466,6 +493,7 @@ export function Sidebar() {
                     active={isItemActive(item)}
                     showChildren={!showSettingsPanel && sectionOpen(item)}
                     onToggleChildren={() => toggleSection(item)}
+                    onActivate={item.href === "/settings" ? () => setMainTreeAt(null) : undefined}
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
                     collapsed={collapsed}
@@ -946,6 +974,7 @@ function NavLink({
   active,
   showChildren = false,
   onToggleChildren,
+  onActivate,
   pathname,
   badge = 0,
   collapsed = false,
@@ -956,6 +985,8 @@ function NavLink({
   showChildren?: boolean;
   /** Open/close the section without navigating — the row's chevron. */
   onToggleChildren?: () => void;
+  /** Reopen a contextual menu when this link already points to the current route. */
+  onActivate?: () => void;
   pathname: string;
   /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
   badge?: number;
@@ -974,6 +1005,7 @@ function NavLink({
       <div className="relative">
         <Link
           href={item.href}
+          onClick={onActivate}
           aria-current={active ? "page" : undefined}
           aria-label={collapsed ? item.label : undefined}
           title={collapsed ? item.label : undefined}

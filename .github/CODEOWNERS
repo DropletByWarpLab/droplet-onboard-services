@@ -57,5 +57,20 @@
 # In-process attribution of a remote dispatch: it must never carry a token.
 /apps/orchestrator/src/services/remote-call-attribution.ts       @rjouffret
 
+# The release-only verify caller outside update-agent/, and the guard that
+# pins which suites need cosign (review #2312).
+/apps/orchestrator/src/services/app-downloads/store.ts           @rjouffret
+/apps/orchestrator/src/__tests__/env-preflight.guard.test.ts     @rjouffret
+
+# The factory reset decides whether the extension key outlives its owner
+# (WARP-3207): the reset, the library that rotates the key and keeps the
+# device-id key beside it (WARP-980), and the suite that pins both. That suite
+# also pins the compose binds of /var/lib/droplet/tpm and /var/run/droplet:
+# CODEOWNERS works per file, so those mount lines are owned through their pin
+# rather than by owning all of docker-compose.yml.
+/scripts/factory-reset.sh                                       @rjouffret
+/scripts/lib/secrets-wipe.sh                                    @rjouffret
+/tests/factory-reset-secrets-wipe.test.sh                       @rjouffret
+
 # This file.
 /.github/CODEOWNERS                                             @rjouffret

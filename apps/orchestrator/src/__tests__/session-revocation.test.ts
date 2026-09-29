@@ -14,7 +14,21 @@ const setStore = new Map<string, Set<string>>();
 // the denylist entry got the token's REMAINING lifetime, not a fixed constant.
 const scalarTtlStore = new Map<string, number | undefined>();
 
+// QUAL-1: flip to make the strict revocation writes fail like a Redis outage.
+const strictFail = { set: false, del: false };
+
 vi.mock("../services/cache.service.js", () => ({
+  cacheSetStrict: vi.fn(async (key: string, value: unknown, ttlSeconds?: number) => {
+    if (strictFail.set) throw new Error("ECONNREFUSED");
+    scalarStore.set(key, value);
+    scalarTtlStore.set(key, ttlSeconds);
+  }),
+  cacheDelStrict: vi.fn(async (key: string) => {
+    if (strictFail.del) throw new Error("ECONNREFUSED");
+    scalarStore.delete(key);
+    setStore.delete(key);
+    scalarTtlStore.delete(key);
+  }),
   cacheGet: vi.fn(async (key: string) => scalarStore.get(key) ?? null),
   cacheSet: vi.fn(async (key: string, value: unknown, ttlSeconds?: number) => {
     scalarStore.set(key, value);
@@ -171,6 +185,29 @@ describe("session revocation (WARP-116)", () => {
       // bounded above by it, with a couple seconds of clock slack.
       expect(ttl!).toBeGreaterThan(REFRESH_TOKEN_TTL_SECONDS - 5);
       expect(ttl!).toBeLessThanOrEqual(REFRESH_TOKEN_TTL_SECONDS);
+    });
+
+    // WARP-3193 QUAL-1 — the count used to include writes that never landed.
+    it("REJECTS (503) instead of counting a denylist write that failed", async () => {
+      await registerRefreshSession("user-1", makeRefresh("user-1"));
+      strictFail.set = true;
+      try {
+        await expect(revokeUserSessions("user-1")).rejects.toMatchObject({
+          status: 503,
+          code: "REVOCATION_UNAVAILABLE",
+        });
+      } finally {
+        strictFail.set = false;
+      }
+    });
+
+    it("REJECTS (503) when the index cannot be cleared, even with nothing to denylist", async () => {
+      strictFail.del = true;
+      try {
+        await expect(revokeUserSessions("ghost")).rejects.toMatchObject({ status: 503 });
+      } finally {
+        strictFail.del = false;
+      }
     });
 
     it("skips members whose encoded expiry is already in the past", async () => {

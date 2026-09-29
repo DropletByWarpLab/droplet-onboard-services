@@ -43,6 +43,19 @@
  *   · Acknowledge sends the notification the page was opened from (`?n=`,
  *     set by the toaster and the service worker); the box keeps it only when
  *     it is this person's own notice for this incident.
+ *
+ * WARP-2980 (ADR-059 P5 PR-C) — patterns on the incident page:
+ *   · the pattern flags (route 18's `patternFlags`: trial, or kept quiet by
+ *     expected activity) sit in the reasons card after the counted reasons
+ *     (PatternFlagList). With flags and no counted reason the card is headed
+ *     "What Droplet would have flagged": it flagged nothing;
+ *   · a trial flag is shown to an owner or admin only (spec §6.13, D19) —
+ *     the box sends flags to nobody else, and the page drops a trial flag for
+ *     any other role (or none yet) even if a box did;
+ *   · "Was this expected?" (VerdictBar) follows the reasons, gated by the
+ *     module level, the box's `viewer.level` and `viewer.canGiveVerdict`;
+ *     it shares the page's one-write-at-a-time guard, because a verdict and
+ *     an acknowledgement race the incident's version.
  */
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
@@ -50,16 +63,19 @@ import { ChevronLeft, Loader2, RefreshCw } from "lucide-react";
 import { Phead } from "@/components/shell/primitives";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
+import { useAuth } from "@/lib/auth";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
 import { useCameraDisplayNames, useSecurityIncident, useSecurityMode } from "@/lib/hooks/useSecurity";
 import { deviceTimeZone } from "@/lib/security-time";
-import type { IncidentActionResult, IncidentDetail, IncidentMemberView } from "@/lib/types";
+import type { IncidentActionResult, IncidentDetail, IncidentMemberView, IncidentVerdict } from "@/lib/types";
 import { AckHistory } from "./AckHistory";
 import { NoticeList } from "./NoticeList";
+import { PatternFlagList } from "./PatternFlagList";
 import { ReasonList } from "./ReasonList";
 import { RESOLVE_COPY, ResolveDialog } from "./ResolveDialog";
 import { SecurityEventRow } from "./SecurityFeed";
 import { fill } from "./TimezoneSelect";
+import { VERDICT_COPY, VerdictBar } from "./VerdictBar";
 import {
   alertCameras,
   clipExpired,
@@ -81,6 +97,8 @@ export const COPY = {
   acknowledgedToast: "Acknowledged",
   resolvedToast: "Resolved",
   whyTitle: "Why Droplet flagged this",
+  // WARP-2980: only pattern flags (trial, or kept quiet by expected activity) — nothing was flagged.
+  wouldHaveTitle: "What Droplet would have flagged",
   whatTitle: "What happened",
   toldTitle: "Who was told",
   acksTitle: "Acknowledgements",
@@ -102,6 +120,9 @@ export const COPY = {
   retry: "Retry",
   loading: "Loading the incident",
 } as const;
+
+/** The writes this page makes; one at a time. */
+type Write = "acknowledge" | "resolve" | "verdict";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A NotificationLog id (cuid): the shape route 19 accepts. */
@@ -157,26 +178,32 @@ function IncidentBody({
   refresh,
   acknowledge,
   resolve,
+  giveVerdict,
   notificationId,
   now: nowProp,
 }: Query & { notificationId: string | null; now?: Date }) {
   const now = nowProp ?? new Date();
   const level = useModuleLevel("security");
+  const { user } = useAuth();
+  // The trial rule (spec §6.13, D19): owner/admin only. Unknown yet → nobody.
+  const ownerOrAdmin = user?.role === "owner" || user?.role === "admin";
   const { mode } = useSecurityMode();
   const cameraLabel = useCameraDisplayNames();
   const { toast } = useToast();
   const device = deviceTimeZone();
   const timezone = mode?.displayTimezone ?? device ?? "UTC";
 
-  const [busy, setBusy] = useState<null | "acknowledge" | "resolve">(null);
+  const [busy, setBusy] = useState<null | Write>(null);
   // The in-flight guard itself: the buttons stay focusable (aria-disabled), so
   // a second press between renders is refused here, not by `disabled`.
   const busyRef = useRef(false);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [focusAfter, setFocusAfter] = useState<null | "acknowledge" | "resolve">(null);
+  const [focusAfter, setFocusAfter] = useState<null | Write>(null);
   const ackRef = useRef<HTMLButtonElement | null>(null);
   const resolveRef = useRef<HTMLButtonElement | null>(null);
   const stateRef = useRef<HTMLDivElement | null>(null);
+  const verdictGroupRef = useRef<HTMLDivElement | null>(null);
+  const verdictAnswerRef = useRef<HTMLParagraphElement | null>(null);
 
   const ids = { why: useId(), what: useId(), told: useId(), acks: useId() };
 
@@ -184,7 +211,10 @@ function IncidentBody({
   // where the person can carry on, never on <body>.
   useEffect(() => {
     if (!focusAfter) return;
-    if (focusAfter === "acknowledge" && ackRef.current) {
+    if (focusAfter === "verdict") {
+      // The buttons stay while the box still takes an answer from this person; if they went, the answer line.
+      if (!verdictGroupRef.current) (verdictAnswerRef.current ?? stateRef.current)?.focus();
+    } else if (focusAfter === "acknowledge" && ackRef.current) {
       // Still there (nothing changed): focus never left it.
     } else if (resolveRef.current) {
       resolveRef.current.focus();
@@ -195,17 +225,17 @@ function IncidentBody({
   }, [focusAfter, incident]);
 
   const run = useCallback(
-    async (action: "acknowledge" | "resolve", write: () => Promise<IncidentActionResult>): Promise<string | null> => {
+    async (action: Write, write: () => Promise<IncidentActionResult>, done: string): Promise<string | null> => {
       if (busyRef.current) return "BUSY";
       busyRef.current = true;
       setBusy(action);
       try {
         const r = await write();
         // `changed:false` (already done) is silent.
-        if (r.changed) toast(action === "acknowledge" ? COPY.acknowledgedToast : COPY.resolvedToast, "success");
+        if (r.changed) toast(done, "success");
         return null;
       } catch (err) {
-        // Typed copy only (409 INCIDENT_CONFLICT / NOT_ACTIONABLE, 503
+        // Typed copy only (409 INCIDENT_CONFLICT / NOT_ACTIONABLE / NOT_JUDGEABLE, 503
         // AUDIT_UNAVAILABLE, …) — never err.message. Then re-read.
         toast(translateError(err, "security"), "error");
         void refresh();
@@ -257,12 +287,12 @@ function IncidentBody({
   const title = incidentTitle(i, cameraLabel);
 
   const onAcknowledge = () => {
-    void run("acknowledge", () => acknowledge({ notificationId })).then((failed) => {
+    void run("acknowledge", () => acknowledge({ notificationId }), COPY.acknowledgedToast).then((failed) => {
       if (failed !== "BUSY") setFocusAfter("acknowledge");
     });
   };
   const onResolve = (note: string) => {
-    void run("resolve", () => resolve({ note })).then((failed) => {
+    void run("resolve", () => resolve({ note }), COPY.resolvedToast).then((failed) => {
       if (failed === "BUSY") return;
       // A note the box refused, or an outage: keep the dialog (and the note) to try again.
       // The incident moved or went away: close it; the re-read shows where it stands.
@@ -272,6 +302,15 @@ function IncidentBody({
       }
     });
   };
+
+  const onVerdict = (verdict: IncidentVerdict) => {
+    const done = verdict === "expected" ? VERDICT_COPY.savedExpected : VERDICT_COPY.savedNotExpected;
+    void run("verdict", () => giveVerdict(verdict), done).then((failed) => {
+      if (failed !== "BUSY") setFocusAfter("verdict");
+    });
+  };
+  // What the box sent this viewer, less a trial flag for anyone but an owner or admin.
+  const flags = i.patternFlags.filter((f) => f.effect !== "trial" || ownerOrAdmin);
 
   const actions =
     showAck || showResolve ? (
@@ -343,14 +382,39 @@ function IncidentBody({
         </p>
       )}
 
-      {i.reasons.length > 0 && (
+      {(i.reasons.length > 0 || flags.length > 0) && (
         <>
-          <SectTitle id={ids.why} title={COPY.whyTitle} />
+          <SectTitle id={ids.why} title={i.reasons.length > 0 ? COPY.whyTitle : COPY.wouldHaveTitle} />
           <section className="card" aria-labelledby={ids.why}>
-            <ReasonList reasons={i.reasons} cameraLabel={cameraLabel} timezone={timezone} now={now} labelledBy={ids.why} />
+            {i.reasons.length > 0 && (
+              <ReasonList reasons={i.reasons} cameraLabel={cameraLabel} timezone={timezone} now={now} labelledBy={ids.why} />
+            )}
+            <PatternFlagList
+              flags={flags}
+              cameraLabel={cameraLabel}
+              timezone={timezone}
+              now={now}
+              labelledBy={ids.why}
+              separated={i.reasons.length > 0}
+            />
           </section>
         </>
       )}
+
+      <VerdictBar
+        verdict={i.verdict}
+        viewer={i.viewer}
+        flags={flags}
+        reasonCodes={i.reasonCodes}
+        openedInMode={i.openedInMode}
+        moduleLevel={level}
+        busy={busy !== null}
+        onVerdict={onVerdict}
+        timezone={timezone}
+        now={now}
+        groupRef={verdictGroupRef}
+        answerRef={verdictAnswerRef}
+      />
 
       <SectTitle id={ids.what} title={COPY.whatTitle} />
       <section className="card" aria-labelledby={ids.what}>

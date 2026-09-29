@@ -1339,6 +1339,11 @@ export interface RosterUser extends AuthUser {
    *  storage: storage/upload limits don't apply. Optional for the same
    *  reason; only an explicit false hides the storage controls. */
   hasStorage?: boolean;
+  /** WARP-3113 — explicit deletion state. PENDING: deactivated, files kept
+   *  until `deletionDueAt`, cancellable. PURGING: the nightly job is removing
+   *  the account now. Optional: an older orchestrator sends nothing. */
+  deletionStatus?: "NONE" | "PENDING" | "PURGING" | "HANDING_OVER";
+  deletionDueAt?: string | null;
 }
 
 /** WARP-2984 — see RosterUser.source. */
@@ -2192,6 +2197,9 @@ export interface MatterGrouped {
   covers: MatterDevice[];
   locks: MatterDevice[];
   other: MatterDevice[];
+  /** WARP-3276: set by the orchestrator when the Matter controller is down
+   *  (it answers 200 with empty groups rather than an error). */
+  _status?: "disconnected";
 }
 
 export interface MatterDiscoveredDevice {
@@ -3192,6 +3200,14 @@ export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 export const PENDING_PROMPT_KEY = "droplet.pendingPrompt";
 
 /**
+ * WARP-3062 — `sessionStorage[CHAT_DRAFT_KEY]` holds the /chat composer's
+ * unsent text, so it survives the composer unmounting (the assistant
+ * layout's switch to Overview and back). Cleared by sending, and on sign-out
+ * with the hand-offs above: it is the signed-in person's words.
+ */
+export const CHAT_DRAFT_KEY = "droplet.chatDraft";
+
+/**
  * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
  * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
  * contract and change together.
@@ -3504,6 +3520,43 @@ export interface ExtensionPromoteResult {
   version: string;
   installed: boolean;
   installError: { code: string; message: string } | null;
+}
+
+/**
+ * WARP-3205 — one `ext-*` row of `GET /api/admin/remote-tools/classifications`,
+ * as the owner's tool review renders it.
+ *
+ * There is deliberately no `wireDescription`: the orchestrator still sends
+ * the row's recorded copy, and nothing here can render it.
+ * `declaredDescription` is the signed manifest's description, sent only when
+ * it and `inputSchema` hash to the row's `inputSchemaHash` (what the review
+ * binds), and is shown only as its author's words.
+ */
+export interface ExtensionToolClassification {
+  serverId: string;
+  toolName: string;
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  denied: boolean;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  /** The review hash (description + arguments) the decision is bound to; sent back with it. */
+  inputSchemaHash: string | null;
+  /** The schema that hash names, or null when the box cannot show it (no review then). */
+  inputSchema: Record<string, unknown> | null;
+  /** The signed description that hash names, beside a non-null `inputSchema`; else null. */
+  declaredDescription: string | null;
+  /** What dispatch does with a call, decided by the orchestrator. */
+  decision: RuntimeToolClassification;
+}
+
+/** The body of `PATCH …/classifications/:serverId/:toolName` for an extension tool. */
+export interface ExtensionToolDecision {
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  denied: boolean;
+  /** The review hash of what the owner was shown (409 STALE_REVIEW if it moved). */
+  inputSchemaHash: string;
 }
 
 // ── WARP-2977 (ADR-059 P2): the Security command center feed ──
@@ -3974,7 +4027,9 @@ export type SecurityErrorCode =
   | "LINK_CONFLICT"
   | "LINK_LIMIT"
   | "LINKS_UNAVAILABLE"
-  | "AI_SETTINGS_UNAVAILABLE";
+  | "AI_SETTINGS_UNAVAILABLE"
+  // WARP-2980 (P5 PR-C) — route 35: nothing this viewer can mark, or a partial view (one body).
+  | "NOT_JUDGEABLE";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
@@ -4294,15 +4349,55 @@ export interface IncidentNoticeView {
  */
 export type IncidentMemberView = Omit<SecurityEvent, "incident"> & { alsoIn: SecurityZoneRef[] };
 
+/** WARP-2980 (P5 PR-B route 18, PR-C) — Expected / Not expected, as the box keeps it. */
+export type IncidentVerdictState = "unreviewed" | "expected" | "not_expected";
+/** Route 35's body: an answer can change, never go back to unreviewed. */
+export type IncidentVerdict = Exclude<IncidentVerdictState, "unreviewed">;
+
+/**
+ * Route 18's verdict — sent only to a viewer who sees every camera and may
+ * read threats (null to anyone else: an answer about things they can't see).
+ */
+export interface IncidentVerdictView {
+  state: IncidentVerdictState;
+  /** Display-safe; null iff unreviewed. */
+  byName: string | null;
+  at: string | null;
+  /** The codes judged when it was marked. */
+  codes: SecurityReasonCode[];
+}
+
+/**
+ * One pattern flag on route 18 (WARP-2980 P5 PR-B): what Droplet would have
+ * flagged (`trial` — every pattern code is trial until P5 PR-D) or what
+ * expected activity kept quiet (`suppressed`). Neither counts: neither sets
+ * the incident's severity or state, and neither told anyone. The box sends
+ * flags only to owner/admin who see the flag's cameras.
+ */
+export interface IncidentPatternFlagView {
+  code: SecurityPatternCode;
+  effect: "trial" | "suppressed";
+  /** What it would carry if it counted. Never shown as the incident's severity. */
+  severity: SecuritySeverity;
+  key: { kind: "area" | "camera"; zoneId: string | null; camera: string | null };
+  evidence: { eventId: string; camera: string; label: string; at: string; summary: string };
+  /**
+   * The numbers behind it (safe integers and exact strings): every flag
+   * `{dayType, hour, windowFrom, windowTo, mode, zoneKind, rulesetVersion}`;
+   * out_of_place `{daysObserved, daysWithEvent, …}`; unusual_volume `{k,
+   * lambda, typicalPerHour, …}`; long_dwell `{durationSec, p99Sec, …}`.
+   */
+  detail: Record<string, string | number | null> | null;
+  /** effect = suppressed: the expected activity that kept it quiet, as it is NOW; else null. */
+  suppression: { id: string; reason: string; state: "active" | "removed" | "expired" } | null;
+}
+
 /**
  * GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike.
  *
- * Deliberately NOT mirrored here: what P5 PR-B (WARP-2980) added to route 18
- * — `verdict`, `patternFlags` and `viewer.canGiveVerdict` — and route 35
- * (POST …/verdict, whose 409 is NOT_JUDGEABLE). The box sends them; this
- * page ignores them. P5 PR-C mirrors and renders them (the verdict bar, the
- * Trial chip, a flag quietened by expected activity), each with its own
- * viewer rule, so none of it is shown before that rule is.
+ * WARP-2980 (P5 PR-C) mirrors what P5 PR-B added — `verdict`, `patternFlags`
+ * and `viewer.canGiveVerdict` — and route 35 (POST …/verdict, 409
+ * NOT_JUDGEABLE), each rendered under its own viewer rule.
  */
 export interface IncidentDetail extends IncidentSummary {
   reasons: IncidentReasonView[];
@@ -4327,11 +4422,19 @@ export interface IncidentDetail extends IncidentSummary {
    * the cause.
    */
   actionable: boolean;
+  /** WARP-2980: null unless this viewer sees every camera and may read threats. */
+  verdict: IncidentVerdictView | null;
+  /** WARP-2980: the flags this viewer may see, in evidence order (owner/admin only, on the box). */
+  patternFlags: IncidentPatternFlagView[];
   /**
    * The viewer's Security level on the box, and whether they have acknowledged
    * or resolved this incident — kept in a partial view too (their own act).
+   * `canGiveVerdict` (WARP-2980): exactly when route 35 would accept an answer
+   * from them — owner/admin who see everything, at act or above, on a view
+   * that isn't partial, with something to judge. Independent of `actionable`:
+   * a trial-only incident has nothing to acknowledge and can still be judged.
    */
-  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
+  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean; canGiveVerdict: boolean };
 }
 
 /** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
