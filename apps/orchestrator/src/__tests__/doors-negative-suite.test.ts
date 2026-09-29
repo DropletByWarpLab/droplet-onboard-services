@@ -5,7 +5,7 @@
  * ADR-055 (P4a) — the §14 cross-cutting NEGATIVE SUITE, the items that can
  * fail a build today:
  *
- *   1. no `doors_*` tool can unlock or write;
+ *   1. no `doors_*` tool can unlock or write (P4a ships none; the guard is forward);
  *   2. no `/api/doors` route lacks the RBAC grant;
  *   3. no in-place AccessEvent UPDATE or DELETE — here, as source (the trigger
  *      itself is proved on real Postgres in doors.pg.test.ts);
@@ -39,7 +39,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createDoorsRouter } from "../routes/doors.js";
-import { FEATURE_GATED_MODULES, MCP_ACTING_USER_GATED_DOMAINS, mountMcpActingUserGates, mountModuleGates } from "../modules/module-mounts.js";
+import { FEATURE_GATED_MODULES, mountModuleGates } from "../modules/module-mounts.js";
 import { MODULE_BY_ID, MODULES, type AvailabilityConfig } from "../modules/module-registry.js";
 import { createModuleGate } from "../middleware/module-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
@@ -47,7 +47,6 @@ import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 import { computeEffectiveIds, computeModuleStates, setModuleEnabled, ModuleToggleError } from "../services/modules.service.js";
 import { WRITE_TOOLS, VOICE_WRITE_TOOLS } from "../services/tool-access.service.js";
-import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 import { alarmClaimsFor } from "../services/door-derivations.js";
 
 // ── the router, walked ────────────────────────────────────────────────────
@@ -107,11 +106,12 @@ function admitted(guard: Handle): string[] {
 // ── 1. no doors_* tool can unlock or write ────────────────────────────────
 
 describe("negative 1 — no doors_* tool can unlock or write (§11.5)", () => {
+  // P4a ships NO doors_* tool (the two reads arrive in P4b, when the module goes
+  // live), so these pass over an empty set today. They fail the day a tool in
+  // the namespace writes, or a tool route reaches /api/doors with anything but
+  // a GET. packages/tools-core/__tests__/doors-read-only.test.ts proves the
+  // same rule rejects a synthetic writing tool, so an empty pass is not vacuous.
   const doorsNames = [...TOOLS.keys()].filter((n) => n.startsWith("doors_")).sort();
-
-  it("the doors tools are exactly the two reads (not vacuous)", () => {
-    expect(doorsNames).toEqual(["doors_list", "doors_recent_events"]);
-  });
 
   it("none is a write tool, in the registry, the catalog or the derived WRITE_TOOLS set the RBAC tiers read", () => {
     for (const name of doorsNames) {
@@ -120,33 +120,17 @@ describe("negative 1 — no doors_* tool can unlock or write (§11.5)", () => {
       expect(WRITE_TOOLS.has(name), name).toBe(false);
       expect(VOICE_WRITE_TOOLS.has(name), name).toBe(false);
     }
-    for (const entry of TOOL_CATALOG.filter((e) => e.domain === "doors")) {
+    for (const entry of TOOL_CATALOG.filter((e) => e.name.startsWith("doors_"))) {
       expect(entry.requiresWrite, entry.name).toBe(false);
     }
   });
 
-  it("every route hop a doors tool makes is a GET, and to a GET route that exists", () => {
-    for (const name of doorsNames) {
-      const entry = TOOL_ROUTES.find((e) => e.tool === name)!;
-      expect(entry.hops.length, name).toBeGreaterThan(0);
-      for (const hop of entry.hops) {
-        expect(hop.method, `${name} ${hop.pathPattern}`).toBe("get");
-        expect(READS.map((r) => `/api${r.path}`), name).toContain(hop.pathPattern);
-      }
+  it("every route hop any tool makes to /api/doors is a GET, and to a GET route that exists", () => {
+    const hops = TOOL_ROUTES.flatMap((e) => e.hops.map((h) => ({ tool: e.tool, ...h }))).filter((h) => h.pathPattern.startsWith("/api/doors"));
+    for (const hop of hops) {
+      expect(hop.method, `${hop.tool} ${hop.pathPattern}`).toBe("get");
+      expect(READS.map((r) => `/api${r.path}`), hop.tool).toContain(hop.pathPattern);
     }
-  });
-
-  it("the doors tools are out of default chat and are the only tools in the doors domain", () => {
-    for (const name of doorsNames) expect(EXCLUDED_FROM_CHAT_TOOLS.has(name), name).toBe(true);
-    expect(TOOL_CATALOG.filter((e) => e.domain === "doors").map((e) => e.name).sort()).toEqual(doorsNames);
-  });
-
-  it("the dispatch guard is not the deny tier: it lives in the interceptor itself (proved in tools-core and mcp-server)", () => {
-    const src = readFileSync(resolve(__dirname, "../../../../packages/tools-core/src/interceptor.ts"), "utf8");
-    // The namespace check runs inside `intercept`, before the deny tier is consulted.
-    const intercept = src.slice(src.indexOf("intercept(tool, args, meta, now = Date.now())"));
-    expect(intercept.indexOf("readOnlyNamespaceBreach(tool)")).toBeGreaterThan(-1);
-    expect(intercept.indexOf("readOnlyNamespaceBreach(tool)")).toBeLessThan(intercept.indexOf("denyTier.evaluate"));
   });
 });
 
@@ -169,8 +153,8 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     expect(route.handles.filter(isRoleGuard), route.key).toHaveLength(1);
   });
 
-  it.each(READS.map((r) => [r.key, r] as const))("%s admits owner, admin and the MCP service principal — nobody else", (_key, route) => {
-    expect(admitted(route.handles.find(isRoleGuard)!), route.key).toEqual(["owner", "admin", "service:mcp"]);
+  it.each(READS.map((r) => [r.key, r] as const))("%s admits owner and admin — nobody else, and no service principal", (_key, route) => {
+    expect(admitted(route.handles.find(isRoleGuard)!), route.key).toEqual(["owner", "admin"]);
   });
 
   it.each(WRITES.map((r) => [r.key, r] as const))(
@@ -185,20 +169,18 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     expect(isRoleGuard(route.handles[1]), route.key).toBe(true);
   });
 
-  it("no router-level gate is used, and no route is `requireRoleOrMcpService` on a write (source)", () => {
+  it("no router-level gate is used, and no route admits the MCP service principal (source)", () => {
     const code = readFileSync(resolve(__dirname, "../routes/doors.ts"), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");
-    // The one MCP-admitting guard is bound to `read` and used only by the two GETs.
-    expect(code.match(/requireRoleOrMcpService\(/g) ?? []).toHaveLength(1);
-    expect(code).toMatch(/const read = requireRoleOrMcpService\(/);
-    expect(code).not.toMatch(/router\.(post|patch|put|delete)\([^)]*\bread\b/);
+    // P4a has no doors tool, so nothing has a reason to reach these routes as the
+    // assistant. The reads join the MCP path in P4b, with their own gate.
+    expect(code).not.toMatch(/requireRoleOrMcpService/);
     expect(code).not.toMatch(/router\.use\(/);
   });
 
-  it("the module carries a per-person grant: feature-gated, in the access catalog, and acting-user gated for the MCP path", () => {
+  it("the module carries a per-person grant: feature-gated and in the access catalog", () => {
     expect(FEATURE_GATED_MODULES.has("doors")).toBe(true);
-    expect(MCP_ACTING_USER_GATED_DOMAINS).toContain("doors");
   });
 
   // The composition, driven for real: every route, through the real gates.
@@ -214,8 +196,6 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     toggle?: boolean | "none";
     grants: Array<{ moduleId: string; level: string }>;
     user: { id: string; role: string; username?: string };
-    acting?: { domains: string[] } | null;
-    actingTier?: string;
   }) {
     const prisma = {
       moduleSetting: {
@@ -234,16 +214,6 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     });
     const resolve = features(opts.grants);
     mountModuleGates(app, createModuleGate(prisma, opts.cfg, 0), resolve);
-    mountMcpActingUserGates(
-      app,
-      (async () => ({
-        scope: opts.acting === null || opts.acting === undefined ? null : { domains: new Set(opts.acting.domains), writeDomains: new Set(), locks: false },
-        tier: opts.actingTier ?? "admin",
-        unresolved: null,
-        userId: "u-1",
-      })) as never,
-      resolve,
-    );
     app.use("/api", createDoorsRouter(prisma));
     return app;
   }
@@ -287,45 +257,19 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     },
   );
 
-  it.each(READS.map((r) => [r.key, r] as const))(
-    "%s: the MCP principal acting for a person without the doors domain gets 404; with it, the read goes through",
+  it.each(ROUTES.map((r) => [r.key, r] as const))(
+    "%s: the MCP service principal is refused (403) even with the module on and the grant held — the assistant has no doors surface in P4a",
     async (_key, route) => {
-      const denied = buildApp({
+      const app = buildApp({
         cfg: CFG_ON,
         toggle: true,
         grants: [{ moduleId: "doors", level: "view" }],
         user: { id: "_service:mcp", role: "service" },
-        acting: { domains: ["files"] },
       });
-      const deniedRes = await request(denied).get(concrete(route)).set("X-Nextcloud-User", "sam");
-      expect(deniedRes.status).toBe(404);
-
-      const allowed = buildApp({
-        cfg: CFG_ON,
-        toggle: true,
-        grants: [{ moduleId: "doors", level: "view" }],
-        user: { id: "_service:mcp", role: "service" },
-        acting: { domains: ["doors"] },
-      });
-      const okRes = await request(allowed).get(concrete(route)).set("X-Nextcloud-User", "sam");
-      expect(okRes.status).toBe(200);
+      const res = await call(app, route);
+      expect(res.status, route.key).toBe(403);
     },
   );
-
-  it("the MCP principal acting for a STAFF person (family tier) is refused even holding the doors grant and domain — the assistant never reads what the browser would 403", async () => {
-    const staff = buildApp({
-      cfg: CFG_ON,
-      toggle: true,
-      grants: [{ moduleId: "doors", level: "view" }],
-      user: { id: "_service:mcp", role: "service" },
-      acting: { domains: ["doors"] },
-      actingTier: "family",
-    });
-    for (const r of READS) {
-      const res = await request(staff).get(concrete(r)).set("X-Nextcloud-User", "sam");
-      expect(res.status, r.key).toBe(404);
-    }
-  });
 
   it("with the grant held, an admin reads but the door-changing routes still refuse them (403, not 404: the module is theirs, the authority is not)", async () => {
     const app = buildApp({

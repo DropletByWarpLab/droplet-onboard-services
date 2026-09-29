@@ -19,11 +19,10 @@
  *     names that lives in THIS repo: the registry entry (present, available,
  *     on its prefix), the per-person grant (FEATURE_GATED_MODULES and the
  *     access catalog — "an empty grant set is a deny"), the routes (mounted,
- *     behind the module gates, and before any catch-all path param), the two
- *     tools (registered, claimed by a module, and their routes mounted), the
- *     retention job, and — in the database — the two tables and BOTH triggers
+ *     behind the module gates, and before any catch-all path param), the
+ *     retention job, and — in the database — the two tables, BOTH triggers
  *     (a box that has the tables but not the append-only trigger has evidence
- *     anything could rewrite).
+ *     anything could rewrite) and the retention function.
  *
  * It reports EVERY problem at once and throws one `DoorsWiringError`: a boot
  * that shows one missing list per restart is how a gap outlives a deploy. The
@@ -31,15 +30,14 @@
  * the box's generated env, the nav entries — are not checkable here and are
  * not pretended to be: there is no compose service (no `services/access-
  * control/` yet) and no nav entry (no page until P4b). The "/access health row
- * on the panel" waits for that page.
+ * on the panel" waits for that page. The tool lists (registry, catalog, route
+ * manifest) join the checklist in P4b, when the module's read tools land.
  */
 import type { Express } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { TOOLS, TOOL_ROUTES } from "@droplet/tools-core";
-import type { ToolRouteEntry } from "@droplet/tools-core";
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 import { MODULE_BY_ID, type AvailabilityConfig, type ModuleDef } from "../modules/module-registry.js";
-import { OWNERS_BY_DOMAIN, isGateableModuleId } from "./access-catalog.js";
+import { isGateableModuleId } from "./access-catalog.js";
 import { createDoorsRouter } from "../routes/doors.js";
 import { doorsRetentionRegistered } from "./doors.service.js";
 import { createLogger } from "../lib/logger.js";
@@ -61,9 +59,6 @@ export interface DoorsWiringSources {
   moduleById?: ReadonlyMap<string, ModuleDef>;
   featureGated?: ReadonlySet<string>;
   isGateable?: (id: string) => boolean;
-  tools?: ReadonlyMap<string, { requiresWrite: boolean; requiresConfirmation: boolean }>;
-  ownersByDomain?: ReadonlyMap<string, readonly string[]>;
-  toolRoutes?: readonly ToolRouteEntry[];
 }
 
 export interface DoorsWiringInput {
@@ -143,8 +138,6 @@ async function readDbFacts(prisma: Pick<PrismaClient, "$queryRaw">): Promise<DbF
 
 // ── the assertion ─────────────────────────────────────────────────────────
 
-const DOORS_TOOL_NAMES = ["doors_list", "doors_recent_events"] as const;
-
 export async function assertDoorsWired(
   input: DoorsWiringInput,
   sources: DoorsWiringSources = {},
@@ -170,7 +163,6 @@ export async function assertDoorsWired(
     if (def.routePrefixes.length !== 1 || def.routePrefixes[0] !== "/api/doors") {
       problems.push(`the registry gives \`doors\` the route prefix ${JSON.stringify(def.routePrefixes)}, not ["/api/doors"]`);
     }
-    if (!def.toolDomains.includes("doors")) problems.push("the registry entry does not claim the `doors` tool domain");
   }
 
   // ── on: the per-person grant ──────────────────────────────────────────
@@ -217,28 +209,6 @@ export async function assertDoorsWired(
         problems.push(
           `only ${gates.length} of ${wantedGates} module gates are mounted in front of /api/doors (mountModuleGates must run before the router)`,
         );
-      }
-    }
-  }
-
-  // ── on: the tools ─────────────────────────────────────────────────────
-  const tools = sources.tools ?? TOOLS;
-  for (const name of DOORS_TOOL_NAMES) {
-    const t = tools.get(name);
-    if (!t) problems.push(`${name} is not registered in @droplet/tools-core`);
-    else if (t.requiresWrite || t.requiresConfirmation) problems.push(`${name} is registered as a write or confirming tool (§11.5)`);
-  }
-  if (!(sources.ownersByDomain ?? OWNERS_BY_DOMAIN).get("doors")?.includes("doors")) {
-    problems.push("the tool domain `doors` is claimed by no module (its tools would reach nobody who holds a role)");
-  }
-  if (stack) {
-    const mounted = mountedApiRoutes(stack);
-    for (const entry of sources.toolRoutes ?? TOOL_ROUTES) {
-      if (!entry.tool.startsWith("doors_")) continue;
-      for (const hop of entry.hops) {
-        const shape = hop.pathPattern.replace(/:[^/]+/g, ":param");
-        const found = [...mounted].some((m) => m.replace(/:[^/ ]+/g, ":param") === `${hop.method.toUpperCase()} ${shape}`);
-        if (!found) problems.push(`${entry.tool} dispatches ${hop.method.toUpperCase()} ${hop.pathPattern}, which is not mounted`);
       }
     }
   }

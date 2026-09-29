@@ -185,9 +185,6 @@ import erpFindPatient from "./handlers/erp/find-patient.js";
 import erpGetArSummary from "./handlers/erp/get-ar-summary.js";
 import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
 import moneyListOpenDocuments from "./handlers/money/list-open-documents.js";
-// ADR-055 (P4a) — doors: two READ-ONLY tools. Never a third that writes (§11.5).
-import doorsList from "./handlers/doors/list.js";
-import doorsRecentEvents from "./handlers/doors/recent-events.js";
 
 // cloud (WARP-2497) — the connected SaaS accounts (Stripe / HubSpot /
 // Mailchimp). Deliberately ONE tool for all three vendors and all ten record
@@ -403,11 +400,6 @@ const allTools: Tool[] = [
   erpFindPatient,
   erpGetArSummary,
   moneyListOpenDocuments,
-  // ADR-055 (P4a, brief §11.5): doors. Two reads; the assistant never opens a
-  // door, issues a credential or changes a grant. Enforced at dispatch too
-  // (interceptor.ts), not only here.
-  doorsList,
-  doorsRecentEvents,
   erpScheduleAppointment,
   // WARP-2497: cloud connectors (Stripe/HubSpot/Mailchimp) — one Read-tier
   // tool covering all ten datasets; the dataset arg picks the provider.

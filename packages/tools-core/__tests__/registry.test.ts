@@ -199,11 +199,6 @@ const EXPECTED_TOOL_NAMES = [
   "cloud_query_dataset",
   // money (WARP-2581) — excluded from the chat pool, MCP/API reachable
   "money_list_open_documents",
-  // doors (ADR-055 P4a, brief §11.5) — the assistant's whole reach into doors:
-  // two READS. No unlock, no grant, no credential, and nothing that confirms.
-  // Excluded from the chat pool while the module ships dark; MCP/API reachable.
-  "doors_list",
-  "doors_recent_events",
   // agent_runs (WARP-2180) — start is Tier-2 (it spends compute unattended),
   // list is Tier-1. Both in the chat pool: a run is startable from chat.
   "start_agent_run",
@@ -253,15 +248,6 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("start_agent_run")?.requiresWrite).toBe(true);
     expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
-
-    // ADR-055 §11.5 — the assistant may never open a door, issue a credential
-    // or change a grant, and no confirmation-token flow makes that acceptable.
-    // Both doors tools are reads, by flag. (`registry.test.ts` is the gate for
-    // the flags; interceptor.test.ts is the gate for dispatch.)
-    for (const name of ["doors_list", "doors_recent_events"]) {
-      expect(TOOLS.get(name)?.requiresWrite, name).toBe(false);
-      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
-    }
     expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
     // WARP-2894 — a draft is inert (POST /api/tools cannot set status), so
     // drafting is a write that needs no confirmation; a person promotes it

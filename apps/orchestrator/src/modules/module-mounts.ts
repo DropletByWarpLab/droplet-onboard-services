@@ -60,7 +60,6 @@ import {
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
-import { DOORS_READ_ROLES } from "../services/doors-access.js";
 import {
   requireMcpActingUserToolDomain,
   type ActingUserAccessResolver,
@@ -221,14 +220,6 @@ export function mountModuleGates(
  * prefix. The email module is not feature-gated for humans, so the gate asks
  * question 1 only, and browser sessions are untouched.
  *
- * `doors` (ADR-055 P4a): `doors_list` and `doors_recent_events` reach
- * routes/doors.ts as `_service:mcp`, and access logs identify people entering
- * places at times, so the assistant must never read more than the person it
- * acts for could. Both tools are reads and every `doors` hop is under
- * `/api/doors` (the same test pins it). The `doors` module IS feature-gated for
- * humans, so the gate asks question 2 (the person's `doors` grant) as well.
- * There is no write hop to gate — the write routes admit no service principal
- * at all (§11.5) — and `everyToolWrites` is false because the domain has reads.
  * `team_chat` (WARP-3162): `team_chat_send_message` and
  * `team_chat_send_meeting_invite` reach routes/team-chat.ts as `_service:mcp`,
  * and the route resolves the acting person for thread membership but never
@@ -239,24 +230,7 @@ export function mountModuleGates(
  * `team_chat` module is not feature-gated for humans, so the gate asks question
  * 1 only, and browser sessions are untouched.
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "doors"];
-
-/**
- * ADR-055 — tier floors on the ACTING person, per gated domain. The `doors`
- * read routes floor at owner/admin for a human (`requireRole`), but
- * `requireRoleOrMcpService` admits `_service:mcp` before any role check, and
- * neither the tool scope (null for a role-less person) nor the §9 catalog
- * (`view` is never floored) narrows a staff member — so, without this, the
- * assistant would read doors for a person whose browser gets a 403. It is the
- * same list the route uses (services/doors-access.ts), read once.
- *
- * Only `doors` has one. Adding a floor to another domain changes what the
- * assistant may do for role-less staff on a shipped surface, so it is a
- * deliberate, tested edit here — pinned exactly in mcp-acting-user-gate.test.ts.
- */
-export const MCP_ACTING_USER_ROLE_FLOORS: Readonly<Record<string, readonly string[]>> = {
-  doors: DOORS_READ_ROLES,
-};
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(
@@ -277,7 +251,6 @@ export function mountMcpActingUserGates(
               def.id,
               resolve,
               FEATURE_GATED_MODULES.has(def.id) ? features : null,
-              MCP_ACTING_USER_ROLE_FLOORS[domain] ?? null,
             ),
             gateScopeFor(def, prefix),
           ),

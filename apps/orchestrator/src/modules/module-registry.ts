@@ -309,19 +309,19 @@ export const MODULES: readonly ModuleDef[] = [
     // SHIPS DARK. `available` reads DOORS_ENABLED, an EXPLICIT boolean (the
     // DOCS_ENABLED idiom — never derived from another variable's emptiness),
     // so a box that has not turned it on has NO doors module: /api/doors 404s
-    // `module_disabled`, the module cannot be switched on in Settings, and the
-    // `doors` tool domain reaches nobody who holds a role. Absent, not empty.
+    // `module_disabled` and the module cannot be switched on in Settings.
+    // Absent, not empty.
     //
     // `navHrefs: []` — there is no dashboard page until P4b, and a nav entry
     // pointing at nothing would be worse than none (the `docs` / `contacts`
     // shape). It is in no BUSINESS_TYPES preset for the same reason.
     //
-    // The `doors` tool domain is claimed in the same change that adds its two
-    // read-only tools — never left unclaimed (WARP-2742).
+    // No tool domain yet: the two read-only chat tools are P4b's, and the
+    // `doors` domain is claimed here in the change that adds them (WARP-2742).
     id: "doors", label: "Doors",
     description: "The doors this box knows about, and the log of what happened at them.",
     category: "operations", routePrefixes: ["/api/doors"], navHrefs: [],
-    toolDomains: ["doors"], core: false, defaultEnabled: false,
+    toolDomains: [], core: false, defaultEnabled: false,
     available: (c) => isTruthy(c.DOORS_ENABLED),
   },
   {

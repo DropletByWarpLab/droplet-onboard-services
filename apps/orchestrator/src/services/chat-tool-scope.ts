@@ -171,30 +171,6 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   // should delete this line rather than re-derive the argument — but do not
   // cite budget as the reason it is still here, because that reason is spent.
   "money_list_open_documents",
-  // ADR-055 (P4a) — doors. The site-7 decision, made on purpose: BOTH reads stay
-  // out of default chat while the module ships dark. Two reasons, neither of
-  // them budget (they cost ~350 chars against ~579 of registry headroom, and a
-  // `doors` rule would advertise them for a few words per turn):
-  //
-  //   1. §6 module gating does not yet reach the chat pool for an owner or for
-  //      anybody holding no AccessRole (see routes/llm.ts, the `/llm/tools/
-  //      catalog` note — WARP-2972 wires it for everyone). So with DOORS_ENABLED
-  //      off, the model would still be OFFERED `doors_list` on every box, and
-  //      its only possible answer would be "Doors isn't switched on": the
-  //      workspace tools' shape, a tool that can only refuse. "Absent when
-  //      the module is off" is a promise this list can keep today and the pool
-  //      cannot.
-  //   2. It is presence data about identifiable people at doors, admin/owner
-  //      only, with no dashboard page to show the same answer (P4b).
-  //
-  // Reachable over MCP and `/api/doors` (per-tool RBAC, then the acting-user
-  // gate on the route). REVISIT WHEN the module gate reaches the chat pool
-  // AND P4b lands: delete these two lines and add a `doors` DOMAIN_RULES entry
-  // in the same change (a domain with in-scope tools and no rule is red).
-  // Deliberately RULELESS meanwhile, like `switch`, `erp` and `workspace`: a
-  // rule would promise a tool the pool can never deliver.
-  "doors_list",
-  "doors_recent_events",
   // ADR-045 slice D — `business_link`, and the reason is POLICY, not budget.
   //
   // An earlier draft of this entry argued from the pool ceiling, the way

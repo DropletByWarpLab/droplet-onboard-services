@@ -23,7 +23,6 @@ import {
   isGrantableDomain,
   tierReachableDomains,
   FEATURE_UNGATED_TOOL_DOMAINS,
-  OWNERS_BY_DOMAIN,
   unmappedToolDomains,
 } from "./access-catalog.js";
 import { toolLayers } from "./tool-layers.service.js";
@@ -416,9 +415,5 @@ describe("access-catalog — doors (ADR-055)", () => {
       expect(clampLevel(tier, "doors", "manage"), tier).toBe("view");
       expect(clampLevel(tier, "doors", "act"), tier).toBe("view");
     }
-  });
-
-  it("is claimed by exactly one module, and that module is `doors`", () => {
-    expect(OWNERS_BY_DOMAIN.get("doors")).toEqual(["doors"]);
   });
 });

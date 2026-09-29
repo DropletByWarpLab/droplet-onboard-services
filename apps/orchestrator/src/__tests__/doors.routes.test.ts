@@ -1,16 +1,14 @@
 /**
  * ADR-055 (P4a) — /api/doors.
  *
- * The real `requireRole` / `requireRoleOrMcpService` run (a stub would let a
- * wrong allowlist pass) against the real service and a stubbed Prisma. The
+ * The real `requireRole` runs (a stub would let a wrong allowlist pass) against the real service and a stubbed Prisma. The
  * module gates — the box toggle and the per-person `doors` grant — are mounted
  * by `mountModuleGates` off the registry prefix; doors-negative-suite.test.ts
  * drives them, since this file mounts the router alone.
  *
- * WHO, the load-bearing part: reads are owner and admin (and the MCP service
- * principal, which is how the two chat tools arrive); writes are the owner
- * ALONE, and no service principal — the assistant reads doors and can never
- * change one (§11.4, §11.5).
+ * WHO, the load-bearing part: reads are owner and admin; writes are the owner
+ * ALONE; no route admits a service principal — the assistant has no doors
+ * surface in P4a, and can never change a door (§11.4, §11.5).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -95,7 +93,7 @@ beforeEach(() => {
 });
 
 describe("GET /api/doors", () => {
-  it.each(["owner", "admin", "mcp"] as const)("%s may read", async (who) => {
+  it.each(["owner", "admin"] as const)("%s may read", async (who) => {
     const res = await request(app(who)).get("/api/doors");
     expect(res.status).toBe(200);
     expect(res.body.doors).toHaveLength(1);
@@ -109,7 +107,7 @@ describe("GET /api/doors", () => {
     });
   });
 
-  it.each(["family", "guest", "voice", null] as const)("%s is refused, and nothing is read", async (who) => {
+  it.each(["family", "guest", "mcp", "voice", null] as const)("%s is refused, and nothing is read", async (who) => {
     const res = await request(app(who)).get("/api/doors");
     expect(res.status).toBe(403);
     expect(prisma.accessPoint.findMany).not.toHaveBeenCalled();
@@ -144,7 +142,7 @@ describe("GET /api/doors/events", () => {
     correlationKey: null,
   });
 
-  it.each(["owner", "admin", "mcp"] as const)("%s may read; ids come back as strings", async (who) => {
+  it.each(["owner", "admin"] as const)("%s may read; ids come back as strings", async (who) => {
     prisma.accessEvent.findMany.mockResolvedValue([evRow(2), evRow(1)]);
     const res = await request(app(who)).get("/api/doors/events?limit=5");
     expect(res.status).toBe(200);
@@ -152,7 +150,7 @@ describe("GET /api/doors/events", () => {
     expect(res.body.nextCursor).toBeNull();
   });
 
-  it.each(["family", "guest", "voice", null] as const)("%s is refused", async (who) => {
+  it.each(["family", "guest", "mcp", "voice", null] as const)("%s is refused", async (who) => {
     expect((await request(app(who)).get("/api/doors/events")).status).toBe(403);
     expect(prisma.accessEvent.findMany).not.toHaveBeenCalled();
   });

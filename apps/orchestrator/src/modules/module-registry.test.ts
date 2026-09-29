@@ -371,7 +371,9 @@ describe("doors module — ADR-055 (ships dark)", () => {
   it("is registered as `doors` — never `access`, which is ADR-032's RBAC", () => {
     expect(doors()).toBeDefined();
     expect(doors().routePrefixes).toEqual(["/api/doors"]);
-    expect(doors().toolDomains).toEqual(["doors"]);
+    // No tool domain in P4a: the two read tools, and the domain that claims
+    // them, are P4b's.
+    expect(doors().toolDomains).toEqual([]);
     expect(MODULES.some((m) => (m.id as string) === "access")).toBe(false);
     for (const m of MODULES) {
       for (const p of m.routePrefixes) expect(p).not.toBe("/api/access");
