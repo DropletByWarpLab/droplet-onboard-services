@@ -93,6 +93,7 @@ import {
 import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
+import { redactToolResult } from "../lib/log-redaction.js";
 
 const logger = createLogger("llm-agent");
 
@@ -2669,7 +2670,37 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           ],
         };
       }
-      const text = result.content[0]?.text ?? "{}";
+      // WARP-3282 — scrub credential shapes (AWS keys, provider tokens, PEM
+      // blocks, `password=` …) out of the tool result BEFORE anything else
+      // reads it. The model can't leak what it never saw: adv-019 showed it
+      // repeating an AWS secret from a search_content snippet verbatim.
+      //
+      // Deliberately redacted for EVERY consumer below, not only the model:
+      // the durable run checkpoint, the returned trace (persisted with the
+      // chat message) and the SSE `tool_result.data` all hold the scrubbed
+      // text. A chat is persisted, exported, shared, and read by members and
+      // guests the underlying file may not be shared with; the person who
+      // may see the credential still opens the document itself through
+      // Files, which this does not touch. Confirmation tokens are hex under
+      // camelCase keys and match no rule, so the approval path is unaffected.
+      // Redacted per decoded JSON string leaf, not over the escaped wire text
+      // (where `KEY="v"` arrives as `KEY=\"v\"` and slips past the rules).
+      // Count only in the log — never the value.
+      const { text, count: credentialsRedacted } = redactToolResult(
+        result.content[0]?.text ?? "{}",
+      );
+      if (credentialsRedacted > 0) {
+        logger.info(
+          {
+            tool: call.function.name,
+            tool_call_id: call.id,
+            turn_id: turnId,
+            iter,
+            redacted: credentialsRedacted,
+          },
+          "agent_tool_result_credentials_redacted",
+        );
+      }
       // WARP-2177 — complete the trace entry with the wire result, so a
       // resume after THIS point replays instead of re-dispatching. Skipped
       // for a replay: the entry is already complete.
