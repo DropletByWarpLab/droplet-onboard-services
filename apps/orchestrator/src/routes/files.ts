@@ -6,7 +6,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
-import { PrismaClient, type DepartmentRight } from "@prisma/client";
+import { PrismaClient, type DepartmentRight, type FolderColor } from "@prisma/client";
 import pino from "pino";
 import {
   ncListFiles,
@@ -1821,6 +1821,135 @@ export function createFilesRouter(
           ncFileId: fileId,
           label,
         });
+        res.status(204).end();
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Folder colours (GET/PUT/DELETE /api/files/folder-colors) ──
+  //
+  // Personal organisation: a colour is visible to the user who set it and to
+  // nobody else, so rows are keyed (req.user.id, ncFileId) and EVERY query
+  // filters on the caller's UUID (never the NC username `getUser(req)`).
+  // Any human role — guest included — may colour folders it can see: this is
+  // the caller's own palette, not a write to shared content, so there is no
+  // `requireRole` and only the `reader` space floor (which is also what the
+  // listing itself needs). The mcp service principal has no palette.
+  //
+  // `ncFileId` survives rename/move, so nothing here runs on those routes.
+  // GET returns every colour the caller has set (bounded by how many folders
+  // they coloured) so the listing stays untouched and cacheable; the
+  // dashboard joins on `ncFileId`, which listings already carry.
+  const FOLDER_COLOR_VALUES = [
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "blue",
+    "purple",
+    "gray",
+  ] as const satisfies readonly FolderColor[];
+
+  /** Local User.id for a real (non-service) caller, else 403 + null. */
+  const folderColorOwner = (req: Request, res: Response): string | null => {
+    const id = req.user?.id;
+    if (!id || req.user?.role === "service") {
+      recordAccessDenied(req, "folder-color-no-user");
+      res.status(403).json({ error: "Forbidden: folder colors are per user" });
+      return null;
+    }
+    return id;
+  };
+
+  /** (space, path) → the folder's ncFileId, or null after writing the 4xx. */
+  const resolveFolderIdOr404 = async (
+    req: Request,
+    res: Response,
+    rawPath: unknown,
+  ): Promise<number | null> => {
+    if (typeof rawPath !== "string" || !rawPath || rawPath === "/") {
+      res.status(400).json({ error: "path is required" });
+      return null;
+    }
+    const resolved = await rootForSpace(
+      prisma,
+      resolveSpace(spaceQueryOrBody(req)),
+      rawPath,
+    );
+    const fileId = await ncGetFileId(await getToken(req), await getUser(req, prisma), resolved);
+    if (fileId === null) {
+      res.status(404).json({ error: "Folder not found" });
+      return null;
+    }
+    // Same department gate the tag/comment routes run: the space token only
+    // authorizes what the caller DECLARED, the file's own registry row decides.
+    if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return null;
+    return fileId;
+  };
+
+  router.get("/files/folder-colors", async (req, res, next) => {
+    try {
+      const userId = folderColorOwner(req, res);
+      if (!userId) return;
+      const rows = await prisma.fileFolderColor.findMany({
+        where: { userId },
+        select: { ncFileId: true, color: true },
+      });
+      res.json({ colors: rows });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  router.put(
+    "/files/folder-colors",
+    requireSpaceAccess(prisma, "reader", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
+      try {
+        const parsed = z
+          .object({
+            path: z.string().min(1),
+            color: z.enum(FOLDER_COLOR_VALUES),
+            space: z.string().optional(),
+          })
+          .safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: `path and color (${FOLDER_COLOR_VALUES.join(", ")}) are required`,
+          });
+          return;
+        }
+        const userId = folderColorOwner(req, res);
+        if (!userId) return;
+        const ncFileId = await resolveFolderIdOr404(req, res, parsed.data.path);
+        if (ncFileId === null) return;
+        const row = await prisma.fileFolderColor.upsert({
+          where: { userId_ncFileId: { userId, ncFileId } },
+          create: { userId, ncFileId, color: parsed.data.color },
+          update: { color: parsed.data.color },
+          select: { ncFileId: true, color: true },
+        });
+        res.json({ color: row });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // Clearing is a DELETE of the row — there is no "none" member to store.
+  // Path travels in the query string (a DELETE body is dropped by proxies).
+  router.delete(
+    "/files/folder-colors",
+    requireSpaceAccess(prisma, "reader", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
+      try {
+        const userId = folderColorOwner(req, res);
+        if (!userId) return;
+        const ncFileId = await resolveFolderIdOr404(req, res, req.query.path);
+        if (ncFileId === null) return;
+        await prisma.fileFolderColor.deleteMany({ where: { userId, ncFileId } });
         res.status(204).end();
       } catch (err) {
         handleFileError(err, res, next);

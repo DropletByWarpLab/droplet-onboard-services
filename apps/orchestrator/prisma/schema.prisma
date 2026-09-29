@@ -4661,6 +4661,39 @@ model FileTag {
   @@index([addedByUserId])
 }
 
+/// Finder-tag-style palette for a folder's colour in the Files UI. "No colour"
+/// is not a member: clearing a colour deletes the `FileFolderColor` row (the
+/// row's existence IS the "this folder is coloured" fact, and `color` is its
+/// only state — there is no second column to disagree with it).
+enum FolderColor {
+  red
+  orange
+  yellow
+  green
+  blue
+  purple
+  gray
+}
+
+/// Per-user folder colour. Personal organisation, NOT shared metadata: user A
+/// colouring a folder is invisible to user B, so it is keyed on
+/// `(userId, ncFileId)`. `ncFileId` (oc:fileid) survives rename/move — the
+/// same identity FileTag / FileComment use — so no path bookkeeping happens on
+/// rename. `userId` is the LOCAL `User.id` UUID (`req.user.id`), never the
+/// Nextcloud username. Like FileTag, no FK to User: a file-metadata table
+/// keyed on Nextcloud identities, mirroring the shipped precedent.
+model FileFolderColor {
+  id        String      @id @default(uuid())
+  userId    String
+  ncFileId  Int
+  color     FolderColor
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@unique([userId, ncFileId])
+  @@index([userId])
+}
+
 /// WARP-468 — Phase E2. 60 s egress byte counter per off-LAN channel.
 ///
 /// One row per (ts, channel). A 60 s apscheduler tick in
