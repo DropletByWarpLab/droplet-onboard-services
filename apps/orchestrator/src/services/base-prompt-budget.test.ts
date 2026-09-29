@@ -420,11 +420,14 @@ describe("worst-case fixed system-block budget", () => {
     // what routes the model (find = where is it, link it; open = take me
     // there; never a path the tool did not return), 515 + 545 = 1,060, and the
     // closing "Tier-1 read; safe to call without operator confirmation." was
-    // dropped from six read tools that already state it as
+    // dropped from nine read tools that already state it as
     // `requiresWrite: false` / `requiresConfirmation: false`
     // (get_bandwidth_usage, list_vpn_peers, list_threat_events,
-    // get_drive_health, get_audit_log, get_update_status). Registry: 114,641
-    // over 159, 359 chars under 115,000 — under half an ordinary tool, so the
+    // get_drive_health, get_audit_log, get_update_status, network_summary,
+    // memory_recall, business_profile_get). That took it to 114,641 at stage
+    // 7363c4ba5. WARP-3194 then lengthened two Security descriptions (+206),
+    // so it stands at 114,676 over 159 with the last three of those dropped
+    // (−171): 324 chars under 115,000 — under half an ordinary tool, so the
     // next crossing is a decision, not an accident. What bounds a real chat
     // turn is untouched: the per-domain assertion above stays green with both
     // in the `data` pool, and the agent loop withholds both from every turn
