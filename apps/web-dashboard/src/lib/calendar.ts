@@ -59,3 +59,26 @@ export function eventVisibilityKey(e: CalendarEvent, knownSourceIds: Set<string>
 export function compareByStart(a: CalendarEvent, b: CalendarEvent): number {
   return new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime();
 }
+
+/** WARP-3265 — an all-day event from a subscribed feed is a pair of calendar
+ *  DATES, which the box stores as UTC midnight. Read in local time, that
+ *  instant is the previous evening west of UTC, so the event landed on two
+ *  days in the month grid and a day early in the agenda and "Up next".
+ *
+ *  Re-anchor it on LOCAL midnight of the same dates, so every view that does
+ *  local-day arithmetic on `startsAt`/`endsAt` gets it right unchanged. The
+ *  dates come from the box's `startDate`/`endDate` when sent, else from the
+ *  UTC date of the instants (older boxes). Same rule as the Mac:
+ *  `allDay && source !== "local"` (a local all-day event already carries the
+ *  creator's local midnight). */
+export function toLocalAllDay(ev: CalendarEvent): CalendarEvent {
+  if (!ev.allDay || ev.source === "local") return ev;
+  const utcDate = (iso: string) => {
+    const t = new Date(iso);
+    return isNaN(t.getTime()) ? null : t.toISOString().slice(0, 10);
+  };
+  const start = parseDateParam(ev.startDate ?? utcDate(ev.startsAt));
+  const end = parseDateParam(ev.endDate ?? utcDate(ev.endsAt));
+  if (!start || !end) return ev;
+  return { ...ev, startsAt: start.toISOString(), endsAt: end.toISOString() };
+}

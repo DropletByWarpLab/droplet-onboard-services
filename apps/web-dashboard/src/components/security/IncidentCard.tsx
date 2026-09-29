@@ -30,7 +30,7 @@ export function incidentIcon(i: Pick<IncidentSummary, "scope" | "reasonCodes">):
 
 export interface IncidentCardProps {
   incident: IncidentSummary;
-  /** Frigate camera name → the household's name for it. Defaults to the Frigate name. */
+  /** Frigate camera name → the business's name for it. Defaults to the Frigate name. */
   cameraLabel?: (name: string) => string;
   /** The zone every time is shown in: the site's, else the device's. */
   timezone: string;

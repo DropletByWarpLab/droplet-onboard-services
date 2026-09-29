@@ -91,6 +91,14 @@ const detection: DetectionEvent = {
   hasSnapshot: true,
 };
 
+// WARP-3104: the page reads the role to hide owner/admin controls; render as
+// the owner so every section this file checks is present.
+const auth = vi.hoisted(() => ({ role: "owner" }));
+vi.mock("@/lib/auth", () => ({
+  authFetch: vi.fn(),
+  useAuth: () => ({ user: { role: auth.role } }),
+}));
+
 vi.mock("swr", () => ({
   default: () => ({ data: undefined, mutate: vi.fn(), isValidating: false }),
 }));
@@ -182,5 +190,28 @@ describe("/cameras — the page's own children", () => {
       .map((el) => el.className)
       .filter((cls) => typeof cls === "string" && / m[btxy]?-\d/.test(" " + cls));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("/cameras — members see cameras, not camera administration (WARP-3104)", () => {
+  afterEach(() => {
+    cleanup();
+    auth.role = "owner";
+  });
+
+  it("an owner sees Add camera, Scan network and New group", () => {
+    const text = renderPage().closest("body")!.textContent ?? "";
+    expect(text).toContain("Add camera");
+    expect(text).toContain("Scan network");
+    expect(text).toContain("New group");
+  });
+
+  it("a member sees none of them, and still sees the grid", () => {
+    auth.role = "family";
+    const text = renderPage().closest("body")!.textContent ?? "";
+    expect(text).not.toContain("Add camera");
+    expect(text).not.toContain("Scan network");
+    expect(text).not.toContain("New group");
+    expect(text).toContain("All cameras");
   });
 });

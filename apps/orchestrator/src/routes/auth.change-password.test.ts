@@ -101,7 +101,7 @@ vi.mock("../services/password.service.js", () => ({
 }));
 
 vi.mock("../services/totp.service.js", () => ({
-  verifyTotpCode: vi.fn(),
+  acceptTotpCode: vi.fn(),
   generateTotpEnrollment: vi.fn(),
   encryptTotpSecret: vi.fn(),
   decryptTotpSecret: vi.fn(),

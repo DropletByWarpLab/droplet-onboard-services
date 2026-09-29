@@ -189,6 +189,30 @@ export interface ValidatedIdentity {
   emailVerified: boolean;
   /** Display name claim, if present. */
   name?: string;
+  /** WARP-3193 SEC-AUTH-3 — Google's `hd` (hosted domain) claim: the
+   *  Workspace domain of the account, RAW. Absent for a consumer Google
+   *  account and for other providers. */
+  hostedDomain?: string;
+}
+
+/**
+ * WARP-3193 SEC-AUTH-3 — the explicit Google Workspace domain allowlist
+ * (`DROPLET_SSO_GOOGLE_ALLOWED_HD`, comma-separated), trimmed + lowercased.
+ * Empty means NO domain is allowed: the callback then refuses to link or
+ * create any Google account that is not already linked by `sub`.
+ */
+export function googleHostedDomainAllowlist(): string[] {
+  return String(config.DROPLET_SSO_GOOGLE_ALLOWED_HD ?? "")
+    .split(",")
+    .map((d) => d.trim().toLowerCase())
+    .filter((d) => d.length > 0);
+}
+
+/** Is this `hd` claim on the allowlist? A missing claim (consumer account)
+ *  and an empty allowlist are both "no" — fail closed. */
+export function isGoogleHostedDomainAllowed(hostedDomain: string | undefined): boolean {
+  if (!hostedDomain) return false;
+  return googleHostedDomainAllowlist().includes(hostedDomain.trim().toLowerCase());
 }
 
 export interface CallbackChecks {
@@ -255,5 +279,6 @@ export async function exchangeCodeAndValidate(
     emailVerified = TRUST_EMAIL_WHEN_VERIFIED_CLAIM_ABSENT[provider];
   }
 
-  return { sub, email, emailVerified, name };
+  const hostedDomain = typeof claims?.hd === "string" ? claims.hd : undefined;
+  return { sub, email, emailVerified, name, hostedDomain };
 }
