@@ -181,4 +181,50 @@ describe("MemoryPanel", () => {
       expect(screen.getByText(/nothing saved yet/i)).toBeInTheDocument();
     });
   });
+
+  describe("phone layout (WARP-3202)", () => {
+    it("anchors to the header below lg: `lg:relative`, never a bare `relative`", async () => {
+      render(<MemoryPanel />);
+      const trigger = screen.getByRole("button", { name: /memory/i });
+      fireEvent.click(trigger);
+      const dialog = await screen.findByRole("dialog", { name: /assistant memory/i });
+
+      expect(trigger.parentElement).toHaveClass("lg:relative");
+      expect(trigger.parentElement).not.toHaveClass("relative");
+      expect(dialog).toHaveClass("right-0", "max-lg:right-3");
+    });
+
+    it("gives the fact and Add one row and Category and Audience the row under it", async () => {
+      render(<MemoryPanel />);
+      fireEvent.click(screen.getByRole("button", { name: /memory/i }));
+      const dialog = await screen.findByRole("dialog", { name: /assistant memory/i });
+      await waitFor(() => screen.getByText("Prefers recaps under 200 words"));
+
+      const fact = screen.getByLabelText(/new fact/i);
+      const add = screen.getByRole("button", { name: /^add$/i });
+      const category = screen.getByRole("button", { name: /^Category:/ });
+      // The per-fact audience control shares its name; the add row's is the
+      // one outside the fact list.
+      const list = screen.getByRole("list");
+      const audience = screen
+        .getAllByRole("button", { name: /^Audience:/ })
+        .find((b) => !list.contains(b))!;
+
+      // The text box is the inset field; nothing in the popover is a native select.
+      expect(fact).toHaveClass("chat-field");
+      expect(dialog.querySelector("select")).toBeNull();
+
+      // `.chat-field-row > button` and `.chat-field-row .pick-select` are what
+      // the phone rule raises to 44px, so each control has to sit in one.
+      const factRow = fact.closest(".chat-field-row");
+      const pickRow = category.closest(".chat-field-row");
+      expect(factRow).not.toBeNull();
+      expect(add.parentElement).toBe(factRow);
+      expect(category).toHaveClass("pick-select");
+      expect(audience).toHaveClass("pick-select");
+      expect(pickRow).not.toBe(factRow);
+      expect(pickRow!.contains(audience)).toBe(true);
+      expect(factRow!.contains(category)).toBe(false);
+    });
+  });
 });

@@ -71,11 +71,50 @@ describe("one derivation, two call sites", () => {
     );
   });
 
-  it("the route passes the configured mode, so `off` still sizes everything", () => {
+  // WARP-3316 — the route no longer reads `config.TOOL_SELECTION_MODE` at the
+  // estimate and the wire. It derives `toolSelectionMode` ONCE (the voice
+  // principal advertises its own scope, so it resolves to "off"; every other
+  // caller resolves to the configured mode) and both sites consume that one
+  // value. The three tests below pin the three halves of that: the derivation
+  // still starts from the config, and the estimate and the wire payload both
+  // read the derived value rather than a literal or the raw config.
+
+  it("the route derives its mode from the configured TOOL_SELECTION_MODE", () => {
     // Under TOOL_SELECTION_MODE=off the pool genuinely IS the wire payload.
-    // Hardcoding "domains" here would under-charge the one mode that needs
-    // the full estimate. Mutation: replace with a literal → red.
-    expect(ROUTE_SRC).toContain("mode: config.TOOL_SELECTION_MODE");
+    // Hardcoding "domains" in the derivation would under-charge the one mode
+    // that needs the full estimate, and would make the operator's rollback
+    // lever a no-op for every non-voice caller.
+    //
+    // Mutation: `isVoice ? "off" : "domains"` (or a bare `"domains"`) → red.
+    expect(ROUTE_SRC).toMatch(
+      /const toolSelectionMode\s*=[^;]*config\.TOOL_SELECTION_MODE/,
+    );
+  });
+
+  it("the budget estimate sizes the derived mode, not a literal or the raw config", () => {
+    // Reading the raw config here would size a voice turn as if the selector
+    // ran, while the wire (below) ships voice's whole scope — the WARP-2552
+    // phantom, reopened for the voice principal.
+    //
+    // Mutation: `mode: "domains"` or `mode: config.TOOL_SELECTION_MODE` → red.
+    expect(ROUTE_SRC).toMatch(
+      /effectiveAdvertisedToolNames\(\{\s*mode: toolSelectionMode,/,
+    );
+  });
+
+  it("every wire payload carries the derived mode, so the loop selects what was sized", () => {
+    // Two sites (streaming and non-streaming). Each value is captured and
+    // compared rather than counting `toolSelectionMode` occurrences, so a
+    // literal or a raw-config read at ONE site cannot hide behind the other.
+    // The length floor stops the check going vacuous if the field is renamed.
+    //
+    // Mutation: `tool_selection_mode: "domains"` or
+    // `tool_selection_mode: config.TOOL_SELECTION_MODE` at either site → red.
+    const wireModes = [...ROUTE_SRC.matchAll(/\btool_selection_mode:\s*([^,\n]+),/g)].map(
+      (m) => m[1]!.trim(),
+    );
+    expect(wireModes.length).toBeGreaterThanOrEqual(2);
+    expect(wireModes).toEqual(wireModes.map(() => "toolSelectionMode"));
   });
 });
 

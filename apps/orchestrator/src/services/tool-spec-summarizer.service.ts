@@ -130,6 +130,9 @@ const SYSTEM = [
   "- If there is nothing of note, say that briefly rather than padding.",
 ].join("\n");
 
+/** The ai-gateway's name for the on-box runtime (`ChatRequest.provider`). */
+const LOCAL_PROVIDER = "local";
+
 const DOMAIN_OF: ReadonlyMap<string, ToolDomain> = new Map(TOOL_CATALOG.map((e) => [e.name, e.domain]));
 
 /**
@@ -184,6 +187,10 @@ export function createToolSpecSummarizer(
           temperature: TEMPERATURE,
           maxTokens,
           ...(reasoningEffort ? { reasoningEffort } : {}),
+          // A withheld domain's results are written on the box, and the request SAYS so: the gateway routes by a
+          // named provider before it looks at the model's name, so a local fine-tune called gpt-* or claude-* still
+          // stays local. Any other summary keeps routing by model, as before.
+          ...(local ? { provider: LOCAL_PROVIDER } : {}),
         });
 
       let result = await ask(MAX_TOKENS);
