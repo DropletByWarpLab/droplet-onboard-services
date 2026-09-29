@@ -187,10 +187,11 @@ describe("/chat page mounts the history panel", () => {
 
     // Deflake: the composer's model selector hydrates asynchronously (useModels),
     // and the resend is a no-op until a model is selected — so clicking too early
-    // calls sendChat 0 times. Wait for the on-device model tag, which only renders
-    // once a local model is selected, before clicking Try-again.
+    // calls sendChat 0 times. The composer's field is disabled until a model is
+    // selected (`disabled={isStreaming || !selectedModel}`), so wait for it to
+    // enable before clicking Try-again.
     await waitFor(
-      () => expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
+      () => expect(screen.getByPlaceholderText("Ask Droplet anything…")).toBeEnabled(),
       { timeout: 10000 },
     );
 

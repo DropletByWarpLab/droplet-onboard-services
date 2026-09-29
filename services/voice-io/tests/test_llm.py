@@ -34,8 +34,10 @@ import pytest
 
 import voice.llm
 from voice.llm import (
+    DEFAULT_LLM_MAX_ITER,
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
+    DEFAULT_LLM_WARM_PATH,
     DEFAULT_VOICE_ALLOWED_TOOLS,
     DEFAULT_VOICE_MAX_TOKENS,
     LLMUnavailable,
@@ -47,6 +49,7 @@ from voice.llm import (
     build_llm_from_env,
     build_system_prompt,
     parse_allowed_tools,
+    parse_max_iter,
     parse_max_tokens,
 )
 
@@ -102,6 +105,85 @@ class TestOrchestratorAvailable:
             raise httpx.ConnectError("connection refused")
         _install_mock_transport(monkeypatch, handler)
         assert OrchestratorLLM(base_url="http://test").available is False
+
+
+# ────────────────────────────────────────────────────────────────────
+# OrchestratorLLM — warm() (WARP-3127 warm on wake)
+# ────────────────────────────────────────────────────────────────────
+
+class TestOrchestratorWarm:
+    def test_warm_path_default(self):
+        assert DEFAULT_LLM_WARM_PATH == "/api/llm/warm"
+
+    def test_warm_posts_to_the_warm_path_with_the_service_bearer(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warming"}),
+        )
+        OrchestratorLLM(base_url="http://test", bearer_token="voice-secret").warm()
+        assert len(captured) == 1
+        req = captured[0]
+        assert req.method == "POST"
+        assert req.url.path == "/api/llm/warm"
+        assert req.headers["Authorization"] == "Bearer voice-secret"
+
+    def test_warm_names_no_model(self, monkeypatch):
+        # The orchestrator warms the box's ACTIVE model (resolveActiveModel).
+        # A client-chosen model would let a caller load a second model onto
+        # the GPU (WARP-1826 / one-model rule).
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "unknown"}),
+        )
+        OrchestratorLLM(base_url="http://test", model="qwen3:8b").warm()
+        body = json.loads(captured[0].content or b"{}")
+        assert "model" not in body
+
+    def test_warm_uses_a_short_timeout(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warm"}),
+        )
+        OrchestratorLLM(base_url="http://test", timeout_s=120.0).warm()
+        timeout = captured[0].extensions["timeout"]
+        # Never the 120 s agent-loop timeout: this is a nudge, not a turn.
+        assert all(v is not None and v <= 2.0 for v in timeout.values())
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 500, 503])
+    def test_warm_swallows_http_errors(self, monkeypatch, status):
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(status, text="nope"))
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ConnectError("connection refused"),
+            httpx.ReadTimeout("slow"),
+            httpx.RemoteProtocolError("reset"),
+            OSError("no route to host"),
+        ],
+    )
+    def test_warm_swallows_transport_errors(self, monkeypatch, exc):
+        def handler(req):
+            raise exc
+        _install_mock_transport(monkeypatch, handler)
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    def test_warm_failure_logs_at_debug_only(self, monkeypatch, caplog):
+        def handler(req):
+            raise httpx.ConnectError("connection refused")
+        _install_mock_transport(monkeypatch, handler)
+        with caplog.at_level("DEBUG", logger="voice.llm"):
+            OrchestratorLLM(base_url="http://test").warm()
+        records = [r for r in caplog.records if r.name == "voice.llm"]
+        assert records, "a failed warm leaves a debug breadcrumb"
+        assert all(r.levelno == 10 for r in records)
+
+    def test_warm_after_close_does_not_raise(self, monkeypatch):
+        # The warm runs on a background thread, so it can land after main.py's
+        # shutdown hook closed the pool. httpx raises RuntimeError (not an
+        # HTTPError) on a closed client; that must be swallowed too.
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(202, json={}))
+        client = OrchestratorLLM(base_url="http://test")
+        client.close()
+        client.warm()  # must not raise
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -320,6 +402,13 @@ class TestMockLLM:
 
     def test_available_false_when_explicitly_set(self):
         assert MockLLM(available=False).available is False
+
+    def test_warm_is_an_inherited_no_op(self):
+        # WARP-3127: warm() lives on the LLMClient interface so the pipeline
+        # can call it on whatever build_llm_from_env returned.
+        m = MockLLM(scripted_replies=["one"])
+        assert m.warm() is None
+        assert m.requests == []
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -666,6 +755,54 @@ class TestMaxTokensCap:
         assert bodies[0]["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
 
 
+class TestMaxIterBudget:
+    """WARP-3316 — the voice agent-loop budget. Iteration 0 is the tool
+    call and iteration 1 the answer, so a budget of 2 dies on the SECOND
+    tool call with the orchestrator's iteration_limit fallback ("couldn't
+    finish within my step limit"). Default is 4; VOICE_MAX_ITER tunes it."""
+
+    def test_default_is_four(self):
+        assert DEFAULT_LLM_MAX_ITER == 4
+
+    def test_reply_sends_default_max_iter(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("what time is it")
+        assert bodies[0]["max_iter"] == 4
+
+    def test_configured_max_iter_is_honored(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test", max_iter=6).reply("hi")
+        assert bodies[0]["max_iter"] == 6
+
+
+class TestParseMaxIter:
+    """VOICE_MAX_ITER parsing: unset/garbage fall back to the default;
+    out-of-range numbers clamp to the orchestrator's 1..10 window."""
+
+    def test_unset_and_blank_use_default(self):
+        assert parse_max_iter(None) == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("") == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("   ") == DEFAULT_LLM_MAX_ITER
+
+    def test_valid_value_is_used(self):
+        assert parse_max_iter("6") == 6
+        assert parse_max_iter("  3 ") == 3
+
+    def test_window_edges_are_accepted(self):
+        assert parse_max_iter("1") == 1
+        assert parse_max_iter("10") == 10
+
+    def test_non_numeric_falls_back(self):
+        assert parse_max_iter("abc") == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("2.5") == DEFAULT_LLM_MAX_ITER
+
+    def test_out_of_range_clamps(self):
+        assert parse_max_iter("0") == 1
+        assert parse_max_iter("-5") == 1
+        assert parse_max_iter("11") == 10
+        assert parse_max_iter("999") == 10
+
+
 class TestAllowedToolsScope:
     """A curated `allowed_tools` scope replaces the inherited ~43-tool set
     on tool-enabled turns. On the greeting fast path (tool_choice="none")
@@ -873,6 +1010,24 @@ class TestBuildLLMFromEnvTurnShaping:
         monkeypatch.setenv("VOICE_MAX_TOKENS", "not-a-number")
         llm = build_llm_from_env()
         assert llm._max_tokens == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_default_build_uses_default_max_iter(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.delenv("VOICE_MAX_ITER", raising=False)
+        llm = build_llm_from_env()
+        assert llm._max_iter == DEFAULT_LLM_MAX_ITER == 4
+
+    def test_voice_max_iter_env_propagates(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_ITER", "7")
+        llm = build_llm_from_env()
+        assert llm._max_iter == 7
+
+    def test_voice_max_iter_env_invalid_falls_back(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_ITER", "lots")
+        llm = build_llm_from_env()
+        assert llm._max_iter == DEFAULT_LLM_MAX_ITER
 
     def test_voice_allowed_tools_env_propagates(self, monkeypatch, stub_geo):
         monkeypatch.delenv("LLM_URL", raising=False)

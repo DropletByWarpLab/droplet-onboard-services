@@ -284,6 +284,9 @@ export default function FilesPage() {
   const { spaces, sharedAvailable } = useSpaces();
   const { user } = useAuth();
   const isOwnerOrAdmin = user?.role === "owner" || user?.role === "admin";
+  // Personal WebDAV drives are open to owner/admin/family (never guest), and
+  // only while the owner has turned them on — the dialog explains when off.
+  const canConnectDrive = isOwnerOrAdmin || user?.role === "family";
   // WARP-1267 — the active space's full record (rights, kind, membership,
   // parent name) drives reader posture, the admin foreign-library banner,
   // and the team breadcrumb prefix below.
@@ -386,9 +389,10 @@ export default function FilesPage() {
   const { toast } = useToast();
   const [error, setError] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
-  // Network drive (SMB): owner/admin-only connect instructions — the
-  // credential behind it is device-wide, so the trigger hides for other
-  // roles (the endpoint 403s them regardless).
+  // Network drive: owner/admin/family can get their own WebDAV drive login
+  // (when the owner has enabled personal drives); the device-wide SMB section
+  // inside the dialog stays owner/admin-only (showSharedDrive — its endpoint
+  // 403s other roles regardless).
   const [showConnectDrive, setShowConnectDrive] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   // Reader posture (WARP-1267): close a still-open new-folder composer if
@@ -1639,7 +1643,7 @@ export default function FilesPage() {
         <Star size={14} />
         <span className="hidden sm:inline">Favorites</span>
       </Link>
-      {isOwnerOrAdmin && (
+      {canConnectDrive && (
         <button
           onClick={() => setShowConnectDrive(true)}
           aria-label="Connect network drive"
@@ -2436,10 +2440,11 @@ export default function FilesPage() {
         />
       )}
 
-      {/* Connect-network-drive instructions (owner/admin) */}
+      {/* Connect-network-drive instructions (owner/admin/family) */}
       <ConnectDriveDialog
         open={showConnectDrive}
         onClose={() => setShowConnectDrive(false)}
+        showSharedDrive={isOwnerOrAdmin}
       />
 
       {/* Move / Copy dialog */}

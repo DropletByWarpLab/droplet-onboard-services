@@ -160,6 +160,14 @@ const WRITES: WriteRoute[] = [
     send: (s) => request(s).delete("/api/security/hours/exceptions/2026-12-25?version=3"),
     action: "exception.delete",
   },
+  // WARP-2979 — route 27.
+  {
+    name: "PUT /api/security/ai-settings",
+    level: "manage",
+    status: 200,
+    send: (s) => request(s).put("/api/security/ai-settings").send({ linking: "suggest_only", summaries: "on", expectedVersion: 0 }),
+    action: "ai_settings.set",
+  },
 ];
 
 const BELOW: Record<"act" | "manage", { role: Role; level: Level }> = {
@@ -230,14 +238,14 @@ describe.each(WRITES)("$name — level pins ($level)", (route) => {
 });
 
 describe("GETs are view-only", () => {
-  it.each(["/api/security/mode", "/api/security/hours"])("family at view → 200 on %s, resolver not consulted", async (path) => {
+  it.each(["/api/security/mode", "/api/security/hours", "/api/security/ai-settings"])("family at view → 200 on %s, resolver not consulted", async (path) => {
     const { server, resolve } = app(seeded(), "family", "view");
     const res = await request(server).get(path);
     expect(res.status).toBe(200);
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it.each(["/api/security/mode", "/api/security/hours"])("guest → 403 on %s", async (path) => {
+  it.each(["/api/security/mode", "/api/security/hours", "/api/security/ai-settings"])("guest → 403 on %s", async (path) => {
     expect((await request(app(seeded(), "guest", "manage").server).get(path)).status).toBe(403);
   });
 });
@@ -252,7 +260,7 @@ describe("router stack", () => {
       handles: l.route!.stack.map((s) => s.handle),
     }));
 
-  it("exactly the six §7 routes, each write rate-limited FIRST, role-guarded, then gated at its level", () => {
+  it("exactly the §7 routes (six, and WARP-2979's two), each write rate-limited FIRST, role-guarded, then gated at its level", () => {
     expect(routes.map((r) => r.key)).toEqual([
       "GET /security/mode",
       "GET /security/hours",
@@ -260,6 +268,8 @@ describe("router stack", () => {
       "PUT /security/hours",
       "PUT /security/hours/exceptions/:date",
       "DELETE /security/hours/exceptions/:date",
+      "GET /security/ai-settings",
+      "PUT /security/ai-settings",
     ]);
     const levels = Object.fromEntries(routes.map((r) => [r.key, r.handles.map(readFeatureGateMeta).find(Boolean)?.level ?? null]));
     expect(levels).toEqual({
@@ -269,6 +279,8 @@ describe("router stack", () => {
       "PUT /security/hours": "manage",
       "PUT /security/hours/exceptions/:date": "manage",
       "DELETE /security/hours/exceptions/:date": "manage",
+      "GET /security/ai-settings": null,
+      "PUT /security/ai-settings": "manage",
     });
     for (const r of routes) {
       const gate = r.handles.findIndex((fn) => readFeatureGateMeta(fn) !== null);
@@ -674,5 +686,99 @@ describe.each([
       .send({ action: "open", for: "2h" });
     expect(res.status).toBe(200);
     expect(res.body.mode).toMatchObject({ mode: "open", manualEnd: "at_time", until: "2026-10-25T02:00:00.000Z" });
+  });
+});
+
+// ── WARP-2979 (P4 §7 routes 26, 27): what Droplet's AI may do in Security ──
+
+describe("GET /api/security/ai-settings (route 26)", () => {
+  it("first read creates the row with its defaults and answers them", async () => {
+    const w = seeded();
+    const res = await request(app(w, "family", "view").server).get("/api/security/ai-settings");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ linking: "link_and_suggest", summaries: "on", version: 0 });
+    expect(w.ai).toMatchObject({ linking: "link_and_suggest", summaries: "on", version: 0 });
+  });
+
+  it("an outage → 503 AI_SETTINGS_UNAVAILABLE, never the defaults", async () => {
+    const { server, prisma } = app(seeded(), "owner", "manage");
+    prisma.securityAiSettings.findUnique.mockRejectedValueOnce(new Error("db down"));
+    const res = await request(server).get("/api/security/ai-settings");
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("AI_SETTINGS_UNAVAILABLE");
+  });
+});
+
+describe("PUT /api/security/ai-settings (route 27)", () => {
+  const withAi = () => seeded({ ai: { id: "singleton", linking: "link_and_suggest", summaries: "on", version: 4, updatedById: null } });
+  const put = (w: FakeWorld, body: Record<string, unknown>) => request(app(w, "admin", "manage").server).put("/api/security/ai-settings").send(body);
+
+  it("200 {linking, summaries, version, changed}; the version moves; audited LAST with the before and after", async () => {
+    const w = withAi();
+    const res = await put(w, { linking: "suggest_only", summaries: "off", expectedVersion: 4 });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ linking: "suggest_only", summaries: "off", version: 5, changed: true });
+    expect(w.ai).toMatchObject({ linking: "suggest_only", summaries: "off", version: 5, updatedById: USER_ID });
+    expect(h.inTx).toHaveBeenCalledTimes(1);
+    expect(h.inTx.mock.calls[0]![1]).toMatchObject({
+      what: "Security: Droplet's AI now only suggests links; Droplet no longer writes incident summaries",
+      refs: {
+        action: "ai_settings.set",
+        linking: "suggest_only",
+        summaries: "off",
+        from: { linking: "link_and_suggest", summaries: "on" },
+      },
+    });
+  });
+
+  it("nothing to change → changed:false, no write, no audit", async () => {
+    const w = withAi();
+    const res = await put(w, { linking: "link_and_suggest", summaries: "on", expectedVersion: 4 });
+    expect(res.body).toEqual({ linking: "link_and_suggest", summaries: "on", version: 4, changed: false });
+    expect(w.log).not.toContain("ai.update");
+    expect(h.inTx).not.toHaveBeenCalled();
+  });
+
+  it("a stale expectedVersion → 409 VERSION_CONFLICT, whatever it asks for — nothing written", async () => {
+    const w = withAi();
+    for (const body of [
+      { linking: "off", summaries: "on", expectedVersion: 3 },
+      { linking: "link_and_suggest", summaries: "on", expectedVersion: 3 },
+    ]) {
+      const res = await put(w, body);
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe("VERSION_CONFLICT");
+    }
+    expect(w.ai).toMatchObject({ linking: "link_and_suggest", version: 4 });
+    expect(h.inTx).not.toHaveBeenCalled();
+  });
+
+  it("400 on an unknown value, a missing field or an extra one (server-stamped fields are never read)", async () => {
+    const w = withAi();
+    for (const body of [
+      { linking: "always", summaries: "on", expectedVersion: 4 },
+      { linking: "off", expectedVersion: 4 },
+      { linking: "off", summaries: "on", expectedVersion: 4, updatedById: "someone" },
+      { linking: "off", summaries: "on", expectedVersion: 1.5 },
+    ]) {
+      expect((await put(w, body)).status).toBe(400);
+    }
+    expect(w.ai!.version).toBe(4);
+  });
+
+  it("the audit cannot be written → 503 AUDIT_UNAVAILABLE and the settings are unchanged", async () => {
+    const w = withAi();
+    h.inTx.mockRejectedValueOnce(new Error("chain down"));
+    const res = await put(w, { linking: "off", summaries: "on", expectedVersion: 4 });
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("AUDIT_UNAVAILABLE");
+    expect(w.ai).toMatchObject({ linking: "link_and_suggest", version: 4 });
+  });
+
+  it("the first write ever creates the row, then applies to version 0", async () => {
+    const w = seeded();
+    const res = await put(w, { linking: "off", summaries: "on", expectedVersion: 0 });
+    expect(res.body).toEqual({ linking: "off", summaries: "on", version: 1, changed: true });
+    expect(h.inTx.mock.calls[0]![1].what).toBe("Security: Droplet's AI no longer looks for links");
   });
 });

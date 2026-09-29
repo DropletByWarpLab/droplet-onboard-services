@@ -171,6 +171,11 @@ import type {
   SecurityZonePatchBody,
   SecurityZonesResponse,
   SecurityZoneWriteResult,
+  SecurityAiSettingsBody,
+  SecurityAiSettingsView,
+  SecurityAiSettingsWriteResult,
+  SecurityLinkDecisionResult,
+  SecurityLinkProposalsView,
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
@@ -179,6 +184,7 @@ import type {
   AlertRoutingView,
   IncidentActionResult,
   IncidentDetail,
+  IncidentVerdict,
   IncidentsPage,
   IncidentsSummary,
 } from "./types";
@@ -9206,6 +9212,8 @@ export interface CloudHistorySummary {
   unaskedOnBoxAnswers: number;
   userMessages: number;
   drewOn: string[];
+  /** WARP-2979 — sources whose answers are never sent to a cloud model, whatever is chosen (e.g. "Security"). */
+  neverSent?: string[];
 }
 
 export async function fetchCloudHistory(conversationId: string): Promise<CloudHistorySummary> {
@@ -9394,6 +9402,43 @@ export function putSecurityZoneLinks(id: string, body: SecurityZoneLinksBody): P
   );
 }
 
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+export const SECURITY_LINK_PROPOSALS_PATH = "/api/security/link-proposals";
+export const SECURITY_LINKS_PATH = "/api/security/links";
+export const SECURITY_AI_SETTINGS_PATH = "/api/security/ai-settings";
+
+/** 23 (view; the list is filled only at manage) — Droplet's open suggestions. */
+export function getSecurityLinkProposals(): Promise<SecurityLinkProposalsView> {
+  return securityFetch<SecurityLinkProposalsView>(`${BASE}${SECURITY_LINK_PROPOSALS_PATH}`);
+}
+
+/** 24 (manage) — add Droplet's suggestion, or Keep a link Droplet made. */
+export function acceptSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/accept`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 25 (manage) — Not this (a suggestion), or Undo (a link Droplet made). Final: Droplet never suggests it again. */
+export function rejectSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/reject`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 26 (view) — what Droplet's AI may do in Security. */
+export function getSecurityAiSettings(): Promise<SecurityAiSettingsView> {
+  return securityFetch<SecurityAiSettingsView>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`);
+}
+
+/** 27 (manage) — change it; `expectedVersion` from the last read (409 VERSION_CONFLICT otherwise). */
+export function putSecurityAiSettings(body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> {
+  return securityFetch<SecurityAiSettingsWriteResult>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`, jsonBody("PUT", body));
+}
+
 /** 13 (manage) — set or clear the weekly hours. */
 export function putSecurityHours(body: SecurityHoursBody): Promise<SecurityHoursWriteResult> {
   return securityFetch<SecurityHoursWriteResult>(`${BASE}${SECURITY_HOURS_PATH}`, jsonBody("PUT", body));
@@ -9529,6 +9574,19 @@ export function resolveSecurityIncident(id: string, opts: { note?: string } = {}
   return securityFetch<IncidentActionResult>(
     `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/resolve`,
     jsonBody("POST", note ? { note } : {}),
+  );
+}
+
+/**
+ * 35 (act, owner/admin — WARP-2980 P5) — Expected / Not expected. The body is
+ * exactly `{verdict}` (strict on the box). It never acknowledges, resolves or
+ * changes who is told; 409 NOT_JUDGEABLE when there is nothing this viewer
+ * can mark (or their view is partial), 409 INCIDENT_CONFLICT on a lost race.
+ */
+export function setSecurityIncidentVerdict(id: string, verdict: IncidentVerdict): Promise<IncidentActionResult> {
+  return securityFetch<IncidentActionResult>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/verdict`,
+    jsonBody("POST", { verdict }),
   );
 }
 

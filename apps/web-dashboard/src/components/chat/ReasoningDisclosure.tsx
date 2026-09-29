@@ -87,7 +87,7 @@ export function ReasoningDisclosure({
               key={i}
               data-testid="reasoning-step"
               data-step-index={i}
-              className="pl-3 border-l-2 border-separator"
+              className="ds-reasoning-step pl-3 border-l-2 border-separator"
             >
               {multi && (
                 <p className="type-caption-2 font-medium text-label-tertiary mb-0.5">

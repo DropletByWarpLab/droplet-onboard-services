@@ -33,6 +33,7 @@ import {
   type Summarizer,
 } from "../services/tool-spec-runner.service.js";
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
+import { resolveFilingModel } from "../services/filing/extract.js";
 import { resolveActiveModel } from "../services/active-model.service.js";
 import { createSandboxTransformer, type Transformer } from "../services/sandbox.client.js";
 import {
@@ -281,7 +282,15 @@ export function createToolsRouter(
    * inference backend, the same reason `dispatcher` is a parameter. Defaults
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
-  summarizer: Summarizer = createToolSpecSummarizer(() => resolveActiveModel(prisma)),
+  // WARP-2979 (#2420 review 2b) — a summary of a withheld domain's results (security, files, memory, business)
+  // is written on the LOCAL model only: the filing worker's local-only resolver, never the active (maybe cloud) one.
+  summarizer: Summarizer = createToolSpecSummarizer(
+    () => resolveActiveModel(prisma),
+    async () => {
+      const r = await resolveFilingModel(prisma);
+      return r.ok ? r.model : null;
+    },
+  ),
   /**
    * WARP-2895 — injected so tests can drive a `transform` / `when` step
    * without a sandbox container, the same reason `summarizer` is a

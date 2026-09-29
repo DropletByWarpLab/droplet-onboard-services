@@ -66,9 +66,10 @@ export function withNotificationParam(url: string, id: string | null): string {
 }
 
 /** WARP-2909 — the box validates `url`, but the toaster never trusts a wire
- *  value it navigates to: only an in-app path, never `//host` or a scheme. */
+ *  value it navigates to: only an in-app path, never `//host`, a scheme or a control character.
+ *  public/sw.js keeps an identical copy (WARP-3208); sw.notification-ack.test.ts pins both. */
 export function isInAppPath(url: unknown): url is string {
-  return typeof url === "string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\");
+  return typeof url === "string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\") && !/[\u0000-\u001f\u007f]/.test(url);
 }
 
 /** A NotificationLog id (cuid): the shape the ack route accepts. */

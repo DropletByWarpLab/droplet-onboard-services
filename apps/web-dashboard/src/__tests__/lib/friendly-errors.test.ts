@@ -802,10 +802,19 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "INCIDENT_CONFLICT",
     "NOT_ACTIONABLE",
     "INCIDENTS_UNAVAILABLE",
+    // WARP-2980 (P5 PR-C) — route 35, Expected / Not expected.
+    "NOT_JUDGEABLE",
     "NO_RECIPIENT",
     "NOT_ELIGIBLE",
     "ROUTING_UNAVAILABLE",
     "USER_NOT_FOUND",
+    // WARP-2979 (ADR-059 P4 §7 routes 23–27) — Droplet's links and the AI settings.
+    "LINK_NOT_FOUND",
+    "LINK_NOT_DECIDABLE",
+    "LINK_CONFLICT",
+    "LINK_LIMIT",
+    "LINKS_UNAVAILABLE",
+    "AI_SETTINGS_UNAVAILABLE",
   ] as const satisfies readonly SecurityErrorCode[];
   // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
   // code added to SecurityErrorCode without copy here fails the build.

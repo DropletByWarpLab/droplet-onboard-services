@@ -9,7 +9,6 @@ import {
   RotateCcw,
   Settings2,
   ShieldCheck,
-  Sparkles,
   Wrench,
   X,
 } from "lucide-react";
@@ -53,7 +52,9 @@ import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
 import { reachableInChat } from "@/lib/tool-domains";
 import { useAuth } from "@/lib/auth";
+import { greetingLine } from "@/lib/greeting";
 import {
+  CHAT_DRAFT_KEY,
   PENDING_COMPOSER_KEY,
   PENDING_PROMPT_KEY,
   type BusinessContextPinKind,
@@ -71,6 +72,7 @@ import { CloudHistoryConsentDialog } from "@/components/chat/CloudHistoryConsent
 import type { ChatProject } from "@/lib/api";
 // WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
 // shared shell set; chat-indigo.css carries the chat-specific surface.
+import { helpSlot } from "@/components/shell/dom-slots";
 import "@/components/shell/indigo-tokens.css";
 import "@/components/chat/chat-indigo.css";
 import { isLocalProvider } from "@/lib/provider";
@@ -81,6 +83,9 @@ export default function ChatPage() {
   const historyHandleRef = useRef<ChatHistoryPanelHandle | null>(null);
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
   const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // WARP-3043 — the header offers HelpLauncher a slot, so Help sits here
+  // instead of floating over the docked composer's send button.
+  const registerHelpSlot = helpSlot.useRegister();
   // WARP-2205 — the file rail's mobile counterpart, mirroring the history
   // drawer above it rather than inventing a second pattern.
   const [mobileFilesOpen, setMobileFilesOpen] = useState(false);
@@ -273,8 +278,9 @@ export default function ChatPage() {
           const next = new URL(window.location.href);
           next.searchParams.delete("c");
           window.history.replaceState(null, "", next.toString());
-          // WARP-1668 — replaceState does NOT notify useSearchParams, so
-          // nothing else here re-renders off this failure. Re-read the
+          // WARP-1668 — Next (≥14.1) patches `history.replaceState`, so
+          // `useSearchParams` follows this strip, but nothing in the strip
+          // tells the resume banner the session is gone. Re-read the
           // profile: if the id we just failed to load was the interview
           // session, `interviewResumable` flips false and the resume banner
           // retires instead of offering the same dead trip again.
@@ -303,14 +309,24 @@ export default function ChatPage() {
   // state → URL: when the hook updates conversationId for any reason
   // (server response after a send, clearMessages, etc.), mirror it into
   // the URL via replaceState so the panel and a refresh both stay aligned.
+  //
+  // WARP-3043 — `c` is removed only when a conversation that WAS open closes
+  // (set → null). On a deep-link mount `conversationId` is still null while
+  // the load is in flight, and deleting `c` then (Next's patched
+  // replaceState updates `useSearchParams`) flashed the empty state and lost
+  // the open conversation if you left before the load landed. A failed load
+  // strips `c` on its own path above.
+  const prevConversationIdRef = useRef(conversationId);
   useEffect(() => {
+    const prev = prevConversationIdRef.current;
+    prevConversationIdRef.current = conversationId;
     if (typeof window === "undefined") return;
     const next = new URL(window.location.href);
     if (conversationId) {
       if (next.searchParams.get("c") === conversationId) return;
       next.searchParams.set("c", conversationId);
     } else {
-      if (!next.searchParams.has("c")) return;
+      if (prev === null || !next.searchParams.has("c")) return;
       next.searchParams.delete("c");
     }
     window.history.replaceState(null, "", next.toString());
@@ -812,9 +828,8 @@ export default function ChatPage() {
     return -1;
   }, [messages]);
 
-  // WARP-855 — design-handoff header: conversation title (first user
-  // message, clamped) or "New chat", plus the "local · on-device" privacy
-  // tag whenever the selected model runs on the box (local provider).
+  // WARP-855 — the header's conversation title: the first user message,
+  // clamped, or "New chat".
   const headerTitle = useMemo(() => {
     const first = messages.find((m) => m.role === "user")?.content.trim();
     if (!first) return "New chat";
@@ -842,10 +857,17 @@ export default function ChatPage() {
     [models, conversationId],
   );
 
-  const isLocalModel = useMemo(
-    () => isLocalProvider(models.find((m) => m.id === selectedModel)?.provider),
-    [models, selectedModel],
-  );
+  // WARP-3043 — ONE flag drives both the centred layout (`is-empty`) and the
+  // greeting, so they never disagree. A `?c=` in the URL is a conversation
+  // on its way (its load is in flight), never a fresh chat — that is what
+  // keeps a deep link from flashing the empty state. The interview session
+  // is its own surface (WARP-2667), and the intro card replaces the
+  // greeting and its suggestions on an untouched business box.
+  const introCardShown =
+    isPrivileged && isBusinessBox && bizProfile?.onboardingState === "not_started";
+  const isFresh =
+    messages.length === 0 && !urlConversationId && !interviewSessionOpen;
+  const showGreeting = isFresh && !introCardShown;
 
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
@@ -868,7 +890,7 @@ export default function ChatPage() {
       </aside>
 
       {/* Main chat area */}
-      <div className="chat-main">
+      <div className={`chat-main${isFresh ? " is-empty" : ""}`}>
         {/* Header */}
         <header className="chat-head">
           {/* WARP-331: mobile-only history-drawer trigger. */}
@@ -879,7 +901,7 @@ export default function ChatPage() {
             aria-label="Open chat history"
             aria-haspopup="dialog"
             aria-expanded={mobileHistoryOpen}
-            className="chat-iconbtn lg:hidden"
+            className="chat-iconbtn chat-drawer-toggle"
             title="Chat history"
           >
             <PanelLeftOpen size={18} aria-hidden="true" />
@@ -901,6 +923,8 @@ export default function ChatPage() {
           {/* WARP-460: pins are per-session — the popover appears once
               the first turn has minted a conversationId. */}
           {conversationId && <ContextPinsPopover sessionId={conversationId} />}
+          {/* WARP-3043 — HelpLauncher portals its trigger in here (≥1024px). */}
+          <span ref={registerHelpSlot} className="help-slot" />
           <button
             onClick={() => setShowSystemPrompt(!showSystemPrompt)}
             className={`chat-iconbtn ${systemPrompt ? "is-on" : ""}`}
@@ -923,7 +947,7 @@ export default function ChatPage() {
               aria-label="Open files in this conversation"
               aria-haspopup="dialog"
               aria-expanded={mobileFilesOpen}
-              className="chat-iconbtn lg:hidden"
+              className="chat-iconbtn chat-drawer-toggle"
               title="Files"
             >
               <PanelRightOpen size={18} aria-hidden="true" />
@@ -932,7 +956,7 @@ export default function ChatPage() {
           <button
             onClick={handleNewChat}
             disabled={messages.length === 0}
-            className="chat-new"
+            className="chat-new chat-new-head"
             aria-label="Start a new chat"
           >
             <RotateCcw size={14} aria-hidden="true" />
@@ -1043,34 +1067,27 @@ export default function ChatPage() {
                 />
               </div>
             )}
-          {/* The generic chat empty state — "Ask Droplet anything" plus four
-              off-topic suggestion prompts. It must never paint inside the
-              interview session: that surface is the walkthrough, and an empty
-              frame of it (the beat before the transcript loads, or a
-              self-healed session) reading "Ask Droplet anything · Dim the
-              conference-room lights" is precisely the "it dropped me back into a
-              chat" report. Keyed off `interviewSessionOpen` — the whole
-              lifecycle AND the navigation into it — so a finished interview
-              reopened after its history is gone stays quiet too, and so does
-              the beat between `router.push` and the transcript arriving. */}
-          {messages.length === 0 &&
-            !interviewSessionOpen &&
-            !(
-              isPrivileged &&
-              isBusinessBox &&
-              bizProfile?.onboardingState === "not_started"
-            ) && (
-            <div className="chat-empty">
-              <div className="ico" aria-hidden="true">
-                <Sparkles size={26} />
-              </div>
-              <p className="h">Ask Droplet anything</p>
-              <p className="s">
+          {/* The generic chat empty state — the greeting and the question
+              (WARP-3043, the Mac app's empty chat), with the suggestions in
+              the composer. It must never paint inside the interview session:
+              that surface is the walkthrough, and an empty frame of it (the
+              beat before the transcript loads, or a self-healed session)
+              reading like a fresh chat is precisely the "it dropped me back
+              into a chat" report. `showGreeting` is keyed off
+              `interviewSessionOpen` — the whole lifecycle AND the navigation
+              into it — so a finished interview reopened after its history is
+              gone stays quiet too, and so does the beat between `router.push`
+              and the transcript arriving. */}
+          {showGreeting && (
+            <div className="chat-empty" data-testid="chat-empty">
+              <p className="l1">{greetingLine(user?.displayName || user?.username)}</p>
+              <h1 className="h">
                 {/* WARP-3048 — there is no picker "above": name the real
                     reason nothing is selected, and where models live. A
-                    degraded list is an outage (WARP-1284), never "no model". */}
+                    degraded list is an outage (WARP-1284), never "no model".
+                    A problem REPLACES the question. */}
                 {selectedModel && !modelsDegraded ? (
-                  "Your local AI is ready — nothing leaves the device."
+                  "What can I help you with today?"
                 ) : modelsLoading ? (
                   "Checking which AI model is ready…"
                 ) : modelsError ? (
@@ -1086,29 +1103,11 @@ export default function ChatPage() {
                     .
                   </>
                 )}
-              </p>
+              </h1>
               {!isPrivileged && isBusinessBox && (
                 <p className="type-caption-1 text-label-quaternary mt-1">
                   {INTERVIEW_COPY.nonOwnerHint}
                 </p>
-              )}
-              {selectedModel && (
-                <div className="chat-suggs">
-                  {[
-                    "What's using the most storage?",
-                    "Summarize the files I uploaded today",
-                    "Dim the conference-room lights to 30%",
-                    "What joined the network this week?",
-                  ].map((prompt) => (
-                    <button
-                      key={prompt}
-                      onClick={() => handleSend(prompt)}
-                      className="chat-sugg"
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
               )}
             </div>
           )}
@@ -1173,7 +1172,7 @@ export default function ChatPage() {
                     <div
                       key={msg.id}
                       data-testid="proposal-parse-failure"
-                      className="my-3 rounded-2xl border border-system-red/30 px-5 py-4 flex items-center gap-3"
+                      className="my-3 chat-tone is-danger px-5 py-4 flex items-center gap-3"
                     >
                       <span className="type-body text-label-primary">
                         {INTERVIEW_COPY.parseFailure}
@@ -1233,11 +1232,7 @@ export default function ChatPage() {
               data-testid="jump-to-latest"
               tabIndex={isDetached ? 0 : -1}
               className={`
-                absolute left-1/2 -translate-x-1/2 -top-12 z-10
-                inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full
-                bg-accent text-white shadow-md
-                type-caption-1 hover:bg-accent-hover
-                focus:outline-none focus:ring-2 focus:ring-accent/40
+                chat-jump absolute left-1/2 -translate-x-1/2 -top-12 z-10
                 transition-opacity duration-150
                 ${isDetached ? "opacity-100" : "opacity-0 pointer-events-none"}
               `}
@@ -1256,7 +1251,7 @@ export default function ChatPage() {
           <div className="px-4 pt-3">
             <div
               role="status"
-              className="flex items-center gap-2 flex-wrap rounded-lg border border-separator bg-surface-secondary px-3 py-2"
+              className="chat-tone flex items-center gap-2 flex-wrap px-3 py-2"
             >
               <Wrench size={14} className="flex-none text-accent" aria-hidden="true" />
               <span className="type-footnote text-label-secondary">
@@ -1303,7 +1298,7 @@ export default function ChatPage() {
                   key={chip}
                   type="button"
                   onClick={() => handleSend(chip)}
-                  className="px-3.5 py-1.5 rounded-full border border-separator type-footnote text-label-primary hover:bg-surface-secondary"
+                  className="chat-sugg"
                 >
                   {chip}
                 </button>
@@ -1312,6 +1307,9 @@ export default function ChatPage() {
           )}
         <ChatInput
           ref={chatInputRef}
+          // WARP-3062 — a half-typed message survives leaving /chat and
+          // coming back (the assistant layout's Ask AI | Overview switch).
+          draftKey={CHAT_DRAFT_KEY}
           onSend={handleSend}
           disabled={isStreaming || !selectedModel}
           attachments={attachments}
@@ -1323,12 +1321,30 @@ export default function ChatPage() {
           onToolCommand={handleToolCommand}
           // WARP-904 — per-turn quick-switch, compact + next to the
           // composer instead of up in the header where a long thread
-          // scrolls it out of reach.
-          modelSelector={
-            <>
-              <ModelSelector value={selectedModel} onChange={handleModelChange} />
-              {isLocalModel && <span className="chat-tag">local · on-device</span>}
-            </>
+          // scrolls it out of reach. A cloud model names its provider on the
+          // picker itself (WARP-3043); there is no separate tag.
+          modelSelector={<ModelSelector value={selectedModel} onChange={handleModelChange} />}
+          // WARP-3043 — the empty chat's suggestions render inside the
+          // composer, under the pill (one scrolling row above it on phones).
+          suggestions={
+            showGreeting && selectedModel ? (
+              <div className="chat-suggs">
+                {[
+                  "What's using the most storage?",
+                  "Summarize the files I uploaded today",
+                  "What joined the network this week?",
+                ].map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => handleSend(prompt)}
+                    className="chat-sugg"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            ) : undefined
           }
         />
       </div>
@@ -1352,6 +1368,7 @@ export default function ChatPage() {
         labelledBy="mobile-files-heading"
         placement="right"
         flush
+        seamless
       >
         <div className="flex flex-col h-full w-full">
           <h2 id="mobile-files-heading" className="sr-only">
@@ -1380,6 +1397,7 @@ export default function ChatPage() {
         // Full-height panel — ChatHistoryPanel owns its own insets
         // (WARP-1153).
         flush
+        seamless
       >
         {/* Width is the Dialog's to own, not this drawer's. The `w-[320px]
             max-w-[85vw]` this used to carry never bought the nav-drawer
