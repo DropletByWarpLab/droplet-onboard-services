@@ -10,15 +10,27 @@
  *     sandbox is a 502, and a head that is not a commit id is refused rather
  *     than placed in a response header.
  */
-import { describe, it, expect, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 vi.mock("../config.js", () => ({
   config: { SANDBOX_URL: "http://sandbox:8030", SANDBOX_SERVICE_TOKEN: "t" },
 }));
 
-import { createWorkspaceSandboxClient, WorkspaceSandboxError } from "../services/workspace.service.js";
+import {
+  BUNDLE_STALL_TIMEOUT_MS,
+  createWorkspaceSandboxClient,
+  WorkspaceSandboxError,
+} from "../services/workspace.service.js";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+
+async function drain(stream: AsyncIterable<Buffer | Uint8Array>): Promise<Buffer> {
+  const parts: Buffer[] = [];
+  for await (const c of stream) parts.push(Buffer.from(c));
+  return Buffer.concat(parts);
+}
 
 function clientWith(respond: (url: string, init: RequestInit) => Response | Promise<Response>) {
   const fetchImpl = vi.fn(async (url: string, init: RequestInit) => respond(url, init));
@@ -40,11 +52,17 @@ describe("bundle()", () => {
   it("dials only the sandbox's bundle route, with the bearer, and returns bytes and head", async () => {
     const bytes = Buffer.from("# v2 git bundle\nPACK");
     const { client, fetchImpl } = clientWith(
-      () => new Response(new Uint8Array(bytes), { status: 200, headers: { "X-Bundle-Head": HEAD } }),
+      () =>
+        new Response(new Uint8Array(bytes), {
+          status: 200,
+          headers: { "X-Bundle-Head": HEAD, "X-Bundle-Sha256": sha(bytes), "Content-Length": String(bytes.length) },
+        }),
     );
     const out = await client.bundle("ws-a");
     expect(out.head).toBe(HEAD);
-    expect(Buffer.compare(out.body, bytes)).toBe(0);
+    expect(out.size).toBe(bytes.length);
+    expect(out.sha256).toBe(sha(bytes));
+    expect(Buffer.compare(await drain(out.stream), bytes)).toBe(0);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe("http://sandbox:8030/workspaces/ws-a/bundle");
@@ -65,6 +83,18 @@ describe("bundle()", () => {
     expect(await rejection(down.client.bundle("ws-a"))).toMatchObject({ status: 502, code: "UNREACHABLE" });
   });
 
+  it("refuses an export that states no length or a malformed sha256 — it cannot be verified", async () => {
+    const bytes = Buffer.from("PACK");
+    for (const headers of <Record<string, string>[]>[
+      { "X-Bundle-Head": HEAD },
+      { "X-Bundle-Head": HEAD, "X-Bundle-Sha256": "abc", "Content-Length": "4" },
+      { "X-Bundle-Head": HEAD, "X-Bundle-Sha256": sha(bytes).toUpperCase(), "Content-Length": "4" },
+    ]) {
+      const { client } = clientWith(() => new Response(new Uint8Array(bytes), { status: 200, headers }));
+      expect(await rejection(client.bundle("ws-a")), JSON.stringify(headers)).toMatchObject({ status: 502 });
+    }
+  });
+
   it("refuses a head that is not a commit id — it becomes a filename in a header", async () => {
     for (const head of [null, "", "abc", `${HEAD}\r\nSet-Cookie: x=1`, "../../etc"]) {
       const { client } = clientWith(
@@ -72,6 +102,99 @@ describe("bundle()", () => {
       );
       expect(await rejection(client.bundle("ws-a")), String(head)).toMatchObject({ status: 502 });
     }
+  });
+});
+
+/**
+ * The export's body is piped to the OWNER with backpressure, so the time it
+ * takes is set by their connection (a remote-access tunnel can be slow), not by
+ * the sandbox. The timeouts pin that: the whole-transfer timer covers only the
+ * wait for headers; the body is bounded by a stall timer that every chunk
+ * re-arms.
+ */
+describe("bundle() timeouts", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A sandbox whose body the test feeds by hand; the fetch signal aborts it as a real fetch would. */
+  function feedableSandbox(total: Buffer) {
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    let signal!: AbortSignal;
+    const { client } = clientWith((_url, init) => {
+      signal = init.signal as AbortSignal;
+      const res = new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            body = c;
+            signal.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")), { once: true });
+          },
+        }),
+        { status: 200, headers: { "X-Bundle-Head": HEAD, "X-Bundle-Sha256": sha(total), "Content-Length": String(total.length) } },
+      );
+      return res;
+    });
+    return { client, feed: (part: Buffer) => body.enqueue(new Uint8Array(part)), end: () => body.close(), signal: () => signal };
+  }
+
+  it("a download slower than the whole-transfer budget is not aborted while bytes keep moving", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const parts = [Buffer.from("aaaa"), Buffer.from("bbbb"), Buffer.from("cccc"), Buffer.from("dddd")];
+    const total = Buffer.concat(parts);
+    const sandbox = feedableSandbox(total);
+    const out = await sandbox.client.bundle("ws-a");
+    const drained = drain(out.stream);
+    // Four chunks a stall-window apart is far past the 125 s whole-transfer
+    // budget, yet no gap is a stall.
+    for (const part of parts) {
+      sandbox.feed(part);
+      await vi.advanceTimersByTimeAsync(BUNDLE_STALL_TIMEOUT_MS - 1_000);
+    }
+    expect(sandbox.signal().aborted).toBe(false);
+    sandbox.end();
+    expect(Buffer.compare(await drained, total)).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a body that goes quiet for the stall window is aborted, and the stream errors as a timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sandbox = feedableSandbox(Buffer.from("aaaabbbb"));
+    const out = await sandbox.client.bundle("ws-a");
+    const settled = drain(out.stream).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    sandbox.feed(Buffer.from("aaaa"));
+    await vi.advanceTimersByTimeAsync(BUNDLE_STALL_TIMEOUT_MS - 1_000);
+    expect(sandbox.signal().aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sandbox.signal().aborted).toBe(true);
+    expect(await settled).toMatchObject({ status: 504, code: "TIMEOUT" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a sandbox that never sends headers is still bounded by the whole-transfer timer", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { client } = clientWith(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        }),
+    );
+    const settled = rejection(client.bundle("ws-a"));
+    await vi.advanceTimersByTimeAsync(125_000);
+    expect(await settled).toMatchObject({ status: 504, code: "TIMEOUT" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("closing the stream early leaves no timer behind", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sandbox = feedableSandbox(Buffer.from("aaaa"));
+    const out = await sandbox.client.bundle("ws-a");
+    out.stream.on("error", () => undefined);
+    out.stream.destroy();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

@@ -23,6 +23,10 @@
 # UI at the dashboard's own origin. Only the two dynamic prefixes the editor
 # actually needs are exposed.
 #
+# Phase 7 (WARP-3053) pins the opposite kind of route: the OCS sharing API under
+# /nextcloud/ is DENIED at the gateway, so an app password cannot mint public
+# links to company files.
+#
 # These checks need no Docker. The authoritative PARSE gate is the nginx image
 # build (docker/nginx/Dockerfile runs `nginx -t` on the real config — asserted
 # in phase 5 below); this file guards the routing SHAPE, which a parse check
@@ -547,6 +551,131 @@ for f in "$NGINX_DIR"/docs-engine.*.conf; do
     fail "$(basename "$f") does not include security-headers.upstream.conf"
   fi
 done
+
+echo ""
+echo "--- Phase 7: the OCS sharing API is denied under /nextcloud/ (WARP-3053) ---"
+# Every user's Nextcloud password equals their Droplet password and app
+# passwords (device pairing, the personal Finder / File Explorer drive) are
+# full-scope, so through /nextcloud/ any member or guest could call Nextcloud's
+# own share endpoint and publish company files, skipping the owner/admin-only
+# rule the web app enforces in the orchestrator. The gateway refuses it.
+SHARING_PREFIXES=(
+  "/nextcloud/ocs/v1.php/apps/files_sharing"
+  "/nextcloud/ocs/v2.php/apps/files_sharing"
+  "/nextcloud/index.php/ocsapp/apps/files_sharing"
+  "/nextcloud/ocsapp/apps/files_sharing"
+)
+
+for prefix in "${SHARING_PREFIXES[@]}"; do
+  if grep -qF "location ^~ $prefix {" "$CONF"; then
+    pass "location ^~ $prefix exists (prefix-priority match beats the plain /nextcloud/ leg)"
+  else
+    fail "location ^~ $prefix is missing — that OCS path reaches Nextcloud through /nextcloud/"
+    continue
+  fi
+  body="$(location_body "$prefix")"
+  if [ "$(grep -cE '^[[:space:]]*[^#[:space:]]' <<<"$body")" = "1" ] \
+     && grep -qE '^[[:space:]]*return 403;[[:space:]]*$' <<<"$body"; then
+    pass "  $prefix answers 403 and does nothing else"
+  else
+    fail "  $prefix must be exactly 'return 403;' — anything more can proxy the request"
+  fi
+  if grep -qE 'proxy_pass|rewrite ' <<<"$body"; then
+    fail "  $prefix proxies or rewrites — the denial must come before anything is forwarded"
+  else
+    pass "  $prefix never reaches proxy_pass"
+  fi
+done
+
+# The location match runs on the normalised URI only while repeated slashes
+# are merged (the nginx default); switching it off would let `/nextcloud//ocs/…`
+# walk past the prefixes above.
+if grep -rqE 'merge_slashes[[:space:]]+off' "$NGINX_DIR"; then
+  fail "merge_slashes is off in a gateway conf — /nextcloud//ocs/v2.php/apps/files_sharing/… would bypass the sharing block"
+else
+  pass "merge_slashes is left at its default (on) in every gateway conf"
+fi
+
+# Resolve probe URIs the way nginx picks a location: the LONGEST matching prefix
+# wins, and a `^~` winner skips the regex phase. Only the :443 server's prefix
+# locations are considered. (nginx normalises the URI first — decoding, dot
+# segments, merged slashes — so probes are written in normalised form.)
+PREFIX_LOCS="$(awk -v start="${HTTPS_LINE:-0}" '
+  NR > start && /^[[:space:]]*location[[:space:]]+(\^~[[:space:]]+)?\/[^[:space:]]*[[:space:]]*\{[[:space:]]*$/ {
+    mod = ($2 == "^~") ? "^~" : ""
+    path = (mod == "^~") ? $3 : $2
+    inblock = 1; deny = 0; proxy = 0; next
+  }
+  inblock && /return 403;/ { deny = 1 }
+  inblock && /proxy_pass/ { proxy = 1 }
+  inblock && /^[[:space:]]*}[[:space:]]*$/ {
+    print path "|" mod "|" ((deny && !proxy) ? "deny" : "other"); inblock = 0
+  }
+' "$CONF")"
+
+# resolve_uri <uri> — print "<winning prefix>|<modifier>|<deny|other>".
+resolve_uri() {
+  local uri="$1" best="" line path
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path="${line%%|*}"
+    case "$uri" in
+      "$path"*) [ "${#path}" -gt "${#best}" ] && best="$path" ;;
+    esac
+  done <<<"$PREFIX_LOCS"
+  [ -n "$best" ] || return 0
+  grep -F "$best|" <<<"$PREFIX_LOCS" | head -1
+}
+
+for uri in \
+  /nextcloud/ocs/v2.php/apps/files_sharing/api/v1/shares \
+  /nextcloud/ocs/v2.php/apps/files_sharing/api/v1/shares/42 \
+  /nextcloud/ocs/v2.php/apps/files_sharing/api/v1/sharees \
+  /nextcloud/ocs/v2.php/apps/files_sharing/api/v1/remote_shares \
+  /nextcloud/ocs/v2.php/apps/files_sharing \
+  /nextcloud/ocs/v1.php/apps/files_sharing/api/v1/shares \
+  /nextcloud/ocs/v1.php/apps/files_sharing/api/v1/shares/42 \
+  /nextcloud/ocs/v1.php/apps/files_sharing \
+  /nextcloud/index.php/ocsapp/apps/files_sharing/api/v1/shares \
+  /nextcloud/ocsapp/apps/files_sharing/api/v1/shares; do
+  got="$(resolve_uri "$uri")"
+  case "$got" in
+    *"|^~|deny") pass "$uri is denied by a ^~ location (any method)" ;;
+    *) fail "$uri resolves to '${got:-nothing}' — expected a ^~ location that returns 403" ;;
+  esac
+done
+
+for uri in \
+  /nextcloud/remote.php/dav/files/alice/ \
+  /nextcloud/remote.php/dav/files/alice/Documents/report.docx \
+  /nextcloud/status.php \
+  /nextcloud/s/AbCdEf123 \
+  /nextcloud/ocs/v2.php/cloud/capabilities \
+  /nextcloud/ocs/v2.php/apps/notifications/api/v2/notifications \
+  /nextcloud/index.php/apps/files_sharing/publicpreview/AbCdEf123; do
+  got="$(resolve_uri "$uri")"
+  if [ "$got" = "/nextcloud/||other" ]; then
+    pass "$uri still resolves to the proxied /nextcloud/ leg"
+  else
+    fail "$uri resolves to '${got:-nothing}' — only the OCS files_sharing paths may be denied; everything else stays proxied by /nextcloud/"
+  fi
+done
+
+# The block is only safe because the web app never sends its own sharing calls
+# through this gateway. Pin the two facts that make that true: the orchestrator's
+# Nextcloud base is the compose-internal address, and every OCS URL is built
+# from it.
+if grep -qF -- '- NEXTCLOUD_URL=http://nextcloud:80' "$REPO_ROOT_REAL/docker/docker-compose.yml"; then
+  pass "the orchestrator talks to Nextcloud on the compose network (NEXTCLOUD_URL=http://nextcloud:80), not through this gateway"
+else
+  fail "docker-compose.yml no longer pins NEXTCLOUD_URL=http://nextcloud:80 — if the orchestrator reaches Nextcloud through the gateway, the web app's own sharing would get 403"
+fi
+if grep -qE 'function ocsUrl\(endpoint: string\): string \{' "$REPO_ROOT_REAL/apps/orchestrator/src/services/nextcloud.client.ts" \
+   && grep -qF 'return `${config.NEXTCLOUD_URL}${endpoint}`;' "$REPO_ROOT_REAL/apps/orchestrator/src/services/nextcloud.client.ts"; then
+  pass "the orchestrator builds every OCS URL from config.NEXTCLOUD_URL (ocsUrl in nextcloud.client.ts)"
+else
+  fail "nextcloud.client.ts no longer builds OCS URLs from config.NEXTCLOUD_URL — re-check that web sharing does not cross the gateway"
+fi
 
 echo ""
 echo "  $((TESTS - FAILURES))/$TESTS passed"
