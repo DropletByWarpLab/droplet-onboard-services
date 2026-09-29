@@ -3399,6 +3399,31 @@ export function getBirdseyeLiveUrl(): string {
   return `${BASE}/api/cameras/birdseye/live`;
 }
 
+/**
+ * Whether the birdseye composite would play for this viewer: the HTTP status
+ * of a GET, read off its headers, and the request aborted at once — the body
+ * is an endless MJPEG stream and is never read. Never HEAD: Express runs the
+ * GET handler for a HEAD and Node sends a HEAD's headers only when the
+ * response ends, which a continuous stream never does. Through `authFetch`,
+ * so an expired access cookie is refreshed before the `<img>` needs it.
+ * Rejects on a timeout (20 s), a network failure, or `signal` aborting.
+ */
+export async function getBirdseyeStatus(signal?: AbortSignal): Promise<number> {
+  const ctrl = new AbortController();
+  const stop = () => ctrl.abort();
+  if (signal?.aborted) stop();
+  signal?.addEventListener("abort", stop, { once: true });
+  const timer = setTimeout(stop, DEFAULT_API_FETCH_TIMEOUT_MS);
+  try {
+    const res = await authFetch(getBirdseyeLiveUrl(), { signal: ctrl.signal });
+    return res.status;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+    ctrl.abort();
+  }
+}
+
 // --- Camera groups ---
 
 export async function fetchCameraGroups(): Promise<CameraGroupInfo[]> {
