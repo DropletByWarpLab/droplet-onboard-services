@@ -119,6 +119,123 @@ The same gate applies to the passkey `POST /auth/webauthn/authenticate/verify?re
 token carries an MFA stamp used by `require-recent-mfa` routes. WebAuthn
 is not part of the app login path.
 
+#### SSO for native clients (`/api/sso/oidc/native/*`)
+
+A native client has no WebView to carry the browser flow's state cookie, so it
+uses a box-local handoff (RFC 8252 loopback or private-use scheme, with PKCE).
+The box stays the OIDC client: the identity provider still redirects to the
+box's own `/api/sso/oidc/callback`, and the redirect URI registered at the
+provider does not change (ADR-016). List the providers first with
+`GET /api/sso/oidc/providers` → `{ providers: ["google" | "entra" | "okta", …] }`.
+Design and rationale: ADR-063 (Proposed).
+
+1. The app makes a PKCE pair: `codeVerifier` (43–128 chars of
+   `A-Z a-z 0-9 - . _ ~`) and `codeChallenge = BASE64URL(SHA256(codeVerifier))`
+   (43 chars, no padding). It opens a loopback listener on a random port and
+   path, or uses `droplet://sso/callback`.
+2. `POST /api/sso/oidc/native/begin` → `200 { authorizeUrl }`.
+3. The app opens `authorizeUrl` in the **system browser** (never an embedded
+   WebView). The person signs in at the provider, which redirects to the box.
+4. The box validates the sign-in and shows a **consent page** in the browser
+   ("Sign in to Droplet?", RFC 8252 §8.6). It sets no cookies. **Continue**
+   sends the browser to `<redirectUri>?code=<handoff code>&state=<state>`.
+   **Cancel** sends it to `<redirectUri>?error=access_denied&state=<state>`.
+5. `POST /api/sso/oidc/native/token` with the handoff code and the verifier →
+   the `/auth/login?return=body` body.
+
+If the sign-in fails at any point after step 3 (the provider refuses, the
+person cancels at the provider, the ID token does not validate, ...) the box
+sends the browser to `<redirectUri>?error=<error>&state=<state>` instead, so
+the app can stop waiting and show the reason. See **Errors relayed to the app**
+below. The app should still give up waiting after the state's 10-minute
+lifetime, because a closed browser tab sends nothing.
+
+| Method | Path | Auth | Body | Returns |
+|---|---|---|---|---|
+| POST | `/sso/oidc/native/begin` | none | `{ provider, redirectUri, codeChallenge, codeChallengeMethod: "S256" }` | `200 { authorizeUrl }` (no cookie, no redirect) |
+| GET | `/sso/oidc/callback?code&state` | none (reached from the provider) | — | `200` consent page whose Continue link is `<redirectUri>?code=<43-char handoff code>&state=<state>`; or `302 <redirectUri>?error=<error>&state=<state>` |
+| POST | `/sso/oidc/native/token` | none | `{ code, codeVerifier }` | `200 { user: { id, username, displayName, role, mustChangePassword }, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
+
+```json
+POST /api/sso/oidc/native/begin
+{ "provider": "entra",
+  "redirectUri": "http://127.0.0.1:49152/sso/7f3a9c",
+  "codeChallenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+  "codeChallengeMethod": "S256" }
+
+200 { "authorizeUrl": "https://login.microsoftonline.com/…/authorize?…" }
+```
+
+```json
+POST /api/sso/oidc/native/token
+{ "code": "<handoff code from the redirect>", "codeVerifier": "<the app's verifier>" }
+
+200 { "user": { "id": "<uuid>", "username": "…", "displayName": "…", "role": "family", "mustChangePassword": false },
+      "accessToken": "<jwt>", "refreshToken": "<jwt>",
+      "accessTokenExpiresAt": 1790000000, "refreshTokenExpiresAt": 1790600000 }
+```
+
+**`redirectUri` rules.** It must be exactly one of these, in canonical form:
+
+- `http://127.0.0.1:<port>/<path>` or `http://[::1]:<port>/<path>`, where
+  `<port>` is 1024–65535 and written without leading zeros. `<path>` may be
+  just `/`. No query, no fragment, no user info.
+- exactly `droplet://sso/callback`.
+
+Anything else is refused, including the name `localhost`, `https`, another
+loopback or LAN address, a missing or default port, shorthand or
+non-canonical addresses, and an upper-case scheme. Prefer loopback with a
+random port and path: another local app can claim `droplet://`, although it
+could only redeem a code for a flow it started with its own verifier.
+
+**Handoff code.** 32 random bytes, base64url (43 chars). The box keeps only its
+SHA-256. It is minted when the consent page is shown, is valid for **60
+seconds** and for **one** redemption, and is useless without the app's
+verifier. A redemption attempt consumes it **whatever the outcome**, so a wrong
+verifier burns the code and the app must start over at `begin`. If the person
+takes longer than 60 seconds on the consent page, redemption answers
+`SSO_HANDOFF_INVALID` and the app starts over. The `state` in the redirect is
+the one the box minted; the app should check it against the `authorizeUrl` it
+opened.
+
+**Errors relayed to the app.** `<redirectUri>?error=<error>&state=<state>`,
+with no `code`. The IdP's own error text is never forwarded.
+
+| `error` | When |
+|---|---|
+| `access_denied` | the person chose Cancel on the consent page, or cancelled or was refused at the provider |
+| `invalid_request`, `unauthorized_client`, `unsupported_response_type`, `invalid_scope`, `temporarily_unavailable`, `interaction_required`, `login_required`, `account_selection_required`, `consent_required` | the provider sent that standard OAuth/OIDC error, or (`invalid_request`) sent neither `code` nor `error` |
+| `server_error` | the provider sent an error code that is not in the list above |
+| `sso_failed` | the ID token did not validate, the provider gave no usable email, or the account is deactivated |
+| `sso_email_unverified` | the provider did not verify the email address |
+| `sso_domain_not_allowed` | Google account outside `DROPLET_SSO_GOOGLE_ALLOWED_HD` |
+| `totp_required` | the account has a local password and TOTP enrolled. SSO does not satisfy that factor: sign in with the password and code instead |
+
+An unknown or replayed `state` is not relayed (the box cannot trust the
+redirect it would go to): the browser sees `401 { error: "Invalid or expired
+SSO state" }` or `401 { error: "Invalid SSO state" }`.
+
+**`/native/token` answers.** No cookies are set and the response is
+`Cache-Control: no-store`. Like `?return=body`, it refuses a browser context
+(any `Origin`, `Referer` or `Sec-Fetch-*` header) without consuming the code.
+The session is an ordinary one: refresh with `/auth/refresh`, the same idle and
+absolute limits, no `lastMfaAt`. The box records the redemption, successful or
+not, in the activity log.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | `begin`: a field is missing or not a string. `token`: `code` is not 43 base64url chars, or `codeVerifier` is not 43–128 unreserved chars |
+| 400 | `INVALID_REDIRECT_URI` | `begin`: `redirectUri` breaks the rules above |
+| 400 | `INVALID_CODE_CHALLENGE` | `begin`: `codeChallenge` is not 43 base64url chars, or `codeChallengeMethod` is not `S256` |
+| 400 | `SSO_PROVIDER_UNSUPPORTED` | `begin`: `provider` is not `google`, `entra` or `okta` |
+| 400 | `SSO_PROVIDER_NOT_CONFIGURED` | `begin`: this box has not configured that provider |
+| 401 | `SSO_HANDOFF_INVALID` | `token`: unknown, already used or expired code, or a verifier that does not match |
+| 401 | `SSO_ACCOUNT_UNAVAILABLE` | `token`: the account was deactivated or removed after the callback |
+| 401 | `TOTP_REQUIRED` | `token`: the account has a local password and TOTP enrolled (same rule as the callback) |
+| 403 | `NATIVE_CLIENT_REQUIRED` | `token`: the request carries a browser marker header |
+| 429 | — | shared `authRateLimit` (20/min/IP across the sign-in routes); `{ error: "Too many requests, slow down" }` |
+| 500 | `SSO_NO_PRISMA` | the directory is not wired |
+
 **Recovery-code step-up.** `/auth/recovery` is a **Bearer-authenticated**
 step-up that consumes one unused recovery code for an already-signed-in
 session (body `{ code }` → `{ ok, remaining }`, six-digit `/auth/totp/verify`
