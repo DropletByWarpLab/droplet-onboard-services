@@ -1,5 +1,5 @@
 /**
- * WARP-3125 — a service caller's explicit tool set is advertised as sent.
+ * WARP-3125 — the voice principal's explicit tool set is advertised as sent.
  *
  * Voice-io sends a curated `allowed_tools` (17 tools) on every tool turn. The
  * route used to run keyword selection over it as well, so the advertised
@@ -125,36 +125,36 @@ describe("effectiveAdvertisedToolNames under `explicit`", () => {
 });
 
 describe("resolveTurnToolSelectionMode", () => {
-  it("a service principal with an explicit list gets `explicit`", () => {
+  it("the voice principal with an explicit list gets `explicit`", () => {
     expect(
       resolveTurnToolSelectionMode({
         configured: "domains",
         callerSuppliedAllowedTools: true,
-        servicePrincipal: true,
+        voicePrincipal: true,
       }),
     ).toBe("explicit");
   });
 
-  it("a person with an explicit list keeps keyword selection", () => {
-    // Scoped to service principals on purpose: a dashboard caller's list is a
+  it("a person, or a non-voice service token, with an explicit list keeps keyword selection", () => {
+    // Scoped to the voice principal on purpose: a dashboard caller's list is a
     // request, and the route's answer for it is unchanged.
     expect(
       resolveTurnToolSelectionMode({
         configured: "domains",
         callerSuppliedAllowedTools: true,
-        servicePrincipal: false,
+        voicePrincipal: false,
       }),
     ).toBe("domains");
   });
 
-  it("a service principal with NO list keeps keyword selection", () => {
+  it("the voice principal with NO list keeps keyword selection", () => {
     // Without a list the pool is the whole chat scope, which does not fit the
     // window unselected. Only a caller that named its set may skip selection.
     expect(
       resolveTurnToolSelectionMode({
         configured: "domains",
         callerSuppliedAllowedTools: false,
-        servicePrincipal: true,
+        voicePrincipal: true,
       }),
     ).toBe("domains");
   });
@@ -162,13 +162,13 @@ describe("resolveTurnToolSelectionMode", () => {
   it("the operator's `off` stays `off` for every caller", () => {
     // TOOL_SELECTION_MODE=off is the documented rollback lever. It must not be
     // turned into a mode that asserts the budget.
-    for (const servicePrincipal of [true, false]) {
+    for (const voicePrincipal of [true, false]) {
       for (const callerSuppliedAllowedTools of [true, false]) {
         expect(
           resolveTurnToolSelectionMode({
             configured: "off",
             callerSuppliedAllowedTools,
-            servicePrincipal,
+            voicePrincipal,
           }),
         ).toBe("off");
       }

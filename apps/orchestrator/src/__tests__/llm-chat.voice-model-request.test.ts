@@ -288,7 +288,7 @@ describe("a voice tool turn on the wire (WARP-3125)", () => {
 
   it("a person sending the same list keeps domain selection, so the two turns differ", async () => {
     // The contrast that makes the first case mean something: this is what
-    // voice got before WARP-3125, and what every non-service caller still
+    // voice got before WARP-3125, and what every non-voice caller still
     // gets.
     const health = await voiceTurn(OWNER, voiceUserTurn("9:17 PM", "is everything working?"));
     const camera = await voiceTurn(OWNER, voiceUserTurn("9:17 PM", "is the front camera online?"));

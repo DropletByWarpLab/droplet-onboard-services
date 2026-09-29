@@ -87,7 +87,7 @@ import { pinnedToolDomainsFromMessages } from "./context-pin-prompt.js";
  *   • `off` — the whole pool, no budget assert. The operator's diagnostic and
  *     rollback lever (`TOOL_SELECTION_MODE=off`).
  *   • `explicit` — WARP-3125. The whole pool, because the CALLER already named
- *     it: a service principal's own `allowed_tools`, after RBAC. Never set by
+ *     it: the voice principal's own `allowed_tools`, after RBAC. Never set by
  *     an operator (config admits only `off`/`domains`); the chat route picks
  *     it per turn through `resolveTurnToolSelectionMode`. Unlike `off`, the
  *     tool budget is still asserted (`selectionAssertsToolBudget`).
@@ -97,8 +97,8 @@ export type ToolSelectionMode = "off" | "domains" | "explicit";
 /**
  * WARP-3125 — the selection mode for ONE chat turn.
  *
- * A service principal that sends its own `allowed_tools` has already chosen
- * its tools. Running keyword selection on top of that list changed the
+ * The voice principal, when it sends its own `allowed_tools`, has already
+ * chosen its tools. Running keyword selection on top of that list changed the
  * advertised `tools[]` with every sentence. llama-server reuses the KV cache
  * only for the prompt prefix that is byte-identical to the previous request,
  * and the tool block sits near the front, so the change cost a re-prefill of
@@ -107,10 +107,14 @@ export type ToolSelectionMode = "off" | "domains" | "explicit";
  * was not advertised), and each miss cost a self-heal iteration out of
  * voice's two.
  *
- * Scoped to service principals WITH a list, and to nothing else:
+ * Scoped to the VOICE principal WITH a list, and to nothing else:
  *   • Dashboard callers keep `domains`. Their `allowed_tools` is a request
  *     filtered by role, and the setup wizard's `[]` is zero tools either way.
- *   • A service principal with no list gets the whole chat scope, which does
+ *   • The other service tokens (`_service:mcp`, `_service:email`, ...) keep
+ *     `domains` too. `/api/llm/chat` admits every one of them, but none has
+ *     opted in, and none is sized to a fixed list. Widen this deliberately,
+ *     per caller, not by sharing the `service` role.
+ *   • The voice principal with no list gets the whole chat scope, which does
  *     not fit the window unselected (WARP-1893), so it keeps `domains`.
  *   • Agent and durable runs never reach this. `agent-run-worker.service.ts`
  *     calls `runAgent` directly with `runToolPool()` and the configured mode,
@@ -121,12 +125,12 @@ export type ToolSelectionMode = "off" | "domains" | "explicit";
 export function resolveTurnToolSelectionMode(opts: {
   configured: ToolSelectionMode;
   callerSuppliedAllowedTools: boolean;
-  servicePrincipal: boolean;
+  voicePrincipal: boolean;
 }): ToolSelectionMode {
   if (
     opts.configured === "domains" &&
     opts.callerSuppliedAllowedTools &&
-    opts.servicePrincipal
+    opts.voicePrincipal
   ) {
     return "explicit";
   }

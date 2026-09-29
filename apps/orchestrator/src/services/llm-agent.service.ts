@@ -473,8 +473,8 @@ export interface AgentRequest {
    * (allowed_tools / chat scope) — RBAC is decided before this field.
    *
    * WARP-3125 — "explicit" advertises the resolved pool whole, like "off",
-   * but still asserts the tool budget. Only the chat route sets it, for a
-   * service principal that named its own `allowed_tools`
+   * but still asserts the tool budget. Only the chat route sets it, for the
+   * voice principal when it names its own `allowed_tools`
    * (`resolveTurnToolSelectionMode`), so the advertised set is identical
    * turn to turn.
    */

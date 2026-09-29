@@ -1,11 +1,14 @@
 /**
- * WARP-3125 — the two pure helpers behind a service caller's chat turn.
+ * WARP-3125 — the two pure helpers behind the voice principal's chat turn.
  *
- *   • `isServicePrincipal` decides who gets the per-turn `explicit` tool
- *     selection and the system-message fold. It must match a machine
- *     principal (`_service:*` minted by middleware/auth.ts) and nothing else:
- *     `service` is also a value of the Prisma `Role` enum, so a role-only
- *     check would admit a JWT-backed row that merely carries that role.
+ *   • `isVoicePrincipal` decides who gets the per-turn `explicit` tool
+ *     selection and the system-message fold. It must match the voice token
+ *     (`_service:voice`, minted by middleware/auth.ts) and nothing else. The
+ *     route admits every service token (role `service`), and the fold puts
+ *     the caller's text into the box's own system instructions, so a sibling
+ *     like `_service:mcp` must not qualify. `service` is also a value of the
+ *     Prisma `Role` enum, so a role-only check would admit a JWT-backed row
+ *     that merely carries that role.
  *   • `splitLeadingSystemMessages` takes the caller's own leading system
  *     message(s) off the request so the route can fold them into its single
  *     index-0 system message. The gpt-oss chat template renders only
@@ -15,26 +18,31 @@
  * The route-level behaviour is pinned in `llm-chat.voice-cache-stable.test.ts`.
  */
 import { describe, it, expect } from "vitest";
-import { isServicePrincipal, splitLeadingSystemMessages } from "../routes/llm.js";
+import { isVoicePrincipal, splitLeadingSystemMessages } from "../routes/llm.js";
 import type { ChatMessage } from "../types/index.js";
 
-describe("isServicePrincipal", () => {
-  it("matches the service principals middleware/auth.ts mints", () => {
-    expect(isServicePrincipal({ id: "_service:voice", role: "service" })).toBe(true);
-    expect(isServicePrincipal({ id: "_service:mcp", role: "service" })).toBe(true);
+describe("isVoicePrincipal", () => {
+  it("matches the voice service token", () => {
+    expect(isVoicePrincipal({ id: "_service:voice", role: "service" })).toBe(true);
+  });
+
+  it("does not match the other service principals middleware/auth.ts mints", () => {
+    // They share the route and the `service` role. Only voice-io opted in.
+    expect(isVoicePrincipal({ id: "_service:mcp", role: "service" })).toBe(false);
+    expect(isVoicePrincipal({ id: "_service:email", role: "service" })).toBe(false);
   });
 
   it("does not match a user row that merely carries the `service` role", () => {
     // `service` is a Prisma Role value. Only the id namespace says the bearer
     // was a service token rather than a session.
-    expect(isServicePrincipal({ id: "3f0c9a8e-user", role: "service" })).toBe(false);
+    expect(isVoicePrincipal({ id: "3f0c9a8e-user", role: "service" })).toBe(false);
   });
 
   it("does not match people or an unauthenticated request", () => {
-    expect(isServicePrincipal({ id: "u1", role: "owner" })).toBe(false);
-    expect(isServicePrincipal({ id: "u2", role: "admin" })).toBe(false);
-    expect(isServicePrincipal({ id: "_service:voice", role: "owner" })).toBe(false);
-    expect(isServicePrincipal(undefined)).toBe(false);
+    expect(isVoicePrincipal({ id: "u1", role: "owner" })).toBe(false);
+    expect(isVoicePrincipal({ id: "u2", role: "admin" })).toBe(false);
+    expect(isVoicePrincipal({ id: "_service:voice", role: "owner" })).toBe(false);
+    expect(isVoicePrincipal(undefined)).toBe(false);
   });
 });
 

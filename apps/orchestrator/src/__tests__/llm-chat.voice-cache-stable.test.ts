@@ -7,17 +7,21 @@
  *
  *  1. Keyword selection ran on top of voice's explicit `allowed_tools`, so the
  *     `# Tools` block changed with every sentence. The route now picks
- *     `explicit` for a service principal that named its own set. RBAC
+ *     `explicit` for the VOICE principal when it names its own set. RBAC
  *     narrowing still runs first. Every other caller keeps the configured
- *     mode, and agent runs never pass through here.
+ *     mode (including the other service principals, `_service:mcp`,
+ *     `_service:email` and the rest, which share the route and the `service`
+ *     role), and agent runs never pass through here.
  *
  *  2. The gpt-oss chat template renders only `messages[0]` as developer
  *     instructions. A system message at index 1 or later has no branch in
  *     the template's message loop and is silently dropped. The route splices
  *     its base prompt at index 0, which pushed voice's own system message
  *     (the spoken-reply persona) to index 1, so on every tool turn it never
- *     reached the model. The route now folds a service caller's leading
- *     system message into the one index-0 system message.
+ *     reached the model. The route now folds the voice principal's leading
+ *     system message into the one index-0 system message. Only voice's: a
+ *     folded message lands in the box's own system instructions, so the fold
+ *     is not extended to every service token.
  *
  * `runAgent` is mocked here, so these cases pin what the route HANDS the loop.
  * What the model then receives is pinned through the real loop in
@@ -328,7 +332,7 @@ describe("POST /api/llm/chat — voice's system message reaches the model (WARP-
   });
 
   it("a dashboard caller's message layout is unchanged", async () => {
-    // Scoped to service principals: a person's own system message keeps its
+    // Scoped to the voice principal: a person's own system message keeps its
     // position. (Pins and attachments at index >= 1 are a separate ticket.)
     const res = await postChat(OWNER, {
       messages: [
@@ -341,5 +345,75 @@ describe("POST /api/llm/chat — voice's system message reaches the model (WARP-
     expect(systemMessages(messages)).toHaveLength(2);
     expect(text(messages[0])).toContain("You are Droplet");
     expect(messages[1]).toEqual({ role: "system", content: "caller context" });
+  });
+});
+
+/**
+ * `/api/llm/chat` admits role `service` for every machine bearer
+ * (middleware/auth.ts SERVICE_PRINCIPALS), not just voice-io. The two
+ * behaviours above are voice's alone:
+ *
+ *  - `explicit` advertises the caller's own list unselected. Another token
+ *    that sends `allowed_tools` has not opted into that; it keeps keyword
+ *    selection and the loop's budget narrowing.
+ *  - the fold puts the caller's system text into the box's index-0 developer
+ *    instructions, AFTER the base prompt and the off-LAN notices. Before
+ *    WARP-3125 the gpt-oss template dropped that text on a tool turn. Folding
+ *    it for every service token would let each one append to the box's own
+ *    system instructions.
+ */
+describe("POST /api/llm/chat — a non-voice service principal is unchanged (WARP-3125)", () => {
+  const MCP: TestUser = { id: "_service:mcp", username: "_service:mcp", role: "service" };
+  const EMAIL: TestUser = { id: "_service:email", username: "_service:email", role: "service" };
+  // `service` is also a Prisma Role value: a user row that carries it is not a
+  // service token, and must not be treated as voice either.
+  const SERVICE_ROLE_USER: TestUser = {
+    id: "3f0c9a8e-user",
+    username: "svc-row",
+    role: "service",
+  };
+  const CALLER_SYSTEM = "SERVICE_CALLER_SYSTEM_TEXT do something unusual";
+
+  const turn = (allowed_tools: string[]) => ({
+    messages: [
+      { role: "system", content: CALLER_SYSTEM },
+      { role: "user", content: "is everything working?" },
+    ],
+    allowed_tools,
+    max_iter: 2,
+  });
+
+  it.each([
+    ["_service:mcp", MCP],
+    ["_service:email", EMAIL],
+    ["a user row carrying the service role", SERVICE_ROLE_USER],
+  ])("%s with an explicit allowed_tools keeps domain selection", async (_label, user) => {
+    const res = await postChat(user, turn(VOICE_TOOLS));
+    expect(res.status).toBe(200);
+    expect(agentRequest().tool_selection_mode).toBe("domains");
+  });
+
+  it.each([
+    ["_service:mcp", MCP],
+    ["_service:email", EMAIL],
+  ])("%s does not get its system text folded into the index-0 instructions", async (_label, user) => {
+    const res = await postChat(user, turn(VOICE_TOOLS));
+    expect(res.status).toBe(200);
+    const { messages } = agentRequest();
+    // The layout a non-voice caller had before WARP-3125: the route's base
+    // prompt at index 0, the caller's own message left where it was.
+    expect(text(messages[0])).toContain("You are Droplet");
+    expect(text(messages[0])).not.toContain(CALLER_SYSTEM);
+    expect(messages[1]).toEqual({ role: "system", content: CALLER_SYSTEM });
+    expect(systemMessages(messages)).toHaveLength(2);
+  });
+
+  it("voice, on the same request, still gets both (the control)", async () => {
+    const res = await postChat(VOICE, turn(VOICE_TOOLS));
+    expect(res.status).toBe(200);
+    const req = agentRequest();
+    expect(req.tool_selection_mode).toBe("explicit");
+    expect(systemMessages(req.messages)).toHaveLength(1);
+    expect(text(req.messages[0]).endsWith(`\n\n${CALLER_SYSTEM}`)).toBe(true);
   });
 });

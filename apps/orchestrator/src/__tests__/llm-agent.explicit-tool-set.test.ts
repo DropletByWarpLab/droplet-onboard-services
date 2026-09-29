@@ -1,7 +1,7 @@
 /**
  * WARP-3125 — the agent loop under `tool_selection_mode: "explicit"`.
  *
- * The chat route picks `explicit` for a service principal that sent its own
+ * The chat route picks `explicit` for the voice principal when it sends its own
  * `allowed_tools` (voice-io). The loop must then put the caller's set on the
  * wire unchanged: the SAME bytes on every turn, whatever the sentence, so
  * llama-server can reuse the cached prefix through the tool block. And unlike

@@ -478,21 +478,14 @@ export function isVoicePrincipal(user: AuthedRequest["user"]): boolean {
 }
 
 /**
- * WARP-3125 — any service-principal bearer (middleware/auth.ts
- * SERVICE_PRINCIPALS): a machine caller that composes its own prompt and tool
- * set. Today `_service:voice` is the only one that calls this route.
- *
- * The id namespace AND the role, like `isVoicePrincipal`: `service` is also a
- * value of the Prisma `Role` enum, so the role alone would admit a user row
- * that happens to carry it. Only a service token mints a `_service:` id.
- */
-export function isServicePrincipal(user: AuthedRequest["user"]): boolean {
-  return user?.role === "service" && (user.id ?? "").startsWith("_service:");
-}
-
-/**
  * WARP-3125 — take a caller's LEADING system message(s) off the front of the
  * request so the route can fold them into its own index-0 system message.
+ *
+ * Applied to the VOICE principal only (`isVoicePrincipal`). This route admits
+ * every service token (role `service`), and the fold puts the caller's text
+ * into the box's own developer instructions, after the base prompt and the
+ * off-LAN notices. Widening it to another service token is a decision to make
+ * for that caller, not a side effect of it sharing the role.
  *
  * Why: the gpt-oss chat template turns only `messages[0]` (system or
  * developer) into the developer instructions. Its message loop has branches
@@ -1202,17 +1195,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       // WARP-3125 — ONE selection mode for this turn, handed to the budget
       // estimate and to both runAgent calls so the two stay in step
-      // (WARP-2552 parity). A service principal that named its own
-      // `allowed_tools` (voice-io) gets `explicit`: its set, RBAC-narrowed
-      // just above, is advertised as-is and in registry order, so the tool
-      // block is identical turn to turn and llama-server can reuse the
-      // cached prefix. Everyone else keeps the configured mode. Agent and
-      // durable runs call runAgent directly and never pass through here.
-      const servicePrincipal = isServicePrincipal((req as AuthedRequest).user);
+      // (WARP-2552 parity). The VOICE principal, when it names its own
+      // `allowed_tools`, gets `explicit`: its set, RBAC-narrowed just above,
+      // is advertised as-is and in registry order, so the tool block is
+      // identical turn to turn and llama-server can reuse the cached prefix.
+      // Everyone else keeps the configured mode, including the other service
+      // tokens (`_service:mcp`, `_service:email`, ...) that share this route
+      // and the `service` role. Agent and durable runs call runAgent directly
+      // and never pass through here.
       const toolSelectionMode = resolveTurnToolSelectionMode({
         configured: config.TOOL_SELECTION_MODE,
         callerSuppliedAllowedTools: chatReq.allowed_tools !== undefined,
-        servicePrincipal,
+        voicePrincipal: isVoice,
       });
 
       // WARP-1121 (§9.3) — is this turn part of the live onboarding
@@ -1347,17 +1341,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
       }
       let agentMessages: ChatMessage[] = replayStrip.messages;
-      // WARP-3125 — a service caller's own system message on a tool turn is
+      // WARP-3125 — the voice principal's own system message on a tool turn is
       // taken off here and folded into the base system message below, so it
       // renders as the model's developer instructions instead of being
       // dropped at index 1 (see `splitLeadingSystemMessages`). Taken BEFORE
       // any pin/attachment splice so only the caller's own messages can be
       // folded. The condition matches the base-prompt block below, so
-      // whatever is taken here is always put back there. Dashboard callers
-      // keep their layout; `tool_choice: "none"` turns get no base prompt,
-      // so the caller's message is already index 0 there.
+      // whatever is taken here is always put back there. Every other caller
+      // keeps its layout (dashboard users and the other service tokens
+      // alike: a folded message joins the box's own system instructions, so
+      // it is not extended past voice); `tool_choice: "none"` turns get no
+      // base prompt, so the caller's message is already index 0 there.
       let callerSystemPreamble = "";
-      if (servicePrincipal && chatReq.tool_choice !== "none") {
+      if (isVoice && chatReq.tool_choice !== "none") {
         const split = splitLeadingSystemMessages(agentMessages);
         callerSystemPreamble = split.preamble;
         agentMessages = split.rest;
@@ -2053,22 +2049,6 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           console.warn("[llm/chat] memory-fact load failed:", err);
         }
 
-        // WARP-2752 (ADR-051) — the brain block. Same fail-open posture as the
-        // memory block above: an unreadable brain degrades the turn, it never
-        // fails it. `buildBrainBlock` resolves the caller's scope itself and
-        // returns "" if it cannot, so a family turn can never inherit
-        // company-scope rows through an error path.
-        let brainBlock = "";
-        try {
-          brainBlock = await buildBrainBlock(prisma, {
-            id: req.user?.id ?? "",
-            role: role ?? "",
-          });
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("[llm/chat] brain block load failed:", err);
-        }
-
         // WARP-1118 — compose the personality block fresh from Prisma each
         // request (§7.2: single-row read, no cache to invalidate). Fail-open
         // to no persona block on any error, same posture as the memory block.
@@ -2116,19 +2096,6 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // gives us the identity+guidance chars without a persona block for the
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
-        // WARP-2746 — THE off-LAN filter for the system-prompt blocks. Runs
-        // BEFORE the size estimate so the estimate, `degradeToFit` and the
-        // wire all see the same text: a block withheld here can neither be
-        // sent nor charged against the window.
-        const promptGate = withholdPromptBlocksForOffLan(
-          { memory: memoryBlock, brain: brainBlock, business: businessBlock },
-          isOffLanTurn,
-        );
-        offLanWithheld.push(...promptGate.withheld);
-        memoryBlock = promptGate.blocks.memory;
-        brainBlock = promptGate.blocks.brain;
-        businessBlock = promptGate.blocks.business;
-
         const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
@@ -2182,7 +2149,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // Since WARP-1921 the agent loop narrows the pool to a per-turn subset
         // (`llm-agent.service.ts`, gated on `tool_selection_mode === "domains"`,
         // which every caller gets unless an operator sets TOOL_SELECTION_MODE=
-        // off, or, since WARP-3125, a service principal names its own
+        // off, or, since WARP-3125, the voice principal names its own
         // `allowed_tools` and gets `explicit`).
         // The comment that used to sit here still claimed the estimate
         // "reflects what the model actually receives"; it had been false since
@@ -2214,6 +2181,47 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           priorToolNames,
           pool: effectiveTools.map((t) => t.name),
         });
+
+        // WARP-2752 (ADR-051) — the brain block. Same fail-open posture as the
+        // memory block above: an unreadable brain degrades the turn, it never
+        // fails it. `buildBrainBlock` resolves the caller's scope itself and
+        // returns "" if it cannot, so a family turn can never inherit
+        // company-scope rows through an error path.
+        //
+        // WARP-3125 — built HERE, after the advertised set, because its closing
+        // hint names `business_find` and must only do so when this turn
+        // advertises it. Voice's fixed list has no `business_find`, and the
+        // block was telling it to call one. It is the SAME set the size
+        // estimate below and the loop use, so the prompt cannot name a tool
+        // the request does not carry.
+        let brainBlock = "";
+        try {
+          brainBlock = await buildBrainBlock(
+            prisma,
+            {
+              id: req.user?.id ?? "",
+              role: role ?? "",
+            },
+            { advertisedTools: advertisedNamesForEstimate },
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] brain block load failed:", err);
+        }
+
+        // WARP-2746 — THE off-LAN filter for the system-prompt blocks. Runs
+        // BEFORE the size estimate so the estimate, `degradeToFit` and the
+        // wire all see the same text: a block withheld here can neither be
+        // sent nor charged against the window.
+        const promptGate = withholdPromptBlocksForOffLan(
+          { memory: memoryBlock, brain: brainBlock, business: businessBlock },
+          isOffLanTurn,
+        );
+        offLanWithheld.push(...promptGate.withheld);
+        memoryBlock = promptGate.blocks.memory;
+        brainBlock = promptGate.blocks.brain;
+        businessBlock = promptGate.blocks.business;
+
         const toolSchemasJson = JSON.stringify(
           effectiveTools
             .filter((t) => advertisedNamesForEstimate.has(t.name))
@@ -2231,7 +2239,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const assembledText = agentMessages
           .map((m) => contentToText(m.content))
           .join("\n");
-        // WARP-3125 — the service caller's folded system text. It was sized
+        // WARP-3125 — the voice principal's folded system text. It was sized
         // inside `historyText` while it sat in agentMessages; it is charged to
         // the never-dropped identity part now, because it goes out verbatim
         // and nothing may drop it.
@@ -2296,7 +2304,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             (isOffLanTurn ? "\n\n" + OFF_LAN_WITHHELD_NOTICE : "") +
             // WARP-2991 — say so when the earlier replies were held back.
             (historyWithheldMessages > 0 ? "\n\n" + OFF_LAN_HISTORY_NOTICE : "") +
-            // WARP-3125 — the service caller's own system text (voice-io's
+            // WARP-3125 — the voice principal's own system text (voice-io's
             // spoken-reply persona), LAST: it is the most specific instruction
             // for this surface, and it is stable text, so the prefix through
             // the tool block stays cacheable. "" for every other caller.

@@ -77,7 +77,7 @@ describe("one derivation, two call sites", () => {
     // the full estimate. Mutation: replace with a literal → red.
     //
     // WARP-3125 — the route now resolves ONE per-turn mode from the configured
-    // one (`explicit` for a service principal's own set), and the estimate and
+    // one (`explicit` for the voice principal's own set), and the estimate and
     // BOTH runAgent calls must read that same value. Mutation: hand either
     // runAgent call `config.TOOL_SELECTION_MODE` again, or the estimate a
     // literal → red, and an explicit voice turn is sized as a selected one.
