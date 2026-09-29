@@ -187,6 +187,30 @@ describe("🔴 the path parameter is the target, and the query models the turn",
     );
   });
 
+  it("🔴 an owner on a box with a module OFF gets every tool the turn's guidance names, minus that module's (WARP-2972)", async () => {
+    // The real turn composes guidance from `namesForGuidance(undefined, verdict)`:
+    // every registered tool except the module-withheld ones — chat-policy and
+    // turn-relevance exclusions do NOT apply to guidance. Sending `undefined`
+    // here would render guidance naming tools the turn no longer holds.
+    mocks.inspectTools.mockResolvedValue({
+      ...TOOLS_RESULT,
+      tier: "owner",
+      noRoleNarrowing: true,
+      counts: { ...TOOLS_RESULT.counts, byGate: { module: 1 } },
+      rows: [
+        { name: "read_file", advertised: true, gate: null, source: "built-in" },
+        { name: "list_cameras", advertised: false, gate: "module", source: "built-in" },
+        { name: "set_wifi_ssid", advertised: false, gate: "chat_policy", source: "built-in" },
+        { name: "ext_thing", advertised: true, gate: null, source: "extension:x@1" },
+      ],
+    });
+    await request(appAs("owner")).get("/api/admin/prompt-inspect/u1");
+    expect(mocks.inspectPrompt).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ allowedToolNames: ["read_file", "set_wifi_ssid"] }),
+    );
+  });
+
   it("🔴 hands the multiplexer's remote call policy to the inspector (WARP-2900)", async () => {
     // The runtime rows' dispatch verdict must come from the policy a real
     // call runs through. app.ts passes the process-wide one; a router that

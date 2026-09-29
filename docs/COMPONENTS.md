@@ -284,6 +284,14 @@ network. Host-published ports and host-network services are called out.
   read-only (`requiresWrite === false`). RBAC is **re-checked on `tools/call`**
   (not just `tools/list`). Matter tool calls **proxy back** to the orchestrator's
   `/api/matter/*` — the Matter fabric lives in the orchestrator.
+- **Module gating (WARP-2972):** a tool whose domain a module toggle (box) or the
+  acting person's own grants withhold is absent from `tools/list` (HTTP) and refused
+  by `tools/call` (both transports, `module_disabled`). The verdict is asked of the
+  orchestrator (`GET /api/modules/tool-verdict`, `_service:mcp` only) — this
+  container has no module registry or availability config — and **fails closed**
+  when it can't be had: module-owned domains withheld, unclaimed ones kept. The stdio
+  child's `tools/list` stays the raw registry; the orchestrator gates its chat pool
+  and `/api/llm/tools` on top of that cached list.
 - **Gotchas:** the `claims === undefined` "trusted" sentinel is **stdio-only** —
   HTTP always requires a valid JWT. gRPC/Redis/Prisma connect lazily so a missing
   dependency at boot doesn't kill the stdio child.

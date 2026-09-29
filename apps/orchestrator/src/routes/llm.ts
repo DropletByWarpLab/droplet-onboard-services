@@ -64,7 +64,15 @@ import {
 import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
-import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
+import {
+  TOOLS,
+  TOOL_CATALOG,
+  TOOL_DOMAINS,
+  isToolWithheldByModule,
+  namesForGuidance,
+  withholdModuleTools,
+} from "@droplet/tools-core";
+import { resolveToolModuleVerdict } from "../services/tool-module-verdict.service.js";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
@@ -1192,6 +1200,16 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         isVoice,
         toolAccessScope,
       );
+      // WARP-2972 — the module axis, resolved ONCE per turn like the scope and
+      // handed to the same three places: the budget estimate, the guidance
+      // block, and the agent loop's pool. It is independent of
+      // `toolAccessScope` — that is null for the owner and for every person
+      // with no AccessRole, and a null scope narrows nothing. Keyed on the
+      // session's `User.id` (a `_service:*` principal is the box); a verdict
+      // that cannot be established is the fail-closed one, never an error.
+      const moduleVerdict = await resolveToolModuleVerdict(
+        (req as AuthedRequest).user?.id,
+      );
 
       // WARP-3125 — ONE selection mode for this turn, handed to the budget
       // estimate and to both runAgent calls so the two stay in step
@@ -2104,7 +2122,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // gives us the identity+guidance chars without a persona block for the
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
-        const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
+        // WARP-2972 — guidance must not name a tool the pool no longer holds;
+        // `undefined` ("every tool") stops being true once a module is off.
+        const identityAndGuidance = buildBaseSystemPrompt(
+          namesForGuidance(allowedForUser, moduleVerdict),
+          "",
+        );
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
         // the NEVER-DROPPED identity part for sizing (it must survive
@@ -2150,7 +2173,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // rule lives where runtime names actually appear — the catalog build
         // (`narrowAllowedToolsForRole`) and the agent loop, both through
         // `currentRuntimeToolLookup`.
-        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
+        //
+        // WARP-2972 — and the module verdict, exactly where the loop applies it
+        // (llm-agent.service.ts), so the estimate sizes the pool the model
+        // receives and not one holding tools a module has withheld.
+        const effectiveTools = withholdModuleTools(
+          narrowToolsToScope(pooledTools, toolAccessScope),
+          moduleVerdict,
+        );
         // WARP-2552 — but the pool is NOT what the model receives, and sizing
         // it as though it were is the defect this fixes.
         //
@@ -2291,7 +2321,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           role: "system",
           content:
             buildBaseSystemPrompt(
-              allowedForUser,
+              namesForGuidance(allowedForUser, moduleVerdict),
               degraded.personaBlock,
               degraded.businessBlock,
             ) +
@@ -2474,6 +2504,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-1529 — the same §3 scope, re-checked fail-closed before
             // every tool dispatch inside the loop.
             toolAccessScope,
+            // WARP-2972 — the module axis, applied to the pool alongside the scope.
+            moduleVerdict,
             tool_choice: chatReq.tool_choice,
             toolCallContext,
             captureReasoning: chatReq.captureReasoning,
@@ -2561,6 +2593,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1529 — the same §3 scope, re-checked fail-closed before
           // every tool dispatch inside the loop.
           toolAccessScope,
+          // WARP-2972 — the module axis, applied to the pool alongside the scope.
+          moduleVerdict,
           tool_choice: chatReq.tool_choice,
           toolCallContext,
           captureReasoning: chatReq.captureReasoning,
@@ -3257,9 +3291,16 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     try {
       const tools = await mcpClient.listTools();
       const role = (req as AuthedRequest).user?.role;
-      const filtered = isPrivilegedRole(role)
-        ? tools
-        : tools.filter((t) => !WRITE_TOOLS.has(t.name));
+      // WARP-2972 — a tool whose module is off for the box, or not held by
+      // this caller, is ABSENT from the list (not marked, not an error): the
+      // same predicate the chat pool applies, for the owner and for anyone
+      // with no AccessRole too. A verdict that cannot be established is the
+      // fail-closed one — module-owned tools withheld, the rest listed.
+      const verdict = await resolveToolModuleVerdict((req as AuthedRequest).user?.id);
+      const filtered = withholdModuleTools(
+        isPrivilegedRole(role) ? tools : tools.filter((t) => !WRITE_TOOLS.has(t.name)),
+        verdict,
+      );
       res.json({
         tools: filtered.map((t) => ({
           name: t.name,
@@ -3302,41 +3343,47 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // `tool-inspect.service.ts` reports as its `chat_policy` gate, so the two
   // surfaces cannot disagree.
   //
-  // 🔴 ONE AXIS, AND THE MISSING ONE IS DELIBERATE. An earlier cut of this
-  // also reported a `module` axis from `domainsForFeatures`. It would have
-  // lied on every shipped box: §6 module gating never reaches the chat pool
-  // for an owner or for anybody holding no AccessRole.
-  // `resolveToolAccessScope` returns a NULL scope for them,
-  // `narrowToolsToScope` passes a null scope through byte-for-byte, and
-  // `llm-agent.service.ts` narrows by EXCLUDED_FROM_CHAT_TOOLS alone — so
-  // `list_cameras` reaches the model on a box with `cameras` switched off,
-  // and `moduleSetting` is never even read. A "Module off" chip would have
-  // been a confident false statement about a boundary. **WARP-2972** wires
-  // that gate for everyone; the axis belongs here again the day it is true,
-  // and not one day sooner.
+  // WARP-2972 — the MODULE axis, now true. `reach.module` says whether the
+  // module that owns the tool's domain is on for this box and held by this
+  // caller. The verdict is the one the chat pool, `GET /api/llm/tools` and the
+  // mcp-server apply (tool-module-verdict.service.ts); this page ANNOTATES it
+  // like `chat`, and never filters — "what this Droplet can do" should still
+  // list a tool a toggle has switched off, with the reason it is not offered.
   //
-  // The PER-PERSON axes (role grants, off-LAN withholding, turn relevance)
-  // are deliberately NOT here either — they need a resolved principal and a
+  // It could not ship before: §6 module gating never reached the chat pool for
+  // an owner or for anybody holding no AccessRole (`resolveToolAccessScope`
+  // returns a NULL scope for them and `narrowToolsToScope` passes null through),
+  // so a "Module off" chip would have been a confident false statement about a
+  // boundary. The gate is enforced for everyone now, so the axis is honest.
+  //
+  // The remaining PER-PERSON axes (role grants, off-LAN withholding, turn
+  // relevance) are deliberately NOT here — they need a resolved principal and a
   // modelled turn, which is what `GET /api/admin/tool-inspect/:userId` is for.
-  router.get("/llm/tools/catalog", (req, res) => {
-    const role = (req as AuthedRequest).user?.role;
-    const tools = isPrivilegedRole(role)
-      ? TOOL_CATALOG
-      : TOOL_CATALOG.filter((t) => !t.requiresWrite);
-    res.json({
-      tools: tools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        homeDescription: t.homeDescription,
-        domain: t.domain,
-        requiresWrite: t.requiresWrite,
-        requiresConfirmation: t.requiresConfirmation,
-        reach: {
-          chat: EXCLUDED_FROM_CHAT_TOOLS.has(t.name) ? "excluded" : "allowed",
-        },
-      })),
-      domains: TOOL_DOMAINS,
-    });
+  router.get("/llm/tools/catalog", async (req, res, next) => {
+    try {
+      const role = (req as AuthedRequest).user?.role;
+      const tools = isPrivilegedRole(role)
+        ? TOOL_CATALOG
+        : TOOL_CATALOG.filter((t) => !t.requiresWrite);
+      const verdict = await resolveToolModuleVerdict((req as AuthedRequest).user?.id);
+      res.json({
+        tools: tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          homeDescription: t.homeDescription,
+          domain: t.domain,
+          requiresWrite: t.requiresWrite,
+          requiresConfirmation: t.requiresConfirmation,
+          reach: {
+            chat: EXCLUDED_FROM_CHAT_TOOLS.has(t.name) ? "excluded" : "allowed",
+            module: isToolWithheldByModule(t.name, verdict) ? "withheld" : "allowed",
+          },
+        })),
+        domains: TOOL_DOMAINS,
+      });
+    } catch (err) {
+      next(err);
+    }
   });
 
   // Key management (proxy to ai-gateway)
