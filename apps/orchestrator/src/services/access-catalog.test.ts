@@ -122,8 +122,10 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
     expect(byId.get("files")).toBe("manage");
     expect(byId.get("network")).toBe("view");
     expect(byId.get("managed_switch")).toBe("view");
-    // every gateable module + chat present exactly once
-    expect(features).toHaveLength(GATEABLE_MODULE_IDS.length + 1);
+    // every gateable module the tier may hold + chat present exactly once
+    // (doors is refused below admin, ADR-055 — see the doors block below)
+    expect(features).toHaveLength(GATEABLE_MODULE_IDS.length);
+    expect(byId.has("doors")).toBe(false);
   });
 
   it("guest default: view everywhere (voice act), chat act", () => {
@@ -410,10 +412,43 @@ describe("access-catalog — doors (ADR-055)", () => {
     // `owner` (routes/doors.ts) and owners hold every catalog level through
     // the §3 bypass, so a `manage` rung would only ever advertise a
     // permission no non-owner can use.
-    for (const tier of ["owner", "admin", "family", "guest"] as const) {
+    for (const tier of ["owner", "admin"] as const) {
       expect(maxLevelFor(tier, "doors"), tier).toBe("view");
       expect(clampLevel(tier, "doors", "manage"), tier).toBe("view");
       expect(clampLevel(tier, "doors", "act"), tier).toBe("view");
     }
+  });
+
+  it("the `view` floor is a REFUSAL, not a clamp: below admin a tier holds no doors grant at all", () => {
+    // `view` is the lowest rung, so a requested level normally clamps DOWN to
+    // it and every tier keeps it. For doors the floor is real (access logs
+    // identify people entering places at times, and the routes floor at
+    // admin): a family or guest role must not be able to STORE doors:view,
+    // any more than it can store manage on network.
+    for (const tier of ["family", "guest", "service"] as const) {
+      expect(maxLevelFor(tier, "doors"), tier).toBeNull();
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel(tier, "doors", level), `${tier} ${level}`).toBeNull();
+      }
+    }
+  });
+
+  it("no other module refuses a tier: every non-doors module still clamps to at least `view`", () => {
+    // The refusal is opt-in per module. security's own family floor on `view`
+    // is unchanged by this (it is not opted in), so this pins the set exactly.
+    for (const moduleId of GATEABLE_MODULE_IDS) {
+      if (moduleId === "doors") continue;
+      for (const tier of ["family", "guest"] as const) {
+        expect(maxLevelFor(tier, moduleId), `${tier} ${moduleId}`).not.toBeNull();
+        expect(clampLevel(tier, moduleId, "manage"), `${tier} ${moduleId}`).not.toBeNull();
+      }
+    }
+  });
+
+  it("a role-less family or guest person's catalog has no doors row; admin's has it at view", () => {
+    for (const tier of ["family", "guest"] as const) {
+      expect(fullCatalogFeatures(tier).some((f) => f.moduleId === "doors"), tier).toBe(false);
+    }
+    expect(fullCatalogFeatures("admin").find((f) => f.moduleId === "doors")).toEqual({ moduleId: "doors", level: "view" });
   });
 });

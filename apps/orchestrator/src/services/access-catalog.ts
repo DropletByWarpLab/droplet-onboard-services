@@ -63,6 +63,16 @@ interface CatalogLevelDef {
   level: FeatureLevel;
   /** Minimum starting-point tier that may hold this level; absent = un-floored. */
   minTier?: "family" | "admin";
+  /**
+   * ADR-055 — meaningful on a module's `view` only. `view` is the lowest rung,
+   * so a tier below its `minTier` normally clamps DOWN to it and holds it
+   * anyway: the floor is documentation the routes back with `requireRole`.
+   * `true` makes the floor a REFUSAL: a tier below `minTier` holds no grant on
+   * the module at all (`maxLevelFor` / `clampLevel` answer `null`), so the role
+   * writer stores none and the resolver hands none out. Opt-in per module;
+   * `security`'s family floor on `view` is not opted in and is unchanged.
+   */
+  refuseBelowFloor?: true;
 }
 
 /**
@@ -120,10 +130,11 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   // yet (§11.4 — out of scope, they depend on AC-017) the module's own grant
   // is the ONLY narrowing, and access logs identify people entering places at
   // times. Default-deny until a narrower grant exists; widening is this one
-  // line and the router's role list. (`view` is never enforced from here —
-  // the floor is documentation the routes back with `requireRole`.)
+  // line and the router's role list. `refuseBelowFloor` is what makes the floor
+  // bite: without it `view` is the lowest rung and a family or guest role could
+  // store doors:view, advertising reach the routes refuse.
   doors: [
-    { level: "view", minTier: "admin" },
+    { level: "view", minTier: "admin", refuseBelowFloor: true },
   ],
   smart_home: [
     { level: "view" },
@@ -220,12 +231,20 @@ function tierMayHold(tier: Role, def: CatalogLevelDef): boolean {
   return TIER_RANK[tier] >= TIER_RANK[def.minTier];
 }
 
+/** ADR-055 — a module whose `view` floor is a refusal, and a tier below it: that tier may hold nothing on the module. */
+function tierRefused(tier: Role, moduleId: GateableModuleId): boolean {
+  const view = CATALOG[moduleId].find((d) => d.level === "view");
+  return view?.refuseBelowFloor === true && !tierMayHold(tier, view);
+}
+
 /**
- * The highest §9 level `tier` may hold on `moduleId`. Every module offers an
- * un-floored `view`, so the result is always at least "view" for a valid
- * gateable module.
+ * The highest §9 level `tier` may hold on `moduleId`. Every module offers a
+ * `view`, so the result is at least "view" — except where `view` itself is a
+ * refusal below its floor (`refuseBelowFloor`, doors): `null` = the tier may
+ * hold nothing on this module.
  */
-export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLevel {
+export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLevel | null {
+  if (tierRefused(tier, moduleId)) return null;
   const defs = CATALOG[moduleId];
   let best: FeatureLevel = "view";
   for (const def of defs) {
@@ -240,13 +259,17 @@ export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLeve
  * Clamp a requested grant level to the highest §9-legal level ≤ the request
  * for this tier — the server-side re-clamp of the dashboard's refloor
  * behavior. A level the module doesn't offer (managed_switch `act`) clamps
- * down the ladder to the nearest offered-and-held level.
+ * down the ladder to the nearest offered-and-held level. `null` = the tier may
+ * hold NO grant on this module (see `maxLevelFor`), so the row must not be
+ * written and a stored one grants nothing — the same contract as
+ * `clampConnectorLevel`.
  */
 export function clampLevel(
   tier: Role,
   moduleId: GateableModuleId,
   requested: FeatureLevel,
-): FeatureLevel {
+): FeatureLevel | null {
+  if (tierRefused(tier, moduleId)) return null;
   const defs = CATALOG[moduleId];
   let best: FeatureLevel = "view";
   for (const def of defs) {
@@ -265,7 +288,7 @@ export function clampLevel(
  * The tier's FULL catalog — what a person with `accessRoleId = null` holds
  * (today's world, bit-for-bit: the coarse ADR-004 floors keep enforcing at
  * layer 1; this is the §9 ceiling view of the same tier). Every gateable
- * module at the tier's max level, plus the always-on chat row.
+ * module the tier may hold, at the tier's max level, plus the always-on chat row.
  */
 export function fullCatalogFeatures(
   tier: Role,
@@ -274,7 +297,8 @@ export function fullCatalogFeatures(
     ...ALWAYS_ON_FEATURES.map((f) => ({ ...f })),
   ];
   for (const moduleId of GATEABLE_MODULE_IDS) {
-    out.push({ moduleId, level: maxLevelFor(tier, moduleId) });
+    const level = maxLevelFor(tier, moduleId);
+    if (level !== null) out.push({ moduleId, level });
   }
   return out;
 }
